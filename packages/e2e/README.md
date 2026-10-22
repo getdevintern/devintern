@@ -209,7 +209,7 @@ fails the explicit live command before it mutates a remote repository.
 
 The Markdown suites above need no task tracker. Separate opt-in suites exercise
 the same built CLI against a real remote tracker ticket through the reusable
-`TrackerScenario` fixture. There are two providers, both published to GitHub:
+`TrackerScenario` fixture. There are three providers, all published to GitHub:
 
 - **GitHub Issues** uses a dedicated GitHub tracker repository that is also the
   code host (the initial pairing).
@@ -217,6 +217,9 @@ the same built CLI against a real remote tracker ticket through the reusable
   instance as the issue source while GitHub remains the publication host. The
   GitLab project is created from the fixture and permanently deleted in cleanup;
   the suite does not require hosted GitLab.com.
+- **GitLab.com Issues** uses a pre-created project on GitLab.com as the issue
+  source while GitHub remains the publication host. The project is never
+  deleted; scenario issues are closed in cleanup.
 
 No model or AI-agent credentials are needed: the deterministic fixture agent
 verifies that unique markers seeded into the ticket description and a seeded
@@ -239,9 +242,9 @@ read back from the tracker API rather than trusted from CLI output. Status
 labels are shared tracker configuration the scenario creates but intentionally
 never deletes. Ownership is recorded the moment a resource is created; cleanup
 attempts every operation even after a failure and reports the ids of anything it
-could not remove. The GitHub suite never creates or deletes the containing
-repository and never touches pre-existing tickets; the GitLab suite removes only
-the project it created.
+could not remove. The GitHub and GitLab.com suites never create or delete the
+containing repository/project and never touch pre-existing tickets; the local
+GitLab suite removes only the project it created.
 
 ### GitHub Issues tracker
 
@@ -279,6 +282,31 @@ issue source and deletes it in cleanup. The GitHub token must have repository
 contents and pull-request write access on the code-host repository. As with the
 other local GitLab suites, `E2E_GITLAB_URL` and `E2E_GITLAB_TOKEN` override the
 generated `.local/gitlab.json` credentials.
+
+### GitLab.com Issues tracker
+
+Configure a dedicated GitLab.com project with Issues enabled in
+`packages/e2e/.env.local` (the hosted source-control project works when Issues is
+enabled), provide a GitHub code host, and run:
+
+```sh
+bun run --filter @getdevintern/code build
+bun run --filter @devintern/e2e test:e2e:tracker:gitlab-com
+```
+
+| Variable                 | Meaning                                                             |
+| ------------------------ | ------------------------------------------------------------------- |
+| `E2E_GITLAB_COM_PROJECT` | Existing GitLab.com project path that will host test issues         |
+| `E2E_GITLAB_COM_TOKEN`   | Token with `api` scope and issues/labels write access               |
+| `E2E_GITHUB_REPOSITORY`  | GitHub code host; defaults to the local `gh` login's E2E repo       |
+| `E2E_GITHUB_TOKEN`       | Optional explicit GitHub token; otherwise uses the local `gh` login |
+
+The suite creates issues, labels, seeded comments and a decoy in the configured
+project, then opens a GitHub PR and verifies status transitions. Cleanup closes
+the scenario issues and deletes only the seeded comments and branches; the
+GitLab.com project, its labels and the closed issues remain (GitLab.com does not
+permanently delete projects on demand). Missing project/token configuration fails
+the opt-in command before any remote mutation.
 
 Ordinary `bun run test` runs only local harness checks and never the live tracker
 suites.

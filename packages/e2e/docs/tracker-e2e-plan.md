@@ -22,16 +22,17 @@ test data into the trackers a worker actually uses.
 
 ## Current coverage
 
-| Tracker             | Default `test` | Opt-in suite                      | Notes                                                                   |
-| ------------------- | -------------- | --------------------------------- | ----------------------------------------------------------------------- |
-| Markdown            | no             | `test:trackers` (read-only path)  | Plain files, no credentials.                                            |
-| Jira                | no             | `test:trackers` (read-only smoke) | Full lifecycle planned in Layer 2.                                      |
-| Trello              | no             | `test:trackers` (read-only smoke) | Full lifecycle planned in Layer 2.                                      |
-| GitHub Issues       | no             | `test:e2e:tracker`                | Existing live suite; dedicated tracker repository doubles as code host. |
-| Local GitLab Issues | no             | `test:e2e:tracker:gitlab`         | Existing live suite; creates and deletes a dedicated project.           |
-| Linear              | no             | none                              | Detection only in Layer 1.                                              |
-| Asana               | no             | none                              | Detection only in Layer 1.                                              |
-| Azure DevOps        | no             | none                              | Detection only in Layer 1.                                              |
+| Tracker             | Default `test` | Opt-in suite                      | Notes                                                                    |
+| ------------------- | -------------- | --------------------------------- | ------------------------------------------------------------------------ |
+| Markdown            | no             | `test:trackers` (read-only path)  | Plain files, no credentials.                                             |
+| Jira                | no             | `test:trackers` (read-only smoke) | Full lifecycle planned in Layer 2.                                       |
+| Trello              | no             | `test:trackers` (read-only smoke) | Full lifecycle planned in Layer 2.                                       |
+| GitHub Issues       | no             | `test:e2e:tracker`                | Existing live suite; dedicated tracker repository doubles as code host.  |
+| Local GitLab Issues | no             | `test:e2e:tracker:gitlab`         | Existing live suite; creates and deletes a dedicated project.            |
+| GitLab.com Issues   | no             | `test:e2e:tracker:gitlab-com`     | Existing live suite; pre-created project, issues only, project retained. |
+| Linear              | no             | none                              | Detection only in Layer 1.                                               |
+| Asana               | no             | none                              | Detection only in Layer 1.                                               |
+| Azure DevOps        | no             | none                              | Detection only in Layer 1.                                               |
 
 The default local run reports these opt-in suites as skipped and planned
 coverage as todo (`helpers/opt-in-suites.ts`), so the test output names what it

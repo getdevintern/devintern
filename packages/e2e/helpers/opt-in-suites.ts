@@ -58,6 +58,12 @@ export const OPT_IN_SUITES: readonly OptInSuite[] = [
     status: "skip",
   },
   {
+    name: "GitLab.com Issues tracker E2E",
+    script: "test:e2e:tracker:gitlab-com",
+    reason: "requires a dedicated GitLab.com project and a GitHub code host",
+    status: "skip",
+  },
+  {
     name: "Workspace tracker smoke (read-only)",
     script: "test:trackers",
     reason: "reads the worker env and contacts Jira/Trello; no writes",

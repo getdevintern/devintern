@@ -128,6 +128,21 @@ test("GitLab tracker listComments drops system notes and strings ids", async () 
   }
 });
 
+test("GitLab tracker cleanup deletes the project by default and can retain a hosted project", async () => {
+  const deleteProject = spyOn(gitlab, "deleteProject").mockResolvedValue();
+  try {
+    await new GitLabTracker(gitlab, project, "token", gitlab.baseUrl).cleanup();
+    expect(deleteProject).toHaveBeenCalledTimes(1);
+
+    await new GitLabTracker(gitlab, project, "token", gitlab.baseUrl, [], {
+      deleteProject: false,
+    }).cleanup();
+    expect(deleteProject).toHaveBeenCalledTimes(1);
+  } finally {
+    deleteProject.mockRestore();
+  }
+});
+
 test("GitLab tracker getTicket maps provider state, labels and body", async () => {
   const fetchMock = spyOn(globalThis, "fetch").mockResolvedValueOnce(
     Response.json({
