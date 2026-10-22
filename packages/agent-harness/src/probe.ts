@@ -13,6 +13,7 @@
  */
 
 import { spawnSync } from "child_process";
+import { warnEffortUnsupported } from "./effort.js";
 import type { AgentHarness, AgentRunOptions, HarnessInvocation, HarnessProbe } from "./types.js";
 
 /** Probe cache keyed by `harness name` + executable path, so each CLI runs once. */
@@ -100,6 +101,10 @@ export async function probeHarness(
  * Probes the CLI first so version-dependent harnesses can adapt, then delegates
  * to {@link AgentHarness.buildArgs} and {@link AgentHarness.buildEnv}.
  *
+ * Every invocation path (the Bun/Node runners and the Code package's direct
+ * spawns) goes through this function, so the effort capability warning is
+ * emitted here rather than in each caller.
+ *
  * @param harness - Harness being run.
  * @param executablePath - Resolved path/command of the CLI.
  * @param options - Per-run options.
@@ -110,6 +115,7 @@ export async function buildHarnessInvocation(
   executablePath: string,
   options: AgentRunOptions,
 ): Promise<HarnessInvocation> {
+  warnEffortUnsupported(harness, options);
   const probe = await probeHarness(harness, executablePath);
   return {
     args: harness.buildArgs(options, probe),

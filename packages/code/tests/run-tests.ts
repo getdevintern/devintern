@@ -40,6 +40,58 @@ process.on("exit", () => {
 const childEnv = { ...process.env };
 delete childEnv.DEVINTERN_PROMPTS_DIR;
 
+// A developer's agent configuration must not leak into the suite either:
+// DEVINTERN_HARNESS_CHAIN changes which harness counts as primary (suppressing
+// AGENT_MODEL), and *_CLI_PATH / DSH_HOME can point tests at tools and state
+// outside the isolated temp directories. Tests that need a harness configure it
+// explicitly.
+//
+// The two DeepSeek live smokes are explicitly opt-in (DSH_LIVE_TEST=1) and
+// document DSH_CLI_PATH/DSH_HOME for a non-PATH dsh install or profile dir, so
+// keep exactly those two overrides in that mode.
+const liveDsh = childEnv.DSH_LIVE_TEST === "1";
+const keepForLiveDsh = new Set(["DSH_CLI_PATH", "DSH_HOME"]);
+for (const key of Object.keys(childEnv)) {
+  if (keepForLiveDsh.has(key) && liveDsh) {
+    continue;
+  }
+  if (key.endsWith("_CLI_PATH") || key.endsWith("_MODEL")) {
+    delete childEnv[key];
+  }
+}
+for (const key of [
+  "AGENT_HARNESS",
+  "DEVINTERN_HARNESS_CHAIN",
+  "AGENT_MODEL",
+  "AGENT_EFFORT",
+  "DSH_HOME",
+]) {
+  if (keepForLiveDsh.has(key) && liveDsh) {
+    continue;
+  }
+  delete childEnv[key];
+}
+
+// DevIntern's own worker runtime must not leak into the suite. The worker
+// marker makes the CLI skip project `.env` loading and makes workspace
+// credential lookup return null, while the webhook auto-review variables
+// override the startup iteration cap. Both hide real regressions when the
+// suite is run from a worker checkout.
+for (const key of [
+  "DEVINTERN_WORKER_SUBPROCESS",
+  "DEVINTERN_WORKER_CHILD",
+  "DEVINTERN_WORKSPACE_REPO",
+  "DEVINTERN_WORKSPACE_TEAM",
+  "DEVINTERN_WORKSPACE_PIPELINE_REPO",
+  "DEVINTERN_RUN_ORIGIN",
+  "DEVINTERN_ACTIONED_SOURCE",
+  "DEVINTERN_USAGE_LIMIT_FILE",
+  "WEBHOOK_AUTO_REVIEW",
+  "WEBHOOK_AUTO_REVIEW_MAX_ITERATIONS",
+]) {
+  delete childEnv[key];
+}
+
 const child = Bun.spawn(["bun", "test", "--timeout=30000", ...process.argv.slice(2)], {
   cwd: import.meta.dir,
   env: {

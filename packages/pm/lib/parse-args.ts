@@ -115,7 +115,7 @@ Options:
   --effort <level>     Reasoning effort for agent runs: low, medium, or high.
                         Overrides the AGENT_EFFORT environment variable; emitted by
                         harnesses that support reasoning effort (claude-code, grok,
-                        antigravity, deepseek, cline, opencode, kilo-code, codex, pi),
+                        antigravity, reasonix, cline, opencode, kilo-code, codex, pi),
                         ignored by the others (with a warning).
   --harness <name>     AI agent harness to use (e.g., "claude-code", "opencode", "codex")
   --decompose          Decompose the story into subtasks (default: off)

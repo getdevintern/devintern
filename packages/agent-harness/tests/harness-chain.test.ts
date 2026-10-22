@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   parseHarnessList,
   resetMiseShimWarnings,
@@ -37,7 +40,10 @@ describe("parseHarnessList", () => {
   test("de-duplicates canonical names keeping the first occurrence", () => {
     expect(parseHarnessList("codex, codex")).toEqual(["codex"]);
     expect(parseHarnessList("gemini, antigravity")).toEqual(["antigravity"]);
-    expect(parseHarnessList("claude-code, agy, antigravity")).toEqual(["claude-code", "antigravity"]);
+    expect(parseHarnessList("claude-code, agy, antigravity")).toEqual([
+      "claude-code",
+      "antigravity",
+    ]);
   });
 
   test("keeps unknown names so callers can warn about them", () => {
@@ -165,6 +171,44 @@ describe("resolveHarnessChain", () => {
     expect(chain.issues[0]!.message).toContain("CODEX_CLI_PATH");
   });
 
+  test("warns when an installed deepseek entry still points at reasonix", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "deepseek-chain-"));
+    const reasonix = join(dir, "reasonix");
+    writeFileSync(reasonix, "#!/bin/sh\nexit 0\n");
+    chmodSync(reasonix, 0o755);
+    process.env.DEEPSEEK_CLI_PATH = reasonix;
+    try {
+      const chain = await resolveHarnessChain({ raw: "deepseek" });
+      expect(chain.entries.map((entry) => entry.name)).toEqual(["deepseek"]);
+      expect(warnings.some((w) => w.includes("resolves to the community Reasonix CLI"))).toBe(
+        true,
+      );
+      expect(warnings.some((w) => w.includes("AGENT_HARNESS=reasonix"))).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("explains the reasonix split when a deepseek chain entry is not installed", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "deepseek-chain-"));
+    const reasonix = join(dir, "reasonix");
+    writeFileSync(reasonix, "#!/bin/sh\nexit 0\n");
+    chmodSync(reasonix, 0o755);
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${dir}:${originalPath ?? ""}`;
+    process.env.DEEPSEEK_CLI_PATH = join(dir, "missing-dsh");
+    try {
+      const chain = await resolveHarnessChain({ raw: "deepseek,codex" });
+      const issue = chain.issues.find((candidate) => candidate.requested === "deepseek");
+      expect(issue?.reason).toBe("not-installed");
+      expect(issue?.message).toContain("AGENT_HARNESS=reasonix");
+      expect(warnings.some((w) => w.includes("AGENT_HARNESS=reasonix"))).toBe(true);
+    } finally {
+      process.env.PATH = originalPath;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("throws when every entry is unknown", async () => {
     await expect(
       resolveHarnessChain({ raw: "nope, also-nope", isInstalled: alwaysInstalled }),
@@ -240,9 +284,7 @@ describe("resolveHarnessChain", () => {
       isInstalled: alwaysInstalled,
       sandboxName: "nono",
       probeSandbox: ({ name }) =>
-        name === "grok"
-          ? { ok: false, reason: "mise: Permission denied" }
-          : { ok: true },
+        name === "grok" ? { ok: false, reason: "mise: Permission denied" } : { ok: true },
     });
 
     expect(chain.entries.map((e) => e.name)).toEqual(["opencode"]);
