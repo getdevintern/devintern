@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 
 import { CodexHarness } from "../src/harnesses/codex.js";
 import { GrokHarness } from "../src/harnesses/grok.js";
+import { MuseHarness } from "../src/harnesses/muse.js";
 import { OpencodeHarness } from "../src/harnesses/opencode.js";
 import { buildPromptArgs, MAX_PROMPT_ARG_BYTES } from "../src/prompt-args.js";
 
@@ -22,6 +23,23 @@ describe("buildPromptArgs", () => {
 
   test("falls back to a positional argument", () => {
     expect(buildPromptArgs(new OpencodeHarness(), "do the task")).toEqual(["do the task"]);
+  });
+
+  test("keeps normal Muse prompts on argv and protects dash-leading text", () => {
+    expect(buildPromptArgs(new MuseHarness(), "do the task")).toEqual(["do the task"]);
+    expect(buildPromptArgs(new MuseHarness(), "---\ntype: Task\n---\nImplement")).toEqual([
+      "--",
+      "---\ntype: Task\n---\nImplement",
+    ]);
+  });
+
+  test("hands an oversized Muse prompt to --prompt-file instead of a pointer", () => {
+    const prompt = `Implement this task:\n${"x".repeat(MAX_PROMPT_ARG_BYTES)}\n`;
+    const args = buildPromptArgs(new MuseHarness(), prompt);
+
+    expect(args).toHaveLength(2);
+    expect(args[0]).toBe("--prompt-file");
+    expect(readFileSync(args[1]!, "utf8")).toBe(prompt);
   });
 
   test("emits the end-of-options marker before a dash-leading positional prompt", () => {
