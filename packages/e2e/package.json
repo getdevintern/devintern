@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "test": "bun test tests/local",
+    "test:trackers": "bun run scripts/trackers.ts",
     "test:e2e": "bun run scripts/github.ts",
     "format": "oxfmt .",
     "format:check": "oxfmt --check .",
@@ -17,7 +18,8 @@
     "test:e2e:bitbucket": "bun run scripts/hosted.ts bitbucket",
     "test:e2e:gitlab-com": "bun run scripts/hosted.ts gitlab-com",
     "test:e2e:tracker": "bun run scripts/tracker.ts",
-    "test:e2e:tracker:gitlab": "bun run scripts/tracker-gitlab.ts"
+    "test:e2e:tracker:gitlab": "bun run scripts/tracker-gitlab.ts",
+    "test:e2e:tracker:gitlab-com": "bun run scripts/tracker-gitlab-com.ts"
   },
   "dependencies": {
     "@devintern/agent-harness": "workspace:*"
