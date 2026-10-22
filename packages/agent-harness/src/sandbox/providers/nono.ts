@@ -53,7 +53,11 @@ import type { Dirent } from "fs";
 import { tmpdir } from "os";
 import { join, relative } from "path";
 import { findInPath } from "../../resolver.js";
-import { harnessStateAbsolutePaths, resolveHomeDir } from "../harness-state.js";
+import {
+  ensureHarnessStateDir,
+  harnessStateAbsolutePaths,
+  resolveHomeDir,
+} from "../harness-state.js";
 import { probeCommand, unsupportedPlatform } from "../probe.js";
 import type { SandboxDetection, SandboxPolicy, SandboxProvider, WrappedCommand } from "../types.js";
 
@@ -365,6 +369,14 @@ export class NonoSandboxProvider implements SandboxProvider {
   readonly priority = 30;
   readonly docsUrl = "https://nono.sh/docs";
 
+  /**
+   * @param stateEnv - Trusted startup environment that gates the custom
+   *   `DSH_HOME` root opt-in. Defaults to the snapshot captured before the
+   *   host merges the repository `.env`; tests pass `process.env`. `DSH_HOME`
+   *   itself is read from the environment the harness child receives.
+   */
+  constructor(private readonly stateEnv?: NodeJS.ProcessEnv) {}
+
   async detect(): Promise<SandboxDetection> {
     const platform = unsupportedPlatform();
     if (platform) return platform;
@@ -426,8 +438,11 @@ export class NonoSandboxProvider implements SandboxProvider {
 
     // Read+write: the harness's own state (session files, settings). Without
     // this the agent exits at startup (observed with claude-code, which also
-    // writes ~/.claude/projects during a run).
-    for (const p of harnessStateAbsolutePaths(harnessName, home)) {
+    // writes ~/.claude/projects during a run). A trusted custom DSH_HOME is
+    // created first: providers skip missing paths, so a fresh directory would
+    // otherwise get no grant at all.
+    ensureHarnessStateDir(harnessName, this.stateEnv);
+    for (const p of harnessStateAbsolutePaths(harnessName, home, this.stateEnv)) {
       if (!existsSync(p)) continue;
       grants.push({ flag: p.endsWith(".json") ? "--allow-file" : "--allow", path: p });
     }

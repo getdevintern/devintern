@@ -69,17 +69,24 @@ export class DeepSeekHarness implements AgentHarness {
    *
    * Upstream is in developer preview and promises breaking changes, so an
    * unexpected version is surfaced immediately instead of failing later with a
-   * raw parser/usage error. The warning is best-effort and never aborts a run.
+   * raw parser/usage error. A CLI that does not report a parseable version
+   * returns `{}`: the Debian/Ubuntu `dsh` package (Dancer's distributed shell)
+   * also installs `/usr/bin/dsh` but documents no `--version`, so treating
+   * unparseable output as an unknown version is what lets
+   * {@link buildHarnessInvocation} refuse to spawn the wrong tool.
    *
    * @param executablePath - Resolved `dsh` command or path.
-   * @returns The detected version snapshot, or `{}` when it cannot be read.
+   * @returns The detected version snapshot, or `{}` when none can be read.
    */
   probe(executablePath: string): HarnessProbe {
     const raw = readCliVersion(executablePath);
     if (raw === undefined) {
       return {};
     }
-    const version = raw.match(/\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?/)?.[0] ?? raw;
+    const version = raw.match(/\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?/)?.[0];
+    if (version === undefined) {
+      return {};
+    }
     if (version !== DEEPSEEK_TESTED_VERSION) {
       console.warn(
         `⚠️  DeepSeek Harness (${this.name}, experimental) is ${version}, but this adapter was ` +

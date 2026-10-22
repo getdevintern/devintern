@@ -23,6 +23,9 @@ export type {
   StructuredOutputResult,
 } from "./types.js";
 
+// Shared errors
+export { HarnessUnavailableError } from "./errors.js";
+
 // Run modes (plan / readonly) and capability checks
 export {
   UnsupportedAgentModeError,

@@ -18,6 +18,7 @@
 import { execSync } from "child_process";
 import { accessSync, constants, existsSync } from "fs";
 import { resolve } from "path";
+import { DEEPSEEK_REASONIX_MIGRATION_HINT, isReasonixBinary } from "./deepseek-migration.js";
 import { DEFAULT_HARNESS_NAME, getHarness, HARNESS_ALIASES, listHarnesses } from "./registry.js";
 import type { AgentHarness, ResolvedHarness } from "./types.js";
 
@@ -75,14 +76,10 @@ export function resolveHarness(options?: HarnessResolutionOptions): ResolvedHarn
  * Guidance for pre-split `AGENT_HARNESS=deepseek` users whose community
  * Reasonix CLI is still installed.
  *
- * `deepseek` intentionally points at DeepSeek's official harness; the
- * community CLI moved to the explicit `reasonix` id. Shared by single-harness
- * and chain resolution so neither path silently switches harnesses.
+ * Re-exported from {@link ./deepseek-migration.js} for callers that resolve
+ * the hint through this module.
  */
-export const DEEPSEEK_REASONIX_MIGRATION_HINT =
-  'The community Reasonix CLI is the separate harness id "reasonix": set ' +
-  "AGENT_HARNESS=reasonix to keep using Reasonix, or install the official dsh " +
-  "CLI (npm i -g @deepseek-ai/dsh) for the official harness.";
+export { DEEPSEEK_REASONIX_MIGRATION_HINT } from "./deepseek-migration.js";
 
 /** Emitted-at-least-once guard for the migration warning. */
 const warnedDeepSeekMigration = new Set<string>();
@@ -125,17 +122,6 @@ export function deepseekReasonixMigrationHint(
     );
   }
   return DEEPSEEK_REASONIX_MIGRATION_HINT;
-}
-
-/**
- * Whether a path/command points at the community Reasonix CLI binary.
- *
- * @param path - Resolved or configured CLI path.
- * @returns Whether the basename is `reasonix`.
- */
-function isReasonixBinary(path: string): boolean {
-  const base = path.replace(/\\/g, "/").split("/").pop() ?? path;
-  return base === "reasonix" || base === "reasonix.exe";
 }
 
 /**

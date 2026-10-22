@@ -12,9 +12,9 @@
  * apart.
  */
 
-import { existsSync, realpathSync } from "fs";
+import { existsSync, mkdirSync, realpathSync } from "fs";
 import { homedir } from "os";
-import { isAbsolute, join, relative, resolve } from "path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "path";
 
 /**
  * Harness name → $HOME paths the agent needs read+write access to.
@@ -37,8 +37,9 @@ import { isAbsolute, join, relative, resolve } from "path";
  * - deepseek (official dsh): `~/.dsh` — profiles, sessions, settings, logs and
  *   `$DSH_HOME/.env`. When `DSH_HOME` is set, DevIntern expands `~`, resolves
  *   relative values against the workspace (matching dsh), and grants that
- *   directory instead — but only inside `$HOME` or the workspace. Other
- *   locations need {@link DSH_HOME_CUSTOM_ROOT_ENV}=1.
+ *   directory instead — but only a `.dsh*` directory directly under `$HOME`
+ *   (e.g. `~/.dsh-custom` or `~/.dsh/profiles`) or one inside the workspace.
+ *   Other locations need {@link DSH_HOME_CUSTOM_ROOT_ENV}=1.
  * - reasonix (community): `~/.reasonix` — `config.json`, skills and per-project
  *   overrides.
  * - goose: `~/.config/goose` (config.yaml), `~/.local/share/goose` (sessions,
@@ -87,22 +88,48 @@ export const HARNESS_STATE_PATHS_EXTRA: Record<
 };
 
 /**
+ * Real process environment captured when this module first loads. The host
+ * merges the repository-controlled `.devintern-code/.env` into `process.env`
+ * afterwards, so the custom-root opt-in must be read from this snapshot:
+ * otherwise a project file could point state at `~/.ssh` and widen the
+ * sandbox grant. Mirrors `resolver.ts`'s `STARTUP_ENV`.
+ *
+ * `DSH_HOME` is deliberately *not* snapshot-gated: the dsh child inherits the
+ * post-dotenv `process.env`, so it creates `$DSH_HOME/profiles/headless` from
+ * that value. Granting the pre-dotenv `~/.dsh` instead makes dsh die with
+ * `EACCES`, which surfaces as an unavailable harness. The `.dsh*`/workspace
+ * check below still prevents a repository file from widening the grant.
+ */
+const STARTUP_ENV: NodeJS.ProcessEnv = { ...process.env };
+
+/**
  * Absolute state directory overrides a harness reads from its own environment.
  *
  * When unset, the corresponding `HARNESS_STATE_PATHS` default applies.
+ *
+ * @param harnessName - Registered harness name.
+ * @param snapshot - Trusted startup environment that gates the custom-root
+ *   opt-in. Defaults to {@link STARTUP_ENV}.
+ * @param env - Environment the harness child actually receives. Defaults to
+ *   the live `process.env` (including values merged from the repository
+ *   `.env`), matching what dsh itself reads.
  */
-function stateDirOverride(harnessName: string): string | undefined {
+function stateDirOverride(
+  harnessName: string,
+  snapshot: NodeJS.ProcessEnv = STARTUP_ENV,
+  env: NodeJS.ProcessEnv = process.env,
+): string | undefined {
   if (harnessName !== "deepseek") {
     return undefined;
   }
-  const dshHome = process.env.DSH_HOME?.trim();
+  const dshHome = env.DSH_HOME?.trim();
   if (!dshHome) {
     return undefined;
   }
-  const resolved = realpathIfExists(resolve(expandHomePath(dshHome)));
-  const home = resolve(resolveHomeDir());
-  const cwd = resolve(process.cwd());
-  if (isAllowedCustomStateRoot(resolved, home, cwd)) {
+  const resolved = canonicalizeStatePath(expandHomePath(dshHome));
+  const home = canonicalizeStatePath(resolveHomeDir());
+  const cwd = canonicalizeStatePath(process.cwd());
+  if (isAllowedCustomStateRoot(resolved, home, cwd, snapshot)) {
     return resolved;
   }
   warnUntrustedDshHomeOnce(resolved);
@@ -146,6 +173,35 @@ function realpathIfExists(path: string): string {
 }
 
 /**
+ * Resolve symlinks in every path component that already exists.
+ *
+ * {@link realpathIfExists} only resolves a path whose final component exists,
+ * which leaves a not-yet-created `DSH_HOME` lexical. A repository can then
+ * point `DSH_HOME` at `link/dsh-state` while `link` is a symlink to a directory
+ * outside the workspace: the lexical path looks trusted, `mkdirSync` creates
+ * the directory on the host, and the next (post-creation) check rejects it.
+ * Walking up to the deepest existing ancestor resolves those symlinks before
+ * validation, so the create and the grant always make the same decision.
+ *
+ * @param path - Absolute or relative path to normalize.
+ * @returns The physical path with any non-existent trailing components kept.
+ */
+function canonicalizeStatePath(path: string): string {
+  let existing = resolve(path);
+  const missing: string[] = [];
+  while (!existsSync(existing)) {
+    const parent = dirname(existing);
+    if (parent === existing) {
+      break;
+    }
+    missing.unshift(basename(existing));
+    existing = parent;
+  }
+  const real = realpathIfExists(existing);
+  return missing.length > 0 ? join(real, ...missing) : real;
+}
+
+/**
  * Whether `child` sits strictly below `parent`.
  *
  * @param parent - Absolute parent directory.
@@ -158,28 +214,59 @@ function isStrictlyWithin(parent: string, child: string): boolean {
 }
 
 /**
+ * Whether `path` is a dsh-owned state directory directly under `home`.
+ *
+ * Only the first segment below `$HOME` counts: `~/.dsh`, `~/.dsh-custom` and
+ * `~/.dsh/profiles` are dsh state, while other `$HOME` subtrees such as
+ * `~/.ssh` (or `~/.ssh/.dsh`) are not. This keeps a repository-selected
+ * `DSH_HOME` from widening the sandbox grant to unrelated credentials.
+ *
+ * @param path - Normalized absolute `DSH_HOME`.
+ * @param home - Normalized `$HOME`.
+ * @returns Whether the path is a dsh state directory under `$HOME`.
+ */
+function isDshStateDirUnderHome(path: string, home: string): boolean {
+  if (home === resolve("/") || !isStrictlyWithin(home, path)) {
+    return false;
+  }
+  const firstSegment = relative(home, path).split(/[\\/]/)[0] ?? "";
+  return firstSegment.startsWith(".dsh");
+}
+
+/**
  * Whether a custom `DSH_HOME` may receive a read-write sandbox grant.
  *
- * Trusted roots are a descendant of `$HOME` (not `$HOME` itself, which would
- * grant the whole home directory) or the workspace directory. Filesystem root
- * and other absolute locations need the explicit
+ * Trusted roots are a `.dsh*` directory directly under `$HOME` (not `$HOME`
+ * itself, which would grant the whole home directory) or the workspace
+ * directory. Other `$HOME` subtrees, the filesystem root, and any location
+ * outside those roots need the explicit
  * {@link DSH_HOME_CUSTOM_ROOT_ENV} opt-in.
  *
  * @param path - Normalized absolute `DSH_HOME`.
  * @param home - Normalized `$HOME`.
  * @param cwd - Normalized workspace directory.
+ * @param env - Trusted environment snapshot holding the opt-in.
  * @returns Whether the path is safe to grant.
  */
-function isAllowedCustomStateRoot(path: string, home: string, cwd: string): boolean {
+function isAllowedCustomStateRoot(
+  path: string,
+  home: string,
+  cwd: string,
+  env: NodeJS.ProcessEnv = STARTUP_ENV,
+): boolean {
   if (path === resolve("/")) {
     return false;
   }
-  if (process.env[DSH_HOME_CUSTOM_ROOT_ENV] === "1") {
+  if (env[DSH_HOME_CUSTOM_ROOT_ENV] === "1") {
     return true;
   }
-  const inHome = home !== resolve("/") && isStrictlyWithin(home, path);
+  // A worker launched from `/` (systemd without WorkingDirectory, cron) has no
+  // meaningful workspace: treating `/` as one would trust any absolute path.
+  if (cwd === resolve("/")) {
+    return false;
+  }
   const inWorkspace = isStrictlyWithin(cwd, path) || path === cwd;
-  return inHome || inWorkspace;
+  return isDshStateDirUnderHome(path, home) || inWorkspace;
 }
 
 /**
@@ -193,9 +280,10 @@ function warnUntrustedDshHomeOnce(path: string): void {
   }
   warnedDshHomes.add(path);
   console.warn(
-    `⚠️  DSH_HOME=${path} is not a trusted sandbox state location (a directory under $HOME ` +
-      "or the workspace; $HOME itself and the filesystem root are excluded), so DevIntern will " +
-      "not grant it read-write access. Move DSH_HOME under $HOME or the workspace, or set " +
+    `⚠️  DSH_HOME=${path} is not a trusted sandbox state location (a .dsh* directory under ` +
+      "$HOME or the workspace; $HOME itself, other $HOME subtrees and the filesystem root are " +
+      "excluded), so DevIntern will not grant it read-write access. Move DSH_HOME to a .dsh* " +
+      `directory under $HOME or into the workspace, or set ` +
       `${DSH_HOME_CUSTOM_ROOT_ENV}=1 to trust that location.`,
   );
 }
@@ -206,19 +294,73 @@ function warnUntrustedDshHomeOnce(path: string): void {
  * Normally returns `$HOME`-relative paths. A harness that honors its own home
  * override (currently dsh's `DSH_HOME`) returns that normalized absolute
  * directory instead so sandbox providers grant the real location. An
- * untrusted override (outside `$HOME`/the workspace) is ignored with a warning
- * and the default state path is returned.
+ * untrusted override (not a `.dsh*` directory directly under `$HOME` and not
+ * inside the workspace) is ignored with a warning and the default state path
+ * is returned.
  *
  * @param harnessName - Registered harness name (e.g. "grok").
+ * @param snapshot - Trusted startup environment that gates the custom-root
+ *   opt-in. Defaults to {@link STARTUP_ENV}, so repository-controlled `.env`
+ *   values cannot widen the grant.
+ * @param env - Environment the harness child actually receives. Defaults to
+ *   the live `process.env`, so a `DSH_HOME` merged from the repository `.env`
+ *   is granted where dsh will actually write.
  * @returns Paths relative to $HOME, or absolute override paths.
  */
-export function harnessStatePaths(harnessName: string): string[] {
-  const override = stateDirOverride(harnessName);
+export function harnessStatePaths(
+  harnessName: string,
+  snapshot: NodeJS.ProcessEnv = STARTUP_ENV,
+  env: NodeJS.ProcessEnv = process.env,
+): string[] {
+  const override = stateDirOverride(harnessName, snapshot, env);
   if (override) {
     return [override];
   }
   const extra = HARNESS_STATE_PATHS_EXTRA[harnessName]?.[process.platform] ?? [];
   return [...(HARNESS_STATE_PATHS[harnessName] ?? []), ...extra];
+}
+
+/**
+ * Create a trusted custom harness state directory before it is granted.
+ *
+ * Sandbox providers only grant paths that already exist, so a fresh
+ * `DSH_HOME` (a custom state directory dsh has not created yet) would
+ * otherwise receive no grant and the sandboxed dsh could not create its
+ * `profiles/`, sessions or logs. Only a path that passed
+ * {@link isAllowedCustomStateRoot} is created; untrusted values are left
+ * untouched (and warned about by {@link stateDirOverride}).
+ *
+ * When there is no override, the default `~/.dsh` state directory is created
+ * for deepseek. Headless runs authenticate with `DEEPSEEK_API_KEY` and never
+ * launch the dsh GUI, so on a fresh install the default directory does not
+ * exist yet; without this the first sandboxed run would get no state grant at
+ * all.
+ *
+ * @param harnessName - Registered harness name.
+ * @param snapshot - Trusted startup environment that gates the custom-root
+ *   opt-in. Defaults to {@link STARTUP_ENV}.
+ * @param env - Environment the harness child actually receives. Defaults to
+ *   the live `process.env`.
+ * @returns The trusted absolute directory (custom override or created default),
+ *   or undefined when there is nothing to create or creation failed.
+ */
+export function ensureHarnessStateDir(
+  harnessName: string,
+  snapshot: NodeJS.ProcessEnv = STARTUP_ENV,
+  env: NodeJS.ProcessEnv = process.env,
+): string | undefined {
+  const override = stateDirOverride(harnessName, snapshot, env);
+  const target =
+    override ?? (harnessName === "deepseek" ? join(resolveHomeDir(), ".dsh") : undefined);
+  if (!target) {
+    return undefined;
+  }
+  try {
+    mkdirSync(target, { recursive: true });
+  } catch {
+    return undefined;
+  }
+  return target;
 }
 
 /**
@@ -229,13 +371,21 @@ export function harnessStatePaths(harnessName: string): string[] {
  *
  * @param harnessName - Registered harness name.
  * @param home - Home directory the sandboxed agent will see. Defaults to {@link resolveHomeDir}.
+ * @param snapshot - Trusted startup environment that gates the custom-root
+ *   opt-in. Defaults to {@link STARTUP_ENV}.
+ * @param env - Environment the harness child actually receives. Defaults to
+ *   the live `process.env`.
  * @returns Absolute paths for sandbox grants.
  */
 export function harnessStateAbsolutePaths(
   harnessName: string,
   home: string = resolveHomeDir(),
+  snapshot: NodeJS.ProcessEnv = STARTUP_ENV,
+  env: NodeJS.ProcessEnv = process.env,
 ): string[] {
-  return harnessStatePaths(harnessName).map((path) => (isAbsolute(path) ? path : join(home, path)));
+  return harnessStatePaths(harnessName, snapshot, env).map((path) =>
+    isAbsolute(path) ? path : join(home, path),
+  );
 }
 
 /**

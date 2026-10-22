@@ -42,9 +42,9 @@ delete childEnv.DEVINTERN_PROMPTS_DIR;
 
 // A developer's agent configuration must not leak into the suite either:
 // DEVINTERN_HARNESS_CHAIN changes which harness counts as primary (suppressing
-// AGENT_MODEL), and *_CLI_PATH / DSH_HOME can point tests at tools and state
-// outside the isolated temp directories. Tests that need a harness configure it
-// explicitly.
+// AGENT_MODEL), and *_CLI_PATH / DSH_HOME / the custom-DSH_HOME opt-in can
+// point tests at tools and state outside the isolated temp directories. Tests
+// that need a harness configure it explicitly.
 //
 // The two DeepSeek live smokes are explicitly opt-in (DSH_LIVE_TEST=1) and
 // document DSH_CLI_PATH/DSH_HOME for a non-PATH dsh install or profile dir, so
@@ -65,6 +65,7 @@ for (const key of [
   "AGENT_MODEL",
   "AGENT_EFFORT",
   "DSH_HOME",
+  "DEVINTERN_SANDBOX_ALLOW_CUSTOM_DSH_HOME",
 ]) {
   if (keepForLiveDsh.has(key) && liveDsh) {
     continue;

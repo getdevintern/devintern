@@ -9,16 +9,16 @@
  * are reclassified, and ordinary agent failures keep the existing path.
  */
 
-/** Error raised when a harness CLI cannot start (sandbox/config problem). */
-export class HarnessUnavailableError extends Error {
-  readonly harnessName?: string;
+import { HarnessUnavailableError } from "@devintern/agent-harness";
 
-  constructor(message: string, options: { harnessName?: string } = {}) {
-    super(message);
-    this.name = "HarnessUnavailableError";
-    this.harnessName = options.harnessName;
-  }
-}
+/**
+ * Error raised when a harness CLI cannot start (sandbox/config problem).
+ *
+ * Re-exported from `@devintern/agent-harness` so an invocation rejected there
+ * (e.g. `deepseek` pointed at the Reasonix binary) is the same class the task
+ * pipeline checks before burning an attempt.
+ */
+export { HarnessUnavailableError };
 
 /** Signals available when an agent child exits. */
 export interface HarnessStartupSignals {
@@ -46,14 +46,21 @@ const STARTUP_PATTERNS: RegExp[] = [
   /\bEACCES\b/,
   /\bENOENT\b/,
   /path_not_granted/i,
-  // DeepSeek Harness headless reports credential problems as `dsh: <CODE>: ...`
-  // and exits before the task runs; classify them as configuration failures.
-  /\bdsh:\s*(?:MISSING_CREDENTIAL|UNAUTHORIZED|INVALID_[A-Z_]+|[A-Z_]*AUTH[A-Z_]*)\b/i,
   /sandbox[^\n]*(?:initializ|initialis|setup|startup)[^\n]*(?:fail|error|denied)/i,
   /(?:fail(?:ed)?|error|cannot|unable)[^\n]*sandbox[^\n]*(?:initializ|initialis|setup|startup)/i,
   /landlock[^\n]*(?:error|denied|fail)/i,
   /seatbelt[^\n]*(?:error|denied|fail)/i,
 ];
+
+/**
+ * DeepSeek Harness headless credential errors (`dsh: <CODE>: ...`). Kept
+ * separate from {@link STARTUP_PATTERNS} and additionally gated on "no work
+ * happened" below: dsh also emits ordinary task-time codes such as
+ * `INVALID_ARGUMENT`, and a long run that fails with one of those must stay a
+ * normal failure. Only credential-specific codes count here.
+ */
+const DSH_CREDENTIAL_STARTUP_PATTERN =
+  /\bdsh:\s*(?:MISSING_CREDENTIAL|UNAUTHORIZED|INVALID_API_KEY|INVALID_CREDENTIAL)\b/i;
 
 /** Generic startup-error line filter (case-insensitive). */
 const ACTIONABLE_LINE =
@@ -121,6 +128,8 @@ function stripDshReasoning(stderr: string): string {
  *
  * Conservative rules:
  * - a recognised startup error (sandbox denial/mise/EACCES/ENOENT) wins;
+ * - a dsh credential error counts only before any assistant output (or within
+ *   the fast-fail window), so task-time error codes stay ordinary failures;
  * - otherwise a non-zero exit within ~2s with no assistant stdout is treated
  *   as a startup failure;
  * - everything else (including timeouts) stays an ordinary agent failure.
@@ -139,14 +148,21 @@ export function detectHarnessStartupFailure(
   // startup diagnostic, and its free-form text can resemble sandbox errors.
   const stderr = stripDshReasoning(signals.stderr);
   const combined = `${stderr}\n${signals.stdout}`;
-  if (STARTUP_PATTERNS.some((pattern) => pattern.test(combined))) {
+  const noAssistantOutput = signals.stdout.trim() === "";
+  const fastExit = signals.exitCode !== null && signals.durationMs <= 2_000;
+  // A dsh credential error only counts if the child also looks like it never
+  // got to work: a long run that fails with a task-time `dsh: <CODE>: ...`
+  // (e.g. INVALID_ARGUMENT) must stay an ordinary agent failure.
+  const dshCredentialFailure =
+    (noAssistantOutput || fastExit) && DSH_CREDENTIAL_STARTUP_PATTERN.test(combined);
+  if (STARTUP_PATTERNS.some((pattern) => pattern.test(combined)) || dshCredentialFailure) {
     return {
       unavailable: true,
       reason: firstActionableLine(signals.stdout, stderr) ?? "harness could not start",
     };
   }
 
-  if (signals.exitCode !== null && signals.durationMs <= 2_000 && signals.stdout.trim() === "") {
+  if (fastExit && noAssistantOutput) {
     return {
       unavailable: true,
       reason:

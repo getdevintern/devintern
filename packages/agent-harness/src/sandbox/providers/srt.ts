@@ -22,7 +22,11 @@ import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { findInPath } from "../../resolver.js";
-import { harnessStateAbsolutePaths, resolveHomeDir } from "../harness-state.js";
+import {
+  ensureHarnessStateDir,
+  harnessStateAbsolutePaths,
+  resolveHomeDir,
+} from "../harness-state.js";
 import { probeCommand, unsupportedPlatform } from "../probe.js";
 import type { SandboxDetection, SandboxPolicy, SandboxProvider, WrappedCommand } from "../types.js";
 
@@ -90,10 +94,16 @@ const HARNESS_STATE_LOCK_FILES: Record<string, string[]> = {
  * files, settings, locks) — an agent denied these starts logged-out or exits.
  * Shares the audited per-harness state map with the nono provider.
  */
-function harnessStateWritePaths(harnessName: string | undefined): string[] {
+function harnessStateWritePaths(
+  harnessName: string | undefined,
+  stateEnv?: NodeJS.ProcessEnv,
+): string[] {
   const home = resolveHomeDir();
   const name = harnessName ?? "claude-code";
-  const state = harnessStateAbsolutePaths(name, home);
+  // A trusted custom DSH_HOME may not exist yet (fresh first run); create it
+  // so the grant below is not filtered out for a missing path.
+  ensureHarnessStateDir(name, stateEnv);
+  const state = harnessStateAbsolutePaths(name, home, stateEnv);
   const locks = (HARNESS_STATE_LOCK_FILES[name] ?? []).map((path) => join(home, path));
   return [...state, ...locks].filter((path) => existsSync(path) || path.endsWith(".lock"));
 }
@@ -103,6 +113,14 @@ export class SrtSandboxProvider implements SandboxProvider {
   readonly displayName = "Anthropic Sandbox Runtime (srt)";
   readonly priority = 20;
   readonly docsUrl = "https://github.com/anthropic-experimental/sandbox-runtime";
+
+  /**
+   * @param stateEnv - Trusted startup environment that gates the custom
+   *   `DSH_HOME` root opt-in. Defaults to the snapshot captured before the
+   *   host merges the repository `.env`; tests pass `process.env`. `DSH_HOME`
+   *   itself is read from the environment the harness child receives.
+   */
+  constructor(private readonly stateEnv?: NodeJS.ProcessEnv) {}
 
   async detect(): Promise<SandboxDetection> {
     const platform = unsupportedPlatform();
@@ -153,7 +171,10 @@ export class SrtSandboxProvider implements SandboxProvider {
         ...(sshAgentSocket ? { allowUnixSockets: [sshAgentSocket] } : {}),
       },
       filesystem: {
-        allowWrite: [...policy.writablePaths, ...harnessStateWritePaths(policy.harnessName)],
+        allowWrite: [
+          ...policy.writablePaths,
+          ...harnessStateWritePaths(policy.harnessName, this.stateEnv),
+        ],
         denyRead: [],
         denyWrite: [],
         ...(policy.readablePaths?.length ? { allowRead: policy.readablePaths } : {}),
