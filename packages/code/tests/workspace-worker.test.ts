@@ -555,6 +555,25 @@ describe("createFleetTaskExecutor serialization", () => {
     expect(repoManager.calls.some((call) => call.startsWith("remove:"))).toBe(true);
   });
 
+  test("an exhausted harness chain defers before creating a worktree", async () => {
+    const executor = createFleetTaskExecutor({
+      config: CONFIG,
+      workspaceDir,
+      skips: state.skips,
+      repoManager,
+      runTask: async () => true,
+      isHarnessExhausted: () => true,
+    });
+    const result = await executor(
+      "T-LIMIT",
+      toRoutableTask({ key: "T-LIMIT", labels: ["backend"], components: [] }),
+    );
+
+    expect(result).toBe("deferred");
+    expect(repoManager.calls).not.toContain("worktree:backend:T-LIMIT");
+    expect(repoManager.calls.some((call) => call.startsWith("remove:"))).toBe(false);
+  });
+
   test("a persisted retry repo bypasses lossy task-key-only rerouting", async () => {
     const executor = createFleetTaskExecutor(
       {

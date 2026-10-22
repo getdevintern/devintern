@@ -249,6 +249,17 @@ function findUsageLimitLine(stdout: string, stderr: string): OutputLine | undefi
 const STRUCTURED_LOG_KEYS = ["error.error", "error.message", "message", "cause"] as const;
 
 /**
+ * Shape of a structured harness log line: `level=ERROR` opens the line, after
+ * an optional logfmt `timestamp=`.
+ *
+ * Matching `level=ERROR` anywhere also matched *source code that quotes* a log
+ * line — a test fixture containing `level=ERROR message="…"` was parsed as a
+ * live diagnostic and killed a healthy run with a fake 4-hour usage window.
+ * Real logger output always starts with its fields, so anchor the shape.
+ */
+const STRUCTURED_LOG_LINE_PATTERN = /^(?:timestamp=\S+\s+)?level=ERROR\b/;
+
+/**
  * Extract candidate diagnostic strings from a structured harness log line.
  *
  * Handles both the v1 opencode `error.error="..."` field and the v2 field set
@@ -261,7 +272,7 @@ const STRUCTURED_LOG_KEYS = ["error.error", "error.message", "message", "cause"]
 function structuredLogCandidates(line: string): string[] {
   const candidates: string[] = [];
 
-  if (/\blevel=ERROR\b/.test(line)) {
+  if (STRUCTURED_LOG_LINE_PATTERN.test(line.trim())) {
     for (const key of STRUCTURED_LOG_KEYS) {
       const pattern = new RegExp(`\\b${key.replace(/\./g, "\\.")}="((?:\\\\.|[^"\\\\])*)"`);
       const match = line.match(pattern);

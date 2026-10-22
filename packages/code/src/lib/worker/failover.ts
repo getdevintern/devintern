@@ -166,6 +166,18 @@ export class WorkerFailover {
     return this.manager.allLimited();
   }
 
+  /**
+   * Whether no chain entry can start a run right now: every entry is either
+   * usage-limited or cooling down after a startup failure.
+   *
+   * Callers that would otherwise touch the repository first (fleet worktree
+   * creation, for example) use this to defer before doing disposable work that
+   * no child will use.
+   */
+  allExhausted(): boolean {
+    return this.manager.allLimited() || this.manager.allUnavailable();
+  }
+
   /** Startup banner line (`Agent harness: a → b (failover enabled)`). */
   describeStartup(): string {
     return `Agent harness: ${this.manager.describeChain()}${
@@ -360,7 +372,7 @@ export async function runWithFailover(
 
   const attempts = Math.max(1, failover.chain.entries.length);
   for (let attempt = 0; attempt < attempts; attempt++) {
-    if (failover.allLimited() || failover.manager.allUnavailable()) {
+    if (failover.allExhausted()) {
       return "deferred";
     }
     // A cooldown may have expired on a higher-priority entry while we were
