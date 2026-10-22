@@ -1,12 +1,14 @@
 /**
  * Selects the one pipeline a routed task runs.
  *
- * A task subprocess can see three layers of pipeline configuration:
+ * A task subprocess can see four layers of pipeline configuration:
  *
- * 1. A workspace per-repository override (`[[repos]].pipeline_file`), pinned
+ * 1. An automation-scoped override (`[[automations]].pipeline_file`), pinned
+ *    into the subprocess environment only for that automation's occurrences.
+ * 2. A workspace per-repository override (`[[repos]].pipeline_file`), pinned
  *    into the subprocess environment by the fleet worker.
- * 2. The repository's checked-in `.devintern-code/settings.json` pipeline.
- * 3. A workspace-wide default (`[defaults].pipeline_file`).
+ * 3. The repository's checked-in `.devintern-code/settings.json` pipeline.
+ * 4. A workspace-wide default (`[defaults].pipeline_file`).
  *
  * Exactly one complete definition is selected — ordered step arrays are never
  * merged across scopes. When none is present the built-in default applies.
@@ -20,11 +22,20 @@ import { existsSync, readFileSync } from "fs";
 import { dirname, isAbsolute, join, resolve } from "path";
 
 import type { PipelineConfig, ProjectSettings } from "../../types/settings";
-import { WORKSPACE_PIPELINE_DEFAULT_ENV, WORKSPACE_PIPELINE_REPO_ENV } from "../workspace/env";
+import {
+  WORKSPACE_PIPELINE_AUTOMATION_ENV,
+  WORKSPACE_PIPELINE_DEFAULT_ENV,
+  WORKSPACE_PIPELINE_REPO_ENV,
+} from "../workspace/env";
 import { DEFAULT_PIPELINE } from "./pipeline-config";
 
 /** Where the selected pipeline definition came from. */
-export type PipelineScope = "workspace-repo" | "repository" | "workspace-default" | "built-in";
+export type PipelineScope =
+  | "automation"
+  | "workspace-repo"
+  | "repository"
+  | "workspace-default"
+  | "built-in";
 
 /** The complete pipeline chosen for one task, with its configuration source. */
 export interface SelectedPipeline {
@@ -127,10 +138,10 @@ export function resolveWorkspaceRelativePaths(
 /**
  * Resolve the pipeline a task should run, honoring scope precedence.
  *
- * Precedence: workspace per-repository override > repository
- * `.devintern-code/settings.json` pipeline > workspace default > built-in
- * default. A referenced workspace file that is missing or invalid throws
- * (never a silent fallback).
+ * Precedence: automation override > workspace per-repository override >
+ * repository `.devintern-code/settings.json` pipeline > workspace default >
+ * built-in default. A referenced workspace file that is missing or invalid
+ * throws (never a silent fallback).
  *
  * @param input.settings - Parsed repository settings, or `null`.
  * @param input.cwd - Repository worktree (the process working directory).
@@ -143,6 +154,17 @@ export function selectPipelineConfig(input: {
   env?: NodeJS.ProcessEnv;
 }): SelectedPipeline {
   const env = input.env ?? process.env;
+
+  const automationFile = env[WORKSPACE_PIPELINE_AUTOMATION_ENV];
+  if (automationFile) {
+    const baseDir = dirname(automationFile);
+    return {
+      config: resolveWorkspaceRelativePaths(loadPipelineConfigFile(automationFile), baseDir),
+      scope: "automation",
+      sourcePath: automationFile,
+      baseDir,
+    };
+  }
 
   const repoFile = env[WORKSPACE_PIPELINE_REPO_ENV];
   if (repoFile) {

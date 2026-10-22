@@ -135,19 +135,37 @@ describe("buildRepoEnv", () => {
   test("clears pipeline references inherited from the worker process env", () => {
     process.env.DEVINTERN_WORKSPACE_PIPELINE_REPO = "/stale/repo.json";
     process.env.DEVINTERN_WORKSPACE_PIPELINE_DEFAULT = "/stale/default.json";
+    process.env.DEVINTERN_WORKSPACE_PIPELINE_AUTOMATION = "/stale/automation.json";
     try {
       const env = buildRepoEnv(repo(), workspaceDir);
       expect(env.DEVINTERN_WORKSPACE_PIPELINE_REPO).toBeUndefined();
       expect(env.DEVINTERN_WORKSPACE_PIPELINE_DEFAULT).toBeUndefined();
+      expect(env.DEVINTERN_WORKSPACE_PIPELINE_AUTOMATION).toBeUndefined();
     } finally {
       delete process.env.DEVINTERN_WORKSPACE_PIPELINE_REPO;
       delete process.env.DEVINTERN_WORKSPACE_PIPELINE_DEFAULT;
+      delete process.env.DEVINTERN_WORKSPACE_PIPELINE_AUTOMATION;
+    }
+  });
+
+  test("pins the automation-scoped pipeline reference over a stale process value", () => {
+    process.env.DEVINTERN_WORKSPACE_PIPELINE_AUTOMATION = "/stale/automation.json";
+    try {
+      const env = buildRepoEnv(repo(), workspaceDir, {
+        pipelineAutomationFile: join(workspaceDir, "pipelines/automation.json"),
+      });
+      expect(env.DEVINTERN_WORKSPACE_PIPELINE_AUTOMATION).toBe(
+        join(workspaceDir, "pipelines/automation.json"),
+      );
+    } finally {
+      delete process.env.DEVINTERN_WORKSPACE_PIPELINE_AUTOMATION;
     }
   });
 
   test("team layers cannot re-route the pinned pipeline references", () => {
     process.env.DEVINTERN_WORKSPACE_PIPELINE_REPO = "/stale/repo.json";
     process.env.DEVINTERN_WORKSPACE_PIPELINE_DEFAULT = "/stale/default.json";
+    process.env.DEVINTERN_WORKSPACE_PIPELINE_AUTOMATION = "/stale/automation.json";
     const team: TeamConfig = {
       name: "platform",
       tracker: "jira",
@@ -155,6 +173,7 @@ describe("buildRepoEnv", () => {
       env: {
         DEVINTERN_WORKSPACE_PIPELINE_REPO: "/team/repo.json",
         DEVINTERN_WORKSPACE_PIPELINE_DEFAULT: "/team/default.json",
+        DEVINTERN_WORKSPACE_PIPELINE_AUTOMATION: "/team/automation.json",
       },
     };
     try {
@@ -162,7 +181,10 @@ describe("buildRepoEnv", () => {
         repo({ pipelineFile: "pipelines/backend.json" }),
         team,
         workspaceDir,
-        { pipelineDefaultFile: join(workspaceDir, "pipelines/default.json") },
+        {
+          pipelineDefaultFile: join(workspaceDir, "pipelines/default.json"),
+          pipelineAutomationFile: join(workspaceDir, "pipelines/automation.json"),
+        },
       );
       expect(pinned.DEVINTERN_WORKSPACE_PIPELINE_REPO).toBe(
         join(workspaceDir, "pipelines/backend.json"),
@@ -170,13 +192,18 @@ describe("buildRepoEnv", () => {
       expect(pinned.DEVINTERN_WORKSPACE_PIPELINE_DEFAULT).toBe(
         join(workspaceDir, "pipelines/default.json"),
       );
+      expect(pinned.DEVINTERN_WORKSPACE_PIPELINE_AUTOMATION).toBe(
+        join(workspaceDir, "pipelines/automation.json"),
+      );
 
       const cleared = buildTeamTaskEnv(repo(), team, workspaceDir);
       expect(cleared.DEVINTERN_WORKSPACE_PIPELINE_REPO).toBeUndefined();
       expect(cleared.DEVINTERN_WORKSPACE_PIPELINE_DEFAULT).toBeUndefined();
+      expect(cleared.DEVINTERN_WORKSPACE_PIPELINE_AUTOMATION).toBeUndefined();
     } finally {
       delete process.env.DEVINTERN_WORKSPACE_PIPELINE_REPO;
       delete process.env.DEVINTERN_WORKSPACE_PIPELINE_DEFAULT;
+      delete process.env.DEVINTERN_WORKSPACE_PIPELINE_AUTOMATION;
     }
   });
 
