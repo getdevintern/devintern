@@ -38,6 +38,7 @@ export type RunStatus =
 export type RunStage =
   | "feasibility"
   | "implementation"
+  | "verify"
   | "auto_review"
   | "change_request"
   | "outcome";

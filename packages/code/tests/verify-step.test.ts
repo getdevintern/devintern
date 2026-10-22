@@ -1,10 +1,14 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RunArtifactRegistry } from "../src/lib/artifacts/registry";
 import { UsageLimitError } from "@devintern/agent-harness";
-import { buildRepairPrompt, verifyImplementation } from "../src/lib/agent/verify";
+import {
+  buildRepairPrompt,
+  describeVerificationFailure,
+  verifyImplementation,
+} from "../src/lib/agent/verify";
 import type { VerifyDependencies } from "../src/lib/agent/verify";
 import {
   UNTRUSTED_CONTENT_NOTICE,
@@ -98,20 +102,48 @@ describe("verifyImplementation", () => {
       kind: "repeat",
       from: "repair",
       maxRepeats: 2,
+      reason: describeVerificationFailure(feedback, feedback.items),
     });
     expect(run.pendingFeedback).toEqual(feedback);
     expect(buildRepairPrompt(run.context.taskContent, feedback)).toContain("Missing case");
   });
 
   test("supports halt and warn policies", async () => {
+    // The reason carries the blocking findings, not only the summary: it is
+    // what the tracker comment and the dashboard show the operator.
+    const reason = describeVerificationFailure(feedback, feedback.items);
+    expect(reason).toContain("Verification found 1 blocking finding(s)");
+    expect(reason).toContain("Missing case");
+
     expect(await verifyImplementation(state({ onFail: "halt" }), deps())).toEqual({
       kind: "halt",
-      reason: feedback.summary,
+      reason,
     });
     expect(await verifyImplementation(state({ onFail: "warn" }), deps())).toEqual({
       kind: "warn",
-      reason: feedback.summary,
+      reason,
     });
+  });
+
+  test("keeps the prompt and raw answer when no verdict can be parsed", async () => {
+    const run = state({});
+    const failing: VerifyDependencies = {
+      ...deps(),
+      runAgent: async () => "the agent wrote prose instead of JSON",
+      parseFeedback: () => {
+        throw new Error('No valid JSON object containing "approved" found in Agent response');
+      },
+    };
+
+    expect(await verifyImplementation(run, failing)).toEqual({
+      kind: "halt",
+      reason:
+        'Verification failed twice: No valid JSON object containing "approved" found in Agent response',
+    });
+    expect(existsSync(join(outputDir, "verify-prompt.txt"))).toBe(true);
+    expect(readFileSync(join(outputDir, "verify-output.txt"), "utf8")).toBe(
+      "the agent wrote prose instead of JSON",
+    );
   });
 
   test("warns when Git delivery is disabled", async () => {

@@ -61,7 +61,7 @@ export type StageStatus =
 export interface RunStageRecord {
   id: number;
   runId: number;
-  stage: "feasibility" | "implementation" | "auto_review" | "change_request" | "outcome";
+  stage: "feasibility" | "implementation" | "verify" | "auto_review" | "change_request" | "outcome";
   status: StageStatus;
   summary?: string;
   detail?: string;
