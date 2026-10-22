@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RunArtifactRegistry } from "../src/lib/artifacts/registry";
+import { beginShutdown, resetShutdownState } from "../src/lib/cli/shutdown-state";
 import { UsageLimitError } from "@devintern/agent-harness";
 import {
   buildRepairPrompt,
@@ -83,6 +84,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  resetShutdownState();
   rmSync(outputDir, { recursive: true, force: true });
 });
 
@@ -123,6 +125,32 @@ describe("verifyImplementation", () => {
       kind: "warn",
       reason,
     });
+  });
+
+  test("stops retrying and reports an interruption while shutting down", async () => {
+    // SIGTERM kills the agent child; retrying would spawn into a dying process
+    // and the shutdown handler already owns the interruption report.
+    const run = state({});
+    let calls = 0;
+    const interrupted: VerifyDependencies = {
+      ...deps(),
+      runAgent: async () => {
+        calls += 1;
+        throw new Error("Opencode exited with code 130: ");
+      },
+    };
+
+    beginShutdown();
+    try {
+      expect(await verifyImplementation(run, interrupted)).toEqual({
+        kind: "halt",
+        haltKind: "stop",
+        reason: "Interrupted during verification",
+      });
+      expect(calls).toBe(1);
+    } finally {
+      resetShutdownState();
+    }
   });
 
   test("keeps the prompt and raw answer when no verdict can be parsed", async () => {
