@@ -28,7 +28,7 @@ import {
 import { resolveAgentEffort, resolveAgentModel } from "../agent/model";
 import { loadPrompt } from "../prompts/loader";
 import { untrustedContentBlock } from "../prompts/untrusted-content";
-import { validateReviewFeedback } from "./feedback";
+import { validateReviewFeedback, validateReviewFeedbackStructure } from "./feedback";
 import { DEFAULT_AUTO_REVIEW_ITERATIONS } from "./auto-review-config";
 import { getSandbox } from "../agent/sandbox";
 import { createHarnessLogSink } from "../observability/harness-logs";
@@ -268,22 +268,40 @@ export function getPRDiff(baseBranch: string, workingDir: string): string {
   }
 }
 
+/** Options for {@link parseReviewFeedback}. */
+export interface ParseReviewFeedbackOptions {
+  /** Lowest finding priority that invalidates an approval. Defaults to `medium`. */
+  minPriority?: ReviewPriority;
+  /**
+   * Whether an approval that contradicts `minPriority` is rejected. Defaults to
+   * `true`, which is what the auto-review loop wants. A step that owns the
+   * policy passes `false`, gets the verdict, and decides for itself — `verify`
+   * downgrades the contradiction to a rejection so `onFail` governs.
+   */
+  enforceApproval?: boolean;
+}
+
 /**
  * Parse structured JSON review feedback from agent output.
  *
  * @param agentOutput - Raw stdout from the review agent
- * @param minPriority - Lowest finding priority that invalidates an approval
+ * @param options - Approval policy for this caller
  * @returns Validated {@link ReviewFeedback} object
  * @throws When no JSON is found or the structure is invalid
  */
 export function parseReviewFeedback(
   agentOutput: string,
-  minPriority: ReviewPriority = "medium",
+  options: ParseReviewFeedbackOptions = {},
 ): ReviewFeedback {
   try {
     const feedback = parseAgentJsonObject(agentOutput, "approved");
 
-    validateReviewFeedback(feedback, minPriority);
+    if (options.enforceApproval === false) {
+      // Schema only: the caller resolves contradictions against its own policy.
+      validateReviewFeedbackStructure(feedback);
+    } else {
+      validateReviewFeedback(feedback, options.minPriority);
+    }
     return feedback;
   } catch (error) {
     throw new Error(`Failed to parse review feedback JSON: ${error}`);

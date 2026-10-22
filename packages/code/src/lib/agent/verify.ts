@@ -11,7 +11,6 @@ import {
 import type { ReviewFeedback, ReviewFeedbackItem, ReviewPriority } from "../../types/auto-review";
 import { isShuttingDown } from "../cli/shutdown-state";
 import { untrustedContentBlock } from "../prompts/untrusted-content";
-import { validateReviewFeedback } from "../review/feedback";
 import { recordRunStage } from "../state/run-recorder";
 import type { TaskStepResult } from "../task/step-runner";
 import type { DeliveryState } from "./run-harness-finalize";
@@ -210,13 +209,10 @@ export async function verifyImplementation(
         state.context.harness,
         state.context.executablePath,
       );
-      // Validate approvals against this step's threshold, not the auto-review
-      // default: `minSeverity: "high"` makes medium findings advisory, so an
-      // approval carrying them must not be rejected as a parse failure.
-      feedback = deps.parseFeedback(output, minSeverity);
-      // Approvals only have to be free of findings at or above the configured
-      // blocking threshold; lower-priority notes are advisory here.
-      validateReviewFeedback(feedback, minSeverity);
+      // Parse the verdict without the auto-review approval rule: this step owns
+      // the policy (`minSeverity`), and resolving a contradiction below keeps a
+      // deterministic rejection out of the transient-failure retry below.
+      feedback = deps.parseFeedback(output, { enforceApproval: false });
       break;
     } catch (error) {
       if (error instanceof UsageLimitError) throw error;
@@ -250,8 +246,18 @@ export async function verifyImplementation(
     }
   }
   if (!feedback) return { kind: "halt", reason: "Verification returned no verdict" };
-  await saveVerification(state, prompt, feedback);
   const blocking = deps.filterItems(feedback.items, minSeverity);
+  // A verdict that approves the work while listing findings at or above the
+  // blocking threshold is contradictory. Resolve it here instead of rejecting
+  // it: the findings are real, so the step's `onFail` policy decides — `warn`
+  // continues, `halt` stops, `loopback` repairs.
+  if (feedback.approved && blocking.length > 0) {
+    console.warn(
+      `⚠️  Verification verdict approved the work while listing ${blocking.length} blocking finding(s); treating it as rejected`,
+    );
+    feedback = { ...feedback, approved: false };
+  }
+  await saveVerification(state, prompt, feedback);
   console.log(`\n🔎 Verification: ${feedback.summary}`);
   recordRunStage("verify", {
     status: blocking.length === 0 ? "succeeded" : "failed",
