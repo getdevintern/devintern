@@ -29,7 +29,7 @@ import { Utils } from "../utils";
 import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "./git-hook-fixer";
 import { resolveAgentEffort, resolveAgentModel } from "./model";
 import { createPlanImplementationPrompt, detectPlanOnlyBehavior, logHookErrorToFile } from "./plan";
-import { createGitHelpers } from "./run-harness-git";
+import { createGitHelpers, headAdvancedDuringRun } from "./run-harness-git";
 import type { FinalizeContext } from "./run-harness-git";
 import { getSandbox } from "./sandbox";
 import { harnessSpawnEnv } from "./spawn";
@@ -246,8 +246,21 @@ export async function commitImplementation(state: DeliveryState): Promise<boolea
     return true;
   }
 
-  const planPath =
-    outcome.result.message === "No changes to commit" ? detectPlanOnlyBehavior(state.output) : null;
+  const noChanges = outcome.result.message === "No changes to commit";
+  const headAdvanced = noChanges && (await headAdvancedDuringRun(ctx));
+
+  // The agent committed its own work during this run. A clean tree only means
+  // the pipeline has nothing left to commit, so deliver those commits instead
+  // of misreading the completion summary as plan-only work.
+  if (noChanges && headAdvanced && (await hasAgentCommitsToDeliver(ctx))) {
+    state.committed = true;
+    console.log("✅ Delivering implementation commits created by the agent");
+    return true;
+  }
+
+  // Only a run whose HEAD never moved can be plan-only. Plan language in the
+  // transcript is otherwise just part of an ordinary completion report.
+  const planPath = noChanges && !headAdvanced ? detectPlanOnlyBehavior(state.output) : null;
   if (planPath && !ctx.isPlanRetry) {
     const output = await implementPlan(ctx, taskKey, taskSummary, planPath);
     if (output !== undefined) {
@@ -259,11 +272,12 @@ export async function commitImplementation(state: DeliveryState): Promise<boolea
     return false;
   }
 
-  if (outcome.result.message === "No changes to commit") {
-    // Agents sometimes commit their own work. The pipeline creates the branch
-    // from the PR target, so commits ahead of it are this run's implementation;
-    // deliver them instead of requiring an extra commit just to satisfy the
-    // clean-tree assumption. A protected or target branch is never accepted.
+  if (noChanges) {
+    // Fallback for runs where the pre-run HEAD could not be captured: agents
+    // sometimes commit their own work. The pipeline creates the branch from the
+    // PR target, so commits ahead of it are this run's implementation; deliver
+    // them instead of requiring an extra commit just to satisfy the clean-tree
+    // assumption. A protected or target branch is never accepted.
     const currentBranch = await Utils.getCurrentBranch();
     const targetBranch = ctx.prTargetBranch.replace(/^origin\//, "");
     if (
