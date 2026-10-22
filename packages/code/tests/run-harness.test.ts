@@ -599,6 +599,25 @@ describe("runAgentHarness git delivery", () => {
     },
   );
 
+  test("delivers commits the plan agent created itself", async () => {
+    // Regression: the plan retry committed its own work, so the follow-up
+    // pipeline commit found a clean tree and failed the run with
+    // "Implementation was not committed".
+    scenario.stdout = "Created a plan";
+    planPath = "PLAN_DETECTED_NO_PATH";
+    commitResults = [
+      { success: false, message: "No changes to commit" },
+      { success: false, message: "No changes to commit" },
+    ];
+    inheritedCommitCount = 2;
+
+    await runAgentHarness({ ...baseInput(), createPr: true });
+
+    expect(commitCalls).toBe(2);
+    expect(deliveryEvents).toContain("push");
+    expect(tracker.transitionStatus).toHaveBeenCalledWith("TASK-1", "In Review");
+  });
+
   test("validates hooks before and after auto-review", async () => {
     scenario.stdout = "done";
 

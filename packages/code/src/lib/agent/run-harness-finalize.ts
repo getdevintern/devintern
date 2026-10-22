@@ -186,11 +186,36 @@ async function implementPlan(
     console.log(`✅ ${result.message}`);
     return output;
   }
+  if (result.message === "No changes to commit" && (await hasAgentCommitsToDeliver(ctx))) {
+    // The plan agent committed its own work, so the tree is clean even though
+    // the branch now holds the implementation. Deliver those commits instead
+    // of failing the run for lacking an extra pipeline commit.
+    console.log("✅ Delivering implementation commits created by the plan agent");
+    return output;
+  }
   console.log(`⚠️  ${result.message}`);
   console.log(
     'You can commit changes manually with: git add . && git commit -m "feat: implement task"',
   );
   return undefined;
+}
+
+/**
+ * Whether the branch already carries commits the pipeline should deliver
+ * instead of requiring an extra commit for a clean-tree assumption.
+ *
+ * The agent (or the plan retry) may have committed its own work. The branch is
+ * created from the PR target, so commits ahead of it are this run's
+ * implementation; a protected or target branch is never accepted.
+ *
+ * @param ctx - Delivery context providing the PR target branch.
+ */
+async function hasAgentCommitsToDeliver(ctx: FinalizeContext): Promise<boolean> {
+  const currentBranch = await Utils.getCurrentBranch();
+  const targetBranch = ctx.prTargetBranch.replace(/^origin\//, "");
+  if (!currentBranch || currentBranch === targetBranch) return false;
+  if (await Utils.isProtectedBranch(currentBranch)) return false;
+  return (await commitsAheadOfTarget(ctx)) > 0;
 }
 
 /**
