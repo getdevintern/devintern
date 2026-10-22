@@ -76,6 +76,13 @@ first; use [`effectiveSkipPermissions`](src/modes.ts) instead of reading
 `options.skipPermissions` directly — constrained modes always suppress YOLO /
 bypass flags. When `mode` is plan/readonly, never emit write-capable flags.
 
+When a CLI exposes no permission flag but reads a setting from its environment,
+translate `effectiveSkipPermissions` in `buildEnv` instead. The official
+DeepSeek Harness does this: `skipPermissions` becomes
+`DSH_PERMISSION_MODE=danger-full-access` (unless the user already set the
+variable), because `dsh headless` has no approval answerer and the profile's
+`workspace-write`/`ask` default fails closed on any escalation.
+
 ## Reasoning effort
 
 [`src/effort.ts`](src/effort.ts) lets callers tune reasoning depth per run

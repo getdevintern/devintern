@@ -94,6 +94,23 @@ describe("buildHeadlessAgentInvocation", () => {
     expect(warnings[0]).toContain("$DSH_HOME/profiles/headless/cordis.patch.yml");
   });
 
+  test("official DeepSeek Harness receives its unattended permission mode", async () => {
+    const originalMode = process.env.DSH_PERMISSION_MODE;
+    delete process.env.DSH_PERMISSION_MODE;
+    try {
+      const { env } = await buildHeadlessAgentInvocation(
+        new DeepSeekHarness(),
+        "/nonexistent/dsh",
+        "implement it",
+        runOptions,
+      );
+      expect(env).toEqual({ DSH_PERMISSION_MODE: "danger-full-access" });
+    } finally {
+      if (originalMode === undefined) delete process.env.DSH_PERMISSION_MODE;
+      else process.env.DSH_PERMISSION_MODE = originalMode;
+    }
+  });
+
   test("headless stdio ignores stdin so TUI CLIs cannot attach a TTY", () => {
     expect(HEADLESS_AGENT_STDIO).toEqual(["ignore", "pipe", "pipe"]);
   });

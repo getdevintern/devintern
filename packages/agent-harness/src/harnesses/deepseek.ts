@@ -18,16 +18,19 @@
  * flags. The model and reasoning level come from the dsh profile
  * (`$DSH_HOME/profiles/headless/cordis.patch.yml`), so `AGENT_MODEL` /
  * `AGENT_EFFORT` are ignored with actionable warnings instead of being passed
- * as unsupported arguments. Headless also disables the managed credential
- * store: authentication resolves from the launch environment, then
- * `<cwd>/.env`, then `$DSH_HOME/.env` (for example `DEEPSEEK_API_KEY`).
+ * as unsupported arguments. Unattended runs still need a permission setting:
+ * see {@link DeepSeekHarness.buildEnv}, which maps DevIntern's
+ * `skipPermissions` to the profile's `DSH_PERMISSION_MODE`. Headless also
+ * disables the managed credential store: authentication resolves from the
+ * launch environment, then `<cwd>/.env`, then `$DSH_HOME/.env` (for example
+ * `DEEPSEEK_API_KEY`).
  *
  * @see https://github.com/deepseek-ai/deepseek-harness
  * @see https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/cli-help.md
  * @see https://github.com/deepseek-ai/deepseek-harness/tree/master/packages/bundle/headless
  */
 
-import { assertModeSupported } from "../modes.js";
+import { assertModeSupported, effectiveSkipPermissions } from "../modes.js";
 import { parseMajorVersion, readCliVersion } from "../probe.js";
 import type { AgentHarness, AgentRunOptions, HarnessProbe } from "../types.js";
 
@@ -128,8 +131,33 @@ export class DeepSeekHarness implements AgentHarness {
     // Headless runs one task to completion: no --max-turns, --model, --effort,
     // or permission-skip flags exist. Workspace writes are governed by the
     // profile's permission preset (workspace-write by default) and
-    // DSH_PERMISSION_MODE.
+    // DSH_PERMISSION_MODE (see buildEnv).
 
     return args;
+  }
+
+  /**
+   * Map DevIntern's unattended permission default onto dsh's environment.
+   *
+   * `dsh headless` has no permission-skip flag. The shipped profile instead
+   * reads `DSH_PERMISSION_MODE`, where `danger-full-access` also pins the
+   * approval policy to `never`; the default `workspace-write` keeps approval
+   * `ask`, and headless composes no interactive answerer, so any operation
+   * that asks (a sandbox escalation, for example) fails closed. DevIntern's
+   * implementation, review, hook-fix and PM spawns request
+   * `skipPermissions: true`, so they need this mapping to run unattended.
+   *
+   * An explicit `DSH_PERMISSION_MODE` wins, letting users keep dsh's own
+   * sandbox (`workspace-write`) or a different preset. When DevIntern's own
+   * sandbox is enabled it remains the enforcement boundary.
+   *
+   * @param options - Per-run options; only the effective permission skip is read.
+   * @returns The dsh environment overlay, or `undefined` to inherit unchanged.
+   */
+  buildEnv(options: AgentRunOptions): Record<string, string> | undefined {
+    if (!effectiveSkipPermissions(options) || process.env.DSH_PERMISSION_MODE) {
+      return undefined;
+    }
+    return { DSH_PERMISSION_MODE: "danger-full-access" };
   }
 }

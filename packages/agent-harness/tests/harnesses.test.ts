@@ -875,6 +875,27 @@ describe("DeepSeekHarness (official dsh, experimental)", () => {
     expect(warnings).toEqual([]);
   });
 
+  test("buildEnv requests autonomous execution for unattended runs", () => {
+    const originalMode = process.env.DSH_PERMISSION_MODE;
+    delete process.env.DSH_PERMISSION_MODE;
+    try {
+      expect(h.buildEnv({ skipPermissions: true })).toEqual({
+        DSH_PERMISSION_MODE: "danger-full-access",
+      });
+      // A spawn that does not request permission-skip leaves the profile's
+      // workspace-write/ask default in place.
+      expect(h.buildEnv({ skipPermissions: false })).toBeUndefined();
+      expect(h.buildEnv({})).toBeUndefined();
+
+      // An explicit profile mode wins, so users can keep dsh's own sandbox.
+      process.env.DSH_PERMISSION_MODE = "workspace-write";
+      expect(h.buildEnv({ skipPermissions: true })).toBeUndefined();
+    } finally {
+      if (originalMode === undefined) delete process.env.DSH_PERMISSION_MODE;
+      else process.env.DSH_PERMISSION_MODE = originalMode;
+    }
+  });
+
   test("probe warns when the installed dsh differs from the verified version", () => {
     const dir = mkdtempSync(join(tmpdir(), "dsh-probe-"));
     const cli = join(dir, "dsh");

@@ -17,7 +17,7 @@
 
 ### Added
 
-- **Official DeepSeek Harness (experimental, DEV-188)**: `AGENT_HARNESS=deepseek` now selects DeepSeek's official `dsh` CLI through its documented `dsh headless` task mode, with `--json` for structured output. The adapter is verified against `@deepseek-ai/dsh` 0.2.1-rc.2, labeled experimental in harness selection and setup docs, and documents installation, `DEEPSEEK_API_KEY` headless authentication (the headless profile ignores GUI-saved credentials), profile-based model/effort configuration, and known limitations. Missing installs, credential failures, and unsupported settings produce actionable guidance, and the sandbox grants `~/.dsh` state access.
+- **Official DeepSeek Harness (experimental, DEV-188)**: `AGENT_HARNESS=deepseek` now selects DeepSeek's official `dsh` CLI through its documented `dsh headless` task mode, with `--json` for structured output. The adapter is verified against `@deepseek-ai/dsh` 0.2.1-rc.2, labeled experimental in harness selection and setup docs, and documents installation, `DEEPSEEK_API_KEY` headless authentication (the headless profile ignores GUI-saved credentials), profile-based model/effort configuration, and known limitations. Unattended spawns map `skipPermissions` to `DSH_PERMISSION_MODE=danger-full-access` (unless the user already set that variable), because headless has no approval answerer and the profile's default `workspace-write`/`ask` pair fails closed on escalation. Missing installs, credential failures, and unsupported settings produce actionable guidance, and the sandbox grants `~/.dsh` (or `DSH_HOME`) state access.
 
 ### Changed
 
