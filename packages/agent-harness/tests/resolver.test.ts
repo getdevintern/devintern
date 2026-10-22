@@ -51,6 +51,21 @@ describe("resolveHarness", () => {
     expect(result.path).toBe("opencode");
   });
 
+  test("deepseek selects the official dsh harness and reasonix stays explicit", () => {
+    const deepseek = resolveHarness({ harnessName: "deepseek", warnDeprecated: false });
+    expect(deepseek.harness.name).toBe("deepseek");
+    expect(deepseek.harness.displayName).toContain("experimental");
+    expect(deepseek.path).toBe("dsh");
+
+    const reasonix = resolveHarness({ harnessName: "reasonix" });
+    expect(reasonix.harness.name).toBe("reasonix");
+    expect(reasonix.path).toBe("reasonix");
+    expect(warnings).toHaveLength(0);
+
+    expect(getHarness("dsh")?.name).toBe("deepseek");
+    expect(getHarness("reasonix")?.name).toBe("reasonix");
+  });
+
   test("uses AGENT_HARNESS env var", () => {
     process.env.AGENT_HARNESS = "codex";
     const result = resolveHarness();

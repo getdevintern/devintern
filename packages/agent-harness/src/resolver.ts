@@ -67,7 +67,44 @@ export function resolveHarness(options?: HarnessResolutionOptions): ResolvedHarn
   const env = process.env;
   const harness = resolveHarnessOrThrow(options, env);
   const path = resolveHarnessPath(harness, options, env);
+  warnDeepSeekReasonixMigration(harness, path, options);
   return { harness, path };
+}
+
+/**
+ * Warn when a pre-split `AGENT_HARNESS=deepseek` configuration now resolves to
+ * the official `dsh` harness but only the community `reasonix` CLI is installed.
+ *
+ * `deepseek` intentionally points at DeepSeek's official harness. This warning
+ * makes that breaking change visible and names the explicit `reasonix` id for
+ * users who have not migrated yet, instead of only failing later with a generic
+ * missing-binary error.
+ *
+ * @param harness - Resolved harness.
+ * @param path - Resolved executable path.
+ * @param options - Warning control from the caller.
+ */
+function warnDeepSeekReasonixMigration(
+  harness: AgentHarness,
+  path: string,
+  options: HarnessResolutionOptions | undefined,
+): void {
+  if (
+    harness.name !== "deepseek" ||
+    options?.warnDeprecated === false ||
+    isHarnessCliAvailable(path)
+  ) {
+    return;
+  }
+  if (!isHarnessCliAvailable("reasonix")) {
+    return;
+  }
+  console.warn(
+    "⚠️  AGENT_HARNESS=deepseek now selects DeepSeek's official experimental harness (dsh), " +
+      "which was not found on PATH. The community Reasonix CLI is installed: " +
+      "set AGENT_HARNESS=reasonix to keep using Reasonix, or install dsh " +
+      "(npm i -g @deepseek-ai/dsh) for the official harness.",
+  );
 }
 
 /**

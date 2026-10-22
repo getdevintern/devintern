@@ -167,8 +167,10 @@ export const GITHUB_PR_TOKEN_STEP: EnvPromptStep = {
 
 /** Shared documentation tail appended to both `.env` and `.env.example`. */
 const ENV_COMMON_TAIL = `# Agent Harness Configuration
-# Which AI agent to use: claude-code | opencode | codex | cursor | grok | deepseek
+# Which AI agent to use: claude-code | opencode | codex | cursor | grok | deepseek | reasonix
 # (also: antigravity | kimi | qwen | goose | kilo-code | cline | pi)
+# deepseek selects DeepSeek's official harness (experimental; CLI 'dsh');
+# reasonix selects the community Reasonix CLI (CLI 'reasonix')
 # Legacy: gemini still resolves to antigravity with a deprecation warning
 # Defaults to 'claude-code' if not specified
 AGENT_HARNESS=claude-code
@@ -182,6 +184,10 @@ AGENT_HARNESS=claude-code
 
 # Backward compatibility: CLAUDE_CLI_PATH is still supported as a fallback
 # CLAUDE_CLI_PATH=claude
+
+# Official DeepSeek Harness (AGENT_HARNESS=deepseek) authenticates headless runs
+# through the launch environment. Set DEEPSEEK_API_KEY here (or in $DSH_HOME/.env).
+# DEEPSEEK_API_KEY=sk-your-deepseek-api-key
 
 # Note: Agents will be run with --dangerously-skip-permissions and --max-turns (agent-specific)
 # This allows for elevated permissions and extended conversations for complex tasks

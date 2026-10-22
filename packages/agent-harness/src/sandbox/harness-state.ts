@@ -32,7 +32,9 @@ import { homedir } from "os";
  *   `config.toml`, `models_cache.json` (verified on grok 1.0.62).
  * - cline: `~/.cline` — global config, agents, rules, workflows and sessions
  *   (`CLINE_DIR` overrides the location).
- * - deepseek (reasonix): `~/.reasonix` — `config.json`, skills and per-project
+ * - deepseek (official dsh): `~/.dsh` — profiles, sessions, settings, logs and
+ *   `$DSH_HOME/.env` (`DSH_HOME` overrides the location).
+ * - reasonix (community): `~/.reasonix` — `config.json`, skills and per-project
  *   overrides.
  * - goose: `~/.config/goose` (config.yaml), `~/.local/share/goose` (sessions,
  *   recipes, logs) and `~/.local/state/goose`.
@@ -58,7 +60,8 @@ export const HARNESS_STATE_PATHS: Record<string, string[]> = {
   opencode: [".config/opencode", ".local/share/opencode", ".local/state/opencode"],
   grok: [".grok"],
   cline: [".cline"],
-  deepseek: [".reasonix"],
+  deepseek: [".dsh"],
+  reasonix: [".reasonix"],
   goose: [".config/goose", ".local/share/goose", ".local/state/goose"],
   "kilo-code": [".config/kilo", ".local/share/kilo", ".local/state/kilo", ".cache/kilo"],
   kimi: [".kimi"],

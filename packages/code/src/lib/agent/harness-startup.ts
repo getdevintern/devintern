@@ -46,6 +46,9 @@ const STARTUP_PATTERNS: RegExp[] = [
   /\bEACCES\b/,
   /\bENOENT\b/,
   /path_not_granted/i,
+  // DeepSeek Harness headless reports credential problems as `dsh: <CODE>: ...`
+  // and exits before the task runs; classify them as configuration failures.
+  /\bdsh:\s*(?:MISSING_CREDENTIAL|UNAUTHORIZED|INVALID_[A-Z_]+|[A-Z_]*AUTH[A-Z_]*)\b/i,
   /sandbox[^\n]*(?:initializ|initialis|setup|startup)[^\n]*(?:fail|error|denied)/i,
   /(?:fail(?:ed)?|error|cannot|unable)[^\n]*sandbox[^\n]*(?:initializ|initialis|setup|startup)/i,
   /landlock[^\n]*(?:error|denied|fail)/i,
@@ -59,7 +62,7 @@ function firstActionableLine(stdout: string, stderr: string): string | undefined
     .map((line) => line.trim())
     .filter(Boolean);
   const actionable = lines.find((line) =>
-    /mise\s+ERROR|Permission denied|EACCES|ENOENT|path_not_granted|sandbox|denied|not found|failed to/i.test(
+    /mise\s+ERROR|Permission denied|EACCES|ENOENT|path_not_granted|sandbox|denied|not found|failed to|MISSING_CREDENTIAL|UNAUTHORIZED|\bdsh:/i.test(
       line,
     ),
   );

@@ -1,5 +1,15 @@
 # @devintern/code Changelog
 
+## [Unreleased]
+
+### Added
+
+- **Official DeepSeek Harness (experimental, DEV-188)**: `AGENT_HARNESS=deepseek` now selects DeepSeek's official `dsh` CLI through its documented `dsh headless` task mode, with `--json` for structured output. The adapter is verified against `@deepseek-ai/dsh` 0.2.1-rc.2, labeled experimental in harness selection and setup docs, and documents installation, `DEEPSEEK_API_KEY` headless authentication (the headless profile ignores GUI-saved credentials), profile-based model/effort configuration, and known limitations. Missing installs, credential failures, and unsupported settings produce actionable guidance, and the sandbox grants `~/.dsh` state access.
+
+### Changed
+
+- **Reasonix is now its own explicit harness**: the community DeepSeek-Reasonix adapter moved from harness id `deepseek` to `reasonix` (`AGENT_HARNESS=reasonix`, CLI `reasonix`). `deepseek` intentionally points at the official experimental harness, so existing Reasonix configurations must switch to `reasonix`; the CLI warns when `dsh` is missing but the Reasonix CLI is installed.
+
 ## [2.19.1] - 2026-10-20
 
 No-op automation patch: recurring jobs can opt into treating a run that changes nothing as a successful no-op, the local dashboard gets a worker-console refresh, and repository-wide TypeScript boundary and lint rules are tightened with expanded live tracker E2E coverage.

@@ -110,7 +110,11 @@ export { ClaudeCodeHarness } from "./harnesses/claude-code.js";
 export { ClineHarness } from "./harnesses/cline.js";
 export { CodexHarness } from "./harnesses/codex.js";
 export { CursorHarness } from "./harnesses/cursor.js";
-export { DeepSeekHarness } from "./harnesses/deepseek.js";
+export {
+  DeepSeekHarness,
+  DEEPSEEK_HEADLESS_PROFILE_PATH,
+  DEEPSEEK_TESTED_VERSION,
+} from "./harnesses/deepseek.js";
 /** @deprecated Use {@link AntigravityHarness}. Re-exports AntigravityHarness. */
 export { GeminiHarness } from "./harnesses/gemini.js";
 export { GooseHarness } from "./harnesses/goose.js";
@@ -120,6 +124,7 @@ export { KimiHarness } from "./harnesses/kimi.js";
 export { OpencodeHarness } from "./harnesses/opencode.js";
 export { PiHarness } from "./harnesses/pi.js";
 export { QwenCodeHarness } from "./harnesses/qwen.js";
+export { ReasonixHarness } from "./harnesses/reasonix.js";
 
 // Runners
 export { runAgentBun } from "./runners/bun.js";

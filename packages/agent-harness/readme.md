@@ -66,6 +66,7 @@ See [`AgentHarness`](src/types.ts) for full semantics. Quick decision table:
 | `supportsMaxTurns` | Set `true` only if the CLI accepts a turn-limit flag *and* emits a recognizable diagnostic on exhaustion. Callers skip transcript scanning when this is false/unset, so tool output cannot be mistaken for a turn-limit error. |
 | [`supportsStructuredOutput`](src/structured-output.ts) | Set `true` only if the CLI has a documented JSON output mode (verify upstream docs — don't assume). Supporting harnesses emit the flag in `buildArgs` when `options.structuredOutput` is set; runners fail closed with `UnsupportedStructuredOutputError` when it is false/unset. See the per-CLI flag table in [Structured (JSON) output](#structured-json-output). |
 | [`supportsEffort`](src/effort.ts) | Set `true` only if the CLI can apply a reasoning-effort level per run — as a dedicated flag (Claude Code / Grok / `agy` / Reasonix `--effort`), a differently named flag (Cline `--thinking <level>`, Opencode/Kilo `--variant <level>`), a config override (Codex `-c model_reasoning_effort="…"`), or composed into the model string (pi `<id>:<thinking>`). Supporting harnesses consume `options.effort` in `buildArgs`; the rest ignore it and runners print a one-line warning (no fail-closed) so failover chains mixing capable and incapable harnesses keep working. See [Reasoning effort](#reasoning-effort). |
+| `effortUnsupportedHint` | Optional one-line guidance appended to the runner's effort warning when `supportsEffort` is false. Use it to name the config surface the CLI actually reads (e.g. the official DeepSeek Harness profile file). |
 | `constrainedModeAllowsExternalTools` | Set `true` only if your constrained mode still permits network + MCP tools. No built-in harness sets it today (Codex's read-only sandbox disables network; Claude's plan mode denies non-annotated MCP tools, which aborts headless runs). Callers whose agents need web/MCP access skip constrained modes unless this is true. |
 | `promptFlag` | Set when the prompt must arrive as a flag value (`kimi --prompt "..."`). Omit for positional prompts (`codex exec "..."`). Prefer argv over stdin — see below. |
 | `imageInput` / `buildImageArgs` | `"path"` (default): images go into the prompt as markdown paths only. `"native"`: also emit CLI flags via `buildImageArgs(paths)` after the prompt (Codex `-i`). Runners call [`preparePromptWithAttachments`](src/attachments.ts); paths should also appear in `attachmentPaths`. |
@@ -106,7 +107,8 @@ capable and incapable harnesses.
   | claude-code | `--effort <level>` (session flag; clamped per model) |
   | cline | `--thinking <level>` (reasoning effort: `none\|low\|medium\|high\|xhigh`) |
   | codex | `-c model_reasoning_effort="<effort>"` config override |
-  | deepseek (reasonix) | `--effort <level>` |
+  | reasonix | `--effort <level>` |
+  | deepseek (official dsh, experimental) | ignored — configure reasoning in `$DSH_HOME/profiles/headless/cordis.patch.yml`; the runner warns with that path |
   | grok | `--effort <level>` (alias `--reasoning-effort`) |
   | kilo-code | `--variant <effort>` (provider-specific reasoning-effort variant) |
   | opencode | `--variant <effort>` (provider-specific reasoning-effort variant) |
@@ -163,7 +165,8 @@ open-question detectors) working exactly as before.
   | kilo-code | `--format json` | JSONL events |
   | kimi | `--output-format stream-json` | JSONL messages |
   | pi | `--mode json` (pairs with `-p`) | JSONL events |
-  | deepseek (reasonix) | `--output-format json` | single result object |
+  | reasonix | `--output-format json` | single result object |
+  | deepseek (official dsh, experimental) | `--json` | NDJSON run events (`session` … `final`) |
 
 - **Detectors & streaming.** Usage-limit and max-turns detectors keep
   scanning the raw streams (JSON event lines can still match

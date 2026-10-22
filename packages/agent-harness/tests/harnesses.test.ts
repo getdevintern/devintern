@@ -5,7 +5,11 @@ import { ClaudeCodeHarness } from "../src/harnesses/claude-code.js";
 import { ClineHarness } from "../src/harnesses/cline.js";
 import { CodexHarness } from "../src/harnesses/codex.js";
 import { CursorHarness } from "../src/harnesses/cursor.js";
-import { DeepSeekHarness } from "../src/harnesses/deepseek.js";
+import {
+  DEEPSEEK_HEADLESS_PROFILE_PATH,
+  DEEPSEEK_TESTED_VERSION,
+  DeepSeekHarness,
+} from "../src/harnesses/deepseek.js";
 import { GeminiHarness } from "../src/harnesses/gemini.js";
 import { GooseHarness } from "../src/harnesses/goose.js";
 import { GrokHarness } from "../src/harnesses/grok.js";
@@ -14,6 +18,7 @@ import { KimiHarness } from "../src/harnesses/kimi.js";
 import { OpencodeHarness } from "../src/harnesses/opencode.js";
 import { PiHarness, composePiModelWithEffort } from "../src/harnesses/pi.js";
 import { QwenCodeHarness } from "../src/harnesses/qwen.js";
+import { ReasonixHarness } from "../src/harnesses/reasonix.js";
 
 describe("ClaudeCodeHarness", () => {
   const h = new ClaudeCodeHarness();
@@ -730,11 +735,11 @@ describe("GrokHarness", () => {
   });
 });
 
-describe("DeepSeekHarness", () => {
-  const h = new DeepSeekHarness();
+describe("ReasonixHarness", () => {
+  const h = new ReasonixHarness();
 
   test("metadata", () => {
-    expect(h.name).toBe("deepseek");
+    expect(h.name).toBe("reasonix");
     expect(h.displayName).toBe("Reasonix");
     expect(h.defaultPath).toBe("reasonix");
     expect(h.promptFlag).toBeUndefined();
@@ -767,5 +772,70 @@ describe("DeepSeekHarness", () => {
 
   test("buildArgs ignores skipPermissions and maxTurns", () => {
     expect(h.buildArgs({ skipPermissions: true, maxTurns: 10 })).toEqual(["run"]);
+  });
+});
+
+describe("DeepSeekHarness (official dsh, experimental)", () => {
+  const h = new DeepSeekHarness();
+
+  test("metadata", () => {
+    expect(h.name).toBe("deepseek");
+    expect(h.displayName).toBe("DeepSeek Harness (experimental)");
+    expect(h.defaultPath).toBe("dsh");
+    expect(h.promptFlag).toBeUndefined();
+    expect(h.supportsStructuredOutput).toBe(true);
+    expect(h.supportsEffort).toBe(false);
+  });
+
+  test("buildArgs empty uses the documented headless invocation", () => {
+    expect(h.buildArgs({})).toEqual(["headless"]);
+  });
+
+  test("buildArgs structured output adds --json", () => {
+    expect(h.buildArgs({ structuredOutput: true })).toEqual(["headless", "--json"]);
+  });
+
+  test("buildArgs ignores unsupported headless flags but warns about the model", () => {
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message: string) => {
+      warnings.push(message);
+    };
+    try {
+      expect(
+        h.buildArgs({
+          model: "deepseek-v4-pro",
+          effort: "high",
+          skipPermissions: true,
+          maxTurns: 10,
+          structuredOutput: true,
+        }),
+      ).toEqual(["headless", "--json"]);
+    } finally {
+      console.warn = originalWarn;
+    }
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("selects its model from the dsh headless profile");
+    expect(warnings[0]).toContain('ignoring model "deepseek-v4-pro"');
+    expect(warnings[0]).toContain("$DSH_HOME/profiles/headless/cordis.patch.yml");
+  });
+
+  test("does not warn when no model is configured", () => {
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message: string) => {
+      warnings.push(message);
+    };
+    try {
+      expect(h.buildArgs({ skipPermissions: true, maxTurns: 10 })).toEqual(["headless"]);
+    } finally {
+      console.warn = originalWarn;
+    }
+    expect(warnings).toEqual([]);
+  });
+
+  test("records the verified upstream version", () => {
+    expect(DEEPSEEK_TESTED_VERSION).toBe("0.2.1-rc.2");
+    expect(DEEPSEEK_HEADLESS_PROFILE_PATH).toContain("profiles/headless/cordis.patch.yml");
   });
 });

@@ -34,6 +34,23 @@ describe("detectHarnessStartupFailure", () => {
     }
   });
 
+  test("classifies DeepSeek Harness headless credential failures", () => {
+    for (const stderr of [
+      "dsh: MISSING_CREDENTIAL: no credential for provider deepseek\n",
+      "dsh: UNAUTHORIZED: provider rejected the API key\n",
+      "dsh: INVALID_API_KEY: check DEEPSEEK_API_KEY\n",
+    ]) {
+      const result = detectHarnessStartupFailure({
+        exitCode: 1,
+        stdout: "",
+        stderr,
+        durationMs: 10_000,
+      });
+      expect(result?.unavailable).toBe(true);
+      expect(result?.reason).toContain("dsh:");
+    }
+  });
+
   test("classifies a fast non-zero exit with no output", () => {
     const result = detectHarnessStartupFailure({
       exitCode: 2,
