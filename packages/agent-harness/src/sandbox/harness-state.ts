@@ -43,6 +43,9 @@ import { homedir } from "os";
  * - qwen: `~/.qwen` — `settings.json`, `installation_id`, memory
  *   (`QWEN_HOME` overrides the location).
  * - pi: `~/.pi` — `auth.json`, sessions, model store, skills and themes.
+ * - muse: `~/.config/muse` (documented settings/skills location),
+ *   `~/.local/share/muse` (observed sessions and tracing), plus the XDG
+ *   state/cache roots under the same app name for the CLI's bookkeeping.
  *
  * A directory grant covers the lock files inside it, so only top-level files
  * need an explicit file grant (the `.json` special case in the providers).
@@ -64,6 +67,7 @@ export const HARNESS_STATE_PATHS: Record<string, string[]> = {
   kimi: [".kimi"],
   qwen: [".qwen"],
   pi: [".pi"],
+  muse: [".config/muse", ".local/share/muse", ".local/state/muse", ".cache/muse"],
 };
 
 /**

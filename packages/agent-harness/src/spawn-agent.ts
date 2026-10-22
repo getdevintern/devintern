@@ -173,11 +173,12 @@ const SEATBELT_WRAPPERS = new Set(["nono", "srt"]);
  * that also self-sandboxes.
  *
  * Codex always runs with `--sandbox workspace-write` (its own Seatbelt on
- * macOS). `sandbox-exec` inside `sandbox-exec` is not supported, so under
- * nono/srt on macOS the inner sandbox would fail to initialize. The outer
- * wrapper already provides the (stronger, whole-process) boundary, so switch
- * codex's own sandbox off for the wrapped run. On Linux the layers stack
- * (Landlock/bwrap compose), so both are kept for defense in depth.
+ * macOS), and Muse Code also uses Seatbelt on macOS. `sandbox-exec` inside
+ * `sandbox-exec` is not supported, so under nono/srt on macOS the inner
+ * sandbox would fail to initialize. The outer wrapper already provides the
+ * (stronger, whole-process) boundary, so switch the harness's own sandbox off
+ * for the wrapped run. On Linux the layers stack (Landlock/bwrap compose), so
+ * both are kept for defense in depth.
  *
  * Exported for tests; `platform` is injectable for the same reason.
  *
@@ -207,6 +208,13 @@ export function applyNestingGuard(
       );
       return adjusted;
     }
+  }
+  if (harnessName === "muse" && !args.includes("--disable-sandbox") && !args.includes("--yolo")) {
+    console.log(
+      `🔒 Disabled Muse Code's own sandbox inside ${providerName} (nested Seatbelt is ` +
+        "unsupported on macOS; the outer sandbox is the enforcement boundary).",
+    );
+    return [...args, "--disable-sandbox"];
   }
   return args;
 }

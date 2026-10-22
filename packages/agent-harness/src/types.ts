@@ -257,6 +257,17 @@ export interface AgentHarness {
    */
   readonly promptFlag?: string;
   /**
+   * Native file-input flag (e.g. Muse Code `--prompt-file`) that accepts a path
+   * holding the full prompt. Used only when the prompt is too large for one
+   * argv entry: {@link buildPromptArgs} writes the prompt to a private temp
+   * file and emits this flag instead of a short "read this file" pointer, so
+   * the CLI receives the complete prompt through its own file surface.
+   *
+   * Falls back to `promptFlag` or a positional argument when the temp file
+   * cannot be written.
+   */
+  readonly promptFileFlag?: string;
+  /**
    * End-of-options marker (e.g. `--`) that this CLI honors before positional
    * arguments. When set and a positional prompt starts with `-`,
    * {@link buildPromptArgs} emits the marker before the prompt so flag-like

@@ -117,6 +117,7 @@ export { GooseHarness } from "./harnesses/goose.js";
 export { GrokHarness } from "./harnesses/grok.js";
 export { KiloCodeHarness } from "./harnesses/kilo-code.js";
 export { KimiHarness } from "./harnesses/kimi.js";
+export { MUSE_READONLY_PROFILE, MuseHarness } from "./harnesses/muse.js";
 export { OpencodeHarness } from "./harnesses/opencode.js";
 export { PiHarness } from "./harnesses/pi.js";
 export { QwenCodeHarness } from "./harnesses/qwen.js";

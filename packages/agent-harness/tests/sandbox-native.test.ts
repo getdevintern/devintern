@@ -178,4 +178,23 @@ describe("applyNestingGuard", () => {
     const args = ["--dangerously-skip-permissions"];
     expect(applyNestingGuard("nono", "claude-code", args, "darwin")).toBe(args);
   });
+
+  test("on macOS under nono, Muse's own sandbox is switched off", () => {
+    const museArgs = ["exec", "--disable-request-user-input", "--disable-approval"];
+    expect(applyNestingGuard("nono", "muse", museArgs, "darwin")).toEqual([
+      ...museArgs,
+      "--disable-sandbox",
+    ]);
+    expect(museArgs).not.toContain("--disable-sandbox"); // input not mutated
+  });
+
+  test("Muse keeps its sandbox when explicitly disabled already, on Linux, or in microVMs", () => {
+    const yolo = ["exec", "--yolo"];
+    expect(applyNestingGuard("nono", "muse", yolo, "darwin")).toBe(yolo);
+    const disabled = ["exec", "--disable-sandbox"];
+    expect(applyNestingGuard("srt", "muse", disabled, "darwin")).toBe(disabled);
+    const args = ["exec", "--disable-approval"];
+    expect(applyNestingGuard("nono", "muse", args, "linux")).toBe(args);
+    expect(applyNestingGuard("docker", "muse", args, "darwin")).toBe(args);
+  });
 });

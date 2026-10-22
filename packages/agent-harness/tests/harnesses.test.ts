@@ -11,6 +11,7 @@ import { GooseHarness } from "../src/harnesses/goose.js";
 import { GrokHarness } from "../src/harnesses/grok.js";
 import { KiloCodeHarness } from "../src/harnesses/kilo-code.js";
 import { KimiHarness } from "../src/harnesses/kimi.js";
+import { MuseHarness } from "../src/harnesses/muse.js";
 import { OpencodeHarness } from "../src/harnesses/opencode.js";
 import { PiHarness, composePiModelWithEffort } from "../src/harnesses/pi.js";
 import { QwenCodeHarness } from "../src/harnesses/qwen.js";
@@ -393,6 +394,94 @@ describe("KimiHarness", () => {
       "--model",
       "kimi-k2",
     ]);
+  });
+});
+
+describe("MuseHarness", () => {
+  const h = new MuseHarness();
+
+  test("metadata", () => {
+    expect(h.name).toBe("muse");
+    expect(h.displayName).toBe("Muse Code");
+    expect(h.defaultPath).toBe("muse");
+    expect(h.promptFlag).toBeUndefined();
+    expect(h.promptFileFlag).toBe("--prompt-file");
+    expect(h.endOfOptionsMarker).toBe("--");
+    expect(h.supportsMaxTurns).toBe(true);
+    expect(h.supportsStructuredOutput).toBe(true);
+    expect(h.supportsEffort).toBe(true);
+    expect(h.supportedModes).toEqual(["readonly"]);
+  });
+
+  test("buildArgs empty", () => {
+    expect(h.buildArgs({})).toEqual(["exec", "--disable-request-user-input"]);
+  });
+
+  test("buildArgs with all options", () => {
+    expect(
+      h.buildArgs({
+        skipPermissions: true,
+        model: "muse-spark-1.2",
+        effort: "high",
+        maxTurns: 25,
+        workingDir: "/tmp/wt",
+        structuredOutput: true,
+      }),
+    ).toEqual([
+      "exec",
+      "--disable-request-user-input",
+      "--disable-approval",
+      "--workspace",
+      "/tmp/wt",
+      "--model",
+      "muse-spark-1.2",
+      "--reasoning-effort",
+      "high",
+      "--json",
+      "--max-model-steps",
+      "25",
+    ]);
+  });
+
+  test("buildArgs does not emit an approval flag when skipPermissions is false", () => {
+    expect(h.buildArgs({ skipPermissions: false })).toEqual([
+      "exec",
+      "--disable-request-user-input",
+    ]);
+  });
+
+  test("readonly mode uses the built-in read-only profile and never a bypass flag", () => {
+    expect(h.buildArgs({ mode: "readonly", skipPermissions: true })).toEqual([
+      "exec",
+      "--disable-request-user-input",
+      "--permission-profile",
+      ":read-only",
+    ]);
+  });
+
+  test("plan mode fails closed (no headless plan surface)", () => {
+    expect(() => h.buildArgs({ mode: "plan" })).toThrow(/does not support agent mode "plan"/);
+  });
+
+  test("map maxTurns to --max-model-steps only when set", () => {
+    expect(h.buildArgs({ maxTurns: 0 })).toContain("--max-model-steps");
+    expect(h.buildArgs({})).not.toContain("--max-model-steps");
+  });
+
+  test("never puts the Meta API key on argv", () => {
+    const previous = process.env.META_API_KEY;
+    process.env.META_API_KEY = "sk-muse-test-secret";
+    try {
+      expect(h.buildArgs({ skipPermissions: true }).join(" ")).not.toContain(
+        "sk-muse-test-secret",
+      );
+    } finally {
+      if (previous === undefined) {
+        delete process.env.META_API_KEY;
+      } else {
+        process.env.META_API_KEY = previous;
+      }
+    }
   });
 });
 

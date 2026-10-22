@@ -1,7 +1,7 @@
 # @devintern/agent-harness
 
 Source-only package that abstracts AI coding agent CLIs (Claude Code, Opencode,
-Codex, Cursor CLI, Antigravity/agy, Grok Build, Kimi, ...) behind one
+Codex, Cursor CLI, Antigravity/agy, Grok Build, Kimi, Muse Code, ...) behind one
 [`AgentHarness`](src/types.ts) interface, plus the diagnostics runners need to
 interpret headless runs: mode enforcement, max-turns detection,
 usage/rate-limit detection, incomplete-implementation and open-question
@@ -68,6 +68,7 @@ See [`AgentHarness`](src/types.ts) for full semantics. Quick decision table:
 | [`supportsEffort`](src/effort.ts) | Set `true` only if the CLI can apply a reasoning-effort level per run — as a dedicated flag (Claude Code / Grok / `agy` / Reasonix `--effort`), a differently named flag (Cline `--thinking <level>`, Opencode/Kilo `--variant <level>`), a config override (Codex `-c model_reasoning_effort="…"`), or composed into the model string (pi `<id>:<thinking>`). Supporting harnesses consume `options.effort` in `buildArgs`; the rest ignore it and runners print a one-line warning (no fail-closed) so failover chains mixing capable and incapable harnesses keep working. See [Reasoning effort](#reasoning-effort). |
 | `constrainedModeAllowsExternalTools` | Set `true` only if your constrained mode still permits network + MCP tools. No built-in harness sets it today (Codex's read-only sandbox disables network; Claude's plan mode denies non-annotated MCP tools, which aborts headless runs). Callers whose agents need web/MCP access skip constrained modes unless this is true. |
 | `promptFlag` | Set when the prompt must arrive as a flag value (`kimi --prompt "..."`). Omit for positional prompts (`codex exec "..."`). Prefer argv over stdin — see below. |
+| `promptFileFlag` | Set when the CLI has a native prompt-file flag (`muse exec --prompt-file <path>`). `buildPromptArgs` uses it only for prompts too large for one argv entry, writing the full prompt to a private temp file instead of a short pointer. |
 | `imageInput` / `buildImageArgs` | `"path"` (default): images go into the prompt as markdown paths only. `"native"`: also emit CLI flags via `buildImageArgs(paths)` after the prompt (Codex `-i`). Runners call [`preparePromptWithAttachments`](src/attachments.ts); paths should also appear in `attachmentPaths`. |
 
 Inside `buildArgs`: always call `assertModeSupported(this, options.mode)`
@@ -109,6 +110,7 @@ capable and incapable harnesses.
   | deepseek (reasonix) | `--effort <level>` |
   | grok | `--effort <level>` (alias `--reasoning-effort`) |
   | kilo-code | `--variant <effort>` (provider-specific reasoning-effort variant) |
+  | muse | `--reasoning-effort <low\|medium\|high>` (alias `--effort`) |
   | opencode | `--variant <effort>` (provider-specific reasoning-effort variant) |
   | pi | composed into the model string: `--model <model>:<effort>` |
   | cursor, goose, kimi, qwen | ignored (runner warns when the option is requested) |
@@ -162,6 +164,7 @@ open-question detectors) working exactly as before.
   | qwen | `--output-format json` | JSON array of messages |
   | kilo-code | `--format json` | JSONL events |
   | kimi | `--output-format stream-json` | JSONL messages |
+  | muse | `--json` | JSONL events |
   | pi | `--mode json` (pairs with `-p`) | JSONL events |
   | deepseek (reasonix) | `--output-format json` | single result object |
 
@@ -182,8 +185,10 @@ open-question detectors) working exactly as before.
   at `MAX_ARG_STRLEN` (131072 bytes) with `E2BIG: argument list too long`, which
   a large review diff easily reaches once the sandbox wrapper's own arguments
   are added. Prompts over `MAX_PROMPT_ARG_BYTES` are written to a private temp
-  file and replaced with a short pointer the agent reads first — callers keep
-  using `buildPromptArgs` and do not need a size check of their own.
+  file and replaced with a short pointer the agent reads first. A harness with
+  `promptFileFlag` instead receives the full file path through that flag (Muse
+  Code's `--prompt-file`), so the CLI reads the complete prompt itself. Callers
+  keep using `buildPromptArgs` and do not need a size check of their own.
 - **`cwd` vs `workingDir`.** Most CLIs inherit the working directory from the
   spawn's `cwd`. Some ignore it (opencode defaults to `$HOME`) and must consume
   `options.workingDir` explicitly as their own flag — see the `workingDir`
