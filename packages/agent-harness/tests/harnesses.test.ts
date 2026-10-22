@@ -834,8 +834,10 @@ describe("DeepSeekHarness (official dsh, experimental)", () => {
       warnings.push(message);
     };
     try {
-      // Code passes these on every implementation (500) and analysis (10) run.
+      // Code passes these on every implementation (500) and analysis (10) run;
+      // PM passes 100 for every story run.
       expect(h.buildArgs({ skipPermissions: true, maxTurns: 500 })).toEqual(["headless"]);
+      expect(h.buildArgs({ skipPermissions: true, maxTurns: 100 })).toEqual(["headless"]);
       expect(h.buildArgs({ skipPermissions: true, maxTurns: 10 })).toEqual(["headless"]);
     } finally {
       console.warn = originalWarn;

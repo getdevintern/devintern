@@ -38,12 +38,13 @@ export const DEEPSEEK_TESTED_VERSION = "0.2.1-rc.2";
 export const DEEPSEEK_HEADLESS_PROFILE_PATH = "$DSH_HOME/profiles/headless/cordis.patch.yml";
 
 /**
- * Turn caps DevIntern's Code workflows supply internally (500 for
- * implementation/review, 10 for analysis). They have no headless equivalent but
- * are not user configuration, so warning about them on every run would be
- * noise. Any other value means the user asked for a specific cap.
+ * Turn caps DevIntern's own workflows supply internally (500 for Code
+ * implementation/review, 10 for Code analysis, 100 for PM story runs). They
+ * have no headless equivalent but are not user configuration, so warning about
+ * them on every run would be noise. Any other value means the user asked for a
+ * specific cap.
  */
-const INTERNAL_TURN_CAPS = new Set([10, 500]);
+const INTERNAL_TURN_CAPS = new Set([10, 100, 500]);
 
 export class DeepSeekHarness implements AgentHarness {
   readonly name = "deepseek";

@@ -45,7 +45,16 @@ delete childEnv.DEVINTERN_PROMPTS_DIR;
 // AGENT_MODEL), and *_CLI_PATH / DSH_HOME can point tests at tools and state
 // outside the isolated temp directories. Tests that need a harness configure it
 // explicitly.
+//
+// The two DeepSeek live smokes are explicitly opt-in (DSH_LIVE_TEST=1) and
+// document DSH_CLI_PATH/DSH_HOME for a non-PATH dsh install or profile dir, so
+// keep exactly those two overrides in that mode.
+const liveDsh = childEnv.DSH_LIVE_TEST === "1";
+const keepForLiveDsh = new Set(["DSH_CLI_PATH", "DSH_HOME"]);
 for (const key of Object.keys(childEnv)) {
+  if (keepForLiveDsh.has(key) && liveDsh) {
+    continue;
+  }
   if (key.endsWith("_CLI_PATH") || key.endsWith("_MODEL")) {
     delete childEnv[key];
   }
@@ -57,6 +66,9 @@ for (const key of [
   "AGENT_EFFORT",
   "DSH_HOME",
 ]) {
+  if (keepForLiveDsh.has(key) && liveDsh) {
+    continue;
+  }
   delete childEnv[key];
 }
 
