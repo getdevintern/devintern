@@ -279,6 +279,27 @@ generated `.local/gitlab.json` credentials.
 Ordinary `bun run test` runs only local harness checks and never the live tracker
 suites.
 
+### Workspace tracker smoke (read-only)
+
+The worker's shared env can be validated without creating any tracker data:
+
+```sh
+bun run --filter @devintern/e2e test:trackers
+```
+
+The command reads `DEVINTERN_ENV_FILE`, `DEVINTERN_WORKSPACE_DIR/.env`, or
+`~/.devintern/.env` (in that order), detects every configured tracker, and runs
+read-only checks. Jira auth/project/status/create-metadata/search, Trello
+auth/board/lists/search, and the Markdown task directory are covered today. No
+ticket, card, comment, label, or status is created or changed, and credentials
+are never printed. The active `TASK_TRACKER` must be configured;
+`JIRA_DEFAULT_PROJECT_KEY` is optional and the first accessible project is
+inspected when it is absent.
+
+This smoke is opt-in and is not part of `test`, Turbo, or CI. See
+[docs/tracker-e2e-plan.md](docs/tracker-e2e-plan.md) for the staged expansion to
+full Jira/Trello lifecycles and offline fake-server coverage.
+
 ## Delivery lifecycle coverage
 
 GitHub and local GitLab also cover an agent exiting unsuccessfully after editing,

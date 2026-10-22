@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "test": "bun test tests/local",
+    "test:trackers": "bun run scripts/trackers.ts",
     "test:e2e": "bun run scripts/github.ts",
     "format": "oxfmt .",
     "format:check": "oxfmt --check .",
