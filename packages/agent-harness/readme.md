@@ -108,7 +108,7 @@ capable and incapable harnesses.
   | cline | `--thinking <level>` (reasoning effort: `none\|low\|medium\|high\|xhigh`) |
   | codex | `-c model_reasoning_effort="<effort>"` config override |
   | reasonix | `--effort <level>` |
-  | deepseek (official dsh, experimental) | ignored — configure reasoning in `$DSH_HOME/profiles/headless/cordis.patch.yml`; the runner warns with that path |
+  | deepseek (official dsh, experimental) | ignored — configure reasoning in `$DSH_HOME/profiles/headless/cordis.patch.yml`; invocation warns with that path |
   | grok | `--effort <level>` (alias `--reasoning-effort`) |
   | kilo-code | `--variant <effort>` (provider-specific reasoning-effort variant) |
   | opencode | `--variant <effort>` (provider-specific reasoning-effort variant) |

@@ -8,6 +8,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
@@ -21,6 +22,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DeepSeekHarness, runAgentNode } from "@devintern/agent-harness";
 import { detectHarnessStartupFailure } from "../src/lib/agent/harness-startup";
+import { buildHeadlessAgentInvocation } from "../src/lib/agent/spawn";
 
 const FAKE_DSH = `#!/bin/sh
 if [ "$1" = "--version" ]; then
@@ -107,6 +109,25 @@ describe("official DeepSeek Harness Code workflow", () => {
     expect(result.stdout).toContain("<!-- devintern:summary:start -->");
     expect(result.stdout).toContain("Fake dsh wrote implemented.txt.");
     expect(result.stderr).toBe("");
+  });
+
+  test("the Code headless path builds and spawns the documented invocation", async () => {
+    const invocation = await buildHeadlessAgentInvocation(
+      new DeepSeekHarness(),
+      cli,
+      "Implement via the Code path",
+      { maxTurns: 500, skipPermissions: true, workingDir: cwd },
+    );
+    expect(invocation.args).toEqual(["headless", "Implement via the Code path"]);
+
+    const result = spawnSync(cli, invocation.args, {
+      cwd,
+      encoding: "utf8",
+      env: { ...process.env, ...invocation.env },
+    });
+    expect(result.status).toBe(0);
+    expect(readFileSync(join(cwd, "implemented.txt"), "utf8")).toContain("implemented by fake dsh");
+    expect(result.stdout).toContain("Fake dsh wrote implemented.txt.");
   });
 
   test("surfaces a missing dsh install with install guidance", async () => {

@@ -12,8 +12,9 @@
  * apart.
  */
 
+import { existsSync, realpathSync } from "fs";
 import { homedir } from "os";
-import { isAbsolute, join } from "path";
+import { isAbsolute, join, relative, resolve } from "path";
 
 /**
  * Harness name → $HOME paths the agent needs read+write access to.
@@ -34,8 +35,10 @@ import { isAbsolute, join } from "path";
  * - cline: `~/.cline` — global config, agents, rules, workflows and sessions
  *   (`CLINE_DIR` overrides the location).
  * - deepseek (official dsh): `~/.dsh` — profiles, sessions, settings, logs and
- *   `$DSH_HOME/.env`. When `DSH_HOME` is set, that absolute directory replaces
- *   the default so the sandbox grants the state the CLI actually reads/writes.
+ *   `$DSH_HOME/.env`. When `DSH_HOME` is set, DevIntern expands `~`, resolves
+ *   relative values against the workspace (matching dsh), and grants that
+ *   directory instead — but only inside `$HOME` or the workspace. Other
+ *   locations need {@link DSH_HOME_CUSTOM_ROOT_ENV}=1.
  * - reasonix (community): `~/.reasonix` — `config.json`, skills and per-project
  *   overrides.
  * - goose: `~/.config/goose` (config.yaml), `~/.local/share/goose` (sessions,
@@ -89,19 +92,122 @@ export const HARNESS_STATE_PATHS_EXTRA: Record<
  * When unset, the corresponding `HARNESS_STATE_PATHS` default applies.
  */
 function stateDirOverride(harnessName: string): string | undefined {
-  if (harnessName === "deepseek") {
-    const dshHome = process.env.DSH_HOME?.trim();
-    return dshHome || undefined;
+  if (harnessName !== "deepseek") {
+    return undefined;
   }
+  const dshHome = process.env.DSH_HOME?.trim();
+  if (!dshHome) {
+    return undefined;
+  }
+  const resolved = realpathIfExists(resolve(expandHomePath(dshHome)));
+  const home = resolve(resolveHomeDir());
+  const cwd = resolve(process.cwd());
+  if (isAllowedCustomStateRoot(resolved, home, cwd)) {
+    return resolved;
+  }
+  warnUntrustedDshHomeOnce(resolved);
   return undefined;
+}
+
+/** Env var that explicitly trusts a `DSH_HOME` outside `$HOME`/the workspace. */
+export const DSH_HOME_CUSTOM_ROOT_ENV = "DEVINTERN_SANDBOX_ALLOW_CUSTOM_DSH_HOME";
+
+/** Emitted-at-most-once guard for the untrusted-state-root warning. */
+const warnedDshHomes = new Set<string>();
+
+/**
+ * Expand a leading `~` the way dsh does.
+ *
+ * @param path - Raw path from `DSH_HOME`.
+ * @returns Path with `~` expanded, or the original value.
+ */
+function expandHomePath(path: string): string {
+  if (path === "~") {
+    return resolveHomeDir();
+  }
+  if (path.startsWith("~/") || path.startsWith("~\\")) {
+    return join(resolveHomeDir(), path.slice(2));
+  }
+  return path;
+}
+
+/**
+ * Resolve symlinks for an existing path; leave non-existent paths lexical.
+ *
+ * @param path - Absolute path to normalize.
+ * @returns The real path when it exists, else the input.
+ */
+function realpathIfExists(path: string): string {
+  try {
+    return existsSync(path) ? realpathSync(path) : path;
+  } catch {
+    return path;
+  }
+}
+
+/**
+ * Whether `child` sits strictly below `parent`.
+ *
+ * @param parent - Absolute parent directory.
+ * @param child - Absolute candidate path.
+ * @returns True for a descendant, false for the parent itself or anything outside.
+ */
+function isStrictlyWithin(parent: string, child: string): boolean {
+  const rel = relative(parent, child);
+  return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
+}
+
+/**
+ * Whether a custom `DSH_HOME` may receive a read-write sandbox grant.
+ *
+ * Trusted roots are a descendant of `$HOME` (not `$HOME` itself, which would
+ * grant the whole home directory) or the workspace directory. Filesystem root
+ * and other absolute locations need the explicit
+ * {@link DSH_HOME_CUSTOM_ROOT_ENV} opt-in.
+ *
+ * @param path - Normalized absolute `DSH_HOME`.
+ * @param home - Normalized `$HOME`.
+ * @param cwd - Normalized workspace directory.
+ * @returns Whether the path is safe to grant.
+ */
+function isAllowedCustomStateRoot(path: string, home: string, cwd: string): boolean {
+  if (path === resolve("/")) {
+    return false;
+  }
+  if (process.env[DSH_HOME_CUSTOM_ROOT_ENV] === "1") {
+    return true;
+  }
+  const inHome = home !== resolve("/") && isStrictlyWithin(home, path);
+  const inWorkspace = isStrictlyWithin(cwd, path) || path === cwd;
+  return inHome || inWorkspace;
+}
+
+/**
+ * Warn once when `DSH_HOME` points outside the sandbox's trusted roots.
+ *
+ * @param path - Normalized custom state directory that was not granted.
+ */
+function warnUntrustedDshHomeOnce(path: string): void {
+  if (warnedDshHomes.has(path)) {
+    return;
+  }
+  warnedDshHomes.add(path);
+  console.warn(
+    `⚠️  DSH_HOME=${path} is not a trusted sandbox state location (a directory under $HOME ` +
+      "or the workspace; $HOME itself and the filesystem root are excluded), so DevIntern will " +
+      "not grant it read-write access. Move DSH_HOME under $HOME or the workspace, or set " +
+      `${DSH_HOME_CUSTOM_ROOT_ENV}=1 to trust that location.`,
+  );
 }
 
 /**
  * The state paths a harness writes to.
  *
  * Normally returns `$HOME`-relative paths. A harness that honors its own home
- * override (currently dsh's `DSH_HOME`) returns that absolute directory instead
- * so sandbox providers grant the real location.
+ * override (currently dsh's `DSH_HOME`) returns that normalized absolute
+ * directory instead so sandbox providers grant the real location. An
+ * untrusted override (outside `$HOME`/the workspace) is ignored with a warning
+ * and the default state path is returned.
  *
  * @param harnessName - Registered harness name (e.g. "grok").
  * @returns Paths relative to $HOME, or absolute override paths.

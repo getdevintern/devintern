@@ -40,6 +40,26 @@ process.on("exit", () => {
 const childEnv = { ...process.env };
 delete childEnv.DEVINTERN_PROMPTS_DIR;
 
+// A developer's agent configuration must not leak into the suite either:
+// DEVINTERN_HARNESS_CHAIN changes which harness counts as primary (suppressing
+// AGENT_MODEL), and *_CLI_PATH / DSH_HOME can point tests at tools and state
+// outside the isolated temp directories. Tests that need a harness configure it
+// explicitly.
+for (const key of Object.keys(childEnv)) {
+  if (key.endsWith("_CLI_PATH") || key.endsWith("_MODEL")) {
+    delete childEnv[key];
+  }
+}
+for (const key of [
+  "AGENT_HARNESS",
+  "DEVINTERN_HARNESS_CHAIN",
+  "AGENT_MODEL",
+  "AGENT_EFFORT",
+  "DSH_HOME",
+]) {
+  delete childEnv[key];
+}
+
 const child = Bun.spawn(["bun", "test", "--timeout=30000", ...process.argv.slice(2)], {
   cwd: import.meta.dir,
   env: {

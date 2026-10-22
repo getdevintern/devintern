@@ -65,6 +65,49 @@ describe("detectHarnessStartupFailure", () => {
     expect(result?.reason).not.toContain("reasoning:");
   });
 
+  test("does not treat sandbox phrases inside dsh reasoning as startup failures", () => {
+    expect(
+      detectHarnessStartupFailure({
+        exitCode: 1,
+        stdout: "",
+        stderr:
+          "dsh: reasoning:\n" +
+          "The sandbox setup failed earlier, retrying normally\n" +
+          "implementation failed on purpose\n",
+        durationMs: 30_000,
+      }),
+    ).toBeNull();
+  });
+
+  test("prefers the dsh credential error over reasoning text", () => {
+    const result = detectHarnessStartupFailure({
+      exitCode: 1,
+      stdout: "",
+      stderr:
+        "dsh: reasoning: the command failed to run\n" +
+        "sandbox setup problem\n" +
+        "dsh: AUTH: provider rejected the API key\n",
+      durationMs: 10_000,
+    });
+    expect(result?.unavailable).toBe(true);
+    expect(result?.reason).toContain("dsh: AUTH:");
+    expect(result?.reason).not.toContain("reasoning:");
+  });
+
+  test("still reports a real startup error after a long dsh reasoning section", () => {
+    const result = detectHarnessStartupFailure({
+      exitCode: 1,
+      stdout: "",
+      stderr:
+        "dsh: reasoning:\n" +
+        "thinking about ENOENT and sandbox setup failures\n" +
+        "dsh: MISSING_CREDENTIAL: no credential for provider deepseek\n",
+      durationMs: 30_000,
+    });
+    expect(result?.unavailable).toBe(true);
+    expect(result?.reason).toContain("MISSING_CREDENTIAL");
+  });
+
   test("classifies a fast non-zero exit with no output", () => {
     const result = detectHarnessStartupFailure({
       exitCode: 2,

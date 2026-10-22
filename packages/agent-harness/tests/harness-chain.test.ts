@@ -171,6 +171,24 @@ describe("resolveHarnessChain", () => {
     expect(chain.issues[0]!.message).toContain("CODEX_CLI_PATH");
   });
 
+  test("warns when an installed deepseek entry still points at reasonix", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "deepseek-chain-"));
+    const reasonix = join(dir, "reasonix");
+    writeFileSync(reasonix, "#!/bin/sh\nexit 0\n");
+    chmodSync(reasonix, 0o755);
+    process.env.DEEPSEEK_CLI_PATH = reasonix;
+    try {
+      const chain = await resolveHarnessChain({ raw: "deepseek" });
+      expect(chain.entries.map((entry) => entry.name)).toEqual(["deepseek"]);
+      expect(warnings.some((w) => w.includes("resolves to the community Reasonix CLI"))).toBe(
+        true,
+      );
+      expect(warnings.some((w) => w.includes("AGENT_HARNESS=reasonix"))).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("explains the reasonix split when a deepseek chain entry is not installed", async () => {
     const dir = mkdtempSync(join(tmpdir(), "deepseek-chain-"));
     const reasonix = join(dir, "reasonix");

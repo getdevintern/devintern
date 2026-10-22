@@ -186,7 +186,7 @@ export const PM_TRACKER_SETUP: Record<string, EnvPromptStep[]> = {
 };
 
 /** Shared documentation tail appended to the generated `.env` (mirrors `.env.example`). */
-const ENV_COMMON_TAIL = `# Agent Harness Configuration
+export const ENV_COMMON_TAIL = `# Agent Harness Configuration
 # Which AI agent to use: claude-code | opencode | codex | cursor | grok | deepseek | reasonix
 # (also: antigravity | kimi | qwen | goose | kilo-code | cline | pi)
 # deepseek selects DeepSeek's official harness (experimental; CLI 'dsh');

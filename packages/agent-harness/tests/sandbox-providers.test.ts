@@ -219,7 +219,7 @@ describe("NonoSandboxProvider harness state grants", () => {
   });
 
   test("grants a custom DSH_HOME instead of ~/.dsh for deepseek", () => {
-    const dshHome = mkdtempSync(join(tmpdir(), "dsh-nono-home-"));
+    const dshHome = mkdtempSync(join(home, "dsh-nono-home-"));
     process.env.DSH_HOME = dshHome;
     try {
       mkdirSync(join(dshHome, "profiles"), { recursive: true });

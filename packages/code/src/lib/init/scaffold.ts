@@ -165,19 +165,29 @@ export const GITHUB_PR_TOKEN_STEP: EnvPromptStep = {
   optional: true,
 };
 
-/** Shared documentation tail appended to both `.env` and `.env.example`. */
-const ENV_COMMON_TAIL = `# Agent Harness Configuration
+/**
+ * Harness selection, CLI path, and authentication documentation shared by the
+ * generated `.env`, `.env.example`, and tracked package examples.
+ */
+export const ENV_HARNESS_DOCS = `# Agent Harness Configuration
 # Which AI agent to use: claude-code | opencode | codex | cursor | grok | deepseek | reasonix
 # (also: antigravity | kimi | qwen | goose | kilo-code | cline | pi)
 # deepseek selects DeepSeek's official harness (experimental; CLI 'dsh');
 # reasonix selects the community Reasonix CLI (CLI 'reasonix')
 # Legacy: gemini still resolves to antigravity with a deprecation warning
 # Defaults to 'claude-code' if not specified
+#
+# Accepts a comma-separated, priority-ordered list for automatic failover in
+# worker mode: when the first harness hits its usage limit, the worker
+# switches to the next entry and fails back to the first once its window
+# resets. Unknown or not-installed entries are warned about and skipped.
+# AGENT_HARNESS=claude-code,codex
 AGENT_HARNESS=claude-code
 
 # Optional: Path to the agent CLI executable.
 # Leave unset — by default devintern uses the harness's standard command
-# (e.g. 'claude' for claude-code) and locates it on your PATH automatically.
+# (e.g. 'claude' for claude-code, 'grok' for grok, 'dsh' for deepseek,
+# 'reasonix' for reasonix) and locates it on your PATH automatically.
 # Only set this if the CLI is NOT on your PATH or uses a non-standard name,
 # in which case provide the command name or a full path.
 # AGENT_CLI_PATH=/custom/path/to/claude
@@ -187,7 +197,10 @@ AGENT_HARNESS=claude-code
 
 # Official DeepSeek Harness (AGENT_HARNESS=deepseek) authenticates headless runs
 # through the launch environment. Set DEEPSEEK_API_KEY here (or in $DSH_HOME/.env).
-# DEEPSEEK_API_KEY=sk-your-deepseek-api-key
+# DEEPSEEK_API_KEY=sk-your-deepseek-api-key`;
+
+/** Shared documentation tail appended to both `.env` and `.env.example`. */
+const ENV_COMMON_TAIL = `${ENV_HARNESS_DOCS}
 
 # Note: Agents will be run with --dangerously-skip-permissions and --max-turns (agent-specific)
 # This allows for elevated permissions and extended conversations for complex tasks

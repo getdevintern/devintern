@@ -227,6 +227,13 @@ export function resolveHarnessChainSync(options: HarnessChainOptions = {}): Reso
       ? options.isInstalled({ name: harness.name, path })
       : isHarnessCliAvailable(path);
 
+    // A stale deepseek path can still point at the community Reasonix CLI.
+    // Since it is executable, installability does not catch the mismatch;
+    // emit the same migration guidance used by single-harness resolution.
+    if (installed && harness.name === "deepseek") {
+      deepseekReasonixMigrationHint(harness.name, path, warnDeprecated !== false);
+    }
+
     if (enforceInstalled && checkInstalled && !installed) {
       if (reportIssues) {
         const envKey = harness.name.toUpperCase().replace(/-/g, "_");

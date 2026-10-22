@@ -821,29 +821,42 @@ describe("DeepSeekHarness (official dsh, experimental)", () => {
     } finally {
       console.warn = originalWarn;
     }
-    expect(warnings).toHaveLength(2);
+    expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain("selects its model from the dsh headless profile");
     expect(warnings[0]).toContain('ignoring model "deepseek-v4-pro"');
     expect(warnings[0]).toContain("$DSH_HOME/profiles/headless/cordis.patch.yml");
-    expect(warnings[1]).toContain("has no headless flag");
-    expect(warnings[1]).toContain("maxTurns=10");
-    expect(warnings[1]).toContain("skipPermissions");
   });
 
-  test("warns that max-turns and permission-skip have no headless equivalent", () => {
+  test("stays quiet for DevIntern's internal turn caps and permission-skip", () => {
     const warnings: string[] = [];
     const originalWarn = console.warn;
     console.warn = (message: string) => {
       warnings.push(message);
     };
     try {
+      // Code passes these on every implementation (500) and analysis (10) run.
+      expect(h.buildArgs({ skipPermissions: true, maxTurns: 500 })).toEqual(["headless"]);
       expect(h.buildArgs({ skipPermissions: true, maxTurns: 10 })).toEqual(["headless"]);
     } finally {
       console.warn = originalWarn;
     }
+    expect(warnings).toEqual([]);
+  });
+
+  test("warns when a user requests a non-default max-turns value", () => {
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message: string) => {
+      warnings.push(message);
+    };
+    try {
+      expect(h.buildArgs({ skipPermissions: true, maxTurns: 2000 })).toEqual(["headless"]);
+    } finally {
+      console.warn = originalWarn;
+    }
     expect(warnings).toHaveLength(1);
-    expect(warnings[0]).toContain("maxTurns=10");
-    expect(warnings[0]).toContain("skipPermissions");
+    expect(warnings[0]).toContain("maxTurns=2000");
+    expect(warnings[0]).not.toContain("skipPermissions");
   });
 
   test("does not warn when no unsupported option is configured", () => {

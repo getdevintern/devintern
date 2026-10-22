@@ -37,6 +37,14 @@ export const DEEPSEEK_TESTED_VERSION = "0.2.1-rc.2";
 /** Where users configure the headless profile's model and reasoning level. */
 export const DEEPSEEK_HEADLESS_PROFILE_PATH = "$DSH_HOME/profiles/headless/cordis.patch.yml";
 
+/**
+ * Turn caps DevIntern's Code workflows supply internally (500 for
+ * implementation/review, 10 for analysis). They have no headless equivalent but
+ * are not user configuration, so warning about them on every run would be
+ * noise. Any other value means the user asked for a specific cap.
+ */
+const INTERNAL_TURN_CAPS = new Set([10, 500]);
+
 export class DeepSeekHarness implements AgentHarness {
   readonly name = "deepseek";
   readonly displayName = "DeepSeek Harness (experimental)";
@@ -83,7 +91,8 @@ export class DeepSeekHarness implements AgentHarness {
    *
    * @param options - Supports `structuredOutput` (`--json`). `model`, `effort`,
    *   `skipPermissions`, and `maxTurns` have no headless CLI equivalent and are
-   *   ignored; explicit values emit actionable guidance.
+   *   ignored. DevIntern's internal turn caps are silent; a user-requested
+   *   non-default `maxTurns` emits actionable guidance.
    * @returns Args starting with `headless`; prompt is appended as a positional argument.
    */
   buildArgs(options: AgentRunOptions): string[] {
@@ -100,11 +109,8 @@ export class DeepSeekHarness implements AgentHarness {
     }
 
     const ignoredOptions: string[] = [];
-    if (options.maxTurns !== undefined) {
+    if (options.maxTurns !== undefined && !INTERNAL_TURN_CAPS.has(options.maxTurns)) {
       ignoredOptions.push(`maxTurns=${options.maxTurns}`);
-    }
-    if (options.skipPermissions) {
-      ignoredOptions.push("skipPermissions");
     }
     if (ignoredOptions.length > 0) {
       console.warn(
