@@ -16,6 +16,21 @@ describe("detectIncompleteImplementation", () => {
     expect(result.reasons).toContain("agent output is too short");
   });
 
+  test("ignores failure language that is part of another word", () => {
+    // Regression: a complete run summary mentioning "a harness whose CLI
+    // cannot emit JSON" matched "I cannot" and the run was reported as an
+    // incomplete implementation after the agent had finished successfully.
+    const stdout = `Registered the new harness.
+
+- A harness whose CLI cannot emit JSON falls back to plain text.
+- Users of Meta's \`muse\` CLI could not select it before this change.
+- AI could not parse the old flag shape.
+
+## Verification
+All suites pass.`;
+    expect(detectIncompleteImplementation(stdout)).toEqual({ incomplete: false, reasons: [] });
+  });
+
   test("returns complete for successful implementation summary", () => {
     const stdout = `I have completed the implementation for DEV-4.
 
