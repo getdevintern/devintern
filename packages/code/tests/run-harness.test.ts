@@ -70,11 +70,12 @@ let commitCalls: number;
 let inheritedCommitCount: number;
 let currentBranch: string;
 let protectedBranch: boolean;
+let headReads: number;
+let headMovedDuringRun: boolean;
 let pushResult: { success: boolean; message: string; hookError?: string };
 let hookResult: { success: boolean; message: string; hookError?: string };
 let hookCalls: number;
 let autoReviewCalls: number;
-let planPath: string | null;
 let verifyVerdicts: ReviewFeedback[];
 let verifyCalls: number;
 let deliveryEvents: string[];
@@ -84,6 +85,9 @@ let pipelineConfig: PipelineConfig | undefined;
 let prResult: { success: boolean; url?: string; message?: string; warnings?: string[] };
 let prCreateOptions: { artifactComment?: string } | undefined;
 let postImplementationCommentMock: ReturnType<typeof mock>;
+
+const HEAD_BEFORE = "1111111111111111111111111111111111111111";
+const HEAD_AFTER = "2222222222222222222222222222222222222222";
 
 class FakeChild extends EventEmitter {
   stdout = new PassThrough();
@@ -140,7 +144,18 @@ mock.module("../src/lib/utils", () => ({
     },
     getCurrentBranch: async () => currentBranch,
     gitRefExists: async () => true,
-    executeGitCommand: async () => ({ success: true, output: String(inheritedCommitCount) }),
+    executeGitCommand: async (args: string[]) => {
+      if (args[0] === "rev-parse" && args[1] === "HEAD") {
+        headReads++;
+        // The first read is the pre-run capture; later reads reflect any
+        // commit the agent made while it was running.
+        return {
+          success: true,
+          output: headReads === 1 || !headMovedDuringRun ? HEAD_BEFORE : HEAD_AFTER,
+        };
+      }
+      return { success: true, output: String(inheritedCommitCount) };
+    },
     isProtectedBranch: async () => protectedBranch,
     remoteBranchExists: async () => true,
     getMainBranchName: async () => "main",
@@ -209,8 +224,8 @@ mock.module("../src/lib/agent/model", () => ({
   resolveAgentModel: () => undefined,
 }));
 mock.module("../src/lib/agent/plan", () => ({
+  ...realPlan,
   createPlanImplementationPrompt: () => "prompt",
-  detectPlanOnlyBehavior: () => planPath,
   logHookErrorToFile: () => {},
 }));
 mock.module("../src/lib/agent/sandbox", () => ({ getSandbox: async () => null }));
@@ -243,6 +258,8 @@ beforeEach(() => {
   inheritedCommitCount = 0;
   currentBranch = "feature/task-1";
   protectedBranch = false;
+  headReads = 0;
+  headMovedDuringRun = false;
   scenario = {};
   commitResult = { success: true, message: "committed" };
   commitResults = [];
@@ -251,7 +268,6 @@ beforeEach(() => {
   hookResult = { success: true, message: "hook ok" };
   hookCalls = 0;
   autoReviewCalls = 0;
-  planPath = null;
   verifyVerdicts = [];
   verifyCalls = 0;
   deliveryEvents = [];
@@ -398,8 +414,10 @@ describe("runAgentHarness git delivery", () => {
     scenario.stdout = "The implementation is complete.";
     commitResult = { success: false, message: "No changes to commit" };
     inheritedCommitCount = 2;
+    headMovedDuringRun = true;
     await runAgentHarness({ ...baseInput(), createPr: true, verify: {} });
     expect(deliveryEvents).toEqual(["commit", "verify", "push"]);
+    expect(commitCalls).toBe(1);
     expect(hookCalls).toBeGreaterThan(0);
     expect(tracker.transitionStatus).toHaveBeenCalledWith("TASK-1", "In Review");
   });
@@ -583,8 +601,7 @@ describe("runAgentHarness git delivery", () => {
   test.each([undefined, "feature/task-1"])(
     "retries a plan-only run before delivering inherited commits (%s)",
     async (resumeBranch) => {
-      scenario.stdout = "Created a plan";
-      planPath = "PLAN_DETECTED_NO_PATH";
+      scenario.stdout = "I've created a plan for the requested change.";
       commitResults = [{ success: false, message: "No changes to commit" }];
       inheritedCommitCount = 2;
 
@@ -603,8 +620,7 @@ describe("runAgentHarness git delivery", () => {
     // Regression: the plan retry committed its own work, so the follow-up
     // pipeline commit found a clean tree and failed the run with
     // "Implementation was not committed".
-    scenario.stdout = "Created a plan";
-    planPath = "PLAN_DETECTED_NO_PATH";
+    scenario.stdout = "I've created a plan for the requested change.";
     commitResults = [
       { success: false, message: "No changes to commit" },
       { success: false, message: "No changes to commit" },
@@ -614,6 +630,55 @@ describe("runAgentHarness git delivery", () => {
     await runAgentHarness({ ...baseInput(), createPr: true });
 
     expect(commitCalls).toBe(2);
+    expect(deliveryEvents).toContain("push");
+    expect(tracker.transitionStatus).toHaveBeenCalledWith("TASK-1", "In Review");
+  });
+
+  test("does not retry a completed run whose transcript mentions plans and summaries", async () => {
+    // Regression for a redundant plan retry: the completion report talked
+    // about the plan, a summary, and the implementation, which the old
+    // generic fallback misread as plan-only behavior.
+    scenario.stdout = [
+      "## Summary",
+      "I followed the plan from the task and finished the implementation.",
+      "Implementation summary: the requested behavior now works.",
+    ].join("\n");
+    commitResults = [{ success: false, message: "No changes to commit" }];
+    inheritedCommitCount = 2;
+
+    await runAgentHarness({ ...baseInput(), createPr: true });
+
+    expect(agentPrompts).toHaveLength(1);
+    expect(commitCalls).toBe(1);
+    expect(deliveryEvents).toContain("push");
+    expect(tracker.transitionStatus).toHaveBeenCalledWith("TASK-1", "In Review");
+  });
+
+  test("retries an explicit plan-only run with no changes and no new commit", async () => {
+    scenario.stdout = "I've created a plan for the requested change.";
+    commitResults = [{ success: false, message: "No changes to commit" }];
+
+    await runAgentHarness({ ...baseInput(), createPr: true });
+
+    expect(agentPrompts).toHaveLength(2);
+    expect(commitCalls).toBe(2);
+    expect(deliveryEvents).toContain("push");
+    expect(tracker.transitionStatus).toHaveBeenCalledWith("TASK-1", "In Review");
+  });
+
+  test("delivers a self-committed run instead of retrying it as plan-only", async () => {
+    // Regression for a redundant plan retry: the agent committed its own work
+    // (HEAD advanced) and left a clean tree, so the pipeline saw
+    // "No changes to commit" even though the implementation was delivered.
+    scenario.stdout = "I've created a plan, then implemented and committed it.";
+    commitResults = [{ success: false, message: "No changes to commit" }];
+    inheritedCommitCount = 1;
+    headMovedDuringRun = true;
+
+    await runAgentHarness({ ...baseInput(), createPr: true });
+
+    expect(agentPrompts).toHaveLength(1);
+    expect(commitCalls).toBe(1);
     expect(deliveryEvents).toContain("push");
     expect(tracker.transitionStatus).toHaveBeenCalledWith("TASK-1", "In Review");
   });
