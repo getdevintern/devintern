@@ -178,6 +178,12 @@ open-question detectors) working exactly as before.
   [`buildPromptArgs`](src/prompt-args.ts). Several TUI-first CLIs (Grok Build,
   Kimi, Goose, Qwen, agy) launch their interactive UI when no prompt argument
   is present and die headless with ENXIO / hang waiting for a terminal.
+- **Oversized prompts go through a file.** Linux rejects a single argv entry
+  at `MAX_ARG_STRLEN` (131072 bytes) with `E2BIG: argument list too long`, which
+  a large review diff easily reaches once the sandbox wrapper's own arguments
+  are added. Prompts over `MAX_PROMPT_ARG_BYTES` are written to a private temp
+  file and replaced with a short pointer the agent reads first — callers keep
+  using `buildPromptArgs` and do not need a size check of their own.
 - **`cwd` vs `workingDir`.** Most CLIs inherit the working directory from the
   spawn's `cwd`. Some ignore it (opencode defaults to `$HOME`) and must consume
   `options.workingDir` explicitly as their own flag — see the `workingDir`
@@ -214,6 +220,12 @@ When adding a harness:
 - Keep new patterns anchored to complete diagnostic lines. Substring matching
   sees tool transcripts (Codex writes its entire transcript to stderr) and this
   repository's own source — both have caused false positives before.
+- Structured log lines (`timestamp=… level=ERROR … message="…"`) are only parsed
+  when the line *starts* with its logfmt fields, and
+  [`isSourceOrDiffLine`](src/output-lines.ts) treats quoted source — including
+  single-quoted and template literals that embed double quotes — as transcript
+  text. A fixture such as this package's own `OPENCODE_LIMIT_LOG` must never be
+  read as live output: doing so killed a healthy run with a fake limit window.
 - Add cases to [`tests/detect-usage-limit.test.ts`](tests/detect-usage-limit.test.ts).
 
 ## Related diagnostics to review
