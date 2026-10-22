@@ -7,6 +7,7 @@ import type { PickupGate } from "../worker/schedule";
 import type { WebhookQueue } from "../state/webhook-queue";
 import type { WorkerState } from "../state/worker-state";
 import type { RoutingSkipStore } from "./state";
+import { getWorkerFailover } from "../worker/failover";
 import { createTaskSupervisor, JobNotStartedError } from "../worker/supervisor";
 import type { TaskSupervisor } from "../worker/supervisor";
 import { findRepo, findTeam, resolveWorkspacePipelinePath } from "./config";
@@ -70,6 +71,12 @@ export interface WorkspaceTaskAcquirerDeps {
   ) => Promise<TaskExecutionResult>;
   /** Shared admission supervisor. A local instance is created only for focused tests. */
   supervisor?: TaskSupervisor;
+  /**
+   * Harness-chain gate: `true` when no chain entry can start a run (every entry
+   * usage-limited or cooling down after a startup failure). Injected for tests;
+   * defaults to the worker's failover controller.
+   */
+  isHarnessExhausted?: () => boolean;
 }
 
 /** Per-task CLI args from `[defaults].worker_task_args`, else `--create-pr`. */
@@ -183,6 +190,7 @@ export type FleetExecutorDeps = Pick<
   | "team"
   | "supervisor"
   | "actionedSource"
+  | "isHarnessExhausted"
 >;
 
 /**
@@ -222,6 +230,8 @@ export function createFleetTaskExecutor(
 ): (taskKey: string, routable: RoutableTask) => Promise<TaskExecutionResult> {
   const { config, workspaceDir, skips, repoManager } = deps;
   const runTask = deps.runTask ?? runTaskViaCli;
+  const isHarnessExhausted =
+    deps.isHarnessExhausted ?? (() => getWorkerFailover()?.allExhausted() ?? false);
   const supervisor =
     deps.supervisor ??
     createTaskSupervisor({
@@ -271,6 +281,14 @@ export function createFleetTaskExecutor(
       // Config validation makes this unreachable; guard anyway.
       console.error(`❌ ${scope} routed ${taskKey} to unknown repo "${decision.repo}"`);
       return false;
+    }
+
+    // Defer before touching git: when the whole harness chain is usage-limited
+    // or cooling down, the CLI child would exit without starting work, yet the
+    // worktree created for it is kept "for debugging". Poll retries would then
+    // leak one disposable worktree per tick until the limit window ends.
+    if (isHarnessExhausted()) {
+      return "deferred";
     }
 
     try {

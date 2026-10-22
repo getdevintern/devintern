@@ -407,6 +407,35 @@ describe("detectUsageLimit", () => {
     expect(result.resetsAt).toBe("4hr 9min");
   });
 
+  test("ignores a structured log line quoted inside source the agent printed", () => {
+    // Regression: a worker run was killed with a fake 4-hour usage window after
+    // the agent ran `sed` over this repository's own usage-limit fixture. The
+    // quoted string embeds a log line that used to be parsed as a live one.
+    const quotedFixture =
+      "  'timestamp=2026-08-26T14:10:30.957Z level=ERROR message=\"stream error\" " +
+      'error.error="AI_APICallError: 5-hour usage limit reached. Resets in 4hr 9min."\';';
+    expect(detectUsageLimit(quotedFixture, "").limited).toBe(false);
+    expect(detectUsageLimit("", quotedFixture).limited).toBe(false);
+  });
+
+  test("ignores a structured log line embedded in printed source", () => {
+    const sourceLine =
+      'const OPENCODE_LIMIT_LOG = \'timestamp=2026-08-26T14:10:30.957Z level=ERROR ' +
+      'message="stream error" error.error="AI_APICallError: 5-hour usage limit reached. ' +
+      'Resets in 4hr 9min."\';';
+    expect(detectUsageLimit(sourceLine, "").limited).toBe(false);
+  });
+
+  test("still detects a structured log line that follows other logfmt fields", () => {
+    // Only the leading fields are anchored; a real logger line whose `level=`
+    // is preceded by another field must keep working.
+    const out =
+      'level=ERROR run=be653f66 message="stream error" error.error="AI_APICallError: 5-hour usage limit reached. Resets in 4hr 9min."';
+    const result = detectUsageLimit(out, "");
+    expect(result.limited).toBe(true);
+    expect(result.resetsAt).toBe("4hr 9min");
+  });
+
   test("extracts a usage limit from OpenCode v2's --format json error envelope", () => {
     const out = JSON.stringify({
       type: "error",

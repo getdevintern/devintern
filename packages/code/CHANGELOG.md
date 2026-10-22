@@ -1,5 +1,12 @@
 # @devintern/code Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **Quoted log fixtures no longer trip usage-limit detection**: an agent that printed a file containing a `level=ERROR … error.error="AI_APICallError: … usage limit reached. Resets in 4hr 9min."` string (for example this repository's own usage-limit test fixture) was killed mid-run and its harness was parked for four hours with a fake limit window. Structured-log extraction now requires the diagnostic line to *start* with its logfmt fields, and the transcript source guard recognizes single-quoted and template literals that embed double quotes, so quoted source is never parsed as live CLI output while real OpenCode v1/v2 log lines still match
+- **Deferred fleet runs no longer leak worktrees**: when every harness in the `AGENT_HARNESS` chain was usage-limited or cooling down after a startup failure, each poll tick created a disposable task worktree and kept it "for debugging" even though the child never started. The fleet executor now checks the chain up front and defers before cloning, fetching, or creating a worktree
+
 ## [2.19.1] - 2026-10-20
 
 No-op automation patch: recurring jobs can opt into treating a run that changes nothing as a successful no-op, the local dashboard gets a worker-console refresh, and repository-wide TypeScript boundary and lint rules are tightened with expanded live tracker E2E coverage.

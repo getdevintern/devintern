@@ -49,6 +49,13 @@ export function isSourceOrDiffLine(line: string): boolean {
     // A single quoted string / JS string literal — not JSON `"key": "value"`,
     // which Grok (and others) print as pretty-printed Internal error objects.
     /^(?:["'`])(?:[^"'`\\]|\\.)*(?:["'`])[,;)]?$/.test(trimmed) ||
+    // JavaScript single-quoted and template literals may embed double quotes,
+    // which the rule above cannot handle (it treats `"` as a delimiter), so a
+    // quoted test fixture such as
+    //   'timestamp=… level=ERROR … error.error="AI_APICallError: …"';
+    // was read as live CLI output. A line that opens and closes with the same
+    // non-double quote is source, not a provider diagnostic.
+    /^(?:'[^']*'|`[^`]*`)[,;)]?$/.test(trimmed) ||
     /\b(?:includes|startsWith|endsWith|\.match|\.test)\s*\(/.test(trimmed) ||
     /=>/.test(trimmed)
   );
