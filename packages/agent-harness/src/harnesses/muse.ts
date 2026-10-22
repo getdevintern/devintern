@@ -14,6 +14,12 @@
  *   also disables the sandbox and trusts the workspace) is deliberately not
  *   emitted: a review checkout must not auto-trust attacker-controlled
  *   skills/rules.
+ * - `--sandbox-network unrestricted` alongside it. Muse's default
+ *   `proxy-only` network mode stops the first connection to each new host for
+ *   review, and a headless run has nobody to answer it; DevIntern's sandbox
+ *   policy is network-open by default (and the outer wrapper still enforces a
+ *   configured domain allowlist), so publishing and package installs must not
+ *   stall. The filesystem sandbox stays on.
  * - `--disable-request-user-input` is always emitted for headless runs so the
  *   agent cannot block on an interactive question. The flag exists from Muse
  *   Code 1.4.9; a known-older install fails with an actionable message.
@@ -139,8 +145,11 @@ export class MuseHarness implements AgentHarness {
       // The profile itself is read-only; never combine it with a bypass flag.
       args.push("--permission-profile", MUSE_READONLY_PROFILE);
     } else if (effectiveSkipPermissions(options)) {
-      // Keep Muse's sandbox in place; only skip the approval gate.
-      args.push("--disable-approval");
+      // Keep Muse's filesystem sandbox in place; only skip the approval gate.
+      // A headless run cannot answer the per-destination network review that
+      // `proxy-only` (Muse's default) requires, so open egress here. The outer
+      // sandbox still enforces any configured domain allowlist.
+      args.push("--disable-approval", "--sandbox-network", "unrestricted");
     }
 
     // Muse roots policy-gated workspace tools at this path. Most runs already

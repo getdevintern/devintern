@@ -61,6 +61,7 @@ describe("Muse Code run outcomes", () => {
     expect(result.maxTurnsReached).toBe(false);
     expect(result.stdout).toContain("--disable-request-user-input");
     expect(result.stdout).toContain("--disable-approval");
+    expect(result.stdout).toContain("--sandbox-network unrestricted");
     expect(result.stdout).toContain("--max-model-steps 3");
     expect(result.stdout).toContain("do the task");
   });

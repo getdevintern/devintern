@@ -452,6 +452,8 @@ describe("MuseHarness", () => {
       "exec",
       "--disable-request-user-input",
       "--disable-approval",
+      "--sandbox-network",
+      "unrestricted",
       "--workspace",
       "/tmp/wt",
       "--model",
@@ -462,6 +464,15 @@ describe("MuseHarness", () => {
       "--max-model-steps",
       "25",
     ]);
+  });
+
+  test("network is opened only when permissions are skipped (headless)", () => {
+    const automated = h.buildArgs({ skipPermissions: true });
+    expect(automated).toContain("--sandbox-network");
+    expect(automated).toContain("unrestricted");
+
+    const interactive = h.buildArgs({ skipPermissions: false });
+    expect(interactive).not.toContain("--sandbox-network");
   });
 
   test("buildArgs does not emit an approval flag when skipPermissions is false", () => {
