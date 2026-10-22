@@ -1,6 +1,14 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { execSync, spawn as nodeSpawn, spawnSync } from "child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { DockerSandboxProvider } from "../src/sandbox/providers/docker.js";
@@ -210,6 +218,20 @@ describe("NonoSandboxProvider harness state grants", () => {
     expect(allows(wrap("grok"))).toContain(join(home, ".grok"));
   });
 
+  test("grants a custom DSH_HOME instead of ~/.dsh for deepseek", () => {
+    const dshHome = mkdtempSync(join(home, "dsh-nono-home-"));
+    process.env.DSH_HOME = dshHome;
+    try {
+      mkdirSync(join(dshHome, "profiles"), { recursive: true });
+      const grants = allows(wrap("deepseek"));
+      expect(grants).toContain(dshHome);
+      expect(grants).not.toContain(join(home, ".dsh"));
+    } finally {
+      delete process.env.DSH_HOME;
+      rmSync(dshHome, { recursive: true, force: true });
+    }
+  });
+
   test("never grants write access to toolchain dirs such as mise", () => {
     mkdirSync(join(home, ".local/share/mise"), { recursive: true });
     mkdirSync(join(home, ".grok"), { recursive: true });
@@ -299,8 +321,16 @@ describe("nono pack profile status", () => {
       warnings.push(args.map(String).join(" "));
     };
     try {
-      new NonoSandboxProvider().wrapCommand("/usr/local/bin/grok", [], policy({ harnessName: "grok" }));
-      new NonoSandboxProvider().wrapCommand("/usr/local/bin/grok", [], policy({ harnessName: "grok" }));
+      new NonoSandboxProvider().wrapCommand(
+        "/usr/local/bin/grok",
+        [],
+        policy({ harnessName: "grok" }),
+      );
+      new NonoSandboxProvider().wrapCommand(
+        "/usr/local/bin/grok",
+        [],
+        policy({ harnessName: "grok" }),
+      );
     } finally {
       console.warn = originalWarn;
     }
@@ -335,7 +365,11 @@ describe("nono pack profile status", () => {
       warnings.push(args.map(String).join(" "));
     };
     try {
-      new NonoSandboxProvider().wrapCommand("/usr/local/bin/grok", [], policy({ harnessName: "grok" }));
+      new NonoSandboxProvider().wrapCommand(
+        "/usr/local/bin/grok",
+        [],
+        policy({ harnessName: "grok" }),
+      );
     } finally {
       console.warn = originalWarn;
     }

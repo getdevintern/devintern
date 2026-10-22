@@ -15,6 +15,14 @@
 - **Verdict JSON survives unescaped quotes in pasted code**: a verification verdict whose summary quoted `["headless", prompt]` terminated its string 40 bytes early, so no balanced object was found and the run failed verification twice with "no valid JSON object containing approved". The parser now escapes unescaped quotes using bracket depth inside the value, repairing that class of verdict without loosening the source/diff safeguards
 - **Large prompts no longer fail with `E2BIG`**: review, verification, fix, and implementation prompts are handed to the CLI as a single argv entry, and Linux rejects an argument at 128 KiB with `E2BIG: argument list too long` before the CLI starts — a 44-file diff plus the review template crossed it, which failed verification twice and posted an incomplete-implementation summary instead of reviewing the change. `buildPromptArgs` now writes prompts over `MAX_PROMPT_ARG_BYTES` to a private temp file and replaces them with a short pointer the agent reads first; the limit is measured in UTF-8 bytes, not characters
 
+### Added
+
+- **Official DeepSeek Harness (experimental, DEV-188)**: `AGENT_HARNESS=deepseek` now selects DeepSeek's official `dsh` CLI through its documented `dsh headless` task mode, with `--json` for structured output. The adapter is verified against `@deepseek-ai/dsh` 0.2.1-rc.2, labeled experimental in harness selection and setup docs, and documents installation, `DEEPSEEK_API_KEY` headless authentication (the headless profile ignores GUI-saved credentials), profile-based model/effort configuration, and known limitations. Missing installs, credential failures, and unsupported settings produce actionable guidance, and the sandbox grants `~/.dsh` state access.
+
+### Changed
+
+- **Reasonix is now its own explicit harness**: the community DeepSeek-Reasonix adapter moved from harness id `deepseek` to `reasonix` (`AGENT_HARNESS=reasonix`, CLI `reasonix`). `deepseek` intentionally points at the official experimental harness, so existing Reasonix configurations must switch to `reasonix`; the CLI warns when `dsh` is missing but the Reasonix CLI is installed.
+
 ## [2.19.1] - 2026-10-20
 
 No-op automation patch: recurring jobs can opt into treating a run that changes nothing as a successful no-op, the local dashboard gets a worker-console refresh, and repository-wide TypeScript boundary and lint rules are tightened with expanded live tracker E2E coverage.
