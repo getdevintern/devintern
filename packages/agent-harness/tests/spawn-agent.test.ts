@@ -13,15 +13,17 @@ import type {
 
 function fakeSandbox(
   wrap: (path: string, args: readonly string[], policy: SandboxPolicy) => WrappedCommand,
+  name = "fake",
+  harnessName?: string,
 ): ResolvedSandbox {
   const provider: SandboxProvider = {
-    name: "fake",
-    displayName: "fake",
+    name,
+    displayName: name,
     priority: 1,
     detect: async () => ({ available: true }),
     wrapCommand: wrap,
   };
-  return { provider, detection: { available: true } };
+  return { provider, detection: { available: true }, harnessName };
 }
 
 function waitForExit(child: { on: (event: string, cb: (code: number) => void) => unknown }) {
@@ -170,5 +172,95 @@ describe("spawnAgent", () => {
     expect(cleaned).toBe(false);
     await cleanup();
     expect(cleaned).toBe(true);
+  });
+});
+
+describe("spawnAgent Muse credential guard", () => {
+  // `--disable-sandbox` is what `applyNestingGuard` adds on macOS under
+  // nono/srt. Passing it explicitly keeps this integration check independent of
+  // the host platform while still exercising the `spawnAgent` wiring.
+  const museArgs = ["exec", "--disable-sandbox"];
+
+  test("threads the denied credential path into the provider policy", async () => {
+    let seenPolicy: SandboxPolicy | null = null;
+    const sandbox = fakeSandbox(
+      (_path, _args, policy) => {
+        seenPolicy = policy;
+        return { path: "/bin/sh", args: ["-c", "exit 0"] };
+      },
+      "nono",
+      "muse",
+    );
+
+    const { child, cleanup } = await spawnAgent({
+      resolvedPath: "/usr/bin/muse",
+      args: museArgs,
+      spawnOptions: {
+        stdio: ["ignore", "pipe", "ignore"],
+        cwd: tmpdir(),
+        env: { HOME: "/home/u", META_API_KEY: "sk-test" },
+      },
+      sandbox,
+    });
+    await waitForExit(child);
+    await cleanup();
+
+    expect(seenPolicy?.harnessName).toBe("muse");
+    expect(seenPolicy?.denyReadPaths).toContain("/home/u/.config/muse/auth.json");
+  });
+
+  test("fails actionably before spawning when META_API_KEY is missing", async () => {
+    const sandbox = fakeSandbox(
+      () => ({ path: "/bin/sh", args: ["-c", "exit 0"] }),
+      "nono",
+      "muse",
+    );
+
+    let caught: unknown;
+    try {
+      await spawnAgent({
+        resolvedPath: "/usr/bin/muse",
+        args: museArgs,
+        spawnOptions: {
+          stdio: ["ignore", "pipe", "ignore"],
+          cwd: tmpdir(),
+          env: { HOME: "/home/u" },
+        },
+        sandbox,
+      });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toContain("META_API_KEY");
+    expect((caught as Error).message).toContain("nono");
+  });
+
+  test("leaves non-Muse runs and intact inner sandboxes untouched", async () => {
+    let seenPolicy: SandboxPolicy | null = null;
+    const sandbox = fakeSandbox(
+      (_path, _args, policy) => {
+        seenPolicy = policy;
+        return { path: "/bin/sh", args: ["-c", "exit 0"] };
+      },
+      "nono",
+      "muse",
+    );
+
+    const { child, cleanup } = await spawnAgent({
+      resolvedPath: "/usr/bin/muse",
+      args: ["exec"],
+      spawnOptions: {
+        stdio: ["ignore", "pipe", "ignore"],
+        cwd: tmpdir(),
+        env: { HOME: "/home/u" },
+      },
+      sandbox,
+    });
+    await waitForExit(child);
+    await cleanup();
+
+    expect(seenPolicy?.denyReadPaths ?? []).toEqual([]);
   });
 });
