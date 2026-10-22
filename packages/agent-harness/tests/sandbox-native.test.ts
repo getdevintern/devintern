@@ -292,6 +292,20 @@ describe("Muse credential guard", () => {
     });
   });
 
+  test("nono drops a direct file grant for the denied credential", () => {
+    const auth = "/home/u/muse-auth.json";
+    expect(refineGrantsAgainstDenies([{ flag: "--read-file", path: auth }], [auth])).toEqual([]);
+    expect(
+      refineGrantsAgainstDenies(
+        [
+          { flag: "--read-file", path: auth },
+          { flag: "--read", path: "/home/u/.config" },
+        ],
+        [auth],
+      ),
+    ).toEqual([{ flag: "--read", path: "/home/u/.config" }]);
+  });
+
   test("does nothing on Linux while Muse's own sandbox is still on, or for other harnesses", () => {
     expect(
       museCredentialGuard("nono", "muse", ["exec"], "linux", { HOME: "/home/u" }),

@@ -276,6 +276,13 @@ export function refineGrantsAgainstDenies(
 ): NonoGrant[] {
   const out: NonoGrant[] = [];
   for (const grant of grants) {
+    // A file grant naming a denied path is itself the conflict; drop it.
+    if (
+      (grant.flag === "--allow-file" || grant.flag === "--read-file") &&
+      denies.includes(grant.path)
+    ) {
+      continue;
+    }
     if (
       (grant.flag === "--allow" || grant.flag === "--read") &&
       denies.some((d) => isInside(d, grant.path))
