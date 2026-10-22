@@ -11,6 +11,7 @@ import {
   verifyImplementation,
 } from "../src/lib/agent/verify";
 import type { VerifyDependencies } from "../src/lib/agent/verify";
+import { parseReviewFeedback } from "../src/lib/review/auto-review-loop";
 import {
   UNTRUSTED_CONTENT_NOTICE,
   untrustedContentBlock,
@@ -94,6 +95,35 @@ describe("verifyImplementation", () => {
     const verdict = { ...feedback, approved: true, items: [] };
 
     expect(await verifyImplementation(run, deps(verdict))).toBeUndefined();
+    expect(run.pendingFeedback).toBeUndefined();
+  });
+
+  test("accepts an approval whose findings sit below the configured threshold", async () => {
+    // `minSeverity: "high"` makes medium findings advisory. A verdict that
+    // approves the work while listing them must not die in the parser, whose
+    // default threshold is the auto-review loop's `medium`.
+    const verdict = JSON.stringify({
+      summary: "Requirements met; advisory notes remain",
+      approved: true,
+      items: [
+        {
+          priority: "medium",
+          confidence: "medium",
+          category: "documentation",
+          file: "docs/code/configuration.md",
+          issue: "The new flag is undocumented",
+          suggestion: "Add a row to the flags table",
+        },
+      ],
+    });
+    const run = state({ minSeverity: "high" });
+    const withRealParser: VerifyDependencies = {
+      ...deps(),
+      runAgent: async () => verdict,
+      parseFeedback: parseReviewFeedback,
+    };
+
+    expect(await verifyImplementation(run, withRealParser)).toBeUndefined();
     expect(run.pendingFeedback).toBeUndefined();
   });
 

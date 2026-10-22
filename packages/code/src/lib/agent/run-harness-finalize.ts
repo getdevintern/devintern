@@ -613,7 +613,7 @@ function verifyDependencies(state: DeliveryState): VerifyDependencies {
   return {
     getDiff: () => state.getDiff(),
     runAgent: (prompt) => state.runAgentPrompt(prompt),
-    parseFeedback: (output) => state.parseReviewFeedback(output),
+    parseFeedback: (output, minPriority) => state.parseReviewFeedback(output, minPriority),
     filterItems: (items, minPriority) => state.filterByPriority(items, minPriority),
   };
 }
