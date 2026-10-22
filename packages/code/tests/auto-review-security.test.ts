@@ -8,6 +8,7 @@ import {
   getPRDiff,
   parseReviewFeedback,
 } from "../src/lib/review/auto-review-loop";
+import { validateReviewFeedback } from "../src/lib/review/feedback";
 import type { ReviewFeedbackItem } from "../src/types/auto-review";
 
 describe("review diff command safety", () => {
@@ -157,5 +158,37 @@ describe("review feedback validation", () => {
 
     expect(prompt).toContain("Confidence: low");
     expect(prompt).toContain("Evidence: unproven");
+  });
+});
+
+describe("approval threshold", () => {
+  const medium: ReviewFeedbackItem = {
+    priority: "medium",
+    category: "bug",
+    issue: "Advisory finding",
+    suggestion: "Consider fixing",
+  };
+  const approvedWithMedium = { summary: "Meets the requirements", approved: true, items: [medium] };
+
+  test("rejects an approval with findings at the default medium threshold", () => {
+    expect(() => validateReviewFeedback({ ...approvedWithMedium, items: [{ ...medium }] })).toThrow(
+      "medium-or-higher",
+    );
+  });
+
+  test("accepts an approval whose findings sit below the caller's threshold", () => {
+    // Verification defaults to `high`, where medium findings are advisory.
+    expect(() =>
+      validateReviewFeedback({ ...approvedWithMedium, items: [{ ...medium }] }, "high"),
+    ).not.toThrow();
+  });
+
+  test("rejects an approval with findings at or above the caller's threshold", () => {
+    expect(() =>
+      validateReviewFeedback(
+        { ...approvedWithMedium, items: [{ ...medium, priority: "high" }] },
+        "high",
+      ),
+    ).toThrow("high-or-higher");
   });
 });

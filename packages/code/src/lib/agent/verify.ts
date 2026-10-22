@@ -140,7 +140,9 @@ export async function verifyImplementation(
         state.context.executablePath,
       );
       feedback = deps.parseFeedback(output);
-      validateReviewFeedback(feedback);
+      // Approvals only have to be free of findings at or above the configured
+      // blocking threshold; lower-priority notes are advisory here.
+      validateReviewFeedback(feedback, minSeverity);
       break;
     } catch (error) {
       if (error instanceof UsageLimitError) throw error;

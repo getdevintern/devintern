@@ -112,6 +112,75 @@ function escapeUnescapedQuotesInStrings(text: string): string {
   return result;
 }
 
+/**
+ * Escape unescaped quotes inside JSON string literals, accounting for code
+ * snippets the model pasted into a value.
+ *
+ * {@link escapeUnescapedQuotesInStrings} trusts any quote followed by `,`/`]`/
+ * `}` as the end of the string. That fails for values quoting code with its own
+ * punctuation — ``emits `["headless", prompt]` `` puts a quote before `,` while
+ * the brackets inside the value are still open, so the string ended 40 bytes
+ * into a 6 KB verdict and nothing later could be balanced.
+ *
+ * Track bracket depth inside the string and only accept a closing quote at
+ * depth zero. A false positive merely yields another candidate that fails to
+ * parse; the caller tries every variant.
+ */
+function escapeUnescapedQuotesByDepth(text: string): string {
+  let result = "";
+  let inString = false;
+  let escaped = false;
+  let depth = 0;
+
+  const isStructural = (index: number): boolean => {
+    let cursor = index;
+    while (cursor < text.length && /\s/.test(text[cursor])) cursor += 1;
+    if (cursor >= text.length) return true;
+    return ",}]: ".includes(text[cursor]);
+  };
+
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index];
+
+    if (!inString) {
+      if (character === '"') inString = true;
+      result += character;
+      continue;
+    }
+
+    if (escaped) {
+      escaped = false;
+      result += character;
+      continue;
+    }
+
+    if (character === "\\") {
+      escaped = true;
+      result += character;
+      continue;
+    }
+
+    if (character === "[" || character === "{" || character === "(") {
+      depth += 1;
+      result += character;
+    } else if (character === "]" || character === "}" || character === ")") {
+      if (depth > 0) depth -= 1;
+      result += character;
+    } else if (character === '"') {
+      if (depth === 0 && isStructural(index + 1)) {
+        inString = false;
+        result += character;
+      } else {
+        result += '\\"';
+      }
+    } else {
+      result += character;
+    }
+  }
+
+  return result;
+}
+
 function balancedObjectCandidates(text: string, firstOnly = false): string[] {
   const candidates: string[] = [];
   let start = -1;
@@ -191,15 +260,26 @@ export function parseAgentJsonObject(output: string, requiredKey: string): Recor
     }),
   ];
 
-  const baseCandidates = [...candidates, ...withClosures];
+  // Values that quote code (`emits ["headless", prompt]`) desynchronize the
+  // string state while balancing, so the object was never isolated. Repair the
+  // whole output first, then balance the repaired text.
+  const depthRepaired = balancedObjectCandidates(
+    escapeUnescapedQuotesByDepth(escapeControlCharsInStrings(output)),
+  ).reverse();
+
+  const baseCandidates = [...candidates, ...depthRepaired, ...withClosures];
 
   let lastParseError: unknown;
-  // Repair ladder: raw → control chars escaped → embedded quotes also escaped.
+  // Repair ladder: raw → control chars escaped → embedded quotes also escaped
+  // → depth-aware quote escaping.
   const variants = [
     ...baseCandidates,
     ...baseCandidates.map(escapeControlCharsInStrings),
     ...baseCandidates.map((base) =>
       escapeUnescapedQuotesInStrings(escapeControlCharsInStrings(base)),
+    ),
+    ...baseCandidates.map((base) =>
+      escapeUnescapedQuotesByDepth(escapeControlCharsInStrings(base)),
     ),
   ];
   for (const candidate of variants) {
@@ -230,6 +310,7 @@ export function parseAgentJsonObject(output: string, requiredKey: string): Recor
       candidate,
       escapeControlCharsInStrings(candidate),
       escapeUnescapedQuotesInStrings(escapeControlCharsInStrings(candidate)),
+      escapeUnescapedQuotesByDepth(escapeControlCharsInStrings(candidate)),
     ]) {
       try {
         const parsed = JSON.parse(variant) as Record<string, unknown>;
