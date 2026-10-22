@@ -9,6 +9,7 @@ import {
   runAgentPrompt,
 } from "../review/auto-review-loop";
 import type { ReviewFeedback, ReviewFeedbackItem, ReviewPriority } from "../../types/auto-review";
+import { isShuttingDown } from "../cli/shutdown-state";
 import { untrustedContentBlock } from "../prompts/untrusted-content";
 import { validateReviewFeedback } from "../review/feedback";
 import { recordRunStage } from "../state/run-recorder";
@@ -216,6 +217,19 @@ export async function verifyImplementation(
       break;
     } catch (error) {
       if (error instanceof UsageLimitError) throw error;
+      // A termination signal kills the agent child (exit 130/143). Retrying
+      // would spawn another child into a process that is already exiting, and
+      // reporting it would add an "incomplete implementation" comment on top of
+      // the shutdown handler's interruption feedback. Stop here; the shutdown
+      // path owns the report.
+      if (isShuttingDown()) {
+        recordRunStage("verify", {
+          status: "skipped",
+          summary: "Interrupted by shutdown",
+          detail: { error: (error as Error).message, interrupted: true },
+        });
+        return { kind: "halt", haltKind: "stop", reason: "Interrupted during verification" };
+      }
       if (attempt === 1) {
         const message = `Verification failed twice: ${(error as Error).message}`;
         // A missing verdict must still be diagnosable: keep the prompt and the

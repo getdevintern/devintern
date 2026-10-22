@@ -9,6 +9,7 @@ import {
 } from "@devintern/agent-harness";
 import { captureError } from "@devintern/utils";
 import { runContext } from "../cli/context";
+import { isShuttingDown } from "../cli/shutdown-state";
 import { uploadSelectedArtifacts } from "../artifacts/upload";
 import { RunArtifactRegistry } from "../artifacts/registry";
 import { buildArtifactComment } from "../artifacts/publication";
@@ -469,6 +470,12 @@ async function repairImplementation(state: DeliveryState) {
 }
 
 async function reportPipelineHalt(state: DeliveryState, reason: string): Promise<void> {
+  // The shutdown handler already reported the interruption; a second comment
+  // and a retry-gate entry would contradict it.
+  if (isShuttingDown()) {
+    console.log(`⚠️  Pipeline halted during shutdown: ${reason}`);
+    return;
+  }
   const ctx = state.context;
   const { taskKey, tracker, task } = ctx;
   const report = `Pipeline stopped: ${reason}\n\n${state.output}`;

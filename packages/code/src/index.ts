@@ -8,6 +8,7 @@ import type { ResolvedHarness } from "@devintern/agent-harness";
 import { isMarkdownFilePath } from "@devintern/task-trackers";
 import { captureError, flushErrorTracking } from "@devintern/utils";
 import { setSandboxOverride } from "./lib/agent/sandbox";
+import { beginShutdown, isShuttingDown } from "./lib/cli/shutdown-state";
 import { initSentryOnce } from "./lib/observability/sentry-init";
 import { flushAnalytics, isAnonymousIdNewlyCreated, track } from "./lib/observability/analytics";
 import type { AnalyticsPropValue } from "./lib/observability/analytics";
@@ -376,11 +377,9 @@ process.on("unhandledRejection", (error: Error) => {
 });
 
 // Handle process termination signals
-let shuttingDown = false;
-
 async function gracefulShutdown(signal: "SIGINT" | "SIGTERM", exitCode: number): Promise<void> {
-  if (shuttingDown) return;
-  shuttingDown = true;
+  if (isShuttingDown()) return;
+  beginShutdown();
   console.log(`\n\n⚠️  Received ${signal}, cleaning up...`);
   // If a task is mid-flight, tell the tracker it was interrupted instead of
   // leaving it silently in "In Progress" with no PR and no feedback.
