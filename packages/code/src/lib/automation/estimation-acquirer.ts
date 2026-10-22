@@ -6,6 +6,7 @@ import {
 } from "./acquirer";
 import type { AutomationRunContext, SpawnedAutomationRun } from "./acquirer";
 import type { AutomationConfig } from "./config";
+import { applyAgentSelectionEnv, pickAgentSelection } from "../agent/selection";
 import type { EstimationConfig } from "./estimation-config";
 
 /** Value of the run-origin marker that attributes CLI runs to scheduled estimation. */
@@ -49,7 +50,7 @@ export function estimationRunEnv(
   base?: Record<string, string | undefined>,
 ): Record<string, string | undefined> {
   return {
-    ...base,
+    ...applyAgentSelectionEnv({ ...base }, pickAgentSelection(estimation)),
     [AUTOMATION_ORIGIN_ENV]: ESTIMATION_ORIGIN_ENV_VALUE,
     [AUTOMATION_ID_ENV]: estimation.id,
   };
@@ -73,6 +74,7 @@ export function spawnEstimationSweep(
     {
       cwd: context.cwd,
       env: estimationRunEnv(estimation, context.env),
+      harnessPin: estimation.harness,
       terminationGraceMs,
     },
   );
