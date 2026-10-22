@@ -28,6 +28,7 @@ import { cn, formatDuration, formatTime } from "@/lib/utils";
 const STAGE_LABELS: Record<RunStageRecord["stage"], string> = {
   feasibility: "Feasibility check",
   implementation: "Implementation",
+  verify: "Verification",
   auto_review: "Self-review",
   change_request: "Change request",
   outcome: "Outcome",

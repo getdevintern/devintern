@@ -8,9 +8,10 @@ import {
   parseReviewFeedback,
   runAgentPrompt,
 } from "../review/auto-review-loop";
-import type { ReviewFeedback, ReviewPriority } from "../../types/auto-review";
+import type { ReviewFeedback, ReviewFeedbackItem, ReviewPriority } from "../../types/auto-review";
 import { untrustedContentBlock } from "../prompts/untrusted-content";
 import { validateReviewFeedback } from "../review/feedback";
+import { recordRunStage } from "../state/run-recorder";
 import type { TaskStepResult } from "../task/step-runner";
 import type { DeliveryState } from "./run-harness-finalize";
 
@@ -68,15 +69,18 @@ export function buildRepairPrompt(taskContent: string, feedback: ReviewFeedback)
   return `Your implementation did not fully satisfy the task. Address these findings with focused changes:\n\n${untrustedContentBlock(findings, "verification findings")}\n\nOriginal task:\n${taskContent.trimEnd()}\n\nDo not commit or push; the task runner handles delivery.`;
 }
 
+/** Directory holding the task's verification artifacts. */
+function taskArtifactDir(state: DeliveryState): string {
+  const ctx = state.context;
+  return ctx.taskKey ? join(resolveOutputDir(), ctx.taskKey.toLowerCase()) : dirname(ctx.taskFile);
+}
+
 async function saveVerification(
   state: DeliveryState,
   prompt: string,
   feedback: ReviewFeedback,
 ): Promise<void> {
-  const ctx = state.context;
-  const taskDir = ctx.taskKey
-    ? join(resolveOutputDir(), ctx.taskKey.toLowerCase())
-    : dirname(ctx.taskFile);
+  const taskDir = taskArtifactDir(state);
   try {
     mkdirSync(taskDir, { recursive: true });
     writeFileSync(join(taskDir, "verify-prompt.txt"), prompt);
@@ -98,6 +102,71 @@ async function saveVerification(
   } catch (error) {
     console.warn(`⚠️  Failed to save verification artifacts: ${error}`);
   }
+}
+
+/**
+ * Persist the prompt and raw agent output when no verdict could be parsed.
+ *
+ * Without this, a failed verification leaves only the parser's one-line error
+ * on the ticket and the raw answer exists only in the harness transcript, so
+ * nobody can tell whether the agent found a real problem or wrote bad JSON.
+ */
+async function saveVerificationFailure(
+  state: DeliveryState,
+  prompt: string,
+  output: string,
+): Promise<void> {
+  const taskDir = taskArtifactDir(state);
+  try {
+    mkdirSync(taskDir, { recursive: true });
+    writeFileSync(join(taskDir, "verify-prompt.txt"), prompt);
+    writeFileSync(join(taskDir, "verify-output.txt"), output);
+    await state.artifacts.addFile({
+      key: "verification-prompt",
+      path: join(taskDir, "verify-prompt.txt"),
+      title: "Verification prompt",
+      kind: "debug",
+      mediaType: "text/plain",
+    });
+    await state.artifacts.addFile({
+      key: "verification-output",
+      path: join(taskDir, "verify-output.txt"),
+      title: "Verification agent output",
+      kind: "debug",
+      mediaType: "text/plain",
+    });
+  } catch (error) {
+    console.warn(`⚠️  Failed to save verification failure artifacts: ${error}`);
+  }
+}
+
+/**
+ * Human-readable verification outcome for a halt, warn, or repair reason.
+ *
+ * The tracker comment and the dashboard both render this string, so it carries
+ * the verdict summary plus the blocking findings — "verification failed"
+ * without the findings is not actionable.
+ *
+ * @param feedback - Parsed verdict.
+ * @param blocking - Findings at or above the configured threshold.
+ * @param limit - Maximum findings listed inline before eliding the rest.
+ */
+export function describeVerificationFailure(
+  feedback: ReviewFeedback,
+  blocking: ReviewFeedbackItem[],
+  limit = 8,
+): string {
+  const listed = blocking.slice(0, limit).map((item) => {
+    const where = item.file ? ` (${item.file}${item.line ? `:${item.line}` : ""})` : "";
+    return `- [${item.priority}] ${item.category}: ${item.issue}${where}`;
+  });
+  const remaining = blocking.length - listed.length;
+  const more = remaining > 0 ? [`- …and ${remaining} more`] : [];
+  return [
+    `Verification found ${blocking.length} blocking finding(s): ${feedback.summary}`,
+    ...listed,
+    ...more,
+  ].join("\n");
 }
 
 /** Verify the committed diff before auto-review and publishing. */
@@ -125,6 +194,7 @@ export async function verifyImplementation(
   }
   const workingDir = process.cwd();
   let prompt = "";
+  let output = "";
   let feedback: ReviewFeedback | undefined;
 
   // Transient diff, agent, and JSON failures get one retry. Usage limits are
@@ -133,7 +203,7 @@ export async function verifyImplementation(
     try {
       const diff = deps.getDiff(state.context.prTargetBranch, workingDir);
       prompt = buildVerifyPrompt(config, state.context.taskContent, diff, workingDir);
-      const output = await deps.runAgent(
+      output = await deps.runAgent(
         prompt,
         workingDir,
         state.context.harness,
@@ -147,7 +217,17 @@ export async function verifyImplementation(
     } catch (error) {
       if (error instanceof UsageLimitError) throw error;
       if (attempt === 1) {
-        return { kind: "halt", reason: `Verification failed twice: ${(error as Error).message}` };
+        const message = `Verification failed twice: ${(error as Error).message}`;
+        // A missing verdict must still be diagnosable: keep the prompt and the
+        // raw answer, and record the stage so the dashboard shows verification
+        // instead of an unexplained halted implementation.
+        await saveVerificationFailure(state, prompt, output);
+        recordRunStage("verify", {
+          status: "failed",
+          summary: (error as Error).message,
+          detail: { error: (error as Error).message, attempts: 2 },
+        });
+        return { kind: "halt", reason: message };
       }
       console.warn(`⚠️  Verification execution failed; retrying: ${(error as Error).message}`);
     }
@@ -156,15 +236,27 @@ export async function verifyImplementation(
   await saveVerification(state, prompt, feedback);
   const blocking = deps.filterItems(feedback.items, minSeverity);
   console.log(`\n🔎 Verification: ${feedback.summary}`);
+  recordRunStage("verify", {
+    status: blocking.length === 0 ? "succeeded" : "failed",
+    summary: feedback.summary,
+    detail: {
+      approved: feedback.approved,
+      summary: feedback.summary,
+      blocking: blocking.length,
+      total: feedback.items.length,
+      items: blocking.length > 0 ? blocking : feedback.items,
+    },
+  });
   if (blocking.length === 0) return;
 
+  const failure = describeVerificationFailure(feedback, blocking);
   if (config.onFail === "warn") {
     console.warn(`⚠️  Verification found ${blocking.length} blocking issue(s); continuing`);
-    return { kind: "warn", reason: feedback.summary };
+    return { kind: "warn", reason: failure };
   }
   if (config.onFail === "halt") {
-    return { kind: "halt", reason: feedback.summary };
+    return { kind: "halt", reason: failure };
   }
   state.pendingFeedback = feedback;
-  return { kind: "repeat", from: repairStep, maxRepeats: maxIterations };
+  return { kind: "repeat", from: repairStep, maxRepeats: maxIterations, reason: failure };
 }
