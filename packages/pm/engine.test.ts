@@ -268,6 +268,58 @@ describe("createEngine", () => {
     expect((caught as EngineError).detail).toBe("boom");
   });
 
+  test("generateStory treats maxTurnsReached as agent failure despite exit 0", async () => {
+    const engine = await createEngine(
+      stubConfig(),
+      { promptsDir: PROMPTS_DIR },
+      {
+        backend: stubBackend(),
+        runAgent: agentReturning({
+          exitCode: 0,
+          stderr: "This turn reached its step limit.\n",
+          maxTurnsReached: true,
+        }),
+      },
+    );
+
+    let caught: unknown;
+    try {
+      await engine.generateStory({
+        source: { type: "prompt", content: "x" },
+        promptStyle: "technical",
+      });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(EngineError);
+    expect((caught as EngineError).code).toBe("agent-failed");
+    expect((caught as EngineError).detail).toBe("This turn reached its step limit.");
+  });
+
+  test("generateStory gives an actionable detail when the step limit has no stderr", async () => {
+    const engine = await createEngine(
+      stubConfig(),
+      { promptsDir: PROMPTS_DIR },
+      {
+        backend: stubBackend(),
+        runAgent: agentReturning({ exitCode: 1, stderr: "", maxTurnsReached: true }),
+      },
+    );
+
+    let caught: unknown;
+    try {
+      await engine.generateStory({
+        source: { type: "prompt", content: "x" },
+        promptStyle: "technical",
+      });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(EngineError);
+    expect((caught as EngineError).code).toBe("agent-failed");
+    expect((caught as EngineError).detail).toBe("Agent hit max-turns limit");
+  });
+
   test("generateStory retries once with a corrective reminder after malformed output", async () => {
     const prompts: string[] = [];
     let calls = 0;
