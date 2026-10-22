@@ -7,7 +7,10 @@
  */
 
 const FAILURE_PATTERNS = [
-  /I (?:was unable to|cannot|could not|failed to)/i,
+  // Require a word boundary before the pronoun: "a CLI cannot emit JSON" and
+  // "AI could not parse this" are tool/doc prose, not the agent admitting
+  // failure, but both used to match because "CLI cannot" contains "I cannot".
+  /\bI (?:was unable to|cannot|could not|failed to)/i,
   /implementation was unsuccessful/i,
   /failed to implement/i,
   /I apologize, but I/i,
