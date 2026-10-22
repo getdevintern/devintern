@@ -13,6 +13,7 @@
  */
 
 import { homedir } from "os";
+import { isAbsolute, join } from "path";
 
 /**
  * Harness name → $HOME paths the agent needs read+write access to.
@@ -33,7 +34,8 @@ import { homedir } from "os";
  * - cline: `~/.cline` — global config, agents, rules, workflows and sessions
  *   (`CLINE_DIR` overrides the location).
  * - deepseek (official dsh): `~/.dsh` — profiles, sessions, settings, logs and
- *   `$DSH_HOME/.env` (`DSH_HOME` overrides the location).
+ *   `$DSH_HOME/.env`. When `DSH_HOME` is set, that absolute directory replaces
+ *   the default so the sandbox grants the state the CLI actually reads/writes.
  * - reasonix (community): `~/.reasonix` — `config.json`, skills and per-project
  *   overrides.
  * - goose: `~/.config/goose` (config.yaml), `~/.local/share/goose` (sessions,
@@ -82,14 +84,52 @@ export const HARNESS_STATE_PATHS_EXTRA: Record<
 };
 
 /**
- * The $HOME-relative state paths a harness writes to.
+ * Absolute state directory overrides a harness reads from its own environment.
+ *
+ * When unset, the corresponding `HARNESS_STATE_PATHS` default applies.
+ */
+function stateDirOverride(harnessName: string): string | undefined {
+  if (harnessName === "deepseek") {
+    const dshHome = process.env.DSH_HOME?.trim();
+    return dshHome || undefined;
+  }
+  return undefined;
+}
+
+/**
+ * The state paths a harness writes to.
+ *
+ * Normally returns `$HOME`-relative paths. A harness that honors its own home
+ * override (currently dsh's `DSH_HOME`) returns that absolute directory instead
+ * so sandbox providers grant the real location.
  *
  * @param harnessName - Registered harness name (e.g. "grok").
- * @returns The paths for this platform; empty when the harness keeps no state.
+ * @returns Paths relative to $HOME, or absolute override paths.
  */
 export function harnessStatePaths(harnessName: string): string[] {
+  const override = stateDirOverride(harnessName);
+  if (override) {
+    return [override];
+  }
   const extra = HARNESS_STATE_PATHS_EXTRA[harnessName]?.[process.platform] ?? [];
   return [...(HARNESS_STATE_PATHS[harnessName] ?? []), ...extra];
+}
+
+/**
+ * The state paths a harness writes to as absolute filesystem paths.
+ *
+ * Resolves relative entries against the sandboxed home directory and keeps
+ * absolute overrides (e.g. a custom `DSH_HOME`) untouched.
+ *
+ * @param harnessName - Registered harness name.
+ * @param home - Home directory the sandboxed agent will see. Defaults to {@link resolveHomeDir}.
+ * @returns Absolute paths for sandbox grants.
+ */
+export function harnessStateAbsolutePaths(
+  harnessName: string,
+  home: string = resolveHomeDir(),
+): string[] {
+  return harnessStatePaths(harnessName).map((path) => (isAbsolute(path) ? path : join(home, path)));
 }
 
 /**

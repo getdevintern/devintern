@@ -66,6 +66,25 @@ describe("resolveHarness", () => {
     expect(getHarness("reasonix")?.name).toBe("reasonix");
   });
 
+  test("warns that deepseek is now dsh when only reasonix is installed", () => {
+    const dir = mkdtempSync(join(tmpdir(), "deepseek-migration-"));
+    const reasonix = join(dir, "reasonix");
+    writeFileSync(reasonix, "#!/bin/sh\nexit 0\n");
+    chmodSync(reasonix, 0o755);
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${dir}:${originalPath ?? ""}`;
+    process.env.DEEPSEEK_CLI_PATH = join(dir, "missing-dsh");
+    try {
+      const result = resolveHarness({ harnessName: "deepseek" });
+      expect(result.path).toBe(join(dir, "missing-dsh"));
+      expect(warnings.some((w) => w.includes("AGENT_HARNESS=reasonix"))).toBe(true);
+      expect(warnings.some((w) => w.includes("@deepseek-ai/dsh"))).toBe(true);
+    } finally {
+      process.env.PATH = originalPath;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("uses AGENT_HARNESS env var", () => {
     process.env.AGENT_HARNESS = "codex";
     const result = resolveHarness();

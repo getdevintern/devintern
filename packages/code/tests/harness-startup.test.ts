@@ -51,6 +51,20 @@ describe("detectHarnessStartupFailure", () => {
     }
   });
 
+  test("ignores dsh reasoning lines when choosing the failure reason", () => {
+    const result = detectHarnessStartupFailure({
+      exitCode: 1,
+      stdout: "",
+      stderr:
+        "dsh: reasoning: inspecting the workspace\n" +
+        "dsh: EACCES: permission denied writing $DSH_HOME/profiles/headless\n",
+      durationMs: 10_000,
+    });
+    expect(result?.unavailable).toBe(true);
+    expect(result?.reason).toContain("EACCES");
+    expect(result?.reason).not.toContain("reasoning:");
+  });
+
   test("classifies a fast non-zero exit with no output", () => {
     const result = detectHarnessStartupFailure({
       exitCode: 2,

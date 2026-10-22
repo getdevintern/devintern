@@ -55,17 +55,23 @@ const STARTUP_PATTERNS: RegExp[] = [
   /seatbelt[^\n]*(?:error|denied|fail)/i,
 ];
 
+/** Generic startup-error line filter (case-insensitive). */
+const ACTIONABLE_LINE =
+  /mise\s+ERROR|Permission denied|EACCES|ENOENT|path_not_granted|sandbox|denied|not found|failed to|MISSING_CREDENTIAL|UNAUTHORIZED/i;
+/**
+ * dsh error lines look like `dsh: MISSING_CREDENTIAL: ...`. Case-sensitive on
+ * purpose so the `dsh: reasoning:` heading (normal stderr streaming) is not
+ * mistaken for the failure reason.
+ */
+const DSH_ERROR_LINE = /\bdsh:\s*[A-Z][A-Z0-9_]*:/;
+
 /** Pick the line that best explains why the process could not start. */
 function firstActionableLine(stdout: string, stderr: string): string | undefined {
   const lines = stderr
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean);
-  const actionable = lines.find((line) =>
-    /mise\s+ERROR|Permission denied|EACCES|ENOENT|path_not_granted|sandbox|denied|not found|failed to|MISSING_CREDENTIAL|UNAUTHORIZED|\bdsh:/i.test(
-      line,
-    ),
-  );
+  const actionable = lines.find((line) => DSH_ERROR_LINE.test(line) || ACTIONABLE_LINE.test(line));
   if (actionable) return actionable;
   const stdoutLine = stdout
     .split(/\r?\n/)

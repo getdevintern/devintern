@@ -22,7 +22,7 @@ import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { findInPath } from "../../resolver.js";
-import { harnessStatePaths, resolveHomeDir } from "../harness-state.js";
+import { harnessStateAbsolutePaths, resolveHomeDir } from "../harness-state.js";
 import { probeCommand, unsupportedPlatform } from "../probe.js";
 import type { SandboxDetection, SandboxPolicy, SandboxProvider, WrappedCommand } from "../types.js";
 
@@ -93,8 +93,9 @@ const HARNESS_STATE_LOCK_FILES: Record<string, string[]> = {
 function harnessStateWritePaths(harnessName: string | undefined): string[] {
   const home = resolveHomeDir();
   const name = harnessName ?? "claude-code";
-  const rel = [...harnessStatePaths(name), ...(HARNESS_STATE_LOCK_FILES[name] ?? [])];
-  return rel.map((p) => join(home, p)).filter((p) => existsSync(p) || p.endsWith(".lock"));
+  const state = harnessStateAbsolutePaths(name, home);
+  const locks = (HARNESS_STATE_LOCK_FILES[name] ?? []).map((path) => join(home, path));
+  return [...state, ...locks].filter((path) => existsSync(path) || path.endsWith(".lock"));
 }
 
 export class SrtSandboxProvider implements SandboxProvider {

@@ -28,7 +28,8 @@
  */
 
 import { assertModeSupported } from "../modes.js";
-import type { AgentHarness, AgentRunOptions } from "../types.js";
+import { parseMajorVersion, readCliVersion } from "../probe.js";
+import type { AgentHarness, AgentRunOptions, HarnessProbe } from "../types.js";
 
 /** dsh version whose headless CLI surface this adapter was verified against. */
 export const DEEPSEEK_TESTED_VERSION = "0.2.1-rc.2";
@@ -51,11 +52,38 @@ export class DeepSeekHarness implements AgentHarness {
     "the dsh headless profile does not read AGENT_EFFORT.";
 
   /**
+   * Detect the installed `dsh` version and warn when it differs from the one
+   * this adapter was verified against.
+   *
+   * Upstream is in developer preview and promises breaking changes, so an
+   * unexpected version is surfaced immediately instead of failing later with a
+   * raw parser/usage error. The warning is best-effort and never aborts a run.
+   *
+   * @param executablePath - Resolved `dsh` command or path.
+   * @returns The detected version snapshot, or `{}` when it cannot be read.
+   */
+  probe(executablePath: string): HarnessProbe {
+    const raw = readCliVersion(executablePath);
+    if (raw === undefined) {
+      return {};
+    }
+    const version = raw.match(/\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?/)?.[0] ?? raw;
+    if (version !== DEEPSEEK_TESTED_VERSION) {
+      console.warn(
+        `⚠️  DeepSeek Harness (${this.name}, experimental) is ${version}, but this adapter was ` +
+          `verified against ${DEEPSEEK_TESTED_VERSION}. Headless flags may have changed; ` +
+          `check the dsh CLI reference or pin @deepseek-ai/dsh@${DEEPSEEK_TESTED_VERSION}.`,
+      );
+    }
+    return { version, major: parseMajorVersion(raw) };
+  }
+
+  /**
    * Build `dsh headless` flags for a non-interactive one-task run.
    *
    * @param options - Supports `structuredOutput` (`--json`). `model`, `effort`,
    *   `skipPermissions`, and `maxTurns` have no headless CLI equivalent and are
-   *   ignored; an explicit model emits actionable guidance.
+   *   ignored; explicit values emit actionable guidance.
    * @returns Args starting with `headless`; prompt is appended as a positional argument.
    */
   buildArgs(options: AgentRunOptions): string[] {
@@ -68,6 +96,21 @@ export class DeepSeekHarness implements AgentHarness {
           `ignoring model "${options.model}". ` +
           `Set the model in ${DEEPSEEK_HEADLESS_PROFILE_PATH} and unset ` +
           `DEEPSEEK_MODEL/AGENT_MODEL for this harness.`,
+      );
+    }
+
+    const ignoredOptions: string[] = [];
+    if (options.maxTurns !== undefined) {
+      ignoredOptions.push(`maxTurns=${options.maxTurns}`);
+    }
+    if (options.skipPermissions) {
+      ignoredOptions.push("skipPermissions");
+    }
+    if (ignoredOptions.length > 0) {
+      console.warn(
+        `⚠️  DeepSeek Harness (${this.name}, experimental) has no headless flag for ` +
+          `${ignoredOptions.join(", ")}; ignoring it. Headless runs one task to completion, and ` +
+          "workspace writes follow the profile permission preset / DSH_PERMISSION_MODE.",
       );
     }
 

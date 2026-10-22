@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { AntigravityHarness } from "../src/harnesses/antigravity.js";
 import { ClaudeCodeHarness } from "../src/harnesses/claude-code.js";
@@ -53,9 +56,13 @@ describe("ClaudeCodeHarness", () => {
 
   test("buildArgs structured output", () => {
     expect(h.buildArgs({ structuredOutput: true })).toEqual(["--output-format", "json"]);
-    expect(
-      h.buildArgs({ skipPermissions: true, model: "opus", structuredOutput: true }),
-    ).toEqual(["--dangerously-skip-permissions", "--model", "opus", "--output-format", "json"]);
+    expect(h.buildArgs({ skipPermissions: true, model: "opus", structuredOutput: true })).toEqual([
+      "--dangerously-skip-permissions",
+      "--model",
+      "opus",
+      "--output-format",
+      "json",
+    ]);
   });
 
   test("buildArgs emits effort via the --effort flag", () => {
@@ -814,13 +821,16 @@ describe("DeepSeekHarness (official dsh, experimental)", () => {
     } finally {
       console.warn = originalWarn;
     }
-    expect(warnings).toHaveLength(1);
+    expect(warnings).toHaveLength(2);
     expect(warnings[0]).toContain("selects its model from the dsh headless profile");
     expect(warnings[0]).toContain('ignoring model "deepseek-v4-pro"');
     expect(warnings[0]).toContain("$DSH_HOME/profiles/headless/cordis.patch.yml");
+    expect(warnings[1]).toContain("has no headless flag");
+    expect(warnings[1]).toContain("maxTurns=10");
+    expect(warnings[1]).toContain("skipPermissions");
   });
 
-  test("does not warn when no model is configured", () => {
+  test("warns that max-turns and permission-skip have no headless equivalent", () => {
     const warnings: string[] = [];
     const originalWarn = console.warn;
     console.warn = (message: string) => {
@@ -830,6 +840,63 @@ describe("DeepSeekHarness (official dsh, experimental)", () => {
       expect(h.buildArgs({ skipPermissions: true, maxTurns: 10 })).toEqual(["headless"]);
     } finally {
       console.warn = originalWarn;
+    }
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("maxTurns=10");
+    expect(warnings[0]).toContain("skipPermissions");
+  });
+
+  test("does not warn when no unsupported option is configured", () => {
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message: string) => {
+      warnings.push(message);
+    };
+    try {
+      expect(h.buildArgs({ structuredOutput: true })).toEqual(["headless", "--json"]);
+    } finally {
+      console.warn = originalWarn;
+    }
+    expect(warnings).toEqual([]);
+  });
+
+  test("probe warns when the installed dsh differs from the verified version", () => {
+    const dir = mkdtempSync(join(tmpdir(), "dsh-probe-"));
+    const cli = join(dir, "dsh");
+    writeFileSync(cli, '#!/bin/sh\necho "0.9.0-rc.1"\n');
+    chmodSync(cli, 0o755);
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message: string) => {
+      warnings.push(message);
+    };
+    try {
+      expect(h.probe(cli)).toEqual({ version: "0.9.0-rc.1", major: 0 });
+    } finally {
+      console.warn = originalWarn;
+      rmSync(dir, { recursive: true, force: true });
+    }
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("0.9.0-rc.1");
+    expect(warnings[0]).toContain(DEEPSEEK_TESTED_VERSION);
+  });
+
+  test("probe stays quiet on the verified version and when the CLI is missing", () => {
+    const dir = mkdtempSync(join(tmpdir(), "dsh-probe-"));
+    const cli = join(dir, "dsh");
+    writeFileSync(cli, `#!/bin/sh\necho "${DEEPSEEK_TESTED_VERSION}"\n`);
+    chmodSync(cli, 0o755);
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message: string) => {
+      warnings.push(message);
+    };
+    try {
+      expect(h.probe(cli)).toEqual({ version: DEEPSEEK_TESTED_VERSION, major: 0 });
+      expect(h.probe(join(dir, "missing-dsh"))).toEqual({});
+    } finally {
+      console.warn = originalWarn;
+      rmSync(dir, { recursive: true, force: true });
     }
     expect(warnings).toEqual([]);
   });
