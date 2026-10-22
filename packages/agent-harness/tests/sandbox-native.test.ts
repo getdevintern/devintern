@@ -1,8 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
+import { join } from "path";
+import { MuseHarness } from "../src/harnesses/muse.js";
+import { buildPromptArgs, MAX_PROMPT_ARG_BYTES } from "../src/prompt-args.js";
 import { NativeSandboxProvider } from "../src/sandbox/providers/native.js";
-import { applyNestingGuard } from "../src/spawn-agent.js";
+import { refineGrantsAgainstDenies } from "../src/sandbox/providers/nono.js";
+import { SrtSandboxProvider } from "../src/sandbox/providers/srt.js";
+import { museCredentialPath } from "../src/sandbox/harness-state.js";
+import { applyNestingGuard, museCredentialGuard } from "../src/spawn-agent.js";
 import type { SandboxPolicy } from "../src/sandbox/types.js";
 
 function policy(overrides: Partial<SandboxPolicy> = {}): SandboxPolicy {
@@ -51,10 +57,7 @@ describe("NativeSandboxProvider", () => {
     expect(settings.sandbox.allowUnsandboxedCommands).toBe(false);
     expect(settings.sandbox.failIfUnavailable).toBe(true);
     expect(settings.sandbox.excludedCommands).toEqual(["docker *", "gh *"]);
-    expect(settings.sandbox.filesystem.allowWrite).toEqual([
-      "/work/repo",
-      "/tmp/devintern-tasks",
-    ]);
+    expect(settings.sandbox.filesystem.allowWrite).toEqual(["/work/repo", "/tmp/devintern-tasks"]);
     // "open" must be explicit: the sandbox default is deny-with-prompt, which
     // hard-fails in -p print mode with the escape hatch closed.
     expect(settings.sandbox.network.allowedDomains).toEqual(["*"]);
@@ -127,9 +130,13 @@ describe("NativeSandboxProvider", () => {
         network: { allowedDomains: ["api.openai.com", "github.com"] },
       }),
     );
-    expect(wrapped.args).toContain('features.network_proxy.domains={ "api.openai.com" = "allow", "github.com" = "allow" }');
+    expect(wrapped.args).toContain(
+      'features.network_proxy.domains={ "api.openai.com" = "allow", "github.com" = "allow" }',
+    );
     expect(wrapped.args).not.toContain('features.network_proxy.domains={ "*" = "allow" }');
-    expect(wrapped.args.filter((arg) => arg === "sandbox_workspace_write.network_access=true")).toHaveLength(1);
+    expect(
+      wrapped.args.filter((arg) => arg === "sandbox_workspace_write.network_access=true"),
+    ).toHaveLength(1);
   });
 
   test("codex: adds --sandbox workspace-write when absent", () => {
@@ -143,10 +150,18 @@ describe("NativeSandboxProvider", () => {
 
   test("throws for harnesses without a built-in sandbox", () => {
     expect(() =>
-      new NativeSandboxProvider().wrapCommand("/usr/bin/goose", [], policy({ harnessName: "goose" })),
+      new NativeSandboxProvider().wrapCommand(
+        "/usr/bin/goose",
+        [],
+        policy({ harnessName: "goose" }),
+      ),
     ).toThrow("no built-in sandbox");
     expect(() =>
-      new NativeSandboxProvider().wrapCommand("/usr/bin/agy", [], policy({ harnessName: "antigravity" })),
+      new NativeSandboxProvider().wrapCommand(
+        "/usr/bin/agy",
+        [],
+        policy({ harnessName: "antigravity" }),
+      ),
     ).toThrow("no built-in sandbox");
   });
 });
@@ -156,7 +171,13 @@ describe("applyNestingGuard", () => {
 
   test("on macOS under nono, codex's own sandbox is switched off", () => {
     const guarded = applyNestingGuard("nono", "codex", codexArgs, "darwin");
-    expect(guarded).toEqual(["exec", "--sandbox", "danger-full-access", "-c", 'approval_policy="never"']);
+    expect(guarded).toEqual([
+      "exec",
+      "--sandbox",
+      "danger-full-access",
+      "-c",
+      'approval_policy="never"',
+    ]);
     expect(codexArgs[2]).toBe("workspace-write"); // input not mutated
   });
 
@@ -179,13 +200,50 @@ describe("applyNestingGuard", () => {
     expect(applyNestingGuard("nono", "claude-code", args, "darwin")).toBe(args);
   });
 
-  test("on macOS under nono, Muse's own sandbox is switched off", () => {
+  test("on macOS under nono, Muse's own sandbox is switched off in the option region", () => {
     const museArgs = ["exec", "--disable-request-user-input", "--disable-approval"];
     expect(applyNestingGuard("nono", "muse", museArgs, "darwin")).toEqual([
-      ...museArgs,
+      "exec",
       "--disable-sandbox",
+      "--disable-request-user-input",
+      "--disable-approval",
     ]);
     expect(museArgs).not.toContain("--disable-sandbox"); // input not mutated
+  });
+
+  test("Muse's guard flag lands before a dash-leading prompt's end-of-options marker", () => {
+    const harness = new MuseHarness();
+    const prompt = "---\ntype: Task\n---\nImplement";
+    const args = [
+      ...harness.buildArgs({ skipPermissions: true }),
+      ...buildPromptArgs(harness, prompt),
+    ];
+    const guarded = applyNestingGuard("nono", "muse", args, "darwin");
+
+    const flagIndex = guarded.indexOf("--disable-sandbox");
+    const markerIndex = guarded.indexOf("--");
+    expect(flagIndex).toBeGreaterThan(-1);
+    expect(markerIndex).toBeGreaterThan(-1);
+    // Everything after `--` is prompt text for Muse; the flag must not land there.
+    expect(flagIndex).toBeLessThan(markerIndex);
+    expect(guarded.slice(markerIndex)).toEqual(["--", prompt]);
+  });
+
+  test("Muse's guard flag stays in the option region for a --prompt-file run", () => {
+    const harness = new MuseHarness();
+    const oversized = "x".repeat(MAX_PROMPT_ARG_BYTES + 1);
+    const args = [...harness.buildArgs({}), ...buildPromptArgs(harness, oversized)];
+    const guarded = applyNestingGuard("srt", "muse", args, "darwin");
+
+    const flagIndex = guarded.indexOf("--disable-sandbox");
+    const promptFileIndex = guarded.indexOf("--prompt-file");
+    expect(flagIndex).toBeGreaterThan(-1);
+    expect(promptFileIndex).toBeGreaterThan(-1);
+    expect(flagIndex).toBeLessThan(promptFileIndex);
+    expect(guarded.slice(promptFileIndex, promptFileIndex + 2)).toEqual([
+      "--prompt-file",
+      expect.any(String),
+    ]);
   });
 
   test("Muse keeps its sandbox when explicitly disabled already, on Linux, or in microVMs", () => {
@@ -196,5 +254,91 @@ describe("applyNestingGuard", () => {
     const args = ["exec", "--disable-approval"];
     expect(applyNestingGuard("nono", "muse", args, "linux")).toBe(args);
     expect(applyNestingGuard("docker", "muse", args, "darwin")).toBe(args);
+  });
+});
+
+describe("Muse credential guard", () => {
+  test("hides the stored auth file from a sandboxed run and requires META_API_KEY", () => {
+    const env = { HOME: "/home/u", META_API_KEY: "sk-test" };
+    const guarded = museCredentialGuard("nono", "muse", ["exec"], "darwin", env);
+    expect(guarded).toEqual({ denyReadPaths: [museCredentialPath(env)] });
+    expect(museCredentialPath(env)).toBe("/home/u/.config/muse/auth.json");
+
+    const missingKey = museCredentialGuard("srt", "muse", ["exec"], "darwin", { HOME: "/home/u" });
+    expect(missingKey).toBeDefined();
+    if (missingKey && "error" in missingKey) {
+      expect(missingKey.error).toContain("META_API_KEY");
+    } else {
+      throw new Error("expected an actionable error when META_API_KEY is unset");
+    }
+  });
+
+  test("honors XDG_CONFIG_HOME and MUSE_AUTH_PATH", () => {
+    expect(museCredentialPath({ HOME: "/home/u", XDG_CONFIG_HOME: "/cfg" })).toBe(
+      "/cfg/muse/auth.json",
+    );
+    expect(museCredentialPath({ MUSE_AUTH_PATH: "/tmp/muse-creds.json" })).toBe(
+      "/tmp/muse-creds.json",
+    );
+    // A custom override must not leave the default file readable.
+    expect(
+      museCredentialGuard("nono", "muse", ["exec"], "darwin", {
+        HOME: "/home/u",
+        MUSE_AUTH_PATH: "/tmp/muse-creds.json",
+        META_API_KEY: "sk-test",
+      }),
+    ).toEqual({
+      denyReadPaths: ["/tmp/muse-creds.json", "/home/u/.config/muse/auth.json"],
+    });
+  });
+
+  test("does nothing on Linux while Muse's own sandbox is still on, or for other harnesses", () => {
+    expect(
+      museCredentialGuard("nono", "muse", ["exec"], "linux", { HOME: "/home/u" }),
+    ).toBeUndefined();
+    expect(
+      museCredentialGuard("nono", "claude-code", ["exec"], "darwin", { HOME: "/home/u" }),
+    ).toBeUndefined();
+    expect(
+      museCredentialGuard("docker", "muse", ["exec"], "darwin", { HOME: "/home/u" }),
+    ).toBeUndefined();
+  });
+
+  test("nono splits a broad state grant instead of granting the auth file", () => {
+    const root = mkdtempSync(join(tmpdir(), "muse-cred-"));
+    const museDir = join(root, ".config", "muse");
+    mkdirSync(museDir, { recursive: true });
+    const auth = join(museDir, "auth.json");
+    const settings = join(museDir, "settings.json");
+    writeFileSync(auth, '{"providers":{"meta":{"access_token":"secret"}}}');
+    writeFileSync(settings, '{"schema_version":1}');
+    try {
+      const grants = refineGrantsAgainstDenies([{ flag: "--allow", path: museDir }], [auth]);
+      const paths = grants.map((grant) => grant.path);
+      expect(paths).not.toContain(auth);
+      expect(paths).toContain(settings);
+
+      // The same deny must survive the broad `$HOME/.config` read grant.
+      const broad = refineGrantsAgainstDenies(
+        [{ flag: "--read", path: join(root, ".config") }],
+        [auth],
+      );
+      const broadPaths = broad.map((grant) => grant.path);
+      expect(broadPaths).not.toContain(auth);
+      expect(broadPaths).toContain(settings);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("srt maps the credential to filesystem.denyRead", () => {
+    const auth = "/home/u/.config/muse/auth.json";
+    const wrapped = new SrtSandboxProvider().wrapCommand(
+      "/usr/bin/muse",
+      ["exec"],
+      policy({ harnessName: "muse", denyReadPaths: [auth] }),
+    );
+    const settings = JSON.parse(readFileSync(wrapped.args[1] as string, "utf8"));
+    expect(settings.filesystem.denyRead).toEqual([auth]);
   });
 });

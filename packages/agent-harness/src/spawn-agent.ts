@@ -15,7 +15,11 @@ import { tmpdir } from "os";
 import { dirname, isAbsolute, join, resolve } from "path";
 import { StringDecoder } from "string_decoder";
 import { spawnReapable } from "./process-reaper.js";
-import { resolveHomeDir } from "./sandbox/harness-state.js";
+import {
+  defaultMuseCredentialPath,
+  museCredentialPath,
+  resolveHomeDir,
+} from "./sandbox/harness-state.js";
 import type { ResolvedSandbox, SandboxPolicy } from "./sandbox/types.js";
 
 export interface SpawnAgentOptions {
@@ -214,9 +218,68 @@ export function applyNestingGuard(
       `🔒 Disabled Muse Code's own sandbox inside ${providerName} (nested Seatbelt is ` +
         "unsupported on macOS; the outer sandbox is the enforcement boundary).",
     );
-    return [...args, "--disable-sandbox"];
+    // Muse parses positionals with clap and `buildPromptArgs` emits `--` before
+    // a dash-leading prompt. Everything after that marker is prompt text, so a
+    // flag appended at the end would be handed to the model instead of parsed
+    // as an option. Insert it in the option region: right after `exec`, or
+    // immediately before an existing end-of-options marker.
+    const marker = args.indexOf("--");
+    const insertAt = marker === -1 && args[0] === "exec" ? 1 : marker === -1 ? args.length : marker;
+    const adjusted = [...args];
+    adjusted.splice(insertAt, 0, "--disable-sandbox");
+    return adjusted;
   }
   return args;
+}
+
+/**
+ * Credential policy for a Muse run whose own sandbox is about to be disabled.
+ *
+ * Muse's own sandbox refuses to let tool commands read
+ * `~/.config/muse/auth.json` (Muse Code 1.4.10+). Disabling that sandbox to
+ * avoid nested Seatbelt removes the protection, while the outer wrapper grants
+ * broad `$HOME` reads. Hide the stored credential from the whole run and
+ * require `META_API_KEY` instead, since Muse can no longer read the file it
+ * would have authenticated with.
+ *
+ * Only nono/srt are handled: other providers do not wrap on macOS (and the
+ * microVM providers keep the credential inside the guest).
+ *
+ * Exported for tests; `platform` and `env` are injectable.
+ *
+ * @param providerName - The active sandbox provider.
+ * @param harnessName - The harness being wrapped.
+ * @param args - The harness argv (pre-wrap).
+ * @param platform - Defaults to `process.platform`.
+ * @param env - Defaults to `process.env`.
+ * @returns A deny-read policy, an actionable error, or undefined when no guard applies.
+ */
+export function museCredentialGuard(
+  providerName: string,
+  harnessName: string | undefined,
+  args: readonly string[],
+  platform: NodeJS.Platform = process.platform,
+  env: NodeJS.ProcessEnv = process.env,
+): { denyReadPaths: string[] } | { error: string } | undefined {
+  if (harnessName !== "muse" || !SEATBELT_WRAPPERS.has(providerName)) {
+    return undefined;
+  }
+  const innerSandboxOff =
+    platform === "darwin" || args.includes("--disable-sandbox") || args.includes("--yolo");
+  if (!innerSandboxOff) {
+    return undefined;
+  }
+  if (!env.META_API_KEY?.trim()) {
+    return {
+      error:
+        "Muse Code's stored credential cannot be read while its inner sandbox is disabled " +
+        `under ${providerName}. Set META_API_KEY for this run, or disable the external ` +
+        "sandbox to use the stored credential.",
+    };
+  }
+  return {
+    denyReadPaths: [...new Set([museCredentialPath(env), defaultMuseCredentialPath(env)])],
+  };
 }
 
 export async function spawnAgent(options: SpawnAgentOptions): Promise<SpawnedAgent> {
@@ -238,6 +301,20 @@ export async function spawnAgent(options: SpawnAgentOptions): Promise<SpawnedAge
       ...options.policy,
       writablePaths: [...defaults.writablePaths, ...(options.policy?.writablePaths ?? [])],
     };
+
+    const credentialGuard = museCredentialGuard(
+      sandbox.provider.name,
+      policy.harnessName,
+      args,
+      process.platform,
+      spawnOptions.env ?? process.env,
+    );
+    if (credentialGuard && "error" in credentialGuard) {
+      throw new Error(credentialGuard.error);
+    }
+    if (credentialGuard) {
+      policy.denyReadPaths = [...(policy.denyReadPaths ?? []), ...credentialGuard.denyReadPaths];
+    }
 
     const guardedArgs = applyNestingGuard(sandbox.provider.name, policy.harnessName, args);
     const wrapped = await sandbox.provider.wrapCommand(resolvedPath, guardedArgs, policy);

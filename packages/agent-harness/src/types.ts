@@ -126,6 +126,10 @@ export interface HarnessProbe {
   version?: string;
   /** Parsed major version (e.g. `2` for `"2.0.23"`). */
   major?: number;
+  /** Parsed minor version (e.g. `0` for `"2.0.23"`). */
+  minor?: number;
+  /** Parsed patch version (e.g. `23` for `"2.0.23"`). */
+  patch?: number;
 }
 
 /** Complete invocation for a harness run: argv plus spawn-environment overlays. */

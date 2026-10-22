@@ -49,9 +49,13 @@ describe("ClaudeCodeHarness", () => {
 
   test("buildArgs structured output", () => {
     expect(h.buildArgs({ structuredOutput: true })).toEqual(["--output-format", "json"]);
-    expect(
-      h.buildArgs({ skipPermissions: true, model: "opus", structuredOutput: true }),
-    ).toEqual(["--dangerously-skip-permissions", "--model", "opus", "--output-format", "json"]);
+    expect(h.buildArgs({ skipPermissions: true, model: "opus", structuredOutput: true })).toEqual([
+      "--dangerously-skip-permissions",
+      "--model",
+      "opus",
+      "--output-format",
+      "json",
+    ]);
   });
 
   test("buildArgs emits effort via the --effort flag", () => {
@@ -417,6 +421,23 @@ describe("MuseHarness", () => {
     expect(h.buildArgs({})).toEqual(["exec", "--disable-request-user-input"]);
   });
 
+  test("rejects known Muse versions older than 1.4.9 before spawning", () => {
+    expect(() => h.buildArgs({}, { version: "muse 1.4.8", major: 1, minor: 4, patch: 8 })).toThrow(
+      /Muse Code 1\.4\.9 or newer is required/,
+    );
+  });
+
+  test("emits the headless question guard on 1.4.9+, newer versions, and unknown versions", () => {
+    expect(h.buildArgs({}, { version: "1.4.9", major: 1, minor: 4, patch: 9 })).toEqual([
+      "exec",
+      "--disable-request-user-input",
+    ]);
+    expect(h.buildArgs({}, { version: "1.5.0", major: 1, minor: 5, patch: 0 })).toContain(
+      "--disable-request-user-input",
+    );
+    expect(h.buildArgs({})).toContain("--disable-request-user-input");
+  });
+
   test("buildArgs with all options", () => {
     expect(
       h.buildArgs({
@@ -472,9 +493,7 @@ describe("MuseHarness", () => {
     const previous = process.env.META_API_KEY;
     process.env.META_API_KEY = "sk-muse-test-secret";
     try {
-      expect(h.buildArgs({ skipPermissions: true }).join(" ")).not.toContain(
-        "sk-muse-test-secret",
-      );
+      expect(h.buildArgs({ skipPermissions: true }).join(" ")).not.toContain("sk-muse-test-secret");
     } finally {
       if (previous === undefined) {
         delete process.env.META_API_KEY;

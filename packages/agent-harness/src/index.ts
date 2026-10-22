@@ -72,6 +72,7 @@ export { buildPromptArgs } from "./prompt-args.js";
 export {
   buildHarnessInvocation,
   parseMajorVersion,
+  parseVersion,
   probeHarness,
   readCliVersion,
   resetHarnessProbeCache,
@@ -117,7 +118,7 @@ export { GooseHarness } from "./harnesses/goose.js";
 export { GrokHarness } from "./harnesses/grok.js";
 export { KiloCodeHarness } from "./harnesses/kilo-code.js";
 export { KimiHarness } from "./harnesses/kimi.js";
-export { MUSE_READONLY_PROFILE, MuseHarness } from "./harnesses/muse.js";
+export { MUSE_MIN_VERSION, MUSE_READONLY_PROFILE, MuseHarness } from "./harnesses/muse.js";
 export { OpencodeHarness } from "./harnesses/opencode.js";
 export { PiHarness } from "./harnesses/pi.js";
 export { QwenCodeHarness } from "./harnesses/qwen.js";
@@ -170,13 +171,19 @@ export {
   resetNonoPackState,
   type NonoPackStatus,
 } from "./sandbox/providers/nono.js";
-export { harnessStatePaths, resolveHomeDir } from "./sandbox/harness-state.js";
+export {
+  defaultMuseCredentialPath,
+  harnessStatePaths,
+  museCredentialPath,
+  resolveHomeDir,
+} from "./sandbox/harness-state.js";
 export { SrtSandboxProvider } from "./sandbox/providers/srt.js";
 export { DockerSandboxProvider } from "./sandbox/providers/docker.js";
 export { SmolvmSandboxProvider } from "./sandbox/providers/smolvm.js";
 export {
   spawnAgent,
   applyNestingGuard,
+  museCredentialGuard,
   buildDefaultSandboxPolicy,
   type SpawnAgentOptions,
   type SpawnedAgent,

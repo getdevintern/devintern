@@ -36,6 +36,19 @@ function stubMuse(name: string, exitCode: number, diagnostic?: string): string {
 describe("Muse Code run outcomes", () => {
   const harness = new MuseHarness();
 
+  test("probe reads the installed version for flag gating", () => {
+    const path = join(dir, "muse-version");
+    writeFileSync(path, '#!/bin/sh\nprintf "muse 1.4.11\\n"\n', { mode: 0o755 });
+    chmodSync(path, 0o755);
+
+    expect(harness.probe(path)).toEqual({
+      version: "muse 1.4.11",
+      major: 1,
+      minor: 4,
+      patch: 11,
+    });
+  });
+
   test("Bun runner returns a completed turn and passes unattended flags", async () => {
     const path = stubMuse("muse-ok", 0);
     const result = await runAgentBun(harness, path, "do the task", {
