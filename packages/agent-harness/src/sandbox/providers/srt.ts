@@ -153,7 +153,7 @@ export class SrtSandboxProvider implements SandboxProvider {
       },
       filesystem: {
         allowWrite: [...policy.writablePaths, ...harnessStateWritePaths(policy.harnessName)],
-        denyRead: [],
+        denyRead: [...(policy.denyReadPaths ?? [])],
         denyWrite: [],
         ...(policy.readablePaths?.length ? { allowRead: policy.readablePaths } : {}),
       },

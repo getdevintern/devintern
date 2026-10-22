@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Muse Code harness (DEV-187)**: `AGENT_HARNESS=muse` runs Meta's `muse exec` CLI for story drafting and ticket implementation. DevIntern passes `--disable-request-user-input` for unattended runs (requires Muse Code 1.4.9+; older versions fail with an upgrade message), maps `skipPermissions` to `--disable-approval` (Muse's filesystem sandbox stays on) with `--sandbox-network unrestricted` so headless publishing and package installs do not stall on Muse's per-destination network review, maps `--max-turns` to `--max-model-steps`, sends `AGENT_MODEL` to `--model` and `AGENT_EFFORT` to `--reasoning-effort`, uses the `:read-only` profile for read-only analysis, and delivers oversized prompts through `--prompt-file`. `--json` stays opt-in via structured output, so normal runs keep plain text output and the existing usage-limit/turn-limit detectors. On macOS under `nono`/`srt`, DevIntern disables Muse's inner Seatbelt (nested Seatbelt is unsupported), requires `META_API_KEY`, and hides `~/.config/muse/auth.json` from the run so agent shell commands cannot read the stored credential. The Muse exit code reports how the turn ended, not whether the implementation or tests passed. See `docs/code/configuration.md#agent-harness`
+
 ### Fixed
 
 - **Quoted log fixtures no longer trip usage-limit detection**: an agent that printed a file containing a `level=ERROR … error.error="AI_APICallError: … usage limit reached. Resets in 4hr 9min."` string (for example this repository's own usage-limit test fixture) was killed mid-run and its harness was parked for four hours with a fake limit window. Structured-log extraction now requires the diagnostic line to *start* with its logfmt fields, and the transcript source guard recognizes single-quoted and template literals that embed double quotes, so quoted source is never parsed as live CLI output while real OpenCode v1/v2 log lines still match
