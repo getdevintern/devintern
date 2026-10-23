@@ -26,6 +26,11 @@ function runCLI(
       ...process.env,
       DEVINTERN_SKIP_LICENSE_CHECK: "1",
       DEVINTERN_NO_UPDATE: "1",
+      // Error-path cases never reach the agent, but the CLI resolves its
+      // harness before validating the file. Point that resolution at the
+      // running Bun binary so the tests don't depend on an installed agent CLI
+      // (the test runner scrubs ambient *_CLI_PATH values).
+      AGENT_CLI_PATH: process.execPath,
       ...env,
     },
   });

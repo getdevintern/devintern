@@ -186,9 +186,11 @@ export const PM_TRACKER_SETUP: Record<string, EnvPromptStep[]> = {
 };
 
 /** Shared documentation tail appended to the generated `.env` (mirrors `.env.example`). */
-const ENV_COMMON_TAIL = `# Agent Harness Configuration
-# Which AI agent to use: claude-code | opencode | codex | cursor | grok | deepseek
+export const ENV_COMMON_TAIL = `# Agent Harness Configuration
+# Which AI agent to use: claude-code | opencode | codex | cursor | grok | deepseek | reasonix
 # (also: antigravity | kimi | qwen | goose | kilo-code | cline | pi)
+# deepseek selects DeepSeek's official harness (experimental; CLI 'dsh');
+# reasonix selects the community Reasonix CLI (CLI 'reasonix')
 # Legacy: gemini still resolves to antigravity with a deprecation warning
 # Defaults to 'claude-code' if not specified
 AGENT_HARNESS=claude-code
@@ -196,10 +198,14 @@ AGENT_HARNESS=claude-code
 # Optional: Path to the agent CLI executable.
 # Leave unset — by default devintern uses the harness's standard command
 # (e.g. 'claude' for claude-code, 'grok' for grok, 'agy' for antigravity,
-# 'reasonix' for deepseek) and locates it on your PATH automatically.
+# 'dsh' for deepseek, 'reasonix' for reasonix) and locates it on your PATH automatically.
 # Only set this if the CLI is NOT on your PATH or uses a non-standard name,
 # in which case provide the command name or a full path.
 # AGENT_CLI_PATH=/custom/path/to/claude
+
+# Official DeepSeek Harness (AGENT_HARNESS=deepseek) authenticates headless runs
+# through the launch environment. Set DEEPSEEK_API_KEY here (or in $DSH_HOME/.env).
+# DEEPSEEK_API_KEY=sk-your-deepseek-api-key
 `;
 
 /**
