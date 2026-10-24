@@ -196,37 +196,8 @@ Details: [devintern.com/pricing](https://devintern.com/pricing/)
 
 The FSL grants no trademark rights: the DevIntern name and logo are trademarks of Daniil Pokrovsky (devintern.com) and may not be used to identify forks or derived products.
 
-## Repository layout
-
-| Package                                        | Purpose                                                          |
-| ---------------------------------------------- | ---------------------------------------------------------------- |
-| [`@getdevintern/code`](packages/code)          | The worker and CLI: ticket → agent → PR → review follow-up       |
-| [`@getdevintern/pm`](packages/pm)              | The `devpm` CLI: rough input → well-specified tickets            |
-| [`@devintern/pm-desktop`](packages/pm-desktop) | Desktop app for ticket drafting: prompt, log, or Figma → tracker |
-| `packages/*` (shared)                          | Agent harness, tracker clients, auth, license check, utilities   |
-
-Website and control plane live elsewhere; this repo is the tool packages.
-
-## Development workflows
-
-Install dependencies with `bun install`, then use the root commands below. Turborepo runs package tasks in parallel where it is safe and orders workspace builds according to their package dependencies.
-
-| Command                | Purpose                                                                       |
-| ---------------------- | ----------------------------------------------------------------------------- |
-| `bun run build`        | Build every workspace and its dependencies                                    |
-| `bun run test`         | Run all package test suites                                                   |
-| `bun run lint`         | Lint all packages                                                             |
-| `bun run typecheck`    | Type-check all packages                                                       |
-| `bun run format:check` | Check formatting without changing files                                       |
-| `bun run format`       | Format all packages; this write task is intentionally not cached              |
-| `bun run dev`          | Start the dashboard and desktop watch tasks; stop them with <kbd>Ctrl+C</kbd> |
-
-Package-level commands remain available, for example `bun run --filter @getdevintern/pm test`. To run a selected task and its dependency graph through Turborepo, use `bun run turbo run build --filter @getdevintern/code`.
-
-Turborepo uses the local `.turbo` directory for its cache; remote caching is not configured. Add `--force` to a Turbo command to ignore cached results, or remove `.turbo` to clear the local cache completely. If a result looks stale, first rerun it with `--force`; changes to the lockfile, package sources, shared lint configuration, or declared build environment variables automatically invalidate affected entries.
-
 ## Contributing
 
-PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). Monorepo layout and Bun-only tooling: [AGENTS.md](AGENTS.md).
+Bug reports, documentation improvements, and PRs are welcome. See the [contributing guide](CONTRIBUTING.md) for repository layout, local development, checks, and contribution requirements.
 
 Built for teams that want agents to close tickets, not just write code.
