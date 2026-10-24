@@ -22,7 +22,7 @@
 </p>
 <p align="center"><em>Ready ticket → pull request → review feedback → follow-up commits.</em></p>
 
-DevIntern is a self-hosted worker that picks up ready tickets from Jira, Linear, GitHub Issues, or your other trackers, runs your coding agent, and opens pull requests. When reviewers request changes, it follows up on the same branch. Your team controls what gets picked up and what gets merged.
+DevIntern is a self-hosted worker that picks up ready tickets from Jira, Linear, GitHub Issues, or your other trackers, runs Claude Code, Codex, Cursor, or OpenCode, and opens pull requests. When reviewers request changes, it follows up on the same branch. Your team controls what gets picked up and what gets merged.
 
 **[Set up your worker](#set-up-your-worker) · [See the pull requests it opened](#see-it-working) · [Worker docs](docs/code/worker.md)**
 
@@ -153,6 +153,8 @@ Browse the [`devintern-authored` pull requests](https://github.com/getdevintern/
 
 Open each PR to inspect its diff, checks, and discussion. The [full list](https://github.com/getdevintern/devintern/pulls?q=is%3Apr+label%3Adevintern-authored) includes work still in review.
 
+If DevIntern is useful to you, star the repo or share a workflow you have automated.
+
 ## Run one ticket first
 
 Want to inspect the pipeline before leaving a worker running? Run a single ticket first. It does not keep watching your backlog or responding to review feedback. Interactive runs are free forever, with no signup and no time limit.
@@ -229,8 +231,6 @@ Package-level commands remain available, for example `bun run --filter @getdevin
 Turborepo uses the local `.turbo` directory for its cache; remote caching is not configured. Add `--force` to a Turbo command to ignore cached results, or remove `.turbo` to clear the local cache completely. If a result looks stale, first rerun it with `--force`; changes to the lockfile, package sources, shared lint configuration, or declared build environment variables automatically invalidate affected entries.
 
 ## Contributing
-
-If DevIntern is useful to you, star the repo or share a workflow you have automated.
 
 PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). Monorepo layout and Bun-only tooling: [AGENTS.md](AGENTS.md).
 
