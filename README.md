@@ -17,15 +17,6 @@
   <a href="https://github.com/getdevintern/devintern"><img src="https://img.shields.io/github/stars/getdevintern/devintern?style=social" alt="Stars"></a>
 </p>
 
-<!-- Social thumbnail. Link previews and every repost crop a static card, not a
-     video frame, so the image below is what the worker story travels as.
-     Asset pending: 1200x630, the ticket → PR → review loop in one frame. -->
-<!--
-<p align="center">
-  <img src="https://devintern.com/marketing/hero/worker-loop.png" width="100%" alt="DevIntern worker: ready ticket → pull request → review feedback → follow-up commits">
-</p>
--->
-
 <p align="center">
   <video src="https://github.com/user-attachments/assets/f62b17c0-4e5b-4a2f-ac3a-761c44af3680" width="100%" controls muted autoplay loop playsinline></video>
 </p>
@@ -152,26 +143,28 @@ Sign in to evaluate unattended automation with a no-card Worker Pilot: 14 days w
 
 ## See it working
 
-Every pull request labeled [`devintern-authored`](https://github.com/getdevintern/devintern/pulls?q=is%3Apr+label%3Adevintern-authored) was opened by the worker running against this repository — the same pipeline you are about to point at your own backlog.
+Browse the [`devintern-authored` pull requests](https://github.com/getdevintern/devintern/pulls?q=is%3Apr+label%3Adevintern-authored) to inspect changes produced by DevIntern on this repository. Start with these merged examples:
 
-| Pull request                                               | What the worker changed                                         | State            |
-| ---------------------------------------------------------- | --------------------------------------------------------------- | ---------------- |
-| [#306](https://github.com/getdevintern/devintern/pull/306) | Smoke coverage for the worker daemon and the PR label assertion | Merged           |
-| [#300](https://github.com/getdevintern/devintern/pull/300) | Sandbox-aware harness readiness, unusable harnesses deferred    | Merged           |
-| [#296](https://github.com/getdevintern/devintern/pull/296) | Per-harness state directories in the sandbox                    | Merged           |
-| [#320](https://github.com/getdevintern/devintern/pull/320) | DeepSeek harness support (experimental), still in review        | Open — in review |
+| Pull request                                               | What changed                                                    |
+| ---------------------------------------------------------- | --------------------------------------------------------------- |
+| [#306](https://github.com/getdevintern/devintern/pull/306) | Smoke coverage for the worker daemon and the PR label assertion |
+| [#300](https://github.com/getdevintern/devintern/pull/300) | Sandbox-aware harness readiness, unusable harnesses deferred    |
+| [#296](https://github.com/getdevintern/devintern/pull/296) | Per-harness state directories in the sandbox                    |
 
-The review comments and follow-up commits on those branches are public too. This repository is the first backlog the worker runs on.
+Open each PR to inspect its diff, checks, and discussion. The [full list](https://github.com/getdevintern/devintern/pulls?q=is%3Apr+label%3Adevintern-authored) includes work still in review.
 
 ## Run one ticket first
 
-The worker is the product; a single run is how you check it before handing it a backlog. Interactive runs are free forever, with no signup and no time limit.
+Want to inspect the pipeline before leaving a worker running? Run a single ticket first. It does not keep watching your backlog or responding to review feedback. Interactive runs are free forever, with no signup and no time limit.
 
 ```bash
 devintern init                              # connect a tracker, or pick Markdown for a local spec
-devintern PROJ-123 --create-pr              # ticket → branch → diff → pull request
-devintern ./tasks/my-task.md --create-pr    # the same loop from a local file, no tracker credentials
+# Choose one: a ticket in your configured tracker, or an existing local task file
+devintern PROJ-123 --create-pr
+# Or: devintern ./tasks/my-task.md --create-pr
 ```
+
+Opening a PR requires source-control access. For a local spec, choose Markdown during setup and create your task file first. The [quick-start guide](docs/code/quick-start.md) walks through setup.
 
 When a ticket is too vague to implement responsibly, the agent posts clarifying questions on the tracker instead of shipping a confidently wrong PR.
 
