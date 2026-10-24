@@ -24,7 +24,15 @@
 
 DevIntern is a self-hosted worker that picks up ready tickets from Jira, Linear, GitHub Issues, or your other trackers, runs Claude Code, Codex, Cursor, or OpenCode, and opens pull requests. When reviewers request changes, it follows up on the same branch. Your team controls what gets picked up and what gets merged.
 
-**[Set up your worker](#set-up-your-worker) · [See the pull requests it opened](#see-it-working) · [Worker docs](docs/code/worker.md)**
+<p align="center">
+  <a href="#set-up-your-worker"><strong>Set up your worker</strong></a>
+  &nbsp;·&nbsp;
+  <a href="#see-it-working">Real pull requests</a>
+  &nbsp;·&nbsp;
+  <a href="docs/code/worker.md">Documentation</a>
+  &nbsp;·&nbsp;
+  <a href="https://devintern.com">Website</a>
+</p>
 
 Try unattended automation free for 14 days with the Worker Pilot. Sign-in required; no credit card or task-count limit. Continued automation requires a license. Bring your existing coding agent; its usage costs are separate.
 
@@ -63,17 +71,6 @@ Try unattended automation free for 14 days with the Worker Pilot. Sign-in requir
   <img src="https://cdn.simpleicons.org/opencode/000000/ffffff" height="22" alt="OpenCode" title="OpenCode" />
 </p>
 
-<p align="center">
-  <a href="docs/code/quick-start.md"><strong>Docs</strong></a>
-  ·
-  <a href="https://www.npmjs.com/package/@getdevintern/code"><strong>npm</strong></a>
-  ·
-  <a href="https://devintern.com"><strong>Website</strong></a>
-  ·
-  <a href="https://devintern.com/pm-desktop/"><strong>PM desktop</strong></a>
-  <!-- · <a href="YOUR-DISCORD-OR-DISCUSSIONS-URL"><strong>Community</strong></a> -->
-</p>
-
 ## Set up your worker
 
 Start in a Git repository on the machine that will run the worker. You need [Bun](https://bun.sh), an installed and authenticated coding agent, and access to your tracker and source-control host.
@@ -97,7 +94,7 @@ Prefer guided setup through your coding agent? Use the [DevIntern setup skill](d
 
 ## Why teams use it
 
-|                   |                                                                                                                                                                |
+| Capability        | What it does                                                                                                                                                   |
 | ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Worker**        | One daemon. Ready tickets become pull requests. Review comments come back as commits on the same branch.                                                       |
 | **Your stack**    | Your tracker, your coding agent, your keys. DevIntern runs the tools you already use instead of selling you another agent.                                     |
@@ -143,17 +140,15 @@ Sign in to evaluate unattended automation with a no-card Worker Pilot: 14 days w
 
 ## See it working
 
-Browse the [`devintern-authored` pull requests](https://github.com/getdevintern/devintern/pulls?q=is%3Apr+label%3Adevintern-authored) to inspect changes produced by DevIntern on this repository. Start with these merged examples:
+Browse the [DevIntern-authored pull requests](https://github.com/getdevintern/devintern/pulls?q=is%3Apr+label%3Adevintern-authored) to inspect changes produced by DevIntern on this repository. Start with these merged examples:
 
-| Pull request                                               | What changed                                                    |
-| ---------------------------------------------------------- | --------------------------------------------------------------- |
-| [#306](https://github.com/getdevintern/devintern/pull/306) | Smoke coverage for the worker daemon and the PR label assertion |
-| [#300](https://github.com/getdevintern/devintern/pull/300) | Sandbox-aware harness readiness, unusable harnesses deferred    |
-| [#296](https://github.com/getdevintern/devintern/pull/296) | Per-harness state directories in the sandbox                    |
+- [Worker daemon smoke coverage and PR label checks (#306)](https://github.com/getdevintern/devintern/pull/306)
+- [Sandbox-aware coding-agent readiness (#300)](https://github.com/getdevintern/devintern/pull/300)
+- [Per-agent state directories in the sandbox (#296)](https://github.com/getdevintern/devintern/pull/296)
 
-Open each PR to inspect its diff, checks, and discussion. The [full list](https://github.com/getdevintern/devintern/pulls?q=is%3Apr+label%3Adevintern-authored) includes work still in review.
+Open each PR to inspect its diff, checks, and discussion. The [full pull request list](https://github.com/getdevintern/devintern/pulls?q=is%3Apr+label%3Adevintern-authored) includes work still in review.
 
-If DevIntern is useful to you, star the repo or share a workflow you have automated.
+If DevIntern is useful to you, [star the repo](https://github.com/getdevintern/devintern) or share a workflow you have automated.
 
 ## Run one ticket first
 
