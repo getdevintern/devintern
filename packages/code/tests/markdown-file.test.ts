@@ -1,5 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import { spawnSync } from "child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -12,15 +11,17 @@ interface CLIResult {
   exitCode: number;
 }
 
-function runCLI(
+// Async so the independent CLI cases below can overlap their bun subprocesses
+// (the same pattern as cli.test.ts) instead of serializing ~15s of startup.
+async function runCLI(
   args: string[],
   cwd: string,
   env: Record<string, string> = {},
   timeoutMs = 15000,
-): CLIResult {
-  const result = spawnSync("bun", [CLI_PATH, ...args], {
-    encoding: "utf8",
-    timeout: timeoutMs,
+): Promise<CLIResult> {
+  const signal = AbortSignal.timeout(timeoutMs);
+  const proc = Bun.spawn({
+    cmd: ["bun", CLI_PATH, ...args],
     cwd,
     env: {
       ...process.env,
@@ -28,12 +29,16 @@ function runCLI(
       DEVINTERN_NO_UPDATE: "1",
       ...env,
     },
+    stdout: "pipe",
+    stderr: "pipe",
+    signal,
   });
-  return {
-    stdout: result.stdout || "",
-    stderr: result.stderr || "",
-    exitCode: result.status ?? 0,
-  };
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited.then((code) => code ?? 0),
+  ]);
+  return { stdout, stderr, exitCode };
 }
 
 function makeTestDir(): string {
@@ -55,13 +60,13 @@ function cleanup(dir: string): void {
 // (empty output) but the file-detection and setup phases still execute.
 const FAKE_AGENT = "/usr/bin/true";
 
-describe("Markdown file path detection", () => {
-  test("accepts an absolute .md file path as task argument", () => {
+describe.concurrent("Markdown file path detection", () => {
+  test("accepts an absolute .md file path as task argument", async () => {
     const testDir = makeTestDir();
     const mdFile = join(testDir, "task.md");
     writeFileSync(mdFile, "# My Task\n\nDo the thing.\n");
     try {
-      const result = runCLI(
+      const result = await runCLI(
         [mdFile, "--no-git", "--skip-clarity-check", "--agent-path", FAKE_AGENT],
         testDir,
       );
@@ -74,11 +79,11 @@ describe("Markdown file path detection", () => {
     }
   }, 30000);
 
-  test("accepts a relative path like ./task.md", () => {
+  test("accepts a relative path like ./task.md", async () => {
     const testDir = makeTestDir();
     writeFileSync(join(testDir, "task.md"), "# Test\n\nContent.\n");
     try {
-      const result = runCLI(
+      const result = await runCLI(
         ["./task.md", "--no-git", "--skip-clarity-check", "--agent-path", FAKE_AGENT],
         testDir,
       );
@@ -90,10 +95,10 @@ describe("Markdown file path detection", () => {
     }
   }, 30000);
 
-  test("shows error when .md file does not exist", () => {
+  test("shows error when .md file does not exist", async () => {
     const testDir = makeTestDir();
     try {
-      const result = runCLI(
+      const result = await runCLI(
         ["/nonexistent/path/task.md", "--no-git", "--skip-clarity-check"],
         testDir,
       );
@@ -105,12 +110,12 @@ describe("Markdown file path detection", () => {
     }
   }, 10000);
 
-  test("shows error for empty .md file", () => {
+  test("shows error for empty .md file", async () => {
     const testDir = makeTestDir();
     const mdFile = join(testDir, "empty.md");
     writeFileSync(mdFile, "   \n  ");
     try {
-      const result = runCLI([mdFile, "--no-git", "--skip-clarity-check"], testDir);
+      const result = await runCLI([mdFile, "--no-git", "--skip-clarity-check"], testDir);
       const output = result.stdout + result.stderr;
       expect(output).toContain("empty");
       expect(result.exitCode).not.toBe(0);
@@ -119,12 +124,12 @@ describe("Markdown file path detection", () => {
     }
   }, 10000);
 
-  test("does not require PM credentials for .md file task", () => {
+  test("does not require PM credentials for .md file task", async () => {
     const testDir = makeTestDir();
     const mdFile = join(testDir, "spec.md");
     writeFileSync(mdFile, "# Feature Spec\n\nImplement the feature.\n");
     try {
-      const result = runCLI(
+      const result = await runCLI(
         [mdFile, "--no-git", "--skip-clarity-check", "--agent-path", FAKE_AGENT],
         testDir,
         {
@@ -140,12 +145,12 @@ describe("Markdown file path detection", () => {
     }
   }, 30000);
 
-  test("extracts title from H1 heading", () => {
+  test("extracts title from H1 heading", async () => {
     const testDir = makeTestDir();
     const mdFile = join(testDir, "task.md");
     writeFileSync(mdFile, "# My Awesome Feature\n\nDescription here.\n");
     try {
-      const result = runCLI(
+      const result = await runCLI(
         [mdFile, "--no-git", "--skip-clarity-check", "--agent-path", FAKE_AGENT],
         testDir,
       );
@@ -155,12 +160,12 @@ describe("Markdown file path detection", () => {
     }
   }, 30000);
 
-  test("falls back to filename when no H1 heading", () => {
+  test("falls back to filename when no H1 heading", async () => {
     const testDir = makeTestDir();
     const mdFile = join(testDir, "my-feature.md");
     writeFileSync(mdFile, "Just some description without a heading.\n");
     try {
-      const result = runCLI(
+      const result = await runCLI(
         [mdFile, "--no-git", "--skip-clarity-check", "--agent-path", FAKE_AGENT],
         testDir,
       );
@@ -171,7 +176,7 @@ describe("Markdown file path detection", () => {
     }
   }, 30000);
 
-  test("uses frontmatter key as task key", () => {
+  test("uses frontmatter key as task key", async () => {
     const testDir = makeTestDir();
     const mdFile = join(testDir, "some-file.md");
     writeFileSync(
@@ -188,7 +193,7 @@ Description.
 `,
     );
     try {
-      const result = runCLI(
+      const result = await runCLI(
         [mdFile, "--no-git", "--skip-clarity-check", "--agent-path", FAKE_AGENT],
         testDir,
       );
@@ -198,30 +203,38 @@ Description.
     }
   }, 30000);
 
-  test("saves task-details.md to output directory", () => {
+  test("saves task-details.md to output directory", async () => {
     const testDir = makeTestDir();
     const outputDir = join(testDir, "output");
     const mdFile = join(testDir, "task.md");
     writeFileSync(mdFile, "# My Task\n\nDo the thing.\n");
     try {
-      runCLI([mdFile, "--no-git", "--skip-clarity-check", "--agent-path", FAKE_AGENT], testDir, {
-        DEVINTERN_OUTPUT_DIR: outputDir,
-      });
+      await runCLI(
+        [mdFile, "--no-git", "--skip-clarity-check", "--agent-path", FAKE_AGENT],
+        testDir,
+        {
+          DEVINTERN_OUTPUT_DIR: outputDir,
+        },
+      );
       expect(existsSync(outputDir)).toBe(true);
     } finally {
       cleanup(testDir);
     }
   }, 30000);
 
-  test("appends implementation instructions when not present", () => {
+  test("appends implementation instructions when not present", async () => {
     const testDir = makeTestDir();
     const outputDir = join(testDir, "output");
     const mdFile = join(testDir, "my-task.md");
     writeFileSync(mdFile, "# My Task\n\nDo the thing.\n");
     try {
-      runCLI([mdFile, "--no-git", "--skip-clarity-check", "--agent-path", FAKE_AGENT], testDir, {
-        DEVINTERN_OUTPUT_DIR: outputDir,
-      });
+      await runCLI(
+        [mdFile, "--no-git", "--skip-clarity-check", "--agent-path", FAKE_AGENT],
+        testDir,
+        {
+          DEVINTERN_OUTPUT_DIR: outputDir,
+        },
+      );
       const taskDetailsDir = join(outputDir, "my-task");
       if (existsSync(taskDetailsDir)) {
         const taskDetails = readFileSync(join(taskDetailsDir, "task-details.md"), "utf8");
@@ -232,7 +245,7 @@ Description.
     }
   }, 30000);
 
-  test("keeps file instructions framed and appends trusted instructions", () => {
+  test("keeps file instructions framed and appends trusted instructions", async () => {
     const testDir = makeTestDir();
     const outputDir = join(testDir, "output");
     const mdFile = join(testDir, "my-task.md");
@@ -241,9 +254,13 @@ Description.
       "# My Task\n\nDo the thing.\n\n## Implementation Instructions\n\nAlready here.\n",
     );
     try {
-      runCLI([mdFile, "--no-git", "--skip-clarity-check", "--agent-path", FAKE_AGENT], testDir, {
-        DEVINTERN_OUTPUT_DIR: outputDir,
-      });
+      await runCLI(
+        [mdFile, "--no-git", "--skip-clarity-check", "--agent-path", FAKE_AGENT],
+        testDir,
+        {
+          DEVINTERN_OUTPUT_DIR: outputDir,
+        },
+      );
       const taskDetailsDir = join(outputDir, "my-task");
       if (existsSync(taskDetailsDir)) {
         const taskDetails = readFileSync(join(taskDetailsDir, "task-details.md"), "utf8");
@@ -261,8 +278,8 @@ Description.
   }, 30000);
 });
 
-describe("Markdown frontmatter status transitions", () => {
-  test("updates status away from 'To Do' when frontmatter has status field", () => {
+describe.concurrent("Markdown frontmatter status transitions", () => {
+  test("updates status away from 'To Do' when frontmatter has status field", async () => {
     const testDir = makeTestDir();
     const mdFile = join(testDir, "task.md");
     writeFileSync(
@@ -278,7 +295,10 @@ Description.
 `,
     );
     try {
-      runCLI([mdFile, "--no-git", "--skip-clarity-check", "--agent-path", FAKE_AGENT], testDir);
+      await runCLI(
+        [mdFile, "--no-git", "--skip-clarity-check", "--agent-path", FAKE_AGENT],
+        testDir,
+      );
       const updated = readFileSync(mdFile, "utf8");
       // Status must have transitioned away from "To Do" (to "In Progress" or "Done")
       expect(updated).not.toContain("status: To Do");
@@ -288,7 +308,7 @@ Description.
     }
   }, 30000);
 
-  test("transitions to In Progress before agent runs", () => {
+  test("transitions to In Progress before agent runs", async () => {
     const testDir = makeTestDir();
     const mdFile = join(testDir, "task.md");
     writeFileSync(
@@ -304,7 +324,7 @@ Description.
 `,
     );
     try {
-      const result = runCLI(
+      const result = await runCLI(
         [mdFile, "--no-git", "--skip-clarity-check", "--agent-path", FAKE_AGENT],
         testDir,
       );
@@ -314,7 +334,7 @@ Description.
     }
   }, 30000);
 
-  test("does not modify file when frontmatter has no status field", () => {
+  test("does not modify file when frontmatter has no status field", async () => {
     const testDir = makeTestDir();
     const mdFile = join(testDir, "task.md");
     const originalContent = `---
@@ -328,7 +348,10 @@ Description.
 `;
     writeFileSync(mdFile, originalContent);
     try {
-      runCLI([mdFile, "--no-git", "--skip-clarity-check", "--agent-path", FAKE_AGENT], testDir);
+      await runCLI(
+        [mdFile, "--no-git", "--skip-clarity-check", "--agent-path", FAKE_AGENT],
+        testDir,
+      );
       const after = readFileSync(mdFile, "utf8");
       expect(after).not.toContain("status:");
     } finally {
@@ -336,13 +359,16 @@ Description.
     }
   }, 30000);
 
-  test("does not modify file when there is no frontmatter", () => {
+  test("does not modify file when there is no frontmatter", async () => {
     const testDir = makeTestDir();
     const mdFile = join(testDir, "task.md");
     const originalContent = "# Task\n\nNo frontmatter here.\n";
     writeFileSync(mdFile, originalContent);
     try {
-      runCLI([mdFile, "--no-git", "--skip-clarity-check", "--agent-path", FAKE_AGENT], testDir);
+      await runCLI(
+        [mdFile, "--no-git", "--skip-clarity-check", "--agent-path", FAKE_AGENT],
+        testDir,
+      );
       const after = readFileSync(mdFile, "utf8");
       expect(after).toBe(originalContent);
     } finally {
@@ -351,8 +377,8 @@ Description.
   }, 30000);
 });
 
-describe("Unstructured markdown files", () => {
-  test("processes plain prose with no heading, key, or frontmatter", () => {
+describe.concurrent("Unstructured markdown files", () => {
+  test("processes plain prose with no heading, key, or frontmatter", async () => {
     const testDir = makeTestDir();
     const outputDir = join(testDir, "output");
     const mdFile = join(testDir, "backlog-item.md");
@@ -361,7 +387,7 @@ describe("Unstructured markdown files", () => {
     writeFileSync(mdFile, originalContent);
 
     try {
-      const result = runCLI(
+      const result = await runCLI(
         [mdFile, "--no-git", "--skip-clarity-check", "--agent-path", FAKE_AGENT],
         testDir,
         { DEVINTERN_OUTPUT_DIR: outputDir },
@@ -385,7 +411,7 @@ describe("Unstructured markdown files", () => {
     }
   }, 30000);
 
-  test("processes markdown with H2 sections but no H1", () => {
+  test("processes markdown with H2 sections but no H1", async () => {
     const testDir = makeTestDir();
     const mdFile = join(testDir, "refactor-auth.md");
     const originalContent = `## Context
@@ -399,7 +425,7 @@ Extract shared middleware package.
     writeFileSync(mdFile, originalContent);
 
     try {
-      const result = runCLI(
+      const result = await runCLI(
         [mdFile, "--no-git", "--skip-clarity-check", "--agent-path", FAKE_AGENT],
         testDir,
       );
@@ -412,7 +438,7 @@ Extract shared middleware package.
     }
   }, 30000);
 
-  test("processes non-devpm frontmatter without key or status", () => {
+  test("processes non-devpm frontmatter without key or status", async () => {
     const testDir = makeTestDir();
     const mdFile = join(testDir, "obsidian-note.md");
     const originalContent = `---
@@ -425,7 +451,7 @@ Random note: wire up webhook retries with exponential backoff.
     writeFileSync(mdFile, originalContent);
 
     try {
-      const result = runCLI(
+      const result = await runCLI(
         [mdFile, "--no-git", "--skip-clarity-check", "--agent-path", FAKE_AGENT],
         testDir,
       );
@@ -440,13 +466,13 @@ Random note: wire up webhook retries with exponential backoff.
     }
   }, 30000);
 
-  test("processes batch of unstructured markdown files", () => {
+  test("processes batch of unstructured markdown files", async () => {
     const testDir = makeTestDir();
     writeFileSync(join(testDir, "one.md"), "First task.\n");
     writeFileSync(join(testDir, "two.md"), "Second task.\n");
 
     try {
-      const result = runCLI(
+      const result = await runCLI(
         ["./one.md", "./two.md", "--no-git", "--skip-clarity-check", "--agent-path", FAKE_AGENT],
         testDir,
         {
@@ -467,8 +493,8 @@ Random note: wire up webhook retries with exponential backoff.
   }, 30000);
 });
 
-describe("PM frontmatter key lookup", () => {
-  test("resolves short frontmatter key to slugged PM filename", () => {
+describe.concurrent("PM frontmatter key lookup", () => {
+  test("resolves short frontmatter key to slugged PM filename", async () => {
     const testDir = makeTestDir();
     const tasksDir = join(testDir, "tasks");
     mkdirSync(tasksDir, { recursive: true });
@@ -488,7 +514,7 @@ Description.
     );
 
     try {
-      const result = runCLI(
+      const result = await runCLI(
         [
           "2026-06-06T09-42-23-kfg5",
           "--no-git",
@@ -513,17 +539,21 @@ Description.
   }, 30000);
 });
 
-describe("Mixed PM task keys and file paths", () => {
-  test("requires PM credentials when mixing PM keys with file paths", () => {
+describe.concurrent("Mixed PM task keys and file paths", () => {
+  test("requires PM credentials when mixing PM keys with file paths", async () => {
     const testDir = makeTestDir();
     const mdFile = join(testDir, "task.md");
     writeFileSync(mdFile, "# Task\n\nDescription.\n");
     try {
-      const result = runCLI(["PROJ-123", mdFile, "--no-git", "--skip-clarity-check"], testDir, {
-        JIRA_BASE_URL: "",
-        JIRA_EMAIL: "",
-        JIRA_API_TOKEN: "",
-      });
+      const result = await runCLI(
+        ["PROJ-123", mdFile, "--no-git", "--skip-clarity-check"],
+        testDir,
+        {
+          JIRA_BASE_URL: "",
+          JIRA_EMAIL: "",
+          JIRA_API_TOKEN: "",
+        },
+      );
       const output = result.stdout + result.stderr;
       expect(output).toContain("Missing required JIRA environment variables");
     } finally {
