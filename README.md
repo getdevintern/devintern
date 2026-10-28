@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <a href="LICENSE.md"><img src="https://img.shields.io/badge/License-FSL--1.1--Apache--2.0-blue" alt="License"></a>
+  <a href="LICENSE.md"><img src="https://img.shields.io/badge/License-FSL--1.1--ALv2-blue" alt="License"></a>
   <a href="https://devintern.com"><img src="https://img.shields.io/badge/Website-devintern.com-blue" alt="Website"></a>
   <a href="https://www.npmjs.com/package/@getdevintern/code"><img src="https://img.shields.io/npm/v/%40getdevintern%2Fcode?label=%40getdevintern%2Fcode" alt="npm"></a>
   <a href="https://github.com/getdevintern/devintern"><img src="https://img.shields.io/github/stars/getdevintern/devintern?style=social" alt="Stars"></a>
@@ -23,6 +23,8 @@
 <p align="center"><em>Ready ticket → pull request → review feedback → follow-up commits.</em></p>
 
 DevIntern is a self-hosted worker that picks up ready tickets from Jira, Linear, GitHub Issues, or your other trackers, runs Claude Code, Codex, Cursor, or OpenCode, and opens pull requests. When reviewers request changes, it follows up on the same branch. Your team controls what gets picked up and what gets merged.
+
+Running it locally from the terminal is free, self-hosted, and needs no signup. Unattended automation is separate: a 14-day Worker Pilot, then a paid license.
 
 <p align="center">
   <a href="#set-up-your-worker"><strong>Set up your worker</strong></a>
@@ -186,7 +188,7 @@ The skills are instructions for your agent. They do not install the CLI, connect
 
 ## License and pricing
 
-Source is under the [Functional Source License, Version 1.1, with Apache 2.0 Future License](LICENSE.md) (FSL-1.1-Apache-2.0). You can read it, audit it, self-build, and self-host. Each release converts to Apache-2.0 two years after publication.
+Source is under the [Functional Source License, Version 1.1, ALv2 Future License](LICENSE.md) (FSL-1.1-ALv2). You can read it, audit it, self-build, and self-host. Each release converts to Apache-2.0 two years after publication.
 
 - **Interactive use** → free forever
 - **Worker Pilot** → 14 days with no task-count limit, no card required; `devintern login` required

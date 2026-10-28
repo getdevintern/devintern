@@ -47,7 +47,7 @@ Turborepo uses the local `.turbo` directory for its cache; remote caching is not
 
 ## Sign-off (DCO)
 
-By contributing, you certify the [Developer Certificate of Origin](https://developercertificate.org/): that you wrote the change or have the right to submit it under this repository's license (FSL-1.1-Apache-2.0). Please add a `Signed-off-by:` line to your commits (`git commit -s`).
+By contributing, you certify the [Developer Certificate of Origin](https://developercertificate.org/): that you wrote the change or have the right to submit it under this repository's license (FSL-1.1-ALv2). Please add a `Signed-off-by:` line to your commits (`git commit -s`).
 
 ## Reporting issues
 
