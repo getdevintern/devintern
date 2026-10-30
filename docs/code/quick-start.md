@@ -83,6 +83,7 @@ The wizard handles credentials for you. If you skip `init`, running a task in an
 | **Asana**          | Asana tasks with project section transitions              | [Asana Integration](./asana-integration.md)                 |
 | **Azure DevOps**   | Azure DevOps work items by ID or URL                      | [Azure DevOps Integration](./azure-devops-integration.md)   |
 | **GitHub Issues**  | GitHub issues with status labels, PRs in the same repo    | [GitHub Issues Integration](./github-issues-integration.md) |
+| **GitLab Issues**  | GitLab issues with status labels, MRs in the same repo    | [GitLab Integration](./gitlab-integration.md)               |
 | **Markdown files** | Local `.md` specs, no PM account needed                   | [Markdown File Tasks](./markdown-tasks.md)                  |
 
 **Jira:** add `JIRA_BASE_URL`, `JIRA_EMAIL`, and `JIRA_API_TOKEN`. You do not need to set `TASK_TRACKER` (it defaults to `jira`).
