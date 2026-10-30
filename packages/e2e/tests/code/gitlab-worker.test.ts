@@ -121,10 +121,13 @@ describe.skipIf(process.env.DEVINTERN_E2E_GITLAB !== "1")("GitLab worker built C
         const branch = `feature/${issue.iid}`;
         const mr = await worker.waitForMergeRequest(branch);
         const runs = await worker.waitFor(
-          "the GitLab tracker run to be recorded",
+          "the GitLab tracker run to settle",
           () => {
             const records = worker.runRecords(String(issue.iid));
-            return records.length > 0 ? records : undefined;
+            const settled = records.some(
+              (record) => record.status === "succeeded" || record.status === "failed",
+            );
+            return settled ? records : undefined;
           },
           90_000,
         );

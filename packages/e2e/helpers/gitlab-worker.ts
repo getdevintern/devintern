@@ -7,10 +7,12 @@
  * API and Git access, and a workspace whose only repo points at the project.
  */
 
-import { chmodSync, cpSync, mkdirSync, writeFileSync } from "node:fs";
+import { Database } from "bun:sqlite";
+import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { cliPath } from "./fixture-workspace";
 import type { GitLab, GitLabProject, MergeRequest } from "../providers/gitlab";
-import { checkedCommand } from "./process";
+import { checkedCommand, command } from "./process";
 import { WorkerFixture } from "./worker";
 import type { WorkerFixtureOptions } from "./worker";
 
@@ -43,6 +45,8 @@ export interface GitLabWorkerOptions extends WorkerFixtureOptions {
   pollIntervalSeconds?: number;
   /** Suppress tracker comments/status transitions; defaults to true. */
   skipComments?: boolean;
+  /** Hosted relay base URL; defaults to the public relay. */
+  relayUrl?: string;
 }
 
 /**
@@ -58,6 +62,8 @@ export class GitLabWorkerFixture extends WorkerFixture {
   project?: GitLabProject;
   private codeHostToken = "";
   private codeHostUserId = 0;
+  private relayConnected = false;
+  private relayTestDataReady = false;
 
   constructor(
     gitlab: GitLab,
@@ -199,6 +205,95 @@ export class GitLabWorkerFixture extends WorkerFixture {
     return this.writeBaseFile("src/greeting.ts", contents);
   }
 
+  /** Install a signed-in Supabase session for the hosted relay connect step. */
+  installRelaySession(sessionPath: string): void {
+    const targetDir = join(this.workspaceDir, "state", "code");
+    mkdirSync(targetDir, { recursive: true, mode: 0o700 });
+    const target = join(targetDir, ".auth-session.json");
+    copyFileSync(sessionPath, target);
+    chmodSync(target, 0o600);
+  }
+
+  /** GitLab refuses to test a note hook until the project has an issue note. */
+  private async ensureHookTestData(): Promise<void> {
+    if (this.relayTestDataReady) return;
+    const issue = await this.createIssue({
+      title: "DevIntern relay hook test fixture",
+      description: "Disposable project data used by hook verification.",
+    });
+    await this.gitlab.request(`/projects/${this.projectId()}/issues/${issue.iid}/notes`, "POST", {
+      body: "Disposable note used to verify the managed relay hook.",
+    });
+    this.relayTestDataReady = true;
+  }
+
+  /** Run the real `worker connect gitlab` command against the hosted relay. */
+  async connectRelay(options: { disconnect?: boolean } = {}): Promise<string> {
+    if (!options.disconnect) await this.ensureHookTestData();
+    const relayUrl = this.gitlabOptions.relayUrl ?? "https://relay.devintern.com";
+    const result = await command(
+      [
+        process.execPath,
+        cliPath,
+        "worker",
+        "connect",
+        "gitlab",
+        "--workspace",
+        join(this.workspaceDir, "workspace.toml"),
+        ...(options.disconnect ? ["--disconnect"] : []),
+      ],
+      this.workspaceDir,
+      {
+        ...this.env,
+        WORKER_RELAY_URL: relayUrl,
+        GITLAB_WEBHOOK_ADMIN_TOKEN: this.rootToken,
+      },
+      180_000,
+    );
+    if (result.exitCode !== 0) {
+      throw new Error(
+        `worker connect gitlab failed (${result.exitCode}):\n${result.stdout}\n${result.stderr}`,
+      );
+    }
+    this.relayConnected = !options.disconnect;
+    return result.stdout + result.stderr;
+  }
+
+  /** Remove the managed project hook and relay route, keeping polling available. */
+  disconnectRelay(): Promise<string> {
+    return this.connectRelay({ disconnect: true });
+  }
+
+  /** Open change requests still registered for review/CI reconciliation. */
+  openAgentChangeRequests(): Array<{
+    provider: string;
+    instance_url: string;
+    project_path: string;
+    change_number: number;
+  }> {
+    if (!existsSync(this.dbPath)) return [];
+    const db = new Database(this.dbPath, { readonly: true });
+    try {
+      return db
+        .query(
+          "SELECT provider, instance_url, project_path, change_number FROM agent_prs WHERE state = 'open' ORDER BY change_number",
+        )
+        .all() as Array<{
+        provider: string;
+        instance_url: string;
+        project_path: string;
+        change_number: number;
+      }>;
+    } finally {
+      db.close();
+    }
+  }
+
+  /** GitLab project hooks, used to verify connect/disconnect idempotence. */
+  projectHooks(): Promise<Array<{ id: number; name?: string; url: string }>> {
+    return this.gitlab.request(`/projects/${this.projectId()}/hooks`);
+  }
+
   /** Post a human discussion with the fixture's root identity. */
   postDiscussion(mergeRequestIid: number, body: string): Promise<Discussion> {
     return this.gitlab.request<Discussion>(
@@ -309,6 +404,15 @@ export class GitLabWorkerFixture extends WorkerFixture {
   /** Stop the daemon, remove the disposable project, and delete temporary paths. */
   override async dispose(): Promise<void> {
     await this.stop();
+    const errors: unknown[] = [];
+    if (this.relayConnected) {
+      try {
+        await this.disconnectRelay();
+        this.relayConnected = false;
+      } catch (error) {
+        errors.push(error);
+      }
+    }
     try {
       // Project deletion can return a transient 500 while GitLab finishes
       // background work from the just-stopped worker; a 404 means an earlier
@@ -329,8 +433,17 @@ export class GitLabWorkerFixture extends WorkerFixture {
         }
       }
       if (lastError) throw lastError;
+    } catch (error) {
+      errors.push(error);
     } finally {
-      await super.dispose();
+      try {
+        await super.dispose();
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+    if (errors.length) {
+      throw new AggregateError(errors, `GitLab worker cleanup failed for ${this.id}`);
     }
   }
 

@@ -34,6 +34,12 @@ export const OPT_IN_SUITES: readonly OptInSuite[] = [
     status: "skip",
   },
   {
+    name: "GitLab hosted relay E2E",
+    script: "test:e2e:gitlab-relay",
+    reason: "requires a signed-in account and writes a temporary hook to the deployed relay",
+    status: "skip",
+  },
+  {
     name: "Bitbucket Cloud source-control E2E",
     script: "test:e2e:bitbucket",
     reason: "requires a dedicated Bitbucket fixture repository and token",
