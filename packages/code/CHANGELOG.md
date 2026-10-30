@@ -1,5 +1,18 @@
 # @devintern/code Changelog
 
+## [2.20.1] - 2026-10-30
+
+Licensing and maintenance patch: the published package now ships the canonical FSL-1.1-ALv2 license text and SPDX id instead of a paraphrased license file, the README states that local terminal use is free, a transitive request-forwarding dependency is patched, and the markdown-file CLI tests run concurrently under explicit process deadlines.
+
+### Fixed
+
+- **The published license is detectable as FSL-1.1-ALv2**: `LICENSE.md` now carries the canonical Functional Source License 1.1 template with the Apache 2.0 future license instead of a paraphrase that license scanners could not match, and the `license` field in the root and package manifests declares the recognizable SPDX id `FSL-1.1-ALv2` rather than `SEE LICENSE IN LICENSE.md`, so npm metadata and license tooling read the actual terms. The package READMEs and repository docs name the license consistently, and the README now states that running DevIntern locally from the terminal is free, self-hosted, and needs no signup
+
+### Technical
+
+- **`proxy-addr` 2.0.8**: the transitive request-forwarding dependency moves from 2.0.7 to 2.0.8 in `bun.lock`; no API or configuration changes
+- **Markdown-file CLI tests run concurrently under bounded process deadlines**: `packages/code/tests/markdown-file.test.ts` replaces serial `spawnSync` runs with an async `Bun.spawn` helper that streams stdout/stderr, enforces a SIGTERM deadline with a bounded SIGKILL grace, and fails a stub that never writes output, so independent CLI cases overlap instead of paying bun startup one at a time, and the timeout, SIGTERM, and SIGKILL paths are covered by dedicated stub CLIs instead of going untested
+
 ## [2.20.0] - 2026-10-23
 
 Reliability release: OpenCode v2 is supported through version probing, sandbox readiness and failover stop turning harness configuration problems into task failures, agents that commit or open a pull request themselves are delivered instead of failed, ad-hoc worker tasks run in parallel and can be re-queued, verification failures are visible and resilient, and the dashboard gains a task activity board alongside user-approved bug reports.

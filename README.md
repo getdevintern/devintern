@@ -7,11 +7,11 @@
 </p>
 
 <p align="center">
-  <strong>A worker for the coding agents you already have. Ready tickets become reviewed pull requests — on your machines.</strong>
+  <strong>Keep your coding agent working through your backlog.</strong>
 </p>
 
 <p align="center">
-  <a href="LICENSE.md"><img src="https://img.shields.io/badge/License-FSL--1.1--Apache--2.0-blue" alt="License"></a>
+  <a href="LICENSE.md"><img src="https://img.shields.io/badge/License-FSL--1.1--ALv2-blue" alt="License"></a>
   <a href="https://devintern.com"><img src="https://img.shields.io/badge/Website-devintern.com-blue" alt="Website"></a>
   <a href="https://www.npmjs.com/package/@getdevintern/code"><img src="https://img.shields.io/npm/v/%40getdevintern%2Fcode?label=%40getdevintern%2Fcode" alt="npm"></a>
   <a href="https://github.com/getdevintern/devintern"><img src="https://img.shields.io/github/stars/getdevintern/devintern?style=social" alt="Stars"></a>
@@ -20,20 +20,28 @@
 <p align="center">
   <video src="https://github.com/user-attachments/assets/f62b17c0-4e5b-4a2f-ac3a-761c44af3680" width="100%" controls muted autoplay loop playsinline></video>
 </p>
-<p align="center"><em>Try it on one task. The product is the worker that keeps going.</em></p>
+<p align="center"><em>Ready ticket → pull request → review feedback → follow-up commits.</em></p>
 
-<!-- Fallback GIF if video is awkward on some clients
+DevIntern is a self-hosted worker that picks up ready tickets from Jira, Linear, GitHub Issues, or your other trackers, runs Claude Code, Codex, Cursor, or OpenCode, and opens pull requests. When reviewers request changes, it follows up on the same branch. Your team controls what gets picked up and what gets merged.
+
+Running it locally from the terminal is free, self-hosted, and needs no signup. Unattended automation is separate: a 14-day Worker Pilot, then a paid license.
+
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/YOUR-GIF-ID" width="820" alt="DevIntern: markdown task becomes a pull request">
+  <a href="#set-up-your-worker"><strong>Set up your worker</strong></a>
+  &nbsp;·&nbsp;
+  <a href="#see-it-working">Real pull requests</a>
+  &nbsp;·&nbsp;
+  <a href="docs/code/worker.md">Documentation</a>
+  &nbsp;·&nbsp;
+  <a href="https://devintern.com">Website</a>
 </p>
--->
 
-DevIntern is a self-hosted worker: it picks up ready tickets from the tracker you already use, runs Claude Code, Codex, Cursor, or OpenCode with your keys, and opens a self-reviewed pull request. You review diffs, not agent sessions. Interactive runs are free; the daemon is the paid product.
+Try unattended automation free for 14 days with the Worker Pilot. Sign-in required; no credit card or task-count limit. Continued automation requires a license. Bring your existing coding agent; its usage costs are separate.
 
 - **Your tracker:** Jira · Linear · GitHub Issues · Trello · Asana · Azure DevOps · plain markdown files
 - **Your agent:** Claude Code · Codex · Cursor · OpenCode (one config line to switch)
-- **Your keys, your machines** — billed on the contract you already have; code never hits our servers
-- **Try it free** — run `devintern PROJ-123` from your terminal, no signup
+- **Your keys, your machines** — agent execution runs locally; your code never hits DevIntern servers
+- **The whole review loop** — ready tickets become PRs; reviewer feedback becomes follow-up commits
 
 <!-- Visual echo of the tracker + agent bullets above.
      Near-black brand marks use color/dark_mode_color so they stay visible
@@ -65,67 +73,39 @@ DevIntern is a self-hosted worker: it picks up ready tickets from the tracker yo
   <img src="https://cdn.simpleicons.org/opencode/000000/ffffff" height="22" alt="OpenCode" title="OpenCode" />
 </p>
 
-<p align="center">
-  <a href="docs/code/quick-start.md"><strong>Docs</strong></a>
-  ·
-  <a href="https://www.npmjs.com/package/@getdevintern/code"><strong>npm</strong></a>
-  ·
-  <a href="https://devintern.com"><strong>Website</strong></a>
-  ·
-  <a href="https://devintern.com/pm-desktop/"><strong>PM desktop</strong></a>
-  <!-- · <a href="YOUR-DISCORD-OR-DISCUSSIONS-URL"><strong>Community</strong></a> -->
-</p>
+## Set up your worker
 
-## Quick start
+Start in a Git repository on the machine that will run the worker. You need [Bun](https://bun.sh), an installed and authenticated coding agent, and access to your tracker and source-control host.
 
 ```bash
-# Requires Bun
+# Install Bun if needed
 curl -fsSL https://bun.sh/install | bash
 bun install -g @getdevintern/code
 
-# Recommended: workspace worker, including for one repo
-# Free Worker Pilot or automation license; wizard offers relay + service setup
+# Guided setup: connect your tracker, choose ready tickets, activate automation
 devintern worker init
 # If the wizard did not start a service, start manually:
 # devintern worker
 ```
 
-For a one-off task instead, run `devintern init` followed by `devintern ./tasks/my-task.md --create-pr` (or `devintern PROJ-123 --create-pr`). Interactive CLI runs are free and need no signup. The worker keeps picking up ready tickets and turns review comments on its pull requests into commits.
+The wizard configures your ready-tasks query and operating policy, checks automation access, and offers to install and start a background service. Without a paid license, it offers sign-in for the 14-day Worker Pilot.
 
-## Agent skills
+Start with a narrow queue of well-specified tasks. Watch the runs in the local dashboard at `http://localhost:4400`, review the resulting PRs, and leave feedback on their branches. The worker picks up that feedback and pushes follow-up commits.
 
-Install the DevIntern skills into your project for Codex:
-
-```bash
-bunx skills add getdevintern/devintern \
-  --skill devintern-setup devintern-workspace devintern-delegate devintern-report --agent codex
-```
-
-Use `--agent claude-code` for Claude Code, or add `--global` for user-wide availability. Install only the skills you need by selecting their names with `--skill`.
-
-| Skill                                                      | Use it for                                                                                                 |
-| ---------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| [devintern-setup](skills/devintern-setup/SKILL.md)         | Install DevIntern, connect source control and trackers, complete authorization, and bring a worker online. |
-| [devintern-workspace](skills/devintern-workspace/SKILL.md) | Configure an existing worker's repos, teams, routing, automations, estimations, monitors, and policies.    |
-| [devintern-delegate](skills/devintern-delegate/SKILL.md)   | Hand one-off implementation tasks to a configured worker.                                                  |
-| [devintern-report](skills/devintern-report/SKILL.md)       | Diagnose a DevIntern failure and file a redacted bug report.                                               |
-
-Skills provide instructions for your agent. The setup skill helps install and configure DevIntern; installing the skills alone does not install the CLI, connect accounts, or start a worker. Workspace changes require an existing workspace; delegation requires a registered repository and a running worker with automation access (Worker Pilot or paid license).
-
-See the [agent skills guide](docs/code/agent-skills.md) for prerequisites, example prompts, and updates.
+Prefer guided setup through your coding agent? Use the [DevIntern setup skill](docs/code/agent-skills.md). Want to inspect one run first? [Run one ticket first](#run-one-ticket-first).
 
 ## Why teams use it
 
-|                   |                                                                                                                            |
-| ----------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| **Worker**        | One daemon. Ready tickets become pull requests. Review comments come back as commits on the same branch.                   |
-| **Your stack**    | Your tracker, your coding agent, your keys. DevIntern runs the tools you already use instead of selling you another agent. |
-| **Quality gates** | Vague tickets get questions on the tracker instead of a wrong PR. The agent reviews its own diff before a human sees it.   |
-| **Self-hosted**   | Runs on a laptop or VM you control. Your code and credentials stay there; the source is available under the FSL.           |
+| Capability        | What it does                                                                                                                                                   |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Worker**        | One daemon. Ready tickets become pull requests. Review comments come back as commits on the same branch.                                                       |
+| **Your stack**    | Your tracker, your coding agent, your keys. DevIntern runs the tools you already use instead of selling you another agent.                                     |
+| **Quality gates** | Vague tickets get questions on the tracker instead of a wrong PR. Enable optional auto-review to have the agent critique and fix its diff before human review. |
+| **Self-hosted**   | Runs on a laptop or VM you control. Your code and credentials stay there; the source is available under the FSL.                                               |
 
-## The worker
+## What the worker does
 
-`devintern worker` is a long-running daemon that polls your tracker, implements ready tickets, opens pull requests, and keeps its own PRs healthy while your team writes specs, reviews code, or sleeps. Your code, credentials, and agent execution never leave your machine.
+`devintern worker` is a long-running daemon that polls your tracker, implements ready tickets, opens pull requests, and keeps its own PRs healthy while your team writes specs, reviews code, or sleeps. Agent execution runs on your machine. Your code and credentials never pass through DevIntern servers; your configured agent, tracker, and source-control providers handle their own requests.
 
 Once it's running, the worker:
 
@@ -138,14 +118,9 @@ Once it's running, the worker:
 - **Survives reality** — accepted work persists to a local SQLite queue across restarts, retries are capped, and rate limits pause rather than break runs.
 - **Shows its work** — every run is recorded stage-by-stage in a built-in dashboard at `http://localhost:4400`; routing rules and automations span a whole fleet of repositories from one `workspace.toml`.
 
-Set it up once:
+### Configure the fleet
 
-```bash
-devintern worker init    # guided setup: query, operating policy, optional integrations + service
-devintern worker         # keeps running: polling, reviews, automations, dashboard
-```
-
-A slice of `workspace.toml` shows most of the story:
+One `workspace.toml` covers every repository, team, and automation. A slice:
 
 ```toml
 [defaults]
@@ -157,6 +132,7 @@ poll_interval = 60
 id = "dependency-health"
 enabled = true
 interval = "6h"
+open_pr = true
 prompt = """Pick one outdated dependency and upgrade it within the same major version."""
 ```
 
@@ -164,33 +140,47 @@ For teams this changes what "keeping the repo healthy" costs: maintenance ticket
 
 Sign in to evaluate unattended automation with a no-card Worker Pilot: 14 days with no task-count limit. Continued use requires the paid automation tier (one-time Supporter license or Team/Business subscription); interactive use stays free forever. [Pricing](https://devintern.com/pricing/) · [Worker docs](docs/code/worker.md)
 
-<!-- Optional: secondary visuals (feasibility comment on a ticket, self-review, worker dashboard)
-<p align="center">
-  <img src="https://github.com/user-attachments/assets/FEASIBILITY-ID" width="400" alt="Feasibility questions posted on the ticket">
-  <img src="https://github.com/user-attachments/assets/PR-DETAIL-ID" width="400" alt="Self-reviewed pull request">
-</p>
--->
+## See it working
 
-## Try one task
+Browse the [DevIntern-authored pull requests](https://github.com/getdevintern/devintern/pulls?q=is%3Apr+label%3Adevintern-authored) to inspect changes produced by DevIntern on this repository. Start with these merged examples:
 
-Point the CLI at a ticket and get a reviewed diff back. Interactive use is free forever: no signup, no time limit.
+- [Worker daemon smoke coverage and PR label checks (#306)](https://github.com/getdevintern/devintern/pull/306)
+- [Sandbox-aware coding-agent readiness (#300)](https://github.com/getdevintern/devintern/pull/300)
+- [Per-agent state directories in the sandbox (#296)](https://github.com/getdevintern/devintern/pull/296)
 
-| Command                                            | What you get                                                                                      |
-| -------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| `devintern PROJ-123 --create-pr`                   | Ticket → feature branch → implemented diff → PR, with a summary posted back to the tracker        |
-| `devintern ./tasks/my-task.md --create-pr`         | The same loop from a local markdown file — zero tracker credentials                               |
-| `devintern --query 'status = "To Do"' --create-pr` | Batch mode: every ticket matching your JQL / Linear filter / GitHub search, run one after another |
-| `devintern PROJ-123 --create-pr --auto-review`     | The agent critiques its own PR diff and commits fixes before any human has to look                |
-| `devintern address-review <pr-url>`                | Review comments on a pull request become addressed commits on its branch                          |
-| `devintern resolve-conflicts <pr-url>`             | The base branch is merged in and the agent resolves the conflicted files sensibly                 |
-| `devintern doctor`                                 | Pre-flight check for runtime, git, agent CLIs, tracker credentials — with a fix hint per problem  |
-| `devintern report`                                 | File a redacted DevIntern bug report with the failing run and log tails attached                  |
+Open each PR to inspect its diff, checks, and discussion. The [full pull request list](https://github.com/getdevintern/devintern/pulls?q=is%3Apr+label%3Adevintern-authored) includes work still in review.
 
-When a ticket is too vague to implement responsibly, the agent posts clarifying questions back on the tracker instead of shipping a confidently wrong PR. See the [quick-start guide](docs/code/quick-start.md) and [full usage reference](docs/code/usage.md).
+If DevIntern is useful to you, [star the repo](https://github.com/getdevintern/devintern) or share a workflow you have automated.
 
-Delivery is a configurable pipeline. Add built-in verification or your own
-project-local TypeScript steps with the [Customizing the Task Pipeline](docs/code/pipelines.md)
-guide ([runnable examples](examples/pipeline-plugins/README.md)).
+## Run one ticket first
+
+Want to inspect the pipeline before leaving a worker running? Run a single ticket first. It does not keep watching your backlog or responding to review feedback. Interactive runs are free forever, with no signup and no time limit.
+
+```bash
+devintern init                              # connect a tracker, or pick Markdown for a local spec
+# Choose one: a ticket in your configured tracker, or an existing local task file
+devintern PROJ-123 --create-pr
+# Or: devintern ./tasks/my-task.md --create-pr
+```
+
+Opening a PR requires source-control access. For a local spec, choose Markdown during setup and create your task file first. The [quick-start guide](docs/code/quick-start.md) walks through setup.
+
+When a ticket is too vague to implement responsibly, the agent posts clarifying questions on the tracker instead of shipping a confidently wrong PR.
+
+Everything else the CLI can do — batch queries, `--auto-review`, `address-review`, `resolve-conflicts`, `doctor`, `report` — lives in the [usage reference](docs/code/usage.md). Delivery is a configurable pipeline: add built-in verification or your own project-local TypeScript steps with [Customizing the Task Pipeline](docs/code/pipelines.md) ([runnable examples](examples/pipeline-plugins/README.md)).
+
+## Agent skills
+
+Your coding agent can install, configure, and drive DevIntern on its own:
+
+```bash
+bunx skills add getdevintern/devintern \
+  --skill devintern-setup devintern-workspace devintern-delegate devintern-report --agent codex
+```
+
+`--agent claude-code` for Claude Code, `--global` for user-wide availability. Four skills cover the whole worker lifecycle: [setup](skills/devintern-setup/SKILL.md), [workspace configuration](skills/devintern-workspace/SKILL.md), [delegating a task](skills/devintern-delegate/SKILL.md), and filing a [redacted bug report](skills/devintern-report/SKILL.md).
+
+The skills are instructions for your agent. They do not install the CLI, connect accounts, or start a worker by themselves. See the [agent skills guide](docs/code/agent-skills.md) for prerequisites and example prompts.
 
 ## Need a ticket first?
 
@@ -198,7 +188,7 @@ guide ([runnable examples](examples/pipeline-plugins/README.md)).
 
 ## License and pricing
 
-Source is under the [Functional Source License, Version 1.1, with Apache 2.0 Future License](LICENSE.md) (FSL-1.1-Apache-2.0). You can read it, audit it, self-build, and self-host. Each release converts to Apache-2.0 two years after publication.
+Source is under the [Functional Source License, Version 1.1, ALv2 Future License](LICENSE.md) (FSL-1.1-ALv2). You can read it, audit it, self-build, and self-host. Each release converts to Apache-2.0 two years after publication.
 
 - **Interactive use** → free forever
 - **Worker Pilot** → 14 days with no task-count limit, no card required; `devintern login` required
@@ -208,37 +198,8 @@ Details: [devintern.com/pricing](https://devintern.com/pricing/)
 
 The FSL grants no trademark rights: the DevIntern name and logo are trademarks of Daniil Pokrovsky (devintern.com) and may not be used to identify forks or derived products.
 
-## Repository layout
-
-| Package                                        | Purpose                                                          |
-| ---------------------------------------------- | ---------------------------------------------------------------- |
-| [`@getdevintern/code`](packages/code)          | The `devintern` CLI: ticket → agent → self-reviewed PR           |
-| [`@getdevintern/pm`](packages/pm)              | The `devpm` CLI: rough input → well-specified tickets            |
-| [`@devintern/pm-desktop`](packages/pm-desktop) | Desktop app for ticket drafting: prompt, log, or Figma → tracker |
-| `packages/*` (shared)                          | Agent harness, tracker clients, auth, license check, utilities   |
-
-Website and control plane live elsewhere; this repo is the tool packages.
-
-## Development workflows
-
-Install dependencies with `bun install`, then use the root commands below. Turborepo runs package tasks in parallel where it is safe and orders workspace builds according to their package dependencies.
-
-| Command                | Purpose                                                                       |
-| ---------------------- | ----------------------------------------------------------------------------- |
-| `bun run build`        | Build every workspace and its dependencies                                    |
-| `bun run test`         | Run all package test suites                                                   |
-| `bun run lint`         | Lint all packages                                                             |
-| `bun run typecheck`    | Type-check all packages                                                       |
-| `bun run format:check` | Check formatting without changing files                                       |
-| `bun run format`       | Format all packages; this write task is intentionally not cached              |
-| `bun run dev`          | Start the dashboard and desktop watch tasks; stop them with <kbd>Ctrl+C</kbd> |
-
-Package-level commands remain available, for example `bun run --filter @getdevintern/pm test`. To run a selected task and its dependency graph through Turborepo, use `bun run turbo run build --filter @getdevintern/code`.
-
-Turborepo uses the local `.turbo` directory for its cache; remote caching is not configured. Add `--force` to a Turbo command to ignore cached results, or remove `.turbo` to clear the local cache completely. If a result looks stale, first rerun it with `--force`; changes to the lockfile, package sources, shared lint configuration, or declared build environment variables automatically invalidate affected entries.
-
 ## Contributing
 
-PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). Monorepo layout and Bun-only tooling: [AGENTS.md](AGENTS.md).
+Bug reports, documentation improvements, and PRs are welcome. See the [contributing guide](CONTRIBUTING.md) for repository layout, local development, checks, and contribution requirements.
 
 Built for teams that want agents to close tickets, not just write code.
