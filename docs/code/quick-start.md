@@ -18,12 +18,12 @@ See [Agent Skills](agent-skills.md) for installation commands for Codex and Clau
 
 **Recommended for ongoing use:** set up a [workspace worker](./worker.md#quick-start), even for one repository, with relay-backed integrations. Start with `devintern worker init`; it includes tracker setup when needed and can install/start the service. The standalone CLI walkthrough below remains useful for an explicitly one-off task or trial run.
 
-Supported task trackers today: **Jira** (default), **Linear**, **Trello**, **Asana**, **Azure DevOps**, **GitHub Issues**, and **local markdown files** (no PM account required).
+Supported task trackers today: **Jira** (default), **Linear**, **Trello**, **Asana**, **Azure DevOps**, **GitHub Issues**, **GitLab Issues**, and **local markdown files** (no PM account required).
 
 ## Prerequisites
 
 - **[Bun](https://bun.sh) runtime** (required to run @devintern/code)
-- A local markdown file, or a task tracker account with API access (Jira, Linear, Trello, Asana, Azure DevOps, or GitHub Issues)
+- A local markdown file, or a task tracker account with API access (Jira, Linear, Trello, Asana, Azure DevOps, GitHub Issues, or GitLab Issues)
 - AI agent CLI installed (e.g., Claude Code, OpenCode, Codex, Cursor)
 - Git repository for your project
 
@@ -50,7 +50,7 @@ devintern init
 In a terminal, this starts an interactive setup wizard that:
 
 - Detects an existing @devintern/pm configuration (`.devintern-pm/.env`) in the same project and offers to reuse those tracker credentials, so you skip straight to validation
-- Asks which task tracker you use — local **markdown files** lead the menu as the zero-account way to try DevIntern in minutes, followed by Jira, Linear, GitHub Issues, Azure DevOps, Asana, and Trello
+- Asks which task tracker you use — local **markdown files** lead the menu as the zero-account way to try DevIntern in minutes, followed by Jira, Linear, GitHub Issues, GitLab Issues, Azure DevOps, Asana, and Trello
 - Links you directly to the provider's token creation page and prompts for each credential, with a pointer to the matching setup guide in these docs
 - Validates the connection with a real API call before finishing (you can retry, edit values, or skip)
 - Offers an optional GitHub token for pull request creation

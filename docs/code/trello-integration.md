@@ -119,7 +119,7 @@ The first 100 matching cards are processed in sequence.
 
 ## Limitations
 
-- **Story points:** Estimation mode (`--estimate`) is not supported for Trello (no estimation concept). Estimation works with Jira, Linear, Azure DevOps, and Asana.
+- **Story points:** Estimation mode (`--estimate`) is not supported for Trello (no estimation concept). Estimation works with Jira, Linear, Azure DevOps, Asana, GitHub, and GitLab (GitHub and GitLab are comment-only).
 - **Comments:** Use `--skip-comments` to skip Trello comments and list transitions for a run.
 
 ## Troubleshooting
