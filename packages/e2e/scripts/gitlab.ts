@@ -12,6 +12,7 @@ const child = Bun.spawn(
     "test",
     "./tests/code/gitlab.test.ts",
     "./tests/code/gitlab-lifecycle.test.ts",
+    "./tests/code/gitlab-worker.test.ts",
     "--timeout",
     "240000",
   ],

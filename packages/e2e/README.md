@@ -1,10 +1,10 @@
 # End-to-end tests
 
 Private Bun workspace for workflows against real services. The suites run the built
-Code CLI against GitHub.com, Bitbucket Cloud, GitLab.com and GitLab Self-Managed
-using a local Markdown task
-and a deterministic agent. Git operations and GitHub API calls are real; no AI account
-or task tracker is needed.
+Code CLI, both one-shot and as the workspace worker daemon, against GitHub.com,
+Bitbucket Cloud, GitLab.com and GitLab Self-Managed using a local Markdown task
+and a deterministic agent. Git operations and provider API calls are real; no AI
+account or task tracker is needed.
 
 ## Run locally
 
@@ -352,3 +352,14 @@ All four areas run through the existing GitHub/GitLab commands above; no task
 tracker, model credentials, or additional local environment variables are needed.
 These lifecycle scenarios currently run against GitHub and local GitLab; the
 hosted GitLab.com and Bitbucket suites retain their publication smoke tests.
+
+Local GitLab also runs the worker daemon itself (`tests/code/gitlab-worker.test.ts`),
+not the one-shot CLI. Each scenario provisions a separate private project and a
+Developer project token, then starts the built `devintern worker` against a real
+workspace. Coverage includes an injected task producing a labelled MR, GitLab
+Issues polling with status transition and actioned deduplication, registered-MR
+review polling, CI repair through an external failed commit status, retry-budget
+escalation, and automatic conflict resolution after the base branch advances.
+Relay delivery, `worker connect gitlab` hook installation, and real project-hook
+callbacks remain out of scope: they need relay infrastructure or a GitLab
+container-to-worker callback path.
