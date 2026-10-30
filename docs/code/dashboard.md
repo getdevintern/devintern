@@ -55,7 +55,7 @@ You can inspect existing run history even when the worker is stopped:
 devintern dashboard
 ```
 
-The command reads the local history without changing it. Use `--port <number>` if port 4400 is already occupied.
+The command reads the local history without changing it. Use `--port <number>` if port 4400 is already occupied (or set `DASHBOARD_PORT`), and `--host <host>` to bind a different loopback address (default `127.0.0.1`; `localhost` and `::1` are also accepted).
 
 ## Local by design
 

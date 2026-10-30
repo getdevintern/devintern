@@ -43,6 +43,9 @@ devintern TASK-123 --agent-path /path/to/claude
 # Override max turns for very complex tasks (default: 500)
 devintern TASK-123 --max-turns 1000
 
+# Retry git hook failures N times (default: 10)
+devintern TASK-123 --hook-retries 3
+
 # Skip automatic commit after AI agent completes
 devintern TASK-123 --no-auto-commit
 

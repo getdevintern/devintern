@@ -632,6 +632,14 @@ AGENT_SPAWN_ENOENT_BACKOFF_MS=1000
 
 These control how devintern handles a brief window where the agent CLI symlink is missing because the tool is updating itself. The defaults are sufficient for all common auto-updaters.
 
+A single agent run is also bounded by wall-clock time; raise or lower that bound when a task legitimately needs more than an hour:
+
+```bash
+# Wall-clock timeout for one agent run, in minutes
+# Default: 60
+AGENT_HARNESS_TIMEOUT_MINUTES=60
+```
+
 **CLI options:**
 
 - `--agent-path`: override the agent executable path
