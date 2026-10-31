@@ -13,6 +13,8 @@ import { isAbsolute, join } from "path";
 
 import type { ErrorMonitorConfig, RepoConfig, TeamConfig } from "./config";
 import { resolveWorkspaceDir, workspaceDbPath, workspaceEnvPath } from "./paths";
+import { applyAgentSelectionEnv } from "../agent/selection";
+import type { AgentSelection } from "../agent/selection";
 import { ANALYTICS_CONFIG_DIR_ENV } from "../observability/analytics";
 import { WORKER_SUBPROCESS_ENV } from "../config/config-dir";
 
@@ -123,12 +125,18 @@ export function gitHubSlugFromRemote(remote: string): string | null {
  *                                 {@link ACTIONED_SOURCE_ENV}).
  * @param options.pipelineDefaultFile - Absolute path of the workspace default
  *                                      pipeline file, if one is configured.
+ * @param options.agentSelection - Per-entry harness/model/effort overrides
+ *                                 applied last (above every env layer).
  * @returns Environment record to pass to `runTaskViaCli` / `runAddressReviewViaCli`.
  */
 export function buildRepoEnv(
   repo: RepoConfig,
   workspaceDir: string = resolveWorkspaceDir(),
-  options: { actionedSource?: string; pipelineDefaultFile?: string } = {},
+  options: {
+    actionedSource?: string;
+    pipelineDefaultFile?: string;
+    agentSelection?: AgentSelection;
+  } = {},
 ): Record<string, string | undefined> {
   const workspaceEnv = parseEnvFile(workspaceEnvPath(workspaceDir));
   const repoFileEnv = repo.envFile
@@ -165,6 +173,8 @@ export function buildRepoEnv(
   if (repo.prLabels && repo.prLabels.length > 0) {
     env.PR_LABELS = repo.prLabels.join(",");
   }
+
+  applyAgentSelectionEnv(env, options.agentSelection);
 
   return env;
 }
@@ -277,7 +287,11 @@ export function buildTeamTaskEnv(
   repo: RepoConfig,
   team: TeamConfig,
   workspaceDir: string = resolveWorkspaceDir(),
-  options: { actionedSource?: string; pipelineDefaultFile?: string } = {},
+  options: {
+    actionedSource?: string;
+    pipelineDefaultFile?: string;
+    agentSelection?: AgentSelection;
+  } = {},
 ): Record<string, string | undefined> {
   const env = buildRepoEnv(repo, workspaceDir, options);
   Object.assign(env, teamLayerEnv(team, workspaceDir));
@@ -286,6 +300,8 @@ export function buildTeamTaskEnv(
   // so re-pin it here: a team `env_file` or inline value must not re-route the
   // pipeline or resurrect a stale reference.
   pinPipelineEnv(env, repo, workspaceDir, options);
+  // Re-apply the entry selection so a team layer cannot re-route the agent.
+  applyAgentSelectionEnv(env, options.agentSelection);
   env.TASK_TRACKER = team.tracker;
   env[WORKSPACE_TEAM_ENV] = team.name;
   return env;
@@ -319,12 +335,16 @@ export function buildErrorMonitorEnv(
  * paths pinned, so the child resolves auth and license state in the workspace.
  *
  * @param workspaceDir - Workspace home (defaults to `~/.devintern`).
+ * @param options.agentSelection - Per-entry harness/model/effort overrides
+ *                                 applied last (above the process env).
  */
 export function buildWorkspaceContextEnv(
   workspaceDir: string = resolveWorkspaceDir(),
+  options: { agentSelection?: AgentSelection } = {},
 ): Record<string, string | undefined> {
   const env: Record<string, string | undefined> = { ...process.env };
   pinWorkerRuntimeEnv(env, workspaceDir);
+  applyAgentSelectionEnv(env, options.agentSelection);
   return env;
 }
 

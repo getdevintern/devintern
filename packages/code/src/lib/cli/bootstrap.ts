@@ -7,7 +7,7 @@ import { LicenseCheckError, requireLicense } from "@devintern/license-check";
 import type { LicenseCheckResult } from "@devintern/license-check";
 import { findEnvFile, maybeOfferCliUpdate } from "@devintern/utils";
 import { isAutomatedEnvironment } from "../config/env-detector";
-import { isWorkerSubprocess, resolveRuntimeStateDir } from "../config/config-dir";
+import { resolveRuntimeStateDir, shouldSkipProjectEnv } from "../config/config-dir";
 import { isInteractive } from "../init/wizard";
 import { flushAnalytics } from "../observability/analytics";
 import { initSentryOnce } from "../observability/sentry-init";
@@ -69,7 +69,7 @@ function loadEnvironmentInner(envFile: string | undefined, skipProjectEnv: boole
 
   // A workspace task already receives its composed credentials from the
   // worker. Do not fill missing keys from the checkout's local config.
-  if (isWorkerSubprocess() || skipProjectEnv) return null;
+  if (shouldSkipProjectEnv() || skipProjectEnv) return null;
 
   // Otherwise, search upward from cwd for the nearest .env file
   const envPath = findEnvFile({ configDirName: ".devintern-code" });
