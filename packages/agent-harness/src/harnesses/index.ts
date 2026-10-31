@@ -22,3 +22,4 @@ export { KimiHarness } from "./kimi.js";
 export { OpencodeHarness } from "./opencode.js";
 export { PiHarness } from "./pi.js";
 export { QwenCodeHarness } from "./qwen.js";
+export { ReasonixHarness } from "./reasonix.js";

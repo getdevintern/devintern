@@ -24,6 +24,11 @@ function cliTrackerTestEnv(): NodeJS.ProcessEnv {
     DEVINTERN_FETCH_MAX_RETRIES: "0",
     DEVINTERN_SKIP_LICENSE_CHECK: "1",
     DEVINTERN_NO_UPDATE: "1",
+    // These argument-parsing runs never invoke the agent, but the CLI resolves
+    // its harness before dispatching. Point that resolution at the running Bun
+    // binary so the tests don't depend on a developer/CI machine having an
+    // agent CLI installed (the test runner scrubs ambient *_CLI_PATH values).
+    AGENT_CLI_PATH: process.execPath,
     // The spawned CLI initializes Sentry with the baked-in production DSN;
     // without this, the expected connection failure against the closed port
     // ("Unable to connect. Is the computer able to access the url?" thrown by
