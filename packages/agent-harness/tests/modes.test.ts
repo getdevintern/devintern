@@ -62,6 +62,7 @@ describe("mode helpers", () => {
     expect(support["goose"]).toEqual([]);
     expect(support["kilo-code"]).toEqual([]);
     expect(support["kimi"]).toEqual([]);
+    expect(support["muse"]).toEqual(["readonly"]);
     expect(support["pi"]).toEqual([]);
     expect(support["qwen"]).toEqual([]);
   });

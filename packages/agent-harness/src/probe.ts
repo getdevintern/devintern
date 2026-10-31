@@ -37,6 +37,32 @@ export function parseMajorVersion(output: string): number | undefined {
 }
 
 /**
+ * Parse a full `major.minor.patch` version from a CLI version string.
+ *
+ * Accepts `X.Y.Z` and `X.Y` shapes (a missing patch is `0`) and ignores any
+ * surrounding text (e.g. `"muse 1.4.11"`). Returns `undefined` when no
+ * version is present.
+ *
+ * @param output - Raw `--version` output.
+ * @returns The parsed components, or `undefined`.
+ */
+export function parseVersion(
+  output: string,
+): { major: number; minor: number; patch: number } | undefined {
+  const match = output.match(/(\d+)\.(\d+)(?:\.(\d+))?/);
+  if (!match?.[1] || !match[2]) {
+    return undefined;
+  }
+  const major = Number.parseInt(match[1], 10);
+  const minor = Number.parseInt(match[2], 10);
+  const patch = match[3] ? Number.parseInt(match[3], 10) : 0;
+  if ([major, minor, patch].some((n) => Number.isNaN(n))) {
+    return undefined;
+  }
+  return { major, minor, patch };
+}
+
+/**
  * Run `<executable> --version` synchronously and return the raw output.
  *
  * Best-effort: returns `undefined` on a spawn failure, non-zero exit, timeout,
