@@ -41,6 +41,7 @@ const SUBCOMMANDS = [
   "logout",
   "whoami",
   "sandbox",
+  "automations",
   "doctor",
   "report",
 ] as const;

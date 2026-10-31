@@ -122,6 +122,7 @@ poll_interval = 60
 # open_pr = true for repo-maintenance jobs that should open a reviewable PR —
 # without it, occurrences do not create a branch, PR, or labels.
 # Cron uses the worker host timezone; interval values support m, h, and d.
+# Or install a bundled recipe by name: devintern automations add dependency-health
 # ----
 # [[automations]]
 # id = "weekday-maintenance"
@@ -146,19 +147,23 @@ function tomlString(value: string): string {
 }
 
 /**
- * Insert or update `[defaults].tracker` / `[defaults].task_query` in a
- * workspace.toml document without rewriting unrelated comments or tables.
+ * Insert or update `[defaults].tracker` / `[defaults].task_query` /
+ * `[defaults].pipeline_file` in a workspace.toml document without rewriting
+ * unrelated comments or tables.
  *
  * @param content - Current workspace.toml text
  * @param defaults - Fields to write
  */
 export function upsertWorkspaceDefaults(
   content: string,
-  defaults: { tracker?: string; taskQuery?: string },
+  defaults: { tracker?: string; taskQuery?: string; pipelineFile?: string },
 ): string {
   let next = content.endsWith("\n") ? content : `${content}\n`;
 
-  if (!/^\[defaults\]/m.test(next) && (defaults.tracker || defaults.taskQuery !== undefined)) {
+  if (
+    !/^\[defaults\]/m.test(next) &&
+    (defaults.tracker || defaults.taskQuery !== undefined || defaults.pipelineFile)
+  ) {
     next += "\n[defaults]\n";
   }
 
@@ -184,6 +189,7 @@ export function upsertWorkspaceDefaults(
 
   if (defaults.tracker) upsert("tracker", defaults.tracker, false);
   if (defaults.taskQuery !== undefined) upsert("task_query", defaults.taskQuery, true);
+  if (defaults.pipelineFile !== undefined) upsert("pipeline_file", defaults.pipelineFile, true);
 
   next = next.slice(0, contentStart) + section + next.slice(sectionEnd);
 

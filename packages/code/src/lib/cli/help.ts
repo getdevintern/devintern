@@ -65,8 +65,11 @@ Subcommands:
   whoami               Show current authenticated user
    sandbox              Sandbox doctor: providers, remaining setup steps, and what
                         the next run will do (exit 1 if it would fail)
+  automations          List, show, and install bundled automation packs into
+                        workspace.toml (add, list, show)
   doctor               Readiness check: runtime, git, agent CLI, tracker
-                        credentials, sign-in, license (exit 1 if anything fails)
+                        credentials, sign-in, license, bundled catalog
+                        (exit 1 if anything fails)
   report               File a redacted bug report for DevIntern itself
                         (run 'devintern report --help' for options)
 
