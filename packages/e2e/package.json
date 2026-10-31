@@ -12,6 +12,7 @@
     "typecheck": "tsc --noEmit",
     "test:e2e:github": "bun run scripts/github.ts",
     "test:e2e:gitlab": "bun run scripts/gitlab.ts",
+    "test:e2e:gitlab-relay": "bun run scripts/gitlab-relay.ts",
     "gitlab:up": "bun run scripts/gitlab-local.ts up",
     "gitlab:down": "bun run scripts/gitlab-local.ts down",
     "gitlab:status": "bun run scripts/gitlab-local.ts status",

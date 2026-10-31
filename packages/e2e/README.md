@@ -361,5 +361,21 @@ Issues polling with status transition and actioned deduplication, registered-MR
 review polling, CI repair through an external failed commit status, retry-budget
 escalation, and automatic conflict resolution after the base branch advances.
 Relay delivery, `worker connect gitlab` hook installation, and real project-hook
-callbacks remain out of scope: they need relay infrastructure or a GitLab
-container-to-worker callback path.
+callbacks remain out of scope for the ordinary worker suite: they need relay
+infrastructure or a GitLab container-to-worker callback path.
+
+The separate opt-in `test:e2e:gitlab-relay` suite uses the **deployed** relay.
+It installs a real managed project hook, proves review feedback arrives with
+normal polling effectively disabled, verifies MR-close unwatching, and checks
+that `--disconnect` removes the managed hook and stops deliveries. It needs a
+signed-in Supabase session (`E2E_RELAY_AUTH_SESSION`, or the local
+`~/.devintern/state/code/.auth-session.json`), an entitled account, and the
+local GitLab container. It writes a temporary hook and relay route, then removes
+both in cleanup. Run it with:
+
+```sh
+bun run --filter @devintern/e2e test:e2e:gitlab-relay
+```
+
+CI must provide `E2E_RELAY_AUTH_SESSION` explicitly; the suite is not part of
+PR CI.
