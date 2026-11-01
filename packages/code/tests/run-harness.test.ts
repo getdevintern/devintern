@@ -63,6 +63,7 @@ let tracker: {
   transitionStatus: ReturnType<typeof mock>;
   postComment: ReturnType<typeof mock>;
   extractDescriptionText: () => string;
+  getTask: ReturnType<typeof mock>;
 };
 let commitResult: { success: boolean; message: string; hookError?: string };
 let commitResults: Array<typeof commitResult>;
@@ -286,6 +287,7 @@ beforeEach(() => {
     transitionStatus: mock(async () => {}),
     postComment: mock(async () => {}),
     extractDescriptionText: () => "description",
+    getTask: mock(async () => task),
   };
   runContext.options = { verbose: false } as never;
   delete process.env.AGENT_HARNESS_TIMEOUT_MINUTES;
