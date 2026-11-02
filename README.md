@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <strong>Keep your coding agent working through your backlog.</strong>
+  <strong>Leave tickets. Come back to pull requests.</strong>
 </p>
 
 <p align="center">
@@ -17,14 +17,11 @@
   <a href="https://github.com/getdevintern/devintern"><img src="https://img.shields.io/github/stars/getdevintern/devintern?style=social" alt="Stars"></a>
 </p>
 
-<p align="center">
-  <video src="https://github.com/user-attachments/assets/f62b17c0-4e5b-4a2f-ac3a-761c44af3680" width="100%" controls muted autoplay loop playsinline></video>
-</p>
-<p align="center"><em>Ready ticket → pull request → review feedback → follow-up commits.</em></p>
-
 DevIntern is a self-hosted worker that picks up ready tickets from Jira, Linear, GitHub Issues, or your other trackers, runs Claude Code, Codex, Cursor, or OpenCode, and opens pull requests. When reviewers request changes, it follows up on the same branch. Your team controls what gets picked up and what gets merged.
 
-Running it locally from the terminal is free, self-hosted, and needs no signup. Unattended automation is separate: a 14-day Worker Pilot, then a paid license.
+![Ready tracker tickets flow through the local worker, coding agent, and quality gates into pull requests. Review feedback returns as commits; DevIntern PM provides optional ticket intake.](assets/readme/ticket-pipeline.png)
+
+Interactive runs are free with no signup. Unattended automation starts with a 14-day Worker Pilot (sign-in required, no credit card or task-count limit), then requires a paid license. Your coding-agent usage costs are separate.
 
 <p align="center">
   <a href="#set-up-your-worker"><strong>Set up your worker</strong></a>
@@ -35,8 +32,6 @@ Running it locally from the terminal is free, self-hosted, and needs no signup. 
   &nbsp;·&nbsp;
   <a href="https://devintern.com">Website</a>
 </p>
-
-Try unattended automation free for 14 days with the Worker Pilot. Sign-in required; no credit card or task-count limit. Continued automation requires a license. Bring your existing coding agent; its usage costs are separate.
 
 - **Your tracker:** Jira · Linear · GitHub Issues · Trello · Asana · Azure DevOps · plain markdown files
 - **Your agent:** Claude Code · Codex · Cursor · OpenCode (one config line to switch)
@@ -94,6 +89,16 @@ Start with a narrow queue of well-specified tasks. Watch the runs in the local d
 
 Prefer guided setup through your coding agent? Use the [DevIntern setup skill](docs/code/agent-skills.md). Want to inspect one run first? [Run one ticket first](#run-one-ticket-first).
 
+## Drive development across projects
+
+One workspace brings your teams’ trackers, repositories, scheduled maintenance, and Sentry fixes together under a single worker. Start with one repository, then add projects as you grow.
+
+![Jira, Linear, and GitHub Issues feed one local workspace serving API, infrastructure, web, and SDK repositories, with scheduled log triage, dependency updates, CI repair, and Sentry fixes.](assets/readme/multi-project-workspace.png)
+
+Choose each team’s ready queue and route work to the right repositories. Each repository keeps its agent and pipeline settings. Scheduled prompts handle recurring chores, and Sentry monitoring feeds qualifying errors into the same ticket-to-PR pipeline. Your team reviews the changes and decides what merges.
+
+[Configure your workspace](docs/code/workspaces.md) · [Set up automations](docs/code/worker.md)
+
 ## Why teams use it
 
 | Capability        | What it does                                                                                                                                                   |
@@ -141,6 +146,11 @@ For teams this changes what "keeping the repo healthy" costs: maintenance ticket
 Sign in to evaluate unattended automation with a no-card Worker Pilot: 14 days with no task-count limit. Continued use requires the paid automation tier (one-time Supporter license or Team/Business subscription); interactive use stays free forever. [Pricing](https://devintern.com/pricing/) · [Worker docs](docs/code/worker.md)
 
 ## See it working
+
+<p align="center">
+  <video src="https://github.com/user-attachments/assets/f62b17c0-4e5b-4a2f-ac3a-761c44af3680" width="100%" controls muted autoplay loop playsinline></video>
+</p>
+<p align="center"><em>Ready ticket → pull request → review feedback → follow-up commits.</em></p>
 
 Browse the [DevIntern-authored pull requests](https://github.com/getdevintern/devintern/pulls?q=is%3Apr+label%3Adevintern-authored) to inspect changes produced by DevIntern on this repository. Start with these merged examples:
 
