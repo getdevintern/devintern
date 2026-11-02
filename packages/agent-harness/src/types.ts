@@ -204,6 +204,12 @@ export interface AgentHarness {
    */
   readonly supportsEffort?: boolean;
   /**
+   * Optional harness-specific guidance appended to the runner warning when
+   * `effort` is requested but {@link supportsEffort} is false. Use it to name
+   * the configuration surface the CLI actually reads (e.g. a profile file).
+   */
+  readonly effortUnsupportedHint?: string;
+  /**
    * Whether this harness's constrained modes still allow unrestricted
    * network and MCP tool use (web search, web fetch, MCP servers).
    *

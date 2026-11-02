@@ -18,6 +18,7 @@
 import { execSync } from "child_process";
 import { accessSync, constants, existsSync } from "fs";
 import { resolve } from "path";
+import { DEEPSEEK_REASONIX_MIGRATION_HINT, isReasonixBinary } from "./deepseek-migration.js";
 import { DEFAULT_HARNESS_NAME, getHarness, HARNESS_ALIASES, listHarnesses } from "./registry.js";
 import type { AgentHarness, ResolvedHarness } from "./types.js";
 
@@ -67,7 +68,95 @@ export function resolveHarness(options?: HarnessResolutionOptions): ResolvedHarn
   const env = process.env;
   const harness = resolveHarnessOrThrow(options, env);
   const path = resolveHarnessPath(harness, options, env);
+  warnDeepSeekReasonixMigration(harness, path, options);
   return { harness, path };
+}
+
+/**
+ * Guidance for pre-split `AGENT_HARNESS=deepseek` users whose community
+ * Reasonix CLI is still installed.
+ *
+ * Re-exported from {@link ./deepseek-migration.js} for callers that resolve
+ * the hint through this module.
+ */
+export { DEEPSEEK_REASONIX_MIGRATION_HINT } from "./deepseek-migration.js";
+
+/** Emitted-at-least-once guard for the migration warning. */
+const warnedDeepSeekMigration = new Set<string>();
+
+/**
+ * Explain that `deepseek` now resolves to official `dsh`, not Reasonix.
+ *
+ * Returns the shared guidance whenever the `deepseek` executable is missing
+ * or points at the community `reasonix` binary. When `warn` is true and a
+ * Reasonix CLI is configured (`REASONIX_CLI_PATH`, legacy `DEEPSEEK_CLI_PATH` /
+ * `AGENT_CLI_PATH`) or installed on PATH, also prints a one-line migration
+ * warning (once per executable path per process).
+ *
+ * @param harnessName - Canonical harness name being resolved.
+ * @param path - Resolved executable path for that harness.
+ * @param warn - Whether a console warning may be emitted. Defaults to true.
+ * @returns The actionable migration hint, or `undefined` when not applicable.
+ */
+export function deepseekReasonixMigrationHint(
+  harnessName: string,
+  path: string,
+  warn = true,
+): string | undefined {
+  if (harnessName !== "deepseek") {
+    return undefined;
+  }
+  const pointsAtReasonix = isReasonixBinary(path);
+  if (!pointsAtReasonix && isHarnessCliAvailable(path)) {
+    return undefined;
+  }
+  if (warn && !warnedDeepSeekMigration.has(path) && (pointsAtReasonix || hasConfiguredReasonix())) {
+    warnedDeepSeekMigration.add(path);
+    console.warn(
+      pointsAtReasonix
+        ? `⚠️  AGENT_HARNESS=deepseek resolves to the community Reasonix CLI (${path}), ` +
+            `but deepseek now selects DeepSeek's official experimental harness (dsh). ` +
+            DEEPSEEK_REASONIX_MIGRATION_HINT
+        : "⚠️  AGENT_HARNESS=deepseek now selects DeepSeek's official experimental harness (dsh), " +
+            `which was not found on PATH. ${DEEPSEEK_REASONIX_MIGRATION_HINT}`,
+    );
+  }
+  return DEEPSEEK_REASONIX_MIGRATION_HINT;
+}
+
+/**
+ * Whether any path override still points at an installed Reasonix CLI.
+ *
+ * Checks `REASONIX_CLI_PATH` in addition to the legacy `DEEPSEEK_CLI_PATH` /
+ * `AGENT_CLI_PATH` values, because a configured-but-not-on-PATH Reasonix
+ * install would otherwise suppress the migration guidance.
+ *
+ * @returns Whether Reasonix is available through configuration or PATH lookup.
+ */
+function hasConfiguredReasonix(): boolean {
+  for (const key of ["REASONIX_CLI_PATH", "DEEPSEEK_CLI_PATH", "AGENT_CLI_PATH"] as const) {
+    const value = process.env[key]?.trim();
+    if (value && isReasonixBinary(value) && isHarnessCliAvailable(value)) {
+      return true;
+    }
+  }
+  return isHarnessCliAvailable("reasonix");
+}
+
+/**
+ * Warn when a pre-split `AGENT_HARNESS=deepseek` configuration now resolves to
+ * the official `dsh` harness but only the community `reasonix` CLI is installed.
+ *
+ * @param harness - Resolved harness.
+ * @param path - Resolved executable path.
+ * @param options - Warning control from the caller.
+ */
+function warnDeepSeekReasonixMigration(
+  harness: AgentHarness,
+  path: string,
+  options: HarnessResolutionOptions | undefined,
+): void {
+  deepseekReasonixMigrationHint(harness.name, path, options?.warnDeprecated !== false);
 }
 
 /**

@@ -15,6 +15,7 @@ import {
   runPmInitWizard,
   writePmProjectConfig,
 } from "./lib/init-wizard";
+import { ENV_COMMON_TAIL } from "./lib/init-shared";
 
 let tempDir: string;
 
@@ -79,6 +80,19 @@ describe("renderPmEnvFile", () => {
     expect(env).toContain("# LINEAR_DEFAULT_TEAM_KEY=ENG");
     expect(env).toContain("# Setup guide: https://devintern.com/docs/pm/linear-integration");
     expect(env).toContain("AGENT_HARNESS=claude-code");
+    expect(env).toContain(ENV_COMMON_TAIL);
+  });
+
+  test("packaged .env.example matches the generator tail copied by devpm init --yes", () => {
+    const example = readFileSync(join(import.meta.dir, ".env.example"), "utf8");
+    expect(example).toContain(ENV_COMMON_TAIL);
+    expect(example).toContain(
+      "# deepseek selects DeepSeek's official harness (experimental; CLI 'dsh');",
+    );
+    expect(example).toContain("# reasonix selects the community Reasonix CLI (CLI 'reasonix')");
+    expect(example).toContain("'dsh' for deepseek");
+    expect(example).toContain("'reasonix' for reasonix");
+    expect(example).toContain("# DEEPSEEK_API_KEY=sk-your-deepseek-api-key");
   });
 });
 

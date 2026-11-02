@@ -81,10 +81,12 @@ export function parseAgentEffort(value: string | undefined | null): AgentEffort 
  */
 export function warnEffortUnsupported(harness: AgentHarness, options: AgentRunOptions): void {
   if (options.effort && harness.supportsEffort !== true) {
+    const hint = harness.effortUnsupportedHint ? ` ${harness.effortUnsupportedHint}` : "";
     console.warn(
       `⚠️  ${harness.displayName} (${harness.name}) does not support reasoning effort; ` +
         `ignoring effort "${options.effort}". ` +
-        `Supported harnesses: antigravity, cline, claude-code, codex, deepseek, grok, kilo-code, opencode, pi.`,
+        `Supported harnesses: antigravity, cline, claude-code, codex, grok, kilo-code, opencode, pi, reasonix.` +
+        hint,
     );
   }
 }

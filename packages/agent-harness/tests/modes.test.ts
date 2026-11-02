@@ -22,6 +22,7 @@ import { KimiHarness } from "../src/harnesses/kimi.js";
 import { OpencodeHarness } from "../src/harnesses/opencode.js";
 import { PiHarness } from "../src/harnesses/pi.js";
 import { QwenCodeHarness } from "../src/harnesses/qwen.js";
+import { ReasonixHarness } from "../src/harnesses/reasonix.js";
 
 describe("mode helpers", () => {
   test("isConstrainedMode", () => {
@@ -59,6 +60,7 @@ describe("mode helpers", () => {
     expect(support["antigravity"]).toEqual([]);
     expect(support["cline"]).toEqual([]);
     expect(support["deepseek"]).toEqual([]);
+    expect(support["reasonix"]).toEqual([]);
     expect(support["goose"]).toEqual([]);
     expect(support["kilo-code"]).toEqual([]);
     expect(support["kimi"]).toEqual([]);
@@ -255,6 +257,7 @@ describe("unsupported harnesses fail closed", () => {
     new KimiHarness(),
     new PiHarness(),
     new QwenCodeHarness(),
+    new ReasonixHarness(),
   ];
 
   for (const h of cases) {

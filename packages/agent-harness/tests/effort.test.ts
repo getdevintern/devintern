@@ -18,6 +18,7 @@ import { KiloCodeHarness } from "../src/harnesses/kilo-code.js";
 import { OpencodeHarness } from "../src/harnesses/opencode.js";
 import { PiHarness } from "../src/harnesses/pi.js";
 import { QwenCodeHarness } from "../src/harnesses/qwen.js";
+import { ReasonixHarness } from "../src/harnesses/reasonix.js";
 import { CursorHarness } from "../src/harnesses/cursor.js";
 import { KimiHarness } from "../src/harnesses/kimi.js";
 import type { AgentEffort } from "../src/types.js";
@@ -111,11 +112,29 @@ describe("harness effort capability flags", () => {
     expect(new ClaudeCodeHarness().supportsEffort).toBe(true);
     expect(new ClineHarness().supportsEffort).toBe(true);
     expect(new CodexHarness().supportsEffort).toBe(true);
-    expect(new DeepSeekHarness().supportsEffort).toBe(true);
+    expect(new ReasonixHarness().supportsEffort).toBe(true);
     expect(new GrokHarness().supportsEffort).toBe(true);
     expect(new KiloCodeHarness().supportsEffort).toBe(true);
     expect(new OpencodeHarness().supportsEffort).toBe(true);
     expect(new PiHarness().supportsEffort).toBe(true);
+  });
+
+  test("official DeepSeek Harness keeps effort config-only and explains where to set it", () => {
+    expect(new DeepSeekHarness().supportsEffort).toBe(false);
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message: string) => {
+      warnings.push(message);
+    };
+    try {
+      warnEffortUnsupported(new DeepSeekHarness(), { effort: "high" });
+    } finally {
+      console.warn = originalWarn;
+    }
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("DeepSeek Harness (experimental) (deepseek)");
+    expect(warnings[0]).toContain("$DSH_HOME/profiles/headless/cordis.patch.yml");
+    expect(warnings[0]).toContain("does not read AGENT_EFFORT");
   });
 
   test("harnesses without a per-run effort mechanism stay unsupported", () => {

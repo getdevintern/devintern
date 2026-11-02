@@ -10,7 +10,6 @@ import type { ChildProcess } from "child_process";
 import { preparePromptWithAttachments } from "../attachments.js";
 import { detectMaxTurnsReached } from "../detect-max-turns.js";
 import { detectUsageLimit, UsageLimitError } from "../detect-usage-limit.js";
-import { warnEffortUnsupported } from "../effort.js";
 import { assertModeSupported } from "../modes.js";
 import { buildHarnessInvocation } from "../probe.js";
 import { buildPromptArgs } from "../prompt-args.js";
@@ -63,7 +62,6 @@ export async function runAgentNode(
 ): Promise<AgentRunResult> {
   assertModeSupported(harness, options.mode);
   assertStructuredOutputSupported(harness, options);
-  warnEffortUnsupported(harness, options);
 
   // Wait out any in-progress CLI auto-update swap before spawning (see
   // resolveExecutablePathWithRetry), so a transient `spawn ENOENT` doesn't

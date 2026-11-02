@@ -18,6 +18,7 @@ import {
   OpencodeHarness,
   PiHarness,
   QwenCodeHarness,
+  ReasonixHarness,
 } from "./harnesses/index.js";
 
 const registry = new Map<string, AgentHarness>();
@@ -36,6 +37,8 @@ export const HARNESS_ALIASES: Readonly<
 > = {
   /** Binary name users often type as the harness id. */
   agy: { target: "antigravity" },
+  /** Official DeepSeek Harness CLI name (`dsh`) → canonical harness id. */
+  dsh: { target: "deepseek" },
   /**
    * Google retired consumer Gemini CLI (2026-06-18) in favor of Antigravity CLI.
    * Keep accepting the old id so existing .env files keep working.
@@ -100,3 +103,4 @@ registerHarness(new KimiHarness());
 registerHarness(new OpencodeHarness());
 registerHarness(new PiHarness());
 registerHarness(new QwenCodeHarness());
+registerHarness(new ReasonixHarness());

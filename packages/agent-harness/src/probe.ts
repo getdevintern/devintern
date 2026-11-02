@@ -7,12 +7,19 @@
  * the installed CLI once per executable and let a harness pick the right flags
  * for the version it finds, rather than assuming one version.
  *
- * Probing is always best-effort: a missing or unparseable version resolves to
- * `{}`, and a harness must then fall back to its baseline (oldest supported)
- * behavior.
+ * Probing is best-effort: a missing or unparseable version resolves to `{}`,
+ * and a harness must then fall back to its baseline (oldest supported)
+ * behavior. `deepseek` is the exception: an unverifiable `dsh` is refused by
+ * {@link buildHarnessInvocation} rather than spawned, because a same-named
+ * unrelated program would receive the prompt.
  */
 
 import { spawnSync } from "child_process";
+import { accessSync, constants } from "fs";
+import { delimiter, isAbsolute, join, resolve } from "path";
+import { DEEPSEEK_REASONIX_MIGRATION_HINT, isReasonixBinary } from "./deepseek-migration.js";
+import { warnEffortUnsupported } from "./effort.js";
+import { HarnessUnavailableError } from "./errors.js";
 import type { AgentHarness, AgentRunOptions, HarnessInvocation, HarnessProbe } from "./types.js";
 
 /** Probe cache keyed by `harness name` + executable path, so each CLI runs once. */
@@ -64,6 +71,40 @@ export function readCliVersion(executablePath: string): string | undefined {
 }
 
 /**
+ * Whether a command resolves to an executable file (path or PATH lookup).
+ *
+ * Kept local instead of importing `resolver.ts`: resolver imports the harness
+ * registry, which imports the harnesses that import this module, so that would
+ * form an import cycle. Used only to distinguish a missing CLI (whose existing
+ * "CLI not found" error must win) from a different program answering `dsh`.
+ *
+ * @param command - Executable name or path.
+ * @returns True when the command exists and is executable.
+ */
+function executableExists(command: string): boolean {
+  const isPath =
+    isAbsolute(command) || command.includes(":") || command.includes("/") || command.includes("\\");
+  const suffixes =
+    process.platform === "win32"
+      ? ["", ...(process.env.PATHEXT ?? ".EXE;.CMD;.BAT").split(";")]
+      : [""];
+  const candidates = isPath
+    ? [isAbsolute(command) ? command : resolve(command)]
+    : (process.env.PATH ?? "")
+        .split(delimiter)
+        .filter(Boolean)
+        .flatMap((dir) => suffixes.map((suffix) => join(dir, `${command}${suffix}`)));
+  return candidates.some((candidate) => {
+    try {
+      accessSync(candidate, constants.X_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+}
+
+/**
  * Probe a harness CLI once (cached per harness + executable path).
  *
  * Harnesses without a {@link AgentHarness.probe} implementation resolve to `{}`
@@ -100,17 +141,52 @@ export async function probeHarness(
  * Probes the CLI first so version-dependent harnesses can adapt, then delegates
  * to {@link AgentHarness.buildArgs} and {@link AgentHarness.buildEnv}.
  *
+ * Every invocation path (the Bun/Node runners and the Code package's direct
+ * spawns) goes through this function, so the effort capability warning is
+ * emitted here rather than in each caller.
+ *
  * @param harness - Harness being run.
  * @param executablePath - Resolved path/command of the CLI.
  * @param options - Per-run options.
  * @returns Args (prompt excluded) and any environment overlay.
+ * @throws {HarnessUnavailableError} When `deepseek` resolves to the community
+ *   Reasonix binary. `reasonix` accepts `run`, not `headless`, so spawning it
+ *   as dsh only produces a usage error; fail with the migration guidance
+ *   instead. The error type lets a worker fail over to the next harness entry
+ *   rather than treating the task as a failed attempt.
+ * @throws {HarnessUnavailableError} When `deepseek` resolves to a `dsh` that
+ *   does not report a parseable version. Debian/Ubuntu's `dsh` package
+ *   (Dancer's distributed shell) installs the same binary name but has no
+ *   `--version`; spawning it would run the prompt as a remote shell command.
  */
 export async function buildHarnessInvocation(
   harness: AgentHarness,
   executablePath: string,
   options: AgentRunOptions,
 ): Promise<HarnessInvocation> {
+  if (harness.name === "deepseek" && isReasonixBinary(executablePath)) {
+    throw new HarnessUnavailableError(
+      `AGENT_HARNESS=deepseek resolves to the community Reasonix CLI (${executablePath}), ` +
+        `but deepseek now selects DeepSeek's official experimental harness (dsh). ` +
+        DEEPSEEK_REASONIX_MIGRATION_HINT,
+      { harnessName: harness.name },
+    );
+  }
   const probe = await probeHarness(harness, executablePath);
+  if (
+    harness.name === "deepseek" &&
+    !probe.version &&
+    executableExists(executablePath || harness.defaultPath)
+  ) {
+    throw new HarnessUnavailableError(
+      `AGENT_HARNESS=deepseek resolved ${executablePath || harness.defaultPath}, but it did not ` +
+        `report a DeepSeek Harness version (dsh --version). Another program named "dsh" (for ` +
+        `example Debian/Ubuntu's distributed shell) may be on PATH. Install the official CLI ` +
+        `(npm i -g @deepseek-ai/dsh) or set DEEPSEEK_CLI_PATH to it.`,
+      { harnessName: harness.name },
+    );
+  }
+  warnEffortUnsupported(harness, options);
   return {
     args: harness.buildArgs(options, probe),
     env: harness.buildEnv?.(options, probe),

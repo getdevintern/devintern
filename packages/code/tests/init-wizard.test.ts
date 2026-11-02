@@ -4,6 +4,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { BUNDLED_TRELLO_API_KEY } from "@devintern/task-trackers";
 import {
+  ENV_HARNESS_DOCS,
   TRACKER_SETUP,
   buildEnvExample,
   renderEnvFile,
@@ -83,6 +84,20 @@ describe("buildEnvExample", () => {
     expect(template).toContain("GITLAB_CODE_HOST_CA_FILE=/path/to/company-ca.pem");
     expect(template).toContain("GITLAB_REVIEWER_ALLOWLIST=alice,bob");
     expect(template).toContain("BITBUCKET_TOKEN");
+    expect(template).toContain(ENV_HARNESS_DOCS);
+  });
+
+  test("tracked package examples match the generated harness documentation", () => {
+    for (const examplePath of [
+      join(import.meta.dir, "../.env.example"),
+      join(import.meta.dir, "../.devintern-code/.env.example"),
+    ]) {
+      const example = readFileSync(examplePath, "utf8");
+      expect(example).toContain(ENV_HARNESS_DOCS);
+      expect(example).toContain("'dsh' for deepseek");
+      expect(example).toContain("'reasonix' for reasonix");
+      expect(example).toContain("# DEEPSEEK_API_KEY=sk-your-deepseek-api-key");
+    }
   });
 });
 

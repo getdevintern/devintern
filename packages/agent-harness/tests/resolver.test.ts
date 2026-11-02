@@ -28,6 +28,8 @@ describe("resolveHarness", () => {
     delete process.env.ANTIGRAVITY_CLI_PATH;
     delete process.env.AGY_CLI_PATH;
     delete process.env.GEMINI_CLI_PATH;
+    delete process.env.DEEPSEEK_CLI_PATH;
+    delete process.env.REASONIX_CLI_PATH;
     warnings = [];
     console.warn = (msg?: unknown) => {
       warnings.push(String(msg));
@@ -49,6 +51,91 @@ describe("resolveHarness", () => {
     const result = resolveHarness({ harnessName: "opencode" });
     expect(result.harness.name).toBe("opencode");
     expect(result.path).toBe("opencode");
+  });
+
+  test("deepseek selects the official dsh harness and reasonix stays explicit", () => {
+    const deepseek = resolveHarness({ harnessName: "deepseek", warnDeprecated: false });
+    expect(deepseek.harness.name).toBe("deepseek");
+    expect(deepseek.harness.displayName).toContain("experimental");
+    expect(deepseek.path).toBe("dsh");
+
+    const reasonix = resolveHarness({ harnessName: "reasonix" });
+    expect(reasonix.harness.name).toBe("reasonix");
+    expect(reasonix.path).toBe("reasonix");
+    expect(warnings).toHaveLength(0);
+
+    expect(getHarness("dsh")?.name).toBe("deepseek");
+    expect(getHarness("reasonix")?.name).toBe("reasonix");
+  });
+
+  test("warns that deepseek is now dsh when only reasonix is installed", () => {
+    const dir = mkdtempSync(join(tmpdir(), "deepseek-migration-"));
+    const reasonix = join(dir, "reasonix");
+    writeFileSync(reasonix, "#!/bin/sh\nexit 0\n");
+    chmodSync(reasonix, 0o755);
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${dir}:${originalPath ?? ""}`;
+    process.env.DEEPSEEK_CLI_PATH = join(dir, "missing-dsh");
+    try {
+      const result = resolveHarness({ harnessName: "deepseek" });
+      expect(result.path).toBe(join(dir, "missing-dsh"));
+      expect(warnings.some((w) => w.includes("AGENT_HARNESS=reasonix"))).toBe(true);
+      expect(warnings.some((w) => w.includes("@deepseek-ai/dsh"))).toBe(true);
+    } finally {
+      process.env.PATH = originalPath;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("warns when DEEPSEEK_CLI_PATH still points at reasonix", () => {
+    const dir = mkdtempSync(join(tmpdir(), "deepseek-migration-"));
+    const reasonix = join(dir, "reasonix");
+    writeFileSync(reasonix, "#!/bin/sh\nexit 0\n");
+    chmodSync(reasonix, 0o755);
+    process.env.DEEPSEEK_CLI_PATH = reasonix;
+    try {
+      const result = resolveHarness({ harnessName: "deepseek" });
+      expect(result.path).toBe(reasonix);
+      expect(warnings.some((w) => w.includes("resolves to the community Reasonix CLI"))).toBe(true);
+      expect(warnings.some((w) => w.includes("AGENT_HARNESS=reasonix"))).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("warns when REASONIX_CLI_PATH is the only reasonix install configured", () => {
+    const dir = mkdtempSync(join(tmpdir(), "deepseek-migration-"));
+    const reasonix = join(dir, "reasonix");
+    writeFileSync(reasonix, "#!/bin/sh\nexit 0\n");
+    chmodSync(reasonix, 0o755);
+    const originalPath = process.env.PATH;
+    process.env.PATH = "/nonexistent";
+    process.env.REASONIX_CLI_PATH = reasonix;
+    process.env.DEEPSEEK_CLI_PATH = join(dir, "missing-dsh");
+    try {
+      resolveHarness({ harnessName: "deepseek" });
+      expect(warnings.some((w) => w.includes("AGENT_HARNESS=reasonix"))).toBe(true);
+    } finally {
+      process.env.PATH = originalPath;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("warns when AGENT_CLI_PATH points at reasonix for a deepseek run", () => {
+    const dir = mkdtempSync(join(tmpdir(), "deepseek-migration-"));
+    const reasonix = join(dir, "reasonix");
+    writeFileSync(reasonix, "#!/bin/sh\nexit 0\n");
+    chmodSync(reasonix, 0o755);
+    process.env.AGENT_HARNESS = "deepseek";
+    process.env.AGENT_CLI_PATH = reasonix;
+    try {
+      const result = resolveHarness();
+      expect(result.harness.name).toBe("deepseek");
+      expect(result.path).toBe(reasonix);
+      expect(warnings.some((w) => w.includes("resolves to the community Reasonix CLI"))).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("uses AGENT_HARNESS env var", () => {
@@ -347,6 +434,8 @@ describe("harness install detection", () => {
     delete process.env.ANTIGRAVITY_CLI_PATH;
     delete process.env.AGY_CLI_PATH;
     delete process.env.GEMINI_CLI_PATH;
+    delete process.env.DEEPSEEK_CLI_PATH;
+    delete process.env.REASONIX_CLI_PATH;
     warnings = [];
     console.warn = (msg?: unknown) => {
       warnings.push(String(msg));

@@ -2,7 +2,9 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DeepSeekHarness } from "../src/harnesses/deepseek.js";
 import { OpencodeHarness } from "../src/harnesses/opencode.js";
+import { HarnessUnavailableError } from "../src/errors.js";
 import {
   buildHarnessInvocation,
   parseMajorVersion,
@@ -14,10 +16,10 @@ import type { AgentHarness } from "../src/types.js";
 
 const tempDirs: string[] = [];
 
-function makeCli(script: string): string {
+function makeCli(script: string, name = "opencode"): string {
   const dir = mkdtempSync(join(tmpdir(), "harness-probe-"));
   tempDirs.push(dir);
-  const cli = join(dir, "opencode");
+  const cli = join(dir, name);
   writeFileSync(cli, `#!/bin/sh\n${script}\n`, "utf8");
   chmodSync(cli, 0o755);
   return cli;
@@ -61,6 +63,23 @@ describe("readCliVersion", () => {
     if (process.platform === "win32") return;
     const cli = makeCli("exit 3");
     expect(readCliVersion(cli)).toBeUndefined();
+  });
+
+  test("deepseek treats unparseable dsh output as no version", () => {
+    if (process.platform === "win32") return;
+    // Debian/Ubuntu's `dsh` (Dancer's distributed shell) documents no
+    // --version; usage text on stdout must not be mistaken for a version.
+    const cli = makeCli("echo 'usage: dsh [-options] machine command'", "dsh");
+    expect(new DeepSeekHarness().probe(cli)).toEqual({});
+  });
+
+  test("deepseek parses the official dsh version", () => {
+    if (process.platform === "win32") return;
+    const cli = makeCli("echo 'dsh 0.2.1-rc.2'", "dsh");
+    expect(new DeepSeekHarness().probe(cli)).toEqual({
+      version: "0.2.1-rc.2",
+      major: 0,
+    });
   });
 });
 
@@ -111,5 +130,48 @@ describe("buildHarnessInvocation", () => {
       args: ["v2"],
       env: { OPENCODE_LOG_LEVEL: "ERROR" },
     });
+  });
+
+  test("refuses to build a deepseek invocation around the Reasonix binary", async () => {
+    const reasonix = makeCli("exit 0", "reasonix");
+    const error = await buildHarnessInvocation(new DeepSeekHarness(), reasonix, {}).catch(
+      (thrown: unknown) => thrown,
+    );
+    expect(error).toBeInstanceOf(HarnessUnavailableError);
+    expect((error as Error).name).toBe("HarnessUnavailableError");
+    expect((error as HarnessUnavailableError).harnessName).toBe("deepseek");
+    expect((error as Error).message).toMatch(/AGENT_HARNESS=reasonix/);
+  });
+
+  test("builds a deepseek invocation when dsh reports its version", async () => {
+    if (process.platform === "win32") return;
+    const dsh = makeCli("echo 'dsh 0.2.1-rc.2'", "dsh");
+    expect(await buildHarnessInvocation(new DeepSeekHarness(), dsh, {})).toEqual({
+      args: ["headless"],
+      env: undefined,
+    });
+  });
+
+  test("refuses a dsh that does not report a DeepSeek Harness version", async () => {
+    if (process.platform === "win32") return;
+    // Debian/Ubuntu's distributed shell prints usage text instead of a version.
+    const dsh = makeCli("echo 'usage: dsh [-options] machine command'", "dsh");
+    const error = await buildHarnessInvocation(new DeepSeekHarness(), dsh, {}).catch(
+      (thrown: unknown) => thrown,
+    );
+    expect(error).toBeInstanceOf(HarnessUnavailableError);
+    expect((error as HarnessUnavailableError).harnessName).toBe("deepseek");
+    expect((error as Error).message).toContain("did not report a DeepSeek Harness version");
+    expect((error as Error).message).toContain("DEEPSEEK_CLI_PATH");
+  });
+
+  test("refuses a dsh whose --version exits non-zero", async () => {
+    if (process.platform === "win32") return;
+    const dsh = makeCli("exit 3", "dsh");
+    const error = await buildHarnessInvocation(new DeepSeekHarness(), dsh, {}).catch(
+      (thrown: unknown) => thrown,
+    );
+    expect(error).toBeInstanceOf(HarnessUnavailableError);
+    expect((error as Error).message).toContain("did not report a DeepSeek Harness version");
   });
 });
