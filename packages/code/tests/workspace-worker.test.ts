@@ -1249,6 +1249,35 @@ describe("resolveWorkspaceAutomationContext", () => {
     expect(context?.cwd).toContain(join("worktrees", "backend", "base"));
     rmSync(workspaceDir, { recursive: true, force: true });
   });
+
+  test("applies the entry's harness/model/effort to the occurrence env only", async () => {
+    const workspaceDir = join(
+      tmpdir(),
+      `ws-automation-selection-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    );
+    const repoManager = new FakeRepoManager(workspaceDir);
+    const context = await resolveWorkspaceAutomationContext(
+      {
+        id: "scheduled",
+        enabled: true,
+        prompt: "work",
+        interval: "1h",
+        intervalMs: 3_600_000,
+        repo: "backend",
+        harness: "codex",
+        model: "gpt-5-codex",
+        effort: "high",
+      },
+      CONFIG,
+      workspaceDir,
+      repoManager,
+    );
+
+    expect(context?.env.AGENT_HARNESS).toBe("codex");
+    expect(context?.env.AGENT_MODEL).toBe("gpt-5-codex");
+    expect(context?.env.AGENT_EFFORT).toBe("high");
+    rmSync(workspaceDir, { recursive: true, force: true });
+  });
 });
 
 describe("worktree sweeping", () => {

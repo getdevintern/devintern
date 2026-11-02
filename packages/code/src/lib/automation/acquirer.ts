@@ -10,6 +10,12 @@ import type { AutomationConfig } from "./config";
 import { automationTaskArgs, nextScheduleOccurrence } from "./config";
 import { AutomationStateStore } from "./state";
 import { workerTaskArgs } from "../acquirers/task-polling";
+import {
+  applyAgentSelectionEnv,
+  dropForeignHarnessCliPaths,
+  pickAgentSelection,
+  primaryHarnessName,
+} from "../agent/selection";
 import { resolveProjectConfigDir } from "../config/config-dir";
 import { RUN_ORIGIN_ENV } from "../observability/analytics";
 import { getWorkerFailover } from "../worker/failover";
@@ -17,6 +23,7 @@ import {
   readUsageLimitHint,
   USAGE_LIMIT_EXIT_CODE,
   USAGE_LIMIT_FILE_ENV,
+  WORKER_CHILD_ENV,
 } from "../worker/usage-limit-protocol";
 
 /** Environment markers the task pipeline reads to attribute scheduled runs. */
@@ -618,7 +625,7 @@ export function automationRunEnv(
   originValue: string = "scheduled",
 ): Record<string, string | undefined> {
   return {
-    ...base,
+    ...applyAgentSelectionEnv({ ...base }, pickAgentSelection(automation)),
     [AUTOMATION_ORIGIN_ENV]: originValue,
     [AUTOMATION_ID_ENV]: automation.id,
   };
@@ -638,6 +645,9 @@ function defaultSpawnRun(
     {
       cwd: context.cwd,
       env: automationRunEnv(automation, context.env, originValue),
+      // A pinned harness must survive the failover child-env pin (see
+      // `pinAutomationEnv`); entries without one keep workspace failover.
+      harnessPin: automation.harness,
       terminationGraceMs,
     },
   );
@@ -674,6 +684,13 @@ export function spawnAutomationProcess(
   options: {
     cwd: string;
     env: Record<string, string | undefined>;
+    /**
+     * Explicit harness pinned by the scheduled entry (`harness` field). When
+     * set, the child is pinned to it and the workspace failover overlay is
+     * skipped so the entry always uses the agent it named. Entries without a
+     * `harness` keep normal workspace failover.
+     */
+    harnessPin?: string;
     terminationGraceMs?: number;
   },
 ): SpawnedAutomationRun {
@@ -746,11 +763,13 @@ export function spawnAutomationProcess(
       }
       if (code === USAGE_LIMIT_EXIT_CODE) {
         const failover = getWorkerFailover();
-        if (failover && !failover.allLimited()) {
+        // A harness pinned by the entry opts out of workspace failover, so an
+        // explicit selection never silently runs a different agent.
+        if (!options.harnessPin && failover && !failover.allLimited()) {
           const outcome = failover.reportFromHint(readUsageLimitHint(env[USAGE_LIMIT_FILE_ENV]));
           if (outcome.kind !== "exhausted") {
             cleanupHint();
-            const nextEnv = pinAutomationEnv(options.env);
+            const nextEnv = pinAutomationEnv(options.env, options.harnessPin);
             hintDir = nextEnv.hintDir;
             start(nextEnv.env);
             return;
@@ -773,7 +792,7 @@ export function spawnAutomationProcess(
     });
   };
 
-  const initial = pinAutomationEnv(options.env);
+  const initial = pinAutomationEnv(options.env, options.harnessPin);
   hintDir = initial.hintDir;
   start(initial.env);
 
@@ -783,10 +802,37 @@ export function spawnAutomationProcess(
   };
 }
 
-function pinAutomationEnv(base: Record<string, string | undefined>): {
+function pinAutomationEnv(
+  base: Record<string, string | undefined>,
+  harnessPin?: string,
+): {
   env: Record<string, string | undefined>;
   hintDir?: string;
 } {
+  if (harnessPin) {
+    // Pin the entry's own harness and skip the workspace failover overlay so
+    // neither the active harness nor a usage-limit failover can re-route an
+    // entry that named its agent. Keep the worker-child marker — and drop any
+    // hint path inherited from an ancestor worker — so a usage-limit abort
+    // still signals the parent by exiting 75 instead of falling through to
+    // one-shot success handling. `spawnAutomationProcess`'s
+    // `!options.harnessPin` guard ignores that exit rather than re-spawning on
+    // another harness.
+    const env: Record<string, string | undefined> = {
+      ...base,
+      AGENT_HARNESS: harnessPin,
+      [WORKER_CHILD_ENV]: "1",
+    };
+    delete env[USAGE_LIMIT_FILE_ENV];
+    // The global AGENT_CLI_PATH names the env's primary harness binary, and the
+    // resolver's CLAUDE_CLI_PATH fallback applies to ANY harness; a pin to a
+    // non-claude harness must resolve its own `<HARNESS>_CLI_PATH` or default
+    // rather than spawn another harness's executable. `applyAgentSelectionEnv`
+    // already drops them when the pin flows through the entry selection; this
+    // guards direct callers that pin without pre-composing that selection.
+    dropForeignHarnessCliPaths(env, harnessPin, primaryHarnessName(base.AGENT_HARNESS));
+    return { env };
+  }
   const failover = getWorkerFailover();
   if (!failover) {
     return { env: base };

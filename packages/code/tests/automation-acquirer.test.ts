@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, rmSync } from "fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
@@ -16,8 +16,11 @@ import {
   writeAutomationTaskFile,
 } from "../src/lib/automation/acquirer";
 import { automationTaskArgs } from "../src/lib/automation/config";
+import { spawnEstimationSweep } from "../src/lib/automation/estimation-acquirer";
 import { AutomationStateStore } from "../src/lib/automation/state";
 import type { AutomationConfig } from "../src/lib/automation/config";
+import { resetWorkerFailover, startWorkerFailover } from "../src/lib/worker/failover";
+import { USAGE_LIMIT_FILE_ENV, WORKER_CHILD_ENV } from "../src/lib/worker/usage-limit-protocol";
 
 describe("AutomationAcquirer", () => {
   describe("resolveAutomationRunArgs", () => {
@@ -986,5 +989,275 @@ describe("AutomationAcquirer triggerManual (dashboard Run now)", () => {
     resolveManual(true);
     await new Promise((resolve) => setTimeout(resolve, 0));
     await acquirer.stop();
+  });
+});
+
+describe("spawnAutomationProcess harness pin", () => {
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+    resetWorkerFailover();
+  });
+
+  // A stub CLI that records the env it was spawned with, then exits 75
+  // (EX_TEMPFAIL) so the parent's usage-limit handling is exercised.
+  const PROBE_SOURCE = `const fs = require("node:fs");
+fs.appendFileSync(
+  process.env.PROBE_LOG,
+  JSON.stringify({
+    harness: process.env.AGENT_HARNESS ?? null,
+    workerChild: process.env[${JSON.stringify(WORKER_CHILD_ENV)}] ?? null,
+    usageLimitFile: process.env[${JSON.stringify(USAGE_LIMIT_FILE_ENV)}] ?? null,
+    cliPath: process.env.AGENT_CLI_PATH ?? null,
+    claudeCliPath: process.env.CLAUDE_CLI_PATH ?? null,
+    model: process.env.AGENT_MODEL ?? null,
+    effort: process.env.AGENT_EFFORT ?? null,
+    argv: process.argv.slice(2),
+  }) + "\\n",
+);
+process.exit(75);
+`;
+
+  function fixture(): { probePath: string; probeLog: string } {
+    const dir = mkdtempSync(join(tmpdir(), "acquirer-pin-"));
+    dirs.push(dir);
+    const probePath = join(dir, "probe.cjs");
+    writeFileSync(probePath, PROBE_SOURCE);
+    return { probePath, probeLog: join(dir, "spawns.jsonl") };
+  }
+
+  function readSpawns(path: string): Array<Record<string, unknown>> {
+    const raw = readFileSync(path, "utf8").trim();
+    return raw ? raw.split("\n").map((line) => JSON.parse(line)) : [];
+  }
+
+  // Strip ambient worker-child markers so the assertions reflect what
+  // `pinAutomationEnv` adds, not whatever the test shell was spawned with.
+  function cleanBase(extra: Record<string, string | undefined>) {
+    const env: Record<string, string | undefined> = { ...process.env, ...extra };
+    delete env[WORKER_CHILD_ENV];
+    delete env[USAGE_LIMIT_FILE_ENV];
+    return env;
+  }
+
+  test("pins the entry harness, keeps the worker-child marker, and never fails over", async () => {
+    const { probePath, probeLog } = fixture();
+    startWorkerFailover({ raw: "codex,grok", checkInstalled: false, log: () => {} });
+    const inheritedHint = join(tmpdir(), `acquirer-inherited-${Date.now()}.json`);
+
+    const run = spawnAutomationProcess(process.execPath, [probePath], {
+      cwd: process.cwd(),
+      // An ancestor worker's hint path must not leak into a pinned child.
+      env: { ...cleanBase({ PROBE_LOG: probeLog }), [USAGE_LIMIT_FILE_ENV]: inheritedHint },
+      harnessPin: "codex",
+    });
+    expect(await run.completion).toBe(false);
+
+    const records = readSpawns(probeLog);
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({
+      harness: "codex",
+      workerChild: "1",
+      usageLimitFile: null,
+    });
+  });
+
+  test("fails over to the next harness when the entry did not pin one", async () => {
+    const { probePath, probeLog } = fixture();
+    startWorkerFailover({ raw: "codex,grok", checkInstalled: false, log: () => {} });
+
+    const run = spawnAutomationProcess(process.execPath, [probePath], {
+      cwd: process.cwd(),
+      env: cleanBase({ PROBE_LOG: probeLog }),
+    });
+    expect(await run.completion).toBe(false);
+
+    const records = readSpawns(probeLog);
+    expect(records.length).toBeGreaterThanOrEqual(2);
+    expect(records[0]).toMatchObject({ harness: "codex", workerChild: "1" });
+    expect(records[0]?.usageLimitFile).not.toBeNull();
+    expect(records[1]).toMatchObject({ harness: "grok", workerChild: "1" });
+  });
+
+  test("an estimation sweep pins the entry harness and never fails over", async () => {
+    const { probePath, probeLog } = fixture();
+    startWorkerFailover({ raw: "codex,grok", checkInstalled: false, log: () => {} });
+
+    const previousEntry = process.argv[1];
+    process.argv[1] = probePath;
+    try {
+      const run = spawnEstimationSweep(
+        {
+          id: "groom",
+          enabled: true,
+          query: "q",
+          interval: "6h",
+          intervalMs: 21_600_000,
+          harness: "claude-code",
+        },
+        { cwd: process.cwd(), env: cleanBase({ PROBE_LOG: probeLog }), release() {} },
+      );
+      expect(await run.completion).toBe(false);
+    } finally {
+      process.argv[1] = previousEntry;
+    }
+
+    const records = readSpawns(probeLog);
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({
+      harness: "claude-code",
+      workerChild: "1",
+      usageLimitFile: null,
+    });
+    expect(records[0]?.argv).toContain("--estimate");
+  });
+
+  test("a pin to a non-primary harness drops the inherited AGENT_CLI_PATH", async () => {
+    const { probePath, probeLog } = fixture();
+    startWorkerFailover({ raw: "claude-code,codex", checkInstalled: false, log: () => {} });
+
+    const run = spawnAutomationProcess(process.execPath, [probePath], {
+      cwd: process.cwd(),
+      env: cleanBase({
+        PROBE_LOG: probeLog,
+        AGENT_HARNESS: "claude-code",
+        AGENT_CLI_PATH: "/opt/custom/claude",
+      }),
+      harnessPin: "codex",
+    });
+    expect(await run.completion).toBe(false);
+
+    const records = readSpawns(probeLog);
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({ harness: "codex", cliPath: null });
+  });
+
+  test("a pin to the primary harness keeps AGENT_CLI_PATH", async () => {
+    const { probePath, probeLog } = fixture();
+    startWorkerFailover({ raw: "claude-code,codex", checkInstalled: false, log: () => {} });
+
+    const run = spawnAutomationProcess(process.execPath, [probePath], {
+      cwd: process.cwd(),
+      env: cleanBase({
+        PROBE_LOG: probeLog,
+        AGENT_HARNESS: "claude-code",
+        AGENT_CLI_PATH: "/opt/custom/claude",
+      }),
+      harnessPin: "claude-code",
+    });
+    expect(await run.completion).toBe(false);
+
+    const records = readSpawns(probeLog);
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({
+      harness: "claude-code",
+      cliPath: "/opt/custom/claude",
+    });
+  });
+
+  test("a pin to a non-claude harness drops the inherited CLAUDE_CLI_PATH fallback", async () => {
+    const { probePath, probeLog } = fixture();
+    startWorkerFailover({ raw: "claude-code,codex", checkInstalled: false, log: () => {} });
+
+    const run = spawnAutomationProcess(process.execPath, [probePath], {
+      cwd: process.cwd(),
+      env: cleanBase({
+        PROBE_LOG: probeLog,
+        AGENT_HARNESS: "claude-code",
+        CLAUDE_CLI_PATH: "/opt/custom/claude",
+      }),
+      harnessPin: "codex",
+    });
+    expect(await run.completion).toBe(false);
+
+    const records = readSpawns(probeLog);
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({ harness: "codex", claudeCliPath: null });
+  });
+
+  test("a pin to claude-code keeps the inherited CLAUDE_CLI_PATH", async () => {
+    const { probePath, probeLog } = fixture();
+    startWorkerFailover({ raw: "codex,claude-code", checkInstalled: false, log: () => {} });
+
+    const run = spawnAutomationProcess(process.execPath, [probePath], {
+      cwd: process.cwd(),
+      env: cleanBase({
+        PROBE_LOG: probeLog,
+        AGENT_HARNESS: "codex",
+        CLAUDE_CLI_PATH: "/opt/custom/claude",
+      }),
+      harnessPin: "claude-code",
+    });
+    expect(await run.completion).toBe(false);
+
+    const records = readSpawns(probeLog);
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({
+      harness: "claude-code",
+      claudeCliPath: "/opt/custom/claude",
+    });
+  });
+
+  test("a pin that changes the harness drops the inherited model", async () => {
+    const { probePath, probeLog } = fixture();
+    startWorkerFailover({ raw: "claude-code,codex", checkInstalled: false, log: () => {} });
+
+    const env = automationRunEnv(
+      {
+        id: "triage",
+        enabled: true,
+        prompt: "p",
+        interval: "1h",
+        intervalMs: 3_600_000,
+        harness: "codex",
+      },
+      cleanBase({
+        PROBE_LOG: probeLog,
+        AGENT_HARNESS: "claude-code",
+        AGENT_MODEL: "claude-sonnet",
+      }),
+    );
+
+    const run = spawnAutomationProcess(process.execPath, [probePath], {
+      cwd: process.cwd(),
+      env,
+      harnessPin: "codex",
+    });
+    expect(await run.completion).toBe(false);
+
+    const records = readSpawns(probeLog);
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({ harness: "codex", model: null });
+  });
+
+  test("a model-only entry cannot leak its model onto a failover harness", async () => {
+    const { probePath, probeLog } = fixture();
+    startWorkerFailover({ raw: "codex,grok", checkInstalled: false, log: () => {} });
+
+    const base = cleanBase({ PROBE_LOG: probeLog, AGENT_HARNESS: "codex,grok" });
+    delete base.AGENT_MODEL;
+    delete base.AGENT_EFFORT;
+    const env = automationRunEnv(
+      {
+        id: "triage",
+        enabled: true,
+        prompt: "p",
+        interval: "1h",
+        intervalMs: 3_600_000,
+        model: "gpt-5-codex",
+      },
+      base,
+    );
+
+    const run = spawnAutomationProcess(process.execPath, [probePath], {
+      cwd: process.cwd(),
+      env,
+    });
+    expect(await run.completion).toBe(false);
+
+    const records = readSpawns(probeLog);
+    expect(records.length).toBeGreaterThanOrEqual(2);
+    expect(records[0]).toMatchObject({ harness: "codex", model: null });
+    expect(records[1]).toMatchObject({ harness: "grok", model: null });
   });
 });

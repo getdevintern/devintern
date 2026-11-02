@@ -1,6 +1,8 @@
 import { CronExpressionParser } from "cron-parser";
 
 import { parseAutomationInterval } from "./config";
+import { parseAgentSelection } from "../agent/selection";
+import type { AgentSelection } from "../agent/selection";
 
 /**
  * One workspace `[[estimations]]` entry: a scheduled story-point sweep.
@@ -9,7 +11,7 @@ import { parseAutomationInterval } from "./config";
  * `query` — the automation prompt pipeline is never used, and there is no
  * `repo` because estimation never touches a repository.
  */
-export interface EstimationConfig {
+export interface EstimationConfig extends AgentSelection {
   id: string;
   enabled: boolean;
   /** Tracker query selecting the tickets to estimate (same language as `--query`). */
@@ -90,6 +92,8 @@ export function parseEstimationEntries(value: unknown): {
       errors.push(`${label}.interval must use a positive duration such as 15m, 6h, or 1d.`);
     }
 
+    const selection = parseAgentSelection(table, { label, id }, errors);
+
     if (
       id &&
       typeof enabledValue === "boolean" &&
@@ -104,6 +108,7 @@ export function parseEstimationEntries(value: unknown): {
         cron,
         interval,
         intervalMs: intervalMs ?? undefined,
+        ...selection,
       });
     }
   }

@@ -4,8 +4,10 @@ import { join } from "path";
 import { CronExpressionParser } from "cron-parser";
 
 import { parseToml } from "../workspace/toml";
+import { parseAgentSelection } from "../agent/selection";
+import type { AgentSelection } from "../agent/selection";
 
-export interface AutomationConfig {
+export interface AutomationConfig extends AgentSelection {
   id: string;
   enabled: boolean;
   prompt: string;
@@ -187,6 +189,8 @@ export function parseAutomationEntries(
       errors.push(`${label}.repo "${repo}" does not match any [[repos]] name.`);
     }
 
+    const selection = parseAgentSelection(table, { label, id }, errors);
+
     const allowNoChangesValue = table.allow_no_changes;
     const allowNoChanges = typeof allowNoChangesValue === "boolean" ? allowNoChangesValue : false;
     if (
@@ -208,6 +212,7 @@ export function parseAutomationEntries(
         repo,
         openPr,
         allowNoChanges,
+        ...selection,
       });
     }
   }
