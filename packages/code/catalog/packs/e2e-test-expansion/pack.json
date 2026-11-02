@@ -1,0 +1,8 @@
+{
+  "id": "e2e-test-expansion",
+  "name": "E2E test expansion",
+  "description": "Add one focused end-to-end test for an important uncovered user journey.",
+  "schedule": { "interval": "7d" },
+  "openPr": true,
+  "prompt": "prompt.md"
+}

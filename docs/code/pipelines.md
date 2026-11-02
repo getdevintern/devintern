@@ -34,15 +34,20 @@ standalone pipeline file.
 
 ## Where a task gets its pipeline
 
-A task subprocess can see up to four layers, and **exactly one complete
+A task subprocess can see up to five layers, and **exactly one complete
 definition runs** — ordered step arrays are never merged across scopes:
 
-1. **Workspace per-repository override** — `pipeline_file` on a `[[repos]]`
-   entry in `workspace.toml` (highest).
-2. **Repository settings** — the `pipeline` block in the repository's committed
+1. **Automation override** — `pipeline_file` on the `[[automations]]` entry
+   whose occurrence is running (highest). Applies to that automation's runs
+   alone; installed pack pipelines land here. In a single-repo project
+   (`.devintern-code/automations.toml`), the same key resolves against the
+   project directory.
+2. **Workspace per-repository override** — `pipeline_file` on a `[[repos]]`
+   entry in `workspace.toml`.
+3. **Repository settings** — the `pipeline` block in the repository's committed
    `.devintern-code/settings.json`.
-3. **Workspace default** — `pipeline_file` on `[defaults]` in `workspace.toml`.
-4. **Built-in default** — `implement → commit → auto-review → finalize`.
+4. **Workspace default** — `pipeline_file` on `[defaults]` in `workspace.toml`.
+5. **Built-in default** — `implement → commit → auto-review → finalize`.
 
 A referenced workspace file that is missing or invalid fails the run, naming the
 repository and the file; it never silently falls back. See

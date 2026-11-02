@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "packs": [
+    "dependency-health",
+    "flaky-test-triage",
+    "log-triage",
+    "e2e-test-expansion"
+  ]
+}

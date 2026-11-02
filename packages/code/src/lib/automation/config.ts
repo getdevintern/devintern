@@ -19,6 +19,13 @@ export interface AutomationConfig {
    */
   openPr?: boolean;
   /**
+   * Workspace-relative JSON file holding this automation's pipeline override.
+   * Takes precedence over every other pipeline scope for this automation's
+   * occurrences only, so installing a pack pipeline never re-routes unrelated
+   * tasks. See {@link selectPipelineConfig}.
+   */
+  pipelineFile?: string;
+  /**
    * Whether an occurrence that makes no repository changes is a successful
    * no-op instead of a failed run. Opt-in and off by default, for jobs whose
    * prompt explicitly allows "make no changes and report".
@@ -187,6 +194,8 @@ export function parseAutomationEntries(
       errors.push(`${label}.repo "${repo}" does not match any [[repos]] name.`);
     }
 
+    const pipelineFile = stringValue("pipeline_file");
+
     const allowNoChangesValue = table.allow_no_changes;
     const allowNoChanges = typeof allowNoChangesValue === "boolean" ? allowNoChangesValue : false;
     if (
@@ -207,6 +216,7 @@ export function parseAutomationEntries(
         intervalMs: schedule.intervalMs,
         repo,
         openPr,
+        pipelineFile,
         allowNoChanges,
       });
     }
