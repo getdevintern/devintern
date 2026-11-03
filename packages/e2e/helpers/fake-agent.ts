@@ -17,6 +17,23 @@ const mode =
 if (process.env.E2E_AGENT_INVOCATIONS) {
   appendFileSync(process.env.E2E_AGENT_INVOCATIONS, JSON.stringify({ mode }) + "\n");
 }
+// Opt-in start/end timeline for concurrency coverage. An `exit` handler records
+// the end exactly once, so early exits, failures and thrown errors still close
+// their interval. The existing E2E_AGENT_INVOCATIONS record stays unchanged.
+const timelinePath = process.env.E2E_AGENT_TIMELINE;
+let timelineEnded = false;
+function recordTimeline(event: "start" | "end"): void {
+  if (!timelinePath) return;
+  appendFileSync(timelinePath, JSON.stringify({ mode, event, at: Date.now() }) + "\n");
+}
+if (timelinePath) {
+  recordTimeline("start");
+  process.on("exit", () => {
+    if (timelineEnded) return;
+    timelineEnded = true;
+    recordTimeline("end");
+  });
+}
 // Opt-in delay for bounded-timeout coverage. Defaults to 0, so every existing
 // scenario stays as fast and deterministic as before.
 const delayMs = Number(process.env.E2E_AGENT_DELAY_MS ?? "0");

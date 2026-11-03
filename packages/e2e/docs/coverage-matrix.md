@@ -149,7 +149,7 @@ Run: `bun run --filter @devintern/e2e test` (build the CLI first); the sandbox s
 | Scheduled `[[automations]]`: schedule, no-op, PR policy, hot reload                                     | `gap`              | —                                                                                 | Deterministic fixture repo and prompt.                          |
 | Scheduled `[[estimations]]`                                                                             | `gap`              | —                                                                                 | Fixture tracker and story-point assertion.                      |
 | Working windows / quiet hours                                                                           | `gap`              | —                                                                                 | Ready-task deferral and `run-now` bypass.                       |
-| Workspace and per-repo concurrency                                                                      | `gap`              | —                                                                                 | Multiple queued tasks and limits.                               |
+| Workspace and per-repo concurrency                                                                      | `default`          | `tests/local/worker-concurrency.test.ts` (`bun run --filter @devintern/e2e test`) | —                                                               |
 | Orphan recovery after a crash                                                                           | `gap`              | —                                                                                 | Kill mid-run, restart, assert failed run and no PR.             |
 | Harness failover                                                                                        | `gap`              | —                                                                                 | Stub usage-limit harness plus fallback.                         |
 | Review polling, CI repair, conflict resolution                                                          | `live`             | GitLab worker suite                                                               | GitHub parity and scheduled/manual modes.                       |
@@ -200,8 +200,8 @@ and each task opens its own PR.
 12. Sandbox providers `native`, `nono`, and `docker`, removed-provider (`srt`,
     `smolvm`) migration errors, plus invalid-provider and missing-binary
     fail-closed paths.
-13. Scheduled automations, estimations, quiet hours, concurrency, and orphan
-    recovery on a deterministic local workspace.
+13. Scheduled automations, estimations, quiet hours, and orphan recovery on a
+    deterministic local workspace.
 14. Harness failover with stub harnesses.
 15. Sentry auto-fix with a fake or opt-in project.
 16. Auth/license (`login`, `logout`, `whoami`, trial, expired/offline) with a

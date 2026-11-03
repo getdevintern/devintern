@@ -69,6 +69,14 @@ const INJECTED_COLUMNS = [
   "finished_at",
 ].join(", ");
 
+/** One start or end event from the deterministic agent's optional timeline. */
+export interface WorkerAgentTimelineEvent {
+  mode: string;
+  event: "start" | "end";
+  /** Unix epoch milliseconds recorded by the agent process. */
+  at: number;
+}
+
 /** One row from the worker's shared run-record table. */
 export interface WorkerRunRecord {
   id: number;
@@ -159,6 +167,23 @@ export class WorkerFixture {
   }
 
   /**
+   * Start/end events written by the deterministic agent when
+   * `E2E_AGENT_TIMELINE` is set (this fixture sets it in {@link prepare}).
+   *
+   * Events are appended as JSON lines so tests can derive concurrency by
+   * sorting real start/end timestamps instead of sampling in a poll loop.
+   */
+  agentTimeline(): WorkerAgentTimelineEvent[] {
+    const path = this.env.E2E_AGENT_TIMELINE;
+    if (!path || !existsSync(path)) return [];
+    return readFileSync(path, "utf8")
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as WorkerAgentTimelineEvent);
+  }
+
+  /**
    * Whether the daemon process is still running.
    *
    * `child.exitCode` is authoritative as soon as the process is reaped, even
@@ -183,6 +208,7 @@ export class WorkerFixture {
     chmodSync(agent, 0o700);
     this.env.AGENT_CLI_PATH = agent;
     this.env.E2E_AGENT_INVOCATIONS = join(this.root, "agent-invocations.jsonl");
+    this.env.E2E_AGENT_TIMELINE = join(this.root, "agent-timeline.jsonl");
 
     mkdirSync(this.workspaceDir, { recursive: true });
     writeFileSync(
