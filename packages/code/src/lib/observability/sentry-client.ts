@@ -22,6 +22,42 @@ export const SENTRY_ACTION_FAILED_COMMENT =
   "🤖 DevIntern attempted automated remediation, but the run did not complete successfully. " +
   "The issue remains unresolved.";
 
+/** Extra attempts after the first for transient network/5xx failures. */
+const DEFAULT_MAX_TRANSIENT_RETRIES = 2;
+/** Keep a server-supplied Retry-After short enough that polling cannot stall. */
+const MAX_RETRY_AFTER_MS = 10_000;
+const BASE_RETRY_DELAY_MS = 500;
+const MAX_RETRY_DELAY_MS = 2_000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Exponential backoff with jitter, or the capped server hint when present. */
+function retryDelayMs(attempt: number, retryAfterMs?: number): number {
+  if (retryAfterMs !== undefined) return Math.min(retryAfterMs, MAX_RETRY_AFTER_MS);
+  const ceiling = Math.min(BASE_RETRY_DELAY_MS * 2 ** attempt, MAX_RETRY_DELAY_MS);
+  return ceiling + Math.random() * ceiling * 0.5;
+}
+
+/** Compose Sentry search terms so `is:unresolved` appears exactly once. */
+function composeUnresolvedQuery(extra?: string): string {
+  const terms = (extra ?? "").trim().split(/\s+/).filter(Boolean);
+  const composed: string[] = [];
+  let sawUnresolved = false;
+  for (const term of terms) {
+    if (/^is:unresolved$/i.test(term)) {
+      if (sawUnresolved) continue;
+      sawUnresolved = true;
+      composed.push("is:unresolved");
+    } else {
+      composed.push(term);
+    }
+  }
+  if (!sawUnresolved) composed.unshift("is:unresolved");
+  return composed.join(" ");
+}
+
 /** Subset of the Sentry issue (group) payload the acquirer needs. */
 export interface SentryIssue extends ErrorMonitorIssue {
   id: string;
@@ -51,6 +87,10 @@ export interface SentryClientOptions {
   baseUrl?: string;
   query?: string;
   fetchImpl?: typeof fetch;
+  /** Extra attempts after the first for transient failures (default 2). */
+  maxRetries?: number;
+  /** Sleep override so tests can avoid real backoff waits. */
+  sleepImpl?: (ms: number) => Promise<void>;
 }
 
 export class SentryClient implements ErrorMonitorProvider<SentryIssue> {
@@ -61,6 +101,8 @@ export class SentryClient implements ErrorMonitorProvider<SentryIssue> {
   private readonly baseUrl: string;
   private readonly query?: string;
   private readonly fetchImpl: typeof fetch;
+  private readonly maxRetries: number;
+  private readonly sleepImpl: (ms: number) => Promise<void>;
 
   constructor(options: SentryClientOptions) {
     this.authToken = options.authToken;
@@ -69,6 +111,8 @@ export class SentryClient implements ErrorMonitorProvider<SentryIssue> {
     this.baseUrl = (options.baseUrl || DEFAULT_SENTRY_BASE_URL).replace(/\/+$/, "");
     this.query = options.query;
     this.fetchImpl = options.fetchImpl ?? fetch;
+    this.maxRetries = Math.max(0, options.maxRetries ?? DEFAULT_MAX_TRANSIENT_RETRIES);
+    this.sleepImpl = options.sleepImpl ?? sleep;
   }
 
   /**
@@ -79,7 +123,7 @@ export class SentryClient implements ErrorMonitorProvider<SentryIssue> {
    */
   async fetchUnresolvedIssues(query = this.query): Promise<SentryIssue[]> {
     const params = new URLSearchParams({
-      query: query ? `is:unresolved ${query}`.trim() : "is:unresolved",
+      query: composeUnresolvedQuery(query),
       sort: "date",
       statsPeriod: "14d",
       per_page: "100",
@@ -89,40 +133,7 @@ export class SentryClient implements ErrorMonitorProvider<SentryIssue> {
       : `/api/0/organizations/${encodeURIComponent(this.organization)}/issues/`;
     const url = `${this.baseUrl}${path}?${params.toString()}`;
 
-    let response: Response;
-    try {
-      response = await this.fetchImpl(url, {
-        headers: {
-          Authorization: `Bearer ${this.authToken}`,
-          "Content-Type": "application/json",
-        },
-      });
-    } catch (error) {
-      throw new SourceFetchError(
-        "unreadable",
-        `Sentry request failed for ${url}: ${(error as Error).message}`,
-      );
-    }
-
-    if (response.status === 401 || response.status === 403) {
-      throw new SourceFetchError(
-        "auth-failed",
-        `Sentry rejected the auth token (HTTP ${response.status})`,
-      );
-    }
-    if (response.status === 429) {
-      throw new SourceFetchError(
-        "rate-limited",
-        `Sentry rate-limited the request (HTTP 429) for ${url}`,
-        { retryAfterMs: parseRetryAfterMs(response) },
-      );
-    }
-    if (!response.ok) {
-      throw new SourceFetchError(
-        "unreadable",
-        `Sentry API error (HTTP ${response.status}) for ${url}`,
-      );
-    }
+    const response = await this.requestWithRetry(url);
 
     let body: Array<Record<string, unknown>>;
     try {
@@ -156,6 +167,59 @@ export class SentryClient implements ErrorMonitorProvider<SentryIssue> {
         metadata: (raw.metadata as SentryIssue["metadata"]) ?? undefined,
       };
     });
+  }
+
+  /**
+   * Send the issue request, retrying transient network/5xx failures a bounded
+   * number of times. Auth and rate-limit responses are classified immediately
+   * so the acquirer can keep its durable backoff behavior.
+   */
+  private async requestWithRetry(url: string): Promise<Response> {
+    for (let attempt = 0; ; attempt++) {
+      let response: Response;
+      try {
+        response = await this.fetchImpl(url, {
+          headers: {
+            Authorization: `Bearer ${this.authToken}`,
+            "Content-Type": "application/json",
+          },
+        });
+      } catch (error) {
+        if (attempt >= this.maxRetries) {
+          throw new SourceFetchError(
+            "unreadable",
+            `Sentry request failed for ${url}: ${(error as Error).message}`,
+          );
+        }
+        await this.sleepImpl(retryDelayMs(attempt));
+        continue;
+      }
+
+      if (response.status === 401 || response.status === 403) {
+        throw new SourceFetchError(
+          "auth-failed",
+          `Sentry rejected the auth token (HTTP ${response.status})`,
+        );
+      }
+      if (response.status === 429) {
+        throw new SourceFetchError(
+          "rate-limited",
+          `Sentry rate-limited the request (HTTP 429) for ${url}`,
+          { retryAfterMs: parseRetryAfterMs(response) },
+        );
+      }
+      if (response.status >= 500 && response.status <= 599 && attempt < this.maxRetries) {
+        await this.sleepImpl(retryDelayMs(attempt, parseRetryAfterMs(response)));
+        continue;
+      }
+      if (!response.ok) {
+        throw new SourceFetchError(
+          "unreadable",
+          `Sentry API error (HTTP ${response.status}) for ${url}`,
+        );
+      }
+      return response;
+    }
   }
 
   /** Shared-provider adapter entry point. */

@@ -118,6 +118,11 @@ export class ErrorMonitorAcquirer<TIssue extends ErrorMonitorIssue> implements A
    * ok-to-ok writes on every poll; failures are always persisted.
    */
   private lastPersistedStatus: SourceFetchFailureStatus | "ok" | null = null;
+  /**
+   * Last failure detail that was logged. Repeated identical failures are
+   * suppressed so one upstream outage does not produce a warning every tick.
+   */
+  private lastLoggedFailure: { status: SourceFetchFailureStatus; message: string } | null = null;
 
   constructor(options: ErrorMonitorAcquirerOptions<TIssue>) {
     this.options = {
@@ -267,6 +272,13 @@ export class ErrorMonitorAcquirer<TIssue extends ErrorMonitorIssue> implements A
 
   /** Record a successful read so health counters reset and the cursor may advance. */
   private recordReadSuccess(): void {
+    const recoveredFrom = this.lastLoggedFailure;
+    this.lastLoggedFailure = null;
+    if (recoveredFrom) {
+      console.log(
+        `✅ [${this.name}] source is readable again (was ${recoveredFrom.status}); polling resumed.`,
+      );
+    }
     // An ok source stays ok; skip the SQLite write (and WAL churn) on the
     // steady-state ok-to-ok transition. This is only an in-process hint, so a
     // source that failed and recovered is still persisted.
@@ -304,6 +316,12 @@ export class ErrorMonitorAcquirer<TIssue extends ErrorMonitorIssue> implements A
     message: string,
     retryAfterMs?: number,
   ): void {
+    const previous = this.lastLoggedFailure;
+    this.lastLoggedFailure = { status, message };
+    // Log the transition into failure, and any new detail (for example a
+    // different HTTP status or classification), but not the same outage again.
+    if (previous && previous.status === status && previous.message === message) return;
+
     const retry =
       retryAfterMs !== undefined ? ` (retry in ${Math.ceil(retryAfterMs / 1000)}s)` : "";
     switch (status) {

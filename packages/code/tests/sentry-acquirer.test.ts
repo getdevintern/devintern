@@ -45,6 +45,35 @@ function issue(overrides: Partial<SentryIssue> = {}): SentryIssue {
   };
 }
 
+function captureConsole(): {
+  logs: string[];
+  warnings: string[];
+  errors: string[];
+  restore: () => void;
+} {
+  const logs: string[] = [];
+  const warnings: string[] = [];
+  const errors: string[] = [];
+  const original = {
+    log: console.log,
+    warn: console.warn,
+    error: console.error,
+  };
+  console.log = (...args: unknown[]) => logs.push(args.join(" "));
+  console.warn = (...args: unknown[]) => warnings.push(args.join(" "));
+  console.error = (...args: unknown[]) => errors.push(args.join(" "));
+  return {
+    logs,
+    warnings,
+    errors,
+    restore: () => {
+      console.log = original.log;
+      console.warn = original.warn;
+      console.error = original.error;
+    },
+  };
+}
+
 describe("SentryClient", () => {
   test("queries the project endpoint with auth and is:unresolved", async () => {
     const requests: string[] = [];
@@ -125,6 +154,225 @@ describe("SentryClient", () => {
     const client = new SentryClient({ authToken: "t", organization: "acme", fetchImpl });
     const error = await expectFetchError(client.fetchIssues());
     expect(error.status).toBe("unreadable");
+  });
+
+  test("composes is:unresolved exactly once when the query already contains it", async () => {
+    const requests: string[] = [];
+    const fetchImpl = (async (input: string | URL | Request) => {
+      requests.push(String(input));
+      return new Response(JSON.stringify([]), { status: 200 });
+    }) as typeof fetch;
+    const client = new SentryClient({
+      authToken: "t",
+      organization: "acme",
+      query: "is:unresolved",
+      fetchImpl,
+    });
+
+    await client.fetchUnresolvedIssues();
+
+    const query = new URL(String(requests[0])).searchParams.get("query");
+    expect(query).toBe("is:unresolved");
+    expect(query?.match(/is:unresolved/gi)).toHaveLength(1);
+  });
+
+  test("normalizes whitespace and casing of a configured is:unresolved term", async () => {
+    const requests: string[] = [];
+    const fetchImpl = (async (input: string | URL | Request) => {
+      requests.push(String(input));
+      return new Response(JSON.stringify([]), { status: 200 });
+    }) as typeof fetch;
+    const client = new SentryClient({
+      authToken: "t",
+      organization: "acme",
+      query: "  IS:Unresolved  ",
+      fetchImpl,
+    });
+
+    await client.fetchUnresolvedIssues();
+
+    const query = new URL(String(requests[0])).searchParams.get("query");
+    expect(query).toBe("is:unresolved");
+  });
+
+  test("keeps extra query terms alongside is:unresolved", async () => {
+    const requests: string[] = [];
+    const fetchImpl = (async (input: string | URL | Request) => {
+      requests.push(String(input));
+      return new Response(JSON.stringify([]), { status: 200 });
+    }) as typeof fetch;
+    const client = new SentryClient({
+      authToken: "t",
+      organization: "acme",
+      query: "environment:production",
+      fetchImpl,
+    });
+
+    await client.fetchUnresolvedIssues();
+
+    const query = new URL(String(requests[0])).searchParams.get("query");
+    expect(query).toBe("is:unresolved environment:production");
+  });
+
+  test("retries a transient 503 and returns issues from the next attempt", async () => {
+    let calls = 0;
+    const sleeps: number[] = [];
+    const fetchImpl = (async () => {
+      calls++;
+      if (calls === 1) return new Response("boom", { status: 503 });
+      return new Response(JSON.stringify([issue()]), { status: 200 });
+    }) as unknown as typeof fetch;
+    const client = new SentryClient({
+      authToken: "t",
+      organization: "acme",
+      fetchImpl,
+      sleepImpl: async (ms) => {
+        sleeps.push(ms);
+      },
+    });
+
+    const issues = await client.fetchUnresolvedIssues();
+
+    expect(calls).toBe(2);
+    expect(sleeps).toHaveLength(1);
+    expect(issues).toHaveLength(1);
+  });
+
+  test("retries a network failure and returns issues from the next attempt", async () => {
+    let calls = 0;
+    const fetchImpl = (async () => {
+      calls++;
+      if (calls === 1) throw new Error("ECONNRESET");
+      return new Response(JSON.stringify([issue()]), { status: 200 });
+    }) as unknown as typeof fetch;
+    const client = new SentryClient({
+      authToken: "t",
+      organization: "acme",
+      fetchImpl,
+      sleepImpl: async () => {},
+    });
+
+    const issues = await client.fetchUnresolvedIssues();
+
+    expect(calls).toBe(2);
+    expect(issues).toHaveLength(1);
+  });
+
+  test("throws unreadable with the HTTP status once transient retries are exhausted", async () => {
+    let calls = 0;
+    const fetchImpl = (async () => {
+      calls++;
+      return new Response("boom", { status: 503 });
+    }) as unknown as typeof fetch;
+    const client = new SentryClient({
+      authToken: "t",
+      organization: "acme",
+      fetchImpl,
+      maxRetries: 1,
+      sleepImpl: async () => {},
+    });
+
+    const error = await expectFetchError(client.fetchUnresolvedIssues());
+
+    expect(calls).toBe(2);
+    expect(error.status).toBe("unreadable");
+    expect(error.message).toContain("HTTP 503");
+  });
+
+  test("honors a short Retry-After on a 503", async () => {
+    let calls = 0;
+    const sleeps: number[] = [];
+    const fetchImpl = (async () => {
+      calls++;
+      if (calls === 1) {
+        return new Response("boom", {
+          status: 503,
+          headers: { "retry-after": "2" },
+        });
+      }
+      return new Response(JSON.stringify([]), { status: 200 });
+    }) as unknown as typeof fetch;
+    const client = new SentryClient({
+      authToken: "t",
+      organization: "acme",
+      fetchImpl,
+      sleepImpl: async (ms) => {
+        sleeps.push(ms);
+      },
+    });
+
+    await client.fetchUnresolvedIssues();
+
+    expect(sleeps).toEqual([2_000]);
+  });
+
+  test("caps a long Retry-After so polling cannot stall", async () => {
+    let calls = 0;
+    const sleeps: number[] = [];
+    const fetchImpl = (async () => {
+      calls++;
+      if (calls === 1) {
+        return new Response("boom", {
+          status: 503,
+          headers: { "retry-after": "30" },
+        });
+      }
+      return new Response(JSON.stringify([]), { status: 200 });
+    }) as unknown as typeof fetch;
+    const client = new SentryClient({
+      authToken: "t",
+      organization: "acme",
+      fetchImpl,
+      sleepImpl: async (ms) => {
+        sleeps.push(ms);
+      },
+    });
+
+    await client.fetchUnresolvedIssues();
+
+    expect(sleeps).toEqual([10_000]);
+  });
+
+  test("does not retry auth failures", async () => {
+    let calls = 0;
+    const fetchImpl = (async () => {
+      calls++;
+      return new Response("denied", { status: 401 });
+    }) as unknown as typeof fetch;
+    const client = new SentryClient({
+      authToken: "t",
+      organization: "acme",
+      fetchImpl,
+      sleepImpl: async () => {},
+    });
+
+    const error = await expectFetchError(client.fetchUnresolvedIssues());
+
+    expect(calls).toBe(1);
+    expect(error.status).toBe("auth-failed");
+  });
+
+  test("does not retry rate limits and keeps the Retry-After window", async () => {
+    let calls = 0;
+    const fetchImpl = (async () => {
+      calls++;
+      return new Response("slow down", {
+        status: 429,
+        headers: { "retry-after": "30" },
+      });
+    }) as unknown as typeof fetch;
+    const client = new SentryClient({
+      authToken: "t",
+      organization: "acme",
+      fetchImpl,
+      sleepImpl: async () => {},
+    });
+
+    const error = await expectFetchError(client.fetchUnresolvedIssues());
+
+    expect(calls).toBe(1);
+    expect(error.status).toBe("rate-limited");
+    expect(error.retryAfterMs).toBe(30_000);
   });
 
   test("classifies a network failure as unreadable", async () => {
@@ -625,5 +873,91 @@ describe("ErrorMonitorAcquirer with Sentry issues", () => {
     await acquirer.tick();
 
     expect(statuses).toEqual(["ok"]);
+  });
+
+  test("logs one warning for repeated identical failures and one recovery line", async () => {
+    let failing = true;
+    const provider = {
+      providerName: "sentry",
+      fetchIssues: async () => {
+        if (failing) {
+          throw new SourceFetchError(
+            "unreadable",
+            "Sentry API error (HTTP 504) for https://sentry.io/api/0/projects/acme/webapp/issues/",
+          );
+        }
+        return [issue()];
+      },
+      validateIssue: () => ({ valid: true }),
+      buildTaskMarkdown: () => "task",
+    };
+    const acquirer = new ErrorMonitorAcquirer({
+      sourceId: "primary",
+      intervalSeconds: 60,
+      queue,
+      provider,
+      executeTask: async () => true,
+    });
+
+    const failingCapture = captureConsole();
+    try {
+      await acquirer.tick();
+      await acquirer.tick();
+    } finally {
+      failingCapture.restore();
+    }
+
+    expect(
+      failingCapture.warnings.filter((line) => line.includes("source is unreadable")),
+    ).toHaveLength(1);
+    expect(failingCapture.logs.filter((line) => line.includes("readable again"))).toHaveLength(0);
+
+    failing = false;
+    const recoveryCapture = captureConsole();
+    try {
+      await acquirer.tick();
+    } finally {
+      recoveryCapture.restore();
+    }
+
+    expect(recoveryCapture.logs.filter((line) => line.includes("readable again"))).toHaveLength(1);
+    expect(recoveryCapture.logs.some((line) => line.includes("was unreadable"))).toBe(true);
+  });
+
+  test("logs new failure detail when the failure status changes", async () => {
+    let statusCode = 503;
+    const provider = {
+      providerName: "sentry",
+      fetchIssues: async () => {
+        throw new SourceFetchError(
+          "unreadable",
+          `Sentry API error (HTTP ${statusCode}) for https://sentry.io/api/0/projects/acme/webapp/issues/`,
+        );
+      },
+      validateIssue: () => ({ valid: true }),
+      buildTaskMarkdown: () => "task",
+    };
+    const acquirer = new ErrorMonitorAcquirer({
+      sourceId: "primary",
+      intervalSeconds: 60,
+      queue,
+      provider,
+      executeTask: async () => true,
+    });
+
+    const capture = captureConsole();
+    try {
+      await acquirer.tick();
+      await acquirer.tick();
+      statusCode = 504;
+      await acquirer.tick();
+    } finally {
+      capture.restore();
+    }
+
+    const failures = capture.warnings.filter((line) => line.includes("source is unreadable"));
+    expect(failures).toHaveLength(2);
+    expect(failures[0]).toContain("HTTP 503");
+    expect(failures[1]).toContain("HTTP 504");
   });
 });

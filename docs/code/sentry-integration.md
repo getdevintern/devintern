@@ -118,14 +118,18 @@ A source that cannot be read is never reported as a quiet source. If a fetch
 fails, the tick yields an explicit failure status instead of an empty success:
 `unreadable` for a transient or malformed response, `rate-limited` when Sentry
 returns HTTP 429 (the `Retry-After` window is recorded alongside the status),
-and `auth-failed` for a rejected token. On any of these the cursor is left
+and `auth-failed` for a rejected token. Transient network errors and Sentry 5xx
+responses are retried twice with short backoff, honoring a capped
+`Retry-After`, before the tick reports `unreadable`; auth and rate-limit
+responses are classified immediately. On any of these the cursor is left
 unchanged, so the next tick retries and no error is skipped simply because it
-was not fetched. The per-source status (including consecutive failures and the
-last successful read) is persisted in the workspace database beside the schedule
-state for operator inspection; authentication failures are additionally logged
-as errors and are visible immediately. The recorded status and retry window are
-not yet consumed to delay polling — ticks keep firing on `poll_interval` — and
-the dashboard does not yet surface them.
+was not fetched. Repeated identical failures are logged once, with a recovery
+line when the source reads successfully again. The per-source status (including
+consecutive failures and the last successful read) is persisted in the workspace
+database beside the schedule state for operator inspection; authentication
+failures are additionally logged as errors and are visible immediately. The
+recorded status and retry window are not yet consumed to delay polling — ticks
+keep firing on `poll_interval` — and the dashboard does not yet surface them.
 
 Handled issue IDs are stored in the workspace database under a source key that
 includes the provider and configured source `id`. That prevents collisions
