@@ -178,10 +178,15 @@ describe("RepoManager", () => {
     const base = await manager.ensureBaseWorktree(repo);
 
     // Simulate an automation that left the shared checkout on its own branch.
+    // The bare clone has no identity of its own (CI has no global one), so the
+    // fixture commit passes it explicitly.
     git(base, "checkout -b feature/stale");
     writeFileSync(join(base, "stale.txt"), "stale work\n");
     git(base, "add .");
-    git(base, 'commit -m "stale feature work"');
+    git(
+      base,
+      '-c user.name="Fixture User" -c user.email="fixture@example.com" commit -m "stale feature work"',
+    );
     const staleHead = git(base, "rev-parse HEAD");
 
     // Upstream moves on while the checkout is stale.
