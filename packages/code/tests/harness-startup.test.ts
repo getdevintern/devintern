@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 
-import { detectHarnessStartupFailure } from "../src/lib/agent/harness-startup";
+import {
+  describeAgentExitFailure,
+  detectHarnessStartupFailure,
+} from "../src/lib/agent/harness-startup";
 
 describe("detectHarnessStartupFailure", () => {
   test("classifies a mise sandbox denial", () => {
@@ -23,6 +26,21 @@ describe("detectHarnessStartupFailure", () => {
       durationMs: 90,
     });
     expect(result?.unavailable).toBe(true);
+  });
+
+  test("classifies a nested nono session-state failure regardless of the OS error wording", () => {
+    const result = detectHarnessStartupFailure({
+      exitCode: 1,
+      stdout: "",
+      // A second nono layer cannot create its audit state under the outer
+      // confinement and exits before the agent starts.
+      stderr:
+        "nono: Snapshot error: Failed to create session directory " +
+        "/home/user/.local/state/nono/audit/abc123: Read-only file system (os error 30)",
+      durationMs: 10_000,
+    });
+    expect(result?.unavailable).toBe(true);
+    expect(result?.reason).toContain("nono: Snapshot error");
   });
 
   test("classifies EACCES and ENOENT", () => {
@@ -64,5 +82,34 @@ describe("detectHarnessStartupFailure", () => {
         durationMs: 100,
       }),
     ).toBeNull();
+  });
+});
+
+describe("describeAgentExitFailure", () => {
+  test("prefers the last failure-shaped stderr line over routine progress output", () => {
+    expect(
+      describeAgentExitFailure(
+        "working...\n",
+        "warning: retrying\nfatal: remote rejected the push\n",
+      ),
+    ).toBe("fatal: remote rejected the push");
+  });
+
+  test("falls back to stderr then stdout when no line names a failure", () => {
+    expect(describeAgentExitFailure("", "agent stopped\n")).toBe("agent stopped");
+    expect(describeAgentExitFailure("agent stopped\n", "")).toBe("agent stopped");
+  });
+
+  test("strips ANSI sequences and truncates long reasons", () => {
+    expect(describeAgentExitFailure("", "\u001b[31mfatal: boom\u001b[0m\n")).toBe("fatal: boom");
+    const long = `error: ${"x".repeat(400)}`;
+    const reason = describeAgentExitFailure("", long, 20);
+    expect(reason).toBe(`error: ${"x".repeat(13)}…`);
+    expect(reason?.length).toBe(21);
+  });
+
+  test("returns undefined when the agent produced no output", () => {
+    expect(describeAgentExitFailure("", "")).toBeUndefined();
+    expect(describeAgentExitFailure("\n \r\n", "\n")).toBeUndefined();
   });
 });

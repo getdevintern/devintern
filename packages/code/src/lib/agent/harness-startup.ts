@@ -49,7 +49,12 @@ const STARTUP_PATTERNS: RegExp[] = [
   /sandbox[^\n]*(?:initializ|initialis|setup|startup)[^\n]*(?:fail|error|denied)/i,
   /(?:fail(?:ed)?|error|cannot|unable)[^\n]*sandbox[^\n]*(?:initializ|initialis|setup|startup)/i,
   /landlock[^\n]*(?:error|denied|fail)/i,
+  /(?:fail(?:ed)?|error|cannot|unable)[^\n]*landlock[^\n]*(?:ruleset|rules|domain|namespace)/i,
   /seatbelt[^\n]*(?:error|denied|fail)/i,
+  // A nested nono wrapper fails while creating its session/capability state,
+  // before the agent starts. The OS error wording varies by version, so match
+  // the wrapper prefix rather than relying on "Permission denied".
+  /nono:[^\n]*(?:snapshot|session|capabilit)[^\n]*(?:error|fail|denied)/i,
 ];
 
 /** Pick the line that best explains why the process could not start. */
@@ -69,6 +74,52 @@ function firstActionableLine(stdout: string, stderr: string): string | undefined
     .map((line) => line.trim())
     .find(Boolean);
   return stdoutLine;
+}
+
+/** Strip ANSI colour/control sequences so the reason stays readable in logs. */
+function stripAnsi(text: string): string {
+  return text.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "");
+}
+
+/** Maximum characters of agent output carried into a thrown exit error. */
+const EXIT_REASON_MAX_CHARS = 300;
+
+/**
+ * Pick the line that best explains an ordinary non-zero agent exit.
+ *
+ * Startup failures are classified separately by
+ * {@link detectHarnessStartupFailure}; this helper covers the remaining case,
+ * where the agent ran and then failed. Without it the thrown error is only
+ * "Agent exited with code 1", which is unattributable in Sentry and in ticket
+ * feedback. Prefer the last stderr line that names a failure, then the last
+ * stderr line, then the last stdout line, so the reason is the most specific
+ * available without pasting the whole transcript.
+ *
+ * @param stdout - Captured agent stdout.
+ * @param stderr - Captured agent stderr.
+ * @param maxChars - Maximum reason length (default 300).
+ * @returns A single-line reason, or undefined when the agent produced no output.
+ */
+export function describeAgentExitFailure(
+  stdout: string,
+  stderr: string,
+  maxChars: number = EXIT_REASON_MAX_CHARS,
+): string | undefined {
+  const lines = (text: string): string[] =>
+    text
+      .split(/\r?\n/)
+      .map((line) => stripAnsi(line).trim())
+      .filter(Boolean);
+  const stderrLines = lines(stderr);
+  const stdoutLines = lines(stdout);
+  const failureLine = stderrLines
+    .filter((line) =>
+      /\b(?:error|failed|failure|denied|permission|not found|timed out|limit)\b/i.test(line),
+    )
+    .at(-1);
+  const reason = failureLine ?? stderrLines.at(-1) ?? stdoutLines.at(-1);
+  if (!reason) return undefined;
+  return reason.length > maxChars ? `${reason.slice(0, maxChars)}…` : reason;
 }
 
 /**
