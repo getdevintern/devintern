@@ -173,6 +173,36 @@ describe("RepoManager", () => {
     expect(await manager.ensureBaseWorktree(repo)).toBe(base);
   });
 
+  test("ensureBaseWorktree resets a reused checkout to the fetched default branch", async () => {
+    await manager.ensureBareClone(repo);
+    const base = await manager.ensureBaseWorktree(repo);
+
+    // Simulate an automation that left the shared checkout on its own branch.
+    git(base, "checkout -b feature/stale");
+    writeFileSync(join(base, "stale.txt"), "stale work\n");
+    git(base, "add .");
+    git(base, 'commit -m "stale feature work"');
+    const staleHead = git(base, "rev-parse HEAD");
+
+    // Upstream moves on while the checkout is stale.
+    writeFileSync(join(originDir, "next.txt"), "next\n");
+    git(originDir, "add .");
+    git(originDir, 'commit -m "Next upstream commit"');
+    await manager.fetch(repo.name);
+
+    expect(await manager.ensureBaseWorktree(repo)).toBe(base);
+    // Detached at the fetched default branch, not on the previous feature
+    // branch and not on the pre-fetch commit.
+    expect(git(base, "rev-parse --abbrev-ref HEAD")).toBe("HEAD");
+    expect(git(base, "rev-parse HEAD")).toBe(git(originDir, "rev-parse main"));
+    expect(existsSync(join(base, "README.md"))).toBe(true);
+    expect(existsSync(join(base, "next.txt"))).toBe(true);
+    // Tracked files from the stale feature branch are gone.
+    expect(existsSync(join(base, "stale.txt"))).toBe(false);
+    // The branch the previous run created is left intact for its own PR.
+    expect(git(base, "rev-parse feature/stale")).toBe(staleHead);
+  });
+
   test("sweepStaleWorktrees removes old task worktrees but never the base", async () => {
     await manager.ensureBareClone(repo);
     const base = await manager.ensureBaseWorktree(repo);

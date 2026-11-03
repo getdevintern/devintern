@@ -165,23 +165,47 @@ export class RepoManager {
   }
 
   /**
-   * Ensure the persistent base worktree (default branch) exists.
+   * Ensure the persistent base worktree (default branch) exists and is current.
    *
    * Review and mention runs need a normal checkout to operate from; task
    * runs use disposable worktrees instead. Hooks are isolated on first
    * creation; task subprocesses install dependencies after preparing their
    * final branch, including every reuse by an automation.
+   *
+   * A reused checkout is reset to the fetched default branch. It is shared by
+   * automations and review jobs, and a previous run can leave it on its own
+   * feature branch at an old commit; without the reset the next automation
+   * would start from that stale head instead of the default branch.
    */
   async ensureBaseWorktree(repo: RepoConfig): Promise<string> {
     return this.withAdminLock(repo.name, async () => {
       const path = this.baseWorktreePath(repo.name);
-      if (existsSync(path)) {
+      const branch = await this.resolveDefaultBranch(repo);
+      if (!existsSync(path)) {
+        await this.addWorktreeUnlocked(repo.name, path, `origin/${branch}`);
         return path;
       }
-      const branch = await this.resolveDefaultBranch(repo);
-      await this.addWorktreeUnlocked(repo.name, path, `origin/${branch}`);
+      await this.syncBaseWorktreeUnlocked(path, branch);
       return path;
     });
+  }
+
+  /**
+   * Detach a reused base worktree at `origin/<branch>`, discarding tracked
+   * changes left by an interrupted run without moving the branch the previous
+   * run created. Untracked files are kept (they include installed
+   * dependencies); `--force` replaces any that would block the checkout.
+   */
+  private async syncBaseWorktreeUnlocked(path: string, branch: string): Promise<void> {
+    const result = await Utils.executeGitCommand(
+      ["checkout", "--force", "--detach", `origin/${branch}`],
+      { cwd: path },
+    );
+    if (!result.success) {
+      throw new Error(
+        `Failed to sync base worktree at ${path} to origin/${branch}: ${result.error}`,
+      );
+    }
   }
 
   /**
