@@ -10,14 +10,19 @@
  * A pickup is inheritance: the prior attempt already paid for reading the code,
  * cloning the worktree, and producing changes. Resuming reuses its branch and
  * hands the prior report to the next agent so it continues instead of
- * re-deriving. Incomplete state (no branch, no report, or a branch that no
- * longer exists) always falls back to a fresh run.
+ * re-deriving. A branch with real commits ahead of its base is resumable even
+ * when the report is missing (legacy/interrupted runs) or the implementation
+ * stage failed before delivery (incomplete, commit, or review halt). When a
+ * commit probe is supplied it decides for every status — the stage is written
+ * before delivery runs, so a succeeded stage plus a report can still describe
+ * an empty branch. Incomplete state (no branch, no report and no landed
+ * commits, or a branch that no longer exists) falls back to a fresh run.
  *
  * Every read is best-effort: a storage or parse error degrades to "fresh", the
  * safe default.
  */
 
-import type { RunRecord, RunStatus, RunStore } from "./run-recorder";
+import type { RunRecord, RunStatus, RunStore, StageStatus } from "./run-recorder";
 
 /** Terminal statuses whose runs are candidates for pickup. */
 export const PICKUP_STATUSES: readonly RunStatus[] = ["failed", "escalated", "abandoned"];
@@ -105,6 +110,19 @@ export interface SessionPickupOptions {
    * the resolver falls back to a fresh run. Absent → trust the record.
    */
   branchExists?: (branch: string) => boolean | Promise<boolean>;
+  /**
+   * Optional probe for commits on the recorded branch ahead of its target base.
+   *
+   * Older/interrupted runs can carry real implementation commits without a
+   * saved report (the stage used to be written only after auto-review). The
+   * stage is also written before commit/verify/auto-review, so even a
+   * `succeeded` stage with a report can predate delivery: a crash or SIGTERM
+   * during those phases leaves an empty branch behind. Whenever this probe is
+   * supplied it is authoritative — resume requires landed commits regardless
+   * of the report. Absent → a report from a stage that did not fail is trusted;
+   * false → the run stays fresh.
+   */
+  hasLandedCommits?: (session: { branch: string; run: RunRecord }) => boolean | Promise<boolean>;
   /** Optional description of already-landed work (git log/diff). Never fatal. */
   describeLanded?: (session: {
     branch: string;
@@ -117,38 +135,64 @@ export function isPickupStatus(status: RunStatus): status is PickupRunStatus {
   return (PICKUP_STATUSES as readonly RunStatus[]).includes(status);
 }
 
+/** Implementation report and the status of the stage that recorded it. */
+export interface RecordedImplementation {
+  report?: string;
+  status?: StageStatus;
+}
+
 /**
- * Extract the implementation report a run recorded, if any.
+ * Extract the implementation report a run recorded, plus that stage's status.
  *
  * The pipeline stores the agent's `implementation-summary[-incomplete].md` as a
  * JSON `detail.report` on the `implementation` stage; the most recent such
- * stage wins. Malformed or truncated detail reads as "no report".
+ * stage wins. Malformed or truncated detail reads as "no report". The status
+ * lets pickup tell a completed implementation apart from one that failed
+ * before delivery.
  */
-export function readImplementationReport(
+export function readImplementationStage(
   runStore: SessionPickupRunStore,
   runId: number,
-): string | undefined {
+): RecordedImplementation {
   let stages: ReturnType<SessionPickupRunStore["listStages"]>;
   try {
     stages = runStore.listStages(runId);
   } catch {
-    return undefined;
+    return {};
   }
+  let latestStatus: StageStatus | undefined;
   for (let i = stages.length - 1; i >= 0; i -= 1) {
     const stage = stages[i];
-    if (stage.stage !== "implementation" || !stage.detail) {
+    if (stage.stage !== "implementation") {
+      continue;
+    }
+    latestStatus ??= stage.status;
+    if (!stage.detail) {
       continue;
     }
     try {
       const detail = JSON.parse(stage.detail) as { report?: unknown };
       if (typeof detail.report === "string" && detail.report.trim()) {
-        return detail.report;
+        return { report: detail.report, status: latestStatus };
       }
     } catch {
       // Truncated or non-JSON detail: treat as missing.
     }
   }
-  return undefined;
+  return latestStatus === undefined ? {} : { status: latestStatus };
+}
+
+/**
+ * Extract the implementation report a run recorded, if any.
+ *
+ * @param runStore - Run store holding the stage records
+ * @param runId - Run to inspect
+ */
+export function readImplementationReport(
+  runStore: SessionPickupRunStore,
+  runId: number,
+): string | undefined {
+  return readImplementationStage(runStore, runId).report;
 }
 
 /** A selected candidate run, or why no run qualified. */
@@ -200,14 +244,24 @@ function findCandidateRun(
  * Reconstruct a resumable session from the run store, or explain why a fresh
  * run is required.
  *
- * Resume requires a terminal retriable run with a recorded branch and an
- * implementation report, and (when a probe is supplied) a branch that still
- * exists. Everything else falls back to a fresh run.
+ * Resume requires a terminal retriable run with a recorded branch that still
+ * exists, plus landed commits when a commit probe is supplied (otherwise an
+ * implementation report from a stage that did not fail). Everything else falls
+ * back to a fresh run.
  */
 export async function resolveSessionPickup(
   options: SessionPickupOptions,
 ): Promise<SessionPickupDecision> {
-  const { runStore, taskKey, runId, excludeRunId, scope, branchExists, describeLanded } = options;
+  const {
+    runStore,
+    taskKey,
+    runId,
+    excludeRunId,
+    scope,
+    branchExists,
+    hasLandedCommits,
+    describeLanded,
+  } = options;
 
   let candidate: CandidateRun;
   try {
@@ -229,11 +283,6 @@ export async function resolveSessionPickup(
     return { kind: "fresh", reason: "prior run recorded no branch" };
   }
 
-  const report = readImplementationReport(runStore, run.id);
-  if (!report) {
-    return { kind: "fresh", reason: "prior run recorded no implementation report" };
-  }
-
   if (branchExists) {
     let exists: boolean;
     try {
@@ -243,6 +292,36 @@ export async function resolveSessionPickup(
     }
     if (!exists) {
       return { kind: "fresh", reason: `branch '${branch}' no longer exists` };
+    }
+  }
+
+  const implementation = readImplementationStage(runStore, run.id);
+  const report = implementation.report;
+  // A report proves the agent wrote a summary, not that the branch carries
+  // delivered work. The stage is written as soon as the agent session ends,
+  // before commit/verify/auto-review, so even a `succeeded` stage can be
+  // followed by a hard crash or SIGTERM during delivery that leaves the branch
+  // empty. A supplied commit probe is therefore authoritative for every
+  // status; without one, a failed stage (incomplete handoff or a delivery halt
+  // after the early success record) still requires commits ahead of the base.
+  if (hasLandedCommits || !report || implementation.status === "failed") {
+    let landedCommits = false;
+    if (hasLandedCommits) {
+      try {
+        landedCommits = await hasLandedCommits({ branch, run });
+      } catch {
+        landedCommits = false;
+      }
+    }
+    if (!landedCommits) {
+      return {
+        kind: "fresh",
+        reason: hasLandedCommits
+          ? `branch '${branch}' has no commits to resume`
+          : report
+            ? `branch '${branch}' has no verifiable commits to resume`
+            : "prior run recorded no implementation report",
+      };
     }
   }
 

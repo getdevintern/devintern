@@ -8,9 +8,7 @@
  */
 
 import {
-  accessSync,
   chmodSync,
-  constants,
   cpSync,
   existsSync,
   mkdirSync,
@@ -45,7 +43,26 @@ export function nonoPath(): string | undefined {
 }
 
 /**
- * Base directory for the isolated home.
+ * Git-ignored scratch directory inside the checkout.
+ *
+ * Used when the usual system locations are unavailable. An enclosing kernel
+ * sandbox (for example a nono-wrapped DevIntern worker that runs this suite
+ * from its pre-push hook) commonly grants write access only to the checkout,
+ * and denies `/var/tmp` even though `access()` reports it writable. The
+ * checkout itself is still outside the OS temp dir, so it satisfies the home
+ * constraint below, and `node_modules/.cache` keeps the fixture out of tracked
+ * files.
+ *
+ * @returns Absolute path to the package's scratch directory.
+ */
+function checkoutScratchBase(): string {
+  const base = join(import.meta.dir, "..", "node_modules", ".cache", "devintern-e2e");
+  mkdirSync(base, { recursive: true });
+  return base;
+}
+
+/**
+ * Base directories for the isolated home, most preferred first.
  *
  * The home must live outside the OS temp dir. nono's generated Linux profile
  * extends `linux-host-compat`, which grants a broad read on `/tmp`; when HOME
@@ -54,28 +71,36 @@ export function nonoPath(): string | undefined {
  * parent. A real user home is normally outside `/tmp`, so the fixture mirrors
  * that instead of weakening the product policy.
  *
- * @returns A writable directory that does not contain the OS temp dir.
+ * @returns Candidate bases, excluding the OS temp dir itself.
  */
-function sandboxHomeBase(): string {
-  const candidates = process.platform === "linux" ? ["/var/tmp", tmpdir()] : [tmpdir()];
-  for (const base of candidates) {
-    try {
-      accessSync(base, constants.W_OK);
-      return base;
-    } catch {
-      // Try the next candidate.
-    }
+function sandboxHomeBases(): string[] {
+  const candidates = process.platform === "linux" ? ["/var/tmp"] : [];
+  try {
+    candidates.push(checkoutScratchBase());
+  } catch {
+    // Read-only checkout: fall through to the OS temp dir.
   }
-  return tmpdir();
+  return candidates;
 }
 
 /**
  * Create an isolated home for a sandboxed run.
  *
+ * Usability is probed by creating the directory rather than by `access()`,
+ * because a kernel sandbox can deny the write while `access()` still reports
+ * the path writable.
+ *
  * @returns Path to a fresh temporary home outside the OS temp dir when possible.
  */
 export function createSandboxHome(): string {
-  return mkdtempSync(join(sandboxHomeBase(), "devintern-e2e-home-"));
+  for (const base of sandboxHomeBases()) {
+    try {
+      return mkdtempSync(join(base, "devintern-e2e-home-"));
+    } catch {
+      // Try the next candidate.
+    }
+  }
+  return mkdtempSync(join(tmpdir(), "devintern-e2e-home-"));
 }
 
 /**

@@ -137,16 +137,22 @@ export class RepoManager {
   /**
    * Update `refs/remotes/origin/*` from the remote.
    *
+   * @param repoName - Configured repository name
+   * @param options.timeoutMs - Bound the network operation (used by startup
+   *   probes that must not block on an unreachable remote)
    * @throws When the fetch fails (network, auth, missing clone).
    */
-  async fetch(repoName: string): Promise<void> {
-    await this.withAdminLock(repoName, () => this.fetchUnlocked(repoName));
+  async fetch(repoName: string, options?: { timeoutMs?: number }): Promise<void> {
+    await this.withAdminLock(repoName, () => this.fetchUnlocked(repoName, options));
   }
 
-  private async fetchUnlocked(repoName: string): Promise<void> {
-    const result = await Utils.executeGitCommand(["fetch", "--prune", "origin"], {
-      cwd: this.bareClonePath(repoName),
-    });
+  private async fetchUnlocked(repoName: string, options?: { timeoutMs?: number }): Promise<void> {
+    const result = await Utils.executeGitCommand(
+      ["fetch", "--prune", "origin"],
+      options?.timeoutMs
+        ? { cwd: this.bareClonePath(repoName), timeoutMs: options.timeoutMs }
+        : { cwd: this.bareClonePath(repoName) },
+    );
     if (!result.success) {
       throw new Error(`Failed to fetch repo "${repoName}": ${result.error}`);
     }

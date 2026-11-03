@@ -94,6 +94,13 @@ export interface OrphanRecoveryDeps {
    * trusted. Ignored when `resolvePickup` is injected.
    */
   branchExists?: (branch: string, run: RunRecord) => boolean | Promise<boolean>;
+  /**
+   * Optional probe for commits on a run's recorded branch ahead of its target
+   * base, letting orphan recovery resume a legacy/interrupted run whose branch
+   * has work but whose implementation report is missing. When absent or false,
+   * such a run falls back to the failure/requeue path.
+   */
+  hasLandedCommits?: (branch: string, run: RunRecord) => boolean | Promise<boolean>;
   log?: typeof console.log;
   warn?: typeof console.warn;
 }
@@ -178,6 +185,9 @@ export async function recoverOrphanedTaskRuns(
         scope: run,
         ...(deps.branchExists
           ? { branchExists: (branch: string) => deps.branchExists!(branch, run) }
+          : {}),
+        ...(deps.hasLandedCommits
+          ? { hasLandedCommits: (session) => deps.hasLandedCommits!(session.branch, run) }
           : {}),
       }));
 
