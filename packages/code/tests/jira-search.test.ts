@@ -84,6 +84,28 @@ describe("JiraTaskTrackerClient.searchTasks", () => {
     expect((error as Error).cause).toBe(apiError);
   });
 
+  test("keeps the JQL once when Jira echoes it back in the error", async () => {
+    const client = new JiraTaskTrackerClient(
+      "https://acme.atlassian.net",
+      "user@example.com",
+      "token",
+    );
+
+    const jql = 'status = "To Do"';
+    const apiError = new Error(`Invalid JQL: ${jql}`);
+    client.jiraApiCall = async () => {
+      throw apiError;
+    };
+
+    const error = await client.searchTasks(jql).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(Error);
+    const message = (error as Error).message;
+    expect(message).toContain(`Invalid JQL: ${jql}`);
+    expect(message.split(jql)).toHaveLength(2);
+    expect((error as Error).cause).toBe(apiError);
+  });
+
   test("surfaces a network failure message", async () => {
     const client = new JiraTaskTrackerClient(
       "https://acme.atlassian.net",
