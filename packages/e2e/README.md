@@ -360,6 +360,41 @@ This smoke is opt-in and is not part of `test`, Turbo, or CI. See
 [docs/tracker-e2e-plan.md](docs/tracker-e2e-plan.md) for the staged expansion to
 full Jira/Trello lifecycles and offline fake-server coverage.
 
+## Direct webhook serve
+
+`tests/local/webhook-serve.test.ts` starts the built CLI as
+`devintern webhook serve` on an ephemeral `127.0.0.1` port with a temporary
+queue database, then sends real HTTP requests. It runs in the default offline
+suite:
+
+```sh
+bun run --filter @getdevintern/code build
+bun run --filter @devintern/e2e test
+```
+
+The suite starts with no provider secret and asserts the documented
+`WEBHOOK_SECRET, GITLAB_WEBHOOK_SECRET, or GITLAB_WEBHOOK_SIGNING_TOKEN is
+required` preflight failure before the process listens. The running fixture
+polls `GET /health` (it never waits on a fixed timer), checks queue and failover
+state, and verifies `GET /` documents the GitHub, GitLab and health endpoints.
+
+Signature coverage is local-only: GitHub HMAC-SHA256 over the exact raw body
+(including whitespace and a one-byte tamper), GitLab's `X-Gitlab-Token`, and
+GitLab Standard Webhooks (`webhook-id`, `webhook-timestamp` and the canonical
+`id.timestamp.rawBody` signature). Each mode asserts the accepted and rejected
+status codes, and the GitHub/GitLab duplicate-delivery paths assert that a
+replay is acknowledged as a duplicate (or rejected as in progress) without
+creating a second queue row. The startup preflight and the "only GitHub secret
+configured" GitLab 503 case use short-lived extra server processes.
+
+No real GitHub/GitLab host, token, webhook, relay, or hook installation is used.
+Secrets are random per run, the server is bound to loopback only, and
+`WEBHOOK_VALIDATE_IP` stays unset. The fixture seeds a future harness rate-limit
+window before startup so an accepted review delivery remains in flight and the
+dedupe branch is deterministic; this also keeps the asynchronous review pipeline
+away from any provider API. The temporary root (HOME, workspace, output and
+queue database) is removed in `finally`, even when an assertion fails.
+
 ## Delivery lifecycle coverage
 
 GitHub and local GitLab also cover an agent exiting unsuccessfully after editing,
