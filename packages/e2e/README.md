@@ -273,11 +273,15 @@ fails the explicit live command before it mutates a remote repository.
 
 ## Offline fake tracker servers
 
-The default local suite includes an in-process fake Jira Cloud v3 server, so the
-built CLI can exercise the Jira tracker lifecycle with no credentials and no
-network access. `bun test tests/local` runs
-`tests/local/tracker-jira-fake.test.ts`; it skips only when the built CLI is
+The default local suite includes in-process fake Jira Cloud v3 and Trello REST
+servers, so the built CLI can exercise both tracker lifecycles with no
+credentials and no network access. `bun run --filter @devintern/e2e test` (or
+`bun test tests/local` after building) runs
+`tests/local/tracker-jira-fake.test.ts` and
+`tests/local/tracker-trello-fake.test.ts`; they skip only when the built CLI is
 absent, like the other local Git tests.
+
+### Jira fake
 
 The fake binds `127.0.0.1:0`, accepts any Basic-auth credentials (and never logs
 them), and implements only the endpoints the product calls: `/myself`, enhanced
@@ -295,6 +299,23 @@ delivery of the seeded description/comment markers to the deterministic agent.
 A second run with `--skip-comments` proves no additional comment or transition
 is posted. The local bare Git remote is the code host; no GitHub token or PR is
 required.
+
+### Trello fake
+
+`providers/fake-trello.ts` implements the Trello REST subset the product calls:
+member boards, board lists and labels, card create/detail/update (including list
+moves and label replacement), comment actions, checklists, attachments, and
+search. `tests/local/tracker-trello-fake.test.ts` seeds a card plus a decoy,
+writes per-board list settings, and runs the production Trello client through
+explicit short-link and `--query` selection. The list name is the status, so the
+run moves the card from the todo list to the configured actioned list.
+Credentials are synthetic query values, the fake binds loopback only, and any
+unmatched request fails the test.
+
+```sh
+bun run --filter @getdevintern/code build
+bun run --filter @devintern/e2e test
+```
 
 ## Remote tracker fixtures
 
