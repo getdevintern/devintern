@@ -94,10 +94,25 @@ export function fleetTaskArgs(config: WorkspaceConfig): string[] {
   return workerTaskArgs();
 }
 
-/** Error groups are pre-qualified by the monitor, so skip the generic feasibility agent pass. */
+/**
+ * Build the CLI args for an error-monitor remediation run.
+ *
+ * The monitor already qualified the error group, so the generic feasibility
+ * pass is skipped. A remediation that concludes no code change is needed (the
+ * issue was already fixed, is not reproducible, or belongs to the
+ * environment) is a legitimate outcome: without `--allow-no-changes` delivery
+ * fails the run with "Implementation was not committed", and that failure is
+ * reported back to the same Sentry issue, inflating it and feeding the next
+ * remediation attempt.
+ */
 export function errorMonitorTaskArgs(config: WorkspaceConfig): string[] {
   const args = fleetTaskArgs(config);
-  return args.includes("--skip-clarity-check") ? args : [...args, "--skip-clarity-check"];
+  const withClarity = args.includes("--skip-clarity-check")
+    ? args
+    : [...args, "--skip-clarity-check"];
+  return withClarity.includes("--allow-no-changes")
+    ? withClarity
+    : [...withClarity, "--allow-no-changes"];
 }
 
 /**

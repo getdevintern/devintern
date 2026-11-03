@@ -708,6 +708,7 @@ describe("buildBugfixTaskMarkdown", () => {
     expect(md).toContain("TypeError");
     expect(md).toContain("src/app.ts in handler");
     expect(md).toContain(issue().permalink);
+    expect(md).toContain("successful no-op");
   });
 
   test("frames the Sentry issue text as untrusted external content", () => {
