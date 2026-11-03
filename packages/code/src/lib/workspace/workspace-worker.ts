@@ -24,9 +24,9 @@ import { RunStore } from "../state/run-recorder";
 import type { RunRecord } from "../state/run-recorder";
 import { RetryStateStore } from "../state/retry-state";
 import { ScheduledRetryStore } from "../state/run-retry";
-import { InjectedTaskStore } from "../state/injected-tasks";
+import { InjectedTaskStore, succeededRunCoversClaim } from "../state/injected-tasks";
 import type { InjectedTask } from "../state/injected-tasks";
-import { resolveSessionPickup } from "../state/session-pickup";
+import { latestScopedTaskRun, resolveSessionPickup } from "../state/session-pickup";
 import type { SessionPickupRunStore } from "../state/session-pickup";
 import { createTaskActionedGate } from "../task/actioned-state";
 import type { TaskTrackerClient } from "../trackers/client";
@@ -47,6 +47,7 @@ import {
   workspaceDbPath,
   worktreesDir,
   workspaceRunNowPath,
+  writeWorkerStartMarker,
 } from "./paths";
 import { WorkspaceConfigReloader } from "./config-reload";
 import { createWorkspaceLock, openWorkspaceState } from "./state";
@@ -65,6 +66,11 @@ import { flushAnalytics, trackWorkerStarted } from "../observability/analytics";
 import { startWorkerFailover } from "../worker/failover";
 import { RetryQueueAcquirer } from "./retry-acquirer";
 import { InjectedTaskAcquirer, INJECTED_TASK_SOURCE } from "./injected-acquirer";
+import {
+  INJECTED_INTERRUPTED_MESSAGE,
+  injectedAutoResumeExhaustedMessage,
+  skipInterruptedChildRunning,
+} from "./injected-recovery";
 import { toRoutableTask } from "./router";
 import { createIdleWorkerAutoUpdater } from "./worker-auto-update";
 import {
@@ -302,7 +308,7 @@ export async function recoverOrphanedWorkspaceRuns(options: {
  */
 export interface InjectedTaskRecoveryOptions {
   /** Run store used to reconstruct the interrupted run's session. */
-  runStore?: SessionPickupRunStore;
+  runStore?: SessionPickupRunStore & { reapOrphanedRuns?: () => number };
   /**
    * Optional branch-existence probe scoped to the row's repo. Absent (or a
    * missing base worktree) trusts the recorded branch, matching
@@ -315,22 +321,6 @@ export interface InjectedTaskRecoveryOptions {
   warn?: typeof console.warn;
 }
 
-/** Message used when no safe resume state exists for an interrupted row. */
-export const INJECTED_INTERRUPTED_MESSAGE = "worker restarted while this task was running";
-
-/** Actionable message when a row's automatic-resume budget is exhausted. */
-export function injectedAutoResumeExhaustedMessage(
-  taskKey: string,
-  runId: number,
-  branch: string,
-): string {
-  return (
-    `worker restarted again while this task was running; automatic resume budget exhausted ` +
-    `(run #${runId}, branch '${branch}'). Resume it manually with ` +
-    `\`devintern worker add --resume ${taskKey}\` or the dashboard Re-queue action.`
-  );
-}
-
 export async function recoverOrphanedInjectedTasks(
   store: InjectedTaskStore,
   options: InjectedTaskRecoveryOptions = {},
@@ -340,18 +330,33 @@ export async function recoverOrphanedInjectedTasks(
   const limit = options.maxAutoResumes ?? injectedAutoResumeLimit();
 
   for (const orphan of store.listRunning()) {
+    // A hard kill can leave the detached task child alive. That child is the
+    // same task and may still finish successfully, so resume only once it is
+    // gone (a mismatched start time means its pid was recycled).
+    if (skipInterruptedChildRunning(orphan, warn)) {
+      continue;
+    }
+    // Injected runs are local origin/tracker, pinned to the row's repo.
+    const scope = { origin: "local", tracker: "local", repo: orphan.repo } as const;
     let decision: Awaited<ReturnType<typeof resolveSessionPickup>> = {
       kind: "fresh",
       reason: "run store unavailable",
     };
+    let latestRun: RunRecord | undefined;
     if (options.runStore) {
       try {
+        latestRun = latestScopedTaskRun(options.runStore, orphan.taskKey, scope);
+        // Ordering or a failed sweep can leave the latest run `in_progress`.
+        // Reap it (idempotent; only touches runs still `in_progress`) so an
+        // interrupted attempt is evaluated as terminal, not as a live run.
+        if (latestRun?.status === "in_progress") {
+          options.runStore.reapOrphanedRuns?.();
+          latestRun = latestScopedTaskRun(options.runStore, orphan.taskKey, scope);
+        }
         decision = await resolveSessionPickup({
           runStore: options.runStore,
           taskKey: orphan.taskKey,
-          // Injected runs are recorded as local tracker/origin, pinned to the
-          // row's repo, and never carry a team/automation id.
-          scope: { origin: "local", tracker: "local", repo: orphan.repo },
+          scope,
           ...(options.branchExists
             ? { branchExists: (branch: string) => options.branchExists!(branch, orphan) }
             : {}),
@@ -385,7 +390,12 @@ export async function recoverOrphanedInjectedTasks(
       }
       continue;
     }
-
+    // Only a run that started after this claim proves the attempt finished:
+    // `--resume` re-queues settled rows, so a pre-restart success is stale.
+    if (succeededRunCoversClaim(latestRun, orphan.startedAt)) {
+      store.finish(orphan.id, "done", `run #${latestRun!.id} already succeeded before the restart`);
+      continue;
+    }
     store.finish(orphan.id, "failed", INJECTED_INTERRUPTED_MESSAGE);
     warn(`⚠️  [fleet] injected task ${orphan.taskKey} was interrupted by a worker restart`);
   }
@@ -399,7 +409,7 @@ export function makeBeforeAcquirersStart(
   store: InjectedTaskStore,
   options: {
     next?: () => Promise<void> | void;
-    runStore?: SessionPickupRunStore;
+    runStore?: SessionPickupRunStore & { reapOrphanedRuns?: () => number };
     branchExists?: (branch: string, task: InjectedTask) => boolean | Promise<boolean>;
     maxAutoResumes?: number;
     log?: typeof console.log;
@@ -413,16 +423,25 @@ export function makeBeforeAcquirersStart(
 }
 
 /**
- * Branch-existence probe for injected-row auto-resume. Reads the row's repo
- * base worktree; a missing repo/worktree trusts the recorded branch, matching
- * orphan recovery.
+ * Branch-existence probe for injected-row auto-resume.
+ *
+ * Injected-only workspaces never materialize the per-repo base worktree (the
+ * executor adds only a disposable task worktree), so probe the bare clone,
+ * which always exists after the repo's first run. Link worktrees share the
+ * bare clone's ref store, so both local task branches and fetched origin refs
+ * are visible there. Fall back to the base worktree when present, and treat a
+ * completely missing repo as "unknown" — refuse the resume and settle the row
+ * `failed` rather than trusting a branch that cannot be verified.
  */
 export function createInjectedBranchExistsProbe(
   workspaceDir: string,
 ): (branch: string, task: InjectedTask) => Promise<boolean> {
+  const repoManager = new RepoManager(workspaceDir);
   return async (branch, task) => {
-    const repoCwd = join(worktreesDir(workspaceDir), task.repo, BASE_WORKTREE_NAME);
-    if (!existsSync(repoCwd)) return true;
+    const bareCwd = repoManager.bareClonePath(task.repo);
+    const baseCwd = repoManager.baseWorktreePath(task.repo);
+    const repoCwd = existsSync(bareCwd) ? bareCwd : existsSync(baseCwd) ? baseCwd : undefined;
+    if (!repoCwd) return false;
     return (
       (await Utils.gitRefExists(`refs/heads/${branch}`, { cwd: repoCwd })) ||
       (await Utils.gitRefExists(`refs/remotes/origin/${branch}`, { cwd: repoCwd }))
@@ -575,13 +594,17 @@ export function buildInjectedTaskAcquirer(
         repo: task.repo,
         source: INJECTED_TASK_SOURCE,
         runOrigin: "local",
-        // The CLI resolves the local markdown file; the key still names the
-        // worktree and supervisor label.
+        // The CLI resolves the local markdown file; the key still names the worktree.
         taskRef: task.taskFile,
+        // Persist the detached child pid for hard-kill startup recovery.
+        onChildSpawn: (pid) => {
+          if (!store.isClosed()) store.setChildPid(task.id, pid);
+        },
       })(task.taskKey, toRoutableTask({ key: task.taskKey, labels: [], components: [] })),
     intervalSeconds: parseEnvInteger("WORKER_INJECTED_INTERVAL_SECONDS", 5, { min: 1 }),
     maxConcurrency: deps.config.workspace.execution.maxConcurrency,
     maxConcurrencyPerRepo: deps.config.workspace.execution.maxConcurrencyPerRepo,
+    isDraining: () => deps.supervisor?.isDraining() ?? false,
     verbose,
   });
 }
@@ -881,8 +904,8 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
     ? resolve(options.workspacePath)
     : workspaceConfigPath(resolveWorkspaceDir());
   const workspaceDir = options.workspacePath ? dirname(configPath) : resolveWorkspaceDir();
+  writeWorkerStartMarker(workspaceDir);
   const config = loadWorkspaceConfig(configPath);
-
   if (config.repos.length === 0) {
     console.error(
       `❌ No repos configured in ${configPath}.\n` +
@@ -908,7 +931,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   pruneInjectedTasks(injectedTasks);
   startInjectedTaskSweeper(injectedTasks);
 
-  assertWorkspaceHasWork(config, retryQueue, injectedTasks.hasPending(), multiTeam, initialQuery);
+  assertWorkspaceHasWork(config, retryQueue, injectedTasks, multiTeam, initialQuery);
 
   const state = openWorkspaceState(workspaceDir);
   await startWorkerFailover({
@@ -1399,37 +1422,70 @@ function applyWorkspaceEnv(
   };
 }
 
+/** Whether the workspace config itself contains ongoing work. */
+export function workspaceHasConfiguredWork(
+  config: WorkspaceConfig,
+  multiTeam: boolean,
+  initialQuery: string | undefined,
+): boolean {
+  return (
+    multiTeam ||
+    Boolean(initialQuery) ||
+    config.automations.length > 0 ||
+    config.estimations.length > 0 ||
+    config.errorMonitors.some((source) => source.enabled)
+  );
+}
+
+/**
+ * Whether startup has any work to keep the worker alive.
+ *
+ * Scheduled dashboard retries and queued/in-flight injected tasks are the
+ * exceptions to the task-query requirement: the worker can still run to drain
+ * them (and to recover an interrupted injected row under the post-lock hook).
+ * A `running` injected row counts here because only that hook can resume or
+ * fail it.
+ */
+export function workspaceHasStartupWork(
+  config: WorkspaceConfig,
+  retryQueue: Pick<ScheduledRetryStore, "hasPending">,
+  injectedTasks: Pick<InjectedTaskStore, "hasPending" | "listRunning">,
+  multiTeam: boolean,
+  initialQuery: string | undefined,
+): boolean {
+  return (
+    workspaceHasConfiguredWork(config, multiTeam, initialQuery) ||
+    retryQueue.hasPending() ||
+    injectedTasks.hasPending() ||
+    injectedTasks.listRunning().length > 0
+  );
+}
+
 /**
  * Exit when workspace mode has no work configured.
  *
- * Scheduled dashboard retries and queued injected tasks are the exceptions:
- * the worker can still run to drain them.
+ * Scheduled dashboard retries and queued/in-flight injected tasks are the
+ * exceptions: the worker can still run to drain them (and to recover an
+ * interrupted injected row under the post-lock hook).
  */
 function assertWorkspaceHasWork(
   config: WorkspaceConfig,
   retryQueue: ScheduledRetryStore,
-  injectedPending: boolean,
+  injectedTasks: InjectedTaskStore,
   multiTeam: boolean,
   initialQuery: string | undefined,
 ): void {
-  const hasWork =
-    multiTeam ||
-    initialQuery ||
-    config.automations.length > 0 ||
-    config.estimations.length > 0 ||
-    config.errorMonitors.some((source) => source.enabled);
-  if (hasWork) return;
-
-  if (retryQueue.hasPending() || injectedPending) {
-    console.warn(
-      "⚠️  No task query or automations configured; the worker will only drain scheduled retries and injected tasks.",
+  if (!workspaceHasStartupWork(config, retryQueue, injectedTasks, multiTeam, initialQuery)) {
+    console.error(
+      "❌ Workspace mode needs a task query: set [defaults].task_query in workspace.toml.",
     );
-    return;
+    process.exit(1);
   }
-  console.error(
-    "❌ Workspace mode needs a task query: set [defaults].task_query in workspace.toml.",
+  if (workspaceHasConfiguredWork(config, multiTeam, initialQuery)) return;
+
+  console.warn(
+    "⚠️  No task query or automations configured; the worker will only drain scheduled retries and injected tasks.",
   );
-  process.exit(1);
 }
 
 export {

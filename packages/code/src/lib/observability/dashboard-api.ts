@@ -51,6 +51,10 @@ import type { HarnessLogContent, HarnessLogFile } from "./harness-logs";
 import { listRunArtifacts, readRunArtifact } from "./task-artifacts";
 import type { TaskArtifactContent, TaskArtifactFile } from "./task-artifacts";
 import { resolveQueueDbPath, WebhookQueue } from "../state/webhook-queue";
+import {
+  injectedChildStillRunningMessage,
+  interruptedChildStillRunning,
+} from "../workspace/injected-recovery";
 import { resolveWorkspaceDir } from "../workspace/paths";
 import { WorkerState } from "../state/worker-state";
 import type { Cursor } from "../state/worker-state";
@@ -945,6 +949,10 @@ function retryInjectedRun(
   }
   if (task.status === "pending" || task.status === "running") {
     return conflict(`ad-hoc task ${taskKey} is already ${task.status} (task #${task.id})`);
+  }
+  // Re-queueing force-removes the worktree the surviving child is working in.
+  if (interruptedChildStillRunning(task)) {
+    return conflict(injectedChildStillRunningMessage(taskKey, task.childPid!));
   }
   const revived = store.requeueSettled(taskKey);
   if (!revived) {

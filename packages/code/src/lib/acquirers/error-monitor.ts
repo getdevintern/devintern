@@ -217,7 +217,7 @@ export class ErrorMonitorAcquirer<TIssue extends ErrorMonitorIssue> implements A
           );
           continue;
         }
-        await this.reportAction(issue, result);
+        await this.reportAction(issue, result === true);
         console.log(
           result
             ? `✅ [${this.name}] fix for ${issue.displayId} completed`

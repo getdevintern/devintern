@@ -4,6 +4,7 @@ import { join } from "path";
 import { tmpdir } from "os";
 
 import { InjectedTaskStore } from "../src/lib/state/injected-tasks";
+import { createTaskSupervisor } from "../src/lib/worker/supervisor";
 import { InjectedTaskAcquirer } from "../src/lib/workspace/injected-acquirer";
 import type { TaskExecutionResult } from "../src/lib/acquirers/task-polling";
 
@@ -240,6 +241,60 @@ describe("InjectedTaskAcquirer", () => {
     } finally {
       verify.close();
     }
+  });
+
+  test("leaves a claimed row running when a graceful drain interrupts its run", async () => {
+    enqueue("local-a");
+    const supervisor = createTaskSupervisor({ maxConcurrency: 1, maxConcurrencyPerRepo: 1 });
+    const acquirer = new InjectedTaskAcquirer({
+      store,
+      // The fleet executor reports a drain abort as "interrupted" (see
+      // runTaskViaCli), distinct from a genuine pipeline failure.
+      execute: async (task) =>
+        supervisor.schedule({
+          id: task.taskKey,
+          source: "test",
+          repo: task.repo,
+          kind: "task",
+          checkoutClass: "task_worktree",
+          run: (signal) =>
+            new Promise<TaskExecutionResult>((resolve) => {
+              signal.addEventListener("abort", () => resolve("interrupted"), { once: true });
+            }),
+        }),
+      isDraining: () => supervisor.isDraining(),
+      intervalSeconds: 3600,
+    });
+
+    const tick = acquirer.tick();
+    await waitFor(() => supervisor.inFlightCount() === 1);
+    // Shutdown order in createWorkerShutdownHandler: drain starts, acquirers
+    // stop, the drain aborts the child and settles before onShutdown closes
+    // the store.
+    acquirer.stop();
+    await supervisor.drain({ graceMs: 0 });
+    await tick;
+
+    expect(store.getById(1)?.status).toBe("running");
+    expect(store.getById(1)?.message).toBeUndefined();
+  });
+
+  test("settles a genuine failure that happens during the shutdown window", async () => {
+    enqueue("local-a");
+    // The drain flag alone must not launder a real pipeline failure: only the
+    // executor's "interrupted" marker means the outcome is unknown.
+    const acquirer = new InjectedTaskAcquirer({
+      store,
+      execute: async () => false,
+      isDraining: () => true,
+      intervalSeconds: 3600,
+    });
+
+    await acquirer.tick();
+
+    const row = store.getById(1);
+    expect(row?.status).toBe("failed");
+    expect(row?.message).toBe("task pipeline did not complete cleanly");
   });
 
   test("start returns without waiting for a slow injected task", async () => {

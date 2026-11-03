@@ -4,7 +4,11 @@ import { join } from "path";
 import { tmpdir } from "os";
 
 import { createMarkdownChangeDetector } from "../src/lib/acquirers/change-detector";
-import { processedTaskId, TaskPollingAcquirer } from "../src/lib/acquirers/task-polling";
+import {
+  processedTaskId,
+  runTaskViaCli,
+  TaskPollingAcquirer,
+} from "../src/lib/acquirers/task-polling";
 import type { ReadyTask, TaskExecutionResult } from "../src/lib/acquirers/task-polling";
 import type { PickupGate } from "../src/lib/worker/schedule";
 import { TASK_POLL_LAST_DRAIN_KEY, WorkerState } from "../src/lib/state/worker-state";
@@ -30,6 +34,70 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
   });
   return { promise, resolve };
 }
+
+describe("runTaskViaCli", () => {
+  test("reports the spawned child pid before the run settles", async () => {
+    const dir = uniqueDir("task-via-cli");
+    mkdirSync(dir, { recursive: true });
+    const script = join(dir, "fake-task.ts");
+    writeFileSync(script, "process.exit(0)\n");
+    const originalArgv1 = process.argv[1];
+    const spawnedPids: number[] = [];
+    try {
+      process.argv[1] = script;
+      const result = await runTaskViaCli("local-child-pid", [], {
+        env: { ...process.env },
+        onChildSpawn: (pid) => spawnedPids.push(pid),
+      });
+      expect(result).toBe(true);
+      expect(spawnedPids).toHaveLength(1);
+      expect(spawnedPids[0]).toBeGreaterThan(0);
+    } finally {
+      process.argv[1] = originalArgv1;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("reports a child killed by a shutdown abort as interrupted, not failed", async () => {
+    const dir = uniqueDir("task-via-cli-abort");
+    mkdirSync(dir, { recursive: true });
+    // Hangs so the abort always arrives while the child is alive.
+    const script = join(dir, "fake-hang.ts");
+    writeFileSync(script, "setInterval(() => {}, 1000)\n");
+    const originalArgv1 = process.argv[1];
+    const controller = new AbortController();
+    try {
+      process.argv[1] = script;
+      const result = await runTaskViaCli("local-abort", [], {
+        env: { ...process.env },
+        signal: controller.signal,
+        // The listener is registered right after the spawn callback, so abort
+        // on a later tick instead of inside it.
+        onChildSpawn: () => setTimeout(() => controller.abort(), 50),
+      });
+      expect(result).toBe("interrupted");
+    } finally {
+      process.argv[1] = originalArgv1;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("keeps a genuine non-zero exit a failure even when it is not interrupted", async () => {
+    const dir = uniqueDir("task-via-cli-fail");
+    mkdirSync(dir, { recursive: true });
+    const script = join(dir, "fake-fail.ts");
+    writeFileSync(script, "process.exit(1)\n");
+    const originalArgv1 = process.argv[1];
+    try {
+      process.argv[1] = script;
+      const result = await runTaskViaCli("local-fail", [], { env: { ...process.env } });
+      expect(result).toBe(false);
+    } finally {
+      process.argv[1] = originalArgv1;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("createMarkdownChangeDetector", () => {
   let tasksDir: string;

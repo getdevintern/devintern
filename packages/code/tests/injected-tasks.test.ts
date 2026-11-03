@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
-import { InjectedTaskStore } from "../src/lib/state/injected-tasks";
+import { InjectedTaskStore, addAutoResumeColumn } from "../src/lib/state/injected-tasks";
 
 describe("InjectedTaskStore", () => {
   let dir: string;
@@ -214,6 +214,47 @@ describe("InjectedTaskStore", () => {
     expect(store.listRunning().map((task) => task.id)).toEqual([first.id]);
   });
 
+  test("records the child pid while running and clears it on settle", () => {
+    const { task } = store.enqueue(base);
+    store.claimNext();
+    store.setChildPid(task.id, 4321, 1_700_000_000_000);
+    expect(store.getById(task.id)?.childPid).toBe(4321);
+    expect(store.getById(task.id)?.childStartedAt).toBe(1_700_000_000_000);
+    store.finish(task.id, "failed", "interrupted");
+    expect(store.getById(task.id)?.childPid).toBeUndefined();
+    expect(store.getById(task.id)?.childStartedAt).toBeUndefined();
+  });
+
+  test("records the child pid while running and clears it on requeue", () => {
+    const { task } = store.enqueue(base);
+    store.claimNext();
+    store.setChildPid(task.id, 4321);
+    store.requeue(task.id);
+    expect(store.getById(task.id)?.childPid).toBeUndefined();
+    expect(store.getById(task.id)?.childStartedAt).toBeUndefined();
+    expect(store.getById(task.id)?.status).toBe("pending");
+  });
+
+  test("an explicit re-queue keeps the recorded child so the caller can probe it", () => {
+    // The manual re-queue guards must be able to see (and refuse) a live child;
+    // the next claim overwrites both fields when it spawns its own child.
+    const { task } = store.enqueue(base);
+    store.claimNext();
+    store.setChildPid(task.id, 4321, 1_700_000_000_000);
+    // No public setter can settle a row while keeping the pid, so mirror the
+    // exact legacy state a pre-upgrade database can hold.
+    const raw = new Database(dbPath);
+    try {
+      raw.run("UPDATE injected_tasks SET status = 'failed' WHERE id = ?", [task.id]);
+    } finally {
+      raw.close();
+    }
+    const revived = store.requeueSettled(task.taskKey)!;
+    expect(revived.status).toBe("pending");
+    expect(revived.childPid).toBe(4321);
+    expect(revived.childStartedAt).toBe(1_700_000_000_000);
+  });
+
   test("migrates a database created before auto_resume_count existed", () => {
     const legacyPath = join(dir, "legacy", "queue.db");
     mkdirSync(join(dir, "legacy"), { recursive: true });
@@ -246,6 +287,58 @@ describe("InjectedTaskStore", () => {
       const row = migrated.getByTaskKey("local-legacy");
       expect(row?.autoResumeCount).toBe(0);
       expect(migrated.listRunning()).toHaveLength(1);
+    } finally {
+      migrated.close();
+    }
+  });
+
+  test("two openers racing the auto_resume_count migration both succeed", () => {
+    const legacyPath = join(dir, "race", "queue.db");
+    mkdirSync(join(dir, "race"), { recursive: true });
+    const legacy = new Database(legacyPath);
+    legacy.run(`
+      CREATE TABLE injected_tasks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_key TEXT NOT NULL,
+        repo TEXT NOT NULL,
+        title TEXT NOT NULL,
+        body TEXT NOT NULL DEFAULT '',
+        task_file TEXT NOT NULL,
+        idempotency_key TEXT,
+        actor TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        message TEXT,
+        created_at INTEGER NOT NULL,
+        started_at INTEGER,
+        finished_at INTEGER
+      )
+    `);
+    legacy.close();
+
+    const first = new Database(legacyPath);
+    const second = new Database(legacyPath);
+    const hasColumn = (db: Database) =>
+      (db.query("PRAGMA table_info(injected_tasks)").all() as Array<{ name: string }>).some(
+        (column) => column.name === "auto_resume_count",
+      );
+    try {
+      // Both connections observe the legacy schema before either migrates,
+      // matching two processes that open the shared DB during the same upgrade.
+      expect(hasColumn(first)).toBe(false);
+      expect(hasColumn(second)).toBe(false);
+      addAutoResumeColumn(first);
+      // The loser of the ALTER must ignore SQLite's duplicate-column error.
+      expect(() => addAutoResumeColumn(second)).not.toThrow();
+      expect(hasColumn(second)).toBe(true);
+    } finally {
+      first.close();
+      second.close();
+    }
+
+    // The public store still opens the migrated DB normally.
+    const migrated = new InjectedTaskStore(legacyPath);
+    try {
+      expect(migrated.list()).toEqual([]);
     } finally {
       migrated.close();
     }

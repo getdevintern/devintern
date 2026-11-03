@@ -1,21 +1,28 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { execSync } from "child_process";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
 import {
+  createInjectedBranchExistsProbe,
+  createInjectedStartupRecovery,
   makeBeforeAcquirersStart,
   recoverOrphanedInjectedTasks,
   recoverOrphanedWorkspaceRuns,
   scheduleOrphanPickups,
   startInjectedTaskSweeper,
+  workspaceHasStartupWork,
 } from "../src/lib/workspace/workspace-worker";
 import { RunStore } from "../src/lib/state/run-recorder";
 import type { RunRecord } from "../src/lib/state/run-recorder";
 import { ScheduledRetryStore } from "../src/lib/state/run-retry";
 import { InjectedTaskStore } from "../src/lib/state/injected-tasks";
-import { BASE_WORKTREE_NAME } from "../src/lib/workspace/repo-manager";
-import type { WorkspaceConfig } from "../src/lib/workspace/config";
+import type { InjectedTask } from "../src/lib/state/injected-tasks";
+import { readProcessStartTime } from "../src/lib/workspace/injected-recovery";
+import { BASE_WORKTREE_NAME, RepoManager } from "../src/lib/workspace/repo-manager";
+import type { RepoConfig, WorkspaceConfig } from "../src/lib/workspace/config";
+import { workspaceDbPath } from "../src/lib/workspace/paths";
 
 describe("recoverOrphanedWorkspaceRuns", () => {
   let workspaceDir: string;
@@ -259,6 +266,148 @@ describe("recoverOrphanedWorkspaceRuns", () => {
     injected.close();
   });
 
+  test("leaves a row running while the interrupted child process is still alive", async () => {
+    seedResumableLocalRun("local-live-child");
+    const injected = new InjectedTaskStore(dbPath);
+    const claimedId = claimInjected(injected, "local-live-child");
+    injected.setChildPid(claimedId, process.pid, readProcessStartTime(process.pid));
+
+    const warnings: string[] = [];
+    await recoverOrphanedInjectedTasks(injected, {
+      runStore: store,
+      branchExists: () => true,
+      warn: (...args: unknown[]) => warnings.push(args.map(String).join(" ")),
+    });
+
+    const after = injected.getById(claimedId)!;
+    // That child is the same task and may still finish successfully, so the row
+    // stays claimed: failing it here would send the operator's `--resume` at a
+    // second branch and PR.
+    expect(after.status).toBe("running");
+    expect(after.childPid).toBe(process.pid);
+    expect(after.autoResumeCount).toBe(0);
+    expect(warnings.join("\n")).toContain(`pid ${process.pid}`);
+    expect(warnings.join("\n")).toContain("A child that succeeds needs no resume");
+    injected.close();
+  });
+
+  test("treats a recycled child pid as gone so the row still auto-resumes", async () => {
+    seedResumableLocalRun("local-recycled-child");
+    const injected = new InjectedTaskStore(dbPath);
+    const claimedId = claimInjected(injected, "local-recycled-child");
+    // The pid is alive (it is this test process) but the recorded spawn time is
+    // an hour earlier, so the pid must have been recycled after a reboot.
+    injected.setChildPid(claimedId, process.pid, Date.now() - 60 * 60 * 1_000);
+
+    const warnings: string[] = [];
+    await recoverOrphanedInjectedTasks(injected, {
+      runStore: store,
+      branchExists: () => true,
+      warn: (...args: unknown[]) => warnings.push(args.map(String).join(" ")),
+    });
+
+    const after = injected.getById(claimedId)!;
+    expect(after.status).toBe("pending");
+    expect(after.autoResumeCount).toBe(1);
+    expect(after.childPid).toBeUndefined();
+    expect(warnings.join("\n")).not.toContain("still running its previous attempt");
+    injected.close();
+  });
+
+  test("settles a running row done when a run started after the claim succeeded", async () => {
+    const injected = new InjectedTaskStore(dbPath);
+    const claimedId = claimInjected(injected, "local-succeeded");
+    // The run must start after the current claim: that is what proves the
+    // attempt this row is waiting on finished, rather than an older run.
+    const runId = store.createRun({
+      origin: "local",
+      taskKey: "local-succeeded",
+      tracker: "local",
+      repo: "web-app",
+      branch: "feature/local-succeeded",
+    });
+    store.finishRun(runId, "succeeded", "PR opened");
+
+    await recoverOrphanedInjectedTasks(injected, {
+      runStore: store,
+      branchExists: () => true,
+      log: () => {},
+      warn: () => {},
+    });
+
+    const after = injected.getById(claimedId)!;
+    expect(after.status).toBe("done");
+    expect(after.message).toContain(`run #${runId} already succeeded`);
+    injected.close();
+  });
+
+  test("does not settle a re-queued done row done on its pre-restart succeeded run", async () => {
+    // `worker add --resume` re-queues `done` rows. If the worker crashes after
+    // the new claim but before the replacement child starts a run, the latest
+    // run is still the old succeeded one; treating it as done would silently
+    // drop the operator's explicit re-run.
+    const oldRunId = store.createRun({
+      origin: "local",
+      taskKey: "local-requeued",
+      tracker: "local",
+      repo: "web-app",
+      branch: "feature/local-requeued",
+    });
+    store.finishRun(oldRunId, "succeeded", "PR opened");
+    const injected = new InjectedTaskStore(dbPath);
+    const claimedId = claimInjected(injected, "local-requeued");
+    injected.finish(claimedId, "done", `run #${oldRunId} already succeeded`);
+
+    expect(injected.requeueSettled("local-requeued")?.status).toBe("pending");
+    expect(injected.claimNext()?.id).toBe(claimedId);
+
+    await recoverOrphanedInjectedTasks(injected, {
+      runStore: store,
+      branchExists: () => true,
+      log: () => {},
+      warn: () => {},
+    });
+
+    const after = injected.getById(claimedId)!;
+    expect(after.status).toBe("failed");
+    expect(after.message).toBe("worker restarted while this task was running");
+    injected.close();
+  });
+
+  test("reaps an un-reaped in_progress run and auto-resumes it", async () => {
+    const runId = store.createRun({
+      origin: "local",
+      taskKey: "local-in-progress",
+      tracker: "local",
+      repo: "web-app",
+      branch: "feature/local-in-progress",
+    });
+    store.addStage(
+      runId,
+      "implementation",
+      "succeeded",
+      undefined,
+      JSON.stringify({ report: "prior implementation report" }),
+    );
+    // Deliberately leave the run `in_progress`: ordering or a failed sweep
+    // means the injected hook may see an attempt that was never reaped.
+    expect(store.getRun(runId)?.status).toBe("in_progress");
+
+    const injected = new InjectedTaskStore(dbPath);
+    const claimedId = claimInjected(injected, "local-in-progress");
+
+    await recoverOrphanedInjectedTasks(injected, {
+      runStore: store,
+      branchExists: () => true,
+    });
+
+    const after = injected.getById(claimedId)!;
+    expect(after.status).toBe("pending");
+    expect(after.autoResumeCount).toBe(1);
+    expect(store.getRun(runId)?.status).toBe("failed");
+    injected.close();
+  });
+
   test("still fails a running injected row with no prior local run", async () => {
     const injected = new InjectedTaskStore(dbPath);
     const claimedId = claimInjected(injected, "local-no-run");
@@ -357,6 +506,77 @@ describe("recoverOrphanedWorkspaceRuns", () => {
     injected.close();
   });
 
+  test("startup work counts a running injected row in an injected-only workspace", () => {
+    const injected = new InjectedTaskStore(dbPath);
+    const retryQueue = new ScheduledRetryStore(dbPath);
+    const config = {
+      workspace: {},
+      defaults: { tracker: "jira", pollIntervalSeconds: 60 },
+      repos: [],
+      routing: [],
+      automations: [],
+      estimations: [],
+      errorMonitors: [],
+    } as unknown as WorkspaceConfig;
+
+    const claimedId = claimInjected(injected, "local-running-startup");
+    // The bug: `hasPending()` alone is false once the row is claimed.
+    expect(injected.hasPending()).toBe(false);
+    expect(workspaceHasStartupWork(config, retryQueue, injected, false, undefined)).toBe(true);
+
+    injected.finish(claimedId, "done");
+    expect(workspaceHasStartupWork(config, retryQueue, injected, false, undefined)).toBe(false);
+    injected.close();
+    retryQueue.close();
+  });
+
+  test("defaults the auto-resume budget to one and honors WORKER_INJECTED_AUTO_RESUME_LIMIT=0", async () => {
+    delete process.env.WORKER_INJECTED_AUTO_RESUME_LIMIT;
+    seedResumableLocalRun("local-env-default");
+    const injected = new InjectedTaskStore(dbPath);
+    const claimedId = claimInjected(injected, "local-env-default");
+    try {
+      // No explicit option: the env default (1) applies.
+      await recoverOrphanedInjectedTasks(injected, {
+        runStore: store,
+        branchExists: () => true,
+      });
+      expect(injected.getById(claimedId)?.status).toBe("pending");
+      expect(injected.getById(claimedId)?.autoResumeCount).toBe(1);
+
+      expect(injected.claimNext()?.id).toBe(claimedId);
+      await recoverOrphanedInjectedTasks(injected, {
+        runStore: store,
+        branchExists: () => true,
+      });
+      expect(injected.getById(claimedId)?.status).toBe("failed");
+      expect(injected.getById(claimedId)?.message).toContain(
+        "devintern worker add --resume local-env-default",
+      );
+    } finally {
+      injected.close();
+    }
+  });
+
+  test("WORKER_INJECTED_AUTO_RESUME_LIMIT=0 disables automatic resume", async () => {
+    process.env.WORKER_INJECTED_AUTO_RESUME_LIMIT = "0";
+    seedResumableLocalRun("local-env-zero");
+    const injected = new InjectedTaskStore(dbPath);
+    const claimedId = claimInjected(injected, "local-env-zero");
+    try {
+      await recoverOrphanedInjectedTasks(injected, {
+        runStore: store,
+        branchExists: () => true,
+      });
+      const after = injected.getById(claimedId)!;
+      expect(after.status).toBe("failed");
+      expect(after.autoResumeCount).toBe(0);
+      expect(after.message).toContain("devintern worker add --resume local-env-zero");
+    } finally {
+      injected.close();
+    }
+  });
+
   test("the periodic sweeper prunes settled rows and their prompt files", async () => {
     const injected = new InjectedTaskStore(dbPath);
     const promptFile = join(workspaceDir, "injected", "sweep.md");
@@ -381,6 +601,192 @@ describe("recoverOrphanedWorkspaceRuns", () => {
     } finally {
       clearInterval(timer);
       injected.close();
+    }
+  });
+});
+
+describe("injected startup recovery (production wiring)", () => {
+  let rootDir: string;
+  let originDir: string;
+  let workspaceDir: string;
+  let dbPath: string;
+  const savedEnv = { ...process.env };
+
+  function git(cwd: string, command: string): string {
+    return execSync(`git ${command}`, { cwd, encoding: "utf8" }).trim();
+  }
+
+  function repo(): RepoConfig {
+    return {
+      name: "backend",
+      remote: `file://${originDir}`,
+      defaultBranch: "main",
+      env: {},
+    };
+  }
+
+  beforeEach(() => {
+    rootDir = join(
+      tmpdir(),
+      `injected-recovery-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    );
+    originDir = join(rootDir, "origin");
+    workspaceDir = join(rootDir, "workspace");
+    mkdirSync(originDir, { recursive: true });
+    mkdirSync(workspaceDir, { recursive: true });
+
+    git(originDir, "init -b main");
+    git(originDir, 'config user.name "Fixture User"');
+    git(originDir, 'config user.email "fixture@example.com"');
+    writeFileSync(join(originDir, "README.md"), "# Fixture\n");
+    git(originDir, "add .");
+    git(originDir, 'commit -m "Initial commit"');
+    dbPath = workspaceDbPath(workspaceDir);
+  });
+
+  afterEach(() => {
+    process.env = { ...savedEnv };
+    rmSync(rootDir, { recursive: true, force: true });
+  });
+
+  /** Seed a resumable local run in the workspace DB the production hook opens. */
+  function seedResumableRun(taskKey: string, options: { finish?: boolean } = {}): void {
+    const runStore = new RunStore(dbPath);
+    try {
+      const runId = runStore.createRun({
+        origin: "local",
+        taskKey,
+        tracker: "local",
+        repo: "backend",
+        branch: `feature/${taskKey}`,
+      });
+      runStore.addStage(
+        runId,
+        "implementation",
+        "succeeded",
+        undefined,
+        JSON.stringify({ report: "prior implementation report" }),
+      );
+      if (options.finish !== false) {
+        runStore.finishRun(
+          runId,
+          "failed",
+          "worker stopped cleanly; interruption feedback already handled",
+        );
+      }
+    } finally {
+      runStore.close();
+    }
+  }
+
+  function claimInjected(taskKey: string): { store: InjectedTaskStore; id: number } {
+    const store = new InjectedTaskStore(dbPath);
+    store.enqueue({
+      taskKey,
+      repo: "backend",
+      title: taskKey,
+      body: "",
+      taskFile: join(workspaceDir, "injected", `${taskKey}.md`),
+    });
+    return { store, id: store.claimNext()!.id };
+  }
+
+  /** Clone the fixture like the injected executor does, without a base worktree. */
+  async function cloneLikeInjectedRun(taskKey?: string): Promise<RepoManager> {
+    const manager = new RepoManager(workspaceDir);
+    await manager.ensureBareClone(repo());
+    if (taskKey) {
+      const worktree = await manager.createTaskWorktree(repo(), taskKey);
+      git(worktree, `checkout -b feature/${taskKey}`);
+    }
+    return manager;
+  }
+
+  const missingTask = { repo: "backend" } as InjectedTask;
+
+  test("branch probe reads the bare clone when no base worktree exists", async () => {
+    const manager = await cloneLikeInjectedRun("local-probe");
+    // An injected-only workspace never materializes the base worktree.
+    expect(existsSync(manager.baseWorktreePath("backend"))).toBe(false);
+
+    const probe = createInjectedBranchExistsProbe(workspaceDir);
+    expect(await probe("feature/local-probe", missingTask)).toBe(true);
+    expect(await probe("feature/local-missing", missingTask)).toBe(false);
+  });
+
+  test("branch probe refuses to resume when the repo cannot be probed", async () => {
+    const probe = createInjectedBranchExistsProbe(workspaceDir);
+    expect(await probe("feature/anything", missingTask)).toBe(false);
+  });
+
+  test("auto-resumes through the production hook when the branch still exists", async () => {
+    seedResumableRun("local-prod-resume");
+    await cloneLikeInjectedRun("local-prod-resume");
+    const { store, id } = claimInjected("local-prod-resume");
+    const order: string[] = [];
+    const recovery = createInjectedStartupRecovery(store, workspaceDir, () => {
+      order.push("caller");
+    });
+
+    try {
+      await recovery.hook();
+      const after = store.getById(id)!;
+      expect(after.status).toBe("pending");
+      expect(after.autoResumeCount).toBe(1);
+      expect(order).toEqual(["caller"]);
+    } finally {
+      recovery.close();
+      store.close();
+    }
+  });
+
+  test("auto-resumes through the production hook from an un-reaped in_progress run", async () => {
+    seedResumableRun("local-prod-in-progress", { finish: false });
+    await cloneLikeInjectedRun("local-prod-in-progress");
+    const { store, id } = claimInjected("local-prod-in-progress");
+    const recovery = createInjectedStartupRecovery(store, workspaceDir);
+
+    try {
+      await recovery.hook();
+      const after = store.getById(id)!;
+      expect(after.status).toBe("pending");
+      expect(after.autoResumeCount).toBe(1);
+    } finally {
+      recovery.close();
+      store.close();
+    }
+  });
+
+  test("fails through the production hook when the recorded branch is gone", async () => {
+    seedResumableRun("local-prod-gone");
+    // Clone exists but the task branch was never created (or already deleted).
+    await cloneLikeInjectedRun();
+    const { store, id } = claimInjected("local-prod-gone");
+    const recovery = createInjectedStartupRecovery(store, workspaceDir);
+
+    try {
+      await recovery.hook();
+      const after = store.getById(id)!;
+      expect(after.status).toBe("failed");
+      expect(after.message).toBe("worker restarted while this task was running");
+      expect(after.autoResumeCount).toBe(0);
+    } finally {
+      recovery.close();
+      store.close();
+    }
+  });
+
+  test("closes its run store on shutdown", () => {
+    const closeSpy = spyOn(RunStore.prototype, "close");
+    const store = new InjectedTaskStore(dbPath);
+    const recovery = createInjectedStartupRecovery(store, workspaceDir);
+    try {
+      expect(closeSpy).not.toHaveBeenCalled();
+      recovery.close();
+      expect(closeSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      closeSpy.mockRestore();
+      store.close();
     }
   });
 });

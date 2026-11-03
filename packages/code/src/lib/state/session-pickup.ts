@@ -151,6 +151,33 @@ export function readImplementationReport(
   return undefined;
 }
 
+/** Whether a run belongs to the requested tracker/team/repository context. */
+function matchesScope(run: RunRecord, scope: SessionPickupOptions["scope"] = {}): boolean {
+  return (
+    run.origin === (scope.origin ?? "task") &&
+    run.tracker === scope.tracker &&
+    run.team === scope.team &&
+    run.repo === scope.repo &&
+    run.automationId === scope.automationId
+  );
+}
+
+/**
+ * The latest run for `taskKey` in `scope`, regardless of status.
+ *
+ * Startup recovery needs the actual outcome even when no pickup is possible: a
+ * run that finished `succeeded` before its row settled means the task is done,
+ * not interrupted. Shares {@link findCandidateRun}'s scope rules so both
+ * callers agree on which run is authoritative.
+ */
+export function latestScopedTaskRun(
+  runStore: SessionPickupRunStore,
+  taskKey: string,
+  scope: SessionPickupOptions["scope"] = {},
+): RunRecord | undefined {
+  return runStore.listRuns({ taskKey }).find((run) => matchesScope(run, scope));
+}
+
 /** A selected candidate run, or why no run qualified. */
 type CandidateRun = { kind: "found"; run: RunRecord } | { kind: "none"; reason: string };
 
@@ -172,12 +199,7 @@ function findCandidateRun(
   excludeRunId?: number,
   scope: SessionPickupOptions["scope"] = {},
 ): CandidateRun {
-  const matchesScope = (run: RunRecord) =>
-    run.origin === (scope.origin ?? "task") &&
-    run.tracker === scope.tracker &&
-    run.team === scope.team &&
-    run.repo === scope.repo &&
-    run.automationId === scope.automationId;
+  const inScope = (run: RunRecord) => matchesScope(run, scope);
   if (runId !== undefined) {
     const run = runStore.getRun(runId) ?? undefined;
     if (!run) {
@@ -186,13 +208,13 @@ function findCandidateRun(
     if (run.taskKey !== taskKey) {
       return { kind: "none", reason: "pinned run belongs to another task" };
     }
-    if (!matchesScope(run)) {
+    if (!inScope(run)) {
       return { kind: "none", reason: "pinned run belongs to another task context" };
     }
     return { kind: "found", run };
   }
   const runs = runStore.listRuns({ taskKey });
-  const run = runs.find((candidate) => candidate.id !== excludeRunId && matchesScope(candidate));
+  const run = runs.find((candidate) => candidate.id !== excludeRunId && inScope(candidate));
   return run ? { kind: "found", run } : { kind: "none", reason: "no prior attempt on record" };
 }
 

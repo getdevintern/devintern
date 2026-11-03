@@ -36,6 +36,13 @@ export interface InjectedTaskAcquirerOptions {
    * pending while other repos can still start. Defaults to unbounded.
    */
   maxConcurrencyPerRepo?: number;
+  /**
+   * Whether a graceful shutdown drain has begun. The pipeline reports a drain
+   * abort as `"interrupted"`; this is the fallback for an executor that throws
+   * instead, whose rows must then be left `running` for startup recovery rather
+   * than settled `failed`.
+   */
+  isDraining?: () => boolean;
   verbose?: boolean;
 }
 
@@ -186,11 +193,31 @@ export class InjectedTaskAcquirer implements Acquirer {
         // cannot spin.
         store.requeue(task.id);
         console.log(`⏳ [${this.name}] ${task.taskKey} deferred; will retry next tick`);
+      } else if (result === "interrupted") {
+        // A graceful shutdown aborted this run's child, so its failure is an
+        // artifact of the drain, not the pipeline. Leave the row claimed: the
+        // successor worker's startup recovery settles it from the run record,
+        // and a settle here would race the store close that follows the drain.
+        // A genuine failure that merely happens during the shutdown window
+        // arrives as `false` and is settled below, keeping its real outcome.
+        console.log(
+          `⏸️  [${this.name}] ${task.taskKey} interrupted by worker shutdown; ` +
+            "left running for the next worker to resume",
+        );
       } else {
         store.finish(task.id, "failed", "task pipeline did not complete cleanly");
       }
     } catch (error) {
       if (store.isClosed()) {
+        return;
+      }
+      // Fallback for an executor that throws on a drain (rather than reporting
+      // `"interrupted"`): its row must stay claimed for startup recovery.
+      if (this.options.isDraining?.()) {
+        console.log(
+          `⏸️  [${this.name}] ${task.taskKey} interrupted by worker shutdown; ` +
+            "left running for the next worker to resume",
+        );
         return;
       }
       const message = error instanceof Error ? error.message : String(error);

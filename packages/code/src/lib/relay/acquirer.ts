@@ -64,9 +64,13 @@ export interface RelayHandlers {
    * @returns Whether the run completed; `false` means it failed or matched
    *          no workspace repo (never silently swallowed by the caller).
    *          `"deferred"` means every harness is usage-limited; `"skipped"`
-   *          means the retry gate declined the run.
+   *          means the retry gate declined the run; `"interrupted"` means a
+   *          shutdown drain killed it, which is reported as not completed.
    */
-  addressPr(repo: string, prNumber: number): Promise<boolean | "deferred" | "skipped">;
+  addressPr(
+    repo: string,
+    prNumber: number,
+  ): Promise<boolean | "deferred" | "skipped" | "interrupted">;
   /** New PR conversation comment → mention/permission gates decide inside. */
   handlePrComment(repo: string, prNumber: number, commentId: number): Promise<void>;
   /** Tracker task changed → re-evaluate the matching team/default source. */

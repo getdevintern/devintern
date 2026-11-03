@@ -20,11 +20,7 @@ import {
   resolveProjectKey,
 } from "../config/project-settings";
 import { validateEnvironment } from "../config/validate-environment";
-import {
-  RUN_ORIGIN_ENV,
-  flushAnalytics,
-  trackInteractiveTaskRun,
-} from "../observability/analytics";
+import { flushAnalytics, trackInteractiveTaskRun } from "../observability/analytics";
 import { DEFAULT_AUTO_REVIEW_ITERATIONS } from "../review/auto-review-config";
 import { shouldSkipRetry } from "../state/retry-gate";
 import { clearRetryState, getRetryState } from "../state/retry-state";
@@ -59,6 +55,7 @@ import {
 import { WORKSPACE_REPO_ENV } from "../workspace/env";
 import { resolveWorkspaceDir, worktreesDir } from "../workspace/paths";
 import { reportProcessingFailure } from "./processing-failure";
+import { resolveRunIdentity } from "./run-identity";
 import { runTaskSteps } from "./step-runner";
 import type { TaskStep } from "./step-runner";
 
@@ -500,27 +497,16 @@ async function prepareTask(input: {
   // origin so run history distinguishes them from scheduled runs.
   const scheduledAutomationId = process.env.DEVINTERN_AUTOMATION_ID;
   const trackerName = process.env.TASK_TRACKER || "jira";
-  const isManualAutomationRun =
-    scheduledAutomationId !== undefined && process.env[RUN_ORIGIN_ENV] === "manual";
-  const isErrorMonitorRun = process.env[RUN_ORIGIN_ENV] === "error_monitor";
-  const isLocalInjectedRun = process.env[RUN_ORIGIN_ENV] === "local";
+  const identity = resolveRunIdentity(process.env);
   beginRun({
-    origin: scheduledAutomationId
-      ? isManualAutomationRun
-        ? "manual"
-        : "scheduled"
-      : isErrorMonitorRun
-        ? "error_monitor"
-        : isLocalInjectedRun
-          ? "local"
-          : "task",
+    origin: identity.origin,
     taskKey: workflowKey,
-    tracker: isErrorMonitorRun ? "sentry" : isLocalInjectedRun ? "local" : trackerName,
-    team: process.env.DEVINTERN_WORKSPACE_TEAM,
-    repo: process.env.DEVINTERN_WORKSPACE_REPO,
+    tracker: identity.tracker,
+    team: identity.team,
+    repo: identity.repo,
     // The harness that will implement this run (resolved at startup).
     harness: resolvedAgent.harness.name,
-    ...(scheduledAutomationId ? { automationId: scheduledAutomationId } : {}),
+    ...(identity.automationId ? { automationId: identity.automationId } : {}),
     // Ticket link for remote trackers only: markdown-file inputs and
     // materialized automation prompts have no tracker page, and deriving
     // URLs from their synthetic keys would point nowhere.
