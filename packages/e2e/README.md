@@ -86,6 +86,18 @@ and secret `E2E_GITHUB_TOKEN` before running it. Do not expose these
 credentials to untrusted pull-request code. Build the CLI in that job before
 running the suite so the artifact matches the checkout.
 
+## Worker `worker add` option matrix
+
+The default local suite (`tests/local/worker-add-options.test.ts`) drives the built
+CLI's `devintern worker add` through every documented option against a throwaway
+workspace and a local bare Git remote seeded from `fixtures/simple-project`; no
+tracker or hosted code host is involved. Enqueue-only cases cover `--title`,
+`--body`, `--body-file <path>`, `--body-file -` stdin, `--idempotency-key`,
+`--workspace`, `--json`, and the validation errors. Daemon cases cover `--wait`,
+`--wait-timeout` (`0` and a bounded timeout through `E2E_AGENT_DELAY_MS`), and
+`--resume`, asserting the pushed branch/commit directly on the bare remote rather
+than a pull request.
+
 ## Agent harness invocation checks
 
 The ordinary local suite also probes every registered agent harness whose CLI is

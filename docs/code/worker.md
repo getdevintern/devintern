@@ -324,11 +324,11 @@ configuration.
 | `--body <text>`            | Task description                                                                                                                |
 | `--body-file <path>`       | Read the description from a file (`-` reads stdin)                                                                              |
 | `--idempotency-key <key>`  | Dedupe key; while a task with the key is pending/running a retry reuses it, and once it settles the key starts a new occurrence |
-| `--resume <taskKey>`       | Re-queue a settled ad-hoc task under its existing key (resumes its branch and prior report)                                     |
+| `--resume <taskKey>`       | Re-queue a settled ad-hoc task under its existing key (a failed or interrupted attempt resumes its branch and prior report)     |
 | `--wait`                   | Block until the run finishes; exit `0` on success, `1` on failure                                                               |
 | `--wait-timeout <seconds>` | Give up waiting after this long (default 21600 = 6h; `0` waits without a limit)                                                 |
 | `--json`                   | Emit a single `{ id, taskKey, repo, status, deduplicated }` object on stdout (failed `--wait` runs add an `error` field)        |
-| `--workspace <path>`       | Use this `workspace.toml` (default `~/.devintern/workspace.toml`, or `DEVINTERN_WORKSPACE_DIR`)                                  |
+| `--workspace <path>`       | Use this `workspace.toml` (default `~/.devintern/workspace.toml`, or `DEVINTERN_WORKSPACE_DIR`)                                 |
 
 Behavior to expect:
 
@@ -343,8 +343,10 @@ Behavior to expect:
   **Re-queue task**): the row keeps its key, so the retry targets the same
   `feature/local-<slug>` branch and session pickup hands the prior attempt's
   report to the agent — when it recorded one — instead of starting a second
-  branch and PR. A task that never started is still `pending` and needs no
-  resume.
+  branch and PR. A task whose prior attempt already succeeded has no interrupted
+  work to inherit, so resuming it starts a fresh attempt rather than reusing the
+  prior branch and report. A task that never started is still `pending` and needs
+  no resume.
 - **Concurrency.** Pending ad-hoc tasks are claimed together and run in
   parallel up to the workspace's `max_concurrency` / `max_concurrency_per_repo`
   limits, sharing capacity with polled, review, and automation work. A task
@@ -416,10 +418,10 @@ worker_task_args = "--create-pr"
 poll_interval = 60
 ```
 
-| Option               | Description                                                       |
-| -------------------- | ----------------------------------------------------------------- |
+| Option               | Description                                                                                     |
+| -------------------- | ----------------------------------------------------------------------------------------------- |
 | `--workspace <path>` | Use this `workspace.toml` (default `~/.devintern/workspace.toml`, or `DEVINTERN_WORKSPACE_DIR`) |
-| `-v, --verbose`      | Verbose logging                                                   |
+| `-v, --verbose`      | Verbose logging                                                                                 |
 
 Unattended automation is exactly where sandboxing the agent matters most: set `AGENT_SANDBOX=auto` in the workspace `.env` to confine agent runs to the project workspace. See [Sandboxing the Agent](./configuration.md#sandboxing-the-agent) for providers and setup.
 

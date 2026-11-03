@@ -17,6 +17,21 @@ const mode =
 if (process.env.E2E_AGENT_INVOCATIONS) {
   appendFileSync(process.env.E2E_AGENT_INVOCATIONS, JSON.stringify({ mode }) + "\n");
 }
+// Opt-in delay for bounded-timeout coverage. Defaults to 0, so every existing
+// scenario stays as fast and deterministic as before.
+const delayMs = Number(process.env.E2E_AGENT_DELAY_MS ?? "0");
+if (Number.isFinite(delayMs) && delayMs > 0) {
+  await Bun.sleep(delayMs);
+}
+// A settled-but-failed attempt with an implementation report, for resume
+// coverage: exit 0 with failure language so the pipeline records an escalated
+// run (branch + report) without editing the fixture.
+if (mode === "incomplete") {
+  console.log(
+    "Implementation was unsuccessful. I could not complete the requested change because the deterministic E2E fixture intentionally stopped before editing any tracked file. The branch and run record must remain available for a resume attempt.",
+  );
+  process.exit(0);
+}
 // Tracker scenarios seed unique markers into the ticket description and a
 // comment; both must reach the agent's actual input before it edits anything.
 const missingMarkers: string[] = [];
