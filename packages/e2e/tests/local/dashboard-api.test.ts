@@ -289,7 +289,11 @@ test.skipIf(!builtCli || !hasIpv6Loopback())(
     const worker = new WorkerFixture();
     let dashboard: DashboardFixture | undefined;
     try {
-      dashboard = await DashboardFixture.start(worker, { host: "::1", cwd: worker.root });
+      // The CLI resolves its agent harness before dispatching any subcommand,
+      // so prepare() supplies the deterministic AGENT_CLI_PATH the fixture
+      // needs instead of depending on an ambient agent installation.
+      await worker.prepare();
+      dashboard = await DashboardFixture.start(worker, { host: "::1" });
       // Bracketed IPv6 authority; an unbracketed host would poll the default
       // 127.0.0.1 and time out even though the server is listening on ::1.
       expect(dashboard.baseUrl).toMatch(/^http:\/\/\[::1\]:\d+$/);
