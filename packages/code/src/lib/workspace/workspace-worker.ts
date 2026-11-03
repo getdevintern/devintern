@@ -417,6 +417,8 @@ export function buildInjectedTaskAcquirer(
         taskRef: task.taskFile,
       })(task.taskKey, toRoutableTask({ key: task.taskKey, labels: [], components: [] })),
     intervalSeconds: parseEnvInteger("WORKER_INJECTED_INTERVAL_SECONDS", 5, { min: 1 }),
+    maxConcurrency: deps.config.workspace.execution.maxConcurrency,
+    maxConcurrencyPerRepo: deps.config.workspace.execution.maxConcurrencyPerRepo,
     verbose,
   });
 }
