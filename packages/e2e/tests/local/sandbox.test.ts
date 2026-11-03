@@ -62,24 +62,6 @@ function providerOfflineEnv(provider: string): Record<string, string> {
   return { PATH: providerOfflinePath(provider) };
 }
 
-/**
- * Slice one provider's row out of the doctor's provider table.
- *
- * Blocks start at an indented provider row and end at the blank line the report
- * prints between providers. Assertions must be scoped to a block: the `native`
- * row is always available, so a global "✅ available" match proves nothing
- * about the provider under test.
- */
-function providerBlock(text: string, provider: string): string {
-  const header = new RegExp(`^ {2}${provider} {2,}\\S`, "m");
-  return text.split(/\n\s*\n/).find((block) => header.test(block)) ?? "";
-}
-
-/** Whether any entry of a PATH can resolve an executable name. */
-function pathResolves(path: string, binary: string): boolean {
-  return path.split(delimiter).some((entry) => entry !== "" && existsSync(join(entry, binary)));
-}
-
 /** PATH with a stub executable shadowing the real one, for unreachable services. */
 function shadowBinEnv(run: SandboxWorkspace, name: string, source: string): Record<string, string> {
   const bin = join(run.root, "shadow-bin");
@@ -309,7 +291,7 @@ test.skipIf(skip)(
 );
 
 // Explicit providers that cannot be enforced must abort before the agent runs.
-for (const provider of ["srt", "smolvm", "docker"] as const) {
+for (const provider of ["docker"] as const) {
   test.skipIf(!existsSync(cliPath))(
     `an explicitly requested ${provider} provider fails closed when it is unusable`,
     async () => {
@@ -434,82 +416,35 @@ test.skipIf(!existsSync(cliPath))(
   60_000,
 );
 
-test.skipIf(!existsSync(cliPath))(
-  "sandbox doctor reports srt availability honestly without crashing",
-  async () => {
-    const root = mkdtempSync(join(tmpdir(), "devintern-e2e-sandbox-doctor-srt-"));
-    const home = createProviderHome(root);
-    const bin = join(home, "bin");
-    mkdirSync(bin, { recursive: true });
-    stubHarness(bin, "claude");
-    const baseEnv = sandboxEnvironment(root, home, "srt");
-    const cliPathEnv = [bin, runtimeBinDir(), baseEnv.PATH].join(delimiter);
-    const env = {
-      ...baseEnv,
-      PATH: cliPathEnv,
-      AGENT_HARNESS: "claude-code",
-    };
-    try {
-      const result = await command([process.execPath, cliPath, "sandbox"], root, env);
-      const text = `${result.stdout}\n${result.stderr}`;
-      // Available with a failing preflight and unavailable both exit non-zero.
-      expect([0, 1]).toContain(result.exitCode);
-      expect(text).toContain("Configured: AGENT_SANDBOX=srt");
-
-      // The assertion is scoped to the srt row: the always-available `native`
-      // row would otherwise satisfy a global "✅ available" match even when srt
-      // reports itself unusable. Installed srt can only fail for an
-      // srt-specific reason (the missing Linux dependencies); a missing binary
-      // must say so on the srt row.
-      const srtBlock = providerBlock(text, "srt");
-      expect(srtBlock).toContain("Anthropic Sandbox Runtime (srt)");
-      if (pathResolves(cliPathEnv, providerBinary("srt") ?? "srt")) {
-        expect(srtBlock).toMatch(
-          /✅ available|❌ srt found, but required Linux dependencies are missing/,
-        );
-      } else {
-        expect(srtBlock).toContain("❌ srt not found on PATH");
+for (const provider of ["srt", "smolvm"] as const) {
+  test.skipIf(!existsSync(cliPath))(
+    `sandbox doctor reports the removed ${provider} provider as a migration error`,
+    async () => {
+      const root = mkdtempSync(join(tmpdir(), `devintern-e2e-sandbox-doctor-${provider}-`));
+      const home = createProviderHome(root);
+      const bin = join(home, "bin");
+      mkdirSync(bin, { recursive: true });
+      stubHarness(bin, "claude");
+      const baseEnv = sandboxEnvironment(root, home, provider);
+      const env = {
+        ...baseEnv,
+        PATH: [bin, runtimeBinDir(), baseEnv.PATH].join(delimiter),
+        AGENT_HARNESS: "claude-code",
+      };
+      try {
+        const result = await command([process.execPath, cliPath, "sandbox"], root, env);
+        const text = `${result.stdout}\n${result.stderr}`;
+        expect(result.exitCode).toBe(1);
+        expect(text).toContain(`Configured: AGENT_SANDBOX=${provider}`);
+        expect(text).toContain(`Sandbox provider "${provider}" has been removed`);
+        expect(text).not.toContain("Uncaught exception");
+      } finally {
+        rmSync(root, { recursive: true, force: true });
       }
-      expect(text).not.toContain("Uncaught exception");
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  },
-  60_000,
-);
-
-test.skipIf(!existsSync(cliPath))(
-  "sandbox doctor reports smolvm as unavailable when its binary is missing",
-  async () => {
-    const root = mkdtempSync(join(tmpdir(), "devintern-e2e-sandbox-doctor-smolvm-"));
-    const home = createProviderHome(root);
-    const bin = join(home, "bin");
-    mkdirSync(bin, { recursive: true });
-    stubHarness(bin, "claude");
-    const baseEnv = sandboxEnvironment(root, home, "smolvm");
-    const env = {
-      ...baseEnv,
-      // Removing the binary avoids booting a microVM (and downloading an
-      // image) just to render the doctor report.
-      PATH: [bin, providerOfflinePath("smolvm")].join(delimiter),
-      AGENT_HARNESS: "claude-code",
-    };
-    try {
-      const result = await command([process.execPath, cliPath, "sandbox"], root, env);
-      const text = `${result.stdout}\n${result.stderr}`;
-      expect(result.exitCode).toBe(1);
-      expect(text).toContain("Configured: AGENT_SANDBOX=smolvm");
-      expect(text).toMatch(/smolvm\s+SmolVM \(microVM\)/);
-      expect(text).toContain("smolvm is not usable on this machine");
-      expect(text).toContain("smolvm not found on PATH");
-      expect(text).not.toContain("agent wrapped with SmolVM");
-      expect(text).not.toContain("Uncaught exception");
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  },
-  60_000,
-);
+    },
+    60_000,
+  );
+}
 
 test.skipIf(!existsSync(cliPath))(
   "sandbox doctor does not claim docker sandboxes a run when the daemon is unreachable",
@@ -618,40 +553,4 @@ test.skipIf(process.platform === "win32")(
     expect(native.usable).toBe(true);
     expect(native.reason).toBe("native has no external binary to probe");
   },
-);
-
-// Optional real boundary. srt can wrap an arbitrary process, so the shell probe
-// works unchanged. It is skip-gated on the same detection the CLI uses plus a
-// start-up probe: srt inside another OS sandbox (or without bwrap namespaces)
-// cannot start, and a failed start is an environment prerequisite, not a
-// product regression.
-const srtPrerequisite = await providerPrerequisite("srt");
-
-test.skipIf(!existsSync(cliPath) || !srtPrerequisite.usable)(
-  "a srt-wrapped agent writes inside the granted paths and cannot escape",
-  async () => {
-    const run = await new SandboxWorkspace({ provider: "srt" }).prepare();
-    try {
-      const result = await run.run({}, ["--sandbox", "srt"]);
-      const text = `${result.stdout}\n${result.stderr}`;
-      expect(result.exitCode).toBe(0);
-      expect(text).toContain("🔒 Agent sandbox: Anthropic Sandbox Runtime (srt)");
-
-      const checks = run.checks();
-      expect(checks["working-dir-write"]?.ok).toBe(true);
-      expect(checks["temp-write"]?.ok).toBe(true);
-      expect(checks["output-write"]?.ok).toBe(true);
-      expect(checks["repo-edit"]?.ok).toBe(true);
-      expect(checks["home-write"]?.ok).toBe(false);
-      expectOutsideWriteDenied(run, checks);
-      expect(existsSync(join(run.home, "sandbox-escape"))).toBe(false);
-
-      expect(await run.git("branch", "--show-current")).toBe(run.head);
-      expect(await run.git("diff", "--name-only", `${run.base}...HEAD`)).toBe("src/greeting.ts");
-      expect(await run.remoteSha(run.head)).toBe(await run.git("rev-parse", "HEAD"));
-    } finally {
-      run.dispose();
-    }
-  },
-  120_000,
 );

@@ -2,8 +2,8 @@
  * Helpers for the sandbox end-to-end suite.
  *
  * The suite drives the built CLI with a deterministic shell agent wrapped by a
- * sandbox provider. For providers that can wrap an arbitrary process (nono,
- * srt) it asserts the real boundary: writes inside the task workspace, temp
+ * sandbox provider. For providers that can wrap an arbitrary process (nono)
+ * it asserts the real boundary: writes inside the task workspace, temp
  * dir and output dir succeed, while writes elsewhere are denied. No AI account
  * or model call is involved.
  *
@@ -48,8 +48,6 @@ export const SANDBOX_SECRET = "readable-outside-write-scope";
  */
 const PROVIDER_BINARIES: Record<string, string | undefined> = {
   nono: "nono",
-  srt: "srt",
-  smolvm: "smolvm",
   docker: "sbx",
 };
 
@@ -426,7 +424,7 @@ export class SandboxWorkspace {
    *
    * @param overrides - Environment overrides for this run.
    * @param extraArgs - Additional CLI arguments appended to the base argv
-   *   (for example `--sandbox srt`). The flag wins over `AGENT_SANDBOX`.
+   *   (for example `--sandbox nono`). The flag wins over `AGENT_SANDBOX`.
    * @returns The CLI's exit code and captured output.
    */
   async run(overrides: Record<string, string> = {}, extraArgs: readonly string[] = []) {
@@ -494,7 +492,7 @@ export class SandboxWorkspace {
  * Build a PATH that cannot resolve one executable, while keeping the
  * toolchain and system commands the parent CLI needs.
  *
- * @param binary - Executable name to remove (for example `srt`).
+ * @param binary - Executable name to remove (for example `nono`).
  * @param source - PATH to filter (defaults to the process PATH).
  * @returns A PATH without any directory containing that executable.
  */
@@ -592,9 +590,8 @@ function firstLine(text: string): string {
  *
  * Detection alone is not enough for a start-up probe, but it is decisive for
  * the opposite direction: when the CLI would report the provider unavailable
- * (missing binary, or a missing Linux dependency such as `bwrap`/`socat`/`rg`
- * for srt), a boundary test must skip instead of failing for an environmental
- * reason.
+ * (missing binary or a missing Linux dependency), a boundary test must skip
+ * instead of failing for an environmental reason.
  *
  * @param provider - Registered provider name.
  * @returns The provider's detection, or undefined for an unregistered name.
@@ -602,76 +599,6 @@ function firstLine(text: string): string {
 async function providerDetection(provider: string): Promise<SandboxDetection | undefined> {
   const detections = await detectSandboxProviders();
   return detections.find((entry) => entry.provider.name === provider)?.detection;
-}
-
-function probeSrt(providerPathValue: string): ProviderPrerequisite {
-  const dir = mkdtempSync(join(tmpdir(), "devintern-e2e-srt-prereq-"));
-  const settings = join(dir, "settings.json");
-  writeFileSync(
-    settings,
-    JSON.stringify({
-      network: {
-        allowedDomains: ["api.anthropic.com"],
-        deniedDomains: [],
-        strictAllowlist: true,
-        allowLocalBinding: true,
-      },
-      filesystem: { allowWrite: [dir], denyRead: [], denyWrite: [] },
-    }),
-  );
-  try {
-    const result = spawnSync(providerPathValue, ["--settings", settings, "sh", "-c", "true"], {
-      encoding: "utf8",
-      stdio: "pipe",
-      timeout: 30_000,
-      env: process.env,
-    });
-    if (result.error) return { usable: false, reason: result.error.message };
-    if (result.status !== 0) {
-      return {
-        usable: false,
-        reason: `srt cannot start here (bwrap/namespace prerequisite): ${firstLine(
-          result.stderr || result.stdout || `exit ${result.status}`,
-        )}`,
-      };
-    }
-    return { usable: true, reason: "srt starts on this host" };
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-}
-
-function probeSmolvm(providerPathValue: string): ProviderPrerequisite {
-  const doctor = spawnSync(providerPathValue, ["doctor"], {
-    encoding: "utf8",
-    stdio: "pipe",
-    timeout: 60_000,
-    env: process.env,
-  });
-  if (doctor.error || doctor.status !== 0) {
-    return {
-      usable: false,
-      reason:
-        "smolvm doctor failed — host still needs setup (KVM/QEMU/network prerequisites; " +
-        "run 'smolvm setup')",
-    };
-  }
-  // A first run downloads a multi-GB guest image. Never trigger that from a
-  // test: require a QEMU guest image already cached on the host.
-  const images = spawnSync(providerPathValue, ["image", "list"], {
-    encoding: "utf8",
-    stdio: "pipe",
-    timeout: 30_000,
-    env: process.env,
-  });
-  const listing = `${images.stdout ?? ""}\n${images.stderr ?? ""}`;
-  if (images.status !== 0 || !/qemu/i.test(listing) || !/(claude|ubuntu)/i.test(listing)) {
-    return {
-      usable: false,
-      reason: "no cached smolvm QEMU guest image (first run would download one)",
-    };
-  }
-  return { usable: true, reason: "smolvm doctor passes and a QEMU guest image is cached" };
 }
 
 function probeDocker(providerPathValue: string): ProviderPrerequisite {
@@ -696,14 +623,12 @@ function probeDocker(providerPathValue: string): ProviderPrerequisite {
  * Check whether an optional real-provider boundary test can run on this host.
  *
  * Detection alone is not enough for a boundary test: the provider must also be
- * able to start. srt inside another OS sandbox, an unsigned `sbx`, and a
- * smolvm host that still needs `smolvm setup` all report unusable here instead
+ * able to start. An unsigned or unreachable `sbx` reports unusable here instead
  * of failing a boundary test for environmental reasons.
  *
  * The gate starts from the provider's own {@link detectSandboxProviders}
- * result, so it mirrors the CLI exactly: a host where srt exists but a required
- * Linux dependency (`bwrap`, `socat`, `rg`) is missing skips here instead of
- * running a boundary test the CLI would refuse.
+ * result, so it mirrors the CLI exactly: a host where a required dependency is
+ * missing skips here instead of running a boundary test the CLI would refuse.
  *
  * @param provider - Registered provider name.
  * @returns Whether the provider can run, plus an honest skip reason.
@@ -730,10 +655,6 @@ export async function providerPrerequisite(provider: string): Promise<ProviderPr
     return { usable: false, reason: `${binary} is not on the test process PATH` };
   }
   switch (provider) {
-    case "srt":
-      return probeSrt(path);
-    case "smolvm":
-      return probeSmolvm(path);
     case "docker":
       return probeDocker(path);
     default:

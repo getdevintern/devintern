@@ -106,7 +106,7 @@ Set `E2E_HARNESS_PROBE_TIMEOUT_MS` to tune the per-harness timeout (default
 `10000`). These checks do not run full agent tasks; the deterministic fake agent
 continues to cover the implementation, git, and pull-request lifecycle.
 
-## Sandbox checks (nono, srt, native, docker, smolvm)
+## Sandbox checks (nono, native, docker, removed providers)
 
 The ordinary local suite exercises sandbox provider selection and the
 fail-closed guarantee deterministically, plus the real nono boundary when nono
@@ -121,38 +121,33 @@ run:
 | Provider | Default-offline check                                               | Optional real boundary                              |
 | -------- | ------------------------------------------------------------------- | --------------------------------------------------- |
 | `nono`   | Removed from `PATH`; exits non-zero, no probe, no commit.           | Runs when installed, with `HOME` outside `/tmp`.    |
-| `srt`    | Removed from `PATH`; exits non-zero, no probe, no commit.           | Runs only when `srt` can actually start.            |
-| `smolvm` | Removed from `PATH`; exits non-zero, no probe, no commit.           | Not runnable with the shell probe (see below).      |
 | `docker` | `sbx ls` shadowed to fail (unreachable daemon); exits non-zero.     | Not runnable with the shell probe (see below).      |
 | `native` | Unsupported harness (`goose`) with a stub `goose`; exits non-zero.  | Needs a real claude-code/codex account, so not run. |
 | `auto`   | Picks `native` for a native-capable harness and `nono` for `goose`. | —                                                   |
 | invalid  | `--sandbox bogus` and `AGENT_SANDBOX=bogus` both exit non-zero.     | —                                                   |
+| removed  | `--sandbox srt` / `smolvm` and `AGENT_SANDBOX` forms exit non-zero. | —                                                   |
 
 The same suite covers the `devintern sandbox` doctor for non-nono providers:
-native as the next run for claude-code/codex, srt availability reported honestly,
-smolvm reported unavailable when its binary is absent, docker refusing to claim
-a sandboxed run when `sbx` cannot list its daemon, and a missing harness CLI
-surfacing as a preflight failure with the `*_CLI_PATH` fix.
+native as the next run for claude-code/codex, docker refusing to claim a
+sandboxed run when `sbx` cannot list its daemon, a missing harness CLI surfacing
+as a preflight failure with the `*_CLI_PATH` fix, and the removed `srt`/`smolvm`
+providers reporting a migration error instead of an unknown-provider list.
 
-`srt`, `smolvm`, and Docker Sandboxes (`sbx`) stay optional. Their real-boundary
-tests skip unless the prerequisite below is present; the fail-closed tests still
-run by removing or shadowing the executable. `smolvm` and `sbx` only run agents
-pre-installed in their guest microVM and ignore the host executable path, so the
-deterministic shell probe cannot exercise their boundary; their coverage here is
-selection, doctor reporting, and fail-closed behavior.
+Docker Sandboxes (`sbx`) stays optional. Its real-boundary test skips unless the
+prerequisite below is present; the fail-closed test still runs by shadowing the
+executable. `sbx` only runs agents pre-installed in its guest microVM and
+ignores the host executable path, so the deterministic shell probe cannot
+exercise its boundary; its coverage here is selection, doctor reporting, and
+fail-closed behavior.
 
 ### Optional real-provider prerequisites
 
-- **srt**: `srt` on `PATH` plus bubblewrap, socat, and ripgrep on Linux. It must
-  be able to create its namespaces: running the suite inside another OS sandbox
-  (for example a nono-wrapped editor) makes `srt` fail with a bwrap uid-map
-  error, and the boundary test skips instead of failing.
-- **smolvm**: CelestoAI `smolvm` on `PATH`, `/dev/kvm` accessible, QEMU on
-  Linux, `smolvm doctor` passing (some hosts still need `smolvm setup`), and a
-  cached QEMU guest image. The suite never downloads an image or boots a VM just
-  to decide whether to run.
 - **Docker Sandboxes**: the `sbx` CLI signed in (`sbx login`) with a reachable
   daemon; `sbx ls` must succeed.
+
+Removed providers (`srt`, `smolvm`) have no prerequisite and no boundary test:
+the suite only asserts that selecting either one fails with a migration message
+naming `nono` or `docker`.
 
 The sandbox suite keeps the nono isolated `HOME` outside the OS temp directory:
 nono's Linux profile grants a broad read on `/tmp`, and a home nested under
