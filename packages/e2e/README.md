@@ -245,6 +245,31 @@ on the DevIntern GitHub repository. Each job receives only its provider's token,
 and no credentials are exposed to untrusted PR workflows. Missing configuration
 fails the explicit live command before it mutates a remote repository.
 
+## Offline fake tracker servers
+
+The default local suite includes an in-process fake Jira Cloud v3 server, so the
+built CLI can exercise the Jira tracker lifecycle with no credentials and no
+network access. `bun test tests/local` runs
+`tests/local/tracker-jira-fake.test.ts`; it skips only when the built CLI is
+absent, like the other local Git tests.
+
+The fake binds `127.0.0.1:0`, accepts any Basic-auth credentials (and never logs
+them), and implements only the endpoints the product calls: `/myself`, enhanced
+JQL `search/jql`, issue read/update, comments (ADF and text), and workflow
+transitions. Any unmatched request returns a diagnostic 404 and fails the test,
+so a client change that starts calling a new route is visible instead of
+silently returning `{}`.
+
+Two scenarios run the production Jira client through explicit-key and `--query`
+selection against a seeded issue and a decoy outside the selector. Read-back
+goes through the fake fixture, not CLI stdout: the pushed `feature/<key>` branch
+and exact `src/greeting.ts` diff, the run record, the configured workflow
+status, surviving unrelated labels, the implementation summary comment, and
+delivery of the seeded description/comment markers to the deterministic agent.
+A second run with `--skip-comments` proves no additional comment or transition
+is posted. The local bare Git remote is the code host; no GitHub token or PR is
+required.
+
 ## Remote tracker fixtures
 
 The Markdown suites above need no task tracker. Separate opt-in suites exercise
