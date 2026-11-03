@@ -94,9 +94,10 @@ export const OPT_IN_SUITES: readonly OptInSuite[] = [
     status: "todo",
   },
   {
-    name: "Offline fake tracker servers",
+    name: "Offline fake Trello server",
     script: "test",
-    reason: "planned in Layer 3 of docs/tracker-e2e-plan.md",
+    reason:
+      "planned in Layer 3 of docs/tracker-e2e-plan.md; the offline Jira fake runs in the default suite",
     status: "todo",
   },
 ];

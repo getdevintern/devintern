@@ -1,7 +1,8 @@
 # Tracker E2E expansion plan
 
-Status: **Layer 1 implemented** (read-only workspace smoke). Layers 2 and 3 are
-planned, not implemented.
+Status: **Layer 1 implemented** (read-only workspace smoke). **The Jira part of
+Layer 3 is implemented** (offline fake lifecycle in the default suite). The
+Jira/Trello Layer 2 live suites and the Trello part of Layer 3 remain planned.
 
 This plan describes how `packages/e2e` grows tracker coverage without making the
 default `bun run test` depend on the network or credentials, and without writing
@@ -22,17 +23,17 @@ test data into the trackers a worker actually uses.
 
 ## Current coverage
 
-| Tracker             | Default `test` | Opt-in suite                      | Notes                                                                    |
-| ------------------- | -------------- | --------------------------------- | ------------------------------------------------------------------------ |
-| Markdown            | no             | `test:trackers` (read-only path)  | Plain files, no credentials.                                             |
-| Jira                | no             | `test:trackers` (read-only smoke) | Full lifecycle planned in Layer 2.                                       |
-| Trello              | no             | `test:trackers` (read-only smoke) | Full lifecycle planned in Layer 2.                                       |
-| GitHub Issues       | no             | `test:e2e:tracker`                | Existing live suite; dedicated tracker repository doubles as code host.  |
-| Local GitLab Issues | no             | `test:e2e:tracker:gitlab`         | Existing live suite; creates and deletes a dedicated project.            |
-| GitLab.com Issues   | no             | `test:e2e:tracker:gitlab-com`     | Existing live suite; pre-created project, issues only, project retained. |
-| Linear              | no             | none                              | Detection only in Layer 1.                                               |
-| Asana               | no             | none                              | Detection only in Layer 1.                                               |
-| Azure DevOps        | no             | none                              | Detection only in Layer 1.                                               |
+| Tracker             | Default `test`     | Opt-in suite                           | Notes                                                                                                                            |
+| ------------------- | ------------------ | -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| Markdown            | no                 | `test:trackers` (read-only path)       | Plain files, no credentials.                                                                                                     |
+| Jira                | yes (offline fake) | `test:trackers` (read-only live smoke) | Fake lifecycle: key/`--query`, transition, comment, `--skip-comments`. Real project lifecycle and estimation planned in Layer 2. |
+| Trello              | no                 | `test:trackers` (read-only smoke)      | Full lifecycle planned in Layer 2.                                                                                               |
+| GitHub Issues       | no                 | `test:e2e:tracker`                     | Existing live suite; dedicated tracker repository doubles as code host.                                                          |
+| Local GitLab Issues | no                 | `test:e2e:tracker:gitlab`              | Existing live suite; creates and deletes a dedicated project.                                                                    |
+| GitLab.com Issues   | no                 | `test:e2e:tracker:gitlab-com`          | Existing live suite; pre-created project, issues only, project retained.                                                         |
+| Linear              | no                 | none                                   | Detection only in Layer 1.                                                                                                       |
+| Asana               | no                 | none                                   | Detection only in Layer 1.                                                                                                       |
+| Azure DevOps        | no                 | none                                   | Detection only in Layer 1.                                                                                                       |
 
 The default local run reports these opt-in suites as skipped and planned
 coverage as todo (`helpers/opt-in-suites.ts`), so the test output names what it
@@ -190,23 +191,50 @@ Acceptance criteria:
 - Missing fixture configuration fails before any remote mutation.
 - A rerun does not collide with leftovers from a previous run.
 
-## Layer 3 — fake tracker servers for the default local suite (planned)
+## Layer 3 — fake tracker servers for the default local suite (Jira implemented)
 
 Run the built CLI against in-process Bun servers that implement the subset of
-the Jira and Trello APIs the product uses:
+the tracker APIs the product uses. This gives deterministic, credential-free
+lifecycle coverage in the default `test` run and catches request-shape
+regressions without depending on provider availability.
 
-- Jira: `myself`, project/status metadata, `search/jql`, issue create/get,
-  comments, transitions.
-- Trello: member/board/list reads, card create/get/update, list moves, comments,
-  labels, search.
+### Jira (implemented)
 
-Point the CLI at the fakes through `JIRA_BASE_URL` and
-`TRELLO_API_BASE_URL` (already supported by `TrelloClient`), with synthetic
-credentials. This gives deterministic, credential-free lifecycle coverage in
-the default `test` run and catches request-shape regressions without depending
-on provider availability.
+`providers/fake-jira.ts` serves a strict Jira Cloud REST v3 subset on
+`127.0.0.1:0` and owns all issues, comments, labels, and statuses in memory.
+`tests/local/tracker-jira-fake.test.ts` seeds an expected issue plus a decoy
+outside the selector, writes per-project Jira statuses into
+`.devintern-code/settings.json`, and runs the production Jira client through the
+built CLI for both explicit-key and `--query` selection. It reads state back
+through the fixture rather than CLI stdout.
 
-Acceptance criteria:
+Endpoints covered:
+
+- `GET /rest/api/3/myself`
+- `GET /rest/api/3/search/jql` (enhanced JQL, requested issue fields)
+- `GET /rest/api/3/issue/{key}` (including `?expand=renderedFields`)
+- `GET /rest/api/3/issue/{key}/comment` (including `?expand=renderedBody`)
+- `POST /rest/api/3/issue/{key}/comment` (ADF or text)
+- `GET` / `POST /rest/api/3/issue/{key}/transitions`
+- `PUT /rest/api/3/issue/{key}` (labels/fields)
+
+Any other route returns a diagnostic 404 naming the method and path, and the
+test asserts no unexpected request occurred. The fake accepts any Basic-auth
+credentials, never logs them, and makes no outbound requests. Scenarios assert
+the pushed `feature/<key>` branch and exact `src/greeting.ts` diff, the run
+record, the configured workflow status, surviving unrelated labels, the
+implementation comment, and `--skip-comments` on a second run. The local bare
+Git remote is the code host; no PR, GitHub token, or model credentials are
+required. The only skip is the existing built-CLI guard.
+
+### Trello (planned)
+
+The Trello fake remains planned: member/board/list reads, card create/get/update,
+list moves, comments, labels, and search. Point the CLI at it through
+`TRELLO_API_BASE_URL` (already supported by `TrelloClient`) with synthetic
+credentials.
+
+### Acceptance criteria (applies to each implemented fake)
 
 - The fakes assert the exact endpoints and payloads the CLI sends.
 - The CLI-visible outcomes match the real lifecycle assertions: branch/PR,
@@ -247,7 +275,8 @@ Acceptance criteria:
 1. Layer 1 read-only smoke (done).
 2. Trello Layer 2 on a dedicated board; it needs no project provisioning.
 3. Jira Layer 2 with a dedicated `E2E` project.
-4. Layer 3 fake servers so the default suite covers Jira and Trello lifecycle.
+4. Layer 3 fake servers so the default suite covers Jira (done) and Trello
+   (planned) lifecycle.
 5. Add read-only checks for Linear, Asana, and Azure DevOps when credentials
    exist.
 6. Revisit live GitHub/GitLab tracker smoke only if the full suites start

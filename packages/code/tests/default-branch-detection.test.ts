@@ -177,6 +177,31 @@ describe("Default branch detection", () => {
     ).toBe("origin/main");
   });
 
+  test("resolves the cached default branch without contacting the remote", async () => {
+    configureOrigin("develop");
+    execSync("git remote set-head origin develop", { cwd: repoDir });
+
+    const executeGitCommand = Utils.executeGitCommand;
+    const gitCommands = spyOn(Utils, "executeGitCommand").mockImplementation((args, options) => {
+      const command = args.join(" ");
+      if (command.includes("ls-remote") || command.startsWith("fetch")) {
+        throw new Error(`network git command in cached resolution: ${command}`);
+      }
+      return executeGitCommand(args, options);
+    });
+    try {
+      await expect(Utils.getCachedDefaultBranch({ cwd: repoDir })).resolves.toBe("develop");
+    } finally {
+      gitCommands.mockRestore();
+    }
+  });
+
+  test("falls back to main without a network probe when no remote metadata exists", async () => {
+    execSync("git branch -M main", { cwd: repoDir });
+
+    await expect(Utils.getCachedDefaultBranch({ cwd: repoDir })).resolves.toBe("main");
+  });
+
   test("uses cached origin HEAD when the bounded noninteractive remote probe fails", async () => {
     configureOrigin("master");
     execSync("git remote set-head origin master", { cwd: repoDir });

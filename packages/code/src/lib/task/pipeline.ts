@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, statSync, unlinkSync } from "fs";
+import { mkdirSync, unlinkSync } from "fs";
 import { basename, join } from "path";
 import { UsageLimitError } from "@devintern/agent-harness";
 import { isMarkdownFilePath } from "@devintern/task-trackers";
@@ -7,6 +7,7 @@ import { runAnalysisWithFallback } from "../agent/analysis-mode";
 import { adoptAgentCreatedChangeRequest } from "../agent/adopt-change-request";
 import { runClarityCheck } from "../agent/clarity";
 import { HarnessUnavailableError } from "../agent/harness-startup";
+import { readImplementationReport } from "../agent/implementation-report";
 import { runAgentHarness } from "../agent/run-harness";
 import { flushAnalyticsAndExit } from "../cli/bootstrap";
 import { isWorkerTaskProcess, runContext } from "../cli/context";
@@ -34,9 +35,12 @@ import {
   RunStore,
   beginRun,
   getActiveRunContext,
+  hasRunStage,
+  latestRunStage,
   recordRunBranch,
   recordRunStage,
   recordRunTicket,
+  replaceRunStage,
 } from "../state/run-recorder";
 import { pickupSelection, resolveSessionPickup } from "../state/session-pickup";
 import type { SessionPickupDecision } from "../state/session-pickup";
@@ -174,6 +178,78 @@ interface ImplementationInput {
   resumeBranch?: string;
 }
 
+/** Extract the `report` string from a recorded stage's JSON detail. */
+function readStageReport(detail: string | undefined): string | undefined {
+  if (!detail) return undefined;
+  try {
+    const parsed = JSON.parse(detail) as { report?: unknown };
+    return typeof parsed.report === "string" && parsed.report.trim() ? parsed.report : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Record the implementation stage from this attempt's summary files, correcting
+ * an early record when a later phase changed the outcome.
+ *
+ * The harness writes the stage before commit/verify/auto-review so an
+ * interruption in those phases still leaves resumable state. Afterwards:
+ *
+ * - finalize writes `implementation-summary-incomplete.md` on a halt, turning
+ *   the early success into a failure; or
+ * - a successful verify/plan repair rewrites `implementation-summary.md`, so
+ *   the early report no longer describes what was actually implemented.
+ *
+ * Both cases replace the single row so the dashboard and session pickup never
+ * hand a stale status/report to the next agent, preserving the prior report
+ * under `agentReport`.
+ *
+ * @param taskDir - Per-task output directory holding the summary files
+ * @param implementationStartedAt - Epoch ms when the agent session started
+ * @param harnessName - Display name recorded on the stage
+ */
+export function recordImplementationStage(
+  taskDir: string,
+  implementationStartedAt: number,
+  harnessName: string,
+): ReturnType<typeof readImplementationReport> {
+  const { incomplete, report } = readImplementationReport(taskDir, implementationStartedAt);
+
+  const stage = {
+    status: incomplete ? ("failed" as const) : ("succeeded" as const),
+    summary: incomplete
+      ? `incomplete implementation with ${harnessName}`
+      : `implemented with ${harnessName}`,
+    detail: {
+      harness: harnessName,
+      durationMs: Date.now() - implementationStartedAt,
+      ...(report === undefined ? {} : { report }),
+    },
+  };
+
+  const recorded = hasRunStage("implementation") ? latestRunStage("implementation") : undefined;
+  if (!recorded) {
+    recordRunStage("implementation", stage);
+  } else {
+    const recordedReport = readStageReport(recorded.detail);
+    const reportChanged = report !== undefined && report !== recordedReport;
+    if (recorded.status !== stage.status || reportChanged) {
+      replaceRunStage("implementation", {
+        ...stage,
+        detail: {
+          ...stage.detail,
+          ...(recordedReport === undefined || recordedReport === report
+            ? {}
+            : { agentReport: recordedReport }),
+        },
+      });
+    }
+  }
+
+  return { incomplete, report };
+}
+
 /**
  * Run the agent implementation session for a prepared task, record the
  * implementation stage, and finish the run record.
@@ -241,38 +317,16 @@ async function runImplementation(input: ImplementationInput): Promise<void> {
   // An incomplete-summary file written during this run means the agent
   // stopped short and handed back to a human (mtime check guards against
   // stale files from earlier attempts in the same task directory).
-  const incompleteSummaryPath = join(taskDir, "implementation-summary-incomplete.md");
-  const implementationIncomplete =
-    existsSync(incompleteSummaryPath) &&
-    statSync(incompleteSummaryPath).mtimeMs >= implementationStartedAt;
-
-  // Persist the agent's own report (implementation-summary[-incomplete].md)
-  // in the run record: the output directory is an ephemeral debug artifact,
-  // and for escalated runs this text is the "why" a human needs.
-  const REPORT_EXCERPT_LENGTH = 10_000;
-  const reportPath = implementationIncomplete
-    ? incompleteSummaryPath
-    : join(taskDir, "implementation-summary.md");
-  let implementationReport: string | undefined;
-  try {
-    if (existsSync(reportPath) && statSync(reportPath).mtimeMs >= implementationStartedAt) {
-      implementationReport = readFileSync(reportPath, "utf8").slice(0, REPORT_EXCERPT_LENGTH);
-    }
-  } catch {
-    /* best-effort: recording must never fail a run */
-  }
-
-  recordRunStage("implementation", {
-    status: implementationIncomplete ? "failed" : "succeeded",
-    summary: implementationIncomplete
-      ? `incomplete implementation with ${resolvedAgent.harness.displayName}`
-      : `implemented with ${resolvedAgent.harness.displayName}`,
-    detail: {
-      harness: resolvedAgent.harness.displayName,
-      durationMs: Date.now() - implementationStartedAt,
-      ...(implementationReport === undefined ? {} : { report: implementationReport }),
-    },
-  });
+  // The harness already records a completed implementation before commit and
+  // auto-review, so an interruption in those phases still leaves resumable
+  // state. Only halted sessions (which never reach that early write) and
+  // storage failures fall through to the recording pass, which also corrects an
+  // early success when finalize wrote the incomplete summary afterwards.
+  const { incomplete: implementationIncomplete } = recordImplementationStage(
+    taskDir,
+    implementationStartedAt,
+    resolvedAgent.harness.displayName,
+  );
 
   if (isMarkdownTaskTracker(tracker)) {
     await tracker.markDoneIfSuccessful(workflowKey, taskDir);
@@ -1168,6 +1222,17 @@ export async function processSingleTask(
     // (branch + report) is selected instead of the current in_progress run.
     const currentRunId = getActiveRunContext()?.id;
     const pickupStore = new RunStore();
+    // Feature branches follow the checkout they were cut from: fleet task
+    // worktrees branch off the fetched remote base, while a normal CLI checkout
+    // branches off the local base. Comparing a local-checkout branch against a
+    // remote base that has not received local commits would present unrelated
+    // local commits as the branch's landed work.
+    const compareOptions = {
+      cwd: process.cwd(),
+      basePreference: process.env[WORKSPACE_REPO_ENV]
+        ? ("remote-first" as const)
+        : ("local-first" as const),
+    };
     let pickup: SessionPickupDecision;
     try {
       pickup = await resolveSessionPickup({
@@ -1185,8 +1250,12 @@ export async function processSingleTask(
         branchExists: async (branch) =>
           (await Utils.gitRefExists(`refs/heads/${branch}`)) ||
           (await Utils.gitRefExists(`refs/remotes/origin/${branch}`)),
+        // A legacy/interrupted run may have commits but no implementation
+        // stage; reuse its branch when the commits are really there.
+        hasLandedCommits: ({ branch }) =>
+          Utils.hasCommitsAhead(branch, effectiveTargetBranch, compareOptions),
         describeLanded: ({ branch }) =>
-          Utils.collectLandedWork(branch, effectiveTargetBranch, { cwd: process.cwd() }),
+          Utils.collectLandedWork(branch, effectiveTargetBranch, compareOptions),
       });
     } finally {
       pickupStore.close();
