@@ -52,7 +52,6 @@ describe("sandbox detection", () => {
     const names = first.map((d) => d.provider.name);
     expect(names).toContain("nono");
     expect(names).toContain("docker");
-    expect(names).toContain("smolvm");
 
     const second = await detectSandboxProviders();
     expect(second).toBe(first); // cached: same promise result

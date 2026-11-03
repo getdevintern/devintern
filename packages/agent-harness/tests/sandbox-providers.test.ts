@@ -4,10 +4,6 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFil
 import { tmpdir } from "os";
 import { join } from "path";
 import { DockerSandboxProvider } from "../src/sandbox/providers/docker.js";
-import {
-  SmolvmSandboxProvider,
-  resetSmolvmLegacyWarning,
-} from "../src/sandbox/providers/smolvm.js";
 import type { SandboxPolicy } from "../src/sandbox/types.js";
 
 // Bun's mock.module patches the existing module in place, so the namespace
@@ -477,79 +473,5 @@ describe("DockerSandboxProvider.wrapCommand", () => {
     expect(provider.supportsHarness("claude-code")).toBe(true);
     expect(provider.supportsHarness("codex")).toBe(true);
     expect(provider.supportsHarness("goose")).toBe(false);
-  });
-});
-
-/** Records the boot call instead of spawning a real microVM. */
-class StubBootSmolvmProvider extends SmolvmSandboxProvider {
-  bootCalls: Array<{ smolvmAgent: string; sandboxName: string; workingDir: string }> = [];
-  protected override bootSandbox(smolvmAgent: string, sandboxName: string, workingDir: string) {
-    this.bootCalls.push({ smolvmAgent, sandboxName, workingDir });
-  }
-}
-
-describe("SmolvmSandboxProvider.wrapCommand", () => {
-  test("boots a named sandbox, then execs the agent in the working dir", () => {
-    const provider = new StubBootSmolvmProvider();
-    const wrapped = provider.wrapCommand(
-      "/usr/bin/claude",
-      ["-p", "hi there"],
-      policy({ workingDir: "/Users/dev/repo" }),
-    );
-    expect(provider.bootCalls).toHaveLength(1);
-    expect(provider.bootCalls[0]?.smolvmAgent).toBe("claude");
-    expect(provider.bootCalls[0]?.workingDir).toBe("/Users/dev/repo");
-
-    expect(wrapped.path).toBe("smolvm");
-    expect(wrapped.args.slice(0, 3)).toEqual([
-      "sandbox",
-      "exec",
-      provider.bootCalls[0]!.sandboxName,
-    ]);
-    expect(wrapped.args).toContain("--timeout");
-    // Agent argv runs via sh -lc from the mounted working dir, shell-quoted.
-    const guestCommand = wrapped.args[wrapped.args.length - 1];
-    expect(wrapped.args.slice(-3, -1)).toEqual(["sh", "-lc"]);
-    expect(guestCommand).toBe(
-      'export HOME="$(getent passwd "$(id -u)" | cut -d: -f6)" IS_SANDBOX=1 && ' +
-        "cd '/Users/dev/repo' && claude '-p' 'hi there'",
-    );
-    expect(wrapped.cleanup).toBeInstanceOf(Function);
-  });
-
-  test("is excluded from auto selection via priority 0", () => {
-    expect(new SmolvmSandboxProvider().priority).toBe(0);
-  });
-
-  test("warns once that it is legacy and unsupported", () => {
-    resetSmolvmLegacyWarning();
-    const warnings: string[] = [];
-    const originalWarn = console.warn;
-    console.warn = (message?: unknown) => {
-      warnings.push(String(message));
-    };
-    try {
-      const provider = new StubBootSmolvmProvider();
-      const runPolicy = policy({ workingDir: "/Users/dev/repo" });
-      provider.wrapCommand("/usr/bin/claude", [], runPolicy);
-      provider.wrapCommand("/usr/bin/claude", [], runPolicy);
-    } finally {
-      console.warn = originalWarn;
-      resetSmolvmLegacyWarning();
-    }
-    expect(warnings).toHaveLength(1);
-    expect(warnings[0]).toContain("legacy and unsupported");
-    expect(warnings[0]).toContain("docker");
-    expect(warnings[0]).toContain("nono");
-  });
-
-  test("rejects unsupported harnesses", () => {
-    expect(() =>
-      new SmolvmSandboxProvider().wrapCommand(
-        "/usr/bin/goose",
-        [],
-        policy({ harnessName: "goose" }),
-      ),
-    ).toThrow("does not support");
   });
 });

@@ -235,6 +235,28 @@ describe("resolveSandbox", () => {
     await expect(resolveSandbox({ trustedEnv: {} })).rejects.toThrow(migration);
   });
 
+  test("explicit smolvm fails with the removal migration error", async () => {
+    const migration = 'Sandbox provider "smolvm" has been removed. Use "docker"';
+    await expect(resolveSandbox({ sandboxName: "smolvm", trustedEnv: {} })).rejects.toThrow(
+      migration,
+    );
+
+    process.env.AGENT_SANDBOX = "smolvm";
+    await expect(resolveSandbox({ trustedEnv: {} })).rejects.toThrow(migration);
+  });
+
+  test("Object.prototype member names are reported as unknown providers", async () => {
+    // The removed-provider lookup uses untrusted input, so inherited keys must
+    // not resolve to anything: every one of these must get the actionable
+    // unknown-provider list, never a prototype member masquerading as a
+    // migration message.
+    for (const name of ["constructor", "toString", "hasOwnProperty", "__proto__"]) {
+      await expect(resolveSandbox({ sandboxName: name, trustedEnv: {} })).rejects.toThrow(
+        `Unknown sandbox provider: "${name}"`,
+      );
+    }
+  });
+
   test("explicit different non-nestable provider is not stacked on an active sandbox", async () => {
     const other = makeProvider("fake-other");
     registerSandboxProvider(other);

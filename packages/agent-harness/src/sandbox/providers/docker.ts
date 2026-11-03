@@ -3,8 +3,7 @@
  *
  * Docker removed the `docker sandbox` CLI plugin; Docker Sandboxes now ships
  * as its own `sbx` binary (`brew install docker/tap/sbx`, `winget install
- * Docker.sbx`). Wrapping is a three-step flow, mirroring the smolvm provider
- * (verified against sbx v0.35.0):
+ * Docker.sbx`). Wrapping is a three-step flow (verified against sbx v0.35.0):
  *
  *   1. `sbx create --name X <agent> <workingDir>` boots the microVM with the
  *      working dir mounted as the workspace at its host path. Runs inside
