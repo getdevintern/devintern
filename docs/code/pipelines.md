@@ -262,7 +262,7 @@ The `context` passed to `run` is the same object across all steps and carries:
 | `loopbackFeedback`, `loopbackReason` | Set by a `repeat` for the next run. |
 | `runAgentPrompt(prompt)` | Run the configured agent and return its stdout. |
 | `getDiff()` | Unified diff against `prTargetBranch`. |
-| `parseReviewFeedback(output)` | Parse and validate a JSON review verdict. |
+| `parseReviewFeedback(output, options?)` | Parse a JSON review verdict. `options.minPriority` (default `medium`) sets the approval threshold; `options.enforceApproval: false` returns a contradictory approval for the caller to resolve. |
 | `filterByPriority(items, min)` | Filter findings at or above a priority. |
 
 `data` on a step result is how steps communicate: a later step reads
