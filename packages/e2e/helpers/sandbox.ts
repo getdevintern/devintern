@@ -85,7 +85,26 @@ export function nonoPath(): string | undefined {
 }
 
 /**
- * Candidate base directories for the nono isolated home.
+ * Git-ignored scratch directory inside the checkout.
+ *
+ * Used when the usual system locations are unavailable. An enclosing kernel
+ * sandbox (for example a nono-wrapped DevIntern worker that runs this suite
+ * from its pre-push hook) commonly grants write access only to the checkout,
+ * and denies `/var/tmp` even though `access()` reports it writable. The
+ * checkout itself is still outside the OS temp dir, so it satisfies the home
+ * constraint below, and `node_modules/.cache` keeps the fixture out of tracked
+ * files.
+ *
+ * @returns Absolute path to the package's scratch directory.
+ */
+function checkoutScratchBase(): string {
+  const base = join(import.meta.dir, "..", "node_modules", ".cache", "devintern-e2e");
+  mkdirSync(base, { recursive: true });
+  return base;
+}
+
+/**
+ * Base directories for the isolated home, most preferred first.
  *
  * The home must live outside the OS temp dir. nono's generated Linux profile
  * extends `linux-host-compat`, which grants a broad read on `/tmp`; when HOME
@@ -94,21 +113,24 @@ export function nonoPath(): string | undefined {
  * parent. A real user home is normally outside `/tmp`, so the fixture mirrors
  * that instead of weakening the product policy.
  *
- * POSIX write permission is not enough when the suite itself runs under a
- * sandbox (Landlock can deny `/var/tmp` while `access(W_OK)` still succeeds),
- * so callers try to create the directory and fall through on failure.
- *
- * @returns Candidate directories, most preferred first.
+ * @returns Candidate bases, excluding the OS temp dir itself.
  */
 function sandboxHomeBases(): string[] {
-  const packageLocal = join(import.meta.dir, "..", ".local");
-  return process.platform === "linux"
-    ? ["/var/tmp", packageLocal, tmpdir()]
-    : [tmpdir(), packageLocal];
+  const candidates = process.platform === "linux" ? ["/var/tmp"] : [];
+  try {
+    candidates.push(checkoutScratchBase());
+  } catch {
+    // Read-only checkout: fall through to the OS temp dir.
+  }
+  return candidates;
 }
 
 /**
  * Create an isolated home for a sandboxed run.
+ *
+ * Usability is probed by creating the directory rather than by `access()`,
+ * because a kernel sandbox can deny the write while `access()` still reports
+ * the path writable.
  *
  * @returns Path to a fresh temporary home outside the OS temp dir when possible.
  */
