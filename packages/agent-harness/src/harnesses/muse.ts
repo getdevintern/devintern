@@ -14,12 +14,18 @@
  *   also disables the sandbox and trusts the workspace) is deliberately not
  *   emitted: a review checkout must not auto-trust attacker-controlled
  *   skills/rules.
- * - `--sandbox-network unrestricted` alongside it. Muse's default
- *   `proxy-only` network mode stops the first connection to each new host for
- *   review, and a headless run has nobody to answer it; DevIntern's sandbox
- *   policy is network-open by default (and the outer wrapper still enforces a
- *   configured domain allowlist), so publishing and package installs must not
- *   stall. The filesystem sandbox stays on.
+ * - `--sandbox-network enabled` alongside it. Muse's default `proxy-only`
+ *   network mode stops the first connection to each new host for review, and a
+ *   headless run has nobody to answer it; DevIntern's sandbox policy is
+ *   network-open by default (and the outer wrapper still enforces a configured
+ *   domain allowlist), so publishing and package installs must not stall. The
+ *   filesystem sandbox stays on. `enabled` is Muse's full-egress mode: current
+ *   builds accept only `restricted|enabled|proxy-only` and reject
+ *   `unrestricted`, while `enabled` has been accepted since before DevIntern's
+ *   1.4.9 minimum (Muse 1.4.7 introduced the `unrestricted` spelling but kept
+ *   `enabled` as an alias). One spelling therefore covers every supported
+ *   release, so no version gate is needed; raise {@link MUSE_MIN_VERSION} if a
+ *   future Muse removes the alias.
  * - `--disable-request-user-input` is always emitted for headless runs so the
  *   agent cannot block on an interactive question. The flag exists from Muse
  *   Code 1.4.9; a known-older install fails with an actionable message.
@@ -148,8 +154,10 @@ export class MuseHarness implements AgentHarness {
       // Keep Muse's filesystem sandbox in place; only skip the approval gate.
       // A headless run cannot answer the per-destination network review that
       // `proxy-only` (Muse's default) requires, so open egress here. The outer
-      // sandbox still enforces any configured domain allowlist.
-      args.push("--disable-approval", "--sandbox-network", "unrestricted");
+      // sandbox still enforces any configured domain allowlist. `enabled` is
+      // the full-egress mode current builds accept; 1.4.14 rejects
+      // `unrestricted`.
+      args.push("--disable-approval", "--sandbox-network", "enabled");
     }
 
     // Muse roots policy-gated workspace tools at this path. Most runs already
