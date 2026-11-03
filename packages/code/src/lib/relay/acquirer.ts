@@ -62,10 +62,12 @@ export interface RelayHandlers {
   /**
    * Review submitted on one of the agent's own PRs → address it.
    * @returns Whether the run completed; `false` means it failed or matched
-   *          no workspace repo (never silently swallowed by the caller).
-   *          `"deferred"` means every harness is usage-limited; `"skipped"`
-   *          means the retry gate declined the run; `"interrupted"` means a
-   *          shutdown drain killed it, which is reported as not completed.
+   *          no workspace repo. The delivery is acknowledged anyway, because
+   *          the run reports its own failure and retrying it would re-run the
+   *          whole review on every backoff cycle. `"deferred"` means every
+   *          harness is usage-limited; `"skipped"` means the retry gate
+   *          declined the run; `"interrupted"` means a shutdown drain killed
+   *          it, which is reported as not completed.
    */
   addressPr(
     repo: string,
@@ -274,7 +276,19 @@ export class RelayAcquirer implements Acquirer {
           return;
         }
         if (!ok) {
-          throw new Error(`Relay review ${repo}#${pr} did not complete cleanly`);
+          // The run started and reported failure (or the slug matched no
+          // workspace repo). `devintern address-review` already reports the
+          // concrete cause, so rethrowing here only adds a duplicate error and
+          // keeps the delivery transient: the relay redelivers it on every
+          // backoff cycle, re-running the whole review forever while pinning
+          // the cursor for every later envelope. Treat it as terminal for this
+          // delivery, matching the polling acquirer, which logs the same
+          // outcome as a warning and moves on.
+          console.warn(
+            `⚠️  [relay] ${repo}#${pr} feedback run did not complete cleanly; ` +
+              "acknowledging the delivery instead of retrying it",
+          );
+          return;
         }
         console.log(`✅ [relay] ${repo}#${pr} feedback addressed`);
         return;

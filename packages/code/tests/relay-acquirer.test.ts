@@ -349,7 +349,46 @@ describe("RelayAcquirer", () => {
     expect(workerState.getCursor(`relay:${RELAY_URL}`)?.cursorValue).toBe("1");
   });
 
-  for (const outcome of ["deferred", false, "rate-limit"] as const) {
+  test("a review run that fails is acknowledged and later envelopes still dispatch", async () => {
+    const review = envelope({ seq: 1, ref: { pr: 5 }, deliveryId: "failed-review" });
+    const following = envelope({
+      seq: 2,
+      eventType: "task.changed",
+      source: "jira",
+      ref: { task: "NEXT-1" },
+      deliveryId: "after-failed-review",
+    });
+    let attempts = 0;
+    const addressPr: RelayHandlers["addressPr"] = async (repo, pr) => {
+      attempts++;
+      log.addressed.push([repo, pr]);
+      return false;
+    };
+    const { acquirer } = makeAcquirer([{ events: [review, following], cursor: 2 }], {
+      agentPrs: [["acme/webapp", 5]],
+      addressPr,
+    });
+
+    acquirer.start();
+    try {
+      await waitFor(() => log.tasks.length === 1);
+    } finally {
+      await acquirer.stop();
+    }
+
+    // The run was attempted once. A failed run is terminal for its delivery:
+    // the run reported its own error, and redelivering it would re-run the
+    // review on every backoff cycle while pinning the cursor.
+    expect(attempts).toBe(1);
+    expect(log.addressed).toEqual([["acme/webapp", 5]]);
+    expect(queue.hasProcessed("relay", "github:failed-review")).toBe(true);
+    expect(queue.isInFlight("relay", "github:failed-review")).toBe(false);
+    // Later envelopes are no longer blocked behind the failed one.
+    expect(log.tasks).toEqual([["NEXT-1", "jira"]]);
+    expect(workerState.getCursor(`relay:${RELAY_URL}`)?.cursorValue).toBe("2");
+  });
+
+  for (const outcome of ["deferred", "rate-limit"] as const) {
     test(`review outcome ${outcome} stays retryable and blocks later envelopes`, async () => {
       const review = envelope({ ref: { pr: 5 }, deliveryId: "retry-review" });
       const following = envelope({
