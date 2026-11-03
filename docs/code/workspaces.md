@@ -286,7 +286,7 @@ Set `conflict_resolution = "disabled"` to turn automatic conflict resolution off
 
 The scheduling is identical; only where the work runs changes:
 
-- Each occurrence runs in the repo's persistent base worktree (`~/.devintern/worktrees/<repo>/base`) with the same layered environment as review work: shared `.env` → repo `env_file` → `[repos.env]`. When `open_pr = true`, dependencies are reinstalled after the occurrence prepares its final branch, so they stay aligned with its lockfile.
+- Each occurrence runs in the repo's persistent base worktree (`~/.devintern/worktrees/<repo>/base`) with the same layered environment as review work: shared `.env` → repo `env_file` → `[repos.env]`. When `open_pr = true`, dependencies are reinstalled after the occurrence prepares its final branch, so they stay aligned with its lockfile. Reuse resets the checkout to the fetched default branch first, so a previous occurrence's branch, stale commit, or tracked edits cannot become the next run's starting point; the previous branch itself is left intact.
 - It takes the normal per-repo run lock, so it never mutates a checkout concurrently with a task or PR run.
 - Occurrence task files land under the workspace home (`~/.devintern/automations/<id>/`), next to `repos/`, `worktrees/`, and the central database — not inside the repo worktrees.
 

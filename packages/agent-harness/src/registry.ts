@@ -15,6 +15,7 @@ import {
   GrokHarness,
   KiloCodeHarness,
   KimiHarness,
+  MuseHarness,
   OpencodeHarness,
   PiHarness,
   QwenCodeHarness,
@@ -36,6 +37,8 @@ export const HARNESS_ALIASES: Readonly<
 > = {
   /** Binary name users often type as the harness id. */
   agy: { target: "antigravity" },
+  /** Product name users may type instead of the binary name. */
+  "muse-code": { target: "muse" },
   /**
    * Google retired consumer Gemini CLI (2026-06-18) in favor of Antigravity CLI.
    * Keep accepting the old id so existing .env files keep working.
@@ -97,6 +100,7 @@ registerHarness(new GooseHarness());
 registerHarness(new GrokHarness());
 registerHarness(new KiloCodeHarness());
 registerHarness(new KimiHarness());
+registerHarness(new MuseHarness());
 registerHarness(new OpencodeHarness());
 registerHarness(new PiHarness());
 registerHarness(new QwenCodeHarness());

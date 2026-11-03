@@ -22,6 +22,7 @@ import {
 } from "../worker/orphan-recovery";
 import { RunStore } from "../state/run-recorder";
 import type { RunRecord } from "../state/run-recorder";
+import { readImplementationReport } from "../state/session-pickup";
 import { RetryStateStore } from "../state/retry-state";
 import { ScheduledRetryStore } from "../state/run-retry";
 import { InjectedTaskStore } from "../state/injected-tasks";
@@ -37,6 +38,8 @@ import {
   buildWorkspaceContextEnv,
 } from "./env";
 import {
+  automationsDir,
+  injectedTasksDir,
   resolveWorkspaceDir,
   workspaceConfigPath,
   workspaceDbPath,
@@ -101,6 +104,22 @@ function pruneInjectedTasks(
 
 /** Interval between periodic injected-task prunes (1 hour). */
 export const INJECTED_TASK_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
+
+/**
+ * Create the workspace directories agent sandboxes grant write access to.
+ *
+ * A sandbox grant only applies to paths that already exist, and a sandboxed
+ * agent needs `injected/` (ad-hoc `worker add` prompts) plus `automations/`
+ * (automation cursors) writable before its first run. The worker owns these
+ * directories, so it creates them at startup.
+ *
+ * @param workspaceDir - Workspace home.
+ */
+function ensureAgentWritableWorkspaceDirs(workspaceDir: string): void {
+  for (const dir of [injectedTasksDir(workspaceDir), automationsDir(workspaceDir)]) {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+  }
+}
 
 /**
  * Keep pruning settled injected tasks (and their prompt files) while the
@@ -180,6 +199,95 @@ export async function recoverOrphanedWorkspaceRuns(options: {
     const trackerType = config.defaults.tracker || "multi-team";
     retryStore = new RetryStateStore(dbPath);
 
+    // Cheap local base: config wins, else the clone's cached origin/HEAD, so a
+    // repo with no resumable work costs no network on startup. The cached value
+    // is only a hint (`origin/HEAD` is written when the bare clone is created
+    // and `git fetch` never refreshes it, so it can still name the repo's *old*
+    // default branch); hasLandedCommits checks the conventional defaults too so
+    // a rename cannot make an empty branch look resumable. Resolve each repo once.
+    const repoManager = new RepoManager(workspaceDir);
+    const resolvedBases = new Map<string, Promise<string>>();
+    const baseBranchFor = (repo: string): Promise<string> => {
+      const configured = findRepo(config, repo)?.defaultBranch;
+      if (configured) {
+        return Promise.resolve(configured);
+      }
+      let pending = resolvedBases.get(repo);
+      if (!pending) {
+        pending = Utils.getCachedDefaultBranch({
+          cwd: join(worktreesDir(workspaceDir), repo, BASE_WORKTREE_NAME),
+        });
+        resolvedBases.set(repo, pending);
+      }
+      return pending;
+    };
+    // Candidate bases for a report-less pickup. A configured default branch is
+    // authoritative. Otherwise the clone's cached origin/HEAD is the starting
+    // point, but it can name the repo's *old* default (`git fetch` never
+    // refreshes origin/HEAD) and a branch cut from the new default would then
+    // look like it carried upstream commits as its own work. Requiring the
+    // branch to be ahead of every conventional remote default that exists
+    // locally avoids a network probe while covering that rename (the original
+    // iteration-3 live `ls-remote` check added up to 5s per repo to startup).
+    const conventionalBases = ["main", "master"];
+    const baseCandidates = new Map<string, Promise<string[]>>();
+    const baseCandidatesFor = (repo: string, repoCwd: string): Promise<string[]> => {
+      let pending = baseCandidates.get(repo);
+      if (!pending) {
+        pending = (async () => {
+          const base = await baseBranchFor(repo);
+          if (findRepo(config, repo)?.defaultBranch) {
+            return [base];
+          }
+          const candidates = [base];
+          for (const name of conventionalBases) {
+            if (name === base) continue;
+            if (await Utils.gitRefExists(`refs/remotes/origin/${name}`, { cwd: repoCwd })) {
+              candidates.push(`origin/${name}`);
+            }
+          }
+          return candidates;
+        })();
+        baseCandidates.set(repo, pending);
+      }
+      return pending;
+    };
+
+    // Report-less pickup decisions compare commits against remote refs. Refresh
+    // each affected repo once, in parallel, before recovery so the probe sees
+    // refs current as of the crash instead of whatever the last run fetched.
+    // The timeout bounds an unreachable remote to one wait for all repos, and
+    // the cached refs remain the fallback when it fails.
+    const probeRepos = new Set<string>();
+    try {
+      for (const run of runStore.listRuns({ status: "in_progress", origin: "task" })) {
+        if (
+          run.repo &&
+          run.branch &&
+          existsSync(join(worktreesDir(workspaceDir), run.repo, BASE_WORKTREE_NAME)) &&
+          existsSync(repoManager.bareClonePath(run.repo)) &&
+          !readImplementationReport(runStore, run.id)
+        ) {
+          probeRepos.add(run.repo);
+        }
+      }
+    } catch {
+      // Best-effort: recovery still probes the refs already on disk.
+    }
+    await Promise.allSettled(
+      [...probeRepos].map(async (repo) => {
+        try {
+          await repoManager.fetch(repo, { timeoutMs: 5000 });
+        } catch (error) {
+          console.warn(
+            `⚠️  [fleet] could not refresh refs for ${repo} before orphan recovery: ${
+              (error as Error).message
+            }`,
+          );
+        }
+      }),
+    );
+
     const recovery = await recoverOrphanedTaskRuns({
       runStore,
       tracker,
@@ -206,6 +314,31 @@ export async function recoverOrphanedWorkspaceRuns(options: {
           (await Utils.gitRefExists(`refs/heads/${branch}`, { cwd: repoCwd })) ||
           (await Utils.gitRefExists(`refs/remotes/origin/${branch}`, { cwd: repoCwd }))
         );
+      },
+      // A run interrupted before the implementation stage was persisted can
+      // still hold real commits. Verify them against the repo's base branch so
+      // orphan recovery resumes that work instead of restarting it. Without a
+      // checkout to inspect, stay conservative and do not claim resumable work.
+      hasLandedCommits: async (branch, run) => {
+        const repoCwd = run.repo
+          ? join(worktreesDir(workspaceDir), run.repo, BASE_WORKTREE_NAME)
+          : undefined;
+        if (!repoCwd || !run.repo || !existsSync(repoCwd)) {
+          return false;
+        }
+        const repoName = run.repo;
+        // The branch must carry commits beyond every plausible base. A stale
+        // cached origin/HEAD (old default branch) would otherwise make commits
+        // that belong to the repo's new default look like the branch's own
+        // work and resume an empty branch. A configured base is authoritative;
+        // otherwise main/master are checked too (see baseCandidatesFor).
+        const bases = await baseCandidatesFor(repoName, repoCwd);
+        for (const baseBranch of bases) {
+          if (!(await Utils.hasCommitsAhead(branch, baseBranch, { cwd: repoCwd }))) {
+            return false;
+          }
+        }
+        return true;
       },
     });
 
@@ -399,6 +532,8 @@ export function buildInjectedTaskAcquirer(
         taskRef: task.taskFile,
       })(task.taskKey, toRoutableTask({ key: task.taskKey, labels: [], components: [] })),
     intervalSeconds: parseEnvInteger("WORKER_INJECTED_INTERVAL_SECONDS", 5, { min: 1 }),
+    maxConcurrency: deps.config.workspace.execution.maxConcurrency,
+    maxConcurrencyPerRepo: deps.config.workspace.execution.maxConcurrencyPerRepo,
     verbose,
   });
 }
@@ -412,7 +547,7 @@ export async function resolveWorkspaceAutomationContext(
 ) {
   // Keep occurrence task files in the workspace home (next to repos/,
   // worktrees/, and the central DB) instead of inside a repo worktree.
-  const taskFileDir = join(workspaceDir, "automations");
+  const taskFileDir = automationsDir(workspaceDir);
   const repo = automation.repo
     ? findRepo(config, automation.repo)
     : config.repos.length === 1
@@ -721,6 +856,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   // Ad-hoc `devintern worker add` tasks also ride the shared workspace DB and
   // drain through the same fleet executor.
   const injectedTasks = new InjectedTaskStore(workspaceDbPath(workspaceDir));
+  ensureAgentWritableWorkspaceDirs(workspaceDir);
   pruneInjectedTasks(injectedTasks);
   startInjectedTaskSweeper(injectedTasks);
 
@@ -1200,6 +1336,9 @@ function applyWorkspaceEnv(
   // Shared workspace values serve GitHub/review consumers and the legacy
   // single-defaults tracker. Team clients use explicit composed env maps.
   applyWorkspaceProcessEnv(workspaceDir);
+  // In-process spawn sites (webhook reviews, hook fixes) build the sandbox
+  // policy from this value; task subprocesses get it from `buildRepoEnv`.
+  process.env.DEVINTERN_WORKSPACE_DIR = workspaceDir;
   const multiTeam = config.teams.length > 0;
   if (config.defaults.tracker) process.env.TASK_TRACKER = config.defaults.tracker;
   // In-process consumers (dashboard, run records) follow the fleet DB.

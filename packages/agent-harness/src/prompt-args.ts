@@ -27,6 +27,27 @@ export const MAX_PROMPT_ARG_BYTES = 120_000;
 const OVERSIZED_PROMPT_DIR = join(tmpdir(), "devintern-prompts");
 
 /**
+ * Write the full prompt to a private, content-addressed temp file.
+ *
+ * @param prompt - Full prompt text.
+ * @returns Absolute path to the file, or `undefined` when temp storage failed.
+ */
+function writePromptFile(prompt: string): string | undefined {
+  const digest = createHash("sha256").update(prompt).digest("hex").slice(0, 16);
+  const path = join(OVERSIZED_PROMPT_DIR, `${digest}.md`);
+  try {
+    mkdirSync(OVERSIZED_PROMPT_DIR, { recursive: true, mode: 0o700 });
+    writeFileSync(path, prompt, { mode: 0o600 });
+    return path;
+  } catch (error) {
+    // Falling back to argv reproduces the original E2BIG failure, but it is
+    // still better than throwing away the run when only temp storage is broken.
+    console.warn(`⚠️  Could not write the oversized prompt to ${path}: ${error}`);
+    return undefined;
+  }
+}
+
+/**
  * Write an oversized prompt to a private temp file and return a short prompt
  * that points the agent at it.
  *
@@ -38,15 +59,8 @@ const OVERSIZED_PROMPT_DIR = join(tmpdir(), "devintern-prompts");
  * @returns Bootstrap prompt naming the file that holds it.
  */
 function externalizePrompt(prompt: string): string {
-  const digest = createHash("sha256").update(prompt).digest("hex").slice(0, 16);
-  const path = join(OVERSIZED_PROMPT_DIR, `${digest}.md`);
-  try {
-    mkdirSync(OVERSIZED_PROMPT_DIR, { recursive: true, mode: 0o700 });
-    writeFileSync(path, prompt, { mode: 0o600 });
-  } catch (error) {
-    // Falling back to argv reproduces the original E2BIG failure, but it is
-    // still better than throwing away the run when only temp storage is broken.
-    console.warn(`⚠️  Could not externalize an oversized prompt to ${path}: ${error}`);
+  const path = writePromptFile(prompt);
+  if (!path) {
     return prompt;
   }
   return [
@@ -71,20 +85,31 @@ function externalizePrompt(prompt: string): string {
  * controlling terminal.
  *
  * Prompts larger than {@link MAX_PROMPT_ARG_BYTES} (bytes, not characters) are
- * written to a temp file and replaced with a short pointer, because the kernel
- * rejects a single oversized argv entry with `E2BIG` before the CLI starts.
+ * written to a temp file, because the kernel rejects a single oversized argv
+ * entry with `E2BIG` before the CLI starts. Harnesses with a `promptFileFlag`
+ * receive the full prompt via that flag; the rest receive a short pointer the
+ * agent reads first.
  *
  * Positional prompts that begin with `-` (markdown frontmatter, bullet lists)
  * would be parsed as CLI flags and rejected. Harnesses that declare an
  * `endOfOptionsMarker` get the marker emitted before such a prompt.
  *
- * @param harness - Harness definition supplying the optional `promptFlag`.
+ * @param harness - Harness definition supplying the optional `promptFlag`
+ *   and/or `promptFileFlag`.
  * @param prompt - Full prompt text.
  * @returns Argv entries to append after `harness.buildArgs()` output.
  */
 export function buildPromptArgs(harness: AgentHarness, prompt: string): string[] {
-  const effective =
-    Buffer.byteLength(prompt, "utf8") > MAX_PROMPT_ARG_BYTES ? externalizePrompt(prompt) : prompt;
+  const oversized = Buffer.byteLength(prompt, "utf8") > MAX_PROMPT_ARG_BYTES;
+
+  if (oversized && harness.promptFileFlag) {
+    const path = writePromptFile(prompt);
+    if (path) {
+      return [harness.promptFileFlag, path];
+    }
+  }
+
+  const effective = oversized ? externalizePrompt(prompt) : prompt;
 
   if (harness.promptFlag) {
     return [harness.promptFlag, effective];

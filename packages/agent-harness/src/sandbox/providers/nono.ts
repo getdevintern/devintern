@@ -20,7 +20,10 @@
  *   `.local/bin` beneath it.
  * - `--allow` on the harness's own config dir (e.g. `~/.claude` +
  *   `~/.claude.json`): agents write session state there and hard-fail
- *   without it.
+ *   without it. When the policy denies a file inside such a grant (Muse's
+ *   stored credential), the grant is split into per-child grants that omit
+ *   the denied path instead of relying on deny-over-allow, which Landlock
+ *   cannot express.
  * - `--allow-file /dev/ptmx` so tools that allocate a PTY (lefthook,
  *   script(1), interactive CLIs) can open the master; without it git
  *   hooks fail with path_not_granted on /dev/ptmx.
@@ -273,6 +276,13 @@ export function refineGrantsAgainstDenies(
 ): NonoGrant[] {
   const out: NonoGrant[] = [];
   for (const grant of grants) {
+    // A file grant naming a denied path is itself the conflict; drop it.
+    if (
+      (grant.flag === "--allow-file" || grant.flag === "--read-file") &&
+      denies.includes(grant.path)
+    ) {
+      continue;
+    }
     if (
       (grant.flag === "--allow" || grant.flag === "--read") &&
       denies.some((d) => isInside(d, grant.path))
@@ -448,7 +458,7 @@ export class NonoSandboxProvider implements SandboxProvider {
       if (existsSync(p)) grants.push({ flag: "--read", path: p });
     }
 
-    // Extra readable roots from the policy (parity with srt's allowRead).
+    // Extra readable roots from the policy.
     for (const p of policy.readablePaths ?? []) {
       if (existsSync(p)) grants.push({ flag: "--read", path: p });
     }
@@ -469,14 +479,20 @@ export class NonoSandboxProvider implements SandboxProvider {
 
     // Network: open by default in nono; a policy allowlist maps to the proxy
     // filter. (Programs that ignore proxy env vars lose connectivity when an
-    // allowlist is set — same caveat as srt.)
+    // allowlist is set.)
     if (policy.network !== "open") {
       for (const domain of policy.network.allowedDomains) {
         suffix.push("--allow-domain", domain);
       }
     }
 
-    const refined = preflightLandlockGrants(nonoArgs, grants, suffix);
+    const refined = preflightLandlockGrants(
+      nonoArgs,
+      (policy.denyReadPaths ?? []).length > 0
+        ? refineGrantsAgainstDenies(grants, policy.denyReadPaths ?? [])
+        : grants,
+      suffix,
+    );
     return {
       path: "nono",
       args: [...nonoArgs, ...flattenGrants(refined), ...suffix, "--", path, ...args],

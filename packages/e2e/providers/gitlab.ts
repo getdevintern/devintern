@@ -12,6 +12,8 @@ export interface MergeRequest {
   source_branch: string;
   target_branch: string;
   sha: string;
+  web_url: string;
+  labels?: string[];
 }
 
 class GitLabRequestError extends Error {

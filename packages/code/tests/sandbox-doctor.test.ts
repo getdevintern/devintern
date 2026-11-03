@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { DetectedSandboxProvider } from "@devintern/agent-harness";
-import { buildSandboxDoctorReport } from "../src/lib/agent/sandbox";
+import { resolveSandbox } from "@devintern/agent-harness";
+import { buildSandboxDoctorReport, collectHarnessPreflight } from "../src/lib/agent/sandbox";
 
 function detected(
   name: string,
@@ -35,7 +36,7 @@ function detected(
 describe("buildSandboxDoctorReport", () => {
   test("sandboxing off: says so and suggests the best installed provider", () => {
     const report = buildSandboxDoctorReport(
-      [detected("nono", { priority: 30 }), detected("srt", { priority: 20 })],
+      [detected("nono", { priority: 30 })],
       "none",
       "default",
       "claude-code",
@@ -62,8 +63,8 @@ describe("buildSandboxDoctorReport", () => {
 
   test("explicit unavailable provider: next run fails with the detection reason", () => {
     const report = buildSandboxDoctorReport(
-      [detected("srt", { available: false, reason: "srt not found on PATH. Install: npm i -g" })],
-      "srt",
+      [detected("nono", { available: false, reason: "nono not found on PATH. Install: nono.sh" })],
+      "nono",
       ".devintern-code/.env",
       "claude-code",
       "linux",
@@ -71,13 +72,76 @@ describe("buildSandboxDoctorReport", () => {
     const text = report.lines.join("\n");
     expect(report.nextRunFails).toBe(true);
     expect(text).toContain("❌ fails");
-    expect(text).toContain("srt not found on PATH");
+    expect(text).toContain("nono not found on PATH");
+  });
+
+  test("removed srt provider: next run fails with the migration message", () => {
+    const report = buildSandboxDoctorReport(
+      [detected("nono", { priority: 30 })],
+      "srt",
+      ".devintern-code/.env",
+      "claude-code",
+      "linux",
+    );
+    const text = report.lines.join("\n");
+    expect(report.nextRunFails).toBe(true);
+    expect(text).toContain('Sandbox provider "srt" has been removed');
+    expect(text).toContain('Use "nono"');
+    expect(text).not.toContain("unknown provider");
+  });
+
+  test("removed smolvm provider: next run fails with the migration message", () => {
+    const report = buildSandboxDoctorReport(
+      [detected("nono", { priority: 30 })],
+      "smolvm",
+      ".devintern-code/.env",
+      "claude-code",
+      "linux",
+    );
+    const text = report.lines.join("\n");
+    expect(report.nextRunFails).toBe(true);
+    expect(text).toContain('Sandbox provider "smolvm" has been removed');
+    expect(text).toContain('Use "docker"');
+    expect(text).toContain('"nono" for local confinement');
+    expect(text).not.toContain("unknown provider");
+  });
+
+  test("removed provider message is the resolver's message, not a copy", async () => {
+    for (const name of ["srt", "smolvm"]) {
+      const report = buildSandboxDoctorReport(
+        [detected("nono", { priority: 30 })],
+        name,
+        ".devintern-code/.env",
+        "claude-code",
+        "linux",
+      );
+      const runtime = await resolveSandbox({ sandboxName: name, trustedEnv: {} }).then(
+        () => "resolved unexpectedly",
+        (error: Error) => error.message,
+      );
+      expect(report.lines.join("\n")).toContain(runtime);
+    }
+  });
+
+  test("Object.prototype member names are unknown providers in the doctor too", () => {
+    for (const name of ["constructor", "toString", "__proto__"]) {
+      const report = buildSandboxDoctorReport(
+        [detected("nono", { priority: 30 })],
+        name,
+        ".devintern-code/.env",
+        "claude-code",
+        "linux",
+      );
+      const text = report.lines.join("\n");
+      expect(report.nextRunFails).toBe(true);
+      expect(text).toContain(`unknown provider "${name}"`);
+    }
   });
 
   test("explicit provider that does not support the harness: next run fails", () => {
     const report = buildSandboxDoctorReport(
-      [detected("smolvm", { harnesses: ["claude-code", "codex", "pi"] })],
-      "smolvm",
+      [detected("docker", { harnesses: ["claude-code", "codex"] })],
+      "docker",
       "environment",
       "goose",
       "linux",
@@ -101,8 +165,8 @@ describe("buildSandboxDoctorReport", () => {
 
   test("active enclosing sandbox: reports inherited confinement for an explicit provider", () => {
     const report = buildSandboxDoctorReport(
-      [detected("nono", { priority: 30 }), detected("srt", { priority: 20 })],
-      "srt",
+      [detected("nono", { priority: 30 })],
+      "nono",
       ".devintern-code/.env",
       "claude-code",
       "linux",
@@ -142,8 +206,8 @@ describe("buildSandboxDoctorReport", () => {
 
   test("active enclosing sandbox: unavailable explicit provider still fails (matches resolver)", () => {
     const report = buildSandboxDoctorReport(
-      [detected("srt", { available: false, reason: "srt not found on PATH" })],
-      "srt",
+      [detected("nono", { available: false, reason: "nono not found on PATH" })],
+      "nono",
       ".devintern-code/.env",
       "claude-code",
       "linux",
@@ -152,14 +216,14 @@ describe("buildSandboxDoctorReport", () => {
     const text = report.lines.join("\n");
     expect(report.nextRunFails).toBe(true);
     expect(text).toContain("❌ fails");
-    expect(text).toContain("srt not found on PATH");
+    expect(text).toContain("nono not found on PATH");
     expect(text).not.toContain("already inside the nono sandbox");
   });
 
   test("active enclosing sandbox: harness-incompatible explicit provider still fails", () => {
     const report = buildSandboxDoctorReport(
-      [detected("smolvm", { harnesses: ["claude-code", "codex", "pi"] })],
-      "smolvm",
+      [detected("docker", { harnesses: ["claude-code", "codex"] })],
+      "docker",
       "environment",
       "goose",
       "linux",
@@ -261,9 +325,24 @@ describe("buildSandboxDoctorReport", () => {
     expect(report.nextRunFails).toBe(true);
   });
 
+  test("auto preflight probes through the provider auto would pick for the harness", async () => {
+    const report = await collectHarnessPreflight(
+      "auto",
+      [
+        detected("native", { priority: 40, harnesses: ["claude-code", "codex"] }),
+        detected("nono", { priority: 30 }),
+      ],
+      "goose",
+    );
+    // native has the higher priority but cannot wrap goose, so the doctor must
+    // preflight through nono (matching the resolver) instead of failing a run
+    // that will actually use nono.
+    expect(report?.provider).toBe("nono");
+  });
+
   test("per-provider setup notes are platform aware", () => {
     const linuxText = buildSandboxDoctorReport(
-      [detected("docker"), detected("smolvm")],
+      [detected("docker")],
       "none",
       "default",
       "claude-code",
@@ -271,17 +350,15 @@ describe("buildSandboxDoctorReport", () => {
     ).lines.join("\n");
     expect(linuxText).toContain("setup: one-time: sbx policy init balanced");
     expect(linuxText).not.toContain("after sbx login");
-    expect(linuxText).toContain("needs KVM (/dev/kvm)");
 
     const macText = buildSandboxDoctorReport(
-      [detected("docker"), detected("smolvm")],
+      [detected("docker")],
       "none",
       "default",
       "claude-code",
       "darwin",
     ).lines.join("\n");
     expect(macText).toContain("sbx policy init balanced (after sbx login)");
-    expect(macText).not.toContain("needs KVM");
   });
 
   test("nono pack status per chain entry is surfaced", () => {

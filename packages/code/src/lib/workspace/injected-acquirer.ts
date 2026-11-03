@@ -25,6 +25,17 @@ export interface InjectedTaskAcquirerOptions {
   /** Run one claimed task through the fleet executor. */
   execute: (task: InjectedTask) => Promise<TaskExecutionResult>;
   intervalSeconds: number;
+  /**
+   * Global agent concurrency cap. Claim at most this many injected tasks at
+   * once so this queue cannot start more work than the worker allows.
+   * Defaults to unbounded (tests and single-source callers).
+   */
+  maxConcurrency?: number;
+  /**
+   * Per-repository agent concurrency cap. A task for a saturated repo stays
+   * pending while other repos can still start. Defaults to unbounded.
+   */
+  maxConcurrencyPerRepo?: number;
   verbose?: boolean;
 }
 
@@ -37,44 +48,68 @@ export class InjectedTaskAcquirer implements Acquirer {
   readonly name = INJECTED_TASK_SOURCE;
   private options: InjectedTaskAcquirerOptions;
   private timer: ReturnType<typeof setInterval> | null = null;
-  private busy = false;
+  private claiming = false;
+  private stopped = false;
+  private inFlight = 0;
+  private readonly inFlightByRepo = new Map<string, number>();
 
   constructor(options: InjectedTaskAcquirerOptions) {
     this.options = options;
   }
 
-  /** Start draining: immediate first tick, then on the configured interval. */
+  /**
+   * Install the interval and kick off the first drain without waiting for it.
+   *
+   * Startup must never block on an injected task: `startWorker` starts its
+   * acquirers sequentially, so awaiting the first drain would keep scheduled
+   * automations, estimations, and event acquirers from starting until the
+   * task settled. The supervisor and the caps below still bound execution.
+   */
   async start(): Promise<void> {
+    this.stopped = false;
     console.log(`📥 Draining injected tasks every ${this.options.intervalSeconds}s`);
-    await this.tick();
-    this.timer = setInterval(() => void this.tick(), this.options.intervalSeconds * 1000);
+    this.timer = setInterval(() => this.kick(), this.options.intervalSeconds * 1000);
+    this.kick();
   }
 
   stop(): void {
+    this.stopped = true;
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
     }
   }
 
+  /** Start a drain, ignoring overlaps (the next interval will retry). */
+  private kick(): void {
+    if (this.stopped) return;
+    void this.tick().catch((error) => {
+      if (!this.options.store.isClosed()) {
+        console.error(`❌ [${this.name}] drain failed: ${(error as Error).message}`);
+      }
+    });
+  }
+
   /**
-   * Claim every pending task, oldest first, then run them concurrently. The
-   * workspace supervisor bounds actual execution (`max_concurrency` and
-   * `max_concurrency_per_repo`); ad-hoc tasks share the same capacity as
-   * polled, review, and automation work.
+   * Claim pending tasks up to the available global/per-repo capacity and run
+   * them concurrently. A deferred row (busy repo or exhausted harness) is
+   * requeued for the next interval tick; it cannot spin here because this
+   * drain never re-claims a row it already handled. The interval refills
+   * freed slots without holding worker startup or another acquirer.
    *
-   * A deferred row (busy repo) is requeued and retried on the next tick. Every
-   * row is claimed exactly once per drain, so a blocked repo cannot starve
-   * independent repos behind it.
+   * The returned promise covers the executions started by this call, which
+   * keeps tests deterministic; production callers use {@link start} or the
+   * interval and never await it.
    */
   async tick(): Promise<void> {
-    if (this.busy || this.options.store.isClosed()) {
+    if (this.stopped || this.claiming || this.options.store.isClosed()) {
       return;
     }
-    this.busy = true;
+    this.claiming = true;
+    const executions: Promise<void>[] = [];
+    const excluded: number[] = [];
     try {
-      const executions: Promise<void>[] = [];
-      for (;;) {
+      while (this.hasCapacity()) {
         // `stop()` closes the store immediately after returning, but in-flight
         // `execute` calls may resolve later; writing then would reopen the
         // connection the successor worker has taken over. Leave those rows
@@ -82,25 +117,54 @@ export class InjectedTaskAcquirer implements Acquirer {
         if (this.options.store.isClosed()) {
           break;
         }
-        const task = this.options.store.claimNext();
+        const task = this.options.store.claimNext(excluded);
         if (!task) {
           break;
         }
-        executions.push(
-          (async () => {
-            // runOne settles its own row and never rejects; allSettled keeps a
-            // future regression from abandoning the remaining executions.
-            await this.runOne(task);
-          })(),
-        );
+        // Avoid re-claiming a row we requeue in this same drain.
+        excluded.push(task.id);
+        if (!this.hasRepoCapacity(task.repo)) {
+          this.options.store.requeue(task.id);
+          continue;
+        }
+        this.reserveSlot(task.repo);
+        executions.push(this.runOne(task).finally(() => this.releaseSlot(task.repo)));
       }
-      await Promise.allSettled(executions);
     } finally {
-      this.busy = false;
+      this.claiming = false;
+    }
+    await Promise.allSettled(executions);
+  }
+
+  /** Whether another injected task may start globally right now. */
+  private hasCapacity(): boolean {
+    return this.inFlight < (this.options.maxConcurrency ?? Number.POSITIVE_INFINITY);
+  }
+
+  /** Whether another injected task may start for this repository right now. */
+  private hasRepoCapacity(repo: string): boolean {
+    return (
+      (this.inFlightByRepo.get(repo) ?? 0) <
+      (this.options.maxConcurrencyPerRepo ?? Number.POSITIVE_INFINITY)
+    );
+  }
+
+  private reserveSlot(repo: string): void {
+    this.inFlight += 1;
+    this.inFlightByRepo.set(repo, (this.inFlightByRepo.get(repo) ?? 0) + 1);
+  }
+
+  private releaseSlot(repo: string): void {
+    this.inFlight = Math.max(0, this.inFlight - 1);
+    const remaining = (this.inFlightByRepo.get(repo) ?? 0) - 1;
+    if (remaining > 0) {
+      this.inFlightByRepo.set(repo, remaining);
+    } else {
+      this.inFlightByRepo.delete(repo);
     }
   }
 
-  /** Run one claimed task and settle its row; a deferred row is requeued. */
+  /** Run one claimed task and settle its row. */
   private async runOne(task: InjectedTask): Promise<void> {
     const { store, execute, verbose } = this.options;
     console.log(`📥 [${this.name}] running ${task.taskKey} → ${task.repo}`);
@@ -117,12 +181,11 @@ export class InjectedTaskAcquirer implements Acquirer {
         store.finish(task.id, "done", "skipped: ticket unchanged since the incomplete attempt");
         console.log(`⏭️  [${this.name}] ${task.taskKey} skipped; ticket unchanged`);
       } else if (result === "deferred") {
-        // Repo busy (or otherwise not started): back to the queue for the next
-        // tick. Every row is claimed once per drain, so this cannot starve
-        // tasks for other repos.
+        // Repo busy (or harness exhausted): back to the queue for the next
+        // interval tick. Every row is claimed at most once per drain, so this
+        // cannot spin.
         store.requeue(task.id);
         console.log(`⏳ [${this.name}] ${task.taskKey} deferred; will retry next tick`);
-        return;
       } else {
         store.finish(task.id, "failed", "task pipeline did not complete cleanly");
       }
@@ -133,9 +196,10 @@ export class InjectedTaskAcquirer implements Acquirer {
       const message = error instanceof Error ? error.message : String(error);
       store.finish(task.id, "failed", message);
       console.error(`❌ [${this.name}] ${task.taskKey} failed: ${message}`);
-    }
-    if (verbose) {
-      console.log(`   [${this.name}] ${task.taskKey} settled`);
+    } finally {
+      if (verbose && !store.isClosed()) {
+        console.log(`   [${this.name}] ${task.taskKey} settled`);
+      }
     }
   }
 }

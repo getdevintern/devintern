@@ -23,7 +23,7 @@ import {
 } from "../agent/spawn";
 import { resolveAgentEffort, resolveAgentModel } from "../agent/model";
 import { parseChangeRequestUrl } from "../code-host/index";
-import { getSandbox } from "../agent/sandbox";
+import { agentSandboxPolicy, getSandbox } from "../agent/sandbox";
 import { createHarnessLogSink } from "../observability/harness-logs";
 import { beginRun, endRun, recordRunStage } from "../state/run-recorder";
 import { formatCiFixPrompt, formatReviewPrompt } from "./formatter";
@@ -109,6 +109,7 @@ export async function runAgent(
           env: harnessSpawnEnv(agentEnv),
         },
         sandbox: await getSandbox(harness.name),
+        policy: agentSandboxPolicy(),
         sink: createHarnessLogSink({
           harness,
           label: "address-review",

@@ -33,6 +33,7 @@ import {
   workspaceCodeStateDir,
   workspaceConfigPath,
   workspaceDbPath,
+  workspaceStateDir,
 } from "./paths";
 
 /** Maximum body size accepted (matches the run recorder's description cap). */
@@ -469,9 +470,42 @@ export async function runWorkerAdd(
       }
     }
     return await enqueueNewTask(add, target.body, target.repo, context);
+  } catch (enqueueError) {
+    // Filesystem/DB failures (including a sandbox denying writes to the
+    // workspace state) must not escape as a minified stack trace: agents parse
+    // stderr and the exit code, and the raw Node error is not actionable.
+    return reportEnqueueFailure(enqueueError, selectedDir, error);
   } finally {
     store.close();
   }
+}
+
+/**
+ * Explain why an enqueue could not be written, with the fix for the common
+ * permission/sandbox denial.
+ *
+ * @param cause - Error thrown while writing the prompt file or queue row.
+ * @param workspaceDir - Workspace home, for the paths an operator must grant.
+ * @param error - Failure sink.
+ * @returns Exit code 1.
+ */
+function reportEnqueueFailure(
+  cause: unknown,
+  workspaceDir: string,
+  error: (message: string) => void,
+): number {
+  const detail = cause instanceof Error ? cause.message : String(cause);
+  const code = (cause as NodeJS.ErrnoException | undefined)?.code;
+  error(`❌ Could not enqueue the task: ${detail}`);
+  if (code === "EACCES" || code === "EPERM" || code === "EROFS") {
+    error("   The workspace state must be writable by this process.");
+    error(
+      `   Grant write access to ${displayPath(injectedTasksDir(workspaceDir))} and ` +
+        `${displayPath(workspaceStateDir(workspaceDir))}`,
+    );
+    error("   (under a sandbox, add them to AGENT_SANDBOX_WRITABLE_PATHS).");
+  }
+  return 1;
 }
 
 /** Shared sinks + task state threaded through the enqueue/report/wait paths. */

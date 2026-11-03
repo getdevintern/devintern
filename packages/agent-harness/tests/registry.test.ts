@@ -5,7 +5,7 @@ import { ClaudeCodeHarness } from "../src/harnesses/claude-code.js";
 describe("registry", () => {
   test("listHarnesses returns all built-in harnesses", () => {
     const harnesses = listHarnesses();
-    expect(harnesses.length).toBe(13);
+    expect(harnesses.length).toBe(14);
     const names = harnesses.map((h) => h.name);
     expect(names).toContain("claude-code");
     expect(names).toContain("opencode");
@@ -18,6 +18,7 @@ describe("registry", () => {
     expect(names).toContain("grok");
     expect(names).toContain("kilo-code");
     expect(names).toContain("kimi");
+    expect(names).toContain("muse");
     expect(names).toContain("cline");
     expect(names).toContain("pi");
     expect(names).toContain("qwen");
@@ -38,6 +39,11 @@ describe("registry", () => {
     expect(byAgy).toBe(byCanonical);
     expect(byGemini).toBe(byCanonical);
     expect(byCanonical?.defaultPath).toBe("agy");
+  });
+
+  test("getHarness resolves the Muse Code product-name alias", () => {
+    expect(getHarness("muse-code")?.name).toBe("muse");
+    expect(getHarness("muse-code")?.defaultPath).toBe("muse");
   });
 
   test("getHarness returns undefined for unknown name", () => {

@@ -20,6 +20,7 @@ import { PiHarness } from "../src/harnesses/pi.js";
 import { QwenCodeHarness } from "../src/harnesses/qwen.js";
 import { CursorHarness } from "../src/harnesses/cursor.js";
 import { KimiHarness } from "../src/harnesses/kimi.js";
+import { MuseHarness } from "../src/harnesses/muse.js";
 import type { AgentEffort } from "../src/types.js";
 
 describe("AGENT_EFFORTS", () => {
@@ -114,6 +115,7 @@ describe("harness effort capability flags", () => {
     expect(new DeepSeekHarness().supportsEffort).toBe(true);
     expect(new GrokHarness().supportsEffort).toBe(true);
     expect(new KiloCodeHarness().supportsEffort).toBe(true);
+    expect(new MuseHarness().supportsEffort).toBe(true);
     expect(new OpencodeHarness().supportsEffort).toBe(true);
     expect(new PiHarness().supportsEffort).toBe(true);
   });

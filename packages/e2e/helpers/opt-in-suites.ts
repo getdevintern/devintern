@@ -34,6 +34,12 @@ export const OPT_IN_SUITES: readonly OptInSuite[] = [
     status: "skip",
   },
   {
+    name: "GitLab hosted relay E2E",
+    script: "test:e2e:gitlab-relay",
+    reason: "requires a signed-in account and writes a temporary hook to the deployed relay",
+    status: "skip",
+  },
+  {
     name: "Bitbucket Cloud source-control E2E",
     script: "test:e2e:bitbucket",
     reason: "requires a dedicated Bitbucket fixture repository and token",
@@ -88,9 +94,10 @@ export const OPT_IN_SUITES: readonly OptInSuite[] = [
     status: "todo",
   },
   {
-    name: "Offline fake tracker servers",
+    name: "Offline fake Trello server",
     script: "test",
-    reason: "planned in Layer 3 of docs/tracker-e2e-plan.md",
+    reason:
+      "planned in Layer 3 of docs/tracker-e2e-plan.md; the offline Jira fake runs in the default suite",
     status: "todo",
   },
 ];

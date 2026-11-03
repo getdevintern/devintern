@@ -2,6 +2,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 
+import { stripWorkerInjectedEnv } from "./setup/worker-env";
+
 const existingCeilings = process.env.GIT_CEILING_DIRECTORIES;
 const gitCeilingDirectories = [resolve(tmpdir()), existingCeilings]
   .filter((value): value is string => Boolean(value))
@@ -34,11 +36,12 @@ process.on("exit", () => {
 
 // Ambient prompt overrides make prompt-rendering tests non-hermetic: a
 // developer's DEVINTERN_PROMPTS_DIR (or an ancestor `.devintern-code/prompts/`)
-// would silently change their results. Drop the variable from the child
-// environment so the bundled catalog is the default for the whole run; tests
-// that exercise overrides pass explicit `overrideDirs` instead.
+// would silently change their results. The same applies to the rest of the
+// worker-injected environment when an agent runs the suite from inside a
+// worker task subprocess, so strip the whole set from the child environment
+// and let the per-file guard handle in-process code.
 const childEnv = { ...process.env };
-delete childEnv.DEVINTERN_PROMPTS_DIR;
+stripWorkerInjectedEnv(childEnv);
 
 const child = Bun.spawn(["bun", "test", "--timeout=30000", ...process.argv.slice(2)], {
   cwd: import.meta.dir,

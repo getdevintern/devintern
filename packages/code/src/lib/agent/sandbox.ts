@@ -10,9 +10,12 @@
  * picks up changes on restart, same as AGENT_HARNESS.
  */
 
+import { existsSync } from "fs";
+
 import {
   harnessCliPathEnvKey,
   probeHarnessUnderSandbox,
+  removedSandboxProviderMessage,
   resolveExecutablePath,
   resolveHarnessChainSync,
   resolveSandbox,
@@ -21,8 +24,15 @@ import type {
   DetectedSandboxProvider,
   NonoPackStatus,
   ResolvedSandbox,
+  SandboxPolicy,
   SandboxProvider,
 } from "@devintern/agent-harness";
+import {
+  automationsDir,
+  injectedTasksDir,
+  resolveWorkspaceDir,
+  workspaceStateDir,
+} from "../workspace/paths";
 
 let cliOverride: string | undefined;
 let cached: Promise<ResolvedSandbox | null> | null = null;
@@ -31,7 +41,7 @@ let cached: Promise<ResolvedSandbox | null> | null = null;
  * Record the `--sandbox` CLI flag value. Must be called during CLI parsing,
  * before the first {@link getSandbox} call.
  *
- * @param name - Provider name ("none", "auto", "nono", "srt", "docker", "smolvm").
+ * @param name - Provider name ("none", "auto", "nono", "docker").
  */
 export function setSandboxOverride(name: string | undefined): void {
   cliOverride = name;
@@ -57,28 +67,63 @@ export function getSandbox(harnessName: string): Promise<ResolvedSandbox | null>
 }
 
 /**
+ * Workspace paths a sandboxed agent must be able to write for DevIntern
+ * features that live outside the checkout.
+ *
+ * `devintern worker add` (the documented way for an agent to delegate work —
+ * see the devintern-delegate skill) writes a prompt file under `injected/`,
+ * inserts a row into `state/queue.db`, and automations advance their cursor
+ * under `automations/`. The default sandbox policy only grants the working
+ * directory and the task output dir, so without these grants delegation from
+ * an agent run fails with a sandbox `EACCES`.
+ *
+ * Only existing paths are returned: the worker creates the directories it
+ * owns at startup, so a run outside workspace mode keeps the default policy
+ * untouched.
+ *
+ * @param workspaceDir - Workspace home (defaults to `~/.devintern`).
+ * @returns Existing workspace directories agents may write.
+ */
+export function workspaceAgentWritablePaths(
+  workspaceDir: string = resolveWorkspaceDir(),
+): string[] {
+  return [
+    injectedTasksDir(workspaceDir),
+    workspaceStateDir(workspaceDir),
+    automationsDir(workspaceDir),
+  ].filter((path) => existsSync(path));
+}
+
+/**
+ * Build the sandbox policy overrides every agent spawn passes to
+ * {@link spawnAgent}: the default policy plus the workspace paths agent-facing
+ * CLI features need to write.
+ *
+ * @param workspaceDir - Workspace home (defaults to `~/.devintern`).
+ * @returns Policy overrides merged into the provider's default policy.
+ */
+export function agentSandboxPolicy(
+  workspaceDir: string = resolveWorkspaceDir(),
+): Partial<SandboxPolicy> {
+  return { writablePaths: workspaceAgentWritablePaths(workspaceDir) };
+}
+
+/**
  * One-time setup steps and usage caveats per provider that detection cannot
  * probe (external service state, per-user auth). Shown by the doctor so
  * users learn what a first run still needs before it fails.
  */
 const PROVIDER_SETUP_NOTES: Record<string, (linux: boolean) => string[]> = {
   native: () => [
-    "confines shell commands and their children; for a boundary around the whole agent process use nono or srt",
+    "confines shell commands and their children; for a boundary around the whole agent process use nono",
   ],
   nono: () => [
     "one-time per agent: nono pull nolabs-ai/<agent> (packs: claude, codex, opencode, goose, pi, antigravity)",
   ],
-  srt: () => [
-    "network runs on a built-in allowlist of agent essentials; extend it with AGENT_SANDBOX_ALLOWED_DOMAINS",
-  ],
   docker: (linux) => [
     "one-time: sbx policy init balanced" + (linux ? "" : " (after sbx login)"),
     "agent auth: sbx secret set -g anthropic — host logins are not visible inside the VM",
-    "not compatible with /tmp working dirs (review worktrees); use nono or srt for those",
-  ],
-  smolvm: (linux) => [
-    "first run downloads a guest VM image (several minutes)",
-    ...(linux ? ["needs KVM (/dev/kvm) and your distro's QEMU system package"] : []),
+    "not compatible with /tmp working dirs (review worktrees); use nono for those",
   ],
 };
 
@@ -193,10 +238,26 @@ export async function collectHarnessPreflight(
     return undefined;
   }
 
+  // `sandboxName: "none"` keeps this chain resolution free of probes: the
+  // doctor runs the probes itself so it can render every entry, including
+  // fallbacks the runtime chain would drop.
+  const chain = resolveHarnessChainSync({ checkInstalled: false, raw, sandboxName: "none" });
+  // `auto` must pick the same provider the resolver would for the primary
+  // harness: a provider that cannot wrap it (e.g. native for goose) is not a
+  // candidate, even though it has a higher priority.
+  const primaryHarness = chain.entries[0]?.name;
+
   let provider: SandboxProvider | undefined;
   if (configured === "auto") {
     provider = detections
-      .filter(({ provider: candidate, detection }) => detection.available && candidate.priority > 0)
+      .filter(
+        ({ provider: candidate, detection }) =>
+          detection.available &&
+          candidate.priority > 0 &&
+          (!primaryHarness ||
+            !candidate.supportsHarness ||
+            candidate.supportsHarness(primaryHarness)),
+      )
       .sort((a, b) => b.provider.priority - a.provider.priority)[0]?.provider;
   } else {
     const detected = detections.find((entry) => entry.provider.name === configured);
@@ -206,10 +267,6 @@ export async function collectHarnessPreflight(
     return undefined;
   }
 
-  // `sandboxName: "none"` keeps this chain resolution free of probes: the
-  // doctor runs the probes itself so it can render every entry, including
-  // fallbacks the runtime chain would drop.
-  const chain = resolveHarnessChainSync({ checkInstalled: false, raw, sandboxName: "none" });
   const entries = await Promise.all(
     chain.entries.map(async (entry): Promise<HarnessPreflightEntry> => {
       const path = resolveExecutablePath(entry.path);
@@ -292,6 +349,9 @@ export function buildSandboxDoctorReport(
 
   // What the next agent run will actually do with the current configuration.
   let nextRunFails = false;
+  // Shared with the resolver so the doctor, the runtime error and the tests
+  // cannot drift; consulted before the generic unknown-provider branch.
+  const removedMessage = removedSandboxProviderMessage(configured);
   lines.push(`Configured: AGENT_SANDBOX=${configured} (${configuredSource})`);
   if (configured === "none") {
     lines.push("Next run:   agents run unsandboxed (sandboxing is off)");
@@ -309,6 +369,9 @@ export function buildSandboxDoctorReport(
           ? `Next run:   auto picks ${autoPick.provider.name} — agent wrapped with ${autoPick.provider.displayName}`
           : "Next run:   auto finds no usable provider — the run proceeds unsandboxed with a warning",
     );
+  } else if (removedMessage) {
+    nextRunFails = true;
+    lines.push(`Next run:   ❌ fails — ${removedMessage}`);
   } else {
     const chosen = detections.find((d) => d.provider.name === configured);
     if (!chosen) {
@@ -328,7 +391,7 @@ export function buildSandboxDoctorReport(
       nextRunFails = true;
       lines.push(
         `Next run:   ❌ fails — ${configured} does not support the configured ` +
-          `"${harnessName}" harness. Use nono or srt (any harness), or switch AGENT_HARNESS.`,
+          `"${harnessName}" harness. Use nono (any harness), or switch AGENT_HARNESS.`,
       );
     } else if (activeSandbox && !chosen.provider.canNestInSandbox) {
       lines.push(

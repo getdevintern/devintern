@@ -68,6 +68,7 @@ describe("recoverOrphanedTaskRuns", () => {
     now?: number;
     maxAgeMs?: number;
     branchExists?: (branch: string, run: RunRecord) => boolean;
+    hasLandedCommits?: (branch: string, run: RunRecord) => boolean;
   }
 
   function recover({
@@ -77,6 +78,7 @@ describe("recoverOrphanedTaskRuns", () => {
     now = Date.now(),
     maxAgeMs = DEFAULT_ORPHAN_MAX_AGE_MS,
     branchExists,
+    hasLandedCommits,
   }: RecoveryOptions = {}) {
     return recoverOrphanedTaskRuns({
       runStore: store,
@@ -89,6 +91,7 @@ describe("recoverOrphanedTaskRuns", () => {
       maxAgeMs,
       now,
       ...(branchExists ? { branchExists } : {}),
+      ...(hasLandedCommits ? { hasLandedCommits } : {}),
       log: () => {},
       warn: () => {},
     });
@@ -259,6 +262,40 @@ describe("recoverOrphanedTaskRuns", () => {
     expect(result.resumable).toHaveLength(0);
     expect(posted).toHaveLength(1);
     expect(transitions).toEqual([{ key: "PROJ-12", status: "To Do" }]);
+  });
+
+  test("resumes a legacy run whose branch has commits but no report", async () => {
+    // Interrupted during auto-review before the implementation stage was
+    // persisted: the branch still holds the work, so recovery must resume it.
+    const runId = store.createRun({
+      origin: "task",
+      taskKey: "PROJ-12b",
+      branch: "feature/proj-12b",
+    });
+
+    const result = await recover({
+      branchExists: () => true,
+      hasLandedCommits: () => true,
+    });
+
+    expect(result.resumable.map((run) => run.id)).toEqual([runId]);
+    expect(result.recovered).toBe(0);
+    expect(posted).toHaveLength(0);
+    expect(transitions).toHaveLength(0);
+  });
+
+  test("requeues a report-less run whose branch has no commits", async () => {
+    store.createRun({ origin: "task", taskKey: "PROJ-12c", branch: "feature/proj-12c" });
+
+    const result = await recover({
+      branchExists: () => true,
+      hasLandedCommits: () => false,
+    });
+
+    expect(result.resumable).toHaveLength(0);
+    expect(result.recovered).toBe(1);
+    expect(posted).toHaveLength(1);
+    expect(transitions).toEqual([{ key: "PROJ-12c", status: "To Do" }]);
   });
 
   test("requeues instead of resuming when the recorded branch no longer exists", async () => {

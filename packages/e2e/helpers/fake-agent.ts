@@ -1,13 +1,62 @@
 #!/usr/bin/env bun
 import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 
-const mode = process.env.E2E_AGENT_MODE ?? "implement";
+// A one-shot fixture run can pin its mode explicitly. A long-lived worker
+// cannot: the same daemon runs implementation, review, CI-repair and conflict
+// jobs, so those tests identify the prompt by a seeded marker instead.
+const agentInput = process.argv.join(" ");
+const mode =
+  process.env.E2E_AGENT_MODE ??
+  (agentInput.includes("# Resolve Merge Conflicts")
+    ? "conflict"
+    : agentInput.includes("E2E_CI_FIX_MARKER")
+      ? "ci"
+      : agentInput.includes("E2E_REVIEW_GREETING")
+        ? "review"
+        : "implement");
 if (process.env.E2E_AGENT_INVOCATIONS) {
   appendFileSync(process.env.E2E_AGENT_INVOCATIONS, JSON.stringify({ mode }) + "\n");
 }
+// Opt-in delay for bounded-timeout coverage. Defaults to 0, so every existing
+// scenario stays as fast and deterministic as before.
+const delayMs = Number(process.env.E2E_AGENT_DELAY_MS ?? "0");
+if (Number.isFinite(delayMs) && delayMs > 0) {
+  await Bun.sleep(delayMs);
+}
+// A settled-but-failed attempt with an implementation report, for resume
+// coverage: exit 0 with failure language so the pipeline records an escalated
+// run (branch + report) without editing the fixture. `incomplete` leaves one
+// landed (empty) commit because session pickup only reuses a branch that has
+// commits ahead of its base, even when the run recorded a report.
+// `incomplete-empty` skips the commit to cover the documented fallback to a
+// fresh attempt branch when the prior branch has nothing to resume.
+if (mode === "incomplete" || mode === "incomplete-empty") {
+  if (mode === "incomplete") {
+    const commit = Bun.spawnSync(
+      [
+        "git",
+        "-c",
+        "user.name=DevIntern E2E",
+        "-c",
+        "user.email=e2e@example.com",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "wip: interrupted attempt",
+      ],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    if (commit.exitCode !== 0) {
+      throw new Error(commit.stdout.toString() + commit.stderr.toString());
+    }
+  }
+  console.log(
+    "Implementation was unsuccessful. I could not complete the requested change because the deterministic E2E fixture intentionally stopped before editing any tracked file. The branch and run record must remain available for a resume attempt.",
+  );
+  process.exit(0);
+}
 // Tracker scenarios seed unique markers into the ticket description and a
 // comment; both must reach the agent's actual input before it edits anything.
-const agentInput = process.argv.join(" ");
 const missingMarkers: string[] = [];
 if (
   process.env.E2E_EXPECT_DESCRIPTION_MARKER &&
@@ -32,20 +81,35 @@ if (mode === "no-change") {
   process.exit(0);
 }
 const expected =
-  mode === "review"
-    ? 'export const greeting = "Hello, world!";\n'
-    : 'export const greeting = "Hello";\n';
-if (readFileSync(path, "utf8") !== expected)
+  mode === "implement"
+    ? 'export const greeting = "Hello";\n'
+    : 'export const greeting = "Hello, world!";\n';
+if (mode !== "conflict" && readFileSync(path, "utf8") !== expected)
   throw new Error("Unexpected fixture contents; refusing to edit this workspace");
-if (mode === "review" && !process.argv.join(" ").includes("E2E_REVIEW_GREETING")) {
+if (mode === "review" && !agentInput.includes("E2E_REVIEW_GREETING")) {
   throw new Error("Review feedback marker was not delivered to the agent");
 }
-writeFileSync(
-  path,
+if (mode === "ci" && process.env.E2E_FAIL_CI === "1") {
+  console.error("E2E deliberate CI repair failure");
+  process.exit(19);
+}
+const replacement =
   mode === "review"
     ? 'export const greeting = "Hello, reviewer!";\n'
-    : 'export const greeting = "Hello, world!";\n',
-);
+    : mode === "ci"
+      ? 'export const greeting = "Hello, CI!";\n'
+      : mode === "conflict"
+        ? 'export const greeting = "Hello, merged!";\n'
+        : 'export const greeting = "Hello, world!";\n';
+writeFileSync(path, replacement);
+if (mode === "conflict") {
+  // The merge resolver trusts the index, not the agent's output: stage the
+  // resolved file so `git diff --diff-filter=U` no longer reports it.
+  const add = Bun.spawnSync(["git", "add", "-A"], { stdout: "pipe", stderr: "pipe" });
+  if (add.exitCode !== 0) {
+    throw new Error(add.stdout.toString() + add.stderr.toString());
+  }
+}
 if (mode === "fail") {
   console.error("E2E deliberate implementation failure after editing the fixture");
   process.exit(17);
@@ -54,11 +118,12 @@ const check = Bun.spawnSync([process.execPath, "test"], { stdout: "pipe", stderr
 if (check.exitCode !== 0) {
   throw new Error(check.stdout.toString() + check.stderr.toString());
 }
+const greeting = replacement.match(/"([^"]+)"/)?.[1] ?? "Hello, world!";
 console.log(`<!-- devintern:summary:start -->
 ## Why
 The fixture needs a more descriptive greeting.
 ## What changed
-Updated src/greeting.ts to export ${mode === "review" ? "Hello, reviewer!" : "Hello, world!"}.
+Updated src/greeting.ts to export ${greeting}.
 ## Scope
 The greeting export is the only changed file.
 ## Tradeoffs

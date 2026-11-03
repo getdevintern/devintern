@@ -15,7 +15,11 @@ import { tmpdir } from "os";
 import { dirname, isAbsolute, join, resolve } from "path";
 import { StringDecoder } from "string_decoder";
 import { spawnReapable } from "./process-reaper.js";
-import { resolveHomeDir } from "./sandbox/harness-state.js";
+import {
+  defaultMuseCredentialPath,
+  museCredentialPath,
+  resolveHomeDir,
+} from "./sandbox/harness-state.js";
 import type { ResolvedSandbox, SandboxPolicy } from "./sandbox/types.js";
 
 export interface SpawnAgentOptions {
@@ -116,8 +120,8 @@ export function gitAdminPaths(workingDir: string): string[] {
  *
  * Env tuning: `AGENT_SANDBOX_WRITABLE_PATHS` (colon-separated) adds writable
  * paths; `AGENT_SANDBOX_ALLOWED_DOMAINS` (comma-separated) switches the
- * network policy to a domain allowlist (enforced by providers that support
- * network filtering, currently srt).
+ * network policy to a domain allowlist (enforced by nono's proxy filter and
+ * Docker's per-sandbox rules).
  *
  * @param workingDir - The directory the agent operates in.
  * @returns The default policy; callers may extend it via `SpawnAgentOptions.policy`.
@@ -141,8 +145,8 @@ export function buildDefaultSandboxPolicy(workingDir: string): SandboxPolicy {
   // On macOS the per-user temp AND cache trees live side by side under
   // /var/folders/<xx>/<hash>/ (T and C). tmpdir() alone (…/T) is too narrow:
   // agents also write the sibling cache dir — claude-code's auth check fails
-  // as "not logged in" without it (verified under srt) — so grant the parent
-  // user dir, which is still scoped to this user.
+  // as "not logged in" without it (verified under a kernel sandbox) — so grant
+  // the parent user dir, which is still scoped to this user.
   const tempScope = process.platform === "darwin" ? dirname(tmpdir()) : tmpdir();
 
   return {
@@ -166,18 +170,19 @@ export function buildDefaultSandboxPolicy(workingDir: string): SandboxPolicy {
  * @returns The reapable child and a cleanup hook for VM-backed providers.
  */
 /** Providers that apply Seatbelt on macOS around the whole process. */
-const SEATBELT_WRAPPERS = new Set(["nono", "srt"]);
+const SEATBELT_WRAPPERS = new Set(["nono"]);
 
 /**
  * Avoid nested Seatbelt on macOS when an external wrapper contains a harness
  * that also self-sandboxes.
  *
  * Codex always runs with `--sandbox workspace-write` (its own Seatbelt on
- * macOS). `sandbox-exec` inside `sandbox-exec` is not supported, so under
- * nono/srt on macOS the inner sandbox would fail to initialize. The outer
- * wrapper already provides the (stronger, whole-process) boundary, so switch
- * codex's own sandbox off for the wrapped run. On Linux the layers stack
- * (Landlock/bwrap compose), so both are kept for defense in depth.
+ * macOS), and Muse Code also uses Seatbelt on macOS. `sandbox-exec` inside
+ * `sandbox-exec` is not supported, so under nono on macOS the inner
+ * sandbox would fail to initialize. The outer wrapper already provides the
+ * (stronger, whole-process) boundary, so switch the harness's own sandbox off
+ * for the wrapped run. On Linux the layers stack (Landlock/bwrap compose), so
+ * both are kept for defense in depth.
  *
  * Exported for tests; `platform` is injectable for the same reason.
  *
@@ -208,7 +213,73 @@ export function applyNestingGuard(
       return adjusted;
     }
   }
+  if (harnessName === "muse" && !args.includes("--disable-sandbox") && !args.includes("--yolo")) {
+    console.log(
+      `🔒 Disabled Muse Code's own sandbox inside ${providerName} (nested Seatbelt is ` +
+        "unsupported on macOS; the outer sandbox is the enforcement boundary).",
+    );
+    // Muse parses positionals with clap and `buildPromptArgs` emits `--` before
+    // a dash-leading prompt. Everything after that marker is prompt text, so a
+    // flag appended at the end would be handed to the model instead of parsed
+    // as an option. Insert it in the option region: right after `exec`, or
+    // immediately before an existing end-of-options marker.
+    const marker = args.indexOf("--");
+    const insertAt = marker === -1 && args[0] === "exec" ? 1 : marker === -1 ? args.length : marker;
+    const adjusted = [...args];
+    adjusted.splice(insertAt, 0, "--disable-sandbox");
+    return adjusted;
+  }
   return args;
+}
+
+/**
+ * Credential policy for a Muse run whose own sandbox is about to be disabled.
+ *
+ * Muse's own sandbox refuses to let tool commands read
+ * `~/.config/muse/auth.json` (Muse Code 1.4.10+). Disabling that sandbox to
+ * avoid nested Seatbelt removes the protection, while the outer wrapper grants
+ * broad `$HOME` reads. Hide the stored credential from the whole run and
+ * require `META_API_KEY` instead, since Muse can no longer read the file it
+ * would have authenticated with.
+ *
+ * Only nono is handled: other providers do not wrap on macOS (and the
+ * microVM providers keep the credential inside the guest).
+ *
+ * Exported for tests; `platform` and `env` are injectable.
+ *
+ * @param providerName - The active sandbox provider.
+ * @param harnessName - The harness being wrapped.
+ * @param args - The harness argv (pre-wrap).
+ * @param platform - Defaults to `process.platform`.
+ * @param env - Defaults to `process.env`.
+ * @returns A deny-read policy, an actionable error, or undefined when no guard applies.
+ */
+export function museCredentialGuard(
+  providerName: string,
+  harnessName: string | undefined,
+  args: readonly string[],
+  platform: NodeJS.Platform = process.platform,
+  env: NodeJS.ProcessEnv = process.env,
+): { denyReadPaths: string[] } | { error: string } | undefined {
+  if (harnessName !== "muse" || !SEATBELT_WRAPPERS.has(providerName)) {
+    return undefined;
+  }
+  const innerSandboxOff =
+    platform === "darwin" || args.includes("--disable-sandbox") || args.includes("--yolo");
+  if (!innerSandboxOff) {
+    return undefined;
+  }
+  if (!env.META_API_KEY?.trim()) {
+    return {
+      error:
+        "Muse Code's stored credential cannot be read while its inner sandbox is disabled " +
+        `under ${providerName}. Set META_API_KEY for this run, or disable the external ` +
+        "sandbox to use the stored credential.",
+    };
+  }
+  return {
+    denyReadPaths: [...new Set([museCredentialPath(env), defaultMuseCredentialPath(env)])],
+  };
 }
 
 export async function spawnAgent(options: SpawnAgentOptions): Promise<SpawnedAgent> {
@@ -230,6 +301,20 @@ export async function spawnAgent(options: SpawnAgentOptions): Promise<SpawnedAge
       ...options.policy,
       writablePaths: [...defaults.writablePaths, ...(options.policy?.writablePaths ?? [])],
     };
+
+    const credentialGuard = museCredentialGuard(
+      sandbox.provider.name,
+      policy.harnessName,
+      args,
+      process.platform,
+      spawnOptions.env ?? process.env,
+    );
+    if (credentialGuard && "error" in credentialGuard) {
+      throw new Error(credentialGuard.error);
+    }
+    if (credentialGuard) {
+      policy.denyReadPaths = [...(policy.denyReadPaths ?? []), ...credentialGuard.denyReadPaths];
+    }
 
     const guardedArgs = applyNestingGuard(sandbox.provider.name, policy.harnessName, args);
     const wrapped = await sandbox.provider.wrapCommand(resolvedPath, guardedArgs, policy);

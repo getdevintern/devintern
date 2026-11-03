@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { cpSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { isolatedEnvironment } from "../../helpers/environment";
@@ -59,6 +59,27 @@ test("the deterministic agent refuses to edit until seeded description and comme
       'export const greeting = "Hello, world!";\n',
     );
     expect(output).toContain("<!-- devintern:summary:start -->");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the deterministic agent selects review mode from the seeded prompt marker", async () => {
+  const root = mkdtempSync(join(tmpdir(), "devintern-e2e-local-"));
+  const cwd = join(root, "repo");
+  try {
+    cpSync(fixture, cwd, { recursive: true });
+    writeFileSync(join(cwd, "src/greeting.ts"), 'export const greeting = "Hello, world!";\n');
+    const env = isolatedEnvironment(root);
+    const output = await checkedCommand(
+      [process.execPath, agentPath, "-p", "Address this feedback. E2E_REVIEW_GREETING"],
+      cwd,
+      env,
+    );
+    expect(readFileSync(join(cwd, "src/greeting.ts"), "utf8")).toBe(
+      'export const greeting = "Hello, reviewer!";\n',
+    );
+    expect(output).toContain("Hello, reviewer!");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

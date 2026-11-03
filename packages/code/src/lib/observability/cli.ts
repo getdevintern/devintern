@@ -5,6 +5,7 @@ import {
   loadEnvironment,
   loadSupabaseConfig,
 } from "../cli/bootstrap";
+import { hasHelpArg } from "../cli/help";
 import { flushAnalytics, trackDoctorRun } from "./analytics";
 
 /**
@@ -71,6 +72,20 @@ export async function runDashboardCommand(args: string[]): Promise<void> {
  * any check fails so scripts and CI can gate on it.
  */
 export async function runDoctorCommand(): Promise<never> {
+  if (hasHelpArg(process.argv.slice(2))) {
+    console.log(
+      [
+        "Usage: devintern doctor",
+        "",
+        "Check runtime, git, agent CLI, tracker credentials, sign-in, and license",
+        "readiness for a first run. Exits non-zero when any check fails.",
+        "",
+        "Options:",
+        "  -h, --help  Display this help message",
+      ].join("\n"),
+    );
+    process.exit(0);
+  }
   const { collectReadinessChecks, renderReadinessReport } = await import("./readiness");
   loadEnvironment();
   let supabaseConfig;

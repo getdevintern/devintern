@@ -241,4 +241,129 @@ describe("InjectedTaskAcquirer", () => {
       verify.close();
     }
   });
+
+  test("start returns without waiting for a slow injected task", async () => {
+    enqueue("local-a");
+    let started = false;
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const acquirer = new InjectedTaskAcquirer({
+      store,
+      execute: async () => {
+        started = true;
+        await gate;
+        return true as TaskExecutionResult;
+      },
+      intervalSeconds: 3600,
+    });
+
+    try {
+      const returned = await Promise.race([
+        acquirer.start().then(() => true),
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 500)),
+      ]);
+      expect(returned).toBe(true);
+      expect(started).toBe(true);
+    } finally {
+      release();
+      acquirer.stop();
+      await waitFor(() => store.list().every((task) => task.status !== "running"));
+    }
+  });
+
+  test("claims only up to maxConcurrency and refills a freed slot on the next drain", async () => {
+    enqueue("local-a");
+    enqueue("local-b");
+    enqueue("local-c");
+
+    const started: string[] = [];
+    const releases = new Map<string, () => void>();
+    const acquirer = new InjectedTaskAcquirer({
+      store,
+      maxConcurrency: 2,
+      execute: async (task) => {
+        started.push(task.taskKey);
+        await new Promise<void>((resolve) => releases.set(task.taskKey, resolve));
+        return true as TaskExecutionResult;
+      },
+      intervalSeconds: 3600,
+    });
+
+    try {
+      void acquirer.start();
+      await waitFor(() => started.length === 2);
+      expect(store.list().filter((task) => task.status === "running")).toHaveLength(2);
+      expect(store.list().filter((task) => task.status === "pending")).toHaveLength(1);
+
+      // Freeing one slot does not start the third until the next drain; the
+      // interval does that in production, and the cap still holds meanwhile.
+      const first = started[0]!;
+      releases.get(first)!();
+      await waitFor(() => store.list().find((task) => task.taskKey === first)?.status === "done");
+      void acquirer.tick();
+      await waitFor(() => started.length === 3);
+      expect(new Set(started)).toEqual(new Set(["local-a", "local-b", "local-c"]));
+    } finally {
+      for (const release of releases.values()) release();
+      acquirer.stop();
+      await waitFor(() => store.list().every((task) => task.status !== "running"));
+    }
+  });
+
+  test("keeps a saturated repo pending while another repo starts", async () => {
+    enqueue("local-a", "r1");
+    enqueue("local-b", "r1");
+    enqueue("local-c", "r2");
+
+    const started: string[] = [];
+    const releases = new Map<string, () => void>();
+    const acquirer = new InjectedTaskAcquirer({
+      store,
+      maxConcurrency: 3,
+      maxConcurrencyPerRepo: 1,
+      execute: async (task) => {
+        started.push(task.taskKey);
+        await new Promise<void>((resolve) => releases.set(task.taskKey, resolve));
+        return true as TaskExecutionResult;
+      },
+      intervalSeconds: 3600,
+    });
+
+    try {
+      void acquirer.start();
+      await waitFor(() => started.length === 2);
+      expect(new Set(started)).toEqual(new Set(["local-a", "local-c"]));
+      expect(
+        store
+          .list()
+          .filter((task) => task.status === "pending")
+          .map((task) => task.taskKey),
+      ).toEqual(["local-b"]);
+
+      releases.get("local-a")!();
+      await waitFor(
+        () => store.list().find((task) => task.taskKey === "local-a")?.status === "done",
+      );
+      void acquirer.tick();
+      await waitFor(() => started.includes("local-b"));
+      expect(store.list().find((task) => task.taskKey === "local-b")?.status).toBe("running");
+    } finally {
+      for (const release of releases.values()) release();
+      acquirer.stop();
+      await waitFor(() => store.list().every((task) => task.status !== "running"));
+    }
+  });
 });
+
+/** Poll a synchronous condition; replace fixed sleeps in concurrency tests. */
+async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) {
+      throw new Error(`Timed out after ${timeoutMs}ms waiting for condition`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}

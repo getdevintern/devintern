@@ -451,6 +451,8 @@ devintern webhook serve --port 3000
 pm2 start "devintern webhook serve" --name devintern-webhooks
 ```
 
+`--port <port>` and `--host <host>` override the `WEBHOOK_PORT` / `WEBHOOK_HOST` environment variables.
+
 ### Systemd Service (Linux)
 
 Create `/etc/systemd/system/devintern-webhooks.service`:
