@@ -229,7 +229,7 @@ mock.module("../src/lib/agent/plan", () => ({
   createPlanImplementationPrompt: () => "prompt",
   logHookErrorToFile: () => {},
 }));
-mock.module("../src/lib/agent/sandbox", () => ({ getSandbox: async () => null }));
+mock.module("../src/lib/agent/sandbox", () => ({ ...realSandbox, getSandbox: async () => null }));
 mock.module("@devintern/utils", () => ({ ...realUtilsPkg, captureError: () => {} }));
 
 const { runAgentHarness } = await import("../src/lib/agent/run-harness");

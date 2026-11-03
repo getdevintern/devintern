@@ -13,7 +13,7 @@ import {
 import type { AgentHarness, AgentRunOptions } from "@devintern/agent-harness";
 import { ReadonlyAnalysisError } from "../agent/analysis-mode";
 import { parseAgentJsonObject } from "../agent/json";
-import { getSandbox } from "../agent/sandbox";
+import { agentSandboxPolicy, getSandbox } from "../agent/sandbox";
 import { harnessSpawnEnv } from "../agent/spawn";
 import { createHarnessLogSink } from "../observability/harness-logs";
 import { resolveOutputDir } from "../config/output-dir";
@@ -100,6 +100,7 @@ export async function runEstimation(
         args: estimationSpawnArgs,
         spawnOptions: { stdio: ["ignore", "pipe", "pipe"], env: harnessSpawnEnv(estimationEnv) },
         sandbox: await getSandbox(harness.name),
+        policy: agentSandboxPolicy(),
         sink: createHarnessLogSink({
           harness,
           label: "estimation",

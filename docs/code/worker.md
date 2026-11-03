@@ -312,7 +312,10 @@ and a durable row in the central DB, then picked up by the running worker on its
 next poll — no `[[routing.rules]]` entry is needed because the row names its repo
 explicitly. Tasks are attributed to the `local:add` source in worker logs, run
 records, and the dashboard, and start on a `feature/local-<slug>` branch (the
-`local-` prefix cannot collide with a tracker key).
+`local-` prefix cannot collide with a tracker key). Sandboxed agents can enqueue
+too: workspace runs grant write access to `injected/`, `state/`, and
+`automations/`, so `worker add` works under `AGENT_SANDBOX` without extra
+configuration.
 
 | Option                     | Description                                                                                                                     |
 | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |

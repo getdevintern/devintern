@@ -13,7 +13,7 @@ import {
   HEADLESS_AGENT_STDIO,
 } from "../agent/spawn";
 import { resolveAgentEffort, resolveAgentModel } from "../agent/model";
-import { getSandbox } from "../agent/sandbox";
+import { agentSandboxPolicy, getSandbox } from "../agent/sandbox";
 import { createHarnessLogSink } from "../observability/harness-logs";
 
 import { resolveActiveHarness } from "./runtime";
@@ -86,6 +86,7 @@ export async function runAgentHarnessForReview(
           env: harnessSpawnEnv(agentEnv),
         },
         sandbox: await getSandbox(harness.name),
+        policy: agentSandboxPolicy(),
         sink: createHarnessLogSink({
           harness,
           label: "review",
