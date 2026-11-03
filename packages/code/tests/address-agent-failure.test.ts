@@ -8,7 +8,7 @@
 
 import { describe, expect, test } from "bun:test";
 
-import { describeAgentFailure } from "../src/lib/review/address";
+import { describeAgentFailure, classifyAgentFailure } from "../src/lib/review/address";
 
 describe("describeAgentFailure", () => {
   test("names the harness outcome and keeps the spawn error", () => {
@@ -51,21 +51,79 @@ describe("describeAgentFailure", () => {
     expect(message).not.toContain("Last agent output");
   });
 
-  test("truncates a very long output line", () => {
+  test("truncates a very long output line, keeping the tail", () => {
     const message = describeAgentFailure({
       success: false,
       output: "x".repeat(800),
       failureReason: "exited with code 1",
     });
 
-    expect(message).toContain("Last agent output: xxxx");
+    expect(message).toContain("Last agent output: ...");
     expect(message.length).toBeLessThan(800);
-    expect(message).toContain("...");
+    expect(message).not.toContain("x".repeat(800));
+  });
+
+  test("keeps the final error when output uses carriage-return progress updates", () => {
+    const progress = Array.from({ length: 60 }, (_, i) => `progress ${i}%`).join("\r");
+    const message = describeAgentFailure({
+      success: false,
+      output: `${progress}\rfinal: Error: unknown option --dir\n`,
+      failureReason: "exited with code 1",
+    });
+
+    expect(message).toContain("Last agent output: final: Error: unknown option --dir");
+  });
+
+  test("masks credentials in the reason and the output excerpt", () => {
+    const message = describeAgentFailure({
+      success: false,
+      output: "starting\nAWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\n",
+      failureReason: "exited with code 1",
+    });
+
+    expect(message).not.toContain("wJalrXUtnFEMI");
+    expect(message).toContain("AWS_SECRET_ACCESS_KEY=[redacted]");
   });
 
   test("falls back to a reason when the harness reported none", () => {
     expect(describeAgentFailure({ success: false, output: "" })).toBe(
       "Agent failed to complete successfully: agent process did not report success",
     );
+  });
+});
+
+describe("classifyAgentFailure", () => {
+  const base = { code: 0, timedOut: false, maxTurnsReached: false, timeoutMinutes: 60 };
+
+  test("returns undefined for a clean exit", () => {
+    expect(classifyAgentFailure(base)).toBeUndefined();
+  });
+
+  test("reports a non-zero exit code", () => {
+    expect(classifyAgentFailure({ ...base, code: 2 })).toBe("exited with code 2");
+  });
+
+  test("reports a signal termination when the exit code is null", () => {
+    expect(classifyAgentFailure({ ...base, code: null })).toBe(
+      "agent process was terminated by a signal",
+    );
+  });
+
+  test("reports max turns ahead of the accompanying non-zero exit", () => {
+    expect(classifyAgentFailure({ ...base, code: 1, maxTurnsReached: true })).toBe(
+      "reached max turns limit",
+    );
+  });
+
+  test("reports the timeout ahead of max turns and a null exit code", () => {
+    expect(
+      classifyAgentFailure({
+        ...base,
+        code: null,
+        timedOut: true,
+        maxTurnsReached: true,
+        timeoutMinutes: 5,
+      }),
+    ).toBe("timed out after 5 minutes");
   });
 });

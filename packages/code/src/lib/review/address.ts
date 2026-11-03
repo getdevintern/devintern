@@ -25,7 +25,7 @@ import { resolveAgentEffort, resolveAgentModel } from "../agent/model";
 import { parseChangeRequestUrl } from "../code-host/index";
 import { agentSandboxPolicy, getSandbox } from "../agent/sandbox";
 import { createHarnessLogSink } from "../observability/harness-logs";
-import { stripAnsi } from "../observability/worker-logs";
+import { redactSecrets, stripAnsi } from "../observability/worker-logs";
 import { beginRun, endRun, recordRunStage } from "../state/run-recorder";
 import { formatCiFixPrompt, formatReviewPrompt } from "./formatter";
 import type { CiFailureFeedback } from "./formatter";
@@ -64,6 +64,29 @@ export interface AgentRunResult {
   maxTurnsReached?: boolean;
   /** Why the run failed; absent on success and on the max-turns path. */
   failureReason?: string;
+}
+
+/**
+ * Explain why an agent run did not succeed, if it did not.
+ *
+ * Precedence matters: a timed-out run is also killed by a signal, and a
+ * max-turns run also exits non-zero, so the most specific cause wins.
+ *
+ * @param outcome - Exit code (null when killed by a signal) plus run flags
+ * @returns The failure reason, or undefined when the run succeeded
+ */
+export function classifyAgentFailure(outcome: {
+  code: number | null;
+  timedOut: boolean;
+  maxTurnsReached: boolean;
+  timeoutMinutes: number;
+}): string | undefined {
+  const { code, timedOut, maxTurnsReached, timeoutMinutes } = outcome;
+  if (code === 0 && !maxTurnsReached && !timedOut) return undefined;
+  if (timedOut) return `timed out after ${timeoutMinutes} minutes`;
+  if (maxTurnsReached) return "reached max turns limit";
+  if (code === null) return "agent process was terminated by a signal";
+  return `exited with code ${code}`;
 }
 
 /**
@@ -203,15 +226,12 @@ export async function runAgent(
         );
         const output = stdoutOutput + stderrOutput;
         const success = code === 0 && !maxTurnsReached && !timedOut;
-        const failureReason = success
-          ? undefined
-          : timedOut
-            ? `timed out after ${timeoutMinutes} minutes`
-            : maxTurnsReached
-              ? "reached max turns limit"
-              : code === null
-                ? "agent process was terminated by a signal"
-                : `exited with code ${code}`;
+        const failureReason = classifyAgentFailure({
+          code,
+          timedOut,
+          maxTurnsReached,
+          timeoutMinutes,
+        });
 
         resolve({
           success,
@@ -613,14 +633,18 @@ const AGENT_FAILURE_EXCERPT_MAX = 500;
 
 /** Return the last non-empty output line, stripped of ANSI and bounded in size. */
 function lastMeaningfulOutputLine(output: string): string | undefined {
-  const lines = stripAnsi(output)
-    .split(/\r?\n/)
-    .map((line) => line.trim())
+  // Split on raw line breaks first: `stripAnsi` deletes `\r`, so splitting after
+  // it would merge `\r`-based progress updates (and the real error at the end)
+  // into one line.
+  const lines = output
+    .split(/\r\n|\r|\n/)
+    .map((line) => stripAnsi(line).trim())
     .filter(Boolean);
   const last = lines.at(-1);
   if (!last) return undefined;
+  // Keep the tail: the actionable error is the end of a long progress line.
   return last.length > AGENT_FAILURE_EXCERPT_MAX
-    ? `${last.slice(0, AGENT_FAILURE_EXCERPT_MAX)}...`
+    ? `...${last.slice(-AGENT_FAILURE_EXCERPT_MAX)}`
     : last;
 }
 
@@ -633,13 +657,17 @@ function lastMeaningfulOutputLine(output: string): string | undefined {
  * tracking. The spawn-error output already contains the reason, so it is not
  * repeated.
  *
+ * Both the reason and the excerpt are passed through `redactSecrets`, because
+ * this message is thrown and reaches error tracking (see `captureError`),
+ * where the generic Sentry `redactText` does not mask env-style credentials.
+ *
  * @param result - A run result whose `success` is false.
- * @returns Human-readable, bounded failure description.
+ * @returns Human-readable, bounded, credential-free failure description.
  */
 export function describeAgentFailure(result: AgentRunResult): string {
-  const reason = result.failureReason ?? "agent process did not report success";
+  const reason = redactSecrets(result.failureReason ?? "agent process did not report success");
   const message = `Agent failed to complete successfully: ${reason}`;
-  const lastLine = lastMeaningfulOutputLine(result.output);
+  const lastLine = lastMeaningfulOutputLine(redactSecrets(result.output));
   if (!lastLine || reason.toLowerCase().includes(lastLine.toLowerCase())) {
     return message;
   }

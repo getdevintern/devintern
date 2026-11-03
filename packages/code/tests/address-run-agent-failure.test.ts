@@ -19,7 +19,7 @@ const realHarnessLogs = { ...(await import("../src/lib/observability/harness-log
 const fakeHarness = {
   name: "probe",
   displayName: "Probe",
-  supportsMaxTurns: false,
+  supportsMaxTurns: true,
   buildArgs: () => [],
 } as unknown as AgentHarness;
 
@@ -112,5 +112,24 @@ describe("runAgent failure details", () => {
 
     expect(result.success).toBe(true);
     expect(result.failureReason).toBeUndefined();
+  });
+
+  test("reports a signal termination when the process closes without a code", async () => {
+    scenario = { code: null, stderr: "Killed\n" };
+
+    const result = await runAgent("address this review", "/tmp", false);
+
+    expect(result.success).toBe(false);
+    expect(result.failureReason).toBe("agent process was terminated by a signal");
+  });
+
+  test("reports max turns ahead of the non-zero exit code that accompanies it", async () => {
+    scenario = { code: 1, stdout: "Error: Reached max turns (500)\n" };
+
+    const result = await runAgent("address this review", "/tmp", false);
+
+    expect(result.success).toBe(false);
+    expect(result.maxTurnsReached).toBe(true);
+    expect(result.failureReason).toBe("reached max turns limit");
   });
 });
