@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdirSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -122,6 +122,43 @@ describe("RetryQueueAcquirer", () => {
     await acquirer.tick();
     expect(calls).toEqual(["PROJ-1", "PROJ-1"]);
     expect(store.hasPending()).toBe(false);
+  });
+
+  test("leaves queued retries untouched and silent while the harness chain is paused", async () => {
+    store.schedule({ taskKey: "PROJ-1", actor: "a@x.com" });
+
+    const calls: string[] = [];
+    let paused = true;
+    const logs = spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const acquirer = new RetryQueueAcquirer({
+        store,
+        execute: async (taskKey) => {
+          calls.push(taskKey);
+          return true;
+        },
+        isPaused: () => paused,
+        intervalSeconds: 3600,
+      });
+
+      // Many paused ticks must not claim, re-run, requeue, or log the row.
+      for (let i = 0; i < 50; i++) {
+        await acquirer.tick();
+      }
+      expect(calls).toEqual([]);
+      expect(logs).not.toHaveBeenCalled();
+      expect(store.hasActive("PROJ-1")).toBe(true);
+      expect(store.hasPending()).toBe(true);
+
+      // The first unpaused tick drains the row normally.
+      paused = false;
+      await acquirer.tick();
+      expect(calls).toEqual(["PROJ-1"]);
+      expect(store.hasActive("PROJ-1")).toBe(false);
+      expect(store.hasPending()).toBe(false);
+    } finally {
+      logs.mockRestore();
+    }
   });
 
   test("records the error message when the executor throws", async () => {

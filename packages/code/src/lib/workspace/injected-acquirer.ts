@@ -16,6 +16,7 @@
 import type { Acquirer } from "../../worker";
 import type { InjectedTask, InjectedTaskStore } from "../state/injected-tasks";
 import type { TaskExecutionResult } from "../acquirers/task-polling";
+import { getWorkerFailover } from "../worker/failover";
 
 /** Source label surfaced in worker logs, run records, and the dashboard. */
 export const INJECTED_TASK_SOURCE = "local:add";
@@ -43,6 +44,14 @@ export interface InjectedTaskAcquirerOptions {
    * than settled `failed`.
    */
   isDraining?: () => boolean;
+  /**
+   * Whether the harness chain is exhausted (usage-limited or cooling down).
+   * A paused drain leaves every row pending instead of claiming, running, and
+   * requeueing it on each interval tick, which otherwise floods the log with
+   * identical `running`/`deferred` lines for the whole limit window.
+   * Defaults to the process-wide worker failover state.
+   */
+  isPaused?: () => boolean;
   verbose?: boolean;
 }
 
@@ -112,6 +121,12 @@ export class InjectedTaskAcquirer implements Acquirer {
     if (this.stopped || this.claiming || this.options.store.isClosed()) {
       return;
     }
+    // Exhausted harness chain: claim nothing and log nothing until the pause
+    // ends. The executor keeps its own pre-git guard for work that starts
+    // between this check and the run.
+    if (this.isPaused()) {
+      return;
+    }
     this.claiming = true;
     const executions: Promise<void>[] = [];
     const excluded: number[] = [];
@@ -141,6 +156,11 @@ export class InjectedTaskAcquirer implements Acquirer {
       this.claiming = false;
     }
     await Promise.allSettled(executions);
+  }
+
+  /** Whether the harness chain is exhausted and the drain must stay idle. */
+  private isPaused(): boolean {
+    return this.options.isPaused?.() ?? getWorkerFailover()?.allExhausted() ?? false;
   }
 
   /** Whether another injected task may start globally right now. */

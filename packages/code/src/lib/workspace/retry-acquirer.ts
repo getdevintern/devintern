@@ -15,6 +15,7 @@
 import type { Acquirer } from "../../worker";
 import type { ScheduledRetry, ScheduledRetryStore } from "../state/run-retry";
 import type { TaskExecutionResult } from "../acquirers/task-polling";
+import { getWorkerFailover } from "../worker/failover";
 import { toRoutableTask } from "./router";
 import type { RoutableTask } from "./router";
 
@@ -27,6 +28,14 @@ export interface RetryQueueAcquirerOptions {
     retry: ScheduledRetry,
   ) => Promise<TaskExecutionResult>;
   intervalSeconds: number;
+  /**
+   * Whether the harness chain is exhausted (usage-limited or cooling down).
+   * A paused drain leaves queued retries untouched instead of claiming,
+   * re-running, and requeueing one on every interval tick, which otherwise
+   * floods the log for the whole limit window. Defaults to the process-wide
+   * worker failover state.
+   */
+  isPaused?: () => boolean;
   verbose?: boolean;
 }
 
@@ -67,6 +76,12 @@ export class RetryQueueAcquirer implements Acquirer {
     if (this.busy) {
       return;
     }
+    // Exhausted harness chain: claim nothing and log nothing until the pause
+    // ends. The executor keeps its own pre-git guard for work that starts
+    // between this check and the run.
+    if (this.isPaused()) {
+      return;
+    }
     this.busy = true;
     try {
       for (;;) {
@@ -81,6 +96,11 @@ export class RetryQueueAcquirer implements Acquirer {
     } finally {
       this.busy = false;
     }
+  }
+
+  /** Whether the harness chain is exhausted and the drain must stay idle. */
+  private isPaused(): boolean {
+    return this.options.isPaused?.() ?? getWorkerFailover()?.allExhausted() ?? false;
   }
 
   /** Run one claimed retry; false when it was requeued for the next tick. */

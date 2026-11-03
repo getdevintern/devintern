@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdirSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -110,6 +110,43 @@ describe("InjectedTaskAcquirer", () => {
     await acquirer.tick();
     expect(calls).toEqual(["local-a", "local-a"]);
     expect(store.hasPending()).toBe(false);
+  });
+
+  test("leaves pending rows untouched and silent while the harness chain is paused", async () => {
+    enqueue("local-a");
+
+    const calls: string[] = [];
+    let paused = true;
+    const logs = spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const acquirer = new InjectedTaskAcquirer({
+        store,
+        execute: async (task) => {
+          calls.push(task.taskKey);
+          return true;
+        },
+        isPaused: () => paused,
+        intervalSeconds: 3600,
+      });
+
+      // Many paused ticks must not claim, run, requeue, or log the row.
+      for (let i = 0; i < 50; i++) {
+        await acquirer.tick();
+      }
+      expect(calls).toEqual([]);
+      expect(logs).not.toHaveBeenCalled();
+      expect(store.hasPending()).toBe(true);
+      expect(store.getById(1)?.status).toBe("pending");
+
+      // The first unpaused tick drains the row normally.
+      paused = false;
+      await acquirer.tick();
+      expect(calls).toEqual(["local-a"]);
+      expect(store.hasPending()).toBe(false);
+      expect(store.getById(1)?.status).toBe("done");
+    } finally {
+      logs.mockRestore();
+    }
   });
 
   test("settles a skipped task as done rather than failed", async () => {
