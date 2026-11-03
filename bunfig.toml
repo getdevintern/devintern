@@ -4,13 +4,26 @@
 # preloads would be skipped. Running the suite from a git hook (lefthook
 # pre-push) leaks GIT_DIR into test fixtures, and unguarded fixture git
 # commands then execute against the real repository (this rewrote master
-# twice). Preload the same guards here so root-invoked runs are safe too.
+# twice).
 #
-# guard-sentry is included for the same reason: without it a root-invoked run
-# leaves SENTRY_DISABLED unset, so the CLI subprocesses tests spawn inherit no
-# pin and report expected user-input validation failures (e.g. the markdown
+# Mirror every guard from packages/code/bunfig.toml so root-invoked runs are
+# just as safe as package-invoked ones. Without guard-queue-db /
+# guard-workspace-dir, default resolution lands on this repository's own live
+# `.devintern-code/queue.db` and the developer's `~/.devintern`; without
+# guard-sentry, SENTRY_DISABLED stays unset and the CLI subprocesses tests
+# spawn report expected user-input validation failures (e.g. the markdown
 # client's "File is empty") to the production Sentry DSN as DEVINTERN-7.
+#
+# This preload chain only takes effect once guard-git-state lets the process
+# start: a bare `bun test` at the repo root aborts there unless
+# GIT_CEILING_DIRECTORIES includes the OS temp dir. `bun run test` provides it
+# via packages/code/tests/run-tests.ts; a manual root run must pass it too
+# (e.g. `GIT_CEILING_DIRECTORIES=/tmp bun test`). guard-sentry.test.ts asserts
+# both the successful guarded run and this refusal, so neither behavior drifts.
 preload = [
   "./packages/code/tests/setup/guard-git-state.ts",
+  "./packages/code/tests/setup/guard-queue-db.ts",
+  "./packages/code/tests/setup/guard-workspace-dir.ts",
   "./packages/code/tests/setup/guard-sentry.ts",
+  "./packages/code/tests/setup/guard-worker-env.ts",
 ]
