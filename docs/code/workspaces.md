@@ -322,7 +322,10 @@ The workspace worker uses this shared `.env` even when started inside a reposito
 2. The repo's `env_file` (if set)
 3. Inline `[repos.env]` values (highest precedence)
 
-For GitHub remotes the worker fills `GITHUB_REPO` automatically from the remote URL.
+For GitHub remotes the worker fills `GITHUB_REPO` automatically from the remote URL. For GitLab remotes it fills `GITLAB_PROJECT` with the API project path (`group/sub/repo`, subgroups preserved) when the remote host is `gitlab.com` or matches the host in the effective `GITLAB_BASE_URL` (configured with or without a protocol). Without `GITLAB_BASE_URL`, self-managed GitLab hosts are not detected; GitHub and Bitbucket remotes are never auto-pinned. Explicit `GITHUB_REPO` / `GITLAB_PROJECT` values in the repo `env_file` or `[repos.env]` win over the derived values; otherwise the derived value overrides a workspace-wide setting. Automations inherit exactly the same layered environment as task and review runs, including these auto-pins.
+
+Other trackers have no reliable repo-to-project mapping, so set per-repo project keys in the repo layers — for example `JIRA_DEFAULT_PROJECT_KEY`, `LINEAR_DEFAULT_TEAM_KEY`, `ASANA_DEFAULT_PROJECT_GID`, `AZURE_DEVOPS_PROJECT`, or `TRELLO_DEFAULT_BOARD_ID` in `env_file` / `[repos.env]`. Do not rely on `automation.repo` to derive them.
+
 Artifact upload targets use the same layers: set `DEVINTERN_ARTIFACT_*` in the
 shared `.env` or a repo `env_file`. Select the built-in Files SDK uploader in
 the pipeline to use Cloudflare R2 or S3; see [upload configuration](./artifacts.md#files-sdk-uploader).

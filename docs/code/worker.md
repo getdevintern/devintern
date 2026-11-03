@@ -124,6 +124,8 @@ Configuration is validated on load; while the worker runs it revalidates edits t
 
 Automations are independent of your task tracker: **the prompt is the task**. Each occurrence writes the prompt to a local markdown task file and feeds it through exactly the same pipeline as any other task — clarity check, planning, implementation, and run records. Whether the run also becomes a pull request is the automation's own `open_pr` setting: **off unless switched on** (see below). Nothing is created in your tracker, so no tracker credentials are needed for automation-only workers.
 
+Each occurrence inherits the same layered workspace and repo environment as any other task, including auto-pinned `GITHUB_REPO`/`GITLAB_PROJECT` and per-repo tracker keys; see [Workspaces → Environment](./workspaces.md#environment).
+
 Concretely, each occurrence:
 
 1. Writes `~/.devintern/automations/<id>/<timestamp>.md` (or the equivalent under `DEVINTERN_WORKSPACE_DIR`).

@@ -11,6 +11,7 @@ import {
   buildTeamEnv,
   buildTeamTaskEnv,
   gitHubSlugFromRemote,
+  gitLabProjectFromRemote,
   parseEnvFile,
 } from "../src/lib/workspace/env";
 
@@ -28,8 +29,59 @@ describe("gitHubSlugFromRemote", () => {
   });
 });
 
+describe("gitLabProjectFromRemote", () => {
+  test("parses gitlab.com https, ssh, and scp remotes", () => {
+    expect(gitLabProjectFromRemote("https://gitlab.com/group/sub/repo.git")).toBe("group/sub/repo");
+    expect(gitLabProjectFromRemote("https://gitlab.com/group/sub/repo/")).toBe("group/sub/repo");
+    expect(gitLabProjectFromRemote("git@gitlab.com:group/sub/repo.git")).toBe("group/sub/repo");
+    expect(gitLabProjectFromRemote("ssh://git@gitlab.com/group/sub/repo.git")).toBe(
+      "group/sub/repo",
+    );
+  });
+
+  test("parses self-managed remotes matching GITLAB_BASE_URL", () => {
+    expect(
+      gitLabProjectFromRemote(
+        "https://git.example.com/group/sub/repo.git",
+        "https://git.example.com",
+      ),
+    ).toBe("group/sub/repo");
+    expect(
+      gitLabProjectFromRemote("git@git.example.com:group/sub/repo.git", "git.example.com/"),
+    ).toBe("group/sub/repo");
+    expect(
+      gitLabProjectFromRemote(
+        "ssh://git@git.example.com/group/sub/repo.git",
+        "https://git.example.com/",
+      ),
+    ).toBe("group/sub/repo");
+    expect(
+      gitLabProjectFromRemote(
+        "https://git.example.com/gitlab/group/sub/repo.git",
+        "https://git.example.com/gitlab/",
+      ),
+    ).toBe("group/sub/repo");
+  });
+
+  test("returns null for non-GitLab remotes and unmatched self-managed hosts", () => {
+    expect(gitLabProjectFromRemote("git@github.com:acme/backend.git")).toBeNull();
+    expect(
+      gitLabProjectFromRemote("https://bitbucket.org/acme/backend.git", "https://gitlab.com"),
+    ).toBeNull();
+    expect(gitLabProjectFromRemote("https://git.example.com/group/sub/repo.git")).toBeNull();
+    expect(
+      gitLabProjectFromRemote(
+        "git@git.example.com:group/sub/repo.git",
+        "https://gitlab.example.com",
+      ),
+    ).toBeNull();
+  });
+});
+
 describe("buildRepoEnv", () => {
   let workspaceDir: string;
+  let savedGitLabProject: string | undefined;
+  let savedGitLabBaseUrl: string | undefined;
 
   const repo = (overrides: Partial<RepoConfig> = {}): RepoConfig => ({
     name: "backend",
@@ -41,11 +93,19 @@ describe("buildRepoEnv", () => {
   beforeEach(() => {
     workspaceDir = join(tmpdir(), `ws-env-${Date.now()}-${Math.random().toString(36).slice(2)}`);
     mkdirSync(workspaceDir, { recursive: true });
+    savedGitLabProject = process.env.GITLAB_PROJECT;
+    savedGitLabBaseUrl = process.env.GITLAB_BASE_URL;
+    delete process.env.GITLAB_PROJECT;
+    delete process.env.GITLAB_BASE_URL;
   });
 
   afterEach(() => {
     rmSync(workspaceDir, { recursive: true, force: true });
     delete process.env.WS_ENV_PROCESS_MARKER;
+    if (savedGitLabProject === undefined) delete process.env.GITLAB_PROJECT;
+    else process.env.GITLAB_PROJECT = savedGitLabProject;
+    if (savedGitLabBaseUrl === undefined) delete process.env.GITLAB_BASE_URL;
+    else process.env.GITLAB_BASE_URL = savedGitLabBaseUrl;
   });
 
   test("layers workspace .env, repo env_file, and inline env in precedence order", () => {
@@ -97,6 +157,93 @@ describe("buildRepoEnv", () => {
       workspaceDir,
     );
     expect(nonGitHub.GITHUB_REPO).toBe(process.env.GITHUB_REPO);
+  });
+
+  test("an explicit repo env_file GITHUB_REPO wins over the remote", () => {
+    mkdirSync(join(workspaceDir, "env"), { recursive: true });
+    writeFileSync(join(workspaceDir, "env", "github.env"), "GITHUB_REPO=acme/file-fork\n");
+
+    const env = buildRepoEnv(repo({ envFile: "env/github.env" }), workspaceDir);
+    expect(env.GITHUB_REPO).toBe("acme/file-fork");
+  });
+
+  test("injects GITLAB_PROJECT from a GitLab remote unless overridden", () => {
+    const remote = "git@gitlab.com:group/sub/repo.git";
+    expect(buildRepoEnv(repo({ remote }), workspaceDir).GITLAB_PROJECT).toBe("group/sub/repo");
+
+    const overridden = buildRepoEnv(
+      repo({ remote, env: { GITLAB_PROJECT: "group/fork" } }),
+      workspaceDir,
+    );
+    expect(overridden.GITLAB_PROJECT).toBe("group/fork");
+
+    mkdirSync(join(workspaceDir, "env"), { recursive: true });
+    writeFileSync(join(workspaceDir, "env", "gitlab.env"), "GITLAB_PROJECT=group/from-file\n");
+    const fromFile = buildRepoEnv(repo({ remote, envFile: "env/gitlab.env" }), workspaceDir);
+    expect(fromFile.GITLAB_PROJECT).toBe("group/from-file");
+  });
+
+  test("derived GITLAB_PROJECT overrides a workspace-wide value", () => {
+    writeFileSync(join(workspaceDir, ".env"), "GITLAB_PROJECT=workspace/project\n");
+
+    const env = buildRepoEnv(
+      repo({ remote: "https://gitlab.com/group/sub/repo.git" }),
+      workspaceDir,
+    );
+    expect(env.GITLAB_PROJECT).toBe("group/sub/repo");
+  });
+
+  test("pins GITLAB_PROJECT for a self-managed remote matching GITLAB_BASE_URL", () => {
+    writeFileSync(join(workspaceDir, ".env"), "GITLAB_BASE_URL=git.example.com/\n");
+
+    const env = buildRepoEnv(
+      repo({ remote: "ssh://git@git.example.com/group/sub/repo.git" }),
+      workspaceDir,
+    );
+    expect(env.GITLAB_PROJECT).toBe("group/sub/repo");
+  });
+
+  test("does not infer GITLAB_PROJECT for non-GitLab or unmatched self-managed remotes", () => {
+    const github = buildRepoEnv(repo(), workspaceDir);
+    expect(github.GITLAB_PROJECT).toBeUndefined();
+
+    const bitbucket = buildRepoEnv(
+      repo({ remote: "https://bitbucket.org/acme/backend.git" }),
+      workspaceDir,
+    );
+    expect(bitbucket.GITLAB_PROJECT).toBeUndefined();
+
+    const unmatched = buildRepoEnv(
+      repo({ remote: "https://git.example.com/group/sub/repo.git" }),
+      workspaceDir,
+    );
+    expect(unmatched.GITLAB_PROJECT).toBeUndefined();
+
+    writeFileSync(join(workspaceDir, ".env"), "GITLAB_BASE_URL=https://other.example.com\n");
+    const mismatched = buildRepoEnv(
+      repo({ remote: "https://git.example.com/group/sub/repo.git" }),
+      workspaceDir,
+    );
+    expect(mismatched.GITLAB_PROJECT).toBeUndefined();
+  });
+
+  test("keeps per-repo tracker project-key overrides from [repos.env]", () => {
+    writeFileSync(
+      join(workspaceDir, ".env"),
+      "JIRA_DEFAULT_PROJECT_KEY=WORKSPACE\nLINEAR_DEFAULT_TEAM_KEY=WORKSPACE\n",
+    );
+
+    const env = buildRepoEnv(
+      repo({
+        env: {
+          JIRA_DEFAULT_PROJECT_KEY: "BACKEND",
+          LINEAR_DEFAULT_TEAM_KEY: "BACKEND-TEAM",
+        },
+      }),
+      workspaceDir,
+    );
+    expect(env.JIRA_DEFAULT_PROJECT_KEY).toBe("BACKEND");
+    expect(env.LINEAR_DEFAULT_TEAM_KEY).toBe("BACKEND-TEAM");
   });
 
   test("injects PR_LABELS from repo pr_labels", () => {

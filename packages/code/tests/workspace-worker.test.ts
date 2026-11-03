@@ -1,6 +1,6 @@
 import { GitLabReviewPollingAcquirer } from "../src/lib/acquirers/gitlab-review-polling";
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { existsSync, mkdirSync, rmSync } from "fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
@@ -1247,6 +1247,44 @@ describe("resolveWorkspaceAutomationContext", () => {
 
     expect(context?.taskFileDir).toBe(join(workspaceDir, "automations"));
     expect(context?.cwd).toContain(join("worktrees", "backend", "base"));
+    rmSync(workspaceDir, { recursive: true, force: true });
+  });
+
+  test("keeps per-repo tracker project-key overrides in the composed environment", async () => {
+    const workspaceDir = join(
+      tmpdir(),
+      `ws-automation-env-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    );
+    mkdirSync(workspaceDir, { recursive: true });
+    writeFileSync(join(workspaceDir, ".env"), "JIRA_DEFAULT_PROJECT_KEY=WORKSPACE\n");
+    const config = parseWorkspaceConfig(`
+[defaults]
+tracker = "jira"
+task_query = "project = BACKEND"
+
+[[repos]]
+name = "backend"
+remote = "git@gitlab.com:group/backend.git"
+  [repos.env]
+  JIRA_DEFAULT_PROJECT_KEY = "BACKEND"
+`);
+    const repoManager = new FakeRepoManager(workspaceDir);
+    const context = await resolveWorkspaceAutomationContext(
+      {
+        id: "scheduled",
+        enabled: true,
+        prompt: "work",
+        interval: "1h",
+        intervalMs: 3_600_000,
+        repo: "backend",
+      },
+      config,
+      workspaceDir,
+      repoManager,
+    );
+
+    expect(context?.env.JIRA_DEFAULT_PROJECT_KEY).toBe("BACKEND");
+    expect(context?.env.GITLAB_PROJECT).toBe("group/backend");
     rmSync(workspaceDir, { recursive: true, force: true });
   });
 });

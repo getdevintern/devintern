@@ -108,14 +108,77 @@ export function gitHubSlugFromRemote(remote: string): string | null {
   return match?.[1] ?? null;
 }
 
+interface RemoteLocation {
+  host: string;
+  path: string;
+}
+
+/** Parse a Git remote or base URL into a lower-case host and path. */
+function parseRemoteLocation(value: string, assumeHttps: boolean): RemoteLocation | null {
+  let trimmed = value.trim();
+  if (!trimmed) return null;
+  if (!trimmed.includes("://")) {
+    if (!assumeHttps) {
+      // SCP-style remote: `git@host:group/repo.git` (the user is optional).
+      const scp = trimmed.match(/^(?:[^@/\s]+@)?([^:/\s]+):(.+)$/);
+      if (!scp?.[1] || !scp[2]) return null;
+      return { host: scp[1].toLowerCase(), path: scp[2] };
+    }
+    trimmed = `https://${trimmed}`;
+  }
+  try {
+    const url = new URL(trimmed);
+    return { host: url.hostname.toLowerCase(), path: url.pathname.replace(/^\/+/, "") };
+  } catch {
+    return null;
+  }
+}
+
+/** Normalize a GitLab project path: no `.git`, no leading/trailing slashes. */
+function normalizeGitLabProjectPath(path: string): string | null {
+  let normalized = path.trim().replace(/^\/+|\/+$/g, "");
+  normalized = normalized.replace(/\.git$/i, "").replace(/\/+$/g, "");
+  return normalized || null;
+}
+
+/**
+ * Extract the GitLab API project path from a remote URL.
+ *
+ * Only `gitlab.com` and hosts matching `GITLAB_BASE_URL` are treated as
+ * GitLab; without a base URL, self-managed hosts are left alone.
+ *
+ * @param remote - e.g. `git@gitlab.com:group/sub/repo.git`
+ * @param baseUrl - Effective `GITLAB_BASE_URL`, with or without protocol.
+ * @returns `group/sub/repo`, or null for non-GitLab remotes.
+ */
+export function gitLabProjectFromRemote(remote: string, baseUrl?: string): string | null {
+  const location = parseRemoteLocation(remote, false);
+  if (!location) return null;
+  const base = baseUrl ? parseRemoteLocation(baseUrl, true) : null;
+  const isGitLabHost =
+    location.host === "gitlab.com" || (base !== null && location.host === base.host);
+  if (!isGitLabHost) return null;
+
+  let projectPath = location.path;
+  // A self-managed instance may live under a path prefix (`https://host/gitlab`).
+  if (base !== null && base.host === location.host && base.path) {
+    const prefix = base.path.replace(/\/+$/g, "");
+    if (prefix && projectPath.startsWith(`${prefix}/`)) {
+      projectPath = projectPath.slice(prefix.length + 1);
+    }
+  }
+  return normalizeGitLabProjectPath(projectPath);
+}
+
 /**
  * Compose the environment for a task subprocess routed to one repo.
  *
  * Precedence (later wins): current process env < workspace `.env` < repo
  * `env_file` < inline `[repos.env]` < injected workspace values
  * (`WEBHOOK_QUEUE_DB`, workspace context, stable analytics config
- * directory, `GITHUB_REPO` for GitHub remotes unless the repo layers already
- * set it, and `PR_LABELS` from the repo's `pr_labels` config).
+ * directory, `GITHUB_REPO` for GitHub remotes and `GITLAB_PROJECT` for GitLab
+ * remotes unless the repo layers already set them, and `PR_LABELS` from the
+ * repo's `pr_labels` config).
  *
  * @param repo - Workspace repo the task routed to.
  * @param workspaceDir - Workspace home (defaults to `~/.devintern`).
@@ -157,6 +220,13 @@ export function buildRepoEnv(
     const slug = gitHubSlugFromRemote(repo.remote);
     if (slug) {
       env.GITHUB_REPO = slug;
+    }
+  }
+
+  if (!repoFileEnv.GITLAB_PROJECT && !repo.env.GITLAB_PROJECT) {
+    const project = gitLabProjectFromRemote(repo.remote, env.GITLAB_BASE_URL);
+    if (project) {
+      env.GITLAB_PROJECT = project;
     }
   }
 
