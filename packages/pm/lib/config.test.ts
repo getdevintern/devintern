@@ -20,6 +20,9 @@ describe("loadConfig harness resolution", () => {
     delete process.env.OPENCODE_CLI_PATH;
     delete process.env.CLAUDE_CLI_PATH;
     delete process.env.AGENT_HARNESS;
+    // Worker subprocesses intentionally read no env files; these tests load
+    // the project config from disk.
+    delete process.env.DEVINTERN_WORKER_SUBPROCESS;
   });
 
   afterEach(() => {
@@ -97,7 +100,23 @@ describe("loadConfig workspace env fallback", () => {
     chmodSync(path, 0o755);
   }
 
-  test("CLI fallback resolves tracker config from the workspace .env", async () => {
+  test("CLI fallback resolves the tracker from the workspace .env", async () => {
+    const cli = join(testDir, "agent");
+    writeExecutable(cli);
+    process.env.AGENT_CLI_PATH = cli;
+    writeFileSync(join(workspaceDir, ".env"), "TASK_TRACKER=markdown\nMARKDOWN_TASKS_DIR=.tasks\n");
+    // MARKDOWN_TASKS_DIR is repo-scoped, so it always comes from the project;
+    // the shared workspace file only contributes the tracker selection.
+    mkdirSync(join(testDir, ".devintern-pm"), { recursive: true });
+    writeFileSync(join(testDir, ".devintern-pm", ".env"), "MARKDOWN_TASKS_DIR=project-tasks\n");
+
+    const config = await loadConfig({ baseDir: testDir, workspaceEnvFallback: true });
+
+    expect(config.backend.type).toBe("markdown");
+    expect(config.backend.directory).toBe("project-tasks");
+  });
+
+  test("CLI fallback does not inherit the workspace tasks directory", async () => {
     const cli = join(testDir, "agent");
     writeExecutable(cli);
     process.env.AGENT_CLI_PATH = cli;
@@ -106,7 +125,7 @@ describe("loadConfig workspace env fallback", () => {
     const config = await loadConfig({ baseDir: testDir, workspaceEnvFallback: true });
 
     expect(config.backend.type).toBe("markdown");
-    expect(config.backend.directory).toBe(".tasks");
+    expect(config.backend.directory).toBeUndefined();
   });
 
   test("legacy loadConfig(projectDir) does not adopt the workspace .env", async () => {

@@ -46,7 +46,7 @@ devpm init
 
 In a terminal, this starts an interactive setup wizard that:
 
-- Detects an existing @devintern/code configuration (`.devintern-code/.env`) in the same project and offers to reuse those tracker credentials, so you skip straight to validation; when that config is unavailable, it can reuse credentials from the DevIntern workspace `.env` (`$DEVINTERN_WORKSPACE_DIR/.env`, default `~/.devintern/.env`)
+- Detects an existing @devintern/code configuration (`.devintern-code/.env`) in the same project and offers to reuse those tracker credentials, so you skip straight to validation; when that config is unavailable, it can reuse credentials from the DevIntern workspace `.env` (`$DEVINTERN_WORKSPACE_DIR/.env`, default `~/.devintern/.env`). Repo-scoped values (project key, repository, board, team key, task directory) are always asked for in the current project rather than copied from the shared workspace.
 - Asks which tracker you use (Jira, Linear, Trello, Azure DevOps, Asana, GitHub Issues, GitLab, or markdown files)
 - Links you directly to the provider's token creation page and prompts for each credential, with a pointer to the matching setup guide in these docs
 - Validates the connection with a real API call before finishing (you can retry, edit values, or skip)
@@ -54,7 +54,7 @@ In a terminal, this starts an interactive setup wizard that:
 
 If you need to create credentials manually, use the setup guide for your tracker: [Jira](./jira-integration.md), [Linear](./linear-integration.md), [Trello](./trello-integration.md), [Asana](./asana-integration.md), [Azure DevOps](./azure-devops-integration.md), [GitHub Issues](./github-integration.md), or [GitLab](./gitlab-integration.md).
 
-For scripted or CI setups, pass `--yes` (or `--no-interactive`) to skip the prompts and write the configuration template instead. The non-interactive path also migrates matching Jira and agent values from `.devintern-code/.env` and, for any it does not provide, from the DevIntern workspace `.env`:
+For scripted or CI setups, pass `--yes` (or `--no-interactive`) to skip the prompts and write the configuration template instead. The non-interactive path resolves the tracker from `.devintern-code/.env`, or from the workspace (the `[[teams]]`/`[[repos]]` mapping for the current checkout, then `[defaults].tracker` in `$DEVINTERN_WORKSPACE_DIR/workspace.toml`, which wins over a `TASK_TRACKER` in the shared `.env`), and migrates that tracker's credentials plus agent settings. Repo-scoped values (project key, repository, board, team key, task directory) are never inherited from the workspace — set them for the current project after the scaffold runs. When no tracker can be resolved yet, the scaffold leaves `TASK_TRACKER` and every credential placeholder commented out, so a workspace configured later still supplies them:
 
 ```bash
 devpm init --yes

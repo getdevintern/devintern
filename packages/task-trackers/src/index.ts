@@ -7,12 +7,17 @@ export {
   parseGitHubRepo,
   parseGitLabProject,
   parseTrackerConfigFromEnv,
+  parseWorkspaceTracker,
   resolveWorkspaceDir,
   resolveWorkspaceEnvPath,
+  resolveWorkspaceTracker,
   sanitizeDomain,
   sanitizeGitlabBaseUrl,
 } from "./config/load-tracker-config.ts";
-export type { LoadTrackerConfigOptions } from "./config/load-tracker-config.ts";
+export type {
+  LoadTrackerConfigOptions,
+  ResolveWorkspaceTrackerOptions,
+} from "./config/load-tracker-config.ts";
 export type { ConfiguredTracker, TrackerId, TrackerMeta } from "./config/tracker-meta.ts";
 export {
   TRACKER_IDS,

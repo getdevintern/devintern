@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +9,8 @@ import {
   loadTrackerConfig,
   parseGitHubRepo,
   parseTrackerConfigFromEnv,
+  parseWorkspaceTracker,
+  resolveWorkspaceTracker,
   sanitizeDomain,
 } from "./src/config/load-tracker-config.ts";
 
@@ -35,6 +38,8 @@ const TRACKER_ENV_KEYS = [
   "DEVINTERN_VERBOSE",
   "DEVINTERN_WORKSPACE_DIR",
   "DEVINTERN_WORKER_SUBPROCESS",
+  "DEVINTERN_WORKSPACE_REPO",
+  "DEVINTERN_WORKSPACE_TEAM",
 ] as const;
 
 type EnvSnapshot = Record<string, string | undefined>;
@@ -261,6 +266,198 @@ describe("parseTrackerConfigFromEnv", () => {
   });
 });
 
+describe("parseWorkspaceTracker", () => {
+  test("reads [defaults].tracker", () => {
+    expect(
+      parseWorkspaceTracker(
+        ["[workspace]", 'name = "acme"', "", "[defaults]", 'tracker = "linear"'].join("\n"),
+      ),
+    ).toBe("linear");
+  });
+
+  test("ignores commented tracker lines and reads the first [[teams]] tracker", () => {
+    expect(
+      parseWorkspaceTracker(
+        [
+          "[defaults]",
+          '# tracker = "jira"',
+          "",
+          "[[teams]]",
+          'name = "platform"',
+          'tracker = "github"',
+        ].join("\n"),
+      ),
+    ).toBe("github");
+  });
+
+  test("returns undefined without a tracker", () => {
+    expect(parseWorkspaceTracker('[workspace]\nname = "acme"')).toBeUndefined();
+  });
+});
+
+describe("resolveWorkspaceTracker", () => {
+  let savedEnv: EnvSnapshot;
+  let tempRoot: string;
+  let workspaceDir: string;
+
+  const WORKSPACE_TOML = [
+    "[defaults]",
+    'tracker = "jira"',
+    "",
+    "[[teams]]",
+    'name = "platform"',
+    'tracker = "jira"',
+    'repo = "api"',
+    "",
+    "[[teams]]",
+    'name = "growth"',
+    'tracker = "linear"',
+    'repo = "web"',
+    "  [teams.env]",
+    '  LINEAR_API_KEY = "lin_api_growth"',
+    "",
+    "[[repos]]",
+    'name = "api"',
+    'remote = "git@github.com:acme/api.git"',
+    "",
+    "[[repos]]",
+    'name = "web"',
+    'remote = "git@github.com:acme/web.git"',
+  ].join("\n");
+
+  beforeEach(() => {
+    savedEnv = snapshotEnv();
+    tempRoot = mkdtempSync(join(tmpdir(), "task-trackers-workspace-"));
+    workspaceDir = join(tempRoot, "workspace");
+    mkdirSync(workspaceDir, { recursive: true });
+    for (const key of TRACKER_ENV_KEYS) delete process.env[key];
+  });
+
+  afterEach(() => {
+    restoreEnv(savedEnv);
+    rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  function makeCheckout(name: string, remote: string): string {
+    const dir = join(tempRoot, name);
+    mkdirSync(dir, { recursive: true });
+    execFileSync("git", ["init", "--quiet"], { cwd: dir });
+    execFileSync("git", ["remote", "add", "origin", remote], { cwd: dir });
+    return dir;
+  }
+
+  test("selects the team whose repo matches the checkout origin", async () => {
+    writeFileSync(join(workspaceDir, "workspace.toml"), WORKSPACE_TOML);
+    const checkout = makeCheckout("web-checkout", "https://github.com/acme/web.git");
+
+    await expect(resolveWorkspaceTracker(workspaceDir, { projectDir: checkout })).resolves.toBe(
+      "linear",
+    );
+    await expect(
+      resolveWorkspaceTracker(workspaceDir, {
+        projectDir: makeCheckout("api-checkout", "git@github.com:acme/api.git"),
+      }),
+    ).resolves.toBe("jira");
+  });
+
+  test("honors the worker team marker over the checkout origin", async () => {
+    writeFileSync(join(workspaceDir, "workspace.toml"), WORKSPACE_TOML);
+    process.env.DEVINTERN_WORKSPACE_TEAM = "platform";
+    const checkout = makeCheckout("web-checkout", "https://github.com/acme/web.git");
+
+    await expect(resolveWorkspaceTracker(workspaceDir, { projectDir: checkout })).resolves.toBe(
+      "jira",
+    );
+  });
+
+  test("honors the worker repo marker", async () => {
+    writeFileSync(join(workspaceDir, "workspace.toml"), WORKSPACE_TOML);
+    process.env.DEVINTERN_WORKSPACE_REPO = "web";
+
+    await expect(
+      resolveWorkspaceTracker(workspaceDir, { projectDir: join(tempRoot, "not-a-checkout") }),
+    ).resolves.toBe("linear");
+  });
+
+  test("falls back to a team-scoped routing rule when the team has no fixed repo", async () => {
+    writeFileSync(
+      join(workspaceDir, "workspace.toml"),
+      [
+        "[defaults]",
+        'tracker = "jira"',
+        "",
+        "[[teams]]",
+        'name = "platform"',
+        'tracker = "jira"',
+        "",
+        "[[teams]]",
+        'name = "growth"',
+        'tracker = "linear"',
+        "",
+        "[[repos]]",
+        'name = "web"',
+        'remote = "git@github.com:acme/web.git"',
+        "",
+        "[[routing.rules]]",
+        'team = "growth"',
+        'repo = "web"',
+        'project = "GROW"',
+      ].join("\n"),
+    );
+    const checkout = makeCheckout("web-checkout", "git@github.com:acme/web.git");
+
+    await expect(resolveWorkspaceTracker(workspaceDir, { projectDir: checkout })).resolves.toBe(
+      "linear",
+    );
+  });
+
+  test("matches team names case-insensitively in routing rules", async () => {
+    writeFileSync(
+      join(workspaceDir, "workspace.toml"),
+      [
+        "[defaults]",
+        'tracker = "jira"',
+        "",
+        "[[teams]]",
+        'name = "Growth"',
+        'tracker = "linear"',
+        "",
+        "[[repos]]",
+        'name = "web"',
+        'remote = "git@github.com:acme/web.git"',
+        "",
+        "[[routing.rules]]",
+        'team = "growth"',
+        'repo = "web"',
+        'project = "GROW"',
+      ].join("\n"),
+    );
+    const checkout = makeCheckout("web-checkout", "git@github.com:acme/web.git");
+
+    await expect(resolveWorkspaceTracker(workspaceDir, { projectDir: checkout })).resolves.toBe(
+      "linear",
+    );
+  });
+
+  test("matches DEVINTERN_WORKSPACE_TEAM case-insensitively", async () => {
+    writeFileSync(join(workspaceDir, "workspace.toml"), WORKSPACE_TOML);
+    process.env.DEVINTERN_WORKSPACE_TEAM = "GROWTH";
+
+    await expect(
+      resolveWorkspaceTracker(workspaceDir, { projectDir: join(tempRoot, "not-a-checkout") }),
+    ).resolves.toBe("linear");
+  });
+
+  test("falls back to [defaults].tracker when the checkout matches no repo", async () => {
+    writeFileSync(join(workspaceDir, "workspace.toml"), WORKSPACE_TOML);
+    const checkout = makeCheckout("other-checkout", "git@github.com:acme/other.git");
+
+    await expect(resolveWorkspaceTracker(workspaceDir, { projectDir: checkout })).resolves.toBe(
+      "jira",
+    );
+  });
+});
+
 describe("loadEnvFromConfigDir", () => {
   let savedEnv: EnvSnapshot;
   let originalCwd: string;
@@ -433,6 +630,35 @@ describe("loadTrackerConfig", () => {
     expect(config.linear?.apiKey).toBe("lin_api_workspace");
   });
 
+  test("workspace fallback selects the tracker from workspace.toml when .env has credentials only", async () => {
+    writeFileSync(join(workspaceDir, ".env"), "LINEAR_API_KEY=lin_api_workspace\n");
+    writeFileSync(join(workspaceDir, "workspace.toml"), '[defaults]\ntracker = "linear"\n');
+
+    const config = await loadTrackerConfig(".devintern-pm", undefined, {
+      workspaceEnvFallback: true,
+    });
+
+    expect(config.backend.type).toBe("linear");
+    expect(config.linear?.apiKey).toBe("lin_api_workspace");
+  });
+
+  test("workspace fallback keeps an explicit project TASK_TRACKER over workspace.toml", async () => {
+    writeFileSync(join(workspaceDir, ".env"), "LINEAR_API_KEY=lin_api_workspace\n");
+    writeFileSync(join(workspaceDir, "workspace.toml"), '[defaults]\ntracker = "linear"\n');
+    mkdirSync(join(tempRoot, ".devintern-pm"), { recursive: true });
+    writeFileSync(
+      join(tempRoot, ".devintern-pm", ".env"),
+      "TASK_TRACKER=github\nGITHUB_TOKEN=ghp_project\nGITHUB_REPO=acme/app\n",
+    );
+
+    const config = await loadTrackerConfig(".devintern-pm", undefined, {
+      workspaceEnvFallback: true,
+    });
+
+    expect(config.backend.type).toBe("github");
+    expect(config.github?.repository).toBe("acme/app");
+  });
+
   test(".devintern-pm/.env wins over the workspace file", async () => {
     writeFileSync(
       join(workspaceDir, ".env"),
@@ -451,7 +677,7 @@ describe("loadTrackerConfig", () => {
     expect(config.linear?.apiKey).toBe("lin_api_project");
   });
 
-  test("project plain .env wins over workspace while workspace fills missing keys", async () => {
+  test("project plain .env wins over workspace while workspace fills missing credentials", async () => {
     writeFileSync(
       join(workspaceDir, ".env"),
       [
@@ -468,7 +694,41 @@ describe("loadTrackerConfig", () => {
 
     expect(config.backend.type).toBe("linear");
     expect(config.linear?.apiKey).toBe("lin_api_plain");
-    expect(config.linear?.defaultTeamKey).toBe("WS");
+    // The team key is repo-scoped: another checkout's team must not leak in.
+    expect(config.linear?.defaultTeamKey).toBeUndefined();
+  });
+
+  test("does not inherit a workspace Linear team key", async () => {
+    writeFileSync(
+      join(workspaceDir, ".env"),
+      "TASK_TRACKER=linear\nLINEAR_API_KEY=lin_api_workspace\nLINEAR_DEFAULT_TEAM_KEY=WS\n",
+    );
+    mkdirSync(join(tempRoot, ".devintern-pm"), { recursive: true });
+    writeFileSync(join(tempRoot, ".devintern-pm", ".env"), "LINEAR_DEFAULT_TEAM_KEY=PROJ\n");
+
+    const config = await loadTrackerConfig(".devintern-pm", undefined, {
+      workspaceEnvFallback: true,
+    });
+
+    expect(config.linear?.defaultTeamKey).toBe("PROJ");
+  });
+
+  test("does not inherit a workspace GITHUB_OWNER", async () => {
+    writeFileSync(
+      join(workspaceDir, ".env"),
+      "TASK_TRACKER=github\nGITHUB_TOKEN=ghp_workspace\nGITHUB_REPO=repo-a\nGITHUB_OWNER=other-org\n",
+    );
+    mkdirSync(join(tempRoot, ".devintern-pm"), { recursive: true });
+    writeFileSync(
+      join(tempRoot, ".devintern-pm", ".env"),
+      "GITHUB_REPO=repo-b\nGITHUB_OWNER=acme\n",
+    );
+
+    const config = await loadTrackerConfig(".devintern-pm", undefined, {
+      workspaceEnvFallback: true,
+    });
+
+    expect(config.github?.repository).toBe("acme/repo-b");
   });
 
   test("workspace fallback is off by default (desktop semantics)", async () => {
@@ -480,6 +740,141 @@ describe("loadTrackerConfig", () => {
     await expect(loadTrackerConfig(".devintern-pm")).rejects.toThrow(
       /Missing required environment variables/,
     );
+  });
+
+  test("does not inherit repo-scoped keys from the workspace file", async () => {
+    writeFileSync(
+      join(workspaceDir, ".env"),
+      [
+        "TASK_TRACKER=github",
+        "GITHUB_TOKEN=ghp_workspace",
+        "GITHUB_REPO=acme/repo-a",
+        "TRELLO_DEFAULT_BOARD_ID=board-a",
+        "MARKDOWN_TASKS_DIR=docs/other-repo",
+      ].join("\n"),
+    );
+
+    // The shared workspace file belongs to another repository; without a
+    // project destination the config must fail loudly instead of resolving it.
+    await expect(
+      loadTrackerConfig(".devintern-pm", undefined, { workspaceEnvFallback: true }),
+    ).rejects.toThrow(/Missing required environment variables: GITHUB_REPO/);
+
+    mkdirSync(join(tempRoot, ".devintern-pm"), { recursive: true });
+    writeFileSync(join(tempRoot, ".devintern-pm", ".env"), "GITHUB_REPO=acme/repo-b\n");
+
+    const config = await loadTrackerConfig(".devintern-pm", undefined, {
+      workspaceEnvFallback: true,
+    });
+
+    expect(config.github?.repository).toBe("acme/repo-b");
+    expect(config.backend.directory).toBeUndefined();
+  });
+
+  test("does not inherit a workspace Trello board/list", async () => {
+    writeFileSync(
+      join(workspaceDir, ".env"),
+      [
+        "TASK_TRACKER=trello",
+        "TRELLO_API_TOKEN=trello-token",
+        "TRELLO_DEFAULT_BOARD_ID=board-a",
+        "TRELLO_DEFAULT_LIST_NAME=Doing",
+      ].join("\n"),
+    );
+
+    const config = await loadTrackerConfig(".devintern-pm", undefined, {
+      workspaceEnvFallback: true,
+    });
+
+    expect(config.backend.type).toBe("trello");
+    expect(config.trello?.defaultBoardId).toBeUndefined();
+    expect(config.trello?.defaultListName).toBeUndefined();
+  });
+
+  test("workspace.toml tracker wins over a stale TASK_TRACKER in the shared .env", async () => {
+    writeFileSync(
+      join(workspaceDir, ".env"),
+      [
+        "TASK_TRACKER=jira",
+        "JIRA_BASE_URL=https://stale.atlassian.net",
+        "JIRA_EMAIL=stale@example.com",
+        "JIRA_API_TOKEN=stale-token",
+        "JIRA_DEFAULT_PROJECT_KEY=STALE",
+        "LINEAR_API_KEY=lin_api_workspace",
+      ].join("\n"),
+    );
+    writeFileSync(join(workspaceDir, "workspace.toml"), '[defaults]\ntracker = "linear"\n');
+
+    const config = await loadTrackerConfig(".devintern-pm", undefined, {
+      workspaceEnvFallback: true,
+    });
+
+    expect(config.backend.type).toBe("linear");
+    expect(config.linear?.apiKey).toBe("lin_api_workspace");
+  });
+
+  test("project-only loaders still read the project env when the worker marker is inherited", async () => {
+    process.env.DEVINTERN_WORKER_SUBPROCESS = "1";
+    mkdirSync(join(tempRoot, ".devintern-pm"), { recursive: true });
+    writeFileSync(
+      join(tempRoot, ".devintern-pm", ".env"),
+      "TASK_TRACKER=markdown\nMARKDOWN_TASKS_DIR=tasks\n",
+    );
+
+    // Desktop hosts use loadTrackerConfig(projectDir) (no workspace fallback):
+    // an inherited marker must not hide a fully configured project.
+    const config = await loadTrackerConfig(".devintern-pm");
+
+    expect(config.backend.type).toBe("markdown");
+    expect(config.backend.directory).toBe("tasks");
+  });
+
+  test("multi-team workspace selects the tracker of the team owning this checkout", async () => {
+    writeFileSync(
+      join(workspaceDir, ".env"),
+      [
+        "JIRA_BASE_URL=https://stale.atlassian.net",
+        "JIRA_EMAIL=stale@example.com",
+        "JIRA_API_TOKEN=stale-token",
+        "JIRA_DEFAULT_PROJECT_KEY=PLAT",
+        "LINEAR_API_KEY=lin_api_growth",
+      ].join("\n"),
+    );
+    writeFileSync(
+      join(workspaceDir, "workspace.toml"),
+      [
+        "[[teams]]",
+        'name = "platform"',
+        'tracker = "jira"',
+        'repo = "api"',
+        "",
+        "[[teams]]",
+        'name = "growth"',
+        'tracker = "linear"',
+        'repo = "web"',
+        "",
+        "[[repos]]",
+        'name = "api"',
+        'remote = "git@github.com:acme/api.git"',
+        "",
+        "[[repos]]",
+        'name = "web"',
+        'remote = "git@github.com:acme/web.git"',
+      ].join("\n"),
+    );
+    const checkout = join(tempRoot, "web-checkout");
+    mkdirSync(checkout, { recursive: true });
+    execFileSync("git", ["init", "--quiet"], { cwd: checkout });
+    execFileSync("git", ["remote", "add", "origin", "https://github.com/acme/web.git"], {
+      cwd: checkout,
+    });
+
+    const config = await loadTrackerConfig(".devintern-pm", checkout, {
+      workspaceEnvFallback: true,
+    });
+
+    expect(config.backend.type).toBe("linear");
+    expect(config.linear?.apiKey).toBe("lin_api_growth");
   });
 
   test("worker subprocess ignores plain checkout and workspace env files", async () => {
@@ -502,7 +897,7 @@ describe("loadTrackerConfig", () => {
     expect(config.linear?.defaultTeamKey).toBe("INHERITED");
   });
 
-  test("worker subprocess still honors .devintern-pm/.env", async () => {
+  test("worker subprocess ignores the checkout .devintern-pm/.env", async () => {
     process.env.DEVINTERN_WORKER_SUBPROCESS = "1";
     process.env.TASK_TRACKER = "linear";
     process.env.LINEAR_API_KEY = "lin_api_inherited";
@@ -511,13 +906,19 @@ describe("loadTrackerConfig", () => {
     writeFileSync(join(tempRoot, ".env"), "LINEAR_API_KEY=lin_api_plain\n");
     writeFileSync(join(workspaceDir, ".env"), "LINEAR_API_KEY=lin_api_workspace\n");
     mkdirSync(join(tempRoot, ".devintern-pm"), { recursive: true });
-    writeFileSync(join(tempRoot, ".devintern-pm", ".env"), "LINEAR_API_KEY=lin_api_project\n");
+    writeFileSync(
+      join(tempRoot, ".devintern-pm", ".env"),
+      "TASK_TRACKER=github\nGITHUB_TOKEN=ghp_checkout\nGITHUB_REPO=acme/checkout\nLINEAR_API_KEY=lin_api_project\n",
+    );
 
     const config = await loadTrackerConfig(".devintern-pm", undefined, {
       workspaceEnvFallback: true,
     });
 
-    expect(config.linear?.apiKey).toBe("lin_api_project");
+    // The worker pins TASK_TRACKER and injects team credentials last; a
+    // committed checkout file must not re-route or replace them.
+    expect(config.backend.type).toBe("linear");
+    expect(config.linear?.apiKey).toBe("lin_api_inherited");
     expect(config.linear?.defaultTeamKey).toBe("INHERITED");
   });
 });
