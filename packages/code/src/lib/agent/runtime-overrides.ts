@@ -18,11 +18,20 @@ import type { AgentEffort } from "@devintern/agent-harness";
 export interface AgentRuntimeOverrides {
   /**
    * Overrides `AGENT_MODEL`. A string pins the model; `null` suppresses the
-   * environment value (used when the task switched harnesses and the global
-   * model is harness-specific and therefore unsafe to carry over). `undefined`
-   * means "no override" — the environment value applies.
+   * global environment value (used when the task switched harnesses and the
+   * global model is harness-specific and therefore unsafe to carry over).
+   * `undefined` means "no override" — the environment value applies.
+   *
+   * A `null` override still lets the harness's own `<HARNESS>_MODEL` apply.
    */
   model?: string | null;
+  /**
+   * Harness the model override was resolved for. When set, the override is
+   * only applied to that harness, so a per-task model never leaks onto a
+   * fallback harness in a failover chain. Omitted by older callers/tests, in
+   * which case the override applies to every harness.
+   */
+  harness?: string;
   /** Overrides `AGENT_EFFORT` when defined. */
   effort?: AgentEffort;
 }

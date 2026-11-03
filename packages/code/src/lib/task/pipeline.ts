@@ -1183,6 +1183,32 @@ export const taskSteps: readonly TaskStep<TaskExecutionContext>[] = [
 ];
 
 /**
+ * Apply a task's resolved execution selection to the process-wide runtime
+ * state and return a callback that restores the previous values.
+ *
+ * Task processing is strictly sequential, so swapping the module-level agent
+ * and override slot for the duration of one task is safe. The pipeline always
+ * calls the returned callback from a `finally` block, so a thrown step cannot
+ * leak the selection into the next task.
+ *
+ * @param execution - Resolved harness/model/effort selection for this task
+ * @returns Restore callback for the previous agent and overrides
+ */
+export function applyExecutionSelection(execution: EffectiveExecutionPreferences): () => void {
+  const previousAgent = runContext.resolvedAgent;
+  const previousOverrides = getAgentRuntimeOverrides();
+  runContext.resolvedAgent = execution.agent;
+  setAgentRuntimeOverrides(buildRuntimeOverrides(execution));
+  if (execution.agent.harness.name !== previousAgent.harness.name) {
+    recordRunHarness(execution.agent.harness.name);
+  }
+  return () => {
+    runContext.resolvedAgent = previousAgent;
+    setAgentRuntimeOverrides(previousOverrides);
+  };
+}
+
+/**
  * Run the full implementation workflow for one JIRA task key.
  *
  * @param taskKey - JIRA issue key
@@ -1217,11 +1243,15 @@ export async function processSingleTask(
     const effectiveTargetBranch = await resolveEffectiveTargetBranch(descriptionText);
 
     // Per-task execution preferences (harness / model / effort), parsed from
-    // the description with the same convention as the target branch above.
+    // an explicit `Execution preferences` section or `devintern` HTML comment
+    // in the description. Trackers can expose a markdown view so headings and
+    // code fences survive formatting; identity hashing keeps using the plain
+    // `descriptionText` above.
+    const preferenceText = tracker.extractDescriptionMarkdown?.(task) ?? descriptionText;
     // Invalid or conflicting preferences throw here and are surfaced as
     // actionable task failures instead of silently falling back.
     const execution = resolveExecutionPreferences({
-      description: descriptionText,
+      description: preferenceText,
       currentAgent: runContext.resolvedAgent,
     });
     if (execution.notes.length > 0) {
@@ -1288,13 +1318,7 @@ export async function processSingleTask(
 
     // Apply the per-task selection for the duration of the steps, then restore
     // the process-wide defaults so the next task in a batch is unaffected.
-    const previousAgent = runContext.resolvedAgent;
-    const previousOverrides = getAgentRuntimeOverrides();
-    runContext.resolvedAgent = execution.agent;
-    setAgentRuntimeOverrides(buildRuntimeOverrides(execution));
-    if (execution.agent.harness.name !== previousAgent.harness.name) {
-      recordRunHarness(execution.agent.harness.name);
-    }
+    const restoreExecution = applyExecutionSelection(execution);
 
     let result: Awaited<ReturnType<typeof runTaskSteps>>;
     try {
@@ -1318,8 +1342,7 @@ export async function processSingleTask(
         resumeBranch: pickup.kind === "resume" ? pickup.session.branch : undefined,
       });
     } finally {
-      runContext.resolvedAgent = previousAgent;
-      setAgentRuntimeOverrides(previousOverrides);
+      restoreExecution();
     }
     if (result.kind === "halted") {
       await finishTaskRun("escalated", result.reason);
@@ -1337,6 +1360,9 @@ function buildRuntimeOverrides(
   const overrides: AgentRuntimeOverrides = {};
   if (execution.modelOverride !== undefined) {
     overrides.model = execution.modelOverride;
+    // A per-task model is harness-specific; pin it to the harness it was
+    // resolved for so a fallback spawn does not receive it.
+    overrides.harness = execution.agent.harness.name;
   }
   if (execution.effort !== undefined) {
     overrides.effort = execution.effort;

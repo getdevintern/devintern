@@ -74,6 +74,28 @@ function htmlToPlainText(html: string): string {
     .trim();
 }
 
+/**
+ * Markdown-ish view of the HTML description used only to parse execution
+ * preferences.
+ *
+ * Headings become ATX lines so `## Execution preferences` stays a real section,
+ * and `<pre>` / `<code>` sections are dropped so a pasted documentation example
+ * cannot be read as configuration. {@link htmlToPlainText} is intentionally not
+ * reused for this: it flattens headings and code blocks into ordinary text, and
+ * its output is the persisted identity digest.
+ *
+ * @param html - Raw `System.Description` HTML
+ * @returns Description text with headings preserved and code samples removed
+ */
+function htmlToPreferenceMarkdown(html: string): string {
+  return htmlToPlainText(
+    html
+      .replace(/<pre\b[^>]*>[\s\S]*?<\/pre>/gi, "\n")
+      .replace(/<code\b[^>]*>[\s\S]*?<\/code>/gi, "\n")
+      .replace(/<h([1-6])\b[^>]*>([\s\S]*?)<\/h\1>/gi, "\n## $2\n"),
+  );
+}
+
 export class AzureDevOpsTaskTrackerClient implements TaskTrackerClient {
   private azureClient: AzureDevOpsClient;
 
@@ -145,6 +167,11 @@ export class AzureDevOpsTaskTrackerClient implements TaskTrackerClient {
   extractDescriptionText(task: Task): string {
     const workItem = task.raw as AzureDevOpsWorkItemDetail;
     return htmlToPlainText((workItem.fields["System.Description"] as string) || "");
+  }
+
+  extractDescriptionMarkdown(task: Task): string {
+    const workItem = task.raw as AzureDevOpsWorkItemDetail;
+    return htmlToPreferenceMarkdown((workItem.fields["System.Description"] as string) || "");
   }
 
   // ------------------------------------------------------------------

@@ -164,20 +164,24 @@ export function resolveModelAlias(input: { harness: string; model: string }): Mo
     return { kind: "passthrough", model: requested };
   }
 
-  const forHarness = definitions.find(
-    (entry) => entry.harness === input.harness || entry.harness === "*",
-  );
+  // A harness-specific definition always wins over a wildcard, regardless of
+  // registration order. Entries with no models cannot resolve, so the next
+  // usable definition (for example a wildcard) gets a chance first.
+  const exact = definitions.find((entry) => entry.harness === input.harness);
+  const wildcard = definitions.find((entry) => entry.harness === "*");
+  const forHarness = [exact, wildcard].find((entry) => entry && entry.models.length > 0);
   if (forHarness) {
-    if (forHarness.models.length === 0) {
-      return {
-        kind: "error",
-        model: requested,
-        reason:
-          `Model family "${requested}" has no available models for harness "${input.harness}". ` +
-          `Pass an exact model identifier instead.`,
-      };
-    }
     return { kind: "resolved", alias: requested, model: forHarness.models[0] };
+  }
+
+  if (exact || wildcard) {
+    return {
+      kind: "error",
+      model: requested,
+      reason:
+        `Model family "${requested}" has no available models for harness "${input.harness}". ` +
+        `Pass an exact model identifier instead.`,
+    };
   }
 
   const availableHarnesses = [...new Set(definitions.map((entry) => entry.harness))];

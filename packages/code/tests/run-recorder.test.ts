@@ -15,6 +15,7 @@ import {
   hasRunStage,
   latestRunStage,
   markRunCleanStop,
+  recordRunHarness,
   recordRunStage,
   replaceRunStage,
 } from "../src/lib/state/run-recorder";
@@ -565,6 +566,21 @@ describe("RunStore", () => {
       expect(hasRunStage("verify")).toBe(false);
     } finally {
       endRun("failed", "test cleanup");
+    }
+  });
+
+  test("recordRunHarness updates the stored run and active context", () => {
+    beginRun({ origin: "task", taskKey: "PROJ-HARNESS", harness: "claude-code" });
+    const runId = getActiveRunContext()!.id;
+    const reader = new RunStore();
+    try {
+      expect(reader.getRun(runId)?.harness).toBe("claude-code");
+      recordRunHarness("opencode");
+      expect(reader.getRun(runId)?.harness).toBe("opencode");
+      expect(getActiveRunContext()?.harness).toBe("opencode");
+    } finally {
+      reader.close();
+      endRun("succeeded", "done");
     }
   });
 

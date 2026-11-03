@@ -68,6 +68,36 @@ describe("resolveModelAlias", () => {
     const result = resolveModelAlias({ harness: "goose", model: "anywhere" });
     expect(result).toEqual({ kind: "resolved", alias: "anywhere", model: "universal-1" });
   });
+
+  test("a harness-specific family wins over a wildcard registered first", () => {
+    registerModelAlias({ alias: "fam", harness: "*", models: ["universal"] });
+    registerModelAlias({ alias: "fam", harness: "claude-code", models: ["specific"] });
+    expect(resolveModelAlias({ harness: "claude-code", model: "fam" })).toEqual({
+      kind: "resolved",
+      alias: "fam",
+      model: "specific",
+    });
+  });
+
+  test("a harness-specific family wins over a wildcard registered later", () => {
+    registerModelAlias({ alias: "fam", harness: "claude-code", models: ["specific"] });
+    registerModelAlias({ alias: "fam", harness: "*", models: ["universal"] });
+    expect(resolveModelAlias({ harness: "claude-code", model: "fam" })).toEqual({
+      kind: "resolved",
+      alias: "fam",
+      model: "specific",
+    });
+  });
+
+  test("an empty harness-specific family does not mask a usable wildcard", () => {
+    registerModelAlias({ alias: "fam", harness: "*", models: ["universal"] });
+    registerModelAlias({ alias: "fam", harness: "claude-code", models: [] });
+    expect(resolveModelAlias({ harness: "claude-code", model: "fam" })).toEqual({
+      kind: "resolved",
+      alias: "fam",
+      model: "universal",
+    });
+  });
 });
 
 describe("listModelAliases", () => {
