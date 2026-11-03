@@ -15,7 +15,7 @@ import {
 import type { AgentHarness } from "@devintern/agent-harness";
 import { buildHeadlessAgentInvocation, harnessSpawnEnv, HEADLESS_AGENT_STDIO } from "./spawn";
 import { resolveAgentEffort, resolveAgentModel } from "./model";
-import { getSandbox } from "./sandbox";
+import { agentSandboxPolicy, getSandbox } from "./sandbox";
 import { createHarnessLogSink } from "../observability/harness-logs";
 import { Utils } from "../utils";
 import { resolveOutputDir } from "../config/output-dir";
@@ -289,6 +289,7 @@ ${hookType === "push" ? "- Make sure to amend the commit (git commit --amend --n
           env: harnessSpawnEnv(agentEnv),
         },
         sandbox: await getSandbox(harness.name),
+        policy: agentSandboxPolicy(),
         sink: createHarnessLogSink({
           harness,
           label: `hook-fix-${hookType}`,

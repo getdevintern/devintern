@@ -30,7 +30,7 @@ import { loadPrompt } from "../prompts/loader";
 import { untrustedContentBlock } from "../prompts/untrusted-content";
 import { validateReviewFeedback } from "./feedback";
 import { DEFAULT_AUTO_REVIEW_ITERATIONS } from "./auto-review-config";
-import { getSandbox } from "../agent/sandbox";
+import { agentSandboxPolicy, getSandbox } from "../agent/sandbox";
 import { createHarnessLogSink } from "../observability/harness-logs";
 import type {
   AutoReviewLoopOptions,
@@ -338,6 +338,7 @@ export async function runAgentPrompt(
           env: harnessSpawnEnv(agentEnv),
         },
         sandbox: await getSandbox(harness.name),
+        policy: agentSandboxPolicy(),
         sink: createHarnessLogSink({
           harness,
           label: "auto-review",

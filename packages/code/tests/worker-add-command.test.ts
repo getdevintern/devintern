@@ -1,5 +1,13 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
@@ -211,6 +219,31 @@ describe("runWorkerAdd", () => {
       expect(statSync(join(dir, "injected")).mode & 0o777).toBe(0o700);
     } finally {
       store.close();
+    }
+  });
+
+  test("reports a clean, actionable error when the workspace state is not writable", async () => {
+    // Simulate a sandbox denial: the prompt directory exists but cannot be
+    // written. Root ignores mode bits, so skip there.
+    if (process.getuid?.() === 0) return;
+    const injected = join(dir, "injected");
+    mkdirSync(injected, { recursive: true });
+    chmodSync(injected, 0o500);
+    try {
+      const cap = capture();
+      const code = await runWorkerAdd(
+        ["--workspace", configPath, "--repo", "backend", "--title", "Denied", "--json"],
+        cap.options,
+      );
+      expect(code).toBe(1);
+      // --json keeps stdout for a result object; a failure before enqueue has
+      // none, and the actionable diagnostics go to stderr instead of a stack.
+      expect(cap.out).toHaveLength(0);
+      const diagnostics = cap.err.join("\n");
+      expect(diagnostics).toContain("Could not enqueue the task");
+      expect(diagnostics).toContain("AGENT_SANDBOX_WRITABLE_PATHS");
+    } finally {
+      chmodSync(injected, 0o700);
     }
   });
 

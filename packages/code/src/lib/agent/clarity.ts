@@ -16,7 +16,7 @@ import type { AgentHarness, AgentRunOptions } from "@devintern/agent-harness";
 import { ReadonlyAnalysisError } from "./analysis-mode";
 import { HarnessUnavailableError, detectHarnessStartupFailure } from "./harness-startup";
 import { parseAgentJsonObject } from "./json";
-import { getSandbox } from "./sandbox";
+import { agentSandboxPolicy, getSandbox } from "./sandbox";
 import { harnessSpawnEnv } from "./spawn";
 import { resolveOutputDir } from "../config/output-dir";
 import { createHarnessLogSink } from "../observability/harness-logs";
@@ -97,6 +97,7 @@ export async function runClarityCheck(
         args: spawnArgs,
         spawnOptions: { stdio: ["ignore", "pipe", "pipe"], env: harnessSpawnEnv(clarityEnv) },
         sandbox: await getSandbox(harness.name),
+        policy: agentSandboxPolicy(),
         sink: createHarnessLogSink({
           harness,
           label: "clarity",

@@ -37,6 +37,8 @@ import {
   buildWorkspaceContextEnv,
 } from "./env";
 import {
+  automationsDir,
+  injectedTasksDir,
   resolveWorkspaceDir,
   workspaceConfigPath,
   workspaceDbPath,
@@ -101,6 +103,22 @@ function pruneInjectedTasks(
 
 /** Interval between periodic injected-task prunes (1 hour). */
 export const INJECTED_TASK_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
+
+/**
+ * Create the workspace directories agent sandboxes grant write access to.
+ *
+ * A sandbox grant only applies to paths that already exist, and a sandboxed
+ * agent needs `injected/` (ad-hoc `worker add` prompts) plus `automations/`
+ * (automation cursors) writable before its first run. The worker owns these
+ * directories, so it creates them at startup.
+ *
+ * @param workspaceDir - Workspace home.
+ */
+function ensureAgentWritableWorkspaceDirs(workspaceDir: string): void {
+  for (const dir of [injectedTasksDir(workspaceDir), automationsDir(workspaceDir)]) {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+  }
+}
 
 /**
  * Keep pruning settled injected tasks (and their prompt files) while the
@@ -412,7 +430,7 @@ export async function resolveWorkspaceAutomationContext(
 ) {
   // Keep occurrence task files in the workspace home (next to repos/,
   // worktrees/, and the central DB) instead of inside a repo worktree.
-  const taskFileDir = join(workspaceDir, "automations");
+  const taskFileDir = automationsDir(workspaceDir);
   const repo = automation.repo
     ? findRepo(config, automation.repo)
     : config.repos.length === 1
@@ -721,6 +739,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   // Ad-hoc `devintern worker add` tasks also ride the shared workspace DB and
   // drain through the same fleet executor.
   const injectedTasks = new InjectedTaskStore(workspaceDbPath(workspaceDir));
+  ensureAgentWritableWorkspaceDirs(workspaceDir);
   pruneInjectedTasks(injectedTasks);
   startInjectedTaskSweeper(injectedTasks);
 
@@ -1200,6 +1219,9 @@ function applyWorkspaceEnv(
   // Shared workspace values serve GitHub/review consumers and the legacy
   // single-defaults tracker. Team clients use explicit composed env maps.
   applyWorkspaceProcessEnv(workspaceDir);
+  // In-process spawn sites (webhook reviews, hook fixes) build the sandbox
+  // policy from this value; task subprocesses get it from `buildRepoEnv`.
+  process.env.DEVINTERN_WORKSPACE_DIR = workspaceDir;
   const multiTeam = config.teams.length > 0;
   if (config.defaults.tracker) process.env.TASK_TRACKER = config.defaults.tracker;
   // In-process consumers (dashboard, run records) follow the fleet DB.

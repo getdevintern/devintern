@@ -10,6 +10,8 @@
  * picks up changes on restart, same as AGENT_HARNESS.
  */
 
+import { existsSync } from "fs";
+
 import {
   harnessCliPathEnvKey,
   probeHarnessUnderSandbox,
@@ -21,8 +23,15 @@ import type {
   DetectedSandboxProvider,
   NonoPackStatus,
   ResolvedSandbox,
+  SandboxPolicy,
   SandboxProvider,
 } from "@devintern/agent-harness";
+import {
+  automationsDir,
+  injectedTasksDir,
+  resolveWorkspaceDir,
+  workspaceStateDir,
+} from "../workspace/paths";
 
 let cliOverride: string | undefined;
 let cached: Promise<ResolvedSandbox | null> | null = null;
@@ -54,6 +63,48 @@ export function getSandbox(harnessName: string): Promise<ResolvedSandbox | null>
     });
   }
   return cached;
+}
+
+/**
+ * Workspace paths a sandboxed agent must be able to write for DevIntern
+ * features that live outside the checkout.
+ *
+ * `devintern worker add` (the documented way for an agent to delegate work —
+ * see the devintern-delegate skill) writes a prompt file under `injected/`,
+ * inserts a row into `state/queue.db`, and automations advance their cursor
+ * under `automations/`. The default sandbox policy only grants the working
+ * directory and the task output dir, so without these grants delegation from
+ * an agent run fails with a sandbox `EACCES`.
+ *
+ * Only existing paths are returned: the worker creates the directories it
+ * owns at startup, so a run outside workspace mode keeps the default policy
+ * untouched.
+ *
+ * @param workspaceDir - Workspace home (defaults to `~/.devintern`).
+ * @returns Existing workspace directories agents may write.
+ */
+export function workspaceAgentWritablePaths(
+  workspaceDir: string = resolveWorkspaceDir(),
+): string[] {
+  return [
+    injectedTasksDir(workspaceDir),
+    workspaceStateDir(workspaceDir),
+    automationsDir(workspaceDir),
+  ].filter((path) => existsSync(path));
+}
+
+/**
+ * Build the sandbox policy overrides every agent spawn passes to
+ * {@link spawnAgent}: the default policy plus the workspace paths agent-facing
+ * CLI features need to write.
+ *
+ * @param workspaceDir - Workspace home (defaults to `~/.devintern`).
+ * @returns Policy overrides merged into the provider's default policy.
+ */
+export function agentSandboxPolicy(
+  workspaceDir: string = resolveWorkspaceDir(),
+): Partial<SandboxPolicy> {
+  return { writablePaths: workspaceAgentWritablePaths(workspaceDir) };
 }
 
 /**

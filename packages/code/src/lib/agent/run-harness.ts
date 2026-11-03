@@ -37,7 +37,7 @@ import type { TaskTrackerClient } from "../trackers/client";
 import { formatAgentInputNeededMarkdown } from "../trackers/shared/markdown-comment-formatter";
 import { HarnessUnavailableError, detectHarnessStartupFailure } from "./harness-startup";
 import { resolveAgentEffort, resolveAgentModel } from "./model";
-import { getSandbox } from "./sandbox";
+import { agentSandboxPolicy, getSandbox } from "./sandbox";
 import { harnessSpawnEnv } from "./spawn";
 import type { VerifyConfig } from "./verify";
 import { withImplementationSummary } from "./implementation-summary";
@@ -168,6 +168,7 @@ export async function runAgentSession(
         args: spawnArgs,
         spawnOptions: { stdio: ["ignore", "pipe", "pipe"], env: harnessSpawnEnv(agentEnv) },
         sandbox: await getSandbox(harness.name),
+        policy: agentSandboxPolicy(),
         sink: createHarnessLogSink({
           harness,
           label: "implementation",

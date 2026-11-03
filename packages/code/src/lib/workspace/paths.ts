@@ -29,11 +29,19 @@ export function workspaceEnvPath(workspaceDir: string = resolveWorkspaceDir()): 
 }
 
 /**
+ * Directory holding worker runtime state: the shared queue database, the auth
+ * session, and the license cache. Kept outside repo checkouts.
+ */
+export function workspaceStateDir(workspaceDir: string = resolveWorkspaceDir()): string {
+  return join(workspaceDir, "state");
+}
+
+/**
  * Directory holding the worker's auth session and license cache. Runtime
  * state lives alongside the shared queue database, outside repo checkouts.
  */
 export function workspaceCodeStateDir(workspaceDir: string = resolveWorkspaceDir()): string {
-  return join(workspaceDir, "state", "code");
+  return join(workspaceStateDir(workspaceDir), "code");
 }
 
 /** Preserve worker credentials and relay pairing from the old workspace path. */
@@ -52,7 +60,15 @@ export function ensureWorkspaceCodeState(workspaceDir: string): void {
 
 /** Path of the central workspace SQLite database. */
 export function workspaceDbPath(workspaceDir: string = resolveWorkspaceDir()): string {
-  return join(workspaceDir, "state", "queue.db");
+  return join(workspaceStateDir(workspaceDir), "queue.db");
+}
+
+/**
+ * Directory holding automation state (managed prompts and agent-maintained
+ * cursors). Sandboxed automation agents write their cursor here.
+ */
+export function automationsDir(workspaceDir: string = resolveWorkspaceDir()): string {
+  return join(workspaceDir, "automations");
 }
 
 /**

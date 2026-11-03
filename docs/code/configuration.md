@@ -685,6 +685,8 @@ When DevIntern itself already runs inside a kernel sandbox (for example a `nono`
 
 The default policy confines filesystem writes to what a task run actually needs: your project working directory, the task output directory, the system temp directory, the Playwright and Puppeteer browser caches (so agents that launch a browser for testing or research keep working), and the harness's own state directories under your home directory (`~/.grok`, `~/.claude`, `~/.codex`, `~/.config/opencode`, …) — without those an agent starts logged out or fails on its first state write. Everything else in your home directory stays readable but not writable. Network access stays open, since agents need to reach model APIs, push to git remotes, and install packages.
 
+Workspace runs also grant write access to three workspace directories: `injected/` (ad-hoc task prompt files), `state/` (the central queue database), and `automations/` (automation state and cursors). A sandboxed agent needs them to delegate work with `devintern worker add` and to advance an automation's cursor; without the grants those writes fail with a sandbox `EACCES` even though the command is supported. The worker creates the `injected/` and `automations/` directories at startup.
+
 Optional restrictions:
 
 ```bash
