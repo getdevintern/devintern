@@ -8,7 +8,6 @@ import { DockerSandboxProvider } from "./providers/docker.js";
 import { NativeSandboxProvider } from "./providers/native.js";
 import { NonoSandboxProvider } from "./providers/nono.js";
 import { SmolvmSandboxProvider } from "./providers/smolvm.js";
-import { SrtSandboxProvider } from "./providers/srt.js";
 
 const registry = new Map<string, SandboxProvider>();
 
@@ -43,6 +42,5 @@ export function listSandboxProviders(): SandboxProvider[] {
 // Register built-in providers -------------------------------------------------
 registerSandboxProvider(new NativeSandboxProvider());
 registerSandboxProvider(new NonoSandboxProvider());
-registerSandboxProvider(new SrtSandboxProvider());
 registerSandboxProvider(new DockerSandboxProvider());
 registerSandboxProvider(new SmolvmSandboxProvider());

@@ -5,7 +5,6 @@ import { join } from "path";
 import { detectSandboxProviders } from "../src/sandbox/detect.js";
 import { probeCommand } from "../src/sandbox/probe.js";
 import { NonoSandboxProvider } from "../src/sandbox/providers/nono.js";
-import { SrtSandboxProvider } from "../src/sandbox/providers/srt.js";
 
 /** Create an isolated bin dir with executable stub scripts. */
 function makeBinDir(stubs: Record<string, string>): string {
@@ -48,23 +47,10 @@ describe("sandbox detection", () => {
     expect(detection.version).toBe("nono 1.2.3");
   });
 
-  test("srt on Linux requires bubblewrap, socat, and ripgrep", async () => {
-    if (process.platform !== "linux") return; // Linux-only dependency check
-    binDir = makeBinDir({ srt: 'echo "srt 0.1.0"' });
-    process.env.PATH = `${binDir}:/usr/bin:/bin`;
-    const detection = await new SrtSandboxProvider().detect();
-    // On hosts that already have bwrap/socat/rg installed detection succeeds;
-    // otherwise the reason must name the missing dependencies.
-    if (!detection.available) {
-      expect(detection.reason).toContain("missing");
-    }
-  });
-
   test("detectSandboxProviders returns one entry per registered provider and caches", async () => {
     const first = await detectSandboxProviders({ fresh: true });
     const names = first.map((d) => d.provider.name);
     expect(names).toContain("nono");
-    expect(names).toContain("srt");
     expect(names).toContain("docker");
     expect(names).toContain("smolvm");
 

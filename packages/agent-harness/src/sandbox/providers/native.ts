@@ -27,7 +27,7 @@
  * The trade-off versus the external wrappers: the boundary is configured
  * and enforced inside the harness process rather than by the parent, and
  * (for claude-code) covers a narrower scope. Users who want the stronger
- * parent-enforced guarantee choose nono/srt explicitly.
+ * parent-enforced guarantee choose nono explicitly.
  */
 
 import { mkdtempSync, writeFileSync } from "fs";
@@ -72,7 +72,7 @@ export class NativeSandboxProvider implements SandboxProvider {
         throw new Error(
           `The "${harnessName}" harness has no built-in sandbox. ` +
             `Native sandboxing supports: ${NATIVE_CAPABLE.join(", ")}. ` +
-            "Use AGENT_SANDBOX=nono or AGENT_SANDBOX=srt for other harnesses.",
+            "Use AGENT_SANDBOX=nono for other harnesses.",
         );
     }
   }
