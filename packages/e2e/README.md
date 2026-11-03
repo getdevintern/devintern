@@ -423,6 +423,41 @@ This smoke is opt-in and is not part of `test`, Turbo, or CI. See
 [docs/tracker-e2e-plan.md](docs/tracker-e2e-plan.md) for the staged expansion to
 full Jira/Trello lifecycles and offline fake-server coverage.
 
+## Standalone dashboard API
+
+`tests/local/dashboard-api.test.ts` starts the built CLI as `devintern dashboard`
+against a real `WorkerFixture` workspace, after the worker has drained one
+injected task. The fixture picks a free ephemeral loopback port, polls
+`GET /api/health` for the documented `{ status: "ok" }` payload, and stops the
+process with SIGTERM in `finally`; it never waits on a fixed timer and never
+binds a non-loopback interface. The worker fixture's temporary HOME, workspace,
+output and queue database are the only inputs, so no account, license, tracker,
+or network is involved.
+
+The suite asserts the read surface over that real run: health; the `/api/runs`
+list with id, status, origin, task key and timestamps plus a bounded `limit`
+(and the 400 for an invalid one); run detail with stages, retry eligibility,
+harness-log and artifact arrays; the harness-log and artifact list routes; task
+activity; empty agent-PR and automation catalogs; worker status; the worker log
+tail; the documented 404 for an unknown run id; stats with at least one
+succeeded run; and the 405 `{ error: "method not allowed" }` response for a
+non-GET `/api/runs`.
+It also proves the daemon lock is observed as `running`, then stops the worker
+and asserts the standalone dashboard reports `stopped` or `unknown` instead of a
+phantom live worker. A separate case starts the CLI with `--host 0.0.0.0`,
+asserts a non-zero exit with the loopback error, no "Dashboard running" line,
+and that the chosen port is still free afterwards.
+
+```sh
+bun run --filter @getdevintern/code build
+bun run --filter @devintern/e2e test
+```
+
+The write actions `POST /api/runs/:id/retry` and
+`POST /api/automations/:id/run` are intentionally not exercised here: they
+spawn detached CLI work or mutate the fixture. Worker-embedded dashboard mode
+and log redaction readback are likewise out of scope for this suite.
+
 ## Direct webhook serve
 
 `tests/local/webhook-serve.test.ts` starts the built CLI as
