@@ -19,11 +19,14 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, dirname, join } from "node:path";
+import { delimiter, dirname, join, sep } from "node:path";
+import { detectSandboxProviders } from "@devintern/agent-harness";
+import type { SandboxDetection } from "@devintern/agent-harness";
 import { isolatedEnvironment } from "./environment";
 import { cliPath } from "./fixture-workspace";
 import { checkedCommand, command } from "./process";
@@ -140,19 +143,70 @@ export function createProviderHome(root: string): string {
 }
 
 /**
- * Create a directory outside every sandbox write grant.
+ * Candidate parents for the outside-the-boundary directory.
  *
- * The workspace itself lives under the OS temp dir, which providers grant for
- * temp writes, so a sibling `root/outside` would be writable by design. This
- * path lives under the package's ignored `.local` directory instead: outside
- * `/tmp`, outside the isolated home, and outside the output dir.
+ * Both must stay outside the OS temp dir. A provider's policy grants the temp
+ * dir, and nono's Linux profile goes further: its `system_write_linux` group
+ * allows write on `/tmp` itself, so *any* directory beneath `tmpdir()` is
+ * writable by the wrapped agent. A directory under `/tmp` would therefore
+ * make the escape check assert `true` and fail misleadingly.
  *
- * @returns Path to a fresh outside-the-boundary directory.
+ * The package-local `.local` is preferred because cleanup is obvious and it is
+ * usually outside the temp dir. `/var/tmp` is the fallback for checkouts that
+ * live under the temp dir (CI scratch dirs, some local worktrees); it is not in
+ * any provider write grant.
+ *
+ * @returns Candidate directories, most preferred first.
  */
-function createSandboxOutside(): string {
-  const base = join(import.meta.dir, "..", ".local");
-  mkdirSync(base, { recursive: true });
-  return mkdtempSync(join(base, "devintern-e2e-outside-"));
+function sandboxOutsideBases(): string[] {
+  const packageLocal = join(import.meta.dir, "..", ".local");
+  return process.platform === "win32" ? [packageLocal] : [packageLocal, "/var/tmp"];
+}
+
+/**
+ * Whether a real path is `parent` itself or lives beneath it.
+ *
+ * @param candidate - Real path to test.
+ * @param parent - Real path of the supposed ancestor.
+ * @returns True when `candidate` is at or below `parent`.
+ */
+function isAtOrBelow(candidate: string, parent: string): boolean {
+  if (candidate === parent) return true;
+  return candidate.startsWith(parent.endsWith(sep) ? parent : `${parent}${sep}`);
+}
+
+/**
+ * Create a directory provably outside the OS temp dir.
+ *
+ * The base is resolved with `realpath` and rejected when it is at or below the
+ * temp root, so a checkout under `/tmp` cannot silently produce a writable
+ * "outside" directory. POSIX write permission is not enough when the suite
+ * itself runs under a sandbox (Landlock can deny `/var/tmp` while
+ * `access(W_OK)` still succeeds), so a candidate that cannot be created falls
+ * through to the next one.
+ *
+ * @param bases - Candidate parents, most preferred first.
+ * @param temp - Temp root the result must stay outside of (defaults to the OS temp dir).
+ * @returns Path to a fresh directory outside `temp`, or undefined when no
+ *   candidate qualifies (callers must skip the escape assertion rather than
+ *   assert a false escape).
+ */
+export function createSandboxOutside(
+  bases: readonly string[] = sandboxOutsideBases(),
+  temp: string = tmpdir(),
+): string | undefined {
+  const tempRoot = realpathSync(temp);
+  for (const base of bases) {
+    try {
+      mkdirSync(base, { recursive: true });
+      const resolved = realpathSync(base);
+      if (isAtOrBelow(resolved, tempRoot)) continue;
+      return mkdtempSync(join(resolved, "devintern-e2e-outside-"));
+    } catch {
+      // Try the next candidate: an enclosing sandbox may deny this base.
+    }
+  }
+  return undefined;
 }
 
 /**
@@ -303,6 +357,11 @@ export interface SandboxWorkspaceOptions {
 export class SandboxWorkspace {
   readonly root = mkdtempSync(join(tmpdir(), "devintern-e2e-sandbox-"));
   readonly cwd = join(this.root, "repo");
+  /**
+   * Host path deliberately outside every writable grant, or undefined when the
+   * host offers no such directory (see {@link createSandboxOutside}). Callers
+   * must not assert an escape when this is undefined.
+   */
   readonly outside = createSandboxOutside();
   readonly id = `e2e-${crypto.randomUUID()}`;
   readonly base = `e2e/base-${this.id}`;
@@ -353,9 +412,12 @@ export class SandboxWorkspace {
       `---\nkey: ${this.id}\n---\n# Expand the greeting\n\nChange the greeting to Hello, world!.\n`,
     );
     // A host path deliberately outside every writable grant, so the probe can
-    // prove the boundary denies writes outside the workspace.
+    // prove the boundary denies writes outside the workspace. When the host has
+    // no such path the probe skips its escape check (see SandboxWorkspace.outside).
     this.env.E2E_SANDBOX_REPORT = this.reportPath;
-    this.env.E2E_SANDBOX_OUTSIDE = this.outside;
+    if (this.outside) {
+      this.env.E2E_SANDBOX_OUTSIDE = this.outside;
+    }
     return this;
   }
 
@@ -424,7 +486,7 @@ export class SandboxWorkspace {
   dispose(): void {
     rmSync(this.root, { recursive: true, force: true });
     rmSync(this.home, { recursive: true, force: true });
-    rmSync(this.outside, { recursive: true, force: true });
+    if (this.outside) rmSync(this.outside, { recursive: true, force: true });
   }
 }
 
@@ -525,6 +587,23 @@ function firstLine(text: string): string {
   );
 }
 
+/**
+ * Detection result for one provider, reusing the CLI's own detector.
+ *
+ * Detection alone is not enough for a start-up probe, but it is decisive for
+ * the opposite direction: when the CLI would report the provider unavailable
+ * (missing binary, or a missing Linux dependency such as `bwrap`/`socat`/`rg`
+ * for srt), a boundary test must skip instead of failing for an environmental
+ * reason.
+ *
+ * @param provider - Registered provider name.
+ * @returns The provider's detection, or undefined for an unregistered name.
+ */
+async function providerDetection(provider: string): Promise<SandboxDetection | undefined> {
+  const detections = await detectSandboxProviders();
+  return detections.find((entry) => entry.provider.name === provider)?.detection;
+}
+
 function probeSrt(providerPathValue: string): ProviderPrerequisite {
   const dir = mkdtempSync(join(tmpdir(), "devintern-e2e-srt-prereq-"));
   const settings = join(dir, "settings.json");
@@ -621,19 +700,34 @@ function probeDocker(providerPathValue: string): ProviderPrerequisite {
  * smolvm host that still needs `smolvm setup` all report unusable here instead
  * of failing a boundary test for environmental reasons.
  *
+ * The gate starts from the provider's own {@link detectSandboxProviders}
+ * result, so it mirrors the CLI exactly: a host where srt exists but a required
+ * Linux dependency (`bwrap`, `socat`, `rg`) is missing skips here instead of
+ * running a boundary test the CLI would refuse.
+ *
  * @param provider - Registered provider name.
  * @returns Whether the provider can run, plus an honest skip reason.
  */
-export function providerPrerequisite(provider: string): ProviderPrerequisite {
+export async function providerPrerequisite(provider: string): Promise<ProviderPrerequisite> {
   if (process.platform === "win32") {
     return { usable: false, reason: "sandbox providers are supported on macOS/Linux only" };
   }
+  // Registration comes first: an unknown name has no detection entry, and the
+  // no-binary fast path below must not let it through as "usable".
+  const detection = await providerDetection(provider);
+  if (!detection) {
+    return { usable: false, reason: `no registered sandbox provider named "${provider}"` };
+  }
+  const binary = providerBinary(provider);
+  if (!binary) {
+    return { usable: true, reason: `${provider} has no external binary to probe` };
+  }
+  if (!detection.available) {
+    return { usable: false, reason: detection.reason ?? `${binary} is not usable on this machine` };
+  }
   const path = providerPath(provider);
   if (!path) {
-    return {
-      usable: false,
-      reason: `${providerBinary(provider) ?? provider} not found on PATH`,
-    };
+    return { usable: false, reason: `${binary} is not on the test process PATH` };
   }
   switch (provider) {
     case "srt":
