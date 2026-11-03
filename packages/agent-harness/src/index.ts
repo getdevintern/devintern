@@ -146,6 +146,7 @@ export {
 export {
   resolveSandbox,
   activeSandboxName,
+  removedSandboxProviderMessage,
   type SandboxResolutionOptions,
 } from "./sandbox/resolver.js";
 export { detectSandboxProviders, type DetectedSandboxProvider } from "./sandbox/detect.js";

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { DetectedSandboxProvider } from "@devintern/agent-harness";
+import { resolveSandbox } from "@devintern/agent-harness";
 import { buildSandboxDoctorReport, collectHarnessPreflight } from "../src/lib/agent/sandbox";
 
 function detected(
@@ -103,6 +104,38 @@ describe("buildSandboxDoctorReport", () => {
     expect(text).toContain('Use "docker"');
     expect(text).toContain('"nono" for local confinement');
     expect(text).not.toContain("unknown provider");
+  });
+
+  test("removed provider message is the resolver's message, not a copy", async () => {
+    for (const name of ["srt", "smolvm"]) {
+      const report = buildSandboxDoctorReport(
+        [detected("nono", { priority: 30 })],
+        name,
+        ".devintern-code/.env",
+        "claude-code",
+        "linux",
+      );
+      const runtime = await resolveSandbox({ sandboxName: name, trustedEnv: {} }).then(
+        () => "resolved unexpectedly",
+        (error: Error) => error.message,
+      );
+      expect(report.lines.join("\n")).toContain(runtime);
+    }
+  });
+
+  test("Object.prototype member names are unknown providers in the doctor too", () => {
+    for (const name of ["constructor", "toString", "__proto__"]) {
+      const report = buildSandboxDoctorReport(
+        [detected("nono", { priority: 30 })],
+        name,
+        ".devintern-code/.env",
+        "claude-code",
+        "linux",
+      );
+      const text = report.lines.join("\n");
+      expect(report.nextRunFails).toBe(true);
+      expect(text).toContain(`unknown provider "${name}"`);
+    }
   });
 
   test("explicit provider that does not support the harness: next run fails", () => {

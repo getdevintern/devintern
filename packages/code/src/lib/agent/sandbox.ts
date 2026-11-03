@@ -15,6 +15,7 @@ import { existsSync } from "fs";
 import {
   harnessCliPathEnvKey,
   probeHarnessUnderSandbox,
+  removedSandboxProviderMessage,
   resolveExecutablePath,
   resolveHarnessChainSync,
   resolveSandbox,
@@ -348,6 +349,9 @@ export function buildSandboxDoctorReport(
 
   // What the next agent run will actually do with the current configuration.
   let nextRunFails = false;
+  // Shared with the resolver so the doctor, the runtime error and the tests
+  // cannot drift; consulted before the generic unknown-provider branch.
+  const removedMessage = removedSandboxProviderMessage(configured);
   lines.push(`Configured: AGENT_SANDBOX=${configured} (${configuredSource})`);
   if (configured === "none") {
     lines.push("Next run:   agents run unsandboxed (sandboxing is off)");
@@ -365,18 +369,9 @@ export function buildSandboxDoctorReport(
           ? `Next run:   auto picks ${autoPick.provider.name} — agent wrapped with ${autoPick.provider.displayName}`
           : "Next run:   auto finds no usable provider — the run proceeds unsandboxed with a warning",
     );
-  } else if (configured === "srt") {
+  } else if (removedMessage) {
     nextRunFails = true;
-    lines.push(
-      'Next run:   ❌ fails — Sandbox provider "srt" has been removed. Use "nono" for ' +
-        'whole-process confinement (or "docker" for a microVM boundary).',
-    );
-  } else if (configured === "smolvm") {
-    nextRunFails = true;
-    lines.push(
-      'Next run:   ❌ fails — Sandbox provider "smolvm" has been removed. Use "docker" ' +
-        'for a microVM boundary (or "nono" for local confinement).',
-    );
+    lines.push(`Next run:   ❌ fails — ${removedMessage}`);
   } else {
     const chosen = detections.find((d) => d.provider.name === configured);
     if (!chosen) {

@@ -245,6 +245,18 @@ describe("resolveSandbox", () => {
     await expect(resolveSandbox({ trustedEnv: {} })).rejects.toThrow(migration);
   });
 
+  test("Object.prototype member names are reported as unknown providers", async () => {
+    // The removed-provider lookup uses untrusted input, so inherited keys must
+    // not resolve to anything: every one of these must get the actionable
+    // unknown-provider list, never a prototype member masquerading as a
+    // migration message.
+    for (const name of ["constructor", "toString", "hasOwnProperty", "__proto__"]) {
+      await expect(resolveSandbox({ sandboxName: name, trustedEnv: {} })).rejects.toThrow(
+        `Unknown sandbox provider: "${name}"`,
+      );
+    }
+  });
+
   test("explicit different non-nestable provider is not stacked on an active sandbox", async () => {
     const other = makeProvider("fake-other");
     registerSandboxProvider(other);

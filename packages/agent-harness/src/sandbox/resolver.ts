@@ -89,18 +89,42 @@ const ACTIVE_SANDBOX_ENV: Record<string, ActiveSandboxMarker> = {
 
 /**
  * Removed providers and the migration message users see when they still have
- * `--sandbox <name>` or `AGENT_SANDBOX=<name>` configured. Keeping them in one
- * map makes a future removal a one-line change with a consistent, actionable
+ * `--sandbox <name>` or `AGENT_SANDBOX=<name>` configured. This is the single
+ * source of truth: the resolver, `devintern sandbox`, and their tests all read
+ * it, so a future removal is a one-line change with a consistent, actionable
  * error instead of the generic unknown-provider list.
+ *
+ * A `Map` (not an object literal) is deliberate: the lookup key is untrusted
+ * input (`--sandbox <x>` / `AGENT_SANDBOX`), and an object lookup would resolve
+ * inherited prototype members such as `constructor` or `toString` to a truthy
+ * non-string value instead of falling through to the unknown-provider error.
  */
-const REMOVED_SANDBOX_PROVIDERS: Record<string, string> = {
-  srt:
+const REMOVED_SANDBOX_PROVIDERS = new Map<string, string>([
+  [
+    "srt",
     'Sandbox provider "srt" has been removed. Use "nono" for whole-process confinement ' +
-    '(or "docker" for a microVM boundary).',
-  smolvm:
+      '(or "docker" for a microVM boundary). ' +
+      "See https://devintern.com/docs/code/configuration#removed-providers",
+  ],
+  [
+    "smolvm",
     'Sandbox provider "smolvm" has been removed. Use "docker" for a microVM boundary ' +
-    '(or "nono" for local confinement).',
-};
+      '(or "nono" for local confinement). ' +
+      "See https://devintern.com/docs/code/configuration#removed-providers",
+  ],
+]);
+
+/**
+ * Migration message for a retired sandbox provider.
+ *
+ * @param name - Provider name from `--sandbox` or `AGENT_SANDBOX`; untrusted
+ *   input, so only own entries of the removed-provider map can match.
+ * @returns The migration message, or `undefined` when the name is not a
+ *   removed provider (callers then report it as unknown).
+ */
+export function removedSandboxProviderMessage(name: string): string | undefined {
+  return REMOVED_SANDBOX_PROVIDERS.get(name);
+}
 
 /**
  * Name of the sandbox provider already wrapping this process, if any.
@@ -187,7 +211,7 @@ export async function resolveSandbox(
   // Explicit migration path for retired providers: a user who still has
   // `--sandbox <name>` or `AGENT_SANDBOX=<name>` configured must get an
   // actionable message instead of the generic unknown-provider list.
-  const removedMessage = REMOVED_SANDBOX_PROVIDERS[name];
+  const removedMessage = removedSandboxProviderMessage(name);
   if (removedMessage) {
     throw new Error(removedMessage);
   }
