@@ -188,7 +188,7 @@ export const PM_TRACKER_SETUP: Record<string, EnvPromptStep[]> = {
 /** Shared documentation tail appended to the generated `.env` (mirrors `.env.example`). */
 const ENV_COMMON_TAIL = `# Agent Harness Configuration
 # Which AI agent to use: claude-code | opencode | codex | cursor | grok | deepseek
-# (also: antigravity | kimi | qwen | goose | kilo-code | cline | pi)
+# (also: antigravity | kimi | muse | qwen | goose | kilo-code | cline | pi)
 # Legacy: gemini still resolves to antigravity with a deprecation warning
 # Defaults to 'claude-code' if not specified
 AGENT_HARNESS=claude-code

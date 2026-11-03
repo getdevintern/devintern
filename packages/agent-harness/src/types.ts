@@ -126,6 +126,10 @@ export interface HarnessProbe {
   version?: string;
   /** Parsed major version (e.g. `2` for `"2.0.23"`). */
   major?: number;
+  /** Parsed minor version (e.g. `0` for `"2.0.23"`). */
+  minor?: number;
+  /** Parsed patch version (e.g. `23` for `"2.0.23"`). */
+  patch?: number;
 }
 
 /** Complete invocation for a harness run: argv plus spawn-environment overlays. */
@@ -256,6 +260,17 @@ export interface AgentHarness {
    * Use this when the CLI expects the prompt as a flag value.
    */
   readonly promptFlag?: string;
+  /**
+   * Native file-input flag (e.g. Muse Code `--prompt-file`) that accepts a path
+   * holding the full prompt. Used only when the prompt is too large for one
+   * argv entry: {@link buildPromptArgs} writes the prompt to a private temp
+   * file and emits this flag instead of a short "read this file" pointer, so
+   * the CLI receives the complete prompt through its own file surface.
+   *
+   * Falls back to `promptFlag` or a positional argument when the temp file
+   * cannot be written.
+   */
+  readonly promptFileFlag?: string;
   /**
    * End-of-options marker (e.g. `--`) that this CLI honors before positional
    * arguments. When set and a positional prompt starts with `-`,

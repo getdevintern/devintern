@@ -106,6 +106,13 @@ describe("resolveHarness", () => {
     expect(result.path).toBe("/opencode/path");
   });
 
+  test("resolves the Muse binary and MUSE_CLI_PATH override", () => {
+    expect(resolveHarness({ harnessName: "muse" }).path).toBe("muse");
+    process.env.MUSE_CLI_PATH = "/custom/muse";
+    expect(resolveHarness({ harnessName: "muse" }).path).toBe("/custom/muse");
+    delete process.env.MUSE_CLI_PATH;
+  });
+
   test("falls back to CLAUDE_CLI_PATH for non-claude harnesses when harness is env-driven", () => {
     process.env.AGENT_HARNESS = "kimi";
     process.env.CLAUDE_CLI_PATH = "/claude/fallback";

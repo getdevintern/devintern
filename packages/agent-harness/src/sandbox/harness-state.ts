@@ -13,6 +13,7 @@
  */
 
 import { homedir } from "os";
+import { join, resolve } from "path";
 
 /**
  * Harness name → $HOME paths the agent needs read+write access to.
@@ -43,6 +44,9 @@ import { homedir } from "os";
  * - qwen: `~/.qwen` — `settings.json`, `installation_id`, memory
  *   (`QWEN_HOME` overrides the location).
  * - pi: `~/.pi` — `auth.json`, sessions, model store, skills and themes.
+ * - muse: `~/.config/muse` (documented settings/skills location),
+ *   `~/.local/share/muse` (observed sessions and tracing), plus the XDG
+ *   state/cache roots under the same app name for the CLI's bookkeeping.
  *
  * A directory grant covers the lock files inside it, so only top-level files
  * need an explicit file grant (the `.json` special case in the providers).
@@ -64,6 +68,7 @@ export const HARNESS_STATE_PATHS: Record<string, string[]> = {
   kimi: [".kimi"],
   qwen: [".qwen"],
   pi: [".pi"],
+  muse: [".config/muse", ".local/share/muse", ".local/state/muse", ".cache/muse"],
 };
 
 /**
@@ -101,4 +106,36 @@ export function harnessStatePaths(harnessName: string): string[] {
  */
 export function resolveHomeDir(): string {
   return process.env.HOME || homedir();
+}
+
+/**
+ * Absolute path to Muse Code's stored Meta credential.
+ *
+ * Muse's launcher and CLI read the credential from `MUSE_AUTH_PATH` when set,
+ * otherwise `$XDG_CONFIG_HOME/muse/auth.json`, otherwise
+ * `$HOME/.config/muse/auth.json`. The path is needed even when the file does
+ * not exist yet, so a sandbox grant can exclude it before the first write.
+ *
+ * @param env - Environment to read the overrides from (defaults to `process.env`).
+ * @returns The absolute credential path.
+ */
+export function museCredentialPath(env: NodeJS.ProcessEnv = process.env): string {
+  if (env.MUSE_AUTH_PATH) {
+    return resolve(env.MUSE_AUTH_PATH);
+  }
+  const configHome = env.XDG_CONFIG_HOME || join(env.HOME || homedir(), ".config");
+  return resolve(configHome, "muse", "auth.json");
+}
+
+/**
+ * Muse's default credential path, ignoring XDG and `MUSE_AUTH_PATH` overrides.
+ *
+ * The outer sandbox grants `~/.config/muse` from `$HOME`, so the default file
+ * must stay denied even when the CLI is configured to read a different path.
+ *
+ * @param env - Environment to read `$HOME` from (defaults to `process.env`).
+ * @returns The absolute `$HOME/.config/muse/auth.json` path.
+ */
+export function defaultMuseCredentialPath(env: NodeJS.ProcessEnv = process.env): string {
+  return resolve(env.HOME || homedir(), ".config", "muse", "auth.json");
 }

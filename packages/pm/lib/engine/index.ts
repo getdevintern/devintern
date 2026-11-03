@@ -375,7 +375,11 @@ export async function createEngine(
         onStderr: onAgentChunk ? (chunk) => onAgentChunk(chunk, "stderr") : undefined,
       });
 
-      if (result.exitCode !== 0) {
+      // A completed turn is not a successful turn: harnesses such as Muse Code
+      // may report a model-step/time limit through the result instead of (or in
+      // addition to) a non-zero exit code. Treat that as an agent failure so the
+      // engine does not retry a run that ran out of budget or parse partial JSON.
+      if (result.exitCode !== 0 || result.maxTurnsReached === true) {
         const dumpFile = await dumpAgentOutput(label, result, dumpContext);
         return {
           ok: false,
@@ -383,7 +387,10 @@ export async function createEngine(
           error: new EngineError(
             "agent-failed",
             messages.failure,
-            result.stderr.trim() || "Unknown agent error",
+            result.stderr.trim() ||
+              (result.maxTurnsReached === true
+                ? "Agent hit max-turns limit"
+                : "Unknown agent error"),
             dumpFile ?? undefined,
           ),
         };

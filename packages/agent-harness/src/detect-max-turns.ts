@@ -16,6 +16,8 @@ import { isSourceOrDiffLine, outputLines } from "./output-lines.js";
 const MAX_TURNS_PATTERNS = [
   /^(?:error:\s*)?reached max turns(?:\s*\(\d+\))?[.!]?$/i,
   /^(?:error:\s*)?max(?:imum)? turns reached[.!]?$/i,
+  // Muse Code's `--max-model-steps` exhaustion diagnostic (exit 1).
+  /^(?:error:\s*)?this turn reached its step limit[.!]?$/i,
 ] as const;
 
 /**

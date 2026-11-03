@@ -25,6 +25,18 @@ export interface SandboxPolicy {
   /** Extra readable roots beyond the provider's defaults. */
   readablePaths?: string[];
   /**
+   * Absolute paths the agent must not be able to read, even when a broader
+   * grant (a writable state directory, a top-level `$HOME` entry) contains
+   * them. Used for credentials that belong to the harness rather than the
+   * agent, e.g. `~/.config/muse/auth.json` when Muse's own sandbox is
+   * disabled to avoid nested Seatbelt on macOS.
+   *
+   * Providers that cannot express deny-over-allow split the containing
+   * grants instead (nono), and providers with a native deny list pass the
+   * paths through (srt `filesystem.denyRead`).
+   */
+  denyReadPaths?: string[];
+  /**
    * Network policy. "open" keeps egress unrestricted — the agent needs LLM
    * APIs, git push, and package registries, so this is the default. Domain
    * allowlists are enforced only by providers that support them (srt).
