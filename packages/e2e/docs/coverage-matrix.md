@@ -165,7 +165,7 @@ independently of this repository.
 
 ## Delegation
 
-The weekly scout ranks every accepted gap by value and dispatches them with
+The scout ranks every accepted gap by value and dispatches them with
 `devintern worker add` in descending order, using stable
 `e2e-<area>-<slug>` idempotency keys. There is no fixed per-run cap: it rejects
 blocked or low-value candidates instead of padding the batch. It does not edit
