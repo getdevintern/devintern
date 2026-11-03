@@ -392,8 +392,13 @@ Secrets are random per run, the server is bound to loopback only, and
 `WEBHOOK_VALIDATE_IP` stays unset. The fixture seeds a future harness rate-limit
 window before startup so an accepted review delivery remains in flight and the
 dedupe branch is deterministic; this also keeps the asynchronous review pipeline
-away from any provider API. The temporary root (HOME, workspace, output and
-queue database) is removed in `finally`, even when an assertion fails.
+away from any provider API. The fixture also creates the queue database inside
+its temporary root before spawning the server, which is the precondition that
+makes `WebhookQueue` skip its one-time copy of the hardcoded legacy
+`/tmp/devintern-webhooks/queue.db`; the suite asserts that precondition from
+`WebhookServerFixture.preSpawnQueueDb` rather than moving the product-global
+path. The temporary root (HOME, workspace, output and queue database) is removed
+in `finally`, even when an assertion fails.
 
 ## Delivery lifecycle coverage
 

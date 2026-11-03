@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { isolatedEnvironment } from "./environment";
 import { cliPath } from "./fixture-workspace";
 
@@ -37,6 +37,60 @@ export interface WebhookServerFixtureOptions {
    * assert the in-progress dedupe branch deterministically and offline.
    */
   pauseReviewQueue?: boolean;
+}
+
+/**
+ * Create an empty queue database at `dbPath`.
+ *
+ * `WebhookQueue` copies the hardcoded legacy `/tmp/devintern-webhooks/queue.db`
+ * into any missing `WEBHOOK_QUEUE_DB`. Pre-creating the file makes that
+ * migration's `existsSync(dbPath)` guard skip the copy, so a developer's real
+ * pending events can never replay inside this isolated fixture.
+ */
+function ensureQueueDb(dbPath: string): void {
+  mkdirSync(dirname(dbPath), { recursive: true });
+  const db = new Database(dbPath);
+  db.close();
+}
+
+/**
+ * State of `WEBHOOK_QUEUE_DB` immediately before the child process is spawned.
+ *
+ * `WebhookQueue` copies the hardcoded legacy `/tmp/devintern-webhooks/queue.db`
+ * only when the target database does not exist yet
+ * (`migrateLegacyDb`, packages/code/src/lib/state/webhook-queue.ts). This
+ * snapshot lets tests assert that precondition without moving or deleting that
+ * product-global path.
+ */
+export interface QueueDbSnapshot {
+  /** The target database file already existed, so legacy migration is skipped. */
+  exists: boolean;
+  /** The schema did not exist yet: the fixture never seeds event rows. */
+  hasWebhookEventsTable: boolean;
+  /** Rows in `webhook_events`, `0` when the table does not exist. */
+  eventCount: number;
+}
+
+/** Snapshot the queue database without creating or migrating anything. */
+function snapshotQueueDb(dbPath: string): QueueDbSnapshot {
+  if (!existsSync(dbPath)) {
+    return { exists: false, hasWebhookEventsTable: false, eventCount: 0 };
+  }
+  const db = new Database(dbPath, { readonly: true });
+  try {
+    const table = db
+      .query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'webhook_events'")
+      .get();
+    if (!table) {
+      return { exists: true, hasWebhookEventsTable: false, eventCount: 0 };
+    }
+    const row = db.query("SELECT COUNT(*) AS count FROM webhook_events").get() as {
+      count: number;
+    };
+    return { exists: true, hasWebhookEventsTable: true, eventCount: row.count };
+  } finally {
+    db.close();
+  }
 }
 
 /** Write the queue metadata row that makes the restored failover chain exhausted. */
@@ -107,6 +161,8 @@ export class WebhookServerFixture {
     readonly env: Record<string, string>,
     port: number,
     private readonly child: Bun.Subprocess<"ignore", "pipe", "pipe">,
+    /** `WEBHOOK_QUEUE_DB` state captured after setup, before the child spawns. */
+    readonly preSpawnQueueDb: QueueDbSnapshot,
   ) {
     this.baseUrl = `http://127.0.0.1:${port}`;
     this.queueDbPath = env.WEBHOOK_QUEUE_DB;
@@ -127,9 +183,16 @@ export class WebhookServerFixture {
     if (options.gitlabWebhookSigningToken !== undefined) {
       env.GITLAB_WEBHOOK_SIGNING_TOKEN = options.gitlabWebhookSigningToken;
     }
+    // Always pre-create the queue DB, even when the review queue is not paused:
+    // otherwise the child migrates the legacy /tmp queue into this root and
+    // recovers (and processes) whatever pending events it finds.
+    ensureQueueDb(env.WEBHOOK_QUEUE_DB);
     if (options.pauseReviewQueue) {
       seedFutureRateLimit(env.WEBHOOK_QUEUE_DB, env.AGENT_HARNESS ?? "claude-code");
     }
+    // Captured after setup so tests can assert the precondition that makes
+    // `migrateLegacyDb` skip the product-global legacy path.
+    const preSpawnQueueDb = snapshotQueueDb(env.WEBHOOK_QUEUE_DB);
 
     const port = await freePort();
     const child = Bun.spawn(
@@ -151,7 +214,7 @@ export class WebhookServerFixture {
         stderr: "pipe",
       },
     );
-    const fixture = new WebhookServerFixture(root, env, port, child);
+    const fixture = new WebhookServerFixture(root, env, port, child, preSpawnQueueDb);
     try {
       await fixture.waitForHealth();
       return fixture;

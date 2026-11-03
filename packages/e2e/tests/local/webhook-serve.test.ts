@@ -214,7 +214,11 @@ describe.skipIf(!builtCli)("devintern webhook serve", () => {
     const health = (await healthResponse.json()) as {
       status?: string;
       queue?: { pending?: unknown; processing?: unknown; failed?: unknown };
-      harness?: { active?: unknown; chain?: unknown; rateLimitedUntil?: unknown };
+      harness?: {
+        active?: unknown;
+        chain?: unknown;
+        rateLimitedUntil?: Record<string, unknown>;
+      };
     };
     expect(health.status).toBe("ok");
     expect(typeof health.queue?.pending).toBe("number");
@@ -222,7 +226,11 @@ describe.skipIf(!builtCli)("devintern webhook serve", () => {
     expect(typeof health.queue?.failed).toBe("number");
     expect(typeof health.harness?.active).toBe("string");
     expect(typeof health.harness?.chain).toBe("string");
-    expect(health.harness?.rateLimitedUntil).toBeTypeOf("object");
+    // The suite's offline guarantee: the seeded rate-limit window must pause the
+    // review queue, otherwise accepted deliveries reach a real provider API.
+    const rateLimitedUntil = health.harness?.rateLimitedUntil ?? {};
+    expect(rateLimitedUntil["claude-code"]).toBeTypeOf("number");
+    expect(rateLimitedUntil["claude-code"]).toBeGreaterThan(Date.now());
 
     const root = (await (await fetch(`${server.baseUrl}/`)).json()) as WebhookResponse;
     expect(root.service).toContain("Webhook Server");
@@ -309,13 +317,12 @@ describe.skipIf(!builtCli)("devintern webhook serve", () => {
     expect(queueRows(server.queueDbPath).filter((row) => row.id === eventId)).toHaveLength(1);
 
     const rowsBeforeDuplicate = queueRows(server.queueDbPath).length;
+    // With the review queue paused by the seeded rate-limit window the first
+    // run never finishes, so the replay deterministically hits the in-flight
+    // branch rather than the handled-dedupe branch.
     const duplicate = await postJson(`${server.baseUrl}/webhooks/github`, headers, body);
-    if (duplicate.response.status === 200) {
-      expect(duplicate.payload.message).toBe("Duplicate delivery");
-    } else {
-      expect(duplicate.response.status).toBe(409);
-      expect(duplicate.payload.message).toBe("Delivery already in progress");
-    }
+    expect(duplicate.response.status).toBe(409);
+    expect(duplicate.payload.message).toBe("Delivery already in progress");
     expect(queueRows(server.queueDbPath).length).toBe(rowsBeforeDuplicate);
     expect(
       queueRows(server.queueDbPath).filter((row) => row.event_type === "pull_request_review"),
@@ -416,6 +423,70 @@ describe.skipIf(!builtCli)("devintern webhook serve", () => {
       expect(response.payload.error).toBe("GitLab webhooks are not configured");
     } finally {
       await githubOnly.dispose();
+    }
+  }, 60_000);
+
+  test("GitHub route returns 503 when only GitLab secrets are configured", async () => {
+    const gitlabOnly = await WebhookServerFixture.start({
+      gitlabWebhookSecret: randomBytes(32).toString("hex"),
+      gitlabWebhookSigningToken: `whsec_${randomBytes(32).toString("base64")}`,
+      pauseReviewQueue: true,
+    });
+    try {
+      const body = JSON.stringify(reviewPayload());
+      // Forge the HMAC with the empty secret: before the guard, an empty
+      // WEBHOOK_SECRET made this signature (computable by anyone) valid.
+      const forgedReview = await postJson(
+        `${gitlabOnly.baseUrl}/webhooks/github`,
+        githubHeaders("pull_request_review", {
+          deliveryId: randomUUID(),
+          signature: signGithub(body, ""),
+        }),
+        body,
+      );
+      expect(forgedReview.response.status).toBe(503);
+      expect(forgedReview.payload.error).toBe("GitHub webhooks are not configured");
+      expect(forgedReview.payload.eventId).toBeUndefined();
+
+      const pingBody = JSON.stringify({ zen: "forged", hook_id: 1, hook: { events: [] } });
+      const forgedPing = await postJson(
+        `${gitlabOnly.baseUrl}/webhooks/github`,
+        githubHeaders("ping", { signature: signGithub(pingBody, "") }),
+        pingBody,
+      );
+      expect(forgedPing.response.status).toBe(503);
+      expect(forgedPing.payload.error).toBe("GitHub webhooks are not configured");
+
+      // Nothing was accepted, persisted, or enqueued.
+      expect(queueRows(gitlabOnly.queueDbPath)).toHaveLength(0);
+    } finally {
+      await gitlabOnly.dispose();
+    }
+  }, 60_000);
+
+  test("fixture pre-creates the isolated queue DB so the legacy /tmp migration is skipped", async () => {
+    // `WebhookQueue` copies the hardcoded legacy `/tmp/devintern-webhooks/queue.db`
+    // only when WEBHOOK_QUEUE_DB does not exist yet (migrateLegacyDb in
+    // packages/code/src/lib/state/webhook-queue.ts). Assert the fixture's
+    // precondition directly instead of moving that product-global path around:
+    // a pre-existing target DB means a developer's real pending events can
+    // never be imported or replayed inside this root.
+    const isolated = await WebhookServerFixture.start({
+      webhookSecret: randomBytes(32).toString("hex"),
+    });
+    try {
+      expect(isolated.preSpawnQueueDb).toEqual({
+        exists: true,
+        hasWebhookEventsTable: false,
+        eventCount: 0,
+      });
+      // The child keeps using the file inside this fixture's temporary root.
+      expect(isolated.queueDbPath.startsWith(isolated.root)).toBe(true);
+      expect(existsSync(isolated.queueDbPath)).toBe(true);
+      expect(queueRows(isolated.queueDbPath)).toHaveLength(0);
+      expect(isolated.stdout).not.toContain("Recovering");
+    } finally {
+      await isolated.dispose();
     }
   }, 60_000);
 });

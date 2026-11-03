@@ -39,6 +39,17 @@ describe("Webhook Handler", () => {
       expect(result.error).toBe("Missing X-Hub-Signature-256 header");
     });
 
+    test("should reject a signature keyed with an empty secret", () => {
+      const payload = '{"action":"submitted"}';
+      // Anyone can compute HMAC(""), so an unconfigured secret must never verify.
+      const forged =
+        "sha256=" + require("crypto").createHmac("sha256", "").update(payload).digest("hex");
+
+      const result = verifyWebhookSignature(payload, forged, "");
+      expect(result.valid).toBe(false);
+      expect(result.error).toBe("Webhook secret is not configured");
+    });
+
     test("should reject invalid signature format", () => {
       const payload = '{"action":"submitted"}';
       const result = verifyWebhookSignature(payload, "invalid-signature", secret);
