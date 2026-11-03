@@ -16,6 +16,7 @@ import { buildRepoEnv, buildTeamTaskEnv } from "./env";
 import { effectiveRoutingRules, routeTask, routeTaskWithRules, toRoutableTask } from "./router";
 import type { RoutableTask } from "./router";
 import { RUN_ORIGIN_ENV } from "../observability/analytics";
+import { AUTOMATION_ID_ENV } from "../automation/acquirer";
 import { PICKUP_RUN_ID_ENV } from "../state/session-pickup";
 import { actionedSourceKey } from "../task/actioned-state";
 
@@ -67,7 +68,12 @@ export interface WorkspaceTaskAcquirerDeps {
   runTask?: (
     taskKey: string,
     extraArgs: string[],
-    opts: { cwd: string; env: Record<string, string | undefined>; signal?: AbortSignal },
+    opts: {
+      cwd: string;
+      env: Record<string, string | undefined>;
+      signal?: AbortSignal;
+      onChildSpawn?: (pid: number) => void;
+    },
   ) => Promise<TaskExecutionResult>;
   /** Shared admission supervisor. A local instance is created only for focused tests. */
   supervisor?: TaskSupervisor;
@@ -226,6 +232,11 @@ export function createFleetTaskExecutor(
      * resolves from that specific run.
      */
     pickupRunId?: number;
+    /**
+     * Called with the task child pid after it spawns. Used by the injected-task
+     * queue to persist the pid for interrupt recovery.
+     */
+    onChildSpawn?: (pid: number) => void;
   } = {},
 ): (taskKey: string, routable: RoutableTask) => Promise<TaskExecutionResult> {
   const { config, workspaceDir, skips, repoManager } = deps;
@@ -320,6 +331,13 @@ export function createFleetTaskExecutor(
                 actionedSource: deps.actionedSource,
                 pipelineDefaultFile,
               });
+          if (options.runOrigin === "local") {
+            // An injected task is never an automation run. A marker leaked from
+            // the worker's parent env would make the pipeline record a
+            // `scheduled` origin/automationId, which no longer matches the
+            // local scope startup recovery looks runs up by.
+            delete env[AUTOMATION_ID_ENV];
+          }
           const ok = await runTask(options.taskRef ?? taskKey, extraArgs, {
             cwd: worktree,
             env: {
@@ -330,6 +348,7 @@ export function createFleetTaskExecutor(
                 : {}),
             },
             signal,
+            ...(options.onChildSpawn ? { onChildSpawn: options.onChildSpawn } : {}),
           });
 
           // A retry-gate skip is a clean outcome: no run was started, so the

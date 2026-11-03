@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import {
   chmodSync,
   existsSync,
@@ -21,13 +22,14 @@ import {
 import { InjectedTaskStore } from "../src/lib/state/injected-tasks";
 import { RunStore } from "../src/lib/state/run-recorder";
 import { LockManager } from "../src/lib/lock-manager";
-import { workspaceDbPath } from "../src/lib/workspace/paths";
+import { workspaceDbPath, workspaceWorkerStartPath } from "../src/lib/workspace/paths";
 import { loadWorkspaceConfig } from "../src/lib/workspace/config";
-import {
-  recoverOrphanedInjectedTasks,
-  recoverOrphanedWorkspaceRuns,
-} from "../src/lib/workspace/workspace-worker";
+import { recoverOrphanedWorkspaceRuns } from "../src/lib/workspace/workspace-worker";
 import { InjectedTaskAcquirer } from "../src/lib/workspace/injected-acquirer";
+import {
+  readProcessStartTime,
+  recoverOrphanedInjectedTasks,
+} from "../src/lib/workspace/injected-recovery";
 import type { TaskExecutionResult } from "../src/lib/acquirers/task-polling";
 
 const WORKSPACE_TOML = `[workspace]
@@ -299,6 +301,48 @@ describe("runWorkerAdd", () => {
       expect(revived?.status).toBe("pending");
       expect(revived?.message).toBeUndefined();
       expect(revived?.taskFile).toBe(task.taskFile);
+    } finally {
+      after.close();
+    }
+  });
+
+  test("--resume refuses while the interrupted attempt's child is still alive", async () => {
+    const dbPath = workspaceDbPath(dir);
+    const seeded = new InjectedTaskStore(dbPath);
+    const { task } = seeded.enqueue({
+      taskKey: "local-live-child",
+      repo: "backend",
+      title: "Live child",
+      body: "",
+      taskFile: join(dir, "injected", "local-live-child.md"),
+    });
+    seeded.claimNext();
+    seeded.setChildPid(task.id, process.pid, readProcessStartTime(process.pid));
+    seeded.close();
+
+    // A pre-upgrade DB can hold a settled row that still names its child;
+    // re-queueing it would force-remove the worktree that child is using.
+    const raw = new Database(dbPath);
+    try {
+      raw.run("UPDATE injected_tasks SET status = 'failed' WHERE id = ?", [task.id]);
+    } finally {
+      raw.close();
+    }
+
+    const cap = capture();
+    const code = await runWorkerAdd(
+      ["--workspace", configPath, "--resume", "local-live-child", "--json"],
+      cap.options,
+    );
+    expect(code).toBe(1);
+    expect(cap.err.join("\n")).toContain(`pid ${process.pid}`);
+    expect(cap.err.join("\n")).toContain(
+      "If that child finishes successfully, no resume is needed",
+    );
+
+    const after = new InjectedTaskStore(dbPath);
+    try {
+      expect(after.getByTaskKey("local-live-child")?.status).toBe("failed");
     } finally {
       after.close();
     }
@@ -687,7 +731,7 @@ describe("runWorkerAdd", () => {
     // Injected-row recovery runs post-lock in the real startup path.
     const recovery = new InjectedTaskStore(dbPath);
     try {
-      recoverOrphanedInjectedTasks(recovery);
+      await recoverOrphanedInjectedTasks(recovery);
     } finally {
       recovery.close();
     }
@@ -717,6 +761,466 @@ describe("runWorkerAdd", () => {
       drain.close();
     }
     expect(calls).toEqual([enqueued.taskKey]);
+  });
+
+  test("restart recovery auto-resumes a resumable running injected row", async () => {
+    const dbPath = workspaceDbPath(dir);
+    const runs = new RunStore(dbPath);
+    const runId = runs.createRun({
+      origin: "local",
+      taskKey: "local-resumable",
+      tracker: "local",
+      repo: "backend",
+      branch: "feature/local-resumable",
+    });
+    runs.addStage(
+      runId,
+      "implementation",
+      "succeeded",
+      undefined,
+      JSON.stringify({ report: "prior work" }),
+    );
+    runs.finishRun(runId, "failed", "interrupted");
+
+    const seed = new InjectedTaskStore(dbPath);
+    seed.enqueue({
+      taskKey: "local-resumable",
+      repo: "backend",
+      title: "Resumable",
+      body: "",
+      taskFile: join(dir, "injected", "local-resumable.md"),
+    });
+    const claimed = seed.claimNext()!;
+
+    try {
+      await recoverOrphanedInjectedTasks(seed, {
+        runStore: runs,
+        branchExists: () => true,
+      });
+      expect(seed.getById(claimed.id)?.status).toBe("pending");
+      expect(seed.getById(claimed.id)?.autoResumeCount).toBe(1);
+    } finally {
+      seed.close();
+      runs.close();
+    }
+  });
+
+  test("--wait keeps waiting across an automatic resume and reports success", async () => {
+    const dbPath = workspaceDbPath(dir);
+    writeFileSync(
+      join(dir, ".worker.lock"),
+      JSON.stringify({ pid: process.pid, timestamp: new Date().toISOString() }),
+    );
+
+    const worker = (async () => {
+      const seed = new InjectedTaskStore(dbPath);
+      const runs = new RunStore(dbPath);
+      try {
+        let taskKey: string | undefined;
+        for (let attempt = 0; attempt < 300; attempt++) {
+          const row = seed.list().find((task) => task.status === "pending");
+          if (row) {
+            taskKey = row.taskKey;
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        if (!taskKey) throw new Error("timed out waiting for the enqueued row");
+
+        seed.claimNext();
+        const runId = runs.createRun({
+          origin: "local",
+          taskKey,
+          tracker: "local",
+          repo: "backend",
+          branch: `feature/${taskKey}`,
+        });
+        runs.addStage(
+          runId,
+          "implementation",
+          "succeeded",
+          undefined,
+          JSON.stringify({ report: "prior work" }),
+        );
+        runs.finishRun(runId, "failed", "interrupted");
+
+        await recoverOrphanedInjectedTasks(seed, {
+          runStore: runs,
+          branchExists: () => true,
+        });
+
+        // Replacement run settles successfully.
+        const replacement = seed.claimNext();
+        if (!replacement) throw new Error("row was not auto-resumed");
+        seed.finish(replacement.id, "done");
+      } finally {
+        seed.close();
+        runs.close();
+      }
+    })();
+
+    const cap = capture();
+    const code = await runWorkerAdd(
+      ["--workspace", configPath, "--repo", "backend", "--title", "Wait auto", "--wait", "--json"],
+      cap.options,
+    );
+    await worker;
+
+    expect(code).toBe(0);
+    expect(JSON.parse(cap.out[0]!)).toMatchObject({
+      taskKey: "local-wait-auto",
+      status: "done",
+      deduplicated: false,
+    });
+  });
+
+  test("--wait exits non-zero when the replacement run after an automatic resume fails", async () => {
+    const dbPath = workspaceDbPath(dir);
+    writeFileSync(
+      join(dir, ".worker.lock"),
+      JSON.stringify({ pid: process.pid, timestamp: new Date().toISOString() }),
+    );
+
+    const worker = (async () => {
+      const seed = new InjectedTaskStore(dbPath);
+      const runs = new RunStore(dbPath);
+      try {
+        let taskKey: string | undefined;
+        for (let attempt = 0; attempt < 300; attempt++) {
+          const row = seed.list().find((task) => task.status === "pending");
+          if (row) {
+            taskKey = row.taskKey;
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        if (!taskKey) throw new Error("timed out waiting for the enqueued row");
+
+        seed.claimNext();
+        const runId = runs.createRun({
+          origin: "local",
+          taskKey,
+          tracker: "local",
+          repo: "backend",
+          branch: `feature/${taskKey}`,
+        });
+        runs.addStage(
+          runId,
+          "implementation",
+          "succeeded",
+          undefined,
+          JSON.stringify({ report: "prior work" }),
+        );
+        runs.finishRun(runId, "failed", "interrupted");
+
+        await recoverOrphanedInjectedTasks(seed, {
+          runStore: runs,
+          branchExists: () => true,
+        });
+
+        const replacement = seed.claimNext();
+        if (!replacement) throw new Error("row was not auto-resumed");
+        seed.finish(replacement.id, "failed", "replacement run failed");
+      } finally {
+        seed.close();
+        runs.close();
+      }
+    })();
+
+    const cap = capture();
+    const code = await runWorkerAdd(
+      [
+        "--workspace",
+        configPath,
+        "--repo",
+        "backend",
+        "--title",
+        "Wait auto fail",
+        "--wait",
+        "--json",
+      ],
+      cap.options,
+    );
+    await worker;
+
+    expect(code).toBe(1);
+    expect(JSON.parse(cap.out[0]!)).toMatchObject({
+      taskKey: "local-wait-auto-fail",
+      status: "failed",
+      deduplicated: false,
+    });
+  });
+
+  test("--wait keeps waiting while a running task's worker restarts", async () => {
+    const dbPath = workspaceDbPath(dir);
+    const lockPath = join(dir, ".worker.lock");
+    const writeLock = () =>
+      writeFileSync(
+        lockPath,
+        JSON.stringify({ pid: process.pid, timestamp: new Date().toISOString() }),
+      );
+    writeLock();
+
+    const companion = (async () => {
+      const seed = new InjectedTaskStore(dbPath);
+      try {
+        let pending: { id: number } | undefined;
+        for (let attempt = 0; attempt < 300; attempt++) {
+          pending = seed.list().find((task) => task.status === "pending");
+          if (pending) break;
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        if (!pending) throw new Error("timed out waiting for the enqueued row");
+
+        const claimed = seed.claimNext()!;
+        // Simulate the restart gap: the worker lock disappears while the task
+        // is still claimed, then a replacement worker takes over.
+        rmSync(lockPath, { force: true });
+        await new Promise((resolve) => setTimeout(resolve, 1_300));
+        writeLock();
+        seed.finish(claimed.id, "done");
+      } finally {
+        seed.close();
+      }
+    })();
+
+    const cap = capture();
+    const code = await runWorkerAdd(
+      [
+        "--workspace",
+        configPath,
+        "--repo",
+        "backend",
+        "--title",
+        "Wait restart",
+        "--wait",
+        "--json",
+      ],
+      cap.options,
+    );
+    await companion;
+
+    expect(code).toBe(0);
+    expect(JSON.parse(cap.out[0]!)).toMatchObject({
+      taskKey: "local-wait-restart",
+      status: "done",
+    });
+    expect(cap.err.join("\n")).toContain("may auto-resume when the worker restarts");
+  });
+
+  test("--wait does not count a live replacement's pre-lock startup against the grace", async () => {
+    const dbPath = workspaceDbPath(dir);
+    const lockPath = join(dir, ".worker.lock");
+    const writeLock = () =>
+      writeFileSync(
+        lockPath,
+        JSON.stringify({ pid: process.pid, timestamp: new Date().toISOString() }),
+      );
+    writeLock();
+
+    const companion = (async () => {
+      const seed = new InjectedTaskStore(dbPath);
+      try {
+        let pending: { id: number } | undefined;
+        for (let attempt = 0; attempt < 300; attempt++) {
+          pending = seed.list().find((task) => task.status === "pending");
+          if (pending) break;
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        if (!pending) throw new Error("timed out waiting for the enqueued row");
+
+        const claimed = seed.claimNext()!;
+        rmSync(lockPath, { force: true });
+        // The replacement process is alive but still doing pre-lock startup
+        // (orphan recovery, worktree sweep, push probes) for longer than the
+        // test's restart grace. Its marker must hold the grace open.
+        writeFileSync(
+          workspaceWorkerStartPath(dir),
+          JSON.stringify({ pid: process.pid, startedAt: Date.now() }),
+        );
+        await new Promise((resolve) => setTimeout(resolve, 1_300));
+        writeLock();
+        seed.finish(claimed.id, "done");
+      } finally {
+        seed.close();
+      }
+    })();
+
+    const cap = capture();
+    const code = await runWorkerAdd(
+      [
+        "--workspace",
+        configPath,
+        "--repo",
+        "backend",
+        "--title",
+        "Wait startup",
+        "--wait",
+        "--json",
+      ],
+      { ...cap.options, restartGraceMs: 300 },
+    );
+    await companion;
+
+    expect(code).toBe(0);
+    expect(JSON.parse(cap.out[0]!)).toMatchObject({
+      taskKey: "local-wait-startup",
+      status: "done",
+    });
+  });
+
+  test("--wait keeps a pending task during a live replacement's pre-lock startup", async () => {
+    const dbPath = workspaceDbPath(dir);
+    const lockPath = join(dir, ".worker.lock");
+    const writeLock = () =>
+      writeFileSync(
+        lockPath,
+        JSON.stringify({ pid: process.pid, timestamp: new Date().toISOString() }),
+      );
+    writeLock();
+
+    const companion = (async () => {
+      const seed = new InjectedTaskStore(dbPath);
+      try {
+        let pending: { id: number } | undefined;
+        for (let attempt = 0; attempt < 300; attempt++) {
+          pending = seed.list().find((task) => task.status === "pending");
+          if (pending) break;
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        if (!pending) throw new Error("timed out waiting for the enqueued row");
+
+        // The previous worker died before claiming the queued row; the
+        // replacement is alive but still doing pre-lock startup for longer than
+        // the test's restart grace. `--wait` must keep waiting (the row will be
+        // claimed) instead of reporting a transient restart as a failure.
+        rmSync(lockPath, { force: true });
+        writeFileSync(
+          workspaceWorkerStartPath(dir),
+          JSON.stringify({ pid: process.pid, startedAt: Date.now() }),
+        );
+        await new Promise((resolve) => setTimeout(resolve, 1_300));
+        writeLock();
+        const claimed = seed.claimNext()!;
+        seed.finish(claimed.id, "done");
+      } finally {
+        seed.close();
+      }
+    })();
+
+    const cap = capture();
+    const code = await runWorkerAdd(
+      [
+        "--workspace",
+        configPath,
+        "--repo",
+        "backend",
+        "--title",
+        "Wait pending startup",
+        "--wait",
+        "--json",
+      ],
+      { ...cap.options, restartGraceMs: 300 },
+    );
+    await companion;
+
+    expect(code).toBe(0);
+    expect(JSON.parse(cap.out[0]!)).toMatchObject({
+      taskKey: "local-wait-pending-startup",
+      status: "done",
+    });
+    expect(cap.err.join("\n")).not.toContain("The worker stopped before the task finished");
+  });
+
+  test("--wait still fails fast on a pending task when no replacement is starting", async () => {
+    const dbPath = workspaceDbPath(dir);
+    writeFileSync(
+      join(dir, ".worker.lock"),
+      JSON.stringify({ pid: process.pid, timestamp: new Date().toISOString() }),
+    );
+
+    const companion = (async () => {
+      const seed = new InjectedTaskStore(dbPath);
+      try {
+        for (let attempt = 0; attempt < 300; attempt++) {
+          if (seed.hasPending()) break;
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        // The worker dies with the row still queued and never comes back.
+        rmSync(join(dir, ".worker.lock"), { force: true });
+      } finally {
+        seed.close();
+      }
+    })();
+
+    const cap = capture();
+    const code = await runWorkerAdd(
+      [
+        "--workspace",
+        configPath,
+        "--repo",
+        "backend",
+        "--title",
+        "Queued dead",
+        "--wait",
+        "--json",
+      ],
+      { ...cap.options, restartGraceMs: 300 },
+    );
+    await companion;
+
+    expect(code).toBe(1);
+    expect(cap.err.join("\n")).toContain("The worker stopped before the task finished");
+  });
+
+  test("--wait fails after the restart grace when the worker never returns", async () => {
+    const dbPath = workspaceDbPath(dir);
+    const lockPath = join(dir, ".worker.lock");
+    writeFileSync(
+      lockPath,
+      JSON.stringify({ pid: process.pid, timestamp: new Date().toISOString() }),
+    );
+
+    const companion = (async () => {
+      const seed = new InjectedTaskStore(dbPath);
+      try {
+        let pending: { id: number } | undefined;
+        for (let attempt = 0; attempt < 300; attempt++) {
+          pending = seed.list().find((task) => task.status === "pending");
+          if (pending) break;
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        if (!pending) throw new Error("timed out waiting for the enqueued row");
+
+        seed.claimNext();
+        // The worker dies permanently: the row stays `running` and no
+        // replacement process ever takes the lock back.
+        rmSync(lockPath, { force: true });
+      } finally {
+        seed.close();
+      }
+    })();
+
+    const cap = capture();
+    const code = await runWorkerAdd(
+      [
+        "--workspace",
+        configPath,
+        "--repo",
+        "backend",
+        "--title",
+        "Dead worker",
+        "--wait",
+        "--json",
+      ],
+      { ...cap.options, restartGraceMs: 1_000 },
+    );
+    await companion;
+
+    expect(code).toBe(1);
+    expect(cap.out).toHaveLength(1);
+    expect(JSON.parse(cap.out[0]!).error).toContain("did not restart within 1s");
+    expect(cap.err.join("\n")).toContain("did not restart within 1s");
   });
 
   test("reads the body from stdin for --body-file -", async () => {

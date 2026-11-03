@@ -39,7 +39,7 @@ Open the failed run and choose **Retry**. The worker queues a fresh attempt usin
 
 Retry after correcting the underlying problem, for example missing credentials, unclear task details, or a temporary agent failure. The dashboard prevents duplicate retries while another attempt is already queued or running.
 
-Ad-hoc tasks created with `devintern worker add` show **Re-queue task** instead: the queue row is put back as `pending` under its existing key, so the worker resumes the interrupted attempt's branch and report rather than opening a second branch and pull request. If the row was already pruned (30 days by default) or is still queued/running, the run detail explains why it cannot be re-queued and points at `devintern worker add`.
+Ad-hoc tasks created with `devintern worker add` show **Re-queue task** instead: the queue row is put back as `pending` under its existing key, so the worker resumes the interrupted attempt's branch and report rather than opening a second branch and pull request. The worker also auto-resumes an interrupted ad-hoc task once at startup when its prior local run recorded a resumable branch with either an implementation report or commits ahead of the repo's base (unless the interrupted attempt's child process is still alive; the row then stays `running` and is re-checked at the next startup, and re-queueing is refused with the pid to stop first); **Re-queue task** remains available for rows that were not resumable or whose automatic-resume budget is exhausted. If the row was already pruned (30 days by default) or is still queued/running, the run detail explains why it cannot be re-queued and points at `devintern worker add`.
 
 ## Run an automation now
 

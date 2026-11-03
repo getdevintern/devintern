@@ -23,8 +23,25 @@ import { unlinkSync } from "fs";
 
 import { prepareQueueDbDirectory } from "./webhook-queue";
 import { configureSqliteConnection } from "./sqlite";
+import type { RunRecord } from "./run-recorder";
 
 export type InjectedTaskStatus = "pending" | "running" | "done" | "failed";
+
+/**
+ * Whether a run finished successfully for the row's current claim.
+ *
+ * A run that started before the row was claimed predates an explicit
+ * `worker add --resume` re-queue; treating it as the current attempt's result
+ * would silently drop the operator's re-run.
+ */
+export function succeededRunCoversClaim(
+  run: Pick<RunRecord, "status" | "startedAt"> | undefined,
+  claimStartedAt: number | undefined,
+): boolean {
+  return (
+    run?.status === "succeeded" && claimStartedAt !== undefined && run.startedAt >= claimStartedAt
+  );
+}
 
 /** One ad-hoc task enqueued for a workspace repo. */
 export interface InjectedTask {
@@ -42,6 +59,25 @@ export interface InjectedTask {
   actor: string;
   status: InjectedTaskStatus;
   message?: string;
+  /**
+   * How many times startup recovery has automatically resumed this row after a
+   * worker restart. Persisted so a restart loop cannot re-run the task forever;
+   * manual `worker add --resume` / dashboard re-queue is not counted.
+   */
+  autoResumeCount: number;
+  /**
+   * Pid of the detached task child most recently spawned for this row. Persisted
+   * so startup recovery can refuse to resume while a hard-killed worker's child
+   * is still alive and could race the replacement run in the same branch.
+   */
+  childPid?: number;
+  /**
+   * When that child was recorded (epoch ms). A recorded pid outlives the process
+   * it names — the OS recycles pids and a reboot restarts the table — so the
+   * probe compares this with the live process's start time and treats a
+   * mismatched (recycled) pid as dead.
+   */
+  childStartedAt?: number;
   createdAt: number;
   startedAt?: number;
   finishedAt?: number;
@@ -58,6 +94,9 @@ interface InjectedTaskRow {
   actor: string;
   status: string;
   message: string | null;
+  auto_resume_count: number | null;
+  child_pid: number | null;
+  child_started_at: number | null;
   created_at: number;
   started_at: number | null;
   finished_at: number | null;
@@ -75,10 +114,62 @@ function rowToInjectedTask(row: InjectedTaskRow): InjectedTask {
     actor: row.actor,
     status: row.status as InjectedTaskStatus,
     message: row.message ?? undefined,
+    autoResumeCount: row.auto_resume_count ?? 0,
+    childPid: row.child_pid ?? undefined,
+    childStartedAt: row.child_started_at ?? undefined,
     createdAt: row.created_at,
     startedAt: row.started_at ?? undefined,
     finishedAt: row.finished_at ?? undefined,
   };
+}
+
+/**
+ * Add the durable auto-resume column to a legacy table.
+ *
+ * The injected-task DB is shared by the worker, the dashboard, and CLI
+ * processes, so two first-upgrades can both observe the column missing and
+ * race the `ALTER TABLE`. The loser sees SQLite's duplicate-column error,
+ * which means the migration already applied and is safe to ignore; any other
+ * failure (locked/corrupt DB) must still surface instead of leaving the store
+ * half-migrated.
+ */
+export function addAutoResumeColumn(db: Database): void {
+  try {
+    db.run("ALTER TABLE injected_tasks ADD COLUMN auto_resume_count INTEGER NOT NULL DEFAULT 0");
+  } catch (error) {
+    if (!/duplicate column name/i.test((error as Error).message)) {
+      throw error;
+    }
+  }
+}
+
+/**
+ * Add the durable child-pid column to a legacy table. Same race rule as
+ * {@link addAutoResumeColumn}: a concurrent opener's duplicate-column error
+ * means the migration already applied.
+ */
+export function addChildPidColumn(db: Database): void {
+  try {
+    db.run("ALTER TABLE injected_tasks ADD COLUMN child_pid INTEGER");
+  } catch (error) {
+    if (!/duplicate column name/i.test((error as Error).message)) {
+      throw error;
+    }
+  }
+}
+
+/**
+ * Add the child start-time column to a legacy table. Same race rule as
+ * {@link addAutoResumeColumn}.
+ */
+export function addChildStartedAtColumn(db: Database): void {
+  try {
+    db.run("ALTER TABLE injected_tasks ADD COLUMN child_started_at INTEGER");
+  } catch (error) {
+    if (!/duplicate column name/i.test((error as Error).message)) {
+      throw error;
+    }
+  }
 }
 
 export interface EnqueueInjectedTaskInput {
@@ -139,11 +230,28 @@ export class InjectedTaskStore {
         actor TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT 'pending',
         message TEXT,
+        auto_resume_count INTEGER NOT NULL DEFAULT 0,
+        child_pid INTEGER,
+        child_started_at INTEGER,
         created_at INTEGER NOT NULL,
         started_at INTEGER,
         finished_at INTEGER
       )
     `);
+    // Older databases predate the durable auto-resume budget; add the column
+    // in place instead of requiring a migration step.
+    const columns = this.db.query("PRAGMA table_info(injected_tasks)").all() as Array<{
+      name: string;
+    }>;
+    if (!columns.some((column) => column.name === "auto_resume_count")) {
+      addAutoResumeColumn(this.db);
+    }
+    if (!columns.some((column) => column.name === "child_pid")) {
+      addChildPidColumn(this.db);
+    }
+    if (!columns.some((column) => column.name === "child_started_at")) {
+      addChildStartedAtColumn(this.db);
+    }
     this.db.run("CREATE INDEX IF NOT EXISTS idx_injected_tasks_status ON injected_tasks(status)");
     this.db.run(
       "CREATE INDEX IF NOT EXISTS idx_injected_tasks_finished_at ON injected_tasks(finished_at)",
@@ -294,11 +402,25 @@ export class InjectedTaskStore {
     return row ? rowToInjectedTask(row) : null;
   }
 
+  /**
+   * Record the detached child process spawned for a claimed row. A hard-killed
+   * worker leaves this pid behind; startup recovery checks it (and its recorded
+   * start time, to detect a recycled pid) before resuming.
+   */
+  setChildPid(id: number, pid: number, startedAt: number = Date.now()): void {
+    this.ensureDb().run(
+      `UPDATE injected_tasks
+       SET child_pid = ?, child_started_at = ?
+       WHERE id = ? AND status = 'running'`,
+      [pid, startedAt, id],
+    );
+  }
+
   /** Mark a claimed task finished (`done` or `failed` with an optional message). */
   finish(id: number, outcome: "done" | "failed", message?: string): void {
     this.ensureDb().run(
       `UPDATE injected_tasks
-       SET status = ?, message = ?, finished_at = ?
+       SET status = ?, message = ?, finished_at = ?, child_pid = NULL, child_started_at = NULL
        WHERE id = ? AND status = 'running'`,
       [outcome, message ?? null, Date.now(), id],
     );
@@ -308,7 +430,7 @@ export class InjectedTaskStore {
   requeue(id: number): void {
     this.ensureDb().run(
       `UPDATE injected_tasks
-       SET status = 'pending', started_at = NULL
+       SET status = 'pending', started_at = NULL, child_pid = NULL, child_started_at = NULL
        WHERE id = ? AND status = 'running'`,
       [id],
     );
@@ -323,12 +445,22 @@ export class InjectedTaskStore {
    * attempt's branch and implementation report. A row that is already
    * pending/running (or disappeared) is left alone: `null` tells the caller the
    * retry did not start.
+   *
+   * An explicit retry also resets the automatic-resume budget: the operator has
+   * intervened, so a later interruption may be resumed automatically again.
+   *
+   * The recorded child pid/start time are intentionally left in place: callers
+   * must refuse the re-queue while that process is alive, because the retried
+   * run would force-remove the worktree the surviving agent is working in. A
+   * re-queue that passes the liveness check overwrites both fields when the next
+   * child spawns.
    */
   requeueSettled(taskKey: string): InjectedTask | null {
     const row = this.ensureDb()
       .query(
         `UPDATE injected_tasks
-         SET status = 'pending', started_at = NULL, finished_at = NULL, message = NULL
+         SET status = 'pending', started_at = NULL, finished_at = NULL, message = NULL,
+             auto_resume_count = 0
          WHERE task_key = ? AND status IN ('done', 'failed')
          RETURNING *`,
       )
@@ -336,16 +468,75 @@ export class InjectedTaskStore {
     return row ? rowToInjectedTask(row) : null;
   }
 
+  /** Every row currently claimed as `running` (startup auto-resume scan). */
+  listRunning(): InjectedTask[] {
+    const rows = this.ensureDb()
+      .query("SELECT * FROM injected_tasks WHERE status = 'running' ORDER BY id ASC")
+      .all() as InjectedTaskRow[];
+    return rows.map(rowToInjectedTask);
+  }
+
   /**
-   * Settle every row left `running` by a dead worker (startup orphan
-   * recovery). Rows are failed rather than requeued so an interrupted ad-hoc
-   * task is not silently re-run on every restart. Returns the settled rows.
+   * Return an interrupted `running` row to `pending` when its automatic-resume
+   * budget allows, otherwise settle it `failed` with an actionable message.
+   *
+   * The counter is durable on the row, so a restart loop cannot re-run the same
+   * task forever. `requeueSettled` (manual `--resume`) does not consume the
+   * budget and resets it; this method is the only automatic consumer.
+   *
+   * @returns The updated row and whether it was resumed; `null` when the row is
+   *   no longer running (a concurrent settle won).
+   */
+  autoResume(
+    id: number,
+    options: { limit: number; exhaustedMessage: string; now?: number },
+  ): { task: InjectedTask; resumed: boolean } | null {
+    const db = this.ensureDb();
+    const now = options.now ?? Date.now();
+    const row = db
+      .query("SELECT * FROM injected_tasks WHERE id = ?")
+      .get(id) as InjectedTaskRow | null;
+    if (!row || row.status !== "running") return null;
+
+    if ((row.auto_resume_count ?? 0) >= options.limit) {
+      const failed = db
+        .query(
+          `UPDATE injected_tasks
+           SET status = 'failed', message = ?, finished_at = ?, child_pid = NULL,
+               child_started_at = NULL
+           WHERE id = ? AND status = 'running'
+           RETURNING *`,
+        )
+        .get(options.exhaustedMessage, now, id) as InjectedTaskRow | null;
+      return failed ? { task: rowToInjectedTask(failed), resumed: false } : null;
+    }
+
+    const resumed = db
+      .query(
+        `UPDATE injected_tasks
+         SET status = 'pending', started_at = NULL, finished_at = NULL, message = NULL,
+             auto_resume_count = auto_resume_count + 1, child_pid = NULL, child_started_at = NULL
+         WHERE id = ? AND status = 'running'
+         RETURNING *`,
+      )
+      .get(id) as InjectedTaskRow | null;
+    return resumed ? { task: rowToInjectedTask(resumed), resumed: true } : null;
+  }
+
+  /**
+   * Settle every row left `running` by a dead worker (bulk explicit failure).
+   *
+   * Startup recovery uses {@link listRunning} + {@link autoResume} instead so a
+   * row with a resumable session can return to `pending` under a durable
+   * budget. This helper remains for callers that deliberately want the old
+   * settle-everything behavior. Returns the settled rows.
    */
   failRunning(message: string): InjectedTask[] {
     const rows = this.ensureDb()
       .query(
         `UPDATE injected_tasks
-         SET status = 'failed', message = ?, finished_at = ?
+         SET status = 'failed', message = ?, finished_at = ?, child_pid = NULL,
+             child_started_at = NULL
          WHERE status = 'running'
          RETURNING *`,
       )

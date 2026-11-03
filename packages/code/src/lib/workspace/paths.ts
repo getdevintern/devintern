@@ -1,4 +1,4 @@
-import { chmodSync, copyFileSync, existsSync, mkdirSync } from "fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
 
@@ -69,6 +69,52 @@ export function workspaceDbPath(workspaceDir: string = resolveWorkspaceDir()): s
  */
 export function automationsDir(workspaceDir: string = resolveWorkspaceDir()): string {
   return join(workspaceDir, "automations");
+}
+
+/**
+ * Path of the worker's early startup marker. The process writes this as soon
+ * as it resolves its workspace, before the slow pre-lock startup work (orphan
+ * recovery, worktree sweep, push probes), so `worker add --wait` can tell a
+ * replacement worker is starting rather than permanently gone.
+ */
+export function workspaceWorkerStartPath(workspaceDir: string = resolveWorkspaceDir()): string {
+  return join(workspaceDir, ".worker.starting");
+}
+
+/** Shape of the worker's early startup marker. */
+export interface WorkerStartMarker {
+  pid: number;
+  startedAt: number;
+}
+
+/**
+ * Write the early startup marker. Failure is only a warning: the marker is an
+ * optimization for `--wait`, never a startup requirement.
+ */
+export function writeWorkerStartMarker(workspaceDir: string, pid: number = process.pid): void {
+  try {
+    writeFileSync(
+      workspaceWorkerStartPath(workspaceDir),
+      JSON.stringify({ pid, startedAt: Date.now() }),
+      { encoding: "utf8", mode: 0o600 },
+    );
+  } catch (error) {
+    console.warn(`⚠️  Could not write the worker startup marker: ${(error as Error).message}`);
+  }
+}
+
+/** Read the startup marker, or null when absent/unreadable/malformed. */
+export function readWorkerStartMarker(workspaceDir: string): WorkerStartMarker | null {
+  try {
+    const raw = JSON.parse(readFileSync(workspaceWorkerStartPath(workspaceDir), "utf8")) as {
+      pid?: unknown;
+      startedAt?: unknown;
+    };
+    if (typeof raw.pid !== "number" || typeof raw.startedAt !== "number") return null;
+    return { pid: raw.pid, startedAt: raw.startedAt };
+  } catch {
+    return null;
+  }
 }
 
 /**

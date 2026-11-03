@@ -28,12 +28,17 @@ import { RunStore } from "../state/run-recorder";
 import type { RunRecord } from "../state/run-recorder";
 import { applyWorkspaceProcessEnv } from "./env";
 import {
+  injectedChildStillRunningMessage,
+  interruptedChildStillRunning,
+} from "./injected-recovery";
+import {
   injectedTasksDir,
   resolveWorkspaceDir,
   workspaceCodeStateDir,
   workspaceConfigPath,
   workspaceDbPath,
   workspaceStateDir,
+  readWorkerStartMarker,
 } from "./paths";
 
 /** Maximum body size accepted (matches the run recorder's description cap). */
@@ -53,6 +58,17 @@ const WAIT_POLL_INTERVAL_MS = 1_000;
  */
 export const DEFAULT_WAIT_TIMEOUT_SECONDS = 6 * 60 * 60;
 
+/**
+ * How long `--wait` tolerates a missing worker for an already-claimed task.
+ *
+ * A claimed (`running`) row is mid-run, so the worker may have just been
+ * restarted and startup recovery can auto-resume it. A worker that never
+ * returns (crash without a restart, or a permanently stopped daemon) must
+ * still fail in bounded time instead of waiting out the six-hour overall
+ * deadline.
+ */
+export const WORKER_RESTART_GRACE_MS = 5 * 60 * 1_000;
+
 export interface WorkerAddOptions {
   /** Human-readable status sink (defaults to stdout). */
   log?: (message: string) => void;
@@ -60,6 +76,8 @@ export interface WorkerAddOptions {
   error?: (message: string) => void;
   /** Reads stdin for `--body-file -`; injectable for tests. */
   readStdin?: () => string;
+  /** Override {@link WORKER_RESTART_GRACE_MS}; injectable for tests. */
+  restartGraceMs?: number;
 }
 
 export interface AddOptions {
@@ -451,6 +469,7 @@ export async function runWorkerAdd(
       wait: add.wait,
       json: add.json,
       waitTimeoutSeconds: add.waitTimeoutSeconds,
+      restartGraceMs: options.restartGraceMs,
     };
     if (add.resume) {
       return await resumeTask(add.resume, context);
@@ -518,6 +537,8 @@ interface TaskContext {
   json: boolean;
   /** `--wait` deadline in seconds; `0` = no limit, undefined = the default. */
   waitTimeoutSeconds?: number;
+  /** How long `--wait` tolerates a missing worker; defaults to the constant. */
+  restartGraceMs?: number;
   store: InjectedTaskStore;
   selectedDir: string;
 }
@@ -679,6 +700,14 @@ async function resumeTask(
     return await waitForTask(task.id, { ...ctx, deduplicated: true, taskKey });
   }
 
+  // A hard-killed worker's detached child may still be running this attempt in
+  // the same worktree. Re-queueing would force-remove that worktree underneath
+  // it, so refuse until the operator confirms the process is gone.
+  if (interruptedChildStillRunning(task)) {
+    ctx.error(`❌ ${injectedChildStillRunningMessage(taskKey, task.childPid!)}`);
+    return 1;
+  }
+
   const revived = store.requeueSettled(taskKey);
   if (!revived) {
     ctx.error(`❌ ${taskKey} could not be re-queued; it moved on. Reload and try again.`);
@@ -729,6 +758,16 @@ function failWait(
   return 1;
 }
 
+/** Whether a process still exists (EPERM means it exists but is not signalable). */
+function isPidRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
 /**
  * Poll a task row until it settles and emit exactly one result. Fails fast when
  * the worker disappears, and again when the `--wait-timeout` deadline elapses
@@ -744,6 +783,8 @@ async function waitForTask(
   ctx.status(`⏳ Waiting for task #${id} to finish (Ctrl-C to detach)...`);
   const timeoutSeconds = ctx.waitTimeoutSeconds ?? DEFAULT_WAIT_TIMEOUT_SECONDS;
   const deadline = timeoutSeconds > 0 ? Date.now() + timeoutSeconds * 1_000 : Infinity;
+  const restartGraceMs = ctx.restartGraceMs ?? WORKER_RESTART_GRACE_MS;
+  let workerGapSince: number | null = null;
   for (;;) {
     const task = ctx.store.getById(id);
     if (!task) {
@@ -769,15 +810,59 @@ async function waitForTask(
     const workerRunning =
       LockManager.readLockStatus(ctx.selectedDir, ".worker.lock", { plainDir: true })?.running ??
       false;
-    if (!workerRunning) {
-      return failWait(
-        ctx,
-        { id, repo: task.repo, error: "The worker stopped before the task finished." },
-        [
-          "❌ The worker stopped before the task finished; it remains queued/failed.",
-          "   Start the worker again and inspect the dashboard run history.",
-        ],
-      );
+    if (workerRunning) {
+      // A replacement worker came back within the grace: a later restart gets
+      // its own grace window rather than inheriting an old one.
+      workerGapSince = null;
+    } else {
+      const now = Date.now();
+      // The replacement worker writes this marker before its slow pre-lock
+      // startup (orphan recovery, worktree sweep, push probes), so a live
+      // replacement is evidence the worker is coming back even while the lock
+      // is still absent. Only a marker written after this task was claimed can
+      // belong to the replacement; an older marker is from the dead worker and
+      // a recycled pid must not be mistaken for a new process.
+      const startingMarker = readWorkerStartMarker(ctx.selectedDir);
+      const replacementStarting =
+        startingMarker !== null &&
+        isPidRunning(startingMarker.pid) &&
+        (task.startedAt === undefined || startingMarker.startedAt >= task.startedAt);
+      if (replacementStarting) {
+        // Restart grace measures from evidence of a new worker, not from the
+        // lock disappearing while that process is still in startup.
+        workerGapSince = now;
+      } else if (workerGapSince === null) {
+        workerGapSince = now;
+        if (task.status === "running") {
+          ctx.status(
+            `ℹ️  No worker is running; task #${id} is still running and may auto-resume when ` +
+              "the worker restarts. Still waiting within the restart grace period.",
+          );
+        }
+      }
+      if (!replacementStarting && now - workerGapSince >= restartGraceMs) {
+        const graceSeconds = Math.max(1, Math.round(restartGraceMs / 1_000));
+        const error =
+          `The worker stopped and did not restart within ${graceSeconds}s while task #${id} ` +
+          "was running.";
+        return failWait(ctx, { id, repo: task.repo, error }, [
+          `❌ ${error}`,
+          "   Start the worker again to auto-resume the task, or inspect the dashboard run history.",
+        ]);
+      }
+      if (task.status !== "running" && !replacementStarting) {
+        // A `pending` row has nobody to claim it, so fail fast as before. While
+        // a replacement is starting it will be claimed, so it waits through the
+        // same bounded grace instead of reporting a transient restart failure.
+        return failWait(
+          ctx,
+          { id, repo: task.repo, error: "The worker stopped before the task finished." },
+          [
+            "❌ The worker stopped before the task finished; it remains queued/failed.",
+            "   Start the worker again and inspect the dashboard run history.",
+          ],
+        );
+      }
     }
     await new Promise((resolveWait) => setTimeout(resolveWait, WAIT_POLL_INTERVAL_MS));
   }
@@ -814,6 +899,7 @@ function reportPrunedTask(
     actor: "",
     status: run.status === "succeeded" ? "done" : "failed",
     message: run.outcomeReason,
+    autoResumeCount: 0,
     createdAt: run.startedAt,
   };
   if (!ctx.json) {

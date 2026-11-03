@@ -337,16 +337,53 @@ Behavior to expect:
   `worker add` says so — and `--wait` refuses to block. Settled rows are pruned
   after 30 days by default; set `WORKER_INJECTED_TASK_RETENTION_DAYS` to change
   that window.
-- **Interrupted tasks are not auto-restarted.** A task that was mid-run when the
-  worker died is marked `failed` at the next startup, and its run records why.
-  Re-queue it explicitly with `--resume <taskKey>` (or the dashboard's
-  **Re-queue task**): the row keeps its key, so the retry targets the same
+- **Interrupted tasks are auto-resumed when it is safe.** A task left mid-run
+  by a worker restart is inspected at the next startup. When its latest local
+  run recorded a branch that still exists and the branch carries either an
+  implementation report or commits ahead of the repo's base, the row returns to
+  `pending` and the next run inherits that branch and report through session
+  pickup; `--wait` keeps waiting across the restart and exits with the
+  replacement run's outcome. Automatic resume is bounded to one per row by
+  default — set `WORKER_INJECTED_AUTO_RESUME_LIMIT` to change it (`0` disables
+  it) — so a restart loop cannot re-run the task forever. When there is no safe
+  state (no prior run, no recorded branch, no report and no landed commits, or
+  the branch is gone), the row settles `failed` with
+  `worker restarted while this task was running` instead of silently starting a
+  fresh run. A row whose latest run had already succeeded (the worker died
+  before settling the row) settles `done` instead, so `--wait` reports the
+  successful PR and a later `--resume` does not start a second run. When the
+  bound is exhausted the row fails with an actionable
+  `--resume` message. Re-queue either case explicitly with
+  `--resume <taskKey>` (or the dashboard's **Re-queue task**), which resets the
+  automatic budget: the row keeps its key, so the retry targets the same
   `feature/local-<slug>` branch and session pickup hands the prior attempt's
   report to the agent — when it recorded one — instead of starting a second
   branch and PR. A task whose prior attempt already succeeded has no interrupted
   work to inherit, so resuming it starts a fresh attempt rather than reusing the
   prior branch and report. A task that never started is still `pending` and needs
   no resume.
+- **A graceful shutdown does not launder a real failure.** Draining the worker
+  aborts running task children; the aborted run is reported as *interrupted*,
+  so its row stays `running` for the successor's startup recovery. A pipeline
+  that fails on its own during the same shutdown window still settles `failed`
+  with its real error and message — only an abort is treated as an unknown
+  outcome.
+- **Hard kills keep a live child out of the resume path.** Task children run
+  detached and are stopped through the worker's shutdown signal. The worker
+  records the spawned child pid *and its start time* on the queue row, so after
+  a `SIGKILL` or OOM kill startup recovery probes the pid (and its detached
+  process group) before auto-resuming. If it is still alive, the row stays
+  `running` and is re-checked at the next startup: that child is the same task,
+  and re-queueing would force-remove its worktree and race a second agent on the
+  same `feature/local-*` branch. A child that finishes successfully needs no
+  resume — the next startup settles the row `done` from its run record. A pid
+  whose live process started at a different time is treated as recycled (the OS
+  reuses pids, and a reboot restarts the table), so it never blocks the row or
+  tells you to kill an unrelated process. `--resume` and the dashboard
+  **Re-queue task** refuse while the recorded child is still alive, and work
+  again once it has exited.
+  **Re-queue task** refuse while the recorded child is still alive, and work
+  again once it has exited.
 - **Concurrency.** Pending ad-hoc tasks are claimed together and run in
   parallel up to the workspace's `max_concurrency` / `max_concurrency_per_repo`
   limits, sharing capacity with polled, review, and automation work. A task
@@ -354,9 +391,19 @@ Behavior to expect:
   blocking independent repos behind it.
 - **Non-interactive.** The command returns after enqueue. `--wait` is the
   scripting hook: it polls the row and exits with the run's status. It fails fast
-  if the worker disappears, and exits non-zero with a clear message once
-  `--wait-timeout` (default 6 hours) elapses without the task settling — a live
-  worker that keeps deferring the task (a usage-limit pause, a permanently
+  only when a queued (`pending`) task has no worker that could claim it; a task
+  that was already `running` keeps waiting through a worker restart so startup
+  recovery can auto-resume it, but fails after a bounded five-minute restart
+  grace if no worker comes back. A `pending` task waits through the same grace
+  whenever a live replacement is starting (it will be claimed), so a transient
+  restart is not reported as a failure. The grace starts only when no
+  replacement process is starting: a replacement writes a startup marker before
+  its slow pre-lock work (orphan recovery, worktree sweep, push probes), and
+  while that process is alive its startup time does not count against the grace
+  (the overall `--wait-timeout` still bounds the wait). It exits non-zero once
+  the task settles `failed` (including an exhausted automatic-resume budget) or
+  when `--wait-timeout` (default 6 hours) elapses without the task settling — a
+  live worker that keeps deferring the task (a usage-limit pause, a permanently
   saturated repo) can no longer make `--wait` hang forever. Pass
   `--wait-timeout 0` to wait without a limit.
 - **Machine-readable.** With `--json`, stdout carries exactly one JSON object;

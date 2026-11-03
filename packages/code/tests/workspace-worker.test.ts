@@ -22,12 +22,17 @@ import {
 import type { FleetTask, RepoManagerLike } from "../src/lib/workspace/workspace-worker";
 import { InjectedTaskStore } from "../src/lib/state/injected-tasks";
 import { RUN_ORIGIN_ENV } from "../src/lib/observability/analytics";
+import { resolveRunIdentity } from "../src/lib/task/run-identity";
 import {
   actionedSourceKey,
   createTaskActionedGate,
   recordTaskActioned,
 } from "../src/lib/task/actioned-state";
-import { ACTIONED_SOURCE_ENV } from "../src/lib/workspace/env";
+import {
+  ACTIONED_SOURCE_ENV,
+  WORKSPACE_REPO_ENV,
+  WORKSPACE_TEAM_ENV,
+} from "../src/lib/workspace/env";
 import { PICKUP_RUN_ID_ENV } from "../src/lib/state/session-pickup";
 import type { TaskTrackerClient } from "../src/lib/trackers/client";
 import type { Task } from "../src/types/task-tracker";
@@ -790,6 +795,103 @@ describe("buildInjectedTaskAcquirer", () => {
       store.close();
     }
   });
+
+  test("records the spawned task child pid on the claimed row", async () => {
+    const repoManager = new FakeRepoManager(workspaceDir);
+    const store = new InjectedTaskStore(join(workspaceDir, "injected-tasks.db"));
+    try {
+      const { task } = store.enqueue({
+        taskKey: "local-child-pid",
+        repo: "backend",
+        title: "Child pid",
+        body: "",
+        taskFile: join(workspaceDir, "injected", "local-child-pid.md"),
+      });
+
+      let persistedDuringRun: number | undefined;
+      const acquirer = buildInjectedTaskAcquirer(
+        {
+          config: CONFIG,
+          workspaceDir,
+          skips: state.skips,
+          repoManager,
+          runTask: async (_taskRef, _args, options) => {
+            options.onChildSpawn?.(process.pid);
+            persistedDuringRun = store.getById(task.id)?.childPid;
+            return true;
+          },
+        },
+        store,
+      );
+
+      await acquirer.tick();
+
+      expect(persistedDuringRun).toBe(process.pid);
+      // A clean settle clears it so a later startup never probes a stale pid.
+      expect(store.getById(task.id)?.childPid).toBeUndefined();
+    } finally {
+      store.close();
+    }
+  });
+
+  test("composes the run scope injected orphan recovery matches on restart", async () => {
+    const repoManager = new FakeRepoManager(workspaceDir);
+    const store = new InjectedTaskStore(join(workspaceDir, "injected-tasks.db"));
+    const taskFile = join(workspaceDir, "injected", "local-scope.md");
+    const savedOrigin = process.env[RUN_ORIGIN_ENV];
+    const savedAutomation = process.env.DEVINTERN_AUTOMATION_ID;
+    const savedTracker = process.env.TASK_TRACKER;
+    // Simulate markers leaked from the worker's parent env: neither may turn an
+    // injected task into a scheduled/manual run, or the recorded scope stops
+    // matching `origin: "local"` / `tracker: "local"` in orphan recovery.
+    process.env[RUN_ORIGIN_ENV] = "manual";
+    process.env.DEVINTERN_AUTOMATION_ID = "leaked-automation";
+    process.env.TASK_TRACKER = "jira";
+    try {
+      store.enqueue({
+        taskKey: "local-scope",
+        repo: "backend",
+        title: "Scope",
+        body: "",
+        taskFile,
+      });
+
+      let observedEnv: Record<string, string | undefined> | undefined;
+      const acquirer = buildInjectedTaskAcquirer(
+        {
+          config: CONFIG,
+          workspaceDir,
+          skips: state.skips,
+          repoManager,
+          runTask: async (_taskRef, _args, options) => {
+            observedEnv = options.env;
+            return true;
+          },
+        },
+        store,
+      );
+
+      await acquirer.tick();
+
+      expect(observedEnv).toBeDefined();
+      expect(observedEnv![WORKSPACE_REPO_ENV]).toBe("backend");
+      expect(observedEnv![WORKSPACE_TEAM_ENV]).toBeUndefined();
+      expect(resolveRunIdentity(observedEnv!)).toEqual({
+        origin: "local",
+        tracker: "local",
+        repo: "backend",
+        team: undefined,
+      });
+    } finally {
+      if (savedOrigin === undefined) delete process.env[RUN_ORIGIN_ENV];
+      else process.env[RUN_ORIGIN_ENV] = savedOrigin;
+      if (savedAutomation === undefined) delete process.env.DEVINTERN_AUTOMATION_ID;
+      else process.env.DEVINTERN_AUTOMATION_ID = savedAutomation;
+      if (savedTracker === undefined) delete process.env.TASK_TRACKER;
+      else process.env.TASK_TRACKER = savedTracker;
+      store.close();
+    }
+  });
 });
 
 describe("fleetTaskArgs", () => {
@@ -896,6 +998,7 @@ GITLAB_CODE_HOST_PROXY = ""
             async drain() {},
             holdAdmissions() {},
             resume() {},
+            isDraining: () => false,
             inFlightCount: () => 0,
             queuedCount: () => 0,
           },
@@ -1017,6 +1120,7 @@ GITLAB_CODE_HOST_PROXY = ""
             async drain() {},
             holdAdmissions() {},
             resume() {},
+            isDraining: () => false,
             inFlightCount: () => 0,
             queuedCount: () => 0,
           },

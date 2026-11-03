@@ -45,6 +45,7 @@ import {
   workspaceDbPath,
   worktreesDir,
   workspaceRunNowPath,
+  writeWorkerStartMarker,
 } from "./paths";
 import { WorkspaceConfigReloader } from "./config-reload";
 import { createWorkspaceLock, openWorkspaceState } from "./state";
@@ -63,6 +64,7 @@ import { flushAnalytics, trackWorkerStarted } from "../observability/analytics";
 import { startWorkerFailover } from "../worker/failover";
 import { RetryQueueAcquirer } from "./retry-acquirer";
 import { InjectedTaskAcquirer, INJECTED_TASK_SOURCE } from "./injected-acquirer";
+import { createInjectedStartupRecovery } from "./injected-recovery";
 import { toRoutableTask } from "./router";
 import { createIdleWorkerAutoUpdater } from "./worker-auto-update";
 import {
@@ -381,38 +383,6 @@ export async function recoverOrphanedWorkspaceRuns(options: {
 }
 
 /**
- * Fail injected rows left `running` by a dead worker so `worker add --wait`
- * (or a retried automation) settles instead of hanging on a run that will
- * never finish.
- *
- * Call this only while holding the workspace singleton lock (the worker's
- * post-lock `beforeAcquirersStart` hook). A second `devintern worker` that has
- * not yet acquired the lock would otherwise fail the still-live worker's
- * `running` rows before exiting; the live worker's later `finish` is guarded
- * by `WHERE status = 'running'`, so the successful task would be recorded
- * `failed`.
- */
-export function recoverOrphanedInjectedTasks(store: InjectedTaskStore): void {
-  for (const orphan of store.failRunning("worker restarted while this task was running")) {
-    console.warn(`⚠️  [fleet] injected task ${orphan.taskKey} was interrupted by a worker restart`);
-  }
-}
-
-/**
- * Compose the post-lock startup hook: recover injected orphans (safe now that
- * this process owns the workspace lock), then run the caller's own hook.
- */
-export function makeBeforeAcquirersStart(
-  store: InjectedTaskStore,
-  next?: () => Promise<void> | void,
-): () => Promise<void> {
-  return async () => {
-    recoverOrphanedInjectedTasks(store);
-    await next?.();
-  };
-}
-
-/**
  * Enqueue a dashboard retry for every orphaned run whose recorded state can be
  * resumed. The retry acquirer drains these with `--force`, and the pipeline
  * reconstructs the branch and prior report (session pickup) instead of
@@ -527,13 +497,17 @@ export function buildInjectedTaskAcquirer(
         repo: task.repo,
         source: INJECTED_TASK_SOURCE,
         runOrigin: "local",
-        // The CLI resolves the local markdown file; the key still names the
-        // worktree and supervisor label.
+        // The CLI resolves the local markdown file; the key still names the worktree.
         taskRef: task.taskFile,
+        // Persist the detached child pid for hard-kill startup recovery.
+        onChildSpawn: (pid) => {
+          if (!store.isClosed()) store.setChildPid(task.id, pid);
+        },
       })(task.taskKey, toRoutableTask({ key: task.taskKey, labels: [], components: [] })),
     intervalSeconds: parseEnvInteger("WORKER_INJECTED_INTERVAL_SECONDS", 5, { min: 1 }),
     maxConcurrency: deps.config.workspace.execution.maxConcurrency,
     maxConcurrencyPerRepo: deps.config.workspace.execution.maxConcurrencyPerRepo,
+    isDraining: () => deps.supervisor?.isDraining() ?? false,
     verbose,
   });
 }
@@ -833,8 +807,8 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
     ? resolve(options.workspacePath)
     : workspaceConfigPath(resolveWorkspaceDir());
   const workspaceDir = options.workspacePath ? dirname(configPath) : resolveWorkspaceDir();
+  writeWorkerStartMarker(workspaceDir);
   const config = loadWorkspaceConfig(configPath);
-
   if (config.repos.length === 0) {
     console.error(
       `❌ No repos configured in ${configPath}.\n` +
@@ -860,7 +834,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   pruneInjectedTasks(injectedTasks);
   startInjectedTaskSweeper(injectedTasks);
 
-  assertWorkspaceHasWork(config, retryQueue, injectedTasks.hasPending(), multiTeam, initialQuery);
+  assertWorkspaceHasWork(config, retryQueue, injectedTasks, multiTeam, initialQuery);
 
   const state = openWorkspaceState(workspaceDir);
   await startWorkerFailover({
@@ -880,12 +854,12 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
     maxConcurrency: config.workspace.execution.maxConcurrency,
     maxConcurrencyPerRepo: config.workspace.execution.maxConcurrencyPerRepo,
   });
-  // Recover what the previous worker left behind before acquiring new work.
-  await recoverOrphanedWorkspaceRuns({
-    config,
+  await recoverOrphanedWorkspaceRuns({ config, workspaceDir, dbPath: state.dbPath });
+  const injectedStartup = createInjectedStartupRecovery(
+    injectedTasks,
     workspaceDir,
-    dbPath: state.dbPath,
-  });
+    options.beforeAcquirersStart,
+  );
 
   // Working windows (quiet hours): gate only the ready-task drain; reviews,
   // mentions, automations, and relay events stay on their normal paths.
@@ -1291,7 +1265,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       // Capture logs in the workspace home: one daemon serves many repos, and
       // the dashboard's log tailer already searches this directory.
       logDir: workspaceDir,
-      beforeAcquirersStart: makeBeforeAcquirersStart(injectedTasks, options.beforeAcquirersStart),
+      beforeAcquirersStart: injectedStartup.hook,
       accessCheck: options.accessCheck,
       beginShutdown: () => supervisor.drain(),
       onShutdown: () => {
@@ -1299,6 +1273,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
         autoUpdater.stop();
         errorMonitorStatusStore?.close();
         errorMonitorStatusStore = null;
+        injectedStartup.close();
         injectedTasks.close();
         // Release the listening socket before finalExitCode: the handover
         // successor starts (binds the same dashboard port) while this
@@ -1350,37 +1325,70 @@ function applyWorkspaceEnv(
   };
 }
 
+/** Whether the workspace config itself contains ongoing work. */
+export function workspaceHasConfiguredWork(
+  config: WorkspaceConfig,
+  multiTeam: boolean,
+  initialQuery: string | undefined,
+): boolean {
+  return (
+    multiTeam ||
+    Boolean(initialQuery) ||
+    config.automations.length > 0 ||
+    config.estimations.length > 0 ||
+    config.errorMonitors.some((source) => source.enabled)
+  );
+}
+
+/**
+ * Whether startup has any work to keep the worker alive.
+ *
+ * Scheduled dashboard retries and queued/in-flight injected tasks are the
+ * exceptions to the task-query requirement: the worker can still run to drain
+ * them (and to recover an interrupted injected row under the post-lock hook).
+ * A `running` injected row counts here because only that hook can resume or
+ * fail it.
+ */
+export function workspaceHasStartupWork(
+  config: WorkspaceConfig,
+  retryQueue: Pick<ScheduledRetryStore, "hasPending">,
+  injectedTasks: Pick<InjectedTaskStore, "hasPending" | "listRunning">,
+  multiTeam: boolean,
+  initialQuery: string | undefined,
+): boolean {
+  return (
+    workspaceHasConfiguredWork(config, multiTeam, initialQuery) ||
+    retryQueue.hasPending() ||
+    injectedTasks.hasPending() ||
+    injectedTasks.listRunning().length > 0
+  );
+}
+
 /**
  * Exit when workspace mode has no work configured.
  *
- * Scheduled dashboard retries and queued injected tasks are the exceptions:
- * the worker can still run to drain them.
+ * Scheduled dashboard retries and queued/in-flight injected tasks are the
+ * exceptions: the worker can still run to drain them (and to recover an
+ * interrupted injected row under the post-lock hook).
  */
 function assertWorkspaceHasWork(
   config: WorkspaceConfig,
   retryQueue: ScheduledRetryStore,
-  injectedPending: boolean,
+  injectedTasks: InjectedTaskStore,
   multiTeam: boolean,
   initialQuery: string | undefined,
 ): void {
-  const hasWork =
-    multiTeam ||
-    initialQuery ||
-    config.automations.length > 0 ||
-    config.estimations.length > 0 ||
-    config.errorMonitors.some((source) => source.enabled);
-  if (hasWork) return;
-
-  if (retryQueue.hasPending() || injectedPending) {
-    console.warn(
-      "⚠️  No task query or automations configured; the worker will only drain scheduled retries and injected tasks.",
+  if (!workspaceHasStartupWork(config, retryQueue, injectedTasks, multiTeam, initialQuery)) {
+    console.error(
+      "❌ Workspace mode needs a task query: set [defaults].task_query in workspace.toml.",
     );
-    return;
+    process.exit(1);
   }
-  console.error(
-    "❌ Workspace mode needs a task query: set [defaults].task_query in workspace.toml.",
+  if (workspaceHasConfiguredWork(config, multiTeam, initialQuery)) return;
+
+  console.warn(
+    "⚠️  No task query or automations configured; the worker will only drain scheduled retries and injected tasks.",
   );
-  process.exit(1);
 }
 
 export {
