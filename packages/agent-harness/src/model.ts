@@ -170,8 +170,9 @@ export function resolveModelAlias(input: { harness: string; model: string }): Mo
   const exact = definitions.find((entry) => entry.harness === input.harness);
   const wildcard = definitions.find((entry) => entry.harness === "*");
   const forHarness = [exact, wildcard].find((entry) => entry && entry.models.length > 0);
-  if (forHarness) {
-    return { kind: "resolved", alias: requested, model: forHarness.models[0] };
+  const latest = forHarness?.models[0];
+  if (latest !== undefined) {
+    return { kind: "resolved", alias: requested, model: latest };
   }
 
   if (exact || wildcard) {
