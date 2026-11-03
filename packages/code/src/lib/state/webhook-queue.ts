@@ -252,6 +252,18 @@ export class WebhookQueue {
       )
     `);
 
+    // Durable retry bookkeeping for relayed envelopes. The control plane owns
+    // redelivery, so a delivery that keeps failing must stop pinning the local
+    // cursor after a bounded number of attempts.
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS relay_delivery_attempts (
+        external_id TEXT PRIMARY KEY,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        updated_at INTEGER NOT NULL
+      )
+    `);
+
     // Durable base-branch advancement events. This is deliberately separate
     // from webhook_events: eligibility is discovered by polling, deferrals do
     // not consume attempts, and the deterministic id is also the eventual
@@ -493,7 +505,40 @@ export class WebhookQueue {
     return this.inFlight.has(this.deliveryKey(source, externalId));
   }
 
-  /** Configured retry ceiling, shared by webhook and base-sync work. */
+  /**
+   * Consume one retryable relay-delivery failure and record its error.
+   *
+   * Relay redelivery is driven by the control plane (the local cursor stays
+   * put), so this durable counter is what stops a permanently failing
+   * envelope from pinning the cursor for every later delivery.
+   *
+   * @param externalId - Relay envelope id (source/team/delivery)
+   * @param error - Failure message to retain for diagnostics
+   * @returns The number of failed attempts recorded so far
+   */
+  beginRelayDeliveryAttempt(externalId: string, error: string, now: number = Date.now()): number {
+    this.db.run(
+      `INSERT INTO relay_delivery_attempts (external_id, attempts, last_error, updated_at)
+       VALUES (?, 1, ?, ?)
+       ON CONFLICT(external_id) DO UPDATE SET
+         attempts = relay_delivery_attempts.attempts + 1,
+         last_error = excluded.last_error,
+         updated_at = excluded.updated_at`,
+      [externalId, error, now],
+    );
+    const row = this.db
+      .query(`SELECT attempts FROM relay_delivery_attempts WHERE external_id = ?`)
+      .get(externalId);
+    const record = parseRowObject(row, "relay_delivery_attempts row");
+    return requireNonNegativeInteger(record, "attempts", "relay_delivery_attempts row");
+  }
+
+  /** Forget a relay delivery's retry history once it is handled or exhausted. */
+  clearRelayDeliveryAttempts(externalId: string): void {
+    this.db.run(`DELETE FROM relay_delivery_attempts WHERE external_id = ?`, [externalId]);
+  }
+
+  /** Configured retry ceiling, shared by webhook, base-sync, and relay work. */
   getMaxRetries(): number {
     return this.maxRetries;
   }
@@ -637,6 +682,9 @@ export class WebhookQueue {
          WHERE status IN ('completed', 'failed') AND updated_at < ?`,
         [cutoff],
       );
+      // Attempt rows are cleared when a delivery settles; this only reaps
+      // stale rows left behind by a crash before that bookkeeping ran.
+      this.db.run(`DELETE FROM relay_delivery_attempts WHERE updated_at < ?`, [cutoff]);
       return result.changes;
     })();
   }
