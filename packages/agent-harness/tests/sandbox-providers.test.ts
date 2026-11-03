@@ -4,8 +4,10 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFil
 import { tmpdir } from "os";
 import { join } from "path";
 import { DockerSandboxProvider } from "../src/sandbox/providers/docker.js";
-import { SmolvmSandboxProvider } from "../src/sandbox/providers/smolvm.js";
-import { SrtSandboxProvider } from "../src/sandbox/providers/srt.js";
+import {
+  SmolvmSandboxProvider,
+  resetSmolvmLegacyWarning,
+} from "../src/sandbox/providers/smolvm.js";
 import type { SandboxPolicy } from "../src/sandbox/types.js";
 
 // Bun's mock.module patches the existing module in place, so the namespace
@@ -410,55 +412,6 @@ describe("nono Landlock grant refinement", () => {
   });
 });
 
-describe("SrtSandboxProvider.wrapCommand", () => {
-  test("grants OpenCode write access to its state locks", () => {
-    const stateDir = join(process.env.HOME ?? "", ".local/state/opencode");
-    if (!existsSync(stateDir)) return;
-    const wrapped = new SrtSandboxProvider().wrapCommand(
-      "/usr/bin/opencode",
-      ["run", "test"],
-      policy({ harnessName: "opencode" }),
-    );
-    const settings = JSON.parse(readFileSync(wrapped.args[1] as string, "utf8"));
-    expect(settings.filesystem.allowWrite).toContain(stateDir);
-  });
-
-  test("writes a settings file and passes the agent as argv", () => {
-    const wrapped = new SrtSandboxProvider().wrapCommand("/usr/bin/claude", ["-p", "hi"], policy());
-    expect(wrapped.path).toBe("srt");
-    expect(wrapped.args[0]).toBe("--settings");
-    const settingsFile = wrapped.args[1] as string;
-    expect(settingsFile.startsWith(tmpdir())).toBe(true);
-    expect(wrapped.args.slice(2)).toEqual(["/usr/bin/claude", "-p", "hi"]);
-
-    const settings = JSON.parse(readFileSync(settingsFile, "utf8"));
-    // Policy paths plus (machine-dependent) harness state paths.
-    expect(settings.filesystem.allowWrite).toContain("/work/repo");
-    expect(settings.filesystem.allowWrite).toContain("/tmp/devintern-tasks");
-    // srt's schema requires these fields and rejects "*" in allowedDomains,
-    // so the open-network policy maps to the default agent-essentials list.
-    expect(settings.filesystem.denyRead).toEqual([]);
-    expect(settings.filesystem.denyWrite).toEqual([]);
-    expect(settings.network.deniedDomains).toEqual([]);
-    expect(settings.network.strictAllowlist).toBe(true);
-    expect(settings.network.allowedDomains).not.toContain("*");
-    expect(settings.network.allowedDomains).toContain("api.anthropic.com");
-    expect(settings.network.allowedDomains).toContain("github.com");
-    expect(settings.network.allowedDomains).toContain("registry.npmjs.org");
-    expect(settings.network.allowLocalBinding).toBe(true); // dev servers, Playwright CDP
-  });
-
-  test("maps a domain allowlist into network.allowedDomains", () => {
-    const wrapped = new SrtSandboxProvider().wrapCommand(
-      "/usr/bin/claude",
-      [],
-      policy({ network: { allowedDomains: ["github.com", "*.anthropic.com"] } }),
-    );
-    const settings = JSON.parse(readFileSync(wrapped.args[1] as string, "utf8"));
-    expect(settings.network.allowedDomains).toEqual(["github.com", "*.anthropic.com"]);
-  });
-});
-
 /** Records create/policy calls instead of spawning a real microVM. */
 class StubDockerProvider extends DockerSandboxProvider {
   createCalls: Array<{ sbxAgent: string; sandboxName: string; workingDir: string }> = [];
@@ -566,6 +519,28 @@ describe("SmolvmSandboxProvider.wrapCommand", () => {
 
   test("is excluded from auto selection via priority 0", () => {
     expect(new SmolvmSandboxProvider().priority).toBe(0);
+  });
+
+  test("warns once that it is legacy and unsupported", () => {
+    resetSmolvmLegacyWarning();
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message?: unknown) => {
+      warnings.push(String(message));
+    };
+    try {
+      const provider = new StubBootSmolvmProvider();
+      const runPolicy = policy({ workingDir: "/Users/dev/repo" });
+      provider.wrapCommand("/usr/bin/claude", [], runPolicy);
+      provider.wrapCommand("/usr/bin/claude", [], runPolicy);
+    } finally {
+      console.warn = originalWarn;
+      resetSmolvmLegacyWarning();
+    }
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("legacy and unsupported");
+    expect(warnings[0]).toContain("docker");
+    expect(warnings[0]).toContain("nono");
   });
 
   test("rejects unsupported harnesses", () => {

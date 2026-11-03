@@ -177,9 +177,8 @@ export {
   museCredentialPath,
   resolveHomeDir,
 } from "./sandbox/harness-state.js";
-export { SrtSandboxProvider } from "./sandbox/providers/srt.js";
 export { DockerSandboxProvider } from "./sandbox/providers/docker.js";
-export { SmolvmSandboxProvider } from "./sandbox/providers/smolvm.js";
+export { SmolvmSandboxProvider, resetSmolvmLegacyWarning } from "./sandbox/providers/smolvm.js";
 export {
   spawnAgent,
   applyNestingGuard,

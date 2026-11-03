@@ -177,7 +177,7 @@ describe("spawnAgent", () => {
 
 describe("spawnAgent Muse credential guard", () => {
   // `--disable-sandbox` is what `applyNestingGuard` adds on macOS under
-  // nono/srt. Passing it explicitly keeps this integration check independent of
+  // nono. Passing it explicitly keeps this integration check independent of
   // the host platform while still exercising the `spawnAgent` wiring.
   const museArgs = ["exec", "--disable-sandbox"];
 
