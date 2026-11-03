@@ -8,7 +8,19 @@ import {
   resolveHarness,
 } from "@devintern/agent-harness";
 import { getLoadedEnvPath, loadEnvironment } from "../cli/bootstrap";
+import { hasHelpArg } from "../cli/help";
 import { buildSandboxDoctorReport, collectHarnessPreflight } from "./sandbox";
+
+const SANDBOX_USAGE = [
+  "Usage: devintern sandbox",
+  "",
+  "Report detected sandbox providers, the one-time setup each still needs, and",
+  "what the next agent run will do with the current AGENT_SANDBOX configuration.",
+  "Exits non-zero when the configured provider guarantees a failed run.",
+  "",
+  "Options:",
+  "  -h, --help  Display this help message",
+].join("\n");
 
 /**
  * `devintern sandbox` — report detected providers, remaining setup steps, and
@@ -16,6 +28,10 @@ import { buildSandboxDoctorReport, collectHarnessPreflight } from "./sandbox";
  * the configured provider guarantees a failed run, so scripts/CI can gate.
  */
 export async function runSandboxCommand(): Promise<never> {
+  if (hasHelpArg(process.argv.slice(2))) {
+    console.log(SANDBOX_USAGE);
+    process.exit(0);
+  }
   loadEnvironment();
   const detections = await detectSandboxProviders();
   const configured = process.env.AGENT_SANDBOX || "none";

@@ -39,6 +39,7 @@ import {
 } from "./lib/cli/bootstrap";
 import { isSubcommandCommand, createProgram } from "./lib/cli/program";
 import type { ProgramOptions } from "./lib/cli/program";
+import { hasHelpArg } from "./lib/cli/help";
 import { validateEnvironment } from "./lib/config/validate-environment";
 import { isWorkerTaskProcess, runContext } from "./lib/cli/context";
 import { AUTOMATION_ACCESS_EXIT_CODE } from "./lib/worker/usage-limit-protocol";
@@ -107,6 +108,13 @@ if (process.argv[2] === "init") {
   // Handle worker command - long-running workspace daemon.
   await runWorkerCli(process.argv.slice(3));
 } else if (process.argv[2] === "workspace") {
+  if (hasHelpArg(process.argv.slice(3))) {
+    console.log("Usage: devintern worker <command>");
+    console.log("");
+    console.log("Workspace setup and management live under `devintern worker`.");
+    console.log("Run `devintern worker --help` for available commands.");
+    process.exit(0);
+  }
   console.error("❌ Unknown command: workspace");
   console.error("   Workspace setup and management live under `devintern worker`.");
   console.error("   Run `devintern worker --help` for available commands.");
