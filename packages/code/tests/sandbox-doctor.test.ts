@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { DetectedSandboxProvider } from "@devintern/agent-harness";
-import { buildSandboxDoctorReport } from "../src/lib/agent/sandbox";
+import { buildSandboxDoctorReport, collectHarnessPreflight } from "../src/lib/agent/sandbox";
 
 function detected(
   name: string,
@@ -259,6 +259,21 @@ describe("buildSandboxDoctorReport", () => {
       },
     );
     expect(report.nextRunFails).toBe(true);
+  });
+
+  test("auto preflight probes through the provider auto would pick for the harness", async () => {
+    const report = await collectHarnessPreflight(
+      "auto",
+      [
+        detected("native", { priority: 40, harnesses: ["claude-code", "codex"] }),
+        detected("nono", { priority: 30 }),
+      ],
+      "goose",
+    );
+    // native has the higher priority but cannot wrap goose, so the doctor must
+    // preflight through nono (matching the resolver) instead of failing a run
+    // that will actually use nono.
+    expect(report?.provider).toBe("nono");
   });
 
   test("per-provider setup notes are platform aware", () => {

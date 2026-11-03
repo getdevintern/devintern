@@ -193,10 +193,26 @@ export async function collectHarnessPreflight(
     return undefined;
   }
 
+  // `sandboxName: "none"` keeps this chain resolution free of probes: the
+  // doctor runs the probes itself so it can render every entry, including
+  // fallbacks the runtime chain would drop.
+  const chain = resolveHarnessChainSync({ checkInstalled: false, raw, sandboxName: "none" });
+  // `auto` must pick the same provider the resolver would for the primary
+  // harness: a provider that cannot wrap it (e.g. native for goose) is not a
+  // candidate, even though it has a higher priority.
+  const primaryHarness = chain.entries[0]?.name;
+
   let provider: SandboxProvider | undefined;
   if (configured === "auto") {
     provider = detections
-      .filter(({ provider: candidate, detection }) => detection.available && candidate.priority > 0)
+      .filter(
+        ({ provider: candidate, detection }) =>
+          detection.available &&
+          candidate.priority > 0 &&
+          (!primaryHarness ||
+            !candidate.supportsHarness ||
+            candidate.supportsHarness(primaryHarness)),
+      )
       .sort((a, b) => b.provider.priority - a.provider.priority)[0]?.provider;
   } else {
     const detected = detections.find((entry) => entry.provider.name === configured);
@@ -206,10 +222,6 @@ export async function collectHarnessPreflight(
     return undefined;
   }
 
-  // `sandboxName: "none"` keeps this chain resolution free of probes: the
-  // doctor runs the probes itself so it can render every entry, including
-  // fallbacks the runtime chain would drop.
-  const chain = resolveHarnessChainSync({ checkInstalled: false, raw, sandboxName: "none" });
   const entries = await Promise.all(
     chain.entries.map(async (entry): Promise<HarnessPreflightEntry> => {
       const path = resolveExecutablePath(entry.path);

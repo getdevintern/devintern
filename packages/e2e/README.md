@@ -101,6 +101,29 @@ Set `E2E_HARNESS_PROBE_TIMEOUT_MS` to tune the per-harness timeout (default
 `10000`). These checks do not run full agent tasks; the deterministic fake agent
 continues to cover the implementation, git, and pull-request lifecycle.
 
+## Sandbox checks (nono)
+
+The ordinary local suite also exercises the real `nono` boundary when the
+binary is installed; otherwise those tests skip, like the harness probes. A
+deterministic shell agent reports what it could write and read, so the suite
+needs no AI account:
+
+- `devintern sandbox` reports nono as available, shows the preflight for the
+  configured harness, and `AGENT_SANDBOX=auto` picks nono for a harness without
+  a built-in sandbox (the preflight must use the same provider the run will).
+- A nono-wrapped run edits the fixture and pushes its branch while writes to
+  the working directory, output directory and temp dir succeed; writes to
+  `$HOME` are denied, and reads stay open (the v1 policy).
+- An explicitly requested nono provider fails closed when nono is not on
+  `PATH`: the task exits non-zero instead of running the agent unsandboxed.
+- An enclosing `NONO_CAP_FILE` marker is inherited rather than nested, so the
+  agent runs in the existing confinement.
+
+The sandbox suite keeps its isolated `HOME` outside the OS temp directory:
+nono's Linux profile grants a broad read on `/tmp`, and a home nested under
+that grant makes nono refuse its own per-user deny rules. Real user homes are
+normally outside `/tmp`, so the fixture mirrors that.
+
 ## Local GitLab Self-Managed
 
 Docker Engine and Docker Compose must be installed and accessible to your user.
