@@ -909,6 +909,26 @@ export function recordRunStage(
 }
 
 /**
+ * Whether the current run already recorded a stage.
+ *
+ * Used where a stage is written early (before auto-review can interrupt the
+ * process) and the later pipeline pass must not duplicate or regress it.
+ *
+ * @param stage - Pipeline stage name
+ */
+export function hasRunStage(stage: RunStage): boolean {
+  if (currentStore === null || currentRunId === null) {
+    return false;
+  }
+  try {
+    return currentStore.listStages(currentRunId).some((record) => record.stage === stage);
+  } catch {
+    // Recording is best-effort; a read failure means "not recorded yet".
+    return false;
+  }
+}
+
+/**
  * Attach the created PR to the current run (no-op when no run is active).
  *
  * @param pr - Repo slug, PR number, and URL

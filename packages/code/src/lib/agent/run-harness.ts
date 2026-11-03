@@ -33,6 +33,7 @@ import { finalizeAgentRun } from "./run-harness-finalize";
 import { readHeadCommit } from "./run-harness-git";
 import type { FinalizeContext } from "./run-harness-git";
 import { recordIncompleteAttempt } from "../state/retry-state";
+import { recordRunStage } from "../state/run-recorder";
 import type { TaskTrackerClient } from "../trackers/client";
 import { formatAgentInputNeededMarkdown } from "../trackers/shared/markdown-comment-formatter";
 import { HarnessUnavailableError, detectHarnessStartupFailure } from "./harness-startup";
@@ -41,6 +42,7 @@ import { agentSandboxPolicy, getSandbox } from "./sandbox";
 import { harnessSpawnEnv } from "./spawn";
 import type { VerifyConfig } from "./verify";
 import { withImplementationSummary } from "./implementation-summary";
+import { readImplementationReport } from "./implementation-report";
 
 interface RunAgentHarnessOptions {
   taskFile: string;
@@ -511,6 +513,34 @@ export async function runAgentSession(
   });
 }
 
+/**
+ * Persist the implementation stage as soon as the agent session completes,
+ * before commit/verify/auto-review run.
+ *
+ * Auto-review can run for a long time and a worker restart during it used to
+ * leave a run with commits and a branch but no implementation stage, so
+ * session pickup could not reuse the work. Writing the stage here makes the
+ * agent's report durable before any post-implementation work can interrupt the
+ * process. The later pipeline pass sees the stage and does not duplicate it.
+ *
+ * @param input - The implementation run inputs
+ * @param startedAt - Epoch ms when the agent session started
+ */
+function recordCompletedImplementation(input: RunAgentHarnessOptions, startedAt: number): void {
+  const taskDir = input.taskKey ? join(resolveOutputDir(), input.taskKey.toLowerCase()) : undefined;
+  if (!taskDir) return;
+  const { report } = readImplementationReport(taskDir, startedAt);
+  recordRunStage("implementation", {
+    status: "succeeded",
+    summary: `implemented with ${input.harness.displayName}`,
+    detail: {
+      harness: input.harness.displayName,
+      durationMs: Date.now() - startedAt,
+      ...(report === undefined ? {} : { report }),
+    },
+  });
+}
+
 /** Run implementation and deliver it when the agent completed meaningful work. */
 export async function runAgentHarness(input: RunAgentHarnessOptions): Promise<void> {
   // Select exactly one pipeline: a workspace per-repo override, the repo's
@@ -549,8 +579,12 @@ export async function runAgentHarness(input: RunAgentHarnessOptions): Promise<vo
   }
   console.log(`🧩 Pipeline: ${describePipelineSelection(selection, configuredPipeline)}`);
 
+  const implementationStartedAt = Date.now();
   const session = await runAgentSession(input);
   if (session.kind === "halted") return;
+  // Persist the report before commit/verify/auto-review: an interruption in
+  // any later phase must still leave resumable implementation state.
+  recordCompletedImplementation(input, implementationStartedAt);
   await new Promise<void>((resolve, reject) => {
     finalizeAgentRun({
       ...session.context,

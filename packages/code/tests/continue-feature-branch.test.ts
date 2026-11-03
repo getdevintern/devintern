@@ -231,3 +231,49 @@ describe("collectLandedWork", () => {
     expect(landed).toBeUndefined();
   });
 });
+
+describe("hasCommitsAhead", () => {
+  let testDir: string;
+  let repoDir: string;
+
+  beforeEach(() => {
+    testDir = join(tmpdir(), `commits-ahead-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    repoDir = join(testDir, "test-repo");
+    mkdirSync(repoDir, { recursive: true });
+    execSync("git init", { cwd: repoDir });
+    execSync("git config user.email 'test@test.com'", { cwd: repoDir });
+    execSync("git config user.name 'Test User'", { cwd: repoDir });
+    writeFileSync(join(repoDir, "README.md"), "# Test Repo\n", "utf8");
+    execSync("git add .", { cwd: repoDir });
+    execSync("git commit -m 'Initial commit'", { cwd: repoDir });
+    try {
+      execSync("git branch -M main", { cwd: repoDir });
+    } catch {
+      // Already on main.
+    }
+  });
+
+  afterEach(() => {
+    rmSync(testDir, { recursive: true, force: true });
+  });
+
+  test("is true when the branch has commits ahead of the base", async () => {
+    execSync("git checkout -b feature/proj-20", { cwd: repoDir });
+    writeFileSync(join(repoDir, "feature.txt"), "new feature\n", "utf8");
+    execSync("git add .", { cwd: repoDir });
+    execSync("git commit -m 'add feature file'", { cwd: repoDir });
+
+    expect(await Utils.hasCommitsAhead("feature/proj-20", "main", { cwd: repoDir })).toBe(true);
+  });
+
+  test("is false for a branch with no commits ahead", async () => {
+    execSync("git checkout -b feature/proj-21", { cwd: repoDir });
+
+    expect(await Utils.hasCommitsAhead("feature/proj-21", "main", { cwd: repoDir })).toBe(false);
+  });
+
+  test("is false when either ref is missing", async () => {
+    expect(await Utils.hasCommitsAhead("feature/missing", "main", { cwd: repoDir })).toBe(false);
+    expect(await Utils.hasCommitsAhead("main", "missing", { cwd: repoDir })).toBe(false);
+  });
+});

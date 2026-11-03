@@ -225,6 +225,20 @@ export async function recoverOrphanedWorkspaceRuns(options: {
           (await Utils.gitRefExists(`refs/remotes/origin/${branch}`, { cwd: repoCwd }))
         );
       },
+      // A run interrupted before the implementation stage was persisted can
+      // still hold real commits. Verify them against the repo's base branch so
+      // orphan recovery resumes that work instead of restarting it. Without a
+      // checkout to inspect, stay conservative and do not claim resumable work.
+      hasLandedCommits: async (branch, run) => {
+        const repoCwd = run.repo
+          ? join(worktreesDir(workspaceDir), run.repo, BASE_WORKTREE_NAME)
+          : undefined;
+        if (!repoCwd || !existsSync(repoCwd)) {
+          return false;
+        }
+        const baseBranch = await Utils.getMainBranchName({ cwd: repoCwd });
+        return Utils.hasCommitsAhead(branch, baseBranch, { cwd: repoCwd });
+      },
     });
 
     // Dashboard-scheduled retries claimed by the previous worker: settle the

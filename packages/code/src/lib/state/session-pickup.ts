@@ -10,8 +10,10 @@
  * A pickup is inheritance: the prior attempt already paid for reading the code,
  * cloning the worktree, and producing changes. Resuming reuses its branch and
  * hands the prior report to the next agent so it continues instead of
- * re-deriving. Incomplete state (no branch, no report, or a branch that no
- * longer exists) always falls back to a fresh run.
+ * re-deriving. A branch with real commits ahead of its base is resumable even
+ * when the report is missing (legacy/interrupted runs); incomplete state (no
+ * branch, no report and no landed commits, or a branch that no longer exists)
+ * falls back to a fresh run.
  *
  * Every read is best-effort: a storage or parse error degrades to "fresh", the
  * safe default.
@@ -105,6 +107,15 @@ export interface SessionPickupOptions {
    * the resolver falls back to a fresh run. Absent → trust the record.
    */
   branchExists?: (branch: string) => boolean | Promise<boolean>;
+  /**
+   * Optional probe for commits on the recorded branch ahead of its target base.
+   *
+   * Older/interrupted runs can carry real implementation commits without a
+   * saved report (the stage used to be written only after auto-review). When
+   * the report is absent but this probe confirms landed commits, the branch is
+   * still resumable. Absent or false → a report-less run stays fresh.
+   */
+  hasLandedCommits?: (session: { branch: string; run: RunRecord }) => boolean | Promise<boolean>;
   /** Optional description of already-landed work (git log/diff). Never fatal. */
   describeLanded?: (session: {
     branch: string;
@@ -200,14 +211,23 @@ function findCandidateRun(
  * Reconstruct a resumable session from the run store, or explain why a fresh
  * run is required.
  *
- * Resume requires a terminal retriable run with a recorded branch and an
- * implementation report, and (when a probe is supplied) a branch that still
- * exists. Everything else falls back to a fresh run.
+ * Resume requires a terminal retriable run with a recorded branch that still
+ * exists, plus either an implementation report or (via the optional probe)
+ * commits ahead of its target base. Everything else falls back to a fresh run.
  */
 export async function resolveSessionPickup(
   options: SessionPickupOptions,
 ): Promise<SessionPickupDecision> {
-  const { runStore, taskKey, runId, excludeRunId, scope, branchExists, describeLanded } = options;
+  const {
+    runStore,
+    taskKey,
+    runId,
+    excludeRunId,
+    scope,
+    branchExists,
+    hasLandedCommits,
+    describeLanded,
+  } = options;
 
   let candidate: CandidateRun;
   try {
@@ -229,11 +249,6 @@ export async function resolveSessionPickup(
     return { kind: "fresh", reason: "prior run recorded no branch" };
   }
 
-  const report = readImplementationReport(runStore, run.id);
-  if (!report) {
-    return { kind: "fresh", reason: "prior run recorded no implementation report" };
-  }
-
   if (branchExists) {
     let exists: boolean;
     try {
@@ -243,6 +258,29 @@ export async function resolveSessionPickup(
     }
     if (!exists) {
       return { kind: "fresh", reason: `branch '${branch}' no longer exists` };
+    }
+  }
+
+  const report = readImplementationReport(runStore, run.id);
+  if (!report) {
+    // Legacy/interrupted runs may have delivered commits before the
+    // implementation stage existed. Resume those only when the branch probe
+    // confirms real work; an unverifiable or empty branch stays fresh.
+    let landedCommits = false;
+    if (hasLandedCommits) {
+      try {
+        landedCommits = await hasLandedCommits({ branch, run });
+      } catch {
+        landedCommits = false;
+      }
+    }
+    if (!landedCommits) {
+      return {
+        kind: "fresh",
+        reason: hasLandedCommits
+          ? `branch '${branch}' has no commits to resume`
+          : "prior run recorded no implementation report",
+      };
     }
   }
 

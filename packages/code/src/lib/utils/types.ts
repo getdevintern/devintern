@@ -115,6 +115,7 @@ export interface UtilsSurface {
     baseBranch: string,
     options?: { cwd?: string },
   ): Promise<string | undefined>;
+  hasCommitsAhead(branch: string, baseBranch: string, options?: { cwd?: string }): Promise<boolean>;
   removeReviewWorktree(
     worktreePath: string,
     options?: { verbose?: boolean; cwd?: string },

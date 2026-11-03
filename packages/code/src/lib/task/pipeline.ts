@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, statSync, unlinkSync } from "fs";
+import { mkdirSync, unlinkSync } from "fs";
 import { basename, join } from "path";
 import { UsageLimitError } from "@devintern/agent-harness";
 import { isMarkdownFilePath } from "@devintern/task-trackers";
@@ -7,6 +7,7 @@ import { runAnalysisWithFallback } from "../agent/analysis-mode";
 import { adoptAgentCreatedChangeRequest } from "../agent/adopt-change-request";
 import { runClarityCheck } from "../agent/clarity";
 import { HarnessUnavailableError } from "../agent/harness-startup";
+import { readImplementationReport } from "../agent/implementation-report";
 import { runAgentHarness } from "../agent/run-harness";
 import { flushAnalyticsAndExit } from "../cli/bootstrap";
 import { isWorkerTaskProcess, runContext } from "../cli/context";
@@ -34,6 +35,7 @@ import {
   RunStore,
   beginRun,
   getActiveRunContext,
+  hasRunStage,
   recordRunBranch,
   recordRunStage,
   recordRunTicket,
@@ -241,38 +243,26 @@ async function runImplementation(input: ImplementationInput): Promise<void> {
   // An incomplete-summary file written during this run means the agent
   // stopped short and handed back to a human (mtime check guards against
   // stale files from earlier attempts in the same task directory).
-  const incompleteSummaryPath = join(taskDir, "implementation-summary-incomplete.md");
-  const implementationIncomplete =
-    existsSync(incompleteSummaryPath) &&
-    statSync(incompleteSummaryPath).mtimeMs >= implementationStartedAt;
+  const { incomplete: implementationIncomplete, report: implementationReport } =
+    readImplementationReport(taskDir, implementationStartedAt);
 
-  // Persist the agent's own report (implementation-summary[-incomplete].md)
-  // in the run record: the output directory is an ephemeral debug artifact,
-  // and for escalated runs this text is the "why" a human needs.
-  const REPORT_EXCERPT_LENGTH = 10_000;
-  const reportPath = implementationIncomplete
-    ? incompleteSummaryPath
-    : join(taskDir, "implementation-summary.md");
-  let implementationReport: string | undefined;
-  try {
-    if (existsSync(reportPath) && statSync(reportPath).mtimeMs >= implementationStartedAt) {
-      implementationReport = readFileSync(reportPath, "utf8").slice(0, REPORT_EXCERPT_LENGTH);
-    }
-  } catch {
-    /* best-effort: recording must never fail a run */
+  // The harness already records a completed implementation before commit and
+  // auto-review, so an interruption in those phases still leaves resumable
+  // state. Only halted sessions (which never reach that early write) and
+  // storage failures fall through to this pass.
+  if (!hasRunStage("implementation")) {
+    recordRunStage("implementation", {
+      status: implementationIncomplete ? "failed" : "succeeded",
+      summary: implementationIncomplete
+        ? `incomplete implementation with ${resolvedAgent.harness.displayName}`
+        : `implemented with ${resolvedAgent.harness.displayName}`,
+      detail: {
+        harness: resolvedAgent.harness.displayName,
+        durationMs: Date.now() - implementationStartedAt,
+        ...(implementationReport === undefined ? {} : { report: implementationReport }),
+      },
+    });
   }
-
-  recordRunStage("implementation", {
-    status: implementationIncomplete ? "failed" : "succeeded",
-    summary: implementationIncomplete
-      ? `incomplete implementation with ${resolvedAgent.harness.displayName}`
-      : `implemented with ${resolvedAgent.harness.displayName}`,
-    detail: {
-      harness: resolvedAgent.harness.displayName,
-      durationMs: Date.now() - implementationStartedAt,
-      ...(implementationReport === undefined ? {} : { report: implementationReport }),
-    },
-  });
 
   if (isMarkdownTaskTracker(tracker)) {
     await tracker.markDoneIfSuccessful(workflowKey, taskDir);
@@ -1185,6 +1175,10 @@ export async function processSingleTask(
         branchExists: async (branch) =>
           (await Utils.gitRefExists(`refs/heads/${branch}`)) ||
           (await Utils.gitRefExists(`refs/remotes/origin/${branch}`)),
+        // A legacy/interrupted run may have commits but no implementation
+        // stage; reuse its branch when the commits are really there.
+        hasLandedCommits: ({ branch }) =>
+          Utils.hasCommitsAhead(branch, effectiveTargetBranch, { cwd: process.cwd() }),
         describeLanded: ({ branch }) =>
           Utils.collectLandedWork(branch, effectiveTargetBranch, { cwd: process.cwd() }),
       });

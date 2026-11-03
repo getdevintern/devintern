@@ -12,7 +12,9 @@ import {
   beginRun,
   endRun,
   getActiveRunContext,
+  hasRunStage,
   markRunCleanStop,
+  recordRunStage,
 } from "../src/lib/state/run-recorder";
 
 describe("RunStore", () => {
@@ -550,6 +552,18 @@ describe("RunStore", () => {
     expect(store.getRun(inProgress)?.cleanStop).toBe(true);
     // markCleanStop must not relabel a run that finished during shutdown.
     expect(store.getRun(finished)?.cleanStop).toBeUndefined();
+  });
+
+  test("hasRunStage reports stages recorded for the active run", () => {
+    beginRun({ origin: "task", taskKey: "PROJ-HS" });
+    try {
+      expect(hasRunStage("implementation")).toBe(false);
+      recordRunStage("implementation", { status: "succeeded", summary: "done" });
+      expect(hasRunStage("implementation")).toBe(true);
+      expect(hasRunStage("verify")).toBe(false);
+    } finally {
+      endRun("failed", "test cleanup");
+    }
   });
 
   test("markRunCleanStop labels only the captured run, never a later one", () => {

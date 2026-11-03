@@ -86,6 +86,8 @@ let pipelineConfig: PipelineConfig | undefined;
 let prResult: { success: boolean; url?: string; message?: string; warnings?: string[] };
 let prCreateOptions: { artifactComment?: string } | undefined;
 let postImplementationCommentMock: ReturnType<typeof mock>;
+let recordedStages: Array<{ stage: string; data: unknown }>;
+let autoReviewError: Error | undefined;
 
 const HEAD_BEFORE = "1111111111111111111111111111111111111111";
 const HEAD_AFTER = "2222222222222222222222222222222222222222";
@@ -191,6 +193,7 @@ mock.module("../src/lib/review/auto-review-loop", () => ({
   runAutoReviewLoop: async (options: { maxIterations?: number; minPriority?: string }) => {
     autoReviewCalls++;
     autoReviewOptions.push(options);
+    if (autoReviewError) throw autoReviewError;
     return { success: true, iterations: 1, finalFeedback: [] };
   },
   getPRDiff: () => "diff --git a/file b/file",
@@ -206,7 +209,9 @@ mock.module("../src/lib/review/auto-review-loop", () => ({
 mock.module("../src/lib/state/retry-state", () => ({ recordIncompleteAttempt: () => {} }));
 mock.module("../src/lib/state/run-recorder", () => ({
   recordRunPr: () => {},
-  recordRunStage: () => {},
+  recordRunStage: (stage: string, data: unknown) => {
+    recordedStages.push({ stage, data });
+  },
 }));
 mock.module("../src/lib/state/worker-state", () => ({
   ...realWorkerState,
@@ -274,6 +279,8 @@ beforeEach(() => {
   deliveryEvents = [];
   agentPrompts = [];
   autoReviewOptions = [];
+  recordedStages = [];
+  autoReviewError = undefined;
   pipelineConfig = undefined;
   prResult = { success: true, url: "https://github.com/o/r/pull/1", warnings: [] };
   prCreateOptions = undefined;
@@ -397,6 +404,27 @@ describe("runAgentHarness non-commit outcomes", () => {
 });
 
 describe("runAgentHarness git delivery", () => {
+  test("records the implementation stage before auto-review can interrupt delivery", async () => {
+    // The worker restart shape: the agent finished and wrote its report, then
+    // auto-review hit a usage limit before the pipeline could record the stage.
+    // The durable stage must already exist so session pickup can reuse it.
+    scenario.stdout = "Implemented the parser and its tests.";
+    autoReviewError = new realHarness.UsageLimitError();
+
+    await expect(
+      runAgentHarness({ ...baseInput(), createPr: true, autoReview: true }),
+    ).rejects.toThrow(realHarness.UsageLimitError);
+
+    const implementation = recordedStages.find((entry) => entry.stage === "implementation");
+    expect(implementation).toBeDefined();
+    const data = implementation?.data as {
+      status?: string;
+      detail?: { report?: string };
+    };
+    expect(data.status).toBe("succeeded");
+    expect(data.detail?.report).toContain("Implemented the parser");
+  });
+
   test("verifies and publishes inherited commits when pickup needs no new edits", async () => {
     scenario.stdout = "The inherited implementation is complete and validated.";
     commitResult = { success: false, message: "No changes to commit" };

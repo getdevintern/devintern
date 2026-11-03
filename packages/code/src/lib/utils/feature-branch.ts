@@ -649,8 +649,52 @@ async function createFeatureBranchRef(
   return createResult;
 }
 
+/**
+ * Whether `branch` carries commits that are not reachable from `baseBranch`.
+ *
+ * Used by session pickup to recognise legacy/interrupted runs that left real
+ * work on their recorded branch but no saved implementation report. Local refs
+ * win over `origin/*` so a branch only present remotely still counts. Any
+ * missing ref or git failure reports false: an unverifiable branch is never
+ * treated as resumable.
+ *
+ * @param branch - Feature branch to inspect
+ * @param baseBranch - Target/base branch the work would be merged into
+ * @param options - Optional working directory
+ */
+export async function hasCommitsAhead(
+  branch: string,
+  baseBranch: string,
+  options?: { cwd?: string },
+): Promise<boolean> {
+  const gitOpts = options?.cwd ? { cwd: options.cwd } : undefined;
+  try {
+    const resolveRef = async (name: string): Promise<string | undefined> => {
+      const local = `refs/heads/${name}`;
+      if (await Utils.gitRefExists(local, gitOpts)) return local;
+      const remote = `refs/remotes/origin/${name}`;
+      if (await Utils.gitRefExists(remote, gitOpts)) return remote;
+      return undefined;
+    };
+    const baseRef = await resolveRef(baseBranch.replace(/^origin\//, ""));
+    const branchRef = await resolveRef(branch);
+    if (!baseRef || !branchRef) return false;
+
+    const result = await Utils.executeGitCommand(
+      ["rev-list", "--count", `${baseRef}..${branchRef}`],
+      gitOpts,
+    );
+    if (!result.success) return false;
+    const value = result.output.trim();
+    return /^\d+$/.test(value) && Number(value) > 0;
+  } catch {
+    return false;
+  }
+}
+
 Object.assign(Utils, {
   createFeatureBranch,
   continueFeatureBranch,
   collectLandedWork,
+  hasCommitsAhead,
 });
