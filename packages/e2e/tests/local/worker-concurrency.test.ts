@@ -41,14 +41,19 @@ function diagnostics(worker: WorkerFixture, details: string[] = []): string {
   ].join("\n");
 }
 
-async function enqueueTasks(worker: WorkerFixture): Promise<WorkerInjectedTask[]> {
+async function enqueueTasks(
+  worker: WorkerFixture,
+  count: number,
+  repo: string = worker.repoName,
+): Promise<WorkerInjectedTask[]> {
   const tasks: WorkerInjectedTask[] = [];
-  for (const index of [1, 2, 3]) {
+  for (let index = 1; index <= count; index += 1) {
     tasks.push(
       await worker.addTask({
-        title: `Concurrency greeting ${index}`,
+        repo,
+        title: `Concurrency greeting ${repo} ${index}`,
         body: [
-          `Change the greeting to Hello, world! for concurrency task ${index}.`,
+          `Change the greeting to Hello, world! for concurrency task ${repo} ${index}.`,
           "",
           `E2E_CONCURRENCY_MARKER_${crypto.randomUUID()}`,
         ].join("\n"),
@@ -102,20 +107,27 @@ async function expectPushedGreeting(
 ): Promise<void> {
   for (const task of tasks) {
     const branch = `feature/${task.task_key}`;
-    expect(await worker.branchFile(branch, "src/greeting.ts")).toBe(CANONICAL_GREETING);
+    expect(await worker.branchFile(branch, "src/greeting.ts", task.repo)).toBe(CANONICAL_GREETING);
   }
 }
 
 cliTest(
   "the worker runs no more than max_concurrency injected tasks at once",
   async () => {
-    const worker = new WorkerFixture({ maxConcurrency: 2, maxConcurrencyPerRepo: 2 });
+    // Two repos with two tasks each make the global cap the binding
+    // constraint: `max_concurrency_per_repo = 2` alone would admit all four,
+    // so a peak of two can only come from `max_concurrency`.
+    const repos = ["fixture-a", "fixture-b"];
+    const worker = new WorkerFixture({ repos, maxConcurrency: 2, maxConcurrencyPerRepo: 2 });
     worker.env.E2E_AGENT_DELAY_MS = String(AGENT_DELAY_MS);
     try {
       await worker.prepare();
       // Enqueue before startup: the injection-only workspace stays alive
-      // because work is pending, and the three rows are ready together.
-      const tasks = await enqueueTasks(worker);
+      // because work is pending, and the four rows are ready together.
+      const tasks: WorkerInjectedTask[] = [];
+      for (const repo of repos) {
+        tasks.push(...(await enqueueTasks(worker, 2, repo)));
+      }
       worker.start();
       await worker.waitForReady();
 
@@ -123,21 +135,22 @@ cliTest(
       const events = await waitForCompleteTimeline(worker, tasks.length);
       const peak = maxOverlap(events);
 
-      // Exactly two proves the global cap is enforced and that work is not
-      // accidentally serialized (peak > 1) or over-admitted (peak === 3).
+      // Exactly two proves the global cap is enforced: without it both repos
+      // would start their two permitted tasks and the peak would be four.
+      // Peak one would mean work was accidentally serialized instead.
       expect(peak, diagnostics(worker, [`observed peak overlap: ${peak}`])).toBe(2);
 
       await expectPushedGreeting(worker, tasks);
       await worker.waitFor("the successful runs' worktrees to be removed", () =>
-        worker.taskWorktrees().length === 0 ? true : undefined,
+        worker.allTaskWorktrees().length === 0 ? true : undefined,
       );
-      expect(worker.taskWorktrees()).toEqual([]);
+      expect(worker.allTaskWorktrees()).toEqual([]);
       expect(worker.running, diagnostics(worker)).toBe(true);
     } finally {
       await worker.dispose();
     }
   },
-  // Comfortably above prepare + 20s readiness + three 2.5s agent runs +
+  // Comfortably above prepare + 20s readiness + two waves of 2.5s agent runs +
   // settle/worktree bounds + the helper's 25s SIGTERM and 5s SIGKILL.
   180_000,
 );
@@ -149,7 +162,7 @@ cliTest(
     worker.env.E2E_AGENT_DELAY_MS = String(AGENT_DELAY_MS);
     try {
       await worker.prepare();
-      const tasks = await enqueueTasks(worker);
+      const tasks = await enqueueTasks(worker, 3);
       worker.start();
       await worker.waitForReady();
 

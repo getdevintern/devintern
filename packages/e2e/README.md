@@ -118,12 +118,16 @@ bun run --filter @getdevintern/code build
 bun run --filter @devintern/e2e test
 ```
 
-Two scenarios enqueue three injected tasks before startup. With
-`max_concurrency = 2` the peak agent overlap is exactly two, proving the cap is
-neither exceeded nor accidentally serial. With `max_concurrency = 3` and
-`max_concurrency_per_repo = 1`, three tasks in the single fixture repo run one
-at a time. Both scenarios assert every run succeeded, pushed the canonical
-greeting edit, left no task worktrees, and kept the daemon running.
+Two scenarios enqueue injected tasks before startup. The global-cap scenario
+seeds **two** fixture repos with two tasks each and sets `max_concurrency = 2`,
+`max_concurrency_per_repo = 2`: the per-repo cap alone would admit all four, so
+the observed peak agent overlap of exactly two can only come from the global
+cap (a missing global cap would show four, and accidental serialization one).
+The per-repo scenario sets `max_concurrency = 3` and
+`max_concurrency_per_repo = 1`, so three tasks in the single fixture repo run
+one at a time even though the global cap allows more. Both scenarios assert
+every run succeeded, pushed the canonical greeting edit, left no task
+worktrees, and kept the daemon running.
 
 ## Agent harness invocation checks
 

@@ -94,6 +94,12 @@ export interface WorkerFixtureOptions {
   maxConcurrency?: number;
   /** Per-repository agent concurrency; defaults to one. */
   maxConcurrencyPerRepo?: number;
+  /**
+   * Repository names seeded as separate bare remotes, in `[[repos]]` order.
+   * Each one gets its own seeded checkout and remote. Defaults to a single
+   * repo named {@link WorkerFixture.repoName} (`fixture`).
+   */
+  repos?: string[];
 }
 
 /** Log captured from the worker subprocess, for readiness and failure reports. */
@@ -114,10 +120,15 @@ interface OutputWaiter {
 export class WorkerFixture {
   readonly root = mkdtempSync(join(tmpdir(), "devintern-e2e-worker-"));
   readonly workspaceDir = join(this.root, "workspace");
-  readonly repoName = "fixture";
+  /** Every seeded repo name, primary first. */
+  readonly repoNames: string[];
+  /** Primary repo name; the first entry of {@link repoNames}. */
+  readonly repoName: string;
   readonly baseBranch = "e2e-base";
-  readonly remote = join(this.root, "remote.git");
-  readonly seed = join(this.root, "seed");
+  /** Bare remote of the primary repo. */
+  readonly remote: string;
+  /** Seed checkout of the primary repo. */
+  readonly seed: string;
   readonly env = isolatedEnvironment(this.root);
 
   private child: ReturnType<typeof Bun.spawn> | null = null;
@@ -127,6 +138,10 @@ export class WorkerFixture {
   private readonly waiters = new Set<OutputWaiter>();
 
   constructor(private readonly options: WorkerFixtureOptions = {}) {
+    this.repoNames = options.repos?.length ? [...options.repos] : ["fixture"];
+    this.repoName = this.repoNames[0]!;
+    this.remote = this.remoteFor(this.repoName);
+    this.seed = this.seedDir(this.repoName);
     this.env.DEVINTERN_WORKSPACE_DIR = this.workspaceDir;
     this.env.WEBHOOK_QUEUE_DB = this.dbPath;
     Object.assign(this.env, {
@@ -226,26 +241,49 @@ export class WorkerFixture {
         'tracker = "markdown"',
         'worker_task_args = "--create-pr --skip-clarity-check --skip-comments"',
         "",
-        "[[repos]]",
-        `name = "${this.repoName}"`,
-        `remote = "${this.remote}"`,
-        `default_branch = "${this.baseBranch}"`,
-        "",
+        ...this.repoNames.flatMap((name) => [
+          "[[repos]]",
+          `name = "${name}"`,
+          `remote = "${this.remoteFor(name)}"`,
+          `default_branch = "${this.baseBranch}"`,
+          "",
+        ]),
       ].join("\n"),
     );
 
-    cpSync(fixture, this.seed, { recursive: true });
+    for (const name of this.repoNames) {
+      await this.seedFixtureRemote(name);
+    }
+  }
+
+  /** Seed one bare remote and its checkout from the canonical fixture. */
+  private async seedFixtureRemote(repo: string): Promise<void> {
+    const remote = this.remoteFor(repo);
+    const seed = this.seedDir(repo);
+    cpSync(fixture, seed, { recursive: true });
     await checkedCommand(
-      ["git", "init", "--bare", "--initial-branch", this.baseBranch, this.remote],
+      ["git", "init", "--bare", "--initial-branch", this.baseBranch, remote],
       this.root,
       this.env,
     );
-    const git = (...args: string[]) => checkedCommand(["git", ...args], this.seed, this.env);
+    const git = (...args: string[]) => checkedCommand(["git", ...args], seed, this.env);
     await git("init", "--initial-branch", this.baseBranch);
-    await git("remote", "add", "origin", this.remote);
+    await git("remote", "add", "origin", remote);
     await git("add", ".");
     await git("commit", "-m", "Seed worker fixture");
     await git("push", "--set-upstream", "origin", this.baseBranch);
+  }
+
+  /** Bare remote path for one seeded repo. */
+  private remoteFor(repo: string): string {
+    return repo === this.repoNames[0]
+      ? join(this.root, "remote.git")
+      : join(this.root, `${repo}.git`);
+  }
+
+  /** Seeded checkout path for one repo. */
+  private seedDir(repo: string): string {
+    return repo === this.repoNames[0] ? join(this.root, "seed") : join(this.root, `seed-${repo}`);
   }
 
   /** Start the real worker daemon in its own process group. */
@@ -314,10 +352,16 @@ export class WorkerFixture {
   }
 
   /** Enqueue one task through the built CLI and return its durable row. */
-  async addTask(input: { title: string; body: string }): Promise<WorkerInjectedTask> {
+  async addTask(input: {
+    title: string;
+    body: string;
+    /** Seed repo to target; defaults to the primary repo. */
+    repo?: string;
+  }): Promise<WorkerInjectedTask> {
+    const repo = input.repo ?? this.repoName;
     const result = await this.runAdd([
       "--repo",
-      this.repoName,
+      repo,
       "--title",
       input.title,
       "--body",
@@ -411,20 +455,27 @@ export class WorkerFixture {
         );
   }
 
-  /** Contents of a file on a branch in the local bare repository. */
-  branchFile(branch: string, path: string): Promise<string> {
+  /** Contents of a file on a branch in one repo's local bare remote. */
+  branchFile(branch: string, path: string, repo: string = this.repoName): Promise<string> {
     return checkedCommand(
-      ["git", "--git-dir", this.remote, "show", `refs/heads/${branch}:${path}`],
+      ["git", "--git-dir", this.remoteFor(repo), "show", `refs/heads/${branch}:${path}`],
       this.root,
       this.env,
     );
   }
 
-  /** Non-base task worktrees left under the repo's workspace directory. */
-  taskWorktrees(): string[] {
-    const dir = join(this.workspaceDir, "worktrees", this.repoName);
+  /** Non-base task worktrees left under one repo's workspace directory. */
+  taskWorktrees(repo: string = this.repoName): string[] {
+    const dir = join(this.workspaceDir, "worktrees", repo);
     if (!existsSync(dir)) return [];
     return readdirSync(dir).filter((entry) => entry !== "base");
+  }
+
+  /** Non-base task worktrees left under any seeded repo, `repo/worktree` prefixed. */
+  allTaskWorktrees(): string[] {
+    return this.repoNames.flatMap((repo) =>
+      this.taskWorktrees(repo).map((entry) => `${repo}/${entry}`),
+    );
   }
 
   /** Poll a synchronous probe until it returns a value; never only sleep. */
