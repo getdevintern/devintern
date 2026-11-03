@@ -73,6 +73,7 @@ const INJECTED_COLUMNS = [
 export interface WorkerRunRecord {
   id: number;
   task_key: string | null;
+  origin: string;
   status: string;
   branch: string | null;
   repo: string | null;
@@ -86,6 +87,12 @@ export interface WorkerFixtureOptions {
   maxConcurrency?: number;
   /** Per-repository agent concurrency; defaults to one. */
   maxConcurrencyPerRepo?: number;
+  /**
+   * Extra TOML appended to the generated `workspace.toml` (for example an
+   * `[[error_monitors]]` source). The default tables are kept unchanged, so a
+   * caller only supplies the additional section.
+   */
+  workspaceTomlExtra?: string;
 }
 
 /** Log captured from the worker subprocess, for readiness and failure reports. */
@@ -172,10 +179,13 @@ export class WorkerFixture {
   /**
    * Seed the local bare repository and write a credential-free workspace.
    *
-   * The workspace deliberately has no task query, automation, estimation, or
-   * error monitor. That is valid only while an injected task is pending, so
-   * enqueue work before {@link start}: the worker then takes the documented
-   * injection-only exception instead of exiting for lack of configured work.
+   * The default workspace deliberately has no task query, automation,
+   * estimation, or error monitor. That is valid only while an injected task is
+   * pending, so enqueue work before {@link start}: the worker then takes the
+   * documented injection-only exception instead of exiting for lack of
+   * configured work. {@link WorkerFixtureOptions.workspaceTomlExtra} can add a
+   * source such as `[[error_monitors]]`, which counts as configured work on its
+   * own.
    */
   async prepare(): Promise<void> {
     const agent = join(this.root, "agent.ts");
@@ -185,28 +195,28 @@ export class WorkerFixture {
     this.env.E2E_AGENT_INVOCATIONS = join(this.root, "agent-invocations.jsonl");
 
     mkdirSync(this.workspaceDir, { recursive: true });
-    writeFileSync(
-      join(this.workspaceDir, "workspace.toml"),
-      [
-        "[workspace]",
-        "dashboard = false",
-        "",
-        "[workspace.execution]",
-        'isolation = "best_effort_host"',
-        `max_concurrency = ${this.options.maxConcurrency ?? 1}`,
-        `max_concurrency_per_repo = ${this.options.maxConcurrencyPerRepo ?? 1}`,
-        "",
-        "[defaults]",
-        'tracker = "markdown"',
-        'worker_task_args = "--create-pr --skip-clarity-check --skip-comments"',
-        "",
-        "[[repos]]",
-        `name = "${this.repoName}"`,
-        `remote = "${this.remote}"`,
-        `default_branch = "${this.baseBranch}"`,
-        "",
-      ].join("\n"),
-    );
+    const workspaceToml = [
+      "[workspace]",
+      "dashboard = false",
+      "",
+      "[workspace.execution]",
+      'isolation = "best_effort_host"',
+      `max_concurrency = ${this.options.maxConcurrency ?? 1}`,
+      `max_concurrency_per_repo = ${this.options.maxConcurrencyPerRepo ?? 1}`,
+      "",
+      "[defaults]",
+      'tracker = "markdown"',
+      'worker_task_args = "--create-pr --skip-clarity-check --skip-comments"',
+      "",
+      "[[repos]]",
+      `name = "${this.repoName}"`,
+      `remote = "${this.remote}"`,
+      `default_branch = "${this.baseBranch}"`,
+      "",
+    ];
+    const extraToml = this.options.workspaceTomlExtra?.trim();
+    if (extraToml) workspaceToml.push(extraToml, "");
+    writeFileSync(join(this.workspaceDir, "workspace.toml"), workspaceToml.join("\n"));
 
     cpSync(fixture, this.seed, { recursive: true });
     await checkedCommand(
@@ -377,10 +387,10 @@ export class WorkerFixture {
   runRecords(taskKey?: string): WorkerRunRecord[] {
     return taskKey === undefined
       ? this.query<WorkerRunRecord>(
-          "SELECT id, task_key, status, branch, repo, pr_url, outcome_reason, attempt FROM runs ORDER BY id",
+          "SELECT id, task_key, origin, status, branch, repo, pr_url, outcome_reason, attempt FROM runs ORDER BY id",
         )
       : this.query<WorkerRunRecord>(
-          "SELECT id, task_key, status, branch, repo, pr_url, outcome_reason, attempt FROM runs WHERE task_key = ? ORDER BY id",
+          "SELECT id, task_key, origin, status, branch, repo, pr_url, outcome_reason, attempt FROM runs WHERE task_key = ? ORDER BY id",
           [taskKey],
         );
   }

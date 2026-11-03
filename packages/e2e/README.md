@@ -296,6 +296,30 @@ A second run with `--skip-comments` proves no additional comment or transition
 is posted. The local bare Git remote is the code host; no GitHub token or PR is
 required.
 
+## Offline fake Sentry error monitor
+
+The default local suite also runs `tests/local/worker-sentry-monitor.test.ts`,
+which starts the real worker daemon with an `[[error_monitors]]` Sentry source
+pointed at an in-process fake. The fake binds `127.0.0.1:0`, accepts any Bearer
+token (and never reads or logs it), and implements only the project issue-list
+and issue-comment endpoints the product calls. Any other route, or an
+unexpected organization/project/issue id, returns a diagnostic 404 and fails
+the test.
+
+The scenario seeds one unresolved issue and waits for exactly one
+`error_monitor` run. It asserts the pushed `feature/` branch contains only the
+deterministic `src/greeting.ts` edit, the generated `error-fixes/` markdown
+carries the untrusted-content block plus the issue title/culprit and no token,
+and the fake received one success comment. Two further polls of the same issue
+must not create a second run or comment, proving the durable `issue:<id>`
+dedupe. No Sentry account, token, project, or network access is used. Run it
+with:
+
+```sh
+bun run --filter @getdevintern/code build
+bun run --filter @devintern/e2e test
+```
+
 ## Remote tracker fixtures
 
 The Markdown suites above need no task tracker. Separate opt-in suites exercise
