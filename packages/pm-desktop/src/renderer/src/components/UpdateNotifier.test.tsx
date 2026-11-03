@@ -8,6 +8,7 @@ import type { UpdateStatus } from "../../../shared/auto-update.ts";
 import type { IpcResult, PmDesktopApi } from "../../../shared/ipc-contract.ts";
 import type { QueryClient } from "@tanstack/react-query";
 import { qk } from "../queries/keys.ts";
+import { fixHappyDomNodeName } from "../test-helpers/happy-dom.ts";
 import { createTestQueryClient, withQueryClient } from "../test-helpers/query-client.tsx";
 import { formatAboutUpdateResult } from "./AboutDialog.tsx";
 
@@ -205,6 +206,9 @@ describe("UpdateNotifier against fake window.pm", () => {
 
   beforeEach(() => {
     domWindow = new Window();
+    // ReleaseNotes sanitizes with DOMPurify, which reads node names through
+    // `Node.prototype` — happy-dom only implements them per concrete class.
+    fixHappyDomNodeName(domWindow);
     const { document } = domWindow;
     globalThis.document = document as unknown as Document;
     globalThis.window = domWindow as unknown as Window & typeof globalThis.window;
