@@ -64,8 +64,15 @@ export interface PolledComment {
   created_at: string;
 }
 
+/** One tick's actionable feedback ids plus the cursor update they imply. */
+interface FeedbackClaims {
+  ids: string[];
+  /** Cursor to persist once the run settles (or when there is nothing to run). */
+  cursor: { source: string; value: string; etag?: string } | null;
+}
+
 export interface AutomaticResolveResult {
-  outcome: "clean" | "resolved" | "skipped" | "failed" | "deferred";
+  outcome: "clean" | "resolved" | "skipped" | "failed" | "deferred" | "interrupted";
   message: string;
 }
 
@@ -118,6 +125,14 @@ export interface ReviewPollingAcquirerOptions {
    * reloads (repos added to `workspace.toml`) apply on later ticks.
    */
   allowedRepos?: string[] | (() => string[]);
+  /**
+   * Failed `address-review` runs tolerated per review/comment id before the
+   * feedback is marked handled (tests/embedders). Defaults to
+   * `WORKER_FEEDBACK_MAX_ATTEMPTS` or 3.
+   */
+  feedbackMaxAttempts?: number;
+  /** Time window for retrying setup/transport throws; defaults to the relay window. */
+  feedbackTransportRetryWindowMs?: number;
   verbose?: boolean;
   /**
    * Schedule gating automatic conflict resolution (workspace scheduled
@@ -186,6 +201,36 @@ export function baseSyncRetryBackoffMs(attempts: number): number {
   if (attempts <= 0) return 0;
   return Math.min(RETRY_BACKOFF_BASE_MS * 2 ** (attempts - 1), RETRY_BACKOFF_MAX_MS);
 }
+
+/**
+ * Failed `address-review` runs tolerated for one review/comment id before the
+ * feedback is recorded as handled anyway.
+ *
+ * A non-zero child exit can be a transient transport/5xx failure or a
+ * deterministic one (bad repo state, agent crash) and the exit status cannot
+ * tell them apart, so a failed run releases its claim and is retried on the
+ * next tick. Without the retry a transient failure would silently drop the
+ * feedback; without the cap a deterministic failure would re-run the agent on
+ * every tick forever. `WORKER_FEEDBACK_MAX_ATTEMPTS` overrides the default.
+ */
+export const DEFAULT_FEEDBACK_MAX_ATTEMPTS = parseEnvInteger("WORKER_FEEDBACK_MAX_ATTEMPTS", 3, {
+  min: 1,
+  max: 100,
+});
+
+/** Bound for one feedback id; a value <= 0 falls back to the default. */
+export function feedbackMaxAttempts(override?: number): number {
+  return override !== undefined && override > 0 ? override : DEFAULT_FEEDBACK_MAX_ATTEMPTS;
+}
+
+/**
+ * Time window for a feedback run that threw before the agent started (bare
+ * clone, fetch, permission or network errors). Such a throw costs one round
+ * trip, so it reuses the relay's delivery window instead of the tight
+ * started-run budget; `WORKER_RELAY_RETRY_WINDOW_MINUTES` overrides the default.
+ */
+const DEFAULT_FEEDBACK_TRANSPORT_RETRY_WINDOW_MS =
+  parseEnvInteger("WORKER_RELAY_RETRY_WINDOW_MINUTES", 60, { min: 1, max: 7 * 24 * 60 }) * 60_000;
 
 /** Default wall-clock budget for one resolve-conflicts subprocess. */
 export const DEFAULT_RESOLVE_TIMEOUT_MS = 30 * 60 * 1000;
@@ -372,11 +417,18 @@ async function runResolveWithFailover(
   },
 ): Promise<AutomaticResolveResult> {
   let last: AutomaticResolveResult | null = null;
+  let interrupted = false;
   const status = await runWithFailover(async (env) => {
     const spawned = await spawnResolveOnce(repo, prNumber, extraArgs, { ...opts, env });
     last = spawned.result;
+    if (spawned.result.outcome === "interrupted") interrupted = true;
     return spawned.code;
   }, opts.env ?? process.env);
+  if (interrupted) {
+    // A shutdown drain aborted the resolver. Report that distinctly so the
+    // base-sync caller does not spend an attempt (or exhaust the event).
+    return { outcome: "interrupted", message: "resolver cancelled" };
+  }
   if (status === "deferred") {
     return {
       outcome: "deferred",
@@ -419,7 +471,7 @@ function spawnResolveOnce(
       resolve(value);
     };
     if (opts.signal?.aborted) {
-      finish({ code: 1, result: { outcome: "failed", message: "resolver cancelled" } });
+      finish({ code: 1, result: { outcome: "interrupted", message: "resolver cancelled" } });
       return;
     }
     let result: AutomaticResolveResult | null = null;
@@ -467,7 +519,7 @@ function spawnResolveOnce(
     });
     child.on("close", (code) => {
       if (aborted) {
-        finish({ code: 1, result: { outcome: "failed", message: "resolver cancelled" } });
+        finish({ code: 1, result: { outcome: "interrupted", message: "resolver cancelled" } });
         return;
       }
       if (timedOut) {
@@ -594,6 +646,8 @@ export class ReviewPollingAcquirer implements Acquirer {
   /** Cached scheduled-window state; `undefined` = not loaded from the cursor yet. */
   private conflictWindowState: ConflictWindowState | null | undefined;
   private lastFeedbackPollAt: number;
+  /** Backoff per `repo#pr` after a setup/transport throw before the run started. */
+  private feedbackRetries = new Map<string, { attempts: number; nextAt: number }>();
   /** Last time a rejected-credential warning was printed (rate-limited). */
   private lastAuthWarnAt = 0;
 
@@ -604,6 +658,11 @@ export class ReviewPollingAcquirer implements Acquirer {
 
   private now(): number {
     return (this.options.now ?? Date.now)();
+  }
+
+  private feedbackTransportRetryWindowMs(): number {
+    const override = this.options.feedbackTransportRetryWindowMs;
+    return override ?? DEFAULT_FEEDBACK_TRANSPORT_RETRY_WINDOW_MS;
   }
 
   /** Start polling: immediate first tick, then on the configured interval. */
@@ -784,7 +843,7 @@ export class ReviewPollingAcquirer implements Acquirer {
     pollFeedback: boolean,
     prefetched?: ConditionalResult<PolledPr>,
   ): Promise<void> {
-    const { workerState, github, addressPr, resolveConflicts } = this.options;
+    const { workerState, queue, github, addressPr, resolveConflicts } = this.options;
 
     // 1. PR state (ETag-cached): unwatch confirmed closed/merged PRs. When the
     //    reconciliation pass already fetched this PR, its result is reused
@@ -824,44 +883,233 @@ export class ReviewPollingAcquirer implements Acquirer {
 
     if (!pollFeedback) return;
 
+    // A setup/transport throw backs off before touching the same PR again, so
+    // an outage does not re-attempt the clone/fetch on every poll tick.
+    const feedbackRetryKey = agentPrKey(repo, prNumber);
+    const pendingRetry = this.feedbackRetries.get(feedbackRetryKey);
+    if (pendingRetry && this.now() < pendingRetry.nextAt) return;
+    this.feedbackRetries.delete(feedbackRetryKey);
+
     // 2. Reviews (ETag-cached): new human changes_requested reviews.
     // 3. Inline review comments since the last seen timestamp.
     // Both passes must run (each advances its own cursor), so no short-circuit.
-    const reviewed = await this.collectActionableReviews(repo, prNumber);
-    const commented = await this.collectActionableComments(repo, prNumber, watchedSinceMs);
-    if (!reviewed && !commented) {
+    const reviews = await this.collectActionableReviews(repo, prNumber);
+    const comments = await this.collectActionableComments(repo, prNumber, watchedSinceMs);
+    const claimedIds = [...reviews.ids, ...comments.ids];
+    const commitCursors = (): void => {
+      for (const cursor of [reviews.cursor, comments.cursor]) {
+        if (cursor) {
+          workerState.setCursor(cursor.source, cursor.value, cursor.etag);
+        }
+      }
+    };
+    if (claimedIds.length === 0) {
+      commitCursors();
       return;
     }
 
+    // Claim before executing so a persistently failing review does not loop
+    // every tick. Deferred/interrupted runs release the claim below so the
+    // feedback is re-admitted on the next tick instead of being lost.
+    for (const id of claimedIds) {
+      queue.markProcessed(SOURCE, id);
+    }
+
     console.log(`\n📌 [${this.name}] new review feedback on ${repo}#${prNumber}`);
-    const ok = await addressPr(repo, prNumber);
-    if (ok === "deferred") {
-      console.log(
-        `⏳ [${this.name}] ${repo}#${prNumber} deferred; will retry when a harness is available`,
+    const maxAttempts = feedbackMaxAttempts(this.options.feedbackMaxAttempts);
+    let ok: TaskExecutionResult;
+    try {
+      ok = await addressPr(repo, prNumber);
+    } catch (error) {
+      // A setup/transport throw never started an agent run: retry it inside a
+      // time window with backoff (matching the relay) instead of the tight
+      // started-run budget.
+      const { retryable, highestAttempt, detail } = this.recordThrownFeedbackFailure(
+        claimedIds,
+        repo,
+        prNumber,
+        error,
       );
-    } else if (ok === "skipped") {
+      if (retryable.length > 0) {
+        this.feedbackRetries.set(feedbackRetryKey, {
+          attempts: highestAttempt,
+          nextAt: this.now() + baseSyncRetryBackoffMs(highestAttempt),
+        });
+        console.log(
+          `⚠️  [${this.name}] ${repo}#${prNumber} feedback run ${detail} ` +
+            `(attempt ${highestAttempt}, retrying within the ` +
+            `${Math.round(this.feedbackTransportRetryWindowMs() / 60_000)}m window)`,
+        );
+        throw error;
+      }
+      console.log(
+        `⚠️  [${this.name}] ${repo}#${prNumber} feedback run failed for ` +
+          `${Math.round(this.feedbackTransportRetryWindowMs() / 60_000)}m; marking it handled`,
+      );
+      commitCursors();
+      return;
+    }
+    if (ok === "interrupted" || ok === "deferred") {
+      // A shutdown drain killed the run or every harness is usage-limited.
+      // Neither is a completed attempt, so release the ids and leave both
+      // cursors where they were: the next tick re-fetches and retries the
+      // same feedback (the relay path does the same).
+      for (const id of claimedIds) {
+        queue.unmarkProcessed(SOURCE, id);
+      }
+      if (ok === "interrupted") {
+        console.log(
+          `⏸️  [${this.name}] ${repo}#${prNumber} interrupted by worker shutdown; will retry`,
+        );
+      } else {
+        console.log(
+          `⏳ [${this.name}] ${repo}#${prNumber} deferred; will retry when a harness is available`,
+        );
+      }
+      return;
+    }
+
+    if (ok === false) {
+      // The child exited non-zero. That covers both transient transport/5xx
+      // failures and deterministic ones, and the exit status cannot tell them
+      // apart. Release the claims and leave both cursors so the next tick
+      // re-fetches and retries — but only until each id's bounded budget is
+      // spent, so a deterministic failure cannot burn an agent run forever.
+      const { retryable, highestAttempt } = this.recordFeedbackFailure(
+        claimedIds,
+        repo,
+        prNumber,
+        maxAttempts,
+      );
+      for (const id of retryable) {
+        queue.unmarkProcessed(SOURCE, id);
+      }
+      if (retryable.length > 0) {
+        console.log(
+          `⚠️  [${this.name}] ${repo}#${prNumber} feedback run did not complete cleanly ` +
+            `(attempt ${highestAttempt}/${maxAttempts}); will retry`,
+        );
+        return;
+      }
+      // Every id spent its budget: the failure is terminal so the cursors may
+      // advance and the same feedback does not loop forever.
+    }
+
+    for (const id of claimedIds) {
+      queue.clearFeedbackAttempts(id);
+    }
+    commitCursors();
+    if (ok === "skipped") {
       console.log(`⏭️  [${this.name}] ${repo}#${prNumber} skipped; nothing to address`);
-    } else if (ok === "interrupted") {
-      console.log(`⏸️  [${this.name}] ${repo}#${prNumber} interrupted by worker shutdown`);
+    } else if (ok) {
+      console.log(`✅ [${this.name}] ${repo}#${prNumber} feedback addressed`);
     } else {
       console.log(
-        ok
-          ? `✅ [${this.name}] ${repo}#${prNumber} feedback addressed`
-          : `⚠️  [${this.name}] ${repo}#${prNumber} feedback run did not complete cleanly`,
+        `⚠️  [${this.name}] ${repo}#${prNumber} feedback run failed ${maxAttempts} times; ` +
+          `marking it handled`,
       );
     }
   }
 
-  /** Mark unprocessed human `changes_requested` reviews as actionable. */
-  private async collectActionableReviews(repo: string, prNumber: number): Promise<boolean> {
+  /**
+   * Count one failed `address-review` run against every claimed feedback id.
+   *
+   * IDs that spend the budget are cleared from the retry ledger (their claim
+   * stays recorded, making the failure terminal); IDs still under budget are
+   * returned so the caller can release their claim and let the next tick retry.
+   *
+   * @param claimedIds - Feedback ids provisionally claimed for this run
+   * @param repo - Repo slug, for the recorded error message
+   * @param prNumber - PR number, for the recorded error message
+   * @param maxAttempts - Per-id retry ceiling
+   * @param detail - What failed (exit status or a thrown error message)
+   * @returns The ids that may be retried and the highest attempt count seen
+   */
+  private recordFeedbackFailure(
+    claimedIds: string[],
+    repo: string,
+    prNumber: number,
+    maxAttempts: number,
+    detail = "exited non-zero",
+  ): { retryable: string[]; highestAttempt: number } {
+    const { queue } = this.options;
+    const retryable: string[] = [];
+    let highestAttempt = 0;
+    for (const id of claimedIds) {
+      const attempts = queue.beginFeedbackAttempt(
+        id,
+        `address-review for ${repo}#${prNumber} ${detail}`,
+      );
+      highestAttempt = Math.max(highestAttempt, attempts);
+      if (attempts < maxAttempts) {
+        retryable.push(id);
+      } else {
+        queue.clearFeedbackAttempts(id);
+      }
+    }
+    return { retryable, highestAttempt };
+  }
+
+  /**
+   * Record a thrown feedback failure and decide whether it may still retry.
+   *
+   * A throw comes from a setup/transport step before the run starts, so it is
+   * retryable for a time-based window matching the relay rather than for the
+   * tight started-run attempt budget; an outage the relay survives must not
+   * permanently drop the same feedback in polling mode.
+   *
+   * @param claimedIds - Feedback ids provisionally claimed for this run
+   * @param repo - Repo slug, for the recorded error message
+   * @param prNumber - PR number, for the recorded error message
+   * @param error - The thrown failure
+   * @returns The ids that may still retry, the highest attempt count seen, and
+   *          the recorded failure detail
+   */
+  private recordThrownFeedbackFailure(
+    claimedIds: string[],
+    repo: string,
+    prNumber: number,
+    error: unknown,
+  ): { retryable: string[]; highestAttempt: number; detail: string } {
+    const { queue } = this.options;
+    const now = this.now();
+    const windowMs = this.feedbackTransportRetryWindowMs();
+    const detail = `threw: ${error instanceof Error ? error.message : String(error)}`;
+    const retryable: string[] = [];
+    let highestAttempt = 0;
+    for (const id of claimedIds) {
+      const attempts = queue.beginFeedbackAttempt(
+        id,
+        `address-review for ${repo}#${prNumber} ${detail}`,
+        now,
+      );
+      highestAttempt = Math.max(highestAttempt, attempts);
+      const firstAttemptAt = queue.getRelayDeliveryFirstAttemptAt(id) ?? now;
+      if (now - firstAttemptAt < windowMs) {
+        retryable.push(id);
+      } else {
+        // The window elapsed: the provisional claim stays recorded so the
+        // failure becomes terminal instead of looping forever.
+        queue.clearFeedbackAttempts(id);
+      }
+    }
+    for (const id of retryable) {
+      queue.unmarkProcessed(SOURCE, id);
+    }
+    return { retryable, highestAttempt, detail };
+  }
+
+  /** Collect unprocessed human `changes_requested` reviews as actionable. */
+  private async collectActionableReviews(repo: string, prNumber: number): Promise<FeedbackClaims> {
     const { workerState, queue, github } = this.options;
     const reviewsSource = `github:reviews:${repo}#${prNumber}`;
     const reviewsCursor = workerState.getCursor(reviewsSource);
     const reviewsResult = await github.fetchReviews(repo, prNumber, reviewsCursor?.etag);
-    let actionable = false;
+    const ids: string[] = [];
+    let cursor: FeedbackClaims["cursor"] = null;
     if (!reviewsResult.notModified && reviewsResult.data) {
       if (reviewsResult.etag) {
-        workerState.setCursor(reviewsSource, "reviews", reviewsResult.etag);
+        cursor = { source: reviewsSource, value: "reviews", etag: reviewsResult.etag };
       }
       for (const review of reviewsResult.data) {
         if (review.state.toLowerCase() !== "changes_requested" || review.user.type === "Bot") {
@@ -871,26 +1119,25 @@ export class ReviewPollingAcquirer implements Acquirer {
         if (queue.hasProcessed(SOURCE, externalId)) {
           continue;
         }
-        queue.markProcessed(SOURCE, externalId);
-        actionable = true;
+        ids.push(externalId);
       }
     }
-    return actionable;
+    return { ids, cursor };
   }
 
-  /** Mark unprocessed non-bot inline comments as actionable and advance the cursor. */
+  /** Collect unprocessed non-bot inline comments as actionable. */
   private async collectActionableComments(
     repo: string,
     prNumber: number,
     watchedSinceMs: number,
-  ): Promise<boolean> {
+  ): Promise<FeedbackClaims> {
     const { workerState, queue, github } = this.options;
     const commentsSource = `github:prcomments:${repo}#${prNumber}`;
     const commentsCursor = workerState.getCursor(commentsSource);
     const sinceIso = commentsCursor?.cursorValue ?? new Date(watchedSinceMs).toISOString();
     const comments = await github.fetchReviewCommentsSince(repo, prNumber, sinceIso);
     let maxCreatedAt = sinceIso;
-    let actionable = false;
+    const ids: string[] = [];
     for (const comment of comments) {
       if (comment.created_at > maxCreatedAt) {
         maxCreatedAt = comment.created_at;
@@ -902,13 +1149,12 @@ export class ReviewPollingAcquirer implements Acquirer {
       if (queue.hasProcessed(SOURCE, externalId)) {
         continue;
       }
-      queue.markProcessed(SOURCE, externalId);
-      actionable = true;
+      ids.push(externalId);
     }
-    if (maxCreatedAt !== sinceIso) {
-      workerState.setCursor(commentsSource, maxCreatedAt);
-    }
-    return actionable;
+    return {
+      ids,
+      cursor: maxCreatedAt !== sinceIso ? { source: commentsSource, value: maxCreatedAt } : null,
+    };
   }
 
   /**
@@ -998,10 +1244,22 @@ export class ReviewPollingAcquirer implements Acquirer {
     } catch (error) {
       result = { outcome: "failed", message: (error as Error).message };
     }
-    const terminal = result.outcome !== "failed" && result.outcome !== "deferred";
+    const terminal =
+      result.outcome !== "failed" &&
+      result.outcome !== "deferred" &&
+      result.outcome !== "interrupted";
     if (terminal) {
       this.deferCounts.delete(externalId);
       queue.completeBaseSyncEvent(BASE_SYNC_SOURCE, externalId);
+    } else if (result.outcome === "interrupted") {
+      // A shutdown drain aborted the resolver; its outcome is unknown, not a
+      // failure. Undo the tentative attempt so a restart can retry the same
+      // event instead of eventually exhausting it.
+      this.deferCounts.delete(externalId);
+      queue.deferBaseSyncAttempt(externalId);
+      console.warn(
+        `⏸️  [${this.name}] ${repo}#${prNumber} base sync interrupted by worker shutdown; will retry`,
+      );
     } else if (result.outcome === "deferred") {
       const defers = (this.deferCounts.get(externalId) ?? 0) + 1;
       this.deferCounts.set(externalId, defers);
@@ -1030,7 +1288,7 @@ export class ReviewPollingAcquirer implements Acquirer {
           runId,
           result.outcome === "failed"
             ? "failed"
-            : result.outcome === "deferred"
+            : result.outcome === "deferred" || result.outcome === "interrupted"
               ? "deferred"
               : "succeeded",
           result.message,

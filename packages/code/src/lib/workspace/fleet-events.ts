@@ -138,7 +138,8 @@ export function fleetGitHubSlugs(config: WorkspaceConfig): string[] {
  * base worktree. Used for the agent's own PRs (no gate needed) and as the
  * execution half of gated mention handling.
  *
- * @returns Handler resolving false when the slug maps to no workspace repo.
+ * @returns Handler resolving `"skipped"` when the slug maps to no workspace
+ *          repo (an intentional no-op, not a failed run).
  */
 export function createFleetAddressPr(deps: FleetEventDeps): AddressPr {
   const { config, workspaceDir, repoManager } = deps;
@@ -150,7 +151,7 @@ export function createFleetAddressPr(deps: FleetEventDeps): AddressPr {
       console.warn(
         `⚠️  [fleet] PR event for ${slug}#${prNumber} matches no workspace repo; skipping.`,
       );
-      return false;
+      return "skipped";
     }
     const invoke = async (signal?: AbortSignal) => {
       await repoManager.ensureBareClone(repo);
@@ -282,34 +283,36 @@ export function createFleetCiFix(
  * Build the fleet mention handler: permission-gate the mentioning user, then
  * run the review pipeline for that PR.
  *
- * The gate fails closed: API errors count as "no access".
+ * A confirmed denial returns `"skipped"` (an intentional no-op). A permission
+ * API error is rethrown so the relay classifies it as transport and retries:
+ * a transient 5xx/rate limit must not be mistaken for a denial and permanently
+ * drop a valid @mention.
  */
 export function createFleetMentionHandler(
   deps: FleetEventDeps,
   sharedAddressPr?: AddressPr,
-): (slug: string, comment: { user: { login: string } }, prNumber: number) => Promise<void> {
+): (
+  slug: string,
+  comment: { user: { login: string } },
+  prNumber: number,
+) => Promise<TaskExecutionResult> {
   const addressPr = sharedAddressPr ?? coalescePrFeedbackRuns(createFleetAddressPr(deps));
 
   return async (slug, comment, prNumber) => {
     const [owner, name] = slug.split("/") as [string, string];
     const actor = comment.user.login;
 
-    let hasAccess = false;
-    try {
-      hasAccess = await deps.userHasPushAccess(owner, name, actor);
-    } catch {
-      hasAccess = false;
-    }
+    const hasAccess = await deps.userHasPushAccess(owner, name, actor);
     if (!hasAccess) {
       console.log(
         `⛔ [fleet] Skipping mention on ${slug}#${prNumber}: @${actor} does not have push access ` +
           "(mention-triggered automation requires write, maintain, or admin permission)",
       );
-      return;
+      return "skipped";
     }
 
     console.log(`📌 [fleet] @mention on ${slug}#${prNumber} by @${actor}`);
-    await addressPr(slug, prNumber);
+    return addressPr(slug, prNumber);
   };
 }
 

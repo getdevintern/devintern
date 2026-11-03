@@ -15,6 +15,7 @@ import { ensureGitInfoExcluded } from "../utils/git-exclude";
 import { configureSqliteConnection } from "./sqlite";
 import {
   RowParseError,
+  optionalNumber,
   optionalString,
   parseRowObject,
   requireEnum,
@@ -252,17 +253,42 @@ export class WebhookQueue {
       )
     `);
 
-    // Durable retry bookkeeping for relayed envelopes. The control plane owns
-    // redelivery, so a delivery that keeps failing must stop pinning the local
-    // cursor after a bounded number of attempts.
+    // Durable retry bookkeeping for relayed envelopes and polling feedback.
+    // The control plane owns relay redelivery, so a delivery that keeps failing
+    // must stop pinning the local cursor after a bounded number of attempts;
+    // polling feedback uses the same ledger to bound its own retries.
     this.db.run(`
       CREATE TABLE IF NOT EXISTS relay_delivery_attempts (
         external_id TEXT PRIMARY KEY,
         attempts INTEGER NOT NULL DEFAULT 0,
+        run_failure_attempts INTEGER NOT NULL DEFAULT 0,
         last_error TEXT,
-        updated_at INTEGER NOT NULL
+        updated_at INTEGER NOT NULL,
+        first_attempt_at INTEGER
       )
     `);
+    // Add the retry-window anchor to databases created by an older build.
+    // Existing rows are backfilled from `updated_at`, which is the last
+    // failure timestamp and therefore a safe (slightly later) window start.
+    const relayAttemptColumns = this.db
+      .query("PRAGMA table_info(relay_delivery_attempts)")
+      .all() as Array<{ name: string }>;
+    if (!relayAttemptColumns.some((column) => column.name === "first_attempt_at")) {
+      this.db.run("ALTER TABLE relay_delivery_attempts ADD COLUMN first_attempt_at INTEGER");
+    }
+    // Started-run failures get their own count so a prior transport failure
+    // cannot consume the tighter agent-run budget. Pre-existing rows start at
+    // zero; their next failed run is the first against the separate budget.
+    if (!relayAttemptColumns.some((column) => column.name === "run_failure_attempts")) {
+      this.db.run(
+        "ALTER TABLE relay_delivery_attempts ADD COLUMN run_failure_attempts INTEGER NOT NULL DEFAULT 0",
+      );
+    }
+    this.db.run(
+      `UPDATE relay_delivery_attempts
+       SET first_attempt_at = updated_at
+       WHERE first_attempt_at IS NULL`,
+    );
 
     // Durable base-branch advancement events. This is deliberately separate
     // from webhook_events: eligibility is discovered by polling, deferrals do
@@ -509,22 +535,40 @@ export class WebhookQueue {
    * Consume one retryable relay-delivery failure and record its error.
    *
    * Relay redelivery is driven by the control plane (the local cursor stays
-   * put), so this durable counter is what stops a permanently failing
-   * envelope from pinning the cursor for every later delivery.
+   * put), so this durable row is what stops a permanently failing envelope
+   * from pinning the cursor for every later delivery. `first_attempt_at`
+   * anchors a time-based budget: transient outages and rate limits that last
+   * minutes must not exhaust a small attempt count.
    *
    * @param externalId - Relay envelope id (source/team/delivery)
    * @param error - Failure message to retain for diagnostics
-   * @returns The number of failed attempts recorded so far
+   * @param now - Timestamp of this failure (injected for tests)
+   * @param runFailed - Whether a started agent run failed (vs a transport error)
+   * @returns The number of failed attempts recorded so far, transport and run
+   *          combined; use {@link getRelayDeliveryRunFailureAttempts} for the
+   *          started-run subset
    */
-  beginRelayDeliveryAttempt(externalId: string, error: string, now: number = Date.now()): number {
+  beginRelayDeliveryAttempt(
+    externalId: string,
+    error: string,
+    now: number = Date.now(),
+    runFailed = false,
+  ): number {
     this.db.run(
-      `INSERT INTO relay_delivery_attempts (external_id, attempts, last_error, updated_at)
-       VALUES (?, 1, ?, ?)
+      `INSERT INTO relay_delivery_attempts
+         (external_id, attempts, run_failure_attempts, last_error, updated_at, first_attempt_at)
+       VALUES (?, 1, ?, ?, ?, ?)
        ON CONFLICT(external_id) DO UPDATE SET
          attempts = relay_delivery_attempts.attempts + 1,
+         run_failure_attempts = relay_delivery_attempts.run_failure_attempts +
+           excluded.run_failure_attempts,
          last_error = excluded.last_error,
-         updated_at = excluded.updated_at`,
-      [externalId, error, now],
+         updated_at = excluded.updated_at,
+         first_attempt_at = COALESCE(
+           relay_delivery_attempts.first_attempt_at,
+           excluded.first_attempt_at
+         )`,
+      [externalId, runFailed ? 1 : 0, error, now, now],
     );
     const row = this.db
       .query(`SELECT attempts FROM relay_delivery_attempts WHERE external_id = ?`)
@@ -533,9 +577,64 @@ export class WebhookQueue {
     return requireNonNegativeInteger(record, "attempts", "relay_delivery_attempts row");
   }
 
+  /**
+   * Count failures caused by a started agent run, excluding transport errors.
+   *
+   * @param externalId - Relay envelope id (source/team/delivery)
+   * @returns Failed started runs recorded for this delivery, `0` when none
+   */
+  getRelayDeliveryRunFailureAttempts(externalId: string): number {
+    const row = this.db
+      .query(`SELECT run_failure_attempts FROM relay_delivery_attempts WHERE external_id = ?`)
+      .get(externalId);
+    if (!row) return 0;
+    const record = parseRowObject(row, "relay_delivery_attempts row");
+    return requireNonNegativeInteger(record, "run_failure_attempts", "relay_delivery_attempts row");
+  }
+
+  /**
+   * Read when a relay delivery first failed.
+   *
+   * @param externalId - Relay envelope id (source/team/delivery)
+   * @returns Epoch ms of the first recorded failure, or `null` when none exists
+   */
+  getRelayDeliveryFirstAttemptAt(externalId: string): number | null {
+    const row = this.db
+      .query(`SELECT first_attempt_at FROM relay_delivery_attempts WHERE external_id = ?`)
+      .get(externalId);
+    if (!row) return null;
+    const record = parseRowObject(row, "relay_delivery_attempts row");
+    return optionalNumber(record, "first_attempt_at", "relay_delivery_attempts row") ?? null;
+  }
+
   /** Forget a relay delivery's retry history once it is handled or exhausted. */
   clearRelayDeliveryAttempts(externalId: string): void {
     this.db.run(`DELETE FROM relay_delivery_attempts WHERE external_id = ?`, [externalId]);
+  }
+
+  /**
+   * Consume one retryable polling-feedback failure for a review/comment id.
+   *
+   * Polling feedback claims its ids in `processed_events` before running, so a
+   * failed run releases the claim and records an attempt here instead of
+   * marking the feedback handled. The durable count bounds the retry so a
+   * deterministic failure eventually becomes terminal rather than re-running
+   * the agent on every poll tick forever. Feedback ids (`review:…`,
+   * `comment:…`) share the attempt ledger with relay envelope ids but can
+   * never collide with them.
+   *
+   * @param externalId - Feedback id (`review:<repo>#<pr>:<id>` / `comment:…`)
+   * @param error - Failure message to retain for diagnostics
+   * @param now - Timestamp of this failure (injected for tests)
+   * @returns The number of failed attempts recorded so far
+   */
+  beginFeedbackAttempt(externalId: string, error: string, now: number = Date.now()): number {
+    return this.beginRelayDeliveryAttempt(externalId, error, now);
+  }
+
+  /** Forget a feedback id's retry history once it is handled or exhausted. */
+  clearFeedbackAttempts(externalId: string): void {
+    this.clearRelayDeliveryAttempts(externalId);
   }
 
   /** Configured retry ceiling, shared by webhook, base-sync, and relay work. */

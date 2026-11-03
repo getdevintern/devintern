@@ -97,6 +97,7 @@ describe("bot mention aliases", () => {
       },
       handleMention: async (c, prNumber) => {
         handled.push({ id: c.id, prNumber });
+        return true;
       },
     });
 
@@ -183,6 +184,8 @@ describe("MentionSweepAcquirer", () => {
     pr?: Partial<SweptPrInfo>;
     shouldPollFeedback?: () => boolean;
     feedbackFallbackIntervalSeconds?: number;
+    feedbackMaxAttempts?: number;
+    onMention?: (id: number) => Promise<boolean | "deferred" | "skipped" | "interrupted">;
   }) {
     const handled: Array<{ id: number; prNumber: number }> = [];
     const posted: string[] = [];
@@ -191,6 +194,7 @@ describe("MentionSweepAcquirer", () => {
       intervalSeconds: 60,
       shouldPollFeedback: options.shouldPollFeedback,
       feedbackFallbackIntervalSeconds: options.feedbackFallbackIntervalSeconds,
+      feedbackMaxAttempts: options.feedbackMaxAttempts,
       workerState,
       queue,
       github: {
@@ -210,6 +214,7 @@ describe("MentionSweepAcquirer", () => {
       },
       handleMention: async (c, prNumber) => {
         handled.push({ id: c.id, prNumber });
+        return options.onMention ? options.onMention(c.id) : true;
       },
     });
     return { acquirer, handled, posted };
@@ -221,6 +226,119 @@ describe("MentionSweepAcquirer", () => {
     await acquirer.tick();
     await acquirer.tick();
     expect(handled).toEqual([{ id: 1, prNumber: 5 }]);
+  });
+
+  test("an interrupted mention releases its claim and retries on the next sweep", async () => {
+    const commentAt = new Date(Date.now() + 60_000).toISOString();
+    const outcomes: Array<"interrupted" | "deferred" | true> = ["interrupted", true];
+    const { acquirer, handled } = makeAcquirer({
+      issueComments: [comment({ created_at: commentAt })],
+      onMention: async () => outcomes.shift() ?? true,
+    });
+
+    await acquirer.tick();
+    expect(handled).toHaveLength(1);
+    // A shutdown drain killed the run: the comment must not stay handled, and
+    // the cursor must not move past it.
+    expect(queue.hasProcessed("github:mentions", "comment:1")).toBe(false);
+    expect(
+      workerState.getCursor("github:mention:issuecomments:acme/widgets")?.cursorValue,
+    ).not.toBe(commentAt);
+
+    // The next sweep re-fetches and runs the mention normally.
+    await acquirer.tick();
+    expect(handled).toHaveLength(2);
+    expect(queue.hasProcessed("github:mentions", "comment:1")).toBe(true);
+    expect(workerState.getCursor("github:mention:issuecomments:acme/widgets")?.cursorValue).toBe(
+      commentAt,
+    );
+  });
+
+  test("a deferred mention releases its claim and retries on the next sweep", async () => {
+    const commentAt = new Date(Date.now() + 60_000).toISOString();
+    const outcomes: Array<"interrupted" | "deferred" | true> = ["deferred", true];
+    const { acquirer, handled } = makeAcquirer({
+      issueComments: [comment({ created_at: commentAt })],
+      onMention: async () => outcomes.shift() ?? true,
+    });
+
+    await acquirer.tick();
+    expect(handled).toHaveLength(1);
+    expect(queue.hasProcessed("github:mentions", "comment:1")).toBe(false);
+    expect(
+      workerState.getCursor("github:mention:issuecomments:acme/widgets")?.cursorValue,
+    ).not.toBe(commentAt);
+
+    await acquirer.tick();
+    expect(handled).toHaveLength(2);
+    expect(queue.hasProcessed("github:mentions", "comment:1")).toBe(true);
+    expect(workerState.getCursor("github:mention:issuecomments:acme/widgets")?.cursorValue).toBe(
+      commentAt,
+    );
+  });
+
+  test("a thrown mention handler releases its claim and retries on the next sweep", async () => {
+    const commentAt = new Date(Date.now() + 60_000).toISOString();
+    let calls = 0;
+    const { acquirer, handled } = makeAcquirer({
+      issueComments: [comment({ created_at: commentAt })],
+      feedbackMaxAttempts: 3,
+      onMention: async () => {
+        calls++;
+        if (calls < 3) throw new Error("GitHub API error (403): rate limited");
+        return true;
+      },
+    });
+
+    await acquirer.tick();
+    expect(calls).toBe(1);
+    expect(handled).toHaveLength(1);
+    // A throw is not proof the mention was addressed: release the claim and
+    // hold the cursor so the next sweep retries it instead of dropping it.
+    expect(queue.hasProcessed("github:mentions", "comment:1")).toBe(false);
+    expect(
+      workerState.getCursor("github:mention:issuecomments:acme/widgets")?.cursorValue,
+    ).not.toBe(commentAt);
+
+    await acquirer.tick();
+    expect(calls).toBe(2);
+    expect(queue.hasProcessed("github:mentions", "comment:1")).toBe(false);
+
+    await acquirer.tick();
+    expect(calls).toBe(3);
+    expect(handled).toHaveLength(3);
+    expect(queue.hasProcessed("github:mentions", "comment:1")).toBe(true);
+    expect(workerState.getCursor("github:mention:issuecomments:acme/widgets")?.cursorValue).toBe(
+      commentAt,
+    );
+  });
+
+  test("a mention that keeps throwing becomes terminal after its budget", async () => {
+    const commentAt = new Date(Date.now() + 60_000).toISOString();
+    let calls = 0;
+    const { acquirer } = makeAcquirer({
+      issueComments: [comment({ created_at: commentAt })],
+      feedbackMaxAttempts: 2,
+      onMention: async () => {
+        calls++;
+        throw new Error("GitHub API error (403): forbidden");
+      },
+    });
+
+    await acquirer.tick();
+    expect(calls).toBe(1);
+    expect(queue.hasProcessed("github:mentions", "comment:1")).toBe(false);
+
+    await acquirer.tick();
+    expect(calls).toBe(2);
+    expect(queue.hasProcessed("github:mentions", "comment:1")).toBe(true);
+    expect(workerState.getCursor("github:mention:issuecomments:acme/widgets")?.cursorValue).toBe(
+      commentAt,
+    );
+
+    // Terminal feedback is not retried on a later sweep.
+    await acquirer.tick();
+    expect(calls).toBe(2);
   });
 
   test("healthy relay suppresses mention polling between safety sweeps", async () => {

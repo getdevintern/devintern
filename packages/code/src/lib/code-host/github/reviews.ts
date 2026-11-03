@@ -406,6 +406,27 @@ export class GitHubReviewsClient {
   }
 
   /**
+   * Check whether a user can push to the repository (write/maintain/admin),
+   * propagating API failures.
+   *
+   * Unlike {@link userHasPushAccess}, a transient API error is not reported as
+   * a denial, so retry-capable callers (the relay mention handler) can leave
+   * the delivery retryable instead of permanently dropping a valid @mention.
+   *
+   * @param owner - Repository owner
+   * @param repo - Repository name
+   * @param username - GitHub login to check
+   * @returns Whether the user has write/maintain/admin permission
+   */
+  async userHasPushAccessOrThrow(owner: string, repo: string, username: string): Promise<boolean> {
+    const { permission, roleName } = await this.getCollaboratorPermission(owner, repo, username);
+    if (permission === "admin" || permission === "write") {
+      return true;
+    }
+    return roleName === "maintain" || roleName === "write" || roleName === "admin";
+  }
+
+  /**
    * Check whether a user can push to the repository (write/maintain/admin).
    * Fails closed: an API error is reported as no push access.
    *
@@ -415,11 +436,7 @@ export class GitHubReviewsClient {
    */
   async userHasPushAccess(owner: string, repo: string, username: string): Promise<boolean> {
     try {
-      const { permission, roleName } = await this.getCollaboratorPermission(owner, repo, username);
-      if (permission === "admin" || permission === "write") {
-        return true;
-      }
-      return roleName === "maintain" || roleName === "write" || roleName === "admin";
+      return await this.userHasPushAccessOrThrow(owner, repo, username);
     } catch {
       return false;
     }

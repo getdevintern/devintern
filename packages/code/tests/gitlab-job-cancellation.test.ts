@@ -34,10 +34,11 @@ test.each(["review", "conflict"] as const)("%s URL job stops on cancellation", a
     expect(existsSync(marker)).toBe(true);
     controller.abort();
     const result = await run;
-    // A cancelled review is not a failed review: report the drain abort so the
-    // caller keeps the delivery retryable instead of marking it handled.
+    // A cancelled run is not a failed run: report the drain abort so the
+    // caller keeps the delivery/event retryable instead of consuming an
+    // attempt or marking it handled.
     if (kind === "review") expect(result).toBe("interrupted");
-    else expect(result).toMatchObject({ outcome: "failed" });
+    else expect(result).toMatchObject({ outcome: "interrupted" });
   } finally {
     controller.abort();
     await run;

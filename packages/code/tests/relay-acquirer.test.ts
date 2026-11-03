@@ -60,8 +60,12 @@ describe("RelayAcquirer", () => {
       agentPrs?: [string, number][];
       evaluateTask?: RelayHandlers["evaluateTask"];
       addressPr?: RelayHandlers["addressPr"];
+      handlePrComment?: RelayHandlers["handlePrComment"];
       /** Override the shared queue (e.g. a lower retry ceiling for a test). */
       queue?: WebhookQueue;
+      deliveryRetryWindowMs?: number;
+      deliveryMaxAttempts?: number;
+      runFailureMaxAttempts?: number;
     } = {},
   ): { acquirer: RelayAcquirer; requests: string[]; authHeaders: string[] } {
     const requests: string[] = [];
@@ -101,6 +105,9 @@ describe("RelayAcquirer", () => {
       queue: deliveryQueue,
       fetchImpl,
       isAgentPr: (repo, pr) => agentPrs.some(([r, n]) => r === repo && n === pr),
+      deliveryRetryWindowMs: options.deliveryRetryWindowMs,
+      deliveryMaxAttempts: options.deliveryMaxAttempts,
+      runFailureMaxAttempts: options.runFailureMaxAttempts,
       handlers: {
         addressPr:
           options.addressPr ??
@@ -108,9 +115,12 @@ describe("RelayAcquirer", () => {
             log.addressed.push([repo, pr]);
             return true;
           }),
-        handlePrComment: async (repo, pr, commentId) => {
-          log.comments.push([repo, pr, commentId]);
-        },
+        handlePrComment:
+          options.handlePrComment ??
+          (async (repo, pr, commentId) => {
+            log.comments.push([repo, pr, commentId]);
+            return true;
+          }),
         evaluateTask:
           options.evaluateTask ??
           (async (taskKey, trackerSource, team) => {
@@ -282,7 +292,7 @@ describe("RelayAcquirer", () => {
       isAgentPr: () => false,
       handlers: {
         addressPr: async () => false,
-        handlePrComment: async () => {},
+        handlePrComment: async () => true,
         evaluateTask: async () => {},
       },
       onPollSuccess: () => {
@@ -352,7 +362,7 @@ describe("RelayAcquirer", () => {
     expect(workerState.getCursor(`relay:${RELAY_URL}`)?.cursorValue).toBe("1");
   });
 
-  test("a review run that fails is acknowledged and later envelopes still dispatch", async () => {
+  test("a failed review run stays retryable instead of being acknowledged", async () => {
     const review = envelope({ seq: 1, ref: { pr: 5 }, deliveryId: "failed-review" });
     const following = envelope({
       seq: 2,
@@ -362,13 +372,13 @@ describe("RelayAcquirer", () => {
       deliveryId: "after-failed-review",
     });
     let attempts = 0;
-    // Mirrors the no-credentials wiring in fleet-event-acquirers.ts: when the
-    // relay has no GitHub credentials it logs and returns false (it does not
-    // throw), so this outcome must be acknowledged rather than escape dispatch.
+    // A non-zero subprocess exit collapses to `false`, which could be a
+    // transient transport/5xx failure. The relay must keep it retryable rather
+    // than acknowledge and lose the review.
     const addressPr: RelayHandlers["addressPr"] = async (repo, pr) => {
       attempts++;
       log.addressed.push([repo, pr]);
-      return false;
+      return attempts > 1;
     };
     const { acquirer } = makeAcquirer([{ events: [review, following], cursor: 2 }], {
       agentPrs: [["acme/webapp", 5]],
@@ -377,22 +387,138 @@ describe("RelayAcquirer", () => {
 
     acquirer.start();
     try {
-      await waitFor(() => log.tasks.length === 1);
+      await waitFor(() => attempts === 1);
     } finally {
       await acquirer.stop();
     }
 
-    // The run was attempted once. A false outcome is terminal for its
-    // delivery: the run reported its own error (or there were no credentials
-    // to run it), and redelivering it would re-run the whole review on every
-    // backoff cycle while pinning the cursor.
-    expect(attempts).toBe(1);
-    expect(log.addressed).toEqual([["acme/webapp", 5]]);
-    expect(queue.hasProcessed("relay", "github:failed-review")).toBe(true);
+    expect(queue.hasProcessed("relay", "github:failed-review")).toBe(false);
     expect(queue.isInFlight("relay", "github:failed-review")).toBe(false);
-    // Later envelopes are no longer blocked behind the failed one.
+    expect(workerState.getCursor(`relay:${RELAY_URL}`)?.cursorValue ?? "0").toBe("0");
+    expect(log.tasks).toEqual([]);
+
+    // The relay redelivers and the retry succeeds; later envelopes dispatch.
+    const { acquirer: retry } = makeAcquirer([{ events: [review, following], cursor: 2 }], {
+      agentPrs: [["acme/webapp", 5]],
+      addressPr,
+    });
+    retry.start();
+    try {
+      await waitFor(() => log.tasks.length === 1);
+    } finally {
+      await retry.stop();
+    }
+    expect(attempts).toBe(2);
+    expect(queue.hasProcessed("relay", "github:failed-review")).toBe(true);
     expect(log.tasks).toEqual([["NEXT-1", "jira"]]);
     expect(workerState.getCursor(`relay:${RELAY_URL}`)?.cursorValue).toBe("2");
+  });
+
+  test("a started-but-failed review run spends the tighter started-run budget", async () => {
+    const review = envelope({ seq: 1, ref: { pr: 5 }, deliveryId: "deterministic-failure" });
+    let attempts = 0;
+    // A deterministic agent failure (bad repo state, compile error) can never
+    // succeed, so it must not consume the full transport budget of eight whole
+    // agent runs: the default started-run budget acknowledges it after one
+    // retry.
+    const addressPr: RelayHandlers["addressPr"] = async () => {
+      attempts++;
+      return false;
+    };
+    const options = {
+      agentPrs: [["acme/webapp", 5]] as [string, number][],
+      addressPr,
+    };
+
+    const { acquirer } = makeAcquirer([{ events: [review], cursor: 1 }], options);
+    acquirer.start();
+    try {
+      await waitFor(
+        () =>
+          attempts === 1 &&
+          queue.getRelayDeliveryFirstAttemptAt("github:deterministic-failure") !== null,
+      );
+    } finally {
+      await acquirer.stop();
+    }
+    expect(queue.hasProcessed("relay", "github:deterministic-failure")).toBe(false);
+
+    // One retry is allowed, then the failure is terminal even though the
+    // eight-attempt transport ceiling is far from spent.
+    const { acquirer: retry } = makeAcquirer([{ events: [review], cursor: 1 }], options);
+    retry.start();
+    try {
+      await waitFor(() => queue.hasProcessed("relay", "github:deterministic-failure"));
+    } finally {
+      await retry.stop();
+    }
+    expect(attempts).toBe(2);
+    expect(workerState.getCursor(`relay:${RELAY_URL}`)?.cursorValue).toBe("1");
+
+    // A further redelivery is acknowledged without another agent run.
+    const { acquirer: later, requests } = makeAcquirer([{ events: [review], cursor: 1 }], options);
+    later.start();
+    try {
+      await waitFor(() => requests.length === 1);
+    } finally {
+      await later.stop();
+    }
+    expect(attempts).toBe(2);
+    expect(workerState.getCursor(`relay:${RELAY_URL}`)?.cursorValue).toBe("1");
+  });
+
+  test("a prior transport failure does not consume the started-run retry budget", async () => {
+    const review = envelope({ seq: 1, ref: { pr: 5 }, deliveryId: "mixed-failure" });
+    let attempts = 0;
+    let phase: "transport" | "run" = "transport";
+    const addressPr: RelayHandlers["addressPr"] = async () => {
+      attempts++;
+      if (phase === "transport") {
+        throw new Error("upstream unavailable (503)");
+      }
+      return false;
+    };
+    const options = {
+      agentPrs: [["acme/webapp", 5]] as [string, number][],
+      addressPr,
+      runFailureMaxAttempts: 2,
+    };
+
+    // First a transport failure, which must spend only the transport budget.
+    const { acquirer } = makeAcquirer([{ events: [review], cursor: 1 }], options);
+    acquirer.start();
+    try {
+      await waitFor(() => attempts === 1);
+    } finally {
+      await acquirer.stop();
+    }
+    expect(queue.hasProcessed("relay", "github:mixed-failure")).toBe(false);
+    expect(queue.getRelayDeliveryRunFailureAttempts("github:mixed-failure")).toBe(0);
+
+    // The first started-run failure is 1/2 against the run budget and must
+    // stay retryable even though the delivery already failed once in transit.
+    phase = "run";
+    const { acquirer: second } = makeAcquirer([{ events: [review], cursor: 1 }], options);
+    second.start();
+    try {
+      await waitFor(
+        () =>
+          attempts === 2 && queue.getRelayDeliveryRunFailureAttempts("github:mixed-failure") === 1,
+      );
+    } finally {
+      await second.stop();
+    }
+    expect(queue.hasProcessed("relay", "github:mixed-failure")).toBe(false);
+
+    // The second started-run failure spends the run budget and is terminal.
+    const { acquirer: third } = makeAcquirer([{ events: [review], cursor: 1 }], options);
+    third.start();
+    try {
+      await waitFor(() => queue.hasProcessed("relay", "github:mixed-failure"));
+    } finally {
+      await third.stop();
+    }
+    expect(attempts).toBe(3);
   });
 
   test("an interrupted review run stays retryable and holds the cursor", async () => {
@@ -443,7 +569,132 @@ describe("RelayAcquirer", () => {
     expect(workerState.getCursor(`relay:${RELAY_URL}`)?.cursorValue).toBe("2");
   });
 
-  test("a transiently failing delivery is acknowledged once its attempt budget is spent", async () => {
+  test("an interrupted mention run stays retryable and holds the cursor", async () => {
+    const comment = envelope({
+      seq: 1,
+      eventType: "pr.comment_created",
+      ref: { pr: 5, commentId: 77 },
+      deliveryId: "interrupted-mention",
+    });
+    const following = envelope({
+      seq: 2,
+      eventType: "task.changed",
+      source: "jira",
+      ref: { task: "NEXT-1" },
+      deliveryId: "after-interrupted-mention",
+    });
+    let attempts = 0;
+    const handlePrComment: RelayHandlers["handlePrComment"] = async () => {
+      attempts++;
+      return "interrupted";
+    };
+    const { acquirer } = makeAcquirer([{ events: [comment, following], cursor: 2 }], {
+      handlePrComment,
+    });
+
+    acquirer.start();
+    try {
+      await waitFor(() => attempts === 1);
+    } finally {
+      await acquirer.stop();
+    }
+
+    expect(queue.hasProcessed("relay", "github:interrupted-mention")).toBe(false);
+    expect(queue.isInFlight("relay", "github:interrupted-mention")).toBe(false);
+    expect(workerState.getCursor(`relay:${RELAY_URL}`)?.cursorValue ?? "0").toBe("0");
+    expect(log.tasks).toEqual([]);
+
+    // The relay redelivers after restart and the retry runs normally.
+    const { acquirer: retry } = makeAcquirer([{ events: [comment, following], cursor: 2 }]);
+    retry.start();
+    try {
+      await waitFor(() => log.tasks.length === 1);
+    } finally {
+      await retry.stop();
+    }
+    expect(queue.hasProcessed("relay", "github:interrupted-mention")).toBe(true);
+    expect(workerState.getCursor(`relay:${RELAY_URL}`)?.cursorValue).toBe("2");
+  });
+
+  test("a rate-limited delivery retries beyond the webhook retry budget", async () => {
+    const review = envelope({ seq: 1, ref: { pr: 5 }, deliveryId: "rate-limited" });
+    let attempts = 0;
+    const addressPr: RelayHandlers["addressPr"] = async () => {
+      attempts++;
+      throw new Error("GitHub API error (403): API rate limit exceeded");
+    };
+    // `WEBHOOK_MAX_RETRIES` is intentionally 1: the relay budget is
+    // time-based, so a rate limit lasting minutes must not be acknowledged
+    // after the first failure.
+    const cappedQueue = new WebhookQueue({ dbPath: join(dir, "rate-limit.db"), maxRetries: 1 });
+    try {
+      for (let round = 1; round <= 3; round++) {
+        const { acquirer } = makeAcquirer([{ events: [review], cursor: 1 }], {
+          agentPrs: [["acme/webapp", 5]],
+          addressPr,
+          queue: cappedQueue,
+        });
+        acquirer.start();
+        try {
+          await waitFor(() => attempts === round);
+        } finally {
+          await acquirer.stop();
+        }
+        expect(cappedQueue.hasProcessed("relay", "github:rate-limited")).toBe(false);
+        expect(workerState.getCursor(`relay:${RELAY_URL}`)?.cursorValue ?? "0").toBe("0");
+      }
+
+      const { acquirer } = makeAcquirer([{ events: [review], cursor: 1 }], {
+        agentPrs: [["acme/webapp", 5]],
+        queue: cappedQueue,
+      });
+      acquirer.start();
+      try {
+        await waitFor(() => cappedQueue.hasProcessed("relay", "github:rate-limited"));
+      } finally {
+        await acquirer.stop();
+      }
+      expect(workerState.getCursor(`relay:${RELAY_URL}`)?.cursorValue).toBe("1");
+    } finally {
+      cappedQueue.close();
+    }
+  });
+
+  test("a delivery is acknowledged once the relay retry window elapses", async () => {
+    const review = envelope({ seq: 1, ref: { pr: 5 }, deliveryId: "window-spent" });
+    let attempts = 0;
+    const addressPr: RelayHandlers["addressPr"] = async () => {
+      attempts++;
+      throw new Error("upstream unavailable (503)");
+    };
+    const windowQueue = new WebhookQueue({ dbPath: join(dir, "window.db"), maxRetries: 100 });
+    try {
+      // Seed a failure from a day ago so the first observed failure is
+      // already outside the one-hour retry window.
+      windowQueue.beginRelayDeliveryAttempt(
+        "github:window-spent",
+        "seeded outage",
+        Date.now() - 24 * 60 * 60 * 1000,
+      );
+      const { acquirer } = makeAcquirer([{ events: [review], cursor: 1 }], {
+        agentPrs: [["acme/webapp", 5]],
+        addressPr,
+        queue: windowQueue,
+      });
+      acquirer.start();
+      try {
+        await waitFor(() => windowQueue.hasProcessed("relay", "github:window-spent"));
+      } finally {
+        await acquirer.stop();
+      }
+      expect(attempts).toBe(1);
+      expect(workerState.getCursor(`relay:${RELAY_URL}`)?.cursorValue).toBe("1");
+    } finally {
+      windowQueue.close();
+    }
+  });
+
+  test("a delivery whose retry window is spent is acknowledged so later envelopes dispatch", async () => {
     const review = envelope({ seq: 1, ref: { pr: 5 }, deliveryId: "capped-review" });
     const following = envelope({
       seq: 2,
@@ -459,37 +710,26 @@ describe("RelayAcquirer", () => {
     };
     const cappedQueue = new WebhookQueue({ dbPath: join(dir, "capped.db"), maxRetries: 2 });
     try {
-      const first = makeAcquirer([{ events: [review, following], cursor: 2 }], {
+      // The window started a day ago, so this failure exhausts it.
+      cappedQueue.beginRelayDeliveryAttempt(
+        "github:capped-review",
+        "seeded outage",
+        Date.now() - 24 * 60 * 60 * 1000,
+      );
+      const { acquirer } = makeAcquirer([{ events: [review, following], cursor: 2 }], {
         agentPrs: [["acme/webapp", 5]],
         addressPr,
         queue: cappedQueue,
       });
-      first.acquirer.start();
-      try {
-        await waitFor(() => attempts === 1);
-      } finally {
-        await first.acquirer.stop();
-      }
-      // First failure is retryable: the delivery is not handled and the
-      // following envelope stays blocked behind the same cursor.
-      expect(cappedQueue.hasProcessed("relay", "github:capped-review")).toBe(false);
-      expect(workerState.getCursor(`relay:${RELAY_URL}`)?.cursorValue ?? "0").toBe("0");
-      expect(log.tasks).toEqual([]);
-
-      const second = makeAcquirer([{ events: [review, following], cursor: 2 }], {
-        agentPrs: [["acme/webapp", 5]],
-        addressPr,
-        queue: cappedQueue,
-      });
-      second.acquirer.start();
+      acquirer.start();
       try {
         await waitFor(() => log.tasks.length === 1);
       } finally {
-        await second.acquirer.stop();
+        await acquirer.stop();
       }
-      // Second failure exhausts the budget: acknowledge it so it stops
-      // pinning the cursor, then dispatch later envelopes.
-      expect(attempts).toBe(2);
+      // The exhausted delivery is acknowledged so it stops pinning the cursor,
+      // then later envelopes dispatch in the same poll.
+      expect(attempts).toBe(1);
       expect(cappedQueue.hasProcessed("relay", "github:capped-review")).toBe(true);
       expect(log.tasks).toEqual([["NEXT-1", "jira"]]);
       expect(workerState.getCursor(`relay:${RELAY_URL}`)?.cursorValue).toBe("2");
@@ -546,6 +786,70 @@ describe("RelayAcquirer", () => {
       expect(workerState.getCursor(`relay:${RELAY_URL}`)?.cursorValue).toBe("2");
     });
   }
+
+  test("a deferred run is not recorded as a failed attempt", async () => {
+    const review = envelope({ seq: 1, ref: { pr: 5 }, deliveryId: "deferred-review" });
+    let attempts = 0;
+    const addressPr: RelayHandlers["addressPr"] = async () => {
+      attempts++;
+      return "deferred";
+    };
+    const { acquirer } = makeAcquirer([{ events: [review], cursor: 1 }], {
+      agentPrs: [["acme/webapp", 5]],
+      addressPr,
+    });
+
+    acquirer.start();
+    try {
+      await waitFor(() => attempts === 1);
+    } finally {
+      await acquirer.stop();
+    }
+
+    // Deferral is an expected capacity gap: it must not spend the retry
+    // budget (or be reported as a failure).
+    expect(queue.getRelayDeliveryFirstAttemptAt("github:deferred-review")).toBeNull();
+    expect(queue.hasProcessed("relay", "github:deferred-review")).toBe(false);
+  });
+
+  test("a delivery is acknowledged once the attempt ceiling is spent", async () => {
+    const review = envelope({ seq: 1, ref: { pr: 5 }, deliveryId: "attempt-capped" });
+    let attempts = 0;
+    const addressPr: RelayHandlers["addressPr"] = async () => {
+      attempts++;
+      throw new Error("upstream unavailable (503)");
+    };
+    const { acquirer } = makeAcquirer([{ events: [review], cursor: 1 }], {
+      agentPrs: [["acme/webapp", 5]],
+      addressPr,
+      deliveryMaxAttempts: 2,
+    });
+
+    acquirer.start();
+    try {
+      // First failure records attempt 1 and retries.
+      await waitFor(() => attempts === 1);
+      expect(queue.hasProcessed("relay", "github:attempt-capped")).toBe(false);
+    } finally {
+      await acquirer.stop();
+    }
+
+    const { acquirer: retry } = makeAcquirer([{ events: [review], cursor: 1 }], {
+      agentPrs: [["acme/webapp", 5]],
+      addressPr,
+      deliveryMaxAttempts: 2,
+    });
+    retry.start();
+    try {
+      await waitFor(() => queue.hasProcessed("relay", "github:attempt-capped"));
+    } finally {
+      await retry.stop();
+    }
+    // The second failure hits the ceiling, so the envelope stops pinning the
+    // cursor even though the one-hour window has not elapsed.
+    expect(attempts).toBe(2);
+    expect(workerState.getCursor(`relay:${RELAY_URL}`)?.cursorValue).toBe("1");
+  });
 
   test("an in-flight delivery holds the cursor without releasing another run's claim", async () => {
     const review = envelope({ ref: { pr: 5 }, deliveryId: "running" });

@@ -189,7 +189,7 @@ describe("fleet event handlers", () => {
 
   test("addressPr skips slugs outside the workspace", async () => {
     const addressPr = createFleetAddressPr(deps());
-    expect(await addressPr("acme/unknown", 7)).toBe(false);
+    expect(await addressPr("acme/unknown", 7)).toBe("skipped");
     expect(reviews).toHaveLength(0);
   });
 
@@ -301,21 +301,39 @@ describe("fleet event handlers", () => {
     expect(repoManager.calls).toContain("fetch:backend");
   });
 
-  test("mention handler gates on push access and fails closed", async () => {
+  test("mention handler gates on confirmed push access and rethrows API errors", async () => {
     const handle = createFleetMentionHandler(deps());
 
     pushAccess = false;
-    await handle("acme/backend", { user: { login: "driveby" } }, 5);
+    await expect(handle("acme/backend", { user: { login: "driveby" } }, 5)).resolves.toBe(
+      "skipped",
+    );
     expect(reviews).toHaveLength(0);
 
+    // A permission-check API error is transport, not a confirmed denial: it
+    // must be retryable rather than acknowledged as an intentional no-op.
     pushAccess = new Error("api down");
-    await handle("acme/backend", { user: { login: "maintainer" } }, 5);
+    await expect(handle("acme/backend", { user: { login: "maintainer" } }, 5)).rejects.toThrow(
+      "api down",
+    );
     expect(reviews).toHaveLength(0);
 
     pushAccess = true;
     await handle("acme/backend", { user: { login: "maintainer" } }, 5);
     expect(reviews).toHaveLength(1);
     expect(reviews[0].prNumber).toBe(5);
+  });
+
+  test("mention handler returns the run outcome so a drain abort is not swallowed", async () => {
+    const handler = createFleetMentionHandler({
+      ...deps(),
+      runReview: async () => "interrupted" as const,
+    });
+
+    pushAccess = true;
+    await expect(handler("acme/backend", { user: { login: "maintainer" } }, 5)).resolves.toBe(
+      "interrupted",
+    );
   });
 });
 
