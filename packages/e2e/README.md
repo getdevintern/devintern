@@ -6,6 +6,11 @@ Bitbucket Cloud, GitLab.com and GitLab Self-Managed using a local Markdown task
 and a deterministic agent. Git operations and provider API calls are real; no AI
 account or task tracker is needed.
 
+The maintained coverage inventory and gap backlog live in
+[docs/coverage-matrix.md](docs/coverage-matrix.md). The recurring `e2e-expander`
+workspace automation scouts that list and delegates each accepted gap to the
+worker as a separate task and pull request.
+
 ## Run locally
 
 From the monorepo root:
