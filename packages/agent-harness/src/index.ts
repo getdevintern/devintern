@@ -146,6 +146,7 @@ export {
 export {
   resolveSandbox,
   activeSandboxName,
+  removedSandboxProviderMessage,
   type SandboxResolutionOptions,
 } from "./sandbox/resolver.js";
 export { detectSandboxProviders, type DetectedSandboxProvider } from "./sandbox/detect.js";
@@ -178,7 +179,6 @@ export {
   resolveHomeDir,
 } from "./sandbox/harness-state.js";
 export { DockerSandboxProvider } from "./sandbox/providers/docker.js";
-export { SmolvmSandboxProvider, resetSmolvmLegacyWarning } from "./sandbox/providers/smolvm.js";
 export {
   spawnAgent,
   applyNestingGuard,

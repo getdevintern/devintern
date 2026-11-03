@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { DetectedSandboxProvider } from "@devintern/agent-harness";
+import { resolveSandbox } from "@devintern/agent-harness";
 import { buildSandboxDoctorReport, collectHarnessPreflight } from "../src/lib/agent/sandbox";
 
 function detected(
@@ -89,10 +90,58 @@ describe("buildSandboxDoctorReport", () => {
     expect(text).not.toContain("unknown provider");
   });
 
+  test("removed smolvm provider: next run fails with the migration message", () => {
+    const report = buildSandboxDoctorReport(
+      [detected("nono", { priority: 30 })],
+      "smolvm",
+      ".devintern-code/.env",
+      "claude-code",
+      "linux",
+    );
+    const text = report.lines.join("\n");
+    expect(report.nextRunFails).toBe(true);
+    expect(text).toContain('Sandbox provider "smolvm" has been removed');
+    expect(text).toContain('Use "docker"');
+    expect(text).toContain('"nono" for local confinement');
+    expect(text).not.toContain("unknown provider");
+  });
+
+  test("removed provider message is the resolver's message, not a copy", async () => {
+    for (const name of ["srt", "smolvm"]) {
+      const report = buildSandboxDoctorReport(
+        [detected("nono", { priority: 30 })],
+        name,
+        ".devintern-code/.env",
+        "claude-code",
+        "linux",
+      );
+      const runtime = await resolveSandbox({ sandboxName: name, trustedEnv: {} }).then(
+        () => "resolved unexpectedly",
+        (error: Error) => error.message,
+      );
+      expect(report.lines.join("\n")).toContain(runtime);
+    }
+  });
+
+  test("Object.prototype member names are unknown providers in the doctor too", () => {
+    for (const name of ["constructor", "toString", "__proto__"]) {
+      const report = buildSandboxDoctorReport(
+        [detected("nono", { priority: 30 })],
+        name,
+        ".devintern-code/.env",
+        "claude-code",
+        "linux",
+      );
+      const text = report.lines.join("\n");
+      expect(report.nextRunFails).toBe(true);
+      expect(text).toContain(`unknown provider "${name}"`);
+    }
+  });
+
   test("explicit provider that does not support the harness: next run fails", () => {
     const report = buildSandboxDoctorReport(
-      [detected("smolvm", { harnesses: ["claude-code", "codex", "pi"] })],
-      "smolvm",
+      [detected("docker", { harnesses: ["claude-code", "codex"] })],
+      "docker",
       "environment",
       "goose",
       "linux",
@@ -173,8 +222,8 @@ describe("buildSandboxDoctorReport", () => {
 
   test("active enclosing sandbox: harness-incompatible explicit provider still fails", () => {
     const report = buildSandboxDoctorReport(
-      [detected("smolvm", { harnesses: ["claude-code", "codex", "pi"] })],
-      "smolvm",
+      [detected("docker", { harnesses: ["claude-code", "codex"] })],
+      "docker",
       "environment",
       "goose",
       "linux",
@@ -293,7 +342,7 @@ describe("buildSandboxDoctorReport", () => {
 
   test("per-provider setup notes are platform aware", () => {
     const linuxText = buildSandboxDoctorReport(
-      [detected("docker"), detected("smolvm")],
+      [detected("docker")],
       "none",
       "default",
       "claude-code",
@@ -301,17 +350,15 @@ describe("buildSandboxDoctorReport", () => {
     ).lines.join("\n");
     expect(linuxText).toContain("setup: one-time: sbx policy init balanced");
     expect(linuxText).not.toContain("after sbx login");
-    expect(linuxText).toContain("needs KVM (/dev/kvm)");
 
     const macText = buildSandboxDoctorReport(
-      [detected("docker"), detected("smolvm")],
+      [detected("docker")],
       "none",
       "default",
       "claude-code",
       "darwin",
     ).lines.join("\n");
     expect(macText).toContain("sbx policy init balanced (after sbx login)");
-    expect(macText).not.toContain("needs KVM");
   });
 
   test("nono pack status per chain entry is surfaced", () => {
