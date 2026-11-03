@@ -4,7 +4,7 @@
 
 ### Upgrade notes
 
-- **Breaking: the `srt` and `smolvm` sandbox providers are gone with no deprecation release.** Both are removed in this release, so `AGENT_SANDBOX=srt|smolvm` (or `--sandbox srt|smolvm`) in `.devintern-code/.env`, a workspace `.env`, or the shell now fails **every** run immediately — including unattended worker and webhook runs — and `devintern sandbox` reports the same message and exits non-zero. Before upgrading from 2.20.1, switch to `nono` (whole-process confinement) or `docker` (microVM boundary); the policy variables are unchanged. See [Removed providers](https://devintern.com/docs/code/configuration#removed-providers).
+- **Breaking: the `srt` and `smolvm` sandbox providers are gone with no deprecation release.** Both are removed in this release, so `AGENT_SANDBOX=srt|smolvm` (or `--sandbox srt|smolvm`) in `.devintern-code/.env`, a workspace `.env`, or the shell now fails **every** run immediately — including unattended worker and webhook runs — and `devintern sandbox` reports the same message and exits non-zero. Before upgrading from 2.20.1, switch to `nono` (whole-process confinement) or `docker` (microVM boundary); the policy variables are unchanged. See [Sandbox providers](https://devintern.com/docs/code/configuration#providers).
 
 ### Removed
 

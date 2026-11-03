@@ -679,17 +679,6 @@ Run `devintern sandbox` at any time for a full diagnosis: which providers are in
 
 If you explicitly select a provider that is not installed or does not support your harness, the run fails with an actionable error rather than silently running unsandboxed.
 
-### Removed providers
-
-Two sandbox providers were retired. Naming one still fails fast with a migration error instead of being silently ignored or treated as an unknown value:
-
-| Removed value | Migrate to                                  | Notes                                                                                                       |
-| ------------- | ------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `srt`         | `nono` (or `docker` for a microVM boundary) | Earlier whole-process wrapper; its `SANDBOX_RUNTIME=1` marker is still detected for inherited environments. |
-| `smolvm`      | `docker` (or `nono` for local confinement)  | Earlier microVM provider; Docker Sandboxes (`sbx`) is the supported microVM option now.                     |
-
-If `AGENT_SANDBOX` (in `.devintern-code/.env`, the workspace `.env`, or the shell) or `--sandbox` still names one of these, **every run fails immediately** — including unattended worker and webhook runs — and `devintern sandbox` reports the same message and exits non-zero. Update the value before upgrading; no other change is needed because `nono` and `docker` read the same policy variables.
-
 When DevIntern itself already runs inside a kernel sandbox (for example a `nono` shell, or a DevIntern agent that launched DevIntern), it detects the enclosing sandbox and does not add a second one: nested kernel sandboxes cannot set up their namespaces under the outer confinement and fail before the agent starts. The agent inherits the existing confinement instead. This applies to `auto` and to explicitly requested providers that cannot nest (`native`, `nono`) — stacking a _different_ one on top of the active sandbox is skipped the same way, with a warning naming both. MicroVM providers (`docker`) run the agent in their own guest and are not skipped for this reason: an explicitly requested microVM can run inside another sandbox. Detection reads each wrapper's marker (`NONO_CAP_FILE` for nono, plus the retained `SANDBOX_RUNTIME` marker for inherited environments) from the real process environment captured when the CLI starts, _before_ `.devintern-code/.env` is merged, so a repository cannot forge a marker through its `.env` to disable an explicitly requested sandbox. An explicitly requested provider is always validated for availability and harness compatibility before any nesting decision, so an unusable or incompatible request fails with an actionable error rather than silently inheriting the enclosing sandbox.
 
 ### What the sandbox allows

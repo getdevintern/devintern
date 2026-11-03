@@ -104,13 +104,13 @@ const REMOVED_SANDBOX_PROVIDERS = new Map<string, string>([
     "srt",
     'Sandbox provider "srt" has been removed. Use "nono" for whole-process confinement ' +
       '(or "docker" for a microVM boundary). ' +
-      "See https://devintern.com/docs/code/configuration#removed-providers",
+      "See https://devintern.com/docs/code/configuration#providers",
   ],
   [
     "smolvm",
     'Sandbox provider "smolvm" has been removed. Use "docker" for a microVM boundary ' +
       '(or "nono" for local confinement). ' +
-      "See https://devintern.com/docs/code/configuration#removed-providers",
+      "See https://devintern.com/docs/code/configuration#providers",
   ],
 ]);
 
