@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -151,6 +152,103 @@ describe("InjectedTaskStore", () => {
       /task_key/,
     );
     expect(store.list()).toHaveLength(1);
+  });
+
+  test("autoResume returns a running row to pending while budget remains", () => {
+    const { task } = store.enqueue(base);
+    const claimed = store.claimNext()!;
+    expect(claimed.autoResumeCount).toBe(0);
+
+    const first = store.autoResume(task.id, {
+      limit: 1,
+      exhaustedMessage: "exhausted",
+    });
+    expect(first?.resumed).toBe(true);
+    expect(first?.task.status).toBe("pending");
+    expect(first?.task.autoResumeCount).toBe(1);
+    expect(first?.task.startedAt).toBeUndefined();
+    expect(first?.task.message).toBeUndefined();
+
+    // The replacement run is claimed, then a second interruption exhausts the
+    // durable budget and settles the row failed.
+    expect(store.claimNext()?.id).toBe(task.id);
+    const second = store.autoResume(task.id, {
+      limit: 1,
+      exhaustedMessage: "automatic resume budget exhausted",
+    });
+    expect(second?.resumed).toBe(false);
+    expect(second?.task.status).toBe("failed");
+    expect(second?.task.message).toBe("automatic resume budget exhausted");
+    expect(second?.task.autoResumeCount).toBe(1);
+  });
+
+  test("autoResume ignores rows that are not running", () => {
+    const { task } = store.enqueue(base);
+    expect(store.autoResume(task.id, { limit: 1, exhaustedMessage: "x" })).toBeNull();
+    expect(store.getById(task.id)?.status).toBe("pending");
+  });
+
+  test("manual requeueSettled resets the automatic-resume budget", () => {
+    const { task } = store.enqueue(base);
+    store.claimNext();
+    store.autoResume(task.id, { limit: 1, exhaustedMessage: "exhausted" });
+    store.claimNext();
+    store.autoResume(task.id, { limit: 1, exhaustedMessage: "exhausted" });
+    expect(store.getById(task.id)?.status).toBe("failed");
+    expect(store.getById(task.id)?.autoResumeCount).toBe(1);
+
+    const revived = store.requeueSettled(base.taskKey);
+    expect(revived?.status).toBe("pending");
+    expect(revived?.autoResumeCount).toBe(0);
+
+    // A manual resume after exhaustion can itself be auto-resumed once more.
+    store.claimNext();
+    const resumed = store.autoResume(task.id, { limit: 1, exhaustedMessage: "exhausted" });
+    expect(resumed?.resumed).toBe(true);
+  });
+
+  test("listRunning returns only claimed rows", () => {
+    store.enqueue(base);
+    store.enqueue({ ...base, taskKey: "local-b", taskFile: "/ws/injected/b.md" });
+    const first = store.claimNext()!;
+    expect(store.listRunning().map((task) => task.id)).toEqual([first.id]);
+  });
+
+  test("migrates a database created before auto_resume_count existed", () => {
+    const legacyPath = join(dir, "legacy", "queue.db");
+    mkdirSync(join(dir, "legacy"), { recursive: true });
+    const legacy = new Database(legacyPath);
+    legacy.run(`
+      CREATE TABLE injected_tasks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_key TEXT NOT NULL,
+        repo TEXT NOT NULL,
+        title TEXT NOT NULL,
+        body TEXT NOT NULL DEFAULT '',
+        task_file TEXT NOT NULL,
+        idempotency_key TEXT,
+        actor TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        message TEXT,
+        created_at INTEGER NOT NULL,
+        started_at INTEGER,
+        finished_at INTEGER
+      )
+    `);
+    legacy.run(
+      `INSERT INTO injected_tasks (task_key, repo, title, body, task_file, actor, status, created_at)
+       VALUES ('local-legacy', 'backend', 'Legacy', '', '/ws/legacy.md', 'local:add', 'running', 1)`,
+    );
+    legacy.close();
+
+    const migrated = new InjectedTaskStore(legacyPath);
+    try {
+      const row = migrated.getByTaskKey("local-legacy");
+      expect(row?.autoResumeCount).toBe(0);
+      expect(migrated.listRunning()).toHaveLength(1);
+    } finally {
+      migrated.close();
+    }
   });
 
   test("pruneSettled removes settled rows and spares pending/running ones", () => {

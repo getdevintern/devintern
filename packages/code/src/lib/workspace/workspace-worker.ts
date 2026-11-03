@@ -25,6 +25,9 @@ import type { RunRecord } from "../state/run-recorder";
 import { RetryStateStore } from "../state/retry-state";
 import { ScheduledRetryStore } from "../state/run-retry";
 import { InjectedTaskStore } from "../state/injected-tasks";
+import type { InjectedTask } from "../state/injected-tasks";
+import { resolveSessionPickup } from "../state/session-pickup";
+import type { SessionPickupRunStore } from "../state/session-pickup";
 import { createTaskActionedGate } from "../task/actioned-state";
 import type { TaskTrackerClient } from "../trackers/client";
 import { findRepo, findTeam, loadWorkspaceConfig, resolveWorkspacePipelinePath } from "./config";
@@ -88,6 +91,15 @@ function injectedTaskRetentionMs(): number {
   return (
     parseEnvInteger("WORKER_INJECTED_TASK_RETENTION_DAYS", 30, { min: 0 }) * 24 * 60 * 60 * 1000
   );
+}
+
+/**
+ * Automatic resumes allowed per injected-task row across worker restarts:
+ * `WORKER_INJECTED_AUTO_RESUME_LIMIT`, default 1. `0` disables automatic
+ * resume (interrupted rows still settle `failed` with the manual fallback).
+ */
+function injectedAutoResumeLimit(): number {
+  return parseEnvInteger("WORKER_INJECTED_AUTO_RESUME_LIMIT", 1, { min: 0 });
 }
 
 /** Startup/periodic retention sweep: bound the injected-task table and files a long-lived daemon fills. */
@@ -266,9 +278,20 @@ export async function recoverOrphanedWorkspaceRuns(options: {
 }
 
 /**
- * Fail injected rows left `running` by a dead worker so `worker add --wait`
- * (or a retried automation) settles instead of hanging on a run that will
- * never finish.
+ * Startup recovery for injected rows left `running` by a dead worker.
+ *
+ * Rows whose latest terminal `origin: "local"` run has complete resumable state
+ * (recorded branch, implementation report, and — when the workspace can probe
+ * it — a branch that still exists) are returned to `pending` so the next run
+ * inherits that branch and report through the normal session-pickup path. Every
+ * other row settles `failed`: silently starting a fresh run for an interrupted
+ * task whose side effects are unknown is not safe.
+ *
+ * Automatic resumes are bounded durably per row (`options.maxAutoResumes`,
+ * default {@link injectedAutoResumeLimit}) so a restart loop cannot re-run the
+ * same task forever. Exhausting the bound settles the row `failed` with a
+ * message naming the run and the manual fallback; `worker add --resume` and the
+ * dashboard re-queue action keep working.
  *
  * Call this only while holding the workspace singleton lock (the worker's
  * post-lock `beforeAcquirersStart` hook). A second `devintern worker` that has
@@ -277,9 +300,94 @@ export async function recoverOrphanedWorkspaceRuns(options: {
  * by `WHERE status = 'running'`, so the successful task would be recorded
  * `failed`.
  */
-export function recoverOrphanedInjectedTasks(store: InjectedTaskStore): void {
-  for (const orphan of store.failRunning("worker restarted while this task was running")) {
-    console.warn(`⚠️  [fleet] injected task ${orphan.taskKey} was interrupted by a worker restart`);
+export interface InjectedTaskRecoveryOptions {
+  /** Run store used to reconstruct the interrupted run's session. */
+  runStore?: SessionPickupRunStore;
+  /**
+   * Optional branch-existence probe scoped to the row's repo. Absent (or a
+   * missing base worktree) trusts the recorded branch, matching
+   * `recoverOrphanedTaskRuns`.
+   */
+  branchExists?: (branch: string, task: InjectedTask) => boolean | Promise<boolean>;
+  /** Automatic resumes allowed per row; defaults to the worker env setting. */
+  maxAutoResumes?: number;
+  log?: typeof console.log;
+  warn?: typeof console.warn;
+}
+
+/** Message used when no safe resume state exists for an interrupted row. */
+export const INJECTED_INTERRUPTED_MESSAGE = "worker restarted while this task was running";
+
+/** Actionable message when a row's automatic-resume budget is exhausted. */
+export function injectedAutoResumeExhaustedMessage(
+  taskKey: string,
+  runId: number,
+  branch: string,
+): string {
+  return (
+    `worker restarted again while this task was running; automatic resume budget exhausted ` +
+    `(run #${runId}, branch '${branch}'). Resume it manually with ` +
+    `\`devintern worker add --resume ${taskKey}\` or the dashboard Re-queue action.`
+  );
+}
+
+export async function recoverOrphanedInjectedTasks(
+  store: InjectedTaskStore,
+  options: InjectedTaskRecoveryOptions = {},
+): Promise<void> {
+  const log = options.log ?? console.log;
+  const warn = options.warn ?? console.warn;
+  const limit = options.maxAutoResumes ?? injectedAutoResumeLimit();
+
+  for (const orphan of store.listRunning()) {
+    let decision: Awaited<ReturnType<typeof resolveSessionPickup>> = {
+      kind: "fresh",
+      reason: "run store unavailable",
+    };
+    if (options.runStore) {
+      try {
+        decision = await resolveSessionPickup({
+          runStore: options.runStore,
+          taskKey: orphan.taskKey,
+          // Injected runs are recorded as local tracker/origin, pinned to the
+          // row's repo, and never carry a team/automation id.
+          scope: { origin: "local", tracker: "local", repo: orphan.repo },
+          ...(options.branchExists
+            ? { branchExists: (branch: string) => options.branchExists!(branch, orphan) }
+            : {}),
+        });
+      } catch (error) {
+        warn(
+          `⚠️  [fleet] could not evaluate session pickup for injected task ${orphan.taskKey}: ` +
+            `${(error as Error).message}`,
+        );
+      }
+    }
+
+    if (decision.kind === "resume") {
+      const { runId, branch } = decision.session;
+      const resumed = store.autoResume(orphan.id, {
+        limit,
+        exhaustedMessage: injectedAutoResumeExhaustedMessage(orphan.taskKey, runId, branch),
+      });
+      if (!resumed) continue;
+      if (resumed.resumed) {
+        log(
+          `♻️  [fleet] auto-resuming interrupted injected task ${orphan.taskKey} ` +
+            `(run #${runId}, branch '${branch}')`,
+        );
+      } else {
+        warn(
+          `⚠️  [fleet] injected task ${orphan.taskKey} was interrupted by a worker restart ` +
+            `and its automatic resume budget is exhausted; run ` +
+            `\`devintern worker add --resume ${orphan.taskKey}\` or use the dashboard Re-queue action`,
+        );
+      }
+      continue;
+    }
+
+    store.finish(orphan.id, "failed", INJECTED_INTERRUPTED_MESSAGE);
+    warn(`⚠️  [fleet] injected task ${orphan.taskKey} was interrupted by a worker restart`);
   }
 }
 
@@ -289,11 +397,66 @@ export function recoverOrphanedInjectedTasks(store: InjectedTaskStore): void {
  */
 export function makeBeforeAcquirersStart(
   store: InjectedTaskStore,
-  next?: () => Promise<void> | void,
+  options: {
+    next?: () => Promise<void> | void;
+    runStore?: SessionPickupRunStore;
+    branchExists?: (branch: string, task: InjectedTask) => boolean | Promise<boolean>;
+    maxAutoResumes?: number;
+    log?: typeof console.log;
+    warn?: typeof console.warn;
+  } = {},
 ): () => Promise<void> {
   return async () => {
-    recoverOrphanedInjectedTasks(store);
-    await next?.();
+    await recoverOrphanedInjectedTasks(store, options);
+    await options.next?.();
+  };
+}
+
+/**
+ * Branch-existence probe for injected-row auto-resume. Reads the row's repo
+ * base worktree; a missing repo/worktree trusts the recorded branch, matching
+ * orphan recovery.
+ */
+export function createInjectedBranchExistsProbe(
+  workspaceDir: string,
+): (branch: string, task: InjectedTask) => Promise<boolean> {
+  return async (branch, task) => {
+    const repoCwd = join(worktreesDir(workspaceDir), task.repo, BASE_WORKTREE_NAME);
+    if (!existsSync(repoCwd)) return true;
+    return (
+      (await Utils.gitRefExists(`refs/heads/${branch}`, { cwd: repoCwd })) ||
+      (await Utils.gitRefExists(`refs/remotes/origin/${branch}`, { cwd: repoCwd }))
+    );
+  };
+}
+
+/** Build the production post-lock hook for injected-row startup recovery. */
+export function makeStartupInjectedRecovery(
+  store: InjectedTaskStore,
+  runStore: SessionPickupRunStore,
+  workspaceDir: string,
+  next?: () => Promise<void> | void,
+): () => Promise<void> {
+  return makeBeforeAcquirersStart(store, {
+    runStore,
+    branchExists: createInjectedBranchExistsProbe(workspaceDir),
+    next,
+  });
+}
+
+/**
+ * Own the run store for injected-row startup recovery, exposing the hook and a
+ * close callback so the worker can release it during shutdown.
+ */
+export function createInjectedStartupRecovery(
+  store: InjectedTaskStore,
+  workspaceDir: string,
+  next?: () => Promise<void> | void,
+): { hook: () => Promise<void>; close: () => void } {
+  const runStore = new RunStore(workspaceDbPath(workspaceDir));
+  return {
+    hook: makeStartupInjectedRecovery(store, runStore, workspaceDir, next),
+    close: () => runStore.close(),
   };
 }
 
@@ -765,12 +928,12 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
     maxConcurrency: config.workspace.execution.maxConcurrency,
     maxConcurrencyPerRepo: config.workspace.execution.maxConcurrencyPerRepo,
   });
-  // Recover what the previous worker left behind before acquiring new work.
-  await recoverOrphanedWorkspaceRuns({
-    config,
+  await recoverOrphanedWorkspaceRuns({ config, workspaceDir, dbPath: state.dbPath });
+  const injectedStartup = createInjectedStartupRecovery(
+    injectedTasks,
     workspaceDir,
-    dbPath: state.dbPath,
-  });
+    options.beforeAcquirersStart,
+  );
 
   // Working windows (quiet hours): gate only the ready-task drain; reviews,
   // mentions, automations, and relay events stay on their normal paths.
@@ -1176,7 +1339,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       // Capture logs in the workspace home: one daemon serves many repos, and
       // the dashboard's log tailer already searches this directory.
       logDir: workspaceDir,
-      beforeAcquirersStart: makeBeforeAcquirersStart(injectedTasks, options.beforeAcquirersStart),
+      beforeAcquirersStart: injectedStartup.hook,
       accessCheck: options.accessCheck,
       beginShutdown: () => supervisor.drain(),
       onShutdown: () => {
@@ -1184,6 +1347,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
         autoUpdater.stop();
         errorMonitorStatusStore?.close();
         errorMonitorStatusStore = null;
+        injectedStartup.close();
         injectedTasks.close();
         // Release the listening socket before finalExitCode: the handover
         // successor starts (binds the same dashboard port) while this

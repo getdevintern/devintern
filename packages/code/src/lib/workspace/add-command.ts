@@ -744,6 +744,7 @@ async function waitForTask(
   ctx.status(`⏳ Waiting for task #${id} to finish (Ctrl-C to detach)...`);
   const timeoutSeconds = ctx.waitTimeoutSeconds ?? DEFAULT_WAIT_TIMEOUT_SECONDS;
   const deadline = timeoutSeconds > 0 ? Date.now() + timeoutSeconds * 1_000 : Infinity;
+  let reportedWorkerGap = false;
   for (;;) {
     const task = ctx.store.getById(id);
     if (!task) {
@@ -770,14 +771,29 @@ async function waitForTask(
       LockManager.readLockStatus(ctx.selectedDir, ".worker.lock", { plainDir: true })?.running ??
       false;
     if (!workerRunning) {
-      return failWait(
-        ctx,
-        { id, repo: task.repo, error: "The worker stopped before the task finished." },
-        [
-          "❌ The worker stopped before the task finished; it remains queued/failed.",
-          "   Start the worker again and inspect the dashboard run history.",
-        ],
-      );
+      // A claimed (`running`) row is mid-run: the worker may have just been
+      // restarted, and startup recovery can auto-resume it once the new process
+      // owns the lock. Keep waiting until it settles or the timeout elapses
+      // rather than failing during the restart gap. A `pending` row has nobody
+      // to claim it, so fail fast as before.
+      if (task.status === "running") {
+        if (!reportedWorkerGap) {
+          ctx.status(
+            `ℹ️  No worker is running; task #${id} is still running and may auto-resume when ` +
+              "the worker restarts. Still waiting (bounded by --wait-timeout).",
+          );
+          reportedWorkerGap = true;
+        }
+      } else {
+        return failWait(
+          ctx,
+          { id, repo: task.repo, error: "The worker stopped before the task finished." },
+          [
+            "❌ The worker stopped before the task finished; it remains queued/failed.",
+            "   Start the worker again and inspect the dashboard run history.",
+          ],
+        );
+      }
     }
     await new Promise((resolveWait) => setTimeout(resolveWait, WAIT_POLL_INTERVAL_MS));
   }
@@ -814,6 +830,7 @@ function reportPrunedTask(
     actor: "",
     status: run.status === "succeeded" ? "done" : "failed",
     message: run.outcomeReason,
+    autoResumeCount: 0,
     createdAt: run.startedAt,
   };
   if (!ctx.json) {

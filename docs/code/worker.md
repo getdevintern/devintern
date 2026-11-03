@@ -337,14 +337,24 @@ Behavior to expect:
   `worker add` says so — and `--wait` refuses to block. Settled rows are pruned
   after 30 days by default; set `WORKER_INJECTED_TASK_RETENTION_DAYS` to change
   that window.
-- **Interrupted tasks are not auto-restarted.** A task that was mid-run when the
-  worker died is marked `failed` at the next startup, and its run records why.
-  Re-queue it explicitly with `--resume <taskKey>` (or the dashboard's
-  **Re-queue task**): the row keeps its key, so the retry targets the same
+- **Interrupted tasks are auto-resumed when it is safe.** A task left mid-run
+  by a worker restart is inspected at the next startup. When its latest local
+  run recorded a branch and implementation report (and the branch still
+  exists), the row returns to `pending` and the next run inherits that branch
+  and report through session pickup; `--wait` keeps waiting across the restart
+  and exits with the replacement run's outcome. Automatic resume is bounded to
+  one per row by default — set `WORKER_INJECTED_AUTO_RESUME_LIMIT` to change it
+  (`0` disables it) — so a restart loop cannot re-run the task forever. When
+  there is no safe state (no prior run, no recorded branch, no implementation
+  report, or the branch is gone), the row settles `failed` with
+  `worker restarted while this task was running` instead of silently starting a
+  fresh run. When the bound is exhausted the row fails with an actionable
+  `--resume` message. Re-queue either case explicitly with
+  `--resume <taskKey>` (or the dashboard's **Re-queue task**), which resets the
+  automatic budget: the row keeps its key, so the retry targets the same
   `feature/local-<slug>` branch and session pickup hands the prior attempt's
-  report to the agent — when it recorded one — instead of starting a second
-  branch and PR. A task that never started is still `pending` and needs no
-  resume.
+  report to the agent instead of starting a second branch and PR. A task that
+  never started is still `pending` and needs no resume.
 - **Concurrency.** Pending ad-hoc tasks are claimed together and run in
   parallel up to the workspace's `max_concurrency` / `max_concurrency_per_repo`
   limits, sharing capacity with polled, review, and automation work. A task
@@ -352,11 +362,14 @@ Behavior to expect:
   blocking independent repos behind it.
 - **Non-interactive.** The command returns after enqueue. `--wait` is the
   scripting hook: it polls the row and exits with the run's status. It fails fast
-  if the worker disappears, and exits non-zero with a clear message once
-  `--wait-timeout` (default 6 hours) elapses without the task settling — a live
-  worker that keeps deferring the task (a usage-limit pause, a permanently
-  saturated repo) can no longer make `--wait` hang forever. Pass
-  `--wait-timeout 0` to wait without a limit.
+  only when a queued (`pending`) task has no worker that could claim it; a task
+  that was already `running` keeps waiting through a worker restart so startup
+  recovery can auto-resume it. It exits non-zero once the task settles `failed`
+  (including an exhausted automatic-resume budget) or when `--wait-timeout`
+  (default 6 hours) elapses without the task settling — a live worker that keeps
+  deferring the task (a usage-limit pause, a permanently saturated repo) can no
+  longer make `--wait` hang forever. Pass `--wait-timeout 0` to wait without a
+  limit.
 - **Machine-readable.** With `--json`, stdout carries exactly one JSON object;
   every human/status line (license notices, "Enqueued…", the `--wait` progress
   line) goes to stderr, so `devintern worker add … --json | jq .` parses cleanly.

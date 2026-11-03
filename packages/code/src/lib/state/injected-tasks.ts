@@ -42,6 +42,12 @@ export interface InjectedTask {
   actor: string;
   status: InjectedTaskStatus;
   message?: string;
+  /**
+   * How many times startup recovery has automatically resumed this row after a
+   * worker restart. Persisted so a restart loop cannot re-run the task forever;
+   * manual `worker add --resume` / dashboard re-queue is not counted.
+   */
+  autoResumeCount: number;
   createdAt: number;
   startedAt?: number;
   finishedAt?: number;
@@ -58,6 +64,7 @@ interface InjectedTaskRow {
   actor: string;
   status: string;
   message: string | null;
+  auto_resume_count: number | null;
   created_at: number;
   started_at: number | null;
   finished_at: number | null;
@@ -75,6 +82,7 @@ function rowToInjectedTask(row: InjectedTaskRow): InjectedTask {
     actor: row.actor,
     status: row.status as InjectedTaskStatus,
     message: row.message ?? undefined,
+    autoResumeCount: row.auto_resume_count ?? 0,
     createdAt: row.created_at,
     startedAt: row.started_at ?? undefined,
     finishedAt: row.finished_at ?? undefined,
@@ -139,11 +147,22 @@ export class InjectedTaskStore {
         actor TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT 'pending',
         message TEXT,
+        auto_resume_count INTEGER NOT NULL DEFAULT 0,
         created_at INTEGER NOT NULL,
         started_at INTEGER,
         finished_at INTEGER
       )
     `);
+    // Older databases predate the durable auto-resume budget; add the column
+    // in place instead of requiring a migration step.
+    const columns = this.db.query("PRAGMA table_info(injected_tasks)").all() as Array<{
+      name: string;
+    }>;
+    if (!columns.some((column) => column.name === "auto_resume_count")) {
+      this.db.run(
+        "ALTER TABLE injected_tasks ADD COLUMN auto_resume_count INTEGER NOT NULL DEFAULT 0",
+      );
+    }
     this.db.run("CREATE INDEX IF NOT EXISTS idx_injected_tasks_status ON injected_tasks(status)");
     this.db.run(
       "CREATE INDEX IF NOT EXISTS idx_injected_tasks_finished_at ON injected_tasks(finished_at)",
@@ -323,12 +342,16 @@ export class InjectedTaskStore {
    * attempt's branch and implementation report. A row that is already
    * pending/running (or disappeared) is left alone: `null` tells the caller the
    * retry did not start.
+   *
+   * An explicit retry also resets the automatic-resume budget: the operator has
+   * intervened, so a later interruption may be resumed automatically again.
    */
   requeueSettled(taskKey: string): InjectedTask | null {
     const row = this.ensureDb()
       .query(
         `UPDATE injected_tasks
-         SET status = 'pending', started_at = NULL, finished_at = NULL, message = NULL
+         SET status = 'pending', started_at = NULL, finished_at = NULL, message = NULL,
+             auto_resume_count = 0
          WHERE task_key = ? AND status IN ('done', 'failed')
          RETURNING *`,
       )
@@ -336,10 +359,67 @@ export class InjectedTaskStore {
     return row ? rowToInjectedTask(row) : null;
   }
 
+  /** Every row currently claimed as `running` (startup auto-resume scan). */
+  listRunning(): InjectedTask[] {
+    const rows = this.ensureDb()
+      .query("SELECT * FROM injected_tasks WHERE status = 'running' ORDER BY id ASC")
+      .all() as InjectedTaskRow[];
+    return rows.map(rowToInjectedTask);
+  }
+
   /**
-   * Settle every row left `running` by a dead worker (startup orphan
-   * recovery). Rows are failed rather than requeued so an interrupted ad-hoc
-   * task is not silently re-run on every restart. Returns the settled rows.
+   * Return an interrupted `running` row to `pending` when its automatic-resume
+   * budget allows, otherwise settle it `failed` with an actionable message.
+   *
+   * The counter is durable on the row, so a restart loop cannot re-run the same
+   * task forever. `requeueSettled` (manual `--resume`) does not consume the
+   * budget and resets it; this method is the only automatic consumer.
+   *
+   * @returns The updated row and whether it was resumed; `null` when the row is
+   *   no longer running (a concurrent settle won).
+   */
+  autoResume(
+    id: number,
+    options: { limit: number; exhaustedMessage: string; now?: number },
+  ): { task: InjectedTask; resumed: boolean } | null {
+    const db = this.ensureDb();
+    const now = options.now ?? Date.now();
+    const row = db
+      .query("SELECT * FROM injected_tasks WHERE id = ?")
+      .get(id) as InjectedTaskRow | null;
+    if (!row || row.status !== "running") return null;
+
+    if ((row.auto_resume_count ?? 0) >= options.limit) {
+      const failed = db
+        .query(
+          `UPDATE injected_tasks
+           SET status = 'failed', message = ?, finished_at = ?
+           WHERE id = ? AND status = 'running'
+           RETURNING *`,
+        )
+        .get(options.exhaustedMessage, now, id) as InjectedTaskRow | null;
+      return failed ? { task: rowToInjectedTask(failed), resumed: false } : null;
+    }
+
+    const resumed = db
+      .query(
+        `UPDATE injected_tasks
+         SET status = 'pending', started_at = NULL, finished_at = NULL, message = NULL,
+             auto_resume_count = auto_resume_count + 1
+         WHERE id = ? AND status = 'running'
+         RETURNING *`,
+      )
+      .get(id) as InjectedTaskRow | null;
+    return resumed ? { task: rowToInjectedTask(resumed), resumed: true } : null;
+  }
+
+  /**
+   * Settle every row left `running` by a dead worker (bulk explicit failure).
+   *
+   * Startup recovery uses {@link listRunning} + {@link autoResume} instead so a
+   * row with a resumable session can return to `pending` under a durable
+   * budget. This helper remains for callers that deliberately want the old
+   * settle-everything behavior. Returns the settled rows.
    */
   failRunning(message: string): InjectedTask[] {
     const rows = this.ensureDb()

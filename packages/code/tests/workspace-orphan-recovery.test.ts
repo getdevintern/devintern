@@ -5,6 +5,7 @@ import { tmpdir } from "os";
 
 import {
   makeBeforeAcquirersStart,
+  recoverOrphanedInjectedTasks,
   recoverOrphanedWorkspaceRuns,
   scheduleOrphanPickups,
   startInjectedTaskSweeper,
@@ -48,6 +49,42 @@ describe("recoverOrphanedWorkspaceRuns", () => {
     dbPath = join(workspaceDir, "state", "queue.db");
     store = new RunStore(dbPath);
   });
+
+  /** Seed a terminal local run with a recorded branch and implementation report. */
+  function seedResumableLocalRun(
+    taskKey: string,
+    options: { branch?: string; report?: string | null } = {},
+  ): number {
+    const branch = options.branch ?? `feature/${taskKey}`;
+    const runId = store.createRun({
+      origin: "local",
+      taskKey,
+      tracker: "local",
+      repo: "web-app",
+      branch,
+    });
+    const report = options.report === undefined ? "prior implementation report" : options.report;
+    if (report !== null) {
+      store.addStage(runId, "implementation", "succeeded", undefined, JSON.stringify({ report }));
+    }
+    store.finishRun(
+      runId,
+      "failed",
+      "worker stopped cleanly; interruption feedback already handled",
+    );
+    return runId;
+  }
+
+  function claimInjected(injected: InjectedTaskStore, taskKey: string): number {
+    injected.enqueue({
+      taskKey,
+      repo: "web-app",
+      title: taskKey,
+      body: "",
+      taskFile: join(workspaceDir, "injected", `${taskKey}.md`),
+    });
+    return injected.claimNext()!.id;
+  }
 
   afterEach(() => {
     process.env = { ...savedEnv };
@@ -174,7 +211,7 @@ describe("recoverOrphanedWorkspaceRuns", () => {
     }
   });
 
-  test("makeBeforeAcquirersStart fails injected running rows and chains the caller hook", async () => {
+  test("makeBeforeAcquirersStart fails non-resumable injected rows and chains the caller hook", async () => {
     const injected = new InjectedTaskStore(dbPath);
     injected.enqueue({
       taskKey: "local-post-lock",
@@ -186,12 +223,137 @@ describe("recoverOrphanedWorkspaceRuns", () => {
     const claimed = injected.claimNext()!;
 
     const order: string[] = [];
-    await makeBeforeAcquirersStart(injected, () => {
-      order.push("caller");
+    await makeBeforeAcquirersStart(injected, {
+      next: () => {
+        order.push("caller");
+      },
     })();
 
     expect(order).toEqual(["caller"]);
     expect(injected.getById(claimed.id)?.status).toBe("failed");
+    expect(injected.getById(claimed.id)?.message).toBe(
+      "worker restarted while this task was running",
+    );
+    injected.close();
+  });
+
+  test("auto-resumes a running injected row whose prior local run is resumable", async () => {
+    const runId = seedResumableLocalRun("local-resume");
+    const injected = new InjectedTaskStore(dbPath);
+    const claimedId = claimInjected(injected, "local-resume");
+
+    const logs: string[] = [];
+    await recoverOrphanedInjectedTasks(injected, {
+      runStore: store,
+      branchExists: () => true,
+      log: (...args: unknown[]) => logs.push(args.map(String).join(" ")),
+      warn: (...args: unknown[]) => logs.push(args.map(String).join(" ")),
+    });
+
+    const after = injected.getById(claimedId)!;
+    expect(after.status).toBe("pending");
+    expect(after.autoResumeCount).toBe(1);
+    expect(logs.join("\n")).toContain("auto-resuming interrupted injected task local-resume");
+    expect(logs.join("\n")).toContain(`run #${runId}`);
+    expect(logs.join("\n")).toContain("branch 'feature/local-resume'");
+    injected.close();
+  });
+
+  test("still fails a running injected row with no prior local run", async () => {
+    const injected = new InjectedTaskStore(dbPath);
+    const claimedId = claimInjected(injected, "local-no-run");
+
+    await recoverOrphanedInjectedTasks(injected, { runStore: store, branchExists: () => true });
+
+    const after = injected.getById(claimedId)!;
+    expect(after.status).toBe("failed");
+    expect(after.message).toBe("worker restarted while this task was running");
+    expect(after.autoResumeCount).toBe(0);
+    injected.close();
+  });
+
+  test("still fails a running injected row whose prior run recorded no report", async () => {
+    seedResumableLocalRun("local-no-report", { report: null });
+    const injected = new InjectedTaskStore(dbPath);
+    const claimedId = claimInjected(injected, "local-no-report");
+
+    await recoverOrphanedInjectedTasks(injected, { runStore: store, branchExists: () => true });
+
+    expect(injected.getById(claimedId)?.status).toBe("failed");
+    expect(injected.getById(claimedId)?.message).toBe(
+      "worker restarted while this task was running",
+    );
+    injected.close();
+  });
+
+  test("still fails a running injected row when the recorded branch is gone", async () => {
+    seedResumableLocalRun("local-branch-gone");
+    const injected = new InjectedTaskStore(dbPath);
+    const claimedId = claimInjected(injected, "local-branch-gone");
+
+    await recoverOrphanedInjectedTasks(injected, {
+      runStore: store,
+      branchExists: () => false,
+    });
+
+    expect(injected.getById(claimedId)?.status).toBe("failed");
+    expect(injected.getById(claimedId)?.message).toBe(
+      "worker restarted while this task was running",
+    );
+    injected.close();
+  });
+
+  test("bounds automatic resumes across restarts and preserves manual --resume", async () => {
+    const runId = seedResumableLocalRun("local-budget");
+    const injected = new InjectedTaskStore(dbPath);
+    const claimedId = claimInjected(injected, "local-budget");
+
+    // First restart: the row is auto-resumed.
+    await recoverOrphanedInjectedTasks(injected, {
+      runStore: store,
+      branchExists: () => true,
+      maxAutoResumes: 1,
+    });
+    expect(injected.getById(claimedId)?.status).toBe("pending");
+    expect(injected.getById(claimedId)?.autoResumeCount).toBe(1);
+
+    // The replacement run is claimed, then the worker restarts again.
+    expect(injected.claimNext()?.id).toBe(claimedId);
+    await recoverOrphanedInjectedTasks(injected, {
+      runStore: store,
+      branchExists: () => true,
+      maxAutoResumes: 1,
+    });
+
+    const exhausted = injected.getById(claimedId)!;
+    expect(exhausted.status).toBe("failed");
+    expect(exhausted.autoResumeCount).toBe(1);
+    expect(exhausted.message).toContain(`run #${runId}`);
+    expect(exhausted.message).toContain("devintern worker add --resume local-budget");
+    expect(exhausted.message).toContain("Re-queue");
+
+    // The manual path still works after the automatic budget is exhausted, and
+    // a fresh explicit retry grants a fresh automatic budget.
+    const revived = injected.requeueSettled("local-budget")!;
+    expect(revived.status).toBe("pending");
+    expect(revived.autoResumeCount).toBe(0);
+    injected.close();
+  });
+
+  test("auto-resume limit 0 keeps the explicit failure path", async () => {
+    seedResumableLocalRun("local-disabled");
+    const injected = new InjectedTaskStore(dbPath);
+    const claimedId = claimInjected(injected, "local-disabled");
+
+    await recoverOrphanedInjectedTasks(injected, {
+      runStore: store,
+      branchExists: () => true,
+      maxAutoResumes: 0,
+    });
+
+    const after = injected.getById(claimedId)!;
+    expect(after.status).toBe("failed");
+    expect(after.message).toContain("devintern worker add --resume local-disabled");
     injected.close();
   });
 
