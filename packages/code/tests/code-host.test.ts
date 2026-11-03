@@ -40,9 +40,62 @@ describe("parseGitRemoteUrl", () => {
     });
   });
 
+  test("treats a remote on another port as a different instance when required", () => {
+    expect(
+      parseGitRemoteUrl("https://git.example.test:9443/gitlab/acme/platform/widgets.git", {
+        gitlabBaseUrl: "https://git.example.test:8443/gitlab/",
+        requireHttpPort: true,
+      }),
+    ).toBeNull();
+    expect(
+      parseGitRemoteUrl("https://git.example.test/gitlab/acme/platform/widgets.git", {
+        gitlabBaseUrl: "https://git.example.test:8443/gitlab/",
+        requireHttpPort: true,
+      }),
+    ).toBeNull();
+    // An SSH remote names the code host, not the tracker's HTTP endpoint, so
+    // its transport port cannot disqualify the instance.
+    expect(
+      parseGitRemoteUrl("git@git.example.test:acme/platform/widgets.git", {
+        gitlabBaseUrl: "https://git.example.test:8443/gitlab/",
+        requireHttpPort: true,
+      }),
+    ).toMatchObject({
+      provider: "gitlab",
+      instanceUrl: "https://git.example.test:8443/gitlab",
+      projectPath: "acme/platform/widgets",
+    });
+  });
+
+  test("keeps split git/web ports on the same instance by default", () => {
+    // A repo cloned from the git endpoint on :8443 while the tracker/API lives
+    // at https://git.example.test is still the same instance. Only the project
+    // pin opts into port matching; origin checks and PR detection must not
+    // report this remote as unknown.
+    expect(
+      parseGitRemoteUrl("https://git.example.test:8443/group/repo.git", {
+        gitlabBaseUrl: "https://git.example.test",
+      }),
+    ).toMatchObject({
+      provider: "gitlab",
+      instanceUrl: "https://git.example.test",
+      projectPath: "group/repo",
+    });
+  });
+
   test("maps SSH aliases to the configured GitLab instance", () => {
     expect(
       parseGitRemoteUrl("git@corp-git:acme/widgets.git", {
+        gitlabBaseUrl: "https://git.example.test/gitlab",
+        gitlabHostAliases: ["corp-git"],
+      }),
+    ).toMatchObject({
+      provider: "gitlab",
+      instanceUrl: "https://git.example.test/gitlab",
+      projectPath: "acme/widgets",
+    });
+    expect(
+      parseGitRemoteUrl("https://corp-git/gitlab/acme/widgets.git", {
         gitlabBaseUrl: "https://git.example.test/gitlab",
         gitlabHostAliases: ["corp-git"],
       }),
@@ -111,6 +164,28 @@ describe("parseChangeRequestUrl", () => {
       instanceUrl: "https://git.example.test/gitlab",
       projectPath: "acme/widgets",
       number: 9,
+    });
+  });
+
+  test("rejects a merge-request URL from another port", () => {
+    // The URL's port is part of the instance identity: accepting a :9443 URL as
+    // the :8443 instance stores a project/instance pairing whose polling and MR
+    // calls would target a same-path project on the other endpoint.
+    expect(
+      parseChangeRequestUrl(
+        "https://git.example.test:9443/gitlab/acme/widgets/-/merge_requests/7",
+        { gitlabBaseUrl: "https://git.example.test:8443/gitlab" },
+      ),
+    ).toBeNull();
+    expect(
+      parseChangeRequestUrl(
+        "https://git.example.test:8443/gitlab/acme/widgets/-/merge_requests/7",
+        { gitlabBaseUrl: "https://git.example.test:8443/gitlab" },
+      ),
+    ).toMatchObject({
+      instanceUrl: "https://git.example.test:8443/gitlab",
+      projectPath: "acme/widgets",
+      number: 7,
     });
   });
 

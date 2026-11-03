@@ -45,6 +45,8 @@ GITLAB_PROJECT=group/sub/repo
 - `GITLAB_TOKEN` — personal access token from `/-/user_settings/personal_access_tokens` on the same instance, with the **`api`** scope.
 - `GITLAB_PROJECT` — project path (`group/repo`, subgroups allowed: `group/sub/repo`) or a numeric project ID.
 
+In a worker workspace, `GITLAB_PROJECT` also selects the GitLab Issues project for task, review, CI-fix, error-monitor, and automation subprocesses routed to that repo: issue lookup, status labels, comments, and ticket URLs all target it. The workspace worker derives it from the repo remote when no workspace-wide `GITLAB_PROJECT` is set and the remote belongs to the `GITLAB_BASE_URL` instance (see [Workspaces → Environment](./workspaces.md#environment)); explicit workspace, repo, or team values win. The worker's polling loop and issue search still use the workspace or team `GITLAB_PROJECT`, not the repo pin. If your code lives in a GitLab repo but issues are tracked in a separate project, set `GITLAB_PROJECT` in the shared workspace `.env` (also used by polling), or for that repo in its `env_file` / `[repos.env]` (affects runs but not polling).
+
 ### 3. Configure status labels
 
 Like GitHub Issues, GitLab has no built-in workflow states that map cleanly across teams, so @devintern/code maps statuses to labels. Create the labels in your project, then configure them in `.devintern-code/settings.json` using the project path as the key:
@@ -136,7 +138,7 @@ GITLAB_CODE_HOST_URL=https://gitlab.corp.example/platform
 GITLAB_CODE_HOST_ALIASES=corp-git,gitlab-vpn
 ```
 
-DevIntern recognizes `gitlab.com`, the configured instance host, and these explicit aliases. It does not probe or guess unknown hosts.
+DevIntern recognizes `gitlab.com`, the configured instance host, and these explicit aliases. It does not probe or guess unknown hosts. The worker's GitLab Issues project pin uses these aliases only when `GITLAB_CODE_HOST_URL` (or its `gitlab.com` default) and `GITLAB_BASE_URL` resolve to the same instance; an alias of a different code host never selects a tracker project.
 
 For an internal certificate authority, provide a readable PEM bundle. Do not disable TLS verification:
 

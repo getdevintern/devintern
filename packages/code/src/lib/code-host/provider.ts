@@ -30,10 +30,26 @@ export interface GitRemoteParseOptions {
   gitlabBaseUrl?: string;
   /** SSH hostnames that resolve to the configured GitLab instance. */
   gitlabHostAliases?: Iterable<string>;
+  /**
+   * Require an HTTP(S) remote to match the configured instance's port.
+   *
+   * The repo-scoped GitLab project pin opts in so a code mirror on `:9443`
+   * cannot be paired with a tracker at `:8443`. General remote parsing keeps
+   * matching HTTP remotes by hostname, because a split git/web-port layout
+   * (`git clone` on `:8443`, web/API on the default port) is still the same
+   * instance and must not turn into an unknown repository.
+   */
+  requireHttpPort?: boolean;
 }
 
 interface RemoteParts {
   hostname: string;
+  /**
+   * `hostname[:port]` when the remote is an HTTP(S) URL, whose port identifies
+   * the web endpoint. Null for SSH/SCP remotes, whose port (if any) is the SSH
+   * transport and says nothing about the tracker's HTTP instance.
+   */
+  httpHost: string | null;
   path: string;
 }
 
@@ -65,8 +81,10 @@ function parseRemoteParts(remoteUrl: string): RemoteParts | null {
   if (/^[a-z][a-z\d+.-]*:\/\//i.test(trimmed)) {
     try {
       const url = new URL(trimmed);
+      const http = url.protocol === "http:" || url.protocol === "https:";
       return {
         hostname: url.hostname.toLowerCase(),
+        httpHost: http ? url.host.toLowerCase() : null,
         path: decodeURIComponent(url.pathname).replace(/^\/+/, ""),
       };
     } catch {
@@ -77,7 +95,7 @@ function parseRemoteParts(remoteUrl: string): RemoteParts | null {
   // SCP-style SSH URL: git@example.com:group/project.git
   const scp = trimmed.match(/^(?:[^@/:]+@)?([^/:]+):(.+)$/);
   if (!scp?.[1] || !scp[2]) return null;
-  return { hostname: scp[1].toLowerCase(), path: scp[2].replace(/^\/+/, "") };
+  return { hostname: scp[1].toLowerCase(), httpHost: null, path: scp[2].replace(/^\/+/, "") };
 }
 
 function cleanProjectPath(path: string): string | null {
@@ -93,6 +111,8 @@ function cleanProjectPath(path: string): string | null {
 function configuredGitLab(options: GitRemoteParseOptions): {
   instanceUrl: string;
   hostname: string;
+  /** `hostname[:port]` — the HTTP endpoint identity of the tracker instance. */
+  host: string;
   pathPrefix: string;
   aliases: Set<string>;
 } | null {
@@ -103,6 +123,7 @@ function configuredGitLab(options: GitRemoteParseOptions): {
     return {
       instanceUrl,
       hostname: parsed.hostname.toLowerCase(),
+      host: parsed.host.toLowerCase(),
       pathPrefix: parsed.pathname.replace(/^\/+|\/+$/g, ""),
       aliases: new Set(
         [...(options.gitlabHostAliases ?? [])].map((alias) => alias.trim().toLowerCase()),
@@ -111,6 +132,45 @@ function configuredGitLab(options: GitRemoteParseOptions): {
   } catch {
     return null;
   }
+}
+
+/**
+ * Compare an HTTP(S) endpoint identity (`hostname[:port]`) with the configured
+ * instance.
+ *
+ * With `requireHttpPort` the ports must agree; without it only the hostname is
+ * compared, which keeps split git/web-port clone layouts on the same instance.
+ */
+function httpHostMatchesInstance(
+  hostname: string,
+  httpHost: string,
+  configured: { hostname: string; host: string },
+  requireHttpPort: boolean,
+): boolean {
+  return requireHttpPort ? httpHost === configured.host : hostname === configured.hostname;
+}
+
+/**
+ * Whether the remote names the configured instance's web endpoint.
+ *
+ * SSH/SCP remotes only name the code host, so they are compared by hostname;
+ * their transport port says nothing about the tracker's HTTP endpoint.
+ */
+function remoteMatchesInstance(
+  remote: RemoteParts,
+  configured: { hostname: string; host: string },
+  requireHttpPort: boolean,
+): boolean {
+  return remote.httpHost === null
+    ? remote.hostname === configured.hostname
+    : httpHostMatchesInstance(remote.hostname, remote.httpHost, configured, requireHttpPort);
+}
+
+/** Whether the remote is gitlab.com, honoring the optional port requirement. */
+function remoteIsGitLabCom(remote: RemoteParts, requireHttpPort: boolean): boolean {
+  return requireHttpPort && remote.httpHost !== null
+    ? remote.httpHost === "gitlab.com"
+    : remote.hostname === "gitlab.com";
 }
 
 /**
@@ -149,16 +209,19 @@ export function parseGitRemoteUrl(
   }
 
   const configured = configuredGitLab(options);
-  const isGitLabCom = remote.hostname === "gitlab.com";
+  const requireHttpPort = options.requireHttpPort === true;
+  const isGitLabCom = remoteIsGitLabCom(remote, requireHttpPort);
   const matchesConfigured =
     configured &&
-    (remote.hostname === configured.hostname || configured.aliases.has(remote.hostname));
+    (remoteMatchesInstance(remote, configured, requireHttpPort) ||
+      configured.aliases.has(remote.hostname));
   if (!isGitLabCom && !matchesConfigured) return null;
 
   let path = remote.path;
   if (
     configured &&
-    remote.hostname === configured.hostname &&
+    (remoteMatchesInstance(remote, configured, requireHttpPort) ||
+      (!isGitLabCom && configured.aliases.has(remote.hostname))) &&
     configured.pathPrefix &&
     (path === configured.pathPrefix || path.startsWith(`${configured.pathPrefix}/`))
   ) {
@@ -216,8 +279,14 @@ export function parseChangeRequestUrl(
   }
 
   const configured = configuredGitLab(options);
-  const isGitLabCom = hostname === "gitlab.com";
-  if (!isGitLabCom && hostname !== configured?.hostname) return null;
+  const httpHost = url.host.toLowerCase();
+  const isGitLabCom = httpHost === "gitlab.com";
+  if (
+    !isGitLabCom &&
+    !(configured && httpHostMatchesInstance(hostname, httpHost, configured, true))
+  ) {
+    return null;
+  }
 
   let relativePath = path;
   if (

@@ -17,6 +17,20 @@ test.each([
 ])("accepts matching origin %s", (remote) => {
   expect(() => assertGitLabOrigin(identity, remote, options)).not.toThrow();
 });
+test("accepts a split-port clone of the configured instance", () => {
+  // The git endpoint may be on a different port from the web/API endpoint; the
+  // origin guard (and PR detection) must still resolve it as this instance.
+  const splitIdentity: ChangeRequestIdentity = {
+    ...identity,
+    instanceUrl: "https://git.example.test",
+    webUrl: "https://git.example.test/group/sub/project/-/merge_requests/17",
+  };
+  expect(() =>
+    assertGitLabOrigin(splitIdentity, "https://git.example.test:8443/group/sub/project.git", {
+      gitlabBaseUrl: splitIdentity.instanceUrl,
+    }),
+  ).not.toThrow();
+});
 test.each([
   null,
   "",

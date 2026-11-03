@@ -15,6 +15,11 @@ import type { ErrorMonitorConfig, RepoConfig, TeamConfig } from "./config";
 import { resolveWorkspaceDir, workspaceDbPath, workspaceEnvPath } from "./paths";
 import { ANALYTICS_CONFIG_DIR_ENV } from "../observability/analytics";
 import { WORKER_SUBPROCESS_ENV } from "../config/config-dir";
+import {
+  normalizeCodeHostUrl,
+  parseGitLabHostAliases,
+  parseGitRemoteUrl,
+} from "../code-host/provider";
 
 export const WORKSPACE_REPO_ENV = "DEVINTERN_WORKSPACE_REPO";
 export const WORKSPACE_TEAM_ENV = "DEVINTERN_WORKSPACE_TEAM";
@@ -108,66 +113,131 @@ export function gitHubSlugFromRemote(remote: string): string | null {
   return match?.[1] ?? null;
 }
 
-interface RemoteLocation {
-  host: string;
-  path: string;
-}
-
-/** Parse a Git remote or base URL into a lower-case host and path. */
-function parseRemoteLocation(value: string, assumeHttps: boolean): RemoteLocation | null {
-  let trimmed = value.trim();
-  if (!trimmed) return null;
-  if (!trimmed.includes("://")) {
-    if (!assumeHttps) {
-      // SCP-style remote: `git@host:group/repo.git` (the user is optional).
-      const scp = trimmed.match(/^(?:[^@/\s]+@)?([^:/\s]+):(.+)$/);
-      if (!scp?.[1] || !scp[2]) return null;
-      return { host: scp[1].toLowerCase(), path: scp[2] };
-    }
-    trimmed = `https://${trimmed}`;
-  }
-  try {
-    const url = new URL(trimmed);
-    return { host: url.hostname.toLowerCase(), path: url.pathname.replace(/^\/+/, "") };
-  } catch {
-    return null;
-  }
-}
-
-/** Normalize a GitLab project path: no `.git`, no leading/trailing slashes. */
-function normalizeGitLabProjectPath(path: string): string | null {
-  let normalized = path.trim().replace(/^\/+|\/+$/g, "");
-  normalized = normalized.replace(/\.git$/i, "").replace(/\/+$/g, "");
-  return normalized || null;
-}
-
 /**
  * Extract the GitLab API project path from a remote URL.
  *
- * Only `gitlab.com` and hosts matching `GITLAB_BASE_URL` are treated as
- * GitLab; without a base URL, self-managed hosts are left alone.
+ * Uses the canonical code-host parser so remotes resolve exactly as they do
+ * for merge requests, relays, and worker connect (percent-decoding, subgroup
+ * validation, and verified host aliases included). A remote only counts as
+ * the tracker instance: `gitlab.com` remotes are ignored when `GITLAB_BASE_URL`
+ * points at a self-managed instance, and self-managed remotes need a matching
+ * base host and port (or a verified alias).
  *
  * @param remote - e.g. `git@gitlab.com:group/sub/repo.git`
  * @param baseUrl - Effective `GITLAB_BASE_URL`, with or without protocol.
+ * @param hostAliases - SSH hostnames verified to alias the tracker instance.
+ *                       Code-host aliases only qualify when the code host and
+ *                       tracker resolve to the same URL (see {@link trackerHostAliases}).
  * @returns `group/sub/repo`, or null for non-GitLab remotes.
  */
-export function gitLabProjectFromRemote(remote: string, baseUrl?: string): string | null {
-  const location = parseRemoteLocation(remote, false);
-  if (!location) return null;
-  const base = baseUrl ? parseRemoteLocation(baseUrl, true) : null;
-  const isGitLabHost =
-    location.host === "gitlab.com" || (base !== null && location.host === base.host);
-  if (!isGitLabHost) return null;
-
-  let projectPath = location.path;
-  // A self-managed instance may live under a path prefix (`https://host/gitlab`).
-  if (base !== null && base.host === location.host && base.path) {
-    const prefix = base.path.replace(/\/+$/g, "");
-    if (prefix && projectPath.startsWith(`${prefix}/`)) {
-      projectPath = projectPath.slice(prefix.length + 1);
+export function gitLabProjectFromRemote(
+  remote: string,
+  baseUrl?: string,
+  hostAliases: Iterable<string> = [],
+): string | null {
+  // Track the instance by host *and* port: `https://git.example.com:9443` is
+  // not the tracker at `https://git.example.com:8443`, and its project path
+  // must not be pinned against that instance.
+  let baseHost: string | null = null;
+  if (baseUrl?.trim()) {
+    try {
+      baseHost = new URL(normalizeCodeHostUrl(baseUrl)).host.toLowerCase();
+    } catch {
+      // An unusable base URL is a credential error; never guess the instance.
+      return null;
     }
   }
-  return normalizeGitLabProjectPath(projectPath);
+
+  const parsed = parseGitRemoteUrl(remote, {
+    gitlabBaseUrl: baseUrl,
+    gitlabHostAliases: hostAliases,
+    // The pin must not pair a project path from another port with the tracker.
+    // Other parser consumers keep hostname matching for split git/web ports.
+    requireHttpPort: true,
+  });
+  if (parsed?.provider !== "gitlab") return null;
+
+  // A gitlab.com remote only belongs to this tracker when the tracker itself
+  // is gitlab.com (or no base URL is configured). Otherwise the project path
+  // would pair with a base URL from another host.
+  const instanceHost = new URL(parsed.instanceUrl).host.toLowerCase();
+  if (baseHost !== null && baseHost !== "gitlab.com" && instanceHost !== baseHost) {
+    return null;
+  }
+  return parsed.projectPath;
+}
+
+/** Workspace/repo layer pairs used to compose and re-pin one repo environment. */
+interface ComposedRepoEnv {
+  env: Record<string, string | undefined>;
+  /** `GITLAB_PROJECT` derived from the remote at the repo layers, if any. */
+  derivedGitLabProject: string | null;
+  /** Explicit repo-layer `GITLAB_PROJECT` (`env_file` or `[repos.env]`). */
+  explicitGitLabProject: string | undefined;
+}
+
+/**
+ * SSH host aliases that may classify a remote for the tracker pin.
+ *
+ * `GITLAB_CODE_HOST_ALIASES` aliases the *code host*, which can be a different
+ * GitLab instance from `GITLAB_BASE_URL` (the tracker). Only when both URLs
+ * resolve to the same instance may an alias identify a repo as belonging to
+ * the tracker; otherwise an alias remote from the code host would be paired
+ * with a project path on the tracker instance.
+ */
+function trackerHostAliases(env: Record<string, string | undefined>): string[] {
+  const aliases = parseGitLabHostAliases(env.GITLAB_CODE_HOST_ALIASES);
+  if (aliases.length === 0) return [];
+  const baseUrl = env.GITLAB_BASE_URL?.trim();
+  if (!baseUrl) return [];
+  try {
+    const codeHost = normalizeCodeHostUrl(env.GITLAB_CODE_HOST_URL?.trim() || "https://gitlab.com");
+    return codeHost === normalizeCodeHostUrl(baseUrl) ? aliases : [];
+  } catch {
+    // An invalid code-host URL never widens which remotes belong to the tracker.
+    return [];
+  }
+}
+
+/**
+ * Derive and pin `GITLAB_PROJECT` for one repo, or clear a stale derived pin.
+ *
+ * An explicit workspace, repo, or team value always wins: only a value this
+ * function derived may be re-derived against a later layer, and
+ * `previouslyPinned` identifies it. This keeps a workspace that centralizes
+ * GitLab issues in one project from silently switching task runs to each
+ * repo's code project.
+ *
+ * @returns The derived project path now present in `env`, or null.
+ */
+function applyGitLabProjectPin(
+  env: Record<string, string | undefined>,
+  repo: RepoConfig,
+  options: {
+    explicitProject?: string;
+    previouslyPinned?: string | null;
+  } = {},
+): string | null {
+  if (options.explicitProject) {
+    return null;
+  }
+  const current = env.GITLAB_PROJECT;
+  if (current && current !== options.previouslyPinned) {
+    return null;
+  }
+  const derived = gitLabProjectFromRemote(
+    repo.remote,
+    env.GITLAB_BASE_URL,
+    trackerHostAliases(env),
+  );
+  if (derived) {
+    env.GITLAB_PROJECT = derived;
+    return derived;
+  }
+  if (options.previouslyPinned && env.GITLAB_PROJECT === options.previouslyPinned) {
+    delete env.GITLAB_PROJECT;
+  }
+  return null;
 }
 
 /**
@@ -177,8 +247,12 @@ export function gitLabProjectFromRemote(remote: string, baseUrl?: string): strin
  * `env_file` < inline `[repos.env]` < injected workspace values
  * (`WEBHOOK_QUEUE_DB`, workspace context, stable analytics config
  * directory, `GITHUB_REPO` for GitHub remotes and `GITLAB_PROJECT` for GitLab
- * remotes unless the repo layers already set them, and `PR_LABELS` from the
- * repo's `pr_labels` config).
+ * remotes when no explicit workspace or repo value selects a project, and
+ * `PR_LABELS` from the repo's `pr_labels` config).
+ *
+ * An explicit `GITLAB_PROJECT` from the workspace or repo layers is never
+ * replaced: it may intentionally point the tracker at a different project
+ * than the code repo (see {@link applyGitLabProjectPin}).
  *
  * @param repo - Workspace repo the task routed to.
  * @param workspaceDir - Workspace home (defaults to `~/.devintern`).
@@ -193,6 +267,15 @@ export function buildRepoEnv(
   workspaceDir: string = resolveWorkspaceDir(),
   options: { actionedSource?: string; pipelineDefaultFile?: string } = {},
 ): Record<string, string | undefined> {
+  return composeRepoEnv(repo, workspaceDir, options).env;
+}
+
+/** Compose one repo's environment plus the GitLab pin metadata callers re-derive. */
+function composeRepoEnv(
+  repo: RepoConfig,
+  workspaceDir: string,
+  options: { actionedSource?: string; pipelineDefaultFile?: string },
+): ComposedRepoEnv {
   const workspaceEnv = parseEnvFile(workspaceEnvPath(workspaceDir));
   const repoFileEnv = repo.envFile
     ? parseEnvFile(isAbsolute(repo.envFile) ? repo.envFile : join(workspaceDir, repo.envFile))
@@ -223,12 +306,10 @@ export function buildRepoEnv(
     }
   }
 
-  if (!repoFileEnv.GITLAB_PROJECT && !repo.env.GITLAB_PROJECT) {
-    const project = gitLabProjectFromRemote(repo.remote, env.GITLAB_BASE_URL);
-    if (project) {
-      env.GITLAB_PROJECT = project;
-    }
-  }
+  const explicitGitLabProject = repoFileEnv.GITLAB_PROJECT ?? repo.env.GITLAB_PROJECT;
+  const derivedGitLabProject = applyGitLabProjectPin(env, repo, {
+    explicitProject: explicitGitLabProject,
+  });
 
   // Config-driven PR labels win over a PR_LABELS the repo env layers carried;
   // when the config sets none, an env-provided value survives untouched.
@@ -236,7 +317,7 @@ export function buildRepoEnv(
     env.PR_LABELS = repo.prLabels.join(",");
   }
 
-  return env;
+  return { env, derivedGitLabProject, explicitGitLabProject };
 }
 
 /**
@@ -302,8 +383,30 @@ function namespacedTeamEnv(
 }
 
 /**
+ * Team layer applied over a repo environment: namespaced workspace values
+ * (`<TRACKER>_<TEAM>_<SETTING>`) followed by the team's `env_file` and inline
+ * overrides.
+ *
+ * Both layers must be applied together: the worker validates and polls with
+ * {@link buildTeamEnv}, so a subprocess built without the namespaced values
+ * (for example `GITLAB_PLATFORM_PROJECT`) would poll one tracker project and
+ * then act on the repo-derived one.
+ */
+function teamOverlayEnv(
+  workspaceEnv: Record<string, string>,
+  team: TeamConfig,
+  workspaceDir: string,
+): Record<string, string> {
+  return {
+    ...namespacedTeamEnv(workspaceEnv, team),
+    ...teamLayerEnv(team, workspaceDir),
+  };
+}
+
+/**
  * Compose a team's own credential environment: workspace `.env`, then the
- * team's `env_file`, then inline team overrides.
+ * namespaced team values (`<TRACKER>_<TEAM>_<SETTING>`), then the team's
+ * `env_file`, then inline team overrides.
  *
  * Used both for building the team's tracker client/detector in the worker
  * process and as a layer inside {@link buildTeamTaskEnv}.
@@ -318,8 +421,7 @@ export function buildTeamEnv(
   const workspaceEnv = parseEnvFile(workspaceEnvPath(workspaceDir));
   return {
     ...workspaceEnv,
-    ...namespacedTeamEnv(workspaceEnv, team),
-    ...teamLayerEnv(team, workspaceDir),
+    ...teamOverlayEnv(workspaceEnv, team, workspaceDir),
   };
 }
 
@@ -330,12 +432,19 @@ export function buildTeamEnv(
  * credentials between the repo layers and the final pin:
  *
  * process env < workspace `.env` < repo `env_file` < `[repos.env]` <
- * team `env_file` < team inline < worker runtime paths and `TASK_TRACKER` pin.
+ * namespaced workspace team values (`<TRACKER>_<TEAM>_<SETTING>`) < team
+ * `env_file` < team inline < worker runtime paths and `TASK_TRACKER` pin.
  *
  * The team wins ties because its credentials describe the tracker that
  * acquired the task (status transitions must hit that board, even if a stale
  * single-repo config still carries another tracker's variables), and
  * `TASK_TRACKER` is pinned last so nothing can re-route the child CLI.
+ *
+ * Because the team layers can replace `GITLAB_BASE_URL`, the project derived
+ * from the repo remote is re-derived against the team credentials: a pin that
+ * no longer belongs to that instance is dropped instead of pairing a project
+ * path with another host's API. An explicit repo or team `GITLAB_PROJECT`
+ * always survives.
  *
  * @param repo - Workspace repo the task routed to.
  * @param team - Team that acquired the task.
@@ -349,13 +458,29 @@ export function buildTeamTaskEnv(
   workspaceDir: string = resolveWorkspaceDir(),
   options: { actionedSource?: string; pipelineDefaultFile?: string } = {},
 ): Record<string, string | undefined> {
-  const env = buildRepoEnv(repo, workspaceDir, options);
-  Object.assign(env, teamLayerEnv(team, workspaceDir));
+  const { env, derivedGitLabProject, explicitGitLabProject } = composeRepoEnv(
+    repo,
+    workspaceDir,
+    options,
+  );
+  // Include the namespaced workspace team values here too, exactly as the
+  // worker's own tracker client (`buildTeamEnv`) does; otherwise the poller and
+  // the subprocess would resolve different tracker projects.
+  const teamEnv = teamOverlayEnv(parseEnvFile(workspaceEnvPath(workspaceDir)), team, workspaceDir);
+  Object.assign(env, teamEnv);
   pinWorkerRuntimeEnv(env, workspaceDir);
-  // The team layer merged after `buildRepoEnv` pinned the pipeline selection,
+  // The team layer merged after the repo layers pinned the pipeline selection,
   // so re-pin it here: a team `env_file` or inline value must not re-route the
   // pipeline or resurrect a stale reference.
   pinPipelineEnv(env, repo, workspaceDir, options);
+  // The team layer can also point `GITLAB_BASE_URL` at another instance, so the
+  // project derived from the repo remote may belong to a different host. Re-derive
+  // against the team credentials and drop the stale pin rather than send the
+  // tracker to `<team base>/api/v4/projects/<project from another host>`.
+  applyGitLabProjectPin(env, repo, {
+    explicitProject: explicitGitLabProject ?? teamEnv.GITLAB_PROJECT,
+    previouslyPinned: derivedGitLabProject,
+  });
   env.TASK_TRACKER = team.tracker;
   env[WORKSPACE_TEAM_ENV] = team.name;
   return env;

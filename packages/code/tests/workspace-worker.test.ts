@@ -1255,9 +1255,22 @@ describe("resolveWorkspaceAutomationContext", () => {
       tmpdir(),
       `ws-automation-env-${Date.now()}-${Math.random().toString(36).slice(2)}`,
     );
-    mkdirSync(workspaceDir, { recursive: true });
-    writeFileSync(join(workspaceDir, ".env"), "JIRA_DEFAULT_PROJECT_KEY=WORKSPACE\n");
-    const config = parseWorkspaceConfig(`
+    // This assertion is about the repo-derived pin, so ambient GitLab settings
+    // from the developer or CI shell must not leak into it.
+    const savedGitLabEnv = new Map<string, string | undefined>();
+    for (const key of [
+      "GITLAB_PROJECT",
+      "GITLAB_BASE_URL",
+      "GITLAB_CODE_HOST_URL",
+      "GITLAB_CODE_HOST_ALIASES",
+    ]) {
+      savedGitLabEnv.set(key, process.env[key]);
+      delete process.env[key];
+    }
+    try {
+      mkdirSync(workspaceDir, { recursive: true });
+      writeFileSync(join(workspaceDir, ".env"), "JIRA_DEFAULT_PROJECT_KEY=WORKSPACE\n");
+      const config = parseWorkspaceConfig(`
 [defaults]
 tracker = "jira"
 task_query = "project = BACKEND"
@@ -1268,24 +1281,30 @@ remote = "git@gitlab.com:group/backend.git"
   [repos.env]
   JIRA_DEFAULT_PROJECT_KEY = "BACKEND"
 `);
-    const repoManager = new FakeRepoManager(workspaceDir);
-    const context = await resolveWorkspaceAutomationContext(
-      {
-        id: "scheduled",
-        enabled: true,
-        prompt: "work",
-        interval: "1h",
-        intervalMs: 3_600_000,
-        repo: "backend",
-      },
-      config,
-      workspaceDir,
-      repoManager,
-    );
+      const repoManager = new FakeRepoManager(workspaceDir);
+      const context = await resolveWorkspaceAutomationContext(
+        {
+          id: "scheduled",
+          enabled: true,
+          prompt: "work",
+          interval: "1h",
+          intervalMs: 3_600_000,
+          repo: "backend",
+        },
+        config,
+        workspaceDir,
+        repoManager,
+      );
 
-    expect(context?.env.JIRA_DEFAULT_PROJECT_KEY).toBe("BACKEND");
-    expect(context?.env.GITLAB_PROJECT).toBe("group/backend");
-    rmSync(workspaceDir, { recursive: true, force: true });
+      expect(context?.env.JIRA_DEFAULT_PROJECT_KEY).toBe("BACKEND");
+      expect(context?.env.GITLAB_PROJECT).toBe("group/backend");
+    } finally {
+      for (const [key, value] of savedGitLabEnv) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      rmSync(workspaceDir, { recursive: true, force: true });
+    }
   });
 });
 
