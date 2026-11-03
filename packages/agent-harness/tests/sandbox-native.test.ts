@@ -6,7 +6,6 @@ import { MuseHarness } from "../src/harnesses/muse.js";
 import { buildPromptArgs, MAX_PROMPT_ARG_BYTES } from "../src/prompt-args.js";
 import { NativeSandboxProvider } from "../src/sandbox/providers/native.js";
 import { refineGrantsAgainstDenies } from "../src/sandbox/providers/nono.js";
-import { SrtSandboxProvider } from "../src/sandbox/providers/srt.js";
 import { museCredentialPath } from "../src/sandbox/harness-state.js";
 import { applyNestingGuard, museCredentialGuard } from "../src/spawn-agent.js";
 import type { SandboxPolicy } from "../src/sandbox/types.js";
@@ -181,11 +180,6 @@ describe("applyNestingGuard", () => {
     expect(codexArgs[2]).toBe("workspace-write"); // input not mutated
   });
 
-  test("on macOS under srt, same adjustment", () => {
-    const guarded = applyNestingGuard("srt", "codex", codexArgs, "darwin");
-    expect(guarded[2]).toBe("danger-full-access");
-  });
-
   test("on Linux the layers stack: args unchanged", () => {
     expect(applyNestingGuard("nono", "codex", codexArgs, "linux")).toBe(codexArgs);
   });
@@ -233,7 +227,7 @@ describe("applyNestingGuard", () => {
     const harness = new MuseHarness();
     const oversized = "x".repeat(MAX_PROMPT_ARG_BYTES + 1);
     const args = [...harness.buildArgs({}), ...buildPromptArgs(harness, oversized)];
-    const guarded = applyNestingGuard("srt", "muse", args, "darwin");
+    const guarded = applyNestingGuard("nono", "muse", args, "darwin");
 
     const flagIndex = guarded.indexOf("--disable-sandbox");
     const promptFileIndex = guarded.indexOf("--prompt-file");
@@ -250,7 +244,7 @@ describe("applyNestingGuard", () => {
     const yolo = ["exec", "--yolo"];
     expect(applyNestingGuard("nono", "muse", yolo, "darwin")).toBe(yolo);
     const disabled = ["exec", "--disable-sandbox"];
-    expect(applyNestingGuard("srt", "muse", disabled, "darwin")).toBe(disabled);
+    expect(applyNestingGuard("nono", "muse", disabled, "darwin")).toBe(disabled);
     const args = ["exec", "--disable-approval"];
     expect(applyNestingGuard("nono", "muse", args, "linux")).toBe(args);
     expect(applyNestingGuard("docker", "muse", args, "darwin")).toBe(args);
@@ -264,7 +258,7 @@ describe("Muse credential guard", () => {
     expect(guarded).toEqual({ denyReadPaths: [museCredentialPath(env)] });
     expect(museCredentialPath(env)).toBe("/home/u/.config/muse/auth.json");
 
-    const missingKey = museCredentialGuard("srt", "muse", ["exec"], "darwin", { HOME: "/home/u" });
+    const missingKey = museCredentialGuard("nono", "muse", ["exec"], "darwin", { HOME: "/home/u" });
     expect(missingKey).toBeDefined();
     if (missingKey && "error" in missingKey) {
       expect(missingKey.error).toContain("META_API_KEY");
@@ -343,16 +337,5 @@ describe("Muse credential guard", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
-  });
-
-  test("srt maps the credential to filesystem.denyRead", () => {
-    const auth = "/home/u/.config/muse/auth.json";
-    const wrapped = new SrtSandboxProvider().wrapCommand(
-      "/usr/bin/muse",
-      ["exec"],
-      policy({ harnessName: "muse", denyReadPaths: [auth] }),
-    );
-    const settings = JSON.parse(readFileSync(wrapped.args[1] as string, "utf8"));
-    expect(settings.filesystem.denyRead).toEqual([auth]);
   });
 });

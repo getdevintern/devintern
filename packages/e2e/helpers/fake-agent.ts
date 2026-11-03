@@ -17,6 +17,44 @@ const mode =
 if (process.env.E2E_AGENT_INVOCATIONS) {
   appendFileSync(process.env.E2E_AGENT_INVOCATIONS, JSON.stringify({ mode }) + "\n");
 }
+// Opt-in delay for bounded-timeout coverage. Defaults to 0, so every existing
+// scenario stays as fast and deterministic as before.
+const delayMs = Number(process.env.E2E_AGENT_DELAY_MS ?? "0");
+if (Number.isFinite(delayMs) && delayMs > 0) {
+  await Bun.sleep(delayMs);
+}
+// A settled-but-failed attempt with an implementation report, for resume
+// coverage: exit 0 with failure language so the pipeline records an escalated
+// run (branch + report) without editing the fixture. `incomplete` leaves one
+// landed (empty) commit because session pickup only reuses a branch that has
+// commits ahead of its base, even when the run recorded a report.
+// `incomplete-empty` skips the commit to cover the documented fallback to a
+// fresh attempt branch when the prior branch has nothing to resume.
+if (mode === "incomplete" || mode === "incomplete-empty") {
+  if (mode === "incomplete") {
+    const commit = Bun.spawnSync(
+      [
+        "git",
+        "-c",
+        "user.name=DevIntern E2E",
+        "-c",
+        "user.email=e2e@example.com",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "wip: interrupted attempt",
+      ],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    if (commit.exitCode !== 0) {
+      throw new Error(commit.stdout.toString() + commit.stderr.toString());
+    }
+  }
+  console.log(
+    "Implementation was unsuccessful. I could not complete the requested change because the deterministic E2E fixture intentionally stopped before editing any tracked file. The branch and run record must remain available for a resume attempt.",
+  );
+  process.exit(0);
+}
 // Tracker scenarios seed unique markers into the ticket description and a
 // comment; both must reach the agent's actual input before it edits anything.
 const missingMarkers: string[] = [];

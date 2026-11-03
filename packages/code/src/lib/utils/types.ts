@@ -84,6 +84,7 @@ export interface UtilsSurface {
   ): Promise<{ success: boolean; error?: string }>;
   resolveDefaultBranch(preferredBranch?: string, options?: { cwd?: string }): Promise<string>;
   getMainBranchName(options?: { cwd?: string }): Promise<string>;
+  getCachedDefaultBranch(options?: { cwd?: string }): Promise<string>;
   remoteTrackingRefMatchesHead(branch: string, options?: { cwd?: string }): Promise<boolean>;
   pushCurrentBranch(options?: {
     verbose?: boolean;
@@ -113,8 +114,13 @@ export interface UtilsSurface {
   collectLandedWork(
     branch: string,
     baseBranch: string,
-    options?: { cwd?: string },
+    options?: { cwd?: string; basePreference?: "remote-first" | "local-first" },
   ): Promise<string | undefined>;
+  hasCommitsAhead(
+    branch: string,
+    baseBranch: string,
+    options?: { cwd?: string; basePreference?: "remote-first" | "local-first" },
+  ): Promise<boolean>;
   removeReviewWorktree(
     worktreePath: string,
     options?: { verbose?: boolean; cwd?: string },

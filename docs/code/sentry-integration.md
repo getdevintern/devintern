@@ -118,14 +118,28 @@ A source that cannot be read is never reported as a quiet source. If a fetch
 fails, the tick yields an explicit failure status instead of an empty success:
 `unreadable` for a transient or malformed response, `rate-limited` when Sentry
 returns HTTP 429 (the `Retry-After` window is recorded alongside the status),
-and `auth-failed` for a rejected token. On any of these the cursor is left
-unchanged, so the next tick retries and no error is skipped simply because it
-was not fetched. The per-source status (including consecutive failures and the
-last successful read) is persisted in the workspace database beside the schedule
-state for operator inspection; authentication failures are additionally logged
-as errors and are visible immediately. The recorded status and retry window are
-not yet consumed to delay polling — ticks keep firing on `poll_interval` — and
-the dashboard does not yet surface them.
+and `auth-failed` for a rejected token. Transient network errors and Sentry 5xx
+responses are retried twice with short backoff, before the tick reports
+`unreadable`; the whole retry loop shares a 4-second total wait budget. A
+`Retry-After` is honored exactly when it fits the remaining budget, and when it
+does not fit the fetch fails instead of sleeping only part of the window and
+sending an early request. Every request also carries a 10-second abort timeout
+and the whole read is capped at 15 seconds of wall-clock time, so a peer that
+accepts the connection and never responds ends as an explicit `unreadable`
+failure and the next tick polls normally instead of leaving the source stuck
+mid-poll. The first poll runs in the background, so even a slow or throttled
+read cannot delay worker startup or successor readiness. Auth and
+rate-limit responses are classified immediately. On any of these the cursor is
+left unchanged, so the next tick retries and no error is skipped simply because
+it was not fetched. Repeated identical failures are logged once, then repeated as a
+heartbeat every tenth consecutive failure or after about 15 minutes, so a long
+outage stays visible instead of looking like a dead worker; a recovery line is
+logged when the source reads successfully again. The per-source status (including
+consecutive failures and the last successful read) is persisted in the workspace
+database beside the schedule state for operator inspection; authentication
+failures are additionally logged as errors and are visible immediately. The
+recorded status and retry window are not yet consumed to delay polling — ticks
+keep firing on `poll_interval` — and the dashboard does not yet surface them.
 
 Handled issue IDs are stored in the workspace database under a source key that
 includes the provider and configured source `id`. That prevents collisions

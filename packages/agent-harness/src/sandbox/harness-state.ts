@@ -8,8 +8,8 @@
  * the first state write — which is what happened to grok before `~/.grok` was
  * added.
  *
- * Shared by the exec-wrapper providers (`nono`, `srt`) so the two cannot drift
- * apart.
+ * Shared by the exec-wrapper providers (`nono`) so the policy cannot drift
+ * from the harness's own state layout.
  */
 
 import { homedir } from "os";

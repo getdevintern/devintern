@@ -233,7 +233,7 @@ When a run cannot finish, devintern posts an "Implementation Incomplete" comment
 
 The gate ignores the automation's own comments: posting the failure comment (and moving the ticket back) updates the tracker's timestamp, but neither of those counts as a change, so a failed ticket sits still until a human edits it. This applies to every failure kind — incomplete implementations as well as crash, interrupt, and usage-limit comments.
 
-Any of those actions bumps the ticket's update stamp, so the worker picks it up on the next change detection and the retry runs. On a retry the agent is told which attempt this is, why the previous attempt stopped, and which comments are new since then, so new guidance takes priority. When the previous attempt left complete recorded state — a branch plus its own implementation report — the retry **picks up where it stopped** (session pickup): the recorded branch is checked out and the prior report is handed to the agent so it inherits already-landed work instead of redoing it. When that state is incomplete (no branch, no report, or the branch is gone), the retry starts fresh and gets its own attempt branch (`feature/{key}`, then `feature/{key}-attempt-2`, and so on).
+Any of those actions bumps the ticket's update stamp, so the worker picks it up on the next change detection and the retry runs. On a retry the agent is told which attempt this is, why the previous attempt stopped, and which comments are new since then, so new guidance takes priority. When the previous attempt left complete recorded state — a branch with commits ahead of its base plus its own implementation report — the retry **picks up where it stopped** (session pickup): the recorded branch is checked out and the prior report is handed to the agent so it inherits already-landed work instead of redoing it. A report-less branch is still resumable when a commit probe confirms it has commits ahead of its base, which covers legacy and interrupted runs that delivered work before the implementation report was saved. A report recorded by an implementation stage that failed before delivery is held to the same commit check, so it cannot make an empty branch resumable. When the branch is gone, has no commits to resume, or cannot be verified, the retry starts fresh and gets its own attempt branch (`feature/{key}`, then `feature/{key}-attempt-2`, and so on).
 
 If a run completes but you want a different result, move the ticket back to your to-do status (optionally with a comment describing what to change) and it re-runs the same way.
 
@@ -265,7 +265,7 @@ The worker now bridges that gap on startup. Before any new tickets are acquired,
 
 Recovery respects the retry gate: the requeued ticket is not re-run on restart (no duplicate execution). It sits in To Do like any other ticket whose last attempt failed, and runs again when the ticket changes — an edited description, a new comment, or `--force`.
 
-**Session pickup.** When an interrupted run left complete recorded state — a branch and its own implementation report — the worker does not post a failure and restart from scratch. It queues a pickup retry (`--force`) that reuses the same branch and hands the prior report to the agent, so the work already done is inherited rather than redone. Incomplete state (no branch, no report, or a branch that no longer exists) falls back to the normal failure-and-requeue path above; the recorded run is authoritative, and a ticket a human has already moved out of In Progress is never resumed.
+**Session pickup.** When an interrupted run left complete recorded state — a branch with landed commits and its own implementation report — the worker does not post a failure and restart from scratch. It queues a pickup retry (`--force`) that reuses the same branch and hands the prior report to the agent, so the work already done is inherited rather than redone. A report-less branch is also resumable when the commit probe confirms landed work ahead of its base, which recovers legacy and interrupted runs that finished implementation before the report was persisted; a report whose implementation stage failed before delivery needs that same commit confirmation. Incomplete state (no branch, a branch that no longer exists, or a branch with no verifiable commits to resume) falls back to the normal failure-and-requeue path above; the recorded run is authoritative, and a ticket a human has already moved out of In Progress is never resumed.
 
 Two guards keep the recovery from making noise or causing harm:
 
@@ -324,11 +324,11 @@ configuration.
 | `--body <text>`            | Task description                                                                                                                |
 | `--body-file <path>`       | Read the description from a file (`-` reads stdin)                                                                              |
 | `--idempotency-key <key>`  | Dedupe key; while a task with the key is pending/running a retry reuses it, and once it settles the key starts a new occurrence |
-| `--resume <taskKey>`       | Re-queue a settled ad-hoc task under its existing key (resumes its branch and prior report)                                     |
+| `--resume <taskKey>`       | Re-queue a settled ad-hoc task under its existing key (a failed or interrupted attempt resumes its branch and prior report)     |
 | `--wait`                   | Block until the run finishes; exit `0` on success, `1` on failure                                                               |
 | `--wait-timeout <seconds>` | Give up waiting after this long (default 21600 = 6h; `0` waits without a limit)                                                 |
 | `--json`                   | Emit a single `{ id, taskKey, repo, status, deduplicated }` object on stdout (failed `--wait` runs add an `error` field)        |
-| `--workspace <path>`       | Use this `workspace.toml` (default `~/.devintern/workspace.toml`, or `DEVINTERN_WORKSPACE_DIR`)                                  |
+| `--workspace <path>`       | Use this `workspace.toml` (default `~/.devintern/workspace.toml`, or `DEVINTERN_WORKSPACE_DIR`)                                 |
 
 Behavior to expect:
 
@@ -339,14 +339,15 @@ Behavior to expect:
   that window.
 - **Interrupted tasks are auto-resumed when it is safe.** A task left mid-run
   by a worker restart is inspected at the next startup. When its latest local
-  run recorded a branch and implementation report (and the branch still
-  exists), the row returns to `pending` and the next run inherits that branch
-  and report through session pickup; `--wait` keeps waiting across the restart
-  and exits with the replacement run's outcome. Automatic resume is bounded to
-  one per row by default — set `WORKER_INJECTED_AUTO_RESUME_LIMIT` to change it
-  (`0` disables it) — so a restart loop cannot re-run the task forever. When
-  there is no safe state (no prior run, no recorded branch, no implementation
-  report, or the branch is gone), the row settles `failed` with
+  run recorded a branch that still exists and the branch carries either an
+  implementation report or commits ahead of the repo's base, the row returns to
+  `pending` and the next run inherits that branch and report through session
+  pickup; `--wait` keeps waiting across the restart and exits with the
+  replacement run's outcome. Automatic resume is bounded to one per row by
+  default — set `WORKER_INJECTED_AUTO_RESUME_LIMIT` to change it (`0` disables
+  it) — so a restart loop cannot re-run the task forever. When there is no safe
+  state (no prior run, no recorded branch, no report and no landed commits, or
+  the branch is gone), the row settles `failed` with
   `worker restarted while this task was running` instead of silently starting a
   fresh run. A row whose latest run had already succeeded (the worker died
   before settling the row) settles `done` instead, so `--wait` reports the
@@ -356,8 +357,11 @@ Behavior to expect:
   `--resume <taskKey>` (or the dashboard's **Re-queue task**), which resets the
   automatic budget: the row keeps its key, so the retry targets the same
   `feature/local-<slug>` branch and session pickup hands the prior attempt's
-  report to the agent instead of starting a second branch and PR. A task that
-  never started is still `pending` and needs no resume.
+  report to the agent — when it recorded one — instead of starting a second
+  branch and PR. A task whose prior attempt already succeeded has no interrupted
+  work to inherit, so resuming it starts a fresh attempt rather than reusing the
+  prior branch and report. A task that never started is still `pending` and needs
+  no resume.
 - **A graceful shutdown does not launder a real failure.** Draining the worker
   aborts running task children; the aborted run is reported as *interrupted*,
   so its row stays `running` for the successor's startup recovery. A pipeline
@@ -376,6 +380,8 @@ Behavior to expect:
   whose live process started at a different time is treated as recycled (the OS
   reuses pids, and a reboot restarts the table), so it never blocks the row or
   tells you to kill an unrelated process. `--resume` and the dashboard
+  **Re-queue task** refuse while the recorded child is still alive, and work
+  again once it has exited.
   **Re-queue task** refuse while the recorded child is still alive, and work
   again once it has exited.
 - **Concurrency.** Pending ad-hoc tasks are claimed together and run in
@@ -459,10 +465,10 @@ worker_task_args = "--create-pr"
 poll_interval = 60
 ```
 
-| Option               | Description                                                       |
-| -------------------- | ----------------------------------------------------------------- |
+| Option               | Description                                                                                     |
+| -------------------- | ----------------------------------------------------------------------------------------------- |
 | `--workspace <path>` | Use this `workspace.toml` (default `~/.devintern/workspace.toml`, or `DEVINTERN_WORKSPACE_DIR`) |
-| `-v, --verbose`      | Verbose logging                                                   |
+| `-v, --verbose`      | Verbose logging                                                                                 |
 
 Unattended automation is exactly where sandboxing the agent matters most: set `AGENT_SANDBOX=auto` in the workspace `.env` to confine agent runs to the project workspace. See [Sandboxing the Agent](./configuration.md#sandboxing-the-agent) for providers and setup.
 

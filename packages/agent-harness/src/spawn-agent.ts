@@ -120,8 +120,8 @@ export function gitAdminPaths(workingDir: string): string[] {
  *
  * Env tuning: `AGENT_SANDBOX_WRITABLE_PATHS` (colon-separated) adds writable
  * paths; `AGENT_SANDBOX_ALLOWED_DOMAINS` (comma-separated) switches the
- * network policy to a domain allowlist (enforced by providers that support
- * network filtering, currently srt).
+ * network policy to a domain allowlist (enforced by nono's proxy filter and
+ * Docker's per-sandbox rules).
  *
  * @param workingDir - The directory the agent operates in.
  * @returns The default policy; callers may extend it via `SpawnAgentOptions.policy`.
@@ -145,8 +145,8 @@ export function buildDefaultSandboxPolicy(workingDir: string): SandboxPolicy {
   // On macOS the per-user temp AND cache trees live side by side under
   // /var/folders/<xx>/<hash>/ (T and C). tmpdir() alone (…/T) is too narrow:
   // agents also write the sibling cache dir — claude-code's auth check fails
-  // as "not logged in" without it (verified under srt) — so grant the parent
-  // user dir, which is still scoped to this user.
+  // as "not logged in" without it (verified under a kernel sandbox) — so grant
+  // the parent user dir, which is still scoped to this user.
   const tempScope = process.platform === "darwin" ? dirname(tmpdir()) : tmpdir();
 
   return {
@@ -170,7 +170,7 @@ export function buildDefaultSandboxPolicy(workingDir: string): SandboxPolicy {
  * @returns The reapable child and a cleanup hook for VM-backed providers.
  */
 /** Providers that apply Seatbelt on macOS around the whole process. */
-const SEATBELT_WRAPPERS = new Set(["nono", "srt"]);
+const SEATBELT_WRAPPERS = new Set(["nono"]);
 
 /**
  * Avoid nested Seatbelt on macOS when an external wrapper contains a harness
@@ -178,7 +178,7 @@ const SEATBELT_WRAPPERS = new Set(["nono", "srt"]);
  *
  * Codex always runs with `--sandbox workspace-write` (its own Seatbelt on
  * macOS), and Muse Code also uses Seatbelt on macOS. `sandbox-exec` inside
- * `sandbox-exec` is not supported, so under nono/srt on macOS the inner
+ * `sandbox-exec` is not supported, so under nono on macOS the inner
  * sandbox would fail to initialize. The outer wrapper already provides the
  * (stronger, whole-process) boundary, so switch the harness's own sandbox off
  * for the wrapped run. On Linux the layers stack (Landlock/bwrap compose), so
@@ -242,7 +242,7 @@ export function applyNestingGuard(
  * require `META_API_KEY` instead, since Muse can no longer read the file it
  * would have authenticated with.
  *
- * Only nono/srt are handled: other providers do not wrap on macOS (and the
+ * Only nono is handled: other providers do not wrap on macOS (and the
  * microVM providers keep the credential inside the guest).
  *
  * Exported for tests; `platform` and `env` are injectable.

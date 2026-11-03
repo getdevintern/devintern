@@ -4,8 +4,6 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFil
 import { tmpdir } from "os";
 import { join } from "path";
 import { DockerSandboxProvider } from "../src/sandbox/providers/docker.js";
-import { SmolvmSandboxProvider } from "../src/sandbox/providers/smolvm.js";
-import { SrtSandboxProvider } from "../src/sandbox/providers/srt.js";
 import type { SandboxPolicy } from "../src/sandbox/types.js";
 
 // Bun's mock.module patches the existing module in place, so the namespace
@@ -410,55 +408,6 @@ describe("nono Landlock grant refinement", () => {
   });
 });
 
-describe("SrtSandboxProvider.wrapCommand", () => {
-  test("grants OpenCode write access to its state locks", () => {
-    const stateDir = join(process.env.HOME ?? "", ".local/state/opencode");
-    if (!existsSync(stateDir)) return;
-    const wrapped = new SrtSandboxProvider().wrapCommand(
-      "/usr/bin/opencode",
-      ["run", "test"],
-      policy({ harnessName: "opencode" }),
-    );
-    const settings = JSON.parse(readFileSync(wrapped.args[1] as string, "utf8"));
-    expect(settings.filesystem.allowWrite).toContain(stateDir);
-  });
-
-  test("writes a settings file and passes the agent as argv", () => {
-    const wrapped = new SrtSandboxProvider().wrapCommand("/usr/bin/claude", ["-p", "hi"], policy());
-    expect(wrapped.path).toBe("srt");
-    expect(wrapped.args[0]).toBe("--settings");
-    const settingsFile = wrapped.args[1] as string;
-    expect(settingsFile.startsWith(tmpdir())).toBe(true);
-    expect(wrapped.args.slice(2)).toEqual(["/usr/bin/claude", "-p", "hi"]);
-
-    const settings = JSON.parse(readFileSync(settingsFile, "utf8"));
-    // Policy paths plus (machine-dependent) harness state paths.
-    expect(settings.filesystem.allowWrite).toContain("/work/repo");
-    expect(settings.filesystem.allowWrite).toContain("/tmp/devintern-tasks");
-    // srt's schema requires these fields and rejects "*" in allowedDomains,
-    // so the open-network policy maps to the default agent-essentials list.
-    expect(settings.filesystem.denyRead).toEqual([]);
-    expect(settings.filesystem.denyWrite).toEqual([]);
-    expect(settings.network.deniedDomains).toEqual([]);
-    expect(settings.network.strictAllowlist).toBe(true);
-    expect(settings.network.allowedDomains).not.toContain("*");
-    expect(settings.network.allowedDomains).toContain("api.anthropic.com");
-    expect(settings.network.allowedDomains).toContain("github.com");
-    expect(settings.network.allowedDomains).toContain("registry.npmjs.org");
-    expect(settings.network.allowLocalBinding).toBe(true); // dev servers, Playwright CDP
-  });
-
-  test("maps a domain allowlist into network.allowedDomains", () => {
-    const wrapped = new SrtSandboxProvider().wrapCommand(
-      "/usr/bin/claude",
-      [],
-      policy({ network: { allowedDomains: ["github.com", "*.anthropic.com"] } }),
-    );
-    const settings = JSON.parse(readFileSync(wrapped.args[1] as string, "utf8"));
-    expect(settings.network.allowedDomains).toEqual(["github.com", "*.anthropic.com"]);
-  });
-});
-
 /** Records create/policy calls instead of spawning a real microVM. */
 class StubDockerProvider extends DockerSandboxProvider {
   createCalls: Array<{ sbxAgent: string; sandboxName: string; workingDir: string }> = [];
@@ -524,57 +473,5 @@ describe("DockerSandboxProvider.wrapCommand", () => {
     expect(provider.supportsHarness("claude-code")).toBe(true);
     expect(provider.supportsHarness("codex")).toBe(true);
     expect(provider.supportsHarness("goose")).toBe(false);
-  });
-});
-
-/** Records the boot call instead of spawning a real microVM. */
-class StubBootSmolvmProvider extends SmolvmSandboxProvider {
-  bootCalls: Array<{ smolvmAgent: string; sandboxName: string; workingDir: string }> = [];
-  protected override bootSandbox(smolvmAgent: string, sandboxName: string, workingDir: string) {
-    this.bootCalls.push({ smolvmAgent, sandboxName, workingDir });
-  }
-}
-
-describe("SmolvmSandboxProvider.wrapCommand", () => {
-  test("boots a named sandbox, then execs the agent in the working dir", () => {
-    const provider = new StubBootSmolvmProvider();
-    const wrapped = provider.wrapCommand(
-      "/usr/bin/claude",
-      ["-p", "hi there"],
-      policy({ workingDir: "/Users/dev/repo" }),
-    );
-    expect(provider.bootCalls).toHaveLength(1);
-    expect(provider.bootCalls[0]?.smolvmAgent).toBe("claude");
-    expect(provider.bootCalls[0]?.workingDir).toBe("/Users/dev/repo");
-
-    expect(wrapped.path).toBe("smolvm");
-    expect(wrapped.args.slice(0, 3)).toEqual([
-      "sandbox",
-      "exec",
-      provider.bootCalls[0]!.sandboxName,
-    ]);
-    expect(wrapped.args).toContain("--timeout");
-    // Agent argv runs via sh -lc from the mounted working dir, shell-quoted.
-    const guestCommand = wrapped.args[wrapped.args.length - 1];
-    expect(wrapped.args.slice(-3, -1)).toEqual(["sh", "-lc"]);
-    expect(guestCommand).toBe(
-      'export HOME="$(getent passwd "$(id -u)" | cut -d: -f6)" IS_SANDBOX=1 && ' +
-        "cd '/Users/dev/repo' && claude '-p' 'hi there'",
-    );
-    expect(wrapped.cleanup).toBeInstanceOf(Function);
-  });
-
-  test("is excluded from auto selection via priority 0", () => {
-    expect(new SmolvmSandboxProvider().priority).toBe(0);
-  });
-
-  test("rejects unsupported harnesses", () => {
-    expect(() =>
-      new SmolvmSandboxProvider().wrapCommand(
-        "/usr/bin/goose",
-        [],
-        policy({ harnessName: "goose" }),
-      ),
-    ).toThrow("does not support");
   });
 });

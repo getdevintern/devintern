@@ -22,12 +22,10 @@ import {
 } from "../worker/orphan-recovery";
 import { RunStore } from "../state/run-recorder";
 import type { RunRecord } from "../state/run-recorder";
+import { readImplementationReport } from "../state/session-pickup";
 import { RetryStateStore } from "../state/retry-state";
 import { ScheduledRetryStore } from "../state/run-retry";
-import { InjectedTaskStore, succeededRunCoversClaim } from "../state/injected-tasks";
-import type { InjectedTask } from "../state/injected-tasks";
-import { latestScopedTaskRun, resolveSessionPickup } from "../state/session-pickup";
-import type { SessionPickupRunStore } from "../state/session-pickup";
+import { InjectedTaskStore } from "../state/injected-tasks";
 import { createTaskActionedGate } from "../task/actioned-state";
 import type { TaskTrackerClient } from "../trackers/client";
 import { findRepo, findTeam, loadWorkspaceConfig, resolveWorkspacePipelinePath } from "./config";
@@ -66,11 +64,7 @@ import { flushAnalytics, trackWorkerStarted } from "../observability/analytics";
 import { startWorkerFailover } from "../worker/failover";
 import { RetryQueueAcquirer } from "./retry-acquirer";
 import { InjectedTaskAcquirer, INJECTED_TASK_SOURCE } from "./injected-acquirer";
-import {
-  INJECTED_INTERRUPTED_MESSAGE,
-  injectedAutoResumeExhaustedMessage,
-  skipInterruptedChildRunning,
-} from "./injected-recovery";
+import { createInjectedStartupRecovery } from "./injected-recovery";
 import { toRoutableTask } from "./router";
 import { createIdleWorkerAutoUpdater } from "./worker-auto-update";
 import {
@@ -97,15 +91,6 @@ function injectedTaskRetentionMs(): number {
   return (
     parseEnvInteger("WORKER_INJECTED_TASK_RETENTION_DAYS", 30, { min: 0 }) * 24 * 60 * 60 * 1000
   );
-}
-
-/**
- * Automatic resumes allowed per injected-task row across worker restarts:
- * `WORKER_INJECTED_AUTO_RESUME_LIMIT`, default 1. `0` disables automatic
- * resume (interrupted rows still settle `failed` with the manual fallback).
- */
-function injectedAutoResumeLimit(): number {
-  return parseEnvInteger("WORKER_INJECTED_AUTO_RESUME_LIMIT", 1, { min: 0 });
 }
 
 /** Startup/periodic retention sweep: bound the injected-task table and files a long-lived daemon fills. */
@@ -216,6 +201,95 @@ export async function recoverOrphanedWorkspaceRuns(options: {
     const trackerType = config.defaults.tracker || "multi-team";
     retryStore = new RetryStateStore(dbPath);
 
+    // Cheap local base: config wins, else the clone's cached origin/HEAD, so a
+    // repo with no resumable work costs no network on startup. The cached value
+    // is only a hint (`origin/HEAD` is written when the bare clone is created
+    // and `git fetch` never refreshes it, so it can still name the repo's *old*
+    // default branch); hasLandedCommits checks the conventional defaults too so
+    // a rename cannot make an empty branch look resumable. Resolve each repo once.
+    const repoManager = new RepoManager(workspaceDir);
+    const resolvedBases = new Map<string, Promise<string>>();
+    const baseBranchFor = (repo: string): Promise<string> => {
+      const configured = findRepo(config, repo)?.defaultBranch;
+      if (configured) {
+        return Promise.resolve(configured);
+      }
+      let pending = resolvedBases.get(repo);
+      if (!pending) {
+        pending = Utils.getCachedDefaultBranch({
+          cwd: join(worktreesDir(workspaceDir), repo, BASE_WORKTREE_NAME),
+        });
+        resolvedBases.set(repo, pending);
+      }
+      return pending;
+    };
+    // Candidate bases for a report-less pickup. A configured default branch is
+    // authoritative. Otherwise the clone's cached origin/HEAD is the starting
+    // point, but it can name the repo's *old* default (`git fetch` never
+    // refreshes origin/HEAD) and a branch cut from the new default would then
+    // look like it carried upstream commits as its own work. Requiring the
+    // branch to be ahead of every conventional remote default that exists
+    // locally avoids a network probe while covering that rename (the original
+    // iteration-3 live `ls-remote` check added up to 5s per repo to startup).
+    const conventionalBases = ["main", "master"];
+    const baseCandidates = new Map<string, Promise<string[]>>();
+    const baseCandidatesFor = (repo: string, repoCwd: string): Promise<string[]> => {
+      let pending = baseCandidates.get(repo);
+      if (!pending) {
+        pending = (async () => {
+          const base = await baseBranchFor(repo);
+          if (findRepo(config, repo)?.defaultBranch) {
+            return [base];
+          }
+          const candidates = [base];
+          for (const name of conventionalBases) {
+            if (name === base) continue;
+            if (await Utils.gitRefExists(`refs/remotes/origin/${name}`, { cwd: repoCwd })) {
+              candidates.push(`origin/${name}`);
+            }
+          }
+          return candidates;
+        })();
+        baseCandidates.set(repo, pending);
+      }
+      return pending;
+    };
+
+    // Report-less pickup decisions compare commits against remote refs. Refresh
+    // each affected repo once, in parallel, before recovery so the probe sees
+    // refs current as of the crash instead of whatever the last run fetched.
+    // The timeout bounds an unreachable remote to one wait for all repos, and
+    // the cached refs remain the fallback when it fails.
+    const probeRepos = new Set<string>();
+    try {
+      for (const run of runStore.listRuns({ status: "in_progress", origin: "task" })) {
+        if (
+          run.repo &&
+          run.branch &&
+          existsSync(join(worktreesDir(workspaceDir), run.repo, BASE_WORKTREE_NAME)) &&
+          existsSync(repoManager.bareClonePath(run.repo)) &&
+          !readImplementationReport(runStore, run.id)
+        ) {
+          probeRepos.add(run.repo);
+        }
+      }
+    } catch {
+      // Best-effort: recovery still probes the refs already on disk.
+    }
+    await Promise.allSettled(
+      [...probeRepos].map(async (repo) => {
+        try {
+          await repoManager.fetch(repo, { timeoutMs: 5000 });
+        } catch (error) {
+          console.warn(
+            `⚠️  [fleet] could not refresh refs for ${repo} before orphan recovery: ${
+              (error as Error).message
+            }`,
+          );
+        }
+      }),
+    );
+
     const recovery = await recoverOrphanedTaskRuns({
       runStore,
       tracker,
@@ -242,6 +316,31 @@ export async function recoverOrphanedWorkspaceRuns(options: {
           (await Utils.gitRefExists(`refs/heads/${branch}`, { cwd: repoCwd })) ||
           (await Utils.gitRefExists(`refs/remotes/origin/${branch}`, { cwd: repoCwd }))
         );
+      },
+      // A run interrupted before the implementation stage was persisted can
+      // still hold real commits. Verify them against the repo's base branch so
+      // orphan recovery resumes that work instead of restarting it. Without a
+      // checkout to inspect, stay conservative and do not claim resumable work.
+      hasLandedCommits: async (branch, run) => {
+        const repoCwd = run.repo
+          ? join(worktreesDir(workspaceDir), run.repo, BASE_WORKTREE_NAME)
+          : undefined;
+        if (!repoCwd || !run.repo || !existsSync(repoCwd)) {
+          return false;
+        }
+        const repoName = run.repo;
+        // The branch must carry commits beyond every plausible base. A stale
+        // cached origin/HEAD (old default branch) would otherwise make commits
+        // that belong to the repo's new default look like the branch's own
+        // work and resume an empty branch. A configured base is authoritative;
+        // otherwise main/master are checked too (see baseCandidatesFor).
+        const bases = await baseCandidatesFor(repoName, repoCwd);
+        for (const baseBranch of bases) {
+          if (!(await Utils.hasCommitsAhead(branch, baseBranch, { cwd: repoCwd }))) {
+            return false;
+          }
+        }
+        return true;
       },
     });
 
@@ -281,202 +380,6 @@ export async function recoverOrphanedWorkspaceRuns(options: {
     retryStore?.close();
     runStore.close();
   }
-}
-
-/**
- * Startup recovery for injected rows left `running` by a dead worker.
- *
- * Rows whose latest terminal `origin: "local"` run has complete resumable state
- * (recorded branch, implementation report, and — when the workspace can probe
- * it — a branch that still exists) are returned to `pending` so the next run
- * inherits that branch and report through the normal session-pickup path. Every
- * other row settles `failed`: silently starting a fresh run for an interrupted
- * task whose side effects are unknown is not safe.
- *
- * Automatic resumes are bounded durably per row (`options.maxAutoResumes`,
- * default {@link injectedAutoResumeLimit}) so a restart loop cannot re-run the
- * same task forever. Exhausting the bound settles the row `failed` with a
- * message naming the run and the manual fallback; `worker add --resume` and the
- * dashboard re-queue action keep working.
- *
- * Call this only while holding the workspace singleton lock (the worker's
- * post-lock `beforeAcquirersStart` hook). A second `devintern worker` that has
- * not yet acquired the lock would otherwise fail the still-live worker's
- * `running` rows before exiting; the live worker's later `finish` is guarded
- * by `WHERE status = 'running'`, so the successful task would be recorded
- * `failed`.
- */
-export interface InjectedTaskRecoveryOptions {
-  /** Run store used to reconstruct the interrupted run's session. */
-  runStore?: SessionPickupRunStore & { reapOrphanedRuns?: () => number };
-  /**
-   * Optional branch-existence probe scoped to the row's repo. Absent (or a
-   * missing base worktree) trusts the recorded branch, matching
-   * `recoverOrphanedTaskRuns`.
-   */
-  branchExists?: (branch: string, task: InjectedTask) => boolean | Promise<boolean>;
-  /** Automatic resumes allowed per row; defaults to the worker env setting. */
-  maxAutoResumes?: number;
-  log?: typeof console.log;
-  warn?: typeof console.warn;
-}
-
-export async function recoverOrphanedInjectedTasks(
-  store: InjectedTaskStore,
-  options: InjectedTaskRecoveryOptions = {},
-): Promise<void> {
-  const log = options.log ?? console.log;
-  const warn = options.warn ?? console.warn;
-  const limit = options.maxAutoResumes ?? injectedAutoResumeLimit();
-
-  for (const orphan of store.listRunning()) {
-    // A hard kill can leave the detached task child alive. That child is the
-    // same task and may still finish successfully, so resume only once it is
-    // gone (a mismatched start time means its pid was recycled).
-    if (skipInterruptedChildRunning(orphan, warn)) {
-      continue;
-    }
-    // Injected runs are local origin/tracker, pinned to the row's repo.
-    const scope = { origin: "local", tracker: "local", repo: orphan.repo } as const;
-    let decision: Awaited<ReturnType<typeof resolveSessionPickup>> = {
-      kind: "fresh",
-      reason: "run store unavailable",
-    };
-    let latestRun: RunRecord | undefined;
-    if (options.runStore) {
-      try {
-        latestRun = latestScopedTaskRun(options.runStore, orphan.taskKey, scope);
-        // Ordering or a failed sweep can leave the latest run `in_progress`.
-        // Reap it (idempotent; only touches runs still `in_progress`) so an
-        // interrupted attempt is evaluated as terminal, not as a live run.
-        if (latestRun?.status === "in_progress") {
-          options.runStore.reapOrphanedRuns?.();
-          latestRun = latestScopedTaskRun(options.runStore, orphan.taskKey, scope);
-        }
-        decision = await resolveSessionPickup({
-          runStore: options.runStore,
-          taskKey: orphan.taskKey,
-          scope,
-          ...(options.branchExists
-            ? { branchExists: (branch: string) => options.branchExists!(branch, orphan) }
-            : {}),
-        });
-      } catch (error) {
-        warn(
-          `⚠️  [fleet] could not evaluate session pickup for injected task ${orphan.taskKey}: ` +
-            `${(error as Error).message}`,
-        );
-      }
-    }
-
-    if (decision.kind === "resume") {
-      const { runId, branch } = decision.session;
-      const resumed = store.autoResume(orphan.id, {
-        limit,
-        exhaustedMessage: injectedAutoResumeExhaustedMessage(orphan.taskKey, runId, branch),
-      });
-      if (!resumed) continue;
-      if (resumed.resumed) {
-        log(
-          `♻️  [fleet] auto-resuming interrupted injected task ${orphan.taskKey} ` +
-            `(run #${runId}, branch '${branch}')`,
-        );
-      } else {
-        warn(
-          `⚠️  [fleet] injected task ${orphan.taskKey} was interrupted by a worker restart ` +
-            `and its automatic resume budget is exhausted; run ` +
-            `\`devintern worker add --resume ${orphan.taskKey}\` or use the dashboard Re-queue action`,
-        );
-      }
-      continue;
-    }
-    // Only a run that started after this claim proves the attempt finished:
-    // `--resume` re-queues settled rows, so a pre-restart success is stale.
-    if (succeededRunCoversClaim(latestRun, orphan.startedAt)) {
-      store.finish(orphan.id, "done", `run #${latestRun!.id} already succeeded before the restart`);
-      continue;
-    }
-    store.finish(orphan.id, "failed", INJECTED_INTERRUPTED_MESSAGE);
-    warn(`⚠️  [fleet] injected task ${orphan.taskKey} was interrupted by a worker restart`);
-  }
-}
-
-/**
- * Compose the post-lock startup hook: recover injected orphans (safe now that
- * this process owns the workspace lock), then run the caller's own hook.
- */
-export function makeBeforeAcquirersStart(
-  store: InjectedTaskStore,
-  options: {
-    next?: () => Promise<void> | void;
-    runStore?: SessionPickupRunStore & { reapOrphanedRuns?: () => number };
-    branchExists?: (branch: string, task: InjectedTask) => boolean | Promise<boolean>;
-    maxAutoResumes?: number;
-    log?: typeof console.log;
-    warn?: typeof console.warn;
-  } = {},
-): () => Promise<void> {
-  return async () => {
-    await recoverOrphanedInjectedTasks(store, options);
-    await options.next?.();
-  };
-}
-
-/**
- * Branch-existence probe for injected-row auto-resume.
- *
- * Injected-only workspaces never materialize the per-repo base worktree (the
- * executor adds only a disposable task worktree), so probe the bare clone,
- * which always exists after the repo's first run. Link worktrees share the
- * bare clone's ref store, so both local task branches and fetched origin refs
- * are visible there. Fall back to the base worktree when present, and treat a
- * completely missing repo as "unknown" — refuse the resume and settle the row
- * `failed` rather than trusting a branch that cannot be verified.
- */
-export function createInjectedBranchExistsProbe(
-  workspaceDir: string,
-): (branch: string, task: InjectedTask) => Promise<boolean> {
-  const repoManager = new RepoManager(workspaceDir);
-  return async (branch, task) => {
-    const bareCwd = repoManager.bareClonePath(task.repo);
-    const baseCwd = repoManager.baseWorktreePath(task.repo);
-    const repoCwd = existsSync(bareCwd) ? bareCwd : existsSync(baseCwd) ? baseCwd : undefined;
-    if (!repoCwd) return false;
-    return (
-      (await Utils.gitRefExists(`refs/heads/${branch}`, { cwd: repoCwd })) ||
-      (await Utils.gitRefExists(`refs/remotes/origin/${branch}`, { cwd: repoCwd }))
-    );
-  };
-}
-
-/** Build the production post-lock hook for injected-row startup recovery. */
-export function makeStartupInjectedRecovery(
-  store: InjectedTaskStore,
-  runStore: SessionPickupRunStore,
-  workspaceDir: string,
-  next?: () => Promise<void> | void,
-): () => Promise<void> {
-  return makeBeforeAcquirersStart(store, {
-    runStore,
-    branchExists: createInjectedBranchExistsProbe(workspaceDir),
-    next,
-  });
-}
-
-/**
- * Own the run store for injected-row startup recovery, exposing the hook and a
- * close callback so the worker can release it during shutdown.
- */
-export function createInjectedStartupRecovery(
-  store: InjectedTaskStore,
-  workspaceDir: string,
-  next?: () => Promise<void> | void,
-): { hook: () => Promise<void>; close: () => void } {
-  const runStore = new RunStore(workspaceDbPath(workspaceDir));
-  return {
-    hook: makeStartupInjectedRecovery(store, runStore, workspaceDir, next),
-    close: () => runStore.close(),
-  };
 }
 
 /**

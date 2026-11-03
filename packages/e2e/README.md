@@ -86,6 +86,18 @@ and secret `E2E_GITHUB_TOKEN` before running it. Do not expose these
 credentials to untrusted pull-request code. Build the CLI in that job before
 running the suite so the artifact matches the checkout.
 
+## Worker `worker add` option matrix
+
+The default local suite (`tests/local/worker-add-options.test.ts`) drives the built
+CLI's `devintern worker add` through every documented option against a throwaway
+workspace and a local bare Git remote seeded from `fixtures/simple-project`; no
+tracker or hosted code host is involved. Enqueue-only cases cover `--title`,
+`--body`, `--body-file <path>`, `--body-file -` stdin, `--idempotency-key`,
+`--workspace`, `--json`, and the validation errors. Daemon cases cover `--wait`,
+`--wait-timeout` (`0` and a bounded timeout through `E2E_AGENT_DELAY_MS`), and
+`--resume`, asserting the pushed branch/commit directly on the bare remote rather
+than a pull request.
+
 ## Agent harness invocation checks
 
 The ordinary local suite also probes every registered agent harness whose CLI is
@@ -106,28 +118,54 @@ Set `E2E_HARNESS_PROBE_TIMEOUT_MS` to tune the per-harness timeout (default
 `10000`). These checks do not run full agent tasks; the deterministic fake agent
 continues to cover the implementation, git, and pull-request lifecycle.
 
-## Sandbox checks (nono)
+## Sandbox checks (nono, native, docker, removed providers)
 
-The ordinary local suite also exercises the real `nono` boundary when the
-binary is installed; otherwise those tests skip, like the harness probes. A
-deterministic shell agent reports what it could write and read, so the suite
-needs no AI account:
+The ordinary local suite exercises sandbox provider selection and the
+fail-closed guarantee deterministically, plus the real nono boundary when nono
+is installed. A deterministic shell agent reports what it could write and read,
+so no AI account is needed.
 
-- `devintern sandbox` reports nono as available, shows the preflight for the
-  configured harness, and `AGENT_SANDBOX=auto` picks nono for a harness without
-  a built-in sandbox (the preflight must use the same provider the run will).
-- A nono-wrapped run edits the fixture and pushes its branch while writes to
-  the working directory, output directory and temp dir succeed; writes to
-  `$HOME` are denied, and reads stay open (the v1 policy).
-- An explicitly requested nono provider fails closed when nono is not on
-  `PATH`: the task exits non-zero instead of running the agent unsandboxed.
-- An enclosing `NONO_CAP_FILE` marker is inherited rather than nested, so the
-  agent runs in the existing confinement.
+The fail-closed and doctor checks always run against the built CLI. A provider
+that is explicitly requested but cannot be enforced must abort before the
+agent edits or pushes anything — never silently fall back to an unsandboxed
+run:
 
-The sandbox suite keeps its isolated `HOME` outside the OS temp directory:
+| Provider | Default-offline check                                               | Optional real boundary                              |
+| -------- | ------------------------------------------------------------------- | --------------------------------------------------- |
+| `nono`   | Removed from `PATH`; exits non-zero, no probe, no commit.           | Runs when installed, with `HOME` outside `/tmp`.    |
+| `docker` | `sbx ls` shadowed to fail (unreachable daemon); exits non-zero.     | Not runnable with the shell probe (see below).      |
+| `native` | Unsupported harness (`goose`) with a stub `goose`; exits non-zero.  | Needs a real claude-code/codex account, so not run. |
+| `auto`   | Picks `native` for a native-capable harness and `nono` for `goose`. | —                                                   |
+| invalid  | `--sandbox bogus` and `AGENT_SANDBOX=bogus` both exit non-zero.     | —                                                   |
+| removed  | `--sandbox srt` / `smolvm` and `AGENT_SANDBOX` forms exit non-zero. | —                                                   |
+
+The same suite covers the `devintern sandbox` doctor for non-nono providers:
+native as the next run for claude-code/codex, docker refusing to claim a
+sandboxed run when `sbx` cannot list its daemon, a missing harness CLI surfacing
+as a preflight failure with the `*_CLI_PATH` fix, and the removed `srt`/`smolvm`
+providers reporting a migration error instead of an unknown-provider list.
+
+Docker Sandboxes (`sbx`) stays optional. Its real-boundary test skips unless the
+prerequisite below is present; the fail-closed test still runs by shadowing the
+executable. `sbx` only runs agents pre-installed in its guest microVM and
+ignores the host executable path, so the deterministic shell probe cannot
+exercise its boundary; its coverage here is selection, doctor reporting, and
+fail-closed behavior.
+
+### Optional real-provider prerequisites
+
+- **Docker Sandboxes**: the `sbx` CLI signed in (`sbx login`) with a reachable
+  daemon; `sbx ls` must succeed.
+
+Removed providers (`srt`, `smolvm`) have no prerequisite and no boundary test:
+the suite only asserts that selecting either one fails with a migration message
+naming `nono` or `docker`.
+
+The sandbox suite keeps the nono isolated `HOME` outside the OS temp directory:
 nono's Linux profile grants a broad read on `/tmp`, and a home nested under
 that grant makes nono refuse its own per-user deny rules. Real user homes are
-normally outside `/tmp`, so the fixture mirrors that.
+normally outside `/tmp`, so the fixture mirrors that. Other providers use a
+workspace-local isolated home.
 
 ## Local GitLab Self-Managed
 
@@ -232,6 +270,31 @@ or both. Set the repository variables and matching token secrets from the table
 on the DevIntern GitHub repository. Each job receives only its provider's token,
 and no credentials are exposed to untrusted PR workflows. Missing configuration
 fails the explicit live command before it mutates a remote repository.
+
+## Offline fake tracker servers
+
+The default local suite includes an in-process fake Jira Cloud v3 server, so the
+built CLI can exercise the Jira tracker lifecycle with no credentials and no
+network access. `bun test tests/local` runs
+`tests/local/tracker-jira-fake.test.ts`; it skips only when the built CLI is
+absent, like the other local Git tests.
+
+The fake binds `127.0.0.1:0`, accepts any Basic-auth credentials (and never logs
+them), and implements only the endpoints the product calls: `/myself`, enhanced
+JQL `search/jql`, issue read/update, comments (ADF and text), and workflow
+transitions. Any unmatched request returns a diagnostic 404 and fails the test,
+so a client change that starts calling a new route is visible instead of
+silently returning `{}`.
+
+Two scenarios run the production Jira client through explicit-key and `--query`
+selection against a seeded issue and a decoy outside the selector. Read-back
+goes through the fake fixture, not CLI stdout: the pushed `feature/<key>` branch
+and exact `src/greeting.ts` diff, the run record, the configured workflow
+status, surviving unrelated labels, the implementation summary comment, and
+delivery of the seeded description/comment markers to the deterministic agent.
+A second run with `--skip-comments` proves no additional comment or transition
+is posted. The local bare Git remote is the code host; no GitHub token or PR is
+required.
 
 ## Remote tracker fixtures
 

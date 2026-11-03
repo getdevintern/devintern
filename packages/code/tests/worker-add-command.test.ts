@@ -24,12 +24,12 @@ import { RunStore } from "../src/lib/state/run-recorder";
 import { LockManager } from "../src/lib/lock-manager";
 import { workspaceDbPath, workspaceWorkerStartPath } from "../src/lib/workspace/paths";
 import { loadWorkspaceConfig } from "../src/lib/workspace/config";
-import {
-  recoverOrphanedInjectedTasks,
-  recoverOrphanedWorkspaceRuns,
-} from "../src/lib/workspace/workspace-worker";
+import { recoverOrphanedWorkspaceRuns } from "../src/lib/workspace/workspace-worker";
 import { InjectedTaskAcquirer } from "../src/lib/workspace/injected-acquirer";
-import { readProcessStartTime } from "../src/lib/workspace/injected-recovery";
+import {
+  readProcessStartTime,
+  recoverOrphanedInjectedTasks,
+} from "../src/lib/workspace/injected-recovery";
 import type { TaskExecutionResult } from "../src/lib/acquirers/task-polling";
 
 const WORKSPACE_TOML = `[workspace]
