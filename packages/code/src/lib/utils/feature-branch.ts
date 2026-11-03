@@ -192,23 +192,62 @@ export async function continueFeatureBranch(
 }
 
 /**
+ * Resolve a branch name to a comparable ref.
+ *
+ * `preferRemote` mirrors fleet bare clones: their `refs/heads/*` stay frozen at
+ * clone time because the fetch refspec writes only `refs/remotes/origin/*`, so
+ * a base branch resolved local-first makes upstream commits look like work the
+ * feature branch produced. Feature branches keep local-first so a branch that
+ * only exists remotely still resolves. An explicit `origin/` prefix always
+ * means the remote ref: it never falls back to `refs/heads/<name>`, so a
+ * qualified base with no remote ref is unverifiable rather than silently
+ * compared against an unrelated local branch.
+ */
+async function resolveComparingRef(
+  name: string,
+  gitOpts: GitOptions | undefined,
+  preferRemote: boolean,
+): Promise<string | undefined> {
+  const qualified = name.startsWith("origin/");
+  const bare = qualified ? name.slice("origin/".length) : name;
+  const local = `refs/heads/${bare}`;
+  const remote = `refs/remotes/origin/${bare}`;
+  const candidates = qualified ? [remote] : preferRemote ? [remote, local] : [local, remote];
+  for (const ref of candidates) {
+    if (await Utils.gitRefExists(ref, gitOpts)) return ref;
+  }
+  return undefined;
+}
+
+/**
  * Best-effort description of work already landed on `branch` relative to a base
  * (commits and a diff stat). Returns undefined when either ref is missing or git
  * fails, so callers never treat absence as proof of no work.
+ *
+ * `basePreference` follows the checkout the branch was cut from: fleet bare
+ * clones need a remote-first base (their local refs stay frozen), while a
+ * normal CLI checkout cuts feature branches from the local base.
  */
 export async function collectLandedWork(
   branch: string,
   baseBranch: string,
-  options?: { cwd?: string },
+  options?: { cwd?: string; basePreference?: "remote-first" | "local-first" },
 ): Promise<string | undefined> {
   const gitOpts = options?.cwd ? { cwd: options.cwd } : undefined;
+  const preferRemoteBase = (options?.basePreference ?? "remote-first") === "remote-first";
   try {
+    const [baseRef, branchRef] = await Promise.all([
+      resolveComparingRef(baseBranch, gitOpts, preferRemoteBase),
+      resolveComparingRef(branch, gitOpts, false),
+    ]);
+    if (!baseRef || !branchRef) return undefined;
+
     const [log, stat] = await Promise.all([
       Utils.executeGitCommand(
-        ["log", "--oneline", "--no-decorate", `${baseBranch}..${branch}`],
+        ["log", "--oneline", "--no-decorate", `${baseRef}..${branchRef}`],
         gitOpts,
       ),
-      Utils.executeGitCommand(["diff", "--stat", `${baseBranch}...${branch}`], gitOpts),
+      Utils.executeGitCommand(["diff", "--stat", `${baseRef}...${branchRef}`], gitOpts),
     ]);
     const sections: string[] = [];
     if (log.success && log.output.trim()) {
@@ -653,31 +692,31 @@ async function createFeatureBranchRef(
  * Whether `branch` carries commits that are not reachable from `baseBranch`.
  *
  * Used by session pickup to recognise legacy/interrupted runs that left real
- * work on their recorded branch but no saved implementation report. Local refs
- * win over `origin/*` so a branch only present remotely still counts. Any
- * missing ref or git failure reports false: an unverifiable branch is never
- * treated as resumable.
+ * work on their recorded branch but no saved implementation report. The base is
+ * resolved remote-first by default: fleet bare clones never advance
+ * `refs/heads/*` (the fetch refspec writes only `refs/remotes/origin/*`), so a
+ * stale local base would report upstream commits as the branch's own work. A
+ * normal CLI checkout cuts feature branches from the *local* base, so callers
+ * there pass `basePreference: "local-first"`; comparing against a remote base
+ * that has not received local commits would present unrelated local commits as
+ * landed work. The feature branch keeps local-first so a branch only present
+ * remotely still counts. Any missing ref or git failure reports false: an
+ * unverifiable branch is never treated as resumable.
  *
  * @param branch - Feature branch to inspect
  * @param baseBranch - Target/base branch the work would be merged into
- * @param options - Optional working directory
+ * @param options - Optional working directory and base-ref preference
  */
 export async function hasCommitsAhead(
   branch: string,
   baseBranch: string,
-  options?: { cwd?: string },
+  options?: { cwd?: string; basePreference?: "remote-first" | "local-first" },
 ): Promise<boolean> {
   const gitOpts = options?.cwd ? { cwd: options.cwd } : undefined;
+  const preferRemoteBase = (options?.basePreference ?? "remote-first") === "remote-first";
   try {
-    const resolveRef = async (name: string): Promise<string | undefined> => {
-      const local = `refs/heads/${name}`;
-      if (await Utils.gitRefExists(local, gitOpts)) return local;
-      const remote = `refs/remotes/origin/${name}`;
-      if (await Utils.gitRefExists(remote, gitOpts)) return remote;
-      return undefined;
-    };
-    const baseRef = await resolveRef(baseBranch.replace(/^origin\//, ""));
-    const branchRef = await resolveRef(branch);
+    const baseRef = await resolveComparingRef(baseBranch, gitOpts, preferRemoteBase);
+    const branchRef = await resolveComparingRef(branch, gitOpts, false);
     if (!baseRef || !branchRef) return false;
 
     const result = await Utils.executeGitCommand(

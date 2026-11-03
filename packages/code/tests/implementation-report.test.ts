@@ -61,6 +61,47 @@ describe("readImplementationReport", () => {
     });
   });
 
+  test("prefers a fresh success summary over a stale incomplete summary from a prior attempt", () => {
+    // A prior attempt's halt file predates this attempt by far more than the
+    // mtime tolerance, so it is stale and must not override the success this
+    // attempt just wrote.
+    writeSummary("implementation-summary-incomplete.md", "Stale halt.", STARTED_AT - 500);
+    writeSummary("implementation-summary.md", "Implemented the parser.", STARTED_AT + 5_000);
+
+    expect(readImplementationReport(taskDir, STARTED_AT)).toEqual({
+      incomplete: false,
+      report: "Implemented the parser.",
+    });
+  });
+
+  test("prefers a newer fresh success summary over an older fresh incomplete summary", () => {
+    // Both files are inside this attempt: the halt was written first and the
+    // success report after it, so the newer success must win instead of the
+    // older incomplete file (the case that prevents a stale halt from
+    // overriding a fresh report).
+    writeSummary("implementation-summary-incomplete.md", "Halted.", STARTED_AT + 1_000);
+    writeSummary("implementation-summary.md", "Implemented the parser.", STARTED_AT + 2_000);
+
+    expect(readImplementationReport(taskDir, STARTED_AT)).toEqual({
+      incomplete: false,
+      report: "Implemented the parser.",
+    });
+  });
+
+  test("prefers a newer incomplete summary over an older success summary", () => {
+    writeSummary("implementation-summary.md", "Implemented the parser.", STARTED_AT + 1_000);
+    writeSummary(
+      "implementation-summary-incomplete.md",
+      "Verification failed.",
+      STARTED_AT + 2_000,
+    );
+
+    expect(readImplementationReport(taskDir, STARTED_AT)).toEqual({
+      incomplete: true,
+      report: "Verification failed.",
+    });
+  });
+
   test("reports no summary when the task directory has none", () => {
     expect(readImplementationReport(taskDir, STARTED_AT)).toEqual({ incomplete: false });
   });

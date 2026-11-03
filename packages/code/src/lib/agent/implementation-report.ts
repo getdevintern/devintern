@@ -11,11 +11,11 @@ export const IMPLEMENTATION_REPORT_EXCERPT_LENGTH = 10_000;
  * timestamp stored on a file the run just wrote, so an exact `>=` comparison
  * occasionally treats this attempt's own summary as stale (visible on fast
  * runs, where the agent finishes in the same millisecond it started). A stale
- * summary always comes from a previous attempt minutes earlier, so a one-second
- * tolerance keeps the guard meaningful while absorbing clock and filesystem
- * timestamp granularity.
+ * summary always comes from a previous attempt, so a few milliseconds absorb
+ * clock and filesystem timestamp granularity without letting an attempt that
+ * finished moments before this one masquerade as its own.
  */
-const SUMMARY_MTIME_TOLERANCE_MS = 1_000;
+const SUMMARY_MTIME_TOLERANCE_MS = 5;
 
 /** Implementation summary files the agent may have written for this run. */
 export interface ImplementationReport {
@@ -25,20 +25,25 @@ export interface ImplementationReport {
   report?: string;
 }
 
+/** Mtime of a summary file, or undefined when it is absent or unreadable. */
+function summaryMtime(path: string): number | undefined {
+  try {
+    return existsSync(path) ? statSync(path).mtimeMs : undefined;
+  } catch {
+    // Treat an unreadable stat as "not this run's file".
+    return undefined;
+  }
+}
+
 /**
  * Whether a summary file was written at or after the attempt start.
  *
- * @param path - Summary file to inspect
+ * @param mtimeMs - File modification time, or undefined when absent
  * @param sinceMs - Epoch ms when this implementation attempt started
  * @returns True when the file belongs to the current attempt.
  */
-function writtenThisAttempt(path: string, sinceMs: number): boolean {
-  try {
-    return existsSync(path) && statSync(path).mtimeMs >= sinceMs - SUMMARY_MTIME_TOLERANCE_MS;
-  } catch {
-    // Treat an unreadable stat as "not this run's file".
-    return false;
-  }
+function writtenThisAttempt(mtimeMs: number | undefined, sinceMs: number): boolean {
+  return mtimeMs !== undefined && mtimeMs >= sinceMs - SUMMARY_MTIME_TOLERANCE_MS;
 }
 
 /**
@@ -46,26 +51,35 @@ function writtenThisAttempt(path: string, sinceMs: number): boolean {
  *
  * The summary directory is shared across attempts, so only files modified at or
  * after `sinceMs` belong to this run; a stale summary from an earlier attempt is
- * ignored. Reads are best-effort: a missing or unreadable file means "no
- * report", never a failed task.
+ * ignored. When both a success and an incomplete summary are fresh, the newer
+ * file wins: a halt written after the agent's report escalates the run, while a
+ * stale incomplete file from a prior attempt cannot override a fresh success.
+ * Reads are best-effort: a missing or unreadable file means "no report", never a
+ * failed task.
  *
  * @param taskDir - Per-task output directory holding the summary files
  * @param sinceMs - Epoch ms when this implementation attempt started
  */
 export function readImplementationReport(taskDir: string, sinceMs: number): ImplementationReport {
+  const successPath = join(taskDir, "implementation-summary.md");
   const incompletePath = join(taskDir, "implementation-summary-incomplete.md");
-  const incomplete = writtenThisAttempt(incompletePath, sinceMs);
+  const successMtime = summaryMtime(successPath);
+  const incompleteMtime = summaryMtime(incompletePath);
+  const successFresh = writtenThisAttempt(successMtime, sinceMs);
+  const incompleteFresh = writtenThisAttempt(incompleteMtime, sinceMs);
 
-  const reportPath = incomplete ? incompletePath : join(taskDir, "implementation-summary.md");
+  const incomplete =
+    incompleteFresh && (!successFresh || (incompleteMtime ?? 0) >= (successMtime ?? 0));
+  const reportPath = incomplete ? incompletePath : successFresh ? successPath : undefined;
+  if (reportPath === undefined) return { incomplete: false };
+
   try {
-    if (writtenThisAttempt(reportPath, sinceMs)) {
-      return {
-        incomplete,
-        report: readFileSync(reportPath, "utf8").slice(0, IMPLEMENTATION_REPORT_EXCERPT_LENGTH),
-      };
-    }
+    return {
+      incomplete,
+      report: readFileSync(reportPath, "utf8").slice(0, IMPLEMENTATION_REPORT_EXCERPT_LENGTH),
+    };
   } catch {
     /* best-effort: recording must never fail a run */
+    return { incomplete };
   }
-  return { incomplete };
 }

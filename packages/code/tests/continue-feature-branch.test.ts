@@ -276,4 +276,156 @@ describe("hasCommitsAhead", () => {
     expect(await Utils.hasCommitsAhead("feature/missing", "main", { cwd: repoDir })).toBe(false);
     expect(await Utils.hasCommitsAhead("main", "missing", { cwd: repoDir })).toBe(false);
   });
+
+  test("is true for a branch that only exists as an origin remote ref", async () => {
+    execSync("git checkout -b feature/remote-only", { cwd: repoDir });
+    writeFileSync(join(repoDir, "remote.txt"), "remote work\n", "utf8");
+    execSync("git add .", { cwd: repoDir });
+    execSync("git commit -m 'remote-only work'", { cwd: repoDir });
+    const sha = execSync("git rev-parse HEAD", { cwd: repoDir, encoding: "utf8" }).trim();
+    execSync(`git update-ref refs/remotes/origin/feature/remote-only ${sha}`, { cwd: repoDir });
+    execSync("git checkout main", { cwd: repoDir });
+    execSync("git branch -D feature/remote-only", { cwd: repoDir });
+
+    expect(await Utils.hasCommitsAhead("feature/remote-only", "main", { cwd: repoDir })).toBe(true);
+  });
+
+  test("accepts an origin/-prefixed base branch", async () => {
+    execSync("git checkout -b feature/prefixed-base", { cwd: repoDir });
+    writeFileSync(join(repoDir, "prefixed.txt"), "prefixed work\n", "utf8");
+    execSync("git add .", { cwd: repoDir });
+    execSync("git commit -m 'prefixed-base work'", { cwd: repoDir });
+    const mainSha = execSync("git rev-parse main", { cwd: repoDir, encoding: "utf8" }).trim();
+    execSync(`git update-ref refs/remotes/origin/main ${mainSha}`, { cwd: repoDir });
+    // Drop the local base ref so the probe must resolve `origin/main`.
+    execSync("git branch -D main", { cwd: repoDir });
+
+    expect(
+      await Utils.hasCommitsAhead("feature/prefixed-base", "origin/main", { cwd: repoDir }),
+    ).toBe(true);
+  });
+
+  test("returns false for an origin/-prefixed base that has no remote ref", async () => {
+    execSync("git checkout -b feature/prefixed-missing", { cwd: repoDir });
+    writeFileSync(join(repoDir, "prefixed.txt"), "prefixed work\n", "utf8");
+    execSync("git add .", { cwd: repoDir });
+    execSync("git commit -m 'prefixed work'", { cwd: repoDir });
+    // Local `main` exists and the branch is ahead of it, so a fallback to
+    // `refs/heads/main` would report true. An explicit origin/ prefix must not
+    // silently compare against that unrelated local ref.
+    execSync("git rev-parse --verify refs/heads/main", { cwd: repoDir });
+    expect(() =>
+      execSync("git rev-parse --verify refs/remotes/origin/main", { cwd: repoDir }),
+    ).toThrow();
+
+    expect(
+      await Utils.hasCommitsAhead("feature/prefixed-missing", "origin/main", { cwd: repoDir }),
+    ).toBe(false);
+    expect(
+      await Utils.collectLandedWork("feature/prefixed-missing", "origin/main", { cwd: repoDir }),
+    ).toBeUndefined();
+  });
+
+  test("is false when only the stale local base lags the feature branch", async () => {
+    // Fleet bare clones never advance refs/heads/* (the fetch refspec writes
+    // only refs/remotes/origin/*). Model that: local main stays at the clone
+    // commit while origin/main moves on, and the feature branch starts from the
+    // current origin/main.
+    execSync("git checkout -b feature/proj-22", { cwd: repoDir });
+    writeFileSync(join(repoDir, "upstream.txt"), "upstream work\n", "utf8");
+    execSync("git add .", { cwd: repoDir });
+    execSync("git commit -m 'upstream work'", { cwd: repoDir });
+    const upstreamSha = execSync("git rev-parse HEAD", { cwd: repoDir, encoding: "utf8" }).trim();
+    execSync(`git update-ref refs/remotes/origin/main ${upstreamSha}`, { cwd: repoDir });
+    execSync("git checkout -b feature/proj-23", { cwd: repoDir });
+    // Local refs/heads/main is still the initial commit, so main..feature moves.
+    expect(
+      execSync("git rev-list --count refs/heads/main..feature/proj-23", {
+        cwd: repoDir,
+        encoding: "utf8",
+      }).trim(),
+    ).toBe("1");
+    expect(
+      execSync("git rev-list --count refs/remotes/origin/main..feature/proj-23", {
+        cwd: repoDir,
+        encoding: "utf8",
+      }).trim(),
+    ).toBe("0");
+
+    expect(await Utils.hasCommitsAhead("feature/proj-23", "main", { cwd: repoDir })).toBe(false);
+    expect(await Utils.hasCommitsAhead("feature/proj-23", "origin/main", { cwd: repoDir })).toBe(
+      false,
+    );
+  });
+
+  test("collects no landed work when the branch only contains upstream commits", async () => {
+    execSync("git checkout -b feature/proj-24", { cwd: repoDir });
+    writeFileSync(join(repoDir, "upstream.txt"), "upstream work\n", "utf8");
+    execSync("git add .", { cwd: repoDir });
+    execSync("git commit -m 'upstream work'", { cwd: repoDir });
+    const upstreamSha = execSync("git rev-parse HEAD", { cwd: repoDir, encoding: "utf8" }).trim();
+    execSync(`git update-ref refs/remotes/origin/main ${upstreamSha}`, { cwd: repoDir });
+
+    expect(
+      await Utils.collectLandedWork("feature/proj-24", "main", { cwd: repoDir }),
+    ).toBeUndefined();
+  });
+
+  test("local-first compares a CLI branch against the base it was cut from", async () => {
+    // Normal CLI checkout: origin/main is still at the initial commit, local
+    // main gains an unpushed commit, and the feature branch is cut from local
+    // main with no work of its own. Remote-first sees that local-only commit as
+    // landed work; local-first correctly reports an empty branch.
+    const initial = execSync("git rev-parse HEAD", { cwd: repoDir, encoding: "utf8" }).trim();
+    execSync(`git update-ref refs/remotes/origin/main ${initial}`, { cwd: repoDir });
+    writeFileSync(join(repoDir, "local-only.txt"), "local-only main work\n", "utf8");
+    execSync("git add .", { cwd: repoDir });
+    execSync("git commit -m 'local-only main commit'", { cwd: repoDir });
+    execSync("git checkout -b feature/empty", { cwd: repoDir });
+
+    expect(
+      await Utils.hasCommitsAhead("feature/empty", "main", {
+        cwd: repoDir,
+        basePreference: "remote-first",
+      }),
+    ).toBe(true);
+    expect(
+      await Utils.hasCommitsAhead("feature/empty", "main", {
+        cwd: repoDir,
+        basePreference: "local-first",
+      }),
+    ).toBe(false);
+
+    const remoteFirst = await Utils.collectLandedWork("feature/empty", "main", {
+      cwd: repoDir,
+      basePreference: "remote-first",
+    });
+    expect(remoteFirst).toContain("local-only main commit");
+    expect(
+      await Utils.collectLandedWork("feature/empty", "main", {
+        cwd: repoDir,
+        basePreference: "local-first",
+      }),
+    ).toBeUndefined();
+  });
+
+  test("is false when git rev-list fails", async () => {
+    execSync("git checkout -b feature/rev-list-failure", { cwd: repoDir });
+    writeFileSync(join(repoDir, "failure.txt"), "work\n", "utf8");
+    execSync("git add .", { cwd: repoDir });
+    execSync("git commit -m 'work before failure'", { cwd: repoDir });
+
+    const original = Utils.executeGitCommand;
+    Utils.executeGitCommand = async (args, options) =>
+      args[0] === "rev-list"
+        ? { success: false, output: "", error: "simulated git failure" }
+        : original(args, options);
+    try {
+      expect(
+        await Utils.hasCommitsAhead("feature/rev-list-failure", "main", { cwd: repoDir }),
+      ).toBe(false);
+    } finally {
+      Utils.executeGitCommand = original;
+    }
+  });
 });

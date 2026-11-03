@@ -13,7 +13,7 @@
 
 import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { EventEmitter } from "node:events";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -212,6 +212,26 @@ mock.module("../src/lib/state/run-recorder", () => ({
   recordRunStage: (stage: string, data: unknown) => {
     recordedStages.push({ stage, data });
   },
+  replaceRunStage: (stage: string, data: unknown) => {
+    for (let i = recordedStages.length - 1; i >= 0; i -= 1) {
+      if (recordedStages[i]?.stage === stage) recordedStages.splice(i, 1);
+    }
+    recordedStages.push({ stage, data });
+  },
+  hasRunStage: (stage: string) => recordedStages.some((entry) => entry.stage === stage),
+  latestRunStage: (stage: string) => {
+    for (let i = recordedStages.length - 1; i >= 0; i -= 1) {
+      const entry = recordedStages[i];
+      if (entry?.stage !== stage) continue;
+      const data = entry.data as { status?: string; detail?: unknown };
+      return {
+        stage,
+        status: data.status,
+        detail: data.detail === undefined ? undefined : JSON.stringify(data.detail),
+      };
+    }
+    return undefined;
+  },
 }));
 mock.module("../src/lib/state/worker-state", () => ({
   ...realWorkerState,
@@ -401,6 +421,26 @@ describe("runAgentHarness non-commit outcomes", () => {
     expect(tracker.postComment).not.toHaveBeenCalled();
     expect(tracker.postIncompleteImplementationComment).not.toHaveBeenCalled();
   });
+
+  test("ignores a stale incomplete summary from a prior attempt when recording the stage", async () => {
+    const taskDir = join(outDir, "task-1");
+    mkdirSync(taskDir, { recursive: true });
+    const stalePath = join(taskDir, "implementation-summary-incomplete.md");
+    writeFileSync(stalePath, "stale halt from a prior attempt", "utf8");
+    const staleSeconds = (Date.now() - 60_000) / 1000;
+    utimesSync(stalePath, staleSeconds, staleSeconds);
+    scenario.stdout = "Implemented the parser and its tests.";
+
+    await runAgentHarness({ ...baseInput(), enableGit: false });
+
+    const implementation = recordedStages.find((entry) => entry.stage === "implementation");
+    const data = implementation?.data as {
+      status?: string;
+      detail?: { report?: string };
+    };
+    expect(data.status).toBe("succeeded");
+    expect(data.detail?.report).toContain("Implemented the parser");
+  });
 });
 
 describe("runAgentHarness git delivery", () => {
@@ -461,6 +501,26 @@ describe("runAgentHarness git delivery", () => {
     );
     expect(deliveryEvents).not.toContain("push");
     expect(tracker.transitionStatus).not.toHaveBeenCalledWith("TASK-1", "In Review");
+  });
+
+  test("marks the early implementation stage failed when delivery halts", async () => {
+    scenario.stdout = "Implemented the parser and its tests.";
+    commitResult = { success: false, message: "No changes to commit" };
+
+    await expect(runAgentHarness({ ...baseInput(), createPr: true })).rejects.toThrow(
+      "Implementation was not committed",
+    );
+
+    const implementation = [...recordedStages]
+      .reverse()
+      .find((entry) => entry.stage === "implementation");
+    const data = implementation?.data as {
+      status?: string;
+      detail?: { report?: string; deliveryError?: string };
+    };
+    expect(data.status).toBe("failed");
+    expect(data.detail?.report).toContain("Implemented the parser");
+    expect(data.detail?.deliveryError).toContain("Implementation was not committed");
   });
 
   test("does not publish agent commits on the PR target branch", async () => {

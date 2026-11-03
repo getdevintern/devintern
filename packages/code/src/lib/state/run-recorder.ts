@@ -373,6 +373,45 @@ export class RunStore {
   }
 
   /**
+   * Replace a run's stage row (all occurrences) with a single fresh record.
+   *
+   * Used when a stage is written early and a later phase learns a terminal
+   * fact that contradicts it (for example, finalize writes the incomplete
+   * summary after the implementation stage already recorded success). Replacing
+   * instead of appending keeps the stage timeline and the latest-stage lookup
+   * consistent: the corrected status is the only one a reader sees.
+   *
+   * @param runId - Run id
+   * @param stage - Pipeline stage name
+   * @param status - Corrected stage outcome
+   * @param summary - One-line human-readable summary
+   * @param detail - Structured detail (JSON-stringified), truncated if huge
+   */
+  replaceStage(
+    runId: number,
+    stage: RunStage,
+    status: StageStatus,
+    summary?: string,
+    detail?: string,
+  ): void {
+    this.db.transaction(() => {
+      this.db.run(`DELETE FROM run_stages WHERE run_id = ? AND stage = ?`, [runId, stage]);
+      this.db.run(
+        `INSERT INTO run_stages (run_id, stage, status, summary, detail, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [
+          runId,
+          stage,
+          status,
+          summary ?? null,
+          detail ? detail.slice(0, MAX_DETAIL_LENGTH) : null,
+          Date.now(),
+        ],
+      );
+    })();
+  }
+
+  /**
    * Attach the created PR to a run.
    *
    * @param runId - Run id
@@ -905,6 +944,53 @@ export function recordRunStage(
     currentStore.addStage(currentRunId, stage, data.status, data.summary, detail);
   } catch (error) {
     warnOnce(`stage:${stage}`, error);
+  }
+}
+
+/**
+ * Replace a stage already recorded for the current run (no-op when no run is
+ * active or the stage was never written).
+ *
+ * Used when a later phase corrects an early record — the implementation stage
+ * is written before finalize, which may then discover that verification
+ * halted. Keeping a single row means the dashboard and session pickup both see
+ * the corrected status.
+ *
+ * @param stage - Pipeline stage name
+ * @param data - Corrected stage outcome, summary, and optional structured detail
+ */
+export function replaceRunStage(
+  stage: RunStage,
+  data: { status: StageStatus; summary?: string; detail?: unknown },
+): void {
+  if (currentStore === null || currentRunId === null) {
+    return;
+  }
+  try {
+    const detail = data.detail === undefined ? undefined : JSON.stringify(data.detail);
+    currentStore.replaceStage(currentRunId, stage, data.status, data.summary, detail);
+  } catch (error) {
+    warnOnce(`stage:${stage}`, error);
+  }
+}
+
+/**
+ * Latest record for a stage on the current run, when one exists.
+ *
+ * @param stage - Pipeline stage name
+ */
+export function latestRunStage(stage: RunStage): RunStageRecord | undefined {
+  if (currentStore === null || currentRunId === null) {
+    return undefined;
+  }
+  try {
+    return currentStore
+      .listStages(currentRunId)
+      .filter((record) => record.stage === stage)
+      .at(-1);
+  } catch {
+    // Recording is best-effort; a read failure means "not recorded yet".
+    return undefined;
   }
 }
 
