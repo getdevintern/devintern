@@ -5,7 +5,7 @@ partially exercises, and what is still missing. The `e2e-expander` workspace
 automation scouts this file and delegates the highest-value gaps to the worker
 as separate ad-hoc tasks. Each delegated task updates this file in its own PR.
 
-Last reviewed: 2026-11-03.
+Last reviewed: 2026-11-04.
 
 ## Status legend
 
@@ -142,31 +142,31 @@ Run: `bun run --filter @devintern/e2e test` (build the CLI first); the sandbox s
 
 ## `devintern worker` surface
 
-| Behavior                                                                                                | Status             | Evidence                                                                          | Missing                                                         |
-| ------------------------------------------------------------------------------------------------------- | ------------------ | --------------------------------------------------------------------------------- | --------------------------------------------------------------- |
-| Daemon: injected task drain, branch/PR, run record, worktree cleanup, graceful stop                     | `default` / `live` | `tests/local/worker.test.ts`, `tests/code/gitlab-worker.test.ts`                  | —                                                               |
-| Tracker polling and actioned deduplication                                                              | `live`             | GitLab worker suite                                                               | GitHub/Jira/Trello/Linear/Asana/Azure worker paths.             |
-| Scheduled `[[automations]]`: schedule, no-op, PR policy, hot reload                                     | `gap`              | —                                                                                 | Deterministic fixture repo and prompt.                          |
-| Scheduled `[[estimations]]`                                                                             | `gap`              | —                                                                                 | Fixture tracker and story-point assertion.                      |
-| Working windows / quiet hours                                                                           | `gap`              | —                                                                                 | Ready-task deferral and `run-now` bypass.                       |
-| Workspace and per-repo concurrency                                                                      | `gap`              | —                                                                                 | Multiple queued tasks and limits.                               |
-| Orphan recovery after a crash                                                                           | `gap`              | —                                                                                 | Kill mid-run, restart, assert failed run and no PR.             |
-| Harness failover                                                                                        | `gap`              | —                                                                                 | Stub usage-limit harness plus fallback.                         |
-| Review polling, CI repair, conflict resolution                                                          | `live`             | GitLab worker suite                                                               | GitHub parity and scheduled/manual modes.                       |
-| Relay instant events                                                                                    | `live`             | GitLab relay suite                                                                | GitHub relay and tracker webhooks.                              |
-| Sentry error monitors                                                                                   | `gap`              | —                                                                                 | Fake Sentry API or opt-in project.                              |
-| Dashboard embedded in the worker                                                                        | `gap`              | —                                                                                 | API and run-now/retry.                                          |
-| Native service install/uninstall                                                                        | `gap`              | —                                                                                 | systemd/launchd path without touching the host service manager. |
-| Auto-update                                                                                             | `gap`              | —                                                                                 | Disabled in tests; simulate an available update safely.         |
-| Team routing, `env_file`, per-repo env                                                                  | `gap`              | —                                                                                 | Multi-repo fixture.                                             |
-| `worker init`                                                                                           | `gap`              | —                                                                                 | Non-interactive failure and prompt-free path.                   |
-| `worker login`                                                                                          | `gap`              | —                                                                                 | Session isolation from project login.                           |
-| `worker scaffold`                                                                                       | `gap`              | —                                                                                 | Creates `workspace.toml` and shared `.env` in a temp home.      |
-| `worker add-repo`                                                                                       | `gap`              | —                                                                                 | Detects remote/name and updates the TOML.                       |
-| `worker add`: `--title`, `--body`, `--json`                                                             | `default`          | `WorkerFixture.addTask`                                                           | —                                                               |
-| `worker add`: `--body-file`, `--idempotency-key`, `--resume`, `--wait`, `--wait-timeout`, `--workspace` | `default`          | `tests/local/worker-add-options.test.ts` (`bun run --filter @devintern/e2e test`) | —                                                               |
-| `worker connect`                                                                                        | `gap`              | —                                                                                 | See external section.                                           |
-| `worker run-now`                                                                                        | `gap`              | —                                                                                 | Marker creation, drain, marker removal, quiet-hours bypass.     |
+| Behavior                                                                                                | Status             | Evidence                                                                              | Missing                                                         |
+| ------------------------------------------------------------------------------------------------------- | ------------------ | ------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| Daemon: injected task drain, branch/PR, run record, worktree cleanup, graceful stop                     | `default` / `live` | `tests/local/worker.test.ts`, `tests/code/gitlab-worker.test.ts`                      | —                                                               |
+| Tracker polling and actioned deduplication                                                              | `live`             | GitLab worker suite                                                                   | GitHub/Jira/Trello/Linear/Asana/Azure worker paths.             |
+| Scheduled `[[automations]]`: schedule, no-op, PR policy, hot reload                                     | `gap`              | —                                                                                     | Deterministic fixture repo and prompt.                          |
+| Scheduled `[[estimations]]`                                                                             | `gap`              | —                                                                                     | Fixture tracker and story-point assertion.                      |
+| Working windows / quiet hours                                                                           | `default`          | `tests/local/worker-working-windows.test.ts` (`bun run --filter @devintern/e2e test`) | —                                                               |
+| Workspace and per-repo concurrency                                                                      | `gap`              | —                                                                                     | Multiple queued tasks and limits.                               |
+| Orphan recovery after a crash                                                                           | `gap`              | —                                                                                     | Kill mid-run, restart, assert failed run and no PR.             |
+| Harness failover                                                                                        | `gap`              | —                                                                                     | Stub usage-limit harness plus fallback.                         |
+| Review polling, CI repair, conflict resolution                                                          | `live`             | GitLab worker suite                                                                   | GitHub parity and scheduled/manual modes.                       |
+| Relay instant events                                                                                    | `live`             | GitLab relay suite                                                                    | GitHub relay and tracker webhooks.                              |
+| Sentry error monitors                                                                                   | `gap`              | —                                                                                     | Fake Sentry API or opt-in project.                              |
+| Dashboard embedded in the worker                                                                        | `gap`              | —                                                                                     | API and run-now/retry.                                          |
+| Native service install/uninstall                                                                        | `gap`              | —                                                                                     | systemd/launchd path without touching the host service manager. |
+| Auto-update                                                                                             | `gap`              | —                                                                                     | Disabled in tests; simulate an available update safely.         |
+| Team routing, `env_file`, per-repo env                                                                  | `gap`              | —                                                                                     | Multi-repo fixture.                                             |
+| `worker init`                                                                                           | `gap`              | —                                                                                     | Non-interactive failure and prompt-free path.                   |
+| `worker login`                                                                                          | `gap`              | —                                                                                     | Session isolation from project login.                           |
+| `worker scaffold`                                                                                       | `gap`              | —                                                                                     | Creates `workspace.toml` and shared `.env` in a temp home.      |
+| `worker add-repo`                                                                                       | `gap`              | —                                                                                     | Detects remote/name and updates the TOML.                       |
+| `worker add`: `--title`, `--body`, `--json`                                                             | `default`          | `WorkerFixture.addTask`                                                               | —                                                               |
+| `worker add`: `--body-file`, `--idempotency-key`, `--resume`, `--wait`, `--wait-timeout`, `--workspace` | `default`          | `tests/local/worker-add-options.test.ts` (`bun run --filter @devintern/e2e test`)     | —                                                               |
+| `worker connect`                                                                                        | `gap`              | —                                                                                     | See external section.                                           |
+| `worker run-now`                                                                                        | `default`          | `tests/local/worker-working-windows.test.ts` (`bun run --filter @devintern/e2e test`) | —                                                               |
 
 ## Delegation
 
@@ -193,15 +193,15 @@ and each task opens its own PR.
 6. `--auto-review` loop and iteration cap on GitHub and GitLab.
 7. `worker add` full option matrix (`--body-file`, idempotency, resume, wait,
    wait-timeout, workspace, validation and deduplication).
-8. `worker scaffold`, `add-repo`, `run-now`, and `connect status` in temp homes.
+8. `worker scaffold`, `add-repo`, and `connect status` in temp homes.
 9. Standalone `address-review` and `resolve-conflicts` options on GitHub/GitLab.
 10. `dashboard` standalone/embedded API, run-now, retry, and log redaction.
 11. `webhook serve` with signed GitHub/GitLab payloads.
 12. Sandbox providers `native`, `nono`, and `docker`, removed-provider (`srt`,
     `smolvm`) migration errors, plus invalid-provider and missing-binary
     fail-closed paths.
-13. Scheduled automations, estimations, quiet hours, concurrency, and orphan
-    recovery on a deterministic local workspace.
+13. Scheduled automations, estimations, concurrency, and orphan recovery on
+    a deterministic local workspace.
 14. Harness failover with stub harnesses.
 15. Sentry auto-fix with a fake or opt-in project.
 16. Auth/license (`login`, `logout`, `whoami`, trial, expired/offline) with a
