@@ -18,9 +18,15 @@
 # spawns never report events to the baked-in production Sentry DSN (expected
 # user-input validation errors from test scenarios were being shipped to
 # Sentry from CI, see DEVINTERN-7).
+#
+# guard-worker-env.ts drops worker-injected runtime variables
+# (DEVINTERN_WORKER_SUBPROCESS, the pipeline override, the harness chain, …) so
+# `bun test` behaves the same whether it is run from a shell or from inside a
+# DevIntern worker task subprocess.
 preload = [
   "./tests/setup/guard-git-state.ts",
   "./tests/setup/guard-queue-db.ts",
   "./tests/setup/guard-workspace-dir.ts",
   "./tests/setup/guard-sentry.ts",
+  "./tests/setup/guard-worker-env.ts",
 ]
