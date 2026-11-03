@@ -74,15 +74,14 @@ independently of this repository.
 
 ### Sandboxing
 
-| Behavior                                                                                | Status    | Evidence                      | Missing                                                                |
-| --------------------------------------------------------------------------------------- | --------- | ----------------------------- | ---------------------------------------------------------------------- |
-| nono availability, preflight, write boundary, fail-closed, inheritance (when installed) | `default` | `tests/local/sandbox.test.ts` | Network policy and pack updates.                                       |
-| `auto` provider selection                                                               | `partial` | nono path only                | Native harness path and fallback order.                                |
-| `native` provider (claude-code, codex)                                                  | `gap`     | —                             | Preflight and fail-closed behavior with stub harnesses.                |
-| `srt` provider                                                                          | `gap`     | —                             | Detect binary; skip when absent; assert explicit-provider fail-closed. |
-| `docker` provider                                                                       | `gap`     | —                             | Detect daemon; skip when absent; assert fail-closed and isolation.     |
-| `smolvm` provider                                                                       | `gap`     | —                             | Detect binary; skip when absent; assert fail-closed and isolation.     |
-| Sandbox grants for `injected/`, `state/`, `automations/`                                | `gap`     | —                             | `worker add` and automation writes under a sandbox.                    |
+| Behavior                                                                                | Status    | Evidence                      | Missing                                                            |
+| --------------------------------------------------------------------------------------- | --------- | ----------------------------- | ------------------------------------------------------------------ |
+| nono availability, preflight, write boundary, fail-closed, inheritance (when installed) | `default` | `tests/local/sandbox.test.ts` | Network policy and pack updates.                                   |
+| `auto` provider selection                                                               | `partial` | nono path only                | Native harness path and fallback order.                            |
+| `native` provider (claude-code, codex)                                                  | `gap`     | —                             | Preflight and fail-closed behavior with stub harnesses.            |
+| `docker` provider                                                                       | `gap`     | —                             | Detect daemon; skip when absent; assert fail-closed and isolation. |
+| `smolvm` provider                                                                       | `gap`     | —                             | Detect binary; skip when absent; assert fail-closed and isolation. |
+| Sandbox grants for `injected/`, `state/`, `automations/`                                | `gap`     | —                             | `worker add` and automation writes under a sandbox.                |
 
 ### Agent harnesses and failover
 
@@ -108,32 +107,33 @@ independently of this repository.
 
 ## `devintern` command surface
 
-| Command / flag                                                           | Status             | Evidence                       | Missing                                                                |
-| ------------------------------------------------------------------------ | ------------------ | ------------------------------ | ---------------------------------------------------------------------- |
-| Single task key or local Markdown file                                   | `default`          | `tests/local/cli.test.ts`      | —                                                                      |
-| Multiple task keys and mixed Markdown/tracker batches                    | `gap`              | —                              | Batch ordering and per-task failure isolation.                         |
-| `--query` across trackers                                                | `live`             | tracker suites                 | Jira/Trello/Linear/Asana/Azure.                                        |
-| `--create-pr`, `--pr-target-branch` explicit                             | `default` / `live` | local + provider suites        | Implicit target is live-only on GitLab; add GitHub coverage.           |
-| `--skip-clarity-check`, `--skip-comments`, `--no-update`, `--agent-path` | `default`          | local suites                   | —                                                                      |
-| `--allow-no-changes`                                                     | `gap`              | —                              | Agent no-op run exits successfully and creates no PR.                  |
-| `--force`                                                                | `gap`              | —                              | Incomplete task rerun gate.                                            |
-| `--no-git`, `--no-auto-commit`                                           | `gap`              | —                              | Branch/commit omissions.                                               |
-| `--estimate`                                                             | `gap`              | —                              | Per-tracker story-point write/comment.                                 |
-| `--auto-review`, `--auto-review-iterations`                              | `gap`              | —                              | Review/fix loop and cap.                                               |
-| `--env-file`                                                             | `gap`              | —                              | Alternate credential source and precedence.                            |
-| `--max-turns`, `--hook-retries`                                          | `partial`          | helper passes `--hook-retries` | Failure/retry path.                                                    |
-| `--sandbox <provider>`                                                   | `partial`          | nono suite                     | srt/docker/smolvm/native and invalid provider.                         |
-| `--verbose`, deprecated `--jql`, `--claude-path`, `--skip-jira-comments` | `gap`              | —                              | Compatibility and warning paths.                                       |
-| `init`                                                                   | `gap`              | —                              | Non-interactive failure and scaffold alternatives.                     |
-| `workspace`                                                              | `gap`              | —                              | Help/error redirect only; low value.                                   |
-| `dashboard`                                                              | `gap`              | —                              | Standalone server and API.                                             |
-| `webhook serve`                                                          | `gap`              | —                              | Signed payload delivery.                                               |
-| `address-review`                                                         | `partial`          | GitLab live lifecycle          | GitHub; `--no-push`, `--no-reply`, `--ci-feedback`, `--expected-head`. |
-| `resolve-conflicts`                                                      | `partial`          | GitLab worker auto mode        | Standalone CLI, scheduled/disabled modes.                              |
-| `login`, `logout`, `whoami`                                              | `gap`              | —                              | Local fake session or opt-in account suite.                            |
-| `sandbox`                                                                | `partial`          | nono doctor                    | Non-nono providers, missing harness, invalid provider.                 |
-| `doctor`                                                                 | `gap`              | —                              | Runtime/git/agent/tracker/sign-in/license checks and exit code.        |
-| `report`                                                                 | `gap`              | —                              | `--print`, spool/save, redaction, `--from`, offline failure.           |
+| Command / flag                                                           | Status             | Evidence                       | Missing                                                                  |
+| ------------------------------------------------------------------------ | ------------------ | ------------------------------ | ------------------------------------------------------------------------ |
+| Single task key or local Markdown file                                   | `default`          | `tests/local/cli.test.ts`      | —                                                                        |
+| Multiple task keys and mixed Markdown/tracker batches                    | `gap`              | —                              | Batch ordering and per-task failure isolation.                           |
+| `--query` across trackers                                                | `live`             | tracker suites                 | Jira/Trello/Linear/Asana/Azure.                                          |
+| `--create-pr`, `--pr-target-branch` explicit                             | `default` / `live` | local + provider suites        | Implicit target is live-only on GitLab; add GitHub coverage.             |
+| `--skip-clarity-check`, `--skip-comments`, `--no-update`, `--agent-path` | `default`          | local suites                   | —                                                                        |
+| `--allow-no-changes`                                                     | `gap`              | —                              | Agent no-op run exits successfully and creates no PR.                    |
+| `--force`                                                                | `gap`              | —                              | Incomplete task rerun gate.                                              |
+| `--no-git`, `--no-auto-commit`                                           | `gap`              | —                              | Branch/commit omissions.                                                 |
+| `--estimate`                                                             | `gap`              | —                              | Per-tracker story-point write/comment.                                   |
+| `--auto-review`, `--auto-review-iterations`                              | `gap`              | —                              | Review/fix loop and cap.                                                 |
+| `--env-file`                                                             | `gap`              | —                              | Alternate credential source and precedence.                              |
+| `--max-turns`, `--hook-retries`                                          | `partial`          | helper passes `--hook-retries` | Failure/retry path.                                                      |
+| `--sandbox <provider>`                                                   | `partial`          | nono suite                     | docker/smolvm/native and invalid provider.                               |
+| removed `srt` provider migration error                                   | `gap`              | —                              | `--sandbox srt` and `AGENT_SANDBOX=srt` fail with a message naming nono. |
+| `--verbose`, deprecated `--jql`, `--claude-path`, `--skip-jira-comments` | `gap`              | —                              | Compatibility and warning paths.                                         |
+| `init`                                                                   | `gap`              | —                              | Non-interactive failure and scaffold alternatives.                       |
+| `workspace`                                                              | `gap`              | —                              | Help/error redirect only; low value.                                     |
+| `dashboard`                                                              | `gap`              | —                              | Standalone server and API.                                               |
+| `webhook serve`                                                          | `gap`              | —                              | Signed payload delivery.                                                 |
+| `address-review`                                                         | `partial`          | GitLab live lifecycle          | GitHub; `--no-push`, `--no-reply`, `--ci-feedback`, `--expected-head`.   |
+| `resolve-conflicts`                                                      | `partial`          | GitLab worker auto mode        | Standalone CLI, scheduled/disabled modes.                                |
+| `login`, `logout`, `whoami`                                              | `gap`              | —                              | Local fake session or opt-in account suite.                              |
+| `sandbox`                                                                | `partial`          | nono doctor                    | Non-nono providers, missing harness, invalid provider.                   |
+| `doctor`                                                                 | `gap`              | —                              | Runtime/git/agent/tracker/sign-in/license checks and exit code.          |
+| `report`                                                                 | `gap`              | —                              | `--print`, spool/save, redaction, `--from`, offline failure.             |
 
 ## `devintern worker` surface
 
@@ -192,8 +192,8 @@ and each task opens its own PR.
 9. Standalone `address-review` and `resolve-conflicts` options on GitHub/GitLab.
 10. `dashboard` standalone/embedded API, run-now, retry, and log redaction.
 11. `webhook serve` with signed GitHub/GitLab payloads.
-12. Sandbox providers `native`, `srt`, `docker`, `smolvm`, plus invalid-provider
-    and missing-binary fail-closed paths.
+12. Sandbox providers `native`, `docker`, `smolvm`, plus invalid-provider,
+    removed-`srt` migration, and missing-binary fail-closed paths.
 13. Scheduled automations, estimations, quiet hours, concurrency, and orphan
     recovery on a deterministic local workspace.
 14. Harness failover with stub harnesses.

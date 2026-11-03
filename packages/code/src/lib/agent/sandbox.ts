@@ -40,7 +40,7 @@ let cached: Promise<ResolvedSandbox | null> | null = null;
  * Record the `--sandbox` CLI flag value. Must be called during CLI parsing,
  * before the first {@link getSandbox} call.
  *
- * @param name - Provider name ("none", "auto", "nono", "srt", "docker", "smolvm").
+ * @param name - Provider name ("none", "auto", "nono", "docker", "smolvm").
  */
 export function setSandboxOverride(name: string | undefined): void {
   cliOverride = name;
@@ -114,20 +114,18 @@ export function agentSandboxPolicy(
  */
 const PROVIDER_SETUP_NOTES: Record<string, (linux: boolean) => string[]> = {
   native: () => [
-    "confines shell commands and their children; for a boundary around the whole agent process use nono or srt",
+    "confines shell commands and their children; for a boundary around the whole agent process use nono",
   ],
   nono: () => [
     "one-time per agent: nono pull nolabs-ai/<agent> (packs: claude, codex, opencode, goose, pi, antigravity)",
   ],
-  srt: () => [
-    "network runs on a built-in allowlist of agent essentials; extend it with AGENT_SANDBOX_ALLOWED_DOMAINS",
-  ],
   docker: (linux) => [
     "one-time: sbx policy init balanced" + (linux ? "" : " (after sbx login)"),
     "agent auth: sbx secret set -g anthropic — host logins are not visible inside the VM",
-    "not compatible with /tmp working dirs (review worktrees); use nono or srt for those",
+    "not compatible with /tmp working dirs (review worktrees); use nono for those",
   ],
   smolvm: (linux) => [
+    "legacy and unsupported; prefer docker for microVM isolation or nono for local confinement",
     "first run downloads a guest VM image (several minutes)",
     ...(linux ? ["needs KVM (/dev/kvm) and your distro's QEMU system package"] : []),
   ],
@@ -150,6 +148,7 @@ function describeProviders(
   for (const { provider, detection } of detections) {
     const notes: string[] = [];
     if (provider.priority <= 0) notes.push("explicit-only, never picked by auto");
+    if (provider.name === "smolvm") notes.push("legacy, unsupported");
     if (provider.supportsHarness && !provider.supportsHarness(harnessName)) {
       notes.push(`does not support the configured "${harnessName}" harness`);
     }
@@ -372,6 +371,12 @@ export function buildSandboxDoctorReport(
           ? `Next run:   auto picks ${autoPick.provider.name} — agent wrapped with ${autoPick.provider.displayName}`
           : "Next run:   auto finds no usable provider — the run proceeds unsandboxed with a warning",
     );
+  } else if (configured === "srt") {
+    nextRunFails = true;
+    lines.push(
+      'Next run:   ❌ fails — Sandbox provider "srt" has been removed. Use "nono" for ' +
+        'whole-process confinement (or "docker" for a microVM boundary).',
+    );
   } else {
     const chosen = detections.find((d) => d.provider.name === configured);
     if (!chosen) {
@@ -391,7 +396,7 @@ export function buildSandboxDoctorReport(
       nextRunFails = true;
       lines.push(
         `Next run:   ❌ fails — ${configured} does not support the configured ` +
-          `"${harnessName}" harness. Use nono or srt (any harness), or switch AGENT_HARNESS.`,
+          `"${harnessName}" harness. Use nono (any harness), or switch AGENT_HARNESS.`,
       );
     } else if (activeSandbox && !chosen.provider.canNestInSandbox) {
       lines.push(

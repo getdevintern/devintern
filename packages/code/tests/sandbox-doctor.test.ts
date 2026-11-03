@@ -35,7 +35,7 @@ function detected(
 describe("buildSandboxDoctorReport", () => {
   test("sandboxing off: says so and suggests the best installed provider", () => {
     const report = buildSandboxDoctorReport(
-      [detected("nono", { priority: 30 }), detected("srt", { priority: 20 })],
+      [detected("nono", { priority: 30 })],
       "none",
       "default",
       "claude-code",
@@ -62,8 +62,8 @@ describe("buildSandboxDoctorReport", () => {
 
   test("explicit unavailable provider: next run fails with the detection reason", () => {
     const report = buildSandboxDoctorReport(
-      [detected("srt", { available: false, reason: "srt not found on PATH. Install: npm i -g" })],
-      "srt",
+      [detected("nono", { available: false, reason: "nono not found on PATH. Install: nono.sh" })],
+      "nono",
       ".devintern-code/.env",
       "claude-code",
       "linux",
@@ -71,7 +71,22 @@ describe("buildSandboxDoctorReport", () => {
     const text = report.lines.join("\n");
     expect(report.nextRunFails).toBe(true);
     expect(text).toContain("❌ fails");
-    expect(text).toContain("srt not found on PATH");
+    expect(text).toContain("nono not found on PATH");
+  });
+
+  test("removed srt provider: next run fails with the migration message", () => {
+    const report = buildSandboxDoctorReport(
+      [detected("nono", { priority: 30 })],
+      "srt",
+      ".devintern-code/.env",
+      "claude-code",
+      "linux",
+    );
+    const text = report.lines.join("\n");
+    expect(report.nextRunFails).toBe(true);
+    expect(text).toContain('Sandbox provider "srt" has been removed');
+    expect(text).toContain('Use "nono"');
+    expect(text).not.toContain("unknown provider");
   });
 
   test("explicit provider that does not support the harness: next run fails", () => {
@@ -101,8 +116,8 @@ describe("buildSandboxDoctorReport", () => {
 
   test("active enclosing sandbox: reports inherited confinement for an explicit provider", () => {
     const report = buildSandboxDoctorReport(
-      [detected("nono", { priority: 30 }), detected("srt", { priority: 20 })],
-      "srt",
+      [detected("nono", { priority: 30 })],
+      "nono",
       ".devintern-code/.env",
       "claude-code",
       "linux",
@@ -142,8 +157,8 @@ describe("buildSandboxDoctorReport", () => {
 
   test("active enclosing sandbox: unavailable explicit provider still fails (matches resolver)", () => {
     const report = buildSandboxDoctorReport(
-      [detected("srt", { available: false, reason: "srt not found on PATH" })],
-      "srt",
+      [detected("nono", { available: false, reason: "nono not found on PATH" })],
+      "nono",
       ".devintern-code/.env",
       "claude-code",
       "linux",
@@ -152,7 +167,7 @@ describe("buildSandboxDoctorReport", () => {
     const text = report.lines.join("\n");
     expect(report.nextRunFails).toBe(true);
     expect(text).toContain("❌ fails");
-    expect(text).toContain("srt not found on PATH");
+    expect(text).toContain("nono not found on PATH");
     expect(text).not.toContain("already inside the nono sandbox");
   });
 

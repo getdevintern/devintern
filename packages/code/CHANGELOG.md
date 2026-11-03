@@ -1,5 +1,15 @@
 # @devintern/code Changelog
 
+## [Unreleased]
+
+### Changed
+
+- **`smolvm` is frozen as a legacy provider**: explicit selection still works, but it prints a one-time legacy warning, `devintern sandbox` labels it legacy/unsupported, and the docs point to `docker` for microVM isolation or `nono` for local confinement. The provider and its tests stay in place; removal is a separate follow-up.
+
+### Removed
+
+- **`srt` sandbox provider removed**: `AGENT_SANDBOX=srt` and `--sandbox srt` now fail with a migration error naming `nono` (or `docker` for a microVM boundary) instead of the generic unknown-provider list. `nono` remains the supported whole-process wrapper. The `SANDBOX_RUNTIME` marker is still detected so a DevIntern launched inside an existing `srt` shell inherits the enclosing confinement instead of nesting another sandbox.
+
 ## [2.20.1] - 2026-10-30
 
 Licensing and maintenance patch: the published package now ships the canonical FSL-1.1-ALv2 license text and SPDX id instead of a paraphrased license file, the README states that local terminal use is free, a transitive request-forwarding dependency is patched, and the markdown-file CLI tests run concurrently under explicit process deadlines.

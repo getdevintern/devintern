@@ -1,5 +1,10 @@
 /**
- * SmolVM sandbox provider (CelestoAI/SmolVM) — explicit-only in v1.
+ * SmolVM sandbox provider (CelestoAI/SmolVM) — legacy, explicit-only.
+ *
+ * FROZEN: this provider is kept for existing users but is unsupported and
+ * will be removed in a future release. Selecting it logs a one-time warning.
+ * Prefer `docker` for microVM isolation or `nono` for local whole-process
+ * confinement.
  *
  * SmolVM runs agents inside a microVM (QEMU on macOS, Firecracker/KVM on
  * Linux) with host directories mounted read-write over 9p. The CLI has no
@@ -42,6 +47,25 @@ const BOOT_TIMEOUT_MS = 15 * 60_000;
 /** POSIX single-quote escaping for embedding argv in `sh -lc`. */
 function shellQuote(arg: string): string {
   return `'${arg.replaceAll("'", "'\\''")}'`;
+}
+
+/** Whether the legacy-provider warning has already been logged this process. */
+let legacyWarned = false;
+
+/**
+ * Forget the one-time legacy warning. Exposed for tests and long-lived hosts
+ * that want the next selection to announce the legacy status again.
+ */
+export function resetSmolvmLegacyWarning(): void {
+  legacyWarned = false;
+}
+
+function warnLegacyOnce(): void {
+  if (legacyWarned) return;
+  legacyWarned = true;
+  console.warn(
+    '⚠️ smolvm is legacy and unsupported; prefer "docker" for microVM isolation or "nono" for local confinement.',
+  );
 }
 
 export class SmolvmSandboxProvider implements SandboxProvider {
@@ -114,13 +138,14 @@ export class SmolvmSandboxProvider implements SandboxProvider {
   }
 
   wrapCommand(_path: string, args: readonly string[], policy: SandboxPolicy): WrappedCommand {
+    warnLegacyOnce();
     const harnessName = policy.harnessName ?? "claude-code";
     const smolvmAgent = SMOLVM_AGENT_NAMES[harnessName];
     if (!smolvmAgent) {
       throw new Error(
         `SmolVM does not support the "${harnessName}" harness. ` +
           `Supported: ${Object.keys(SMOLVM_AGENT_NAMES).join(", ")}. ` +
-          "Use AGENT_SANDBOX=nono or AGENT_SANDBOX=srt for other harnesses.",
+          "Use AGENT_SANDBOX=nono for other harnesses.",
       );
     }
 
