@@ -453,7 +453,7 @@ describe("MuseHarness", () => {
       "--disable-request-user-input",
       "--disable-approval",
       "--sandbox-network",
-      "unrestricted",
+      "enabled",
       "--workspace",
       "/tmp/wt",
       "--model",
@@ -469,7 +469,8 @@ describe("MuseHarness", () => {
   test("network is opened only when permissions are skipped (headless)", () => {
     const automated = h.buildArgs({ skipPermissions: true });
     expect(automated).toContain("--sandbox-network");
-    expect(automated).toContain("unrestricted");
+    expect(automated).toContain("enabled");
+    expect(automated).not.toContain("unrestricted");
 
     const interactive = h.buildArgs({ skipPermissions: false });
     expect(interactive).not.toContain("--sandbox-network");
