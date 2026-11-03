@@ -491,8 +491,9 @@ cliTest(
     const worker = new WorkerFixture();
     try {
       await worker.prepare();
-      // An escalated run records both the branch and an implementation report,
-      // which is the state session pickup inherits for --resume.
+      // An escalated run records the branch, a landed commit, and an
+      // implementation report. Session pickup requires commits before it
+      // resumes a branch, so the fixture commits an empty placeholder.
       worker.env.E2E_AGENT_MODE = "incomplete";
       const original = await worker.addTask({
         title: "Resume interrupted task",
