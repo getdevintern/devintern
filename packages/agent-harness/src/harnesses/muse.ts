@@ -29,7 +29,7 @@
  * - `--disable-request-user-input` is always emitted for headless runs so the
  *   agent cannot block on an interactive question. The flag exists from Muse
  *   Code 1.4.9; a known-older install fails with an actionable message.
- * - On macOS under nono/srt the outer wrapper disables Muse's inner Seatbelt
+ * - On macOS under nono the outer wrapper disables Muse's inner Seatbelt
  *   (nested Seatbelt is unsupported), so DevIntern also hides
  *   `~/.config/muse/auth.json` and requires `META_API_KEY` (see
  *   `museCredentialGuard` in `spawn-agent.ts`).

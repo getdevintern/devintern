@@ -1,5 +1,21 @@
 # @devintern/code Changelog
 
+## [Unreleased]
+
+### Upgrade notes
+
+- **Breaking: the `srt` and `smolvm` sandbox providers are gone with no deprecation release.** Both are removed in this release, so `AGENT_SANDBOX=srt|smolvm` (or `--sandbox srt|smolvm`) in `.devintern-code/.env`, a workspace `.env`, or the shell now fails **every** run immediately — including unattended worker and webhook runs — and `devintern sandbox` reports the same message and exits non-zero. Before upgrading from 2.20.1, switch to `nono` (whole-process confinement) or `docker` (microVM boundary); the policy variables are unchanged. See [Sandbox providers](https://devintern.com/docs/code/configuration#providers).
+
+### Removed
+
+- **`srt` sandbox provider removed**: `AGENT_SANDBOX=srt` and `--sandbox srt` now fail with a migration error naming `nono` (or `docker` for a microVM boundary) instead of the generic unknown-provider list. `nono` remains the supported whole-process wrapper. The `SANDBOX_RUNTIME` marker is still detected so a DevIntern launched inside an existing `srt` shell inherits the enclosing confinement instead of nesting another sandbox.
+- **`smolvm` sandbox provider removed**: `AGENT_SANDBOX=smolvm` and `--sandbox smolvm` now fail with a migration error naming `docker` (or `nono` for local confinement). The provider, its registration and export, its tests, setup notes, and documentation are gone. The supported providers are `native`, `nono`, and `docker` (plus `none` / `auto`).
+
+### Fixed
+
+- **Verification accepts approvals whose findings are below its threshold**: `parseReviewFeedback` validated every verdict against the auto-review default (`medium`) before `verify` could apply `minSeverity: "high"`, so an approval listing advisory medium notes died as "Failed to parse review feedback JSON" and the step retried the agent twice before halting despite `onFail: "warn"`. The parser now separates schema validation from the approval policy, and `verify` judges approvals at its configured `minSeverity`.
+- **A contradictory verification verdict no longer burns two agent runs**: an approval that listed a finding at or above `minSeverity` was rejected by the parser, so the step treated a deterministic policy rejection as a transient agent failure and re-ran verification (roughly 25 minutes per attempt) before halting despite `onFail: "warn"`. `verify` now downgrades such a verdict to a rejection and lets `onFail` decide; callers that do not own the policy still get the strict check.
+
 ## [2.20.1] - 2026-10-30
 
 Licensing and maintenance patch: the published package now ships the canonical FSL-1.1-ALv2 license text and SPDX id instead of a paraphrased license file, the README states that local terminal use is free, a transitive request-forwarding dependency is patched, and the markdown-file CLI tests run concurrently under explicit process deadlines.

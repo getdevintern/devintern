@@ -61,15 +61,7 @@ const __filename_resolved = fileURLToPath(import.meta.url);
 const __dirname_resolved = dirname(__filename_resolved);
 setEnvironmentEntryDir(__dirname_resolved);
 
-const KNOWN_SANDBOX_PROVIDERS = new Set([
-  "none",
-  "auto",
-  "native",
-  "nono",
-  "srt",
-  "docker",
-  "smolvm",
-]);
+const KNOWN_SANDBOX_PROVIDERS = new Set(["none", "auto", "native", "nono", "docker"]);
 
 /** Allowlisted, non-identifying props for the `cli_run` analytics event. */
 function buildCliRunProps(tracker: string): Record<string, AnalyticsPropValue | undefined> {

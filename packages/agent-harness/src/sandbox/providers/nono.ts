@@ -458,7 +458,7 @@ export class NonoSandboxProvider implements SandboxProvider {
       if (existsSync(p)) grants.push({ flag: "--read", path: p });
     }
 
-    // Extra readable roots from the policy (parity with srt's allowRead).
+    // Extra readable roots from the policy.
     for (const p of policy.readablePaths ?? []) {
       if (existsSync(p)) grants.push({ flag: "--read", path: p });
     }
@@ -479,7 +479,7 @@ export class NonoSandboxProvider implements SandboxProvider {
 
     // Network: open by default in nono; a policy allowlist maps to the proxy
     // filter. (Programs that ignore proxy env vars lose connectivity when an
-    // allowlist is set — same caveat as srt.)
+    // allowlist is set.)
     if (policy.network !== "open") {
       for (const domain of policy.network.allowedDomains) {
         suffix.push("--allow-domain", domain);

@@ -72,12 +72,15 @@ interface ActiveSandboxMarker {
  * - nono exports `NONO_CAP_FILE` (a path to its capability set) into every
  *   sandboxed process; the path is validated to exist so a stale value does
  *   not disable an explicitly requested sandbox.
- * - srt (sandbox-runtime) exports `SANDBOX_RUNTIME=1`.
+ * - `SANDBOX_RUNTIME=1` is retained for inherited detection only: it is the
+ *   marker exported by the retired srt provider, so a DevIntern launched
+ *   inside an existing srt shell still detects the enclosing confinement and
+ *   does not add another sandbox.
  *
  * Precedence: when both markers are present (only possible in the trusted
- * startup snapshot), insertion order decides — `nono` is reported before
- * `srt`. There is no reliable signal to disambiguate a genuinely nested pair,
- * so this order is deliberate and documented.
+ * startup snapshot), insertion order decides — `nono` is reported before the
+ * inherited `srt` marker. There is no reliable signal to disambiguate a
+ * genuinely nested pair, so this order is deliberate and documented.
  */
 const ACTIVE_SANDBOX_ENV: Record<string, ActiveSandboxMarker> = {
   NONO_CAP_FILE: { provider: "nono", validate: (value) => existsSync(value) },
@@ -85,12 +88,52 @@ const ACTIVE_SANDBOX_ENV: Record<string, ActiveSandboxMarker> = {
 };
 
 /**
+ * Removed providers and the migration message users see when they still have
+ * `--sandbox <name>` or `AGENT_SANDBOX=<name>` configured. This is the single
+ * source of truth: the resolver, `devintern sandbox`, and their tests all read
+ * it, so a future removal is a one-line change with a consistent, actionable
+ * error instead of the generic unknown-provider list.
+ *
+ * A `Map` (not an object literal) is deliberate: the lookup key is untrusted
+ * input (`--sandbox <x>` / `AGENT_SANDBOX`), and an object lookup would resolve
+ * inherited prototype members such as `constructor` or `toString` to a truthy
+ * non-string value instead of falling through to the unknown-provider error.
+ */
+const REMOVED_SANDBOX_PROVIDERS = new Map<string, string>([
+  [
+    "srt",
+    'Sandbox provider "srt" has been removed. Use "nono" for whole-process confinement ' +
+      '(or "docker" for a microVM boundary). ' +
+      "See https://devintern.com/docs/code/configuration#providers",
+  ],
+  [
+    "smolvm",
+    'Sandbox provider "smolvm" has been removed. Use "docker" for a microVM boundary ' +
+      '(or "nono" for local confinement). ' +
+      "See https://devintern.com/docs/code/configuration#providers",
+  ],
+]);
+
+/**
+ * Migration message for a retired sandbox provider.
+ *
+ * @param name - Provider name from `--sandbox` or `AGENT_SANDBOX`; untrusted
+ *   input, so only own entries of the removed-provider map can match.
+ * @returns The migration message, or `undefined` when the name is not a
+ *   removed provider (callers then report it as unknown).
+ */
+export function removedSandboxProviderMessage(name: string): string | undefined {
+  return REMOVED_SANDBOX_PROVIDERS.get(name);
+}
+
+/**
  * Name of the sandbox provider already wrapping this process, if any.
  *
  * Re-wrapping with any kernel sandbox — the same provider or a different one —
- * would nest the sandbox, which nono/srt cannot do (the inner instance cannot
- * create its session state under the outer confinement and exits non-zero
- * before the agent starts). Callers use this to avoid the redundant layer.
+ * would nest the sandbox, which kernel wrappers cannot do (the inner instance
+ * cannot create its session state under the outer confinement and exits
+ * non-zero before the agent starts). Callers use this to avoid the redundant
+ * layer.
  *
  * @param env - Environment to inspect. Defaults to the trusted startup snapshot
  *   ({@link STARTUP_ENV}), not live `process.env`, so a repository's
@@ -158,12 +201,19 @@ export async function resolveSandbox(
     if (!best) {
       warn(
         "⚠️  AGENT_SANDBOX=auto: no sandbox provider available on this machine — " +
-          "running the agent unsandboxed. Install nono (https://nono.sh) or srt " +
-          "(npm install -g @anthropic-ai/sandbox-runtime) to enable isolation.",
+          "running the agent unsandboxed. Install nono (https://nono.sh) to enable isolation.",
       );
       return null;
     }
     return best;
+  }
+
+  // Explicit migration path for retired providers: a user who still has
+  // `--sandbox <name>` or `AGENT_SANDBOX=<name>` configured must get an
+  // actionable message instead of the generic unknown-provider list.
+  const removedMessage = removedSandboxProviderMessage(name);
+  if (removedMessage) {
+    throw new Error(removedMessage);
   }
 
   const provider = getSandboxProvider(name);
@@ -192,7 +242,7 @@ export async function resolveSandbox(
   if (harnessName && provider.supportsHarness && !provider.supportsHarness(harnessName)) {
     throw new Error(
       `Sandbox provider "${name}" does not support the "${harnessName}" harness. ` +
-        'Use "nono" or "srt" (they wrap any harness), or switch AGENT_HARNESS.',
+        'Use "nono" (it wraps any harness), or switch AGENT_HARNESS.',
     );
   }
 

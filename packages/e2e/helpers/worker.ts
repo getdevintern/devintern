@@ -34,10 +34,40 @@ export interface WorkerInjectedTask {
   id: number;
   task_key: string;
   repo: string;
+  title: string;
+  body: string;
   status: "pending" | "running" | "done" | "failed";
   message: string | null;
   task_file: string;
+  idempotency_key: string | null;
+  actor: string;
+  created_at: number;
+  started_at: number | null;
+  finished_at: number | null;
 }
+
+/** Result of one built-CLI `worker add` invocation. */
+export interface WorkerAddResult {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+}
+
+const INJECTED_COLUMNS = [
+  "id",
+  "task_key",
+  "repo",
+  "title",
+  "body",
+  "task_file",
+  "idempotency_key",
+  "actor",
+  "status",
+  "message",
+  "created_at",
+  "started_at",
+  "finished_at",
+].join(", ");
 
 /** One row from the worker's shared run-record table. */
 export interface WorkerRunRecord {
@@ -48,6 +78,7 @@ export interface WorkerRunRecord {
   repo: string | null;
   pr_url: string | null;
   outcome_reason: string | null;
+  attempt: number | null;
 }
 
 export interface WorkerFixtureOptions {
@@ -225,32 +256,92 @@ export class WorkerFixture {
     await this.waitForOutput(/Draining injected tasks every 1s/, timeoutMs, "worker readiness");
   }
 
+  /**
+   * Run the built CLI's `worker add` with arbitrary options.
+   *
+   * The default cwd is the fixture workspace; `stdin` is piped so
+   * `--body-file -` can be exercised without a shell.
+   */
+  async runAdd(
+    args: string[],
+    options: { stdin?: string; cwd?: string; env?: Record<string, string> } = {},
+  ): Promise<WorkerAddResult> {
+    const child = Bun.spawn([process.execPath, cliPath, "worker", "add", ...args], {
+      cwd: options.cwd ?? this.workspaceDir,
+      env: { ...this.env, ...options.env },
+      stdin: options.stdin === undefined ? "ignore" : "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    if (options.stdin !== undefined) {
+      const stdin = child.stdin;
+      if (!stdin) throw new Error("worker add stdin pipe was not created");
+      stdin.write(options.stdin);
+      await stdin.end();
+    }
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    return { exitCode, stdout, stderr };
+  }
+
   /** Enqueue one task through the built CLI and return its durable row. */
   async addTask(input: { title: string; body: string }): Promise<WorkerInjectedTask> {
-    const stdout = await checkedCommand(
-      [
-        process.execPath,
-        cliPath,
-        "worker",
-        "add",
-        "--repo",
-        this.repoName,
-        "--title",
-        input.title,
-        "--body",
-        input.body,
-        "--json",
-      ],
-      this.workspaceDir,
-      this.env,
-    );
-    const result = JSON.parse(stdout) as { id?: unknown };
-    if (typeof result.id !== "number") {
-      throw new Error(`worker add did not return a task id: ${stdout}`);
+    const result = await this.runAdd([
+      "--repo",
+      this.repoName,
+      "--title",
+      input.title,
+      "--body",
+      input.body,
+      "--json",
+    ]);
+    if (result.exitCode !== 0) {
+      throw new Error(`worker add exited ${result.exitCode}:\n${result.stderr}`);
     }
-    const task = this.injectedTask(result.id);
-    if (!task) throw new Error(`Enqueued task #${result.id} was not readable from ${this.dbPath}`);
+    const parsed = JSON.parse(result.stdout.trim()) as { id?: unknown };
+    if (typeof parsed.id !== "number") {
+      throw new Error(`worker add did not return a task id: ${result.stdout}`);
+    }
+    const task = this.injectedTask(parsed.id);
+    if (!task) throw new Error(`Enqueued task #${parsed.id} was not readable from ${this.dbPath}`);
     return task;
+  }
+
+  /** Every injected-task row, oldest first, from a workspace queue DB. */
+  injectedRows(dbPath: string = this.dbPath): WorkerInjectedTask[] {
+    return this.query<WorkerInjectedTask>(
+      `SELECT ${INJECTED_COLUMNS} FROM injected_tasks ORDER BY id`,
+      [],
+      dbPath,
+    );
+  }
+
+  /** Find one injected-task row by task key and/or idempotency key. */
+  findInjectedTask(
+    input: { taskKey?: string; idempotencyKey?: string },
+    dbPath: string = this.dbPath,
+  ): WorkerInjectedTask | undefined {
+    const conditions: string[] = [];
+    const params: string[] = [];
+    if (input.taskKey !== undefined) {
+      conditions.push("task_key = ?");
+      params.push(input.taskKey);
+    }
+    if (input.idempotencyKey !== undefined) {
+      conditions.push("idempotency_key = ?");
+      params.push(input.idempotencyKey);
+    }
+    if (conditions.length === 0) {
+      throw new Error("findInjectedTask needs a taskKey or idempotencyKey");
+    }
+    return this.query<WorkerInjectedTask>(
+      `SELECT ${INJECTED_COLUMNS} FROM injected_tasks WHERE ${conditions.join(" AND ")} ORDER BY id LIMIT 1`,
+      params,
+      dbPath,
+    )[0];
   }
 
   /**
@@ -277,8 +368,8 @@ export class WorkerFixture {
   /** Read one injected-task row, or undefined before the table exists. */
   injectedTask(id: number): WorkerInjectedTask | undefined {
     return this.query<WorkerInjectedTask>(
-      "SELECT id, task_key, repo, status, message, task_file FROM injected_tasks WHERE id = ?",
-      id,
+      `SELECT ${INJECTED_COLUMNS} FROM injected_tasks WHERE id = ?`,
+      [id],
     )[0];
   }
 
@@ -286,11 +377,11 @@ export class WorkerFixture {
   runRecords(taskKey?: string): WorkerRunRecord[] {
     return taskKey === undefined
       ? this.query<WorkerRunRecord>(
-          "SELECT id, task_key, status, branch, repo, pr_url, outcome_reason FROM runs ORDER BY id",
+          "SELECT id, task_key, status, branch, repo, pr_url, outcome_reason, attempt FROM runs ORDER BY id",
         )
       : this.query<WorkerRunRecord>(
-          "SELECT id, task_key, status, branch, repo, pr_url, outcome_reason FROM runs WHERE task_key = ? ORDER BY id",
-          taskKey,
+          "SELECT id, task_key, status, branch, repo, pr_url, outcome_reason, attempt FROM runs WHERE task_key = ? ORDER BY id",
+          [taskKey],
         );
   }
 
@@ -391,11 +482,11 @@ export class WorkerFixture {
   }
 
   /** Run a read-only queue query, tolerating a database that is still absent. */
-  private query<T>(sql: string, ...params: Array<string | number>): T[] {
-    if (!existsSync(this.dbPath)) return [];
+  private query<T>(sql: string, params: Array<string | number> = [], dbPath = this.dbPath): T[] {
+    if (!existsSync(dbPath)) return [];
     let db: Database | undefined;
     try {
-      db = new Database(this.dbPath, { readonly: true });
+      db = new Database(dbPath, { readonly: true });
       db.run("PRAGMA busy_timeout = 5000");
       return db.query(sql).all(...params) as T[];
     } catch {

@@ -265,8 +265,8 @@ When adding a harness:
   macOS — see `applyNestingGuard` for how codex is special-cased under wrapper
   providers. Also list any paths/config dirs your CLI writes outside the repo
   (auth state, caches) since sandbox write-paths are constrained.
-- **A new harness's state directory.** The exec-wrapper providers (`nono`,
-  `srt`) grant read+write access to the harness's own state under `$HOME`
+- **A new harness's state directory.** The exec-wrapper provider (`nono`)
+  grants read+write access to the harness's own state under `$HOME`
   from the shared map in
   [`src/sandbox/harness-state.ts`](src/sandbox/harness-state.ts). A harness
   missing from that map starts (its auth file is readable) and then fails on
