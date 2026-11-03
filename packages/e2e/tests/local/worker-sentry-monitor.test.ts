@@ -36,12 +36,24 @@ function monitorConfig(baseUrl: string): string {
 test.skipIf(!existsSync(cliPath))(
   "the worker auto-fixes one fake Sentry issue, comments back, and dedupes it",
   async () => {
-    const sentry = new FakeSentryServer();
+    // Unique per run: the deterministic agent refuses to edit unless this exact
+    // string reaches its prompt. It exists only in the seeded issue title, so
+    // the run can only succeed if the generated task markdown carried the
+    // Sentry payload into the agent input — not merely to the task filename.
+    const marker = `E2E_SENTRY_ISSUE_MARKER_${crypto.randomUUID()}`;
+    const sentry = new FakeSentryServer({
+      issue: {
+        title: `TypeError: cannot read properties of undefined (reading 'greeting') ${marker}`,
+      },
+    });
     const authToken = `sentry-e2e-${crypto.randomUUID()}`;
     const worker = new WorkerFixture({ workspaceTomlExtra: monitorConfig(sentry.url) });
     // The worker builds the Sentry client from its own process env, so the
     // synthetic token only needs to cross the daemon boundary.
     worker.env.SENTRY_AUTH_TOKEN = authToken;
+    // Forwarded to the agent subprocess by the daemon, which then fails the run
+    // if the marker is missing from its input.
+    worker.env.E2E_EXPECT_DESCRIPTION_MARKER = marker;
     try {
       await worker.prepare();
       worker.start();
@@ -106,6 +118,8 @@ test.skipIf(!existsSync(cliPath))(
 
       // The generated task is the bridge between the untrusted Sentry payload
       // and the agent prompt: it must carry the framed issue text and no token.
+      // The succeeded run above already proves the marker-laden title reached
+      // the agent input; the file assertion below proves the task it came from.
       const taskDir = join(worker.workspaceDir, "error-fixes");
       const taskFiles = readdirSync(taskDir).filter((name) => name.endsWith(".md"));
       expect(taskFiles, diagnostics()).toHaveLength(1);

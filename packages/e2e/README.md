@@ -307,8 +307,11 @@ unexpected organization/project/issue id, returns a diagnostic 404 and fails
 the test.
 
 The scenario seeds one unresolved issue and waits for exactly one
-`error_monitor` run. It asserts the pushed `feature/` branch contains only the
-deterministic `src/greeting.ts` edit, the generated `error-fixes/` markdown
+`error_monitor` run. The seeded issue title carries a unique marker that the
+deterministic agent requires to be present in its own input, so a regression
+that drops the Sentry payload from the prompt fails the run instead of silently
+editing the fixture. It also asserts the pushed `feature/` branch contains only
+the deterministic `src/greeting.ts` edit, the generated `error-fixes/` markdown
 carries the untrusted-content block plus the issue title/culprit and no token,
 and the fake received one success comment. Two further polls of the same issue
 must not create a second run or comment, proving the durable `issue:<id>`
