@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { isolatedEnvironment } from "./environment";
@@ -93,6 +93,27 @@ function snapshotQueueDb(dbPath: string): QueueDbSnapshot {
   }
 }
 
+/**
+ * Write an inert agent CLI into the fixture root and return its path.
+ *
+ * `devintern` resolves the agent harness strictly at startup for every
+ * subcommand (`resolveAgentHarness` in packages/code/src/index.ts), so
+ * `webhook serve` exits immediately on a machine with no harness CLI on PATH —
+ * which is the case on CI runners. Pinning `AGENT_CLI_PATH` keeps the child
+ * independent of the host like the other e2e fixtures do, and because the stub
+ * does nothing an accepted delivery can never reach a real agent.
+ */
+function writeAgentStub(root: string): string {
+  const stub = join(root, "bin", "agent.ts");
+  mkdirSync(dirname(stub), { recursive: true });
+  writeFileSync(
+    stub,
+    "#!/usr/bin/env bun\n// Offline agent stub: webhook-serve tests keep deliveries queued or ignored\n// so the review pipeline never invokes this. It only satisfies the CLI startup\n// harness resolution.\nprocess.exit(0);\n",
+    { mode: 0o700 },
+  );
+  return stub;
+}
+
 /** Write the queue metadata row that makes the restored failover chain exhausted. */
 function seedFutureRateLimit(dbPath: string, harness: string): void {
   const db = new Database(dbPath);
@@ -176,6 +197,10 @@ export class WebhookServerFixture {
   static async start(options: WebhookServerFixtureOptions = {}): Promise<WebhookServerFixture> {
     const root = mkdtempSync(join(tmpdir(), "devintern-e2e-webhook-"));
     const env = isolatedEnvironment(root);
+    // The CLI resolves its agent harness at startup even for `webhook serve`,
+    // so pin the same inert stub the other e2e fixtures use instead of
+    // depending on whatever agent CLI the host (or CI runner) happens to have.
+    env.AGENT_CLI_PATH = writeAgentStub(root);
     if (options.webhookSecret !== undefined) env.WEBHOOK_SECRET = options.webhookSecret;
     if (options.gitlabWebhookSecret !== undefined) {
       env.GITLAB_WEBHOOK_SECRET = options.gitlabWebhookSecret;
