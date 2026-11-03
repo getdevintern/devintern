@@ -41,7 +41,7 @@ function log(line: string): void {
  */
 export async function runServe(options: ServeOptions = {}): Promise<void> {
   await migrateLegacyConfigDir();
-  const config = await loadConfig();
+  const config = await loadConfig({ workspaceEnvFallback: true });
 
   // Same entitlement gate as the interactive CLI: every chat task creation
   // is human-approved, so chat serving counts as interactive use.

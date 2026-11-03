@@ -1,10 +1,41 @@
 import { readFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
 import { findEnvFile } from "@devintern/utils";
 import { DEFAULT_GITLAB_BASE_URL } from "../clients/gitlab.ts";
 import { getMissingRequiredEnv, isTrackerId } from "./tracker-meta.ts";
 import type { TrackerConfig, TrackerType } from "./types.ts";
 
 export const BUNDLED_TRELLO_API_KEY = "b2d5d1ced28b515c6eb66c40187400b0";
+
+/** Marker the DevIntern worker sets on every subprocess it spawns. */
+export const WORKER_SUBPROCESS_ENV = "DEVINTERN_WORKER_SUBPROCESS";
+
+type EnvLike = Record<string, string | undefined>;
+
+/**
+ * Resolve the DevIntern workspace home directory.
+ *
+ * `DEVINTERN_WORKSPACE_DIR` wins when set (tests and non-default workspaces);
+ * otherwise the default is `~/.devintern`.
+ *
+ * @param env - Environment to read (defaults to `process.env`).
+ * @returns Workspace home directory.
+ */
+export function resolveWorkspaceDir(env: EnvLike = process.env): string {
+  const override = env.DEVINTERN_WORKSPACE_DIR?.trim();
+  return override || join(homedir(), ".devintern");
+}
+
+/**
+ * Resolve the workspace-level `.env` path (`<workspace>/.env`).
+ *
+ * @param env - Environment to read (defaults to `process.env`).
+ * @returns Absolute path of the workspace `.env`.
+ */
+export function resolveWorkspaceEnvPath(env: EnvLike = process.env): string {
+  return join(resolveWorkspaceDir(env), ".env");
+}
 
 /**
  * Throw when `TRACKER_META.requiredEnv` entries are missing for `backendType`.
@@ -147,6 +178,35 @@ export function parseGitHubRepo(
   );
 }
 
+/** Apply dotenv-style `KEY=value` lines to `process.env`. */
+function applyEnvContent(envContent: string): void {
+  for (const line of envContent.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed && !trimmed.startsWith("#")) {
+      const [key, ...valueParts] = trimmed.split("=");
+      if (key && valueParts.length > 0) {
+        let value = valueParts.join("=").trim();
+        if (
+          (value.startsWith('"') && value.endsWith('"')) ||
+          (value.startsWith("'") && value.endsWith("'"))
+        ) {
+          value = value.slice(1, -1);
+        }
+        process.env[key.trim()] = value;
+      }
+    }
+  }
+}
+
+/** Load one optional env file into `process.env`; missing files are ignored. */
+async function applyEnvFile(envPath: string): Promise<void> {
+  try {
+    applyEnvContent(await readFile(envPath, "utf8"));
+  } catch {
+    // Optional .env file
+  }
+}
+
 /**
  * Load environment variables from the nearest `.env` file.
  *
@@ -169,26 +229,54 @@ export async function loadEnvFromConfigDir(
     return;
   }
 
-  try {
-    const envContent = await readFile(envPath, "utf8");
-    for (const line of envContent.split("\n")) {
-      const trimmed = line.trim();
-      if (trimmed && !trimmed.startsWith("#")) {
-        const [key, ...valueParts] = trimmed.split("=");
-        if (key && valueParts.length > 0) {
-          let value = valueParts.join("=").trim();
-          if (
-            (value.startsWith('"') && value.endsWith('"')) ||
-            (value.startsWith("'") && value.endsWith("'"))
-          ) {
-            value = value.slice(1, -1);
-          }
-          process.env[key.trim()] = value;
-        }
-      }
+  await applyEnvFile(envPath);
+}
+
+/**
+ * Load the env layers that feed {@link parseTrackerConfigFromEnv}.
+ *
+ * Legacy callers (desktop) keep the single-file lookup: nearest
+ * `{configDirName}/.env`, else nearest plain `.env`. CLI callers enable
+ * `workspaceEnvFallback`, which merges (lowest to highest) the DevIntern
+ * workspace `.env`, the nearest project plain `.env`, and finally the nearest
+ * `{configDirName}/.env`.
+ *
+ * Worker-spawned subprocesses (`DEVINTERN_WORKER_SUBPROCESS=1`) load only an
+ * explicit `{configDirName}/.env`: the worker already injected the exact
+ * per-repo/team layer, and re-reading checkout or workspace files would
+ * clobber it.
+ */
+async function loadTrackerEnv(
+  configDirName: string,
+  baseDir: string,
+  workspaceEnvFallback: boolean,
+): Promise<void> {
+  const configEnvPath = findEnvFile({
+    configDirName,
+    startDir: baseDir,
+    includePlainEnv: false,
+  });
+
+  if (process.env[WORKER_SUBPROCESS_ENV] === "1") {
+    if (configEnvPath) {
+      await applyEnvFile(configEnvPath);
     }
-  } catch {
-    // Optional .env file
+    return;
+  }
+
+  if (!workspaceEnvFallback) {
+    await loadEnvFromConfigDir(configDirName, baseDir);
+    return;
+  }
+
+  const plainEnvPath = findEnvFile({ startDir: baseDir });
+  const seen = new Set<string>();
+  for (const envPath of [resolveWorkspaceEnvPath(), plainEnvPath, configEnvPath]) {
+    if (!envPath) continue;
+    const resolvedPath = resolve(envPath);
+    if (seen.has(resolvedPath)) continue;
+    seen.add(resolvedPath);
+    await applyEnvFile(resolvedPath);
   }
 }
 
@@ -299,6 +387,15 @@ export function parseTrackerConfigFromEnv(): TrackerConfig {
   };
 }
 
+export interface LoadTrackerConfigOptions {
+  /**
+   * Also load the DevIntern workspace `.env` as a fallback and merge a plain
+   * project `.env` beneath `{configDirName}/.env`. Enabled by the `devpm` CLI;
+   * desktop hosts leave it off to keep project-scoped semantics.
+   */
+  workspaceEnvFallback?: boolean;
+}
+
 /**
  * Load tracker configuration from a project config directory.
  *
@@ -306,13 +403,19 @@ export function parseTrackerConfigFromEnv(): TrackerConfig {
  *
  * @param configDirName - Config folder name (e.g. `.devintern-pm`).
  * @param baseDir - Directory to start the upward search from (defaults to cwd).
+ * @param options - Optional env-layer behavior (see {@link LoadTrackerConfigOptions}).
  * @returns Fully resolved {@link TrackerConfig} for the selected task tracker.
  * @throws When required environment variables for the chosen backend are missing or invalid.
  */
 export async function loadTrackerConfig(
   configDirName: string,
   baseDir?: string,
+  options: LoadTrackerConfigOptions = {},
 ): Promise<TrackerConfig> {
-  await loadEnvFromConfigDir(configDirName, baseDir);
+  await loadTrackerEnv(
+    configDirName,
+    baseDir ?? process.cwd(),
+    options.workspaceEnvFallback ?? false,
+  );
   return parseTrackerConfigFromEnv();
 }

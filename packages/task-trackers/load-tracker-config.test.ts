@@ -33,6 +33,8 @@ const TRACKER_ENV_KEYS = [
   "GITHUB_REPO",
   "GITHUB_OWNER",
   "DEVINTERN_VERBOSE",
+  "DEVINTERN_WORKSPACE_DIR",
+  "DEVINTERN_WORKER_SUBPROCESS",
 ] as const;
 
 type EnvSnapshot = Record<string, string | undefined>;
@@ -377,16 +379,20 @@ describe("loadTrackerConfig", () => {
   let savedEnv: EnvSnapshot;
   let originalCwd: string;
   let tempRoot: string;
+  let workspaceDir: string;
 
   beforeEach(() => {
     savedEnv = snapshotEnv();
     originalCwd = process.cwd();
     tempRoot = mkdtempSync(join(tmpdir(), "task-trackers-load-"));
+    workspaceDir = join(tempRoot, "workspace");
+    mkdirSync(workspaceDir, { recursive: true });
     process.chdir(tempRoot);
 
     for (const key of TRACKER_ENV_KEYS) {
       delete process.env[key];
     }
+    process.env.DEVINTERN_WORKSPACE_DIR = workspaceDir;
   });
 
   afterEach(() => {
@@ -411,5 +417,107 @@ describe("loadTrackerConfig", () => {
     expect(config.backend.type).toBe("linear");
     expect(config.linear?.apiKey).toBe("lin_api_from_file");
     expect(config.linear?.defaultTeamKey).toBe("PLAT");
+  });
+
+  test("workspace fallback resolves tracker config when the project has no env file", async () => {
+    writeFileSync(
+      join(workspaceDir, ".env"),
+      "TASK_TRACKER=linear\nLINEAR_API_KEY=lin_api_workspace\n",
+    );
+
+    const config = await loadTrackerConfig(".devintern-pm", undefined, {
+      workspaceEnvFallback: true,
+    });
+
+    expect(config.backend.type).toBe("linear");
+    expect(config.linear?.apiKey).toBe("lin_api_workspace");
+  });
+
+  test(".devintern-pm/.env wins over the workspace file", async () => {
+    writeFileSync(
+      join(workspaceDir, ".env"),
+      "TASK_TRACKER=linear\nLINEAR_API_KEY=lin_api_workspace\n",
+    );
+    mkdirSync(join(tempRoot, ".devintern-pm"), { recursive: true });
+    writeFileSync(
+      join(tempRoot, ".devintern-pm", ".env"),
+      "TASK_TRACKER=linear\nLINEAR_API_KEY=lin_api_project\n",
+    );
+
+    const config = await loadTrackerConfig(".devintern-pm", undefined, {
+      workspaceEnvFallback: true,
+    });
+
+    expect(config.linear?.apiKey).toBe("lin_api_project");
+  });
+
+  test("project plain .env wins over workspace while workspace fills missing keys", async () => {
+    writeFileSync(
+      join(workspaceDir, ".env"),
+      [
+        "TASK_TRACKER=linear",
+        "LINEAR_API_KEY=lin_api_workspace",
+        "LINEAR_DEFAULT_TEAM_KEY=WS",
+      ].join("\n"),
+    );
+    writeFileSync(join(tempRoot, ".env"), "LINEAR_API_KEY=lin_api_plain\n");
+
+    const config = await loadTrackerConfig(".devintern-pm", undefined, {
+      workspaceEnvFallback: true,
+    });
+
+    expect(config.backend.type).toBe("linear");
+    expect(config.linear?.apiKey).toBe("lin_api_plain");
+    expect(config.linear?.defaultTeamKey).toBe("WS");
+  });
+
+  test("workspace fallback is off by default (desktop semantics)", async () => {
+    writeFileSync(
+      join(workspaceDir, ".env"),
+      "TASK_TRACKER=linear\nLINEAR_API_KEY=lin_api_workspace\n",
+    );
+
+    await expect(loadTrackerConfig(".devintern-pm")).rejects.toThrow(
+      /Missing required environment variables/,
+    );
+  });
+
+  test("worker subprocess ignores plain checkout and workspace env files", async () => {
+    process.env.DEVINTERN_WORKER_SUBPROCESS = "1";
+    process.env.TASK_TRACKER = "linear";
+    process.env.LINEAR_API_KEY = "lin_api_inherited";
+    process.env.LINEAR_DEFAULT_TEAM_KEY = "INHERITED";
+
+    writeFileSync(join(tempRoot, ".env"), "LINEAR_API_KEY=lin_api_plain\n");
+    writeFileSync(
+      join(workspaceDir, ".env"),
+      "LINEAR_API_KEY=lin_api_workspace\nLINEAR_DEFAULT_TEAM_KEY=WORKSPACE\n",
+    );
+
+    const config = await loadTrackerConfig(".devintern-pm", undefined, {
+      workspaceEnvFallback: true,
+    });
+
+    expect(config.linear?.apiKey).toBe("lin_api_inherited");
+    expect(config.linear?.defaultTeamKey).toBe("INHERITED");
+  });
+
+  test("worker subprocess still honors .devintern-pm/.env", async () => {
+    process.env.DEVINTERN_WORKER_SUBPROCESS = "1";
+    process.env.TASK_TRACKER = "linear";
+    process.env.LINEAR_API_KEY = "lin_api_inherited";
+    process.env.LINEAR_DEFAULT_TEAM_KEY = "INHERITED";
+
+    writeFileSync(join(tempRoot, ".env"), "LINEAR_API_KEY=lin_api_plain\n");
+    writeFileSync(join(workspaceDir, ".env"), "LINEAR_API_KEY=lin_api_workspace\n");
+    mkdirSync(join(tempRoot, ".devintern-pm"), { recursive: true });
+    writeFileSync(join(tempRoot, ".devintern-pm", ".env"), "LINEAR_API_KEY=lin_api_project\n");
+
+    const config = await loadTrackerConfig(".devintern-pm", undefined, {
+      workspaceEnvFallback: true,
+    });
+
+    expect(config.linear?.apiKey).toBe("lin_api_project");
+    expect(config.linear?.defaultTeamKey).toBe("INHERITED");
   });
 });

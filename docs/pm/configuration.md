@@ -4,7 +4,7 @@ sidebarLabel: "Configuration"
 description: "Environment variables, tracker credentials, and defaults for @devintern/pm."
 section: "Create Tasks"
 order: 2
-dateModified: 2026-08-08
+dateModified: 2026-11-03
 ---
 
 # @devintern/pm Configuration
@@ -222,7 +222,18 @@ When set to `1` or `true`, every API request, response status, and retry attempt
 
 @devintern/pm searches for `.devintern-pm/.env` by traversing up from the current working directory to the project root (the nearest `.git` directory or your home directory). You can run `devpm` from any subdirectory of your project and it will find the correct config automatically.
 
-Run `devpm init` once per project to create this file (guided wizard in a terminal, or `devpm init --yes` for the template).
+In manual CLI mode, configuration is layered (higher wins). Missing keys fall through to the next layer, and inherited environment variables fill anything no file provides:
+
+1. Nearest `.devintern-pm/.env` (explicit project config).
+2. Nearest project plain `.env`.
+3. DevIntern workspace `.env`: `$DEVINTERN_WORKSPACE_DIR/.env`, defaulting to `~/.devintern/.env`.
+4. Inherited `process.env`.
+
+This means a partial project `.env` still picks up tracker keys from your workspace config, while project-specific values win. `.devintern-code/.env` is **not** read at runtime; only the `devpm init` wizard may reuse it.
+
+Worker-spawned subprocesses (`DEVINTERN_WORKER_SUBPROCESS=1`) are different: the DevIntern worker already injects the exact per-repo/team credential layer, so `devpm` loads only `.devintern-pm/.env` when present. A plain checkout `.env` is ignored, and the workspace `.env` is not re-applied over the injected repo/team values.
+
+Run `devpm init` once per project to create this file (guided wizard in a terminal, or `devpm init --yes` for the template). The interactive wizard can reuse tracker credentials from your project's `.devintern-code/.env` or, when that is unavailable, from the workspace `.env` (shown as `DevIntern workspace (~/.devintern/.env)`). Reuse only writes `.devintern-pm/.env`; the workspace file is never modified.
 
 ## Error Reporting
 

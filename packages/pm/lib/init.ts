@@ -3,6 +3,7 @@
  */
 
 import { join } from "node:path";
+import { resolveWorkspaceEnvPath } from "@devintern/task-trackers";
 import { readFile, writeFile, pathExists, mkdir } from "./runtime/fs.js";
 import { getModuleDir } from "./runtime/path.js";
 import { askConfirm } from "./runtime/stdin.js";
@@ -77,49 +78,65 @@ function emptyMigratedConfig(): MigratedPmConfig {
 }
 
 /**
- * Read JIRA_* / AGENT_* values from an existing `.devintern-code/.env`, if any.
+ * Read JIRA_* / AGENT_* values from the project's `.devintern-code/.env`,
+ * falling back to the DevIntern workspace `.env` for keys the project file
+ * does not provide. The workspace file is never written to.
  *
  * @param cwd - Project directory to look in.
  * @returns Migrated values, or empty strings when no config is found.
  */
 async function readDevinternCodeConfig(cwd: string): Promise<MigratedPmConfig> {
-  const envPath = join(cwd, ".devintern-code", ".env");
-  try {
-    if (!(await pathExists(envPath))) {
-      return emptyMigratedConfig();
-    }
+  const config = emptyMigratedConfig();
+  const sources = [
+    { label: ".devintern-code", path: join(cwd, ".devintern-code", ".env") },
+    { label: "DevIntern workspace", path: resolveWorkspaceEnvPath() },
+  ];
 
-    console.log("📋 Found existing .devintern-code configuration");
-    const content = await readFile(envPath);
-    const config = emptyMigratedConfig();
+  for (const source of sources) {
+    try {
+      if (!(await pathExists(source.path))) continue;
 
-    // Extract JIRA_* and agent configuration values
-    for (const line of content.split("\n")) {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith("#")) continue;
-      if (trimmed.startsWith("JIRA_BASE_URL=")) {
-        config.jiraBaseUrl = trimmed.split("=", 2)[1]?.trim() || "";
-      } else if (trimmed.startsWith("JIRA_EMAIL=")) {
-        config.jiraEmail = trimmed.split("=", 2)[1]?.trim() || "";
-      } else if (trimmed.startsWith("JIRA_API_TOKEN=")) {
-        config.jiraApiToken = trimmed.split("=", 2)[1]?.trim() || "";
-      } else if (trimmed.startsWith("AGENT_HARNESS=")) {
-        config.agentHarness = trimmed.split("=", 2)[1]?.trim() || "";
-      } else if (trimmed.startsWith("AGENT_CLI_PATH=")) {
-        config.agentCliPath = trimmed.split("=", 2)[1]?.trim() || "";
-      } else if (trimmed.startsWith("CLAUDE_CLI_PATH=")) {
-        config.agentCliPath = trimmed.split("=", 2)[1]?.trim() || "";
+      console.log(`📋 Found existing ${source.label} configuration`);
+      const parsed = parseMigratedConfig(await readFile(source.path));
+      for (const key of Object.keys(config) as Array<keyof MigratedPmConfig>) {
+        if (!config[key] && parsed[key]) {
+          config[key] = parsed[key];
+        }
       }
+    } catch {
+      // Optional config source
     }
-
-    if (config.jiraBaseUrl || config.jiraEmail || config.jiraApiToken || config.agentCliPath) {
-      console.log("✅ Migrating configuration from .devintern-code");
-    }
-    return config;
-  } catch {
-    // No .devintern-code found, that's fine
-    return emptyMigratedConfig();
   }
+
+  if (config.jiraBaseUrl || config.jiraEmail || config.jiraApiToken || config.agentCliPath) {
+    console.log("✅ Migrating configuration from existing DevIntern config");
+  }
+  return config;
+}
+
+/** Extract the JIRA_* / AGENT_* keys the non-interactive template knows about. */
+function parseMigratedConfig(content: string): MigratedPmConfig {
+  const config = emptyMigratedConfig();
+
+  for (const line of content.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    if (trimmed.startsWith("JIRA_BASE_URL=")) {
+      config.jiraBaseUrl = trimmed.split("=", 2)[1]?.trim() || "";
+    } else if (trimmed.startsWith("JIRA_EMAIL=")) {
+      config.jiraEmail = trimmed.split("=", 2)[1]?.trim() || "";
+    } else if (trimmed.startsWith("JIRA_API_TOKEN=")) {
+      config.jiraApiToken = trimmed.split("=", 2)[1]?.trim() || "";
+    } else if (trimmed.startsWith("AGENT_HARNESS=")) {
+      config.agentHarness = trimmed.split("=", 2)[1]?.trim() || "";
+    } else if (trimmed.startsWith("AGENT_CLI_PATH=")) {
+      config.agentCliPath = trimmed.split("=", 2)[1]?.trim() || "";
+    } else if (trimmed.startsWith("CLAUDE_CLI_PATH=")) {
+      config.agentCliPath = trimmed.split("=", 2)[1]?.trim() || "";
+    }
+  }
+
+  return config;
 }
 
 /**
