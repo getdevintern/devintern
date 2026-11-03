@@ -10,10 +10,10 @@ const HEALTH_POLL_INTERVAL_MS = 50;
 const STOP_TIMEOUT_MS = 5_000;
 const PAUSED_QUEUE_WINDOW_MS = 60 * 60 * 1000;
 
-/** Ask the OS for a currently free loopback port. */
-export async function freePort(): Promise<number> {
+/** Ask the OS for a currently free port on a loopback host. */
+export async function freePort(hostname = "127.0.0.1"): Promise<number> {
   const server = Bun.serve({
-    hostname: "127.0.0.1",
+    hostname,
     port: 0,
     fetch: () => new Response("ok"),
   });

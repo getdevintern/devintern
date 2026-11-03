@@ -70,6 +70,17 @@ async function workerStatus(baseUrl: string): Promise<WorkerResponse> {
   return await readJson<WorkerResponse>(await fetch(`${baseUrl}/api/worker`));
 }
 
+/** Whether this host can bind IPv6 loopback, so the `::1` case is not flaky. */
+function hasIpv6Loopback(): boolean {
+  try {
+    const probe = Bun.serve({ hostname: "::1", port: 0, fetch: () => new Response("ok") });
+    probe.stop(true);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 test.skipIf(!builtCli)(
   "the standalone dashboard serves real worker run history and degrades without the daemon",
   async () => {
@@ -178,11 +189,16 @@ test.skipIf(!builtCli)(
       // The fixture pushes to a local bare remote, so no code-host PR exists.
       expect(agentPrs.prs).toEqual([]);
 
-      const logs = await readJson<{ available: boolean; entries: unknown[] }>(
+      const logs = await readJson<{ available: boolean; entries: Array<{ message: string }> }>(
         await fetch(`${baseUrl}/api/logs`),
       );
-      expect(logs.available).toBeTypeOf("boolean");
-      expect(logs.entries).toBeArray();
+      expect(logs.available).toBe(true);
+      expect(logs.entries.length).toBeGreaterThan(0);
+      // The daemon tees its startup banner into worker.stdout.log before the
+      // first task runs, so an empty or never-tailed response fails here.
+      expect(logs.entries.map((entry) => entry.message)).toContainEqual(
+        expect.stringContaining("Starting devintern worker"),
+      );
 
       const missingId = 2_147_483_647;
       const missing = await fetch(`${baseUrl}/api/runs/${missingId}`);
@@ -213,6 +229,30 @@ test.skipIf(!builtCli)(
       );
       expect(automations.automations).toEqual([]);
 
+      // --- write-route refusals (no work is spawned) -------------------------
+      // The fixture run succeeded, so the retry handler refuses before it can
+      // spawn detached CLI work (run-retry.ts:95-96).
+      const retrySettled = await fetch(`${baseUrl}/api/runs/${run.id}/retry`, { method: "POST" });
+      expect(retrySettled.status).toBe(409);
+      expect(await retrySettled.json()).toEqual({
+        error: "not retriable: this run already succeeded",
+      });
+
+      const retryMalformed = await fetch(`${baseUrl}/api/runs/not-an-int/retry`, {
+        method: "POST",
+      });
+      expect(retryMalformed.status).toBe(400);
+      expect(await retryMalformed.json()).toEqual({ error: "run id must be an integer" });
+
+      const missingAutomationRun = await fetch(`${baseUrl}/api/automations/nope/run`, {
+        method: "POST",
+      });
+      expect(missingAutomationRun.status).toBe(404);
+      expect(await missingAutomationRun.json()).toEqual({
+        error: 'automation "nope" not found',
+      });
+
+      // A POST that matches no write route still falls through to the guard.
       const post = await fetch(`${baseUrl}/api/runs`, { method: "POST" });
       expect(post.status).toBe(405);
       expect(await post.json()).toEqual({ error: "method not allowed" });
@@ -241,6 +281,34 @@ test.skipIf(!builtCli)(
   // Exceeds the helper's worst case: 20s readiness + 45s settle + dashboard
   // health polling/stop plus prepare() and daemon work.
   240_000,
+);
+
+test.skipIf(!builtCli || !hasIpv6Loopback())(
+  "the dashboard fixture polls the host it binds, including IPv6 loopback",
+  async () => {
+    const worker = new WorkerFixture();
+    let dashboard: DashboardFixture | undefined;
+    try {
+      dashboard = await DashboardFixture.start(worker, { host: "::1", cwd: worker.root });
+      // Bracketed IPv6 authority; an unbracketed host would poll the default
+      // 127.0.0.1 and time out even though the server is listening on ::1.
+      expect(dashboard.baseUrl).toMatch(/^http:\/\/\[::1\]:\d+$/);
+
+      const health = await fetch(`${dashboard.baseUrl}/api/health`);
+      expect(health.status).toBe(200);
+      expect(await health.json()).toEqual({ status: "ok" });
+
+      const status = await workerStatus(dashboard.baseUrl);
+      expect(status.dbMissing).toBe(true);
+
+      expect(await dashboard.stop()).toBe(0);
+      dashboard = undefined;
+    } finally {
+      await dashboard?.stop().catch(() => undefined);
+      await worker.dispose();
+    }
+  },
+  45_000,
 );
 
 test.skipIf(!builtCli)(

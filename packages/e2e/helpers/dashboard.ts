@@ -3,9 +3,10 @@
  *
  * Runs the real built CLI as `devintern dashboard` against the workspace and
  * queue database owned by a {@link WorkerFixture}. The fixture picks a free
- * loopback port, polls `GET /api/health` until the server accepts requests, and
- * always owns the child process lifecycle; callers still own the worker and its
- * temporary root, so {@link DashboardFixture.stop} never removes files.
+ * port on the requested loopback host, polls `GET /api/health` at the URL built
+ * from that same host, and always owns the child process lifecycle; callers
+ * still own the worker and its temporary root, so {@link DashboardFixture.stop}
+ * never removes files.
  */
 
 import { cliPath } from "./fixture-workspace";
@@ -19,10 +20,27 @@ const STOP_TIMEOUT_MS = 10_000;
 export interface DashboardFixtureOptions {
   /** Working directory for the dashboard CLI; defaults to the fixture workspace. */
   cwd?: string;
-  /** Loopback bind host; defaults to `127.0.0.1`. */
+  /** Loopback bind host; defaults to `127.0.0.1`. Also used for the health URL. */
   host?: string;
   /** Port to bind; defaults to a free ephemeral port. */
   port?: number;
+}
+
+/** Strip IPv6 brackets so the authority is never double-bracketed. */
+function bareHost(host: string): string {
+  return host.trim().replace(/^\[|\]$/g, "");
+}
+
+/**
+ * Build the client base URL for a loopback bind host.
+ *
+ * IPv6 literals must be bracketed (`http://[::1]:4400`) or the URL parser reads
+ * the address colons as the port separator. `localhost` and IPv4 hosts pass
+ * through unchanged so the client resolves the same name the server bound.
+ */
+function baseUrlFor(host: string, port: number): string {
+  const normalized = bareHost(host);
+  return `http://${normalized.includes(":") ? `[${normalized}]` : normalized}:${port}`;
 }
 
 /** Collect a child stream into memory without blocking the spawned process. */
@@ -72,10 +90,11 @@ export class DashboardFixture {
 
   private constructor(
     readonly env: Record<string, string>,
+    readonly host: string,
     readonly port: number,
     private readonly child: Bun.Subprocess<"ignore", "pipe", "pipe">,
   ) {
-    this.baseUrl = `http://127.0.0.1:${port}`;
+    this.baseUrl = baseUrlFor(host, port);
     this.captured = [
       capture(child.stdout, this.stdoutChunks),
       capture(child.stderr, this.stderrChunks),
@@ -88,7 +107,7 @@ export class DashboardFixture {
     options: DashboardFixtureOptions = {},
   ): Promise<DashboardFixture> {
     const host = options.host ?? "127.0.0.1";
-    const port = options.port ?? (await freePort());
+    const port = options.port ?? (await freePort(host));
     const child = Bun.spawn(
       [process.execPath, cliPath, "dashboard", "--host", host, "--port", String(port)],
       {
@@ -99,7 +118,7 @@ export class DashboardFixture {
         stderr: "pipe",
       },
     );
-    const fixture = new DashboardFixture(worker.env, port, child);
+    const fixture = new DashboardFixture(worker.env, host, port, child);
     try {
       await fixture.waitForHealth();
       return fixture;
