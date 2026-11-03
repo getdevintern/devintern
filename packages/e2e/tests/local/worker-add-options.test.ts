@@ -491,8 +491,10 @@ cliTest(
     const worker = new WorkerFixture();
     try {
       await worker.prepare();
-      // An escalated run records both the branch and an implementation report,
-      // which is the state session pickup inherits for --resume.
+      // An escalated run records the branch, an implementation report, and a
+      // landed commit, which is the state session pickup inherits for
+      // --resume. Pickup requires commits ahead of the base, so the fixture
+      // commits before handing back to a human.
       worker.env.E2E_AGENT_MODE = "incomplete";
       const original = await worker.addTask({
         title: "Resume interrupted task",
@@ -532,6 +534,46 @@ cliTest(
         'export const greeting = "Hello, world!";',
       );
       expect(worker.runRecords()).toHaveLength(2);
+    } finally {
+      await worker.dispose();
+    }
+  },
+  300_000,
+);
+
+cliTest(
+  "worker add --resume starts a fresh attempt branch when the prior attempt landed no commits",
+  async () => {
+    const worker = new WorkerFixture();
+    try {
+      await worker.prepare();
+      // An escalated run with a report but no landed work: session pickup
+      // refuses the empty branch, so the retry gets its own attempt branch.
+      worker.env.E2E_AGENT_MODE = "incomplete-empty";
+      const original = await worker.addTask({
+        title: "Resume an empty branch",
+        body: "Change the greeting to Hello, world!",
+      });
+      worker.start();
+      await worker.waitForReady();
+      const first = await worker.waitForSettled(original.id);
+      expect(first.runs).toHaveLength(1);
+      expect(first.runs[0]!.branch).toBe(`feature/${original.task_key}`);
+      expect(first.runs[0]!.status).toBe("escalated");
+      await worker.stop();
+
+      worker.env.E2E_AGENT_MODE = "implement";
+      const resumed = await worker.runAdd(["--resume", original.task_key, "--json"]);
+      expect(resumed.exitCode, resumed.stderr).toBe(0);
+
+      worker.start();
+      await worker.waitForReady();
+      const settled = await worker.waitForSettled(original.id);
+      expect(settled.task.status).toBe("done");
+      expect(settled.runs).toHaveLength(2);
+      expect(settled.runs[1]?.branch).toBe(`feature/${original.task_key}-attempt-2`);
+      expect(settled.runs[1]?.attempt).toBe(2);
+      expect(settled.runs[1]?.status).toBe("succeeded");
     } finally {
       await worker.dispose();
     }
