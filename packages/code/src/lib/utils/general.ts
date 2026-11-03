@@ -1,6 +1,11 @@
 import { fetchWithRetry as sharedFetchWithRetry } from "@devintern/utils";
 import { existsSync, mkdirSync } from "fs";
 import { Utils } from "./registry";
+import type {
+  ExecutionPreferenceConflict,
+  ExecutionPreferences,
+  ExtractedExecutionPreferences,
+} from "./types";
 
 /**
  * Ensure a directory exists, creating it recursively when missing.
@@ -212,6 +217,78 @@ export function extractTargetBranch(description: string | undefined): string | n
 }
 
 /**
+ * Extract optional execution preferences (harness, model, effort) from a task
+ * description.
+ *
+ * Follows the same conventions as {@link extractTargetBranch}: line-anchored,
+ * colon-required labels that tolerate markdown formatting:
+ *
+ * - `Harness: opencode` / `**Harness**: opencode` / `## Agent harness: codex`
+ * - `Model: astra` / `Agent model: claude-sonnet-4-6`
+ * - `Effort: high` / `Reasoning effort: low`
+ *
+ * Repeated identical values collapse to one preference; conflicting values for
+ * the same field are reported in `conflicts` so the caller can fail with
+ * actionable feedback instead of guessing which one the author meant.
+ *
+ * @param description - Task description text
+ * @returns Parsed preferences plus any conflicts found
+ */
+export function extractExecutionPreferences(
+  description: string | undefined,
+): ExtractedExecutionPreferences {
+  const preferences: ExecutionPreferences = {};
+  const conflicts: ExecutionPreferenceConflict[] = [];
+  if (!description) {
+    return { preferences, conflicts };
+  }
+
+  // Value grammars per field: harness ids are hyphenated names; model ids may
+  // be family aliases or provider-qualified identifiers; effort is a word.
+  const fields: ReadonlyArray<{
+    field: keyof ExecutionPreferences;
+    labels: string[];
+    value: string;
+  }> = [
+    { field: "harness", labels: ["agent harness", "harness"], value: "[A-Za-z0-9][A-Za-z0-9-]*" },
+    {
+      field: "model",
+      labels: ["agent model", "model"],
+      value: "[A-Za-z0-9][A-Za-z0-9._/:@-]*",
+    },
+    {
+      field: "effort",
+      labels: ["reasoning effort", "agent effort", "effort"],
+      value: "[A-Za-z][A-Za-z-]*",
+    },
+  ];
+
+  for (const { field, labels, value } of fields) {
+    const labelPattern = labels.map((label) => label.replace(/\s+/g, "\\s+")).join("|");
+    const pattern = new RegExp(
+      `^[ \\t]*(?:[-*+>]\\s*)?#{0,6}\\s*[*_]{0,3}(?:${labelPattern})[*_]{0,3}\\s*:\\s*\\|?\\s*[*_]{0,3}(${value})`,
+      "gim",
+    );
+    const values: string[] = [];
+    for (const match of description.matchAll(pattern)) {
+      if (match[1]) {
+        values.push(match[1]);
+      }
+    }
+    if (values.length === 0) {
+      continue;
+    }
+    const unique = [...new Set(values)];
+    preferences[field] = unique[0];
+    if (unique.length > 1) {
+      conflicts.push({ field, values: unique });
+    }
+  }
+
+  return { preferences, conflicts };
+}
+
+/**
  * Generate a unique task output filename with timestamp.
  *
  * @param taskKey - JIRA issue key
@@ -243,5 +320,6 @@ Object.assign(Utils, {
   fetchWithRetry,
   parseTaskKey,
   extractTargetBranch,
+  extractExecutionPreferences,
   generateTaskFilename,
 });

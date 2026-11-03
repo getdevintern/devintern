@@ -8,11 +8,13 @@
  * unusable.
  *
  * Resolution per spawn:
- * 1. `<HARNESS>_MODEL` (e.g. `OPENCODE_MODEL`, `GROK_MODEL`) — explicit override
+ * 1. A per-task override from the task description (see
+ *    `execution-preferences.ts`), delivered through `runtime-overrides.ts`.
+ * 2. `<HARNESS>_MODEL` (e.g. `OPENCODE_MODEL`, `GROK_MODEL`) — explicit override
  *    for that harness, valid for primary and fallback entries alike.
- * 2. `AGENT_MODEL` — when the harness is the only configured entry, or the
+ * 3. `AGENT_MODEL` — when the harness is the only configured entry, or the
  *    primary (first) entry of a multi-harness chain.
- * 3. Unset — a fallback harness runs with its own default model.
+ * 4. Unset — a fallback harness runs with its own default model.
  *
  * `DEVINTERN_HARNESS_CHAIN` carries the original chain into a worker child,
  * whose `AGENT_HARNESS` is pinned to the active entry so failover can work.
@@ -22,11 +24,14 @@
  * AGENT_EFFORT tunes the reasoning depth of the underlying agent alongside the
  * model (low / medium / high). It is emitted only by harnesses with effort
  * support (Codex config override; pi model-string suffix); others ignore it with
- * a warning. Invalid values fail with a clear message.
+ * a warning. Invalid values fail with a clear message. A per-task effort
+ * preference takes precedence over the environment for that task.
  */
 
 import { getHarness, parseAgentEffort, parseHarnessList } from "@devintern/agent-harness";
 import type { AgentEffort } from "@devintern/agent-harness";
+
+import { getAgentRuntimeOverrides } from "./runtime-overrides";
 
 /**
  * Internal env var that preserves the configured failover chain inside a worker
@@ -72,6 +77,10 @@ function configuredChain(): string[] {
 /**
  * Read the model for one harness spawn, if any.
  *
+ * A per-task override wins over every environment value. `null` suppresses the
+ * environment entirely (used when a task switched harnesses, since `AGENT_MODEL`
+ * is harness-specific).
+ *
  * @param harnessName - Harness that will be spawned. Omit in a worker child to
  *   use the pinned active entry.
  * @param chainOverride - Configured chain, when the caller already resolved it
@@ -83,6 +92,11 @@ export function resolveAgentModel(
   harnessName?: string,
   chainOverride?: readonly string[],
 ): string | undefined {
+  const override = getAgentRuntimeOverrides();
+  if (override && override.model !== undefined) {
+    return override.model ?? undefined;
+  }
+
   const chain = chainOverride && chainOverride.length > 0 ? [...chainOverride] : configuredChain();
   const active = activeHarnessName(harnessName);
   const specific = process.env[harnessModelEnvKey(active)]?.trim();
@@ -109,10 +123,16 @@ export function resolveAgentModel(
 /**
  * Read the configured reasoning effort, if any.
  *
+ * A per-task override wins over `AGENT_EFFORT`.
+ *
  * @throws {InvalidAgentEffortError} when AGENT_EFFORT is set to a value
  *   outside low / medium / high — fail loudly instead of spawning agents
  *   with a silently ignored (or worse, misparsed) setting.
  */
 export function resolveAgentEffort(): AgentEffort | undefined {
+  const override = getAgentRuntimeOverrides();
+  if (override?.effort !== undefined) {
+    return override.effort;
+  }
   return parseAgentEffort(process.env.AGENT_EFFORT);
 }

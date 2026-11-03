@@ -180,6 +180,24 @@ devintern MYAPP-456
 - Target branch can be specified with `--pr-target-branch`. If omitted (or if the named branch does not exist on the remote), the repository default branch is used
 - Target branch can also be auto-detected from the task description. Add a line like `Target branch: develop` to the card or issue and `devintern` will pick it up. Supported patterns: `Target branch:`, `Base branch:`, `PR target:`. Falls back to `--pr-target-branch` if no pattern matches.
 
+### Per-Task Execution Preferences
+
+Just like the target branch, you can override the agent harness, model, and reasoning effort for a single task from the task description — without changing your defaults or restarting the worker:
+
+```
+Harness: opencode
+Model: astra
+Effort: high
+```
+
+- All three are optional and independent. Omitted preferences use your existing defaults (`AGENT_HARNESS`, `AGENT_MODEL`, `AGENT_EFFORT`).
+- Recognized labels (case-insensitive, markdown formatting tolerated): `Harness:` / `Agent harness:`, `Model:` / `Agent model:`, `Effort:` / `Reasoning effort:` / `Agent effort:`.
+- `Model:` accepts a **family or alias** (for example `astra`) and resolves to the latest compatible model for the selected harness, or an exact model identifier when you need a specific version. Family names are matched case-insensitively; unrecognized values are passed through to the harness as-is.
+- `Effort:` is `low`, `medium`, or `high`. It is applied only when the selected harness supports reasoning effort; otherwise the preference is ignored with a warning and the task proceeds.
+- Unknown harnesses, conflicting values (the same label twice with different values), incompatible harness/model combinations, and invalid effort values fail the task with an actionable message instead of silently using a different preference.
+- When only `Harness:` is set, `AGENT_MODEL` is **not** carried over (it is harness-specific); the task uses the new harness's own default model unless you also set `Model:`.
+- The effective harness, resolved model, and applied (or ignored) effort are printed before the run starts and recorded in the run history.
+
 ## What It Does
 
 1. **Fetches** task details (description, custom fields where supported, comments, attachments)

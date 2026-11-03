@@ -6,8 +6,13 @@ import { captureError, flushErrorTracking } from "@devintern/utils";
 import { runAnalysisWithFallback } from "../agent/analysis-mode";
 import { adoptAgentCreatedChangeRequest } from "../agent/adopt-change-request";
 import { runClarityCheck } from "../agent/clarity";
+import { resolveExecutionPreferences } from "../agent/execution-preferences";
+import type { EffectiveExecutionPreferences } from "../agent/execution-preferences";
 import { HarnessUnavailableError } from "../agent/harness-startup";
 import { readImplementationReport } from "../agent/implementation-report";
+import { resolveAgentEffort, resolveAgentModel } from "../agent/model";
+import { getAgentRuntimeOverrides, setAgentRuntimeOverrides } from "../agent/runtime-overrides";
+import type { AgentRuntimeOverrides } from "../agent/runtime-overrides";
 import { runAgentHarness } from "../agent/run-harness";
 import { flushAnalyticsAndExit } from "../cli/bootstrap";
 import { isWorkerTaskProcess, runContext } from "../cli/context";
@@ -34,6 +39,7 @@ import {
   hasRunStage,
   latestRunStage,
   recordRunBranch,
+  recordRunHarness,
   recordRunStage,
   recordRunTicket,
   replaceRunStage,
@@ -205,11 +211,13 @@ function readStageReport(detail: string | undefined): string | undefined {
  * @param taskDir - Per-task output directory holding the summary files
  * @param implementationStartedAt - Epoch ms when the agent session started
  * @param harnessName - Display name recorded on the stage
+ * @param execution - Effective model/effort for this task, when known
  */
 export function recordImplementationStage(
   taskDir: string,
   implementationStartedAt: number,
   harnessName: string,
+  execution: { model?: string; effort?: string } = {},
 ): ReturnType<typeof readImplementationReport> {
   const { incomplete, report } = readImplementationReport(taskDir, implementationStartedAt);
 
@@ -220,6 +228,8 @@ export function recordImplementationStage(
       : `implemented with ${harnessName}`,
     detail: {
       harness: harnessName,
+      ...(execution.model === undefined ? {} : { model: execution.model }),
+      ...(execution.effort === undefined ? {} : { effort: execution.effort }),
       durationMs: Date.now() - implementationStartedAt,
       ...(report === undefined ? {} : { report }),
     },
@@ -319,10 +329,16 @@ async function runImplementation(input: ImplementationInput): Promise<void> {
   // state. Only halted sessions (which never reach that early write) and
   // storage failures fall through to the recording pass, which also corrects an
   // early success when finalize wrote the incomplete summary afterwards.
+  const effectiveModel = resolveAgentModel(resolvedAgent.harness.name);
+  const effectiveEffort = resolveAgentEffort();
   const { incomplete: implementationIncomplete } = recordImplementationStage(
     taskDir,
     implementationStartedAt,
     resolvedAgent.harness.displayName,
+    {
+      ...(effectiveModel === undefined ? {} : { model: effectiveModel }),
+      ...(effectiveEffort === undefined ? {} : { effort: effectiveEffort }),
+    },
   );
 
   if (isMarkdownTaskTracker(tracker)) {
@@ -1200,6 +1216,21 @@ export async function processSingleTask(
 
     const effectiveTargetBranch = await resolveEffectiveTargetBranch(descriptionText);
 
+    // Per-task execution preferences (harness / model / effort), parsed from
+    // the description with the same convention as the target branch above.
+    // Invalid or conflicting preferences throw here and are surfaced as
+    // actionable task failures instead of silently falling back.
+    const execution = resolveExecutionPreferences({
+      description: descriptionText,
+      currentAgent: runContext.resolvedAgent,
+    });
+    if (execution.notes.length > 0) {
+      console.log("\n🧩 Execution preferences from task description:");
+      for (const note of execution.notes) {
+        console.log(note);
+      }
+    }
+
     // Session pickup: reconstruct branch + prior report from the run store so a
     // restart or dashboard retry resumes instead of redoing the work. Falls
     // back to a fresh run when the recorded state is incomplete.
@@ -1255,25 +1286,41 @@ export async function processSingleTask(
       console.log(`\n🆕 Session pickup unavailable (${pickup.reason}); starting fresh`);
     }
 
-    const result = await runTaskSteps(taskSteps, {
-      taskKey,
-      totalTasks,
-      skipClarityCheck,
-      outputFile: "",
-      taskDir: "",
-      workflowKey,
-      tracker,
-      task,
-      taskDetails,
-      effectiveTargetBranch,
-      attachmentMap: new Map<string, string>(),
-      relatedIssues,
-      priorRetryState,
-      pickup,
-      projectSettings,
-      projectKey,
-      resumeBranch: pickup.kind === "resume" ? pickup.session.branch : undefined,
-    });
+    // Apply the per-task selection for the duration of the steps, then restore
+    // the process-wide defaults so the next task in a batch is unaffected.
+    const previousAgent = runContext.resolvedAgent;
+    const previousOverrides = getAgentRuntimeOverrides();
+    runContext.resolvedAgent = execution.agent;
+    setAgentRuntimeOverrides(buildRuntimeOverrides(execution));
+    if (execution.agent.harness.name !== previousAgent.harness.name) {
+      recordRunHarness(execution.agent.harness.name);
+    }
+
+    let result: Awaited<ReturnType<typeof runTaskSteps>>;
+    try {
+      result = await runTaskSteps(taskSteps, {
+        taskKey,
+        totalTasks,
+        skipClarityCheck,
+        outputFile: "",
+        taskDir: "",
+        workflowKey,
+        tracker,
+        task,
+        taskDetails,
+        effectiveTargetBranch,
+        attachmentMap: new Map<string, string>(),
+        relatedIssues,
+        priorRetryState,
+        pickup,
+        projectSettings,
+        projectKey,
+        resumeBranch: pickup.kind === "resume" ? pickup.session.branch : undefined,
+      });
+    } finally {
+      runContext.resolvedAgent = previousAgent;
+      setAgentRuntimeOverrides(previousOverrides);
+    }
     if (result.kind === "halted") {
       await finishTaskRun("escalated", result.reason);
       runContext.activeTaskContext = null;
@@ -1281,4 +1328,18 @@ export async function processSingleTask(
   } catch (error) {
     await handleTaskFailure(error, { taskKey, taskIndex, totalTasks });
   }
+}
+
+/** Translate a resolved selection into the runtime override slot (or null). */
+function buildRuntimeOverrides(
+  execution: EffectiveExecutionPreferences,
+): AgentRuntimeOverrides | null {
+  const overrides: AgentRuntimeOverrides = {};
+  if (execution.modelOverride !== undefined) {
+    overrides.model = execution.modelOverride;
+  }
+  if (execution.effort !== undefined) {
+    overrides.effort = execution.effort;
+  }
+  return Object.keys(overrides).length > 0 ? overrides : null;
 }
