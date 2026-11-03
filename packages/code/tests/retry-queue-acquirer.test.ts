@@ -4,6 +4,7 @@ import { join } from "path";
 import { tmpdir } from "os";
 
 import { ScheduledRetryStore } from "../src/lib/state/run-retry";
+import { resetWorkerFailover } from "../src/lib/worker/failover";
 import { RetryQueueAcquirer } from "../src/lib/workspace/retry-acquirer";
 import type { TaskExecutionResult } from "../src/lib/acquirers/task-polling";
 
@@ -13,6 +14,10 @@ describe("RetryQueueAcquirer", () => {
   let store: ScheduledRetryStore;
 
   beforeEach(() => {
+    // The default `isPaused` reads the process-wide failover singleton, so a
+    // controller leaked by an earlier test (or a preload) would silently
+    // disable every drain in this file. Start each test from a clean slate.
+    resetWorkerFailover();
     dir = join(
       tmpdir(),
       `retry-acquirer-test-${Date.now()}-${Math.random().toString(36).slice(2)}`,
@@ -25,6 +30,7 @@ describe("RetryQueueAcquirer", () => {
   afterEach(() => {
     store.close();
     rmSync(dir, { recursive: true, force: true });
+    resetWorkerFailover();
   });
 
   function makeAcquirer(

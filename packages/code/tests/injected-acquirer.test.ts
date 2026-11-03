@@ -4,6 +4,7 @@ import { join } from "path";
 import { tmpdir } from "os";
 
 import { InjectedTaskStore } from "../src/lib/state/injected-tasks";
+import { resetWorkerFailover } from "../src/lib/worker/failover";
 import { createTaskSupervisor } from "../src/lib/worker/supervisor";
 import { InjectedTaskAcquirer } from "../src/lib/workspace/injected-acquirer";
 import type { TaskExecutionResult } from "../src/lib/acquirers/task-polling";
@@ -13,6 +14,10 @@ describe("InjectedTaskAcquirer", () => {
   let store: InjectedTaskStore;
 
   beforeEach(() => {
+    // The default `isPaused` reads the process-wide failover singleton, so a
+    // controller leaked by an earlier test (or a preload) would silently
+    // disable every drain in this file. Start each test from a clean slate.
+    resetWorkerFailover();
     dir = join(tmpdir(), `injected-acq-${Date.now()}-${Math.random().toString(36).slice(2)}`);
     mkdirSync(dir, { recursive: true });
     store = new InjectedTaskStore(join(dir, "queue.db"));
@@ -21,6 +26,7 @@ describe("InjectedTaskAcquirer", () => {
   afterEach(() => {
     store.close();
     rmSync(dir, { recursive: true, force: true });
+    resetWorkerFailover();
   });
 
   function enqueue(taskKey: string, repo = "backend") {
