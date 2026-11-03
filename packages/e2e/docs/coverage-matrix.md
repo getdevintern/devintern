@@ -27,6 +27,8 @@ of truth; this table is a snapshot.
 - Worker surface: `packages/code/src/lib/worker/cli.ts` (subcommands and daemon)
   and the implementations under `packages/code/src/lib/worker/` and
   `packages/code/src/lib/workspace/`.
+- Direct webhook surface: `packages/code/src/lib/code-host/cli.ts`,
+  `packages/code/src/webhook-server.ts`, and `packages/code/src/lib/webhook/`.
 - Intended behavior: `docs/code/*.md`.
 - Existing suites: `packages/e2e/tests/{local,code,trackers}` and
   `packages/e2e/helpers/opt-in-suites.ts`.
@@ -97,17 +99,17 @@ Run: `bun run --filter @devintern/e2e test` (build the CLI first); the sandbox s
 
 ### Relay, auth, licensing, and observability services
 
-| Behavior                                                                                                               | Status    | Evidence                            | Missing                                                                       |
-| ---------------------------------------------------------------------------------------------------------------------- | --------- | ----------------------------------- | ----------------------------------------------------------------------------- |
-| GitLab relay: delivery, MR-close unwatch, `--disconnect`                                                               | `live`    | `tests/code/gitlab-relay.test.ts`   | GitHub relay delivery and tracker webhooks.                                   |
-| `worker connect` targets (`github`, `gitlab`, `linear`, `asana`, `trello`, `azure-devops`, `jira`, `sentry`, `status`) | `gap`     | —                                   | Validation, `status`, and non-mutating paths; relay targets stay live/opt-in. |
-| Supabase login/logout/whoami and session refresh                                                                       | `gap`     | —                                   | Safe local fake or explicit opt-in account suite.                             |
-| Automation license gate, Worker Pilot trial, offline/expired behavior                                                  | `gap`     | —                                   | Tests currently disable the gate.                                             |
-| Sentry error-monitor polling and auto-fix                                                                              | `gap`     | —                                   | Fake Sentry API or opt-in project; create one fix run and dedupe.             |
-| Dashboard standalone server/API, run history, retry, run-now                                                           | `gap`     | —                                   | Fixture queue DB plus HTTP assertions.                                        |
-| Worker/dashboard logs and artifacts                                                                                    | `partial` | asserted indirectly by worker tests | Direct readback and redaction checks.                                         |
-| Direct webhook server (`webhook serve`) and signature validation                                                       | `gap`     | —                                   | Local HTTP server with signed GitHub/GitLab payloads.                         |
-| Anonymous telemetry opt-out and update check                                                                           | `gap`     | —                                   | Tests disable both; assert no network when disabled.                          |
+| Behavior                                                                                                               | Status    | Evidence                                                                     | Missing                                                                       |
+| ---------------------------------------------------------------------------------------------------------------------- | --------- | ---------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| GitLab relay: delivery, MR-close unwatch, `--disconnect`                                                               | `live`    | `tests/code/gitlab-relay.test.ts`                                            | GitHub relay delivery and tracker webhooks.                                   |
+| `worker connect` targets (`github`, `gitlab`, `linear`, `asana`, `trello`, `azure-devops`, `jira`, `sentry`, `status`) | `gap`     | —                                                                            | Validation, `status`, and non-mutating paths; relay targets stay live/opt-in. |
+| Supabase login/logout/whoami and session refresh                                                                       | `gap`     | —                                                                            | Safe local fake or explicit opt-in account suite.                             |
+| Automation license gate, Worker Pilot trial, offline/expired behavior                                                  | `gap`     | —                                                                            | Tests currently disable the gate.                                             |
+| Sentry error-monitor polling and auto-fix                                                                              | `gap`     | —                                                                            | Fake Sentry API or opt-in project; create one fix run and dedupe.             |
+| Dashboard standalone server/API, run history, retry, run-now                                                           | `gap`     | —                                                                            | Fixture queue DB plus HTTP assertions.                                        |
+| Worker/dashboard logs and artifacts                                                                                    | `partial` | asserted indirectly by worker tests                                          | Direct readback and redaction checks.                                         |
+| Direct webhook server (`webhook serve`) and signature validation                                                       | `default` | `tests/local/webhook-serve.test.ts` (`bun run --filter @devintern/e2e test`) | Live provider callbacks and event-specific pipelines; loopback HTTP only.     |
+| Anonymous telemetry opt-out and update check                                                                           | `gap`     | —                                                                            | Tests disable both; assert no network when disabled.                          |
 
 ## `devintern` command surface
 
@@ -130,7 +132,7 @@ Run: `bun run --filter @devintern/e2e test` (build the CLI first); the sandbox s
 | `init`                                                                   | `gap`              | —                                                                                                                             | Non-interactive failure and scaffold alternatives.                     |
 | `workspace`                                                              | `gap`              | —                                                                                                                             | Help/error redirect only; low value.                                   |
 | `dashboard`                                                              | `gap`              | —                                                                                                                             | Standalone server and API.                                             |
-| `webhook serve`                                                          | `gap`              | —                                                                                                                             | Signed payload delivery.                                               |
+| `webhook serve`                                                          | `default`          | `tests/local/webhook-serve.test.ts` (`bun run --filter @devintern/e2e test`)                                                  | Live provider callbacks and event-specific pipelines.                  |
 | `address-review`                                                         | `partial`          | GitLab live lifecycle                                                                                                         | GitHub; `--no-push`, `--no-reply`, `--ci-feedback`, `--expected-head`. |
 | `resolve-conflicts`                                                      | `partial`          | GitLab worker auto mode                                                                                                       | Standalone CLI, scheduled/disabled modes.                              |
 | `login`, `logout`, `whoami`                                              | `gap`              | —                                                                                                                             | Local fake session or opt-in account suite.                            |

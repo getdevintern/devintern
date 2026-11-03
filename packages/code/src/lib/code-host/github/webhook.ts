@@ -28,6 +28,15 @@ export function verifyWebhookSignature(
   signature: string | null,
   secret: string,
 ): SignatureVerificationResult {
+  // Defense in depth: an empty key makes the expected HMAC publicly
+  // computable, so a signature keyed with "" must never verify.
+  if (!secret) {
+    return {
+      valid: false,
+      error: "Webhook secret is not configured",
+    };
+  }
+
   if (!signature) {
     return {
       valid: false,
