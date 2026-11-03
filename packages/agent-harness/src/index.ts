@@ -178,7 +178,6 @@ export {
   resolveHomeDir,
 } from "./sandbox/harness-state.js";
 export { DockerSandboxProvider } from "./sandbox/providers/docker.js";
-export { SmolvmSandboxProvider, resetSmolvmLegacyWarning } from "./sandbox/providers/smolvm.js";
 export {
   spawnAgent,
   applyNestingGuard,

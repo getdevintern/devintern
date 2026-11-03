@@ -80,7 +80,6 @@ independently of this repository.
 | `auto` provider selection                                                               | `partial` | nono path only                | Native harness path and fallback order.                            |
 | `native` provider (claude-code, codex)                                                  | `gap`     | —                             | Preflight and fail-closed behavior with stub harnesses.            |
 | `docker` provider                                                                       | `gap`     | —                             | Detect daemon; skip when absent; assert fail-closed and isolation. |
-| `smolvm` provider                                                                       | `gap`     | —                             | Detect binary; skip when absent; assert fail-closed and isolation. |
 | Sandbox grants for `injected/`, `state/`, `automations/`                                | `gap`     | —                             | `worker add` and automation writes under a sandbox.                |
 
 ### Agent harnesses and failover
@@ -121,8 +120,8 @@ independently of this repository.
 | `--auto-review`, `--auto-review-iterations`                              | `gap`              | —                              | Review/fix loop and cap.                                                 |
 | `--env-file`                                                             | `gap`              | —                              | Alternate credential source and precedence.                              |
 | `--max-turns`, `--hook-retries`                                          | `partial`          | helper passes `--hook-retries` | Failure/retry path.                                                      |
-| `--sandbox <provider>`                                                   | `partial`          | nono suite                     | docker/smolvm/native and invalid provider.                               |
-| removed `srt` provider migration error                                   | `gap`              | —                              | `--sandbox srt` and `AGENT_SANDBOX=srt` fail with a message naming nono. |
+| `--sandbox <provider>`                                                   | `partial`          | nono suite                     | docker/native and invalid provider.                                      |
+| removed provider migration errors                                        | `gap`              | —                              | Migration failure for `srt`/`smolvm` via `--sandbox` or `AGENT_SANDBOX`. |
 | `--verbose`, deprecated `--jql`, `--claude-path`, `--skip-jira-comments` | `gap`              | —                              | Compatibility and warning paths.                                         |
 | `init`                                                                   | `gap`              | —                              | Non-interactive failure and scaffold alternatives.                       |
 | `workspace`                                                              | `gap`              | —                              | Help/error redirect only; low value.                                     |
@@ -192,8 +191,8 @@ and each task opens its own PR.
 9. Standalone `address-review` and `resolve-conflicts` options on GitHub/GitLab.
 10. `dashboard` standalone/embedded API, run-now, retry, and log redaction.
 11. `webhook serve` with signed GitHub/GitLab payloads.
-12. Sandbox providers `native`, `docker`, `smolvm`, plus invalid-provider,
-    removed-`srt` migration, and missing-binary fail-closed paths.
+12. Sandbox providers `native` and `docker`, plus invalid-provider,
+    removed-provider (`srt`, `smolvm`) migration, and missing-binary fail-closed paths.
 13. Scheduled automations, estimations, quiet hours, concurrency, and orphan
     recovery on a deterministic local workspace.
 14. Harness failover with stub harnesses.

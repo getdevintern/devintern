@@ -8,7 +8,7 @@
  * - Exec wrappers (nono): the wrapper `exec`s the agent in place, so
  *   the process-group reaper in `process-reaper.ts` works unchanged and any
  *   registered harness can be wrapped.
- * - MicroVMs (Docker Sandboxes, SmolVM): the agent runs inside a VM whose
+ * - MicroVMs (Docker Sandboxes): the agent runs inside a VM whose
  *   lifetime is decoupled from the CLI process, so these providers restrict
  *   `supportsHarness` to agents available inside the guest and implement
  *   `cleanup()` to stop the VM.
@@ -101,7 +101,7 @@ export interface SandboxProvider {
    * wrappers (`nono`) and the in-process `native` sandbox cannot nest:
    * the inner instance cannot set up its namespaces/session state under the
    * outer confinement and exits before the agent starts. MicroVM providers
-   * (`docker`, `smolvm`) run the agent inside a guest, independent of the host
+   * (`docker`) run the agent inside a guest, independent of the host
    * namespaces, so they may nest. Undefined means "cannot nest".
    */
   readonly canNestInSandbox?: boolean;

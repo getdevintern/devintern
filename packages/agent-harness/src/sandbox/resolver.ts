@@ -88,6 +88,21 @@ const ACTIVE_SANDBOX_ENV: Record<string, ActiveSandboxMarker> = {
 };
 
 /**
+ * Removed providers and the migration message users see when they still have
+ * `--sandbox <name>` or `AGENT_SANDBOX=<name>` configured. Keeping them in one
+ * map makes a future removal a one-line change with a consistent, actionable
+ * error instead of the generic unknown-provider list.
+ */
+const REMOVED_SANDBOX_PROVIDERS: Record<string, string> = {
+  srt:
+    'Sandbox provider "srt" has been removed. Use "nono" for whole-process confinement ' +
+    '(or "docker" for a microVM boundary).',
+  smolvm:
+    'Sandbox provider "smolvm" has been removed. Use "docker" for a microVM boundary ' +
+    '(or "nono" for local confinement).',
+};
+
+/**
  * Name of the sandbox provider already wrapping this process, if any.
  *
  * Re-wrapping with any kernel sandbox — the same provider or a different one —
@@ -169,14 +184,12 @@ export async function resolveSandbox(
     return best;
   }
 
-  // Explicit migration path for the retired provider: a user who still has
-  // `--sandbox srt` or `AGENT_SANDBOX=srt` configured must get an actionable
-  // message instead of the generic unknown-provider list.
-  if (name === "srt") {
-    throw new Error(
-      'Sandbox provider "srt" has been removed. Use "nono" for whole-process confinement ' +
-        '(or "docker" for a microVM boundary).',
-    );
+  // Explicit migration path for retired providers: a user who still has
+  // `--sandbox <name>` or `AGENT_SANDBOX=<name>` configured must get an
+  // actionable message instead of the generic unknown-provider list.
+  const removedMessage = REMOVED_SANDBOX_PROVIDERS[name];
+  if (removedMessage) {
+    throw new Error(removedMessage);
   }
 
   const provider = getSandboxProvider(name);

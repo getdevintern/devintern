@@ -235,6 +235,16 @@ describe("resolveSandbox", () => {
     await expect(resolveSandbox({ trustedEnv: {} })).rejects.toThrow(migration);
   });
 
+  test("explicit smolvm fails with the removal migration error", async () => {
+    const migration = 'Sandbox provider "smolvm" has been removed. Use "docker"';
+    await expect(resolveSandbox({ sandboxName: "smolvm", trustedEnv: {} })).rejects.toThrow(
+      migration,
+    );
+
+    process.env.AGENT_SANDBOX = "smolvm";
+    await expect(resolveSandbox({ trustedEnv: {} })).rejects.toThrow(migration);
+  });
+
   test("explicit different non-nestable provider is not stacked on an active sandbox", async () => {
     const other = makeProvider("fake-other");
     registerSandboxProvider(other);
