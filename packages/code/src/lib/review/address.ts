@@ -25,6 +25,7 @@ import { resolveAgentEffort, resolveAgentModel } from "../agent/model";
 import { parseChangeRequestUrl } from "../code-host/index";
 import { agentSandboxPolicy, getSandbox } from "../agent/sandbox";
 import { createHarnessLogSink } from "../observability/harness-logs";
+import { stripAnsi } from "../observability/worker-logs";
 import { beginRun, endRun, recordRunStage } from "../state/run-recorder";
 import { formatCiFixPrompt, formatReviewPrompt } from "./formatter";
 import type { CiFailureFeedback } from "./formatter";
@@ -50,18 +51,34 @@ function readCiFeedbackFile(filePath: string): CiFailureFeedback {
 }
 
 /**
+ * Outcome of one review/CI-fix agent run.
+ *
+ * `failureReason` carries the harness outcome that explains `success: false`.
+ * The generic "agent failed" exception used to drop this detail, so a spawn
+ * error such as `E2BIG: argument list too long` reached error tracking with no
+ * actionable cause.
+ */
+export interface AgentRunResult {
+  success: boolean;
+  output: string;
+  maxTurnsReached?: boolean;
+  /** Why the run failed; absent on success and on the max-turns path. */
+  failureReason?: string;
+}
+
+/**
  * Run the configured agent harness to address review feedback.
  *
  * @param prompt - Full review prompt sent to the agent via argv (`-p` / positional)
  * @param workDir - Git working directory for the agent process
  * @param verbose - When true, log command and timeout details
- * @returns Whether the agent succeeded, its combined output, and max-turns flag
+ * @returns Whether the agent succeeded, its combined output, and failure details
  */
 export async function runAgent(
   prompt: string,
   workDir: string,
   verbose: boolean,
-): Promise<{ success: boolean; output: string; maxTurnsReached?: boolean }> {
+): Promise<AgentRunResult> {
   const { harness, path: executablePath } = resolveHarness();
   // Wait out any in-progress CLI auto-update swap before spawning, so a
   // transient `spawn ENOENT` doesn't abort the review.
@@ -163,9 +180,11 @@ export async function runAgent(
 
       agent.on("error", (error: NodeJS.ErrnoException) => {
         clearTimeout(timeout);
+        sandboxCleanup().catch(() => {});
         resolve({
           success: false,
           output: `Failed to run ${harness.displayName}: ${error.message}`,
+          failureReason: `failed to run ${harness.displayName}: ${error.message}`,
         });
       });
 
@@ -183,11 +202,22 @@ export async function runAgent(
           harness.supportsMaxTurns === true,
         );
         const output = stdoutOutput + stderrOutput;
+        const success = code === 0 && !maxTurnsReached && !timedOut;
+        const failureReason = success
+          ? undefined
+          : timedOut
+            ? `timed out after ${timeoutMinutes} minutes`
+            : maxTurnsReached
+              ? "reached max turns limit"
+              : code === null
+                ? "agent process was terminated by a signal"
+                : `exited with code ${code}`;
 
         resolve({
-          success: code === 0 && !maxTurnsReached && !timedOut,
+          success,
           output: timedOut ? output + `\n\nTimed out after ${timeoutMinutes} minutes` : output,
           maxTurnsReached,
+          ...(failureReason ? { failureReason } : {}),
         });
       });
     })().catch((error) => {
@@ -195,9 +225,11 @@ export async function runAgent(
         reject(error);
         return;
       }
+      const detail = error instanceof Error ? error.message : String(error);
       resolve({
         success: false,
-        output: `Failed to run ${harness.displayName}: ${error instanceof Error ? error.message : String(error)}`,
+        output: `Failed to run ${harness.displayName}: ${detail}`,
+        failureReason: `failed to run ${harness.displayName}: ${detail}`,
       });
     });
   });
@@ -576,8 +608,46 @@ function stopIfNoChanges(
   return true;
 }
 
+/** Longest output excerpt appended to a failure message (keeps events readable). */
+const AGENT_FAILURE_EXCERPT_MAX = 500;
+
+/** Return the last non-empty output line, stripped of ANSI and bounded in size. */
+function lastMeaningfulOutputLine(output: string): string | undefined {
+  const lines = stripAnsi(output)
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const last = lines.at(-1);
+  if (!last) return undefined;
+  return last.length > AGENT_FAILURE_EXCERPT_MAX
+    ? `${last.slice(0, AGENT_FAILURE_EXCERPT_MAX)}...`
+    : last;
+}
+
+/**
+ * Build the error message for a failed agent run.
+ *
+ * Always names the harness outcome (`exited with code 1`, a spawn failure, a
+ * timeout) and appends the last meaningful output line, because a bare
+ * "Agent failed to complete successfully" is not actionable in logs or error
+ * tracking. The spawn-error output already contains the reason, so it is not
+ * repeated.
+ *
+ * @param result - A run result whose `success` is false.
+ * @returns Human-readable, bounded failure description.
+ */
+export function describeAgentFailure(result: AgentRunResult): string {
+  const reason = result.failureReason ?? "agent process did not report success";
+  const message = `Agent failed to complete successfully: ${reason}`;
+  const lastLine = lastMeaningfulOutputLine(result.output);
+  if (!lastLine || reason.toLowerCase().includes(lastLine.toLowerCase())) {
+    return message;
+  }
+  return `${message}\nLast agent output: ${lastLine}`;
+}
+
 /** Validate the agent run outcome, throwing on max-turns or failure. */
-function assertAgentSucceeded(agentResult: Awaited<ReturnType<typeof runAgent>>): void {
+function assertAgentSucceeded(agentResult: AgentRunResult): void {
   if (agentResult.maxTurnsReached) {
     console.error("\n❌ Agent reached max turns limit without completing the task");
     throw new Error(
@@ -585,8 +655,9 @@ function assertAgentSucceeded(agentResult: Awaited<ReturnType<typeof runAgent>>)
     );
   }
   if (!agentResult.success) {
-    console.error("\n❌ Agent failed to complete successfully");
-    throw new Error("Agent failed to complete successfully");
+    const message = describeAgentFailure(agentResult);
+    console.error(`\n❌ ${message}`);
+    throw new Error(message);
   }
   console.log("\n✅ Agent completed successfully");
 }
