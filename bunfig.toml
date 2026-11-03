@@ -1,8 +1,16 @@
 [test]
 # Root-level safety net: `bun test` run from the repo root discovers package
 # tests but does NOT read per-package bunfig.toml, so packages/code's guard
-# preload would be skipped. Running the suite from a git hook (lefthook
+# preloads would be skipped. Running the suite from a git hook (lefthook
 # pre-push) leaks GIT_DIR into test fixtures, and unguarded fixture git
 # commands then execute against the real repository (this rewrote master
-# twice). Preload the same guard here so root-invoked runs are safe too.
-preload = ["./packages/code/tests/setup/guard-git-state.ts"]
+# twice). Preload the same guards here so root-invoked runs are safe too.
+#
+# guard-sentry is included for the same reason: without it a root-invoked run
+# leaves SENTRY_DISABLED unset, so the CLI subprocesses tests spawn inherit no
+# pin and report expected user-input validation failures (e.g. the markdown
+# client's "File is empty") to the production Sentry DSN as DEVINTERN-7.
+preload = [
+  "./packages/code/tests/setup/guard-git-state.ts",
+  "./packages/code/tests/setup/guard-sentry.ts",
+]
