@@ -202,6 +202,16 @@ describe("GitHubReviewsClient auth failure path", () => {
     expect(
       isGitHubAuthError(new Error("GitHub API error (403): You have triggered abuse detection")),
     ).toBe(false);
+    // GitHub reuses 403 for non-credential conditions; these must keep the
+    // normal capture/retry path instead of being hidden behind auth throttles.
+    for (const detail of [
+      "Repository was archived so is read-only.",
+      "This issue is locked.",
+      "Repository access blocked",
+      "Forbidden",
+    ]) {
+      expect(isGitHubAuthError(new Error(`GitHub API error (403): ${detail}`))).toBe(false);
+    }
     expect(isGitHubAuthError(new Error("GitHub API error (404): Not Found"))).toBe(false);
     expect(isGitHubAuthError(new Error("GitHub API error (500): Server Error"))).toBe(false);
     expect(isGitHubAuthError(null)).toBe(false);
