@@ -1,5 +1,18 @@
 # @devintern/code Changelog
 
+## [2.22.1] - 2026-11-05
+
+GitHub pairing and polling reliability patch: `worker connect github` verifies every repository on an account in one App installation instead of leaving all but the first waiting forever, and change-detector polling re-queries an overlapping window so a task created during tracker index lag is not dropped permanently.
+
+### Fixed
+
+- **GitHub App pairing covers every repository on an account in one installation**: `devintern worker connect github` paired repositories one at a time, each with its own pairing state and install URL, but a GitHub App installation is per account — once the App was installed, the next install URL only offered the installation settings page and never produced a callback, so every repository after the first waited forever and uninstalling to retry dropped the repositories already paired. Repositories are now grouped by owner and sent in one pairing request, the relay verifies and registers each requested repository from the installation's repository list, and the pairing status records all of them locally. A partial selection no longer fails silently: the CLI names the repositories the installation did not grant so they can be added and the command retried
+- **Change-detector polling survives tracker index lag**: a query-based change detector advanced its cursor to the detection start time and built the next delta query from exactly that cursor, so windows were contiguous. Tracker search indexes publish asynchronously, so a task created or edited within the index lag window before a tick was invisible to that tick and every later window started after its updated stamp, dropping it permanently. The delta query now re-queries a five-minute look-back before the persisted cursor; re-detection is safe because the acquirer dedupes by task key and updated stamp and the actioned gate blocks finished work, and the overlap also absorbs cursor clock skew
+
+### Technical
+
+- **Webhook help and docs cleanup**: `devintern webhook serve --help` no longer lists the unused `WEBHOOK_AUTO_REPLY` variable, the package-local deployment guide drops the same no-op entry, and the GitHub integration guide removes an outdated note
+
 ## [2.22.0] - 2026-11-04
 
 Jira diagnostics release: a failed Jira search now reports why it failed instead of echoing only the JQL, so an expired token, an unreachable host, and a malformed query no longer look identical in the worker log.
