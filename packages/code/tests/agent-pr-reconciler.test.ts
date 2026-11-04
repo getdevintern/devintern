@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -172,5 +172,118 @@ describe("agent PR reconciler", () => {
 
     expect(closure).toBeNull();
     expect(workerState.getCursor(agentPrStateCursorSource("acme/widgets", 15))?.etag).toBe('W/"1"');
+  });
+
+  test("an unusable PR state keeps the row open and still persists the ETag", () => {
+    const payloads: { label: string; data: PolledPr; prNumber: number }[] = [
+      { label: "missing state", data: {}, prNumber: 20 },
+      { label: "undefined state", data: { state: undefined }, prNumber: 21 },
+      { label: "null state", data: { state: null } as unknown as PolledPr, prNumber: 22 },
+      { label: "empty state", data: { state: "" }, prNumber: 23 },
+      { label: "unknown state", data: { state: "draft" }, prNumber: 24 },
+    ];
+
+    payloads.forEach(({ label, data, prNumber }, index) => {
+      workerState.recordAgentPr({ repo: "acme/widgets", prNumber });
+      const closure = applyAgentPrFetch(
+        workerState,
+        { repo: "acme/widgets", prNumber },
+        { data, etag: 'W/"9"', notModified: false },
+      );
+
+      expect({ label, closure }).toEqual({ label, closure: null });
+      expect({ label, open: workerState.listOpenAgentPrs("acme/widgets").length }).toEqual({
+        label,
+        open: index + 1,
+      });
+      expect({
+        label,
+        etag: workerState.getCursor(agentPrStateCursorSource("acme/widgets", prNumber))?.etag,
+      }).toEqual({ label, etag: 'W/"9"' });
+      expect({ label, counts: workerState.countAgentPrs() }).toEqual({
+        label,
+        counts: { open: index + 1, closed: 0 },
+      });
+    });
+  });
+
+  test("an unusable PR state warns once per PR per process", () => {
+    const warnings: string[] = [];
+    const warn = spyOn(console, "warn").mockImplementation((message: unknown) => {
+      warnings.push(String(message));
+    });
+    try {
+      workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 30 });
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        applyAgentPrFetch(
+          workerState,
+          { repo: "acme/widgets", prNumber: 30 },
+          { data: {}, etag: 'W/"1"', notModified: false },
+        );
+      }
+    } finally {
+      warn.mockRestore();
+    }
+
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("acme/widgets#30");
+    expect(warnings[0]).not.toContain("undefined; unwatching");
+  });
+
+  test("state open keeps the row watched without warning", () => {
+    const warn = spyOn(console, "warn");
+    try {
+      workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 50 });
+      const closure = applyAgentPrFetch(
+        workerState,
+        { repo: "acme/widgets", prNumber: 50 },
+        { data: { state: "open" }, etag: 'W/"2"', notModified: false },
+      );
+
+      expect(closure).toBeNull();
+      expect(warn).not.toHaveBeenCalled();
+      expect(workerState.listOpenAgentPrs()).toHaveLength(1);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test("state closed and merged close the row with a terminal reason", () => {
+    for (const [prNumber, state] of [
+      [51, "closed"],
+      [52, "merged"],
+    ] as const) {
+      workerState.recordAgentPr({ repo: "acme/widgets", prNumber });
+      const closure = applyAgentPrFetch(
+        workerState,
+        { repo: "acme/widgets", prNumber },
+        { data: { state }, etag: 'W/"3"', notModified: false },
+      );
+
+      expect(closure).toEqual({ repo: "acme/widgets", prNumber, reason: state });
+      expect(workerState.listOpenAgentPrs()).toHaveLength(0);
+    }
+  });
+
+  test("reconciliation leaves a row open when the payload omits state", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 40 });
+    const fresh = new Map<string, ConditionalResult<PolledPr>>();
+    const summary = await reconcileOpenAgentPrs({
+      workerState,
+      github: {
+        async fetchPr() {
+          return { data: {}, etag: 'W/"4"', notModified: false };
+        },
+      },
+      watched: workerState.listOpenAgentPrs(),
+      fresh,
+    });
+
+    expect(summary.checked).toBe(1);
+    expect(summary.closed).toEqual([]);
+    expect(workerState.listOpenAgentPrs().map((pr) => pr.prNumber)).toEqual([40]);
+    expect(workerState.getCursor(agentPrStateCursorSource("acme/widgets", 40))?.etag).toBe('W/"4"');
+    // The fetch is still shared with the per-PR poll loop (no second request).
+    expect(fresh.get(agentPrKey("acme/widgets", 40))?.data).toEqual({});
   });
 });

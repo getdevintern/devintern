@@ -16,13 +16,70 @@
 
 import type { AgentPr, WorkerState } from "../state/worker-state";
 
-/** The subset of a GitHub PR payload the poller and reconciler rely on. */
+/**
+ * The subset of a GitHub PR payload the poller and reconciler rely on.
+ *
+ * `state` is optional because it arrives from a remote API: a payload can omit
+ * it (or report a value this worker does not know). Absence must be modelled
+ * honestly so the compiler forces callers to decide what it means.
+ */
 export interface PolledPr {
-  state: string;
+  state?: string;
   /** GitHub's computed merge state; `"dirty"` means merge conflicts. */
   mergeable_state?: string;
   head?: { sha: string; ref?: string; repo?: { full_name: string } | null };
   base?: { sha: string; ref?: string };
+}
+
+/** GitHub PR states that prove a PR is no longer open. */
+export type TerminalAgentPrState = "closed" | "merged";
+
+/** Classification of a remote PR `state` value; `null` means unusable. */
+export type AgentPrLifecycleState = "open" | TerminalAgentPrState | null;
+
+const TERMINAL_AGENT_PR_STATES: ReadonlySet<string> = new Set<TerminalAgentPrState>([
+  "closed",
+  "merged",
+]);
+
+/**
+ * Classify a remote PR `state`.
+ *
+ * Only an explicitly recognised value is actionable: `"closed"`/`"merged"`
+ * are terminal, `"open"` is alive, and everything else — missing, `null`,
+ * empty, non-string, or unknown — is unusable (`null`). Unusable state must
+ * never close a registry row: that would permanently stop polling a PR that is
+ * still open.
+ */
+export function classifyAgentPrState(state: unknown): AgentPrLifecycleState {
+  if (typeof state !== "string") return null;
+  const normalized = state.trim().toLowerCase();
+  if (normalized === "open") return "open";
+  return TERMINAL_AGENT_PR_STATES.has(normalized) ? (normalized as TerminalAgentPrState) : null;
+}
+
+/** PRs already reported as having an unusable state (one warning per process). */
+const warnedUnusableState = new Set<string>();
+
+/** Describe an unusable state value without echoing the surrounding payload. */
+function describeUnusableState(state: unknown): string {
+  if (state === undefined) return "missing";
+  if (state === null) return "null";
+  if (typeof state === "string") {
+    return state === "" ? "empty string" : `unrecognised ${JSON.stringify(state.slice(0, 40))}`;
+  }
+  return `unexpected ${typeof state}`;
+}
+
+/** Warn at most once per PR per process about a state the worker cannot act on. */
+function warnUnusableStateOnce(repo: string, prNumber: number, state: unknown): void {
+  const key = agentPrKey(repo, prNumber);
+  if (warnedUnusableState.has(key)) return;
+  warnedUnusableState.add(key);
+  console.warn(
+    `⚠️  [agent-pr-reconciler] ${repo}#${prNumber} returned an unusable PR state ` +
+      `(${describeUnusableState(state)}); keeping it watched and retrying next poll`,
+  );
 }
 
 /** Result of a conditional (ETag-cached) GitHub GET. */
@@ -46,8 +103,8 @@ export interface AgentPrReconcileGitHub {
 export interface AgentPrClosure {
   repo: string;
   prNumber: number;
-  /** The PR's confirmed GitHub state. */
-  reason: string;
+  /** The PR's confirmed terminal GitHub state. */
+  reason: TerminalAgentPrState;
 }
 
 export interface AgentPrReconcileSummary {
@@ -70,7 +127,11 @@ export function agentPrKey(repo: string, prNumber: number): string {
 
 /**
  * Apply one fetched PR state to the registry: persist the ETag cursor and
- * close the row only when GitHub confirms that it is no longer open.
+ * close the row only when GitHub explicitly reports a terminal state.
+ *
+ * Unusable state (missing, `null`, empty, or unrecognised) leaves the row open
+ * so the next reconciliation tick retries; it must never be treated as
+ * "not open".
  *
  * @returns The closure record, or `null` when the PR stays watched.
  */
@@ -82,12 +143,18 @@ export function applyAgentPrFetch(
   if (!result.notModified && result.etag) {
     workerState.setCursor(agentPrStateCursorSource(pr.repo, pr.prNumber), "state", result.etag);
   }
-  if (result.data && result.data.state !== "open") {
-    const reason = result.data.state;
-    workerState.markAgentPrClosed(pr.repo, pr.prNumber);
-    return { repo: pr.repo, prNumber: pr.prNumber, reason };
+  const data = result.data;
+  if (!data) return null;
+
+  const state = classifyAgentPrState(data.state);
+  if (state === null) {
+    warnUnusableStateOnce(pr.repo, pr.prNumber, data.state);
+    return null;
   }
-  return null;
+  if (state === "open") return null;
+
+  workerState.markAgentPrClosed(pr.repo, pr.prNumber);
+  return { repo: pr.repo, prNumber: pr.prNumber, reason: state };
 }
 
 /**
