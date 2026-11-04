@@ -5,7 +5,17 @@ import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 // cannot: the same daemon runs implementation, review, CI-repair and conflict
 // jobs, so those tests identify the prompt by a seeded marker instead.
 const agentInput = process.argv.join(" ");
+// The local auto-review loop sends the bundled review and fix prompts from the
+// same one-shot CLI run that implemented the task. Detect those turns before
+// the explicit E2E_AGENT_MODE so a single run can exercise
+// implement → review → fix → review without the fixture pinning one mode.
+const promptMode = agentInput.includes("You are reviewing a pull request")
+  ? "auto-review-feedback"
+  : agentInput.includes("## Feedback to Address")
+    ? "auto-review-fix"
+    : undefined;
 const mode =
+  promptMode ??
   process.env.E2E_AGENT_MODE ??
   (agentInput.includes("# Resolve Merge Conflicts")
     ? "conflict"
@@ -72,6 +82,60 @@ if (
 }
 if (missingMarkers.length > 0) {
   throw new Error(`Seeded ${missingMarkers.join(" and ")} marker(s) did not reach the agent input`);
+}
+// Auto-review reviewer turn: print only the JSON verdict the loop parses. The
+// first iteration reports one blocking medium finding; a later iteration
+// approves so the loop converges. E2E_AUTO_REVIEW_STUCK keeps every iteration
+// unapproved to prove the iteration cap.
+if (mode === "auto-review-feedback") {
+  const iteration = Number(agentInput.match(/\*\*Review Iteration\*\*:\s*(\d+)/)?.[1] ?? "1");
+  const stuck = process.env.E2E_AUTO_REVIEW_STUCK === "1";
+  if (!stuck && iteration > 1) {
+    console.log(
+      JSON.stringify({
+        summary: "The review finding was addressed and no blocking issues remain.",
+        approved: true,
+        items: [],
+      }),
+    );
+  } else {
+    console.log(
+      JSON.stringify({
+        summary: "The greeting change works, but the exported value is not asserted.",
+        approved: false,
+        items: [
+          {
+            priority: "medium",
+            confidence: "high",
+            category: "code-quality",
+            file: "src/greeting.ts",
+            line: "1",
+            issue:
+              "The fixture test only checks a Hello prefix, so it cannot catch a wrong greeting value.",
+            evidence:
+              "tests/greeting.test.ts:5 asserts only a Hello prefix, not the exact exported value",
+            suggestion: "Assert the exact exported greeting value in tests/greeting.test.ts.",
+          },
+        ],
+      }),
+    );
+  }
+  process.exit(0);
+}
+// Auto-review fixer turn: apply the suggested edit and leave the commit to the
+// production loop. Accept an already-fixed file so a later fix turn is a no-op.
+if (mode === "auto-review-fix") {
+  const fixedPath = "src/greeting.ts";
+  const fixed = 'export const greeting = "Hello, reviewer!";\n';
+  const current = readFileSync(fixedPath, "utf8");
+  if (current !== fixed) {
+    if (current !== 'export const greeting = "Hello, world!";\n') {
+      throw new Error("Unexpected fixture contents; refusing to edit this workspace");
+    }
+    writeFileSync(fixedPath, fixed);
+  }
+  console.log("Applied the review suggestion: src/greeting.ts now exports Hello, reviewer!");
+  process.exit(0);
 }
 const path = "src/greeting.ts";
 if (mode === "no-change") {

@@ -86,6 +86,34 @@ and secret `E2E_GITHUB_TOKEN` before running it. Do not expose these
 credentials to untrusted pull-request code. Build the CLI in that job before
 running the suite so the artifact matches the checkout.
 
+## Local auto-review loop
+
+`tests/local/cli-auto-review.test.ts` runs the built CLI's `--auto-review` loop
+against a local bare Git remote and the deterministic fixture agent, with no
+hosted PR, account, or network access. The fixture agent gains two prompt-driven
+modes: `auto-review-feedback` (the bundled `review.md` prompt) prints only a
+JSON verdict, and `auto-review-fix` (the bundled `fix.md` prompt) edits
+`src/greeting.ts` without committing or pushing. The reviewer reports one
+`medium` finding on iteration 1 and approves from iteration 2, so the loop
+converges; `E2E_AUTO_REVIEW_STUCK=1` keeps every iteration unapproved to prove
+`--auto-review-iterations` caps the review/fix cycles. Both modes are recorded
+in `E2E_AGENT_INVOCATIONS` so the test asserts the exact
+implement → review → fix → review sequence.
+
+The scenarios assert the pushed `feature/<task-key>` branch, the exact
+`src/greeting.ts` diff, the two commits ahead of base (the implementation plus
+`fix: address PR review feedback`), and the
+`DEVINTERN_OUTPUT_DIR/<task-key>/auto-review-summary.json` artifact
+(`iterations`, `success`, and `history`). Per-iteration verdicts are saved under
+`iteration-<n>/feedback.json`. A non-approved loop still exits 0 and delivers
+the branch; the local remote has no supported PR host, so `--create-pr` pushes
+and exits without a PR URL.
+
+```sh
+bun run --filter @getdevintern/code build
+bun run --filter @devintern/e2e test
+```
+
 ## Worker `worker add` option matrix
 
 The default local suite (`tests/local/worker-add-options.test.ts`) drives the built
