@@ -217,9 +217,11 @@ fake persists custom fields on `PUT /rest/api/3/issue/{key}` and exposes them
 for assertions; it also implements `PUT /rest/api/3/issue/{key}/comment/{id}`
 for in-place re-estimation and a deterministic clock control for the <24h skip.
 Scenarios assert the story-point value, the single estimation comment (created
-then updated by id), `estimation-result.json`, and the skip behavior for
-unchanged and recent issues. `--skip-comments` proves the field-only path. No
-branch, commit, or push is created.
+then updated by id, with the rewritten body carrying the new points),
+`estimation-result.json`, and the skip behavior for unchanged and recent
+issues. `--skip-comments` proves the field-only path and that a repeated sweep
+stays a no-op without a comment to anchor the re-estimation gate. No branch,
+commit, or push is created.
 
 Endpoints covered:
 

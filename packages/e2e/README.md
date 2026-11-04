@@ -342,12 +342,12 @@ against the same fake. Project settings configure `storyPointsField:
 "customfield_10016"` explicitly so discovery drift is not conflated with the
 write path. The deterministic agent detects the bundled estimation prompt and
 returns a Fibonacci value; the test reads the custom field, the single
-estimation comment (create, then in-place update), and
-`estimation-result.json` back from durable state. It also exercises the <24h
-skip, the already-estimated-and-unchanged skip, and `--skip-comments`
-field-only behavior. Estimation runs are read-only: no branch, commit, or push
-reaches the local bare remote. No extra prerequisites or credentials are
-needed.
+estimation comment (create, then in-place update whose body carries the new
+value), and `estimation-result.json` back from durable state. It also exercises
+the <24h skip, the already-estimated-and-unchanged skip, and `--skip-comments`
+field-only behavior with a repeated sweep proving it does not re-estimate.
+Estimation runs are read-only: no branch, commit, or push reaches the local
+bare remote. No extra prerequisites or credentials are needed.
 
 ## Remote tracker fixtures
 

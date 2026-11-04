@@ -144,6 +144,9 @@ test.skipIf(!existsSync(cliPath))(
       const updatedComments = await estimationComments(tracker, issue.key);
       expect(updatedComments).toHaveLength(1);
       expect(updatedComments[0]?.id).toBe(estimationCommentId);
+      // The in-place PUT must rewrite the body, not just reuse the comment id.
+      expect(updatedComments[0]?.body).toContain("Story Points: 5");
+      expect(updatedComments[0]?.body).not.toContain("Story Points: 3");
       expect(tracker.getStoryPoints(issue.key)).toBe(5);
       expect(run.agentInvocations().map((invocation) => invocation.mode)).toEqual([
         "estimate",
@@ -153,6 +156,16 @@ test.skipIf(!existsSync(cliPath))(
         "estimate",
         "estimate",
       ]);
+
+      // The re-estimation's own field and comment writes are not a user change:
+      // a third no-change sweep must skip instead of estimating forever.
+      const steadyState = await runEstimate(run, issue.key, { skipComments: false });
+      expect(steadyState.exitCode).toBe(0);
+      expect(run.agentInvocations()).toHaveLength(2);
+      const steadyStateComments = await estimationComments(tracker, issue.key);
+      expect(steadyStateComments.map((comment) => comment.id)).toEqual([estimationCommentId!]);
+      expect(tracker.getStoryPoints(issue.key)).toBe(5);
+      expect(run.runRecords({ allTasks: true })).toHaveLength(2);
       expect(tracker.unexpectedRequests).toEqual([]);
     } finally {
       await tracker.cleanup();
@@ -212,6 +225,14 @@ test.skipIf(!existsSync(cliPath))(
       expect(await tracker.listComments(issue.key)).toEqual([]);
       expect(run.agentInvocations().map((invocation) => invocation.mode)).toEqual(["estimate"]);
       expect(readEstimationResult(run, issue.key)).toMatchObject({ storyPoints: 3 });
+
+      // No comment can serve as the re-estimation baseline, so the durable
+      // state recorded by the first sweep must make a second sweep a no-op.
+      const repeat = await runEstimate(run, issue.key);
+      expect(repeat.exitCode).toBe(0);
+      expect(tracker.getStoryPoints(issue.key)).toBe(3);
+      expect(run.agentInvocations()).toHaveLength(1);
+      expect(run.runRecords({ allTasks: true })).toHaveLength(1);
       expect(tracker.unexpectedRequests).toEqual([]);
     } finally {
       await tracker.cleanup();

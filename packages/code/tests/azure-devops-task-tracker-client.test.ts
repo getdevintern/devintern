@@ -213,7 +213,11 @@ describe("AzureDevOpsTaskTrackerClient estimation", () => {
     });
 
     const found = await adapter.findEstimationComment("4211");
-    expect(found).toEqual({ commentId: "9", created: "2026-01-03T00:00:00Z" });
+    expect(found).toEqual({
+      commentId: "9",
+      created: "2026-01-03T00:00:00Z",
+      updated: "2026-01-03T00:00:00Z",
+    });
   });
 });
 

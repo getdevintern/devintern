@@ -305,13 +305,18 @@ export class AsanaTaskTrackerClient implements TaskTrackerClient {
 
   async findEstimationComment(
     taskKey: string,
-  ): Promise<{ commentId: string; created: string } | null> {
+  ): Promise<{ commentId: string; created: string; updated: string } | null> {
     try {
       const stories = await this.asanaClient.getStories(this.toTaskGid(taskKey));
       const existing = stories.find((s) =>
         (s.text || s.html_text || "").includes(ESTIMATION_COMMENT_MARKER),
       );
-      return existing ? { commentId: existing.gid, created: existing.created_at } : null;
+      // Asana stories expose no edit timestamp, so this value is only a
+      // fallback for tasks estimated before lib/state/estimation-state.ts
+      // existed; the re-estimation gate prefers the durable task baseline.
+      return existing
+        ? { commentId: existing.gid, created: existing.created_at, updated: existing.created_at }
+        : null;
     } catch (error) {
       console.warn(`⚠️  Failed to check for estimation comment on ${taskKey}: ${error}`);
       return null;
