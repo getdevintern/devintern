@@ -100,6 +100,8 @@ describe("CiFailureWatcherAcquirer", () => {
     prCalls?: number;
     actionsCalls?: number;
     statusCalls?: number;
+    /** When set, fetchPr rejects with this error instead of returning data. */
+    prError?: Error;
   }
 
   function makeGithub(gh: FakeGitHubState): CiFailureWatcherGitHub {
@@ -107,6 +109,7 @@ describe("CiFailureWatcherAcquirer", () => {
       async fetchPr(_repo, _n, etag): Promise<CiConditionalResult<PolledCiPr>> {
         gh.prCalls = (gh.prCalls ?? 0) + 1;
         gh.seenPrEtag = etag;
+        if (gh.prError) throw gh.prError;
         if (gh.prEtagHit) {
           return { data: null, etag, notModified: true };
         }
@@ -241,6 +244,127 @@ describe("CiFailureWatcherAcquirer", () => {
     inaccessible = false;
     await acquirer.tick();
     expect(workerState.listOpenAgentPrs()).toHaveLength(1);
+  });
+
+  test("credential failures warn at most once per hour with actionable guidance", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 43 });
+    let now = 1_000;
+    const gh: FakeGitHubState = {
+      prState: "open",
+      headSha: sha1,
+      workflowRuns: [],
+      prError: new Error(
+        "GitHub API error (403): Resource not accessible by personal access token",
+      ),
+    };
+    const { acquirer } = makeAcquirer(gh, { now: () => now });
+    const warns: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warns.push(args.join(" "));
+    };
+    try {
+      await acquirer.tick();
+      // Two failing PRs, but a permanent credential failure warns once.
+      expect(warns).toHaveLength(1);
+      expect(warns[0]).toContain("[poll:ci-failures]");
+      expect(warns[0]).toContain("acme/widgets#42");
+      expect(warns[0]).toContain("403");
+      expect(warns[0]).toContain("Actions: Read");
+      expect(warns[0]).toContain("Commit statuses: Read");
+      expect(warns[0]).toContain("docs/code/worker.md");
+
+      now += 60_000;
+      await acquirer.tick();
+      expect(warns).toHaveLength(1);
+
+      now += 60 * 60_000;
+      await acquirer.tick();
+      expect(warns).toHaveLength(2);
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
+
+  test("rate-limit and server failures still warn per PR and per tick", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 43 });
+    const gh: FakeGitHubState = {
+      prState: "open",
+      headSha: sha1,
+      workflowRuns: [],
+      prError: new Error("GitHub API error (403): API rate limit exceeded"),
+    };
+    const { acquirer } = makeAcquirer(gh);
+    const warns: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warns.push(args.join(" "));
+    };
+    try {
+      await acquirer.tick();
+      expect(warns).toHaveLength(2);
+      expect(warns.every((line) => !line.includes("Actions: Read"))).toBe(true);
+
+      gh.prError = new Error("GitHub API error (500): Internal Server Error");
+      await acquirer.tick();
+      expect(warns).toHaveLength(4);
+      expect(warns.slice(2).every((line) => !line.includes("Actions: Read"))).toBe(true);
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
+
+  test("recovery logs once and rearms the credential warning throttle", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    let now = 1_000;
+    const gh: FakeGitHubState = {
+      prState: "open",
+      headSha: sha1,
+      workflowRuns: [],
+      prError: new Error(
+        "GitHub API error (403): Resource not accessible by personal access token",
+      ),
+    };
+    const { acquirer } = makeAcquirer(gh, { now: () => now });
+    const warns: string[] = [];
+    const logs: string[] = [];
+    const originalWarn = console.warn;
+    const originalLog = console.log;
+    console.warn = (...args: unknown[]) => {
+      warns.push(args.join(" "));
+    };
+    console.log = (...args: unknown[]) => {
+      logs.push(args.join(" "));
+    };
+    const recoveryLines = () =>
+      logs.filter((line) => line.includes("GitHub credential accepted again")).length;
+    try {
+      await acquirer.tick();
+      expect(warns).toHaveLength(1);
+      expect(recoveryLines()).toBe(0);
+
+      gh.prError = undefined;
+      await acquirer.tick();
+      expect(recoveryLines()).toBe(1);
+
+      // Subsequent healthy ticks stay quiet.
+      await acquirer.tick();
+      expect(recoveryLines()).toBe(1);
+
+      // A new failure warns promptly rather than waiting out the old hour.
+      gh.prError = new Error(
+        "GitHub API error (403): Resource not accessible by personal access token",
+      );
+      now += 60_000;
+      await acquirer.tick();
+      expect(warns).toHaveLength(2);
+      expect(recoveryLines()).toBe(1);
+    } finally {
+      console.warn = originalWarn;
+      console.log = originalLog;
+    }
   });
 
   test("relay reconciliation bypasses the timer for one registered change", async () => {

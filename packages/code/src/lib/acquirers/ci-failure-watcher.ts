@@ -39,6 +39,7 @@ import { RowParseError } from "../state/row-parse";
 import type { Acquirer } from "../../worker";
 import type { CiFailureFeedback } from "../review/formatter";
 import { serializePrRun } from "./review-polling";
+import { isGitHubAuthError } from "../code-host/github/reviews";
 
 import type {
   CiProvider,
@@ -304,6 +305,9 @@ export class CiFailureWatcherAcquirer implements Acquirer {
   private timer: ReturnType<typeof setInterval> | null = null;
   private busy = false;
   private greenPollSchedules = new Map<string, GreenPollSchedule>();
+  /** Throttle state for permanent credential/permission failures. */
+  private lastAuthWarnAt: number | null = null;
+  private authFailureActive = false;
 
   constructor(options: CiFailureWatcherAcquirerOptions) {
     this.options = {
@@ -365,6 +369,8 @@ export class CiFailureWatcherAcquirer implements Acquirer {
         if (!watchedKeys.has(key)) this.greenPollSchedules.delete(key);
       }
 
+      let sawSuccess = false;
+      let sawAuthFailure = false;
       for (const pr of watchedPrs) {
         const key = this.prKey(pr.repo, pr.prNumber);
         const schedule = this.greenPollSchedules.get(key);
@@ -374,6 +380,7 @@ export class CiFailureWatcherAcquirer implements Acquirer {
 
         try {
           const outcome = await this.pollPr(pr.repo, pr.prNumber);
+          sawSuccess = true;
           if (outcome === "unchanged-green") {
             this.scheduleGreenPoll(key, schedule?.nextBackoffIndex ?? 0);
           } else {
@@ -383,14 +390,53 @@ export class CiFailureWatcherAcquirer implements Acquirer {
           }
         } catch (error) {
           this.greenPollSchedules.delete(key);
+          if (isGitHubAuthError(error)) {
+            // A rejected or under-scoped credential fails identically on every
+            // request, so re-reporting it per PR per tick floods the log.
+            sawAuthFailure = true;
+            this.warnAuthFailure(pr.repo, pr.prNumber, error as Error);
+            continue;
+          }
           console.warn(
             `⚠️  [${this.name}] polling ${pr.repo}#${pr.prNumber} failed: ${(error as Error).message}`,
           );
         }
       }
+      // Only a tick with no credential failures proves the credential works
+      // again; a mix of success and rejection must not rearm the throttle.
+      if (sawSuccess && !sawAuthFailure) this.noteAuthRecovery();
     } finally {
       this.busy = false;
     }
+  }
+
+  /** One credential warning per rolling hour, not one per PR per tick. */
+  private static AUTH_WARN_INTERVAL_MS = 60 * 60 * 1000;
+
+  private warnAuthFailure(repo: string, prNumber: number, error: Error): void {
+    this.authFailureActive = true;
+    const now = this.now();
+    if (
+      this.lastAuthWarnAt !== null &&
+      now - this.lastAuthWarnAt < CiFailureWatcherAcquirer.AUTH_WARN_INTERVAL_MS
+    ) {
+      return;
+    }
+    this.lastAuthWarnAt = now;
+    console.warn(
+      `⚠️  [${this.name}] GitHub rejected the credential while polling ${repo}#${prNumber}: ` +
+        `${error.message} The token is missing CI read permission; grant Actions: Read and ` +
+        "Commit statuses: Read to GITHUB_TOKEN. CI fixes will be attempted once reads succeed; " +
+        "polling continues. See docs/code/worker.md#ci-failures-on-the-agents-prs.",
+    );
+  }
+
+  /** Announce recovery once after an auth-failure episode and rearm the throttle. */
+  private noteAuthRecovery(): void {
+    if (!this.authFailureActive) return;
+    this.authFailureActive = false;
+    this.lastAuthWarnAt = null;
+    console.log(`✅ [${this.name}] GitHub credential accepted again; CI polling recovered`);
   }
 
   /** Promptly reconcile one watched change after an authenticated provider hint. */

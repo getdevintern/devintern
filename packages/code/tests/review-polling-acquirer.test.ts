@@ -1125,6 +1125,46 @@ describe("ReviewPollingAcquirer", () => {
     }
   });
 
+  test("403 permission denials are throttled like rejected credentials", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 1 });
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 2 });
+
+    const forbidden = new Error(
+      "GitHub API error (403): Resource not accessible by personal access token",
+    );
+    let warns = 0;
+    const originalWarn = console.warn;
+    console.warn = () => {
+      warns += 1;
+    };
+    try {
+      const acquirer = new ReviewPollingAcquirer({
+        intervalSeconds: 60,
+        workerState,
+        queue,
+        github: {
+          async fetchPr() {
+            throw forbidden;
+          },
+          async fetchReviews() {
+            throw new Error("must not be reached");
+          },
+          async fetchReviewCommentsSince() {
+            throw new Error("must not be reached");
+          },
+        },
+        addressPr: async () => true,
+      });
+
+      // Both PRs hit the same permanent permission failure, but only the
+      // first triggers a warning this hour.
+      await acquirer.tick();
+      expect(warns).toBe(1);
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
+
   test("non-auth polling failures warn per PR as before", async () => {
     workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 1 });
     workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 2 });

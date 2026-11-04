@@ -129,21 +129,36 @@ export function isGitHubNotFound(error: unknown): boolean {
 }
 
 /**
- * Whether an error thrown by a GitHub API client call is an HTTP 401
- * (`Bad credentials`) or a missing-credential failure: the credential is
- * expired, revoked, or rejected. Unlike 5xx/429 responses this is not
- * transient — every request with the same credential fails identically, so
- * long-running callers treat it as a configuration problem (renew
- * `GITHUB_TOKEN`) instead of re-reporting it as a per-tick failure forever.
+ * Whether an error thrown by a GitHub API client call is a credential failure:
+ * an HTTP 401 (`Bad credentials`), a missing-credential failure, or a 403
+ * permission denial (`Resource not accessible by personal access token`). The
+ * credential is expired, revoked, rejected, or under-scoped. Unlike 5xx/429
+ * responses this is not transient — every request with the same credential
+ * fails identically, so long-running callers treat it as a configuration
+ * problem (renew `GITHUB_TOKEN` or grant the missing permission) instead of
+ * re-reporting it as a per-tick failure forever.
+ *
+ * 404 remains false because callers cannot distinguish a deleted resource from
+ * one this credential cannot see. 403 rate-limit and abuse-detection responses
+ * also remain false: they are transient and must keep their normal retry
+ * handling.
  *
  * @param error - Error thrown by `apiRequest` / `conditionalGet`
  */
 export function isGitHubAuthError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return (
+  if (
     message.includes("GitHub API error (401)") ||
     message.includes("No GitHub authentication configured")
-  );
+  ) {
+    return true;
+  }
+  if (!message.includes("GitHub API error (403)")) {
+    return false;
+  }
+  const lower = message.toLowerCase();
+  const rateLimited = lower.includes("rate limit") || lower.includes("abuse detection");
+  return !rateLimited;
 }
 
 /** Build an API error message; 401s get actionable credential guidance. */

@@ -542,6 +542,8 @@ Pending, failing, and not-yet-reported CI is checked at the configured workspace
 
 Relay-backed workspaces perform these API calls with the local `GITHUB_TOKEN`. A fine-grained token—or the customer-owned App used by a no-relay worker—needs **Actions: Read** and **Commit statuses: Read** in addition to the normal PR and contents permissions. Existing App installations must be re-approved after adding permissions. No extra webhook event subscription is required because CI is polled. GitHub does not currently expose its separate Checks permission for fine-grained PATs, so check-run-only CI providers are not watched unless they also publish a commit status; GitHub Actions is fully supported through the Actions API.
 
+If the token is missing either permission, the watcher logs one actionable warning per hour — naming the affected PR and both required permissions — instead of repeating the same failure on every poll. Polling continues, and CI auto-fix resumes automatically once the token can read CI again (the watcher logs a single recovery line).
+
 ## Mention the bot on any PR
 
 The worker also reacts to mentions on pull requests it did not create. When a teammate writes a comment like `@devintern address the review feedback` on any PR in the repository, the worker picks it up on the next poll and handles it through the same pipeline. Detection is a repository-wide sweep of new comments (two requests per interval, regardless of how many PRs are open), so mentions work without any webhook setup.
