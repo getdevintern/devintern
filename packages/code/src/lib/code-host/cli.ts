@@ -29,7 +29,6 @@ function printWebhookServeHelp(): void {
   console.log("  At least one provider webhook secret is required.");
   console.log("  WEBHOOK_PORT        Port to listen on (default: 3000)");
   console.log("  WEBHOOK_HOST        Host to bind to (default: 0.0.0.0)");
-  console.log("  WEBHOOK_AUTO_REPLY  Set to 'true' to automatically reply to review comments");
   console.log("  WEBHOOK_VALIDATE_IP Set to 'true' to only accept requests from GitHub IPs");
   console.log("  WEBHOOK_DEBUG       Set to 'true' for verbose logging");
 }
