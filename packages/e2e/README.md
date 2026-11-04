@@ -149,6 +149,47 @@ Set `E2E_HARNESS_PROBE_TIMEOUT_MS` to tune the per-harness timeout (default
 `10000`). These checks do not run full agent tasks; the deterministic fake agent
 continues to cover the implementation, git, and pull-request lifecycle.
 
+## Worker harness failover (usage limit)
+
+The default local suite drives the real `devintern worker` daemon through the
+failover state machine with a two-entry `AGENT_HARNESS=claude-code,codex` chain
+whose harness CLIs are local stubs under the fixture root
+(`tests/local/worker-harness-failover.test.ts`). No agent CLI, account, model
+call, or network access is used.
+
+The primary stub (pinned with `CLAUDE_CODE_CLI_PATH`) only prints a recognized
+limit pair — `Claude usage limit reached` plus the adjacent `resets in 1 hour`
+hint — and exits non-zero; it never edits the repository. The fallback stub
+(pinned with `CODEX_CLI_PATH`) `exec`s the deterministic `helpers/fake-agent.ts`
+with the original argv, so it performs the canonical implementation edit. The
+test clears the fixture's global `AGENT_CLI_PATH`: env-driven harness
+resolution prefers it over every `<HARNESS>_CLI_PATH`, so leaving it set would
+send the codex retry back to the primary.
+
+The covered path asserts the row settles `done` with a `deferred` attempt
+recorded for the limited primary and exactly one `succeeded` attempt for the
+fallback; that the primary stub ran exactly once (no post-limit retry); that the
+pushed branch contains `export const greeting = "Hello, world!";` and differs
+from the base only in `src/greeting.ts`; that the fallback reached
+`E2E_AGENT_INVOCATIONS`; that the worker logs name the
+`claude-code → codex` failover instead of a generic failure; and that
+`webhook_meta` persists a future `rate_limit:claude-code` window with
+`failover:active_harness=codex`. A usage limit lands after `prepare-branch`
+created the unsuffixed feature ref (nothing was pushed), so the retried attempt
+records and pushes `feature/<task-key>-attempt-2`, matching the documented
+fresh-attempt naming. The second scenario makes both stubs limit and asserts the
+row is requeued `pending` with two `deferred` runs, no branch on the bare
+remote, both persisted windows, and a worker that stays alive.
+
+Failback after the primary's reset window elapses is not covered: the stub
+windows are one hour, and the process-scoped resume timer is out of scope for
+this offline suite.
+
+```sh
+bun run --filter @getdevintern/code build
+bun run --filter @devintern/e2e test
+```
+
 ## Sandbox checks (nono, native, docker, removed providers)
 
 The ordinary local suite exercises sandbox provider selection and the

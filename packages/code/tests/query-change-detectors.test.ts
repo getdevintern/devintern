@@ -6,6 +6,7 @@ import {
   createGitHubChangeDetector,
   createJiraChangeDetector,
   createLinearChangeDetector,
+  DELTA_LOOKBACK_MS,
 } from "../src/lib/acquirers/change-detector";
 
 function stubSearch(taskCount: number) {
@@ -65,7 +66,7 @@ describe("query-based change detectors", () => {
     const since = Date.now() - 60_000;
     await detector.changesSince(String(since));
     const filter = JSON.parse(queries[0]!);
-    expect(filter.updatedAt.gt).toBe(new Date(since).toISOString());
+    expect(filter.updatedAt.gt).toBe(new Date(since - DELTA_LOOKBACK_MS).toISOString());
   });
 
   test("github uses the updated:>= search qualifier without milliseconds", async () => {
@@ -74,7 +75,23 @@ describe("query-based change detectors", () => {
 
     const since = Date.parse("2026-07-03T10:00:00.123Z");
     await detector.changesSince(String(since));
-    expect(queries[0]).toBe("updated:>=2026-07-03T10:00:00Z");
+    expect(queries[0]).toBe(
+      `updated:>=${new Date(since - DELTA_LOOKBACK_MS).toISOString().replace(/\.\d{3}Z$/, "Z")}`,
+    );
+  });
+
+  test("delta queries overlap the cursor so a late-indexed change is not lost", async () => {
+    // Tracker search indexes can publish a change after the tick that first
+    // queried for it. If the next window starts exactly at the previous
+    // detection time, that change is invisible forever.
+    const { queries, searchTasks } = stubSearch(0);
+    const detector = createGitHubChangeDetector(searchTasks);
+
+    const since = Date.parse("2026-11-04T09:00:49.000Z");
+    const result = await detector.changesSince(String(since));
+
+    expect(queries[0]).toBe("updated:>=2026-11-04T08:55:49Z");
+    expect(Number(result.nextCursor)).toBeGreaterThan(since);
   });
 
   test("azure devops uses a day-precision WIQL window", async () => {

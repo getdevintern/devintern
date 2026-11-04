@@ -102,11 +102,26 @@ export interface ChangeDetectorOptions {
 }
 
 /**
+ * Extra look-back applied to the persisted cursor before building a delta
+ * query.
+ *
+ * Tracker search indexes update asynchronously: GitHub issue search, for
+ * example, can lag a minute or more behind the REST API. A task created or
+ * edited shortly before a tick may not be visible to that tick's delta query,
+ * and because the next window starts at the previous detection time, the
+ * change would be lost permanently. Looking back re-detects it; the acquirer's
+ * `(key, updated)` dedupe keeps the extra window from running a task twice.
+ * The same overlap absorbs cursor clock skew ahead of the tracker clock.
+ */
+export const DELTA_LOOKBACK_MS = 5 * 60_000;
+
+/**
  * Build a detector that runs one cheap tracker query per tick asking "did
  * anything change since the cursor?". The cursor is the detection start time
- * (epoch ms); the query window always overlaps the previous one, and the
- * acquirer's `(key, updated)` dedupe absorbs re-detections, so clock skew or
- * a crash mid-tick can delay work but never drop it.
+ * (epoch ms); the query window overlaps the previous one by
+ * {@link DELTA_LOOKBACK_MS}, and the acquirer's `(key, updated)` dedupe absorbs
+ * re-detections, so index lag, clock skew, or a crash mid-tick can delay work
+ * but never drop it.
  *
  * @param source - Cursor source key (tracker name)
  * @param searchTasks - The tracker's `searchTasks`
@@ -131,7 +146,9 @@ function createQueryChangeDetector(
         return { changed: true, nextCursor: String(now) };
       }
 
-      const { tasks } = await searchTasks(buildDeltaQuery(since));
+      // Never step past an update the tracker index had not published yet:
+      // re-query an overlapping window instead of exactly `since`.
+      const { tasks } = await searchTasks(buildDeltaQuery(since - DELTA_LOOKBACK_MS));
       return { changed: tasks.length > 0, nextCursor: String(now) };
     },
   };
