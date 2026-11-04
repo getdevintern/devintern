@@ -28,6 +28,7 @@ import { checkedCommand } from "./process";
 
 const packageRoot = resolve(import.meta.dir, "..");
 const fixture = join(packageRoot, "fixtures/simple-project");
+const runNowFileName = ".run-now";
 
 /** One row from the worker's durable injected-task queue. */
 export interface WorkerInjectedTask {
@@ -92,6 +93,15 @@ export interface WorkerFixtureOptions {
   maxConcurrency?: number;
   /** Per-repository agent concurrency; defaults to one. */
   maxConcurrencyPerRepo?: number;
+  /**
+   * Extra TOML inserted immediately after the default `[defaults]` table and
+   * before `[[repos]]`. Bare keys therefore extend `[defaults]` (for example
+   * `task_query = "status=todo"`); start a table header to add a section such
+   * as `[worker.schedule]`. Existing tests are unaffected when it is omitted.
+   */
+  workspaceTomlExtra?: string;
+  /** Extra environment variables for the daemon and every built-CLI invocation. */
+  env?: Record<string, string>;
 }
 
 /** Log captured from the worker subprocess, for readiness and failure reports. */
@@ -135,6 +145,7 @@ export class WorkerFixture {
       AGENT_HARNESS: "claude-code",
       AGENT_SANDBOX: "none",
     });
+    Object.assign(this.env, options.env);
   }
 
   /** Shared workspace database (`<workspace>/state/queue.db`). */
@@ -164,6 +175,11 @@ export class WorkerFixture {
       .map((line) => JSON.parse(line) as { mode: string });
   }
 
+  /** Sentinel path a running daemon consumes for one manual drain. */
+  get runNowPath(): string {
+    return join(this.workspaceDir, runNowFileName);
+  }
+
   /**
    * Whether the daemon process is still running.
    *
@@ -182,6 +198,8 @@ export class WorkerFixture {
    * error monitor. That is valid only while an injected task is pending, so
    * enqueue work before {@link start}: the worker then takes the documented
    * injection-only exception instead of exiting for lack of configured work.
+   * Pass {@link WorkerFixtureOptions.workspaceTomlExtra} to opt into a task
+   * query or other startup-only sections without changing that default.
    */
   async prepare(): Promise<void> {
     const agent = join(this.root, "agent.ts");
@@ -191,6 +209,7 @@ export class WorkerFixture {
     this.env.E2E_AGENT_INVOCATIONS = join(this.root, "agent-invocations.jsonl");
 
     mkdirSync(this.workspaceDir, { recursive: true });
+    const extraToml = this.options.workspaceTomlExtra?.trim();
     writeFileSync(
       join(this.workspaceDir, "workspace.toml"),
       [
@@ -205,6 +224,9 @@ export class WorkerFixture {
         "[defaults]",
         'tracker = "markdown"',
         'worker_task_args = "--create-pr --skip-clarity-check --skip-comments"',
+        // Bare keys in the extra block continue `[defaults]`; a table header
+        // starts a new section. Omitted, the file is byte-identical to before.
+        ...(extraToml ? ["", ...extraToml.split("\n")] : []),
         "",
         "[[repos]]",
         `name = "${this.repoName}"`,
@@ -263,16 +285,16 @@ export class WorkerFixture {
   }
 
   /**
-   * Run the built CLI's `worker add` with arbitrary options.
+   * Run the built CLI with arbitrary arguments in the fixture environment.
    *
    * The default cwd is the fixture workspace; `stdin` is piped so
    * `--body-file -` can be exercised without a shell.
    */
-  async runAdd(
+  async runCli(
     args: string[],
     options: { stdin?: string; cwd?: string; env?: Record<string, string> } = {},
   ): Promise<WorkerAddResult> {
-    const child = Bun.spawn([process.execPath, cliPath, "worker", "add", ...args], {
+    const child = Bun.spawn([process.execPath, cliPath, ...args], {
       cwd: options.cwd ?? this.workspaceDir,
       env: { ...this.env, ...options.env },
       stdin: options.stdin === undefined ? "ignore" : "pipe",
@@ -281,7 +303,7 @@ export class WorkerFixture {
     });
     if (options.stdin !== undefined) {
       const stdin = child.stdin;
-      if (!stdin) throw new Error("worker add stdin pipe was not created");
+      if (!stdin) throw new Error("worker CLI stdin pipe was not created");
       stdin.write(options.stdin);
       await stdin.end();
     }
@@ -291,6 +313,22 @@ export class WorkerFixture {
       child.exited,
     ]);
     return { exitCode, stdout, stderr };
+  }
+
+  /** Run the built CLI's `worker add` with arbitrary options. */
+  runAdd(
+    args: string[],
+    options: { stdin?: string; cwd?: string; env?: Record<string, string> } = {},
+  ): Promise<WorkerAddResult> {
+    return this.runCli(["worker", "add", ...args], options);
+  }
+
+  /** Run the built CLI's `worker run-now` with arbitrary options. */
+  runRunNow(
+    args: string[],
+    options: { cwd?: string; env?: Record<string, string> } = {},
+  ): Promise<WorkerAddResult> {
+    return this.runCli(["worker", "run-now", ...args], options);
   }
 
   /** Enqueue one task through the built CLI and return its durable row. */

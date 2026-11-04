@@ -98,6 +98,33 @@ tracker or hosted code host is involved. Enqueue-only cases cover `--title`,
 `--resume`, asserting the pushed branch/commit directly on the bare remote rather
 than a pull request.
 
+## Working windows and `worker run-now`
+
+`tests/local/worker-working-windows.test.ts` runs the real daemon against a
+temporary Markdown task directory whose ready task matches
+`task_query = "status=todo"`. Its `[worker.schedule]` declares `UTC` active
+windows that exclude the current minute (with `catch_up_missed = false`), so the
+test first proves the task is not picked up across two poll intervals, then runs
+the built CLI's `devintern worker run-now --workspace <workspace.toml>` and waits
+for that one drain. It asserts the pushed `feature/<key>` branch and exact
+`src/greeting.ts` diff, that the daemon removed the `.run-now` marker, and that
+the completed (Done and actioned) task does not get a second run. A small
+negative check proves `run-now` against a directory without `workspace.toml`
+exits non-zero and writes no marker.
+
+`WorkerFixture` accepts `workspaceTomlExtra` for this scenario: the text is
+inserted after the default `[defaults]` table and before `[[repos]]`, so bare
+keys extend `[defaults]` while a table header starts a new section. Its `env`
+option adds environment values for the daemon and CLI invocations; this scenario
+uses it for the deterministic agent marker, then points `MARKDOWN_TASKS_DIR` at
+a directory under the fixture root before starting the daemon. Omitting both
+keeps the previous workspace and environment unchanged.
+
+```sh
+bun run --filter @getdevintern/code build
+bun run --filter @devintern/e2e test
+```
+
 ## Agent harness invocation checks
 
 The ordinary local suite also probes every registered agent harness whose CLI is
