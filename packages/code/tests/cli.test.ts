@@ -143,6 +143,7 @@ describe.concurrent("CLI Argument Handling", () => {
     const result = await runCLI(["webhook", "serve", "--help"]);
     expect(result.stdout).toContain("Usage: devintern webhook serve [options]");
     expect(result.stdout).toContain("--port <port>");
+    expect(result.stdout).not.toContain("WEBHOOK_AUTO_REPLY");
     expect(result.stderr).not.toContain("deprecated");
     expect(result.exitCode).toBe(0);
   });
