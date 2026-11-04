@@ -49,6 +49,15 @@ export interface SandboxPolicy {
    * need it to address the agent by name inside the guest.
    */
   harnessName?: string;
+  /**
+   * Environment the child will actually be spawned with, before any
+   * {@link WrappedCommand.env} overlay. Providers that adapt the child env
+   * (e.g. nono redirects `BUN_INSTALL`) must decide against this, not against
+   * the CLI process's own `process.env`: a caller (or a project env file) can
+   * supply a different value in `spawnOptions.env`. Callers that omit it are
+   * assumed to spawn with `process.env`.
+   */
+  env?: NodeJS.ProcessEnv;
 }
 
 /** The rewritten invocation returned by {@link SandboxProvider.wrapCommand}. */
