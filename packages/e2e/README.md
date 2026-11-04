@@ -98,6 +98,37 @@ tracker or hosted code host is involved. Enqueue-only cases cover `--title`,
 `--resume`, asserting the pushed branch/commit directly on the bare remote rather
 than a pull request.
 
+## Worker concurrency limits
+
+`tests/local/worker-concurrency.test.ts` proves the workspace's global and
+per-repository agent caps against the real worker daemon and the deterministic
+agent, entirely offline. `WorkerFixture` accepts `maxConcurrency` and
+`maxConcurrencyPerRepo` and writes them into `[workspace.execution]`, so no
+production code is changed to exercise the caps.
+
+The fixture's deterministic agent records an optional JSONL timeline when
+`E2E_AGENT_TIMELINE` is set (the worker fixture sets it under its temporary
+root): one `{ mode, event: "start", at }` line when the run begins and one
+`{ mode, event: "end", at }` line when the process exits. Tests derive peak
+overlap by sorting those events; the existing `E2E_AGENT_INVOCATIONS` format is
+unchanged. Run it with the default local suite:
+
+```sh
+bun run --filter @getdevintern/code build
+bun run --filter @devintern/e2e test
+```
+
+Two scenarios enqueue injected tasks before startup. The global-cap scenario
+seeds **two** fixture repos with two tasks each and sets `max_concurrency = 2`,
+`max_concurrency_per_repo = 2`: the per-repo cap alone would admit all four, so
+the observed peak agent overlap of exactly two can only come from the global
+cap (a missing global cap would show four, and accidental serialization one).
+The per-repo scenario sets `max_concurrency = 3` and
+`max_concurrency_per_repo = 1`, so three tasks in the single fixture repo run
+one at a time even though the global cap allows more. Both scenarios assert
+every run succeeded, pushed the canonical greeting edit, left no task
+worktrees, and kept the daemon running.
+
 ## Agent harness invocation checks
 
 The ordinary local suite also probes every registered agent harness whose CLI is
