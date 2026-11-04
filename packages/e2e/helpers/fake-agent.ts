@@ -13,7 +13,9 @@ const mode =
       ? "ci"
       : agentInput.includes("E2E_REVIEW_GREETING")
         ? "review"
-        : "implement");
+        : agentInput.includes("E2E_NO_CHANGE")
+          ? "no-change"
+          : "implement");
 if (process.env.E2E_AGENT_INVOCATIONS) {
   appendFileSync(process.env.E2E_AGENT_INVOCATIONS, JSON.stringify({ mode }) + "\n");
 }
