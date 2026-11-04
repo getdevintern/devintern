@@ -31,6 +31,52 @@ export interface EstimationResult {
   summary: string;
 }
 
+/** Outcome of one estimation attempt. */
+export interface EstimationOutcome {
+  result: EstimationResult;
+  /** True when the tracker field and/or estimation comment was written. */
+  wroteTracker: boolean;
+  /** True when a story-points field was resolved (configured or discovered). */
+  fieldAttempted: boolean;
+  /** True when the story-points field was written successfully. */
+  wroteField: boolean;
+  /** True when the estimation comment was posted or updated successfully. */
+  wroteComment: boolean;
+  /**
+   * Whether the caller may record a settled re-estimation baseline. False when
+   * the tracker was only partially updated, in either direction: the field
+   * write succeeded but an existing estimation comment failed to update, or a
+   * resolved field write failed while the comment succeeded. Settling either
+   * way would leave the stale half unretried on the next sweep.
+   */
+  canSettleBaseline: boolean;
+}
+
+/** Classification of one estimation attempt for batch accounting. */
+export type EstimationAttempt =
+  | { ok: true; outcome: EstimationOutcome }
+  | { ok: false; error: string; outcome: EstimationOutcome | null };
+
+/**
+ * Classify an estimation attempt for the batch summary and run record.
+ *
+ * A parsed result that wrote nothing to the tracker is a failed attempt, not a
+ * success: nothing recorded the estimate, and reporting success would hide a
+ * persistent misconfiguration behind exit code 0 while every later sweep
+ * re-invokes the agent.
+ *
+ * @param outcome - Outcome from {@link runEstimation}, or null when parsing failed
+ */
+export function classifyEstimationAttempt(outcome: EstimationOutcome | null): EstimationAttempt {
+  if (!outcome) {
+    return { ok: false, error: "Failed to parse estimation response", outcome };
+  }
+  if (!outcome.wroteTracker) {
+    return { ok: false, error: "Estimation wrote nothing to the tracker", outcome };
+  }
+  return { ok: true, outcome };
+}
+
 export interface RunEstimationOptions {
   estimationFile: string;
   harness: AgentHarness;
@@ -46,11 +92,14 @@ export interface RunEstimationOptions {
 /**
  * Run the agent to estimate story points and update the task tracker (field + comment).
  *
+ * Resolves with whether the tracker was actually written so the caller only
+ * records a re-estimation baseline for successful writes.
+ *
  * @param options - Estimation inputs
  */
 export async function runEstimation(
   options: RunEstimationOptions,
-): Promise<EstimationResult | null> {
+): Promise<EstimationOutcome | null> {
   const {
     estimationFile,
     harness,
@@ -221,11 +270,15 @@ export async function runEstimation(
             console.log(`📊 Using configured story points field: ${configuredField}`);
           }
           const fieldId = configuredField || (await tracker.discoverEstimationField(taskKey));
+          const fieldAttempted = Boolean(fieldId);
+          let wroteField = false;
+          let wroteComment = false;
 
           // Update story points
           if (fieldId) {
             try {
               await tracker.updateEstimation(taskKey, fieldId, result.storyPoints);
+              wroteField = true;
             } catch (updateError) {
               console.warn(`⚠️  Failed to set story points field: ${updateError}`);
             }
@@ -244,6 +297,7 @@ export async function runEstimation(
               } else {
                 await tracker.postEstimationComment(taskKey, result);
               }
+              wroteComment = true;
             } catch (commentError) {
               console.warn(
                 `⚠️  Failed to ${existingCommentId ? "update" : "post"} estimation comment: ${commentError}`,
@@ -252,6 +306,16 @@ export async function runEstimation(
           } else {
             console.log("⏭️  Skipping estimation comment (--skip-comments)");
           }
+
+          const wroteTracker = wroteField || wroteComment;
+          // A stale comment must not be trusted as the baseline: `needsEstimation`
+          // compares the comment timestamp with the durable state, so recording
+          // the post-field-write state would hide the failed comment update. The
+          // same applies in reverse: a comment-only success must not settle the
+          // baseline when the resolved field write failed, or the stale/missing
+          // field would never be retried.
+          const canSettleBaseline =
+            (!fieldAttempted || wroteField) && (skipComments || wroteComment);
 
           // Save estimation result to task directory
           try {
@@ -265,7 +329,14 @@ export async function runEstimation(
             console.warn(`⚠️  Failed to save estimation result: ${saveError}`);
           }
 
-          resolve(result);
+          resolve({
+            result,
+            wroteTracker,
+            fieldAttempted,
+            wroteField,
+            wroteComment,
+            canSettleBaseline,
+          });
         } catch (parseError) {
           // See runClarityCheck: let the fallback retry read-only failures in
           // default mode instead of counting the task as failed.

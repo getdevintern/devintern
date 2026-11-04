@@ -322,10 +322,10 @@ absent, like the other local Git tests.
 
 The fake binds `127.0.0.1:0`, accepts any Basic-auth credentials (and never logs
 them), and implements only the endpoints the product calls: `/myself`, enhanced
-JQL `search/jql`, issue read/update, comments (ADF and text), and workflow
-transitions. Any unmatched request returns a diagnostic 404 and fails the test,
-so a client change that starts calling a new route is visible instead of
-silently returning `{}`.
+JQL `search/jql`, issue read/update (including custom fields), comments (ADF and
+text, create and update), and workflow transitions. Any unmatched request
+returns a diagnostic 404 and fails the test, so a client change that starts
+calling a new route is visible instead of silently returning `{}`.
 
 Two scenarios run the production Jira client through explicit-key and `--query`
 selection against a seeded issue and a decoy outside the selector. Read-back
@@ -336,6 +336,18 @@ delivery of the seeded description/comment markers to the deterministic agent.
 A second run with `--skip-comments` proves no additional comment or transition
 is posted. The local bare Git remote is the code host; no GitHub token or PR is
 required.
+
+`tests/local/tracker-jira-estimation.test.ts` covers the `--estimate` workflow
+against the same fake. Project settings configure `storyPointsField:
+"customfield_10016"` explicitly so discovery drift is not conflated with the
+write path. The deterministic agent detects the bundled estimation prompt and
+returns a Fibonacci value; the test reads the custom field, the single
+estimation comment (create, then in-place update whose body carries the new
+value), and `estimation-result.json` back from durable state. It also exercises
+the <24h skip, the already-estimated-and-unchanged skip, and `--skip-comments`
+field-only behavior with a repeated sweep proving it does not re-estimate.
+Estimation runs are read-only: no branch, commit, or push reaches the local
+bare remote. No extra prerequisites or credentials are needed.
 
 ## Remote tracker fixtures
 

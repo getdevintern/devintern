@@ -115,8 +115,19 @@ export interface TaskTrackerClient {
   // Estimation (optional — trackers without estimation fields can no-op or throw)
   // ------------------------------------------------------------------
 
-  /** Find a previously-posted automated estimation comment. */
-  findEstimationComment(taskKey: string): Promise<{ commentId: string; created: string } | null>;
+  /**
+   * Find a previously-posted automated estimation comment.
+   *
+   * `updated` is the comment's last-modified timestamp (falling back to its
+   * creation timestamp when the tracker exposes no edit time). The
+   * re-estimation gate prefers the durable baseline in lib/state/estimation-state.ts
+   * and uses this value only as a fallback for tasks estimated before that
+   * state existed, because the estimation's own field and comment writes must
+   * not schedule another estimation.
+   */
+  findEstimationComment(
+    taskKey: string,
+  ): Promise<{ commentId: string; created: string; updated: string } | null>;
 
   /**
    * Discover the editable estimation field for a task.

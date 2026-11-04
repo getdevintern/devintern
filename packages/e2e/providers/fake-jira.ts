@@ -41,6 +41,8 @@ interface FakeJiraIssue {
   status: string;
   labels: string[];
   comments: FakeJiraComment[];
+  /** Custom fields written through `PUT /rest/api/3/issue/{key}`. */
+  fields: Record<string, unknown>;
   created: string;
   updated: string;
 }
@@ -210,6 +212,7 @@ export class FakeJiraTracker implements TrackerFixture {
       status: this.statuses.todo,
       labels: [...(input.labels ?? [])],
       comments: [],
+      fields: {},
       created: timestamp,
       updated: timestamp,
     };
@@ -266,6 +269,32 @@ export class FakeJiraTracker implements TrackerFixture {
     return this.requireIssue(ticketKey).status;
   }
 
+  /**
+   * Move the deterministic fake clock so a ticket can be created "now" for the
+   * estimation <24h skip. Later timestamped writes continue from this instant.
+   *
+   * @param epochMs - Epoch milliseconds to use as the server's current time
+   */
+  setNow(epochMs: number): void {
+    if (!Number.isFinite(epochMs)) throw new Error(`Invalid fake Jira clock: ${epochMs}`);
+    this.now = epochMs;
+  }
+
+  /** Read one persisted custom field, or `undefined` when it was never written. */
+  getField(ticketKey: string, fieldId: string): unknown {
+    return this.requireIssue(ticketKey).fields[fieldId];
+  }
+
+  /**
+   * Story points written to the convention field used by the estimation test.
+   *
+   * @param ticketKey - Issue key
+   * @param fieldId - Jira custom field id (default `customfield_10016`)
+   */
+  getStoryPoints(ticketKey: string, fieldId = "customfield_10016"): unknown {
+    return this.getField(ticketKey, fieldId);
+  }
+
   async listComments(ticketKey: string): Promise<TrackerComment[]> {
     const issue = this.requireIssue(ticketKey);
     return issue.comments.map((comment) => ({ id: comment.id, body: adfToText(comment.body) }));
@@ -320,6 +349,11 @@ export class FakeJiraTracker implements TrackerFixture {
     }
     if (commentMatch?.[1] && method === "POST") {
       return this.postComment(commentMatch[1], request);
+    }
+
+    const commentUpdateMatch = path.match(/^\/rest\/api\/3\/issue\/([^/]+)\/comment\/([^/]+)$/);
+    if (commentUpdateMatch?.[1] && commentUpdateMatch[2] && method === "PUT") {
+      return this.updateComment(commentUpdateMatch[1], commentUpdateMatch[2], request);
     }
 
     const transitionMatch = path.match(/^\/rest\/api\/3\/issue\/([^/]+)\/transitions$/);
@@ -381,6 +415,12 @@ export class FakeJiraTracker implements TrackerFixture {
     if (fields?.description && typeof fields.description === "object") {
       issue.description = fields.description as AdfNode;
     }
+    // Persist every other field verbatim (notably story-point custom fields) so
+    // a test can read back the value the CLI actually wrote.
+    for (const [fieldId, value] of Object.entries(fields ?? {})) {
+      if (fieldId === "labels" || fieldId === "summary" || fieldId === "description") continue;
+      issue.fields[fieldId] = value;
+    }
     issue.updated = this.timestamp();
     return new Response(null, { status: 204 });
   }
@@ -421,6 +461,29 @@ export class FakeJiraTracker implements TrackerFixture {
     return json(this.commentPayload(comment), 201);
   }
 
+  private async updateComment(key: string, commentId: string, request: Request): Promise<Response> {
+    const issue = this.issues.get(key.toUpperCase());
+    if (!issue) return notFound(key);
+    const comment = issue.comments.find((candidate) => candidate.id === commentId);
+    if (!comment) {
+      return json({ errorMessages: [`Fake Jira comment not found: ${commentId}`] }, 404);
+    }
+    const body = await readJson(request);
+    if (!body.ok) return body.response;
+    const container = asRecord(body.value);
+    const rawBody = container?.body;
+    const adf =
+      rawBody && typeof rawBody === "object"
+        ? (rawBody as AdfNode)
+        : textToAdf(typeof rawBody === "string" ? rawBody : "");
+    const timestamp = this.timestamp();
+    comment.body = adf;
+    comment.renderedBody = adfToHtml(adf);
+    comment.updated = timestamp;
+    issue.updated = timestamp;
+    return json(this.commentPayload(comment));
+  }
+
   private getTransitions(key: string): Response {
     const issue = this.issues.get(key.toUpperCase());
     if (!issue) return notFound(key);
@@ -459,6 +522,7 @@ export class FakeJiraTracker implements TrackerFixture {
       key: issue.key,
       self: `${this.baseUrl}/rest/api/3/issue/${issue.key}`,
       fields: {
+        ...issue.fields,
         summary: issue.summary,
         description: issue.description,
         issuetype: { id: "10001", name: "Task", subtask: false },
