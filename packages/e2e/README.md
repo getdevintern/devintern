@@ -108,8 +108,13 @@ queue database and the bare remote instead of parsing CLI stdout. The matrix
 covers:
 
 - `open_pr = true`: the run is `scheduled`, records a branch, and the branch on
-  the bare remote changes exactly `src/greeting.ts` in one commit.
-- `open_pr = false`: the agent still runs, but the per-automation policy
+  the bare remote changes exactly `src/greeting.ts` in one commit. PR creation
+  itself is not covered here: the bare remote has no detectable code-host
+  platform, so the run succeeds with `pr_url` null and the code-host suites own
+  that path. A second workspace in the same file omits `--create-pr` from its
+  defaults, proving the automation's own `open_pr` opt-in still pushes a branch.
+- `open_pr = false`: the agent still runs (each invocation is attributed to its
+  automation via `DEVINTERN_AUTOMATION_ID`), but the per-automation policy
   (`--no-git`) suppresses the branch and push even though the workspace
   `worker_task_args` include `--create-pr`.
 - `allow_no_changes = true` with an `E2E_NO_CHANGE` prompt: the unchanged run
@@ -124,9 +129,10 @@ covers:
   `workspace.toml`; the live reloader reconciles it and its next occurrence
   records a `scheduled` run.
 
-The test costs up to one cron boundary for the first window plus one more for the
-reloaded automation, with all entries sharing a minute, so allow roughly two
-minutes. Run it with the rest of the default local suite:
+The file costs up to two cron boundaries for the main workspace (the first
+window and the reloaded automation share a minute) plus one more for the opt-in
+fixture, so allow roughly three minutes. Run it with the rest of the default
+local suite:
 
 ```sh
 bun run --filter @getdevintern/code build

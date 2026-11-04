@@ -141,6 +141,13 @@ export interface WorkerFixtureOptions {
   maxConcurrency?: number;
   /** Per-repository agent concurrency; defaults to one. */
   maxConcurrencyPerRepo?: number;
+  /**
+   * `[defaults].worker_task_args` for every task.
+   *
+   * Defaults to `--create-pr --skip-clarity-check --skip-comments`; omitting
+   * `--create-pr` lets a test isolate an automation's own `open_pr` opt-in.
+   */
+  workerTaskArgs?: string;
   /** Scheduled `[[automations]]` entries; the default workspace has none. */
   automations?: WorkerAutomation[];
 }
@@ -205,14 +212,14 @@ export class WorkerFixture {
   }
 
   /** Records written by the deterministic agent, one per invocation. */
-  agentInvocations(): Array<{ mode: string }> {
+  agentInvocations(): Array<{ mode: string; automation?: string }> {
     const path = this.env.E2E_AGENT_INVOCATIONS;
     if (!path || !existsSync(path)) return [];
     return readFileSync(path, "utf8")
       .trim()
       .split("\n")
       .filter(Boolean)
-      .map((line) => JSON.parse(line) as { mode: string });
+      .map((line) => JSON.parse(line) as { mode: string; automation?: string });
   }
 
   /**
@@ -254,7 +261,9 @@ export class WorkerFixture {
       "",
       "[defaults]",
       'tracker = "markdown"',
-      'worker_task_args = "--create-pr --skip-clarity-check --skip-comments"',
+      `worker_task_args = ${JSON.stringify(
+        this.options.workerTaskArgs ?? "--create-pr --skip-clarity-check --skip-comments",
+      )}`,
       "",
       "[[repos]]",
       `name = "${this.repoName}"`,
