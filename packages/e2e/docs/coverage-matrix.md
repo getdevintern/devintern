@@ -5,7 +5,7 @@ partially exercises, and what is still missing. The `e2e-expander` workspace
 automation scouts this file and delegates the highest-value gaps to the worker
 as separate ad-hoc tasks. Each delegated task updates this file in its own PR.
 
-Last reviewed: 2026-11-03.
+Last reviewed: 2026-11-04.
 
 ## Status legend
 
@@ -99,17 +99,17 @@ Run: `bun run --filter @devintern/e2e test` (build the CLI first); the sandbox s
 
 ### Relay, auth, licensing, and observability services
 
-| Behavior                                                                                                               | Status    | Evidence                                                                     | Missing                                                                       |
-| ---------------------------------------------------------------------------------------------------------------------- | --------- | ---------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
-| GitLab relay: delivery, MR-close unwatch, `--disconnect`                                                               | `live`    | `tests/code/gitlab-relay.test.ts`                                            | GitHub relay delivery and tracker webhooks.                                   |
-| `worker connect` targets (`github`, `gitlab`, `linear`, `asana`, `trello`, `azure-devops`, `jira`, `sentry`, `status`) | `gap`     | —                                                                            | Validation, `status`, and non-mutating paths; relay targets stay live/opt-in. |
-| Supabase login/logout/whoami and session refresh                                                                       | `gap`     | —                                                                            | Safe local fake or explicit opt-in account suite.                             |
-| Automation license gate, Worker Pilot trial, offline/expired behavior                                                  | `gap`     | —                                                                            | Tests currently disable the gate.                                             |
-| Sentry error-monitor polling and auto-fix                                                                              | `gap`     | —                                                                            | Fake Sentry API or opt-in project; create one fix run and dedupe.             |
-| Dashboard standalone server/API, run history, retry, run-now                                                           | `gap`     | —                                                                            | Fixture queue DB plus HTTP assertions.                                        |
-| Worker/dashboard logs and artifacts                                                                                    | `partial` | asserted indirectly by worker tests                                          | Direct readback and redaction checks.                                         |
-| Direct webhook server (`webhook serve`) and signature validation                                                       | `default` | `tests/local/webhook-serve.test.ts` (`bun run --filter @devintern/e2e test`) | Live provider callbacks and event-specific pipelines; loopback HTTP only.     |
-| Anonymous telemetry opt-out and update check                                                                           | `gap`     | —                                                                            | Tests disable both; assert no network when disabled.                          |
+| Behavior                                                                                                               | Status    | Evidence                                                                     | Missing                                                                                    |
+| ---------------------------------------------------------------------------------------------------------------------- | --------- | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| GitLab relay: delivery, MR-close unwatch, `--disconnect`                                                               | `live`    | `tests/code/gitlab-relay.test.ts`                                            | GitHub relay delivery and tracker webhooks.                                                |
+| `worker connect` targets (`github`, `gitlab`, `linear`, `asana`, `trello`, `azure-devops`, `jira`, `sentry`, `status`) | `gap`     | —                                                                            | Validation, `status`, and non-mutating paths; relay targets stay live/opt-in.              |
+| Supabase login/logout/whoami and session refresh                                                                       | `gap`     | —                                                                            | Safe local fake or explicit opt-in account suite.                                          |
+| Automation license gate, Worker Pilot trial, offline/expired behavior                                                  | `gap`     | —                                                                            | Tests currently disable the gate.                                                          |
+| Sentry error-monitor polling and auto-fix                                                                              | `default` | `tests/local/worker-sentry-monitor.test.ts`                                  | Live Sentry project; issue status resolution after deployment; multiple concurrent issues. |
+| Dashboard standalone server/API, run history, retry, run-now                                                           | `gap`     | —                                                                            | Fixture queue DB plus HTTP assertions.                                                     |
+| Worker/dashboard logs and artifacts                                                                                    | `partial` | asserted indirectly by worker tests                                          | Direct readback and redaction checks.                                                      |
+| Direct webhook server (`webhook serve`) and signature validation                                                       | `default` | `tests/local/webhook-serve.test.ts` (`bun run --filter @devintern/e2e test`) | Live provider callbacks and event-specific pipelines; loopback HTTP only.                  |
+| Anonymous telemetry opt-out and update check                                                                           | `gap`     | —                                                                            | Tests disable both; assert no network when disabled.                                       |
 
 ## `devintern` command surface
 
@@ -154,7 +154,7 @@ Run: `bun run --filter @devintern/e2e test` (build the CLI first); the sandbox s
 | Harness failover                                                                                        | `default`          | `tests/local/worker-harness-failover.test.ts`                                     | Failback after the reset window and restart-time restore of the persisted chain. |
 | Review polling, CI repair, conflict resolution                                                          | `live`             | GitLab worker suite                                                               | GitHub parity and scheduled/manual modes.                                        |
 | Relay instant events                                                                                    | `live`             | GitLab relay suite                                                                | GitHub relay and tracker webhooks.                                               |
-| Sentry error monitors                                                                                   | `gap`              | —                                                                                 | Fake Sentry API or opt-in project.                                               |
+| Sentry error monitors                                                                                   | `default`          | `tests/local/worker-sentry-monitor.test.ts`                                       | Live Sentry project; issue status resolution after deployment.                   |
 | Dashboard embedded in the worker                                                                        | `gap`              | —                                                                                 | API and run-now/retry.                                                           |
 | Native service install/uninstall                                                                        | `gap`              | —                                                                                 | systemd/launchd path without touching the host service manager.                  |
 | Auto-update                                                                                             | `gap`              | —                                                                                 | Disabled in tests; simulate an available update safely.                          |
@@ -204,7 +204,8 @@ and each task opens its own PR.
     recovery on a deterministic local workspace.
 14. ~~Harness failover with stub harnesses~~ (implemented by
     `tests/local/worker-harness-failover.test.ts`).
-15. Sentry auto-fix with a fake or opt-in project.
+15. ~~Sentry auto-fix with a fake or opt-in project~~ (implemented by
+    `tests/local/worker-sentry-monitor.test.ts`).
 16. Auth/license (`login`, `logout`, `whoami`, trial, expired/offline) with a
     safe fake or explicit account suite.
 17. Linear, Asana, and Azure DevOps read-only checks, then fake lifecycles.
