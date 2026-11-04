@@ -1,5 +1,17 @@
 # @devintern/code Changelog
 
+## [2.22.0] - 2026-11-04
+
+Jira diagnostics release: a failed Jira search now reports why it failed instead of echoing only the JQL, so an expired token, an unreachable host, and a malformed query no longer look identical in the worker log.
+
+### Fixed
+
+- **Jira search failures keep their root cause**: `JiraClient.searchIssues` replaced every failure with `Failed to search issues with JQL: <query>`, so an HTTP status and body (`401 Unauthorized`), a DNS or TLS failure, and a rejected query all produced the same message and left operators with nothing to act on. The message now appends the underlying error text — once, because Jira may echo the JQL back inside its error body — and sets the original error as `cause`, which the worker log and `--verbose` output preserve. The same search path backs the Jira tracker's task polling, so the diagnostic reaches ad-hoc tasks, fleet runs, and automations alike
+
+### Technical
+
+- **Jira search error regression tests**: `packages/task-trackers/jira-client.test.ts` and `packages/code/tests/jira-search.test.ts` cover the HTTP-error, echoed-JQL, empty-message, and network-failure cases, asserting that the query survives exactly once and that `cause` carries the original error
+
 ## [2.21.0] - 2026-11-03
 
 Automation-resilience release: Muse Code joins the supported harnesses, interrupted ad-hoc worker tasks resume after a restart instead of failing, Sentry polling survives upstream outages without wedging the worker, and sandboxed agents can delegate work again. The `srt` and `smolvm` sandbox providers are removed without a deprecation release; see **Upgrade notes** before upgrading.
