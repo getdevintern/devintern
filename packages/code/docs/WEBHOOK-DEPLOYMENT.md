@@ -383,7 +383,6 @@ export GITHUB_APP_PRIVATE_KEY_BASE64="..."
 # Optional
 export WEBHOOK_PORT="3000"        # Default: 3000
 export WEBHOOK_HOST="0.0.0.0"     # Default: 0.0.0.0
-export WEBHOOK_AUTO_REPLY="true"  # Reply to addressed comments
 export WEBHOOK_AUTO_REVIEW="true" # Run self-review loop after addressing feedback
 export AUTO_REVIEW_ITERATIONS="2" # Max review-fix cycles for the self-review loop (default: 2; shared with the CLI)
 ```
@@ -417,7 +416,6 @@ WorkingDirectory=/path/to/your/projects
 Environment=WEBHOOK_SECRET=your-secret
 Environment=GITHUB_APP_ID=123456
 Environment=GITHUB_APP_PRIVATE_KEY_PATH=/path/to/key.pem
-Environment=WEBHOOK_AUTO_REPLY=true
 Environment=WEBHOOK_AUTO_REVIEW=true
 ExecStart=/usr/local/bin/devintern webhook serve --port 3000
 Restart=always

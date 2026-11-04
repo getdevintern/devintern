@@ -69,6 +69,12 @@ const INJECTED_COLUMNS = [
   "finished_at",
 ].join(", ");
 
+/** Prefix of the per-harness usage-limit keys persisted in `webhook_meta`. */
+const RATE_LIMIT_KEY_PREFIX = "rate_limit:";
+
+/** Key of the persisted active harness in `webhook_meta`. */
+const ACTIVE_HARNESS_KEY = "failover:active_harness";
+
 /** One row from the worker's shared run-record table. */
 export interface WorkerRunRecord {
   id: number;
@@ -402,6 +408,43 @@ export class WorkerFixture {
       this.root,
       this.env,
     );
+  }
+
+  /**
+   * Persisted per-harness usage-limit windows (harness → epoch ms) from the
+   * queue's `webhook_meta` table, read through the same read-only pattern as
+   * the other queue queries.
+   *
+   * @param dbPath - Workspace queue database; defaults to this fixture's.
+   */
+  rateLimits(dbPath: string = this.dbPath): Record<string, number> {
+    const rows = this.query<{ key: string; value: string }>(
+      `SELECT key, value FROM webhook_meta WHERE key LIKE '${RATE_LIMIT_KEY_PREFIX}%'`,
+      [],
+      dbPath,
+    );
+    const limits: Record<string, number> = {};
+    for (const row of rows) {
+      const untilMs = Number(row.value);
+      if (Number.isFinite(untilMs)) {
+        limits[row.key.slice(RATE_LIMIT_KEY_PREFIX.length)] = untilMs;
+      }
+    }
+    return limits;
+  }
+
+  /**
+   * Persisted active harness from `webhook_meta`, or undefined before failover
+   * has written one.
+   *
+   * @param dbPath - Workspace queue database; defaults to this fixture's.
+   */
+  activeHarness(dbPath: string = this.dbPath): string | undefined {
+    return this.query<{ value: string }>(
+      "SELECT value FROM webhook_meta WHERE key = ?",
+      [ACTIVE_HARNESS_KEY],
+      dbPath,
+    )[0]?.value;
   }
 
   /** Non-base task worktrees left under the repo's workspace directory. */

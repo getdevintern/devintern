@@ -425,7 +425,6 @@ export GITHUB_TOKEN="ghp_..."
 # Optional
 export WEBHOOK_PORT="3000"        # Default: 3000
 export WEBHOOK_HOST="0.0.0.0"     # Default: 0.0.0.0
-export WEBHOOK_AUTO_REPLY="true"  # Reply to addressed comments
 export WEBHOOK_AUTO_REVIEW="true" # Run self-review loop after addressing feedback
 export AUTO_REVIEW_ITERATIONS="2" # Max review-fix cycles for the self-review loop (default: 2; shared with the CLI)
 export WEBHOOK_MAX_RETRIES="3"    # Retries per failed webhook job
@@ -472,7 +471,6 @@ Environment=PATH=/home/your-user/.local/bin:/home/your-user/.local/share/mise/in
 Environment=LICENSE_KEY=your-automation-license-key
 Environment=WEBHOOK_SECRET=your-secret
 Environment=GITHUB_TOKEN=ghp_...
-Environment=WEBHOOK_AUTO_REPLY=true
 Environment=WEBHOOK_AUTO_REVIEW=true
 ExecStart=/usr/local/bin/devintern webhook serve --port 3000
 Restart=always
