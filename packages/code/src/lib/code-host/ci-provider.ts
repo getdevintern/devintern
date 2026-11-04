@@ -6,7 +6,12 @@ export interface CiConditionalResult<T> {
   gone?: boolean;
 }
 export interface CiChange {
-  state: string;
+  /**
+   * Remote PR state. Optional and untyped on purpose: providers can omit it
+   * or report a value this worker does not recognise, and callers must treat
+   * that as "unknown", never as "not open".
+   */
+  state?: unknown;
   headSha?: string;
   headRepository?: string;
 }

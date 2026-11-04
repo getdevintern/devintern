@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, setSystemTime, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, setSystemTime, spyOn, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -18,6 +18,7 @@ import { WebhookQueue } from "../src/lib/state/webhook-queue";
 import { RunStore } from "../src/lib/state/run-recorder";
 import { WorkerState } from "../src/lib/state/worker-state";
 import type { ConflictResolutionMode } from "../src/lib/workspace/config";
+import { resetUnusableStateWarnings } from "../src/lib/review/agent-pr-reconciler";
 
 describe("ReviewPollingAcquirer", () => {
   let dbPath: string;
@@ -25,6 +26,7 @@ describe("ReviewPollingAcquirer", () => {
   let queue: WebhookQueue;
 
   beforeEach(() => {
+    resetUnusableStateWarnings();
     dbPath = join(tmpdir(), `rp-test-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
     workerState = new WorkerState(dbPath);
     queue = new WebhookQueue({ dbPath });
@@ -246,6 +248,66 @@ describe("ReviewPollingAcquirer", () => {
     await acquirer.tick();
     expect(addressed).toEqual([]);
     expect(workerState.listOpenAgentPrs()).toHaveLength(0);
+  });
+
+  test("an unusable PR state keeps the row watched across ticks and warns once", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 77 });
+    const warnings: string[] = [];
+    const warn = spyOn(console, "warn").mockImplementation((message: unknown) => {
+      warnings.push(String(message));
+    });
+    const addressed: string[] = [];
+    try {
+      const acquirer = new ReviewPollingAcquirer({
+        intervalSeconds: 60,
+        workerState,
+        queue,
+        github: {
+          async fetchPr() {
+            return { data: {}, etag: 'W/"empty"', notModified: false };
+          },
+          async fetchReviews() {
+            return { data: [], etag: 'W/"reviews"', notModified: false };
+          },
+          async fetchReviewCommentsSince() {
+            return [];
+          },
+        },
+        addressPr: async (repo, n) => {
+          addressed.push(`${repo}#${n}`);
+          return true;
+        },
+      });
+
+      await acquirer.tick();
+      await acquirer.tick();
+    } finally {
+      warn.mockRestore();
+    }
+
+    expect(workerState.listOpenAgentPrs().map((pr) => pr.prNumber)).toEqual([77]);
+    expect(workerState.countAgentPrs()).toEqual({ open: 1, closed: 0 });
+    expect(addressed).toEqual([]);
+    expect(warnings.filter((message) => message.includes("unusable PR state"))).toHaveLength(1);
+  });
+
+  test("an unusable PR state defers feedback instead of marking it processed", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const gh: FakeGitHubState = {
+      prState: "draft",
+      reviews: [{ id: 1, state: "changes_requested", user: human }],
+      comments: [],
+    };
+    const { acquirer, addressed } = makeAcquirer(gh);
+
+    await acquirer.tick();
+    expect(addressed).toEqual([]);
+    // The review must stay unprocessed so it is retried once state is usable.
+    expect(queue.hasProcessed("github:reviews", "review:acme/widgets#42:1")).toBe(false);
+
+    gh.prState = "open";
+    await acquirer.tick();
+    expect(addressed).toEqual(["acme/widgets#42"]);
   });
 
   test("stored ETags are sent on subsequent ticks and 304 skips review parsing", async () => {

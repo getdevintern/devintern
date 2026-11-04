@@ -8,6 +8,7 @@ import {
   agentPrStateCursorSource,
   applyAgentPrFetch,
   reconcileOpenAgentPrs,
+  resetUnusableStateWarnings,
 } from "../src/lib/review/agent-pr-reconciler";
 import type { ConditionalResult, PolledPr } from "../src/lib/review/agent-pr-reconciler";
 import { WorkerState } from "../src/lib/state/worker-state";
@@ -17,6 +18,7 @@ describe("agent PR reconciler", () => {
   let workerState: WorkerState;
 
   beforeEach(() => {
+    resetUnusableStateWarnings();
     dbPath = join(tmpdir(), `apr-test-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
     workerState = new WorkerState(dbPath);
   });
@@ -174,17 +176,23 @@ describe("agent PR reconciler", () => {
     expect(workerState.getCursor(agentPrStateCursorSource("acme/widgets", 15))?.etag).toBe('W/"1"');
   });
 
-  test("an unusable PR state keeps the row open and still persists the ETag", () => {
+  test("an unusable PR state keeps the row open and clears the ETag cursor", () => {
     const payloads: { label: string; data: PolledPr; prNumber: number }[] = [
       { label: "missing state", data: {}, prNumber: 20 },
       { label: "undefined state", data: { state: undefined }, prNumber: 21 },
-      { label: "null state", data: { state: null } as unknown as PolledPr, prNumber: 22 },
+      { label: "null state", data: { state: null }, prNumber: 22 },
       { label: "empty state", data: { state: "" }, prNumber: 23 },
       { label: "unknown state", data: { state: "draft" }, prNumber: 24 },
+      { label: "numeric state", data: { state: 42 }, prNumber: 25 },
+      { label: "object state", data: { state: {} }, prNumber: 26 },
+      { label: "boolean state", data: { state: true }, prNumber: 27 },
     ];
 
     payloads.forEach(({ label, data, prNumber }, index) => {
       workerState.recordAgentPr({ repo: "acme/widgets", prNumber });
+      // Simulate a usable response from an earlier tick whose ETag must not
+      // turn the retry into a state-less 304.
+      workerState.setCursor(agentPrStateCursorSource("acme/widgets", prNumber), "state", 'W/"old"');
       const closure = applyAgentPrFetch(
         workerState,
         { repo: "acme/widgets", prNumber },
@@ -198,13 +206,56 @@ describe("agent PR reconciler", () => {
       });
       expect({
         label,
-        etag: workerState.getCursor(agentPrStateCursorSource("acme/widgets", prNumber))?.etag,
-      }).toEqual({ label, etag: 'W/"9"' });
+        cursor: workerState.getCursor(agentPrStateCursorSource("acme/widgets", prNumber)),
+      }).toEqual({ label, cursor: null });
       expect({ label, counts: workerState.countAgentPrs() }).toEqual({
         label,
         counts: { open: index + 1, closed: 0 },
       });
     });
+  });
+
+  test("an unusable response is re-read unconditionally instead of replayed as a 304", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 60 });
+    // Minimal GitHub stand-in: same ETag, but the payload becomes usable
+    // between ticks. Returning 304 whenever the client sends the ETag models
+    // the failure the cursor clearing must prevent.
+    let payload: PolledPr = {};
+    const etag = 'W/"bad"';
+    const sentEtags: (string | undefined)[] = [];
+    let dataFetches = 0;
+    const github = {
+      async fetchPr(_repo: string, _prNumber: number, requestEtag?: string) {
+        sentEtags.push(requestEtag);
+        if (requestEtag === etag) return { data: null, notModified: true };
+        dataFetches += 1;
+        return { data: payload, etag, notModified: false };
+      },
+    };
+
+    const first = await reconcileOpenAgentPrs({
+      workerState,
+      github,
+      watched: workerState.listOpenAgentPrs(),
+    });
+    expect(first.closed).toEqual([]);
+    expect(dataFetches).toBe(1);
+    expect(workerState.getCursor(agentPrStateCursorSource("acme/widgets", 60))).toBeNull();
+
+    // The same ETag now carries a usable state: only an unconditional request
+    // can observe it.
+    payload = { state: "open" };
+    const second = await reconcileOpenAgentPrs({
+      workerState,
+      github,
+      watched: workerState.listOpenAgentPrs(),
+    });
+
+    expect(sentEtags).toEqual([undefined, undefined]);
+    expect(dataFetches).toBe(2);
+    expect(second.closed).toEqual([]);
+    expect(workerState.getCursor(agentPrStateCursorSource("acme/widgets", 60))?.etag).toBe(etag);
+    expect(workerState.listOpenAgentPrs().map((pr) => pr.prNumber)).toEqual([60]);
   });
 
   test("an unusable PR state warns once per PR per process", () => {
@@ -228,6 +279,72 @@ describe("agent PR reconciler", () => {
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain("acme/widgets#30");
     expect(warnings[0]).not.toContain("undefined; unwatching");
+  });
+
+  test("a closed then re-registered PR warns again about an unusable state", () => {
+    const warnings: string[] = [];
+    const warn = spyOn(console, "warn").mockImplementation((message: unknown) => {
+      warnings.push(String(message));
+    });
+    try {
+      workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 31 });
+      applyAgentPrFetch(
+        workerState,
+        { repo: "acme/widgets", prNumber: 31 },
+        { data: {}, etag: 'W/"1"', notModified: false },
+      );
+      applyAgentPrFetch(
+        workerState,
+        { repo: "acme/widgets", prNumber: 31 },
+        { data: { state: "closed" }, etag: 'W/"2"', notModified: false },
+      );
+      workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 31 });
+      applyAgentPrFetch(
+        workerState,
+        { repo: "acme/widgets", prNumber: 31 },
+        { data: {}, etag: 'W/"3"', notModified: false },
+      );
+    } finally {
+      warn.mockRestore();
+    }
+
+    expect(warnings.filter((message) => message.includes("unusable PR state"))).toHaveLength(2);
+  });
+
+  test("warnings for a PR closed outside the reconciler are forgotten", async () => {
+    const warnings: string[] = [];
+    const warn = spyOn(console, "warn").mockImplementation((message: unknown) => {
+      warnings.push(String(message));
+    });
+    try {
+      workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 32 });
+      applyAgentPrFetch(
+        workerState,
+        { repo: "acme/widgets", prNumber: 32 },
+        { data: {}, etag: 'W/"1"', notModified: false },
+      );
+      // Simulate the CI watcher closing the row: it never calls applyAgentPrFetch.
+      workerState.markAgentPrClosed("acme/widgets", 32);
+      await reconcileOpenAgentPrs({
+        workerState,
+        github: {
+          async fetchPr() {
+            return open();
+          },
+        },
+        watched: workerState.listOpenAgentPrs(),
+      });
+      workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 32 });
+      applyAgentPrFetch(
+        workerState,
+        { repo: "acme/widgets", prNumber: 32 },
+        { data: {}, etag: 'W/"2"', notModified: false },
+      );
+    } finally {
+      warn.mockRestore();
+    }
+
+    expect(warnings.filter((message) => message.includes("unusable PR state"))).toHaveLength(2);
   });
 
   test("state open keeps the row watched without warning", () => {
@@ -282,7 +399,9 @@ describe("agent PR reconciler", () => {
     expect(summary.checked).toBe(1);
     expect(summary.closed).toEqual([]);
     expect(workerState.listOpenAgentPrs().map((pr) => pr.prNumber)).toEqual([40]);
-    expect(workerState.getCursor(agentPrStateCursorSource("acme/widgets", 40))?.etag).toBe('W/"4"');
+    // The unusable payload's ETag is not cached, so the next tick re-reads it
+    // instead of trusting a 304 that carries no state.
+    expect(workerState.getCursor(agentPrStateCursorSource("acme/widgets", 40))).toBeNull();
     // The fetch is still shared with the per-PR poll loop (no second request).
     expect(fresh.get(agentPrKey("acme/widgets", 40))?.data).toEqual({});
   });

@@ -33,6 +33,7 @@ import {
   agentPrKey,
   agentPrStateCursorSource,
   applyAgentPrFetch,
+  classifyAgentPrState,
   reconcileOpenAgentPrs,
 } from "../review/agent-pr-reconciler";
 import type { ConditionalResult, PolledPr } from "../review/agent-pr-reconciler";
@@ -813,6 +814,17 @@ export class ReviewPollingAcquirer implements Acquirer {
     }
 
     if (!pollFeedback) return;
+
+    // GitHub can return an unusable PR state (missing/null/unknown) even though
+    // the row stays watched (applyAgentPrFetch refuses to close on it). Do not
+    // collect feedback in that case: collection marks reviews/comments as
+    // processed *before* the address run re-fetches the PR, and that run rejects
+    // an unconfirmed PR — so events would be deduped forever without ever being
+    // addressed. Skipping leaves both cursors and processed markers untouched,
+    // so the feedback is picked up once the state is usable again.
+    const observedPr = prResult.notModified ? this.prCache.get(prKey) : prResult.data;
+    const lifecycle = observedPr ? classifyAgentPrState(observedPr.state) : "open";
+    if (lifecycle !== "open") return;
 
     // 2. Reviews (ETag-cached): new human changes_requested reviews.
     // 3. Inline review comments since the last seen timestamp.

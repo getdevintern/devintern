@@ -383,6 +383,123 @@ describe("CiFailureWatcherAcquirer", () => {
     expect(workerState.listOpenAgentPrs()).toHaveLength(0);
   });
 
+  test("an unusable PR state keeps the CI watch instead of unwatching", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const base = makeGithub({ prState: "open", workflowRuns: [] });
+
+    for (const data of [{}, { state: "draft" }] as PolledCiPr[]) {
+      const acquirer = new CiFailureWatcherAcquirer({
+        intervalSeconds: 60,
+        workerState,
+        queue,
+        provider: createGitHubCiProvider({
+          ...base,
+          fetchPr: async () => ({ data, etag: 'W/"unusable"', notModified: false }),
+        }),
+        fixPr: async () => true,
+      });
+
+      await acquirer.tick();
+      expect(workerState.listOpenAgentPrs()).toHaveLength(1);
+    }
+  });
+
+  test("an unusable PR state defers CI fixes without spending the retry budget", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const base = makeGithub({
+      prState: "open",
+      headSha: sha1,
+      workflowRuns: [failingRun(505)],
+    });
+    let usable = false;
+    const fixed: string[] = [];
+    const comments: string[] = [];
+    const acquirer = new CiFailureWatcherAcquirer({
+      intervalSeconds: 60,
+      workerState,
+      queue,
+      provider: createGitHubCiProvider({
+        ...base,
+        fetchPr: async () =>
+          usable
+            ? {
+                data: { state: "open", head: { sha: sha1 } },
+                etag: 'W/"open"',
+                notModified: false,
+              }
+            : { data: { head: { sha: sha1 } }, etag: 'W/"unusable"', notModified: false },
+        postComment: async (_repo, _n, body) => {
+          comments.push(body);
+        },
+      }),
+      fixPr: async (repo, n) => {
+        fixed.push(`${repo}#${n}`);
+        return true;
+      },
+      maxAttempts: 2,
+    });
+
+    for (let i = 0; i < 3; i += 1) {
+      await acquirer.tick();
+    }
+    expect(fixed).toEqual([]);
+    expect(comments).toEqual([]);
+    expect(workerState.getCiFixState("acme/widgets", 42).consecutiveFailures).toBe(0);
+    expect(workerState.getCiFixState("acme/widgets", 42).escalatedSha).toBeUndefined();
+    expect(workerState.listOpenAgentPrs()).toHaveLength(1);
+
+    usable = true;
+    await acquirer.tick();
+    expect(fixed).toEqual(["acme/widgets#42"]);
+    expect(comments).toEqual([]);
+  });
+
+  test("an unusable PR ETag is never replayed, so a 304 cannot authorize a CI fix", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const base = makeGithub({
+      prState: "open",
+      headSha: sha1,
+      workflowRuns: [failingRun(506)],
+    });
+    const etag = 'W/"unusable"';
+    const sentEtags: (string | undefined)[] = [];
+    const fixed: string[] = [];
+    const acquirer = new CiFailureWatcherAcquirer({
+      intervalSeconds: 60,
+      workerState,
+      queue,
+      provider: createGitHubCiProvider({
+        ...base,
+        fetchPr: async (_repo, _prNumber, requestEtag) => {
+          sentEtags.push(requestEtag);
+          // Model a server that answers the cached unusable ETag with a
+          // state-less 304. The watcher must never send it back: a 304 would
+          // default `lifecycle` to "open" and let a fix run for an unconfirmed PR.
+          if (requestEtag === etag) {
+            return { data: null, etag, notModified: true };
+          }
+          return { data: { head: { sha: sha1 } }, etag, notModified: false };
+        },
+      }),
+      fixPr: async (repo, n) => {
+        fixed.push(`${repo}#${n}`);
+        return true;
+      },
+    });
+
+    await acquirer.tick();
+    expect(fixed).toEqual([]);
+    expect(sentEtags).toEqual([undefined]);
+    expect(workerState.getCursor("github:cipr:acme/widgets#42")).toBeNull();
+
+    await acquirer.tick();
+    // The unusable ETag was not persisted, so the next request is
+    // unconditional and observes the still-unusable payload again.
+    expect(sentEtags).toEqual([undefined, undefined]);
+    expect(fixed).toEqual([]);
+    expect(workerState.getCursor("github:cipr:acme/widgets#42")).toBeNull();
+  });
+
   test("fork PRs are skipped gracefully", async () => {
     workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
     const gh: FakeGitHubState = {
