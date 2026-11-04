@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { execSync, spawn as nodeSpawn, spawnSync } from "child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "fs";
-import { tmpdir } from "os";
+import { homedir, tmpdir } from "os";
 import { join } from "path";
 import { DockerSandboxProvider } from "../src/sandbox/providers/docker.js";
 import type { SandboxPolicy } from "../src/sandbox/types.js";
@@ -100,6 +100,49 @@ describe("NonoSandboxProvider.wrapCommand", () => {
         expect(wrapped.args[i + 1]).not.toBe(process.env.HOME);
       }
     }
+  });
+
+  test("gives Bun a writable install/temp root instead of ~/.bun", () => {
+    const wrapped = new NonoSandboxProvider().wrapCommand("/usr/bin/claude", [], policy());
+    const env = wrapped.env;
+    expect(env).toBeDefined();
+    const install = env!.BUN_INSTALL as string;
+    const temp = env!.BUN_TMPDIR as string;
+    const bunHome = join(process.env.HOME ?? homedir(), ".bun");
+
+    // Never point a sandboxed child at the user's real (read-only) install.
+    for (const p of [install, temp]) {
+      expect(typeof p).toBe("string");
+      expect(p.startsWith(bunHome)).toBe(false);
+      // Created before spawn so the child's first write cannot hit ENOENT.
+      expect(existsSync(p)).toBe(true);
+    }
+
+    // Both paths are inside an explicit --allow grant in the generated argv.
+    const sep = wrapped.args.indexOf("--");
+    const allows: string[] = [];
+    for (let i = 0; i < sep; i++) {
+      if (wrapped.args[i] === "--allow") allows.push(wrapped.args[i + 1] as string);
+    }
+    const underAllow = (p: string) => allows.some((root) => p === root || p.startsWith(`${root}/`));
+    expect(underAllow(install)).toBe(true);
+    expect(underAllow(temp)).toBe(true);
+  });
+
+  test("a child Bun process can write under the wrapped BUN_INSTALL", () => {
+    const wrapped = new NonoSandboxProvider().wrapCommand("/usr/bin/claude", [], policy());
+    const env = { ...process.env, ...wrapped.env };
+    const install = env.BUN_INSTALL as string;
+    const probeName = `probe-${process.pid}.txt`;
+    // Spawn Bun itself with only the provider's environment overlay applied.
+    const result = spawnSync(
+      process.execPath,
+      ["-e", `await Bun.write(process.env.BUN_INSTALL + "/${probeName}", "ok")`],
+      { encoding: "utf8", env, timeout: 30_000 },
+    );
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(0);
+    expect(readFileSync(join(install, probeName), "utf8")).toBe("ok");
   });
 
   test("passes AGENT_SANDBOX_NONO_PROFILE as --profile", () => {
@@ -297,8 +340,16 @@ describe("nono pack profile status", () => {
       warnings.push(args.map(String).join(" "));
     };
     try {
-      new NonoSandboxProvider().wrapCommand("/usr/local/bin/grok", [], policy({ harnessName: "grok" }));
-      new NonoSandboxProvider().wrapCommand("/usr/local/bin/grok", [], policy({ harnessName: "grok" }));
+      new NonoSandboxProvider().wrapCommand(
+        "/usr/local/bin/grok",
+        [],
+        policy({ harnessName: "grok" }),
+      );
+      new NonoSandboxProvider().wrapCommand(
+        "/usr/local/bin/grok",
+        [],
+        policy({ harnessName: "grok" }),
+      );
     } finally {
       console.warn = originalWarn;
     }
@@ -333,7 +384,11 @@ describe("nono pack profile status", () => {
       warnings.push(args.map(String).join(" "));
     };
     try {
-      new NonoSandboxProvider().wrapCommand("/usr/local/bin/grok", [], policy({ harnessName: "grok" }));
+      new NonoSandboxProvider().wrapCommand(
+        "/usr/local/bin/grok",
+        [],
+        policy({ harnessName: "grok" }),
+      );
     } finally {
       console.warn = originalWarn;
     }

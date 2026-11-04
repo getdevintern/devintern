@@ -27,6 +27,11 @@
  * - `--allow-file /dev/ptmx` so tools that allocate a PTY (lefthook,
  *   script(1), interactive CLIs) can open the master; without it git
  *   hooks fail with path_not_granted on /dev/ptmx.
+ * - `BUN_INSTALL`/`BUN_TMPDIR` in the child env point at a disposable
+ *   `devintern-bun` cache under the OS tmpdir (explicitly granted here).
+ *   Bun otherwise defaults to the read-only `~/.bun`, so `bun install` /
+ *   `bun add` fails with "EACCES accessing temporary directory" before it
+ *   resolves anything.
  * - `--allow-unix-socket $SSH_AUTH_SOCK` so `git push` over ssh works.
  * - Domain allowlists map to repeated `--allow-domain` (nono's proxy filter);
  *   network is otherwise open by default.
@@ -56,6 +61,7 @@ import type { Dirent } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { findInPath } from "../../resolver.js";
+import { sandboxBunEnv } from "../bun-env.js";
 import { harnessStatePaths, resolveHomeDir } from "../harness-state.js";
 import { probeCommand, unsupportedPlatform } from "../probe.js";
 import type { SandboxDetection, SandboxPolicy, SandboxProvider, WrappedCommand } from "../types.js";
@@ -424,8 +430,14 @@ export class NonoSandboxProvider implements SandboxProvider {
     const home = resolveHomeDir();
     const grants: NonoGrant[] = [];
 
+    // Bun defaults BUN_INSTALL to ~/.bun, which stays read-only under the
+    // sandbox. Point the child at a disposable cache that is created here and
+    // explicitly granted below so `bun install`/`bun add` works on the first
+    // try instead of failing with "EACCES accessing temporary directory".
+    const bun = sandboxBunEnv();
+
     // Read+write: the policy's writable set.
-    const writable = new Set([policy.workingDir, ...policy.writablePaths]);
+    const writable = new Set([policy.workingDir, ...policy.writablePaths, bun.writablePath]);
     for (const p of writable) {
       if (existsSync(p)) grants.push({ flag: "--allow", path: p });
     }
@@ -496,6 +508,7 @@ export class NonoSandboxProvider implements SandboxProvider {
     return {
       path: "nono",
       args: [...nonoArgs, ...flattenGrants(refined), ...suffix, "--", path, ...args],
+      env: bun.env,
     };
   }
 }
