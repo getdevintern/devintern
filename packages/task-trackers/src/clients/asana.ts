@@ -151,15 +151,18 @@ export function parseAsanaTaskFilters(query: string): AsanaTaskFilters {
 
 export class AsanaClient {
   private apiToken: string;
-  private baseUrl = "https://app.asana.com/api/1.0";
+  private baseUrl: string;
 
   /**
    * Create an Asana REST API client.
    *
-   * @param config - Personal access token.
+   * @param config - Personal access token. `baseUrl` and `ASANA_API_BASE_URL`
+   *   are for tests/proxies; production uses Asana's API.
    */
-  constructor(config: { apiToken: string }) {
+  constructor(config: { apiToken: string; baseUrl?: string }) {
     this.apiToken = config.apiToken;
+    this.baseUrl =
+      config.baseUrl ?? process.env.ASANA_API_BASE_URL ?? "https://app.asana.com/api/1.0";
   }
 
   /**

@@ -2,9 +2,15 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { AsanaClient, parseAsanaTaskFilters } from "./src/clients/asana.ts";
 
 const originalFetch = globalThis.fetch;
+const originalBaseUrl = process.env.ASANA_API_BASE_URL;
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
+  if (originalBaseUrl === undefined) {
+    delete process.env.ASANA_API_BASE_URL;
+  } else {
+    process.env.ASANA_API_BASE_URL = originalBaseUrl;
+  }
 });
 
 type CapturedRequest = { url: string; method: string; body?: unknown };
@@ -58,6 +64,38 @@ describe("parseAsanaTaskFilters", () => {
       completed: true,
     });
     expect(parseAsanaTaskFilters("just some text")).toEqual({ text: "just some text" });
+  });
+});
+
+describe("AsanaClient endpoint override", () => {
+  test("constructor baseUrl is used for REST requests", async () => {
+    const calls = mockFetch(() => ({ json: {} }));
+
+    const client = new AsanaClient({
+      apiToken: "pat",
+      baseUrl: "http://127.0.0.1:1/api/1.0",
+    });
+    await client.getTaskDetail("123456");
+
+    expect(calls[0].url).toStartWith("http://127.0.0.1:1/api/1.0/tasks/123456?opt_fields=");
+  });
+
+  test("ASANA_API_BASE_URL overrides the default REST endpoint", async () => {
+    process.env.ASANA_API_BASE_URL = "http://127.0.0.1:2/api/1.0";
+    const calls = mockFetch(() => ({ json: {} }));
+
+    await makeClient().getTaskDetail("123456");
+
+    expect(calls[0].url).toStartWith("http://127.0.0.1:2/api/1.0/tasks/123456?opt_fields=");
+  });
+
+  test("keeps the production base URL when no override is set", async () => {
+    delete process.env.ASANA_API_BASE_URL;
+    const calls = mockFetch(() => ({ json: {} }));
+
+    await makeClient().getTaskDetail("123456");
+
+    expect(calls[0].url).toStartWith("https://app.asana.com/api/1.0/tasks/123456?opt_fields=");
   });
 });
 

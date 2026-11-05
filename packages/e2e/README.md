@@ -337,6 +337,30 @@ A second run with `--skip-comments` proves no additional comment or transition
 is posted. The local bare Git remote is the code host; no GitHub token or PR is
 required.
 
+The default suite also includes an in-process fake Asana REST API v1.0 server.
+`bun test tests/local` runs `tests/local/tracker-asana-fake.test.ts` (same
+built-CLI skip guard); run just that file with
+`bun test tests/local/tracker-asana-fake.test.ts` after building the CLI. The
+fake binds `127.0.0.1:0`, accepts any Bearer token
+(never logging or echoing it), and implements only the endpoints the product
+calls: project task listing with the completed/section/assignee/free-text
+filters `AsanaClient.searchTasks` applies, task detail with
+notes/memberships/tags/custom fields, comment stories (list, post, update),
+project sections, `addTask` section moves, task completion and custom-field
+updates, and empty attachment discovery. Point the CLI at the fake with
+`ASANA_API_BASE_URL=<fake>/api/1.0`; production keeps
+`https://app.asana.com/api/1.0` when the variable is absent. Any unmatched
+route returns a diagnostic 404 and fails the test.
+
+Both Asana scenarios (explicit task GID and `--query` with a section/free-text
+selector) run against a seeded task and a decoy outside the selector. Read-back
+goes through the fake fixture, not CLI stdout: the pushed `feature/<gid>`
+branch and exact `src/greeting.ts` diff, the run record, the final project
+section, surviving tags, the durable implementation summary and seeded prompt
+comment, and delivery of both markers to the deterministic agent. No Asana
+credentials, network access, or GitHub token are required; the local bare Git
+remote is the code host.
+
 ## Remote tracker fixtures
 
 The Markdown suites above need no task tracker. Separate opt-in suites exercise
