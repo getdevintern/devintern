@@ -330,7 +330,7 @@ test.skipIf(!existsSync(cliPath))(
           diagnostics(),
         ).toEqual(["src/greeting.ts"]);
         expect(
-          await worker.branchFile(expected.repo, expected.branch, "src/greeting.ts"),
+          await worker.repoBranchFile(expected.repo, expected.branch, "src/greeting.ts"),
           diagnostics(),
         ).toBe('export const greeting = "Hello, world!";');
       }
@@ -355,7 +355,9 @@ test.skipIf(!existsSync(cliPath))(
       await worker.dispose();
     }
   },
-  // Six Markdown tasks through a real daemon, plus startup, readiness, a later
-  // dedupe poll, graceful stop, and process cleanup.
-  240_000,
+  // Worst case inside the body: 30s readiness + 120s routed runs + 30s skips
+  // + 30s + 30s dedupe polls + 25s SIGTERM + 5s SIGKILL + 5s descendant
+  // SIGTERM + 2s descendant SIGKILL = 277s, plus prepare() (two seed cycles)
+  // and the per-branch git assertions. Leave headroom above that sum.
+  330_000,
 );

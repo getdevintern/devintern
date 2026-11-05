@@ -8,28 +8,24 @@
  * `[[teams]]`/`[[routing.rules]]`, so the daemon exercises tracker polling,
  * team-scoped routing, routing skips, and layered task environments.
  *
- * The fixture owns the temporary root, both bare remotes, and the daemon
+ * The fixture owns the temporary root, its bare remotes, and the daemon
  * process group. Test code writes `workspace.toml`, `.env`, env files, and task
  * files through {@link writeWorkspaceFile} and {@link writeTask}.
  */
 
-import { Database } from "bun:sqlite";
 import {
   chmodSync,
   cpSync,
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
-  rmSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { isolatedEnvironment } from "./environment";
 import { cliPath } from "./fixture-workspace";
 import { checkedCommand } from "./process";
+import { WorkerFixture } from "./worker";
 
 const packageRoot = resolve(import.meta.dir, "..");
 const fixture = join(packageRoot, "fixtures/simple-project");
@@ -39,18 +35,6 @@ export interface MultiRepoSpec {
   name: string;
   remote: string;
   seed: string;
-}
-
-/** One row from the worker's shared run-record table. */
-export interface MultiRepoRunRecord {
-  id: number;
-  task_key: string | null;
-  team: string | null;
-  repo: string | null;
-  status: string;
-  branch: string | null;
-  pr_url: string | null;
-  outcome_reason: string | null;
 }
 
 /** One row from the worker's routing-skip table, candidates parsed. */
@@ -63,22 +47,6 @@ export interface MultiRepoRoutingSkip {
   created_at: number;
 }
 
-interface OutputWaiter {
-  pattern: RegExp;
-  resolve: () => void;
-  reject: (error: Error) => void;
-  timer: ReturnType<typeof setTimeout>;
-}
-
-function isAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 /**
  * Real multi-repo workspace daemon backed by local bare repositories.
  *
@@ -87,69 +55,25 @@ function isAlive(pid: number): boolean {
  * `finally` so the daemon, any task children, and the temporary root are
  * released.
  */
-export class MultiRepoWorkerFixture {
-  readonly root = mkdtempSync(join(tmpdir(), "devintern-e2e-multi-repo-"));
-  readonly workspaceDir = join(this.root, "workspace");
-  readonly tasksDir = join(this.root, "tasks");
-  readonly baseBranch = "e2e-base";
-  readonly env = isolatedEnvironment(this.root);
-  readonly globalInvocations = join(this.root, "global-agent-invocations.jsonl");
+export class MultiRepoWorkerFixture extends WorkerFixture {
+  readonly tasksDir: string;
+  readonly globalInvocations: string;
   readonly repos: MultiRepoSpec[];
 
-  private child: ReturnType<typeof Bun.spawn> | null = null;
-  private exitCode: number | undefined;
-  private exitPromise: Promise<number> | null = null;
-  private output = "";
-  private readonly waiters = new Set<OutputWaiter>();
-
   constructor(repoNames: readonly string[] = ["repo-a", "repo-b"]) {
+    super({ rootPrefix: "devintern-e2e-multi-repo-" });
+    this.tasksDir = join(this.root, "tasks");
+    this.globalInvocations = join(this.root, "global-agent-invocations.jsonl");
     this.repos = repoNames.map((name) => ({
       name,
       remote: join(this.root, `${name}.git`),
       seed: join(this.root, `seed-${name}`),
     }));
-    this.env.DEVINTERN_WORKSPACE_DIR = this.workspaceDir;
-    this.env.WEBHOOK_QUEUE_DB = this.dbPath;
-    Object.assign(this.env, {
-      DEVINTERN_SKIP_LICENSE_CHECK: "1",
-      DEVINTERN_NO_UPDATE: "1",
-      DEVINTERN_TELEMETRY_DISABLED: "1",
-      AGENT_HARNESS: "claude-code",
-      AGENT_SANDBOX: "none",
-    });
-  }
-
-  /** Shared workspace database (`<workspace>/state/queue.db`). */
-  get dbPath(): string {
-    return join(this.workspaceDir, "state", "queue.db");
-  }
-
-  /** Complete stdout/stderr captured from the worker so far. */
-  get logs(): string {
-    return this.output;
   }
 
   /** Current captured log length, for "a later line" waits. */
   get outputLength(): number {
-    return this.output.length;
-  }
-
-  /** Last captured log lines, for failure diagnostics. */
-  tail(): string {
-    const lines = this.output.trim().split("\n");
-    return lines.slice(-80).join("\n");
-  }
-
-  /** Whether the daemon process is still running. */
-  get running(): boolean {
-    return this.child !== null && this.child.exitCode === null && this.exitCode === undefined;
-  }
-
-  /** Look up one seeded repository by name. */
-  repo(name: string): MultiRepoSpec {
-    const repo = this.repos.find((candidate) => candidate.name === name);
-    if (!repo) throw new Error(`Unknown fixture repo "${name}"`);
-    return repo;
+    return this.logs.length;
   }
 
   /**
@@ -158,7 +82,7 @@ export class MultiRepoWorkerFixture {
    * Workspace configuration and tasks are written by the test afterwards so
    * each scenario controls the teams, routing rules, and env layering.
    */
-  async prepare(): Promise<void> {
+  override async prepare(): Promise<void> {
     const agent = join(this.root, "agent.ts");
     cpSync(join(packageRoot, "helpers/fake-agent.ts"), agent);
     chmodSync(agent, 0o700);
@@ -206,41 +130,16 @@ export class MultiRepoWorkerFixture {
     utimesSync(path, at, at);
   }
 
-  /** Start the real worker daemon in its own process group. */
-  start(): void {
-    if (this.child) throw new Error("Multi-repo worker fixture is already started");
-    const child = Bun.spawn([process.execPath, cliPath, "worker"], {
-      cwd: this.workspaceDir,
-      env: this.env,
-      stdout: "pipe",
-      stderr: "pipe",
-      detached: true,
-    });
-    this.child = child;
-    this.exitCode = undefined;
-    this.output = "";
-    void this.pump(child.stdout);
-    void this.pump(child.stderr);
-    this.exitPromise = child.exited.then((code) => {
-      this.exitCode = code;
-      this.rejectWaiters(
-        new Error(`Worker exited with code ${code} before the expected log line\n${this.tail()}`),
-      );
-      return code;
-    });
-  }
-
   /** Wait for the workspace worker's live-reload readiness line. */
-  async waitForReady(timeoutMs = 30_000): Promise<void> {
+  override async waitForReady(timeoutMs = 30_000): Promise<void> {
     await this.waitForOutput(/Live config reload armed/, timeoutMs, "worker readiness");
   }
 
-  /** Every run record, oldest first. */
-  runRecords(): MultiRepoRunRecord[] {
-    return this.query<MultiRepoRunRecord>(
-      `SELECT id, task_key, team, repo, status, branch, pr_url, outcome_reason
-       FROM runs ORDER BY id`,
-    );
+  /** Look up one seeded repository by name. */
+  repo(name: string): MultiRepoSpec {
+    const repo = this.repos.find((candidate) => candidate.name === name);
+    if (!repo) throw new Error(`Unknown fixture repo "${name}"`);
+    return repo;
   }
 
   /** Every routing-skip row, newest first, with parsed candidates. */
@@ -281,7 +180,7 @@ export class MultiRepoWorkerFixture {
   }
 
   /** Contents of a file on a branch in one local bare repository. */
-  branchFile(repoName: string, branch: string, path: string): Promise<string> {
+  repoBranchFile(repoName: string, branch: string, path: string): Promise<string> {
     const repo = this.repo(repoName);
     return checkedCommand(
       ["git", "--git-dir", repo.remote, "show", `refs/heads/${branch}:${path}`],
@@ -305,50 +204,13 @@ export class MultiRepoWorkerFixture {
   }
 
   /** Modes recorded by the deterministic agent in one invocation JSONL file. */
-  agentInvocations(path: string): Array<{ mode: string }> {
+  override agentInvocations(path: string = this.globalInvocations): Array<{ mode: string }> {
     if (!existsSync(path)) return [];
     return readFileSync(path, "utf8")
       .trim()
       .split("\n")
       .filter(Boolean)
       .map((line) => JSON.parse(line) as { mode: string });
-  }
-
-  /** Poll a synchronous probe until it returns a value; never only sleep. */
-  async waitFor<T>(
-    label: string,
-    probe: () => T | undefined,
-    timeoutMs = 30_000,
-    intervalMs = 100,
-  ): Promise<T> {
-    const deadline = Date.now() + timeoutMs;
-    for (;;) {
-      this.assertRunning(label);
-      const value = probe();
-      if (value !== undefined) return value;
-      if (Date.now() >= deadline) {
-        throw new Error(`Timed out after ${timeoutMs}ms waiting for ${label}\n${this.tail()}`);
-      }
-      await Bun.sleep(intervalMs);
-    }
-  }
-
-  /** Wait for a log pattern with a bounded timeout and fail fast on exit. */
-  async waitForOutput(pattern: RegExp, timeoutMs = 20_000, label = "log line"): Promise<void> {
-    if (pattern.test(this.output)) return;
-    this.assertRunning(label);
-    await new Promise<void>((resolve, reject) => {
-      const waiter: OutputWaiter = {
-        pattern,
-        resolve,
-        reject,
-        timer: setTimeout(() => {
-          this.waiters.delete(waiter);
-          reject(new Error(`Timed out after ${timeoutMs}ms waiting for ${label}\n${this.tail()}`));
-        }, timeoutMs),
-      };
-      this.waiters.add(waiter);
-    });
   }
 
   /** Wait for a pattern only in log output captured after `since`. */
@@ -361,213 +223,11 @@ export class MultiRepoWorkerFixture {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
       this.assertRunning(label);
-      if (pattern.test(this.output.slice(since))) return;
+      if (pattern.test(this.logs.slice(since))) return;
       if (Date.now() >= deadline) {
         throw new Error(`Timed out after ${timeoutMs}ms waiting for ${label}\n${this.tail()}`);
       }
       await Bun.sleep(100);
-    }
-  }
-
-  /** SIGTERM the daemon, wait for a graceful exit, then force-kill its group. */
-  async stop(timeoutMs = 25_000): Promise<void> {
-    const child = this.child;
-    if (!child) return;
-    // A task subprocess is spawned detached (its own group), so collect the
-    // whole descendant tree before the worker exits and reparents any survivor.
-    const descendants = this.descendantPids();
-    let failure: unknown;
-    try {
-      if (this.exitCode === undefined) {
-        this.signal("SIGTERM");
-        if (!(await this.waitForExit(timeoutMs))) {
-          this.signal("SIGKILL");
-          if (!(await this.waitForExit(5_000))) {
-            throw new Error(`Worker process did not exit after SIGKILL\n${this.tail()}`);
-          }
-        }
-      }
-      await this.exitPromise?.catch(() => undefined);
-    } catch (error) {
-      failure = error;
-    }
-    const survivors = await this.stopDescendants(descendants);
-    this.child = null;
-    if (survivors.length > 0) {
-      throw new Error(`Could not stop worker child process(es): ${survivors.join(", ")}`);
-    }
-    if (failure) throw failure;
-  }
-
-  /** Stop the daemon, remove every temporary path, and report cleanup failures. */
-  async dispose(): Promise<void> {
-    let failure: unknown;
-    try {
-      await this.stop();
-    } catch (error) {
-      failure = error;
-    } finally {
-      rmSync(this.root, { recursive: true, force: true });
-    }
-    if (failure) throw failure;
-  }
-
-  private assertRunning(label: string): void {
-    const exitCode = this.exitCode ?? this.child?.exitCode ?? undefined;
-    if (exitCode === undefined) return;
-    throw new Error(
-      `Worker exited with code ${exitCode} while waiting for ${label}\n${this.tail()}`,
-    );
-  }
-
-  /** Run a read-only queue query, tolerating a database that is still absent. */
-  private query<T>(sql: string, params: Array<string | number> = []): T[] {
-    if (!existsSync(this.dbPath)) return [];
-    let db: Database | undefined;
-    try {
-      db = new Database(this.dbPath, { readonly: true });
-      db.run("PRAGMA busy_timeout = 5000");
-      return db.query(sql).all(...params) as T[];
-    } catch {
-      // The worker may be between schema creation and its first write.
-      return [];
-    } finally {
-      db?.close();
-    }
-  }
-
-  private async pump(stream: ReadableStream<Uint8Array>): Promise<void> {
-    const reader = stream.getReader();
-    const decoder = new TextDecoder();
-    try {
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        this.append(decoder.decode(value, { stream: true }));
-      }
-      this.append(decoder.decode());
-    } catch (error) {
-      this.append(`\n[e2e] worker log stream failed: ${(error as Error).message}\n`);
-    } finally {
-      reader.releaseLock();
-    }
-  }
-
-  private append(chunk: string): void {
-    if (!chunk) return;
-    this.output += chunk;
-    for (const waiter of this.waiters) {
-      if (!waiter.pattern.test(this.output)) continue;
-      this.waiters.delete(waiter);
-      clearTimeout(waiter.timer);
-      waiter.resolve();
-    }
-  }
-
-  private rejectWaiters(error: Error): void {
-    for (const waiter of this.waiters) {
-      this.waiters.delete(waiter);
-      clearTimeout(waiter.timer);
-      waiter.reject(error);
-    }
-  }
-
-  private async waitForExit(timeoutMs: number): Promise<boolean> {
-    const exited = this.child?.exited;
-    if (!exited) return true;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const timeout = new Promise<false>((resolveTimeout) => {
-      timer = setTimeout(() => resolveTimeout(false), timeoutMs);
-    });
-    try {
-      return await Promise.race([exited.then(() => true), timeout]);
-    } finally {
-      if (timer) clearTimeout(timer);
-    }
-  }
-
-  private signal(signal: NodeJS.Signals): void {
-    const pid = this.child?.pid;
-    if (!pid) return;
-    try {
-      // Bun spawned the daemon detached, so the pid is also its process group.
-      process.kill(-pid, signal);
-    } catch {
-      try {
-        this.child?.kill(signal);
-      } catch {
-        // Already gone.
-      }
-    }
-  }
-
-  /** Direct and transitive child pids of the daemon, deepest last. */
-  private descendantPids(): number[] {
-    const rootPid = this.child?.pid;
-    if (!rootPid) return [];
-    let table: string;
-    try {
-      const result = Bun.spawnSync(["ps", "-eo", "pid=,ppid="], {
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-      if (result.exitCode !== 0) return [];
-      table = result.stdout.toString();
-    } catch {
-      return [];
-    }
-    const childrenByParent = new Map<number, number[]>();
-    for (const line of table.split("\n")) {
-      const [pidText, parentText] = line.trim().split(/\s+/);
-      const pid = Number(pidText);
-      const parent = Number(parentText);
-      if (!Number.isInteger(pid) || !Number.isInteger(parent)) continue;
-      const siblings = childrenByParent.get(parent) ?? [];
-      siblings.push(pid);
-      childrenByParent.set(parent, siblings);
-    }
-    const descendants: number[] = [];
-    const stack = [...(childrenByParent.get(rootPid) ?? [])];
-    while (stack.length > 0) {
-      const pid = stack.pop()!;
-      descendants.push(pid);
-      stack.push(...(childrenByParent.get(pid) ?? []));
-    }
-    return descendants;
-  }
-
-  /** Terminate collected descendant groups, returning any pid still alive. */
-  private async stopDescendants(pids: number[]): Promise<number[]> {
-    const survivors = pids.filter(isAlive);
-    if (survivors.length === 0) return [];
-    for (const pid of survivors) {
-      this.signalPid(pid, "SIGTERM");
-    }
-    await this.waitForPidsToExit(survivors, 5_000);
-    for (const pid of survivors.filter(isAlive)) {
-      this.signalPid(pid, "SIGKILL");
-    }
-    await this.waitForPidsToExit(survivors, 2_000);
-    return survivors.filter(isAlive);
-  }
-
-  private signalPid(pid: number, signal: NodeJS.Signals): void {
-    try {
-      // A detached task child is its own group leader.
-      process.kill(-pid, signal);
-    } catch {
-      try {
-        process.kill(pid, signal);
-      } catch {
-        // Already gone.
-      }
-    }
-  }
-
-  private async waitForPidsToExit(pids: number[], timeoutMs: number): Promise<void> {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline && pids.some(isAlive)) {
-      await Bun.sleep(50);
     }
   }
 }
