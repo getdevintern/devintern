@@ -11,6 +11,9 @@
  * state instead of failing, so the dashboard always renders.
  */
 
+import { Database } from "bun:sqlite";
+import { existsSync } from "fs";
+
 import { LockManager } from "../lock-manager";
 import type { LockStatus } from "../lock-manager";
 import type {
@@ -51,6 +54,7 @@ import type { HarnessLogContent, HarnessLogFile } from "./harness-logs";
 import { listRunArtifacts, readRunArtifact } from "./task-artifacts";
 import type { TaskArtifactContent, TaskArtifactFile } from "./task-artifacts";
 import { resolveQueueDbPath, WebhookQueue } from "../state/webhook-queue";
+import { configureSqliteConnection } from "../state/sqlite";
 import {
   injectedChildStillRunningMessage,
   interruptedChildStillRunning,
@@ -95,6 +99,53 @@ const MAX_LOG_LIMIT = 1000;
 
 /** Name of the worker daemon's lock file (see `startWorker`). */
 const WORKER_LOCK_FILE = ".worker.lock";
+
+const EMPTY_QUEUE_STATUS_COUNTS: QueueStatusCounts = { pending: 0, running: 0 };
+
+/**
+ * Count `pending`/`running` rows in one durable queue table without changing it.
+ *
+ * Dashboard GETs must stay read-only (standalone `devintern dashboard` "reads
+ * the local history without changing it"), so this never creates the directory,
+ * database, schema, or indexes: it checks that the file exists first, then opens
+ * `bun:sqlite` with `readonly: true` and closes it again. A missing table
+ * (database written by an older version) degrades to zeros.
+ *
+ * @param dbPath - Shared worker state database
+ * @param table - Queue table to count (fixed identifiers only)
+ */
+function countQueueStatuses(
+  dbPath: string,
+  table: "injected_tasks" | "scheduled_retries",
+): QueueStatusCounts {
+  if (!existsSync(dbPath)) {
+    return { ...EMPTY_QUEUE_STATUS_COUNTS };
+  }
+  let db: Database | null = null;
+  try {
+    db = new Database(dbPath, { readonly: true });
+    configureSqliteConnection(db, { readonly: true });
+    const rows = db
+      .query(
+        `SELECT status, COUNT(*) AS count FROM ${table}
+         WHERE status IN ('pending', 'running')
+         GROUP BY status`,
+      )
+      .all() as Array<{ status: string; count: number }>;
+    const counts = { ...EMPTY_QUEUE_STATUS_COUNTS };
+    for (const row of rows) {
+      // Aggregate read: ignore an unrecognized status group instead of throwing.
+      if (row.status === "pending") counts.pending = row.count;
+      else if (row.status === "running") counts.running = row.count;
+    }
+    return counts;
+  } catch {
+    // Missing table, locked/corrupt DB, or a file removed between check and open.
+    return { ...EMPTY_QUEUE_STATUS_COUNTS };
+  } finally {
+    db?.close();
+  }
+}
 
 export interface ApiResponse {
   status: number;
@@ -174,6 +225,24 @@ export interface EnrichedLogEntry extends LogEntry {
 export interface RunHarnessLogFile extends HarnessLogFile {
   /** 1-based attempt number of the producing run, when its row still exists. */
   attempt?: number;
+}
+
+/** Pending/running counts for one durable work queue. */
+export interface QueueStatusCounts {
+  pending: number;
+  running: number;
+}
+
+/** Every durable queue the worker may be waiting on, as served by `GET /api/worker`. */
+export interface WorkerQueueStats {
+  /** Relay/webhook deliveries awaiting or inside the normal poll loop. */
+  pending: number;
+  processing: number;
+  failed: number;
+  /** Ad-hoc tasks enqueued by `devintern worker add`. */
+  injected: QueueStatusCounts;
+  /** Retries scheduled by the dashboard's Retry action. */
+  retries: QueueStatusCounts;
 }
 
 /** Worker liveness as reported by `GET /api/worker`. */
@@ -568,8 +637,15 @@ export class DashboardData {
     return this.read(null, (stores) => stores.runs.getStats(windowMs));
   }
 
-  getQueueStats(): { pending: number; processing: number; failed: number } {
-    return this.read({ pending: 0, processing: 0, failed: 0 }, (stores) => stores.queue.getStats());
+  getQueueStats(): WorkerQueueStats {
+    const relay = this.read({ pending: 0, processing: 0, failed: 0 }, (stores) =>
+      stores.queue.getStats(),
+    );
+    return {
+      ...relay,
+      injected: countQueueStatuses(this.dbPath, "injected_tasks"),
+      retries: countQueueStatuses(this.dbPath, "scheduled_retries"),
+    };
   }
 
   getAgentPrCounts(): { open: number; closed: number } {

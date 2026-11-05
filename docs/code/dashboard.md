@@ -4,7 +4,7 @@ sidebarLabel: "Dashboard"
 description: "See what the worker is doing, inspect failed runs, and retry work from a local dashboard"
 section: "Automation"
 order: 4
-dateModified: 2026-10-30
+dateModified: 2026-11-05
 ---
 
 # Worker Dashboard
@@ -16,6 +16,7 @@ It starts automatically with `devintern worker`. Open [http://localhost:4400](ht
 ## What you can do
 
 - See whether the worker is running, waiting for its next working window, or processing a task
+- See how much work is waiting in the status strip, including queued ad-hoc tasks and scheduled retries as well as relay deliveries
 - Follow each run from task pickup through implementation and pull request creation
 - Read the raw agent transcript for any harness execution under the run (clarity, implementation, review, and more)
 - Open the task or pull request behind a run

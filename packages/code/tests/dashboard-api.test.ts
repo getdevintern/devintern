@@ -1,6 +1,6 @@
 import { ArtifactStore } from "../src/lib/artifacts/store";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
@@ -17,6 +17,8 @@ import { RunStore } from "../src/lib/state/run-recorder";
 import type { RunStats } from "../src/lib/state/run-recorder";
 import { WebhookQueue } from "../src/lib/state/webhook-queue";
 import { WorkerState } from "../src/lib/state/worker-state";
+import { InjectedTaskStore } from "../src/lib/state/injected-tasks";
+import { ScheduledRetryStore } from "../src/lib/state/run-retry";
 import { isLoopbackDashboardHost, startDashboardServer } from "../src/dashboard-server";
 
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
@@ -286,6 +288,66 @@ describe("dashboard API", () => {
     );
     const dead = handleWorkerStatus(data);
     expect((dead.body as { worker: { status: string } }).worker.status).toBe("stopped");
+  });
+
+  test("worker status counts ad-hoc tasks and scheduled retries alongside relay work", () => {
+    const injected = new InjectedTaskStore(dbPath);
+    for (const key of ["local-one", "local-two", "local-three"]) {
+      injected.enqueue({
+        taskKey: key,
+        repo: "acme/webapp",
+        title: key,
+        body: "",
+        taskFile: join(dir, `${key}.md`),
+      });
+    }
+    // Oldest row becomes running; the other two stay pending.
+    expect(injected.claimNext()?.taskKey).toBe("local-one");
+    injected.close();
+
+    const retries = new ScheduledRetryStore(dbPath);
+    expect(retries.schedule({ taskKey: "PROJ-1", actor: "tester" }).scheduled).toBe(true);
+    retries.close();
+
+    const queue = new WebhookQueue({ dbPath });
+    queue.enqueue("issue_comment", { hello: true });
+    queue.close();
+
+    const body = handleWorkerStatus(data).body as {
+      queue: {
+        pending: number;
+        processing: number;
+        failed: number;
+        injected: { pending: number; running: number };
+        retries: { pending: number; running: number };
+      };
+    };
+    expect(body.queue.pending).toBe(1);
+    expect(body.queue.injected).toEqual({ pending: 2, running: 1 });
+    expect(body.queue.retries).toEqual({ pending: 1, running: 0 });
+  });
+
+  test("worker queue counts are zero and do not create a missing database", () => {
+    expect(existsSync(dbPath)).toBe(false);
+
+    const body = handleWorkerStatus(data).body as {
+      queue: {
+        pending: number;
+        processing: number;
+        failed: number;
+        injected: { pending: number; running: number };
+        retries: { pending: number; running: number };
+      };
+    };
+    expect(body.queue).toEqual({
+      pending: 0,
+      processing: 0,
+      failed: 0,
+      injected: { pending: 0, running: 0 },
+      retries: { pending: 0, running: 0 },
+    });
+    // The GET must stay read-only: no directory, database, or schema creation.
+    expect(existsSync(dbPath)).toBe(false);
   });
 
   test("worker liveness falls back to the workspace home lock (fleet mode)", () => {

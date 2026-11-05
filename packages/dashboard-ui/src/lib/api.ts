@@ -276,7 +276,16 @@ export interface WorkerStatus {
 
 export interface WorkerResponse {
   worker: WorkerStatus;
-  queue: { pending: number; processing: number; failed: number };
+  queue: {
+    /** Relay/webhook deliveries awaiting or inside the normal poll loop. */
+    pending: number;
+    processing: number;
+    failed: number;
+    /** Ad-hoc tasks enqueued by `devintern worker add`. */
+    injected: { pending: number; running: number };
+    /** Retries scheduled by the dashboard's Retry action. */
+    retries: { pending: number; running: number };
+  };
   agentPrs: { open: number; closed: number };
   schedule?: ScheduleSnapshot | null;
   cursors: { source: string; cursorValue: string; updatedAt: number }[];
