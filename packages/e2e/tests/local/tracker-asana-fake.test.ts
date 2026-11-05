@@ -178,6 +178,91 @@ const statusesFor = (tracker: FakeAsanaTracker): Required<TrackerStatusSettings>
 });
 
 /**
+ * Fields `AsanaClient.getTaskDetail`/`searchTasks` request from the real API
+ * (packages/task-trackers/src/clients/asana.ts:109). The fake must honor them.
+ */
+const PRODUCT_TASK_DETAIL_FIELDS = [
+  "name",
+  "notes",
+  "html_notes",
+  "completed",
+  "permalink_url",
+  "assignee.name",
+  "created_at",
+  "modified_at",
+  "created_by.name",
+  "tags.gid",
+  "tags.name",
+  "memberships.project.gid",
+  "memberships.project.name",
+  "memberships.section.gid",
+  "memberships.section.name",
+  "custom_fields.gid",
+  "custom_fields.name",
+  "custom_fields.type",
+  "custom_fields.number_value",
+].join(",");
+
+/** Read one JSON response from the fake's REST API. */
+async function fakeGetJson<T>(url: string): Promise<T> {
+  const response = await fetch(url, { headers: { Authorization: "Bearer test-token" } });
+  if (!response.ok) {
+    throw new Error(`Fake Asana request failed (${response.status}): ${await response.text()}`);
+  }
+  return (await response.json()) as T;
+}
+
+test("projects task payloads onto opt_fields so a dropped field is not masked", async () => {
+  const tracker = new FakeAsanaTracker();
+  try {
+    const ticket = await tracker.createTicket({ title: "Projected task", body: "Body text" });
+
+    const detail = await fakeGetJson<{ data: Record<string, unknown> }>(
+      `${tracker.apiBaseUrl}/tasks/${ticket.key}?opt_fields=${PRODUCT_TASK_DETAIL_FIELDS}`,
+    );
+    expect(detail.data.gid).toBe(ticket.key);
+    expect(detail.data.notes).toBe("Body text");
+    expect(detail.data.memberships).toEqual([
+      {
+        project: { gid: tracker.projectKey(), name: tracker.projectName },
+        section: { gid: expect.any(String), name: tracker.statuses.todo },
+      },
+    ]);
+
+    // A client regression that drops memberships from its selector (as
+    // TASK_DETAIL_FIELDS would if `memberships.section.name` were removed) must
+    // lose the section name, which is exactly what `searchTasks` filters on.
+    const withoutMemberships = PRODUCT_TASK_DETAIL_FIELDS.split(",")
+      .filter((field) => !field.startsWith("memberships."))
+      .join(",");
+    const reduced = await fakeGetJson<{ data: Record<string, unknown> }>(
+      `${tracker.apiBaseUrl}/tasks/${ticket.key}?opt_fields=${withoutMemberships}`,
+    );
+    expect(reduced.data.notes).toBe("Body text");
+    expect(reduced.data).not.toHaveProperty("memberships");
+
+    // Nested selectors keep only the requested leaves, while `gid` is always
+    // returned like the real API.
+    const leaf = await fakeGetJson<{ data: Record<string, unknown> }>(
+      `${tracker.apiBaseUrl}/tasks/${ticket.key}?opt_fields=memberships.section.name`,
+    );
+    expect(leaf.data).toEqual({
+      gid: ticket.key,
+      memberships: [{ section: { name: tracker.statuses.todo } }],
+    });
+
+    const listing = await fakeGetJson<{ data: Record<string, unknown>[] }>(
+      `${tracker.apiBaseUrl}/projects/${tracker.projectKey()}/tasks?opt_fields=gid,name`,
+    );
+    expect(listing.data).toEqual([{ gid: ticket.key, name: "Projected task" }]);
+    expect(tracker.requests).toHaveLength(4);
+    expect(tracker.unexpectedRequests).toEqual([]);
+  } finally {
+    await tracker.cleanup();
+  }
+});
+
+/**
  * The offline lifecycle uses one actioned section for both the in-progress and
  * post-PR settings, because a local bare remote cannot create the PR that
  * would trigger a second section move.

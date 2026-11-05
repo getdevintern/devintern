@@ -7,6 +7,11 @@
  * state, so a client regression (wrong path, payload, or field) fails instead
  * of being mirrored by shared code.
  *
+ * Task responses honor the request's `opt_fields`, as real Asana does. A client
+ * that stops asking for a field the scenario depends on (for example
+ * `memberships.section.name` for section selection) therefore loses that field
+ * and fails here rather than being masked by an unconditional full payload.
+ *
  * Routing is strict. Any request the fake does not implement returns a 404
  * whose body names the method and path, and the request is recorded so a test
  * can fail loudly even if the product ignores the error response.
@@ -193,6 +198,9 @@ export class FakeAsanaTracker implements TrackerFixture {
   /** Requests the fake could not route, for an explicit end-of-test assertion. */
   readonly unexpectedRequests: string[] = [];
 
+  /** Every request served, so a test can prove traffic never reached the fake. */
+  readonly requests: string[] = [];
+
   private readonly apiToken = crypto.randomUUID();
   private readonly server: ReturnType<typeof Bun.serve>;
   private readonly baseUrl: string;
@@ -232,6 +240,9 @@ export class FakeAsanaTracker implements TrackerFixture {
       TASK_TRACKER: this.type,
       ASANA_API_TOKEN: this.apiToken,
       ASANA_DEFAULT_PROJECT_GID: this.projectGidValue,
+      // The shared client only honors ASANA_API_BASE_URL behind this explicit
+      // test flag, so a project .env cannot redirect a real PAT.
+      DEVINTERN_E2E_FAKE_ASANA: "1",
       ASANA_API_BASE_URL: this.apiBaseUrl,
     };
   }
@@ -319,17 +330,16 @@ export class FakeAsanaTracker implements TrackerFixture {
   }
 
   /**
-   * Search project tasks through the fake's own HTTP endpoint, using the same
-   * filter semantics `AsanaClient.searchTasks` applies client-side.
+   * Search project tasks through the fake's own HTTP endpoint, then apply the
+   * same filter semantics `AsanaClient.searchTasks` applies client-side.
    */
   async findTickets(query: string): Promise<TrackerTicket[]> {
     const filters = parseFakeAsanaQuery(query);
     const projectGid = filters.projectGid ?? this.projectGidValue;
+    // Match the product request exactly: it lists the project's tasks and
+    // filters locally rather than sending section/assignee/text query params,
+    // which the real Asana API does not accept here.
     const params = new URLSearchParams({ opt_fields: "gid,name", limit: "100" });
-    if (filters.completed !== undefined) params.set("completed", String(filters.completed));
-    if (filters.sectionName) params.set("section", filters.sectionName);
-    if (filters.assignee) params.set("assignee", filters.assignee);
-    if (filters.text) params.set("text", filters.text);
 
     const response = await fetch(
       `${this.baseUrl}${API_PREFIX}/projects/${projectGid}/tasks?${params.toString()}`,
@@ -338,10 +348,14 @@ export class FakeAsanaTracker implements TrackerFixture {
       throw new Error(`Fake Asana search failed (${response.status}): ${await response.text()}`);
     }
     const payload = (await response.json()) as { data: Array<{ gid: string }> };
-    return payload.data.map((task) => ({
-      key: task.gid,
-      url: `${this.baseUrl}/0/${projectGid}/${task.gid}`,
-    }));
+    return payload.data
+      .map((task) => this.tasks.get(task.gid))
+      .filter((task): task is FakeAsanaTask => task !== undefined)
+      .filter((task) => this.matchesFilters(task, filters))
+      .map((task) => ({
+        key: task.gid,
+        url: `${this.baseUrl}/0/${projectGid}/${task.gid}`,
+      }));
   }
 
   /** Stop the HTTP server and release the ephemeral port. */
@@ -358,6 +372,7 @@ export class FakeAsanaTracker implements TrackerFixture {
     const url = new URL(request.url);
     const path = decodeURIComponent(url.pathname);
     const method = request.method.toUpperCase();
+    this.requests.push(`${method} ${path}${url.search}`);
 
     if (method === "GET" && path === `${API_PREFIX}/attachments`) {
       const parent = url.searchParams.get("parent");
@@ -369,7 +384,10 @@ export class FakeAsanaTracker implements TrackerFixture {
 
     const projectTasksMatch = path.match(/^\/api\/1\.0\/projects\/([^/]+)\/tasks$/);
     if (projectTasksMatch?.[1] && method === "GET") {
-      return this.listProjectTasks(projectTasksMatch[1], url);
+      return this.listProjectTasks(
+        projectTasksMatch[1],
+        parseOptFields(url.searchParams.get("opt_fields")),
+      );
     }
 
     const projectSectionsMatch = path.match(/^\/api\/1\.0\/projects\/([^/]+)\/sections$/);
@@ -392,10 +410,14 @@ export class FakeAsanaTracker implements TrackerFixture {
 
     const taskMatch = path.match(/^\/api\/1\.0\/tasks\/([^/]+)$/);
     if (taskMatch?.[1] && method === "GET") {
-      return this.getTask(taskMatch[1]);
+      return this.getTask(taskMatch[1], parseOptFields(url.searchParams.get("opt_fields")));
     }
     if (taskMatch?.[1] && method === "PUT") {
-      return this.updateTask(taskMatch[1], request);
+      return this.updateTask(
+        taskMatch[1],
+        request,
+        parseOptFields(url.searchParams.get("opt_fields")),
+      );
     }
 
     const storyMatch = path.match(/^\/api\/1\.0\/stories\/([^/]+)$/);
@@ -406,18 +428,15 @@ export class FakeAsanaTracker implements TrackerFixture {
     return this.diagnostic(`Unmatched fake Asana request: ${method} ${path}`);
   }
 
-  private listProjectTasks(projectGid: string, url: URL): Response {
+  private listProjectTasks(projectGid: string, optFields: string[] | undefined): Response {
     if (projectGid !== this.projectGidValue) {
       return this.diagnostic(`Unknown fake Asana project: ${projectGid}`);
     }
-    const filters: FakeAsanaFilters = {
-      sectionName: url.searchParams.get("section") ?? undefined,
-      assignee: url.searchParams.get("assignee") ?? undefined,
-      completed: parseBoolean(url.searchParams.get("completed")),
-      text: url.searchParams.get("text") ?? undefined,
-    };
-    const tasks = [...this.tasks.values()].filter((task) => this.matchesFilters(task, filters));
-    return json({ data: tasks.map((task) => this.taskPayload(task)) });
+    // Real `GET /projects/{gid}/tasks` only supports pagination/field params.
+    // The product lists the full project and filters client-side.
+    return json({
+      data: [...this.tasks.values()].map((task) => this.taskPayload(task, optFields)),
+    });
   }
 
   private listSections(projectGid: string): Response {
@@ -476,13 +495,17 @@ export class FakeAsanaTracker implements TrackerFixture {
     return json({ data: this.storyPayload(story) }, 201);
   }
 
-  private getTask(taskGid: string): Response {
+  private getTask(taskGid: string, optFields: string[] | undefined): Response {
     const task = this.tasks.get(taskGid);
     if (!task) return this.diagnostic(`Unknown fake Asana task: ${taskGid}`);
-    return json({ data: this.taskPayload(task) });
+    return json({ data: this.taskPayload(task, optFields) });
   }
 
-  private async updateTask(taskGid: string, request: Request): Promise<Response> {
+  private async updateTask(
+    taskGid: string,
+    request: Request,
+    optFields: string[] | undefined,
+  ): Promise<Response> {
     const task = this.tasks.get(taskGid);
     if (!task) return this.diagnostic(`Unknown fake Asana task: ${taskGid}`);
     const body = await readJson(request);
@@ -520,7 +543,7 @@ export class FakeAsanaTracker implements TrackerFixture {
       }
     }
     task.modified_at = this.timestamp();
-    return json({ data: this.taskPayload(task) });
+    return json({ data: this.taskPayload(task, optFields) });
   }
 
   private async updateStory(storyGid: string, request: Request): Promise<Response> {
@@ -579,35 +602,41 @@ export class FakeAsanaTracker implements TrackerFixture {
     return true;
   }
 
-  private taskPayload(task: FakeAsanaTask): Record<string, unknown> {
-    return {
-      gid: task.gid,
-      name: task.name,
-      notes: task.notes,
-      html_notes: task.html_notes,
-      completed: task.completed,
-      permalink_url: task.permalink_url,
-      created_at: task.created_at,
-      modified_at: task.modified_at,
-      assignee: task.assignee,
-      created_by: task.created_by,
-      tags: task.tags.map((tag) => ({ gid: tag.gid, name: tag.name })),
-      custom_fields: task.custom_fields.map((field) => ({
-        gid: field.gid,
-        name: field.name,
-        type: field.type,
-        number_value: field.number_value ?? null,
-      })),
-      memberships: [
-        {
-          project: { gid: task.project_gid, name: this.projectName },
-          section: {
-            gid: task.section_gid,
-            name: this.sectionName(task.section_gid),
+  private taskPayload(
+    task: FakeAsanaTask,
+    optFields: string[] | undefined,
+  ): Record<string, unknown> {
+    return projectTaskPayload(
+      {
+        gid: task.gid,
+        name: task.name,
+        notes: task.notes,
+        html_notes: task.html_notes,
+        completed: task.completed,
+        permalink_url: task.permalink_url,
+        created_at: task.created_at,
+        modified_at: task.modified_at,
+        assignee: task.assignee,
+        created_by: task.created_by,
+        tags: task.tags.map((tag) => ({ gid: tag.gid, name: tag.name })),
+        custom_fields: task.custom_fields.map((field) => ({
+          gid: field.gid,
+          name: field.name,
+          type: field.type,
+          number_value: field.number_value ?? null,
+        })),
+        memberships: [
+          {
+            project: { gid: task.project_gid, name: this.projectName },
+            section: {
+              gid: task.section_gid,
+              name: this.sectionName(task.section_gid),
+            },
           },
-        },
-      ],
-    };
+        ],
+      },
+      optFields,
+    );
   }
 
   private storyPayload(story: FakeAsanaStory): Record<string, unknown> {
@@ -671,11 +700,6 @@ export class FakeAsanaTracker implements TrackerFixture {
   }
 }
 
-function parseBoolean(value: string | null): boolean | undefined {
-  if (value === null) return undefined;
-  return value.toLowerCase() === "true";
-}
-
 function json(value: unknown, status = 200): Response {
   return new Response(JSON.stringify(value), {
     status,
@@ -697,4 +721,73 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === "object"
     ? (value as Record<string, unknown>)
     : undefined;
+}
+
+/** Fields Asana returns even when `opt_fields` does not name them. */
+const ALWAYS_RETURNED_TASK_FIELDS = ["gid"] as const;
+
+/** Task fields in Asana's compact representation, used without `opt_fields`. */
+const COMPACT_TASK_FIELDS = ["gid", "name"] as const;
+
+/** Nested tree of requested field names. */
+type FieldSelection = Map<string, FieldSelection>;
+
+/** Parse a comma-separated `opt_fields` selector. */
+function parseOptFields(raw: string | null): string[] | undefined {
+  const fields = raw
+    ?.split(",")
+    .map((field) => field.trim())
+    .filter(Boolean);
+  return fields && fields.length > 0 ? fields : undefined;
+}
+
+/** Build a field tree from dotted selectors such as `memberships.section.name`. */
+function buildFieldSelection(fields: readonly string[]): FieldSelection {
+  const selection: FieldSelection = new Map();
+  for (const field of fields) {
+    let node = selection;
+    for (const segment of field.split(".")) {
+      let child = node.get(segment);
+      if (!child) {
+        child = new Map();
+        node.set(segment, child);
+      }
+      node = child;
+    }
+  }
+  return selection;
+}
+
+/** Keep only selected fields, recursing into nested objects and arrays. */
+function selectFields(value: unknown, selection: FieldSelection): unknown {
+  if (value === null || value === undefined) return value;
+  if (Array.isArray(value)) return value.map((entry) => selectFields(entry, selection));
+  if (typeof value !== "object") return value;
+
+  const record = value as Record<string, unknown>;
+  const selected: Record<string, unknown> = {};
+  for (const [field, children] of selection) {
+    if (!(field in record)) continue;
+    selected[field] = children.size === 0 ? record[field] : selectFields(record[field], children);
+  }
+  return selected;
+}
+
+/**
+ * Project a full task payload onto the request's `opt_fields`.
+ *
+ * Real Asana always returns `gid` and otherwise includes only the requested
+ * fields; omitting the selector returns the compact task. Keeping that behavior
+ * means a client that drops a required field from its `opt_fields` loses the
+ * field here instead of passing against an unrealistically complete payload.
+ */
+function projectTaskPayload(
+  payload: Record<string, unknown>,
+  optFields: string[] | undefined,
+): Record<string, unknown> {
+  const selection = buildFieldSelection(optFields ?? COMPACT_TASK_FIELDS);
+  for (const field of ALWAYS_RETURNED_TASK_FIELDS) {
+    selection.set(field, new Map());
+  }
+  return selectFields(payload, selection) as Record<string, unknown>;
 }

@@ -343,14 +343,18 @@ built-CLI skip guard); run just that file with
 `bun test tests/local/tracker-asana-fake.test.ts` after building the CLI. The
 fake binds `127.0.0.1:0`, accepts any Bearer token
 (never logging or echoing it), and implements only the endpoints the product
-calls: project task listing with the completed/section/assignee/free-text
-filters `AsanaClient.searchTasks` applies, task detail with
+calls: project task listing (`AsanaClient.searchTasks` fetches the full listing
+and filters it client-side), task detail with
 notes/memberships/tags/custom fields, comment stories (list, post, update),
 project sections, `addTask` section moves, task completion and custom-field
 updates, and empty attachment discovery. Point the CLI at the fake with
-`ASANA_API_BASE_URL=<fake>/api/1.0`; production keeps
-`https://app.asana.com/api/1.0` when the variable is absent. Any unmatched
-route returns a diagnostic 404 and fails the test.
+`DEVINTERN_E2E_FAKE_ASANA=1` and `ASANA_API_BASE_URL=<fake>/api/1.0` exported in
+the subprocess environment before the CLI starts; the shared client only honors
+that override behind the explicit test flag, ignores values loaded later from a
+project `.env`, and only accepts loopback hosts. A project `.env` therefore
+cannot redirect a real PAT, and even an exported override cannot send it to a
+remote host. Production keeps `https://app.asana.com/api/1.0` when the variable
+is absent. Any unmatched route returns a diagnostic 404 and fails the test.
 
 Both Asana scenarios (explicit task GID and `--query` with a section/free-text
 selector) run against a seeded task and a decoy outside the selector. Read-back

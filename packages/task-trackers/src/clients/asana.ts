@@ -84,9 +84,100 @@ export interface AsanaAttachment {
   download_url?: string | null;
 }
 
+/** Production Asana REST API base URL. */
+export const DEFAULT_ASANA_API_BASE_URL = "https://app.asana.com/api/1.0";
+
+/** Opt-in flag required before `ASANA_API_BASE_URL` may redirect requests. */
+const E2E_FAKE_ASANA_FLAG = "DEVINTERN_E2E_FAKE_ASANA";
+
+/**
+ * Snapshot of the test override taken when this module is evaluated.
+ *
+ * Project `.env` loaders (`dotenv` in `@getdevintern/code`,
+ * `loadEnvFromConfigDir` in `@getdevintern/pm`) mutate `process.env` after
+ * imports run, and the pm loader even overwrites existing keys. Reading the
+ * override from this snapshot means only a value exported before the process
+ * started can redirect requests, so a cloned repository cannot opt itself in
+ * by shipping `DEVINTERN_E2E_FAKE_ASANA=1` in its `.env`.
+ */
+const E2E_ASANA_ENV = Object.freeze({
+  enabled: process.env[E2E_FAKE_ASANA_FLAG] === "1",
+  baseUrl: process.env.ASANA_API_BASE_URL,
+});
+
 /** Fields requested for detailed task reads. */
 const TASK_DETAIL_FIELDS =
   "name,notes,html_notes,completed,permalink_url,assignee.name,created_at,modified_at,created_by.name,tags.gid,tags.name,memberships.project.gid,memberships.project.name,memberships.section.gid,memberships.section.name,custom_fields.gid,custom_fields.name,custom_fields.type,custom_fields.number_value";
+
+/**
+ * Normalize an Asana API base URL.
+ *
+ * Trims whitespace, treats blanks as absent, strips trailing slashes (so
+ * endpoint concatenation cannot produce `//tasks`), and requires an absolute
+ * http(s) URL.
+ *
+ * @param raw - Raw base URL, possibly from configuration or the environment.
+ * @param source - Label used in validation errors (e.g. an env var name).
+ * @returns Normalized URL, or `undefined` when the value is blank.
+ * @throws When the value is not an absolute http(s) URL.
+ */
+export function sanitizeAsanaBaseUrl(raw: string | undefined, source: string): string | undefined {
+  const trimmed = raw?.trim();
+  if (!trimmed) return undefined;
+
+  const normalized = trimmed.replace(/\/+$/, "");
+  let parsed: URL;
+  try {
+    parsed = new URL(normalized);
+  } catch {
+    throw new Error(
+      `Invalid ${source} "${trimmed}". Expected an absolute http(s) URL such as ` +
+        `${DEFAULT_ASANA_API_BASE_URL}.`,
+    );
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error(
+      `Invalid ${source} "${trimmed}". Only http:// and https:// URLs are supported.`,
+    );
+  }
+  return normalized;
+}
+
+/** Whether a hostname resolves to the local machine. */
+function isLoopbackHostname(hostname: string): boolean {
+  const normalized = hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  return (
+    normalized === "localhost" || normalized === "::1" || /^127(?:\.\d{1,3}){3}$/.test(normalized)
+  );
+}
+
+/**
+ * Read the test-only Asana base URL override.
+ *
+ * A project `.env` must not be able to redirect a PAT, so the override is only
+ * honored when `DEVINTERN_E2E_FAKE_ASANA=1` and the URL were present when this
+ * module loaded (the product CLIs import it before any `.env` loader runs) and
+ * it points at a loopback host.
+ *
+ * @returns Normalized loopback base URL, or `undefined` when the override is
+ *   absent or not enabled.
+ * @throws When enabled with an invalid or non-loopback URL.
+ */
+function asanaBaseUrlFromEnvironment(): string | undefined {
+  if (!E2E_ASANA_ENV.enabled) return undefined;
+
+  const baseUrl = sanitizeAsanaBaseUrl(E2E_ASANA_ENV.baseUrl, "ASANA_API_BASE_URL");
+  if (!baseUrl) return undefined;
+
+  const hostname = new URL(baseUrl).hostname;
+  if (!isLoopbackHostname(hostname)) {
+    throw new Error(
+      `ASANA_API_BASE_URL may only point at a loopback fake server when ` +
+        `${E2E_FAKE_ASANA_FLAG}=1; got "${hostname}".`,
+    );
+  }
+  return baseUrl;
+}
 
 /** Parsed filters for {@link AsanaClient.searchTasks} mini-syntax. */
 export interface AsanaEvent {
@@ -156,13 +247,18 @@ export class AsanaClient {
   /**
    * Create an Asana REST API client.
    *
-   * @param config - Personal access token. `baseUrl` and `ASANA_API_BASE_URL`
-   *   are for tests/proxies; production uses Asana's API.
+   * @param config - Personal access token. `baseUrl` is an explicit override
+   *   for tests/proxies; production uses Asana's API. The test-only
+   *   `ASANA_API_BASE_URL` environment override is honored only when
+   *   `DEVINTERN_E2E_FAKE_ASANA=1` was exported before the process started
+   *   and it targets a loopback host.
    */
   constructor(config: { apiToken: string; baseUrl?: string }) {
     this.apiToken = config.apiToken;
     this.baseUrl =
-      config.baseUrl ?? process.env.ASANA_API_BASE_URL ?? "https://app.asana.com/api/1.0";
+      sanitizeAsanaBaseUrl(config.baseUrl, "Asana baseUrl") ??
+      asanaBaseUrlFromEnvironment() ??
+      DEFAULT_ASANA_API_BASE_URL;
   }
 
   /**

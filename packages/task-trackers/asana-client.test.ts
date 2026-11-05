@@ -3,15 +3,37 @@ import { AsanaClient, parseAsanaTaskFilters } from "./src/clients/asana.ts";
 
 const originalFetch = globalThis.fetch;
 const originalBaseUrl = process.env.ASANA_API_BASE_URL;
+const originalE2eFlag = process.env.DEVINTERN_E2E_FAKE_ASANA;
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
-  if (originalBaseUrl === undefined) {
-    delete process.env.ASANA_API_BASE_URL;
-  } else {
-    process.env.ASANA_API_BASE_URL = originalBaseUrl;
-  }
+  restoreEnv("ASANA_API_BASE_URL", originalBaseUrl);
+  restoreEnv("DEVINTERN_E2E_FAKE_ASANA", originalE2eFlag);
 });
+
+function restoreEnv(name: string, value: string | undefined): void {
+  if (value === undefined) {
+    delete process.env[name];
+  } else {
+    process.env[name] = value;
+  }
+}
+
+type AsanaModule = typeof import("./src/clients/asana.ts");
+
+let importCounter = 0;
+
+/**
+ * Evaluate the Asana client module against the current environment.
+ *
+ * A unique query string forces Bun to re-run module evaluation, which lets a
+ * test distinguish spawn-time variables (snapshotted on import) from `.env`
+ * values applied later.
+ */
+async function importAsanaModule(): Promise<AsanaModule> {
+  importCounter += 1;
+  return (await import(`./src/clients/asana.ts?env=${importCounter}`)) as AsanaModule;
+}
 
 type CapturedRequest = { url: string; method: string; body?: unknown };
 
@@ -80,20 +102,112 @@ describe("AsanaClient endpoint override", () => {
     expect(calls[0].url).toStartWith("http://127.0.0.1:1/api/1.0/tasks/123456?opt_fields=");
   });
 
-  test("ASANA_API_BASE_URL overrides the default REST endpoint", async () => {
-    process.env.ASANA_API_BASE_URL = "http://127.0.0.1:2/api/1.0";
+  test("trims whitespace and strips trailing slashes from an explicit baseUrl", async () => {
     const calls = mockFetch(() => ({ json: {} }));
 
-    await makeClient().getTaskDetail("123456");
+    const client = new AsanaClient({
+      apiToken: "pat",
+      baseUrl: "  http://127.0.0.1:1/api/1.0/  ",
+    });
+    await client.getTaskDetail("123456");
+
+    expect(calls[0].url).toStartWith("http://127.0.0.1:1/api/1.0/tasks/123456?opt_fields=");
+    expect(calls[0].url).not.toContain("//tasks");
+  });
+
+  test("treats an empty explicit baseUrl as absent", async () => {
+    delete process.env.ASANA_API_BASE_URL;
+    const calls = mockFetch(() => ({ json: {} }));
+
+    await new AsanaClient({ apiToken: "pat", baseUrl: "   " }).getTaskDetail("123456");
+
+    expect(calls[0].url).toStartWith("https://app.asana.com/api/1.0/tasks/123456?opt_fields=");
+  });
+
+  test("rejects an invalid explicit baseUrl", () => {
+    expect(() => new AsanaClient({ apiToken: "pat", baseUrl: "not a url" })).toThrow(
+      'Invalid Asana baseUrl "not a url"',
+    );
+  });
+
+  test("ASANA_API_BASE_URL overrides the endpoint behind the E2E flag", async () => {
+    process.env.DEVINTERN_E2E_FAKE_ASANA = "1";
+    process.env.ASANA_API_BASE_URL = "http://127.0.0.1:2/api/1.0";
+    const { AsanaClient: FlaggedClient } = await importAsanaModule();
+    const calls = mockFetch(() => ({ json: {} }));
+
+    await new FlaggedClient({ apiToken: "pat" }).getTaskDetail("123456");
 
     expect(calls[0].url).toStartWith("http://127.0.0.1:2/api/1.0/tasks/123456?opt_fields=");
   });
 
-  test("keeps the production base URL when no override is set", async () => {
-    delete process.env.ASANA_API_BASE_URL;
+  test("ignores ASANA_API_BASE_URL unless the E2E flag is set", async () => {
+    delete process.env.DEVINTERN_E2E_FAKE_ASANA;
+    process.env.ASANA_API_BASE_URL = "https://attacker.example/api/1.0";
+    const { AsanaClient: UnflaggedClient } = await importAsanaModule();
     const calls = mockFetch(() => ({ json: {} }));
 
-    await makeClient().getTaskDetail("123456");
+    await new UnflaggedClient({ apiToken: "pat" }).getTaskDetail("123456");
+
+    expect(calls[0].url).toStartWith("https://app.asana.com/api/1.0/tasks/123456?opt_fields=");
+  });
+
+  test("ignores override values that appear after the module is loaded", async () => {
+    delete process.env.DEVINTERN_E2E_FAKE_ASANA;
+    delete process.env.ASANA_API_BASE_URL;
+    const { AsanaClient: LoadedClient } = await importAsanaModule();
+
+    // Model a project `.env` loader (dotenv or loadEnvFromConfigDir) mutating
+    // process.env after the CLI imports its clients.
+    process.env.DEVINTERN_E2E_FAKE_ASANA = "1";
+    process.env.ASANA_API_BASE_URL = "http://127.0.0.1:2/api/1.0";
+    const calls = mockFetch(() => ({ json: {} }));
+
+    await new LoadedClient({ apiToken: "pat" }).getTaskDetail("123456");
+
+    expect(calls[0].url).toStartWith("https://app.asana.com/api/1.0/tasks/123456?opt_fields=");
+  });
+
+  test("rejects a non-loopback ASANA_API_BASE_URL when the E2E flag is set", async () => {
+    process.env.DEVINTERN_E2E_FAKE_ASANA = "1";
+    process.env.ASANA_API_BASE_URL = "https://attacker.example/api/1.0";
+    const { AsanaClient: FlaggedClient } = await importAsanaModule();
+
+    expect(() => new FlaggedClient({ apiToken: "pat" })).toThrow(
+      "ASANA_API_BASE_URL may only point at a loopback fake server",
+    );
+  });
+
+  test("treats an empty ASANA_API_BASE_URL placeholder as absent", async () => {
+    process.env.DEVINTERN_E2E_FAKE_ASANA = "1";
+    process.env.ASANA_API_BASE_URL = "   ";
+    const { AsanaClient: FlaggedClient } = await importAsanaModule();
+    const calls = mockFetch(() => ({ json: {} }));
+
+    await new FlaggedClient({ apiToken: "pat" }).getTaskDetail("123456");
+
+    expect(calls[0].url).toStartWith("https://app.asana.com/api/1.0/tasks/123456?opt_fields=");
+  });
+
+  test("strips trailing slashes from ASANA_API_BASE_URL", async () => {
+    process.env.DEVINTERN_E2E_FAKE_ASANA = "1";
+    process.env.ASANA_API_BASE_URL = "http://127.0.0.1:2/api/1.0//";
+    const { AsanaClient: FlaggedClient } = await importAsanaModule();
+    const calls = mockFetch(() => ({ json: {} }));
+
+    await new FlaggedClient({ apiToken: "pat" }).getTaskDetail("123456");
+
+    expect(calls[0].url).toStartWith("http://127.0.0.1:2/api/1.0/tasks/123456?opt_fields=");
+    expect(calls[0].url).not.toContain("/api/1.0//tasks");
+  });
+
+  test("keeps the production base URL when no override is set", async () => {
+    delete process.env.ASANA_API_BASE_URL;
+    delete process.env.DEVINTERN_E2E_FAKE_ASANA;
+    const { AsanaClient: PlainClient } = await importAsanaModule();
+    const calls = mockFetch(() => ({ json: {} }));
+
+    await new PlainClient({ apiToken: "pat" }).getTaskDetail("123456");
 
     expect(calls[0].url).toStartWith("https://app.asana.com/api/1.0/tasks/123456?opt_fields=");
   });
@@ -196,6 +310,23 @@ describe("AsanaClient stories", () => {
 });
 
 describe("AsanaClient sections and fields", () => {
+  test("detail and search requests ask for memberships and tags", async () => {
+    const calls = mockFetch(() => ({ json: [] }));
+
+    await makeClient().getTaskDetail("123456");
+    await makeClient().searchTasks({ projectGid: "12345" });
+
+    expect(calls).toHaveLength(2);
+    for (const call of calls) {
+      // Section selection and label assertions depend on these fields; the
+      // fake projects onto opt_fields, so dropping one fails the e2e lifecycle.
+      expect(call.url).toContain("memberships.project.gid");
+      expect(call.url).toContain("memberships.section.name");
+      expect(call.url).toContain("tags.gid");
+      expect(call.url).toContain("tags.name");
+    }
+  });
+
   test("moveTaskToSection posts addTask", async () => {
     const calls = mockFetch(() => ({ json: {} }));
 

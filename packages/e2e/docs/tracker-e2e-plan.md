@@ -239,15 +239,25 @@ client through the built CLI for both explicit-GID and `--query` selection. It
 reads state back through the fixture rather than CLI stdout.
 
 The CLI reaches the fake through `ASANA_API_BASE_URL` (for example
-`http://127.0.0.1:<port>/api/1.0`), read by `AsanaClient`. Production keeps
-`https://app.asana.com/api/1.0` when the variable is absent, and the variable
-is never required.
+`http://127.0.0.1:<port>/api/1.0`) plus `DEVINTERN_E2E_FAKE_ASANA=1`, both
+exported in the subprocess environment before the CLI starts. `AsanaClient`
+only honors that override behind the explicit test flag, ignores values loaded
+later from a project `.env`, and only accepts loopback hosts. A project `.env`
+therefore cannot redirect a real PAT, and even an exported override cannot send
+it to a remote host. Production keeps `https://app.asana.com/api/1.0` when the
+variable is absent, and the variable is never required.
 
 Endpoints covered:
 
-- `GET /projects/{projectGid}/tasks` (project listing with the
-  completed/section/assignee/free-text filters `searchTasks` applies)
+- `GET /projects/{projectGid}/tasks` (full project listing; `searchTasks`
+  filters it client-side rather than sending unsupported query params)
 - `GET /tasks/{gid}` (detail with notes, memberships, tags, custom fields)
+
+Task responses are projected onto the request's `opt_fields`, as the real API
+does, so a client that stops requesting a field the lifecycle depends on — for
+example `memberships.section.name` for section selection — loses it and fails
+the run instead of passing against an unrealistically complete payload.
+
 - `GET` / `POST /tasks/{gid}/stories` (comment stories, HTML or plain text)
 - `PUT /stories/{gid}`
 - `GET /projects/{gid}/sections`
