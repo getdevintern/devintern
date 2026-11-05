@@ -159,6 +159,47 @@ bun run --filter @getdevintern/code build
 bun run --filter @devintern/e2e test
 ```
 
+## Worker crash recovery
+
+`tests/local/worker-orphan-recovery.test.ts` runs in the default offline suite and
+kills the real daemon instead of stopping it. It waits (by polling the queue
+database, never a fixed sleep) until an injected task has a claimed row, an
+`in_progress` run and a recorded `child_pid`, with the deterministic agent
+provably idling (`E2E_AGENT_DELAY_MS`). The fixture writes its invocation record
+only after `interrupted` mode lands the empty commit, so waiting for that record
+also proves the interrupted branch has resumable work; the test re-checks that
+the branch is one commit ahead of base before killing anything. It then
+simulates power loss: `SIGKILL` to the daemon pid from
+`<workspace>/.worker.lock` and its process group, then to the recorded task
+child tree (the agent runs in its own process group), with no graceful
+shutdown. `WORKER_INJECTED_AUTO_RESUME_LIMIT=0` then forces startup
+recovery to refuse the automatic resume of that resumable state, keeping the
+crash observable as a failed row instead of a silent re-run.
+
+The restart reuses the same queue database and enqueues a small keepalive
+injected task first, so an injection-only workspace stays alive after recovery.
+The test asserts the documented outcome: the interrupted row settles `failed`
+with the exhausted-budget message naming its run, branch and
+`devintern worker add --resume` fallback, its run is terminal `failed` with no
+PR and no branch on the local bare remote, no second run is created without
+manual action, the recovery warning names the task and the exhausted budget, the
+lock is re-acquired by the new daemon, `auto_resume_count` stays `0`, and the
+worker keeps draining the keepalive task. It then performs the documented manual
+recovery, `devintern worker add --resume <task-key> --json`, and asserts the row
+settles `done`, exactly one run is added as attempt 2 on the **interrupted**
+branch (no `-attempt-2` branch is created), the deterministic agent runs again,
+and the resumed branch with the `src/greeting.ts` change reaches the bare remote.
+
+```sh
+bun run --filter @getdevintern/code build
+bun run --filter @devintern/e2e test
+```
+
+Not covered here: automatic resume within its budget, implementation-report
+inheritance without landed commits (covered by `worker-add-options.test.ts`),
+tracker status reset/feedback for a non-markdown ticket, and the dashboard's
+Re-queue action.
+
 ## Sandbox checks (nono, native, docker, removed providers)
 
 The ordinary local suite exercises sandbox provider selection and the
