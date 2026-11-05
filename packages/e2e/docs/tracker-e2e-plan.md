@@ -1,8 +1,9 @@
 # Tracker E2E expansion plan
 
-Status: **Layer 1 implemented** (read-only workspace smoke). **The Jira part of
-Layer 3 is implemented** (offline fake lifecycle in the default suite). The
-Jira/Trello Layer 2 live suites and the Trello part of Layer 3 remain planned.
+Status: **Layer 1 implemented** (read-only workspace smoke). **The Jira and
+Azure DevOps parts of Layer 3 are implemented** (offline fake lifecycles in the
+default suite). The Jira/Trello Layer 2 live suites, the Azure DevOps read-only
+check, and the Trello part of Layer 3 remain planned.
 
 This plan describes how `packages/e2e` grows tracker coverage without making the
 default `bun run test` depend on the network or credentials, and without writing
@@ -33,7 +34,7 @@ test data into the trackers a worker actually uses.
 | GitLab.com Issues   | no                 | `test:e2e:tracker:gitlab-com`          | Existing live suite; pre-created project, issues only, project retained.                                                         |
 | Linear              | no                 | none                                   | Detection only in Layer 1.                                                                                                       |
 | Asana               | no                 | none                                   | Detection only in Layer 1.                                                                                                       |
-| Azure DevOps        | no                 | none                                   | Detection only in Layer 1.                                                                                                       |
+| Azure DevOps        | yes (offline fake) | none                                   | Fake lifecycle: key/`--query`, `System.State` PATCH, comments. Live organization lifecycle and estimation planned.               |
 
 The default local run reports these opt-in suites as skipped and planned
 coverage as todo (`helpers/opt-in-suites.ts`), so the test output names what it
@@ -191,7 +192,7 @@ Acceptance criteria:
 - Missing fixture configuration fails before any remote mutation.
 - A rerun does not collide with leftovers from a previous run.
 
-## Layer 3 — fake tracker servers for the default local suite (Jira implemented)
+## Layer 3 — fake tracker servers for the default local suite (Jira and Azure DevOps implemented)
 
 Run the built CLI against in-process Bun servers that implement the subset of
 the tracker APIs the product uses. This gives deterministic, credential-free
@@ -226,6 +227,49 @@ record, the configured workflow status, surviving unrelated labels, the
 implementation comment, and `--skip-comments` on a second run. The local bare
 Git remote is the code host; no PR, GitHub token, or model credentials are
 required. The only skip is the existing built-CLI guard.
+
+### Azure DevOps (implemented)
+
+`providers/fake-azure-devops.ts` serves a strict Azure DevOps WIT subset on
+`127.0.0.1:0` and owns all work items, fields, tags, and comments in memory.
+`tests/local/tracker-azure-devops-fake.test.ts` seeds an expected work item
+(description marker mirrored into `System.Tags` for the selector) plus a decoy
+outside the selector, writes per-project states into
+`.devintern-code/settings.json`, and runs the production Azure DevOps client
+through the built CLI for both explicit numeric key and `--query` selection. It
+reads state back through the fixture rather than CLI stdout.
+
+The CLI reaches the fake through `AZURE_DEVOPS_BASE_URL`, which overrides the
+organization root (`https://dev.azure.com/<organization>` by default) for the
+subprocess. The variable is optional and does not change production behavior
+when absent.
+
+Endpoints covered:
+
+- `POST /<org>/<project>/_apis/wit/wiql?api-version=7.0&$top=100` — evaluates
+  the `AND`-joined `[Field] = / <> / CONTAINS` WIQL subset the scenario uses;
+  an unparseable `WHERE` returns no rows rather than every work item.
+- `GET /<org>/_apis/wit/workitems?ids=<csv>&fields=...` — batch title and
+  `System.ChangedDate` lookup for WIQL results.
+- `GET /<org>/_apis/wit/workitems/<id>?$expand=all` — full fields and an empty
+  relation list.
+- `GET` / `POST /<org>/<project>/_apis/wit/workItems/<id>/comments` — comments
+  stored as HTML and returned oldest first.
+- `PATCH /<org>/_apis/wit/workitems/<id>` — applies JSON-patch
+  `/fields/<name>` operations, including `System.State`.
+
+Any other route returns a diagnostic 404 naming the method and path, and the
+test asserts no unexpected request occurred. The fake accepts any Basic-auth
+credentials, never logs or echoes them, and makes no outbound requests.
+Scenarios assert the pushed `feature/<key>` branch and exact
+`src/greeting.ts` diff, the run record, the final `System.State`, surviving
+unrelated tags, the implementation comment, and delivery of the seeded
+description/comment markers to the deterministic agent. The local bare Git
+remote is the code host; no PR, real Azure DevOps PAT, GitHub token, or model
+credentials are required. The only skip is the existing built-CLI guard.
+
+Estimation (Story Points), attachments, service hooks/webhooks, and a live
+organization lifecycle are not covered.
 
 ### Trello (planned)
 
@@ -267,16 +311,16 @@ credentials.
 - Dedicated Trello board versus dedicated lists on the existing board.
 - Whether the read-only smoke should run as part of the release automation or
   stay a manual pre-flight.
-- Which additional trackers (Linear, Asana, Azure DevOps) justify Layer 2/3
-  coverage versus read-only checks only.
+- Which additional trackers (Linear, Asana) justify Layer 2/3 coverage versus
+  read-only checks only.
 
 ## Suggested order
 
 1. Layer 1 read-only smoke (done).
 2. Trello Layer 2 on a dedicated board; it needs no project provisioning.
 3. Jira Layer 2 with a dedicated `E2E` project.
-4. Layer 3 fake servers so the default suite covers Jira (done) and Trello
-   (planned) lifecycle.
+4. Layer 3 fake servers so the default suite covers Jira and Azure DevOps
+   (done) and Trello (planned) lifecycle.
 5. Add read-only checks for Linear, Asana, and Azure DevOps when credentials
    exist.
 6. Revisit live GitHub/GitLab tracker smoke only if the full suites start

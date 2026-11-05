@@ -314,28 +314,45 @@ fails the explicit live command before it mutates a remote repository.
 
 ## Offline fake tracker servers
 
-The default local suite includes an in-process fake Jira Cloud v3 server, so the
-built CLI can exercise the Jira tracker lifecycle with no credentials and no
-network access. `bun test tests/local` runs
-`tests/local/tracker-jira-fake.test.ts`; it skips only when the built CLI is
-absent, like the other local Git tests.
+The default local suite includes in-process fakes for Jira Cloud v3 and Azure
+DevOps WIT, so the built CLI can exercise tracker lifecycles with no
+credentials and no network access. `bun test tests/local` runs
+`tests/local/tracker-jira-fake.test.ts` and
+`tests/local/tracker-azure-devops-fake.test.ts`; they skip only when the built
+CLI is absent, like the other local Git tests.
 
-The fake binds `127.0.0.1:0`, accepts any Basic-auth credentials (and never logs
-them), and implements only the endpoints the product calls: `/myself`, enhanced
-JQL `search/jql`, issue read/update, comments (ADF and text), and workflow
-transitions. Any unmatched request returns a diagnostic 404 and fails the test,
-so a client change that starts calling a new route is visible instead of
-silently returning `{}`.
+Both fakes bind `127.0.0.1:0`, accept any Basic-auth credentials (and never log
+them), and implement only the endpoints the product calls. Any unmatched
+request returns a diagnostic 404 and fails the test, so a client change that
+starts calling a new route is visible instead of silently returning `{}`.
 
-Two scenarios run the production Jira client through explicit-key and `--query`
-selection against a seeded issue and a decoy outside the selector. Read-back
-goes through the fake fixture, not CLI stdout: the pushed `feature/<key>` branch
-and exact `src/greeting.ts` diff, the run record, the configured workflow
-status, surviving unrelated labels, the implementation summary comment, and
-delivery of the seeded description/comment markers to the deterministic agent.
-A second run with `--skip-comments` proves no additional comment or transition
-is posted. The local bare Git remote is the code host; no GitHub token or PR is
-required.
+The Jira fake covers `/myself`, enhanced JQL `search/jql`, issue read/update,
+comments (ADF and text), and workflow transitions. The Azure DevOps fake covers
+project-scoped WIQL, batch and single work-item reads, work-item JSON-patch
+updates (including `System.State`), and work-item comments. The CLI reaches the
+fake through the existing `AZURE_DEVOPS_BASE_URL` test/proxy override, which
+replaces the organization root (`https://dev.azure.com/<organization>` by
+default) for the subprocess only; production behavior is unchanged when the
+variable is absent.
+
+Two scenarios per fake run the production client through explicit-key and
+`--query` selection against seeded items and a decoy outside the selector.
+Read-back goes through the fixture, not CLI stdout: the pushed `feature/<key>`
+branch and exact `src/greeting.ts` diff, the run record, the configured
+workflow status/state, surviving unrelated labels/tags, the implementation
+summary comment, and delivery of the seeded description/comment markers to the
+deterministic agent. The local bare Git remote is the code host; no GitHub
+token, tracker token, or PR is required. The Jira key scenario additionally
+runs a second time with `--skip-comments` to prove no additional comment or
+transition is posted.
+
+Run just the Azure DevOps lifecycle with:
+
+```sh
+bun run --filter @devintern/e2e test
+# or directly, from packages/e2e
+bun test tests/local/tracker-azure-devops-fake.test.ts
+```
 
 ## Remote tracker fixtures
 

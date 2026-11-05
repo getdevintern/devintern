@@ -27,6 +27,68 @@ function makeClient(): AzureDevOpsClient {
   return new AzureDevOpsClient({ organization: "myorg", pat: "pat", defaultProject: "MyProject" });
 }
 
+describe("AzureDevOpsClient base URL", () => {
+  test("defaults to the production organization root", async () => {
+    const previous = process.env.AZURE_DEVOPS_BASE_URL;
+    delete process.env.AZURE_DEVOPS_BASE_URL;
+    try {
+      const calls = mockFetch(() => ({ id: 42, fields: {}, relations: [] }));
+
+      await makeClient().getWorkItemDetail("42");
+
+      expect(calls[0].url).toStartWith("https://dev.azure.com/myorg/");
+    } finally {
+      if (previous === undefined) {
+        delete process.env.AZURE_DEVOPS_BASE_URL;
+      } else {
+        process.env.AZURE_DEVOPS_BASE_URL = previous;
+      }
+    }
+  });
+
+  test("AZURE_DEVOPS_BASE_URL overrides the organization root", async () => {
+    const previous = process.env.AZURE_DEVOPS_BASE_URL;
+    process.env.AZURE_DEVOPS_BASE_URL = "http://127.0.0.1:9/fakeorg";
+    try {
+      const calls = mockFetch(() => ({ id: 42, fields: {}, relations: [] }));
+
+      await makeClient().getWorkItemDetail("42");
+
+      expect(calls[0].url).toStartWith("http://127.0.0.1:9/fakeorg/");
+    } finally {
+      if (previous === undefined) {
+        delete process.env.AZURE_DEVOPS_BASE_URL;
+      } else {
+        process.env.AZURE_DEVOPS_BASE_URL = previous;
+      }
+    }
+  });
+
+  test("constructor baseUrl takes precedence over the environment", async () => {
+    const previous = process.env.AZURE_DEVOPS_BASE_URL;
+    process.env.AZURE_DEVOPS_BASE_URL = "http://127.0.0.1:9/ignored";
+    try {
+      const calls = mockFetch(() => ({ id: 42, fields: {}, relations: [] }));
+      const client = new AzureDevOpsClient({
+        organization: "myorg",
+        pat: "pat",
+        defaultProject: "MyProject",
+        baseUrl: "http://127.0.0.1:8/explicit",
+      });
+
+      await client.getWorkItemDetail("42");
+
+      expect(calls[0].url).toStartWith("http://127.0.0.1:8/explicit/");
+    } finally {
+      if (previous === undefined) {
+        delete process.env.AZURE_DEVOPS_BASE_URL;
+      } else {
+        process.env.AZURE_DEVOPS_BASE_URL = previous;
+      }
+    }
+  });
+});
+
 describe("AzureDevOpsClient.queryWorkItems", () => {
   test("posts WIQL scoped to the project and batch-fetches titles", async () => {
     const calls = mockFetch((req) => {

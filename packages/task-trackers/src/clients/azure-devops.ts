@@ -62,10 +62,9 @@ export interface AzureDevOpsComment {
 const COMMENTS_API_VERSION = "7.1-preview.3";
 
 export class AzureDevOpsClient {
-  private organization: string;
-  private pat: string;
   private auth: string;
   private defaultProject: string;
+  private baseUrlValue: string;
   private projectsCache: AzureDevOpsProject[] | null = null;
   private workItemTypesCache = new Map<string, AzureDevOpsWorkItemType[]>();
   private workItemCache = new Map<string, { id: number; url: string }>();
@@ -73,12 +72,21 @@ export class AzureDevOpsClient {
   /**
    * Create an Azure DevOps WIT REST API client.
    *
-   * @param config - Organization name, PAT, and default project.
+   * @param config - Organization name, PAT, and default project. `baseUrl` and
+   *   `AZURE_DEVOPS_BASE_URL` are for tests/proxies; production uses
+   *   `https://dev.azure.com/<organization>`.
    */
-  constructor(config: { organization: string; pat: string; defaultProject: string }) {
-    this.organization = config.organization;
-    this.pat = config.pat;
+  constructor(config: {
+    organization: string;
+    pat: string;
+    defaultProject: string;
+    baseUrl?: string;
+  }) {
     this.defaultProject = config.defaultProject;
+    this.baseUrlValue =
+      config.baseUrl ??
+      process.env.AZURE_DEVOPS_BASE_URL ??
+      `https://dev.azure.com/${config.organization}`;
     // Azure DevOps PAT auth: username is empty, password is the PAT
     this.auth = Buffer.from(`:${config.pat}`).toString("base64");
   }
@@ -89,7 +97,7 @@ export class AzureDevOpsClient {
    * @returns Organization root URL (e.g. `https://dev.azure.com/myorg`).
    */
   private get baseUrl(): string {
-    return `https://dev.azure.com/${this.organization}`;
+    return this.baseUrlValue;
   }
 
   /**
