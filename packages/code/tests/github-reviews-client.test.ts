@@ -7,9 +7,15 @@ import {
 } from "../src/lib/code-host/github/reviews";
 
 const originalFetch = globalThis.fetch;
+const originalRetryEnv = process.env.DEVINTERN_FETCH_MAX_RETRIES;
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
+  if (originalRetryEnv === undefined) {
+    delete process.env.DEVINTERN_FETCH_MAX_RETRIES;
+  } else {
+    process.env.DEVINTERN_FETCH_MAX_RETRIES = originalRetryEnv;
+  }
 });
 
 const jsonResponse = (status: number, body: unknown) =>
@@ -207,8 +213,69 @@ describe("GitHubReviewsClient auth failure path", () => {
     expect(isGitHubTransientError(new Error("GitHub API error (422): Validation Failed"))).toBe(
       false,
     );
-    expect(isGitHubTransientError(new Error("fetch failed"))).toBe(false);
+    expect(isGitHubTransientError(new Error("GitHub API error (422): network policy"))).toBe(false);
     expect(isGitHubTransientError(null)).toBe(false);
+  });
+
+  test("a 403 rate limit is transient but a plain 403 is not", () => {
+    expect(
+      isGitHubTransientError(new Error("GitHub API error (403): API rate limit exceeded")),
+    ).toBe(true);
+    expect(
+      isGitHubTransientError(
+        new Error("GitHub API error (403): You have exceeded a secondary rate limit."),
+      ),
+    ).toBe(true);
+    expect(
+      isGitHubTransientError(new Error("GitHub API error (403): abuse detection mechanism")),
+    ).toBe(true);
+    expect(isGitHubTransientError(new Error("GitHub API error (403): Forbidden"))).toBe(false);
+    expect(
+      isGitHubTransientError(new Error("GitHub API error (403): Resource not accessible")),
+    ).toBe(false);
+  });
+
+  test("transport failures are transient like fetchWithRetry treats them", () => {
+    for (const message of [
+      "fetch failed",
+      "connect ECONNREFUSED 140.82.112.5:443",
+      "getaddrinfo ENOTFOUND api.github.com",
+      "socket hang up",
+    ]) {
+      expect(isGitHubTransientError(new Error(message))).toBe(true);
+    }
+    expect(isGitHubTransientError(new Error("Invalid private key"))).toBe(false);
+  });
+
+  test("App-auth HTTP failures carry the status used for classification", async () => {
+    // Without this the default 3 retries (1s/2s/4s backoff) make this test
+    // exceed Bun's 5s timeout and add ~7s to every suite run.
+    process.env.DEVINTERN_FETCH_MAX_RETRIES = "0";
+    let fetchCalls = 0;
+    globalThis.fetch = mockFetch(async () => {
+      fetchCalls += 1;
+      return jsonResponse(503, { message: "Service Unavailable" });
+    });
+
+    const { generateKeyPairSync } = await import("node:crypto");
+    const { GitHubAppAuth } = await import("../src/lib/code-host/github/app-auth");
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const appAuth = new GitHubAppAuth({
+      appId: "1",
+      privateKey: privateKey.export({ type: "pkcs1", format: "pem" }).toString(),
+    });
+    try {
+      await appAuth.getInstallationToken(42);
+      throw new Error("expected getInstallationToken to reject");
+    } catch (error) {
+      expect((error as Error).message).toBe(
+        "GitHub API error (503): Failed to create installation access token: Service Unavailable",
+      );
+      expect(isGitHubTransientError(error)).toBe(true);
+      // A single attempt proves the retry backoff was disabled, not just that
+      // the environment variable happened to be set somewhere.
+      expect(fetchCalls).toBe(1);
+    }
   });
 
   test("non-401 API errors keep the bare status message", async () => {

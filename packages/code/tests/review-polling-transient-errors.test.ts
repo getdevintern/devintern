@@ -97,6 +97,22 @@ describe("ReviewPollingAcquirer transient GitHub failures", () => {
     expect(captures).toHaveLength(0);
   });
 
+  test("GitHub's 403 rate-limit shape is not captured", async () => {
+    const acquirer = acquirerThrowing(new Error("GitHub API error (403): API rate limit exceeded"));
+
+    await acquirer.tick();
+
+    expect(captures).toHaveLength(0);
+  });
+
+  test("transport failures are not captured", async () => {
+    const acquirer = acquirerThrowing(new Error("fetch failed"));
+
+    await acquirer.tick();
+
+    expect(captures).toHaveLength(0);
+  });
+
   test("non-transient API failures still capture with poll context", async () => {
     const acquirer = acquirerThrowing(new Error("GitHub API error (422): Validation Failed"));
 
@@ -110,5 +126,61 @@ describe("ReviewPollingAcquirer transient GitHub failures", () => {
       prNumber: 7,
       stage: "poll-pr",
     });
+  });
+
+  test("a feedback-run git failure is captured even when it looks like a network error", async () => {
+    const failure = new Error("ssh: connect to host github.com: Network is unreachable");
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 7 });
+    const acquirer = new ReviewPollingAcquirer({
+      intervalSeconds: 60,
+      workerState,
+      queue,
+      github: {
+        async fetchPr() {
+          return {
+            data: {
+              state: "open",
+              head: { sha: "abc", ref: "agent/task", repo: { full_name: "acme/widgets" } },
+              base: { sha: "def", ref: "main" },
+            },
+            etag: 'W/"pr-7"',
+            notModified: false,
+          };
+        },
+        async fetchReviews() {
+          return {
+            data: [
+              {
+                id: 1,
+                state: "changes_requested",
+                user: { login: "reviewer", type: "User" },
+              },
+            ],
+            etag: 'W/"reviews-7"',
+            notModified: false,
+          };
+        },
+        async fetchReviewCommentsSince() {
+          return [];
+        },
+      },
+      addressPr: async () => {
+        throw failure;
+      },
+    });
+
+    await acquirer.tick();
+
+    // The failure originates in addressPr's git/repo work, not a GitHub API
+    // fetch, so the transient-network filter must not downgrade it.
+    expect(captures).toHaveLength(1);
+    expect(captures[0]?.error).toBe(failure);
+    expect(captures[0]?.context).toMatchObject({
+      acquirer: "poll:reviews",
+      repo: "acme/widgets",
+      prNumber: 7,
+      stage: "address-pr",
+    });
+    expect(warnings.some((line) => line.includes("addressing acme/widgets#7 failed"))).toBe(true);
   });
 });

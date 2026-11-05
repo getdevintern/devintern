@@ -829,7 +829,26 @@ export class ReviewPollingAcquirer implements Acquirer {
     }
 
     console.log(`\n📌 [${this.name}] new review feedback on ${repo}#${prNumber}`);
-    const ok = await addressPr(repo, prNumber);
+    let ok: TaskExecutionResult;
+    try {
+      ok = await addressPr(repo, prNumber);
+    } catch (error) {
+      // addressPr runs the feedback agent and its git/repo operations, not a
+      // GitHub API fetch. Even when the message mentions the network (e.g.
+      // "ssh: connect ... Network is unreachable"), a failed feedback run is
+      // actionable, so always report it instead of letting the tick's
+      // GitHub-transient filter hide it.
+      captureError(error, {
+        acquirer: this.name,
+        repo,
+        prNumber,
+        stage: "address-pr",
+      });
+      console.warn(
+        `⚠️  [${this.name}] addressing ${repo}#${prNumber} failed: ${(error as Error).message}`,
+      );
+      return;
+    }
     if (ok === "deferred") {
       console.log(
         `⏳ [${this.name}] ${repo}#${prNumber} deferred; will retry when a harness is available`,
