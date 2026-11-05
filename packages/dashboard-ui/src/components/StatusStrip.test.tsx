@@ -2,7 +2,12 @@ import { expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { WorkerStatusIndicator, queueLabel, queueTitle } from "@/components/StatusStrip";
+import {
+  WorkerStatusIndicator,
+  queueLabel,
+  queueTitle,
+  showMissingDatabaseBanner,
+} from "@/components/StatusStrip";
 import type { WorkerResponse, WorkerStatus } from "@/lib/api";
 
 function render(worker: WorkerStatus): string {
@@ -56,4 +61,14 @@ test("failed deliveries are appended to the queued count and breakdown", () => {
 
   expect(queueLabel(queue)).toBe("5 queued, 2 failed");
   expect(queueTitle(queue)).toContain("2 failed deliveries");
+});
+
+test("queued workspace work suppresses the no-database banner", () => {
+  // A fresh project can have no history DB while the workspace worker's queue
+  // DB already holds pending injected rows.
+  expect(showMissingDatabaseBanner({ dbMissing: true, queueDbMissing: false })).toBe(false);
+  // Only when BOTH databases are absent does the banner make sense.
+  expect(showMissingDatabaseBanner({ dbMissing: true, queueDbMissing: true })).toBe(true);
+  expect(showMissingDatabaseBanner({ dbMissing: false, queueDbMissing: true })).toBe(false);
+  expect(showMissingDatabaseBanner({ dbMissing: false, queueDbMissing: false })).toBe(false);
 });

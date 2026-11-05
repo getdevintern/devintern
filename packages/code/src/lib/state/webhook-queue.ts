@@ -941,3 +941,32 @@ function parseBaseSyncEventRow(row: unknown): BaseSyncEvent {
     updatedAt: requireNumber(record, "updated_at", "base_sync_events row"),
   };
 }
+
+/**
+ * Read relay delivery counts without creating or mutating the database.
+ *
+ * The dashboard's run history and its durable queue can live in different
+ * files (standalone `devintern dashboard` with a workspace), so callers pass
+ * the queue DB path explicitly. A missing file, missing table (older DB), or
+ * transient read failure degrades to zeros.
+ *
+ * @param dbPath - Database holding `webhook_events`
+ */
+export function readRelayQueueStats(dbPath: string): {
+  pending: number;
+  processing: number;
+  failed: number;
+} {
+  if (!existsSync(dbPath)) {
+    return { pending: 0, processing: 0, failed: 0 };
+  }
+  let queue: WebhookQueue | null = null;
+  try {
+    queue = new WebhookQueue({ dbPath, readonly: true });
+    return queue.getStats();
+  } catch {
+    return { pending: 0, processing: 0, failed: 0 };
+  } finally {
+    queue?.close();
+  }
+}

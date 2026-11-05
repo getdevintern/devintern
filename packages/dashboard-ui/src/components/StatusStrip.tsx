@@ -72,6 +72,19 @@ export function queueTitle(queue: WorkerResponse["queue"]): string {
   return parts.join(", ");
 }
 
+/**
+ * Whether to show the "no database yet" banner.
+ *
+ * Run history and the durable queue can live in different files. Claiming no
+ * database while the queue DB is recording work would contradict the non-zero
+ * "N queued" label next to it, so only show the banner when BOTH are absent.
+ */
+export function showMissingDatabaseBanner(
+  data: Pick<WorkerResponse, "dbMissing" | "queueDbMissing">,
+): boolean {
+  return data.dbMissing && data.queueDbMissing;
+}
+
 function Item({
   icon,
   label,
@@ -159,7 +172,7 @@ export function StatusStrip() {
           label={`${data.agentPrs.open} agent PR${data.agentPrs.open === 1 ? "" : "s"} open`}
         />
       </a>
-      {data.dbMissing ? (
+      {showMissingDatabaseBanner(data) ? (
         <Item
           icon={<Activity className="size-4" />}
           label="no database yet: run the worker once to start recording"

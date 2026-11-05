@@ -291,6 +291,9 @@ export interface WorkerResponse {
   cursors: { source: string; cursorValue: string; updatedAt: number }[];
   dbPath: string;
   dbMissing: boolean;
+  queueDbPath: string;
+  /** Whether the durable queue database file is absent. */
+  queueDbMissing: boolean;
 }
 
 /** One open agent-created PR (registry rows reconciled with GitHub by the worker). */

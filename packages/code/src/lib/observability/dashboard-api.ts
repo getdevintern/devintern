@@ -11,8 +11,8 @@
  * state instead of failing, so the dashboard always renders.
  */
 
-import { Database } from "bun:sqlite";
 import { existsSync } from "fs";
+import { resolve } from "path";
 
 import { LockManager } from "../lock-manager";
 import type { LockStatus } from "../lock-manager";
@@ -49,17 +49,22 @@ import type {
 } from "../state/run-retry";
 import { readWorkerLogs } from "./worker-logs";
 import type { LogEntry, WorkerLogLevel, WorkerLogsResult } from "./worker-logs";
-import { listHarnessLogs, readHarnessLogContent } from "./harness-logs";
+import { harnessLogsDir, listHarnessLogs, readHarnessLogContent } from "./harness-logs";
 import type { HarnessLogContent, HarnessLogFile } from "./harness-logs";
 import { listRunArtifacts, readRunArtifact } from "./task-artifacts";
 import type { TaskArtifactContent, TaskArtifactFile } from "./task-artifacts";
-import { resolveQueueDbPath, WebhookQueue } from "../state/webhook-queue";
-import { configureSqliteConnection } from "../state/sqlite";
+import { WebhookQueue } from "../state/webhook-queue";
 import {
   injectedChildStillRunningMessage,
   interruptedChildStillRunning,
 } from "../workspace/injected-recovery";
 import { resolveWorkspaceDir } from "../workspace/paths";
+import {
+  readDashboardQueueStatuses,
+  readDashboardRelayStats,
+  resolveDashboardHistoryDbPath,
+  resolveDashboardQueueDbPath,
+} from "./dashboard-db";
 import { WorkerState } from "../state/worker-state";
 import type { Cursor } from "../state/worker-state";
 
@@ -100,53 +105,6 @@ const MAX_LOG_LIMIT = 1000;
 /** Name of the worker daemon's lock file (see `startWorker`). */
 const WORKER_LOCK_FILE = ".worker.lock";
 
-const EMPTY_QUEUE_STATUS_COUNTS: QueueStatusCounts = { pending: 0, running: 0 };
-
-/**
- * Count `pending`/`running` rows in one durable queue table without changing it.
- *
- * Dashboard GETs must stay read-only (standalone `devintern dashboard` "reads
- * the local history without changing it"), so this never creates the directory,
- * database, schema, or indexes: it checks that the file exists first, then opens
- * `bun:sqlite` with `readonly: true` and closes it again. A missing table
- * (database written by an older version) degrades to zeros.
- *
- * @param dbPath - Shared worker state database
- * @param table - Queue table to count (fixed identifiers only)
- */
-function countQueueStatuses(
-  dbPath: string,
-  table: "injected_tasks" | "scheduled_retries",
-): QueueStatusCounts {
-  if (!existsSync(dbPath)) {
-    return { ...EMPTY_QUEUE_STATUS_COUNTS };
-  }
-  let db: Database | null = null;
-  try {
-    db = new Database(dbPath, { readonly: true });
-    configureSqliteConnection(db, { readonly: true });
-    const rows = db
-      .query(
-        `SELECT status, COUNT(*) AS count FROM ${table}
-         WHERE status IN ('pending', 'running')
-         GROUP BY status`,
-      )
-      .all() as Array<{ status: string; count: number }>;
-    const counts = { ...EMPTY_QUEUE_STATUS_COUNTS };
-    for (const row of rows) {
-      // Aggregate read: ignore an unrecognized status group instead of throwing.
-      if (row.status === "pending") counts.pending = row.count;
-      else if (row.status === "running") counts.running = row.count;
-    }
-    return counts;
-  } catch {
-    // Missing table, locked/corrupt DB, or a file removed between check and open.
-    return { ...EMPTY_QUEUE_STATUS_COUNTS };
-  } finally {
-    db?.close();
-  }
-}
-
 export interface ApiResponse {
   status: number;
   body: unknown;
@@ -154,8 +112,16 @@ export interface ApiResponse {
 
 export interface DashboardDataOptions {
   dbPath?: string;
+  queueDbPath?: string;
   /** Project root used to locate the worker lock file. */
   workingDir?: string;
+  /**
+   * Workspace home holding the worker lock, worker capture files, and harness
+   * transcripts. Defaults to `resolveWorkspaceDir()`; a standalone dashboard
+   * passes its `--workspace` value here so liveness and transcripts follow the
+   * same workspace as the queue counts.
+   */
+  workspaceDir?: string;
   /**
    * Live working-window snapshot from the worker process (embedded
    * dashboard only; standalone servers return null).
@@ -298,7 +264,9 @@ export interface DashboardAutomationView {
  */
 export class DashboardData {
   readonly dbPath: string;
+  readonly queueDbPath: string;
   readonly workingDir: string;
+  readonly workspaceDir: string;
   readonly retryMode: "spawn" | "schedule";
   private readonly logDirs: string[];
   private readonly maxLogBytesPerFile: number | undefined;
@@ -310,6 +278,8 @@ export class DashboardData {
   private scheduledRetryStore: ScheduledRetryStore | null = null;
   /** Lazy read-write connection for ad-hoc (`worker add`) rows. */
   private injectedTaskStore: InjectedTaskStore | null = null;
+  /** Lazy read-only connection for eligibility checks (GETs must not create). */
+  private injectedTaskReadStore: InjectedTaskStore | null = null;
   /**
    * Task keys with a dashboard-triggered retry in flight (task key → claimed
    * at). The spawned CLI needs a moment to create its run row, so claims are
@@ -328,8 +298,13 @@ export class DashboardData {
   private automationActionsOverride?: DashboardAutomationActions;
 
   constructor(options: DashboardDataOptions = {}) {
-    this.dbPath = options.dbPath ?? resolveQueueDbPath();
     this.workingDir = options.workingDir ?? process.cwd();
+    this.workspaceDir = options.workspaceDir ?? resolveWorkspaceDir();
+    this.dbPath = options.dbPath ?? resolveDashboardHistoryDbPath(this.workingDir);
+    this.queueDbPath =
+      options.queueDbPath ??
+      options.dbPath ??
+      resolveDashboardQueueDbPath(undefined, this.workingDir);
     this.scheduleSnapshot = options.scheduleSnapshot ?? (() => null);
     this.retryMode = options.retryMode ?? "spawn";
     this.inflightRetryTtlMs = options.inflightRetryTtlMs ?? INFLIGHT_RETRY_TTL_MS;
@@ -340,7 +315,7 @@ export class DashboardData {
       this.logDirs = options.logDirs;
     } else {
       const dirs = [this.workingDir];
-      const workspaceDir = resolveWorkspaceDir();
+      const workspaceDir = this.workspaceDir;
       if (!dirs.includes(workspaceDir)) {
         // Standalone `devintern dashboard` often runs outside the workspace
         // home where the daemon's service definition drops its capture files.
@@ -385,6 +360,18 @@ export class DashboardData {
   /** Whether the database file has been opened successfully. */
   get dbMissing(): boolean {
     return this.ensureStores() === null;
+  }
+
+  /**
+   * Whether the durable queue database is absent. The history DB and queue DB
+   * can differ, so the UI must not claim "no database yet" while a workspace
+   * DB is actively recording ad-hoc/retry work.
+   */
+  get queueDbMissing(): boolean {
+    if (resolve(this.queueDbPath) === resolve(this.dbPath)) {
+      return this.dbMissing;
+    }
+    return !existsSync(this.queueDbPath);
   }
 
   /**
@@ -457,7 +444,8 @@ export class DashboardData {
     }
     // Resolve each producing run once; logs can outlive their run row.
     const attempts = new Map<number, number | undefined>();
-    return listHarnessLogs({ runId, taskKey: run.taskKey }).map((file) => {
+    const dir = harnessLogsDir(this.workspaceDir);
+    return listHarnessLogs({ runId, taskKey: run.taskKey }, dir).map((file) => {
       const id = file.runId;
       if (id === undefined) {
         return file;
@@ -483,7 +471,7 @@ export class DashboardData {
     if (!match) {
       return null;
     }
-    return readHarnessLogContent(name);
+    return readHarnessLogContent(name, { dir: harnessLogsDir(this.workspaceDir) });
   }
 
   /** Registered immutable outputs belonging to this exact attempt. */
@@ -527,21 +515,31 @@ export class DashboardData {
   /** Store backing the schedule mode of the retry action. */
   getScheduledRetryStore(): ScheduledRetryStore {
     if (!this.scheduledRetryStore) {
-      this.scheduledRetryStore = new ScheduledRetryStore(this.dbPath);
+      this.scheduledRetryStore = new ScheduledRetryStore(this.queueDbPath);
     }
     return this.scheduledRetryStore;
   }
 
-  /**
-   * Store backing the ad-hoc retry action. Rows live in the same workspace DB,
-   * so the embedded worker's injected-task acquirer drains a re-queued row on
-   * its next poll.
-   */
+  /** Store backing the ad-hoc retry action; rows live in the durable queue DB. */
   getInjectedTaskStore(): InjectedTaskStore {
     if (!this.injectedTaskStore) {
-      this.injectedTaskStore = new InjectedTaskStore(this.dbPath);
+      this.injectedTaskStore = new InjectedTaskStore(this.queueDbPath);
     }
     return this.injectedTaskStore;
+  }
+
+  /**
+   * Read-only view of the ad-hoc queue, used by GET eligibility checks.
+   *
+   * Opening the read-write store here would create `<workspace>/state/queue.db`
+   * (and its schema) merely by viewing a run, violating the dashboard's
+   * read-only GET contract.
+   */
+  getInjectedTaskReadStore(): InjectedTaskStore {
+    if (!this.injectedTaskReadStore) {
+      this.injectedTaskReadStore = new InjectedTaskStore(this.queueDbPath, { readonly: true });
+    }
+    return this.injectedTaskReadStore;
   }
 
   /** Claim the retry slot for a task; false when one is already held. */
@@ -638,13 +636,10 @@ export class DashboardData {
   }
 
   getQueueStats(): WorkerQueueStats {
-    const relay = this.read({ pending: 0, processing: 0, failed: 0 }, (stores) =>
-      stores.queue.getStats(),
-    );
     return {
-      ...relay,
-      injected: countQueueStatuses(this.dbPath, "injected_tasks"),
-      retries: countQueueStatuses(this.dbPath, "scheduled_retries"),
+      ...readDashboardRelayStats(this.dbPath, this.queueDbPath),
+      injected: readDashboardQueueStatuses(this.queueDbPath, "injected_tasks"),
+      retries: readDashboardQueueStatuses(this.queueDbPath, "scheduled_retries"),
     };
   }
 
@@ -752,6 +747,8 @@ export class DashboardData {
     this.scheduledRetryStore = null;
     this.injectedTaskStore?.close();
     this.injectedTaskStore = null;
+    this.injectedTaskReadStore?.close();
+    this.injectedTaskReadStore = null;
   }
 }
 
@@ -788,7 +785,7 @@ const INFLIGHT_RETRY_TTL_MS = 60_000;
 /** Resolve an ad-hoc row, treating an unreadable/missing store as "no row". */
 function findInjectedTask(data: DashboardData, taskKey: string): InjectedTask | null {
   try {
-    return data.getInjectedTaskStore().getByTaskKey(taskKey);
+    return data.getInjectedTaskReadStore().getByTaskKey(taskKey);
   } catch {
     return null;
   }
@@ -1417,11 +1414,15 @@ export function handleStats(data: DashboardData, params: URLSearchParams): ApiRe
  * running elsewhere, and claiming "stopped" would be wrong.
  *
  * @param workingDir - Project root the dashboard was started from
+ * @param workspaceDir - Workspace home whose lock is also consulted
  */
-function resolveWorkerStatus(workingDir: string): WorkerStatusView {
+function resolveWorkerStatus(
+  workingDir: string,
+  workspaceDir: string = resolveWorkspaceDir(),
+): WorkerStatusView {
   const locks = [
     LockManager.readLockStatus(workingDir, WORKER_LOCK_FILE),
-    LockManager.readLockStatus(resolveWorkspaceDir(), WORKER_LOCK_FILE, { plainDir: true }),
+    LockManager.readLockStatus(workspaceDir, WORKER_LOCK_FILE, { plainDir: true }),
   ].filter((lock): lock is LockStatus => lock !== null);
   if (locks.length === 0) {
     return { status: "unknown" };
@@ -1445,7 +1446,7 @@ export function handleWorkerStatus(data: DashboardData): ApiResponse {
   return {
     status: 200,
     body: {
-      worker: resolveWorkerStatus(data.workingDir),
+      worker: resolveWorkerStatus(data.workingDir, data.workspaceDir),
       queue: data.getQueueStats(),
       agentPrs: data.getAgentPrCounts(),
       schedule: data.getScheduleSnapshot(),
@@ -1456,6 +1457,8 @@ export function handleWorkerStatus(data: DashboardData): ApiResponse {
       })),
       dbPath: data.dbPath,
       dbMissing: data.dbMissing,
+      queueDbPath: data.queueDbPath,
+      queueDbMissing: data.queueDbMissing,
     },
   };
 }
