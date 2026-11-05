@@ -123,7 +123,9 @@ export function createTrackerClient(
         );
       }
 
-      return new AzureDevOpsTaskTrackerClient(organization, pat, project);
+      return new AzureDevOpsTaskTrackerClient(organization, pat, project, {
+        baseUrl: env.AZURE_DEVOPS_BASE_URL,
+      });
     }
 
     case "github": {

@@ -62,10 +62,9 @@ export interface AzureDevOpsComment {
 const COMMENTS_API_VERSION = "7.1-preview.3";
 
 export class AzureDevOpsClient {
-  private organization: string;
-  private pat: string;
   private auth: string;
   private defaultProject: string;
+  private baseUrlValue: string;
   private projectsCache: AzureDevOpsProject[] | null = null;
   private workItemTypesCache = new Map<string, AzureDevOpsWorkItemType[]>();
   private workItemCache = new Map<string, { id: number; url: string }>();
@@ -73,12 +72,28 @@ export class AzureDevOpsClient {
   /**
    * Create an Azure DevOps WIT REST API client.
    *
-   * @param config - Organization name, PAT, and default project.
+   * @param config - Organization name, PAT, and default project. `baseUrl` is
+   *   the explicit organization root used by callers (for example a per-team
+   *   environment); `AZURE_DEVOPS_BASE_URL` remains a fallback for direct
+   *   constructors/tests. Production uses
+   *   `https://dev.azure.com/<organization>`.
    */
-  constructor(config: { organization: string; pat: string; defaultProject: string }) {
-    this.organization = config.organization;
-    this.pat = config.pat;
+  constructor(config: {
+    organization: string;
+    pat: string;
+    defaultProject: string;
+    baseUrl?: string;
+  }) {
     this.defaultProject = config.defaultProject;
+    // Accept empty/whitespace-only values and trailing slashes without
+    // producing relative or double-slash request URLs (mirrors GitLabClient).
+    // An explicit `baseUrl` (including `""`) is authoritative: callers that
+    // thread team config must not be redirected by process.env. The env
+    // fallback remains for direct constructors/tests that omit `baseUrl`.
+    const configured =
+      config.baseUrl !== undefined ? config.baseUrl : process.env.AZURE_DEVOPS_BASE_URL;
+    const productionRoot = `https://dev.azure.com/${config.organization}`.replace(/\/+$/, "");
+    this.baseUrlValue = configured?.trim().replace(/\/+$/, "") || productionRoot;
     // Azure DevOps PAT auth: username is empty, password is the PAT
     this.auth = Buffer.from(`:${config.pat}`).toString("base64");
   }
@@ -89,7 +104,7 @@ export class AzureDevOpsClient {
    * @returns Organization root URL (e.g. `https://dev.azure.com/myorg`).
    */
   private get baseUrl(): string {
-    return `https://dev.azure.com/${this.organization}`;
+    return this.baseUrlValue;
   }
 
   /**

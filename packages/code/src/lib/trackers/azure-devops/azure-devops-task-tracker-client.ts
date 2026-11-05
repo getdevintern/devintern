@@ -77,8 +77,20 @@ function htmlToPlainText(html: string): string {
 export class AzureDevOpsTaskTrackerClient implements TaskTrackerClient {
   private azureClient: AzureDevOpsClient;
 
-  constructor(organization: string, pat: string, defaultProject: string) {
-    this.azureClient = new AzureDevOpsClient({ organization, pat, defaultProject });
+  constructor(
+    organization: string,
+    pat: string,
+    defaultProject: string,
+    options: { baseUrl?: string } = {},
+  ) {
+    this.azureClient = new AzureDevOpsClient({
+      organization,
+      pat,
+      defaultProject,
+      // Always pass an explicit value so this client never falls back to
+      // process.env; the manager threads the team's env map in instead.
+      baseUrl: options.baseUrl ?? "",
+    });
   }
 
   // ------------------------------------------------------------------
