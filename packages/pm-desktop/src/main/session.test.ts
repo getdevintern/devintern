@@ -156,6 +156,22 @@ describe("detectGitRepository", () => {
 
 describe("loadProject suitability", () => {
   let tempDir: string;
+  let userDataDir: string;
+
+  beforeAll(async () => {
+    // loadProject persists project bindings; isolate them so settings never
+    // resolve Electron's userData (which lazily downloads the binary in CI and
+    // can exceed the per-test timeout).
+    userDataDir = await mkdtemp(join(tmpdir(), "pm-desktop-load-userdata-"));
+    setUserDataDirForTests(userDataDir);
+  });
+
+  afterAll(async () => {
+    setUserDataDirForTests(undefined);
+    if (userDataDir) {
+      await rm(userDataDir, { recursive: true, force: true });
+    }
+  });
 
   afterEach(async () => {
     setSessionGitExecForTests(undefined);
@@ -193,10 +209,33 @@ describe("loadProject suitability", () => {
     await createGitDirectory(tempDir);
     await mkdir(join(tempDir, ".devintern-pm"));
     await writeFile(join(tempDir, ".devintern-pm", ".env"), "TASK_TRACKER=jira\n");
-    const status = await loadProject(tempDir);
-    expect(status.isGitRepository).toBe(true);
-    expect(status.configured).toBe(false);
-    expect(status.configError).toBeDefined();
+    // The host may export complete tracker credentials (CI workers often do).
+    // Clear them so the project config is genuinely incomplete.
+    const trackerEnvKeys = [
+      "TASK_TRACKER",
+      "JIRA_BASE_URL",
+      "JIRA_EMAIL",
+      "JIRA_API_TOKEN",
+      "JIRA_DEFAULT_PROJECT_KEY",
+    ] as const;
+    const savedEnv = new Map(trackerEnvKeys.map((key) => [key, process.env[key]]));
+    for (const key of trackerEnvKeys) {
+      delete process.env[key];
+    }
+    try {
+      const status = await loadProject(tempDir);
+      expect(status.isGitRepository).toBe(true);
+      expect(status.configured).toBe(false);
+      expect(status.configError).toBeDefined();
+    } finally {
+      for (const [key, value] of savedEnv) {
+        if (value === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = value;
+        }
+      }
+    }
   });
 
   test("treats a plain project .env without .devintern-pm as unconfigured", async () => {
