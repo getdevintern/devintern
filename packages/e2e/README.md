@@ -337,6 +337,24 @@ A second run with `--skip-comments` proves no additional comment or transition
 is posted. The local bare Git remote is the code host; no GitHub token or PR is
 required.
 
+### Retry gate and `--force`
+
+`tests/local/tracker-force-retry-gate.test.ts` drives the same fake Jira server
+through the incomplete → skipped → forced workflow. The deterministic agent
+runs in `E2E_AGENT_MODE=incomplete`, which exits 0 with failure language and
+lands nothing to deliver. The test reads back durable state: an escalated run
+record, the "Implementation Incomplete" comment, the ticket back in its To Do
+status, and no branch on the local bare remote.
+
+A second run with the unchanged ticket and no `--force` must log
+`Skipping <key>` with the `--force` hint, exit 0 for an interactive one-shot
+run, invoke no agent, open no new run record, and leave the ticket, comments,
+and branch ref untouched. A third run with `--force` reruns the agent on the
+branch recorded by the prior attempt (resuming `feature/<key>` or its
+`-attempt-2` fallback), succeeds, and publishes the branch with only the
+`src/greeting.ts` diff. The decoy issue outside the selector receives no run,
+comment, transition, or branch.
+
 ## Remote tracker fixtures
 
 The Markdown suites above need no task tracker. Separate opt-in suites exercise

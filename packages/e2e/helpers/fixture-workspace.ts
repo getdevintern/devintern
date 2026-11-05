@@ -161,7 +161,9 @@ export class FixtureWorkspace {
     options: {
       apiToken?: string;
       implicitTarget?: boolean;
-      agentMode?: "implement" | "fail" | "no-change";
+      agentMode?: "implement" | "fail" | "incomplete" | "no-change";
+      /** Bypass the retry gate for an unchanged incomplete task. */
+      force?: boolean;
       gitToken?: string;
       /** Task reference passed to the CLI; defaults to the Markdown fixture. */
       taskRef?: string;
@@ -189,6 +191,7 @@ export class FixtureWorkspace {
         "--hook-retries",
         "0",
         "--no-update",
+        ...(options.force ? ["--force"] : []),
       ],
       this.cwd,
       {
