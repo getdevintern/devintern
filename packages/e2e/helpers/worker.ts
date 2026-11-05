@@ -430,6 +430,28 @@ export class WorkerFixture {
     );
   }
 
+  /**
+   * Commits a local task branch has ahead of the configured base branch.
+   *
+   * Reads the worker's bare clone, which shares refs with its task worktrees,
+   * so a feature branch that has not been pushed yet is still visible.
+   */
+  async branchCommitCount(branch: string): Promise<number> {
+    const output = await checkedCommand(
+      [
+        "git",
+        "--git-dir",
+        join(this.workspaceDir, "repos", `${this.repoName}.git`),
+        "rev-list",
+        "--count",
+        `origin/${this.baseBranch}..refs/heads/${branch}`,
+      ],
+      this.root,
+      this.env,
+    );
+    return Number(output);
+  }
+
   /** Branch names currently pushed to the local bare repository. */
   async remoteBranches(): Promise<string[]> {
     const output = await checkedCommand(
