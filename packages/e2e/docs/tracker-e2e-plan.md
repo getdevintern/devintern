@@ -1,8 +1,9 @@
 # Tracker E2E expansion plan
 
-Status: **Layer 1 implemented** (read-only workspace smoke). **The Jira part of
-Layer 3 is implemented** (offline fake lifecycle in the default suite). The
-Jira/Trello Layer 2 live suites and the Trello part of Layer 3 remain planned.
+Status: **Layer 1 implemented** (read-only workspace smoke). **The Jira and
+Asana parts of Layer 3 are implemented** (offline fake lifecycles in the
+default suite). The Jira/Trello Layer 2 live suites and the Trello part of
+Layer 3 remain planned.
 
 This plan describes how `packages/e2e` grows tracker coverage without making the
 default `bun run test` depend on the network or credentials, and without writing
@@ -32,7 +33,7 @@ test data into the trackers a worker actually uses.
 | Local GitLab Issues | no                 | `test:e2e:tracker:gitlab`              | Existing live suite; creates and deletes a dedicated project.                                                                    |
 | GitLab.com Issues   | no                 | `test:e2e:tracker:gitlab-com`          | Existing live suite; pre-created project, issues only, project retained.                                                         |
 | Linear              | no                 | none                                   | Detection only in Layer 1.                                                                                                       |
-| Asana               | no                 | none                                   | Detection only in Layer 1.                                                                                                       |
+| Asana               | yes (offline fake) | none                                   | Fake lifecycle: key/`--query`, section move, comment. Live read-only checks and estimation planned.                              |
 | Azure DevOps        | no                 | none                                   | Detection only in Layer 1.                                                                                                       |
 
 The default local run reports these opt-in suites as skipped and planned
@@ -191,7 +192,7 @@ Acceptance criteria:
 - Missing fixture configuration fails before any remote mutation.
 - A rerun does not collide with leftovers from a previous run.
 
-## Layer 3 — fake tracker servers for the default local suite (Jira implemented)
+## Layer 3 — fake tracker servers for the default local suite (Jira and Asana implemented)
 
 Run the built CLI against in-process Bun servers that implement the subset of
 the tracker APIs the product uses. This gives deterministic, credential-free
@@ -226,6 +227,52 @@ record, the configured workflow status, surviving unrelated labels, the
 implementation comment, and `--skip-comments` on a second run. The local bare
 Git remote is the code host; no PR, GitHub token, or model credentials are
 required. The only skip is the existing built-CLI guard.
+
+### Asana (implemented)
+
+`providers/fake-asana.ts` serves a strict Asana REST API v1.0 subset on
+`127.0.0.1:0` and owns all tasks, section memberships, comment stories, tags,
+and custom fields in memory. `tests/local/tracker-asana-fake.test.ts` seeds an
+expected task plus a decoy outside the selector, writes per-project section
+names into `.devintern-code/settings.json`, and runs the production Asana
+client through the built CLI for both explicit-GID and `--query` selection. It
+reads state back through the fixture rather than CLI stdout.
+
+The CLI reaches the fake through `ASANA_API_BASE_URL` (for example
+`http://127.0.0.1:<port>/api/1.0`) plus `DEVINTERN_E2E_FAKE_ASANA=1`, both
+exported in the subprocess environment before the CLI starts. `AsanaClient`
+only honors that override behind the explicit test flag, ignores values loaded
+later from a project `.env`, and only accepts loopback hosts. A project `.env`
+therefore cannot redirect a real PAT, and even an exported override cannot send
+it to a remote host. Production keeps `https://app.asana.com/api/1.0` when the
+variable is absent, and the variable is never required.
+
+Endpoints covered:
+
+- `GET /projects/{projectGid}/tasks` (full project listing; `searchTasks`
+  filters it client-side rather than sending unsupported query params)
+- `GET /tasks/{gid}` (detail with notes, memberships, tags, custom fields)
+
+Task responses are projected onto the request's `opt_fields`, as the real API
+does, so a client that stops requesting a field the lifecycle depends on — for
+example `memberships.section.name` for section selection — loses it and fails
+the run instead of passing against an unrealistically complete payload.
+
+- `GET` / `POST /tasks/{gid}/stories` (comment stories, HTML or plain text)
+- `PUT /stories/{gid}`
+- `GET /projects/{gid}/sections`
+- `POST /sections/{gid}/addTask`
+- `PUT /tasks/{gid}` (completion and custom-field updates)
+- `GET /attachments?parent={gid}&opt_fields=name,download_url` (empty list)
+
+Any other route returns a diagnostic 404 naming the method and path, and the
+test asserts no unexpected request occurred. The fake accepts any Bearer token,
+never logs it, and makes no outbound requests. Scenarios assert the pushed
+`feature/<gid>` branch and exact `src/greeting.ts` diff, the run record, the
+final section, surviving tags, the implementation comment, and that both seeded
+markers reached the deterministic agent. The local bare Git remote is the code
+host; no PR, Asana credentials, or model credentials are required. Estimation
+is not covered.
 
 ### Trello (planned)
 
@@ -275,8 +322,8 @@ credentials.
 1. Layer 1 read-only smoke (done).
 2. Trello Layer 2 on a dedicated board; it needs no project provisioning.
 3. Jira Layer 2 with a dedicated `E2E` project.
-4. Layer 3 fake servers so the default suite covers Jira (done) and Trello
-   (planned) lifecycle.
+4. Layer 3 fake servers so the default suite covers Jira (done), Asana (done),
+   and Trello (planned) lifecycle.
 5. Add read-only checks for Linear, Asana, and Azure DevOps when credentials
    exist.
 6. Revisit live GitHub/GitLab tracker smoke only if the full suites start
