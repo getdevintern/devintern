@@ -245,3 +245,60 @@ test.skipIf(!existsSync(cliPath))(
   },
   120_000,
 );
+
+test("records comment requests scoped to the wrong project as unmatched", async () => {
+  const tracker = new FakeAzureDevOpsTracker();
+  try {
+    const ticket = await tracker.createTicket({ title: "Wrong project", body: "body" });
+    const url =
+      `${tracker.baseUrl}/SOME_OTHER_PROJECT/_apis/wit/workItems/${ticket.key}/comments` +
+      `?api-version=7.1-preview.3`;
+
+    const getResponse = await fetch(url);
+    expect(getResponse.status).toBe(404);
+
+    const postResponse = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: "<p>wrong project</p>" }),
+    });
+    expect(postResponse.status).toBe(404);
+
+    expect(tracker.unexpectedRequests).toEqual([
+      `Unmatched fake Azure DevOps request: GET /fakeorg/SOME_OTHER_PROJECT/_apis/wit/workItems/${ticket.key}/comments`,
+      `Unmatched fake Azure DevOps request: POST /fakeorg/SOME_OTHER_PROJECT/_apis/wit/workItems/${ticket.key}/comments`,
+    ]);
+  } finally {
+    await tracker.cleanup();
+  }
+});
+
+test("rejects unsupported WIQL operators instead of dropping the clause", async () => {
+  const tracker = new FakeAzureDevOpsTracker();
+  try {
+    const ticket = await tracker.createTicket({
+      title: "Marked work item",
+      body: "body",
+      labels: ["markerA"],
+    });
+
+    const unsupported =
+      `SELECT [System.Id] FROM WorkItems WHERE [System.Tags] CONTAINS 'markerA' ` +
+      `AND [System.Id] IN (999)`;
+    await expect(tracker.findTickets(unsupported)).rejects.toThrow(
+      /Unsupported fake Azure DevOps WIQL/,
+    );
+    expect(
+      tracker.unexpectedRequests.some((entry) =>
+        entry.includes("Unsupported fake Azure DevOps WIQL"),
+      ),
+    ).toBe(true);
+
+    const supported =
+      `SELECT [System.Id] FROM WorkItems WHERE [System.Tags] CONTAINS 'markerA' ` +
+      `AND [System.State] = 'New'`;
+    expect((await tracker.findTickets(supported)).map((entry) => entry.key)).toEqual([ticket.key]);
+  } finally {
+    await tracker.cleanup();
+  }
+});

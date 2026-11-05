@@ -172,17 +172,22 @@ function matchWorkItems(
   if (whereIndex === -1) return { matches: workItems };
 
   const whereClause = query.slice(whereIndex + "WHERE".length);
-  const clauses = [
-    ...whereClause.matchAll(
-      /\[([^\]]+)\]\s*(=|<>|!=|CONTAINS\s+WORDS|CONTAINS|NOT\s+CONTAINS)\s*'([^']*)'/gi,
-    ),
-  ].map((match) => ({
+  const clausePattern =
+    /\[([^\]]+)\]\s*(=|<>|!=|CONTAINS\s+WORDS|CONTAINS|NOT\s+CONTAINS)\s*'([^']*)'/gi;
+  const clauseMatches = [...whereClause.matchAll(clausePattern)];
+  const clauses = clauseMatches.map((match) => ({
     field: (match[1] ?? "").trim().toLowerCase(),
     operator: (match[2] ?? "").replace(/\s+/g, " ").toUpperCase(),
     value: match[3] ?? "",
   }));
 
-  if (clauses.length === 0 || /\bOR\b/i.test(whereClause)) {
+  // Every non-clause token must be a boolean joiner or grouping whitespace.
+  // Anything else (`IN`, `UNDER`, `>`, `WAS EVER`, …) is unsupported, so fail
+  // loudly instead of silently dropping the clause and over-matching.
+  const remainder = whereClause.replace(clausePattern, " ");
+  const onlyJoiners = /^(?:\s|\(|\)|\bAND\b)*$/i.test(remainder);
+
+  if (clauses.length === 0 || /\bOR\b/i.test(whereClause) || !onlyJoiners) {
     return { matches: [], error: `Unsupported fake Azure DevOps WIQL: ${query}` };
   }
 
@@ -442,11 +447,14 @@ export class FakeAzureDevOpsTracker implements TrackerFixture {
     }
 
     const commentsMatch = scopedPath.match(/^\/([^/]+)\/_apis\/wit\/workItems\/(\d+)\/comments$/i);
-    if (commentsMatch?.[1] && commentsMatch[2] && method === "GET") {
-      return this.getComments(Number(commentsMatch[2]));
-    }
-    if (commentsMatch?.[1] && commentsMatch[2] && method === "POST") {
-      return this.postComment(Number(commentsMatch[2]), request);
+    if (commentsMatch?.[1] && commentsMatch[2]) {
+      if (commentsMatch[1] !== this.project) return this.unmatched(method, path);
+      if (method === "GET") {
+        return this.getComments(Number(commentsMatch[2]));
+      }
+      if (method === "POST") {
+        return this.postComment(Number(commentsMatch[2]), request);
+      }
     }
 
     return this.unmatched(method, path);

@@ -243,6 +243,47 @@ describe("createTrackerClient (explicit env)", () => {
     expect(client instanceof GitLabTaskTrackerClient).toBe(true);
   });
 
+  test("threads the Azure DevOps base URL from the env map without reading process.env", async () => {
+    const previous = process.env.AZURE_DEVOPS_BASE_URL;
+    const originalFetch = globalThis.fetch;
+    process.env.AZURE_DEVOPS_BASE_URL = "http://127.0.0.1:9/env-leak";
+    try {
+      const urls: string[] = [];
+      globalThis.fetch = (async (url: unknown) => {
+        urls.push(String(url));
+        return new Response(JSON.stringify({ id: 42, fields: {}, relations: [] }), {
+          status: 200,
+        });
+      }) as typeof fetch;
+
+      const teamClient = createTrackerClient("azure-devops", {
+        AZURE_DEVOPS_ORG: "myorg",
+        AZURE_DEVOPS_PAT: "pat",
+        AZURE_DEVOPS_PROJECT: "MyProject",
+        AZURE_DEVOPS_BASE_URL: "http://127.0.0.1:8/team/",
+      });
+      await teamClient.getTask("42");
+      expect(urls[0]).toStartWith("http://127.0.0.1:8/team/_apis/");
+      expect(urls[0]).not.toContain("/env-leak");
+
+      const defaultClient = createTrackerClient("azure-devops", {
+        AZURE_DEVOPS_ORG: "myorg",
+        AZURE_DEVOPS_PAT: "pat",
+        AZURE_DEVOPS_PROJECT: "MyProject",
+      });
+      await defaultClient.getTask("42");
+      expect(urls[1]).toStartWith("https://dev.azure.com/myorg/_apis/");
+      expect(urls[1]).not.toContain("/env-leak");
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (previous === undefined) {
+        delete process.env.AZURE_DEVOPS_BASE_URL;
+      } else {
+        process.env.AZURE_DEVOPS_BASE_URL = previous;
+      }
+    }
+  });
+
   test("throws on missing credentials in the provided map only", () => {
     expect(() => createTrackerClient("linear", {})).toThrow(/LINEAR_API_KEY/);
   });
