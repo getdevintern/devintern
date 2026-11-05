@@ -36,7 +36,7 @@ import {
   reconcileOpenAgentPrs,
 } from "../review/agent-pr-reconciler";
 import type { ConditionalResult, PolledPr } from "../review/agent-pr-reconciler";
-import { isGitHubAuthError } from "../code-host/github/reviews";
+import { isGitHubAuthError, isGitHubTransientError } from "../code-host/github/reviews";
 import { nextScheduleOccurrence } from "../automation/config";
 import type { CronOrIntervalSchedule } from "../automation/config";
 import { parseEnvInteger } from "../config/env-integer";
@@ -724,12 +724,17 @@ export class ReviewPollingAcquirer implements Acquirer {
             this.warnAuthFailure(error as Error);
             continue;
           }
-          captureError(error, {
-            acquirer: this.name,
-            repo: pr.repo,
-            prNumber: pr.prNumber,
-            stage: "poll-pr",
-          });
+          // A 408/429/5xx survived the client's retries: GitHub is momentarily
+          // unavailable and the next tick retries it. Keep the warning visible,
+          // but do not report expected upstream noise as a fresh issue.
+          if (!isGitHubTransientError(error)) {
+            captureError(error, {
+              acquirer: this.name,
+              repo: pr.repo,
+              prNumber: pr.prNumber,
+              stage: "poll-pr",
+            });
+          }
           console.warn(
             `⚠️  [${this.name}] polling ${pr.repo}#${pr.prNumber} failed: ${(error as Error).message}`,
           );

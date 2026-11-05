@@ -146,6 +146,27 @@ export function isGitHubAuthError(error: unknown): boolean {
   );
 }
 
+/** GitHub statuses that represent a momentary upstream failure. */
+const TRANSIENT_GITHUB_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
+
+/**
+ * Whether an error thrown by a GitHub API client call is a transient upstream
+ * failure (HTTP 408/429 or 5xx) that the next poll can simply retry.
+ *
+ * `fetchWithRetry` already retries these with backoff. When every attempt
+ * still fails the error escapes into long-running polling loops; reporting
+ * each occurrence to error tracking turns a normal GitHub outage into a
+ * recurring defect, so callers warn instead of capturing it.
+ *
+ * @param error - Error thrown by `apiRequest` / `conditionalGet`
+ */
+export function isGitHubTransientError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  const match = message.match(/GitHub API error \((\d{3})\)/);
+  if (!match?.[1]) return false;
+  return TRANSIENT_GITHUB_STATUSES.has(Number(match[1]));
+}
+
 /** Build an API error message; 401s get actionable credential guidance. */
 function apiErrorMessage(status: number, detail: string): string {
   const base = `GitHub API error (${status}): ${detail}`;

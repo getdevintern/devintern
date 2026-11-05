@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
 
-import { GitHubReviewsClient, isGitHubAuthError } from "../src/lib/code-host/github/reviews";
+import {
+  GitHubReviewsClient,
+  isGitHubAuthError,
+  isGitHubTransientError,
+} from "../src/lib/code-host/github/reviews";
 
 const originalFetch = globalThis.fetch;
 
@@ -188,6 +192,23 @@ describe("GitHubReviewsClient auth failure path", () => {
     expect(isGitHubAuthError(new Error("GitHub API error (404): Not Found"))).toBe(false);
     expect(isGitHubAuthError(new Error("GitHub API error (500): Server Error"))).toBe(false);
     expect(isGitHubAuthError(null)).toBe(false);
+  });
+
+  test("isGitHubTransientError recognizes retryable upstream statuses only", () => {
+    for (const status of [408, 429, 500, 502, 503, 504]) {
+      expect(isGitHubTransientError(new Error(`GitHub API error (${status}): Unknown error`))).toBe(
+        true,
+      );
+    }
+    expect(isGitHubTransientError(new Error("GitHub API error (401): Bad credentials"))).toBe(
+      false,
+    );
+    expect(isGitHubTransientError(new Error("GitHub API error (404): Not Found"))).toBe(false);
+    expect(isGitHubTransientError(new Error("GitHub API error (422): Validation Failed"))).toBe(
+      false,
+    );
+    expect(isGitHubTransientError(new Error("fetch failed"))).toBe(false);
+    expect(isGitHubTransientError(null)).toBe(false);
   });
 
   test("non-401 API errors keep the bare status message", async () => {
