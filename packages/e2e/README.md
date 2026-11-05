@@ -98,6 +98,45 @@ tracker or hosted code host is involved. Enqueue-only cases cover `--title`,
 `--resume`, asserting the pushed branch/commit directly on the bare remote rather
 than a pull request.
 
+## Multi-repo team routing
+
+`tests/local/worker-team-routing.test.ts` (helper:
+`helpers/multi-repo-worker.ts`) runs the real `devintern worker` against two local
+bare remotes seeded from `fixtures/simple-project`, a Markdown task directory
+selected by `MARKDOWN_TASKS_DIR`, four `[[teams]]`, and team-scoped
+`[[routing.rules]]`. No hosted tracker, code host, or network access is used.
+
+The test proves the strict routing policy from `docs/code/workspaces.md`:
+
+- Two tasks route to different repositories from their own team's rule; each run
+  records the expected `team`, `repo`, task key, and branch, and the canonical
+  `src/greeting.ts` edit exists only on that repository's feature branch.
+- A task matching two team-scoped rules for different repos is recorded in
+  `routing_skips` as `ambiguous` with sorted candidates `["repo-a", "repo-b"]`,
+  and creates no run, branch, or agent invocation.
+- A task whose label only matches another team's rule (invisible to its own
+  team) is recorded as `unrouted` and likewise creates no run, branch, or
+  invocation.
+- Touching an unrelated Markdown task forces a later detector cycle; the worker
+  logs the skipped tasks as already processed and records no second skip, so a
+  routing miss cannot loop every poll.
+
+Credential layering is observed through the deterministic agent's
+`E2E_AGENT_INVOCATIONS` file, without changing the agent:
+
+| Team  | Task        | Winning layer   | Invocation file          |
+| ----- | ----------- | --------------- | ------------------------ |
+| alpha | `alpha-a`   | team `env_file` | `team-alpha-file.jsonl`  |
+| beta  | `beta-b`    | `[teams.env]`   | `team-beta-inline.jsonl` |
+| gamma | `gamma-env` | repo `env_file` | `repo-a-file.jsonl`      |
+| delta | `delta-b`   | `[repos.env]`   | `repo-b-inline.jsonl`    |
+
+The lower-precedence repo/team files and the fixture-wide invocation file must
+remain empty, proving the winning layer beat `.env`, repo `env_file`,
+`[repos.env]`, and team layers exactly as documented. Every successful run is
+`succeeded`; the daemon is still alive and the fixture removes both remotes and
+the temporary root in `finally`.
+
 ## Agent harness invocation checks
 
 The ordinary local suite also probes every registered agent harness whose CLI is
