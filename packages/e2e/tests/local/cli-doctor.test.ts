@@ -168,10 +168,12 @@ test.skipIf(skip)(
 );
 
 test.skipIf(skip)(
-  "a missing Markdown task directory exits 1 with the tracker, variable and init hint",
+  "a missing MARKDOWN_TASKS_DIR environment variable exits 1 with the tracker, variable and init hint",
   async () => {
     await withDoctorWorkspace(async (workspace) => {
-      const result = await workspace.run([], { MARKDOWN_TASKS_DIR: undefined });
+      // An empty value counts as missing for readiness but keeps dotenv from
+      // filling it from a developer's `packages/code/.env`.
+      const result = await workspace.run([], { MARKDOWN_TASKS_DIR: "" });
       const text = output(result);
 
       expect(result.exitCode).toBe(1);
