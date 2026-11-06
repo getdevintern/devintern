@@ -36,7 +36,7 @@ import {
   reconcileOpenAgentPrs,
 } from "../review/agent-pr-reconciler";
 import type { ConditionalResult, PolledPr } from "../review/agent-pr-reconciler";
-import { isGitHubAuthError } from "../code-host/github/reviews";
+import { isGitHubAuthError, isGitHubTransientError } from "../code-host/github/reviews";
 import { nextScheduleOccurrence } from "../automation/config";
 import type { CronOrIntervalSchedule } from "../automation/config";
 import { parseEnvInteger } from "../config/env-integer";
@@ -724,12 +724,17 @@ export class ReviewPollingAcquirer implements Acquirer {
             this.warnAuthFailure(error as Error);
             continue;
           }
-          captureError(error, {
-            acquirer: this.name,
-            repo: pr.repo,
-            prNumber: pr.prNumber,
-            stage: "poll-pr",
-          });
+          // A 408/429/5xx survived the client's retries: GitHub is momentarily
+          // unavailable and the next tick retries it. Keep the warning visible,
+          // but do not report expected upstream noise as a fresh issue.
+          if (!isGitHubTransientError(error)) {
+            captureError(error, {
+              acquirer: this.name,
+              repo: pr.repo,
+              prNumber: pr.prNumber,
+              stage: "poll-pr",
+            });
+          }
           console.warn(
             `⚠️  [${this.name}] polling ${pr.repo}#${pr.prNumber} failed: ${(error as Error).message}`,
           );
@@ -824,7 +829,26 @@ export class ReviewPollingAcquirer implements Acquirer {
     }
 
     console.log(`\n📌 [${this.name}] new review feedback on ${repo}#${prNumber}`);
-    const ok = await addressPr(repo, prNumber);
+    let ok: TaskExecutionResult;
+    try {
+      ok = await addressPr(repo, prNumber);
+    } catch (error) {
+      // addressPr runs the feedback agent and its git/repo operations, not a
+      // GitHub API fetch. Even when the message mentions the network (e.g.
+      // "ssh: connect ... Network is unreachable"), a failed feedback run is
+      // actionable, so always report it instead of letting the tick's
+      // GitHub-transient filter hide it.
+      captureError(error, {
+        acquirer: this.name,
+        repo,
+        prNumber,
+        stage: "address-pr",
+      });
+      console.warn(
+        `⚠️  [${this.name}] addressing ${repo}#${prNumber} failed: ${(error as Error).message}`,
+      );
+      return;
+    }
     if (ok === "deferred") {
       console.log(
         `⏳ [${this.name}] ${repo}#${prNumber} deferred; will retry when a harness is available`,
