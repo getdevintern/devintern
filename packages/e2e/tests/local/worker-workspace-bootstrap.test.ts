@@ -30,6 +30,19 @@ interface SeededRepository {
   repoName: string;
 }
 
+interface ParsedWorkspaceConfig {
+  repos: Array<{ name: string; remote: string }>;
+  routing?: { rules: Array<{ repo: string; project?: string }> };
+}
+
+/**
+ * Parse the generated TOML as data so assertions cannot accidentally match
+ * the commented examples in the scaffold template.
+ */
+function parseWorkspaceConfigAt(configPath: string): ParsedWorkspaceConfig {
+  return Bun.TOML.parse(readFileSync(configPath, "utf8")) as ParsedWorkspaceConfig;
+}
+
 function createFixture(): BootstrapFixture {
   const root = mkdtempSync(join(tmpdir(), "devintern-e2e-worker-bootstrap-"));
   const env = isolatedEnvironment(root);
@@ -164,10 +177,12 @@ cliTest(
       // origin/HEAD is transient; add-repo must not pin it as a default branch.
       expect(config).not.toMatch(/^default_branch\s*=/m);
 
-      // The repo's default project key seeds a starter routing rule.
-      expect(config).toContain("[[routing.rules]]");
-      expect(config).toContain(`repo = "${repoName}"`);
-      expect(config).toContain('project = "BACK"');
+      // The repo's default project key seeds a starter routing rule. Parse the
+      // document so the template's commented examples cannot satisfy this.
+      const parsedConfig = parseWorkspaceConfigAt(fixture.configPath);
+      expect(parsedConfig.repos).toHaveLength(1);
+      expect(parsedConfig.repos[0]).toMatchObject({ name: repoName, remote: remoteDir });
+      expect(parsedConfig.routing?.rules).toEqual([{ repo: repoName, project: "BACK" }]);
 
       // The conflicting value stays repo-local, not written over the shared one.
       expect(config).toMatch(/\[repos\.env\]\n\s+GITHUB_TOKEN = "repo-token"/);
@@ -217,7 +232,9 @@ cliTest(
       // The package subdirectory still resolves the repository-root env file.
       expect(readFileSync(fixture.envPath, "utf8")).toContain("JIRA_EMAIL=dev@acme.test");
       // The Linear team key seeds the same starter routing rule as a Jira project.
-      expect(readFileSync(fixture.configPath, "utf8")).toContain('project = "ENG"');
+      expect(parseWorkspaceConfigAt(fixture.configPath).routing?.rules).toEqual([
+        { repo: repoName, project: "ENG" },
+      ]);
 
       const configBefore = readFileSync(fixture.configPath);
       const envBefore = readFileSync(fixture.envPath);
