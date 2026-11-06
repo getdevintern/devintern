@@ -171,8 +171,6 @@ export class FixtureWorkspace {
       skipComments?: boolean;
       /** Labels the CLI must apply to the created PR (`PR_LABELS`). */
       prLabels?: string[];
-      /** Pass `--create-pr`; defaults to true so existing scenarios still open a PR. */
-      createPr?: boolean;
       /** Additional CLI arguments appended after the fixture's defaults. */
       extraArgs?: string[];
     } = {},
@@ -188,7 +186,7 @@ export class FixtureWorkspace {
         join(this.root, "bin/agent.ts"),
         "--skip-clarity-check",
         ...(options.skipComments === false ? [] : ["--skip-comments"]),
-        ...(options.createPr === false ? [] : ["--create-pr"]),
+        "--create-pr",
         ...(options.implicitTarget ? [] : ["--pr-target-branch", this.base]),
         "--hook-retries",
         "0",

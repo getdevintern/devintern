@@ -25,12 +25,16 @@ async function prepareLocalRemote(run: FixtureWorkspace): Promise<void> {
 const EXPECTED_GREETING_STATUS = "M src/greeting.ts";
 
 test.skipIf(!existsSync(cliPath))(
-  "--no-git leaves the agent's change on the base branch without committing or pushing",
+  "--no-git keeps --create-pr from committing, pushing, or opening a PR",
   async () => {
     const run = new FixtureWorkspace();
     try {
       await prepareLocalRemote(run);
-      const result = await run.runTask({ createPr: false, extraArgs: ["--no-git"] });
+      // `runTask` always passes `--create-pr`. Keeping it here proves the
+      // `enableGit` guard (`git && autoCommit`) suppresses delivery even when a
+      // PR was requested, which is how automations with `open_pr = false` layer
+      // `--no-git` on top of a `--create-pr` workspace default.
+      const result = await run.runTask({ extraArgs: ["--no-git"] });
 
       expect(result.exitCode).toBe(0);
 
@@ -48,6 +52,8 @@ test.skipIf(!existsSync(cliPath))(
       expect(await run.git("ls-remote", "origin", "refs/heads/feature/*")).toBe("");
 
       expect(run.runRecords().map((record) => record.status)).toEqual(["succeeded"]);
+      // `--create-pr` was requested, but no PR may be recorded.
+      expect(run.runRecords().map((record) => record.pr_url)).toEqual([null]);
 
       // The output must not claim delivery steps that were deliberately skipped.
       expect(result.stdout).not.toContain("Committing changes");
@@ -62,12 +68,14 @@ test.skipIf(!existsSync(cliPath))(
 );
 
 test.skipIf(!existsSync(cliPath))(
-  "--no-auto-commit creates the feature branch but leaves the change uncommitted and unpushed",
+  "--no-auto-commit keeps --create-pr from committing, pushing, or opening a PR",
   async () => {
     const run = new FixtureWorkspace();
     try {
       await prepareLocalRemote(run);
-      const result = await run.runTask({ createPr: false, extraArgs: ["--no-auto-commit"] });
+      // As above, `--create-pr` is still passed so the only thing preventing
+      // delivery is `enableGit` being false for `--no-auto-commit`.
+      const result = await run.runTask({ extraArgs: ["--no-auto-commit"] });
 
       expect(result.exitCode).toBe(0);
 
@@ -85,6 +93,8 @@ test.skipIf(!existsSync(cliPath))(
       expect(await run.git("ls-remote", "origin", "refs/heads/feature/*")).toBe("");
 
       expect(run.runRecords().map((record) => record.status)).toEqual(["succeeded"]);
+      // `--create-pr` was requested, but no PR may be recorded.
+      expect(run.runRecords().map((record) => record.pr_url)).toEqual([null]);
 
       // The output must not claim delivery steps that were deliberately skipped.
       expect(result.stdout).not.toContain("Committing changes");
