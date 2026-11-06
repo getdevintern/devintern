@@ -57,7 +57,7 @@ describe("ReviewPollingAcquirer", () => {
     gh: FakeGitHubState,
     options: {
       resolveResults?: Array<{
-        outcome: "clean" | "resolved" | "skipped" | "failed" | "deferred";
+        outcome: "clean" | "resolved" | "skipped" | "failed" | "deferred" | "interrupted";
         message: string;
       }>;
       runStore?: RunStore;
@@ -70,6 +70,12 @@ describe("ReviewPollingAcquirer", () => {
       disableResolveConflicts?: boolean;
       shouldPollFeedback?: () => boolean;
       feedbackFallbackIntervalSeconds?: number;
+      addressPr?: (
+        repo: string,
+        prNumber: number,
+      ) => Promise<boolean | "deferred" | "skipped" | "interrupted">;
+      feedbackMaxAttempts?: number;
+      feedbackTransportRetryWindowMs?: number;
     } = {},
   ) {
     const addressed: string[] = [];
@@ -113,7 +119,7 @@ describe("ReviewPollingAcquirer", () => {
       },
       addressPr: async (repo, n) => {
         addressed.push(`${repo}#${n}`);
-        return true;
+        return options.addressPr ? options.addressPr(repo, n) : true;
       },
       resolveConflicts: options.disableResolveConflicts
         ? undefined
@@ -125,6 +131,8 @@ describe("ReviewPollingAcquirer", () => {
       runStore: options.runStore,
       now: options.now,
       allowedRepos: options.allowedRepos,
+      feedbackMaxAttempts: options.feedbackMaxAttempts,
+      feedbackTransportRetryWindowMs: options.feedbackTransportRetryWindowMs,
       conflictSchedule: options.conflictSchedule,
       conflictWindowGraceMs: options.conflictWindowGraceMs,
       conflictResolution: options.conflictResolution,
@@ -149,6 +157,168 @@ describe("ReviewPollingAcquirer", () => {
     // Same review on the next tick is deduped.
     await acquirer.tick();
     expect(addressed).toEqual(["acme/widgets#42"]);
+  });
+
+  test("an interrupted feedback run releases the claimed review and comment ids", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const commentAt = new Date(Date.now() + 60_000).toISOString();
+    const gh: FakeGitHubState = {
+      prState: "open",
+      reviews: [{ id: 1, state: "changes_requested", user: human }],
+      comments: [{ id: 77, user: human, created_at: commentAt }],
+    };
+    const outcomes: Array<"interrupted" | true> = ["interrupted", true];
+    const { acquirer, addressed } = makeAcquirer(gh, {
+      addressPr: async () => outcomes.shift() ?? true,
+    });
+
+    await acquirer.tick();
+    expect(addressed).toEqual(["acme/widgets#42"]);
+    // A drain killed the run before it settled: neither id may be recorded as
+    // handled, and neither cursor may advance past the unprocessed feedback.
+    expect(queue.hasProcessed("github:reviews", "review:acme/widgets#42:1")).toBe(false);
+    expect(queue.hasProcessed("github:reviews", "comment:acme/widgets#42:77")).toBe(false);
+    expect(workerState.getCursor("github:reviews:acme/widgets#42")).toBeNull();
+    expect(workerState.getCursor("github:prcomments:acme/widgets#42")).toBeNull();
+
+    // The next tick re-fetches (no stored ETag/since cursor) and retries.
+    await acquirer.tick();
+    expect(addressed).toEqual(["acme/widgets#42", "acme/widgets#42"]);
+    expect(queue.hasProcessed("github:reviews", "review:acme/widgets#42:1")).toBe(true);
+    expect(queue.hasProcessed("github:reviews", "comment:acme/widgets#42:77")).toBe(true);
+    expect(workerState.getCursor("github:reviews:acme/widgets#42")?.etag).toBe('W/"rev-1"');
+    expect(workerState.getCursor("github:prcomments:acme/widgets#42")?.cursorValue).toBe(commentAt);
+  });
+
+  test("a failed feedback run is retried until its budget is spent, then recorded handled", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const commentAt = new Date(Date.now() + 60_000).toISOString();
+    const gh: FakeGitHubState = {
+      prState: "open",
+      reviews: [{ id: 1, state: "changes_requested", user: human }],
+      comments: [{ id: 77, user: human, created_at: commentAt }],
+    };
+    const { acquirer, addressed } = makeAcquirer(gh, {
+      addressPr: async () => false,
+      feedbackMaxAttempts: 3,
+    });
+
+    // A non-zero exit may be transient, so the first two failures release the
+    // claims and leave both cursors uncommitted for a retry.
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      await acquirer.tick();
+      expect(addressed).toHaveLength(attempt);
+      expect(queue.hasProcessed("github:reviews", "review:acme/widgets#42:1")).toBe(false);
+      expect(queue.hasProcessed("github:reviews", "comment:acme/widgets#42:77")).toBe(false);
+      expect(workerState.getCursor("github:reviews:acme/widgets#42")).toBeNull();
+      expect(workerState.getCursor("github:prcomments:acme/widgets#42")).toBeNull();
+    }
+
+    // The third failure spends the budget: the ids become handled and both
+    // cursors advance so a deterministic failure cannot loop forever.
+    await acquirer.tick();
+    expect(addressed).toHaveLength(3);
+    expect(queue.hasProcessed("github:reviews", "review:acme/widgets#42:1")).toBe(true);
+    expect(queue.hasProcessed("github:reviews", "comment:acme/widgets#42:77")).toBe(true);
+    expect(workerState.getCursor("github:reviews:acme/widgets#42")?.etag).toBe('W/"rev-1"');
+    expect(workerState.getCursor("github:prcomments:acme/widgets#42")?.cursorValue).toBe(commentAt);
+
+    // Terminal feedback is not re-run on a later tick.
+    await acquirer.tick();
+    expect(addressed).toHaveLength(3);
+  });
+
+  test("a thrown feedback failure retries inside a time window with backoff, then becomes terminal", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const commentAt = new Date(Date.now() + 60_000).toISOString();
+    const gh: FakeGitHubState = {
+      prState: "open",
+      reviews: [{ id: 1, state: "changes_requested", user: human }],
+      comments: [{ id: 77, user: human, created_at: commentAt }],
+    };
+    let attempts = 0;
+    let nowMs = 1_000_000;
+    const windowMs = 60 * 60_000;
+    const { acquirer, addressed } = makeAcquirer(gh, {
+      addressPr: async () => {
+        attempts++;
+        throw new Error("ensureBareClone failed (503)");
+      },
+      now: () => nowMs,
+      // A transport throw retries for a time window, not a small attempt
+      // budget: outages that the relay survives must not drop the feedback.
+      feedbackTransportRetryWindowMs: windowMs,
+    });
+
+    await acquirer.tick();
+    expect(attempts).toBe(1);
+    expect(addressed).toHaveLength(1);
+    expect(queue.hasProcessed("github:reviews", "review:acme/widgets#42:1")).toBe(false);
+    expect(queue.hasProcessed("github:reviews", "comment:acme/widgets#42:77")).toBe(false);
+    expect(workerState.getCursor("github:reviews:acme/widgets#42")).toBeNull();
+    expect(workerState.getCursor("github:prcomments:acme/widgets#42")).toBeNull();
+
+    // An immediate tick is inside the 30s backoff: no setup retry yet.
+    await acquirer.tick();
+    expect(attempts).toBe(1);
+
+    // After the backoff the same feedback is retried; still well inside the
+    // window, so it stays retryable rather than becoming terminal.
+    nowMs += 30_000;
+    await acquirer.tick();
+    expect(attempts).toBe(2);
+    expect(queue.hasProcessed("github:reviews", "review:acme/widgets#42:1")).toBe(false);
+    expect(queue.hasProcessed("github:reviews", "comment:acme/widgets#42:77")).toBe(false);
+
+    // Once the window elapses the throw becomes terminal: the claims stay
+    // recorded and both cursors advance so the outage cannot loop forever.
+    nowMs += windowMs;
+    await acquirer.tick();
+    expect(attempts).toBe(3);
+    expect(queue.hasProcessed("github:reviews", "review:acme/widgets#42:1")).toBe(true);
+    expect(queue.hasProcessed("github:reviews", "comment:acme/widgets#42:77")).toBe(true);
+    expect(workerState.getCursor("github:reviews:acme/widgets#42")?.etag).toBe('W/"rev-1"');
+    expect(workerState.getCursor("github:prcomments:acme/widgets#42")?.cursorValue).toBe(commentAt);
+
+    // Terminal feedback is not retried on a later tick.
+    await acquirer.tick();
+    expect(attempts).toBe(3);
+  });
+
+  test("a feedback run that succeeds after a failure clears its retry budget", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const gh: FakeGitHubState = {
+      prState: "open",
+      reviews: [{ id: 1, state: "changes_requested", user: human }],
+      comments: [],
+    };
+    const outcomes: boolean[] = [false, true];
+    const { acquirer, addressed } = makeAcquirer(gh, {
+      addressPr: async () => outcomes.shift() ?? true,
+      feedbackMaxAttempts: 2,
+    });
+
+    await acquirer.tick();
+    expect(addressed).toHaveLength(1);
+    expect(queue.hasProcessed("github:reviews", "review:acme/widgets#42:1")).toBe(false);
+
+    await acquirer.tick();
+    expect(addressed).toHaveLength(2);
+    expect(queue.hasProcessed("github:reviews", "review:acme/widgets#42:1")).toBe(true);
+
+    // A new review on the same PR starts a fresh budget: one failure still
+    // leaves it retryable instead of inheriting the old attempt count.
+    gh.reviews = [
+      { id: 1, state: "changes_requested", user: human },
+      { id: 2, state: "changes_requested", user: human },
+    ];
+    outcomes.push(false, true);
+    await acquirer.tick();
+    expect(addressed).toHaveLength(3);
+    expect(queue.hasProcessed("github:reviews", "review:acme/widgets#42:2")).toBe(false);
+    await acquirer.tick();
+    expect(addressed).toHaveLength(4);
+    expect(queue.hasProcessed("github:reviews", "review:acme/widgets#42:2")).toBe(true);
   });
 
   test("healthy relay suppresses feedback polling but not PR reconciliation", async () => {
@@ -700,6 +870,41 @@ describe("ReviewPollingAcquirer", () => {
       "acme/widgets#42",
       "acme/widgets#42",
     ]);
+  });
+
+  test("an interrupted base-sync attempt stays pending without consuming an attempt", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const gh: FakeGitHubState = {
+      prState: "open",
+      mergeableState: "dirty",
+      headSha: "head1",
+      baseSha: "base1",
+      baseIncluded: false,
+      reviews: [],
+      comments: [],
+    };
+    const made = makeAcquirer(gh, {
+      resolveResults: [
+        { outcome: "interrupted", message: "resolver cancelled" },
+        { outcome: "clean", message: "merged" },
+      ],
+    });
+    const eventKey = "base-sync:acme/widgets#42:base1:head1";
+
+    await made.acquirer.tick();
+    // The drain aborted the resolver; the tentative attempt is undone so a
+    // restart can retry the same event instead of eventually exhausting it.
+    expect(queue.getBaseSyncEvent(eventKey)).toMatchObject({
+      attempts: 0,
+      status: "pending",
+    });
+    expect(queue.hasProcessed("github:base-sync", eventKey)).toBe(false);
+
+    // The next tick retries immediately and completes normally.
+    await made.acquirer.tick();
+    expect(made.resolved).toHaveLength(2);
+    expect(queue.getBaseSyncEvent(eventKey)?.status).toBe("completed");
+    expect(queue.hasProcessed("github:base-sync", eventKey)).toBe(true);
   });
 
   test("a head race during pre-run revalidation stays pending without an attempt", async () => {

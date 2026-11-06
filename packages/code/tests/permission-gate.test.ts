@@ -52,4 +52,25 @@ describe("GitHubReviewsClient.userHasPushAccess", () => {
     const client = clientWithPermission(new Error("boom"));
     expect(await client.userHasPushAccess("acme", "widgets", "anyone")).toBe(false);
   });
+
+  test("propagates API errors when the caller needs to retry", async () => {
+    const client = clientWithPermission(new Error("boom"));
+    await expect(client.userHasPushAccessOrThrow("acme", "widgets", "anyone")).rejects.toThrow(
+      "boom",
+    );
+    expect(
+      await clientWithPermission({ permission: "write" }).userHasPushAccessOrThrow(
+        "acme",
+        "widgets",
+        "dev",
+      ),
+    ).toBe(true);
+    expect(
+      await clientWithPermission({ permission: "read" }).userHasPushAccessOrThrow(
+        "acme",
+        "widgets",
+        "drive-by",
+      ),
+    ).toBe(false);
+  });
 });

@@ -157,6 +157,15 @@ export class GitLabReviewPollingAcquirer implements Acquirer {
       );
       return;
     }
+    if (outcome === "interrupted") {
+      // A shutdown drain stopped the run before it settled. That is not a
+      // failed attempt, so leave the retry state untouched and let the next
+      // tick retry immediately (matching the review-polling path).
+      console.log(
+        `⏸️  [${this.name}] ${mr.projectPath}!${mr.changeNumber} interrupted by worker shutdown; will retry`,
+      );
+      return;
+    }
     this.recordFailure(key, now);
     console.log(
       outcome === "deferred"
@@ -213,7 +222,13 @@ export class GitLabReviewPollingAcquirer implements Acquirer {
       headSha: snapshot.headSha,
       baseSha: snapshot.baseSha,
     });
-    if (outcome.outcome === "failed" || outcome.outcome === "deferred") {
+    if (outcome.outcome === "interrupted") {
+      // A shutdown drain stopped the sync before it settled: no attempt is
+      // spent, so the next tick retries without advancing the backoff.
+      console.log(
+        `⏸️  [${this.name}] ${mr.projectPath}!${mr.changeNumber} base sync interrupted by worker shutdown; will retry`,
+      );
+    } else if (outcome.outcome === "failed" || outcome.outcome === "deferred") {
       this.recordFailure(syncRetryKey, now);
     } else {
       this.options.queue.markProcessed(SOURCE, syncKey);

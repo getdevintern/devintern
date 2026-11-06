@@ -47,7 +47,12 @@ function harness(options: {
   rows?: AgentPr[];
   snapshot?: GitLabPollingSnapshot;
   access?: number | null;
-  addressOutcome?: true | false | "deferred";
+  addressOutcome?:
+    | true
+    | false
+    | "deferred"
+    | "interrupted"
+    | (() => true | false | "deferred" | "interrupted");
   now?: () => number;
   allowlist?: string[];
   fetchError?: Error;
@@ -85,7 +90,9 @@ function harness(options: {
     clientFor: () => client,
     addressMr: async () => {
       addressCalls++;
-      return options.addressOutcome ?? true;
+      return typeof options.addressOutcome === "function"
+        ? options.addressOutcome()
+        : (options.addressOutcome ?? true);
     },
     reviewerAllowlist: options.allowlist,
     now: options.now,
@@ -178,6 +185,25 @@ describe("GitLabReviewPollingAcquirer", () => {
     expect(run.addressCalls).toBe(2);
   });
 
+  test("an interrupted addressing run spends no retry attempt", async () => {
+    let now = 1_000_000;
+    const outcomes: Array<true | "interrupted"> = ["interrupted", true];
+    const run = harness({
+      addressOutcome: () => outcomes.shift() ?? true,
+      now: () => now,
+    });
+
+    await run.acquirer.tick();
+    expect(run.addressCalls).toBe(1);
+    expect(run.processed.size).toBe(0);
+
+    // A drain is not a failed attempt: the next tick retries immediately
+    // instead of waiting out the 30s failure backoff.
+    await run.acquirer.tick();
+    expect(run.addressCalls).toBe(2);
+    expect(run.processed.size).toBe(1);
+  });
+
   test("runs base synchronization only for definitive conflict or behind states", async () => {
     const rows = [registered()];
     const processed = new Set<string>();
@@ -205,6 +231,46 @@ describe("GitLabReviewPollingAcquirer", () => {
     await acquirer.tick();
     await acquirer.tick();
     expect(resolved).toEqual([{ headSha: "abc123", baseSha: "base123" }]);
+  });
+
+  test("an interrupted base-sync run spends no retry attempt", async () => {
+    const outcomes = [
+      { outcome: "interrupted" as const, message: "drain" },
+      { outcome: "resolved" as const, message: "done" },
+    ];
+    const processed = new Set<string>();
+    const now = 1_000_000;
+    let resolveCalls = 0;
+    const acquirer = new GitLabReviewPollingAcquirer({
+      intervalSeconds: 60,
+      workerState: {
+        listOpenAgentChangeRequests: () => [registered()],
+        markAgentChangeRequestClosed: () => {},
+      },
+      queue: {
+        hasProcessed: (_source, id) => processed.has(id),
+        markProcessed: (_source, id) => processed.add(id),
+      },
+      clientFor: () => ({
+        getPollingSnapshot: async () => snapshot({ mergeability: "conflicts", feedback: [] }),
+        getMemberAccessLevel: async () => 30,
+      }),
+      addressMr: async () => true,
+      resolveMr: async () => {
+        resolveCalls++;
+        return outcomes.shift() ?? { outcome: "resolved", message: "done" };
+      },
+      now: () => now,
+    });
+
+    await acquirer.tick();
+    expect(resolveCalls).toBe(1);
+    expect(processed.size).toBe(0);
+
+    // No backoff is scheduled for a drain, so the very next tick retries.
+    await acquirer.tick();
+    expect(resolveCalls).toBe(2);
+    expect(processed.size).toBe(1);
   });
 
   test("polls only registered GitLab rows allowed for this workspace", async () => {

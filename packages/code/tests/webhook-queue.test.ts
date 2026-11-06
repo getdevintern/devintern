@@ -225,6 +225,61 @@ describe("WebhookQueue", () => {
     });
   });
 
+  describe("relay delivery attempts", () => {
+    test("counts retryable failures and clears on settlement", () => {
+      expect(queue.beginRelayDeliveryAttempt("d1", "boom")).toBe(1);
+      expect(queue.beginRelayDeliveryAttempt("d1", "boom again")).toBe(2);
+      queue.clearRelayDeliveryAttempts("d1");
+      expect(queue.beginRelayDeliveryAttempt("d1", "fresh budget")).toBe(1);
+    });
+
+    test("attempts survive a restart", () => {
+      expect(queue.beginRelayDeliveryAttempt("d1", "boom")).toBe(1);
+      const reopened = new WebhookQueue({ dbPath });
+      expect(reopened.beginRelayDeliveryAttempt("d1", "boom again")).toBe(2);
+      reopened.close();
+    });
+
+    test("run failures are counted separately from transport failures", () => {
+      expect(queue.beginRelayDeliveryAttempt("d1", "upstream unavailable (503)")).toBe(1);
+      expect(queue.beginRelayDeliveryAttempt("d1", "run exited non-zero", Date.now(), true)).toBe(
+        2,
+      );
+      // The prior transport failure did not consume the started-run budget.
+      expect(queue.getRelayDeliveryRunFailureAttempts("d1")).toBe(1);
+      expect(queue.beginRelayDeliveryAttempt("d1", "upstream unavailable (503)")).toBe(3);
+      expect(queue.getRelayDeliveryRunFailureAttempts("d1")).toBe(1);
+      expect(queue.beginRelayDeliveryAttempt("d1", "run exited non-zero", Date.now(), true)).toBe(
+        4,
+      );
+      expect(queue.getRelayDeliveryRunFailureAttempts("d1")).toBe(2);
+      // A handled/exhausted delivery forgets both counters.
+      queue.clearRelayDeliveryAttempts("d1");
+      expect(queue.getRelayDeliveryRunFailureAttempts("d1")).toBe(0);
+    });
+
+    test("keeps the first attempt timestamp across retries and a restart", () => {
+      const firstAttemptAt = Date.now() - 5_000;
+      expect(queue.beginRelayDeliveryAttempt("d1", "boom", firstAttemptAt)).toBe(1);
+      expect(queue.getRelayDeliveryFirstAttemptAt("d1")).toBe(firstAttemptAt);
+
+      const reopened = new WebhookQueue({ dbPath });
+      expect(reopened.beginRelayDeliveryAttempt("d1", "boom again", firstAttemptAt + 1_000)).toBe(
+        2,
+      );
+      expect(reopened.getRelayDeliveryFirstAttemptAt("d1")).toBe(firstAttemptAt);
+      reopened.close();
+    });
+
+    test("cleanup reaps stale attempt rows", () => {
+      queue.beginRelayDeliveryAttempt("d1", "boom", Date.now() - 1_000);
+      queue.cleanupProcessedEvents(-1);
+      // A zero-age window treats the row as expired, so the next attempt is
+      // the first one in the fresh budget.
+      expect(queue.beginRelayDeliveryAttempt("d1", "fresh")).toBe(1);
+    });
+  });
+
   describe("malformed rows", () => {
     test("getEvent rejects an unknown status", () => {
       insertRawRow(

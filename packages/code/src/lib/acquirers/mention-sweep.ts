@@ -24,6 +24,8 @@
 
 import type { WebhookQueue } from "../state/webhook-queue";
 import type { WorkerState } from "../state/worker-state";
+import { feedbackMaxAttempts } from "./review-polling";
+import type { TaskExecutionResult } from "./task-polling";
 import type { Acquirer } from "../../worker";
 
 export interface SweptComment {
@@ -70,8 +72,19 @@ export interface MentionSweepAcquirerOptions {
   workerState: WorkerState;
   queue: WebhookQueue;
   github: MentionSweepGitHub;
-  /** Feed one mention into the review pipeline (injected for tests). */
-  handleMention: (comment: SweptComment, prNumber: number) => Promise<void>;
+  /**
+   * Feed one mention into the review pipeline (injected for tests).
+   *
+   * Returns the run outcome so a shutdown-drain interruption or usage-limit
+   * deferral can release the comment's dedupe claim instead of losing it.
+   */
+  handleMention: (comment: SweptComment, prNumber: number) => Promise<TaskExecutionResult>;
+  /**
+   * Failed mention handlers tolerated per comment before the mention is marked
+   * handled anyway (tests/embedders). Defaults to `WORKER_FEEDBACK_MAX_ATTEMPTS`
+   * or 3.
+   */
+  feedbackMaxAttempts?: number;
   verbose?: boolean;
 }
 
@@ -237,6 +250,7 @@ export class MentionSweepAcquirer implements Acquirer {
     botNames: string[],
   ): Promise<void> {
     const { workerState, queue, github, handleMention, verbose } = this.options;
+    const maxAttempts = feedbackMaxAttempts(this.options.feedbackMaxAttempts);
 
     const cursor = workerState.getCursor(cursorSource);
     // Mentions predating the first worker start are not dug up.
@@ -249,6 +263,7 @@ export class MentionSweepAcquirer implements Acquirer {
     let maxCreatedAt = sinceIso;
 
     for (const comment of comments) {
+      const previousMaxCreatedAt = maxCreatedAt;
       if (comment.created_at > maxCreatedAt) {
         maxCreatedAt = comment.created_at;
       }
@@ -303,10 +318,48 @@ export class MentionSweepAcquirer implements Acquirer {
         console.log(
           `\n📌 [${this.name}] @${matchedBot} mentioned on PR #${prNumber} by @${comment.user.login}`,
         );
-        await handleMention(comment, prNumber);
+        const outcome = await handleMention(comment, prNumber);
+        if (outcome === "interrupted" || outcome === "deferred") {
+          // The run did not settle (shutdown drain) or never started (all
+          // harnesses usage-limited). Neither is a completed attempt: release
+          // the dedupe claim and stop before the cursor moves past this
+          // comment so the next sweep retries it. Relay-initiated mentions
+          // already behave this way.
+          queue.unmarkProcessed(SOURCE, externalId);
+          maxCreatedAt = previousMaxCreatedAt;
+          console.log(
+            outcome === "interrupted"
+              ? `⏸️  [${this.name}] mention on PR #${prNumber} interrupted by worker shutdown; will retry`
+              : `⏳ [${this.name}] mention on PR #${prNumber} deferred; will retry when a harness is available`,
+          );
+          break;
+        }
+        // A settled run clears any retry history left by earlier throws.
+        queue.clearFeedbackAttempts(externalId);
       } catch (error) {
+        const message = (error as Error).message;
+        // The claim is provisional until the handler settles. A throw (e.g. a
+        // transient permission-API error) must release it and hold the cursor
+        // so the next sweep retries, or polling mode silently drops the
+        // mention the relay now retries. The shared ledger bounds that retry
+        // so a deterministic failure still becomes terminal.
+        const attempts = queue.beginFeedbackAttempt(
+          externalId,
+          `mention on ${this.options.repo}#${prNumber} threw: ${message}`,
+        );
+        if (attempts < maxAttempts) {
+          queue.unmarkProcessed(SOURCE, externalId);
+          maxCreatedAt = previousMaxCreatedAt;
+          console.warn(
+            `⚠️  [${this.name}] handling mention on #${prNumber} failed ` +
+              `(attempt ${attempts}/${maxAttempts}); will retry: ${message}`,
+          );
+          break;
+        }
+        queue.clearFeedbackAttempts(externalId);
         console.warn(
-          `⚠️  [${this.name}] handling mention on #${prNumber} failed: ${(error as Error).message}`,
+          `⚠️  [${this.name}] handling mention on #${prNumber} failed ` +
+            `${maxAttempts} times; marking it handled: ${message}`,
         );
       }
     }

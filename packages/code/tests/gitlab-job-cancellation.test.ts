@@ -34,8 +34,11 @@ test.each(["review", "conflict"] as const)("%s URL job stops on cancellation", a
     expect(existsSync(marker)).toBe(true);
     controller.abort();
     const result = await run;
-    if (kind === "review") expect(result).toBe(false);
-    else expect(result).toMatchObject({ outcome: "failed" });
+    // A cancelled run is not a failed run: report the drain abort so the
+    // caller keeps the delivery/event retryable instead of consuming an
+    // attempt or marking it handled.
+    if (kind === "review") expect(result).toBe("interrupted");
+    else expect(result).toMatchObject({ outcome: "interrupted" });
   } finally {
     controller.abort();
     await run;
@@ -67,7 +70,8 @@ test("a cancelled review waiting on the change lock never spawns", async () => {
   release();
   try {
     await first;
-    expect(await second).toBe(false);
+    // The queued run never spawned; report the abort so callers retry it.
+    expect(await second).toBe("interrupted");
     expect(existsSync(marker)).toBe(false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
