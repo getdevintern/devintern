@@ -13,9 +13,18 @@ const mode =
       ? "ci"
       : agentInput.includes("E2E_REVIEW_GREETING")
         ? "review"
-        : "implement");
+        : agentInput.includes("E2E_NO_CHANGE")
+          ? "no-change"
+          : "implement");
 if (process.env.E2E_AGENT_INVOCATIONS) {
-  appendFileSync(process.env.E2E_AGENT_INVOCATIONS, JSON.stringify({ mode }) + "\n");
+  // Automation subprocesses carry the owning schedule id, so a worker test can
+  // attribute each agent invocation to the automation that spawned it instead
+  // of relying on global mode counts.
+  const automation = process.env.DEVINTERN_AUTOMATION_ID;
+  appendFileSync(
+    process.env.E2E_AGENT_INVOCATIONS,
+    JSON.stringify(automation ? { mode, automation } : { mode }) + "\n",
+  );
 }
 // Opt-in delay for bounded-timeout coverage. Defaults to 0, so every existing
 // scenario stays as fast and deterministic as before.

@@ -69,6 +69,27 @@ const INJECTED_COLUMNS = [
   "finished_at",
 ].join(", ");
 
+/** Serialize one scheduled automation as a TOML `[[automations]]` table. */
+function automationTable(automation: WorkerAutomation): string[] {
+  const lines = [
+    "[[automations]]",
+    `id = ${JSON.stringify(automation.id)}`,
+    `enabled = ${automation.enabled ?? true}`,
+  ];
+  if (automation.interval !== undefined) {
+    lines.push(`interval = ${JSON.stringify(automation.interval)}`);
+  } else {
+    lines.push(`cron = ${JSON.stringify(automation.cron ?? "* * * * *")}`);
+  }
+  lines.push(`prompt = ${JSON.stringify(automation.prompt)}`);
+  if (automation.repo !== undefined) lines.push(`repo = ${JSON.stringify(automation.repo)}`);
+  if (automation.openPr !== undefined) lines.push(`open_pr = ${automation.openPr}`);
+  if (automation.allowNoChanges !== undefined) {
+    lines.push(`allow_no_changes = ${automation.allowNoChanges}`);
+  }
+  return lines;
+}
+
 /** Prefix of the per-harness usage-limit keys persisted in `webhook_meta`. */
 const RATE_LIMIT_KEY_PREFIX = "rate_limit:";
 
@@ -78,6 +99,8 @@ const ACTIVE_HARNESS_KEY = "failover:active_harness";
 /** One row from the worker's shared run-record table. */
 export interface WorkerRunRecord {
   id: number;
+  origin: string;
+  automation_id: string | null;
   task_key: string | null;
   status: string;
   branch: string | null;
@@ -85,6 +108,32 @@ export interface WorkerRunRecord {
   pr_url: string | null;
   outcome_reason: string | null;
   attempt: number | null;
+  started_at: number;
+  finished_at: number | null;
+}
+
+/** One `[[automations]]` entry written into the generated workspace.toml. */
+export interface WorkerAutomation {
+  id: string;
+  /** Defaults to enabled. */
+  enabled?: boolean;
+  /** Exactly one of cron/interval; defaults to every minute. */
+  cron?: string;
+  interval?: string;
+  prompt: string;
+  repo?: string;
+  /** Opt-in PR creation; omitted leaves it unset so the default applies. */
+  openPr?: boolean;
+  /** Treat an occurrence with no repository changes as a successful no-op. */
+  allowNoChanges?: boolean;
+}
+
+/** One durable schedule cursor from the workspace queue. */
+export interface WorkerAutomationSchedule {
+  automation_id: string;
+  schedule_spec: string;
+  next_due_at: number;
+  last_scheduled_at: number | null;
 }
 
 export interface WorkerFixtureOptions {
@@ -92,6 +141,15 @@ export interface WorkerFixtureOptions {
   maxConcurrency?: number;
   /** Per-repository agent concurrency; defaults to one. */
   maxConcurrencyPerRepo?: number;
+  /**
+   * `[defaults].worker_task_args` for every task.
+   *
+   * Defaults to `--create-pr --skip-clarity-check --skip-comments`; omitting
+   * `--create-pr` lets a test isolate an automation's own `open_pr` opt-in.
+   */
+  workerTaskArgs?: string;
+  /** Scheduled `[[automations]]` entries; the default workspace has none. */
+  automations?: WorkerAutomation[];
 }
 
 /** Log captured from the worker subprocess, for readiness and failure reports. */
@@ -154,14 +212,14 @@ export class WorkerFixture {
   }
 
   /** Records written by the deterministic agent, one per invocation. */
-  agentInvocations(): Array<{ mode: string }> {
+  agentInvocations(): Array<{ mode: string; automation?: string }> {
     const path = this.env.E2E_AGENT_INVOCATIONS;
     if (!path || !existsSync(path)) return [];
     return readFileSync(path, "utf8")
       .trim()
       .split("\n")
       .filter(Boolean)
-      .map((line) => JSON.parse(line) as { mode: string });
+      .map((line) => JSON.parse(line) as { mode: string; automation?: string });
   }
 
   /**
@@ -178,10 +236,11 @@ export class WorkerFixture {
   /**
    * Seed the local bare repository and write a credential-free workspace.
    *
-   * The workspace deliberately has no task query, automation, estimation, or
-   * error monitor. That is valid only while an injected task is pending, so
-   * enqueue work before {@link start}: the worker then takes the documented
-   * injection-only exception instead of exiting for lack of configured work.
+   * By default the workspace has no task query, automation, estimation, or
+   * error monitor, so enqueue work before {@link start}: the worker then takes
+   * the documented injection-only exception instead of exiting for lack of
+   * configured work. Passing `automations` adds scheduled `[[automations]]`
+   * tables to the same generated config.
    */
   async prepare(): Promise<void> {
     const agent = join(this.root, "agent.ts");
@@ -191,28 +250,31 @@ export class WorkerFixture {
     this.env.E2E_AGENT_INVOCATIONS = join(this.root, "agent-invocations.jsonl");
 
     mkdirSync(this.workspaceDir, { recursive: true });
-    writeFileSync(
-      join(this.workspaceDir, "workspace.toml"),
-      [
-        "[workspace]",
-        "dashboard = false",
-        "",
-        "[workspace.execution]",
-        'isolation = "best_effort_host"',
-        `max_concurrency = ${this.options.maxConcurrency ?? 1}`,
-        `max_concurrency_per_repo = ${this.options.maxConcurrencyPerRepo ?? 1}`,
-        "",
-        "[defaults]",
-        'tracker = "markdown"',
-        'worker_task_args = "--create-pr --skip-clarity-check --skip-comments"',
-        "",
-        "[[repos]]",
-        `name = "${this.repoName}"`,
-        `remote = "${this.remote}"`,
-        `default_branch = "${this.baseBranch}"`,
-        "",
-      ].join("\n"),
-    );
+    const lines = [
+      "[workspace]",
+      "dashboard = false",
+      "",
+      "[workspace.execution]",
+      'isolation = "best_effort_host"',
+      `max_concurrency = ${this.options.maxConcurrency ?? 1}`,
+      `max_concurrency_per_repo = ${this.options.maxConcurrencyPerRepo ?? 1}`,
+      "",
+      "[defaults]",
+      'tracker = "markdown"',
+      `worker_task_args = ${JSON.stringify(
+        this.options.workerTaskArgs ?? "--create-pr --skip-clarity-check --skip-comments",
+      )}`,
+      "",
+      "[[repos]]",
+      `name = "${this.repoName}"`,
+      `remote = "${this.remote}"`,
+      `default_branch = "${this.baseBranch}"`,
+      "",
+    ];
+    for (const automation of this.options.automations ?? []) {
+      lines.push(...automationTable(automation), "");
+    }
+    writeFileSync(join(this.workspaceDir, "workspace.toml"), lines.join("\n"));
 
     cpSync(fixture, this.seed, { recursive: true });
     await checkedCommand(
@@ -226,6 +288,18 @@ export class WorkerFixture {
     await git("add", ".");
     await git("commit", "-m", "Seed worker fixture");
     await git("push", "--set-upstream", "origin", this.baseBranch);
+  }
+
+  /**
+   * Append one `[[automations]]` table to the live workspace config.
+   *
+   * The running daemon's `fs.watch` reloader reconciles it without a restart,
+   * which is how the test covers live config reload.
+   */
+  appendAutomation(automation: WorkerAutomation): void {
+    const path = join(this.workspaceDir, "workspace.toml");
+    const current = readFileSync(path, "utf8").trimEnd();
+    writeFileSync(path, `${current}\n\n${automationTable(automation).join("\n")}\n`);
   }
 
   /** Start the real worker daemon in its own process group. */
@@ -381,14 +455,49 @@ export class WorkerFixture {
 
   /** Read run records, optionally scoped to one task key. */
   runRecords(taskKey?: string): WorkerRunRecord[] {
+    const columns =
+      "id, origin, automation_id, task_key, status, branch, repo, pr_url, outcome_reason, attempt, started_at, finished_at";
     return taskKey === undefined
-      ? this.query<WorkerRunRecord>(
-          "SELECT id, task_key, status, branch, repo, pr_url, outcome_reason, attempt FROM runs ORDER BY id",
-        )
-      : this.query<WorkerRunRecord>(
-          "SELECT id, task_key, status, branch, repo, pr_url, outcome_reason, attempt FROM runs WHERE task_key = ? ORDER BY id",
-          [taskKey],
-        );
+      ? this.query<WorkerRunRecord>(`SELECT ${columns} FROM runs ORDER BY id`)
+      : this.query<WorkerRunRecord>(`SELECT ${columns} FROM runs WHERE task_key = ? ORDER BY id`, [
+          taskKey,
+        ]);
+  }
+
+  /** Run records attributed to one scheduled automation, oldest first. */
+  automationRuns(automationId: string): WorkerRunRecord[] {
+    return this.query<WorkerRunRecord>(
+      `SELECT id, origin, automation_id, task_key, status, branch, repo, pr_url, outcome_reason,
+              attempt, started_at, finished_at
+         FROM runs WHERE automation_id = ? ORDER BY id`,
+      [automationId],
+    );
+  }
+
+  /** Wait for the first terminal run of one scheduled automation. */
+  async waitForAutomationRun(automationId: string, timeoutMs = 90_000): Promise<WorkerRunRecord> {
+    return await this.waitFor(
+      `automation "${automationId}" run to settle`,
+      () => this.automationRuns(automationId).find((run) => run.status !== "in_progress"),
+      timeoutMs,
+    );
+  }
+
+  /** Durable schedule cursors, including automations that have not run yet. */
+  automationSchedules(): WorkerAutomationSchedule[] {
+    return this.query<WorkerAutomationSchedule>(
+      `SELECT automation_id, schedule_spec, next_due_at, last_scheduled_at
+         FROM automation_schedules ORDER BY automation_id`,
+    );
+  }
+
+  /** Occurrence task-file names materialized for one automation, oldest first. */
+  automationOccurrences(automationId: string): string[] {
+    const dir = join(this.workspaceDir, "automations", automationId);
+    if (!existsSync(dir)) return [];
+    return readdirSync(dir)
+      .filter((name) => name.endsWith(".md"))
+      .sort();
   }
 
   /** Contents of a file on a branch in the local bare repository. */

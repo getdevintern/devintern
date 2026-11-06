@@ -146,7 +146,7 @@ Run: `bun run --filter @devintern/e2e test` (build the CLI first); the sandbox s
 | ------------------------------------------------------------------------------------------------------- | ------------------ | --------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
 | Daemon: injected task drain, branch/PR, run record, worktree cleanup, graceful stop                     | `default` / `live` | `tests/local/worker.test.ts`, `tests/code/gitlab-worker.test.ts`                  | —                                                                                |
 | Tracker polling and actioned deduplication                                                              | `live`             | GitLab worker suite                                                               | GitHub/Jira/Trello/Linear/Asana/Azure worker paths.                              |
-| Scheduled `[[automations]]`: schedule, no-op, PR policy, hot reload                                     | `gap`              | —                                                                                 | Deterministic fixture repo and prompt.                                           |
+| Scheduled `[[automations]]`: schedule, no-op, branch/push policy, hot reload                            | `default`          | `tests/local/worker-automations.test.ts` (`bun run --filter @devintern/e2e test`) | PR creation on a live code host (bare remote exposes no platform).               |
 | Scheduled `[[estimations]]`                                                                             | `gap`              | —                                                                                 | Fixture tracker and story-point assertion.                                       |
 | Working windows / quiet hours                                                                           | `gap`              | —                                                                                 | Ready-task deferral and `run-now` bypass.                                        |
 | Workspace and per-repo concurrency                                                                      | `gap`              | —                                                                                 | Multiple queued tasks and limits.                                                |
@@ -200,8 +200,9 @@ and each task opens its own PR.
 12. Sandbox providers `native`, `nono`, and `docker`, removed-provider (`srt`,
     `smolvm`) migration errors, plus invalid-provider and missing-binary
     fail-closed paths.
-13. Scheduled automations, estimations, quiet hours, concurrency, and orphan
-    recovery on a deterministic local workspace.
+13. Estimations, quiet hours, concurrency, and orphan recovery on a deterministic
+    local workspace. Scheduled automations are implemented by
+    `tests/local/worker-automations.test.ts`.
 14. ~~Harness failover with stub harnesses~~ (implemented by
     `tests/local/worker-harness-failover.test.ts`).
 15. Sentry auto-fix with a fake or opt-in project.
