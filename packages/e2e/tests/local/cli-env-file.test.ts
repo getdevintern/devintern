@@ -261,6 +261,47 @@ test.skipIf(!existsSync(cliPath))(
 );
 
 test.skipIf(!existsSync(cliPath))(
+  "keys absent from --env-file are not filled from the project .env",
+  async () => {
+    const tracker = createOfflineJira();
+    const run = new FixtureWorkspace();
+    try {
+      const seed = await seedJiraScenario(tracker);
+      const statuses = statusesFor(tracker);
+      await prepareJiraWorkspace(run, tracker, seed, statuses);
+      // The project file names an unreachable host and carries its own token.
+      writeUnreachableProjectEnv(run, tracker.projectKey());
+
+      // The explicit file supplies only a token. If the project file leaked in,
+      // the CLI would pair its JIRA_BASE_URL/JIRA_EMAIL with this token and send
+      // a request to the project-controlled host.
+      const customEnv = join(run.root, "token-only.env");
+      writeEnvFile(customEnv, { JIRA_API_TOKEN: tracker.environment().JIRA_API_TOKEN });
+
+      const result = await runJiraTask(run, seed.issue.key, {
+        extraArgs: ["--env-file", customEnv],
+      });
+
+      expect(result.exitCode).not.toBe(0);
+      // Validation fails for the omitted keys instead of silently borrowing
+      // them from .devintern-code/.env.
+      expect(result.stderr).toContain("Missing required JIRA environment variables");
+      expect(result.stderr).toContain("JIRA_BASE_URL");
+      expect(result.stderr).toContain("JIRA_EMAIL");
+
+      // Neither the fake nor the project host was contacted.
+      expect(tracker.requestCount).toBe(0);
+      expect(result.stdout).not.toContain(`Fetching task: ${seed.issue.key}`);
+      await assertNoTaskStarted(run, seed.issue.key);
+    } finally {
+      await tracker.cleanup();
+      run.dispose();
+    }
+  },
+  120_000,
+);
+
+test.skipIf(!existsSync(cliPath))(
   "built CLI falls back to the project .env when --env-file is omitted",
   async () => {
     const tracker = createOfflineJira();

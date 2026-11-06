@@ -22,6 +22,8 @@ The tool searches for `.env` files in the following order:
 3. **User home directory** (`~/.env`)
 4. **Tool installation directory**
 
+When `--env-file` is given, only that file is loaded; the project, home, and installation `.env` files are not read, so keys it omits are never filled from a project-controlled file. Variables already set in your shell are overridden by the selected file.
+
 You can run `devintern` from any subdirectory of your project and it will find the correct config automatically.
 
 ## Required Configuration

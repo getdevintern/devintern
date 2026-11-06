@@ -31,6 +31,7 @@ import {
   VERSION,
   checkForCliUpdate,
   enforceLicenseOrExit,
+  findEnvFileArg,
   getLoadedEnvPath,
   loadEnvironment,
   loadSupabaseConfig,
@@ -132,8 +133,12 @@ if (process.argv[2] === "init") {
 } else if (process.argv[2] === "whoami") {
   await runWhoamiCommand();
 } else {
-  // Load environment variables early (before CLI parsing)
-  loadEnvironment();
+  // Load environment variables early (before CLI parsing). Peek `--env-file`
+  // from argv so an explicit file is the only `.env` source: loading the
+  // implicit project `.env` first would leave its values in place for every
+  // key the explicit file omits (for example, a project-controlled
+  // JIRA_BASE_URL paired with the user's real token).
+  loadEnvironment(findEnvFileArg(process.argv));
 }
 
 /**

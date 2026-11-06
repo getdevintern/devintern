@@ -34,6 +34,40 @@ export function getLoadedEnvPath(): string | null {
 }
 
 /**
+ * Read `--env-file` from raw argv before Commander parses it.
+ *
+ * The task-run entrypoint loads environment variables before Commander runs,
+ * so it cannot use `program.opts().envFile` at that point. Resolving the flag
+ * early lets the explicit file be the only `.env` source instead of merging on
+ * top of the implicit project file.
+ *
+ * Supports both `--env-file <path>` and `--env-file=<path>`.
+ *
+ * @param argv - Process argv (including the executable and script path)
+ * @returns The requested env file path, or `undefined` when the flag is absent
+ */
+export function findEnvFileArg(argv: readonly string[]): string | undefined {
+  const flag = "--env-file";
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    // Everything after `--` is positional, so a later `--env-file` is a task
+    // key rather than an option.
+    if (arg === "--") return undefined;
+    if (arg === flag) {
+      const value = argv[index + 1];
+      // A leading dash means the path is missing (Commander will report it);
+      // treat it as absent so the normal parse error surfaces.
+      return value !== undefined && !value.startsWith("-") ? value : undefined;
+    }
+    if (arg?.startsWith(`${flag}=`)) {
+      const value = arg.slice(flag.length + 1);
+      return value.length > 0 ? value : undefined;
+    }
+  }
+  return undefined;
+}
+
+/**
  * Load environment variables from standard locations or a custom file.
  *
  * Searches upward from the current working directory for the nearest
@@ -59,11 +93,11 @@ function loadEnvironmentInner(envFile: string | undefined, skipProjectEnv: boole
   if (envFile) {
     const customEnvPath = resolve(envFile);
     if (existsSync(customEnvPath)) {
-      // The task-run CLI loads the implicit project `.env` before Commander
-      // parses `--env-file`, and dotenv never replaces variables that are
-      // already set. Without `override`, a project file would win over the
-      // explicitly selected file. `--env-file` is the first entry in the
-      // documented search order, so its values are authoritative.
+      // The task-run CLI resolves `--env-file` from argv before loading
+      // anything (see `findEnvFileArg`), so the explicit file is the only
+      // `.env` source: the implicit project `.env` is never loaded alongside
+      // it. `override` additionally makes its values win over ambient shell
+      // variables, matching the documented search order (`--env-file` first).
       config({ path: customEnvPath, override: true });
       console.log(`📁 Loaded environment from custom file: ${customEnvPath}`);
       return customEnvPath;
