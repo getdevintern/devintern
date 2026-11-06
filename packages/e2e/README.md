@@ -126,6 +126,35 @@ tracker or hosted code host is involved. Enqueue-only cases cover `--title`,
 `--resume`, asserting the pushed branch/commit directly on the bare remote rather
 than a pull request.
 
+## Worker workspace bootstrap (`worker scaffold` and `worker add-repo`)
+
+The default local suite (`tests/local/worker-workspace-bootstrap.test.ts`) drives
+the built CLI's non-interactive onboarding path in a temporary HOME and
+workspace. It seeds a local bare Git remote and a checkout (no network, tracker,
+or credentials), then asserts the on-disk result rather than CLI prose:
+
+- `worker scaffold` writes `workspace.toml` and the shared `.env` with mode
+  `0600`; a second run exits non-zero without changing either file.
+- The generated TOML parses through a follow-up `worker add` invocation.
+- `worker add-repo` derives a filesystem-safe `[[repos]]` name from the remote,
+  does not pin a transient `origin/HEAD`, and seeds a `[[routing.rules]]` entry
+  from `JIRA_DEFAULT_PROJECT_KEY` (or `LINEAR_DEFAULT_TEAM_KEY`).
+- Missing repo env keys merge into the shared `.env`; conflicting values are
+  demoted to the repo's inline `[repos.env]` instead of overwriting shared
+  values.
+- Re-running `add-repo` is idempotent, and running from a package subdirectory
+  still resolves the repository-root `.devintern-code/.env`.
+- A missing workspace or a checkout without an `origin` exits non-zero and
+  writes nothing.
+
+The temporary root (HOME, workspace, bare remote, and seed checkout) is removed
+in `finally`; the run creates no resource outside it.
+
+```sh
+bun run --filter @getdevintern/code build
+bun run --filter @devintern/e2e test
+```
+
 ## Scheduled workspace automations
 
 `tests/local/worker-automations.test.ts` starts one real `devintern worker`
