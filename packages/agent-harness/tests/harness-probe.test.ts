@@ -3,7 +3,9 @@ import { describe, expect, test } from "bun:test";
 import {
   probeHarnessUnderSandbox,
   resetHarnessSandboxProbeCache,
+  resolveProbeProvider,
 } from "../src/sandbox/harness-probe.js";
+import { registerSandboxProvider } from "../src/sandbox/registry.js";
 import type { SandboxProvider } from "../src/sandbox/types.js";
 
 function fakeProvider(name: string, script: string): SandboxProvider {
@@ -18,6 +20,38 @@ function fakeProvider(name: string, script: string): SandboxProvider {
     }),
   };
 }
+
+describe("resolveProbeProvider", () => {
+  const activeEnv = { NONO_CAP_FILE: process.execPath };
+
+  test("skips a non-nestable provider when already inside a sandbox", async () => {
+    const provider = fakeProvider("probe-inherit-kernel", 'console.log("1")');
+    registerSandboxProvider(provider);
+
+    expect(await resolveProbeProvider(provider.name, { trustedEnv: activeEnv })).toBeUndefined();
+    // Outside an enclosing sandbox the same provider is still probed.
+    expect(await resolveProbeProvider(provider.name, { trustedEnv: {} })).toBe(provider);
+  });
+
+  test("still returns a nesting-capable provider inside a sandbox", async () => {
+    const provider: SandboxProvider = {
+      ...fakeProvider("probe-inherit-vm", 'console.log("1")'),
+      canNestInSandbox: true,
+    };
+    registerSandboxProvider(provider);
+
+    expect(await resolveProbeProvider(provider.name, { trustedEnv: activeEnv })).toBe(provider);
+  });
+
+  test("auto never adds a provider when already inside a sandbox", async () => {
+    expect(await resolveProbeProvider("auto", { trustedEnv: activeEnv })).toBeUndefined();
+  });
+
+  test("unknown names and none never resolve", async () => {
+    expect(await resolveProbeProvider("none", { trustedEnv: {} })).toBeUndefined();
+    expect(await resolveProbeProvider("probe-does-not-exist", { trustedEnv: {} })).toBeUndefined();
+  });
+});
 
 describe("probeHarnessUnderSandbox", () => {
   test("reports ok when the wrapped harness version command succeeds", async () => {

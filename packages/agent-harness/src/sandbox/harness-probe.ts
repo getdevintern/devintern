@@ -23,6 +23,7 @@ import { join } from "path";
 import { buildDefaultSandboxPolicy } from "../spawn-agent.js";
 import { detectSandboxProviders } from "./detect.js";
 import { getSandboxProvider } from "./registry.js";
+import { activeSandboxName } from "./resolver.js";
 import type { SandboxProvider } from "./types.js";
 
 /** Result of probing a harness CLI through a sandbox provider. */
@@ -129,32 +130,59 @@ export function firstActionableProbeLine(stderr: string, stdout = ""): string | 
   return actionable ?? lines[0];
 }
 
+/** Options for {@link resolveProbeProvider}. */
+export interface ProbeProviderOptions {
+  /**
+   * Environment to inspect for enclosing-sandbox markers. Defaults to the
+   * trusted startup snapshot read by {@link activeSandboxName}, so tests can
+   * inject markers without touching the real process environment.
+   */
+  trustedEnv?: NodeJS.ProcessEnv;
+}
+
 /**
  * Resolve the provider a configured `AGENT_SANDBOX` value would use.
  *
- * Returns `undefined` for `none`, unknown/unavailable providers, and `auto`
- * when no provider is available. Callers treat that as "cannot preflight" and
- * fail open rather than blocking startup on a probe infrastructure problem.
+ * Returns `undefined` for `none`, unknown/unavailable providers, `auto` when
+ * no provider is available, and when this process already runs inside an
+ * enclosing sandbox that the chosen provider cannot nest in. Callers treat
+ * that as "cannot preflight" and fail open rather than blocking startup on a
+ * probe infrastructure problem.
  *
  * @param sandboxName - Configured sandbox name (`none`, `auto`, `nono`, …).
+ * @param options - Optional environment override for enclosing-sandbox markers.
  */
 export async function resolveProbeProvider(
   sandboxName: string,
+  options: ProbeProviderOptions = {},
 ): Promise<SandboxProvider | undefined> {
   const name = sandboxName.trim();
   if (!name || name === "none") return undefined;
 
+  const active = activeSandboxName(options.trustedEnv);
+  // Mirror the resolver: `auto` never adds a second sandbox when one already
+  // wraps this process, regardless of the picked provider's nesting support.
+  if (name === "auto" && active) return undefined;
+
+  let provider: SandboxProvider | undefined;
   if (name === "auto") {
     const detections = await detectSandboxProviders();
-    return detections
+    provider = detections
       .filter(({ provider, detection }) => detection.available && provider.priority > 0)
       .sort((a, b) => b.provider.priority - a.provider.priority)[0]?.provider;
+  } else {
+    const candidate = getSandboxProvider(name);
+    if (!candidate) return undefined;
+    const detection = await candidate.detect();
+    provider = detection.available ? candidate : undefined;
   }
-
-  const provider = getSandboxProvider(name);
   if (!provider) return undefined;
-  const detection = await provider.detect();
-  return detection.available ? provider : undefined;
+
+  // A kernel wrapper/native sandbox cannot nest inside the enclosing
+  // confinement: probing through it would fail for reasons that do not apply
+  // to the real run, which inherits the existing sandbox instead.
+  if (active && !provider.canNestInSandbox) return undefined;
+  return provider;
 }
 
 /**

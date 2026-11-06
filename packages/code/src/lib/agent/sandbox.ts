@@ -212,9 +212,18 @@ export interface HarnessPreflightEntry {
 
 /** Preflight results collected before rendering the (pure) doctor report. */
 export interface HarnessPreflightReport {
-  /** Sandbox provider the entries were probed through. */
+  /**
+   * Sandbox provider the entries were probed through; the configured provider
+   * when probing was skipped because the run inherits an enclosing sandbox.
+   */
   provider: string;
   entries: HarnessPreflightEntry[];
+  /**
+   * Set when probing was skipped: the process already runs inside this
+   * sandbox and the configured provider cannot (or, for `auto`, would not) add
+   * another layer, so the probe cannot represent the next run.
+   */
+  skipped?: { activeSandbox: string };
 }
 
 /**
@@ -227,12 +236,15 @@ export interface HarnessPreflightReport {
  * @param configured - Effective `AGENT_SANDBOX` value.
  * @param detections - Provider detections already gathered by the doctor.
  * @param raw - Raw `AGENT_HARNESS` value (defaults to the environment).
- * @returns Preflight rows, or undefined when no sandbox/provider is configured.
+ * @param activeSandbox - Enclosing sandbox name from `activeSandboxName()`, if any.
+ * @returns Preflight rows, a skipped report, or undefined when no
+ *   sandbox/provider is configured.
  */
 export async function collectHarnessPreflight(
   configured: string,
   detections: DetectedSandboxProvider[],
   raw?: string,
+  activeSandbox?: string,
 ): Promise<HarnessPreflightReport | undefined> {
   if (!configured || configured === "none") {
     return undefined;
@@ -265,6 +277,14 @@ export async function collectHarnessPreflight(
   }
   if (!provider) {
     return undefined;
+  }
+
+  // Mirror `resolveSandbox`: when an enclosing sandbox is present, `auto`
+  // always inherits it, and an explicit provider is only skipped when it
+  // cannot nest. Probing through a non-nestable wrapper would run a nested
+  // sandbox and report the resulting failure as a harness problem.
+  if (activeSandbox && (configured === "auto" || !provider.canNestInSandbox)) {
+    return { provider: provider.name, entries: [], skipped: { activeSandbox } };
   }
 
   const entries = await Promise.all(
@@ -406,7 +426,13 @@ export function buildSandboxDoctorReport(
 
   lines.push(...describeProviders(detections, harnessName, linux));
 
-  if (preflight && preflight.entries.length > 0) {
+  if (preflight?.skipped) {
+    lines.push(
+      `Harness CLI preflight: skipped — the agent inherits the existing ` +
+        `${preflight.skipped.activeSandbox} confinement`,
+    );
+    lines.push("");
+  } else if (preflight && preflight.entries.length > 0) {
     lines.push(`Harness CLI preflight (${preflight.provider})`);
     for (const entry of preflight.entries) {
       const status = entry.ok ? "OK" : `FAIL — ${entry.reason ?? "could not start"}`;

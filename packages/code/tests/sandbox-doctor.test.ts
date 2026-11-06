@@ -340,6 +340,68 @@ describe("buildSandboxDoctorReport", () => {
     expect(report?.provider).toBe("nono");
   });
 
+  test("collectHarnessPreflight skips probing when the run inherits an enclosing sandbox", async () => {
+    const report = await collectHarnessPreflight(
+      "nono",
+      [detected("nono", { priority: 30 })],
+      "opencode",
+      "nono",
+    );
+    expect(report).toEqual({
+      provider: "nono",
+      entries: [],
+      skipped: { activeSandbox: "nono" },
+    });
+  });
+
+  test("collectHarnessPreflight skips auto probing inside an enclosing sandbox", async () => {
+    const report = await collectHarnessPreflight(
+      "auto",
+      [detected("nono", { priority: 30 })],
+      "opencode",
+      "nono",
+    );
+    expect(report?.entries).toEqual([]);
+    expect(report?.skipped).toEqual({ activeSandbox: "nono" });
+  });
+
+  test("collectHarnessPreflight still probes a nesting-capable provider inside an enclosing sandbox", async () => {
+    const report = await collectHarnessPreflight(
+      "docker",
+      [detected("docker", { canNestInSandbox: true, harnesses: ["opencode"] })],
+      "opencode",
+      "nono",
+    );
+    expect(report?.skipped).toBeUndefined();
+    expect(report?.provider).toBe("docker");
+    expect(report?.entries.length).toBeGreaterThan(0);
+  });
+
+  test("renders a skipped preflight line without a FAIL row or CLI-path hint", () => {
+    const report = buildSandboxDoctorReport(
+      [detected("nono", { priority: 30 })],
+      "nono",
+      "environment",
+      "opencode",
+      "linux",
+      {
+        activeSandbox: "nono",
+        preflight: {
+          provider: "nono",
+          entries: [],
+          skipped: { activeSandbox: "nono" },
+        },
+      },
+    );
+    const text = report.lines.join("\n");
+    expect(report.nextRunFails).toBe(false);
+    expect(text).toContain(
+      "Harness CLI preflight: skipped — the agent inherits the existing nono confinement",
+    );
+    expect(text).not.toContain("FAIL —");
+    expect(text).not.toContain("_CLI_PATH");
+  });
+
   test("per-provider setup notes are platform aware", () => {
     const linuxText = buildSandboxDoctorReport(
       [detected("docker")],

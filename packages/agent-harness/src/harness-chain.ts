@@ -118,6 +118,13 @@ export interface HarnessChainOptions {
   /** Provider override (tests/doctor); otherwise derived from `sandboxName`. */
   sandboxProvider?: SandboxProvider;
   /**
+   * Environment to inspect for enclosing-sandbox markers when deriving the
+   * probe provider. Defaults to the trusted startup snapshot captured by
+   * `activeSandboxName()`, so tests can inject markers without mutating the
+   * real process environment.
+   */
+  trustedEnv?: NodeJS.ProcessEnv;
+  /**
    * Sandbox readiness probe override (tests). Called only when a sandbox is
    * configured. Returning `{ ok: false, reason }` marks the entry as
    * sandbox-incompatible; thrown errors fail open.
@@ -342,7 +349,9 @@ export async function resolveHarnessChain(
   let provider = options.sandboxProvider;
   if (!provider && !options.probeSandbox) {
     try {
-      provider = await resolveProbeProvider(sandboxName);
+      provider = await resolveProbeProvider(sandboxName, {
+        trustedEnv: options.trustedEnv,
+      });
     } catch {
       provider = undefined;
     }

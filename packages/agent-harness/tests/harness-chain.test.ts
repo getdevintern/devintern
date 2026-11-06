@@ -6,6 +6,8 @@ import {
 } from "../src/harness-chain.js";
 import { resolveHarness } from "../src/resolver.js";
 import { getHarness } from "../src/registry.js";
+import { registerSandboxProvider } from "../src/sandbox/registry.js";
+import type { SandboxProvider } from "../src/sandbox/types.js";
 
 describe("parseHarnessList", () => {
   test("defaults to claude-code when raw is undefined", () => {
@@ -232,6 +234,84 @@ describe("resolveHarnessChain", () => {
     });
     expect(probes).toBe(0);
     expect(chain.entries.map((e) => e.name)).toEqual(["codex", "grok"]);
+  });
+
+  test("does not probe through a non-nestable provider when already inside a sandbox", async () => {
+    let wraps = 0;
+    const provider: SandboxProvider = {
+      name: "chain-inherit-kernel",
+      displayName: "chain inherit kernel (test)",
+      priority: 1,
+      detect: async () => ({ available: true }),
+      wrapCommand: () => {
+        wraps++;
+        return { path: "/nonexistent/probe-binary", args: [] };
+      },
+    };
+    registerSandboxProvider(provider);
+
+    const chain = await resolveHarnessChain({
+      raw: "codex,grok",
+      isInstalled: alwaysInstalled,
+      sandboxName: provider.name,
+      trustedEnv: { NONO_CAP_FILE: process.execPath },
+    });
+
+    expect(wraps).toBe(0);
+    expect(chain.issues).toEqual([]);
+    expect(chain.entries.map((e) => e.name)).toEqual(["codex", "grok"]);
+  });
+
+  test("still probes a nesting-capable provider inside an enclosing sandbox", async () => {
+    let wraps = 0;
+    const provider: SandboxProvider = {
+      name: "chain-inherit-vm",
+      displayName: "chain inherit VM (test)",
+      priority: 1,
+      canNestInSandbox: true,
+      detect: async () => ({ available: true }),
+      wrapCommand: () => {
+        wraps++;
+        return { path: process.execPath, args: ["-e", ""] };
+      },
+    };
+    registerSandboxProvider(provider);
+
+    const chain = await resolveHarnessChain({
+      raw: "codex,grok",
+      isInstalled: alwaysInstalled,
+      sandboxName: provider.name,
+      trustedEnv: { NONO_CAP_FILE: process.execPath },
+    });
+
+    expect(wraps).toBe(2);
+    expect(chain.issues).toEqual([]);
+    expect(chain.entries.map((e) => e.name)).toEqual(["codex", "grok"]);
+  });
+
+  test("outside any enclosing sandbox a non-nestable provider is still probed", async () => {
+    let wraps = 0;
+    const provider: SandboxProvider = {
+      name: "chain-no-enclosing",
+      displayName: "chain no enclosing (test)",
+      priority: 1,
+      detect: async () => ({ available: true }),
+      wrapCommand: () => {
+        wraps++;
+        return { path: process.execPath, args: ["-e", ""] };
+      },
+    };
+    registerSandboxProvider(provider);
+
+    const chain = await resolveHarnessChain({
+      raw: "codex",
+      isInstalled: alwaysInstalled,
+      sandboxName: provider.name,
+      trustedEnv: {},
+    });
+
+    expect(wraps).toBe(1);
+    expect(chain.issues).toEqual([]);
   });
 
   test("drops a sandbox-incompatible fallback and reports the fix", async () => {
