@@ -5,6 +5,15 @@ import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 // cannot: the same daemon runs implementation, review, CI-repair and conflict
 // jobs, so those tests identify the prompt by a seeded marker instead.
 const agentInput = process.argv.join(" ");
+// Batch tests seed a unique alphanumeric token into each task body as
+// `E2EPROMPTMARKER<TOKEN>`. Recording every marker this invocation saw proves
+// each task's own prompt reached the agent, in order, even when every task
+// produces the same file edit. Tokens must stay alphanumeric: tracker
+// descriptions pass through HTML-to-Markdown conversion, which escapes `_` and
+// other Markdown-special characters before the prompt reaches this process.
+const promptMarkers = [...agentInput.matchAll(/E2EPROMPTMARKER[A-Z0-9]+/g)].map(
+  (match) => match[0],
+);
 // The local auto-review loop sends the bundled review and fix prompts from the
 // same one-shot CLI run that implemented the task. Detect those turns before
 // the explicit E2E_AGENT_MODE so a single run can exercise
@@ -33,7 +42,11 @@ if (process.env.E2E_AGENT_INVOCATIONS) {
   const automation = process.env.DEVINTERN_AUTOMATION_ID;
   appendFileSync(
     process.env.E2E_AGENT_INVOCATIONS,
-    JSON.stringify(automation ? { mode, automation } : { mode }) + "\n",
+    JSON.stringify({
+      mode,
+      ...(promptMarkers.length > 0 ? { promptMarkers } : {}),
+      ...(automation ? { automation } : {}),
+    }) + "\n",
   );
 }
 // Opt-in delay for bounded-timeout coverage. Defaults to 0, so every existing
@@ -41,6 +54,26 @@ if (process.env.E2E_AGENT_INVOCATIONS) {
 const delayMs = Number(process.env.E2E_AGENT_DELAY_MS ?? "0");
 if (Number.isFinite(delayMs) && delayMs > 0) {
   await Bun.sleep(delayMs);
+}
+// Narrow, explicit per-task failure for batch-isolation coverage. Unlike the
+// process-wide E2E_AGENT_MODE, this only affects a prompt carrying the marker,
+// so one task in a batch can fail while the others still implement.
+//
+// The marker must be alphanumeric. Tracker descriptions are Markdown-escaped
+// before they reach the agent (`E2E_FAIL_ABC` arrives as `E2E\_FAIL\_ABC`), so a
+// marker containing Markdown-special characters would silently never match.
+// Fail loudly instead of letting a future scenario pass without failing.
+const failPromptMarker = process.env.E2E_FAIL_PROMPT_MARKER;
+if (failPromptMarker) {
+  if (!/^[A-Za-z0-9]+$/.test(failPromptMarker)) {
+    throw new Error(
+      "E2E_FAIL_PROMPT_MARKER must be alphanumeric: Markdown escaping prevents a marker with special characters from matching",
+    );
+  }
+  if (agentInput.includes(failPromptMarker)) {
+    console.error("E2E deliberate prompt-marker failure");
+    process.exit(18);
+  }
 }
 // A settled-but-failed attempt with an implementation report, for resume
 // coverage: exit 0 with failure language so the pipeline records an escalated
