@@ -22,6 +22,7 @@ import { join } from "path";
 
 import { buildDefaultSandboxPolicy } from "../spawn-agent.js";
 import { detectSandboxProviders } from "./detect.js";
+import { sandboxInheritsEnclosingSandbox } from "./nesting.js";
 import { getSandboxProvider } from "./registry.js";
 import { activeSandboxName } from "./resolver.js";
 import type { SandboxProvider } from "./types.js";
@@ -138,19 +139,66 @@ export interface ProbeProviderOptions {
    * inject markers without touching the real process environment.
    */
   trustedEnv?: NodeJS.ProcessEnv;
+  /**
+   * Primary harness the run is configured to launch. `resolveSandbox` rejects
+   * an explicit provider that cannot wrap it before any nesting decision, so
+   * the probe must exercise that provider (and report its failure) instead of
+   * claiming the run inherits the enclosing sandbox.
+   */
+  harnessName?: string;
+}
+
+/**
+ * Wrapper-free provider stand-in for a run that inherits an enclosing sandbox.
+ *
+ * Mirrors `resolveSandbox`: an explicitly requested provider that cannot nest
+ * is skipped, and the harness executes inside the confinement already wrapping
+ * this process. The probe therefore must not add a wrapper — it just runs
+ * `<path> --version` so a CLI that cannot start under that confinement (the
+ * mise-shim / permission-denied failure this module exists for) is still
+ * detected instead of silently skipped.
+ *
+ * The name is deliberately distinct from the real provider's so wrapped and
+ * inherited probe results never share a cache entry.
+ *
+ * Exported for callers that know a run inherits the enclosing sandbox but do
+ * not go through {@link resolveProbeProvider} (e.g. the `devintern sandbox`
+ * preflight, which resolves the provider from its own detections).
+ *
+ * @param activeSandbox - Provider name of the sandbox wrapping this process.
+ * @param compatibility - Configured provider whose harness support still
+ *   decides whether the run starts (inheriting does not make an unsupported
+ *   harness runnable). Forwarded so callers can flag those entries as failures.
+ */
+export function inheritedSandboxProbeProvider(
+  activeSandbox: string,
+  compatibility?: Pick<SandboxProvider, "supportsHarness">,
+): SandboxProvider {
+  return {
+    name: `${activeSandbox} (inherited)`,
+    displayName: `inherited ${activeSandbox}`,
+    priority: 0,
+    detect: async () => ({ available: true }),
+    ...(compatibility?.supportsHarness
+      ? { supportsHarness: (harnessName: string) => compatibility.supportsHarness!(harnessName) }
+      : {}),
+    wrapCommand: (path, args) => ({ path, args: [...args] }),
+  };
 }
 
 /**
  * Resolve the provider a configured `AGENT_SANDBOX` value would use.
  *
- * Returns `undefined` for `none`, unknown/unavailable providers, `auto` when
- * no provider is available, and when this process already runs inside an
- * enclosing sandbox that the chosen provider cannot nest in. Callers treat
- * that as "cannot preflight" and fail open rather than blocking startup on a
- * probe infrastructure problem.
+ * Returns `undefined` for `none`, unknown/unavailable providers, and `auto`
+ * when no provider is available. When this process already runs inside an
+ * enclosing sandbox the run inherits it (`auto` never adds a layer, and an
+ * explicitly requested provider is skipped unless it can nest), so the probe
+ * executes the harness directly through the wrapper-free stand-in instead of
+ * being skipped: that exercises the confinement the real run will use.
  *
  * @param sandboxName - Configured sandbox name (`none`, `auto`, `nono`, …).
- * @param options - Optional environment override for enclosing-sandbox markers.
+ * @param options - Optional environment override for enclosing-sandbox markers
+ *   and the primary harness name to validate compatibility against.
  */
 export async function resolveProbeProvider(
   sandboxName: string,
@@ -159,16 +207,27 @@ export async function resolveProbeProvider(
   const name = sandboxName.trim();
   if (!name || name === "none") return undefined;
 
+  const harnessName = options.harnessName?.trim();
   const active = activeSandboxName(options.trustedEnv);
-  // Mirror the resolver: `auto` never adds a second sandbox when one already
-  // wraps this process, regardless of the picked provider's nesting support.
-  if (name === "auto" && active) return undefined;
+  // Mirror the resolver (`sandboxInheritsEnclosingSandbox`): `auto` never adds
+  // a second sandbox when one already wraps this process, so the next run
+  // spawns the harness unwrapped inside that confinement. Probe the same way
+  // (same as the explicit non-nestable case below) instead of skipping: a
+  // broken primary/fallback must still be detected.
+  if (active && sandboxInheritsEnclosingSandbox({ configured: name, activeSandbox: active })) {
+    return inheritedSandboxProbeProvider(active);
+  }
 
   let provider: SandboxProvider | undefined;
   if (name === "auto") {
     const detections = await detectSandboxProviders();
     provider = detections
-      .filter(({ provider, detection }) => detection.available && provider.priority > 0)
+      .filter(
+        ({ provider: candidate, detection }) =>
+          detection.available &&
+          candidate.priority > 0 &&
+          (!harnessName || !candidate.supportsHarness || candidate.supportsHarness(harnessName)),
+      )
       .sort((a, b) => b.provider.priority - a.provider.priority)[0]?.provider;
   } else {
     const candidate = getSandboxProvider(name);
@@ -178,10 +237,25 @@ export async function resolveProbeProvider(
   }
   if (!provider) return undefined;
 
+  // `resolveSandbox` rejects an explicit provider that cannot wrap the harness
+  // before it decides about nesting, so the real run fails even inside an
+  // enclosing sandbox. Probe through the provider so its `wrapCommand` reports
+  // the incompatibility instead of pretending the run inherits the confinement.
+  if (harnessName && provider.supportsHarness && !provider.supportsHarness(harnessName)) {
+    return provider;
+  }
+
   // A kernel wrapper/native sandbox cannot nest inside the enclosing
-  // confinement: probing through it would fail for reasons that do not apply
-  // to the real run, which inherits the existing sandbox instead.
-  if (active && !provider.canNestInSandbox) return undefined;
+  // confinement: the real run inherits the existing sandbox instead of adding
+  // this provider (`resolveSandbox` skips nesting). Probe the harness with no
+  // wrapper so a CLI that cannot start under that confinement is still
+  // detected at startup rather than silently kept.
+  if (
+    active &&
+    sandboxInheritsEnclosingSandbox({ configured: name, activeSandbox: active, provider })
+  ) {
+    return inheritedSandboxProbeProvider(active, provider);
+  }
   return provider;
 }
 

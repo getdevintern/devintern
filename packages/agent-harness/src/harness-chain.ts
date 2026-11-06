@@ -324,9 +324,11 @@ function sandboxIncompatibleIssue(
  * spawning fails with the familiar actionable error instead of an empty chain.
  *
  * When a sandbox is configured, entries are probed in parallel through the
- * sandbox wrapper. Fallbacks that cannot start are dropped; a failing primary
- * is kept with an issue because an empty chain is worse. Probe infrastructure
- * errors fail open (the entry is kept).
+ * sandbox wrapper. Inside an enclosing sandbox that the configured provider
+ * cannot nest in, the probe runs the harness unwrapped instead, because the
+ * real run inherits that confinement. Fallbacks that cannot start are dropped;
+ * a failing primary is kept with an issue because an empty chain is worse.
+ * Probe infrastructure errors fail open (the entry is kept).
  *
  * @param options - Raw value override, installability toggles, and test hooks.
  * @returns The resolved chain with usable entries and dropped-entry issues.
@@ -351,6 +353,7 @@ export async function resolveHarnessChain(
     try {
       provider = await resolveProbeProvider(sandboxName, {
         trustedEnv: options.trustedEnv,
+        harnessName: base.entries[0]?.name,
       });
     } catch {
       provider = undefined;
@@ -376,6 +379,19 @@ export async function resolveHarnessChain(
     base.entries.map(async (entry): Promise<HarnessSandboxProbeResult> => {
       if (!entry.installed) {
         return { ok: true };
+      }
+      // The configured provider's harness support is enforced by
+      // `resolveSandbox` before it decides about nesting, so a harness it
+      // cannot wrap fails the run (or the failover spawn) even inside an
+      // enclosing sandbox. Report that instead of probing the harness as if it
+      // were runnable.
+      if (provider?.supportsHarness && !provider.supportsHarness(entry.name)) {
+        return {
+          ok: false,
+          reason:
+            `the configured ${sandboxName} sandbox does not support ` +
+            `the "${entry.name}" harness`,
+        };
       }
       try {
         return await probe({ name: entry.name, path: entry.path });

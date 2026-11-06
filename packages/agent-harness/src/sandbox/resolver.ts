@@ -19,6 +19,7 @@
 import { existsSync } from "fs";
 import { detectSandboxProviders } from "./detect.js";
 import type { DetectedSandboxProvider } from "./detect.js";
+import { sandboxInheritsEnclosingSandbox } from "./nesting.js";
 import { getSandboxProvider, listSandboxProviders } from "./registry.js";
 import type { ResolvedSandbox } from "./types.js";
 
@@ -184,8 +185,16 @@ export async function resolveSandbox(
     return null;
   };
 
+  // Only `auto` can be decided before provider detection: it inherits the
+  // enclosing sandbox regardless of which provider it would otherwise pick.
+  // An explicit request is validated first (below) and classified after its
+  // provider is resolved, so an unusable request still errors instead of
+  // silently inheriting.
+  if (active && sandboxInheritsEnclosingSandbox({ configured: name, activeSandbox: active })) {
+    return skipNesting(active);
+  }
+
   if (name === "auto") {
-    if (active) return skipNesting(active);
     const detections = options?.detections ?? (await detectSandboxProviders());
     const candidates = detections
       .filter(({ provider, detection }) => {
@@ -249,7 +258,10 @@ export async function resolveSandbox(
   // Already inside a sandbox. Only providers that cannot nest (kernel wrappers
   // and the native harness sandbox) are skipped; microVM providers run in their
   // own guest and may run inside the enclosing confinement.
-  if (active && !provider.canNestInSandbox) {
+  if (
+    active &&
+    sandboxInheritsEnclosingSandbox({ configured: name, activeSandbox: active, provider })
+  ) {
     return skipNesting(active, name);
   }
 

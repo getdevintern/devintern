@@ -33,6 +33,21 @@ function detected(
   };
 }
 
+/** Set `<HARNESS>_CLI_PATH` overrides and restore the previous values afterwards. */
+function setCliPaths(paths: Record<string, string>): () => void {
+  const previous = new Map(Object.keys(paths).map((key) => [key, process.env[key]]));
+  Object.assign(process.env, paths);
+  return () => {
+    for (const [key, value] of previous) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  };
+}
+
 describe("buildSandboxDoctorReport", () => {
   test("sandboxing off: says so and suggests the best installed provider", () => {
     const report = buildSandboxDoctorReport(
@@ -340,29 +355,121 @@ describe("buildSandboxDoctorReport", () => {
     expect(report?.provider).toBe("nono");
   });
 
-  test("collectHarnessPreflight skips probing when the run inherits an enclosing sandbox", async () => {
-    const report = await collectHarnessPreflight(
-      "nono",
-      [detected("nono", { priority: 30 })],
-      "opencode",
-      "nono",
-    );
-    expect(report).toEqual({
-      provider: "nono",
-      entries: [],
-      skipped: { activeSandbox: "nono" },
+  test("collectHarnessPreflight probes directly when the run inherits an enclosing sandbox", async () => {
+    const restore = setCliPaths({
+      OPENCODE_CLI_PATH: process.execPath,
+      GROK_CLI_PATH: "/nonexistent/devintern-doctor-inherited-harness",
     });
+    try {
+      const report = await collectHarnessPreflight(
+        "nono",
+        [detected("nono", { priority: 30 })],
+        "opencode,grok",
+        "nono",
+      );
+      // The runtime drops the broken fallback in this same environment (see
+      // `resolveHarnessChain`), so the doctor must render real rows instead of
+      // a skipped preflight that hides the failure from the CI gate.
+      expect(report?.provider).toBe("nono (inherited)");
+      expect(report?.skipped).toBeUndefined();
+      expect(report?.entries.map((entry) => entry.name)).toEqual(["opencode", "grok"]);
+      expect(report?.entries[0]?.ok).toBe(true);
+      expect(report?.entries[1]?.ok).toBe(false);
+      expect(report?.entries[1]?.suggestion).toContain("GROK_CLI_PATH");
+    } finally {
+      restore();
+    }
   });
 
-  test("collectHarnessPreflight skips auto probing inside an enclosing sandbox", async () => {
-    const report = await collectHarnessPreflight(
-      "auto",
-      [detected("nono", { priority: 30 })],
-      "opencode",
-      "nono",
-    );
-    expect(report?.entries).toEqual([]);
-    expect(report?.skipped).toEqual({ activeSandbox: "nono" });
+  test("collectHarnessPreflight probes directly for auto inside an enclosing sandbox", async () => {
+    const restore = setCliPaths({
+      OPENCODE_CLI_PATH: process.execPath,
+      GROK_CLI_PATH: "/nonexistent/devintern-doctor-auto-inherited-harness",
+    });
+    try {
+      const report = await collectHarnessPreflight(
+        "auto",
+        [detected("nono", { priority: 30 })],
+        "opencode,grok",
+        "nono",
+      );
+      expect(report?.provider).toBe("nono (inherited)");
+      expect(report?.skipped).toBeUndefined();
+      expect(report?.entries.map((entry) => entry.ok)).toEqual([true, false]);
+    } finally {
+      restore();
+    }
+  });
+
+  test("collectHarnessPreflight probes the inherited sandbox for auto even with no usable detection", async () => {
+    const restore = setCliPaths({
+      OPENCODE_CLI_PATH: process.execPath,
+      GROK_CLI_PATH: "/nonexistent/devintern-doctor-auto-undetected-fallback",
+    });
+    try {
+      // `auto` inherits the enclosing sandbox before any provider detection
+      // (`resolveProbeProvider`), so an empty detection list must still produce
+      // readiness rows: otherwise a broken fallback that the runtime drops is
+      // invisible to the doctor and the CI gate.
+      const report = await collectHarnessPreflight("auto", [], "opencode,grok", "nono");
+      expect(report?.provider).toBe("nono (inherited)");
+      expect(report?.skipped).toBeUndefined();
+      expect(report?.entries.map((entry) => entry.name)).toEqual(["opencode", "grok"]);
+      expect(report?.entries.map((entry) => entry.ok)).toEqual([true, false]);
+      expect(report?.entries[1]?.suggestion).toContain("GROK_CLI_PATH");
+    } finally {
+      restore();
+    }
+  });
+
+  test("collectHarnessPreflight probes a provider that cannot wrap the harness instead of skipping", async () => {
+    // The next run fails before spawning (reported by the `Next run:` line), so
+    // the preflight must not additionally claim the run "inherits" a sandbox.
+    const restore = setCliPaths({ GROK_CLI_PATH: process.execPath });
+    try {
+      const report = await collectHarnessPreflight(
+        "native",
+        [detected("native", { harnesses: ["claude-code"] })],
+        "grok",
+        "nono",
+      );
+      expect(report?.skipped).toBeUndefined();
+      expect(report?.provider).toBe("native");
+      expect(report?.entries.map((entry) => entry.ok)).toEqual([false]);
+      expect(report?.entries[0]?.reason).toContain(
+        'the native sandbox does not support the "grok" harness',
+      );
+    } finally {
+      restore();
+    }
+  });
+
+  test("collectHarnessPreflight flags a fallback the explicit provider cannot wrap inside a sandbox", async () => {
+    // Primary support keeps the run inside the configured provider, but the
+    // unsupported fallback would still fail on failover, so it must get a FAIL
+    // row rather than being probed as runnable through the inherited sandbox.
+    const restore = setCliPaths({
+      CLAUDE_CLI_PATH: process.execPath,
+      GROK_CLI_PATH: process.execPath,
+    });
+    try {
+      const report = await collectHarnessPreflight(
+        "native",
+        [detected("native", { harnesses: ["claude-code"] })],
+        "claude-code,grok",
+        "nono",
+      );
+      expect(report?.skipped).toBeUndefined();
+      expect(report?.provider).toBe("nono (inherited)");
+      expect(report?.entries.map((entry) => entry.name)).toEqual(["claude-code", "grok"]);
+      expect(report?.entries[0]?.ok).toBe(true);
+      expect(report?.entries[1]?.ok).toBe(false);
+      expect(report?.entries[1]?.reason).toContain(
+        'the native sandbox does not support the "grok" harness',
+      );
+    } finally {
+      restore();
+    }
   });
 
   test("collectHarnessPreflight still probes a nesting-capable provider inside an enclosing sandbox", async () => {
