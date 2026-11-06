@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { FixtureWorkspace, cliPath } from "../../helpers/fixture-workspace";
 import { checkedCommand, command } from "../../helpers/process";
@@ -236,6 +236,11 @@ describe.skipIf(!builtCli)("devintern report", () => {
     const server = await ReportServerFixture.start();
     try {
       const savedPath = join(workspace.root, "saved-report.json");
+      // A stale world-readable file must be tightened, not trusted.
+      writeFileSync(savedPath, "stale payload\n", { mode: 0o644 });
+      chmodSync(savedPath, 0o644);
+      expect(statSync(savedPath).mode & 0o777).toBe(0o644);
+
       const saved = await savePayload(savedPath, "Saved report", server.endpoint);
 
       expect(statSync(savedPath).mode & 0o777).toBe(0o600);
@@ -338,7 +343,7 @@ describe.skipIf(!builtCli)("devintern report", () => {
       });
       const retry = await runReport([
         "--from",
-        savedPath,
+        failure.savedPath,
         "--endpoint",
         server.endpoint,
         "--yes",
@@ -359,6 +364,37 @@ describe.skipIf(!builtCli)("devintern report", () => {
     } finally {
       server.dispose();
     }
+  }, 30_000);
+
+  test("an unreachable endpoint fails and leaves the report pending with its error", async () => {
+    // Bind then release a loopback port so nothing is listening at the endpoint.
+    const offlineServer = await ReportServerFixture.start();
+    const offlineEndpoint = offlineServer.endpoint;
+    offlineServer.dispose();
+
+    const savedPath = join(workspace.root, "offline-report.json");
+    const saved = await savePayload(savedPath, "Offline report", offlineEndpoint);
+
+    const result = await runReport([
+      "--from",
+      savedPath,
+      "--endpoint",
+      offlineEndpoint,
+      "--yes",
+      "--json",
+    ]);
+    expect(result.exitCode, `offline submit unexpectedly succeeded: ${result.stderr}`).toBe(1);
+    const failure = parseJson<{ ok: boolean; error: string; savedPath: string }>(result.stdout);
+    expect(failure.ok).toBe(false);
+    expect(failure.error).toContain("Could not reach");
+    expect(failure.error).toContain(offlineEndpoint);
+    expect(existsSync(failure.savedPath)).toBe(true);
+
+    const show = await runReport(["show", saved.payload.reportId, "--json"]);
+    expect(show.exitCode).toBe(0);
+    const entry = parseJson<SpoolEntry>(show.stdout);
+    expect(entry.status).toBe("pending");
+    expect(entry.error).toContain("Could not reach");
   }, 30_000);
 
   test("missing input and missing confirmation exit 2 without sending", async () => {
