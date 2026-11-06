@@ -42,6 +42,14 @@ const delayMs = Number(process.env.E2E_AGENT_DELAY_MS ?? "0");
 if (Number.isFinite(delayMs) && delayMs > 0) {
   await Bun.sleep(delayMs);
 }
+// Narrow, explicit per-task failure for batch-isolation coverage. Unlike the
+// process-wide E2E_AGENT_MODE, this only affects a prompt carrying the marker,
+// so one task in a batch can fail while the others still implement.
+const failPromptMarker = process.env.E2E_FAIL_PROMPT_MARKER;
+if (failPromptMarker && agentInput.includes(failPromptMarker)) {
+  console.error("E2E deliberate prompt-marker failure");
+  process.exit(18);
+}
 // A settled-but-failed attempt with an implementation report, for resume
 // coverage: exit 0 with failure language so the pipeline records an escalated
 // run (branch + report) without editing the fixture. `incomplete` leaves one
