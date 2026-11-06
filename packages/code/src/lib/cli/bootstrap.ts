@@ -59,7 +59,12 @@ function loadEnvironmentInner(envFile: string | undefined, skipProjectEnv: boole
   if (envFile) {
     const customEnvPath = resolve(envFile);
     if (existsSync(customEnvPath)) {
-      config({ path: customEnvPath });
+      // The task-run CLI loads the implicit project `.env` before Commander
+      // parses `--env-file`, and dotenv never replaces variables that are
+      // already set. Without `override`, a project file would win over the
+      // explicitly selected file. `--env-file` is the first entry in the
+      // documented search order, so its values are authoritative.
+      config({ path: customEnvPath, override: true });
       console.log(`📁 Loaded environment from custom file: ${customEnvPath}`);
       return customEnvPath;
     }

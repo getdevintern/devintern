@@ -154,6 +154,7 @@ export class FakeJiraTracker implements TrackerFixture {
   private readonly server: ReturnType<typeof Bun.serve>;
   private readonly baseUrl: string;
   private readonly issues = new Map<string, FakeJiraIssue>();
+  private handledRequests = 0;
   private nextIssueNumber = 1;
   private nextCommentId = 10_000;
   private now = Date.parse("2026-01-01T00:00:00.000Z");
@@ -283,6 +284,11 @@ export class FakeJiraTracker implements TrackerFixture {
     }));
   }
 
+  /** Total HTTP requests the fake has handled, including unmatched ones. */
+  get requestCount(): number {
+    return this.handledRequests;
+  }
+
   /** Stop the HTTP server and release the ephemeral port. */
   async cleanup(): Promise<void> {
     this.server.stop(true);
@@ -294,6 +300,7 @@ export class FakeJiraTracker implements TrackerFixture {
   }
 
   private async handle(request: Request): Promise<Response> {
+    this.handledRequests++;
     const url = new URL(request.url);
     const path = decodeURIComponent(url.pathname);
     const method = request.method.toUpperCase();
