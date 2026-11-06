@@ -171,6 +171,8 @@ export class FixtureWorkspace {
       skipComments?: boolean;
       /** Labels the CLI must apply to the created PR (`PR_LABELS`). */
       prLabels?: string[];
+      /** Additional CLI arguments appended after the fixture's defaults. */
+      extraArgs?: string[];
     } = {},
   ) {
     return command(
@@ -189,6 +191,7 @@ export class FixtureWorkspace {
         "--hook-retries",
         "0",
         "--no-update",
+        ...(options.extraArgs ?? []),
       ],
       this.cwd,
       {

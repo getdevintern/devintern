@@ -68,7 +68,7 @@ independently of this repository.
 | GitHub: CI failure repair and retry budget                                                 | `gap`     | —                                     | Worker parity with the GitLab CI scenarios.                                             |
 | GitHub: automatic merge-conflict resolution and scheduled mode                             | `gap`     | —                                     | Worker parity with the GitLab conflict scenario.                                        |
 | GitHub: `@mention` handling                                                                | `gap`     | —                                     | —                                                                                       |
-| GitHub: `--auto-review` loop and iteration cap                                             | `gap`     | —                                     | Both providers; fake reviewer agent.                                                    |
+| GitHub: `--auto-review` loop and iteration cap                                             | `default` | `tests/local/cli-auto-review.test.ts` | Provider parity: real PR review feedback on GitHub/GitLab remains live/opt-in.          |
 | GitLab Self-Managed: MR, default branch, invalid API credentials                           | `live`    | `tests/code/gitlab.test.ts`           | —                                                                                       |
 | GitLab Self-Managed: collision, rejected push, address-review                              | `live`    | `tests/code/gitlab-lifecycle.test.ts` | Standalone `address-review` CLI options.                                                |
 | GitLab Self-Managed worker: injected task, polling, CI repair/escalation, review, conflict | `live`    | `tests/code/gitlab-worker.test.ts`    | Automations, estimations, quiet hours, failover, orphan recovery, service, auto-update. |
@@ -124,7 +124,7 @@ Run: `bun run --filter @devintern/e2e test` (build the CLI first); the sandbox s
 | `--force`                                                                | `gap`              | —                                                                                                                             | Incomplete task rerun gate.                                            |
 | `--no-git`, `--no-auto-commit`                                           | `gap`              | —                                                                                                                             | Branch/commit omissions.                                               |
 | `--estimate`                                                             | `gap`              | —                                                                                                                             | Per-tracker story-point write/comment.                                 |
-| `--auto-review`, `--auto-review-iterations`                              | `gap`              | —                                                                                                                             | Review/fix loop and cap.                                               |
+| `--auto-review`, `--auto-review-iterations`                              | `default`          | `tests/local/cli-auto-review.test.ts` (`bun run --filter @devintern/e2e test`)                                                | Provider parity: live PR review feedback remains opt-in.               |
 | `--env-file`                                                             | `gap`              | —                                                                                                                             | Alternate credential source and precedence.                            |
 | `--max-turns`, `--hook-retries`                                          | `partial`          | helper passes `--hook-retries`                                                                                                | Failure/retry path.                                                    |
 | `--sandbox <provider>`                                                   | `partial`          | `tests/local/sandbox.test.ts` (per-provider fail-closed, removed srt/smolvm migration, native/goose rejection, unknown value) | Real run per provider remains optional.                                |
@@ -190,7 +190,9 @@ and each task opens its own PR.
 4. Trello lifecycle against a dedicated board (Layer 2), when that board and
    token exist.
 5. GitHub worker parity: review polling, CI repair, conflict resolution, mention.
-6. `--auto-review` loop and iteration cap on GitHub and GitLab.
+6. ~~`--auto-review` loop and iteration cap on GitHub and GitLab~~ (the local
+   loop/cap is implemented by `tests/local/cli-auto-review.test.ts`; provider
+   parity with real PR review feedback remains live/opt-in).
 7. `worker add` full option matrix (`--body-file`, idempotency, resume, wait,
    wait-timeout, workspace, validation and deduplication).
 8. `worker scaffold`, `add-repo`, `run-now`, and `connect status` in temp homes.
