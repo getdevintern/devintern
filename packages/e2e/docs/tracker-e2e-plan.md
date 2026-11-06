@@ -1,8 +1,8 @@
 # Tracker E2E expansion plan
 
-Status: **Layer 1 implemented** (read-only workspace smoke). **The Jira part of
-Layer 3 is implemented** (offline fake lifecycle in the default suite). The
-Jira/Trello Layer 2 live suites and the Trello part of Layer 3 remain planned.
+Status: **Layer 1 implemented** (read-only workspace smoke). **The Jira and
+Trello parts of Layer 3 are implemented** (offline fake lifecycles in the
+default suite). The Jira/Trello Layer 2 live suites remain planned.
 
 This plan describes how `packages/e2e` grows tracker coverage without making the
 default `bun run test` depend on the network or credentials, and without writing
@@ -27,7 +27,7 @@ test data into the trackers a worker actually uses.
 | ------------------- | ------------------ | -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
 | Markdown            | no                 | `test:trackers` (read-only path)       | Plain files, no credentials.                                                                                                     |
 | Jira                | yes (offline fake) | `test:trackers` (read-only live smoke) | Fake lifecycle: key/`--query`, transition, comment, `--skip-comments`. Real project lifecycle and estimation planned in Layer 2. |
-| Trello              | no                 | `test:trackers` (read-only smoke)      | Full lifecycle planned in Layer 2.                                                                                               |
+| Trello              | yes (offline fake) | `test:trackers` (read-only smoke)      | Fake lifecycle: short link/`--query`, list move, comment, `--skip-comments`. Real board lifecycle planned in Layer 2.            |
 | GitHub Issues       | no                 | `test:e2e:tracker`                     | Existing live suite; dedicated tracker repository doubles as code host.                                                          |
 | Local GitLab Issues | no                 | `test:e2e:tracker:gitlab`              | Existing live suite; creates and deletes a dedicated project.                                                                    |
 | GitLab.com Issues   | no                 | `test:e2e:tracker:gitlab-com`          | Existing live suite; pre-created project, issues only, project retained.                                                         |
@@ -191,7 +191,7 @@ Acceptance criteria:
 - Missing fixture configuration fails before any remote mutation.
 - A rerun does not collide with leftovers from a previous run.
 
-## Layer 3 — fake tracker servers for the default local suite (Jira implemented)
+## Layer 3 — fake tracker servers for the default local suite (Jira and Trello implemented)
 
 Run the built CLI against in-process Bun servers that implement the subset of
 the tracker APIs the product uses. This gives deterministic, credential-free
@@ -227,12 +227,44 @@ implementation comment, and `--skip-comments` on a second run. The local bare
 Git remote is the code host; no PR, GitHub token, or model credentials are
 required. The only skip is the existing built-CLI guard.
 
-### Trello (planned)
+### Trello (implemented)
 
-The Trello fake remains planned: member/board/list reads, card create/get/update,
-list moves, comments, labels, and search. Point the CLI at it through
-`TRELLO_API_BASE_URL` (already supported by `TrelloClient`) with synthetic
-credentials.
+`providers/fake-trello.ts` serves the Trello REST subset the product calls on
+`127.0.0.1:0` and owns the board, lists, labels, cards, comment actions,
+checklists, and attachments in memory. `tests/local/tracker-trello-fake.test.ts`
+seeds an expected card plus a decoy outside the selector, writes per-board list
+statuses into `.devintern-code/settings.json`, and runs the production Trello
+client through the built CLI for both explicit short-link and `--query`
+selection. The list name is the status, so a run moves the card from the todo
+list to the configured actioned list. It reads state back through the fixture
+rather than CLI stdout.
+
+Endpoints covered:
+
+- `GET /members/me/boards`
+- `GET /boards/{id}/lists`
+- `GET /boards/{id}/labels`
+- `GET` / `POST /cards`
+- `GET` / `PUT /cards/{id}` (card detail, list moves, label replacement)
+- `GET /cards/{id}/actions?filter=commentCard`
+- `POST /cards/{id}/actions/comments`
+- `GET /cards/{id}/checklists`, `POST /checklists`, `POST /checklists/{id}/checkItems`
+- `GET` / `POST /cards/{id}/attachments`
+- `GET /search` (optional `idBoards` scope, `is:open`, `list:"<name>"`, free text)
+
+Any other route returns a diagnostic 404 naming the method and path, and the
+test asserts no unexpected request occurred. The fake accepts any query
+`key`/`token` credentials, never logs them, and makes no outbound requests.
+Scenarios assert the pushed `feature/<short-link>` branch and exact
+`src/greeting.ts` diff, the run record, the configured final list, the surviving
+unrelated label, the implementation comment, the seeded comment, and
+`--skip-comments` on a second run. The local bare Git remote is the code host; no
+PR, GitHub token, Trello credentials, or model credentials are required. The
+only skip is the existing built-CLI guard.
+
+What remains live: creating, moving, commenting on, and archiving cards on a real
+dedicated board (Layer 2), including Trello's eventual search indexing. Trello
+has no estimation concept, so there is no estimation coverage to add.
 
 ### Acceptance criteria (applies to each implemented fake)
 
@@ -275,8 +307,8 @@ credentials.
 1. Layer 1 read-only smoke (done).
 2. Trello Layer 2 on a dedicated board; it needs no project provisioning.
 3. Jira Layer 2 with a dedicated `E2E` project.
-4. Layer 3 fake servers so the default suite covers Jira (done) and Trello
-   (planned) lifecycle.
+4. Layer 3 fake servers so the default suite covers Jira and Trello lifecycle
+   (done).
 5. Add read-only checks for Linear, Asana, and Azure DevOps when credentials
    exist.
 6. Revisit live GitHub/GitLab tracker smoke only if the full suites start
