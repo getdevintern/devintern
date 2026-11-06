@@ -262,7 +262,16 @@ succeed, a non-granted sibling under the workspace stays denied, and an absent
 directory is neither granted nor created implicitly. The fixture root lives
 outside the OS temp dir because nono's Linux profile already grants write on
 `/tmp` itself; a workspace under `/tmp` would make the grant assertion pass
-without exercising the explicit policy.
+without exercising the explicit policy. The fixture also keeps the workspace
+outside its root: `TMPDIR` lives under the root, and the macOS default policy
+grants `dirname(TMPDIR)` (the per-user temp/cache parent), so a workspace inside
+the root would be writable on the default temp grant alone. `SandboxWorkspace`
+asserts that no default writable path covers the workspace before each run.
+
+This test exercises the filesystem grants directly. It does not invoke
+`devintern worker add` or a scheduled automation, so those command paths under
+nono remain uncovered; the worker-option and automation suites run without a
+sandbox.
 
 Docker Sandboxes (`sbx`) stays optional. Its real-boundary test skips unless the
 prerequisite below is present; the fail-closed test still runs by shadowing the

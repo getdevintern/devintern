@@ -10,8 +10,10 @@
  * These tests drive the built CLI with the deterministic shell probe under a
  * real nono boundary. They prove an existing directory is writable, a
  * non-granted workspace sibling is denied, and an absent directory is neither
- * granted nor created implicitly. No AI account, tracker, network, or real
- * repository is involved; only a local bare remote and temporary directories.
+ * granted nor created implicitly. They exercise the filesystem grants directly:
+ * `devintern worker add` and scheduled automations are not invoked here. No AI
+ * account, tracker, network, or real repository is involved; only a local bare
+ * remote and temporary directories.
  */
 
 import { expect, test } from "bun:test";

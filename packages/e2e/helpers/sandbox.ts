@@ -24,8 +24,8 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, dirname, join, sep } from "node:path";
-import { detectSandboxProviders } from "@devintern/agent-harness";
+import { basename, delimiter, dirname, join, sep } from "node:path";
+import { buildDefaultSandboxPolicy, detectSandboxProviders } from "@devintern/agent-harness";
 import type { SandboxDetection } from "@devintern/agent-harness";
 import { isolatedEnvironment } from "./environment";
 import { cliPath } from "./fixture-workspace";
@@ -223,6 +223,95 @@ function sandboxOutsideBases(): string[] {
 function isAtOrBelow(candidate: string, parent: string): boolean {
   if (candidate === parent) return true;
   return candidate.startsWith(parent.endsWith(sep) ? parent : `${parent}${sep}`);
+}
+
+/**
+ * Default writable paths the CLI builds for a fixture environment.
+ *
+ * `buildDefaultSandboxPolicy` reads the process environment, so swap the
+ * variables it consults for the duration of the synchronous call. This lets a
+ * test assert that the fixture workspace is outside every *default* grant
+ * instead of duplicating the policy logic (notably the macOS
+ * `dirname(TMPDIR)` grant in `packages/agent-harness/src/spawn-agent.ts`).
+ *
+ * @param env - Environment handed to the CLI subprocess.
+ * @param workingDir - Working directory the agent runs in.
+ * @returns The default writable paths (before any explicit policy overrides).
+ */
+export function sandboxDefaultWritablePaths(
+  env: Record<string, string>,
+  workingDir: string,
+): string[] {
+  const keys = ["TMPDIR", "DEVINTERN_OUTPUT_DIR", "HOME", "AGENT_SANDBOX_WRITABLE_PATHS"] as const;
+  const saved = keys.map((key) => [key, process.env[key]] as const);
+  try {
+    for (const key of keys) {
+      const value = env[key];
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    return buildDefaultSandboxPolicy(workingDir).writablePaths;
+  } finally {
+    for (const [key, value] of saved) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+/**
+ * Host temp roots the nono provider grants write on independently of the CLI
+ * policy, resolved to real paths.
+ *
+ * The CLI's default policy derives its temp scope from the fixture's
+ * `TMPDIR`, but nono also composes its own provider profile. On Linux
+ * `linux-host-compat` -> `system_write_linux` allows write on `/tmp` itself
+ * (`nono profile groups system_write_linux`), and macOS grants the OS temp tree
+ * (`/private/var/folders`, `/tmp`) plus the user temp parent. A workspace-grant
+ * fixture under any of those roots would be writable even after the explicit
+ * workspace policy is removed, so the guard rejects it.
+ *
+ * @returns Real paths at or below the provider's temp write grants.
+ */
+export function sandboxProviderTempGrants(): string[] {
+  const roots = new Set<string>([realpathSync(tmpdir())]);
+  const platformTemp =
+    process.platform === "darwin"
+      ? ["/private/tmp", "/tmp", "/private/var/folders", "/var/folders"]
+      : ["/tmp"];
+  for (const candidate of platformTemp) {
+    if (existsSync(candidate)) roots.add(realpathSync(candidate));
+  }
+  if (process.platform === "darwin") {
+    // The default policy grants `dirname(TMPDIR)` as well.
+    roots.add(dirname(realpathSync(tmpdir())));
+  }
+  return [...roots];
+}
+
+/**
+ * Fail when one of `grants` already covers `workspaceDir`.
+ *
+ * Exported so the fixture guard's failing branch is covered by a focused test
+ * instead of only by the grant suite's (slow, provider-dependent) success path.
+ *
+ * @param workspaceDir - Resolved workspace path to test.
+ * @param grants - Writable roots to reject.
+ * @param kind - Grant family named in the error message.
+ */
+export function assertWorkspaceOutsideGrants(
+  workspaceDir: string,
+  grants: readonly string[],
+  kind = "default sandbox",
+): void {
+  for (const grant of grants) {
+    if (isAtOrBelow(workspaceDir, grant)) {
+      throw new Error(
+        `sandbox fixture workspace ${workspaceDir} is already covered by the ${kind} ` +
+          `grant ${grant}; the workspace grant tests would pass without the explicit policy`,
+      );
+    }
+  }
 }
 
 /**
@@ -476,6 +565,10 @@ export class SandboxWorkspace {
   constructor(options: SandboxWorkspaceOptions = {}) {
     this.root = mkdtempSync(join(options.rootBase ?? tmpdir(), "devintern-e2e-sandbox-"));
     this.cwd = join(this.root, "repo");
+    // Keep the workspace outside the fixture root. TMPDIR lives under the root
+    // and the macOS default policy grants its parent (`dirname(TMPDIR)`), so a
+    // workspace inside the root would be writable without any explicit grant.
+    this.workspaceDir = join(dirname(this.root), `${basename(this.root)}-workspace`);
     this.outside = createSandboxOutside();
     this.id = `e2e-${crypto.randomUUID()}`;
     this.base = `e2e/base-${this.id}`;
@@ -487,7 +580,7 @@ export class SandboxWorkspace {
     this.reportPath = join(this.root, "output", "sandbox-report.jsonl");
     this.agentPath = join(this.home, "bin", SANDBOX_AGENT_NAME);
     this.env = sandboxEnvironment(this.root, this.home, this.provider);
-    this.workspaceDir = this.env.DEVINTERN_WORKSPACE_DIR ?? join(this.root, "workspace");
+    this.env.DEVINTERN_WORKSPACE_DIR = this.workspaceDir;
     this.workspaceDeniedPath = join(this.workspaceDir, "not-granted");
     this.workspaceGrants = options.workspaceGrants;
     mkdirSync(join(this.home, "bin"), { recursive: true });
@@ -509,6 +602,7 @@ export class SandboxWorkspace {
    * @returns The workspace, ready for {@link run}.
    */
   async prepare(): Promise<this> {
+    this.assertWorkspaceOutsideDefaultGrants();
     mkdirSync(this.cwd, { recursive: true });
     cpSync(join(import.meta.dir, "../fixtures/simple-project"), this.cwd, { recursive: true });
     const remote = join(this.root, "remote.git");
@@ -547,6 +641,31 @@ export class SandboxWorkspace {
       this.env.E2E_SANDBOX_WORKSPACE_GRANTS = "1";
     }
     return this;
+  }
+
+  /**
+   * Fail when a default or provider grant already covers the workspace.
+   *
+   * The grant tests must prove the explicit workspace policy, not a default
+   * temp grant. On macOS the default policy grants `dirname(TMPDIR)`; because
+   * the fixture puts TMPDIR under {@link root}, a workspace inside the root
+   * would be writable on that default grant alone. Beyond the CLI policy, nono
+   * composes `linux-host-compat` on Linux (write on `/tmp`) and grants the OS
+   * temp tree on macOS, so a grant fixture created under the host temp dir
+   * (the default `rootBase`) must be rejected even though
+   * {@link sandboxDefaultWritablePaths} derives its temp scope from the
+   * fixture's own `TMPDIR`.
+   */
+  private assertWorkspaceOutsideDefaultGrants(): void {
+    assertWorkspaceOutsideGrants(
+      this.workspaceDir,
+      sandboxDefaultWritablePaths(this.env, this.cwd),
+    );
+    if (!this.workspaceGrants) return;
+    // Resolve the existing parent so a symlinked root base is compared against
+    // the real provider grant paths.
+    const workspace = join(realpathSync(dirname(this.workspaceDir)), basename(this.workspaceDir));
+    assertWorkspaceOutsideGrants(workspace, sandboxProviderTempGrants(), "provider sandbox temp");
   }
 
   /**
@@ -614,6 +733,9 @@ export class SandboxWorkspace {
   dispose(): void {
     rmSync(this.root, { recursive: true, force: true });
     rmSync(this.home, { recursive: true, force: true });
+    // The workspace is a sibling of the root (see the constructor), so it needs
+    // its own cleanup.
+    rmSync(this.workspaceDir, { recursive: true, force: true });
     if (this.outside) rmSync(this.outside, { recursive: true, force: true });
   }
 }
