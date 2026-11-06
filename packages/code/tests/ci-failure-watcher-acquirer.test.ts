@@ -100,6 +100,14 @@ describe("CiFailureWatcherAcquirer", () => {
     prCalls?: number;
     actionsCalls?: number;
     statusCalls?: number;
+    /** When set, fetchPr rejects with this error instead of returning data. */
+    prError?: Error;
+    /** Per-repo fetchPr rejection (takes precedence over prError). */
+    prErrorFor?: (repo: string, prNumber: number) => Error | undefined;
+    /** When set, fetchWorkflowRuns rejects with this error. */
+    actionsError?: Error;
+    /** When set, fetchCommitStatus rejects with this error. */
+    statusError?: Error;
   }
 
   function makeGithub(gh: FakeGitHubState): CiFailureWatcherGitHub {
@@ -107,6 +115,8 @@ describe("CiFailureWatcherAcquirer", () => {
       async fetchPr(_repo, _n, etag): Promise<CiConditionalResult<PolledCiPr>> {
         gh.prCalls = (gh.prCalls ?? 0) + 1;
         gh.seenPrEtag = etag;
+        const error = gh.prErrorFor?.(_repo, _n) ?? gh.prError;
+        if (error) throw error;
         if (gh.prEtagHit) {
           return { data: null, etag, notModified: true };
         }
@@ -131,6 +141,7 @@ describe("CiFailureWatcherAcquirer", () => {
       ): Promise<CiConditionalResult<WatchedWorkflowRun[]>> {
         gh.actionsCalls = (gh.actionsCalls ?? 0) + 1;
         gh.seenActionsEtag = etag;
+        if (gh.actionsError) throw gh.actionsError;
         if (gh.actionsEtagHit) {
           return { data: null, etag, notModified: true };
         }
@@ -139,6 +150,7 @@ describe("CiFailureWatcherAcquirer", () => {
       async fetchCommitStatus(_repo, _sha, etag): Promise<CiConditionalResult<WatchedStatusState>> {
         gh.statusCalls = (gh.statusCalls ?? 0) + 1;
         gh.seenStatusEtag = etag;
+        if (gh.statusError) throw gh.statusError;
         if (gh.statusEtagHit) {
           return { data: null, etag, notModified: true };
         }
@@ -162,6 +174,8 @@ describe("CiFailureWatcherAcquirer", () => {
       fixResults?: CiFixResult[];
       enabled?: () => boolean;
       now?: () => number;
+      /** Failures consumed one per postComment call (success when empty). */
+      postCommentErrors?: Array<Error | undefined>;
     } = {},
   ) {
     const fixed: string[] = [];
@@ -170,6 +184,8 @@ describe("CiFailureWatcherAcquirer", () => {
     const github: CiFailureWatcherGitHub = {
       ...base,
       postComment: async (_repo, _n, body) => {
+        const failure = overrides.postCommentErrors?.shift();
+        if (failure) throw failure;
         comments.push(body);
       },
     };
@@ -241,6 +257,292 @@ describe("CiFailureWatcherAcquirer", () => {
     inaccessible = false;
     await acquirer.tick();
     expect(workerState.listOpenAgentPrs()).toHaveLength(1);
+  });
+
+  test("credential failures warn at most once per hour with actionable guidance", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 43 });
+    let now = 1_000;
+    const gh: FakeGitHubState = {
+      prState: "open",
+      headSha: sha1,
+      workflowRuns: [],
+      prError: new Error(
+        "GitHub API error (403): Resource not accessible by personal access token",
+      ),
+    };
+    const { acquirer } = makeAcquirer(gh, { now: () => now });
+    const warns: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warns.push(args.join(" "));
+    };
+    try {
+      await acquirer.tick();
+      // Two failing PRs, but a permanent credential failure warns once.
+      expect(warns).toHaveLength(1);
+      expect(warns[0]).toContain("[poll:ci-failures]");
+      expect(warns[0]).toContain("acme/widgets#42");
+      expect(warns[0]).toContain("403");
+      expect(warns[0]).toContain("Actions: Read");
+      expect(warns[0]).toContain("Commit statuses: Read");
+      expect(warns[0]).toContain("docs/code/worker.md");
+
+      now += 60_000;
+      await acquirer.tick();
+      expect(warns).toHaveLength(1);
+
+      now += 60 * 60_000;
+      await acquirer.tick();
+      expect(warns).toHaveLength(2);
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
+
+  test("rate-limit and server failures still warn per PR and per tick", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 43 });
+    const gh: FakeGitHubState = {
+      prState: "open",
+      headSha: sha1,
+      workflowRuns: [],
+      prError: new Error("GitHub API error (403): API rate limit exceeded"),
+    };
+    const { acquirer } = makeAcquirer(gh);
+    const warns: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warns.push(args.join(" "));
+    };
+    try {
+      await acquirer.tick();
+      expect(warns).toHaveLength(2);
+      expect(warns.every((line) => !line.includes("Actions: Read"))).toBe(true);
+
+      gh.prError = new Error("GitHub API error (500): Internal Server Error");
+      await acquirer.tick();
+      expect(warns).toHaveLength(4);
+      expect(warns.slice(2).every((line) => !line.includes("Actions: Read"))).toBe(true);
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
+
+  test("recovery logs once and rearms the credential warning throttle", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    let now = 1_000;
+    const gh: FakeGitHubState = {
+      prState: "open",
+      headSha: sha1,
+      workflowRuns: [],
+      prError: new Error(
+        "GitHub API error (403): Resource not accessible by personal access token",
+      ),
+    };
+    const { acquirer } = makeAcquirer(gh, { now: () => now });
+    const warns: string[] = [];
+    const logs: string[] = [];
+    const originalWarn = console.warn;
+    const originalLog = console.log;
+    console.warn = (...args: unknown[]) => {
+      warns.push(args.join(" "));
+    };
+    console.log = (...args: unknown[]) => {
+      logs.push(args.join(" "));
+    };
+    const recoveryLines = () =>
+      logs.filter((line) => line.includes("GitHub credential accepted again")).length;
+    try {
+      await acquirer.tick();
+      expect(warns).toHaveLength(1);
+      expect(recoveryLines()).toBe(0);
+
+      gh.prError = undefined;
+      await acquirer.tick();
+      expect(recoveryLines()).toBe(1);
+
+      // Subsequent healthy ticks stay quiet.
+      await acquirer.tick();
+      expect(recoveryLines()).toBe(1);
+
+      // A new failure warns promptly rather than waiting out the old hour.
+      gh.prError = new Error(
+        "GitHub API error (403): Resource not accessible by personal access token",
+      );
+      now += 60_000;
+      await acquirer.tick();
+      expect(warns).toHaveLength(2);
+      expect(recoveryLines()).toBe(1);
+    } finally {
+      console.warn = originalWarn;
+      console.log = originalLog;
+    }
+  });
+
+  test("distinct repo credential failures each warn in the same tick", async () => {
+    workerState.recordAgentPr({ repo: "acme/a", prNumber: 1 });
+    workerState.recordAgentPr({ repo: "acme/b", prNumber: 2 });
+    const gh: FakeGitHubState = {
+      prState: "open",
+      headSha: sha1,
+      workflowRuns: [],
+      prErrorFor: (repo) =>
+        repo === "acme/a"
+          ? new Error("GitHub API error (403): Resource not accessible by personal access token")
+          : new Error("GitHub API error (401): Bad credentials"),
+    };
+    const { acquirer } = makeAcquirer(gh);
+    const warns: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warns.push(args.join(" "));
+    };
+    try {
+      await acquirer.tick();
+      // One repo's 403 must not suppress another repo's 401.
+      expect(warns).toHaveLength(2);
+      const permission = warns.find((line) => line.includes("acme/a#1"))!;
+      expect(permission).toContain("403");
+      expect(permission).toContain("Actions: Read");
+      expect(permission).toContain("Commit statuses: Read");
+      expect(permission).not.toContain("expired or revoked");
+      const invalid = warns.find((line) => line.includes("acme/b#2"))!;
+      expect(invalid).toContain("401");
+      expect(invalid).toContain("invalid, expired, or revoked");
+      expect(invalid).not.toContain("Actions: Read");
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
+
+  test("a mixed tick does not report recovery or rearm the throttle", async () => {
+    workerState.recordAgentPr({ repo: "acme/a", prNumber: 1 });
+    workerState.recordAgentPr({ repo: "acme/b", prNumber: 2 });
+    let now = 1_000;
+    const gh: FakeGitHubState = {
+      prState: "open",
+      headSha: sha1,
+      workflowRuns: [],
+      prErrorFor: (repo) =>
+        repo === "acme/a"
+          ? new Error("GitHub API error (403): Resource not accessible by personal access token")
+          : undefined,
+    };
+    const { acquirer } = makeAcquirer(gh, { now: () => now });
+    const warns: string[] = [];
+    const logs: string[] = [];
+    const originalWarn = console.warn;
+    const originalLog = console.log;
+    console.warn = (...args: unknown[]) => {
+      warns.push(args.join(" "));
+    };
+    console.log = (...args: unknown[]) => {
+      logs.push(args.join(" "));
+    };
+    const recoveryLines = () =>
+      logs.filter((line) => line.includes("GitHub credential accepted again")).length;
+    try {
+      await acquirer.tick();
+      expect(warns).toHaveLength(1);
+      expect(recoveryLines()).toBe(0);
+
+      // acme/b succeeds while acme/a still fails: that success must not rearm
+      // acme/a's warning throttle.
+      now += 60_000;
+      await acquirer.tick();
+      expect(warns).toHaveLength(1);
+      expect(recoveryLines()).toBe(0);
+    } finally {
+      console.warn = originalWarn;
+      console.log = originalLog;
+    }
+  });
+
+  test("CI-stream permission failures share the one-per-repo hourly warning", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 43 });
+    let now = 1_000;
+    const gh: FakeGitHubState = {
+      prState: "open",
+      headSha: sha1,
+      workflowRuns: [],
+      actionsError: new Error(
+        "GitHub API error (403): Resource not accessible by personal access token",
+      ),
+    };
+    const { acquirer } = makeAcquirer(gh, { now: () => now });
+    const warns: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warns.push(args.join(" "));
+    };
+    try {
+      // fetchPr succeeds; the 403 comes from the Actions stream instead.
+      await acquirer.tick();
+      expect(warns).toHaveLength(1);
+      expect(warns[0]).toContain("403");
+      expect(warns[0]).toContain("Actions: Read");
+      expect(warns[0]).toContain("Commit statuses: Read");
+
+      now += 60_000;
+      await acquirer.tick();
+      expect(warns).toHaveLength(1);
+
+      now += 60 * 60_000;
+      await acquirer.tick();
+      expect(warns).toHaveLength(2);
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
+
+  test("metadata-only success does not clear the CI-stream credential throttle", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    let now = 1_000;
+    const gh: FakeGitHubState = {
+      prState: "open",
+      headSha: sha1,
+      workflowRuns: [],
+      statusError: new Error(
+        "GitHub API error (403): Resource not accessible by personal access token",
+      ),
+    };
+    const { acquirer } = makeAcquirer(gh, { now: () => now });
+    const warns: string[] = [];
+    const logs: string[] = [];
+    const originalWarn = console.warn;
+    const originalLog = console.log;
+    console.warn = (...args: unknown[]) => {
+      warns.push(args.join(" "));
+    };
+    console.log = (...args: unknown[]) => {
+      logs.push(args.join(" "));
+    };
+    const recoveryLines = () =>
+      logs.filter((line) => line.includes("GitHub credential accepted again")).length;
+    try {
+      await acquirer.tick();
+      expect(warns).toHaveLength(1);
+      expect(warns[0]).toContain("Actions: Read");
+
+      // A fork PR returns right after the PR-state fetch without querying the
+      // CI streams, so it cannot prove those reads recovered.
+      gh.statusError = undefined;
+      gh.headRepoFullName = "someone/fork";
+      now += 60_000;
+      await acquirer.tick();
+      expect(recoveryLines()).toBe(0);
+
+      // Real CI streams are queried again and succeed → recovery.
+      gh.headRepoFullName = undefined;
+      now += 60_000;
+      await acquirer.tick();
+      expect(recoveryLines()).toBe(1);
+    } finally {
+      console.warn = originalWarn;
+      console.log = originalLog;
+    }
   });
 
   test("relay reconciliation bypasses the timer for one registered change", async () => {
@@ -608,6 +910,195 @@ describe("CiFailureWatcherAcquirer", () => {
     expect(fixed).toHaveLength(2);
     expect(comments).toHaveLength(1);
     expect(workerState.getCiFixState("acme/widgets", 42).escalatedSha).toBe(sha1);
+  });
+
+  test("a failed escalation comment is retried instead of permanently suppressing it", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const gh: FakeGitHubState = {
+      prState: "open",
+      headSha: sha1,
+      workflowRuns: [failingRun(850)],
+      jobLogs: "error: build failed",
+    };
+    let now = 1_000;
+    const { acquirer, comments } = makeAcquirer(gh, {
+      maxAttempts: 1,
+      fixResults: [false],
+      now: () => now,
+      postCommentErrors: [
+        new Error("GitHub API error (403): Resource not accessible by personal access token"),
+      ],
+    });
+    const warns: string[] = [];
+    const logs: string[] = [];
+    const originalWarn = console.warn;
+    const originalLog = console.log;
+    console.warn = (...args: unknown[]) => {
+      warns.push(args.join(" "));
+    };
+    console.log = (...args: unknown[]) => {
+      logs.push(args.join(" "));
+    };
+    const recoveryLines = () =>
+      logs.filter((line) => line.includes("GitHub credential accepted again")).length;
+    try {
+      await acquirer.tick();
+      // The escalation comment did not land, so the PR must stay retryable.
+      expect(comments).toHaveLength(0);
+      expect(workerState.getCiFixState("acme/widgets", 42).escalatedSha).toBeUndefined();
+      expect(warns).toHaveLength(1);
+      expect(warns[0]).toContain("403");
+      // The failing request is a comment POST, so the guidance must name the
+      // write permission rather than the CI read scopes (which already work).
+      expect(warns[0]).toContain("Issues: Write");
+      expect(warns[0]).not.toContain("Actions: Read");
+      // A successful PR fetch must not claim credential recovery while the
+      // post itself was rejected.
+      expect(recoveryLines()).toBe(0);
+
+      now += 60_000;
+      await acquirer.tick();
+      expect(comments).toHaveLength(1);
+      expect(workerState.getCiFixState("acme/widgets", 42).escalatedSha).toBe(sha1);
+      expect(recoveryLines()).toBe(1);
+    } finally {
+      console.warn = originalWarn;
+      console.log = originalLog;
+    }
+  });
+
+  test("a CI-read warning does not hide a comment-post permission failure", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const gh: FakeGitHubState = {
+      prState: "open",
+      headSha: sha1,
+      workflowRuns: [failingRun(860)],
+      jobLogs: "error: build failed",
+      actionsError: new Error(
+        "GitHub API error (403): Resource not accessible by personal access token",
+      ),
+    };
+    const { acquirer, comments } = makeAcquirer(gh, {
+      maxAttempts: 1,
+      fixResults: [false],
+      postCommentErrors: [
+        new Error("GitHub API error (403): Resource not accessible by personal access token"),
+      ],
+    });
+    const warns: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warns.push(args.join(" "));
+    };
+    try {
+      // First tick: the CI read is rejected → CI guidance.
+      await acquirer.tick();
+      expect(warns).toHaveLength(1);
+      expect(warns[0]).toContain("Actions: Read");
+
+      // Same hour, now the CI read works but the escalation comment POST is
+      // rejected: its own throttle slot must still warn with write guidance.
+      gh.actionsError = undefined;
+      await acquirer.tick();
+      expect(warns).toHaveLength(2);
+      expect(warns[1]).toContain("posting an escalation comment");
+      expect(warns[1]).toContain("Issues: Write");
+      expect(warns[1]).not.toContain("Actions: Read");
+      expect(comments).toHaveLength(0);
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
+
+  test("non-credential escalation post failures are capped instead of retried forever", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const gh: FakeGitHubState = {
+      prState: "open",
+      headSha: sha1,
+      workflowRuns: [failingRun(861)],
+      jobLogs: "error: build failed",
+    };
+    const errors = Array.from(
+      { length: 10 },
+      () => new Error("GitHub API error (422): Validation Failed"),
+    );
+    const postCommentErrors = errors.slice();
+    const { acquirer, comments } = makeAcquirer(gh, {
+      maxAttempts: 1,
+      fixResults: [false],
+      postCommentErrors,
+    });
+    const warns: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warns.push(args.join(" "));
+    };
+    const postWarns = () =>
+      warns.filter((line) => line.includes("could not post escalation comment"));
+    try {
+      for (let i = 0; i < 6; i++) await acquirer.tick();
+      expect(comments).toHaveLength(0);
+      // Three attempts, then the escalation freezes until the head changes.
+      expect(postWarns()).toHaveLength(3);
+      expect(postWarns()[2]).toContain("after 3 attempt(s)");
+      expect(postWarns()[2]).toContain("not retrying until the head changes");
+      expect(workerState.getCiFixState("acme/widgets", 42).escalatedSha).toBe(sha1);
+      // No further POSTs are attempted at this head.
+      expect(postCommentErrors).toHaveLength(7);
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
+
+  test("an escalation comment retried after a restart persists the escalation once it lands", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    workerState.setCiFixState("acme/widgets", 42, { consecutiveFailures: 1 });
+    const gh: FakeGitHubState = {
+      prState: "open",
+      headSha: sha1,
+      workflowRuns: [failingRun(851)],
+    };
+    const { acquirer, fixed, comments } = makeAcquirer(gh, {
+      maxAttempts: 1,
+      postCommentErrors: [new Error("GitHub API error (500): Internal Server Error")],
+    });
+
+    // Budget was already exhausted before this tick: no repair is attempted,
+    // and a failed post must leave the escalation unrecorded.
+    await acquirer.tick();
+    expect(fixed).toHaveLength(0);
+    expect(comments).toHaveLength(0);
+    expect(workerState.getCiFixState("acme/widgets", 42).escalatedSha).toBeUndefined();
+
+    await acquirer.tick();
+    expect(comments).toHaveLength(1);
+    expect(workerState.getCiFixState("acme/widgets", 42).escalatedSha).toBe(sha1);
+  });
+
+  test("non-credential 403s keep the per-PR capture path", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const gh: FakeGitHubState = {
+      prState: "open",
+      headSha: sha1,
+      workflowRuns: [],
+      prError: new Error("GitHub API error (403): Repository was archived so is read-only."),
+    };
+    const { acquirer } = makeAcquirer(gh);
+    const warns: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warns.push(args.join(" "));
+    };
+    try {
+      await acquirer.tick();
+      await acquirer.tick();
+      // Archived repositories are not credential failures: report every tick,
+      // without permission guidance.
+      expect(warns).toHaveLength(2);
+      expect(warns.every((line) => !line.includes("Actions: Read"))).toBe(true);
+    } finally {
+      console.warn = originalWarn;
+    }
   });
 
   test("a deferred repair preserves the retry budget and remains eligible", async () => {

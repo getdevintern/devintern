@@ -36,7 +36,7 @@ import {
   reconcileOpenAgentPrs,
 } from "../review/agent-pr-reconciler";
 import type { ConditionalResult, PolledPr } from "../review/agent-pr-reconciler";
-import { isGitHubAuthError } from "../code-host/github/reviews";
+import { describeGitHubAuthFailure, isGitHubAuthError } from "../code-host/github/reviews";
 import { nextScheduleOccurrence } from "../automation/config";
 import type { CronOrIntervalSchedule } from "../automation/config";
 import { parseEnvInteger } from "../config/env-integer";
@@ -82,6 +82,36 @@ export interface ReviewPollingGitHub {
     prNumber: number,
     sinceIso: string,
   ): Promise<PolledComment[]>;
+}
+
+/**
+ * Endpoint group a polling pass can fail on. Recovery is tracked per stage so
+ * a successful metadata-only PR fetch cannot clear a reviews/comments throttle
+ * that was never re-tested.
+ */
+type PollStage = "pr-state" | "reviews" | "comments" | "write";
+
+/** Human label for a stage, used in credential warnings. */
+const POLL_STAGE_LABELS: Record<PollStage, string> = {
+  "pr-state": "reading PR state",
+  reviews: "reading reviews",
+  comments: "reading review comments",
+  write: "posting a review comment",
+};
+
+interface AuthFailureEntry {
+  repo: string;
+  stage: PollStage;
+  lastWarnAt: number | null;
+  active: boolean;
+}
+
+/** Stage progress for one PR pass; mutated by {@link ReviewPollingAcquirer.pollPr}. */
+interface PollProgress {
+  /** Stages whose requests completed during this pass. */
+  completed: Set<PollStage>;
+  /** Stage whose request is currently in flight. */
+  current?: PollStage;
 }
 
 export interface ReviewPollingAcquirerOptions {
@@ -584,8 +614,15 @@ export class ReviewPollingAcquirer implements Acquirer {
   /** Cached scheduled-window state; `undefined` = not loaded from the cursor yet. */
   private conflictWindowState: ConflictWindowState | null | undefined;
   private lastFeedbackPollAt: number;
-  /** Last time a rejected-credential warning was printed (rate-limited). */
-  private lastAuthWarnAt = 0;
+  /**
+   * Per-repo/per-stage throttle state for permanent credential failures. Fleet
+   * mode resolves a distinct token per repo, so a 403 in one repo must not
+   * hide an unrelated 401 in another, and a write failure must not be silenced
+   * by a read warning (or cleared by a successful read).
+   */
+  private authFailures = new Map<string, AuthFailureEntry>();
+  /** Per-repo throttle for "404 may mean access lost" warnings. */
+  private inaccessibleWarnAt = new Map<string, number>();
 
   constructor(options: ReviewPollingAcquirerOptions) {
     this.options = options;
@@ -702,12 +739,36 @@ export class ReviewPollingAcquirer implements Acquirer {
       for (const key of this.prCache.keys()) {
         if (!watchedKeys.has(key)) this.clearPrCache(key);
       }
+      const watchedRepos = new Set(watchedPrs.map((pr) => pr.repo));
+      for (const [key, entry] of this.authFailures) {
+        if (!watchedRepos.has(entry.repo)) this.authFailures.delete(key);
+      }
+      for (const repo of this.inaccessibleWarnAt.keys()) {
+        if (!watchedRepos.has(repo)) this.inaccessibleWarnAt.delete(repo);
+      }
+      /** Stages that completed in this tick, per repo (union over its PRs). */
+      const succeededStages = new Map<string, Set<PollStage>>();
+      /** Stages that failed with a credential error in this tick, per repo. */
+      const failedStages = new Map<string, Set<PollStage>>();
+      const recordStages = (
+        target: Map<string, Set<PollStage>>,
+        repo: string,
+        stages: Iterable<PollStage>,
+      ): void => {
+        let entry = target.get(repo);
+        if (!entry) {
+          entry = new Set();
+          target.set(repo, entry);
+        }
+        for (const stage of stages) entry.add(stage);
+      };
       for (const pr of watchedPrs) {
         // Defensive: rows registered mid-run for a foreign repo (or when
         // startup pruning could not run) are skipped, never acted on.
         if (allowedRepos && allowedRepos.length > 0 && !allowedRepos.includes(pr.repo)) {
           continue;
         }
+        const progress: PollProgress = { completed: new Set() };
         try {
           await this.pollPr(
             pr.repo,
@@ -715,13 +776,19 @@ export class ReviewPollingAcquirer implements Acquirer {
             pr.createdAt,
             pollFeedback,
             fresh.get(agentPrKey(pr.repo, pr.prNumber)),
+            progress,
           );
         } catch (error) {
+          recordStages(succeededStages, pr.repo, progress.completed);
           if (isGitHubAuthError(error)) {
-            // A rejected credential fails identically on every request, so
-            // re-reporting it per PR per tick floods error tracking with
-            // duplicates. Warn the operator throttled and keep polling.
-            this.warnAuthFailure(error as Error);
+            // Credential failures (401/rejected, 403/under-scoped) are
+            // configuration problems that fail identically on every PR every
+            // tick. Warn the operator at most once per repo per stage per hour
+            // and intentionally skip captureError so a permanently rejected
+            // credential does not flood error tracking with duplicates.
+            const stage = progress.current ?? "write";
+            recordStages(failedStages, pr.repo, [stage]);
+            this.warnAuthFailure(pr.repo, pr.prNumber, error as Error, stage);
             continue;
           }
           captureError(error, {
@@ -733,6 +800,19 @@ export class ReviewPollingAcquirer implements Acquirer {
           console.warn(
             `⚠️  [${this.name}] polling ${pr.repo}#${pr.prNumber} failed: ${(error as Error).message}`,
           );
+          continue;
+        }
+        recordStages(succeededStages, pr.repo, progress.completed);
+      }
+      // Only a tick where the same stage succeeded proves that stage's
+      // credential works again. A metadata-only PR fetch must not clear a
+      // reviews/comments throttle it never exercised, and one PR's failure
+      // must not mask another's success in the same repo.
+      for (const [repo, stages] of succeededStages) {
+        const failed = failedStages.get(repo);
+        for (const stage of stages) {
+          if (failed?.has(stage)) continue;
+          this.noteAuthRecovery(repo, stage);
         }
       }
     } finally {
@@ -740,25 +820,61 @@ export class ReviewPollingAcquirer implements Acquirer {
     }
   }
 
-  /** One auth-related warning per hour, not one per PR per tick. */
+  /** One credential warning per repo per stage per rolling hour. */
   private static AUTH_WARN_INTERVAL_MS = 60 * 60 * 1000;
 
-  private warnAuthFailure(error: Error): void {
+  private static authKey(repo: string, stage: PollStage): string {
+    return `${repo.toLowerCase()}\u0000${stage}`;
+  }
+
+  private warnAuthFailure(repo: string, prNumber: number, error: Error, stage: PollStage): void {
+    const key = ReviewPollingAcquirer.authKey(repo, stage);
+    const entry = this.authFailures.get(key) ?? {
+      repo,
+      stage,
+      lastWarnAt: null,
+      active: false,
+    };
+    entry.active = true;
     const now = this.now();
-    if (now - this.lastAuthWarnAt < ReviewPollingAcquirer.AUTH_WARN_INTERVAL_MS) {
+    if (
+      entry.lastWarnAt !== null &&
+      now - entry.lastWarnAt < ReviewPollingAcquirer.AUTH_WARN_INTERVAL_MS
+    ) {
+      this.authFailures.set(key, entry);
       return;
     }
-    this.lastAuthWarnAt = now;
+    entry.lastWarnAt = now;
+    this.authFailures.set(key, entry);
     console.warn(
-      `⚠️  [${this.name}] ${error.message} Renew GITHUB_TOKEN ` +
-        "(or reconnect the workspace's GitHub credentials); polling continues.",
+      `⚠️  [${this.name}] GitHub rejected the credential while ${POLL_STAGE_LABELS[stage]} ` +
+        `on ${repo}#${prNumber}: ` +
+        `${error.message} ${describeGitHubAuthFailure(error, stage === "write" ? "comment" : "reviews")}`,
+    );
+  }
+
+  /** Announce one stage's recovery and rearm that stage's throttle. */
+  private noteAuthRecovery(repo: string, stage: PollStage): void {
+    const key = ReviewPollingAcquirer.authKey(repo, stage);
+    const entry = this.authFailures.get(key);
+    if (!entry?.active) return;
+    this.authFailures.delete(key);
+    console.log(
+      `✅ [${this.name}] GitHub credential accepted again for ${repo}; ` +
+        `${POLL_STAGE_LABELS[stage]} recovered`,
     );
   }
 
   private warnPrInaccessible(repo: string, prNumber: number): void {
     const now = this.now();
-    if (now - this.lastAuthWarnAt < ReviewPollingAcquirer.AUTH_WARN_INTERVAL_MS) return;
-    this.lastAuthWarnAt = now;
+    const lastWarnAt = this.inaccessibleWarnAt.get(repo);
+    if (
+      lastWarnAt !== undefined &&
+      now - lastWarnAt < ReviewPollingAcquirer.AUTH_WARN_INTERVAL_MS
+    ) {
+      return;
+    }
+    this.inaccessibleWarnAt.set(repo, now);
     console.warn(
       `⚠️  [${this.name}] GitHub returned 404 for ${repo}#${prNumber}. ` +
         "The PR may still be open but inaccessible to this worker's GitHub credential; " +
@@ -772,13 +888,15 @@ export class ReviewPollingAcquirer implements Acquirer {
     prNumber: number,
     watchedSinceMs: number,
     pollFeedback: boolean,
-    prefetched?: ConditionalResult<PolledPr>,
-  ): Promise<void> {
+    prefetched: ConditionalResult<PolledPr> | undefined,
+    progress: PollProgress,
+  ): Promise<"ok" | "inaccessible"> {
     const { workerState, github, addressPr, resolveConflicts } = this.options;
 
     // 1. PR state (ETag-cached): unwatch confirmed closed/merged PRs. When the
     //    reconciliation pass already fetched this PR, its result is reused
     //    (and already applied), so no second request is spent here.
+    progress.current = "pr-state";
     const prSource = agentPrStateCursorSource(repo, prNumber);
     const prKey = agentPrKey(repo, prNumber);
     const prResult =
@@ -790,14 +908,16 @@ export class ReviewPollingAcquirer implements Acquirer {
       ));
     if (prResult.gone) {
       this.warnPrInaccessible(repo, prNumber);
-      return;
+      // A 404 can mean lost access, so it cannot prove the credential works.
+      return "inaccessible";
     }
     if (!prefetched) {
       const closure = applyAgentPrFetch(workerState, { repo, prNumber }, prResult);
       if (closure) {
         console.log(`👁️  [${this.name}] ${repo}#${prNumber} is ${closure.reason}; unwatching`);
         this.clearPrCache(prKey);
-        return;
+        progress.completed.add("pr-state");
+        return "ok";
       }
     }
 
@@ -812,19 +932,31 @@ export class ReviewPollingAcquirer implements Acquirer {
       if (cachedPr) await this.maybeSyncBase(repo, prNumber, cachedPr);
     }
 
-    if (!pollFeedback) return;
+    // Reconciliation and base sync may spend additional PR-state requests; only
+    // reaching this point proves the whole pr-state stage succeeded.
+    progress.completed.add("pr-state");
+    progress.current = undefined;
+    if (!pollFeedback) return "ok";
 
     // 2. Reviews (ETag-cached): new human changes_requested reviews.
     // 3. Inline review comments since the last seen timestamp.
     // Both passes must run (each advances its own cursor), so no short-circuit.
+    progress.current = "reviews";
     const reviewed = await this.collectActionableReviews(repo, prNumber);
+    progress.completed.add("reviews");
+    progress.current = "comments";
     const commented = await this.collectActionableComments(repo, prNumber, watchedSinceMs);
+    progress.completed.add("comments");
+    progress.current = undefined;
     if (!reviewed && !commented) {
-      return;
+      return "ok";
     }
 
     console.log(`\n📌 [${this.name}] new review feedback on ${repo}#${prNumber}`);
+    progress.current = "write";
     const ok = await addressPr(repo, prNumber);
+    progress.completed.add("write");
+    progress.current = undefined;
     if (ok === "deferred") {
       console.log(
         `⏳ [${this.name}] ${repo}#${prNumber} deferred; will retry when a harness is available`,
@@ -838,6 +970,7 @@ export class ReviewPollingAcquirer implements Acquirer {
           : `⚠️  [${this.name}] ${repo}#${prNumber} feedback run did not complete cleanly`,
       );
     }
+    return "ok";
   }
 
   /** Mark unprocessed human `changes_requested` reviews as actionable. */

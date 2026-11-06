@@ -129,21 +129,122 @@ export function isGitHubNotFound(error: unknown): boolean {
 }
 
 /**
- * Whether an error thrown by a GitHub API client call is an HTTP 401
- * (`Bad credentials`) or a missing-credential failure: the credential is
- * expired, revoked, or rejected. Unlike 5xx/429 responses this is not
- * transient — every request with the same credential fails identically, so
- * long-running callers treat it as a configuration problem (renew
- * `GITHUB_TOKEN`) instead of re-reporting it as a per-tick failure forever.
+ * Whether an error thrown by a GitHub API client call is a credential failure:
+ * an HTTP 401 (`Bad credentials`), a missing-credential failure, or a 403
+ * permission denial with a known credential body (`Resource not accessible`,
+ * `Must have admin rights`). The credential is expired, revoked, rejected, or
+ * under-scoped. Unlike 5xx/429 responses this is not transient — every request
+ * with the same credential fails identically, so long-running callers treat it
+ * as a configuration problem (renew `GITHUB_TOKEN` or grant the missing
+ * permission) instead of re-reporting it as a per-tick failure forever.
+ *
+ * 404 remains false because callers cannot distinguish a deleted resource from
+ * one this credential cannot see. 403 responses without a credential-denial
+ * body also remain false: GitHub reuses 403 for rate limits, abuse detection,
+ * archived read-only repositories, locked issues, and blocked repositories.
+ * Those are either transient or genuine per-request failures and must keep
+ * their normal capture/retry handling.
  *
  * @param error - Error thrown by `apiRequest` / `conditionalGet`
  */
 export function isGitHubAuthError(error: unknown): boolean {
+  return classifyGitHubAuthError(error) !== null;
+}
+
+/** Credential failure classes that need different operator action. */
+export type GitHubAuthFailureKind = "invalid-credential" | "missing-permission";
+
+/**
+ * 403 bodies that prove the credential itself lacks access rather than the
+ * resource being temporarily unavailable (rate limit, archived repo, locked
+ * issue, blocked repository). Matched case-insensitively against the API
+ * error detail.
+ */
+const GITHUB_CREDENTIAL_DENIAL_PATTERNS = [
+  "resource not accessible",
+  "bad credentials",
+  "must have admin rights",
+] as const;
+
+/**
+ * Classify a GitHub credential failure so callers can give correct guidance:
+ * a 401/missing token must be renewed, while a 403 with a credential-denial
+ * body may be a valid token that simply lacks a permission. Unknown 403s are
+ * not credential failures and keep the normal error path.
+ *
+ * @param error - Error thrown by `apiRequest` / `conditionalGet`
+ * @returns The failure class, or `null` when this is not a credential failure
+ */
+export function classifyGitHubAuthError(error: unknown): GitHubAuthFailureKind | null {
   const message = error instanceof Error ? error.message : String(error);
-  return (
+  if (
     message.includes("GitHub API error (401)") ||
     message.includes("No GitHub authentication configured")
+  ) {
+    return "invalid-credential";
+  }
+  if (!message.includes("GitHub API error (403)")) {
+    return null;
+  }
+  const lower = message.toLowerCase();
+  const credentialDenied = GITHUB_CREDENTIAL_DENIAL_PATTERNS.some((pattern) =>
+    lower.includes(pattern),
   );
+  return credentialDenied ? "missing-permission" : null;
+}
+
+/**
+ * API surface a credential failure came from. Read contexts need different
+ * permissions than the write context used for posting PR comments, so the
+ * guidance must not name permissions the failing request does not use.
+ */
+export type GitHubAuthFailureContext = "reviews" | "ci" | "comment";
+
+/** Permission hint for each context, or "" when the read path has no extra scope. */
+function requiredPermissionHint(context: GitHubAuthFailureContext): string {
+  switch (context) {
+    case "ci":
+      return " (CI polling needs Actions: Read and Commit statuses: Read)";
+    case "comment":
+      return " (posting pull-request comments needs Issues: Write or Pull requests: Write)";
+    default:
+      return "";
+  }
+}
+
+/**
+ * Build actionable guidance for a credential failure. Non-credential errors
+ * yield an empty string.
+ *
+ * @param error - Error thrown by `apiRequest` / `conditionalGet`
+ * @param context - API surface that failed; selects the permission hint
+ * @returns Guidance sentence(s) for the operator
+ */
+export function describeGitHubAuthFailure(
+  error: unknown,
+  context: GitHubAuthFailureContext = "reviews",
+): string {
+  const kind = classifyGitHubAuthError(error);
+  if (kind === "invalid-credential") {
+    return (
+      "The GitHub credential is invalid, expired, or revoked. " +
+      "Renew GITHUB_TOKEN (or reconnect the workspace's GitHub credentials); " +
+      (context === "comment"
+        ? "the escalation retries and resumes automatically once the credential works."
+        : "polling continues and resumes automatically once the credential works.")
+    );
+  }
+  if (kind === "missing-permission") {
+    return (
+      "The GitHub token is valid but lacks a permission this request needs. " +
+      "Grant the missing permission" +
+      requiredPermissionHint(context) +
+      (context === "comment"
+        ? "; the escalation retries and lands automatically once the permission is granted."
+        : "; polling continues and recovers automatically once the permission is granted.")
+    );
+  }
+  return "";
 }
 
 /** Build an API error message; 401s get actionable credential guidance. */
@@ -152,8 +253,8 @@ function apiErrorMessage(status: number, detail: string): string {
   if (status === 401) {
     return (
       `${base}. The GitHub credential was rejected as expired or revoked. ` +
-      "Set a valid GITHUB_TOKEN (or reconnect the workspace's GitHub credentials), " +
-      "then restart the worker."
+      "Set a valid GITHUB_TOKEN (or reconnect the workspace's GitHub credentials) " +
+      "to restore access."
     );
   }
   return base;
