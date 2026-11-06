@@ -1,8 +1,9 @@
 # Tracker E2E expansion plan
 
-Status: **Layer 1 implemented** (read-only workspace smoke). **The Jira part of
-Layer 3 is implemented** (offline fake lifecycle in the default suite). The
-Jira/Trello Layer 2 live suites and the Trello part of Layer 3 remain planned.
+Status: **Layer 1 implemented** (read-only workspace smoke). **The Jira and
+Linear parts of Layer 3 are implemented** (offline fake lifecycles in the
+default suite). The Jira/Trello Layer 2 live suites and the Trello part of Layer
+3 remain planned.
 
 This plan describes how `packages/e2e` grows tracker coverage without making the
 default `bun run test` depend on the network or credentials, and without writing
@@ -23,17 +24,17 @@ test data into the trackers a worker actually uses.
 
 ## Current coverage
 
-| Tracker             | Default `test`     | Opt-in suite                           | Notes                                                                                                                            |
-| ------------------- | ------------------ | -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| Markdown            | no                 | `test:trackers` (read-only path)       | Plain files, no credentials.                                                                                                     |
-| Jira                | yes (offline fake) | `test:trackers` (read-only live smoke) | Fake lifecycle: key/`--query`, transition, comment, `--skip-comments`. Real project lifecycle and estimation planned in Layer 2. |
-| Trello              | no                 | `test:trackers` (read-only smoke)      | Full lifecycle planned in Layer 2.                                                                                               |
-| GitHub Issues       | no                 | `test:e2e:tracker`                     | Existing live suite; dedicated tracker repository doubles as code host.                                                          |
-| Local GitLab Issues | no                 | `test:e2e:tracker:gitlab`              | Existing live suite; creates and deletes a dedicated project.                                                                    |
-| GitLab.com Issues   | no                 | `test:e2e:tracker:gitlab-com`          | Existing live suite; pre-created project, issues only, project retained.                                                         |
-| Linear              | no                 | none                                   | Detection only in Layer 1.                                                                                                       |
-| Asana               | no                 | none                                   | Detection only in Layer 1.                                                                                                       |
-| Azure DevOps        | no                 | none                                   | Detection only in Layer 1.                                                                                                       |
+| Tracker             | Default `test`     | Opt-in suite                           | Notes                                                                                                                                                         |
+| ------------------- | ------------------ | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Markdown            | no                 | `test:trackers` (read-only path)       | Plain files, no credentials.                                                                                                                                  |
+| Jira                | yes (offline fake) | `test:trackers` (read-only live smoke) | Fake lifecycle: key/`--query`, transition, comment, `--skip-comments`. Real project lifecycle and estimation planned in Layer 2.                              |
+| Trello              | no                 | `test:trackers` (read-only smoke)      | Full lifecycle planned in Layer 2.                                                                                                                            |
+| GitHub Issues       | no                 | `test:e2e:tracker`                     | Existing live suite; dedicated tracker repository doubles as code host.                                                                                       |
+| Local GitLab Issues | no                 | `test:e2e:tracker:gitlab`              | Existing live suite; creates and deletes a dedicated project.                                                                                                 |
+| GitLab.com Issues   | no                 | `test:e2e:tracker:gitlab-com`          | Existing live suite; pre-created project, issues only, project retained.                                                                                      |
+| Linear              | yes (offline fake) | none                                   | Fake lifecycle: key/`--query`, workflow state, comment, decoy isolation. Live Layer 2 team/project lifecycle, estimation, and attachments remain future work. |
+| Asana               | no                 | none                                   | Detection only in Layer 1.                                                                                                                                    |
+| Azure DevOps        | no                 | none                                   | Detection only in Layer 1.                                                                                                                                    |
 
 The default local run reports these opt-in suites as skipped and planned
 coverage as todo (`helpers/opt-in-suites.ts`), so the test output names what it
@@ -191,7 +192,7 @@ Acceptance criteria:
 - Missing fixture configuration fails before any remote mutation.
 - A rerun does not collide with leftovers from a previous run.
 
-## Layer 3 — fake tracker servers for the default local suite (Jira implemented)
+## Layer 3 — fake tracker servers for the default local suite (Jira and Linear implemented)
 
 Run the built CLI against in-process Bun servers that implement the subset of
 the tracker APIs the product uses. This gives deterministic, credential-free
@@ -226,6 +227,33 @@ record, the configured workflow status, surviving unrelated labels, the
 implementation comment, and `--skip-comments` on a second run. The local bare
 Git remote is the code host; no PR, GitHub token, or model credentials are
 required. The only skip is the existing built-CLI guard.
+
+### Linear (implemented)
+
+`providers/fake-linear.ts` serves a strict Linear GraphQL subset on
+`127.0.0.1:0` and owns one team, its workflow states, issues, labels, and
+markdown comments in memory. `tests/local/tracker-linear-fake.test.ts` seeds an
+expected issue plus a decoy outside the selector, writes per-team statuses into
+`.devintern-code/settings.json`, and runs the production Linear client through
+the built CLI for both explicit-key and JSON IssueFilter `--query` selection.
+State is read back through the fixture rather than CLI stdout. The fixture sets
+`TASK_TRACKER=linear`, a synthetic `LINEAR_API_KEY`, and
+`LINEAR_API_URL=http://127.0.0.1:<port>/graphql`.
+
+Operations covered:
+
+- `IssueById` (identifier/UUID lookup with the full issue-detail field set)
+- `IssueComments` (markdown bodies, fixed advancing timestamps)
+- `TeamStates` (workflow state ids and names)
+- `CommentCreate` (markdown comment bodies)
+- `IssueUpdate` (`stateId`, plus `estimate`/`labelIds`/title/description fields)
+- `SearchIssues` (JSON IssueFilter with `title`/`description` string
+  conditions and `and`/`or`, plus plain-text title contains)
+
+Any other operation or malformed payload returns a diagnostic GraphQL error and
+is recorded in `unexpectedOperations`, which both scenarios assert is empty.
+Live Layer 2 coverage — real team/project lifecycle, estimation, and attachment
+uploads — remains future work; there is intentionally no live Linear suite.
 
 ### Trello (planned)
 
@@ -275,8 +303,8 @@ credentials.
 1. Layer 1 read-only smoke (done).
 2. Trello Layer 2 on a dedicated board; it needs no project provisioning.
 3. Jira Layer 2 with a dedicated `E2E` project.
-4. Layer 3 fake servers so the default suite covers Jira (done) and Trello
-   (planned) lifecycle.
+4. Layer 3 fake servers so the default suite covers Jira (done) and Linear
+   (done), then Trello (planned) lifecycle.
 5. Add read-only checks for Linear, Asana, and Azure DevOps when credentials
    exist.
 6. Revisit live GitHub/GitLab tracker smoke only if the full suites start

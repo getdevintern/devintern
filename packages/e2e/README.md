@@ -406,6 +406,33 @@ A second run with `--skip-comments` proves no additional comment or transition
 is posted. The local bare Git remote is the code host; no GitHub token or PR is
 required.
 
+### Offline fake Linear server
+
+The same default suite also includes an in-process Linear GraphQL fake
+(`providers/fake-linear.ts`), so the built CLI exercises the Linear tracker
+lifecycle without a Linear workspace, token, or network access.
+`tests/local/tracker-linear-fake.test.ts` skips only when the built CLI is
+absent.
+
+The fake binds `127.0.0.1:0` on a single `POST /graphql` endpoint, accepts any
+`Authorization` header without logging it, and serves one in-memory team with
+Todo/In Progress/In Review workflow states, issues, labels, and markdown
+comments. It implements only the operations the product calls: `IssueById`,
+`IssueComments`, `TeamStates`, `CommentCreate`, `IssueUpdate`, and
+`SearchIssues`. Any other operation or malformed payload returns a diagnostic
+GraphQL error and fails the test through `unexpectedOperations`.
+
+The fixture supplies `TASK_TRACKER=linear`, a synthetic `LINEAR_API_KEY`, and
+`LINEAR_API_URL=http://127.0.0.1:<port>/graphql`; no environment variable is
+inherited. Two scenarios run the production Linear client through explicit-key
+and JSON IssueFilter `--query` selection against a seeded issue and a decoy
+outside the selector. Read-back goes through the fake fixture, not CLI stdout:
+the pushed `feature/<key>` branch and exact `src/greeting.ts` diff, the run
+record, the configured workflow state, surviving unrelated labels, the
+implementation summary comment, delivery of the seeded description/comment
+markers to the deterministic agent, and an untouched decoy. The local bare Git
+remote is the code host; no PR, GitHub token, or model credentials are required.
+
 ## Remote tracker fixtures
 
 The Markdown suites above need no task tracker. Separate opt-in suites exercise
@@ -531,7 +558,8 @@ inspected when it is absent.
 
 This smoke is opt-in and is not part of `test`, Turbo, or CI. See
 [docs/tracker-e2e-plan.md](docs/tracker-e2e-plan.md) for the staged expansion to
-full Jira/Trello lifecycles and offline fake-server coverage.
+full Jira/Trello lifecycles and the implemented Jira/Linear fake-server coverage
+(Trello fake planned).
 
 ## Direct webhook serve
 
