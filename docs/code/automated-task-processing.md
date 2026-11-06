@@ -74,7 +74,7 @@ devintern worker run-now
 devintern worker run-now --workspace /path/to/workspace.toml
 ```
 
-The command writes a `.run-now` marker into the workspace home; the worker consumes it on its next poll tick (within `[defaults].poll_interval`, 60 seconds by default), drains, and removes the marker. Logs announce the manual run; the dashboard shows it as pending until served.
+The command writes a `.run-now` marker into the workspace home; the worker consumes it on its next poll tick (within `[defaults].poll_interval`, 60 seconds by default), drains, and removes the marker. Logs announce the manual run; the dashboard shows it as pending until served. If no worker is running, the marker is still written and the command warns that it stays until the next worker's first poll. `--workspace` must name a `workspace.toml`; a missing value or an unknown option is rejected without writing a marker.
 
 ### Seeing the current state
 
