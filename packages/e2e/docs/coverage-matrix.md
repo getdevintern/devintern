@@ -5,7 +5,7 @@ partially exercises, and what is still missing. The `e2e-expander` workspace
 automation scouts this file and delegates the highest-value gaps to the worker
 as separate ad-hoc tasks. Each delegated task updates this file in its own PR.
 
-Last reviewed: 2026-11-05.
+Last reviewed: 2026-11-07.
 
 ## Status legend
 
@@ -139,7 +139,7 @@ Run: `bun run --filter @devintern/e2e test` (build the CLI first); the sandbox s
 | `login`, `logout`, `whoami`                                              | `gap`              | —                                                                                                                             | Local fake session or opt-in account suite.                            |
 | `sandbox`                                                                | `default`          | `tests/local/sandbox.test.ts` (provider matrix, native auto, missing harness, invalid/unreachable, removed srt/smolvm)        | —                                                                      |
 | `doctor`                                                                 | `gap`              | —                                                                                                                             | Runtime/git/agent/tracker/sign-in/license checks and exit code.        |
-| `report`                                                                 | `gap`              | —                                                                                                                             | `--print`, spool/save, redaction, `--from`, offline failure.           |
+| `report`                                                                 | `default`          | `tests/local/cli-report.test.ts` (`bun run --filter @devintern/e2e test`)                                                     | Live endpoint delivery and interactive prompts.                        |
 
 ## `devintern worker` surface
 
