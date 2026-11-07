@@ -429,6 +429,10 @@ export class SentryClient implements ErrorMonitorProvider<SentryIssue> {
       "minimal fix in this repository, and add or adjust tests covering the failure",
       "path. Do not change unrelated behavior.",
       "",
+      "If the issue is already fixed, cannot be reproduced from this repository, or",
+      "needs no code change, make no changes and explain why; the run is recorded as",
+      "a successful no-op.",
+      "",
     ].join("\n");
   }
 }
