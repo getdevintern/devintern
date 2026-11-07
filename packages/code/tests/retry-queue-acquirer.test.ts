@@ -1,9 +1,10 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdirSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
 import { ScheduledRetryStore } from "../src/lib/state/run-retry";
+import { resetWorkerFailover } from "../src/lib/worker/failover";
 import { RetryQueueAcquirer } from "../src/lib/workspace/retry-acquirer";
 import type { TaskExecutionResult } from "../src/lib/acquirers/task-polling";
 
@@ -13,6 +14,10 @@ describe("RetryQueueAcquirer", () => {
   let store: ScheduledRetryStore;
 
   beforeEach(() => {
+    // The default `isPaused` reads the process-wide failover singleton, so a
+    // controller leaked by an earlier test (or a preload) would silently
+    // disable every drain in this file. Start each test from a clean slate.
+    resetWorkerFailover();
     dir = join(
       tmpdir(),
       `retry-acquirer-test-${Date.now()}-${Math.random().toString(36).slice(2)}`,
@@ -25,6 +30,7 @@ describe("RetryQueueAcquirer", () => {
   afterEach(() => {
     store.close();
     rmSync(dir, { recursive: true, force: true });
+    resetWorkerFailover();
   });
 
   function makeAcquirer(
@@ -122,6 +128,43 @@ describe("RetryQueueAcquirer", () => {
     await acquirer.tick();
     expect(calls).toEqual(["PROJ-1", "PROJ-1"]);
     expect(store.hasPending()).toBe(false);
+  });
+
+  test("leaves queued retries untouched and silent while the harness chain is paused", async () => {
+    store.schedule({ taskKey: "PROJ-1", actor: "a@x.com" });
+
+    const calls: string[] = [];
+    let paused = true;
+    const logs = spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const acquirer = new RetryQueueAcquirer({
+        store,
+        execute: async (taskKey) => {
+          calls.push(taskKey);
+          return true;
+        },
+        isPaused: () => paused,
+        intervalSeconds: 3600,
+      });
+
+      // Many paused ticks must not claim, re-run, requeue, or log the row.
+      for (let i = 0; i < 50; i++) {
+        await acquirer.tick();
+      }
+      expect(calls).toEqual([]);
+      expect(logs).not.toHaveBeenCalled();
+      expect(store.hasActive("PROJ-1")).toBe(true);
+      expect(store.hasPending()).toBe(true);
+
+      // The first unpaused tick drains the row normally.
+      paused = false;
+      await acquirer.tick();
+      expect(calls).toEqual(["PROJ-1"]);
+      expect(store.hasActive("PROJ-1")).toBe(false);
+      expect(store.hasPending()).toBe(false);
+    } finally {
+      logs.mockRestore();
+    }
   });
 
   test("records the error message when the executor throws", async () => {

@@ -1,9 +1,10 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdirSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
 import { InjectedTaskStore } from "../src/lib/state/injected-tasks";
+import { resetWorkerFailover } from "../src/lib/worker/failover";
 import { createTaskSupervisor } from "../src/lib/worker/supervisor";
 import { InjectedTaskAcquirer } from "../src/lib/workspace/injected-acquirer";
 import type { TaskExecutionResult } from "../src/lib/acquirers/task-polling";
@@ -13,6 +14,10 @@ describe("InjectedTaskAcquirer", () => {
   let store: InjectedTaskStore;
 
   beforeEach(() => {
+    // The default `isPaused` reads the process-wide failover singleton, so a
+    // controller leaked by an earlier test (or a preload) would silently
+    // disable every drain in this file. Start each test from a clean slate.
+    resetWorkerFailover();
     dir = join(tmpdir(), `injected-acq-${Date.now()}-${Math.random().toString(36).slice(2)}`);
     mkdirSync(dir, { recursive: true });
     store = new InjectedTaskStore(join(dir, "queue.db"));
@@ -21,6 +26,7 @@ describe("InjectedTaskAcquirer", () => {
   afterEach(() => {
     store.close();
     rmSync(dir, { recursive: true, force: true });
+    resetWorkerFailover();
   });
 
   function enqueue(taskKey: string, repo = "backend") {
@@ -110,6 +116,43 @@ describe("InjectedTaskAcquirer", () => {
     await acquirer.tick();
     expect(calls).toEqual(["local-a", "local-a"]);
     expect(store.hasPending()).toBe(false);
+  });
+
+  test("leaves pending rows untouched and silent while the harness chain is paused", async () => {
+    enqueue("local-a");
+
+    const calls: string[] = [];
+    let paused = true;
+    const logs = spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const acquirer = new InjectedTaskAcquirer({
+        store,
+        execute: async (task) => {
+          calls.push(task.taskKey);
+          return true;
+        },
+        isPaused: () => paused,
+        intervalSeconds: 3600,
+      });
+
+      // Many paused ticks must not claim, run, requeue, or log the row.
+      for (let i = 0; i < 50; i++) {
+        await acquirer.tick();
+      }
+      expect(calls).toEqual([]);
+      expect(logs).not.toHaveBeenCalled();
+      expect(store.hasPending()).toBe(true);
+      expect(store.getById(1)?.status).toBe("pending");
+
+      // The first unpaused tick drains the row normally.
+      paused = false;
+      await acquirer.tick();
+      expect(calls).toEqual(["local-a"]);
+      expect(store.hasPending()).toBe(false);
+      expect(store.getById(1)?.status).toBe("done");
+    } finally {
+      logs.mockRestore();
+    }
   });
 
   test("settles a skipped task as done rather than failed", async () => {

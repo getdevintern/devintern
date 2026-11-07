@@ -10,10 +10,12 @@ import { applyWorkspaceConfig } from "../src/lib/workspace/config-reload";
 import {
   buildFleetEventAcquirers,
   buildInjectedTaskAcquirer,
+  buildRetryQueueAcquirer,
   createFleetTaskExecutor,
   createWorkspaceTaskAcquirer,
   errorMonitorTaskArgs,
   fleetTaskArgs,
+  isHarnessChainPaused,
   resolveActionedSource,
   resolveWorkspaceAutomationContext,
   startWorktreeSweeper,
@@ -21,6 +23,8 @@ import {
 } from "../src/lib/workspace/workspace-worker";
 import type { FleetTask, RepoManagerLike } from "../src/lib/workspace/workspace-worker";
 import { InjectedTaskStore } from "../src/lib/state/injected-tasks";
+import { ScheduledRetryStore } from "../src/lib/state/run-retry";
+import { resetWorkerFailover, startWorkerFailover } from "../src/lib/worker/failover";
 import { RUN_ORIGIN_ENV } from "../src/lib/observability/analytics";
 import { resolveRunIdentity } from "../src/lib/task/run-identity";
 import {
@@ -44,6 +48,16 @@ import { toRoutableTask } from "../src/lib/workspace/router";
 import { CiFailureWatcherAcquirer } from "../src/lib/acquirers/ci-failure-watcher";
 import { GitLabReviewsClient } from "../src/lib/code-host/gitlab/reviews";
 import { saveRelayState } from "../src/lib/relay/connect";
+
+// The acquirers' default pause/drain checks read the process-wide failover
+// singleton, so a controller started by one test (or leaked by another file in
+// the same process) must never change the outcome of the next test.
+beforeEach(() => {
+  resetWorkerFailover();
+});
+afterEach(() => {
+  resetWorkerFailover();
+});
 
 /** Deterministic synchronization gate for tests (preferred over sleeps). */
 function deferred(): { promise: Promise<void>; resolve: () => void } {
@@ -889,6 +903,129 @@ describe("buildInjectedTaskAcquirer", () => {
       else process.env.DEVINTERN_AUTOMATION_ID = savedAutomation;
       if (savedTracker === undefined) delete process.env.TASK_TRACKER;
       else process.env.TASK_TRACKER = savedTracker;
+      store.close();
+    }
+  });
+});
+
+describe("harness-chain pause wiring", () => {
+  let workspaceDir: string;
+  let state: WorkspaceState;
+
+  beforeEach(() => {
+    workspaceDir = join(tmpdir(), `ws-pause-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    mkdirSync(workspaceDir, { recursive: true });
+    state = openWorkspaceState(workspaceDir);
+  });
+
+  afterEach(() => {
+    state.close();
+    rmSync(workspaceDir, { recursive: true, force: true });
+  });
+
+  /** Start the process-wide failover with one entry and exhaust it. */
+  async function startAndExhaustChain() {
+    const failover = await startWorkerFailover({
+      checkInstalled: false,
+      sandboxName: "none",
+      raw: "codex",
+      log: () => {},
+    });
+    failover.manager.reportUsageLimit(Date.now() + 60_000);
+    return failover;
+  }
+
+  test("isHarnessChainPaused reflects the live failover state", async () => {
+    expect(isHarnessChainPaused()).toBe(false);
+
+    const failover = await startAndExhaustChain();
+    expect(isHarnessChainPaused()).toBe(true);
+
+    // Reading live state, not a snapshot: the engine unlocking an entry must
+    // unpause the drains without rebuilding them.
+    failover.manager.windowElapsed("codex");
+    expect(isHarnessChainPaused()).toBe(false);
+  });
+
+  test("buildInjectedTaskAcquirer stays idle while exhausted, then drains after the window", async () => {
+    const repoManager = new FakeRepoManager(workspaceDir);
+    const store = new InjectedTaskStore(join(workspaceDir, "injected-tasks.db"));
+    const failover = await startAndExhaustChain();
+    try {
+      const { task } = store.enqueue({
+        taskKey: "local-paused",
+        repo: "backend",
+        title: "Paused",
+        body: "",
+        taskFile: join(workspaceDir, "injected", "local-paused.md"),
+      });
+      let runs = 0;
+      const acquirer = buildInjectedTaskAcquirer(
+        {
+          config: CONFIG,
+          workspaceDir,
+          skips: state.skips,
+          repoManager,
+          // Keep the executor's own pre-git guard permissive so only the
+          // acquirer-level pause can keep the row from running.
+          isHarnessExhausted: () => false,
+          runTask: async () => {
+            runs++;
+            return true;
+          },
+        },
+        store,
+      );
+
+      await acquirer.tick();
+      expect(runs).toBe(0);
+      expect(store.getById(task.id)?.status).toBe("pending");
+
+      failover.manager.windowElapsed("codex");
+      await acquirer.tick();
+      expect(runs).toBe(1);
+      expect(store.getById(task.id)?.status).toBe("done");
+    } finally {
+      store.close();
+    }
+  });
+
+  test("buildRetryQueueAcquirer stays idle while exhausted, then drains after the window", async () => {
+    const repoManager = new FakeRepoManager(workspaceDir);
+    const store = new ScheduledRetryStore(join(workspaceDir, "scheduled-retries.db"));
+    const failover = await startAndExhaustChain();
+    try {
+      // Pin the repo so the executor does not depend on label routing.
+      store.schedule({ taskKey: "PROJ-1", repo: "backend", actor: "a@x.com" });
+      let runs = 0;
+      const acquirer = buildRetryQueueAcquirer(
+        {
+          config: CONFIG,
+          workspaceDir,
+          skips: state.skips,
+          repoManager,
+          // Keep the executor's own pre-git guard permissive so only the
+          // acquirer-level pause can keep the row from running.
+          isHarnessExhausted: () => false,
+          runTask: async () => {
+            runs++;
+            return true;
+          },
+        },
+        store,
+      );
+
+      await acquirer.tick();
+      expect(runs).toBe(0);
+      expect(store.hasActive("PROJ-1")).toBe(true);
+      expect(store.hasPending()).toBe(true);
+
+      failover.manager.windowElapsed("codex");
+      await acquirer.tick();
+      expect(runs).toBe(1);
+      expect(store.hasActive("PROJ-1")).toBe(false);
+      expect(store.hasPending()).toBe(false);
+    } finally {
       store.close();
     }
   });

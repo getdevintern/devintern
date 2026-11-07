@@ -61,7 +61,7 @@ import { createTaskSupervisor, JobNotStartedError } from "../worker/supervisor";
 import type { TaskSupervisor } from "../worker/supervisor";
 import type { AutomationRunContext } from "../automation/acquirer";
 import { flushAnalytics, trackWorkerStarted } from "../observability/analytics";
-import { startWorkerFailover } from "../worker/failover";
+import { startWorkerFailover, getWorkerFailover } from "../worker/failover";
 import { RetryQueueAcquirer } from "./retry-acquirer";
 import { InjectedTaskAcquirer, INJECTED_TASK_SOURCE } from "./injected-acquirer";
 import { createInjectedStartupRecovery } from "./injected-recovery";
@@ -481,6 +481,15 @@ async function withSupervisorSlot(
 }
 
 /**
+ * Live harness-chain pause state for the short-interval drains: while every
+ * chain entry is usage-limited or cooling down, claiming a row would only
+ * requeue it and log the same pair of lines on each tick.
+ */
+export function isHarnessChainPaused(): boolean {
+  return getWorkerFailover()?.allExhausted() ?? false;
+}
+
+/**
  * Build the `worker add` drain acquirer: claims durable injected rows and runs
  * each through the fleet executor, pinned to the repo the row names.
  */
@@ -508,6 +517,45 @@ export function buildInjectedTaskAcquirer(
     maxConcurrency: deps.config.workspace.execution.maxConcurrency,
     maxConcurrencyPerRepo: deps.config.workspace.execution.maxConcurrencyPerRepo,
     isDraining: () => deps.supervisor?.isDraining() ?? false,
+    isPaused: isHarnessChainPaused,
+    verbose,
+  });
+}
+
+/**
+ * Build the dashboard retry drain acquirer: claims durable retry rows and runs
+ * each through the fleet executor with the persisted repo/team pinned and
+ * `--force` prepended.
+ */
+export function buildRetryQueueAcquirer(
+  deps: FleetExecutorDeps,
+  store: ScheduledRetryStore,
+  verbose?: boolean,
+): RetryQueueAcquirer {
+  return new RetryQueueAcquirer({
+    store,
+    execute: (taskKey, routable, retry) => {
+      const retryTeam = retry.team ? findTeam(deps.config, retry.team) : undefined;
+      return createFleetTaskExecutor(
+        {
+          ...deps,
+          ...(retryTeam ? { team: retryTeam } : {}),
+          actionedSource: resolveActionedSource(deps.config, retryTeam),
+        },
+        // The persisted repo/team make retries deterministic even when
+        // task keys overlap or the original route depended on labels.
+        {
+          extraArgs: () => ["--force", ...fleetTaskArgs(deps.config)],
+          repo: retry.repo,
+          source: "retry",
+          // Pin the run this retry targets so session pickup resumes its
+          // branch and prior report instead of the just-opened run.
+          pickupRunId: retry.runId,
+        },
+      )(taskKey, routable);
+    },
+    intervalSeconds: parseEnvInteger("WORKER_RETRY_INTERVAL_SECONDS", 5, { min: 1 }),
+    isPaused: isHarnessChainPaused,
     verbose,
   });
 }
@@ -886,35 +934,11 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   // First in the list and on a short interval: a dashboard-scheduled retry
   // gets picked up ahead of the slower pollers.
   acquirers.push(
-    new RetryQueueAcquirer({
-      store: retryQueue,
-      execute: (taskKey, routable, retry) => {
-        const retryTeam = retry.team ? findTeam(config, retry.team) : undefined;
-        return createFleetTaskExecutor(
-          {
-            config,
-            workspaceDir,
-            skips: state.skips,
-            repoManager,
-            supervisor,
-            ...(retryTeam ? { team: retryTeam } : {}),
-            actionedSource: resolveActionedSource(config, retryTeam),
-          },
-          // The persisted repo/team make retries deterministic even when
-          // task keys overlap or the original route depended on labels.
-          {
-            extraArgs: () => ["--force", ...fleetTaskArgs(config)],
-            repo: retry.repo,
-            source: "retry",
-            // Pin the run this retry targets so session pickup resumes its
-            // branch and prior report instead of the just-opened run.
-            pickupRunId: retry.runId,
-          },
-        )(taskKey, routable);
-      },
-      intervalSeconds: parseEnvInteger("WORKER_RETRY_INTERVAL_SECONDS", 5, { min: 1 }),
-      verbose: options.verbose,
-    }),
+    buildRetryQueueAcquirer(
+      { config, workspaceDir, skips: state.skips, repoManager, supervisor },
+      retryQueue,
+      options.verbose,
+    ),
   );
 
   // Ad-hoc `worker add` tasks: drained on the same short interval as retries,
