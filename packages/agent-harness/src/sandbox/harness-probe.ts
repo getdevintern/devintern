@@ -302,6 +302,9 @@ async function runProbe(
     const policy = {
       ...buildDefaultSandboxPolicy(workingDir),
       harnessName: options.harnessName,
+      // The probe spawns with `env` below; providers must evaluate overrides
+      // against that env rather than the CLI's own process.env.
+      env,
     };
     const wrapped = await options.provider.wrapCommand(options.path, ["--version"], policy);
     const spawnEnv: NodeJS.ProcessEnv = { ...env };

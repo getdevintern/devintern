@@ -175,6 +175,28 @@ describe("probeHarnessUnderSandbox", () => {
     }
   });
 
+  test("threads the caller's env into the sandbox policy", async () => {
+    resetHarnessSandboxProbeCache();
+    let seenEnv: NodeJS.ProcessEnv | undefined;
+    const provider = fakeProvider("probe-env", 'console.log("1")');
+    const originalWrap = provider.wrapCommand.bind(provider);
+    provider.wrapCommand = (path, args, policy) => {
+      seenEnv = policy.env;
+      return originalWrap(path, args, policy);
+    };
+
+    const env = { PATH: process.env.PATH, BUN_INSTALL: "/nowhere/.bun" };
+    await probeHarnessUnderSandbox({
+      path: "/fake/env-harness",
+      provider,
+      env,
+      useCache: false,
+    });
+    // Providers decide BUN_INSTALL overrides against this env, so it must be
+    // the env the probe actually spawns with, not process.env.
+    expect(seenEnv).toBe(env);
+  });
+
   test("caches results per path and provider until reset", async () => {
     resetHarnessSandboxProbeCache();
     let calls = 0;
