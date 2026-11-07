@@ -517,6 +517,15 @@ describe.concurrent("CLI Argument Handling", () => {
     expect(result.stderr).toContain("--workspace requires a path");
   });
 
+  test("dashboard --workspace rejects a file that is not workspace.toml", async () => {
+    const result = await runCLI(["dashboard", "--workspace", "not-workspace.toml"], {
+      prepareDir: (testDir) => writeFileSync(join(testDir, "not-workspace.toml"), ""),
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("No workspace.toml at");
+    expect(result.stderr).toContain("directory that contains it");
+  });
+
   test("worker requires a workspace", async () => {
     const emptyWorkspaceDir = join(
       tmpdir(),
