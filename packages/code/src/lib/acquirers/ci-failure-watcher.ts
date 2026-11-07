@@ -38,6 +38,7 @@ import type { CiFixState, WorkerState } from "../state/worker-state";
 import { RowParseError } from "../state/row-parse";
 import type { Acquirer } from "../../worker";
 import type { CiFailureFeedback } from "../review/formatter";
+import { classifyAgentPrState } from "../review/agent-pr-reconciler";
 import { serializePrRun } from "./review-polling";
 
 import type {
@@ -576,16 +577,25 @@ export class CiFailureWatcherAcquirer implements Acquirer {
       // Only a confirmed closed state may remove a PR from the registry.
       return "active";
     }
+    let lifecycle: ReturnType<typeof classifyAgentPrState> = "open";
     if (!prResult.notModified) {
-      if (prResult.etag) {
-        workerState.setCursor(prSource, prResult.data?.headSha ?? "", prResult.etag);
+      if (prResult.data) {
+        lifecycle = classifyAgentPrState(prResult.data.state);
+        // Only a confirmed terminal state may remove a PR from the registry:
+        // an unusable payload (missing/null/unknown state) must keep polling.
+        if (lifecycle === "closed" || lifecycle === "merged") {
+          console.log(
+            `👁️  [${this.name}] ${this.describe(repo, prNumber)} is ${lifecycle}; unwatching`,
+          );
+          this.markClosed(repo, prNumber);
+          return "removed";
+        }
       }
-      if (prResult.data && prResult.data.state !== "open") {
-        console.log(
-          `👁️  [${this.name}] ${this.describe(repo, prNumber)} is ${prResult.data.state}; unwatching`,
-        );
-        this.markClosed(repo, prNumber);
-        return "removed";
+      // Persist the ETag only for a usable payload: an unusable state must be
+      // re-fetched unconditionally next tick instead of being replayed as a
+      // 304 that carries no state to confirm.
+      if (prResult.etag && lifecycle !== null) {
+        workerState.setCursor(prSource, prResult.data?.headSha ?? "", prResult.etag);
       }
     }
 
@@ -620,6 +630,21 @@ export class CiFailureWatcherAcquirer implements Acquirer {
     );
     if (pending.length === 0) {
       return fullyGreen && !ciChanged ? "unchanged-green" : "active";
+    }
+
+    // An unconfirmed PR state (missing/null/unknown) must not spend the fix
+    // retry budget or escalate: the fix run re-fetches the PR and rejects it,
+    // so every attempt would fail and eventually record an escalation for a
+    // head that was never actually tried. Keep observing and defer the failure
+    // until the state is usable again; no failure is marked processed here.
+    if (lifecycle !== "open") {
+      if (verbose) {
+        console.log(
+          `   [${this.name}] ${this.describe(repo, prNumber)} state is unconfirmed; ` +
+            "deferring CI fix until the next poll",
+        );
+      }
+      return "active";
     }
 
     return this.handleFreshCiFailures({ repo, prNumber, headSha, fresh, pending });
