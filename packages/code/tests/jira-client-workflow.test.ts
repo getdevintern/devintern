@@ -36,7 +36,7 @@ describe("JiraClient workflow methods", () => {
                 content: [
                   {
                     type: "text",
-                    text: "## Execution preferences\nHarness: codex\nModel: astra",
+                    text: "## Execution preferences\nHarness: codex\nModel: gpt-5.2",
                   },
                 ],
               },

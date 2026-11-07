@@ -458,7 +458,7 @@ function collectExecutionPreferenceBlocks(description: string): string[] {
  * formatting:
  *
  * - `Harness: opencode` / `**Harness**: opencode` / `Agent harness: codex`
- * - `Model: astra` / `Agent model: claude-sonnet-4-6`
+ * - `Model: sonnet` / `Agent model: claude-sonnet-4-6`
  * - `Effort: high` / `Reasoning effort: low`
  *
  * Each label and value must fit on one line, so a dangling `Model:` cannot
@@ -486,7 +486,7 @@ export function extractExecutionPreferences(
   const text = blocks.join("\n").replace(/\r\n?/g, "\n");
 
   // Value grammars per field: harness ids are hyphenated names; model ids may
-  // be family aliases or provider-qualified identifiers; effort is a word.
+  // be native aliases or provider-qualified identifiers; effort is a word.
   const fields: ReadonlyArray<{
     field: keyof ExecutionPreferences;
     labels: string[];
@@ -526,12 +526,10 @@ export function extractExecutionPreferences(
     if (values.length === 0) {
       continue;
     }
-    // Values are compared case-insensitively: `open`/`Open` and `High`/`high`
-    // describe the same preference, and model family aliases are documented as
-    // case-insensitive. Keep the first spelling for display / passthrough.
+    // Harness and effort are case-insensitive; model values belong to the CLI.
     const uniqueByValue = new Map<string, string>();
     for (const value of values) {
-      const key = value.toLowerCase();
+      const key = field === "model" ? value : value.toLowerCase();
       if (!uniqueByValue.has(key)) {
         uniqueByValue.set(key, value);
       }

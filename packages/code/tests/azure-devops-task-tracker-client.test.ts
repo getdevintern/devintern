@@ -230,7 +230,7 @@ describe("AzureDevOpsTaskTrackerClient execution preferences", () => {
     const adapter = makeAdapter({});
     const task = descriptionTask(
       "<p>Please fix login.</p>" +
-        "<pre><code>## Execution preferences\nHarness: codex\nModel: astra</code></pre>" +
+        "<pre><code>## Execution preferences\nHarness: codex\nModel: gpt-5.2</code></pre>" +
         "<p>Thanks</p>",
     );
 
@@ -246,11 +246,11 @@ describe("AzureDevOpsTaskTrackerClient execution preferences", () => {
   test("extractDescriptionMarkdown keeps a real preference heading", () => {
     const adapter = makeAdapter({});
     const task = descriptionTask(
-      "<h2>Execution preferences</h2><p>Harness: codex</p><p>Model: astra</p>",
+      "<h2>Execution preferences</h2><p>Harness: codex</p><p>Model: gpt-5.2</p>",
     );
 
     expect(Utils.extractExecutionPreferences(adapter.extractDescriptionMarkdown(task))).toEqual({
-      preferences: { harness: "codex", model: "astra" },
+      preferences: { harness: "codex", model: "gpt-5.2" },
       conflicts: [],
     });
   });

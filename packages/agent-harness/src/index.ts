@@ -44,16 +44,6 @@ export {
   warnEffortUnsupported,
 } from "./effort.js";
 
-// Model family / alias resolution
-export {
-  registerModelAlias,
-  listModelAliases,
-  resetModelAliases,
-  resolveModelAlias,
-  type ModelAliasDefinition,
-  type ModelAliasResolution,
-} from "./model.js";
-
 // Registry
 export {
   registerHarness,

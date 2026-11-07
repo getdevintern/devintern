@@ -187,7 +187,7 @@ Just like the target branch, you can override the agent harness, model, and reas
 ```markdown
 ## Execution preferences
 Harness: opencode
-Model: astra
+Model: anthropic/claude-opus-4-6
 Effort: high
 ```
 
@@ -196,16 +196,16 @@ The block starts at an `Execution preferences` (or `Agent execution preferences`
 ```markdown
 <!-- devintern: Harness: codex -->
 <!-- devintern
-Model: gpt
+Model: gpt-5.2
 Effort: high
 -->
 ```
 
 - All three are optional and independent. Omitted preferences use your existing defaults (`AGENT_HARNESS`, `AGENT_MODEL`, `AGENT_EFFORT`).
 - Recognized labels (case-insensitive, markdown formatting tolerated): `Harness:` / `Agent harness:`, `Model:` / `Agent model:`, `Effort:` / `Reasoning effort:` / `Agent effort:`. Each label and value must be on its own line; a bare `Harness:`/`Model:`/`Effort:` line elsewhere in the description is ignored.
-- `Model:` accepts a **family or alias** (for example `astra`) and resolves to the latest compatible model for the selected harness, or an exact model identifier when you need a specific version (including OpenCode v2 `provider/model#variant` references). Family names are matched case-insensitively. Built-in families are `astra` for `claude-code`, `codex`, `antigravity`, `grok`, `deepseek`, `opencode`, `cline`, and `pi`, plus `gpt` for `codex`. Any other value is passed through to the harness as-is, so native aliases DevIntern does not model keep working.
+- `Model:` is passed unchanged to the selected harness. Use a model identifier or a native alias supported by that CLI (including OpenCode v2 `provider/model#variant` references). DevIntern does not define model aliases, choose model versions, or validate model availability.
 - `Effort:` is `low`, `medium`, or `high`. It is applied only when the selected harness supports reasoning effort; otherwise the preference is ignored with a warning and the task proceeds.
-- Unknown harnesses, conflicting values (the same label twice with different values), incompatible harness/model combinations (an explicitly named `Harness:` with a family that does not map to it), and invalid effort values fail the task with an actionable message instead of silently using a different preference. When no `Harness:` is named, an unmapped family is passed through with a warning rather than failing the task, because the environment-selected CLI may still understand it.
+- Unknown harnesses, conflicting values (the same label twice with different values), and invalid effort values fail the task with an actionable message. Model compatibility and availability are validated by the selected harness.
 - When only `Harness:` is set, `AGENT_MODEL` is **not** carried over (it is harness-specific); the task uses that harness's `<HARNESS>_MODEL` when configured, otherwise its own default model. `Model:` still wins when present.
 - A task-selected harness resolves its CLI from `<HARNESS>_CLI_PATH` (or your `PATH`); `AGENT_CLI_PATH` applies only to the environment-selected primary harness.
 - In unattended worker runs, failover pins each attempt to the active harness. If the description names a different harness, that preference is ignored with a warning so the worker can still fail over correctly; reorder `AGENT_HARNESS` to change which harness the worker uses.

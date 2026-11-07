@@ -206,14 +206,21 @@ describe("extractExecutionPreferences", () => {
     });
   });
 
-  test("treats case-only repeats as the same preference", () => {
+  test("treats case-only harness and effort repeats as the same preference", () => {
     const { preferences, conflicts } = Utils.extractExecutionPreferences(
       withPreferences(
-        "Harness: opencode\nHarness: OpenCode\nModel: astra\nModel: Astra\nEffort: High\nEffort: high",
+        "Harness: opencode\nHarness: OpenCode\nModel: sonnet\nModel: sonnet\nEffort: High\nEffort: high",
       ),
     );
     expect(conflicts).toEqual([]);
-    expect(preferences).toEqual({ harness: "opencode", model: "astra", effort: "High" });
+    expect(preferences).toEqual({ harness: "opencode", model: "sonnet", effort: "High" });
+  });
+
+  test("keeps differently cased model identifiers distinct", () => {
+    const { conflicts } = Utils.extractExecutionPreferences(
+      withPreferences("Model: Custom/Model\nModel: custom/model"),
+    );
+    expect(conflicts).toEqual([{ field: "model", values: ["Custom/Model", "custom/model"] }]);
   });
 
   test("returns empty preferences for an undefined description", () => {
@@ -349,15 +356,18 @@ describe("resolveExecutionPreferences — harness", () => {
 });
 
 describe("resolveExecutionPreferences — model", () => {
-  test("resolves a family alias to a concrete model", () => {
-    const result = resolveExecutionPreferences({
-      description: withPreferences("Model: astra"),
-      currentAgent: agent("claude-code"),
-    });
-    expect(result.modelOverride).toBe("claude-opus-4-6");
-    expect(result.modelAlias).toBe("astra");
-    expect(result.notes.join("\n")).toContain('Model: claude-opus-4-6 (alias "astra")');
-  });
+  test.each(["sonnet", "opus", "gpt", "astra", "Custom/Model#high"])(
+    "passes model %s unchanged without DevIntern alias expansion",
+    (model) => {
+      const result = resolveExecutionPreferences({
+        description: withPreferences(`Model: ${model}`),
+        currentAgent: agent("claude-code"),
+      });
+      expect(result.modelOverride).toBe(model);
+      expect(result.displayModel).toBe(model);
+      expect(result.notes.join("\n")).toContain(`Model: ${model}`);
+    },
+  );
 
   test("passes an exact model identifier through", () => {
     const result = resolveExecutionPreferences({
@@ -365,7 +375,6 @@ describe("resolveExecutionPreferences — model", () => {
       currentAgent: agent("codex"),
     });
     expect(result.modelOverride).toBe("gpt-5.2-codex");
-    expect(result.modelAlias).toBeUndefined();
   });
 
   test("does not leak a per-task model onto a fallback harness", () => {
@@ -385,28 +394,14 @@ describe("resolveExecutionPreferences — model", () => {
     expect(resolveAgentModel("grok")).toBe("grok-4.7");
   });
 
-  test("passes an unmapped family through when the environment selected the harness", () => {
-    // The built-in catalog does not model every harness. Without an explicit
-    // `Harness:` the value may still be a native alias, so it is not a task
-    // error; the CLI gets the final say.
-    const result = resolveExecutionPreferences({
-      description: withPreferences("Model: astra"),
-      currentAgent: agent("goose"),
-    });
-    expect(result.modelOverride).toBe("astra");
-    expect(result.displayModel).toBe("astra");
-    expect(result.modelAlias).toBeUndefined();
-    expect(result.notes.join("\n")).toContain('"astra" is not a known family for harness "goose"');
-  });
-
-  test("fails when the task names a harness incompatible with the family", () => {
+  test("leaves model validation to an explicitly selected harness", () => {
     process.env.GOOSE_CLI_PATH = "/bin/true";
-    expect(() =>
-      resolveExecutionPreferences({
-        description: withPreferences("Harness: goose\nModel: astra"),
-        currentAgent: agent("claude-code"),
-      }),
-    ).toThrow(/not available for harness "goose"/);
+    const result = resolveExecutionPreferences({
+      description: withPreferences("Harness: goose\nModel: custom-model"),
+      currentAgent: agent("claude-code"),
+    });
+    expect(result.modelOverride).toBe("custom-model");
+    expect(result.notes.join("\n")).not.toContain("warning");
   });
 });
 
@@ -503,7 +498,7 @@ describe("resolveExecutionPreferences — failover child", () => {
     expect(result.notes.join("\n")).toContain('belongs to the ignored harness "codex"');
   });
 
-  test("does not resolve an alias for the ignored harness onto the pinned harness", () => {
+  test("does not apply a model for the ignored harness onto the pinned harness", () => {
     process.env.DEVINTERN_WORKER_CHILD = "1";
     process.env.DEVINTERN_HARNESS_CHAIN = "claude-code,grok";
     const pinned = agent("claude-code");
@@ -517,15 +512,14 @@ describe("resolveExecutionPreferences — failover child", () => {
     expect(result.notes.join("\n")).toContain('Model "astra" ignored');
   });
 
-  test("still resolves a model when the requested harness matches the pinned entry", () => {
+  test("passes a native model alias unchanged when the harness matches the pinned entry", () => {
     process.env.DEVINTERN_WORKER_CHILD = "1";
     process.env.DEVINTERN_HARNESS_CHAIN = "claude-code,grok";
     const result = resolveExecutionPreferences({
-      description: withPreferences("Harness: grok\nModel: astra"),
+      description: withPreferences("Harness: grok\nModel: native-alias"),
       currentAgent: agent("grok"),
     });
-    expect(result.modelOverride).toBe("grok-4");
-    expect(result.modelAlias).toBe("astra");
+    expect(result.modelOverride).toBe("native-alias");
   });
 
   test("ignores a model-only exact id on a fallback attempt", () => {
@@ -543,7 +537,7 @@ describe("resolveExecutionPreferences — failover child", () => {
     expect(result.notes.join("\n")).toContain('pinned to fallback harness "grok"');
   });
 
-  test("ignores a model-only alias that only the primary chain entry supports", () => {
+  test("ignores a model-only native alias on a fallback attempt", () => {
     process.env.DEVINTERN_WORKER_CHILD = "1";
     process.env.DEVINTERN_HARNESS_CHAIN = "codex,opencode";
     process.env.OPENCODE_MODEL = "opencode/fallback-default";
