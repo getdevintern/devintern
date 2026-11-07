@@ -6,6 +6,9 @@ import {
 } from "../src/harness-chain.js";
 import { resolveHarness } from "../src/resolver.js";
 import { getHarness } from "../src/registry.js";
+import { detectSandboxProviders } from "../src/sandbox/detect.js";
+import { registerSandboxProvider } from "../src/sandbox/registry.js";
+import type { SandboxProvider } from "../src/sandbox/types.js";
 
 describe("parseHarnessList", () => {
   test("defaults to claude-code when raw is undefined", () => {
@@ -232,6 +235,196 @@ describe("resolveHarnessChain", () => {
     });
     expect(probes).toBe(0);
     expect(chain.entries.map((e) => e.name)).toEqual(["codex", "grok"]);
+  });
+
+  test("auto keeps fallbacks supported by a different provider", async () => {
+    const providers: SandboxProvider[] = [
+      { name: "auto-primary-test", harness: "codex", priority: 10000 },
+      { name: "auto-fallback-test", harness: "grok", priority: 9999 },
+    ].map(({ name, harness, priority }) => ({
+      name, displayName: name, priority,
+      detect: async () => ({ available: true }),
+      supportsHarness: (value: string) => value === harness,
+      wrapCommand: () => ({ path: process.execPath, args: ["--version"] }),
+    }));
+    for (const provider of providers) registerSandboxProvider(provider);
+    try {
+      // Earlier files may have populated the process-wide detection cache.
+      await detectSandboxProviders({ fresh: true });
+      const chain = await resolveHarnessChain({
+        raw: "codex,grok", isInstalled: alwaysInstalled, sandboxName: "auto", trustedEnv: {},
+      });
+      expect(chain.entries.map(entry => entry.name)).toEqual(["codex", "grok"]);
+      expect(chain.issues).toEqual([]);
+    } finally {
+      // Registered fixtures must not influence subsequent automatic selection.
+      for (const provider of providers) provider.priority = 0;
+      await detectSandboxProviders({ fresh: true });
+    }
+  });
+
+  test("probes directly when a non-nestable provider is already inside a sandbox", async () => {
+    let wraps = 0;
+    const provider: SandboxProvider = {
+      name: "chain-inherit-kernel",
+      displayName: "chain inherit kernel (test)",
+      priority: 1,
+      detect: async () => ({ available: true }),
+      wrapCommand: () => {
+        wraps++;
+        return { path: "/nonexistent/probe-binary", args: [] };
+      },
+    };
+    registerSandboxProvider(provider);
+    // `process.execPath --version` exits 0, while the wrapper above always
+    // fails: the chain stays usable only because the probe ran the real path.
+    process.env.CODEX_CLI_PATH = process.execPath;
+    process.env.GROK_CLI_PATH = process.execPath;
+
+    const chain = await resolveHarnessChain({
+      raw: "codex,grok",
+      isInstalled: alwaysInstalled,
+      sandboxName: provider.name,
+      trustedEnv: { NONO_CAP_FILE: process.execPath },
+    });
+
+    expect(wraps).toBe(0);
+    expect(chain.issues).toEqual([]);
+    expect(chain.entries.map((e) => e.name)).toEqual(["codex", "grok"]);
+  });
+
+  test("reports a harness that cannot start under the inherited sandbox", async () => {
+    // Regression guard for silently keeping a broken harness: inside an
+    // enclosing sandbox the probe must run the harness directly and surface
+    // the failure, not skip because the configured provider cannot nest.
+    const provider: SandboxProvider = {
+      name: "chain-inherit-fails",
+      displayName: "chain inherit fails (test)",
+      priority: 1,
+      detect: async () => ({ available: true }),
+      wrapCommand: () => ({ path: process.execPath, args: ["-e", ""] }),
+    };
+    registerSandboxProvider(provider);
+    process.env.OPENCODE_CLI_PATH = process.execPath;
+    process.env.GROK_CLI_PATH = "/nonexistent/devintern-inherited-harness";
+
+    const chain = await resolveHarnessChain({
+      raw: "opencode,grok",
+      isInstalled: alwaysInstalled,
+      sandboxName: provider.name,
+      trustedEnv: { NONO_CAP_FILE: process.execPath },
+    });
+
+    expect(chain.entries.map((e) => e.name)).toEqual(["opencode"]);
+    expect(chain.issues).toHaveLength(1);
+    expect(chain.issues[0]!.requested).toBe("grok");
+    expect(chain.issues[0]!.reason).toBe("sandbox-incompatible");
+    expect(chain.issues[0]!.message).toContain("nono (inherited) sandbox");
+    expect(chain.issues[0]!.message).toContain("GROK_CLI_PATH");
+  });
+
+  test("drops a fallback the explicit provider cannot wrap inside an enclosing sandbox", async () => {
+    // `resolveSandbox` rejects native+grok before the nesting decision, so the
+    // fallback would throw on failover even though the run inherits nono.
+    const provider: SandboxProvider = {
+      name: "chain-inherit-supported-primary",
+      displayName: "chain inherit supported primary (test)",
+      priority: 1,
+      detect: async () => ({ available: true }),
+      supportsHarness: (harnessName) => harnessName === "claude-code",
+      wrapCommand: () => ({ path: process.execPath, args: ["-e", ""] }),
+    };
+    registerSandboxProvider(provider);
+    process.env.CLAUDE_CLI_PATH = process.execPath;
+    process.env.GROK_CLI_PATH = process.execPath;
+
+    const chain = await resolveHarnessChain({
+      raw: "claude-code,grok",
+      isInstalled: alwaysInstalled,
+      sandboxName: provider.name,
+      trustedEnv: { NONO_CAP_FILE: process.execPath },
+    });
+
+    expect(chain.entries.map((e) => e.name)).toEqual(["claude-code"]);
+    expect(chain.issues).toHaveLength(1);
+    expect(chain.issues[0]!.requested).toBe("grok");
+    expect(chain.issues[0]!.reason).toBe("sandbox-incompatible");
+    expect(chain.issues[0]!.message).toContain("does not support");
+    expect(chain.issues[0]!.message).toContain("GROK_CLI_PATH");
+  });
+
+  test("auto probes directly inside an enclosing sandbox", async () => {
+    // `auto` never adds a layer inside an enclosing sandbox, so the real run
+    // spawns the harness unwrapped there. A broken fallback must still be
+    // dropped with a sandbox-incompatible issue instead of being silently kept.
+    process.env.OPENCODE_CLI_PATH = process.execPath;
+    process.env.GROK_CLI_PATH = "/nonexistent/devintern-auto-inherited-harness";
+
+    const chain = await resolveHarnessChain({
+      raw: "opencode,grok",
+      isInstalled: alwaysInstalled,
+      sandboxName: "auto",
+      trustedEnv: { NONO_CAP_FILE: process.execPath },
+    });
+
+    expect(chain.entries.map((e) => e.name)).toEqual(["opencode"]);
+    expect(chain.issues).toHaveLength(1);
+    expect(chain.issues[0]!.requested).toBe("grok");
+    expect(chain.issues[0]!.reason).toBe("sandbox-incompatible");
+    expect(chain.issues[0]!.message).toContain("nono (inherited) sandbox");
+    expect(chain.issues[0]!.message).toContain("GROK_CLI_PATH");
+  });
+
+  test("still probes a nesting-capable provider inside an enclosing sandbox", async () => {
+    let wraps = 0;
+    const provider: SandboxProvider = {
+      name: "chain-inherit-vm",
+      displayName: "chain inherit VM (test)",
+      priority: 1,
+      canNestInSandbox: true,
+      detect: async () => ({ available: true }),
+      wrapCommand: () => {
+        wraps++;
+        return { path: process.execPath, args: ["-e", ""] };
+      },
+    };
+    registerSandboxProvider(provider);
+
+    const chain = await resolveHarnessChain({
+      raw: "codex,grok",
+      isInstalled: alwaysInstalled,
+      sandboxName: provider.name,
+      trustedEnv: { NONO_CAP_FILE: process.execPath },
+    });
+
+    expect(wraps).toBe(2);
+    expect(chain.issues).toEqual([]);
+    expect(chain.entries.map((e) => e.name)).toEqual(["codex", "grok"]);
+  });
+
+  test("outside any enclosing sandbox a non-nestable provider is still probed", async () => {
+    let wraps = 0;
+    const provider: SandboxProvider = {
+      name: "chain-no-enclosing",
+      displayName: "chain no enclosing (test)",
+      priority: 1,
+      detect: async () => ({ available: true }),
+      wrapCommand: () => {
+        wraps++;
+        return { path: process.execPath, args: ["-e", ""] };
+      },
+    };
+    registerSandboxProvider(provider);
+
+    const chain = await resolveHarnessChain({
+      raw: "codex",
+      isInstalled: alwaysInstalled,
+      sandboxName: provider.name,
+      trustedEnv: {},
+    });
+
+    expect(wraps).toBe(1);
+    expect(chain.issues).toEqual([]);
   });
 
   test("drops a sandbox-incompatible fallback and reports the fix", async () => {

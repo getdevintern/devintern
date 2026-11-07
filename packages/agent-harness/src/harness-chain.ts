@@ -118,6 +118,13 @@ export interface HarnessChainOptions {
   /** Provider override (tests/doctor); otherwise derived from `sandboxName`. */
   sandboxProvider?: SandboxProvider;
   /**
+   * Environment to inspect for enclosing-sandbox markers when deriving the
+   * probe provider. Defaults to the trusted startup snapshot captured by
+   * `activeSandboxName()`, so tests can inject markers without mutating the
+   * real process environment.
+   */
+  trustedEnv?: NodeJS.ProcessEnv;
+  /**
    * Sandbox readiness probe override (tests). Called only when a sandbox is
    * configured. Returning `{ ok: false, reason }` marks the entry as
    * sandbox-incompatible; thrown errors fail open.
@@ -317,9 +324,11 @@ function sandboxIncompatibleIssue(
  * spawning fails with the familiar actionable error instead of an empty chain.
  *
  * When a sandbox is configured, entries are probed in parallel through the
- * sandbox wrapper. Fallbacks that cannot start are dropped; a failing primary
- * is kept with an issue because an empty chain is worse. Probe infrastructure
- * errors fail open (the entry is kept).
+ * sandbox wrapper. Inside an enclosing sandbox that the configured provider
+ * cannot nest in, the probe runs the harness unwrapped instead, because the
+ * real run inherits that confinement. Fallbacks that cannot start are dropped;
+ * a failing primary is kept with an issue because an empty chain is worse.
+ * Probe infrastructure errors fail open (the entry is kept).
  *
  * @param options - Raw value override, installability toggles, and test hooks.
  * @returns The resolved chain with usable entries and dropped-entry issues.
@@ -342,12 +351,15 @@ export async function resolveHarnessChain(
   let provider = options.sandboxProvider;
   if (!provider && !options.probeSandbox) {
     try {
-      provider = await resolveProbeProvider(sandboxName);
+      provider = await resolveProbeProvider(sandboxName, {
+        trustedEnv: options.trustedEnv,
+        harnessName: base.entries[0]?.name,
+      });
     } catch {
       provider = undefined;
     }
   }
-  if (!provider && !options.probeSandbox) {
+  if (!provider && !options.probeSandbox && sandboxName !== "auto") {
     // No usable provider to probe through; startup will surface the sandbox
     // error. Never fail the chain because readiness probing itself failed.
     return base;
@@ -369,7 +381,27 @@ export async function resolveHarnessChain(
         return { ok: true };
       }
       try {
-        return await probe({ name: entry.name, path: entry.path });
+        // Auto chooses a provider independently for each harness at spawn time.
+        const entryProvider =
+          sandboxName === "auto" && !options.sandboxProvider && !options.probeSandbox
+            ? await resolveProbeProvider(sandboxName, {
+                trustedEnv: options.trustedEnv,
+                harnessName: entry.name,
+              })
+            : provider;
+        if (entryProvider?.supportsHarness && !entryProvider.supportsHarness(entry.name)) {
+          return {
+            ok: false,
+            reason: `the configured ${sandboxName} sandbox does not support the "${entry.name}" harness`,
+          };
+        }
+        if (options.probeSandbox) return await probe(entry);
+        if (!entryProvider) return { ok: true };
+        return await probeHarnessUnderSandbox({
+          path: entry.path,
+          provider: entryProvider,
+          harnessName: entry.name,
+        });
       } catch {
         // Probe infrastructure failure (e.g. provider wrap throws) is not
         // evidence that the harness is unusable — fail open.
