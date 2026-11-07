@@ -73,7 +73,6 @@ const USAGE_LIMIT_PATTERNS = [
   // JSON Internal error (`"message": "API error (status 402 Payment Required): ..."`).
   // Allow a JSON `"...": "` prefix so the diagnostic still matches inside that object.
   /(?:^|:\s*")(?:api error \(status 402 payment required\):\s*)?grok build usage balance exhausted\b/i,
-  /(?:^|:\s*")api error \(status 402 payment required\)/i,
   // Goose maps provider HTTP 402 responses to this error and can exit zero.
   /^(?:error:\s*)?credits exhausted:\s+[^\n]+$/i,
   /^(?:⚠\s*)?individual quota reached\.\s+please upgrade your subscription to increase your limits[.]?$/i,

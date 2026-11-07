@@ -211,6 +211,22 @@ describe("detectUsageLimit", () => {
     expect(detectUsageLimit(transcript, "").limited).toBe(false);
   });
 
+  test("ignores numbered source listings with quoted Grok payment errors", () => {
+    const transcript = [
+      '    75\t  // JSON Internal error (`"message": "API error (status 402 Payment Required): ..."`).',
+      '    76\t  /(?:^|:\\s*")api error \\(status 402 payment required\\)/i,',
+      '    77\t  // JSON Internal error (`"message": "API error (status 402 Payment Required): Grok Build usage balance exhausted"`).',
+    ].join("\n");
+
+    expect(detectUsageLimit("", transcript).limited).toBe(false);
+    expect(detectUsageLimit(transcript, "").limited).toBe(false);
+  });
+
+  test("ignores a quoted payment error without a balance-exhaustion diagnostic", () => {
+    const prose = 'Example: "API error (status 402 Payment Required): ..."';
+    expect(detectUsageLimit("", prose).limited).toBe(false);
+  });
+
   test("detects Goose credits exhaustion despite its successful exit", () => {
     const out = "Error: Credits exhausted: Insufficient credits to complete this request";
     expect(detectUsageLimit("", out).limited).toBe(true);
