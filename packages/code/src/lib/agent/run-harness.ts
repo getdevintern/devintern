@@ -41,7 +41,11 @@ import {
 } from "../state/run-recorder";
 import type { TaskTrackerClient } from "../trackers/client";
 import { formatAgentInputNeededMarkdown } from "../trackers/shared/markdown-comment-formatter";
-import { HarnessUnavailableError, detectHarnessStartupFailure } from "./harness-startup";
+import {
+  HarnessUnavailableError,
+  describeAgentExitFailure,
+  detectHarnessStartupFailure,
+} from "./harness-startup";
 import { resolveAgentEffort, resolveAgentModel } from "./model";
 import { agentSandboxPolicy, getSandbox } from "./sandbox";
 import { harnessSpawnEnv } from "./spawn";
@@ -509,9 +513,15 @@ export async function runAgentSession(
             },
           });
         } else {
+          const failureDetail = describeAgentExitFailure(stdoutOutput, stderrOutput);
           console.log(`❌ Agent exited with non-zero code ${code}`);
+          if (failureDetail) {
+            console.log(`   Reason: ${failureDetail}`);
+          }
           console.log("   No JIRA comment will be posted due to execution failure");
-          reject(new Error(`Agent exited with code ${code}`));
+          reject(
+            new Error(`Agent exited with code ${code}${failureDetail ? `: ${failureDetail}` : ""}`),
+          );
         }
       });
     })().catch(reject);
