@@ -350,16 +350,22 @@ export async function collectHarnessPreflight(
 
   let provider: SandboxProvider | undefined;
   if (configured === "auto") {
-    provider = detections
-      .filter(
-        ({ provider: candidate, detection }) =>
-          detection.available &&
-          candidate.priority > 0 &&
-          (!primaryHarness ||
-            !candidate.supportsHarness ||
-            candidate.supportsHarness(primaryHarness)),
-      )
-      .sort((a, b) => b.provider.priority - a.provider.priority)[0]?.provider;
+    const rows = await Promise.all(
+      chain.entries.map(async (entry) => {
+        const selected = detections
+          .filter(
+            ({ provider: candidate, detection }) =>
+              detection.available &&
+              candidate.priority > 0 &&
+              (!candidate.supportsHarness || candidate.supportsHarness(entry.name)),
+          )
+          .sort((a, b) => b.provider.priority - a.provider.priority)[0]?.provider;
+        if (!selected) return [];
+        return probeChainEntries({ ...chain, entries: [entry] }, selected);
+      }),
+    );
+    const entries = rows.flat();
+    return entries.length ? { provider: "auto (per harness)", entries } : undefined;
   } else {
     const detected = detections.find((entry) => entry.provider.name === configured);
     provider = detected?.detection.available ? detected.provider : undefined;

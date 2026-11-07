@@ -359,7 +359,7 @@ export async function resolveHarnessChain(
       provider = undefined;
     }
   }
-  if (!provider && !options.probeSandbox) {
+  if (!provider && !options.probeSandbox && sandboxName !== "auto") {
     // No usable provider to probe through; startup will surface the sandbox
     // error. Never fail the chain because readiness probing itself failed.
     return base;
@@ -380,21 +380,28 @@ export async function resolveHarnessChain(
       if (!entry.installed) {
         return { ok: true };
       }
-      // The configured provider's harness support is enforced by
-      // `resolveSandbox` before it decides about nesting, so a harness it
-      // cannot wrap fails the run (or the failover spawn) even inside an
-      // enclosing sandbox. Report that instead of probing the harness as if it
-      // were runnable.
-      if (provider?.supportsHarness && !provider.supportsHarness(entry.name)) {
-        return {
-          ok: false,
-          reason:
-            `the configured ${sandboxName} sandbox does not support ` +
-            `the "${entry.name}" harness`,
-        };
-      }
       try {
-        return await probe({ name: entry.name, path: entry.path });
+        // Auto chooses a provider independently for each harness at spawn time.
+        const entryProvider =
+          sandboxName === "auto" && !options.sandboxProvider && !options.probeSandbox
+            ? await resolveProbeProvider(sandboxName, {
+                trustedEnv: options.trustedEnv,
+                harnessName: entry.name,
+              })
+            : provider;
+        if (entryProvider?.supportsHarness && !entryProvider.supportsHarness(entry.name)) {
+          return {
+            ok: false,
+            reason: `the configured ${sandboxName} sandbox does not support the "${entry.name}" harness`,
+          };
+        }
+        if (options.probeSandbox) return await probe(entry);
+        if (!entryProvider) return { ok: true };
+        return await probeHarnessUnderSandbox({
+          path: entry.path,
+          provider: entryProvider,
+          harnessName: entry.name,
+        });
       } catch {
         // Probe infrastructure failure (e.g. provider wrap throws) is not
         // evidence that the harness is unusable — fail open.

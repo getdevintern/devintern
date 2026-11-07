@@ -352,7 +352,7 @@ describe("buildSandboxDoctorReport", () => {
     // native has the higher priority but cannot wrap goose, so the doctor must
     // preflight through nono (matching the resolver) instead of failing a run
     // that will actually use nono.
-    expect(report?.provider).toBe("nono");
+    expect(report?.provider).toBe("auto (per harness)");
   });
 
   test("collectHarnessPreflight probes directly when the run inherits an enclosing sandbox", async () => {
@@ -569,4 +569,17 @@ describe("buildSandboxDoctorReport", () => {
     );
     expect(report.lines.join("\n")).not.toContain("nono pack profiles");
   });
+});
+
+test("auto selects a compatible provider for each fallback", async () => {
+  const primary = detected("primary-only", { priority: 100, harnesses: ["claude-code"] });
+  const fallback = detected("fallback-only", { priority: 90, harnesses: ["grok"] });
+  for (const item of [primary, fallback]) {
+    item.provider.wrapCommand = () => ({ path: process.execPath, args: ["--version"] });
+  }
+  const report = await collectHarnessPreflight("auto", [primary, fallback], "claude-code,grok");
+  expect(report?.entries.map((entry) => [entry.name, entry.ok])).toEqual([
+    ["claude-code", true],
+    ["grok", true],
+  ]);
 });

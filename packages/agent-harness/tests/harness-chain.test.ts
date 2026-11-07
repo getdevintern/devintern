@@ -236,6 +236,22 @@ describe("resolveHarnessChain", () => {
     expect(chain.entries.map((e) => e.name)).toEqual(["codex", "grok"]);
   });
 
+  test("auto keeps fallbacks supported by a different provider", async () => {
+    for (const [name, harness, priority] of [["auto-primary-test", "codex", 10000], ["auto-fallback-test", "grok", 9999]] as const) {
+      registerSandboxProvider({
+        name, displayName: name, priority,
+        detect: async () => ({ available: true }),
+        supportsHarness: (value) => value === harness,
+        wrapCommand: () => ({ path: process.execPath, args: ["--version"] }),
+      });
+    }
+    const chain = await resolveHarnessChain({
+      raw: "codex,grok", isInstalled: alwaysInstalled, sandboxName: "auto", trustedEnv: {},
+    });
+    expect(chain.entries.map(entry => entry.name)).toEqual(["codex", "grok"]);
+    expect(chain.issues).toEqual([]);
+  });
+
   test("probes directly when a non-nestable provider is already inside a sandbox", async () => {
     let wraps = 0;
     const provider: SandboxProvider = {
