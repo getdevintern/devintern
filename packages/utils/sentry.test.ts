@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 
 const sentryCalls = {
   init: 0,
@@ -34,13 +34,33 @@ const {
 } = await import("./src/sentry.ts");
 const { REDACTED, redactText, redactValue } = await import("./src/redact.ts");
 
+// A root-invoked `bun test` preloads packages/code/tests/setup/guard-sentry.ts,
+// which pins SENTRY_DISABLED=1 for the whole process. These tests need to lift
+// the pin to exercise initialization, but Bun shares process.env across test
+// files: leaving it deleted lets later CLI-spawning tests inherit no pin and
+// report expected validation errors to the production Sentry DSN. Restore the
+// original value after every test (matching sentry-init.test.ts).
+const originalSentryDisabled = process.env.SENTRY_DISABLED;
+
+function restoreSentryDisabled(): void {
+  if (originalSentryDisabled === undefined) {
+    delete process.env.SENTRY_DISABLED;
+  } else {
+    process.env.SENTRY_DISABLED = originalSentryDisabled;
+  }
+}
+
 describe("initErrorTracking", () => {
+  beforeEach(() => {
+    delete process.env.SENTRY_DISABLED;
+  });
+
   afterEach(() => {
     sentryCalls.init = 0;
     sentryCalls.initOpts = undefined;
     sentryCalls.captured = [];
     sentryCalls.flushed = 0;
-    delete process.env.SENTRY_DISABLED;
+    restoreSentryDisabled();
   });
 
   test("no-ops with SENTRY_DISABLED=1", () => {

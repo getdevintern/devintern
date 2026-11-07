@@ -7,14 +7,12 @@ import { extractHarnessFlags } from "./parse-args";
 
 describe("loadConfig harness resolution", () => {
   const originalEnv = { ...process.env };
-  const originalCwd = process.cwd();
   let testDir: string;
 
   beforeEach(() => {
     testDir = mkdtempSync(join(tmpdir(), "pm-config-test-"));
     mkdirSync(join(testDir, ".devintern-pm"));
     writeFileSync(join(testDir, ".devintern-pm", ".env"), "TASK_TRACKER=markdown\n");
-    process.chdir(testDir);
 
     delete process.env.AGENT_CLI_PATH;
     delete process.env.OPENCODE_CLI_PATH;
@@ -23,7 +21,6 @@ describe("loadConfig harness resolution", () => {
   });
 
   afterEach(() => {
-    process.chdir(originalCwd);
     rmSync(testDir, { recursive: true, force: true });
     for (const key of Object.keys(process.env)) {
       if (!(key in originalEnv)) delete process.env[key];

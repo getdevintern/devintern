@@ -261,18 +261,14 @@ describe("parseTrackerConfigFromEnv", () => {
 
 describe("loadEnvFromConfigDir", () => {
   let savedEnv: EnvSnapshot;
-  let originalCwd: string;
   let tempRoot: string;
 
   beforeEach(() => {
     savedEnv = snapshotEnv();
-    originalCwd = process.cwd();
     tempRoot = mkdtempSync(join(tmpdir(), "task-trackers-env-"));
-    process.chdir(tempRoot);
   });
 
   afterEach(() => {
-    process.chdir(originalCwd);
     restoreEnv(savedEnv);
     rmSync(tempRoot, { recursive: true, force: true });
   });
@@ -290,7 +286,7 @@ describe("loadEnvFromConfigDir", () => {
       ].join("\n"),
     );
 
-    await loadEnvFromConfigDir(configDir);
+    await loadEnvFromConfigDir(configDir, tempRoot);
 
     expect(process.env.JIRA_EMAIL).toBe("quoted@example.com");
     expect(process.env.JIRA_API_TOKEN).toBe("plain-token");
@@ -298,7 +294,7 @@ describe("loadEnvFromConfigDir", () => {
 
   test("is a no-op when .env file is missing", async () => {
     delete process.env.JIRA_EMAIL;
-    await loadEnvFromConfigDir(".missing-config-dir");
+    await loadEnvFromConfigDir(".missing-config-dir", tempRoot);
     expect(process.env.JIRA_EMAIL).toBeUndefined();
   });
 
@@ -309,16 +305,10 @@ describe("loadEnvFromConfigDir", () => {
     mkdirSync(join(tempRoot, configDir), { recursive: true });
     writeFileSync(join(tempRoot, configDir, ".env"), "JIRA_EMAIL=parent@example.com\n");
 
-    const previousCwd = process.cwd();
-    process.chdir(childDir);
-    try {
-      delete process.env.JIRA_EMAIL;
-      await loadEnvFromConfigDir(configDir);
+    delete process.env.JIRA_EMAIL;
+    await loadEnvFromConfigDir(configDir, childDir);
 
-      expect(process.env.JIRA_EMAIL).toBe("parent@example.com");
-    } finally {
-      process.chdir(previousCwd);
-    }
+    expect(process.env.JIRA_EMAIL).toBe("parent@example.com");
   });
 
   test("prefers nearest .env over parent .env", async () => {
@@ -330,15 +320,29 @@ describe("loadEnvFromConfigDir", () => {
     writeFileSync(join(tempRoot, configDir, ".env"), "JIRA_EMAIL=parent@example.com\n");
     writeFileSync(join(childDir, configDir, ".env"), "JIRA_EMAIL=child@example.com\n");
 
-    const previousCwd = process.cwd();
-    process.chdir(childDir);
+    delete process.env.JIRA_EMAIL;
+    await loadEnvFromConfigDir(configDir, childDir);
+
+    expect(process.env.JIRA_EMAIL).toBe("child@example.com");
+  });
+
+  test("defaults to cwd when baseDir is omitted", async () => {
+    // guard-git-state forbids process.chdir, so put the fixture directly under
+    // the test process cwd instead of changing into a temp directory. This is
+    // the production path for `devpm` with no --dir (pm/lib/config.ts passes
+    // an undefined baseDir to loadTrackerConfig).
+    const configDir = `.devintern-cwd-test-${process.pid}`;
+    const configPath = join(process.cwd(), configDir);
+    mkdirSync(configPath, { recursive: true });
+    writeFileSync(join(configPath, ".env"), "JIRA_EMAIL=cwd@example.com\n");
+
     try {
       delete process.env.JIRA_EMAIL;
       await loadEnvFromConfigDir(configDir);
 
-      expect(process.env.JIRA_EMAIL).toBe("child@example.com");
+      expect(process.env.JIRA_EMAIL).toBe("cwd@example.com");
     } finally {
-      process.chdir(previousCwd);
+      rmSync(configPath, { recursive: true, force: true });
     }
   });
 
@@ -360,29 +364,20 @@ describe("loadEnvFromConfigDir", () => {
     mkdirSync(childDir, { recursive: true });
     writeFileSync(join(tempRoot, ".env"), "JIRA_EMAIL=plain@example.com\n");
 
-    const previousCwd = process.cwd();
-    process.chdir(childDir);
-    try {
-      delete process.env.JIRA_EMAIL;
-      await loadEnvFromConfigDir(".missing-config-dir");
+    delete process.env.JIRA_EMAIL;
+    await loadEnvFromConfigDir(".missing-config-dir", childDir);
 
-      expect(process.env.JIRA_EMAIL).toBe("plain@example.com");
-    } finally {
-      process.chdir(previousCwd);
-    }
+    expect(process.env.JIRA_EMAIL).toBe("plain@example.com");
   });
 });
 
 describe("loadTrackerConfig", () => {
   let savedEnv: EnvSnapshot;
-  let originalCwd: string;
   let tempRoot: string;
 
   beforeEach(() => {
     savedEnv = snapshotEnv();
-    originalCwd = process.cwd();
     tempRoot = mkdtempSync(join(tmpdir(), "task-trackers-load-"));
-    process.chdir(tempRoot);
 
     for (const key of TRACKER_ENV_KEYS) {
       delete process.env[key];
@@ -390,7 +385,6 @@ describe("loadTrackerConfig", () => {
   });
 
   afterEach(() => {
-    process.chdir(originalCwd);
     restoreEnv(savedEnv);
     rmSync(tempRoot, { recursive: true, force: true });
   });
@@ -407,7 +401,7 @@ describe("loadTrackerConfig", () => {
       ].join("\n"),
     );
 
-    const config = await loadTrackerConfig(configDir);
+    const config = await loadTrackerConfig(configDir, tempRoot);
     expect(config.backend.type).toBe("linear");
     expect(config.linear?.apiKey).toBe("lin_api_from_file");
     expect(config.linear?.defaultTeamKey).toBe("PLAT");

@@ -1,4 +1,4 @@
-import { afterAll, afterEach, describe, expect, mock, test } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -33,11 +33,31 @@ const {
   shutdownErrorTracking,
 } = await import("./error-tracking.ts");
 
+// A root-invoked `bun test` preloads packages/code/tests/setup/guard-sentry.ts,
+// which pins SENTRY_DISABLED=1 for the whole process. This suite exercises
+// initialization, so it must lift the pin while it runs — but it must put the
+// original value back afterwards. Bun shares process.env across test files, so
+// leaving the pin deleted would let later CLI-spawning tests report expected
+// validation errors to the production Sentry DSN.
+const originalSentryDisabled = process.env.SENTRY_DISABLED;
+
+function restoreSentryDisabled(): void {
+  if (originalSentryDisabled === undefined) {
+    delete process.env.SENTRY_DISABLED;
+  } else {
+    process.env.SENTRY_DISABLED = originalSentryDisabled;
+  }
+}
+
 describe("error-tracking", () => {
   let tempDir: string;
 
   afterAll(() => {
     mock.restore();
+  });
+
+  beforeEach(() => {
+    delete process.env.SENTRY_DISABLED;
   });
 
   afterEach(async () => {
@@ -49,7 +69,7 @@ describe("error-tracking", () => {
     sentryCalls.captured = [];
     sentryCalls.capturedExtras = [];
     resetErrorDeduplicationForTests();
-    delete process.env.SENTRY_DISABLED;
+    restoreSentryDisabled();
   });
 
   async function setupSettings(analyticsEnabled?: boolean): Promise<void> {
