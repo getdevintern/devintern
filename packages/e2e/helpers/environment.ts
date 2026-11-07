@@ -16,6 +16,9 @@ export function isolatedEnvironment(root: string): Record<string, string> {
     GIT_CONFIG_NOSYSTEM: "1",
     GIT_CONFIG_GLOBAL: "/dev/null",
     GIT_TERMINAL_PROMPT: "0",
+    // The CLI walks upward for `.env`/config files and Git discovery. Stop both
+    // at the fixture root so a checkout or marker above it cannot leak in.
+    GIT_CEILING_DIRECTORIES: root,
     GIT_AUTHOR_NAME: "DevIntern E2E",
     GIT_AUTHOR_EMAIL: "e2e@example.invalid",
     GIT_COMMITTER_NAME: "DevIntern E2E",
