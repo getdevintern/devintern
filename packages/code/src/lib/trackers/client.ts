@@ -40,6 +40,17 @@ export interface TaskTrackerClient {
   /** Extract plain text from a task's description field. */
   extractDescriptionText(task: Task): string;
 
+  /**
+   * Extract a markdown-formatted view of a task's description for content
+   * parsing such as execution preferences.
+   *
+   * {@link extractDescriptionText} is the persisted identity for actioned and
+   * retry state, so it must stay stable across upgrades. Trackers whose plain
+   * text loses headings or code fences can expose a richer view here without
+   * changing those digests. Defaults to {@link extractDescriptionText}.
+   */
+  extractDescriptionMarkdown?(task: Task): string;
+
   // ------------------------------------------------------------------
   // Related work
   // ------------------------------------------------------------------

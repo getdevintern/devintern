@@ -620,6 +620,21 @@ AGENT_EFFORT=medium
 
 Valid values are `low`, `medium`, and `high` (anything else fails with a clear error). Lower effort runs faster and cheaper; higher effort reasons more deeply — useful for hard analysis tasks, while routine work can stay at the default (unset). The setting applies to every agent spawn, mirroring `AGENT_MODEL`, and degrades cleanly in failover chains: harnesses that expose reasoning effort emit it (Claude Code, Grok, Antigravity, and Reasonix via `--effort`, and Muse Code via `--reasoning-effort`; Cline via `--thinking`; Opencode v1 and Kilo Code via `--variant`; Codex via its `model_reasoning_effort` config override; pi composes it into the model string), harnesses that do not ignore it with a one-line warning. Because pi encodes effort in the model string, it only applies when a model is configured (`AGENT_MODEL` or `--model`); with no model set, pi ignores the effort and prints a one-line warning. OpenCode v2 removed `--variant` and instead folds the effort into the model reference (`provider/model#variant`), so on v2 it likewise only applies when a model is configured; with no model set it is ignored. When `AGENT_EFFORT` is unset no extra flags are emitted and behavior is unchanged.
 
+### Per-task overrides from the task description
+
+A task can override the harness, model, and effort for that task alone by adding an explicit preference block to its description:
+
+```markdown
+## Execution preferences
+Harness: codex
+Model: gpt-5.2
+Effort: high
+```
+
+The block ends at the next heading. A `devintern` HTML comment works too (`<!-- devintern: Harness: codex -->`), so the lines stay hidden in rendered descriptions. Trackers that flatten headings to plain text (Jira ADF, Azure DevOps HTML) also accept a line containing only `Execution preferences`, ending at the next heading or at a blank line followed by ordinary prose (blank lines between the heading and its fields, or between fields, are ignored); fenced code samples and `<pre>` / `<code>` sections are ignored. If the heading is lost entirely, use the comment form. Bare `Harness:`/`Model:`/`Effort:` lines outside such a block are treated as ordinary prose, not configuration.
+
+Each line is optional and independent; omitted values fall back to the environment defaults above. `Model:` is passed unchanged to the selected harness as an exact identifier or a native CLI alias (including OpenCode v2 `provider/model#variant` references). DevIntern does not define model aliases or select model versions; the harness validates model compatibility and availability. `Effort:` is applied only when the selected harness supports reasoning effort; otherwise it is ignored with a warning. Unknown harnesses, conflicting repeated values, and invalid efforts fail the task with an actionable message. When only `Harness:` is set, `AGENT_MODEL` is not carried over because it is harness-specific — the task uses that harness's `<HARNESS>_MODEL` when configured, otherwise its default model. A task-selected harness resolves its CLI from `<HARNESS>_CLI_PATH` (or `PATH`); `AGENT_CLI_PATH` still applies only to the environment-selected primary harness. The effective selection is printed before the run and recorded in run history. See [usage.md](usage.md#per-task-execution-preferences) for the full syntax.
+
 Set `AGENT_CLI_PATH` only when the CLI is not on your `PATH` or uses a non-standard name. You can give it a bare command name or a full path. Avoid committing an **absolute** path to a shared `.env`: it is machine-specific, so copying an `.env` from macOS (`/Users/...`) to a Linux host (`/home/...`) would point at a non-existent binary. If the configured command cannot be found, devintern fails fast at startup with a message telling you the CLI is not on your `PATH`.
 
 **Advanced spawn tuning** (rarely needed):

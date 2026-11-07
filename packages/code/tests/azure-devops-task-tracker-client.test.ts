@@ -5,6 +5,8 @@ import {
 } from "../src/lib/trackers/azure-devops/azure-devops-task-tracker-client";
 import type { AzureDevOpsClient, AzureDevOpsWorkItemDetail } from "@devintern/task-trackers";
 import { formatProcessingFailureMarkdown } from "../src/lib/trackers/shared/markdown-comment-formatter";
+import { Utils } from "../src/lib/utils";
+import type { Task } from "../src/types/task-tracker";
 
 function makeWorkItem(
   overrides: Partial<AzureDevOpsWorkItemDetail> = {},
@@ -214,6 +216,43 @@ describe("AzureDevOpsTaskTrackerClient estimation", () => {
 
     const found = await adapter.findEstimationComment("4211");
     expect(found).toEqual({ commentId: "9", created: "2026-01-03T00:00:00Z" });
+  });
+});
+
+describe("AzureDevOpsTaskTrackerClient execution preferences", () => {
+  function descriptionTask(html: string): Task {
+    return {
+      raw: makeWorkItem({ fields: { ...makeWorkItem().fields, "System.Description": html } }),
+    } as unknown as Task;
+  }
+
+  test("extractDescriptionMarkdown ignores preference samples inside code blocks", () => {
+    const adapter = makeAdapter({});
+    const task = descriptionTask(
+      "<p>Please fix login.</p>" +
+        "<pre><code>## Execution preferences\nHarness: codex\nModel: gpt-5.2</code></pre>" +
+        "<p>Thanks</p>",
+    );
+
+    const markdown = adapter.extractDescriptionMarkdown(task);
+    expect(markdown).toContain("Please fix login.");
+    expect(markdown).not.toContain("Harness: codex");
+    expect(Utils.extractExecutionPreferences(markdown)).toEqual({ preferences: {}, conflicts: [] });
+
+    // The identity digest keeps its historical flattened form.
+    expect(adapter.extractDescriptionText(task)).toContain("Harness: codex");
+  });
+
+  test("extractDescriptionMarkdown keeps a real preference heading", () => {
+    const adapter = makeAdapter({});
+    const task = descriptionTask(
+      "<h2>Execution preferences</h2><p>Harness: codex</p><p>Model: gpt-5.2</p>",
+    );
+
+    expect(Utils.extractExecutionPreferences(adapter.extractDescriptionMarkdown(task))).toEqual({
+      preferences: { harness: "codex", model: "gpt-5.2" },
+      conflicts: [],
+    });
   });
 });
 
