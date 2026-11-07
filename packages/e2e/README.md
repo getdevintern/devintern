@@ -257,6 +257,44 @@ bun run --filter @getdevintern/code build
 bun run --filter @devintern/e2e test
 ```
 
+## Worker conflict-resolution failover
+
+`tests/local/worker-conflict-failover.test.ts` covers the same two-entry
+`AGENT_HARNESS=claude-code,codex` chain on a real worker conflict-resolution
+job, plus the one-shot `devintern resolve-conflicts` contract. No GitHub,
+GitLab, Jira, or agent account is used.
+
+The fixture seeds a genuine merge conflict on a temporary bare remote
+(`git init --bare`) and serves the open MR from a loopback GitLab API fake.
+`git` reaches that remote through `url.<bare>.insteadOf`, so the worker's
+clone, fetch, and push stay on the local repository. The primary stub records
+its invocation, prints `Claude usage limit reached` with the adjacent
+`resets in 1 hour` hint, and exits non-zero. The fallback stub `exec`s
+`helpers/fake-agent.ts`, which resolves `src/greeting.ts` to
+`Hello, merged!`. `AGENT_CLI_PATH` is cleared so `<HARNESS>_CLI_PATH` selects
+each stub. `HOME`, `XDG_CONFIG_HOME`, the queue DB, and the output directory
+come from the fixture's isolated environment.
+
+On the quota-then-success path the worker invokes the primary stub once, fails
+over to codex, and updates `feature/conflict-pr` with an ordinary `git push`
+(no `--force` or `+` refspec). The pushed commit's parents are the previous
+feature tip and the base tip, the base branch is unchanged, and the worker
+stays running. The queue has no injected task. This GitLab conflict job does
+not record a run row; the processed sync id is the success signal. When both
+stubs are limited, the job is deferred, both `rate_limit:` windows are
+persisted, nothing is pushed, merged, or closed, the sync id stays unprocessed,
+and the poller does not retry inside its 30s backoff.
+
+The one-shot command is the documented first-harness contract
+(`packages/agent-harness/src/resolver.ts`): only the primary stub runs, the
+codex stub is not invoked, and an exhausted primary exits nonzero with
+`Agent usage limit reached`. This suite does not add one-shot failover.
+
+```sh
+bun run build
+bun run --filter @devintern/e2e test
+```
+
 ## Sandbox checks (nono, native, docker, removed providers)
 
 The ordinary local suite exercises sandbox provider selection and the
