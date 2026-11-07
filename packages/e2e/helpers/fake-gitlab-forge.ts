@@ -2,11 +2,12 @@
  * Loopback GitLab v4 stand-in for offline conflict-resolution tests.
  *
  * Serves only the endpoints the worker conflict path actually calls, and
- * reads branch SHAs from a local bare repository. Mergeability follows the
- * real git history: a single-parent tip is `conflict`, and a merge commit
- * (two parents) is `mergeable`, so post-push verification sees the pushed
- * SHA without a provider recompute delay. No token, header, or body is
- * written to the request log.
+ * reads branch SHAs from a local bare repository. `diff_refs.base_sha` is
+ * the merge base of the two tips, and `start_sha` is the target tip.
+ * Mergeability is `git merge-tree --write-tree` of the source tip into the
+ * target tip: a clean result is `mergeable`, and a conflicted result is
+ * `conflict`. A git failure is thrown so the handler returns 500 instead of
+ * a false conflict. No token, header, or body is written to the request log.
  */
 
 import { spawnSync } from "node:child_process";
@@ -138,8 +139,11 @@ export class FakeGitlabForge {
 
   private mergeRequest(): unknown {
     const head = this.revParse(this.options.sourceBranch);
-    const base = this.revParse(this.options.targetBranch);
-    const parents = this.parentCount(this.options.sourceBranch);
+    const start = this.revParse(this.options.targetBranch);
+    // base_sha is where the branches diverged. The target tip is start_sha.
+    // Production copies base_sha into the poll snapshot and compares it with
+    // origin/<target>, which is this start SHA once the target has moved on.
+    const base = this.mergeBase(this.options.sourceBranch, this.options.targetBranch);
     return {
       iid: 1,
       title: "Conflict PR",
@@ -151,8 +155,8 @@ export class FakeGitlabForge {
       target_project_id: PROJECT_ID,
       web_url: this.mergeRequestUrl,
       reviewers: [],
-      detailed_merge_status: parents >= 2 ? "mergeable" : "conflict",
-      diff_refs: { base_sha: base, head_sha: head },
+      detailed_merge_status: this.detailedMergeStatus(start, head),
+      diff_refs: { base_sha: base, start_sha: start, head_sha: head },
     };
   }
 
@@ -184,22 +188,52 @@ export class FakeGitlabForge {
     return result.stdout.trim();
   }
 
-  private parentCount(branch: string): number {
+  /** Commit where `source` and `target` diverged. GitLab calls this `base_sha`. */
+  private mergeBase(source: string, target: string): string {
     const result = spawnSync(
       this.options.gitBin,
       [
         "--git-dir",
         this.options.gitDir,
-        "rev-list",
-        "--parents",
-        "-n",
-        "1",
-        `refs/heads/${branch}`,
+        "merge-base",
+        `refs/heads/${source}`,
+        `refs/heads/${target}`,
       ],
       { encoding: "utf8" },
     );
-    if (result.status !== 0) return 0;
-    return result.stdout.trim().split(/\s+/).filter(Boolean).length - 1;
+    if (result.status !== 0) {
+      const detail = (
+        result.stderr ||
+        result.stdout ||
+        result.error?.message ||
+        "no output"
+      ).trim();
+      throw new Error(
+        `fixture git could not find the merge base of ${source} and ${target}: ${detail}`,
+      );
+    }
+    return result.stdout.trim();
+  }
+
+  /**
+   * Mergeability of `head` into `base`.
+   *
+   * `git merge-tree --write-tree` exits 0 when the merge is clean and 1 when
+   * the tips conflict. Any other status (missing ref, killed process, wrapper
+   * failure) is thrown so {@link handle} returns 500. A nonzero status must
+   * not be reported as `conflict`: post-push verification treats a conflict
+   * as a dirty landed merge and treats HTTP 500 as unverified.
+   */
+  private detailedMergeStatus(base: string, head: string): "mergeable" | "conflict" {
+    const result = spawnSync(
+      this.options.gitBin,
+      ["--git-dir", this.options.gitDir, "merge-tree", "--write-tree", base, head],
+      { encoding: "utf8" },
+    );
+    if (result.status === 0) return "mergeable";
+    if (result.status === 1) return "conflict";
+    const detail = (result.stderr || result.stdout || result.error?.message || "no output").trim();
+    throw new Error(`fixture git merge-tree failed (${result.status ?? "signal"}): ${detail}`);
   }
 }
 

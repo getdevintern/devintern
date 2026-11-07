@@ -277,11 +277,13 @@ come from the fixture's isolated environment.
 
 On the quota-then-success path the worker invokes the primary stub once, fails
 over to codex, and updates `feature/conflict-pr` with an ordinary `git push`
-(no `--force` or `+` refspec). The conflict is gone, the base branch is
-unchanged, the worker stays running, and the queue has no injected task and no
-permanent run failure. When both stubs are limited, the job is deferred, both
-`rate_limit:` windows are persisted, nothing is pushed, merged, or closed, and
-the poller does not retry inside its 30s backoff.
+(no `--force` or `+` refspec). The pushed commit's parents are the previous
+feature tip and the base tip, the base branch is unchanged, and the worker
+stays running. The queue has no injected task. This GitLab conflict job does
+not record a run row; the processed sync id is the success signal. When both
+stubs are limited, the job is deferred, both `rate_limit:` windows are
+persisted, nothing is pushed, merged, or closed, the sync id stays unprocessed,
+and the poller does not retry inside its 30s backoff.
 
 The one-shot command is the documented first-harness contract
 (`packages/agent-harness/src/resolver.ts`): only the primary stub runs, the

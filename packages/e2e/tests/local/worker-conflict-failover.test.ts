@@ -82,7 +82,10 @@ interface ConflictHarness {
   gitLog: string;
   stubs: FailoverStubs;
   headSha: string;
+  /** Target-branch tip. Second parent of the pushed merge. */
   baseSha: string;
+  /** Divergence commit. GitLab `diff_refs.base_sha`, and the processed sync id. */
+  mergeBaseSha: string;
   /** Git-wrapper lines written before the worker or one-shot command starts. */
   gitBaseline: number;
 }
@@ -252,7 +255,21 @@ function revParse(realGit: string, gitDir: string, branch: string): string {
   return result.stdout.trim();
 }
 
-function parentCount(realGit: string, gitDir: string, branch: string): number {
+/** Commit where the two branch tips diverged. GitLab reports this as `base_sha`. */
+function mergeBase(realGit: string, gitDir: string, left: string, right: string): string {
+  const result = spawnSync(
+    realGit,
+    ["--git-dir", gitDir, "merge-base", `refs/heads/${left}`, `refs/heads/${right}`],
+    { encoding: "utf8" },
+  );
+  if (result.status !== 0) {
+    throw new Error(`git merge-base failed for ${left} and ${right}: ${result.stderr}`);
+  }
+  return result.stdout.trim();
+}
+
+/** Parent SHAs of `branch`, in the order `git rev-list --parents` prints them. */
+function commitParents(realGit: string, gitDir: string, branch: string): string[] {
   const result = spawnSync(
     realGit,
     ["--git-dir", gitDir, "rev-list", "--parents", "-n", "1", `refs/heads/${branch}`],
@@ -261,7 +278,15 @@ function parentCount(realGit: string, gitDir: string, branch: string): number {
   if (result.status !== 0) {
     throw new Error(`git rev-list failed for ${branch}: ${result.stderr}`);
   }
-  return result.stdout.trim().split(/\s+/).filter(Boolean).length - 1;
+  const ids = result.stdout.trim().split(/\s+/).filter(Boolean);
+  if (ids.length === 0) {
+    throw new Error(`git rev-list returned no commit for ${branch}`);
+  }
+  return ids.slice(1);
+}
+
+function parentCount(realGit: string, gitDir: string, branch: string): number {
+  return commitParents(realGit, gitDir, branch).length;
 }
 
 function showFile(realGit: string, gitDir: string, branch: string, path: string): string {
@@ -482,14 +507,24 @@ async function openConflictHarness(
     }
     if (!forge) throw new Error("fake GitLab forge did not start");
 
+    const headSha = revParse(gitBin, worker.remote, FEATURE_BRANCH);
+    const baseSha = revParse(gitBin, worker.remote, worker.baseBranch);
+    const mergeBaseSha = mergeBase(gitBin, worker.remote, FEATURE_BRANCH, worker.baseBranch);
+    if (mergeBaseSha === baseSha) {
+      throw new Error(
+        "seeded merge base equals the target tip, so GitLab base_sha would match origin/<base>",
+      );
+    }
+
     return {
       worker,
       forge,
       realGit: gitBin,
       gitLog,
       stubs,
-      headSha: revParse(gitBin, worker.remote, FEATURE_BRANCH),
-      baseSha: revParse(gitBin, worker.remote, worker.baseBranch),
+      headSha,
+      baseSha,
+      mergeBaseSha,
       gitBaseline: gitLines(gitLog).length,
     };
   } catch (error) {
@@ -563,7 +598,12 @@ cliTest(
         150_000,
       );
 
-      const expectedSync = syncEventId(fixture.forge.baseUrl, fixture.baseSha, fixture.headSha);
+      // The poll snapshot copies diff_refs.base_sha, the merge base, not the target tip.
+      const expectedSync = syncEventId(
+        fixture.forge.baseUrl,
+        fixture.mergeBaseSha,
+        fixture.headSha,
+      );
       await fixture.worker.waitFor("the conflict sync to be marked processed", () => {
         const rows = processedEvents(fixture.worker.dbPath);
         return rows.some(
@@ -612,10 +652,11 @@ cliTest(
       expect(revParse(fixture.realGit, fixture.worker.remote, FEATURE_BRANCH)).not.toBe(
         fixture.headSha,
       );
+      // `git merge origin/<base>` records the previous feature tip, then the base.
       expect(
-        parentCount(fixture.realGit, fixture.worker.remote, FEATURE_BRANCH),
+        commitParents(fixture.realGit, fixture.worker.remote, FEATURE_BRANCH),
         diagnostics(),
-      ).toBe(2);
+      ).toEqual([fixture.headSha, fixture.baseSha]);
 
       const pushes = pushLines(fixture.gitLog, fixture.gitBaseline);
       expect(pushes, diagnostics()).toEqual([`push origin ${FEATURE_BRANCH}`]);
@@ -635,11 +676,10 @@ cliTest(
       ).toBe(false);
       expect(fixture.forge.authFailures, diagnostics()).toEqual([]);
 
+      // GitLab resolveMr does not call RunStore.createRun, so a run row is not
+      // the outcome record. The processed sync id above is.
       expect(fixture.worker.injectedRows(), diagnostics()).toEqual([]);
-      expect(
-        fixture.worker.runRecords().filter((run) => run.status === "failed"),
-        diagnostics(),
-      ).toEqual([]);
+      expect(fixture.worker.logs, diagnostics()).toContain("syncing to the actual tip");
       expect(fixture.worker.logs, diagnostics()).toContain("claude-code hit a usage limit");
       expect(fixture.worker.logs, diagnostics()).toContain("failing over to codex");
       expect(fixture.worker.rateLimits()["claude-code"] ?? 0, diagnostics()).toBeGreaterThan(
@@ -700,11 +740,9 @@ cliTest(
         processedEvents(fixture.worker.dbPath).some((row) => row.external_id.startsWith("sync:")),
         diagnostics(),
       ).toBe(false);
+      // A deferred GitLab conflict job also writes no run. The unprocessed
+      // sync id above is the deferral record.
       expect(fixture.worker.injectedRows(), diagnostics()).toEqual([]);
-      expect(
-        fixture.worker.runRecords().filter((run) => run.status === "failed"),
-        diagnostics(),
-      ).toEqual([]);
       expect(limits["claude-code"]).toBeGreaterThan(Date.now());
       expect(limits.codex).toBeGreaterThan(Date.now());
       expect(fixture.worker.activeHarness(), diagnostics()).toBe("codex");
