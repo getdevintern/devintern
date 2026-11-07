@@ -180,6 +180,37 @@ devintern MYAPP-456
 - Target branch can be specified with `--pr-target-branch`. If omitted (or if the named branch does not exist on the remote), the repository default branch is used
 - Target branch can also be auto-detected from the task description. Add a line like `Target branch: develop` to the card or issue and `devintern` will pick it up. Supported patterns: `Target branch:`, `Base branch:`, `PR target:`. Falls back to `--pr-target-branch` if no pattern matches.
 
+### Per-Task Execution Preferences
+
+Just like the target branch, you can override the agent harness, model, and reasoning effort for a single task from the task description — without changing your defaults or restarting the worker. Preferences are read only from an explicit block, so ordinary ticket prose is never mistaken for configuration:
+
+```markdown
+## Execution preferences
+Harness: opencode
+Model: astra
+Effort: high
+```
+
+The block starts at an `Execution preferences` (or `Agent execution preferences`) heading and ends at the next heading. Trackers that flatten headings to plain text (Jira ADF, Azure DevOps HTML) are also recognized: a line containing only `Execution preferences` opens a block, which ends at the next heading or at a blank line followed by ordinary prose (blank lines between the heading and its fields, or between fields, are ignored). Fenced code samples and `<pre>` / `<code>` sections are ignored, so pasting the example above does not configure the task. If the heading disappears entirely for your tracker, use the comment form below. You can also put the lines in a `devintern` HTML comment, which stays hidden in rendered descriptions:
+
+```markdown
+<!-- devintern: Harness: codex -->
+<!-- devintern
+Model: gpt
+Effort: high
+-->
+```
+
+- All three are optional and independent. Omitted preferences use your existing defaults (`AGENT_HARNESS`, `AGENT_MODEL`, `AGENT_EFFORT`).
+- Recognized labels (case-insensitive, markdown formatting tolerated): `Harness:` / `Agent harness:`, `Model:` / `Agent model:`, `Effort:` / `Reasoning effort:` / `Agent effort:`. Each label and value must be on its own line; a bare `Harness:`/`Model:`/`Effort:` line elsewhere in the description is ignored.
+- `Model:` accepts a **family or alias** (for example `astra`) and resolves to the latest compatible model for the selected harness, or an exact model identifier when you need a specific version (including OpenCode v2 `provider/model#variant` references). Family names are matched case-insensitively. Built-in families are `astra` for `claude-code`, `codex`, `antigravity`, `grok`, `deepseek`, `opencode`, `cline`, and `pi`, plus `gpt` for `codex`. Any other value is passed through to the harness as-is, so native aliases DevIntern does not model keep working.
+- `Effort:` is `low`, `medium`, or `high`. It is applied only when the selected harness supports reasoning effort; otherwise the preference is ignored with a warning and the task proceeds.
+- Unknown harnesses, conflicting values (the same label twice with different values), incompatible harness/model combinations (an explicitly named `Harness:` with a family that does not map to it), and invalid effort values fail the task with an actionable message instead of silently using a different preference. When no `Harness:` is named, an unmapped family is passed through with a warning rather than failing the task, because the environment-selected CLI may still understand it.
+- When only `Harness:` is set, `AGENT_MODEL` is **not** carried over (it is harness-specific); the task uses that harness's `<HARNESS>_MODEL` when configured, otherwise its own default model. `Model:` still wins when present.
+- A task-selected harness resolves its CLI from `<HARNESS>_CLI_PATH` (or your `PATH`); `AGENT_CLI_PATH` applies only to the environment-selected primary harness.
+- In unattended worker runs, failover pins each attempt to the active harness. If the description names a different harness, that preference is ignored with a warning so the worker can still fail over correctly; reorder `AGENT_HARNESS` to change which harness the worker uses.
+- The effective harness, resolved model, and applied (or ignored) effort are printed before the run starts and recorded in the run history.
+
 ## What It Does
 
 1. **Fetches** task details (description, custom fields where supported, comments, attachments)

@@ -35,7 +35,15 @@ import {
 } from "../workspace/paths";
 
 let cliOverride: string | undefined;
-let cached: Promise<ResolvedSandbox | null> | null = null;
+/**
+ * Keyed by `<sandbox override>\0<harness>`. A batch can select different
+ * harnesses per task, and the provider compatibility check plus nono pack /
+ * native / docker mapping depend on the harness actually being spawned, so one
+ * shared resolution per process would wrap later runs with the first task's
+ * harness.
+ */
+const cachedSandboxes = new Map<string, Promise<ResolvedSandbox | null>>();
+let sandboxAnnounced = false;
 
 /**
  * Record the `--sandbox` CLI flag value. Must be called during CLI parsing,
@@ -45,23 +53,29 @@ let cached: Promise<ResolvedSandbox | null> | null = null;
  */
 export function setSandboxOverride(name: string | undefined): void {
   cliOverride = name;
-  cached = null;
+  cachedSandboxes.clear();
+  sandboxAnnounced = false;
 }
 
 /**
- * Resolve the sandbox for agent spawns, memoized per process.
+ * Resolve the sandbox for agent spawns, memoized per sandbox provider and
+ * harness.
  *
  * @param harnessName - The harness being wrapped, for compatibility filtering.
  * @returns The resolved sandbox, or `null` to spawn the agent directly.
  */
 export function getSandbox(harnessName: string): Promise<ResolvedSandbox | null> {
+  const key = `${cliOverride ?? ""}\0${harnessName}`;
+  let cached = cachedSandboxes.get(key);
   if (!cached) {
     cached = resolveSandbox({ sandboxName: cliOverride, harnessName }).then((resolved) => {
-      if (resolved) {
+      if (resolved && !sandboxAnnounced) {
+        sandboxAnnounced = true;
         console.log(`🔒 Agent sandbox: ${resolved.provider.displayName}`);
       }
       return resolved;
     });
+    cachedSandboxes.set(key, cached);
   }
   return cached;
 }
