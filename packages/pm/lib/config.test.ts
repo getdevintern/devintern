@@ -20,6 +20,9 @@ describe("loadConfig harness resolution", () => {
     delete process.env.OPENCODE_CLI_PATH;
     delete process.env.CLAUDE_CLI_PATH;
     delete process.env.AGENT_HARNESS;
+    // Worker subprocesses intentionally read no env files; these tests load
+    // the project config from disk.
+    delete process.env.DEVINTERN_WORKER_SUBPROCESS;
   });
 
   afterEach(() => {
@@ -51,5 +54,86 @@ describe("loadConfig harness resolution", () => {
     const config = await loadConfig({ harnessName: harness, baseDir: testDir });
     expect(config.agent.harness.name).toBe("opencode");
     expect(config.agent.path).toBe(opencodeCli);
+  });
+});
+
+describe("loadConfig workspace env fallback", () => {
+  const originalEnv = { ...process.env };
+  const originalCwd = process.cwd();
+  let testDir: string;
+  let workspaceDir: string;
+
+  const trackerKeys = [
+    "TASK_TRACKER",
+    "MARKDOWN_TASKS_DIR",
+    "JIRA_BASE_URL",
+    "JIRA_EMAIL",
+    "JIRA_API_TOKEN",
+    "JIRA_DEFAULT_PROJECT_KEY",
+  ];
+
+  beforeEach(() => {
+    testDir = mkdtempSync(join(tmpdir(), "pm-config-workspace-test-"));
+    workspaceDir = join(testDir, "workspace");
+    mkdirSync(workspaceDir, { recursive: true });
+    process.chdir(testDir);
+    process.env.DEVINTERN_WORKSPACE_DIR = workspaceDir;
+    delete process.env.DEVINTERN_WORKER_SUBPROCESS;
+    delete process.env.AGENT_CLI_PATH;
+    delete process.env.OPENCODE_CLI_PATH;
+    delete process.env.CLAUDE_CLI_PATH;
+    delete process.env.AGENT_HARNESS;
+    for (const key of trackerKeys) delete process.env[key];
+  });
+
+  afterEach(() => {
+    process.chdir(originalCwd);
+    rmSync(testDir, { recursive: true, force: true });
+    for (const key of Object.keys(process.env)) {
+      if (!(key in originalEnv)) delete process.env[key];
+    }
+    Object.assign(process.env, originalEnv);
+  });
+
+  function writeExecutable(path: string): void {
+    writeFileSync(path, "#!/bin/sh\n");
+    chmodSync(path, 0o755);
+  }
+
+  test("CLI fallback resolves the tracker from the workspace .env", async () => {
+    const cli = join(testDir, "agent");
+    writeExecutable(cli);
+    process.env.AGENT_CLI_PATH = cli;
+    writeFileSync(join(workspaceDir, ".env"), "TASK_TRACKER=markdown\nMARKDOWN_TASKS_DIR=.tasks\n");
+    // MARKDOWN_TASKS_DIR is repo-scoped, so it always comes from the project;
+    // the shared workspace file only contributes the tracker selection.
+    mkdirSync(join(testDir, ".devintern-pm"), { recursive: true });
+    writeFileSync(join(testDir, ".devintern-pm", ".env"), "MARKDOWN_TASKS_DIR=project-tasks\n");
+
+    const config = await loadConfig({ baseDir: testDir, workspaceEnvFallback: true });
+
+    expect(config.backend.type).toBe("markdown");
+    expect(config.backend.directory).toBe("project-tasks");
+  });
+
+  test("CLI fallback does not inherit the workspace tasks directory", async () => {
+    const cli = join(testDir, "agent");
+    writeExecutable(cli);
+    process.env.AGENT_CLI_PATH = cli;
+    writeFileSync(join(workspaceDir, ".env"), "TASK_TRACKER=markdown\nMARKDOWN_TASKS_DIR=.tasks\n");
+
+    const config = await loadConfig({ baseDir: testDir, workspaceEnvFallback: true });
+
+    expect(config.backend.type).toBe("markdown");
+    expect(config.backend.directory).toBeUndefined();
+  });
+
+  test("legacy loadConfig(projectDir) does not adopt the workspace .env", async () => {
+    const cli = join(testDir, "agent");
+    writeExecutable(cli);
+    process.env.AGENT_CLI_PATH = cli;
+    writeFileSync(join(workspaceDir, ".env"), "TASK_TRACKER=markdown\n");
+
+    await expect(loadConfig(testDir)).rejects.toThrow(/Missing required environment variables/);
   });
 });

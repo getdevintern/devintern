@@ -4,6 +4,12 @@ import { delimiter, dirname, join, resolve } from "node:path";
 export interface FindEnvFileOptions {
   /** Optional config directory name to check first (e.g. '.devintern-code', '.devintern-pm') */
   configDirName?: string;
+  /**
+   * Also match a plain `.env` when no config-dir `.env` is found (default: true).
+   * Set to false to resolve only `{configDirName}/.env` while keeping the same
+   * traversal rules.
+   */
+  includePlainEnv?: boolean;
   /** Stop traversal at the home directory (default: true) */
   stopAtHome?: boolean;
   /** Stop traversal when reaching a .git directory (default: true) */
@@ -63,13 +69,13 @@ function walkUpDirectories(options: WalkUpOptions, onDir: (currentDir: string) =
  * Find the nearest .env file by traversing up the directory tree.
  *
  * At each directory level, checks for `{configDirName}/.env` first,
- * then a plain `.env` file. Returns the path to the first match,
- * or `null` if none is found.
+ * then a plain `.env` file (unless `includePlainEnv` is false). Returns the
+ * path to the first match, or `null` if none is found.
  *
  * Traversal stops at the filesystem root, home directory, or a .git root.
  */
 export function findEnvFile(options: FindEnvFileOptions = {}): string | null {
-  const { configDirName, ...walkOptions } = options;
+  const { configDirName, includePlainEnv = true, ...walkOptions } = options;
   let found: string | null = null;
 
   walkUpDirectories(walkOptions, (currentDir) => {
@@ -79,6 +85,10 @@ export function findEnvFile(options: FindEnvFileOptions = {}): string | null {
         found = configEnvPath;
         return true;
       }
+    }
+
+    if (!includePlainEnv) {
+      return false;
     }
 
     const plainEnvPath = join(currentDir, ".env");

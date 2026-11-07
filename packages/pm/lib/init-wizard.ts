@@ -11,7 +11,8 @@
  * falls back to the non-interactive template scaffold in `init.ts`.
  */
 
-import { join } from "node:path";
+import { homedir } from "node:os";
+import { join, sep } from "node:path";
 import {
   PROBE_TIMEOUT_MS,
   defaultProbe,
@@ -19,8 +20,11 @@ import {
   promptForTracker,
   promptReuseExistingConfig,
   promptSteps,
+  resolveWorkspaceEnvPath,
+  resolveWorkspaceTracker,
   validateConnection,
   withTimeout,
+  withoutRepoSpecificValues,
 } from "@devintern/task-trackers";
 import type { ExistingTrackerConfig } from "@devintern/task-trackers";
 import { ensureGitignore } from "./init";
@@ -83,23 +87,80 @@ export interface PmInitContext {
   envPath: string;
   /** Tracker credentials found in `.devintern-code/.env`, if reusable. */
   reusableFromCode: ExistingTrackerConfig | null;
+  /**
+   * Tracker credentials found in the DevIntern workspace `.env`
+   * (`$DEVINTERN_WORKSPACE_DIR/.env`, default `~/.devintern/.env`), if reusable.
+   * Only populated when {@link PmInitInspectOptions.includeWorkspace} is set.
+   */
+  reusableFromWorkspace?: ExistingTrackerConfig | null;
+  /** Workspace `.env` path inspected for {@link reusableFromWorkspace}. */
+  workspaceEnvPath?: string;
+}
+
+/** Options for {@link inspectPmInitContext}. */
+export interface PmInitInspectOptions {
+  /**
+   * Also inspect the DevIntern workspace `.env`. The CLI wizard opts in; hosts
+   * such as the desktop app leave it off so opening a folder never reads (or
+   * ships over IPC) workspace-wide secrets.
+   */
+  includeWorkspace?: boolean;
 }
 
 /**
- * Inspect `cwd` for an existing pm config and reusable `@devintern/code`
- * tracker credentials. Used by the desktop setup wizard.
+ * Inspect `cwd` for an existing pm config and reusable tracker credentials
+ * from `.devintern-code/.env` or, when opted in, the DevIntern workspace `.env`.
+ * Used by the desktop setup wizard and the interactive CLI.
  */
-export async function inspectPmInitContext(cwd: string): Promise<PmInitContext> {
+export async function inspectPmInitContext(
+  cwd: string,
+  options: PmInitInspectOptions = {},
+): Promise<PmInitContext> {
   const envPath = join(cwd, ".devintern-pm", ".env");
   const configExists = await pathExists(envPath);
 
   let reusableFromCode: ExistingTrackerConfig | null = null;
   const codeEnvPath = join(cwd, ".devintern-code", ".env");
-  if (await pathExists(codeEnvPath)) {
-    reusableFromCode = extractExistingTrackerConfig(await readFile(codeEnvPath), PM_TRACKER_SETUP);
+  try {
+    if (await pathExists(codeEnvPath)) {
+      reusableFromCode = extractExistingTrackerConfig(
+        await readFile(codeEnvPath),
+        PM_TRACKER_SETUP,
+      );
+    }
+  } catch {
+    // Optional config source (missing, unreadable, or not a regular file)
   }
 
-  return { configExists, envPath, reusableFromCode };
+  if (!options.includeWorkspace) {
+    return { configExists, envPath, reusableFromCode };
+  }
+
+  let reusableFromWorkspace: ExistingTrackerConfig | null = null;
+  const workspaceEnvPath = resolveWorkspaceEnvPath();
+  try {
+    if (await pathExists(workspaceEnvPath)) {
+      // The workspace `.env` may omit TASK_TRACKER (canonical workspaces keep it
+      // in workspace.toml), and all its repo-scoped keys belong to another repo.
+      const extracted = extractExistingTrackerConfig(
+        await readFile(workspaceEnvPath),
+        PM_TRACKER_SETUP,
+        await resolveWorkspaceTracker(undefined, { projectDir: cwd }),
+      );
+      reusableFromWorkspace = extracted ? withoutRepoSpecificValues(extracted) : null;
+    }
+  } catch {
+    // Optional workspace config (missing, unreadable, or not a regular file)
+  }
+
+  return { configExists, envPath, reusableFromCode, reusableFromWorkspace, workspaceEnvPath };
+}
+
+/** Human-readable source label for reusable workspace credentials. */
+function workspaceSourceLabel(envPath: string): string {
+  const home = homedir();
+  const display = envPath.startsWith(`${home}${sep}`) ? `~${envPath.slice(home.length)}` : envPath;
+  return `DevIntern workspace (${display})`;
 }
 
 /**
@@ -191,7 +252,8 @@ export async function runPmInitWizard(deps: PmInitWizardDeps = {}): Promise<void
   }
 
   try {
-    const { configExists, envPath, reusableFromCode } = await inspectPmInitContext(cwd);
+    const { configExists, envPath, reusableFromCode, reusableFromWorkspace, workspaceEnvPath } =
+      await inspectPmInitContext(cwd, { includeWorkspace: true });
     if (configExists) {
       log(`\n⚠️  Configuration already exists: ${envPath}`);
       const answer = (await prompt("Overwrite it? (y/N): ")).trim().toLowerCase();
@@ -204,18 +266,23 @@ export async function runPmInitWizard(deps: PmInitWizardDeps = {}): Promise<void
     const values: Record<string, string> = {};
     let trackerId: string | undefined;
 
-    // Fast track: reuse tracker credentials from an existing @devintern/code
-    // config in the same project (env var names are shared).
-    if (reusableFromCode) {
-      const reused = await promptReuseExistingConfig(reusableFromCode, {
-        sourceLabel: "@devintern/code configuration (.devintern-code/.env)",
-        trackerName: PM_TRACKER_NAMES[reusableFromCode.trackerId] ?? reusableFromCode.trackerId,
-        steps: PM_TRACKER_SETUP[reusableFromCode.trackerId] ?? [],
+    // Fast track: prefer the project's @devintern/code config, then fall back
+    // to the DevIntern workspace config (env var names are shared).
+    const reusable = reusableFromCode ?? reusableFromWorkspace ?? null;
+    if (reusable) {
+      const sourceLabel = reusableFromCode
+        ? "@devintern/code configuration (.devintern-code/.env)"
+        : workspaceSourceLabel(workspaceEnvPath ?? resolveWorkspaceEnvPath());
+      const reused = await promptReuseExistingConfig(reusable, {
+        sourceLabel,
+        source: reusableFromCode ? "project" : "workspace",
+        trackerName: PM_TRACKER_NAMES[reusable.trackerId] ?? reusable.trackerId,
+        steps: PM_TRACKER_SETUP[reusable.trackerId] ?? [],
         prompt,
         log,
         values,
       });
-      if (reused) trackerId = reusableFromCode.trackerId;
+      if (reused) trackerId = reusable.trackerId;
     }
 
     const reusedExisting = trackerId !== undefined;

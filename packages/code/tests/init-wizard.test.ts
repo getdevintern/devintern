@@ -369,6 +369,34 @@ describe("runInitWizard", () => {
     expect(env).toContain("LINEAR_DEFAULT_TEAM_KEY=ENG");
   });
 
+  test("fast track: project reuse does not force optional repo-scoped prompts", async () => {
+    mkdirSync(join(tempDir, ".devintern-pm"), { recursive: true });
+    writeFileSync(
+      join(tempDir, ".devintern-pm", ".env"),
+      "TASK_TRACKER=linear\nLINEAR_API_KEY=lin_api_shared\n",
+      "utf8",
+    );
+
+    const { prompt, asked } = promptQueue([
+      "y", // accept reuse
+      "", // skip PR token
+      "n", // decline sign-in offer
+    ]);
+    await runInitWizard({
+      ...testDeps(),
+      prompt,
+      probe: () => Promise.resolve(),
+      cwd: tempDir,
+      log: silentLog,
+    });
+
+    expect(asked.some((q) => q.includes("Enter a number"))).toBe(false);
+    expect(asked.some((q) => q.includes("Default Linear team key"))).toBe(false);
+    const env = readFileSync(join(tempDir, ".devintern-code", ".env"), "utf8");
+    expect(env).toContain("LINEAR_API_KEY=lin_api_shared");
+    expect(env).toContain("# LINEAR_DEFAULT_TEAM_KEY=ENG");
+  });
+
   test("fast track: declining reuse falls back to the tracker menu", async () => {
     mkdirSync(join(tempDir, ".devintern-pm"), { recursive: true });
     writeFileSync(

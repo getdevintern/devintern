@@ -4,7 +4,7 @@ sidebarLabel: "Configuration"
 description: "Environment variables, tracker credentials, and defaults for @devintern/pm."
 section: "Create Tasks"
 order: 2
-dateModified: 2026-08-08
+dateModified: 2026-11-03
 ---
 
 # @devintern/pm Configuration
@@ -222,7 +222,23 @@ When set to `1` or `true`, every API request, response status, and retry attempt
 
 @devintern/pm searches for `.devintern-pm/.env` by traversing up from the current working directory to the project root (the nearest `.git` directory or your home directory). You can run `devpm` from any subdirectory of your project and it will find the correct config automatically.
 
-Run `devpm init` once per project to create this file (guided wizard in a terminal, or `devpm init --yes` for the template).
+In manual CLI mode, configuration is layered (higher wins). Missing keys fall through to the next layer, and inherited environment variables fill anything no file provides:
+
+1. Nearest `.devintern-pm/.env` (explicit project config).
+2. Nearest project plain `.env`.
+3. DevIntern workspace `.env`: `$DEVINTERN_WORKSPACE_DIR/.env`, defaulting to `~/.devintern/.env`.
+4. Inherited `process.env`.
+
+This means a partial project `.env` still picks up tracker credentials from your workspace config, while project-specific values win. Two workspace-layer rules keep that safe:
+
+- In the `devpm` CLI's workspace fallback, repo-scoped values (`JIRA_DEFAULT_PROJECT_KEY`, `LINEAR_DEFAULT_TEAM_KEY`, `GITHUB_REPO`, `GITHUB_OWNER`, `GITLAB_PROJECT`, `AZURE_DEVOPS_PROJECT`, `TRELLO_DEFAULT_BOARD_ID`, `TRELLO_DEFAULT_LIST_NAME`, `ASANA_DEFAULT_PROJECT_GID`, `MARKDOWN_TASKS_DIR`) are never read from the shared workspace `.env`. Set them in `.devintern-pm/.env` (or the project plain `.env`); otherwise the tracker leaves the destination unset (Jira, GitHub, GitLab, and Azure DevOps report the value as missing; Linear, Trello, and Asana use the account's first team/board/project) instead of filing into another repository's destination. The DevIntern worker is different: `devintern worker init` merges a repo's `.devintern-code/.env` into the shared workspace `.env`, and worker task subprocesses inherit that file as a base layer, so a repo-scoped key that exists only there still applies. Per-repo `[repos.env]`, team env layers, and `GITHUB_REPO` derived from the repo remote override it; for multi-repo workspaces set repo-scoped destinations in those layers so each checkout keeps its own.
+- When `workspace.toml` exists, the tracker for the current checkout is canonical for the workspace layer: a `[[teams]]` entry whose `repo` matches the checkout's git origin (or its routing rules, or `DEVINTERN_WORKSPACE_TEAM`/`DEVINTERN_WORKSPACE_REPO` under the worker), then `[defaults].tracker`, then the first `[[teams]].tracker`. A stale `TASK_TRACKER` in the shared `.env` therefore cannot re-route the CLI. An explicit `TASK_TRACKER` in a project env file or the inherited shell environment still wins.
+
+`.devintern-code/.env` is **not** read at runtime; only the `devpm init` wizard may reuse it.
+
+Worker-spawned subprocesses (`DEVINTERN_WORKER_SUBPROCESS=1`) are different: the DevIntern worker already injects the exact per-repo/team credential layer, with `TASK_TRACKER` pinned last. The `devpm` CLI therefore reads no env files at all in that mode — neither `.devintern-pm/.env` nor a plain checkout `.env` nor the workspace `.env` — so a committed or stale project file cannot re-route the task or replace the injected credentials. Hosts that only read project config (the PM desktop app's `loadConfig(projectDir)`) are unaffected by the marker and keep loading the project's own `.devintern-pm/.env`.
+
+Run `devpm init` once per project to create this file (guided wizard in a terminal, or `devpm init --yes` for the template). The interactive wizard can reuse tracker credentials from your project's `.devintern-code/.env` or, when that is unavailable, from the workspace `.env` (shown as `DevIntern workspace (~/.devintern/.env)`). Repo-scoped values (`JIRA_DEFAULT_PROJECT_KEY`, `LINEAR_DEFAULT_TEAM_KEY`, `GITHUB_REPO`, `GITHUB_OWNER`, `GITLAB_PROJECT`, `AZURE_DEVOPS_PROJECT`, `TRELLO_DEFAULT_BOARD_ID`, `TRELLO_DEFAULT_LIST_NAME`, `ASANA_DEFAULT_PROJECT_GID`, `MARKDOWN_TASKS_DIR`) are prompted per project instead of inherited, because the shared workspace file may belong to a different repository. Reuse only writes `.devintern-pm/.env`; the workspace file is never modified. Both init modes follow the same rule and prefer the workspace's team/repo mapping in `$DEVINTERN_WORKSPACE_DIR/workspace.toml` (then `[defaults].tracker`) over a `TASK_TRACKER` in the shared workspace `.env` (an explicit project `.devintern-code/.env` still wins). When no tracker can be resolved, the non-interactive template leaves `TASK_TRACKER` commented out too, so credentials and tracker selected in the workspace later are still honored. Projects initialized by an older `devpm init` keep an active `TASK_TRACKER` in `.devintern-pm/.env`; because an explicit project value intentionally outranks `workspace.toml`, rerun `devpm init` (or comment that line out) to let the workspace choose the tracker for this checkout.
 
 ## Error Reporting
 

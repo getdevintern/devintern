@@ -26,6 +26,11 @@ export interface LoadConfigOptions {
   cliPath?: string;
   /** Directory to resolve config from (defaults to cwd). */
   baseDir?: string;
+  /**
+   * Load the DevIntern workspace `.env` as a fallback (CLI only). Desktop
+   * callers use the string overload and keep project-scoped lookup.
+   */
+  workspaceEnvFallback?: boolean;
 }
 
 /** Build auth configuration for the CLI's persisted Supabase session. */
@@ -66,6 +71,8 @@ export async function migrateLegacyConfigDir(baseDir: string = process.cwd()): P
  * Load and validate application configuration from environment variables.
  *
  * Reads `.devintern-pm/.env` first, then validates backend-specific required vars.
+ * CLI callers can opt into the DevIntern workspace `.env` fallback; the legacy
+ * string overload (pm-desktop) keeps project-scoped lookup.
  *
  * @param optionsOrBaseDir - Optional harness overrides, or a bare base-directory
  *   string (legacy callers such as pm-desktop).
@@ -75,7 +82,9 @@ export async function migrateLegacyConfigDir(baseDir: string = process.cwd()): P
 export async function loadConfig(optionsOrBaseDir?: LoadConfigOptions | string): Promise<Config> {
   const options =
     typeof optionsOrBaseDir === "string" ? { baseDir: optionsOrBaseDir } : optionsOrBaseDir;
-  const trackerConfig = await loadTrackerConfig(".devintern-pm", options?.baseDir);
+  const trackerConfig = await loadTrackerConfig(".devintern-pm", options?.baseDir, {
+    workspaceEnvFallback: options?.workspaceEnvFallback,
+  });
   const agent = resolveHarness({
     harnessName: options?.harnessName,
     cliPath: options?.cliPath,

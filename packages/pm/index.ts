@@ -193,6 +193,7 @@ async function main() {
     // under FSL, so pm performs no license check.
     configForInteractive = await loadConfig({
       harnessName: harnessFlags.harness,
+      workspaceEnvFallback: true,
     });
 
     const engine: PmEngine = await createEngine(configForInteractive, {

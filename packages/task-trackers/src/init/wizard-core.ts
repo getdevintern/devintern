@@ -9,6 +9,7 @@
  */
 
 import { BUNDLED_TRELLO_API_KEY } from "../config/load-tracker-config.ts";
+import { REPO_SCOPED_ENV_KEYS } from "../config/repo-scoped-env-keys.ts";
 import {
   AsanaClient,
   AzureDevOpsClient,
@@ -18,6 +19,10 @@ import {
   LinearClient,
   TrelloClient,
 } from "../clients/index.ts";
+
+// The set lives in `config/` so the runtime env loader can share it without
+// importing this module; re-exported here for existing init callers.
+export { REPO_SCOPED_ENV_KEYS };
 
 export const PROBE_TIMEOUT_MS = 10_000;
 export const MAX_EDIT_ATTEMPTS = 3;
@@ -211,18 +216,39 @@ export interface ExistingTrackerConfig {
 }
 
 /**
+ * Drop repo-scoped values from a reusable config so callers prompt for the
+ * current project's destination instead of inheriting another project's.
+ *
+ * @returns The filtered config, or null when only repo-scoped values remained.
+ */
+export function withoutRepoSpecificValues(
+  existing: ExistingTrackerConfig,
+): ExistingTrackerConfig | null {
+  const values = Object.fromEntries(
+    Object.entries(existing.values).filter(([key]) => !REPO_SCOPED_ENV_KEYS.has(key)),
+  );
+  return Object.keys(values).length > 0 ? { trackerId: existing.trackerId, values } : null;
+}
+
+/**
  * Extract reusable tracker credentials from a sibling DevIntern product's
  * `.env` (env var names are shared across @devintern/code and @devintern/pm).
  *
+ * @param envContent - Raw `.env` contents.
+ * @param setup - Per-tracker prompt tables.
+ * @param trackerHint - Authoritative tracker id (e.g. `[defaults].tracker` from
+ *   a DevIntern `workspace.toml`). Wins over the file's `TASK_TRACKER`, which
+ *   can be stale in a shared workspace `.env`.
  * @returns null when the file's tracker is unknown to `setup` or none of its
  * step values are present
  */
 export function extractExistingTrackerConfig(
   envContent: string,
   setup: Record<string, EnvPromptStep[]>,
+  trackerHint?: string,
 ): ExistingTrackerConfig | null {
   const env = parseEnvContent(envContent);
-  const trackerId = env.TASK_TRACKER || "jira";
+  const trackerId = trackerHint || env.TASK_TRACKER || "jira";
   const steps = setup[trackerId];
   if (!steps) return null;
   const values: Record<string, string> = {};
@@ -235,8 +261,9 @@ export function extractExistingTrackerConfig(
 
 /**
  * Fast track: offer to reuse credentials found in a sibling product's config.
- * On accept, copies them into `values` and prompts only for required steps
- * the existing config does not cover.
+ * On accept, copies them into `values` and prompts for required steps the
+ * existing config does not cover. When the source is the shared workspace,
+ * repo-scoped destination steps filtered out of that config are prompted too.
  *
  * @returns true when accepted (skip tracker selection and credential
  * prompts), false to run the normal flow
@@ -246,6 +273,12 @@ export async function promptReuseExistingConfig(
   opts: {
     /** Where the config came from, e.g. "@devintern/code (.devintern-code/.env)". */
     sourceLabel: string;
+    /**
+     * Which config supplied the credentials. Only a shared `workspace` source
+     * lost repo-scoped destinations during filtering; a `project` source still
+     * has them, so its optional steps keep their normal skip behavior.
+     */
+    source?: "workspace" | "project";
     trackerName: string;
     steps: EnvPromptStep[];
     prompt: PromptFn;
@@ -253,12 +286,20 @@ export async function promptReuseExistingConfig(
     values: Record<string, string>;
   },
 ): Promise<boolean> {
-  const { sourceLabel, trackerName, steps, prompt, log, values } = opts;
+  const { sourceLabel, source = "project", trackerName, steps, prompt, log, values } = opts;
   log(`\n📋 Found an existing ${sourceLabel} for ${trackerName}.`);
   const answer = (await prompt("Reuse those credentials? (Y/n): ")).trim().toLowerCase();
   if (answer === "n" || answer === "no") return false;
   Object.assign(values, existing.values);
-  const missing = steps.filter((step) => !step.optional && !values[step.key]);
+  // Repo-scoped destinations (project key, repo, board, team, project GID,
+  // task dir) are filtered out of shared workspace config before reuse. Ask for
+  // them even when the tracker marks them optional: silently falling back to
+  // the account's first board/team is how a task lands in another project.
+  const missing = steps.filter(
+    (step) =>
+      !values[step.key] &&
+      (!step.optional || (source === "workspace" && REPO_SCOPED_ENV_KEYS.has(step.key))),
+  );
   if (missing.length > 0) {
     await promptSteps(missing, prompt, log, values);
   }

@@ -1,13 +1,22 @@
 export type { TrackerConfig, TrackerType } from "./config/types.ts";
 export {
   BUNDLED_TRELLO_API_KEY,
+  WORKER_SUBPROCESS_ENV,
   loadEnvFromConfigDir,
   loadTrackerConfig,
   parseGitHubRepo,
   parseGitLabProject,
   parseTrackerConfigFromEnv,
+  parseWorkspaceTracker,
+  resolveWorkspaceDir,
+  resolveWorkspaceEnvPath,
+  resolveWorkspaceTracker,
   sanitizeDomain,
   sanitizeGitlabBaseUrl,
+} from "./config/load-tracker-config.ts";
+export type {
+  LoadTrackerConfigOptions,
+  ResolveWorkspaceTrackerOptions,
 } from "./config/load-tracker-config.ts";
 export type { ConfiguredTracker, TrackerId, TrackerMeta } from "./config/tracker-meta.ts";
 export {
