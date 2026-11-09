@@ -531,10 +531,16 @@ async function runSubcommandViaCli(
   } = {},
 ): Promise<TaskExecutionResult> {
   const prUrl = opts.webUrl ?? `https://github.com/${repo}/pull/${prNumber}`;
+  // Distinguishes "the drain killed this run" from "the run failed and the
+  // drain happened to start around the same time". Only the abort handler (or
+  // an already-aborted signal) sets it, so the SIGTERM exit code of a drained
+  // child is never mistaken for a genuine pipeline failure.
+  let interrupted = false;
   const status = await runWithFailover(
     (env) =>
       new Promise<number>((resolve) => {
         if (opts.signal?.aborted) {
+          interrupted = true;
           resolve(1);
           return;
         }
@@ -548,7 +554,10 @@ async function runSubcommandViaCli(
             detached: process.platform !== "win32",
           },
         );
-        const abort = () => killProcessTree(child);
+        const abort = () => {
+          interrupted = true;
+          killProcessTree(child);
+        };
         let settled = false;
         const finish = (code: number) => {
           if (settled) return;
@@ -568,6 +577,7 @@ async function runSubcommandViaCli(
       }),
     opts.env ?? process.env,
   );
+  if (interrupted) return "interrupted";
   return cliResultToTaskResult(status);
 }
 
@@ -867,6 +877,8 @@ export class ReviewPollingAcquirer implements Acquirer {
       );
     } else if (ok === "skipped") {
       console.log(`⏭️  [${this.name}] ${repo}#${prNumber} skipped; nothing to address`);
+    } else if (ok === "interrupted") {
+      console.log(`⏸️  [${this.name}] ${repo}#${prNumber} interrupted by worker shutdown`);
     } else {
       console.log(
         ok
