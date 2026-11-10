@@ -192,7 +192,7 @@ Acceptance criteria:
 - Missing fixture configuration fails before any remote mutation.
 - A rerun does not collide with leftovers from a previous run.
 
-## Layer 3 — fake tracker servers for the default local suite (Jira and Linear implemented)
+## Layer 3 — fake tracker servers for the default local suite (Jira, Linear, and Trello implemented)
 
 Run the built CLI against in-process Bun servers that implement the subset of
 the tracker APIs the product uses. This gives deterministic, credential-free
@@ -255,12 +255,44 @@ is recorded in `unexpectedOperations`, which both scenarios assert is empty.
 Live Layer 2 coverage — real team/project lifecycle, estimation, and attachment
 uploads — remains future work; there is intentionally no live Linear suite.
 
-### Trello (planned)
+### Trello (implemented)
 
-The Trello fake remains planned: member/board/list reads, card create/get/update,
-list moves, comments, labels, and search. Point the CLI at it through
-`TRELLO_API_BASE_URL` (already supported by `TrelloClient`) with synthetic
-credentials.
+`providers/fake-trello.ts` serves the Trello REST subset the product calls on
+`127.0.0.1:0` and owns the board, lists, labels, cards, comment actions,
+checklists, and attachments in memory. `tests/local/tracker-trello-fake.test.ts`
+seeds an expected card plus a decoy outside the selector, writes per-board list
+statuses into `.devintern-code/settings.json`, and runs the production Trello
+client through the built CLI for both explicit short-link and `--query`
+selection. The list name is the status, so a run moves the card from the todo
+list to the configured actioned list. It reads state back through the fixture
+rather than CLI stdout.
+
+Endpoints covered:
+
+- `GET /members/me/boards`
+- `GET /boards/{id}/lists`
+- `GET /boards/{id}/labels`
+- `GET` / `POST /cards`
+- `GET` / `PUT /cards/{id}` (card detail, list moves, label replacement)
+- `GET /cards/{id}/actions?filter=commentCard`
+- `POST /cards/{id}/actions/comments`
+- `GET /cards/{id}/checklists`, `POST /checklists`, `POST /checklists/{id}/checkItems`
+- `GET` / `POST /cards/{id}/attachments`
+- `GET /search` (optional `idBoards` scope, `is:open`, `list:"<name>"`, free text)
+
+Any other route returns a diagnostic 404 naming the method and path, and the
+test asserts no unexpected request occurred. The fake accepts any query
+`key`/`token` credentials, never logs them, and makes no outbound requests.
+Scenarios assert the pushed `feature/<short-link>` branch and exact
+`src/greeting.ts` diff, the run record, the configured final list, the surviving
+unrelated label, the implementation comment, the seeded comment, and
+`--skip-comments` on a second run. The local bare Git remote is the code host; no
+PR, GitHub token, Trello credentials, or model credentials are required. The
+only skip is the existing built-CLI guard.
+
+What remains live: creating, moving, commenting on, and archiving cards on a real
+dedicated board (Layer 2), including Trello's eventual search indexing. Trello
+has no estimation concept, so there is no estimation coverage to add.
 
 ### Acceptance criteria (applies to each implemented fake)
 
@@ -303,8 +335,8 @@ credentials.
 1. Layer 1 read-only smoke (done).
 2. Trello Layer 2 on a dedicated board; it needs no project provisioning.
 3. Jira Layer 2 with a dedicated `E2E` project.
-4. Layer 3 fake servers so the default suite covers Jira (done) and Linear
-   (done), then Trello (planned) lifecycle.
+4. Layer 3 fake servers so the default suite covers Jira, Linear, and Trello
+   lifecycle (done).
 5. Add read-only checks for Linear, Asana, and Azure DevOps when credentials
    exist.
 6. Revisit live GitHub/GitLab tracker smoke only if the full suites start
