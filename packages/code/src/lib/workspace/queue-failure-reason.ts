@@ -1,54 +1,20 @@
 import { RunStore } from "../state/run-recorder";
-import type { RunOrigin } from "../state/run-recorder";
+
+/** Passed to the task subprocess so its run record names the queue execution. */
+export const QUEUE_CLAIM_ENV = "DEVINTERN_QUEUE_CLAIM";
 
 const FALLBACK_REASON = "task pipeline did not complete cleanly";
 
-/** Snapshot the last matching run before the executor can create this attempt. */
-export function previousRunIdForClaim(
-  dbPath: string | undefined,
-  claim: { taskKey: string; origin: RunOrigin; repo?: string; team?: string },
-): number | undefined {
-  if (!dbPath) return undefined;
-  let runs: RunStore | undefined;
-  try {
-    runs = new RunStore(dbPath, { readonly: true });
-    return runs.latestRunForClaim(claim)?.id ?? 0;
-  } catch {
-    return undefined;
-  } finally {
-    try {
-      runs?.close();
-    } catch {
-      // Diagnostic lookup must not affect execution.
-    }
-  }
-}
-
-/** Read the failed run produced by this queue claim, if it was recorded. */
-export function queueFailureReason(
-  dbPath: string | undefined,
-  claim: {
-    taskKey: string;
-    startedAt?: number;
-    origin: RunOrigin;
-    repo?: string;
-    team?: string;
-    previousRunId?: number;
-  },
-): string {
-  if (!dbPath || claim.startedAt === undefined) return FALLBACK_REASON;
+/** Read the failed run produced by this queue execution, if it was recorded. */
+export function queueFailureReason(dbPath: string | undefined, queueClaim: string): string {
+  if (!dbPath) return FALLBACK_REASON;
 
   let runs: RunStore | undefined;
   try {
     runs = new RunStore(dbPath, { readonly: true });
-    const run = runs.latestRunForClaim(claim);
+    const run = runs.runForQueueClaim(queueClaim);
     if (
-      run?.status === "failed" &&
-      (run.startedAt > claim.startedAt ||
-        (run.startedAt === claim.startedAt &&
-          claim.previousRunId !== undefined &&
-          run.id > claim.previousRunId)) &&
-      (claim.previousRunId === undefined || run.id > claim.previousRunId) &&
+      (run?.status === "failed" || run?.status === "abandoned" || run?.status === "escalated") &&
       run.outcomeReason
     ) {
       return run.outcomeReason;

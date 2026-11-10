@@ -32,6 +32,7 @@ import { shouldSkipRetry } from "../state/retry-gate";
 import { clearRetryState, getRetryState } from "../state/retry-state";
 import { actionedSourceKeyFromEnv, recordTaskActioned } from "./actioned-state";
 import { WorkerState } from "../state/worker-state";
+import { QUEUE_CLAIM_ENV } from "../workspace/queue-failure-reason";
 import {
   RunStore,
   beginRun,
@@ -570,6 +571,7 @@ async function prepareTask(input: {
   const identity = resolveRunIdentity(process.env);
   beginRun({
     origin: identity.origin,
+    queueClaim: process.env[QUEUE_CLAIM_ENV],
     taskKey: workflowKey,
     tracker: identity.tracker,
     team: identity.team,

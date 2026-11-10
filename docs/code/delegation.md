@@ -106,10 +106,11 @@ fails without writing anything.
 With `--json`, stdout carries exactly one JSON object; every human/status line
 (license notices, "Enqueued…", the `--wait` progress line) goes to stderr, so
 `devintern worker add … --json | jq .` parses cleanly. `--wait --json` still
-emits a single object: the settled state, or a `status: "failed"` object with an
-`error` on a timeout/worker-stop/inconclusive wait, not an interim pending object
-plus a final one. Without `--json`, diagnostics and the result line print to
-stdout as usual.
+emits a single object: the settled state, with `error` carrying the task's
+failure reason when it failed, or a `status: "failed"` object with an `error` on
+a timeout/worker-stop/inconclusive wait, not an interim pending object plus a
+final one. Successful results have no `error`. Without `--json`, diagnostics and
+the result line print to stdout as usual.
 
 Check the exit code as well as the object; validation failures may produce no
 result object. The enqueue response does not include a PR URL. Confirm a PR from
@@ -163,7 +164,8 @@ work.
   and runs on the next poll. If no worker is running the task is still queued
   (`worker add` says so) and `--wait` refuses to block. Settled rows are pruned
   after 30 days by default; set `WORKER_INJECTED_TASK_RETENTION_DAYS` to change
-  that window.
+  that window. Pruned outcomes remain available to `--wait` for 24 hours after
+  the row is removed, then the next hourly sweep deletes them.
 - **Interrupted tasks are auto-resumed when it is safe.** A task left mid-run
   by a worker restart is inspected at the next startup. When its latest local
   run recorded a branch that still exists and the branch carries either an

@@ -24,9 +24,6 @@ import type { RepoConfig, WorkspaceConfig } from "./config";
 import { loadWorkspaceConfig } from "./config";
 import { InjectedTaskStore } from "../state/injected-tasks";
 import type { EnqueueInjectedTaskResult, InjectedTask } from "../state/injected-tasks";
-import { RunStore } from "../state/run-recorder";
-import type { RunRecord } from "../state/run-recorder";
-import { previousRunIdForClaim } from "./queue-failure-reason";
 import { applyWorkspaceProcessEnv } from "./env";
 import {
   injectedChildStillRunningMessage,
@@ -632,7 +629,7 @@ async function enqueueNewTask(
   }
 }
 
-function serialize(task: InjectedTask): {
+function serialize(task: Pick<InjectedTask, "id" | "taskKey" | "repo" | "status">): {
   id: number;
   taskKey: string;
   repo: string;
@@ -645,7 +642,11 @@ function serialize(task: InjectedTask): {
  * Emit the single result for a settled task: the JSON object under `--json`,
  * otherwise a human success/failure line. Returns the process exit code.
  */
-function emitSettled(task: InjectedTask, deduplicated: boolean, ctx: TaskContext): number {
+function emitSettled(
+  task: Pick<InjectedTask, "id" | "taskKey" | "repo" | "status" | "message">,
+  deduplicated: boolean,
+  ctx: TaskContext,
+): number {
   if (ctx.json) {
     ctx.log(
       JSON.stringify({
@@ -790,16 +791,6 @@ async function waitForTask(
   ctx: TaskContext & { deduplicated: boolean; taskKey: string },
   initialTask: InjectedTask,
 ): Promise<number> {
-  let previousRunId =
-    initialTask.status === "pending"
-      ? previousRunIdForClaim(workspaceDbPath(ctx.selectedDir), {
-          taskKey: ctx.taskKey,
-          origin: "local",
-          repo: initialTask.repo,
-        })
-      : undefined;
-  let claimStartedAt = initialTask.startedAt;
-  let lastStatus = initialTask.status;
   ctx.status(`⏳ Waiting for task #${id} to finish (Ctrl-C to detach)...`);
   const timeoutSeconds = ctx.waitTimeoutSeconds ?? DEFAULT_WAIT_TIMEOUT_SECONDS;
   const deadline = timeoutSeconds > 0 ? Date.now() + timeoutSeconds * 1_000 : Infinity;
@@ -808,22 +799,8 @@ async function waitForTask(
   for (;;) {
     const task = ctx.store.getById(id);
     if (!task) {
-      return reportPrunedTask(id, ctx, {
-        repo: initialTask.repo,
-        startedAt: claimStartedAt ?? initialTask.createdAt,
-        previousRunId,
-      });
+      return reportPrunedTask(id, ctx, initialTask.repo);
     }
-    if (task.status === "pending" && lastStatus !== "pending") {
-      previousRunId = previousRunIdForClaim(workspaceDbPath(ctx.selectedDir), {
-        taskKey: ctx.taskKey,
-        origin: "local",
-        repo: initialTask.repo,
-      });
-      claimStartedAt = undefined;
-    }
-    lastStatus = task.status;
-    if (task.startedAt !== undefined) claimStartedAt = task.startedAt;
     if (task.status === "done" || task.status === "failed") {
       return emitSettled(task, ctx.deduplicated, ctx);
     }
@@ -906,61 +883,31 @@ async function waitForTask(
  * Report a task whose injected row was pruned by the worker's retention sweep
  * before `--wait` observed its terminal status.
  *
- * `pruneSettled` only removes settled (`done`/`failed`) rows, so a row that
- * vanished after the CLI enqueued it settled; its outcome is durably mirrored
- * in the run record (same DB, keyed by the task key) written before the row is
- * finished. Read that instead of reporting a spurious "disappeared" failure
- * for a successful run. A missing or non-terminal run (e.g. the DB was edited
- * out from under us) is genuinely inconclusive and still fails.
+ * `pruneSettled` retains each row's outcome under its immutable queue ID.
+ * This also keeps a later task with the same key from changing this result.
  */
 function reportPrunedTask(
   id: number,
   ctx: TaskContext & { deduplicated: boolean; taskKey: string },
-  claim: { repo: string; startedAt: number; previousRunId?: number },
+  repo: string,
 ): number {
-  const run = readLatestRun(ctx.selectedDir, ctx.taskKey, claim.repo);
-  if (
-    !run ||
-    (run.status !== "succeeded" && run.status !== "failed") ||
-    (claim.previousRunId !== undefined && run.id <= claim.previousRunId) ||
-    run.startedAt < claim.startedAt ||
-    (run.startedAt === claim.startedAt && claim.previousRunId === undefined)
-  ) {
+  const outcome = ctx.store.getPrunedOutcome(id);
+  if (!outcome || outcome.repo !== repo) {
     return failWait(ctx, { id, error: `Injected task #${id} disappeared while waiting.` }, [
       `❌ Injected task #${id} disappeared while waiting.`,
     ]);
   }
-  const settled: InjectedTask = {
+  const settled = {
     id,
     taskKey: ctx.taskKey,
-    repo: run.repo ?? "",
-    title: "",
-    body: "",
-    taskFile: "",
-    actor: "",
-    status: run.status === "succeeded" ? "done" : "failed",
-    message: run.outcomeReason,
-    autoResumeCount: 0,
-    deferCount: 0,
-    createdAt: run.startedAt,
+    repo: outcome.repo,
+    status: outcome.status,
+    message: outcome.message,
   };
   if (!ctx.json) {
-    ctx.status(`ℹ️  Injected task #${id} was pruned after it settled; reporting its run outcome.`);
+    ctx.status(`ℹ️  Injected task #${id} was pruned after it settled; reporting its outcome.`);
   }
   return emitSettled(settled, ctx.deduplicated, ctx);
-}
-
-/** Latest run record for a task key (read-only; null when absent/unreadable). */
-function readLatestRun(selectedDir: string, taskKey: string, repo: string): RunRecord | null {
-  let store: RunStore | null = null;
-  try {
-    store = new RunStore(workspaceDbPath(selectedDir), { readonly: true });
-    return store.latestRunForClaim({ taskKey, origin: "local", repo });
-  } catch {
-    return null;
-  } finally {
-    store?.close();
-  }
 }
 
 /** Read all of stdin (used by `--body-file -`). */

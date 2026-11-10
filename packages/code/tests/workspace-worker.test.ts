@@ -38,6 +38,7 @@ import {
   WORKSPACE_TEAM_ENV,
 } from "../src/lib/workspace/env";
 import { PICKUP_RUN_ID_ENV } from "../src/lib/state/session-pickup";
+import { QUEUE_CLAIM_ENV } from "../src/lib/workspace/queue-failure-reason";
 import type { TaskTrackerClient } from "../src/lib/trackers/client";
 import type { Task } from "../src/types/task-tracker";
 import { createRepoRunLock, openWorkspaceState } from "../src/lib/workspace/state";
@@ -594,6 +595,7 @@ describe("createFleetTaskExecutor serialization", () => {
   });
 
   test("a persisted retry repo bypasses lossy task-key-only rerouting", async () => {
+    let selectedRepo: string | undefined;
     const executor = createFleetTaskExecutor(
       {
         config: CONFIG,
@@ -602,13 +604,20 @@ describe("createFleetTaskExecutor serialization", () => {
         repoManager,
         runTask: async () => true,
       },
-      { repo: "frontend", extraArgs: ["--force"] },
+      {
+        repo: "frontend",
+        extraArgs: ["--force"],
+        onRepoResolved: (repo) => {
+          selectedRepo = repo;
+        },
+      },
     );
     const result = await executor(
       "T-RETRY",
       toRoutableTask({ key: "T-RETRY", labels: [], components: [] }),
     );
     expect(result).toBe(true);
+    expect(selectedRepo).toBe("frontend");
     expect(repoManager.calls).toContain("worktree:frontend:T-RETRY");
   });
 
@@ -720,11 +729,12 @@ remote = "git@github.com:acme/backend.git"
           return true;
         },
       },
-      { repo: "backend", source: "retry", pickupRunId: 42 },
+      { repo: "backend", source: "retry", pickupRunId: 42, queueClaim: "retry-claim" },
     );
 
     await executor("T-PICK", toRoutableTask({ key: "T-PICK", labels: [], components: [] }));
     expect(observed?.[PICKUP_RUN_ID_ENV]).toBe("42");
+    expect(observed?.[QUEUE_CLAIM_ENV]).toBe("retry-claim");
   });
 
   test("omits the pickup run id when the retry has none", async () => {
@@ -745,6 +755,7 @@ remote = "git@github.com:acme/backend.git"
 
     await executor("T-NOP", toRoutableTask({ key: "T-NOP", labels: [], components: [] }));
     expect(observed?.[PICKUP_RUN_ID_ENV]).toBeUndefined();
+    expect(observed?.[QUEUE_CLAIM_ENV]).toBeUndefined();
   });
 });
 
@@ -803,6 +814,7 @@ describe("buildInjectedTaskAcquirer", () => {
       // the task key, and the subprocess is marked as a `local` origin run.
       expect(observed?.taskRef).toBe(taskFile);
       expect(observed?.env[RUN_ORIGIN_ENV]).toBe("local");
+      expect(observed?.env[QUEUE_CLAIM_ENV]).toBeTruthy();
       expect(observed?.args).toEqual(["--create-pr", "--auto-review"]);
       expect(repoManager.calls).toContain("worktree:backend:local-bump-deps");
       expect(store.getById(task.id)?.status).toBe("done");

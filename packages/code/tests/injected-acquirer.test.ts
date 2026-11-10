@@ -409,9 +409,14 @@ describe("InjectedTaskAcquirer", () => {
     const acquirer = new InjectedTaskAcquirer({
       store,
       runDbPath: dbPath,
-      execute: async (task) => {
+      execute: async (task, queueClaim) => {
         const runs = new RunStore(dbPath);
-        const id = runs.createRun({ origin: "local", taskKey: task.taskKey, repo: task.repo });
+        const id = runs.createRun({
+          origin: "local",
+          taskKey: task.taskKey,
+          repo: task.repo,
+          queueClaim,
+        });
         runs.finishRun(id, "failed", "verification failed");
         runs.close();
         return false;
@@ -424,6 +429,33 @@ describe("InjectedTaskAcquirer", () => {
       status: "failed",
       message: "verification failed",
     });
+  });
+
+  test("keeps its own reason when another local run with the same scope finishes later", async () => {
+    enqueue("local-overlap");
+    const dbPath = join(dir, "queue.db");
+    const acquirer = new InjectedTaskAcquirer({
+      store,
+      runDbPath: dbPath,
+      execute: async (task, queueClaim) => {
+        const runs = new RunStore(dbPath);
+        const current = runs.createRun({
+          origin: "local",
+          taskKey: task.taskKey,
+          repo: task.repo,
+          queueClaim,
+        });
+        const other = runs.createRun({ origin: "local", taskKey: task.taskKey, repo: task.repo });
+        runs.finishRun(current, "failed", "this local failure");
+        runs.finishRun(other, "failed", "other local failure");
+        runs.close();
+        return false;
+      },
+      intervalSeconds: 3600,
+    });
+
+    await acquirer.tick();
+    expect(store.getByTaskKey("local-overlap")?.message).toBe("this local failure");
   });
 
   test("ignores old and unrelated run reasons", async () => {
@@ -490,9 +522,14 @@ describe("InjectedTaskAcquirer", () => {
     const acquirer = new InjectedTaskAcquirer({
       store,
       runDbPath: dbPath,
-      execute: async (task) => {
+      execute: async (task, queueClaim) => {
         const runs = new RunStore(dbPath);
-        const current = runs.createRun({ origin: "local", taskKey: task.taskKey, repo: task.repo });
+        const current = runs.createRun({
+          origin: "local",
+          taskKey: task.taskKey,
+          repo: task.repo,
+          queueClaim,
+        });
         runs.finishRun(current, "failed", "current failure");
         const unrelated = runs.createRun({
           origin: "task",

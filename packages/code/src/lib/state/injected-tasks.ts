@@ -27,6 +27,9 @@ import type { RunRecord } from "./run-recorder";
 
 export type InjectedTaskStatus = "pending" | "running" | "done" | "failed";
 
+/** Time for a waiter to recover a settled outcome after its queue row is pruned. */
+const PRUNED_OUTCOME_RECOVERY_MS = 24 * 60 * 60 * 1000;
+
 /**
  * Whether a run finished successfully for the row's current claim.
  *
@@ -296,6 +299,31 @@ export class InjectedTaskStore {
         finished_at INTEGER
       )
     `);
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS pruned_injected_task_outcomes (
+        task_id INTEGER PRIMARY KEY,
+        repo TEXT NOT NULL,
+        status TEXT NOT NULL,
+        message TEXT,
+        archived_at INTEGER
+      )
+    `);
+    const outcomeColumns = this.db
+      .query("PRAGMA table_info(pruned_injected_task_outcomes)")
+      .all() as Array<{ name: string }>;
+    if (!outcomeColumns.some((column) => column.name === "archived_at")) {
+      try {
+        this.db.run("ALTER TABLE pruned_injected_task_outcomes ADD COLUMN archived_at INTEGER");
+      } catch (error) {
+        if (!/duplicate column name/i.test((error as Error).message)) throw error;
+      }
+    }
+    // Old archives have no prune timestamp; give in-flight waiters one recovery
+    // window after upgrade rather than deleting those outcomes immediately.
+    this.db.run(
+      "UPDATE pruned_injected_task_outcomes SET archived_at = ? WHERE archived_at IS NULL",
+      [Date.now()],
+    );
     // Older databases predate the durable auto-resume budget; add the column
     // in place instead of requiring a migration step.
     const columns = this.db.query("PRAGMA table_info(injected_tasks)").all() as Array<{
@@ -427,6 +455,21 @@ export class InjectedTaskStore {
       .query("SELECT * FROM injected_tasks WHERE id = ?")
       .get(id) as InjectedTaskRow | null;
     return row ? rowToInjectedTask(row) : null;
+  }
+
+  /** The exact settled outcome retained when a queue row is pruned. */
+  getPrunedOutcome(
+    id: number,
+  ): { repo: string; status: "done" | "failed"; message?: string } | null {
+    const db = this.ensureDb();
+    const table = db
+      .query("SELECT 1 FROM sqlite_master WHERE name = 'pruned_injected_task_outcomes'")
+      .get();
+    if (!table) return null;
+    const row = db
+      .query("SELECT repo, status, message FROM pruned_injected_task_outcomes WHERE task_id = ?")
+      .get(id) as { repo: string; status: "done" | "failed"; message: string | null } | null;
+    return row ? { repo: row.repo, status: row.status, message: row.message ?? undefined } : null;
   }
 
   /** Load a task by its unique key (dashboard retry, `worker add --resume`). */
@@ -693,20 +736,35 @@ export class InjectedTaskStore {
     const cutoff = now - olderThanMs;
     // Read the file paths before deleting the rows: after the DELETE the paths
     // are gone and the files would leak forever.
-    const settled = db
-      .query(
-        `SELECT task_file FROM injected_tasks
+    const { settled, result } = db.transaction(() => {
+      const settled = db
+        .query(
+          `SELECT id, repo, status, message, task_file FROM injected_tasks
+           WHERE status IN ('done', 'failed')
+             AND COALESCE(finished_at, created_at) < ?`,
+        )
+        .all(cutoff) as Array<{
+        id: number;
+        repo: string;
+        status: string;
+        message: string | null;
+        task_file: string;
+      }>;
+      db.run("DELETE FROM pruned_injected_task_outcomes WHERE archived_at < ?", [
+        now - PRUNED_OUTCOME_RECOVERY_MS,
+      ]);
+      const save = db.query(
+        "INSERT OR REPLACE INTO pruned_injected_task_outcomes (task_id, repo, status, message, archived_at) VALUES (?, ?, ?, ?, ?)",
+      );
+      for (const row of settled) save.run(row.id, row.repo, row.status, row.message, now);
+      const result = db.run(
+        `DELETE FROM injected_tasks
          WHERE status IN ('done', 'failed')
            AND COALESCE(finished_at, created_at) < ?`,
-      )
-      .all(cutoff) as Array<{ task_file: string }>;
-    if (settled.length === 0) return 0;
-    const result = db.run(
-      `DELETE FROM injected_tasks
-       WHERE status IN ('done', 'failed')
-         AND COALESCE(finished_at, created_at) < ?`,
-      [cutoff],
-    );
+        [cutoff],
+      );
+      return { settled, result };
+    })();
     for (const { task_file } of settled) {
       try {
         unlinkSync(task_file);
