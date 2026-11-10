@@ -17,7 +17,7 @@ import type { ScheduledRetry, ScheduledRetryStore } from "../state/run-retry";
 import type { TaskExecutionResult } from "../acquirers/task-polling";
 import { getWorkerFailover } from "../worker/failover";
 import { toRoutableTask } from "./router";
-import { queueFailureReason } from "./queue-failure-reason";
+import { previousRunIdForClaim, queueFailureReason } from "./queue-failure-reason";
 import type { RoutableTask } from "./router";
 
 export interface RetryQueueAcquirerOptions {
@@ -109,6 +109,12 @@ export class RetryQueueAcquirer implements Acquirer {
   /** Run one claimed retry; false when it was requeued for the next tick. */
   private async runOne(retry: ScheduledRetry): Promise<boolean> {
     const { store, execute, verbose } = this.options;
+    const previousRunId = previousRunIdForClaim(this.options.runDbPath, {
+      taskKey: retry.taskKey,
+      origin: "task",
+      repo: retry.repo,
+      team: retry.team,
+    });
     console.log(`🔁 [${this.name}] re-running ${retry.taskKey} (scheduled by ${retry.actor})`);
     try {
       const result = await execute(
@@ -139,7 +145,7 @@ export class RetryQueueAcquirer implements Acquirer {
             origin: "task",
             repo: retry.repo,
             team: retry.team,
-            previousRunId: retry.runId,
+            previousRunId: Math.max(previousRunId ?? 0, retry.runId ?? 0),
           }),
         );
       }

@@ -658,12 +658,6 @@ describe("runWorkerAdd", () => {
       JSON.stringify({ pid: process.pid, timestamp: new Date().toISOString() }),
     );
 
-    // The durable run record the worker writes before finishing the row.
-    const runStore = new RunStore(dbPath);
-    const runId = runStore.createRun({ origin: "local", taskKey: "local-pruned-run" });
-    runStore.finishRun(runId, "succeeded");
-    runStore.close();
-
     // Settle the injected row, then prune it as the retention sweeper would
     // with WORKER_INJECTED_TASK_RETENTION_DAYS=0, so the waiter's next poll
     // finds it gone.
@@ -673,6 +667,14 @@ describe("runWorkerAdd", () => {
         for (let attempt = 0; attempt < 300; attempt++) {
           if (store.hasPending()) {
             const claimed = store.claimNext()!;
+            const runStore = new RunStore(dbPath);
+            const runId = runStore.createRun({
+              origin: "local",
+              taskKey: claimed.taskKey,
+              repo: claimed.repo,
+            });
+            runStore.finishRun(runId, "succeeded");
+            runStore.close();
             store.finish(claimed.id, "done");
             store.pruneSettled(0, Date.now() + 1_000);
             return;
@@ -751,6 +753,60 @@ describe("runWorkerAdd", () => {
       status: "failed",
       error: "pruned run failed",
     });
+  });
+
+  test("--wait --json rejects another source's run after the row is pruned", async () => {
+    writeFileSync(
+      join(dir, ".worker.lock"),
+      JSON.stringify({ pid: process.pid, timestamp: new Date().toISOString() }),
+    );
+    const dbPath = workspaceDbPath(dir);
+    const prune = (async () => {
+      const store = new InjectedTaskStore(dbPath);
+      try {
+        for (let attempt = 0; attempt < 300; attempt++) {
+          if (store.hasPending()) {
+            const claimed = store.claimNext()!;
+            const runs = new RunStore(dbPath);
+            const unrelated = runs.createRun({
+              origin: "task",
+              taskKey: claimed.taskKey,
+              repo: claimed.repo,
+            });
+            runs.finishRun(unrelated, "failed", "private unrelated failure");
+            runs.close();
+            store.finish(claimed.id, "failed", "task pipeline did not complete cleanly");
+            store.pruneSettled(0, Date.now() + 1_000);
+            return;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+      } finally {
+        store.close();
+      }
+    })();
+    const cap = capture();
+    const code = await runWorkerAdd(
+      [
+        "--workspace",
+        configPath,
+        "--repo",
+        "backend",
+        "--title",
+        "Pruned wrong source",
+        "--wait",
+        "--json",
+      ],
+      cap.options,
+    );
+    await prune;
+    expect(code).toBe(1);
+    expect(cap.out).toHaveLength(1);
+    expect(JSON.parse(cap.out[0]!)).toMatchObject({
+      status: "failed",
+      error: expect.stringContaining("disappeared while waiting"),
+    });
+    expect(cap.out[0]).not.toContain("private unrelated failure");
   });
 
   test("--wait-timeout bounds a wait the live worker never settles", async () => {

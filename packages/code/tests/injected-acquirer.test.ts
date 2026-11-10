@@ -460,6 +460,55 @@ describe("InjectedTaskAcquirer", () => {
     );
   });
 
+  test("does not reuse a prior run that shares the claim millisecond", async () => {
+    const dbPath = join(dir, "queue.db");
+    enqueue("local-same-ms");
+    const runs = new RunStore(dbPath);
+    const old = runs.createRun({ origin: "local", taskKey: "local-same-ms", repo: "backend" });
+    runs.finishRun(old, "failed", "previous failure");
+    runs.close();
+    const acquirer = new InjectedTaskAcquirer({
+      store,
+      runDbPath: dbPath,
+      execute: async (task) => {
+        const raw = new Database(dbPath);
+        raw.run("UPDATE runs SET started_at = ? WHERE id = ?", [task.startedAt!, old]);
+        raw.close();
+        return false;
+      },
+      intervalSeconds: 3600,
+    });
+    await acquirer.tick();
+    expect(store.getByTaskKey("local-same-ms")?.message).toBe(
+      "task pipeline did not complete cleanly",
+    );
+  });
+
+  test("uses the current failed local run when another source records a newer run", async () => {
+    const dbPath = join(dir, "queue.db");
+    enqueue("local-mixed-source");
+    const acquirer = new InjectedTaskAcquirer({
+      store,
+      runDbPath: dbPath,
+      execute: async (task) => {
+        const runs = new RunStore(dbPath);
+        const current = runs.createRun({ origin: "local", taskKey: task.taskKey, repo: task.repo });
+        runs.finishRun(current, "failed", "current failure");
+        const unrelated = runs.createRun({
+          origin: "task",
+          taskKey: task.taskKey,
+          repo: task.repo,
+        });
+        runs.finishRun(unrelated, "failed", "other source failure");
+        runs.close();
+        return false;
+      },
+      intervalSeconds: 3600,
+    });
+    await acquirer.tick();
+    expect(store.getByTaskKey("local-mixed-source")?.message).toBe("current failure");
+  });
+
   test("settles a failed row even when run history cannot be read", async () => {
     enqueue("local-a");
     const acquirer = new InjectedTaskAcquirer({

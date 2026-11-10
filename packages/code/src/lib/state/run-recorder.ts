@@ -655,6 +655,31 @@ export class RunStore {
     return rows.map((row) => this.rowToRun(row));
   }
 
+  /** Newest run in one queue claim's source and repo scope. */
+  latestRunForClaim(claim: {
+    taskKey: string;
+    origin: RunOrigin;
+    repo?: string;
+    team?: string;
+  }): RunRecord | null {
+    const clauses = ["task_key = ?", "origin = ?"];
+    const params: (string | number)[] = [claim.taskKey, claim.origin];
+    if (claim.repo !== undefined) {
+      clauses.push("repo = ?");
+      params.push(claim.repo);
+    }
+    if (claim.team !== undefined) {
+      clauses.push("team = ?");
+      params.push(claim.team);
+    }
+    const row = this.db
+      .query(
+        `SELECT * FROM runs WHERE ${clauses.join(" AND ")} ORDER BY started_at DESC, id DESC LIMIT 1`,
+      )
+      .get(...params) as Record<string, unknown> | null;
+    return row ? this.rowToRun(row) : null;
+  }
+
   /**
    * Latest run per task key, using the same ordering as {@link listRuns}
    * (started_at DESC, id DESC). One query for all keys instead of one per key.

@@ -151,20 +151,22 @@ describe("RetryQueueAcquirer", () => {
     expect(row.message).toBe("task pipeline did not complete cleanly");
   });
 
-  test("does not reuse a prior attempt's reason after the retry fails", async () => {
+  test("does not reuse a prior attempt's reason at the claim millisecond", async () => {
     const runs = new RunStore(dbPath);
     const previous = runs.createRun({ origin: "task", taskKey: "PROJ-1" });
     runs.finishRun(previous, "failed", "prior attempt failed");
-    const raw = new Database(dbPath);
-    raw.run("UPDATE runs SET started_at = 1 WHERE id = ?", [previous]);
-    raw.close();
     runs.close();
     store.schedule({ taskKey: "PROJ-1", actor: "a@x.com" });
 
     const acquirer = new RetryQueueAcquirer({
       store,
       runDbPath: dbPath,
-      execute: async () => false,
+      execute: async (_taskKey, _routable, retry) => {
+        const raw = new Database(dbPath);
+        raw.run("UPDATE runs SET started_at = ? WHERE id = ?", [retry.startedAt!, previous]);
+        raw.close();
+        return false;
+      },
       intervalSeconds: 3600,
     });
     await acquirer.tick();

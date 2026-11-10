@@ -17,7 +17,7 @@ import type { Acquirer } from "../../worker";
 import type { InjectedTask, InjectedTaskStore } from "../state/injected-tasks";
 import type { TaskExecutionResult } from "../acquirers/task-polling";
 import { getWorkerFailover } from "../worker/failover";
-import { queueFailureReason } from "./queue-failure-reason";
+import { previousRunIdForClaim, queueFailureReason } from "./queue-failure-reason";
 
 /** Source label surfaced in worker logs, run records, and the dashboard. */
 export const INJECTED_TASK_SOURCE = "local:add";
@@ -255,6 +255,11 @@ export class InjectedTaskAcquirer implements Acquirer {
   /** Run one claimed task and settle its row. */
   private async runOne(task: InjectedTask): Promise<void> {
     const { store, execute, verbose } = this.options;
+    const previousRunId = previousRunIdForClaim(this.options.runDbPath, {
+      taskKey: task.taskKey,
+      origin: "local",
+      repo: task.repo,
+    });
     console.log(`📥 [${this.name}] running ${task.taskKey} → ${task.repo}`);
     try {
       const result = await execute(task);
@@ -293,6 +298,7 @@ export class InjectedTaskAcquirer implements Acquirer {
             startedAt: task.startedAt,
             origin: "local",
             repo: task.repo,
+            previousRunId,
           }),
         );
       }

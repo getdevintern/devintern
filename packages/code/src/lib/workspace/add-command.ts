@@ -26,6 +26,7 @@ import { InjectedTaskStore } from "../state/injected-tasks";
 import type { EnqueueInjectedTaskResult, InjectedTask } from "../state/injected-tasks";
 import { RunStore } from "../state/run-recorder";
 import type { RunRecord } from "../state/run-recorder";
+import { previousRunIdForClaim } from "./queue-failure-reason";
 import { applyWorkspaceProcessEnv } from "./env";
 import {
   injectedChildStillRunningMessage,
@@ -627,7 +628,7 @@ async function enqueueNewTask(
       if (add.json) log(JSON.stringify({ ...serialize(task), deduplicated: false }));
       return 0;
     }
-    return await waitForTask(task.id, { ...ctx, deduplicated: false, taskKey: task.taskKey });
+    return await waitForTask(task.id, { ...ctx, deduplicated: false, taskKey: task.taskKey }, task);
   }
 }
 
@@ -677,7 +678,7 @@ async function reportTask(task: InjectedTask, ctx: TaskContext): Promise<number>
   if (task.status === "done" || task.status === "failed") {
     return emitSettled(task, true, ctx);
   }
-  return await waitForTask(task.id, { ...ctx, deduplicated: true, taskKey: task.taskKey });
+  return await waitForTask(task.id, { ...ctx, deduplicated: true, taskKey: task.taskKey }, task);
 }
 
 /**
@@ -705,7 +706,7 @@ async function resumeTask(
       if (ctx.json) ctx.log(JSON.stringify({ ...serialize(task), deduplicated: true }));
       return 0;
     }
-    return await waitForTask(task.id, { ...ctx, deduplicated: true, taskKey });
+    return await waitForTask(task.id, { ...ctx, deduplicated: true, taskKey }, task);
   }
 
   // A hard-killed worker's detached child may still be running this attempt in
@@ -733,7 +734,7 @@ async function resumeTask(
     if (ctx.json) ctx.log(JSON.stringify({ ...serialize(revived), deduplicated: false }));
     return 0;
   }
-  return await waitForTask(revived.id, { ...ctx, deduplicated: false, taskKey });
+  return await waitForTask(revived.id, { ...ctx, deduplicated: false, taskKey }, revived);
 }
 
 /**
@@ -787,7 +788,18 @@ function isPidRunning(pid: number): boolean {
 async function waitForTask(
   id: number,
   ctx: TaskContext & { deduplicated: boolean; taskKey: string },
+  initialTask: InjectedTask,
 ): Promise<number> {
+  let previousRunId =
+    initialTask.status === "pending"
+      ? previousRunIdForClaim(workspaceDbPath(ctx.selectedDir), {
+          taskKey: ctx.taskKey,
+          origin: "local",
+          repo: initialTask.repo,
+        })
+      : undefined;
+  let claimStartedAt = initialTask.startedAt;
+  let lastStatus = initialTask.status;
   ctx.status(`⏳ Waiting for task #${id} to finish (Ctrl-C to detach)...`);
   const timeoutSeconds = ctx.waitTimeoutSeconds ?? DEFAULT_WAIT_TIMEOUT_SECONDS;
   const deadline = timeoutSeconds > 0 ? Date.now() + timeoutSeconds * 1_000 : Infinity;
@@ -796,8 +808,22 @@ async function waitForTask(
   for (;;) {
     const task = ctx.store.getById(id);
     if (!task) {
-      return reportPrunedTask(id, ctx);
+      return reportPrunedTask(id, ctx, {
+        repo: initialTask.repo,
+        startedAt: claimStartedAt ?? initialTask.createdAt,
+        previousRunId,
+      });
     }
+    if (task.status === "pending" && lastStatus !== "pending") {
+      previousRunId = previousRunIdForClaim(workspaceDbPath(ctx.selectedDir), {
+        taskKey: ctx.taskKey,
+        origin: "local",
+        repo: initialTask.repo,
+      });
+      claimStartedAt = undefined;
+    }
+    lastStatus = task.status;
+    if (task.startedAt !== undefined) claimStartedAt = task.startedAt;
     if (task.status === "done" || task.status === "failed") {
       return emitSettled(task, ctx.deduplicated, ctx);
     }
@@ -890,9 +916,16 @@ async function waitForTask(
 function reportPrunedTask(
   id: number,
   ctx: TaskContext & { deduplicated: boolean; taskKey: string },
+  claim: { repo: string; startedAt: number; previousRunId?: number },
 ): number {
-  const run = readLatestRun(ctx.selectedDir, ctx.taskKey);
-  if (!run || run.status === "in_progress" || run.status === "deferred") {
+  const run = readLatestRun(ctx.selectedDir, ctx.taskKey, claim.repo);
+  if (
+    !run ||
+    (run.status !== "succeeded" && run.status !== "failed") ||
+    (claim.previousRunId !== undefined && run.id <= claim.previousRunId) ||
+    run.startedAt < claim.startedAt ||
+    (run.startedAt === claim.startedAt && claim.previousRunId === undefined)
+  ) {
     return failWait(ctx, { id, error: `Injected task #${id} disappeared while waiting.` }, [
       `❌ Injected task #${id} disappeared while waiting.`,
     ]);
@@ -918,11 +951,11 @@ function reportPrunedTask(
 }
 
 /** Latest run record for a task key (read-only; null when absent/unreadable). */
-function readLatestRun(selectedDir: string, taskKey: string): RunRecord | null {
+function readLatestRun(selectedDir: string, taskKey: string, repo: string): RunRecord | null {
   let store: RunStore | null = null;
   try {
     store = new RunStore(workspaceDbPath(selectedDir), { readonly: true });
-    return store.latestRunByTaskKey([taskKey]).get(taskKey) ?? null;
+    return store.latestRunForClaim({ taskKey, origin: "local", repo });
   } catch {
     return null;
   } finally {
