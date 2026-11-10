@@ -7,7 +7,7 @@
  * report endpoint; a failed submission is saved locally for `--from`.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { detectInstallKind } from "@devintern/utils";
@@ -232,6 +232,9 @@ function savePayloadTo(path: string, payload: BugReportPayload): string {
   const target = resolve(path);
   mkdirSync(dirname(target), { recursive: true });
   writeFileSync(target, `${JSON.stringify(payload, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  // `mode` only applies when the file is created; tighten a pre-existing target
+  // so reports never stay group/world readable.
+  chmodSync(target, 0o600);
   return target;
 }
 

@@ -17,6 +17,29 @@ export interface GitCommandResult {
   error?: string;
 }
 
+/**
+ * Optional execution preferences a task author can embed in a description:
+ * which agent harness to run, which model (family/alias or exact id), and the
+ * reasoning effort.
+ */
+export interface ExecutionPreferences {
+  harness?: string;
+  model?: string;
+  effort?: string;
+}
+
+/** Two or more distinct values supplied for the same execution preference. */
+export interface ExecutionPreferenceConflict {
+  field: "harness" | "model" | "effort";
+  values: string[];
+}
+
+/** Result of parsing execution preferences out of a task description. */
+export interface ExtractedExecutionPreferences {
+  preferences: ExecutionPreferences;
+  conflicts: ExecutionPreferenceConflict[];
+}
+
 /** Public surface registered onto the shared `Utils` object by the domain modules. */
 export interface UtilsSurface {
   ensureDirectoryExists(dirPath: string): void;
@@ -34,6 +57,7 @@ export interface UtilsSurface {
     key: string;
   };
   extractTargetBranch(description: string | undefined): string | null;
+  extractExecutionPreferences(description: string | undefined): ExtractedExecutionPreferences;
   generateTaskFilename(taskKey: string, extension: string): string;
   executeGitCommand(
     args: string[],

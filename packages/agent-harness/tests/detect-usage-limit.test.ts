@@ -211,6 +211,22 @@ describe("detectUsageLimit", () => {
     expect(detectUsageLimit(transcript, "").limited).toBe(false);
   });
 
+  test("ignores numbered source listings with quoted Grok payment errors", () => {
+    const transcript = [
+      '    75\t  // JSON Internal error (`"message": "API error (status 402 Payment Required): ..."`).',
+      '    76\t  /(?:^|:\\s*")api error \\(status 402 payment required\\)/i,',
+      '    77\t  // JSON Internal error (`"message": "API error (status 402 Payment Required): Grok Build usage balance exhausted"`).',
+    ].join("\n");
+
+    expect(detectUsageLimit("", transcript).limited).toBe(false);
+    expect(detectUsageLimit(transcript, "").limited).toBe(false);
+  });
+
+  test("ignores a quoted payment error without a balance-exhaustion diagnostic", () => {
+    const prose = 'Example: "API error (status 402 Payment Required): ..."';
+    expect(detectUsageLimit("", prose).limited).toBe(false);
+  });
+
   test("detects Goose credits exhaustion despite its successful exit", () => {
     const out = "Error: Credits exhausted: Insufficient credits to complete this request";
     expect(detectUsageLimit("", out).limited).toBe(true);
@@ -388,6 +404,14 @@ describe("detectUsageLimit", () => {
       detectUsageLimit("", "Subscription quota exceeded. You can continue using free models.")
         .limited,
     ).toBe(true);
+  });
+
+  test("detects OpenCode's short Go usage limit in stderr and structured logs", () => {
+    expect(detectUsageLimit("", "Error: Go usage limit exceeded\n").limited).toBe(true);
+    const log =
+      'timestamp=2026-11-09T23:00:05.176Z level=ERROR run=abc message="Failed to drain Session" cause="AI.Error: Go usage limit exceeded\\n    at SessionStep.attempt"';
+    expect(detectUsageLimit("", log).limited).toBe(true);
+    expect(detectUsageLimit("", 'throw new Error("Go usage limit exceeded");').limited).toBe(false);
   });
 
   test("extracts a usage limit from OpenCode's printed structured log", () => {

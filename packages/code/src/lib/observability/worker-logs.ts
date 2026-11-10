@@ -158,9 +158,15 @@ export function extractTaskKey(message: string): string | null {
   return null;
 }
 
-/** Key-name shape whose value is treated as a credential. */
+/**
+ * Key-name shape whose value is treated as a credential. The bare `pat`
+ * alternative requires a non-alphanumeric character after it so ordinary words
+ * that merely contain it (`path`, `patch`, `compatible`) are not mistaken for a
+ * personal access token key. The key prefix (`clientPat`, `MYPAT`) is still
+ * allowed before `pat`, because that is how many tools name the variable.
+ */
 const SECRET_KEY_PATTERN =
-  "[A-Za-z0-9_]*(?:token|secret|password|passwd|api[_-]?key|private[_-]?key|access[_-]?key|pat)[A-Za-z0-9_]*";
+  "[A-Za-z0-9_]*(?:token|secret|password|passwd|api[_-]?key|private[_-]?key|access[_-]?key|pat(?![A-Za-z0-9]))[A-Za-z0-9_]*";
 
 /**
  * Mask obvious credentials: `KEY=value`, `KEY: value`, and `"KEY": "value"`

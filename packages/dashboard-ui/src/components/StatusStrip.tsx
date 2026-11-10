@@ -31,6 +31,60 @@ function scheduleLabel(schedule: ScheduleSnapshot): string {
     : `outside working window (${windows})`;
 }
 
+function pluralize(count: number, singular: string, plural: string): string {
+  return `${count} ${count === 1 ? singular : plural}`;
+}
+
+/** Total waiting work across relay deliveries, ad-hoc tasks, and scheduled retries. */
+function queueTotal(queue: WorkerResponse["queue"]): number {
+  return (
+    queue.pending +
+    queue.processing +
+    queue.injected.pending +
+    queue.injected.running +
+    queue.retries.pending +
+    queue.retries.running
+  );
+}
+
+/**
+ * The visible queue label: every waiting work item, with failures appended when
+ * any exist so a broken delivery does not hide behind a healthy queue count.
+ */
+export function queueLabel(queue: WorkerResponse["queue"]): string {
+  const total = queueTotal(queue);
+  return queue.failed > 0 ? `${total} queued, ${queue.failed} failed` : `${total} queued`;
+}
+
+/** Tooltip breakdown explaining where the queued work sits. */
+export function queueTitle(queue: WorkerResponse["queue"]): string {
+  const relay = queue.pending + queue.processing;
+  const adHoc = queue.injected.pending + queue.injected.running;
+  const retries = queue.retries.pending + queue.retries.running;
+  const parts = [
+    pluralize(relay, "relay delivery", "relay deliveries"),
+    pluralize(adHoc, "ad-hoc task", "ad-hoc tasks"),
+    pluralize(retries, "scheduled retry", "scheduled retries"),
+  ];
+  if (queue.failed > 0) {
+    parts.push(pluralize(queue.failed, "failed delivery", "failed deliveries"));
+  }
+  return parts.join(", ");
+}
+
+/**
+ * Whether to show the "no database yet" banner.
+ *
+ * Run history and the durable queue can live in different files. Claiming no
+ * database while the queue DB is recording work would contradict the non-zero
+ * "N queued" label next to it, so only show the banner when BOTH are absent.
+ */
+export function showMissingDatabaseBanner(
+  data: Pick<WorkerResponse, "dbMissing" | "queueDbMissing">,
+): boolean {
+  return data.dbMissing && data.queueDbMissing;
+}
+
 function Item({
   icon,
   label,
@@ -92,10 +146,7 @@ export function StatusStrip() {
     );
   }
 
-  const queueLabel =
-    data.queue.failed > 0
-      ? `${data.queue.pending} queued, ${data.queue.failed} failed`
-      : `${data.queue.pending + data.queue.processing} queued`;
+  const queueLabelText = queueLabel(data.queue);
 
   return (
     <div className="dashboard-status-strip">
@@ -110,14 +161,18 @@ export function StatusStrip() {
           label={scheduleLabel(data.schedule)}
         />
       ) : null}
-      <Item icon={<Inbox className="size-4" />} label={queueLabel} />
+      <Item
+        icon={<Inbox className="size-4" />}
+        label={queueLabelText}
+        title={queueTitle(data.queue)}
+      />
       <a href="#/prs" className="hover:text-foreground">
         <Item
           icon={<GitPullRequest className="size-4" />}
           label={`${data.agentPrs.open} agent PR${data.agentPrs.open === 1 ? "" : "s"} open`}
         />
       </a>
-      {data.dbMissing ? (
+      {showMissingDatabaseBanner(data) ? (
         <Item
           icon={<Activity className="size-4" />}
           label="no database yet: run the worker once to start recording"

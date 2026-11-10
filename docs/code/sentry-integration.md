@@ -110,6 +110,13 @@ a title plus a culprit, exception type, or filename. At most `max_per_tick`
 actionability checks and supplied concrete runtime evidence, Sentry runs skip
 the generic task feasibility assessment and proceed directly to implementation.
 
+A remediation run that concludes no code change is needed is a successful
+no-op, not a failed run. The issue may already be fixed in the current code,
+may not be reproducible from this repository, or may be environment-specific.
+Treating that conclusion as a failure would report the same error back to the
+Sentry issue and feed the next remediation attempt, so those runs deliver no
+branch or pull request and leave the issue unresolved.
+
 Polling stays quiet while issues sit below `min_occurrences`: skipped issues
 are only explained with `--verbose` output. When an issue is picked up, the
 worker logs the project, issue id, and occurrence count once.

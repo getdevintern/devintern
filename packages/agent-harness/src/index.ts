@@ -150,11 +150,13 @@ export {
   type SandboxResolutionOptions,
 } from "./sandbox/resolver.js";
 export { detectSandboxProviders, type DetectedSandboxProvider } from "./sandbox/detect.js";
+export { sandboxInheritsEnclosingSandbox, type SandboxNestingDecision } from "./sandbox/nesting.js";
 export { probeCommand, unsupportedPlatform } from "./sandbox/probe.js";
 export {
   probeHarnessUnderSandbox,
   resetHarnessSandboxProbeCache,
   resolveProbeProvider,
+  inheritedSandboxProbeProvider,
   firstActionableProbeLine,
   type HarnessSandboxProbeOptions,
   type HarnessSandboxProbeResult,

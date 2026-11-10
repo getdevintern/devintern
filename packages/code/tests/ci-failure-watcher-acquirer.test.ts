@@ -174,8 +174,6 @@ describe("CiFailureWatcherAcquirer", () => {
       fixResults?: CiFixResult[];
       enabled?: () => boolean;
       now?: () => number;
-      /** Failures consumed one per postComment call (success when empty). */
-      postCommentErrors?: Array<Error | undefined>;
     } = {},
   ) {
     const fixed: string[] = [];
@@ -184,8 +182,6 @@ describe("CiFailureWatcherAcquirer", () => {
     const github: CiFailureWatcherGitHub = {
       ...base,
       postComment: async (_repo, _n, body) => {
-        const failure = overrides.postCommentErrors?.shift();
-        if (failure) throw failure;
         comments.push(body);
       },
     };
@@ -685,6 +681,123 @@ describe("CiFailureWatcherAcquirer", () => {
     expect(workerState.listOpenAgentPrs()).toHaveLength(0);
   });
 
+  test("an unusable PR state keeps the CI watch instead of unwatching", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const base = makeGithub({ prState: "open", workflowRuns: [] });
+
+    for (const data of [{}, { state: "draft" }] as PolledCiPr[]) {
+      const acquirer = new CiFailureWatcherAcquirer({
+        intervalSeconds: 60,
+        workerState,
+        queue,
+        provider: createGitHubCiProvider({
+          ...base,
+          fetchPr: async () => ({ data, etag: 'W/"unusable"', notModified: false }),
+        }),
+        fixPr: async () => true,
+      });
+
+      await acquirer.tick();
+      expect(workerState.listOpenAgentPrs()).toHaveLength(1);
+    }
+  });
+
+  test("an unusable PR state defers CI fixes without spending the retry budget", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const base = makeGithub({
+      prState: "open",
+      headSha: sha1,
+      workflowRuns: [failingRun(505)],
+    });
+    let usable = false;
+    const fixed: string[] = [];
+    const comments: string[] = [];
+    const acquirer = new CiFailureWatcherAcquirer({
+      intervalSeconds: 60,
+      workerState,
+      queue,
+      provider: createGitHubCiProvider({
+        ...base,
+        fetchPr: async () =>
+          usable
+            ? {
+                data: { state: "open", head: { sha: sha1 } },
+                etag: 'W/"open"',
+                notModified: false,
+              }
+            : { data: { head: { sha: sha1 } }, etag: 'W/"unusable"', notModified: false },
+        postComment: async (_repo, _n, body) => {
+          comments.push(body);
+        },
+      }),
+      fixPr: async (repo, n) => {
+        fixed.push(`${repo}#${n}`);
+        return true;
+      },
+      maxAttempts: 2,
+    });
+
+    for (let i = 0; i < 3; i += 1) {
+      await acquirer.tick();
+    }
+    expect(fixed).toEqual([]);
+    expect(comments).toEqual([]);
+    expect(workerState.getCiFixState("acme/widgets", 42).consecutiveFailures).toBe(0);
+    expect(workerState.getCiFixState("acme/widgets", 42).escalatedSha).toBeUndefined();
+    expect(workerState.listOpenAgentPrs()).toHaveLength(1);
+
+    usable = true;
+    await acquirer.tick();
+    expect(fixed).toEqual(["acme/widgets#42"]);
+    expect(comments).toEqual([]);
+  });
+
+  test("an unusable PR ETag is never replayed, so a 304 cannot authorize a CI fix", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const base = makeGithub({
+      prState: "open",
+      headSha: sha1,
+      workflowRuns: [failingRun(506)],
+    });
+    const etag = 'W/"unusable"';
+    const sentEtags: (string | undefined)[] = [];
+    const fixed: string[] = [];
+    const acquirer = new CiFailureWatcherAcquirer({
+      intervalSeconds: 60,
+      workerState,
+      queue,
+      provider: createGitHubCiProvider({
+        ...base,
+        fetchPr: async (_repo, _prNumber, requestEtag) => {
+          sentEtags.push(requestEtag);
+          // Model a server that answers the cached unusable ETag with a
+          // state-less 304. The watcher must never send it back: a 304 would
+          // default `lifecycle` to "open" and let a fix run for an unconfirmed PR.
+          if (requestEtag === etag) {
+            return { data: null, etag, notModified: true };
+          }
+          return { data: { head: { sha: sha1 } }, etag, notModified: false };
+        },
+      }),
+      fixPr: async (repo, n) => {
+        fixed.push(`${repo}#${n}`);
+        return true;
+      },
+    });
+
+    await acquirer.tick();
+    expect(fixed).toEqual([]);
+    expect(sentEtags).toEqual([undefined]);
+    expect(workerState.getCursor("github:cipr:acme/widgets#42")).toBeNull();
+
+    await acquirer.tick();
+    // The unusable ETag was not persisted, so the next request is
+    // unconditional and observes the still-unusable payload again.
+    expect(sentEtags).toEqual([undefined, undefined]);
+    expect(fixed).toEqual([]);
+    expect(workerState.getCursor("github:cipr:acme/widgets#42")).toBeNull();
+  });
+
   test("fork PRs are skipped gracefully", async () => {
     workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
     const gh: FakeGitHubState = {
@@ -908,169 +1021,6 @@ describe("CiFailureWatcherAcquirer", () => {
     gh.statusEtagHit = true;
     await acquirer.tick();
     expect(fixed).toHaveLength(2);
-    expect(comments).toHaveLength(1);
-    expect(workerState.getCiFixState("acme/widgets", 42).escalatedSha).toBe(sha1);
-  });
-
-  test("a failed escalation comment is retried instead of permanently suppressing it", async () => {
-    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
-    const gh: FakeGitHubState = {
-      prState: "open",
-      headSha: sha1,
-      workflowRuns: [failingRun(850)],
-      jobLogs: "error: build failed",
-    };
-    let now = 1_000;
-    const { acquirer, comments } = makeAcquirer(gh, {
-      maxAttempts: 1,
-      fixResults: [false],
-      now: () => now,
-      postCommentErrors: [
-        new Error("GitHub API error (403): Resource not accessible by personal access token"),
-      ],
-    });
-    const warns: string[] = [];
-    const logs: string[] = [];
-    const originalWarn = console.warn;
-    const originalLog = console.log;
-    console.warn = (...args: unknown[]) => {
-      warns.push(args.join(" "));
-    };
-    console.log = (...args: unknown[]) => {
-      logs.push(args.join(" "));
-    };
-    const recoveryLines = () =>
-      logs.filter((line) => line.includes("GitHub credential accepted again")).length;
-    try {
-      await acquirer.tick();
-      // The escalation comment did not land, so the PR must stay retryable.
-      expect(comments).toHaveLength(0);
-      expect(workerState.getCiFixState("acme/widgets", 42).escalatedSha).toBeUndefined();
-      expect(warns).toHaveLength(1);
-      expect(warns[0]).toContain("403");
-      // The failing request is a comment POST, so the guidance must name the
-      // write permission rather than the CI read scopes (which already work).
-      expect(warns[0]).toContain("Issues: Write");
-      expect(warns[0]).not.toContain("Actions: Read");
-      // A successful PR fetch must not claim credential recovery while the
-      // post itself was rejected.
-      expect(recoveryLines()).toBe(0);
-
-      now += 60_000;
-      await acquirer.tick();
-      expect(comments).toHaveLength(1);
-      expect(workerState.getCiFixState("acme/widgets", 42).escalatedSha).toBe(sha1);
-      expect(recoveryLines()).toBe(1);
-    } finally {
-      console.warn = originalWarn;
-      console.log = originalLog;
-    }
-  });
-
-  test("a CI-read warning does not hide a comment-post permission failure", async () => {
-    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
-    const gh: FakeGitHubState = {
-      prState: "open",
-      headSha: sha1,
-      workflowRuns: [failingRun(860)],
-      jobLogs: "error: build failed",
-      actionsError: new Error(
-        "GitHub API error (403): Resource not accessible by personal access token",
-      ),
-    };
-    const { acquirer, comments } = makeAcquirer(gh, {
-      maxAttempts: 1,
-      fixResults: [false],
-      postCommentErrors: [
-        new Error("GitHub API error (403): Resource not accessible by personal access token"),
-      ],
-    });
-    const warns: string[] = [];
-    const originalWarn = console.warn;
-    console.warn = (...args: unknown[]) => {
-      warns.push(args.join(" "));
-    };
-    try {
-      // First tick: the CI read is rejected → CI guidance.
-      await acquirer.tick();
-      expect(warns).toHaveLength(1);
-      expect(warns[0]).toContain("Actions: Read");
-
-      // Same hour, now the CI read works but the escalation comment POST is
-      // rejected: its own throttle slot must still warn with write guidance.
-      gh.actionsError = undefined;
-      await acquirer.tick();
-      expect(warns).toHaveLength(2);
-      expect(warns[1]).toContain("posting an escalation comment");
-      expect(warns[1]).toContain("Issues: Write");
-      expect(warns[1]).not.toContain("Actions: Read");
-      expect(comments).toHaveLength(0);
-    } finally {
-      console.warn = originalWarn;
-    }
-  });
-
-  test("non-credential escalation post failures are capped instead of retried forever", async () => {
-    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
-    const gh: FakeGitHubState = {
-      prState: "open",
-      headSha: sha1,
-      workflowRuns: [failingRun(861)],
-      jobLogs: "error: build failed",
-    };
-    const errors = Array.from(
-      { length: 10 },
-      () => new Error("GitHub API error (422): Validation Failed"),
-    );
-    const postCommentErrors = errors.slice();
-    const { acquirer, comments } = makeAcquirer(gh, {
-      maxAttempts: 1,
-      fixResults: [false],
-      postCommentErrors,
-    });
-    const warns: string[] = [];
-    const originalWarn = console.warn;
-    console.warn = (...args: unknown[]) => {
-      warns.push(args.join(" "));
-    };
-    const postWarns = () =>
-      warns.filter((line) => line.includes("could not post escalation comment"));
-    try {
-      for (let i = 0; i < 6; i++) await acquirer.tick();
-      expect(comments).toHaveLength(0);
-      // Three attempts, then the escalation freezes until the head changes.
-      expect(postWarns()).toHaveLength(3);
-      expect(postWarns()[2]).toContain("after 3 attempt(s)");
-      expect(postWarns()[2]).toContain("not retrying until the head changes");
-      expect(workerState.getCiFixState("acme/widgets", 42).escalatedSha).toBe(sha1);
-      // No further POSTs are attempted at this head.
-      expect(postCommentErrors).toHaveLength(7);
-    } finally {
-      console.warn = originalWarn;
-    }
-  });
-
-  test("an escalation comment retried after a restart persists the escalation once it lands", async () => {
-    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
-    workerState.setCiFixState("acme/widgets", 42, { consecutiveFailures: 1 });
-    const gh: FakeGitHubState = {
-      prState: "open",
-      headSha: sha1,
-      workflowRuns: [failingRun(851)],
-    };
-    const { acquirer, fixed, comments } = makeAcquirer(gh, {
-      maxAttempts: 1,
-      postCommentErrors: [new Error("GitHub API error (500): Internal Server Error")],
-    });
-
-    // Budget was already exhausted before this tick: no repair is attempted,
-    // and a failed post must leave the escalation unrecorded.
-    await acquirer.tick();
-    expect(fixed).toHaveLength(0);
-    expect(comments).toHaveLength(0);
-    expect(workerState.getCiFixState("acme/widgets", 42).escalatedSha).toBeUndefined();
-
-    await acquirer.tick();
     expect(comments).toHaveLength(1);
     expect(workerState.getCiFixState("acme/widgets", 42).escalatedSha).toBe(sha1);
   });

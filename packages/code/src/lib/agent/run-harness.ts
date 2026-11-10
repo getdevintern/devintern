@@ -41,7 +41,11 @@ import {
 } from "../state/run-recorder";
 import type { TaskTrackerClient } from "../trackers/client";
 import { formatAgentInputNeededMarkdown } from "../trackers/shared/markdown-comment-formatter";
-import { HarnessUnavailableError, detectHarnessStartupFailure } from "./harness-startup";
+import {
+  HarnessUnavailableError,
+  describeAgentExitFailure,
+  detectHarnessStartupFailure,
+} from "./harness-startup";
 import { resolveAgentEffort, resolveAgentModel } from "./model";
 import { agentSandboxPolicy, getSandbox } from "./sandbox";
 import { harnessSpawnEnv } from "./spawn";
@@ -509,9 +513,15 @@ export async function runAgentSession(
             },
           });
         } else {
+          const failureDetail = describeAgentExitFailure(stdoutOutput, stderrOutput);
           console.log(`❌ Agent exited with non-zero code ${code}`);
+          if (failureDetail) {
+            console.log(`   Reason: ${failureDetail}`);
+          }
           console.log("   No JIRA comment will be posted due to execution failure");
-          reject(new Error(`Agent exited with code ${code}`));
+          reject(
+            new Error(`Agent exited with code ${code}${failureDetail ? `: ${failureDetail}` : ""}`),
+          );
         }
       });
     })().catch(reject);
@@ -535,6 +545,8 @@ function recordCompletedImplementation(input: RunAgentHarnessOptions, startedAt:
   const taskDir = input.taskKey ? join(resolveOutputDir(), input.taskKey.toLowerCase()) : undefined;
   if (!taskDir) return;
   const { incomplete, report } = readImplementationReport(taskDir, startedAt);
+  const model = resolveAgentModel(input.harness.name);
+  const effort = resolveAgentEffort();
   recordRunStage("implementation", {
     status: incomplete ? "failed" : "succeeded",
     summary: incomplete
@@ -542,6 +554,8 @@ function recordCompletedImplementation(input: RunAgentHarnessOptions, startedAt:
       : `implemented with ${input.harness.displayName}`,
     detail: {
       harness: input.harness.displayName,
+      ...(model === undefined ? {} : { model }),
+      ...(effort === undefined ? {} : { effort }),
       durationMs: Date.now() - startedAt,
       ...(report === undefined ? {} : { report }),
     },
@@ -588,11 +602,15 @@ function recordHaltedImplementation(
   const { report } = readImplementationReport(taskDir, startedAt);
   const preservedReport = report ?? recordedImplementationReport();
   const reason = error instanceof Error ? error.message : String(error);
+  const model = resolveAgentModel(input.harness.name);
+  const effort = resolveAgentEffort();
   replaceRunStage("implementation", {
     status: "failed",
     summary: `implementation not delivered with ${input.harness.displayName}`,
     detail: {
       harness: input.harness.displayName,
+      ...(model === undefined ? {} : { model }),
+      ...(effort === undefined ? {} : { effort }),
       durationMs: Date.now() - startedAt,
       ...(preservedReport === undefined ? {} : { report: preservedReport }),
       deliveryError: reason,

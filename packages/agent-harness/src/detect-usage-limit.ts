@@ -62,6 +62,9 @@ const USAGE_LIMIT_PATTERNS = [
   // OpenCode Go (anomalyco/opencode session/retry.ts): FreeUsageLimitError and
   // GoUsageLimitError are rewritten into these headless retry messages.
   /^(?:error:\s*)?free usage exceeded(?:,\s*subscribe to go)?[.]?$/i,
+  // OpenCode also emits this shorter Go quota error in its stderr and in the
+  // cause of a structured "Failed to drain Session" log.
+  /^(?:(?:AI\.)?error:\s*)?go usage limit exceeded[.!]?(?:\n|$)/i,
   /^(?:(?:AI_(?:APICall|Retry)Error|error):\s*)?(?:(?:\d+[-\s]?hour|weekly|daily|monthly)\s+)?usage limit reached\.(?:\s+it will reset in [^\n.]+(?:\.|$))?(?:\s+to continue using this model now, enable usage from your available balance\b[^\n]*)?$/i,
   /^subscription quota exceeded\.\s+you can continue using free models[.]?$/i,
   // Grok Build translates account/team exhaustion to these headless messages.
@@ -73,7 +76,6 @@ const USAGE_LIMIT_PATTERNS = [
   // JSON Internal error (`"message": "API error (status 402 Payment Required): ..."`).
   // Allow a JSON `"...": "` prefix so the diagnostic still matches inside that object.
   /(?:^|:\s*")(?:api error \(status 402 payment required\):\s*)?grok build usage balance exhausted\b/i,
-  /(?:^|:\s*")api error \(status 402 payment required\)/i,
   // Goose maps provider HTTP 402 responses to this error and can exit zero.
   /^(?:error:\s*)?credits exhausted:\s+[^\n]+$/i,
   /^(?:⚠\s*)?individual quota reached\.\s+please upgrade your subscription to increase your limits[.]?$/i,

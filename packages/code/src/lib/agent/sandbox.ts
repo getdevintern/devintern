@@ -14,15 +14,18 @@ import { existsSync } from "fs";
 
 import {
   harnessCliPathEnvKey,
+  inheritedSandboxProbeProvider,
   probeHarnessUnderSandbox,
   removedSandboxProviderMessage,
   resolveExecutablePath,
   resolveHarnessChainSync,
   resolveSandbox,
+  sandboxInheritsEnclosingSandbox,
 } from "@devintern/agent-harness";
 import type {
   DetectedSandboxProvider,
   NonoPackStatus,
+  ResolvedHarnessChain,
   ResolvedSandbox,
   SandboxPolicy,
   SandboxProvider,
@@ -35,7 +38,15 @@ import {
 } from "../workspace/paths";
 
 let cliOverride: string | undefined;
-let cached: Promise<ResolvedSandbox | null> | null = null;
+/**
+ * Keyed by `<sandbox override>\0<harness>`. A batch can select different
+ * harnesses per task, and the provider compatibility check plus nono pack /
+ * native / docker mapping depend on the harness actually being spawned, so one
+ * shared resolution per process would wrap later runs with the first task's
+ * harness.
+ */
+const cachedSandboxes = new Map<string, Promise<ResolvedSandbox | null>>();
+let sandboxAnnounced = false;
 
 /**
  * Record the `--sandbox` CLI flag value. Must be called during CLI parsing,
@@ -45,23 +56,29 @@ let cached: Promise<ResolvedSandbox | null> | null = null;
  */
 export function setSandboxOverride(name: string | undefined): void {
   cliOverride = name;
-  cached = null;
+  cachedSandboxes.clear();
+  sandboxAnnounced = false;
 }
 
 /**
- * Resolve the sandbox for agent spawns, memoized per process.
+ * Resolve the sandbox for agent spawns, memoized per sandbox provider and
+ * harness.
  *
  * @param harnessName - The harness being wrapped, for compatibility filtering.
  * @returns The resolved sandbox, or `null` to spawn the agent directly.
  */
 export function getSandbox(harnessName: string): Promise<ResolvedSandbox | null> {
+  const key = `${cliOverride ?? ""}\0${harnessName}`;
+  let cached = cachedSandboxes.get(key);
   if (!cached) {
     cached = resolveSandbox({ sandboxName: cliOverride, harnessName }).then((resolved) => {
-      if (resolved) {
+      if (resolved && !sandboxAnnounced) {
+        sandboxAnnounced = true;
         console.log(`🔒 Agent sandbox: ${resolved.provider.displayName}`);
       }
       return resolved;
     });
+    cachedSandboxes.set(key, cached);
   }
   return cached;
 }
@@ -212,64 +229,54 @@ export interface HarnessPreflightEntry {
 
 /** Preflight results collected before rendering the (pure) doctor report. */
 export interface HarnessPreflightReport {
-  /** Sandbox provider the entries were probed through. */
+  /**
+   * Sandbox provider the entries were probed through. When the next run
+   * inherits an enclosing sandbox this is the wrapper-free inherited stand-in
+   * (`"<active> (inherited)"`), matching the confinement the runtime will use.
+   */
   provider: string;
   entries: HarnessPreflightEntry[];
+  /**
+   * Fail-open fallback: set only when the inherited probe infrastructure itself
+   * cannot run, so the report says probing was skipped instead of failing the
+   * doctor. A run that inherits an enclosing sandbox is normally probed
+   * directly, exactly like the runtime chain resolution.
+   */
+  skipped?: { activeSandbox: string };
 }
 
 /**
- * Probe every configured harness CLI through the sandbox selected for the
- * next run.
+ * Probe every chain entry through one provider, preserving chain order.
  *
- * Collection is async because it executes `--version` through the provider;
- * {@link buildSandboxDoctorReport} stays pure and only renders the result.
- *
- * @param configured - Effective `AGENT_SANDBOX` value.
- * @param detections - Provider detections already gathered by the doctor.
- * @param raw - Raw `AGENT_HARNESS` value (defaults to the environment).
- * @returns Preflight rows, or undefined when no sandbox/provider is configured.
+ * @param chain - Chain whose entries to probe.
+ * @param provider - Sandbox the real run will spawn the harness through.
+ * @param compatibility - Configured provider whose {@link
+ *   SandboxProvider.supportsHarness} still gates the run. Defaults to
+ *   `provider`; the inherited stand-in uses this to name the provider whose
+ *   restriction rejects the entry.
+ * @returns One preflight row per chain entry.
  */
-export async function collectHarnessPreflight(
-  configured: string,
-  detections: DetectedSandboxProvider[],
-  raw?: string,
-): Promise<HarnessPreflightReport | undefined> {
-  if (!configured || configured === "none") {
-    return undefined;
-  }
-
-  // `sandboxName: "none"` keeps this chain resolution free of probes: the
-  // doctor runs the probes itself so it can render every entry, including
-  // fallbacks the runtime chain would drop.
-  const chain = resolveHarnessChainSync({ checkInstalled: false, raw, sandboxName: "none" });
-  // `auto` must pick the same provider the resolver would for the primary
-  // harness: a provider that cannot wrap it (e.g. native for goose) is not a
-  // candidate, even though it has a higher priority.
-  const primaryHarness = chain.entries[0]?.name;
-
-  let provider: SandboxProvider | undefined;
-  if (configured === "auto") {
-    provider = detections
-      .filter(
-        ({ provider: candidate, detection }) =>
-          detection.available &&
-          candidate.priority > 0 &&
-          (!primaryHarness ||
-            !candidate.supportsHarness ||
-            candidate.supportsHarness(primaryHarness)),
-      )
-      .sort((a, b) => b.provider.priority - a.provider.priority)[0]?.provider;
-  } else {
-    const detected = detections.find((entry) => entry.provider.name === configured);
-    provider = detected?.detection.available ? detected.provider : undefined;
-  }
-  if (!provider) {
-    return undefined;
-  }
-
-  const entries = await Promise.all(
+async function probeChainEntries(
+  chain: ResolvedHarnessChain,
+  provider: SandboxProvider,
+  compatibility: SandboxProvider = provider,
+): Promise<HarnessPreflightEntry[]> {
+  return Promise.all(
     chain.entries.map(async (entry): Promise<HarnessPreflightEntry> => {
       const path = resolveExecutablePath(entry.path);
+      // `resolveSandbox` rejects a provider that does not support the harness
+      // before its nesting decision, so this entry cannot start even when the
+      // run inherits an enclosing sandbox. Render a FAIL row instead of
+      // probing a wrapper the runtime would never use.
+      if (compatibility.supportsHarness && !compatibility.supportsHarness(entry.name)) {
+        return {
+          name: entry.name,
+          path,
+          ok: false,
+          reason: `the ${compatibility.name} sandbox does not support the "${entry.name}" harness`,
+          suggestion: "Use AGENT_SANDBOX=nono (it wraps any harness), or switch AGENT_HARNESS.",
+        };
+      }
       const result = await probeHarnessUnderSandbox({
         path,
         provider,
@@ -288,7 +295,115 @@ export async function collectHarnessPreflight(
       };
     }),
   );
-  return { provider: provider.name, entries };
+}
+
+/**
+ * Probe every configured harness CLI through the sandbox selected for the
+ * next run.
+ *
+ * Collection is async because it executes `--version` through the provider;
+ * {@link buildSandboxDoctorReport} stays pure and only renders the result.
+ *
+ * @param configured - Effective `AGENT_SANDBOX` value.
+ * @param detections - Provider detections already gathered by the doctor.
+ * @param raw - Raw `AGENT_HARNESS` value (defaults to the environment).
+ * @param activeSandbox - Enclosing sandbox name from `activeSandboxName()`, if any.
+ * @returns Preflight rows, the fail-open skipped report, or undefined when no
+ *   sandbox/provider is configured.
+ */
+export async function collectHarnessPreflight(
+  configured: string,
+  detections: DetectedSandboxProvider[],
+  raw?: string,
+  activeSandbox?: string,
+): Promise<HarnessPreflightReport | undefined> {
+  if (!configured || configured === "none") {
+    return undefined;
+  }
+
+  // `sandboxName: "none"` keeps this chain resolution free of probes: the
+  // doctor runs the probes itself so it can render every entry, including
+  // fallbacks the runtime chain would drop.
+  const chain = resolveHarnessChainSync({ checkInstalled: false, raw, sandboxName: "none" });
+  // `auto` must pick the same provider the resolver would for the primary
+  // harness: a provider that cannot wrap it (e.g. native for goose) is not a
+  // candidate, even though it has a higher priority.
+  const primaryHarness = chain.entries[0]?.name;
+
+  // When an enclosing sandbox is present, the next run spawns the harness
+  // unwrapped inside that confinement (`resolveSandbox` never nests `auto`, and
+  // skips an explicit provider that cannot nest). Probe with the wrapper-free
+  // stand-in instead of skipping: a broken primary or fallback must surface here
+  // exactly as it does in `resolveHarnessChain`.
+  const probeInherited = async (
+    active: string,
+    compatibility?: SandboxProvider,
+  ): Promise<HarnessPreflightReport> => {
+    const probeProvider = inheritedSandboxProbeProvider(active, compatibility);
+    try {
+      return {
+        provider: probeProvider.name,
+        entries: await probeChainEntries(chain, probeProvider, compatibility ?? probeProvider),
+      };
+    } catch {
+      // Fail open: readiness probing is advisory, so an unexpected probe
+      // infrastructure failure renders the skip instead of failing the doctor.
+      return { provider: probeProvider.name, entries: [], skipped: { activeSandbox: active } };
+    }
+  };
+
+  // Mirror `sandboxInheritsEnclosingSandbox` (the resolver's single source of
+  // truth): `auto` inherits the enclosing sandbox before any provider
+  // detection. Resolving the provider first would return undefined when
+  // nothing was detected, or when no detected provider can wrap the primary
+  // harness, and the doctor would silently drop every readiness row the CI
+  // gate depends on.
+  if (activeSandbox && sandboxInheritsEnclosingSandbox({ configured, activeSandbox })) {
+    return probeInherited(activeSandbox);
+  }
+
+  let provider: SandboxProvider | undefined;
+  if (configured === "auto") {
+    const rows = await Promise.all(
+      chain.entries.map(async (entry) => {
+        const selected = detections
+          .filter(
+            ({ provider: candidate, detection }) =>
+              detection.available &&
+              candidate.priority > 0 &&
+              (!candidate.supportsHarness || candidate.supportsHarness(entry.name)),
+          )
+          .sort((a, b) => b.provider.priority - a.provider.priority)[0]?.provider;
+        if (!selected) return [];
+        return probeChainEntries({ ...chain, entries: [entry] }, selected);
+      }),
+    );
+    const entries = rows.flat();
+    return entries.length ? { provider: "auto (per harness)", entries } : undefined;
+  } else {
+    const detected = detections.find((entry) => entry.provider.name === configured);
+    provider = detected?.detection.available ? detected.provider : undefined;
+  }
+  if (!provider) {
+    return undefined;
+  }
+
+  // `resolveSandbox` rejects an explicit provider that cannot wrap the primary
+  // harness before any nesting decision, so the next run fails before spawning
+  // rather than inheriting the enclosing sandbox. Probe through that provider:
+  // `probeChainEntries` renders the incompatibility as a FAIL row.
+  if (primaryHarness && provider.supportsHarness && !provider.supportsHarness(primaryHarness)) {
+    return { provider: provider.name, entries: await probeChainEntries(chain, provider) };
+  }
+
+  // Mirror `resolveSandbox`: an explicitly requested provider is skipped inside
+  // an enclosing sandbox unless it can nest, so the next run spawns the harness
+  // unwrapped inside that confinement instead.
+  if (activeSandbox && sandboxInheritsEnclosingSandbox({ configured, activeSandbox, provider })) {
+    return probeInherited(activeSandbox, provider);
+  }
+
+  return { provider: provider.name, entries: await probeChainEntries(chain, provider) };
 }
 
 /** Optional extras for {@link buildSandboxDoctorReport}. */
@@ -393,7 +508,10 @@ export function buildSandboxDoctorReport(
         `Next run:   ❌ fails — ${configured} does not support the configured ` +
           `"${harnessName}" harness. Use nono (any harness), or switch AGENT_HARNESS.`,
       );
-    } else if (activeSandbox && !chosen.provider.canNestInSandbox) {
+    } else if (
+      activeSandbox &&
+      sandboxInheritsEnclosingSandbox({ configured, activeSandbox, provider: chosen.provider })
+    ) {
       lines.push(
         `Next run:   already inside the ${activeSandbox} sandbox — no additional sandbox ` +
           "will be added; the agent inherits the existing confinement",
@@ -406,7 +524,13 @@ export function buildSandboxDoctorReport(
 
   lines.push(...describeProviders(detections, harnessName, linux));
 
-  if (preflight && preflight.entries.length > 0) {
+  if (preflight?.skipped) {
+    lines.push(
+      `Harness CLI preflight: skipped — the agent inherits the existing ` +
+        `${preflight.skipped.activeSandbox} confinement`,
+    );
+    lines.push("");
+  } else if (preflight && preflight.entries.length > 0) {
     lines.push(`Harness CLI preflight (${preflight.provider})`);
     for (const entry of preflight.entries) {
       const status = entry.ok ? "OK" : `FAIL — ${entry.reason ?? "could not start"}`;

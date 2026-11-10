@@ -54,7 +54,8 @@ export async function runSandboxCommand(): Promise<never> {
       : "environment"
     : "default";
   const harnessName = resolveHarness().harness.name;
-  const preflight = await collectHarnessPreflight(configured, detections);
+  const activeSandbox = activeSandboxName();
+  const preflight = await collectHarnessPreflight(configured, detections, undefined, activeSandbox);
   // Pack-profile status per chain entry: shows which harness runs are backed
   // by a nono pack and which fall back to the generic profile.
   const packStatuses = parseHarnessList(process.env.AGENT_HARNESS)
@@ -66,7 +67,7 @@ export async function runSandboxCommand(): Promise<never> {
     configuredSource,
     harnessName,
     process.platform,
-    { activeSandbox: activeSandboxName(), packStatuses, preflight },
+    { activeSandbox, packStatuses, preflight },
   );
   console.log(report.lines.join("\n"));
   process.exit(report.nextRunFails ? 1 : 0);

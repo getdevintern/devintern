@@ -4,7 +4,7 @@ sidebarLabel: "Dashboard"
 description: "See what the worker is doing, inspect failed runs, and retry work from a local dashboard"
 section: "Automation"
 order: 4
-dateModified: 2026-10-30
+dateModified: 2026-11-05
 ---
 
 # Worker Dashboard
@@ -16,6 +16,7 @@ It starts automatically with `devintern worker`. Open [http://localhost:4400](ht
 ## What you can do
 
 - See whether the worker is running, waiting for its next working window, or processing a task
+- See how much work is waiting in the status strip, including queued ad-hoc tasks and scheduled retries as well as relay deliveries
 - Follow each run from task pickup through implementation and pull request creation
 - Read the raw agent transcript for any harness execution under the run (clarity, implementation, review, and more)
 - Open the task or pull request behind a run
@@ -57,11 +58,17 @@ devintern dashboard
 
 The command reads the local history without changing it. Use `--port <number>` if port 4400 is already occupied (or set `DASHBOARD_PORT`), and `--host <host>` to bind a different loopback address (default `127.0.0.1`; `localhost` and `::1` are also accepted).
 
+Run history (runs, stats, agent PRs, artifacts, retry audit) comes from the same project-scoped `.devintern-code/queue.db` that a direct `devintern <TASK>` run writes, so local runs stay visible when a workspace is also configured. The pending ad-hoc and scheduled-retry counts in the header come from the workspace queue database (`~/.devintern/state/queue.db`). If you started the worker with a custom `--workspace /path/to/workspace.toml`, pass the same flag to the dashboard so queue counts, worker liveness, and harness-log transcripts follow it. The value can be the `workspace.toml` file or the directory that contains it:
+
+```bash
+devintern dashboard --workspace /path/to/workspace.toml
+```
+
 ## Local by design
 
 The dashboard and its data stay on the worker machine. It listens only on a loopback address, so it is not exposed to your network or the public internet. There is no setting that binds it to another address: a non-loopback bind fails before the server starts, because the dashboard has no built-in authentication and its write endpoints retry runs and trigger automations.
 
-Run history lives in the worker's workspace, alongside its other local state. The embedded dashboard remains available when an expired Worker Pilot pauses acquisition. Starting a standalone dashboard requires an active Worker Pilot or automation license.
+Worker run history lives in the worker's workspace, alongside its other local state. The embedded dashboard remains available when an expired Worker Pilot pauses acquisition. Starting a standalone dashboard requires an active Worker Pilot or automation license.
 
 To disable the dashboard or change its port, edit the workspace settings:
 

@@ -86,6 +86,34 @@ and secret `E2E_GITHUB_TOKEN` before running it. Do not expose these
 credentials to untrusted pull-request code. Build the CLI in that job before
 running the suite so the artifact matches the checkout.
 
+## Local auto-review loop
+
+`tests/local/cli-auto-review.test.ts` runs the built CLI's `--auto-review` loop
+against a local bare Git remote and the deterministic fixture agent, with no
+hosted PR, account, or network access. The fixture agent gains two prompt-driven
+modes: `auto-review-feedback` (the bundled `review.md` prompt) prints only a
+JSON verdict, and `auto-review-fix` (the bundled `fix.md` prompt) edits
+`src/greeting.ts` without committing or pushing. The reviewer reports one
+`medium` finding on iteration 1 and approves from iteration 2, so the loop
+converges; `E2E_AUTO_REVIEW_STUCK=1` keeps every iteration unapproved to prove
+`--auto-review-iterations` caps the review/fix cycles. Both modes are recorded
+in `E2E_AGENT_INVOCATIONS` so the test asserts the exact
+implement → review → fix → review sequence.
+
+The scenarios assert the pushed `feature/<task-key>` branch, the exact
+`src/greeting.ts` diff, the two commits ahead of base (the implementation plus
+`fix: address PR review feedback`), and the
+`DEVINTERN_OUTPUT_DIR/<task-key>/auto-review-summary.json` artifact
+(`iterations`, `success`, and `history`). Per-iteration verdicts are saved under
+`iteration-<n>/feedback.json`. A non-approved loop still exits 0 and delivers
+the branch; the local remote has no supported PR host, so `--create-pr` pushes
+and exits without a PR URL.
+
+```sh
+bun run --filter @getdevintern/code build
+bun run --filter @devintern/e2e test
+```
+
 ## Worker `worker add` option matrix
 
 The default local suite (`tests/local/worker-add-options.test.ts`) drives the built
@@ -97,6 +125,76 @@ tracker or hosted code host is involved. Enqueue-only cases cover `--title`,
 `--wait-timeout` (`0` and a bounded timeout through `E2E_AGENT_DELAY_MS`), and
 `--resume`, asserting the pushed branch/commit directly on the bare remote rather
 than a pull request.
+
+## Worker workspace bootstrap (`worker scaffold` and `worker add-repo`)
+
+The default local suite (`tests/local/worker-workspace-bootstrap.test.ts`) drives
+the built CLI's non-interactive onboarding path in a temporary HOME and
+workspace. It seeds a local bare Git remote and a checkout (no network, tracker,
+or credentials), then asserts the on-disk result rather than CLI prose:
+
+- `worker scaffold` writes `workspace.toml` and the shared `.env` with mode
+  `0600`; a second run exits non-zero without changing either file.
+- The generated TOML parses through a follow-up `worker add` invocation.
+- `worker add-repo` derives a filesystem-safe `[[repos]]` name from the remote,
+  does not pin a transient `origin/HEAD`, and seeds a `[[routing.rules]]` entry
+  from `JIRA_DEFAULT_PROJECT_KEY` (or `LINEAR_DEFAULT_TEAM_KEY`).
+- Missing repo env keys merge into the shared `.env`; conflicting values are
+  demoted to the repo's inline `[repos.env]` instead of overwriting shared
+  values.
+- Re-running `add-repo` is idempotent, and running from a package subdirectory
+  still resolves the repository-root `.devintern-code/.env`.
+- A missing workspace or a checkout without an `origin` exits non-zero and
+  writes nothing.
+
+The temporary root (HOME, workspace, bare remote, and seed checkout) is removed
+in `finally`; the run creates no resource outside it.
+
+```sh
+bun run --filter @getdevintern/code build
+bun run --filter @devintern/e2e test
+```
+
+## Scheduled workspace automations
+
+`tests/local/worker-automations.test.ts` starts one real `devintern worker`
+against a throwaway workspace whose `[[automations]]` entries are all scheduled
+on the next cron minute (`cron = "* * * * *"`). It seeds a local bare Git remote
+from `fixtures/simple-project`, uses the deterministic fake agent, and reads the
+queue database and the bare remote instead of parsing CLI stdout. The matrix
+covers:
+
+- `open_pr = true`: the run is `scheduled`, records a branch, and the branch on
+  the bare remote changes exactly `src/greeting.ts` in one commit. PR creation
+  itself is not covered here: the bare remote has no detectable code-host
+  platform, so the run succeeds with `pr_url` null and the code-host suites own
+  that path. A second workspace in the same file omits `--create-pr` from its
+  defaults, proving the automation's own `open_pr` opt-in still pushes a branch.
+- `open_pr = false`: the agent still runs (each invocation is attributed to its
+  automation via `DEVINTERN_AUTOMATION_ID`), but the per-automation policy
+  (`--no-git`) suppresses the branch and push even though the workspace
+  `worker_task_args` include `--create-pr`.
+- `allow_no_changes = true` with an `E2E_NO_CHANGE` prompt: the unchanged run
+  succeeds and publishes no branch or commit (a local branch may still be
+  recorded).
+- `allow_no_changes` unset with the same prompt: the run fails with the
+  documented missing-commit reason and publishes nothing.
+- Occurrence markdown files exist under `<workspace>/automations/<id>/`,
+  `automation_schedules` has one row per enabled automation, and no unconfigured
+  automation produces a run.
+- After the first window settles, a fifth automation is appended to
+  `workspace.toml`; the live reloader reconciles it and its next occurrence
+  records a `scheduled` run.
+
+The file costs up to two cron boundaries for the main workspace (the first
+window and the reloaded automation share a minute) plus one more for the opt-in
+fixture, so allow roughly three minutes. Run it with the rest of the default
+local suite:
+
+```sh
+bun run --filter @getdevintern/code build
+bun run --filter @devintern/e2e test
+```
 
 ## Agent harness invocation checks
 
@@ -156,6 +254,44 @@ this offline suite.
 
 ```sh
 bun run --filter @getdevintern/code build
+bun run --filter @devintern/e2e test
+```
+
+## Worker conflict-resolution failover
+
+`tests/local/worker-conflict-failover.test.ts` covers the same two-entry
+`AGENT_HARNESS=claude-code,codex` chain on a real worker conflict-resolution
+job, plus the one-shot `devintern resolve-conflicts` contract. No GitHub,
+GitLab, Jira, or agent account is used.
+
+The fixture seeds a genuine merge conflict on a temporary bare remote
+(`git init --bare`) and serves the open MR from a loopback GitLab API fake.
+`git` reaches that remote through `url.<bare>.insteadOf`, so the worker's
+clone, fetch, and push stay on the local repository. The primary stub records
+its invocation, prints `Claude usage limit reached` with the adjacent
+`resets in 1 hour` hint, and exits non-zero. The fallback stub `exec`s
+`helpers/fake-agent.ts`, which resolves `src/greeting.ts` to
+`Hello, merged!`. `AGENT_CLI_PATH` is cleared so `<HARNESS>_CLI_PATH` selects
+each stub. `HOME`, `XDG_CONFIG_HOME`, the queue DB, and the output directory
+come from the fixture's isolated environment.
+
+On the quota-then-success path the worker invokes the primary stub once, fails
+over to codex, and updates `feature/conflict-pr` with an ordinary `git push`
+(no `--force` or `+` refspec). The pushed commit's parents are the previous
+feature tip and the base tip, the base branch is unchanged, and the worker
+stays running. The queue has no injected task. This GitLab conflict job does
+not record a run row; the processed sync id is the success signal. When both
+stubs are limited, the job is deferred, both `rate_limit:` windows are
+persisted, nothing is pushed, merged, or closed, the sync id stays unprocessed,
+and the poller does not retry inside its 30s backoff.
+
+The one-shot command is the documented first-harness contract
+(`packages/agent-harness/src/resolver.ts`): only the primary stub runs, the
+codex stub is not invoked, and an exhausted primary exits nonzero with
+`Agent usage limit reached`. This suite does not add one-shot failover.
+
+```sh
+bun run build
 bun run --filter @devintern/e2e test
 ```
 
@@ -314,28 +450,89 @@ fails the explicit live command before it mutates a remote repository.
 
 ## Offline fake tracker servers
 
-The default local suite includes an in-process fake Jira Cloud v3 server, so the
-built CLI can exercise the Jira tracker lifecycle with no credentials and no
-network access. `bun test tests/local` runs
-`tests/local/tracker-jira-fake.test.ts`; it skips only when the built CLI is
+The default local suite includes in-process fake Jira Cloud v3 and Trello REST
+servers, so the built CLI can exercise both tracker lifecycles with no
+credentials and no network access. `bun run --filter @devintern/e2e test` (or
+`bun test tests/local` after building) runs
+`tests/local/tracker-jira-fake.test.ts` and
+`tests/local/tracker-trello-fake.test.ts`; they skip only when the built CLI is
 absent, like the other local Git tests.
+
+### Jira fake
 
 The fake binds `127.0.0.1:0`, accepts any Basic-auth credentials (and never logs
 them), and implements only the endpoints the product calls: `/myself`, enhanced
-JQL `search/jql`, issue read/update, comments (ADF and text), and workflow
-transitions. Any unmatched request returns a diagnostic 404 and fails the test,
-so a client change that starts calling a new route is visible instead of
-silently returning `{}`.
+JQL `search/jql`, issue read/update (including custom fields), comments (ADF and
+text, create and update), and workflow transitions. Any unmatched request
+returns a diagnostic 404 and fails the test, so a client change that starts
+calling a new route is visible instead of silently returning `{}`.
 
-Two scenarios run the production Jira client through explicit-key and `--query`
-selection against a seeded issue and a decoy outside the selector. Read-back
-goes through the fake fixture, not CLI stdout: the pushed `feature/<key>` branch
-and exact `src/greeting.ts` diff, the run record, the configured workflow
-status, surviving unrelated labels, the implementation summary comment, and
-delivery of the seeded description/comment markers to the deterministic agent.
-A second run with `--skip-comments` proves no additional comment or transition
-is posted. The local bare Git remote is the code host; no GitHub token or PR is
-required.
+The Jira fake covers `/myself`, enhanced JQL `search/jql`, issue read/update,
+comments (ADF and text), and workflow transitions. The Azure DevOps fake covers
+project-scoped WIQL, batch and single work-item reads, work-item JSON-patch
+updates (including `System.State`), and work-item comments. The CLI reaches the
+fake through the existing `AZURE_DEVOPS_BASE_URL` test/proxy override, which
+replaces the organization root (`https://dev.azure.com/<organization>` by
+default) for the subprocess only; production behavior is unchanged when the
+variable is absent.
+
+Two scenarios per fake run the production client through explicit-key and
+`--query` selection against seeded items and a decoy outside the selector.
+Read-back goes through the fixture, not CLI stdout: the pushed `feature/<key>`
+branch and exact `src/greeting.ts` diff, the run record, the configured
+workflow status/state, surviving unrelated labels/tags, the implementation
+summary comment, and delivery of the seeded description/comment markers to the
+deterministic agent. The local bare Git remote is the code host; no GitHub
+token, tracker token, or PR is required. The Jira key scenario additionally
+runs a second time with `--skip-comments` to prove no additional comment or
+transition is posted.
+
+Run just the Azure DevOps lifecycle with:
+
+```sh
+bun run --filter @devintern/e2e test
+# or directly, from packages/e2e
+bun test tests/local/tracker-azure-devops-fake.test.ts
+```
+
+### Offline fake Linear server
+
+The same default suite also includes an in-process Linear GraphQL fake
+(`providers/fake-linear.ts`), so the built CLI exercises the Linear tracker
+lifecycle without a Linear workspace, token, or network access.
+`tests/local/tracker-linear-fake.test.ts` skips only when the built CLI is
+absent.
+
+The fake binds `127.0.0.1:0` on a single `POST /graphql` endpoint, accepts any
+`Authorization` header without logging it, and serves one in-memory team with
+Todo/In Progress/In Review workflow states, issues, labels, and markdown
+comments. It implements only the operations the product calls: `IssueById`,
+`IssueComments`, `TeamStates`, `CommentCreate`, `IssueUpdate`, and
+`SearchIssues`. Any other operation or malformed payload returns a diagnostic
+GraphQL error and fails the test through `unexpectedOperations`.
+
+The fixture supplies `TASK_TRACKER=linear`, a synthetic `LINEAR_API_KEY`, and
+`LINEAR_API_URL=http://127.0.0.1:<port>/graphql`; no environment variable is
+inherited. Two scenarios run the production Linear client through explicit-key
+and JSON IssueFilter `--query` selection against a seeded issue and a decoy
+outside the selector. Read-back goes through the fake fixture, not CLI stdout:
+the pushed `feature/<key>` branch and exact `src/greeting.ts` diff, the run
+record, the configured workflow state, surviving unrelated labels, the
+implementation summary comment, delivery of the seeded description/comment
+markers to the deterministic agent, and an untouched decoy. The local bare Git
+remote is the code host; no PR, GitHub token, or model credentials are required.
+
+`tests/local/tracker-jira-estimation.test.ts` covers the `--estimate` workflow
+against the same fake. Project settings configure `storyPointsField:
+"customfield_10016"` explicitly so discovery drift is not conflated with the
+write path. The deterministic agent detects the bundled estimation prompt and
+returns a Fibonacci value; the test reads the custom field, the single
+estimation comment (create, then in-place update whose body carries the new
+value), and `estimation-result.json` back from durable state. It also exercises
+the <24h skip, the already-estimated-and-unchanged skip, and `--skip-comments`
+field-only behavior with a repeated sweep proving it does not re-estimate.
+Estimation runs are read-only: no branch, commit, or push reaches the local
+bare remote. No extra prerequisites or credentials are needed.
 
 ## Remote tracker fixtures
 
@@ -462,7 +659,49 @@ inspected when it is absent.
 
 This smoke is opt-in and is not part of `test`, Turbo, or CI. See
 [docs/tracker-e2e-plan.md](docs/tracker-e2e-plan.md) for the staged expansion to
-full Jira/Trello lifecycles and offline fake-server coverage.
+full Jira/Trello lifecycles and the implemented Jira/Linear fake-server coverage
+(Trello fake planned).
+
+## Standalone dashboard API
+
+`tests/local/dashboard-api.test.ts` starts the built CLI as `devintern dashboard`
+against a real `WorkerFixture` workspace, after the worker has drained one
+injected task. The fixture picks a free port on the requested loopback host,
+builds the health URL from that same host (bracketing IPv6 literals, so
+`--host ::1` polls `http://[::1]:<port>`), and stops the process with SIGTERM in
+`finally`; it never waits on a fixed timer and never binds a non-loopback
+interface. The worker fixture's temporary HOME, workspace, output and queue
+database are the only inputs, so no account, license, tracker, or network is
+involved.
+
+The suite asserts the read surface over that real run: health; the `/api/runs`
+list with id, status, origin, task key and timestamps plus a bounded `limit`
+(and the 400 for an invalid one); run detail with stages, retry eligibility,
+harness-log and artifact arrays; the harness-log and artifact list routes; task
+activity; empty agent-PR and automation catalogs; worker status; the worker log
+tail including the daemon's captured startup banner; the documented 404 for an
+unknown run id; stats with at least one succeeded run; and the 405
+`{ error: "method not allowed" }` response for a non-GET `/api/runs`.
+It also proves the daemon lock is observed as `running`, then stops the worker
+and asserts the standalone dashboard reports `stopped` or `unknown` instead of a
+phantom live worker. The write-route refusal paths are covered without side
+effects: retrying the succeeded run returns 409 "not retriable: this run already
+succeeded" before any spawn, a non-integer retry id returns 400, and an unknown
+automation id returns 404. A separate case starts the CLI with `--host 0.0.0.0`,
+asserts a non-zero exit with the loopback error, no "Dashboard running" line,
+and that the chosen port is still free afterwards; another starts the fixture
+with `--host ::1` (skipped only when the host cannot bind IPv6 loopback) and
+asserts the bracketed health URL answers.
+
+```sh
+bun run --filter @getdevintern/code build
+bun run --filter @devintern/e2e test
+```
+
+Only the successful write paths are intentionally out of scope: a retry that
+actually queues work and a "Run now" that starts an automation would spawn
+detached CLI work or mutate the fixture. Worker-embedded dashboard mode and log
+redaction readback are likewise out of scope for this suite.
 
 ## Direct webhook serve
 
@@ -554,3 +793,27 @@ bun run --filter @devintern/e2e test:e2e:gitlab-relay
 
 CI must provide `E2E_RELAY_AUTH_SESSION` explicitly; the suite is not part of
 PR CI.
+
+### Worker working windows
+
+`tests/local/worker-working-windows.test.ts` verifies that a ready task waits outside the configured UTC windows and that `worker run-now` drains it once.
+
+### Incomplete task retry gate
+
+`tests/local/tracker-force-retry-gate.test.ts` verifies that an unchanged incomplete Jira task is skipped until `--force` requests a retry.
+
+### Multi-repo team routing
+
+`tests/local/worker-team-routing.test.ts` verifies team routing, ambiguous and unrouted task skips, and layered repo and team environment settings with local bare remotes.
+
+### Asana fake
+
+`tests/local/tracker-asana-fake.test.ts` exercises the built CLI against a loopback Asana API fixture, covering key and query selection, project sections, comments, and decoy isolation.
+
+### Azure DevOps fake
+
+`tests/local/tracker-azure-devops-fake.test.ts` exercises key and WIQL selection, state transitions, comments, and decoy isolation against a loopback fake API. The test subprocess opts in with `DEVINTERN_E2E_FAKE_AZURE_DEVOPS=1`; project configuration cannot enable the endpoint override.
+
+### Jira story-point estimation
+
+`tests/local/tracker-jira-estimation.test.ts` covers one-shot estimation, unchanged-task skips, re-estimation, and `--skip-comments` against the offline Jira fixture.

@@ -1,4 +1,4 @@
-import { existsSync, writeFileSync } from "fs";
+import { existsSync } from "fs";
 import { dirname, resolve } from "path";
 import { activateWorkerTrial, checkLicense, requireLicense } from "@devintern/license-check";
 import {
@@ -17,6 +17,9 @@ import {
   workspaceCodeStateDir,
   workspaceConfigPath,
 } from "../workspace/paths";
+import { parseRunNowArgs, runWorkerRunNow } from "./run-now";
+
+export { parseRunNowArgs, runWorkerRunNow };
 
 /** Sign in to the selected worker workspace without changing project login. */
 async function runWorkerLoginSubcommand(args: string[]): Promise<never> {
@@ -117,34 +120,7 @@ async function runWorkerAddSubcommand(args: string[]): Promise<never> {
  * drain, bypassing working windows without editing them.
  */
 async function runWorkerRunNowSubcommand(args: string[]): Promise<never> {
-  let workspacePath: string | undefined;
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
-    if (arg === "--workspace" && args[i + 1] && !args[i + 1]?.startsWith("-")) {
-      workspacePath = args[i + 1];
-      i++;
-    } else if (arg === "--help" || arg === "-h") {
-      console.log("Usage: devintern worker run-now [--workspace <path>]");
-      console.log("");
-      console.log("Ask the running workspace worker to drain ready tasks now,");
-      console.log("ignoring working windows (quiet hours) for this one pass.");
-      console.log("The worker picks up the request on its next poll interval");
-      console.log("(default 60s) and deletes the marker once served.");
-      process.exit(0);
-    }
-  }
-  const { resolveWorkspaceDir, workspaceConfigPath, workspaceRunNowPath } =
-    await import("../workspace/paths");
-  const selectedDir = workspacePath ? dirname(resolve(workspacePath)) : resolveWorkspaceDir();
-  if (!existsSync(workspaceConfigPath(selectedDir))) {
-    console.error(`❌ No workspace.toml at ${workspaceConfigPath(selectedDir)}.`);
-    process.exit(1);
-  }
-  writeFileSync(workspaceRunNowPath(selectedDir), "");
-  console.log(`✅ Run-now requested for ${workspaceConfigPath(selectedDir)}`);
-  console.log(`   Marker: ${workspaceRunNowPath(selectedDir)}`);
-  console.log("   The worker drains within one poll interval and removes the marker.");
-  process.exit(0);
+  process.exit(runWorkerRunNow(args));
 }
 
 /** Interactively configure unattended automation and a native user service. */

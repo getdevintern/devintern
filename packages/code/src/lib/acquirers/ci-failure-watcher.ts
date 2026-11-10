@@ -38,6 +38,7 @@ import type { CiFixState, WorkerState } from "../state/worker-state";
 import { RowParseError } from "../state/row-parse";
 import type { Acquirer } from "../../worker";
 import type { CiFailureFeedback } from "../review/formatter";
+import { classifyAgentPrState } from "../review/agent-pr-reconciler";
 import { serializePrRun } from "./review-polling";
 import { describeGitHubAuthFailure, isGitHubAuthError } from "../code-host/github/reviews";
 
@@ -278,15 +279,8 @@ interface CachedCiSnapshot {
 
 type PollOutcome = "active" | "unchanged-green" | "removed";
 
-/** API surface a CI credential failure came from; throttled independently. */
-type CiAuthOperation = "poll" | "comment";
-
-/** Result of one escalation-comment attempt. */
-type EscalationOutcome = "posted" | "retry" | "gave-up";
-
 interface CiAuthFailureEntry {
   repo: string;
-  operation: CiAuthOperation;
   lastWarnAt: number | null;
   active: boolean;
 }
@@ -300,13 +294,6 @@ interface CiPollProgress {
    */
   ciQueried: boolean;
 }
-
-/**
- * Non-credential escalation-comment failures tolerated before freezing the
- * escalation for this head. A permanent 403/422/5xx on the comment endpoint
- * must not be retried (and warned about) on every poll forever.
- */
-const MAX_ESCALATION_POST_FAILURES = 3;
 
 interface GreenPollSchedule {
   /** Index of the delay to use after the next unchanged-green observation. */
@@ -335,26 +322,10 @@ export class CiFailureWatcherAcquirer implements Acquirer {
   private timer: ReturnType<typeof setInterval> | null = null;
   private busy = false;
   private greenPollSchedules = new Map<string, GreenPollSchedule>();
-  /**
-   * Per-repo/per-operation throttle state for permanent credential failures.
-   * Fleet mode resolves a distinct token per repo, so a 403 in one repo must
-   * not hide an unrelated 401 in another; a comment-post failure also must not
-   * be silenced by a CI-read warning (they need different permissions).
-   */
+  /** Per-repo throttle state for permanent CI-read credential failures. */
   private authFailures = new Map<string, CiAuthFailureEntry>();
-  /**
-   * Repo operations whose credential failed during the current tick. Credential
-   * errors can surface outside the per-PR fetch try/catch (for example posting
-   * the escalation comment), and such an operation must not be reported as
-   * recovered just because its PR state fetched successfully.
-   */
-  private tickAuthFailedOps = new Set<string>();
-  /**
-   * Consecutive non-credential escalation-comment failures per PR, scoped to
-   * the head SHA that was being escalated, so a permanently failing post is
-   * retried a bounded number of times instead of on every poll forever.
-   */
-  private escalationPostFailures = new Map<string, { headSha: string; failures: number }>();
+  /** Repos whose CI read failed authentication during the current tick. */
+  private tickAuthFailedRepos = new Set<string>();
 
   constructor(options: CiFailureWatcherAcquirerOptions) {
     this.options = {
@@ -409,7 +380,7 @@ export class CiFailureWatcherAcquirer implements Acquirer {
     this.busy = true;
 
     try {
-      this.tickAuthFailedOps.clear();
+      this.tickAuthFailedRepos.clear();
       const watchedPrs =
         this.options.watchedChanges?.() ?? this.options.workerState.listOpenAgentPrs();
       const watchedKeys = new Set(watchedPrs.map((pr) => this.prKey(pr.repo, pr.prNumber)));
@@ -419,9 +390,6 @@ export class CiFailureWatcherAcquirer implements Acquirer {
       }
       for (const [key, entry] of this.authFailures) {
         if (!watchedRepos.has(entry.repo)) this.authFailures.delete(key);
-      }
-      for (const key of this.escalationPostFailures.keys()) {
-        if (!watchedKeys.has(key)) this.escalationPostFailures.delete(key);
       }
 
       const ciSucceededRepos = new Set<string>();
@@ -448,7 +416,7 @@ export class CiFailureWatcherAcquirer implements Acquirer {
           if (isGitHubAuthError(error)) {
             // A rejected or under-scoped credential fails identically on every
             // request, so re-reporting it per PR per tick floods the log.
-            this.warnAuthFailure(pr.repo, pr.prNumber, error as Error, "poll");
+            this.warnAuthFailure(pr.repo, pr.prNumber, error as Error);
             continue;
           }
           console.warn(
@@ -458,12 +426,10 @@ export class CiFailureWatcherAcquirer implements Acquirer {
       }
       // Only a tick where every CI stream was fetched proves polling works
       // again; a metadata-only success (fork PR, missing head SHA) must not
-      // clear a CI throttle it never re-tested. Credential failures raised
-      // outside the per-PR fetch (escalation comments) are tracked per
-      // operation and do not block CI polling's own recovery.
+      // clear a CI throttle it never re-tested.
       for (const repo of ciSucceededRepos) {
-        if (!this.tickAuthFailedOps.has(CiFailureWatcherAcquirer.authKey(repo, "poll"))) {
-          this.noteAuthRecovery(repo, "poll");
+        if (!this.tickAuthFailedRepos.has(repo)) {
+          this.noteAuthRecovery(repo);
         }
       }
     } finally {
@@ -471,24 +437,18 @@ export class CiFailureWatcherAcquirer implements Acquirer {
     }
   }
 
-  /** One credential warning per repo per operation per rolling hour. */
+  /** One credential warning per repo per rolling hour. */
   private static AUTH_WARN_INTERVAL_MS = 60 * 60 * 1000;
 
-  private static authKey(repo: string, operation: CiAuthOperation): string {
-    return `${repo.toLowerCase()}\u0000${operation}`;
+  private static authKey(repo: string): string {
+    return repo.toLowerCase();
   }
 
-  private warnAuthFailure(
-    repo: string,
-    prNumber: number,
-    error: Error,
-    operation: CiAuthOperation,
-  ): void {
-    const key = CiFailureWatcherAcquirer.authKey(repo, operation);
-    this.tickAuthFailedOps.add(key);
+  private warnAuthFailure(repo: string, prNumber: number, error: Error): void {
+    const key = CiFailureWatcherAcquirer.authKey(repo);
+    this.tickAuthFailedRepos.add(repo);
     const entry = this.authFailures.get(key) ?? {
       repo,
-      operation,
       lastWarnAt: null,
       active: false,
     };
@@ -503,23 +463,21 @@ export class CiFailureWatcherAcquirer implements Acquirer {
     }
     entry.lastWarnAt = now;
     this.authFailures.set(key, entry);
-    const activity = operation === "comment" ? "posting an escalation comment on" : "polling";
     console.warn(
-      `⚠️  [${this.name}] GitHub rejected the credential while ${activity} ${repo}#${prNumber}: ` +
-        `${error.message} ${describeGitHubAuthFailure(error, operation === "comment" ? "comment" : "ci")} ` +
+      `⚠️  [${this.name}] GitHub rejected the credential while polling ${repo}#${prNumber}: ` +
+        `${error.message} ${describeGitHubAuthFailure(error, "ci")} ` +
         "See docs/code/worker.md#ci-failures-on-the-agents-prs.",
     );
   }
 
-  /** Announce one operation's recovery and rearm its throttle. */
-  private noteAuthRecovery(repo: string, operation: CiAuthOperation): void {
-    const key = CiFailureWatcherAcquirer.authKey(repo, operation);
+  /** Announce CI polling recovery and rearm its throttle. */
+  private noteAuthRecovery(repo: string): void {
+    const key = CiFailureWatcherAcquirer.authKey(repo);
     const entry = this.authFailures.get(key);
     if (!entry?.active) return;
     this.authFailures.delete(key);
-    const scope = operation === "comment" ? "escalation comment posting" : "CI polling";
     console.log(
-      `✅ [${this.name}] GitHub credential accepted again for ${repo}; ${scope} recovered`,
+      `✅ [${this.name}] GitHub credential accepted again for ${repo}; CI polling recovered`,
     );
   }
 
@@ -614,20 +572,14 @@ export class CiFailureWatcherAcquirer implements Acquirer {
       );
       state.consecutiveFailures = 0;
       state.escalatedSha = undefined;
-      this.escalationPostFailures.delete(this.prKey(repo, prNumber));
       workerState.setCiFixState(repo, prNumber, state);
     }
 
     if (state.consecutiveFailures >= this.maxAttempts) {
       if (!state.escalatedSha && fresh.length > 0) {
-        // Persist the escalation only once the comment landed (or retrying it
-        // is abandoned), so a transient credential/API failure is retried
-        // instead of permanently silencing the escalation for this head SHA.
-        const escalation = await this.escalateToHuman(repo, prNumber, pending, headSha);
-        if (escalation !== "retry") {
-          state.escalatedSha = headSha;
-          workerState.setCiFixState(repo, prNumber, state);
-        }
+        state.escalatedSha = headSha;
+        workerState.setCiFixState(repo, prNumber, state);
+        await this.escalateToHuman(repo, prNumber, pending);
       } else if (verbose) {
         console.log(
           `   [${this.name}] ${this.describe(repo, prNumber)}: retry budget exhausted; waiting for human`,
@@ -683,10 +635,8 @@ export class CiFailureWatcherAcquirer implements Acquirer {
         }
       }
       if (!ok && state.consecutiveFailures >= this.maxAttempts && !state.escalatedSha) {
-        const escalation = await this.escalateToHuman(repo, prNumber, pending, headSha);
-        if (escalation !== "retry") {
-          state.escalatedSha = headSha;
-        }
+        state.escalatedSha = headSha;
+        await this.escalateToHuman(repo, prNumber, pending);
       }
       workerState.setCiFixState(repo, prNumber, state);
       console.log(
@@ -718,16 +668,25 @@ export class CiFailureWatcherAcquirer implements Acquirer {
       // Only a confirmed closed state may remove a PR from the registry.
       return "active";
     }
+    let lifecycle: ReturnType<typeof classifyAgentPrState> = "open";
     if (!prResult.notModified) {
-      if (prResult.etag) {
-        workerState.setCursor(prSource, prResult.data?.headSha ?? "", prResult.etag);
+      if (prResult.data) {
+        lifecycle = classifyAgentPrState(prResult.data.state);
+        // Only a confirmed terminal state may remove a PR from the registry:
+        // an unusable payload (missing/null/unknown state) must keep polling.
+        if (lifecycle === "closed" || lifecycle === "merged") {
+          console.log(
+            `👁️  [${this.name}] ${this.describe(repo, prNumber)} is ${lifecycle}; unwatching`,
+          );
+          this.markClosed(repo, prNumber);
+          return "removed";
+        }
       }
-      if (prResult.data && prResult.data.state !== "open") {
-        console.log(
-          `👁️  [${this.name}] ${this.describe(repo, prNumber)} is ${prResult.data.state}; unwatching`,
-        );
-        this.markClosed(repo, prNumber);
-        return "removed";
+      // Persist the ETag only for a usable payload: an unusable state must be
+      // re-fetched unconditionally next tick instead of being replayed as a
+      // 304 that carries no state to confirm.
+      if (prResult.etag && lifecycle !== null) {
+        workerState.setCursor(prSource, prResult.data?.headSha ?? "", prResult.etag);
       }
     }
 
@@ -765,6 +724,21 @@ export class CiFailureWatcherAcquirer implements Acquirer {
     );
     if (pending.length === 0) {
       return fullyGreen && !ciChanged ? "unchanged-green" : "active";
+    }
+
+    // An unconfirmed PR state (missing/null/unknown) must not spend the fix
+    // retry budget or escalate: the fix run re-fetches the PR and rejects it,
+    // so every attempt would fail and eventually record an escalation for a
+    // head that was never actually tried. Keep observing and defer the failure
+    // until the state is usable again; no failure is marked processed here.
+    if (lifecycle !== "open") {
+      if (verbose) {
+        console.log(
+          `   [${this.name}] ${this.describe(repo, prNumber)} state is unconfirmed; ` +
+            "deferring CI fix until the next poll",
+        );
+      }
+      return "active";
     }
 
     return this.handleFreshCiFailures({ repo, prNumber, headSha, fresh, pending });
@@ -844,21 +818,12 @@ export class CiFailureWatcherAcquirer implements Acquirer {
     }
   }
 
-  /**
-   * Post the give-up comment. Callers only freeze further attempts
-   * (`escalatedSha`) once the comment landed or retrying it is abandoned, so a
-   * transient failure is retried instead of permanently silencing the
-   * escalation. Credential failures use the per-repo/per-operation throttle and
-   * keep retrying (they recover once the token is fixed); non-credential
-   * failures are capped so a permanently rejected post cannot be retried and
-   * warned about on every poll forever.
-   */
+  /** Post the give-up comment and freeze further attempts until head moves. */
   private async escalateToHuman(
     repo: string,
     prNumber: number,
     failures: PendingFailure[],
-    headSha: string,
-  ): Promise<EscalationOutcome> {
+  ): Promise<void> {
     const names = failures.map((f) => `- ${f.name}`).join("\n");
     const body =
       "⚠️ I could not fix the following CI failure(s) automatically after " +
@@ -866,41 +831,17 @@ export class CiFailureWatcherAcquirer implements Acquirer {
       "I have stopped retrying to avoid churn. " +
       (this.options.escalationRecoveryText ??
         "Push a new commit (or mention me) and I will take another look.");
-    const key = this.prKey(repo, prNumber);
     try {
       await this.options.provider.postComment(repo, prNumber, body);
-      this.escalationPostFailures.delete(key);
-      this.noteAuthRecovery(repo, "comment");
       console.log(
         `📣 [${this.name}] ${this.describe(repo, prNumber)}: posted escalation comment after ` +
           `${this.maxAttempts} failed attempt(s)`,
       );
-      return "posted";
     } catch (error) {
-      if (isGitHubAuthError(error)) {
-        // A credential failure is a configuration problem: keep retrying (the
-        // warning is throttled per repo per hour) so the escalation lands as
-        // soon as the token is fixed.
-        this.warnAuthFailure(repo, prNumber, error as Error, "comment");
-        return "retry";
-      }
-      const previous = this.escalationPostFailures.get(key);
-      const failedAttempts = previous?.headSha === headSha ? previous.failures + 1 : 1;
-      this.escalationPostFailures.set(key, { headSha, failures: failedAttempts });
-      if (failedAttempts >= MAX_ESCALATION_POST_FAILURES) {
-        this.escalationPostFailures.delete(key);
-        console.warn(
-          `⚠️  [${this.name}] could not post escalation comment on ${this.describe(repo, prNumber)} ` +
-            `after ${failedAttempts} attempt(s): ${(error as Error).message}; ` +
-            "not retrying until the head changes",
-        );
-        return "gave-up";
-      }
       console.warn(
         `⚠️  [${this.name}] could not post escalation comment on ${this.describe(repo, prNumber)}: ` +
-          `${(error as Error).message}; retrying on the next poll`,
+          `${(error as Error).message}`,
       );
-      return "retry";
     }
   }
 

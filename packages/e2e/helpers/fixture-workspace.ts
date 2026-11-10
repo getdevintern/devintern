@@ -161,7 +161,9 @@ export class FixtureWorkspace {
     options: {
       apiToken?: string;
       implicitTarget?: boolean;
-      agentMode?: "implement" | "fail" | "no-change";
+      agentMode?: "implement" | "fail" | "incomplete" | "no-change";
+      /** Bypass the retry gate for an unchanged incomplete task. */
+      force?: boolean;
       gitToken?: string;
       /** Task reference passed to the CLI; defaults to the Markdown fixture. */
       taskRef?: string;
@@ -171,8 +173,15 @@ export class FixtureWorkspace {
       skipComments?: boolean;
       /** Labels the CLI must apply to the created PR (`PR_LABELS`). */
       prLabels?: string[];
+      /** Additional CLI arguments appended after the fixture's defaults. */
+      extraArgs?: string[];
     } = {},
   ) {
+    // Estimation runs are detected from the bundled prompt, so leave the agent
+    // mode unset for them instead of forcing the implement fixture. Every other
+    // run keeps the historical explicit `implement` default.
+    const agentMode =
+      options.agentMode ?? (options.extraArgs?.includes("--estimate") ? undefined : "implement");
     return command(
       [
         process.execPath,
@@ -189,11 +198,13 @@ export class FixtureWorkspace {
         "--hook-retries",
         "0",
         "--no-update",
+        ...(options.force ? ["--force"] : []),
+        ...(options.extraArgs ?? []),
       ],
       this.cwd,
       {
         ...this.env,
-        E2E_AGENT_MODE: options.agentMode ?? "implement",
+        ...(agentMode === undefined ? {} : { E2E_AGENT_MODE: agentMode }),
         ...(options.gitToken === undefined ? {} : { E2E_GIT_TOKEN: options.gitToken }),
         ...(options.apiToken === undefined ? {} : { [this.apiTokenVariable]: options.apiToken }),
         ...(options.prLabels === undefined ? {} : { PR_LABELS: options.prLabels.join(",") }),
@@ -239,6 +250,7 @@ export class FixtureWorkspace {
   runRecords(options: { allTasks?: boolean } = {}): Array<{
     task_key: string | null;
     tracker: string | null;
+    origin: string;
     status: string;
     pr_url: string | null;
     outcome_reason: string | null;
@@ -247,11 +259,12 @@ export class FixtureWorkspace {
     try {
       return db
         .query(
-          `SELECT task_key, tracker, status, pr_url, outcome_reason FROM runs${options.allTasks ? "" : " WHERE task_key = ?"} ORDER BY id`,
+          `SELECT task_key, tracker, origin, status, pr_url, outcome_reason FROM runs${options.allTasks ? "" : " WHERE task_key = ?"} ORDER BY id`,
         )
         .all(...(options.allTasks ? [] : [this.taskKey])) as Array<{
         task_key: string | null;
         tracker: string | null;
+        origin: string;
         status: string;
         pr_url: string | null;
         outcome_reason: string | null;
@@ -261,7 +274,7 @@ export class FixtureWorkspace {
     }
   }
 
-  agentInvocations(): Array<{ mode: string }> {
+  agentInvocations(): Array<{ mode: string; promptMarkers?: string[] }> {
     const path = this.env.E2E_AGENT_INVOCATIONS;
     if (!existsSync(path)) return [];
     return readFileSync(path, "utf8")

@@ -614,6 +614,25 @@ describe("JiraClient - findEstimationComment", () => {
     expect(result!.created).toBe("2024-06-15T10:00:00.000Z");
   });
 
+  test("should return the comment's updated timestamp for the re-estimate gate", async () => {
+    (jiraClient as any).jiraApiCall = async () => ({
+      comments: [
+        {
+          id: "42",
+          body: "🤖 Automated Story Points Estimation - 5 points, high confidence",
+          author: { displayName: "Bot" },
+          created: "2024-06-15T10:00:00.000Z",
+          updated: "2024-06-16T09:30:00.000Z",
+        },
+      ],
+    });
+
+    const result = await jiraClient.findEstimationComment("TEST-123");
+    expect(result).not.toBeNull();
+    expect(result!.created).toBe("2024-06-15T10:00:00.000Z");
+    expect(result!.updated).toBe("2024-06-16T09:30:00.000Z");
+  });
+
   test("should return comment ID and date via renderedBody", async () => {
     (jiraClient as any).jiraApiCall = async () => ({
       comments: [

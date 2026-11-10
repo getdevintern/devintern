@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 
+import { GUARD_FILES } from "./setup/guard-files";
 import { stripWorkerInjectedEnv } from "./setup/worker-env";
 
 const existingCeilings = process.env.GIT_CEILING_DIRECTORIES;
@@ -43,18 +44,33 @@ process.on("exit", () => {
 const childEnv = { ...process.env };
 stripWorkerInjectedEnv(childEnv);
 
-const child = Bun.spawn(["bun", "test", "--timeout=30000", ...process.argv.slice(2)], {
-  cwd: import.meta.dir,
-  env: {
-    ...childEnv,
-    GIT_CEILING_DIRECTORIES: gitCeilingDirectories,
-    WEBHOOK_QUEUE_DB: join(queueDbTempDir, "queue.db"),
-    DEVINTERN_WORKSPACE_DIR: join(queueDbTempDir, "workspace"),
-    SENTRY_DISABLED: "1",
+// Bun only reads bunfig.toml from the process cwd, and the inner Bun runs with
+// cwd=tests/, so packages/code/bunfig.toml (the file that lists the guards) is
+// never discovered here. Pass the same guards explicitly, otherwise the guard
+// chain is inert in the normal `bun run test` path: the env pins below keep the
+// suite safe, but guard-git-state's process.chdir ban and guard-queue-db's
+// tamper detection would never load, and dropping a guard from bunfig.toml
+// would go unnoticed.
+const GUARD_PRELOADS = GUARD_FILES.flatMap((name) => [
+  "--preload",
+  join(import.meta.dir, "setup", name),
+]);
+
+const child = Bun.spawn(
+  ["bun", "test", "--timeout=30000", ...GUARD_PRELOADS, ...process.argv.slice(2)],
+  {
+    cwd: import.meta.dir,
+    env: {
+      ...childEnv,
+      GIT_CEILING_DIRECTORIES: gitCeilingDirectories,
+      WEBHOOK_QUEUE_DB: join(queueDbTempDir, "queue.db"),
+      DEVINTERN_WORKSPACE_DIR: join(queueDbTempDir, "workspace"),
+      SENTRY_DISABLED: "1",
+    },
+    stdin: "inherit",
+    stdout: "inherit",
+    stderr: "inherit",
   },
-  stdin: "inherit",
-  stdout: "inherit",
-  stderr: "inherit",
-});
+);
 
 process.exit(await child.exited);

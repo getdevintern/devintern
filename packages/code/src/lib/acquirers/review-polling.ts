@@ -33,10 +33,15 @@ import {
   agentPrKey,
   agentPrStateCursorSource,
   applyAgentPrFetch,
+  classifyAgentPrState,
   reconcileOpenAgentPrs,
 } from "../review/agent-pr-reconciler";
 import type { ConditionalResult, PolledPr } from "../review/agent-pr-reconciler";
-import { describeGitHubAuthFailure, isGitHubAuthError } from "../code-host/github/reviews";
+import {
+  describeGitHubAuthFailure,
+  isGitHubAuthError,
+  isGitHubTransientError,
+} from "../code-host/github/reviews";
 import { nextScheduleOccurrence } from "../automation/config";
 import type { CronOrIntervalSchedule } from "../automation/config";
 import { parseEnvInteger } from "../config/env-integer";
@@ -560,10 +565,16 @@ async function runSubcommandViaCli(
   } = {},
 ): Promise<TaskExecutionResult> {
   const prUrl = opts.webUrl ?? `https://github.com/${repo}/pull/${prNumber}`;
+  // Distinguishes "the drain killed this run" from "the run failed and the
+  // drain happened to start around the same time". Only the abort handler (or
+  // an already-aborted signal) sets it, so the SIGTERM exit code of a drained
+  // child is never mistaken for a genuine pipeline failure.
+  let interrupted = false;
   const status = await runWithFailover(
     (env) =>
       new Promise<number>((resolve) => {
         if (opts.signal?.aborted) {
+          interrupted = true;
           resolve(1);
           return;
         }
@@ -577,7 +588,10 @@ async function runSubcommandViaCli(
             detached: process.platform !== "win32",
           },
         );
-        const abort = () => killProcessTree(child);
+        const abort = () => {
+          interrupted = true;
+          killProcessTree(child);
+        };
         let settled = false;
         const finish = (code: number) => {
           if (settled) return;
@@ -597,6 +611,7 @@ async function runSubcommandViaCli(
       }),
     opts.env ?? process.env,
   );
+  if (interrupted) return "interrupted";
   return cliResultToTaskResult(status);
 }
 
@@ -791,12 +806,17 @@ export class ReviewPollingAcquirer implements Acquirer {
             this.warnAuthFailure(pr.repo, pr.prNumber, error as Error, stage);
             continue;
           }
-          captureError(error, {
-            acquirer: this.name,
-            repo: pr.repo,
-            prNumber: pr.prNumber,
-            stage: "poll-pr",
-          });
+          // A 408/429/5xx survived the client's retries: GitHub is momentarily
+          // unavailable and the next tick retries it. Keep the warning visible,
+          // but do not report expected upstream noise as a fresh issue.
+          if (!isGitHubTransientError(error)) {
+            captureError(error, {
+              acquirer: this.name,
+              repo: pr.repo,
+              prNumber: pr.prNumber,
+              stage: "poll-pr",
+            });
+          }
           console.warn(
             `⚠️  [${this.name}] polling ${pr.repo}#${pr.prNumber} failed: ${(error as Error).message}`,
           );
@@ -938,6 +958,17 @@ export class ReviewPollingAcquirer implements Acquirer {
     progress.current = undefined;
     if (!pollFeedback) return "ok";
 
+    // GitHub can return an unusable PR state (missing/null/unknown) even though
+    // the row stays watched (applyAgentPrFetch refuses to close on it). Do not
+    // collect feedback in that case: collection marks reviews/comments as
+    // processed *before* the address run re-fetches the PR, and that run rejects
+    // an unconfirmed PR — so events would be deduped forever without ever being
+    // addressed. Skipping leaves both cursors and processed markers untouched,
+    // so the feedback is picked up once the state is usable again.
+    const observedPr = prResult.notModified ? this.prCache.get(prKey) : prResult.data;
+    const lifecycle = observedPr ? classifyAgentPrState(observedPr.state) : "open";
+    if (lifecycle !== "open") return "ok";
+
     // 2. Reviews (ETag-cached): new human changes_requested reviews.
     // 3. Inline review comments since the last seen timestamp.
     // Both passes must run (each advances its own cursor), so no short-circuit.
@@ -954,15 +985,37 @@ export class ReviewPollingAcquirer implements Acquirer {
 
     console.log(`\n📌 [${this.name}] new review feedback on ${repo}#${prNumber}`);
     progress.current = "write";
-    const ok = await addressPr(repo, prNumber);
-    progress.completed.add("write");
-    progress.current = undefined;
+    let ok: TaskExecutionResult;
+    try {
+      ok = await addressPr(repo, prNumber);
+      progress.completed.add("write");
+    } catch (error) {
+      // addressPr runs the feedback agent and its git/repo operations, not a
+      // GitHub API fetch. Even when the message mentions the network (e.g.
+      // "ssh: connect ... Network is unreachable"), a failed feedback run is
+      // actionable, so always report it instead of letting the tick's
+      // GitHub-transient filter hide it.
+      captureError(error, {
+        acquirer: this.name,
+        repo,
+        prNumber,
+        stage: "address-pr",
+      });
+      console.warn(
+        `⚠️  [${this.name}] addressing ${repo}#${prNumber} failed: ${(error as Error).message}`,
+      );
+      return "ok";
+    } finally {
+      progress.current = undefined;
+    }
     if (ok === "deferred") {
       console.log(
         `⏳ [${this.name}] ${repo}#${prNumber} deferred; will retry when a harness is available`,
       );
     } else if (ok === "skipped") {
       console.log(`⏭️  [${this.name}] ${repo}#${prNumber} skipped; nothing to address`);
+    } else if (ok === "interrupted") {
+      console.log(`⏸️  [${this.name}] ${repo}#${prNumber} interrupted by worker shutdown`);
     } else {
       console.log(
         ok

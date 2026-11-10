@@ -363,14 +363,14 @@ Behavior to expect:
   prior branch and report. A task that never started is still `pending` and needs
   no resume.
 - **A graceful shutdown does not launder a real failure.** Draining the worker
-  aborts running task children; the aborted run is reported as *interrupted*,
+  aborts running task children; the aborted run is reported as _interrupted_,
   so its row stays `running` for the successor's startup recovery. A pipeline
   that fails on its own during the same shutdown window still settles `failed`
   with its real error and message — only an abort is treated as an unknown
   outcome.
 - **Hard kills keep a live child out of the resume path.** Task children run
   detached and are stopped through the worker's shutdown signal. The worker
-  records the spawned child pid *and its start time* on the queue row, so after
+  records the spawned child pid _and its start time_ on the queue row, so after
   a `SIGKILL` or OOM kill startup recovery probes the pid (and its detached
   process group) before auto-resuming. If it is still alive, the row stays
   `running` and is re-checked at the next startup: that child is the same task,
@@ -494,7 +494,7 @@ The opt-out is a live setting: removing it or flipping it back on applies withou
 
 ## Review feedback on the agent's PRs
 
-In polling mode the worker also watches the pull requests it created (no webhook needed). When a human requests changes or leaves new inline review comments on one of the agent's own PRs, the worker addresses the feedback automatically; no mention is required on its own PRs. Closed and merged PRs leave the watch list on their own: the watch list is reconciled with GitHub on every poll cycle, so PRs merged or closed outside the worker drop out of the open count within one poll. A GitHub 404 leaves the PR watched and warns about repository access, because GitHub can return 404 for an inaccessible PR that is still open.
+In polling mode the worker also watches the pull requests it created (no webhook needed). When a human requests changes or leaves new inline review comments on one of the agent's own PRs, the worker addresses the feedback automatically; no mention is required on its own PRs. Closed and merged PRs leave the watch list on their own: the watch list is reconciled with GitHub on every poll cycle, so PRs merged or closed outside the worker drop out of the open count within one poll. A GitHub 404 leaves the PR watched and warns about repository access, because GitHub can return 404 for an inaccessible PR that is still open. Rate limits (429, plus GitHub's 403 rate-limit responses), 5xx responses, and transport failures (DNS/connection errors) are transient: `fetchWithRetry` retries 429/5xx and transport errors with backoff, a 403 rate limit is retried on the next poll, and a poll that still fails is logged as a warning instead of being reported to Sentry, because the next tick retries it.
 
 If a run fails after the agent opened a PR itself (for example by running `gh pr create`), the worker adopts that open PR for the worktree's branch: it applies `pr_labels` and registers the PR in the watch list. The run still reports failed. This failure-path adoption currently looks up GitHub PRs only.
 
@@ -542,7 +542,7 @@ Pending, failing, and not-yet-reported CI is checked at the configured workspace
 
 Relay-backed workspaces perform these API calls with the local `GITHUB_TOKEN`. A fine-grained token—or the customer-owned App used by a no-relay worker—needs **Actions: Read** and **Commit statuses: Read** in addition to the normal PR and contents permissions. Existing App installations must be re-approved after adding permissions. No extra webhook event subscription is required because CI is polled. GitHub does not currently expose its separate Checks permission for fine-grained PATs, so check-run-only CI providers are not watched unless they also publish a commit status; GitHub Actions is fully supported through the Actions API.
 
-A rejected or missing credential (HTTP 401, or no `GITHUB_TOKEN` at all) and a credential-scoped permission denial (HTTP 403 with a GitHub credential message such as `Resource not accessible`) share one throttle per affected repository and operation: the watcher logs at most one actionable warning per operation per hour instead of repeating the same failure on every poll. The warning names the PR and explains whether the credential must be renewed or the missing permission granted — for CI reads, Actions: Read and Commit statuses: Read; for the exhaustion comment, Issues: Write or Pull requests: Write. CI reads and comment posts are throttled separately so a CI warning cannot hide a write-permission failure. A credential failure while posting the exhaustion comment is retried on the next poll instead of silently dropping the escalation, and a non-credential failure (for example a locked issue or persistent 5xx) is retried a bounded number of times before the watcher stops trying for that head SHA. CI auto-fix resumes automatically once the credential can read CI again; the watcher logs a single recovery line per repository and operation, and only after the same endpoint that failed succeeds (a metadata-only PR fetch does not clear a CI or review-read throttle). In fleet mode each repository has its own token, so one repository's credential failure never hides another's in either the CI watcher or review polling. Other 403 responses — rate limits, archived read-only repositories, locked issues, and blocked repositories — are not credential failures and keep their normal per-tick error reporting and retry path.
+A rejected or missing credential (HTTP 401, or no `GITHUB_TOKEN` at all) and a credential-scoped permission denial (HTTP 403 with a GitHub credential message such as `Resource not accessible`) are throttled per affected repository: the CI watcher logs at most one actionable warning per hour instead of repeating the same failure on every poll. The warning names the PR and explains whether the credential must be renewed or the missing CI-read permissions granted (Actions: Read and Commit statuses: Read). CI auto-fix resumes automatically once the credential can read CI again; the watcher logs one recovery line after the CI endpoints succeed (a metadata-only PR fetch does not count as recovery). In fleet mode each repository has its own token, so one repository's credential failure never hides another's in either the CI watcher or review polling. Other 403 responses — rate limits, archived read-only repositories, locked issues, and blocked repositories — keep their normal per-tick error reporting and retry path.
 
 ## Mention the bot on any PR
 

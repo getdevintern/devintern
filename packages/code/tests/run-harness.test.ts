@@ -368,6 +368,15 @@ describe("runAgentHarness early failures", () => {
     await expect(runAgentHarness(baseInput())).rejects.toThrow("Agent exited with code 1");
   });
 
+  test("includes the agent's last failure line in a non-zero exit error", async () => {
+    scenario.closeCode = 1;
+    scenario.stdout = "working...\n";
+    scenario.stderr = "warning: transient retry\nfatal: remote repository not found\n";
+    await expect(runAgentHarness(baseInput())).rejects.toThrow(
+      "Agent exited with code 1: fatal: remote repository not found",
+    );
+  });
+
   test("classifies a sandbox/mise startup failure separately", async () => {
     scenario.closeCode = 1;
     scenario.stderr =

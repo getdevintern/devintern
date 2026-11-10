@@ -93,13 +93,6 @@ export const OPT_IN_SUITES: readonly OptInSuite[] = [
     reason: "read-only checks are planned; the registry only detects them today",
     status: "todo",
   },
-  {
-    name: "Offline fake Trello server",
-    script: "test",
-    reason:
-      "planned in Layer 3 of docs/tracker-e2e-plan.md; the offline Jira fake runs in the default suite",
-    status: "todo",
-  },
 ];
 
 /** Full command shown in skipped-test names. */

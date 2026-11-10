@@ -117,4 +117,35 @@ describe("dashboard harness logs", () => {
     expect(handleRunHarnessLog(data, "99999", encodeURIComponent(name)).status).toBe(404);
     expect(handleRunHarnessLog(data, "abc", encodeURIComponent(name)).status).toBe(400);
   });
+
+  test("reads harness transcripts from an explicitly selected workspace", () => {
+    const customWorkspace = join(dir, "custom-workspace");
+    const store = new RunStore(dbPath);
+    const runId = store.createRun({ origin: "task", taskKey: "DEV-200", harness: "claude-code" });
+    store.close();
+    const name = harnessLogFileName({
+      startedAt: new Date(),
+      origin: "task",
+      runId,
+      taskKey: "DEV-200",
+      label: "implementation",
+    });
+    mkdirSync(harnessLogsDir(customWorkspace), { recursive: true });
+    writeFileSync(join(harnessLogsDir(customWorkspace), name), "=== devintern harness run ===\n");
+
+    const custom = new DashboardData({
+      dbPath,
+      workingDir: dir,
+      workspaceDir: customWorkspace,
+    });
+    try {
+      const logs = custom.listRunHarnessLogs(runId);
+      expect(logs.map((file) => file.name)).toEqual([name]);
+      expect(custom.readRunHarnessLog(runId, name)?.content).toContain(
+        "=== devintern harness run ===",
+      );
+    } finally {
+      custom.close();
+    }
+  });
 });

@@ -48,9 +48,20 @@ export function isLoopbackDashboardHost(host: string): boolean {
 export interface DashboardServerOptions {
   port?: number;
   host?: string;
+  /** Database owning run history (defaults to the project-scoped worker DB). */
   dbPath?: string;
+  /**
+   * Database owning durable queue counts (ad-hoc tasks, scheduled retries).
+   * Defaults to `dbPath` when supplied, else the configured workspace DB.
+   */
+  queueDbPath?: string;
   /** Project root used to locate the worker lock file. */
   workingDir?: string;
+  /**
+   * Workspace home holding the worker lock, capture files, and harness
+   * transcripts (defaults to `resolveWorkspaceDir()`, or `DEVINTERN_WORKSPACE_DIR`).
+   */
+  workspaceDir?: string;
   /** Live working-window snapshot provider (embedded dashboard). */
   scheduleSnapshot?: () => import("./lib/worker/schedule").ScheduleSnapshot | null;
   /**
@@ -137,7 +148,9 @@ export function startDashboardServer(
   }
   const data = new DashboardData({
     dbPath: options.dbPath,
+    queueDbPath: options.queueDbPath,
     workingDir: options.workingDir,
+    workspaceDir: options.workspaceDir,
     scheduleSnapshot: options.scheduleSnapshot,
     retryMode: options.retryMode,
     automationActions: options.automationActions,
@@ -246,6 +259,11 @@ export function startDashboardServer(
 
   console.log(`📊 Dashboard running at http://${host}:${port}`);
   console.log(`   Database: ${data.dbPath}${data.dbMissing ? " (not created yet)" : ""}`);
+  if (data.queueDbPath !== data.dbPath) {
+    console.log(
+      `   Queue database: ${data.queueDbPath}${existsSync(data.queueDbPath) ? "" : " (not created yet)"}`,
+    );
+  }
   if (!uiDir) {
     console.log("   UI assets not found — JSON API only (see /api/runs, /api/stats).");
   }

@@ -4,6 +4,7 @@
  * Handles fetching and responding to PR review comments via the GitHub API.
  */
 
+import { isRetryableNetworkError } from "@devintern/utils";
 import type { GitHubReviewComment, ProcessedReviewComment } from "../../../types/github-webhooks";
 import { GitHubAppAuth } from "./app-auth";
 import { Utils } from "../../utils";
@@ -245,6 +246,43 @@ export function describeGitHubAuthFailure(
     );
   }
   return "";
+}
+
+/** GitHub statuses that represent a momentary upstream failure. */
+const TRANSIENT_GITHUB_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
+
+/** Detail markers GitHub uses for primary/secondary rate-limit 403s. */
+const GITHUB_RATE_LIMIT_PATTERN = /rate limit|abuse detection/i;
+
+/**
+ * Whether an error thrown by a GitHub API client call is a transient upstream
+ * failure that the next poll can simply retry.
+ *
+ * Covers HTTP 408/429/5xx, GitHub's rate-limit 403s (primary and secondary
+ * rate limits use 403, not only 429), and transport failures such as DNS or
+ * connection errors. A plain 403 (permission denied) is not transient.
+ *
+ * `fetchWithRetry` retries the retryable HTTP statuses and transport errors
+ * with backoff; rate-limit 403s are not retried by that helper, but the next
+ * poll retries them. When a call still fails the error escapes into
+ * long-running polling loops; reporting each occurrence to error tracking
+ * turns a normal GitHub outage into a recurring defect, so callers warn
+ * instead of capturing it.
+ *
+ * @param error - Error thrown by `apiRequest` / `conditionalGet`
+ */
+export function isGitHubTransientError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  const match = message.match(/GitHub API error \((\d{3})\)(?::\s*([\s\S]*))?/);
+  if (match?.[1]) {
+    const status = Number(match[1]);
+    if (TRANSIENT_GITHUB_STATUSES.has(status)) return true;
+    if (status === 403 && GITHUB_RATE_LIMIT_PATTERN.test(match[2] ?? "")) return true;
+    // A recognized status that is not transient stays non-transient; do not
+    // let incidental transport-looking words in the detail reclassify it.
+    return false;
+  }
+  return isRetryableNetworkError(error instanceof Error ? error : new Error(message));
 }
 
 /** Build an API error message; 401s get actionable credential guidance. */

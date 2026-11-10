@@ -444,6 +444,20 @@ export class RunStore {
   }
 
   /**
+   * Replace the harness recorded for a run.
+   *
+   * The run is opened with the harness resolved from the environment at
+   * startup, but a task description can override it; this keeps run history
+   * (and the dashboard's per-harness stats) aligned with what actually ran.
+   *
+   * @param runId - Run id
+   * @param harness - Effective harness id for the run
+   */
+  setRunHarness(runId: number, harness: string): void {
+    this.db.run(`UPDATE runs SET harness = ? WHERE id = ?`, [harness, runId]);
+  }
+
+  /**
    * Attach the originating tracker ticket to a run.
    *
    * Fields already set are never clobbered (`COALESCE`), so a late snapshot
@@ -1046,6 +1060,28 @@ export function recordRunBranch(branch: string): void {
     currentStore.setRunBranch(currentRunId, branch);
   } catch (error) {
     warnOnce("branch", error);
+  }
+}
+
+/**
+ * Override the harness recorded for the current run (no-op when no run is
+ * active). Called once a task description's execution preference resolved to a
+ * different harness than the one resolved at startup, so run history and the
+ * dashboard attribute the run correctly.
+ *
+ * @param harness - Effective harness id
+ */
+export function recordRunHarness(harness: string): void {
+  if (currentStore === null || currentRunId === null) {
+    return;
+  }
+  try {
+    currentStore.setRunHarness(currentRunId, harness);
+    if (currentRunMeta) {
+      currentRunMeta.harness = harness;
+    }
+  } catch (error) {
+    warnOnce("harness", error);
   }
 }
 

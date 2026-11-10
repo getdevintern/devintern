@@ -128,7 +128,7 @@ You can add, remove, enable, disable, reschedule, or change the query of an esti
 Notes:
 
 - Works with Jira, Linear, Azure DevOps, Asana, GitHub, and GitLab (GitHub and GitLab are comment-only). Trello/markdown workspaces fail at startup.
-- Runs use the full skip/re-estimate behavior above (24h gate, update-in-place).
+- Runs use the full skip/re-estimate behavior above (24h gate, update-in-place). A partial tracker update (field or comment fails) is reported as failed and retried on the next sweep, even if the successful half changed the task or comment timestamp.
 - Usage-limit aborts end the sweep cleanly; the next occurrence retries. Tickets already written stay done.
 - Each sweep is visible in the [dashboard](./dashboard.md) under its own `estimate` origin.
 

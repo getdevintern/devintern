@@ -5,9 +5,14 @@ import { UsageLimitError } from "@devintern/agent-harness";
 import { isMarkdownFilePath } from "@devintern/task-trackers";
 import { captureError, flushErrorTracking } from "@devintern/utils";
 import { runAnalysisWithFallback } from "../agent/analysis-mode";
-import { runEstimation } from "../automation/estimation";
+import { classifyEstimationAttempt, runEstimation } from "../automation/estimation";
 import { loadProjectSettings } from "../config/project-settings";
 import { flushAnalytics, trackInteractiveTaskRun } from "../observability/analytics";
+import {
+  getEstimationState,
+  needsEstimation,
+  settleEstimationBaseline,
+} from "../state/estimation-state";
 import { beginRun } from "../state/run-recorder";
 import { finishTaskRun } from "../state/task-run";
 import { TaskFormatter } from "../task/formatter";
@@ -76,6 +81,38 @@ export interface EstimationBatchInput {
   tasksToProcess: string[];
 }
 
+/** Mutable estimation summary counters. */
+export interface EstimationBatchResults {
+  estimated: number;
+  failed: number;
+  errors: Array<{ taskKey: string; error: string }>;
+}
+
+/**
+ * Account one estimation attempt in the batch summary.
+ *
+ * Zero-write attempts are failures: nothing reached the tracker, so counting
+ * them as "estimated" would overstate the summary and keep the run status green.
+ *
+ * @param results - Batch counters to update
+ * @param taskKey - Task that was attempted
+ * @param attempt - Classification from {@link classifyEstimationAttempt}
+ * @returns The terminal run status and reason for this attempt
+ */
+export function accountEstimationAttempt(
+  results: EstimationBatchResults,
+  taskKey: string,
+  attempt: ReturnType<typeof classifyEstimationAttempt>,
+): { status: "succeeded" | "failed"; reason?: string } {
+  if (attempt.ok) {
+    results.estimated++;
+    return { status: "succeeded" };
+  }
+  results.failed++;
+  results.errors.push({ taskKey, error: attempt.error });
+  return { status: "failed", reason: attempt.error };
+}
+
 /**
  * `devintern --estimate`: estimate story points for each resolved task, then
  * release the lock and exit non-zero when any estimation failed.
@@ -116,21 +153,36 @@ export async function runEstimationBatch(input: EstimationBatchInput): Promise<v
         continue;
       }
 
-      // Check if task already has an estimation comment
+      // Check whether the task was already estimated and whether it changed
+      // since. The persisted state records the task's `updated` *after* the
+      // last estimation writes, so the gate does not depend on tracker comment
+      // edit semantics (Asana stories have no edit timestamp) and still works
+      // when `--skip-comments` wrote no comment.
       const existingEstimation = await tracker.findEstimationComment(taskKey);
+      const estimationState = getEstimationState(taskKey);
       let existingCommentId: string | undefined;
 
+      // Fall back to the comment timestamp for tasks estimated before the
+      // state table existed. With comments enabled, a missing comment means
+      // the previous estimate skipped it (or it was deleted), so estimate once
+      // to recreate it instead of trusting the stored baseline.
+      if (
+        !needsEstimation({
+          taskUpdated: task.updated,
+          commentUpdated: existingEstimation?.updated,
+          stateUpdated: estimationState?.taskUpdated,
+          stateTracker: estimationState?.tracker,
+          retryRequired: estimationState?.retryRequired,
+          tracker: activeTrackerType,
+          skipComments: options.skipComments,
+        })
+      ) {
+        console.log(`⏭️  Skipping ${taskKey} — already estimated and not updated since`);
+        estimationResults.skipped++;
+        continue;
+      }
+
       if (existingEstimation) {
-        // Compare estimation comment date with task updated date
-        const estimationDate = new Date(existingEstimation.created);
-        const taskUpdated = new Date(task.updated);
-
-        if (taskUpdated <= estimationDate) {
-          console.log(`⏭️  Skipping ${taskKey} — already estimated and not updated since`);
-          estimationResults.skipped++;
-          continue;
-        }
-
         console.log(`🔄 Re-estimating ${taskKey} — task updated since last estimate`);
         existingCommentId = existingEstimation.commentId;
       }
@@ -163,7 +215,7 @@ export async function runEstimationBatch(input: EstimationBatchInput): Promise<v
       TaskFormatter.saveEstimationPrompt(taskDetails, estimationFile, process.env.JIRA_BASE_URL!);
 
       // Run estimation
-      const result = await runAnalysisWithFallback(resolvedAgent.harness, 10, (runOptions) =>
+      const outcome = await runAnalysisWithFallback(resolvedAgent.harness, 10, (runOptions) =>
         runEstimation({
           estimationFile,
           harness: resolvedAgent.harness,
@@ -184,19 +236,26 @@ export async function runEstimationBatch(input: EstimationBatchInput): Promise<v
         // Ignore cleanup errors
       }
 
-      if (result) {
-        estimationResults.estimated++;
-      } else {
-        estimationResults.failed++;
-        estimationResults.errors.push({
-          taskKey,
-          error: "Failed to parse estimation response",
-        });
+      const attempt = classifyEstimationAttempt(outcome);
+      const runOutcome = accountEstimationAttempt(estimationResults, taskKey, attempt);
+
+      if (attempt.ok) {
+        // Re-read the task after a successful field/comment write so the
+        // recorded baseline reflects it; otherwise the next sweep would treat
+        // the estimation's writes as a user change and re-estimate forever.
+        try {
+          const refreshed = await tracker.getTask(taskKey);
+          settleEstimationBaseline(taskKey, activeTrackerType, true, refreshed.updated);
+        } catch (error) {
+          console.warn(`⚠️  Failed to record estimation state: ${(error as Error).message}`);
+          settleEstimationBaseline(taskKey, activeTrackerType, false, task.updated);
+        }
+      } else if (attempt.outcome) {
+        console.error(`❌ ${attempt.error} for ${taskKey}; retrying on the next sweep`);
+        // A durable retry marker overrides even a newly written comment.
+        settleEstimationBaseline(taskKey, activeTrackerType, false, task.updated);
       }
-      await finishTaskRun(
-        result ? "succeeded" : "failed",
-        result ? undefined : "Failed to parse estimation response",
-      );
+      await finishTaskRun(runOutcome.status, runOutcome.reason);
     } catch (error) {
       // Usage limit is account-global — abort the rest of the estimation batch
       // and exit 0 so the scheduler retries next window.

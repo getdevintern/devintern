@@ -5,7 +5,26 @@ import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 // cannot: the same daemon runs implementation, review, CI-repair and conflict
 // jobs, so those tests identify the prompt by a seeded marker instead.
 const agentInput = process.argv.join(" ");
+// Batch tests seed a unique alphanumeric token into each task body as
+// `E2EPROMPTMARKER<TOKEN>`. Recording every marker this invocation saw proves
+// each task's own prompt reached the agent, in order, even when every task
+// produces the same file edit. Tokens must stay alphanumeric: tracker
+// descriptions pass through HTML-to-Markdown conversion, which escapes `_` and
+// other Markdown-special characters before the prompt reaches this process.
+const promptMarkers = [...agentInput.matchAll(/E2EPROMPTMARKER[A-Z0-9]+/g)].map(
+  (match) => match[0],
+);
+// The local auto-review loop sends the bundled review and fix prompts from the
+// same one-shot CLI run that implemented the task. Detect those turns before
+// the explicit E2E_AGENT_MODE so a single run can exercise
+// implement → review → fix → review without the fixture pinning one mode.
+const promptMode = agentInput.includes("You are reviewing a pull request")
+  ? "auto-review-feedback"
+  : agentInput.includes("## Feedback to Address")
+    ? "auto-review-fix"
+    : undefined;
 const mode =
+  promptMode ??
   process.env.E2E_AGENT_MODE ??
   (agentInput.includes("# Resolve Merge Conflicts")
     ? "conflict"
@@ -13,15 +32,134 @@ const mode =
       ? "ci"
       : agentInput.includes("E2E_REVIEW_GREETING")
         ? "review"
-        : "implement");
-if (process.env.E2E_AGENT_INVOCATIONS) {
-  appendFileSync(process.env.E2E_AGENT_INVOCATIONS, JSON.stringify({ mode }) + "\n");
+        : agentInput.includes("# Story Points Estimation") ||
+            agentInput.includes("## Task to Estimate")
+          ? "estimate"
+          : agentInput.includes("E2E_NO_CHANGE")
+            ? "no-change"
+            : "implement");
+// Opt-in start/end timeline for concurrency coverage. An `exit` handler records
+// the end exactly once, so early exits, failures and thrown errors still close
+// their interval. The existing E2E_AGENT_INVOCATIONS record stays unchanged.
+const timelinePath = process.env.E2E_AGENT_TIMELINE;
+let timelineEnded = false;
+function recordTimeline(event: "start" | "end"): void {
+  if (!timelinePath) return;
+  appendFileSync(timelinePath, JSON.stringify({ mode, event, at: Date.now() }) + "\n");
 }
+if (timelinePath) {
+  recordTimeline("start");
+  process.on("exit", () => {
+    if (timelineEnded) return;
+    timelineEnded = true;
+    recordTimeline("end");
+  });
+}
+
+/**
+ * Land an empty commit on the current task branch.
+ *
+ * Session pickup only reuses a branch that has commits ahead of its base, so
+ * resume and crash coverage need one before the run ends (or is killed).
+ */
+function commitInterruptedAttempt(): void {
+  const commit = Bun.spawnSync(
+    [
+      "git",
+      "-c",
+      "user.name=DevIntern E2E",
+      "-c",
+      "user.email=e2e@example.com",
+      "commit",
+      "--allow-empty",
+      "-m",
+      "wip: interrupted attempt",
+    ],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  if (commit.exitCode !== 0) {
+    throw new Error(commit.stdout.toString() + commit.stderr.toString());
+  }
+}
+
+/** Publish this invocation so tests can observe that the agent started. */
+function recordInvocation(): void {
+  if (process.env.E2E_AGENT_INVOCATIONS) {
+    // Automation subprocesses carry the owning schedule id, so a worker test can
+    // attribute each agent invocation to the automation that spawned it instead
+    // of relying on global mode counts.
+    const automation = process.env.DEVINTERN_AUTOMATION_ID;
+    appendFileSync(
+      process.env.E2E_AGENT_INVOCATIONS,
+      JSON.stringify({
+        mode,
+        ...(promptMarkers.length > 0 ? { promptMarkers } : {}),
+        ...(automation ? { automation } : {}),
+      }) + "\n",
+    );
+  }
+}
+
 // Opt-in delay for bounded-timeout coverage. Defaults to 0, so every existing
 // scenario stays as fast and deterministic as before.
 const delayMs = Number(process.env.E2E_AGENT_DELAY_MS ?? "0");
+// A crash test needs the agent to have already committed when the daemon is
+// killed, otherwise the interrupted branch has nothing to resume and startup
+// recovery must settle the row `failed` for lack of work. This mode lands the
+// empty commit first and records the invocation only afterwards, so a test that
+// polls that record before killing the daemon is provably interrupting a
+// resumable attempt (a branch ahead of its base) instead of an unstarted one.
+if (mode === "interrupted") {
+  commitInterruptedAttempt();
+  recordInvocation();
+  if (Number.isFinite(delayMs) && delayMs > 0) {
+    await Bun.sleep(delayMs);
+  }
+  process.exit(0);
+}
+recordInvocation();
 if (Number.isFinite(delayMs) && delayMs > 0) {
   await Bun.sleep(delayMs);
+}
+// Narrow, explicit per-task failure for batch-isolation coverage. Unlike the
+// process-wide E2E_AGENT_MODE, this only affects a prompt carrying the marker,
+// so one task in a batch can fail while the others still implement.
+//
+// The marker must be alphanumeric. Tracker descriptions are Markdown-escaped
+// before they reach the agent (`E2E_FAIL_ABC` arrives as `E2E\_FAIL\_ABC`), so a
+// marker containing Markdown-special characters would silently never match.
+// Fail loudly instead of letting a future scenario pass without failing.
+const failPromptMarker = process.env.E2E_FAIL_PROMPT_MARKER;
+if (failPromptMarker) {
+  if (!/^[A-Za-z0-9]+$/.test(failPromptMarker)) {
+    throw new Error(
+      "E2E_FAIL_PROMPT_MARKER must be alphanumeric: Markdown escaping prevents a marker with special characters from matching",
+    );
+  }
+  if (agentInput.includes(failPromptMarker)) {
+    console.error("E2E deliberate prompt-marker failure");
+    process.exit(18);
+  }
+}
+// Estimation runs are read-only: print only the JSON object the CLI parses,
+// never touch the fixture project. A re-estimation scenario can ask for a
+// different deterministic value to prove the field was rewritten.
+if (mode === "estimate") {
+  const configuredPoints = Number(process.env.E2E_ESTIMATE_POINTS ?? "3");
+  const storyPoints = [1, 2, 3, 5, 8, 13, 21].includes(configuredPoints) ? configuredPoints : 3;
+  console.log(
+    JSON.stringify({
+      storyPoints,
+      confidence: "high",
+      implementationConfidence: 8,
+      reasoning:
+        "The fixture task has a clear, small scope and the deterministic agent can implement it.",
+      risks: [],
+      unclearAreas: [],
+      summary: "Deterministic E2E estimation fixture.",
+    }),
+  );
+  process.exit(0);
 }
 // A settled-but-failed attempt with an implementation report, for resume
 // coverage: exit 0 with failure language so the pipeline records an escalated
@@ -31,25 +169,7 @@ if (Number.isFinite(delayMs) && delayMs > 0) {
 // `incomplete-empty` skips the commit to cover the documented fallback to a
 // fresh attempt branch when the prior branch has nothing to resume.
 if (mode === "incomplete" || mode === "incomplete-empty") {
-  if (mode === "incomplete") {
-    const commit = Bun.spawnSync(
-      [
-        "git",
-        "-c",
-        "user.name=DevIntern E2E",
-        "-c",
-        "user.email=e2e@example.com",
-        "commit",
-        "--allow-empty",
-        "-m",
-        "wip: interrupted attempt",
-      ],
-      { stdout: "pipe", stderr: "pipe" },
-    );
-    if (commit.exitCode !== 0) {
-      throw new Error(commit.stdout.toString() + commit.stderr.toString());
-    }
-  }
+  if (mode === "incomplete") commitInterruptedAttempt();
   console.log(
     "Implementation was unsuccessful. I could not complete the requested change because the deterministic E2E fixture intentionally stopped before editing any tracked file. The branch and run record must remain available for a resume attempt.",
   );
@@ -72,6 +192,60 @@ if (
 }
 if (missingMarkers.length > 0) {
   throw new Error(`Seeded ${missingMarkers.join(" and ")} marker(s) did not reach the agent input`);
+}
+// Auto-review reviewer turn: print only the JSON verdict the loop parses. The
+// first iteration reports one blocking medium finding; a later iteration
+// approves so the loop converges. E2E_AUTO_REVIEW_STUCK keeps every iteration
+// unapproved to prove the iteration cap.
+if (mode === "auto-review-feedback") {
+  const iteration = Number(agentInput.match(/\*\*Review Iteration\*\*:\s*(\d+)/)?.[1] ?? "1");
+  const stuck = process.env.E2E_AUTO_REVIEW_STUCK === "1";
+  if (!stuck && iteration > 1) {
+    console.log(
+      JSON.stringify({
+        summary: "The review finding was addressed and no blocking issues remain.",
+        approved: true,
+        items: [],
+      }),
+    );
+  } else {
+    console.log(
+      JSON.stringify({
+        summary: "The greeting change works, but the exported value is not asserted.",
+        approved: false,
+        items: [
+          {
+            priority: "medium",
+            confidence: "high",
+            category: "code-quality",
+            file: "src/greeting.ts",
+            line: "1",
+            issue:
+              "The fixture test only checks a Hello prefix, so it cannot catch a wrong greeting value.",
+            evidence:
+              "tests/greeting.test.ts:5 asserts only a Hello prefix, not the exact exported value",
+            suggestion: "Assert the exact exported greeting value in tests/greeting.test.ts.",
+          },
+        ],
+      }),
+    );
+  }
+  process.exit(0);
+}
+// Auto-review fixer turn: apply the suggested edit and leave the commit to the
+// production loop. Accept an already-fixed file so a later fix turn is a no-op.
+if (mode === "auto-review-fix") {
+  const fixedPath = "src/greeting.ts";
+  const fixed = 'export const greeting = "Hello, reviewer!";\n';
+  const current = readFileSync(fixedPath, "utf8");
+  if (current !== fixed) {
+    if (current !== 'export const greeting = "Hello, world!";\n') {
+      throw new Error("Unexpected fixture contents; refusing to edit this workspace");
+    }
+    writeFileSync(fixedPath, fixed);
+  }
+  console.log("Applied the review suggestion: src/greeting.ts now exports Hello, reviewer!");
+  process.exit(0);
 }
 const path = "src/greeting.ts";
 if (mode === "no-change") {

@@ -19,7 +19,7 @@
  */
 
 import { Database } from "bun:sqlite";
-import { unlinkSync } from "fs";
+import { existsSync, unlinkSync } from "fs";
 
 import { prepareQueueDbDirectory } from "./webhook-queue";
 import { configureSqliteConnection } from "./sqlite";
@@ -196,7 +196,15 @@ export class InjectedTaskStore {
   private db: Database | null = null;
   private closed = false;
 
-  constructor(private dbPath: string) {}
+  /**
+   * @param dbPath - Database file holding `injected_tasks`
+   * @param options - `readonly` opens the file without creating its directory,
+   *   schema, or indexes (dashboard GET path); a missing file throws.
+   */
+  constructor(
+    private dbPath: string,
+    private options: { readonly?: boolean } = {},
+  ) {}
 
   /** Whether `close()` has released this store's connection. */
   isClosed(): boolean {
@@ -213,6 +221,16 @@ export class InjectedTaskStore {
       throw new Error("InjectedTaskStore is closed");
     }
     if (this.db) {
+      return this.db;
+    }
+    if (this.options.readonly) {
+      // Dashboard GETs must not create the file, its directory, or its schema.
+      // A missing DB is the caller's "no rows" fallback, not something to fix.
+      if (!existsSync(this.dbPath)) {
+        throw new Error(`injected-task database does not exist: ${this.dbPath}`);
+      }
+      this.db = new Database(this.dbPath, { readonly: true });
+      configureSqliteConnection(this.db, { readonly: true });
       return this.db;
     }
     prepareQueueDbDirectory(this.dbPath);
