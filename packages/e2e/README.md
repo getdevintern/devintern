@@ -722,3 +722,7 @@ bun run --filter @devintern/e2e test:e2e:gitlab-relay
 
 CI must provide `E2E_RELAY_AUTH_SESSION` explicitly; the suite is not part of
 PR CI.
+
+### Worker working windows
+
+`tests/local/worker-working-windows.test.ts` verifies that a ready task waits outside the configured UTC windows and that `worker run-now` drains it once.
