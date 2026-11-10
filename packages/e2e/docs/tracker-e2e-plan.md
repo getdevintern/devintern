@@ -34,7 +34,7 @@ test data into the trackers a worker actually uses.
 | GitLab.com Issues   | no                 | `test:e2e:tracker:gitlab-com`          | Existing live suite; pre-created project, issues only, project retained.                                                                                      |
 | Linear              | yes (offline fake) | none                                   | Fake lifecycle: key/`--query`, workflow state, comment, decoy isolation. Live Layer 2 team/project lifecycle, estimation, and attachments remain future work. |
 | Asana               | yes (offline fake) | none                                   | Fake lifecycle: key/`--query`, section transition, comment, decoy isolation.                                                                                  |
-| Azure DevOps        | no                 | none                                   | Detection only in Layer 1.                                                                                                                                    |
+| Azure DevOps        | yes (offline fake) | none                                   | Fake lifecycle: key/`--query`, state transition, comment, decoy isolation.                                                                                    |
 
 The default local run reports these opt-in suites as skipped and planned
 coverage as todo (`helpers/opt-in-suites.ts`), so the test output names what it
@@ -192,7 +192,7 @@ Acceptance criteria:
 - Missing fixture configuration fails before any remote mutation.
 - A rerun does not collide with leftovers from a previous run.
 
-## Layer 3 — fake tracker servers for the default local suite (Jira, Linear, Trello, and Asana implemented)
+## Layer 3 — fake tracker servers for the default local suite (Jira, Linear, Trello, Asana, and Azure DevOps implemented)
 
 Run the built CLI against in-process Bun servers that implement the subset of
 the tracker APIs the product uses. This gives deterministic, credential-free
@@ -327,8 +327,8 @@ has no estimation concept, so there is no estimation coverage to add.
 - Dedicated Trello board versus dedicated lists on the existing board.
 - Whether the read-only smoke should run as part of the release automation or
   stay a manual pre-flight.
-- Which additional trackers (Linear, Asana, Azure DevOps) justify Layer 2/3
-  coverage versus read-only checks only.
+- Which additional trackers (Linear, Asana) justify Layer 2/3 coverage versus
+  read-only checks only.
 
 ## Suggested order
 

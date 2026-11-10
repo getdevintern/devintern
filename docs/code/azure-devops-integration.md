@@ -132,3 +132,7 @@ State names differ per process template and work item type. Check the states ava
 **401 or 403 errors**
 
 Verify the PAT has not expired and includes the Work Items (Read and write) scope for the target organization.
+
+### Offline fake API for local tests
+
+The E2E suite can redirect Azure DevOps requests to a loopback fake server by exporting `DEVINTERN_E2E_FAKE_AZURE_DEVOPS=1` **before starting** the CLI and setting `AZURE_DEVOPS_BASE_URL` to an absolute `http(s)` URL on `127.0.0.1` or `[::1]`. Project `.env` files cannot enable this override. Normal runs use `https://dev.azure.com/<organization>` so a project cannot redirect a PAT.
