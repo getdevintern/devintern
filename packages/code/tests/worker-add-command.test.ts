@@ -422,6 +422,143 @@ describe("runWorkerAdd", () => {
       status: "done",
       deduplicated: false,
     });
+    expect(JSON.parse(cap.out[0]!)).not.toHaveProperty("error");
+  });
+
+  test("--wait --json reports a failed row's message in one object", async () => {
+    writeFileSync(
+      join(dir, ".worker.lock"),
+      JSON.stringify({ pid: process.pid, timestamp: new Date().toISOString() }),
+    );
+    const settle = (async () => {
+      const store = new InjectedTaskStore(workspaceDbPath(dir));
+      try {
+        for (let attempt = 0; attempt < 200; attempt++) {
+          if (store.hasPending()) {
+            store.finish(store.claimNext()!.id, "failed", "verification failed");
+            return;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+      } finally {
+        store.close();
+      }
+    })();
+
+    const cap = capture();
+    const code = await runWorkerAdd(
+      [
+        "--workspace",
+        configPath,
+        "--repo",
+        "backend",
+        "--title",
+        "Failed json",
+        "--wait",
+        "--json",
+      ],
+      cap.options,
+    );
+    await settle;
+
+    expect(code).toBe(1);
+    expect(cap.out).toHaveLength(1);
+    expect(JSON.parse(cap.out[0]!)).toMatchObject({
+      taskKey: "local-failed-json",
+      status: "failed",
+      error: "verification failed",
+      deduplicated: false,
+    });
+  });
+
+  test("an idempotent --wait caller reports the failed row reason", async () => {
+    writeFileSync(
+      join(dir, ".worker.lock"),
+      JSON.stringify({ pid: process.pid, timestamp: new Date().toISOString() }),
+    );
+    const seed = new InjectedTaskStore(workspaceDbPath(dir));
+    seed.enqueue({
+      taskKey: "local-existing-failure",
+      repo: "backend",
+      title: "Existing failure",
+      body: "",
+      taskFile: join(dir, "injected", "local-existing-failure.md"),
+      idempotencyKey: "existing-failure",
+    });
+    seed.close();
+
+    const settle = (async () => {
+      const store = new InjectedTaskStore(workspaceDbPath(dir));
+      try {
+        for (let attempt = 0; attempt < 200; attempt++) {
+          const row = store.getByTaskKey("local-existing-failure");
+          if (row?.status === "pending") {
+            await new Promise((resolve) => setTimeout(resolve, 50));
+            const claimed = store.claimNext();
+            if (claimed) store.finish(claimed.id, "failed", "existing run failed");
+            return;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+      } finally {
+        store.close();
+      }
+    })();
+
+    const cap = capture();
+    const code = await runWorkerAdd(
+      [
+        "--workspace",
+        configPath,
+        "--repo",
+        "backend",
+        "--title",
+        "Existing failure",
+        "--idempotency-key",
+        "existing-failure",
+        "--wait",
+        "--json",
+      ],
+      cap.options,
+    );
+    await settle;
+    expect(code).toBe(1);
+    expect(cap.out).toHaveLength(1);
+    expect(JSON.parse(cap.out[0]!)).toMatchObject({
+      status: "failed",
+      error: "existing run failed",
+      deduplicated: true,
+    });
+  });
+
+  test("--wait prints the failed row reason for a human caller", async () => {
+    writeFileSync(
+      join(dir, ".worker.lock"),
+      JSON.stringify({ pid: process.pid, timestamp: new Date().toISOString() }),
+    );
+    const settle = (async () => {
+      const store = new InjectedTaskStore(workspaceDbPath(dir));
+      try {
+        for (let attempt = 0; attempt < 200; attempt++) {
+          if (store.hasPending()) {
+            store.finish(store.claimNext()!.id, "failed", "verification failed");
+            return;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+      } finally {
+        store.close();
+      }
+    })();
+
+    const cap = capture();
+    const code = await runWorkerAdd(
+      ["--workspace", configPath, "--repo", "backend", "--title", "Failed human", "--wait"],
+      cap.options,
+    );
+    await settle;
+    expect(code).toBe(1);
+    expect(cap.err.join("\n")).toContain("local-failed-human failed: verification failed");
   });
 
   test("dedup with --wait keeps the store open until the task settles", async () => {
@@ -559,6 +696,60 @@ describe("runWorkerAdd", () => {
       taskKey: "local-pruned-run",
       status: "done",
       deduplicated: false,
+    });
+  });
+
+  test("--wait --json reports a pruned failed run's reason", async () => {
+    writeFileSync(
+      join(dir, ".worker.lock"),
+      JSON.stringify({ pid: process.pid, timestamp: new Date().toISOString() }),
+    );
+    const dbPath = workspaceDbPath(dir);
+    const prune = (async () => {
+      const store = new InjectedTaskStore(dbPath);
+      try {
+        for (let attempt = 0; attempt < 300; attempt++) {
+          if (store.hasPending()) {
+            const claimed = store.claimNext()!;
+            const runs = new RunStore(dbPath);
+            const runId = runs.createRun({
+              origin: "local",
+              taskKey: claimed.taskKey,
+              repo: claimed.repo,
+            });
+            runs.finishRun(runId, "failed", "pruned run failed");
+            runs.close();
+            store.finish(claimed.id, "failed", "pruned run failed");
+            store.pruneSettled(0, Date.now() + 1_000);
+            return;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+      } finally {
+        store.close();
+      }
+    })();
+
+    const cap = capture();
+    const code = await runWorkerAdd(
+      [
+        "--workspace",
+        configPath,
+        "--repo",
+        "backend",
+        "--title",
+        "Pruned failed",
+        "--wait",
+        "--json",
+      ],
+      cap.options,
+    );
+    await prune;
+    expect(code).toBe(1);
+    expect(cap.out).toHaveLength(1);
+    expect(JSON.parse(cap.out[0]!)).toMatchObject({
+      status: "failed",
+      error: "pruned run failed",
     });
   });
 

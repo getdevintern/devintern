@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { mkdirSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
 import { InjectedTaskStore } from "../src/lib/state/injected-tasks";
+import { RunStore } from "../src/lib/state/run-recorder";
 import { resetWorkerFailover } from "../src/lib/worker/failover";
 import { createTaskSupervisor } from "../src/lib/worker/supervisor";
 import {
@@ -399,6 +401,79 @@ describe("InjectedTaskAcquirer", () => {
     const row = store.getById(1);
     expect(row?.status).toBe("failed");
     expect(row?.message).toBe("task pipeline did not complete cleanly");
+  });
+
+  test("persists the current failed local run reason", async () => {
+    enqueue("local-a");
+    const dbPath = join(dir, "queue.db");
+    const acquirer = new InjectedTaskAcquirer({
+      store,
+      runDbPath: dbPath,
+      execute: async (task) => {
+        const runs = new RunStore(dbPath);
+        const id = runs.createRun({ origin: "local", taskKey: task.taskKey, repo: task.repo });
+        runs.finishRun(id, "failed", "verification failed");
+        runs.close();
+        return false;
+      },
+      intervalSeconds: 3600,
+    });
+
+    await acquirer.tick();
+    expect(store.getByTaskKey("local-a")).toMatchObject({
+      status: "failed",
+      message: "verification failed",
+    });
+  });
+
+  test("ignores old and unrelated run reasons", async () => {
+    const dbPath = join(dir, "queue.db");
+    enqueue("local-old");
+    enqueue("local-other-source");
+    const runs = new RunStore(dbPath);
+    const old = runs.createRun({ origin: "local", taskKey: "local-old", repo: "backend" });
+    runs.finishRun(old, "failed", "old failure");
+    const raw = new Database(dbPath);
+    raw.run("UPDATE runs SET started_at = 1 WHERE id = ?", [old]);
+    raw.close();
+    runs.close();
+
+    const acquirer = new InjectedTaskAcquirer({
+      store,
+      runDbPath: dbPath,
+      execute: async (task) => {
+        if (task.taskKey === "local-other-source") {
+          const records = new RunStore(dbPath);
+          const id = records.createRun({ origin: "task", taskKey: task.taskKey, repo: task.repo });
+          records.finishRun(id, "failed", "wrong source");
+          records.close();
+        }
+        return false;
+      },
+      intervalSeconds: 3600,
+    });
+
+    await acquirer.tick();
+    expect(store.getByTaskKey("local-old")?.message).toBe("task pipeline did not complete cleanly");
+    expect(store.getByTaskKey("local-other-source")?.message).toBe(
+      "task pipeline did not complete cleanly",
+    );
+  });
+
+  test("settles a failed row even when run history cannot be read", async () => {
+    enqueue("local-a");
+    const acquirer = new InjectedTaskAcquirer({
+      store,
+      runDbPath: join(dir, "missing", "queue.db"),
+      execute: async () => false,
+      intervalSeconds: 3600,
+    });
+
+    await acquirer.tick();
+    expect(store.getByTaskKey("local-a")).toMatchObject({
+      status: "failed",
+      message: "task pipeline did not complete cleanly",
+    });
   });
 
   test("start returns without waiting for a slow injected task", async () => {

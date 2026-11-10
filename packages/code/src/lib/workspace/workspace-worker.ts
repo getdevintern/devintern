@@ -503,6 +503,7 @@ export function buildInjectedTaskAcquirer(
 ): InjectedTaskAcquirer {
   return new InjectedTaskAcquirer({
     store,
+    runDbPath: workspaceDbPath(deps.workspaceDir),
     execute: (task) =>
       createFleetTaskExecutor(deps, {
         extraArgs: () => fleetTaskArgs(deps.config),
@@ -537,6 +538,7 @@ export function buildRetryQueueAcquirer(
 ): RetryQueueAcquirer {
   return new RetryQueueAcquirer({
     store,
+    runDbPath: workspaceDbPath(deps.workspaceDir),
     execute: (taskKey, routable, retry) => {
       const retryTeam = retry.team ? findTeam(deps.config, retry.team) : undefined;
       return createFleetTaskExecutor(

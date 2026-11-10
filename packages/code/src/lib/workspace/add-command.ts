@@ -646,7 +646,15 @@ function serialize(task: InjectedTask): {
  */
 function emitSettled(task: InjectedTask, deduplicated: boolean, ctx: TaskContext): number {
   if (ctx.json) {
-    ctx.log(JSON.stringify({ ...serialize(task), deduplicated }));
+    ctx.log(
+      JSON.stringify({
+        ...serialize(task),
+        deduplicated,
+        ...(task.status === "failed"
+          ? { error: task.message ?? "task pipeline did not complete cleanly" }
+          : {}),
+      }),
+    );
   } else if (task.status === "failed") {
     ctx.error(`❌ ${task.taskKey} failed${task.message ? `: ${task.message}` : ""}`);
   } else {

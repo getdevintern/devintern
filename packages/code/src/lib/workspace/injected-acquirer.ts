@@ -17,6 +17,7 @@ import type { Acquirer } from "../../worker";
 import type { InjectedTask, InjectedTaskStore } from "../state/injected-tasks";
 import type { TaskExecutionResult } from "../acquirers/task-polling";
 import { getWorkerFailover } from "../worker/failover";
+import { queueFailureReason } from "./queue-failure-reason";
 
 /** Source label surfaced in worker logs, run records, and the dashboard. */
 export const INJECTED_TASK_SOURCE = "local:add";
@@ -45,6 +46,8 @@ export function injectedDeferBackoffMs(deferCount: number): number {
 
 export interface InjectedTaskAcquirerOptions {
   store: InjectedTaskStore;
+  /** Shared workspace queue DB, for best-effort failed-run diagnostics. */
+  runDbPath?: string;
   /** Run one claimed task through the fleet executor. */
   execute: (task: InjectedTask) => Promise<TaskExecutionResult>;
   intervalSeconds: number;
@@ -282,7 +285,16 @@ export class InjectedTaskAcquirer implements Acquirer {
             "left running for the next worker to resume",
         );
       } else {
-        store.finish(task.id, "failed", "task pipeline did not complete cleanly");
+        store.finish(
+          task.id,
+          "failed",
+          queueFailureReason(this.options.runDbPath, {
+            taskKey: task.taskKey,
+            startedAt: task.startedAt,
+            origin: "local",
+            repo: task.repo,
+          }),
+        );
       }
     } catch (error) {
       if (store.isClosed()) {

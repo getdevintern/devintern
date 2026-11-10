@@ -17,10 +17,13 @@ import type { ScheduledRetry, ScheduledRetryStore } from "../state/run-retry";
 import type { TaskExecutionResult } from "../acquirers/task-polling";
 import { getWorkerFailover } from "../worker/failover";
 import { toRoutableTask } from "./router";
+import { queueFailureReason } from "./queue-failure-reason";
 import type { RoutableTask } from "./router";
 
 export interface RetryQueueAcquirerOptions {
   store: ScheduledRetryStore;
+  /** Shared workspace queue DB, for best-effort failed-run diagnostics. */
+  runDbPath?: string;
   /** Fleet executor slice (same shape `createFleetTaskExecutor` returns). */
   execute: (
     taskKey: string,
@@ -127,7 +130,18 @@ export class RetryQueueAcquirer implements Acquirer {
         console.log(`⏳ [${this.name}] ${retry.taskKey} deferred; will retry next tick`);
         return false;
       } else {
-        store.finish(retry.id, "failed", "task pipeline did not complete cleanly");
+        store.finish(
+          retry.id,
+          "failed",
+          queueFailureReason(this.options.runDbPath, {
+            taskKey: retry.taskKey,
+            startedAt: retry.startedAt,
+            origin: "task",
+            repo: retry.repo,
+            team: retry.team,
+            previousRunId: retry.runId,
+          }),
+        );
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { mkdirSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
 import { ScheduledRetryStore } from "../src/lib/state/run-retry";
+import { RunStore } from "../src/lib/state/run-recorder";
 import { resetWorkerFailover } from "../src/lib/worker/failover";
 import { RetryQueueAcquirer } from "../src/lib/workspace/retry-acquirer";
 import type { TaskExecutionResult } from "../src/lib/acquirers/task-polling";
@@ -91,6 +93,90 @@ describe("RetryQueueAcquirer", () => {
 
     expect(calls).toEqual(["PROJ-1"]);
     expect(store.hasActive("PROJ-1")).toBe(false);
+  });
+
+  test("persists the current failed retry reason and ignores the pickup run", async () => {
+    const runs = new RunStore(dbPath);
+    const previous = runs.createRun({ origin: "task", taskKey: "PROJ-1", repo: "api" });
+    runs.finishRun(previous, "failed", "previous failure");
+    store.schedule({ taskKey: "PROJ-1", repo: "api", runId: previous, actor: "a@x.com" });
+
+    const acquirer = new RetryQueueAcquirer({
+      store,
+      runDbPath: dbPath,
+      execute: async () => {
+        const current = runs.createRun({ origin: "task", taskKey: "PROJ-1", repo: "api" });
+        runs.finishRun(current, "failed", "current retry failure");
+        return false;
+      },
+      intervalSeconds: 3600,
+    });
+    await acquirer.tick();
+    runs.close();
+
+    const raw = new Database(dbPath, { readonly: true });
+    const row = raw
+      .query("SELECT status, message FROM scheduled_retries WHERE task_key = 'PROJ-1'")
+      .get() as {
+      status: string;
+      message: string;
+    };
+    raw.close();
+    expect(row).toEqual({ status: "failed", message: "current retry failure" });
+  });
+
+  test("falls back when the latest retry run is from another source", async () => {
+    store.schedule({ taskKey: "PROJ-1", actor: "a@x.com" });
+    const acquirer = new RetryQueueAcquirer({
+      store,
+      runDbPath: dbPath,
+      execute: async () => {
+        const runs = new RunStore(dbPath);
+        const id = runs.createRun({ origin: "local", taskKey: "PROJ-1" });
+        runs.finishRun(id, "failed", "unrelated failure");
+        runs.close();
+        return false;
+      },
+      intervalSeconds: 3600,
+    });
+    await acquirer.tick();
+
+    const raw = new Database(dbPath, { readonly: true });
+    const row = raw
+      .query("SELECT message FROM scheduled_retries WHERE task_key = 'PROJ-1'")
+      .get() as {
+      message: string;
+    };
+    raw.close();
+    expect(row.message).toBe("task pipeline did not complete cleanly");
+  });
+
+  test("does not reuse a prior attempt's reason after the retry fails", async () => {
+    const runs = new RunStore(dbPath);
+    const previous = runs.createRun({ origin: "task", taskKey: "PROJ-1" });
+    runs.finishRun(previous, "failed", "prior attempt failed");
+    const raw = new Database(dbPath);
+    raw.run("UPDATE runs SET started_at = 1 WHERE id = ?", [previous]);
+    raw.close();
+    runs.close();
+    store.schedule({ taskKey: "PROJ-1", actor: "a@x.com" });
+
+    const acquirer = new RetryQueueAcquirer({
+      store,
+      runDbPath: dbPath,
+      execute: async () => false,
+      intervalSeconds: 3600,
+    });
+    await acquirer.tick();
+
+    const reader = new Database(dbPath, { readonly: true });
+    const row = reader
+      .query("SELECT message FROM scheduled_retries WHERE task_key = 'PROJ-1'")
+      .get() as {
+      message: string;
+    };
+    reader.close();
+    expect(row.message).toBe("task pipeline did not complete cleanly");
   });
 
   test("settles a skipped row as done rather than failed", async () => {
