@@ -467,15 +467,33 @@ transitions. Any unmatched request returns a diagnostic 404 and fails the test,
 so a client change that starts calling a new route is visible instead of
 silently returning `{}`.
 
-Two scenarios run the production Jira client through explicit-key and `--query`
-selection against a seeded issue and a decoy outside the selector. Read-back
-goes through the fake fixture, not CLI stdout: the pushed `feature/<key>` branch
-and exact `src/greeting.ts` diff, the run record, the configured workflow
-status, surviving unrelated labels, the implementation summary comment, and
-delivery of the seeded description/comment markers to the deterministic agent.
-A second run with `--skip-comments` proves no additional comment or transition
-is posted. The local bare Git remote is the code host; no GitHub token or PR is
-required.
+The Jira fake covers `/myself`, enhanced JQL `search/jql`, issue read/update,
+comments (ADF and text), and workflow transitions. The Azure DevOps fake covers
+project-scoped WIQL, batch and single work-item reads, work-item JSON-patch
+updates (including `System.State`), and work-item comments. The CLI reaches the
+fake through the existing `AZURE_DEVOPS_BASE_URL` test/proxy override, which
+replaces the organization root (`https://dev.azure.com/<organization>` by
+default) for the subprocess only; production behavior is unchanged when the
+variable is absent.
+
+Two scenarios per fake run the production client through explicit-key and
+`--query` selection against seeded items and a decoy outside the selector.
+Read-back goes through the fixture, not CLI stdout: the pushed `feature/<key>`
+branch and exact `src/greeting.ts` diff, the run record, the configured
+workflow status/state, surviving unrelated labels/tags, the implementation
+summary comment, and delivery of the seeded description/comment markers to the
+deterministic agent. The local bare Git remote is the code host; no GitHub
+token, tracker token, or PR is required. The Jira key scenario additionally
+runs a second time with `--skip-comments` to prove no additional comment or
+transition is posted.
+
+Run just the Azure DevOps lifecycle with:
+
+```sh
+bun run --filter @devintern/e2e test
+# or directly, from packages/e2e
+bun test tests/local/tracker-azure-devops-fake.test.ts
+```
 
 ### Offline fake Linear server
 
@@ -779,3 +797,7 @@ PR CI.
 ### Asana fake
 
 `tests/local/tracker-asana-fake.test.ts` exercises the built CLI against a loopback Asana API fixture, covering key and query selection, project sections, comments, and decoy isolation.
+
+### Azure DevOps fake
+
+`tests/local/tracker-azure-devops-fake.test.ts` exercises key and WIQL selection, state transitions, comments, and decoy isolation against a loopback fake API. The test subprocess opts in with `DEVINTERN_E2E_FAKE_AZURE_DEVOPS=1`; project configuration cannot enable the endpoint override.
