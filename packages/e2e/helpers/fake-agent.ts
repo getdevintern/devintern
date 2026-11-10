@@ -35,20 +35,6 @@ const mode =
         : agentInput.includes("E2E_NO_CHANGE")
           ? "no-change"
           : "implement");
-if (process.env.E2E_AGENT_INVOCATIONS) {
-  // Automation subprocesses carry the owning schedule id, so a worker test can
-  // attribute each agent invocation to the automation that spawned it instead
-  // of relying on global mode counts.
-  const automation = process.env.DEVINTERN_AUTOMATION_ID;
-  appendFileSync(
-    process.env.E2E_AGENT_INVOCATIONS,
-    JSON.stringify({
-      mode,
-      ...(promptMarkers.length > 0 ? { promptMarkers } : {}),
-      ...(automation ? { automation } : {}),
-    }) + "\n",
-  );
-}
 // Opt-in start/end timeline for concurrency coverage. An `exit` handler records
 // the end exactly once, so early exits, failures and thrown errors still close
 // their interval. The existing E2E_AGENT_INVOCATIONS record stays unchanged.
@@ -66,9 +52,69 @@ if (timelinePath) {
     recordTimeline("end");
   });
 }
+
+/**
+ * Land an empty commit on the current task branch.
+ *
+ * Session pickup only reuses a branch that has commits ahead of its base, so
+ * resume and crash coverage need one before the run ends (or is killed).
+ */
+function commitInterruptedAttempt(): void {
+  const commit = Bun.spawnSync(
+    [
+      "git",
+      "-c",
+      "user.name=DevIntern E2E",
+      "-c",
+      "user.email=e2e@example.com",
+      "commit",
+      "--allow-empty",
+      "-m",
+      "wip: interrupted attempt",
+    ],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  if (commit.exitCode !== 0) {
+    throw new Error(commit.stdout.toString() + commit.stderr.toString());
+  }
+}
+
+/** Publish this invocation so tests can observe that the agent started. */
+function recordInvocation(): void {
+  if (process.env.E2E_AGENT_INVOCATIONS) {
+    // Automation subprocesses carry the owning schedule id, so a worker test can
+    // attribute each agent invocation to the automation that spawned it instead
+    // of relying on global mode counts.
+    const automation = process.env.DEVINTERN_AUTOMATION_ID;
+    appendFileSync(
+      process.env.E2E_AGENT_INVOCATIONS,
+      JSON.stringify({
+        mode,
+        ...(promptMarkers.length > 0 ? { promptMarkers } : {}),
+        ...(automation ? { automation } : {}),
+      }) + "\n",
+    );
+  }
+}
+
 // Opt-in delay for bounded-timeout coverage. Defaults to 0, so every existing
 // scenario stays as fast and deterministic as before.
 const delayMs = Number(process.env.E2E_AGENT_DELAY_MS ?? "0");
+// A crash test needs the agent to have already committed when the daemon is
+// killed, otherwise the interrupted branch has nothing to resume and startup
+// recovery must settle the row `failed` for lack of work. This mode lands the
+// empty commit first and records the invocation only afterwards, so a test that
+// polls that record before killing the daemon is provably interrupting a
+// resumable attempt (a branch ahead of its base) instead of an unstarted one.
+if (mode === "interrupted") {
+  commitInterruptedAttempt();
+  recordInvocation();
+  if (Number.isFinite(delayMs) && delayMs > 0) {
+    await Bun.sleep(delayMs);
+  }
+  process.exit(0);
+}
+recordInvocation();
 if (Number.isFinite(delayMs) && delayMs > 0) {
   await Bun.sleep(delayMs);
 }
@@ -100,25 +146,7 @@ if (failPromptMarker) {
 // `incomplete-empty` skips the commit to cover the documented fallback to a
 // fresh attempt branch when the prior branch has nothing to resume.
 if (mode === "incomplete" || mode === "incomplete-empty") {
-  if (mode === "incomplete") {
-    const commit = Bun.spawnSync(
-      [
-        "git",
-        "-c",
-        "user.name=DevIntern E2E",
-        "-c",
-        "user.email=e2e@example.com",
-        "commit",
-        "--allow-empty",
-        "-m",
-        "wip: interrupted attempt",
-      ],
-      { stdout: "pipe", stderr: "pipe" },
-    );
-    if (commit.exitCode !== 0) {
-      throw new Error(commit.stdout.toString() + commit.stderr.toString());
-    }
-  }
+  if (mode === "incomplete") commitInterruptedAttempt();
   console.log(
     "Implementation was unsuccessful. I could not complete the requested change because the deterministic E2E fixture intentionally stopped before editing any tracked file. The branch and run record must remain available for a resume attempt.",
   );

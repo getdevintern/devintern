@@ -9,6 +9,7 @@
  */
 
 import { Database } from "bun:sqlite";
+import { execFileSync } from "node:child_process";
 import {
   chmodSync,
   cpSync,
@@ -42,6 +43,10 @@ export interface WorkerInjectedTask {
   task_file: string;
   idempotency_key: string | null;
   actor: string;
+  /** Automatic resumes consumed by startup recovery (`WORKER_INJECTED_AUTO_RESUME_LIMIT`). */
+  auto_resume_count: number;
+  /** Pid of the detached task child spawned for this row, or null when idle. */
+  child_pid: number | null;
   created_at: number;
   started_at: number | null;
   finished_at: number | null;
@@ -65,6 +70,8 @@ const INJECTED_COLUMNS = [
   "actor",
   "status",
   "message",
+  "auto_resume_count",
+  "child_pid",
   "created_at",
   "started_at",
   "finished_at",
@@ -222,6 +229,29 @@ export class WorkerFixture {
   /** Shared workspace database (`<workspace>/state/queue.db`). */
   get dbPath(): string {
     return join(this.workspaceDir, "state", "queue.db");
+  }
+
+  /**
+   * Workspace singleton lock (`<workspace>/.worker.lock`).
+   *
+   * The daemon writes `{ pid, timestamp }` here before starting acquirers; a
+   * hard kill leaves it behind, so tests read its pid to target the crash and
+   * assert the next daemon replaced it.
+   */
+  get lockFile(): string {
+    return join(this.workspaceDir, ".worker.lock");
+  }
+
+  /** Pid recorded in the workspace lock, or undefined before/without a daemon. */
+  daemonPid(): number | undefined {
+    if (!existsSync(this.lockFile)) return undefined;
+    try {
+      const parsed = JSON.parse(readFileSync(this.lockFile, "utf8")) as { pid?: unknown };
+      return typeof parsed.pid === "number" ? parsed.pid : undefined;
+    } catch {
+      // A lock this process is writing right now is not valid JSON yet.
+      return undefined;
+    }
   }
 
   /** Complete stdout/stderr captured from the worker so far. */
@@ -603,6 +633,41 @@ export class WorkerFixture {
   }
 
   /**
+   * Commits a local task branch has ahead of the configured base branch.
+   *
+   * Reads the worker's bare clone, which shares refs with its task worktrees,
+   * so a feature branch that has not been pushed yet is still visible.
+   */
+  async branchCommitCount(branch: string): Promise<number> {
+    const output = await checkedCommand(
+      [
+        "git",
+        "--git-dir",
+        join(this.workspaceDir, "repos", `${this.repoName}.git`),
+        "rev-list",
+        "--count",
+        `origin/${this.baseBranch}..refs/heads/${branch}`,
+      ],
+      this.root,
+      this.env,
+    );
+    return Number(output);
+  }
+
+  /** Branch names currently pushed to the local bare repository. */
+  async remoteBranches(): Promise<string[]> {
+    const output = await checkedCommand(
+      ["git", "--git-dir", this.remote, "for-each-ref", "--format=%(refname:short)", "refs/heads"],
+      this.root,
+      this.env,
+    );
+    return output
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+  }
+
+  /**
    * Persisted per-harness usage-limit windows (harness → epoch ms) from the
    * queue's `webhook_meta` table, read through the same read-only pattern as
    * the other queue queries.
@@ -709,6 +774,34 @@ export class WorkerFixture {
     this.child = null;
   }
 
+  /**
+   * Simulate a hard crash (`kill -9`/power loss) of the daemon.
+   *
+   * SIGKILLs the daemon's process group so no shutdown hook runs: a claimed
+   * injected row stays `running` and its run stays `in_progress` for the next
+   * daemon's startup recovery. The task child is spawned detached and therefore
+   * leads its own process group, so it survives; callers must kill it (and the
+   * agent it leads) with {@link killProcessTree} using the row's `child_pid`.
+   *
+   * The fixture's child handle is released, so {@link start} can relaunch the
+   * daemon without an intervening {@link stop}.
+   *
+   * @returns The daemon pid that was killed
+   */
+  async crash(timeoutMs = 10_000): Promise<number> {
+    const pid = this.daemonPid() ?? this.child?.pid;
+    if (pid === undefined) {
+      throw new Error("Worker fixture has no running daemon to crash");
+    }
+    killProcessGroup(pid, "SIGKILL");
+    if (!(await this.waitForExit(timeoutMs))) {
+      throw new Error(`Worker process ${pid} did not exit after SIGKILL\n${this.tail()}`);
+    }
+    await this.exitPromise?.catch(() => undefined);
+    this.child = null;
+    return pid;
+  }
+
   /** Stop the daemon and remove every temporary path. */
   async dispose(): Promise<void> {
     try {
@@ -813,6 +906,119 @@ export class WorkerFixture {
       }
     }
   }
+}
+
+/**
+ * Signal a pid's process group, falling back to the pid alone.
+ *
+ * Never throws: the target may have exited between the caller's check and the
+ * signal (a normal race when cleaning up after a killed daemon).
+ *
+ * @param pid - Process (and process-group) id to signal
+ * @param signal - Signal to send, defaults to an unblockable `SIGKILL`
+ */
+export function killProcessGroup(pid: number, signal: NodeJS.Signals = "SIGKILL"): void {
+  try {
+    process.kill(-pid, signal);
+  } catch {
+    try {
+      process.kill(pid, signal);
+    } catch {
+      // Already gone.
+    }
+  }
+}
+
+/**
+ * Whether a pid names a live, runnable process.
+ *
+ * A zombie awaiting its parent's `wait()` still answers `kill(pid, 0)` but can
+ * never do work again, so it counts as gone. `ps` is read the same way the
+ * product probes interrupted task children.
+ *
+ * @param pid - Process id to probe
+ */
+export function isProcessRunning(pid: number): boolean {
+  try {
+    const stat = execFileSync("ps", ["-o", "stat=", "-p", String(pid)], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 2_000,
+    }).trim();
+    return stat.length > 0 && !stat.startsWith("Z");
+  } catch {
+    return false;
+  }
+}
+
+/** Every live descendant of `root`, read once from the process table. */
+function processDescendants(root: number): number[] {
+  let output: string;
+  try {
+    output = execFileSync("ps", ["-eo", "pid=,ppid="], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 5_000,
+    });
+  } catch {
+    return [];
+  }
+  const childrenByParent = new Map<number, number[]>();
+  for (const line of output.split("\n")) {
+    const [pidText, ppidText] = line.trim().split(/\s+/);
+    const pid = Number(pidText);
+    const ppid = Number(ppidText);
+    if (!Number.isInteger(pid) || !Number.isInteger(ppid)) continue;
+    const children = childrenByParent.get(ppid) ?? [];
+    children.push(pid);
+    childrenByParent.set(ppid, children);
+  }
+  const descendants: number[] = [];
+  const queue = [...(childrenByParent.get(root) ?? [])];
+  while (queue.length > 0) {
+    const pid = queue.shift()!;
+    descendants.push(pid);
+    queue.push(...(childrenByParent.get(pid) ?? []));
+  }
+  return descendants;
+}
+
+/**
+ * Kill a task child, its process group and every descendant, returning the
+ * pids that were signalled.
+ *
+ * The worker spawns each task child detached (its own process group), but the
+ * agent harness spawns the agent detached as well. Signalling only the task
+ * child's group would therefore leave the deterministic agent sleeping for the
+ * fixture's delay; snapshotting descendants first kills the whole attempt.
+ *
+ * @param pid - Recorded `child_pid` of a task row
+ * @param signal - Signal to send, defaults to an unblockable `SIGKILL`
+ */
+export function killProcessTree(pid: number, signal: NodeJS.Signals = "SIGKILL"): number[] {
+  const pids = [pid, ...processDescendants(pid)];
+  for (const target of pids) killProcessGroup(target, signal);
+  return pids;
+}
+
+/**
+ * Poll until every pid is gone.
+ *
+ * @param pids - Pids to watch
+ * @param timeoutMs - Bounded wait; never sleeps a fixed time before the first probe
+ * @returns The pids still running at the deadline (empty on success)
+ */
+export async function waitForProcessesGone(
+  pids: readonly number[],
+  timeoutMs = 10_000,
+): Promise<number[]> {
+  const deadline = Date.now() + timeoutMs;
+  let alive = pids.filter((pid) => isProcessRunning(pid));
+  while (alive.length > 0 && Date.now() < deadline) {
+    await Bun.sleep(100);
+    alive = alive.filter((pid) => isProcessRunning(pid));
+  }
+  return alive;
 }
 
 export { cliPath };
