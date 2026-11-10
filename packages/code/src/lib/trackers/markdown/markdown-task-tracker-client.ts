@@ -302,7 +302,7 @@ export class MarkdownTaskTrackerClient implements TaskTrackerClient {
 
   async findEstimationComment(
     _taskKey: string,
-  ): Promise<{ commentId: string; created: string } | null> {
+  ): Promise<{ commentId: string; created: string; updated: string } | null> {
     return null;
   }
 

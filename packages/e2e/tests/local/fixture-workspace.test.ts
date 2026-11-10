@@ -152,10 +152,10 @@ test("all-task run records expose an accidentally processed decoy", () => {
     run.pointAt("2");
     const db = new Database(run.env.WEBHOOK_QUEUE_DB);
     db.run(
-      "CREATE TABLE runs (id INTEGER PRIMARY KEY, task_key TEXT, tracker TEXT, status TEXT, pr_url TEXT, outcome_reason TEXT)",
+      "CREATE TABLE runs (id INTEGER PRIMARY KEY, task_key TEXT, tracker TEXT, origin TEXT, status TEXT, pr_url TEXT, outcome_reason TEXT)",
     );
     db.run(
-      "INSERT INTO runs (task_key, tracker, status) VALUES ('2', 'gitlab', 'succeeded'), ('1', 'gitlab', 'failed')",
+      "INSERT INTO runs (task_key, tracker, origin, status) VALUES ('2', 'gitlab', 'task', 'succeeded'), ('1', 'gitlab', 'task', 'failed')",
     );
     db.close();
     expect(run.runRecords().map((record) => record.task_key)).toEqual(["2"]);

@@ -298,11 +298,17 @@ export class GitHubTaskTrackerClient implements TaskTrackerClient {
 
   async findEstimationComment(
     taskKey: string,
-  ): Promise<{ commentId: string; created: string } | null> {
+  ): Promise<{ commentId: string; created: string; updated: string } | null> {
     try {
       const comments = await this.githubClient.listIssueComments(this.toIssueNumber(taskKey));
       const existing = comments.find((c) => (c.body || "").includes(ESTIMATION_COMMENT_MARKER));
-      return existing ? { commentId: String(existing.id), created: existing.created_at } : null;
+      return existing
+        ? {
+            commentId: String(existing.id),
+            created: existing.created_at,
+            updated: existing.updated_at || existing.created_at,
+          }
+        : null;
     } catch (error) {
       console.warn(`⚠️  Failed to check for estimation comment on #${taskKey}: ${error}`);
       return null;

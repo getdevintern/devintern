@@ -106,7 +106,9 @@ changed, or deleted.
 ## Layer 2 — full lifecycle against dedicated fixtures (planned)
 
 Reuse the existing `TrackerScenario` and `assertTrackerLifecycle` machinery,
-with Jira and Trello fixtures and provider-specific status semantics.
+with Jira and Trello fixtures and provider-specific status semantics. CLI
+estimation is already covered offline in Layer 3; real Jira project lifecycle
+and live estimation with a dedicated fixture project remain Layer 2.
 
 ### Provider contract changes
 
@@ -202,12 +204,25 @@ regressions without depending on provider availability.
 ### Jira (implemented)
 
 `providers/fake-jira.ts` serves a strict Jira Cloud REST v3 subset on
-`127.0.0.1:0` and owns all issues, comments, labels, and statuses in memory.
-`tests/local/tracker-jira-fake.test.ts` seeds an expected issue plus a decoy
-outside the selector, writes per-project Jira statuses into
+`127.0.0.1:0` and owns all issues, comments, labels, statuses, and custom fields
+in memory. `tests/local/tracker-jira-fake.test.ts` seeds an expected issue plus
+a decoy outside the selector, writes per-project Jira statuses into
 `.devintern-code/settings.json`, and runs the production Jira client through the
 built CLI for both explicit-key and `--query` selection. It reads state back
 through the fixture rather than CLI stdout.
+
+`tests/local/tracker-jira-estimation.test.ts` adds the `--estimate` workflow.
+Settings name `storyPointsField: "customfield_10016"` explicitly, so the test
+covers the write/comment path without conflating it with field discovery. The
+fake persists custom fields on `PUT /rest/api/3/issue/{key}` and exposes them
+for assertions; it also implements `PUT /rest/api/3/issue/{key}/comment/{id}`
+for in-place re-estimation and a deterministic clock control for the <24h skip.
+Scenarios assert the story-point value, the single estimation comment (created
+then updated by id, with the rewritten body carrying the new points),
+`estimation-result.json`, and the skip behavior for unchanged and recent
+issues. `--skip-comments` proves the field-only path and that a repeated sweep
+stays a no-op without a comment to anchor the re-estimation gate. No branch,
+commit, or push is created.
 
 Endpoints covered:
 
@@ -216,17 +231,19 @@ Endpoints covered:
 - `GET /rest/api/3/issue/{key}` (including `?expand=renderedFields`)
 - `GET /rest/api/3/issue/{key}/comment` (including `?expand=renderedBody`)
 - `POST /rest/api/3/issue/{key}/comment` (ADF or text)
+- `PUT /rest/api/3/issue/{key}/comment/{id}` (ADF or text)
 - `GET` / `POST /rest/api/3/issue/{key}/transitions`
-- `PUT /rest/api/3/issue/{key}` (labels/fields)
+- `PUT /rest/api/3/issue/{key}` (labels, description, and custom fields)
 
 Any other route returns a diagnostic 404 naming the method and path, and the
 test asserts no unexpected request occurred. The fake accepts any Basic-auth
-credentials, never logs them, and makes no outbound requests. Scenarios assert
-the pushed `feature/<key>` branch and exact `src/greeting.ts` diff, the run
-record, the configured workflow status, surviving unrelated labels, the
-implementation comment, and `--skip-comments` on a second run. The local bare
-Git remote is the code host; no PR, GitHub token, or model credentials are
-required. The only skip is the existing built-CLI guard.
+credentials, never logs them, and makes no outbound requests. Lifecycle
+scenarios assert the pushed `feature/<key>` branch and exact
+`src/greeting.ts` diff, the run record, the configured workflow status,
+surviving unrelated labels, the implementation comment, and `--skip-comments`
+on a second run. The local bare Git remote is the code host; no PR, GitHub
+token, or model credentials are required. The only skip is the existing
+built-CLI guard.
 
 ### Linear (implemented)
 
