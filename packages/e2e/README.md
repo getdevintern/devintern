@@ -771,3 +771,7 @@ PR CI.
 ### Incomplete task retry gate
 
 `tests/local/tracker-force-retry-gate.test.ts` verifies that an unchanged incomplete Jira task is skipped until `--force` requests a retry.
+
+### Multi-repo team routing
+
+`tests/local/worker-team-routing.test.ts` verifies team routing, ambiguous and unrouted task skips, and layered repo and team environment settings with local bare remotes.
