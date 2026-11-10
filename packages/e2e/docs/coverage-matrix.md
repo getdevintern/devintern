@@ -51,13 +51,13 @@ independently of this repository.
 | GitLab.com Issues: key and `--query`                                              | `live`    | `tests/code/gitlab-com-tracker.test.ts`                                           | Estimation, reopen/closed handling.                                                            |
 | Jira: offline fake key/`--query`, transition, comment, `--skip-comments`          | `default` | `tests/local/tracker-jira-fake.test.ts`, `bun run --filter @devintern/e2e test`   | Real Jira project lifecycle, issue create/close, estimation, live `--skip-comments` semantics. |
 | Jira: live auth, project access, statuses, create metadata, JQL search            | `partial` | `test:trackers` read-only smoke                                                   | Full live create/transition/comment/close lifecycle; estimation.                               |
-| Trello: auth, board, lists, search                                                | `partial` | `test:trackers` read-only smoke                                                   | Card create/move/comment/archive lifecycle; list transitions; estimation.                      |
+| Trello: offline fake key/`--query`, list move, comment, decoy isolation           | `default` | `tests/local/tracker-trello-fake.test.ts`, `test:trackers` read-only smoke        | Live board lifecycle and search indexing.                                                      |
 | Linear: offline fake key/`--query`, workflow state, comment, decoy isolation      | `default` | `tests/local/tracker-linear-fake.test.ts`, `bun run --filter @devintern/e2e test` | Live team/project lifecycle, estimation, attachment uploads.                                   |
 | Asana                                                                             | `gap`     | detection only                                                                    | Read-only checks and lifecycle.                                                                |
 | Azure DevOps                                                                      | `gap`     | detection only                                                                    | Read-only checks and lifecycle.                                                                |
 | Offline fake Jira server (default lifecycle)                                      | `default` | `tests/local/tracker-jira-fake.test.ts`, `bun run --filter @devintern/e2e test`   | Real Jira create/close and estimation.                                                         |
 | Offline fake Linear server (default lifecycle)                                    | `default` | `tests/local/tracker-linear-fake.test.ts`, `bun run --filter @devintern/e2e test` | Live team/project lifecycle, estimation, attachment uploads.                                   |
-| Offline fake Trello server                                                        | `gap`     | planned Trello part of Layer 3 in `tracker-e2e-plan.md`                           | Deterministic default coverage without network or credentials.                                 |
+| Offline fake Trello server                                                        | `default` | `tests/local/tracker-trello-fake.test.ts`                                         | Live board lifecycle.                                                                          |
 
 ### Source control
 
@@ -185,7 +185,8 @@ and each task opens its own PR.
 
 1. ~~Offline fake Jira server with the lifecycle assertions from Layer 2~~
    (implemented by `tests/local/tracker-jira-fake.test.ts`).
-2. Offline fake Trello server with the card/list/comment lifecycle.
+2. ~~Offline fake Trello server with the card/list/comment lifecycle~~
+   (implemented by `tests/local/tracker-trello-fake.test.ts`).
 3. Jira lifecycle against a dedicated fixture project (Layer 2), when that
    project and token exist.
 4. Trello lifecycle against a dedicated board (Layer 2), when that board and

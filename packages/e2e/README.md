@@ -450,11 +450,15 @@ fails the explicit live command before it mutates a remote repository.
 
 ## Offline fake tracker servers
 
-The default local suite includes an in-process fake Jira Cloud v3 server, so the
-built CLI can exercise the Jira tracker lifecycle with no credentials and no
-network access. `bun test tests/local` runs
-`tests/local/tracker-jira-fake.test.ts`; it skips only when the built CLI is
+The default local suite includes in-process fake Jira Cloud v3 and Trello REST
+servers, so the built CLI can exercise both tracker lifecycles with no
+credentials and no network access. `bun run --filter @devintern/e2e test` (or
+`bun test tests/local` after building) runs
+`tests/local/tracker-jira-fake.test.ts` and
+`tests/local/tracker-trello-fake.test.ts`; they skip only when the built CLI is
 absent, like the other local Git tests.
+
+### Jira fake
 
 The fake binds `127.0.0.1:0`, accepts any Basic-auth credentials (and never logs
 them), and implements only the endpoints the product calls: `/myself`, enhanced
