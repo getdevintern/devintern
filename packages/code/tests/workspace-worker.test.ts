@@ -639,6 +639,7 @@ describe("createFleetTaskExecutor serialization", () => {
 
     expect(observed?.env.DEVINTERN_RUN_ORIGIN).toBe("error_monitor");
     expect(observed?.args).toContain("--skip-clarity-check");
+    expect(observed?.args).toContain("--allow-no-changes");
   });
 
   test("pins the resolved actioned source into the subprocess env", async () => {
@@ -1052,6 +1053,7 @@ remote = "git@github.com:acme/backend.git"
       "--create-pr",
       "--auto-review",
       "--skip-clarity-check",
+      "--allow-no-changes",
     ]);
     const alreadySkipped = {
       ...CONFIG,
@@ -1060,7 +1062,30 @@ remote = "git@github.com:acme/backend.git"
         workerTaskArgs: "--create-pr --skip-clarity-check",
       },
     };
-    expect(errorMonitorTaskArgs(alreadySkipped)).toEqual(["--create-pr", "--skip-clarity-check"]);
+    expect(errorMonitorTaskArgs(alreadySkipped)).toEqual([
+      "--create-pr",
+      "--skip-clarity-check",
+      "--allow-no-changes",
+    ]);
+  });
+
+  test("error monitor runs may conclude that no code change is needed", () => {
+    // A remediation that finds the issue already fixed must not fail with
+    // "Implementation was not committed": that failure is reported back to
+    // the same Sentry issue and feeds the next remediation attempt.
+    expect(errorMonitorTaskArgs(CONFIG)).toContain("--allow-no-changes");
+    const alreadyAllowed = {
+      ...CONFIG,
+      defaults: {
+        ...CONFIG.defaults,
+        workerTaskArgs: "--create-pr --allow-no-changes",
+      },
+    };
+    expect(errorMonitorTaskArgs(alreadyAllowed)).toEqual([
+      "--create-pr",
+      "--allow-no-changes",
+      "--skip-clarity-check",
+    ]);
   });
 });
 
