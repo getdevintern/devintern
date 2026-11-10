@@ -117,6 +117,7 @@ export interface WorkerRunRecord {
   origin: string;
   automation_id: string | null;
   task_key: string | null;
+  team: string | null;
   status: string;
   branch: string | null;
   repo: string | null;
@@ -171,6 +172,8 @@ export interface WorkerFixtureOptions {
   env?: Record<string, string>;
   /** Repo names to seed; defaults to one fixture repo. */
   repos?: string[];
+  /** Prefix for the isolated temporary directory. */
+  rootPrefix?: string;
 }
 
 /** Log captured from the worker subprocess, for readiness and failure reports. */
@@ -189,8 +192,8 @@ interface OutputWaiter {
  * daemon and temporary directories are released.
  */
 export class WorkerFixture {
-  readonly root = mkdtempSync(join(tmpdir(), "devintern-e2e-worker-"));
-  readonly workspaceDir = join(this.root, "workspace");
+  readonly root: string;
+  readonly workspaceDir: string;
   /** Every seeded repo name, primary first. */
   readonly repoNames: string[];
   /** Primary repo name; the first entry of {@link repoNames}. */
@@ -200,15 +203,21 @@ export class WorkerFixture {
   readonly remote: string;
   /** Seed checkout of the primary repo. */
   readonly seed: string;
-  readonly env = isolatedEnvironment(this.root);
+  readonly env: ReturnType<typeof isolatedEnvironment>;
 
   private child: ReturnType<typeof Bun.spawn> | null = null;
   private exitCode: number | undefined;
   private exitPromise: Promise<number> | null = null;
   private output = "";
   private readonly waiters = new Set<OutputWaiter>();
+  /** Descendants observed while the daemon was alive, including reparented survivors. */
+  private readonly knownDescendants = new Set<number>();
+  private descendantTimer: ReturnType<typeof setInterval> | undefined;
 
   constructor(private readonly options: WorkerFixtureOptions = {}) {
+    this.root = mkdtempSync(join(tmpdir(), options.rootPrefix ?? "devintern-e2e-worker-"));
+    this.workspaceDir = join(this.root, "workspace");
+    this.env = isolatedEnvironment(this.root);
     this.repoNames = options.repos?.length ? [...options.repos] : ["fixture"];
     this.repoName = this.repoNames[0]!;
     this.remote = this.remoteFor(this.repoName);
@@ -416,8 +425,10 @@ export class WorkerFixture {
     this.child = child;
     this.exitCode = undefined;
     this.output = "";
+    this.knownDescendants.clear();
     void this.pump(child.stdout);
     void this.pump(child.stderr);
+    this.trackDescendants();
     this.exitPromise = child.exited.then((code) => {
       this.exitCode = code;
       this.rejectWaiters(
@@ -579,7 +590,7 @@ export class WorkerFixture {
   /** Read run records, optionally scoped to one task key. */
   runRecords(taskKey?: string): WorkerRunRecord[] {
     const columns =
-      "id, origin, automation_id, task_key, status, branch, repo, pr_url, outcome_reason, attempt, started_at, finished_at";
+      "id, origin, automation_id, task_key, team, status, branch, repo, pr_url, outcome_reason, attempt, started_at, finished_at";
     return taskKey === undefined
       ? this.query<WorkerRunRecord>(`SELECT ${columns} FROM runs ORDER BY id`)
       : this.query<WorkerRunRecord>(`SELECT ${columns} FROM runs WHERE task_key = ? ORDER BY id`, [
@@ -761,17 +772,35 @@ export class WorkerFixture {
   async stop(timeoutMs = 25_000): Promise<void> {
     const child = this.child;
     if (!child) return;
-    if (this.exitCode === undefined) {
-      this.signal("SIGTERM");
-      if (!(await this.waitForExit(timeoutMs))) {
-        this.signal("SIGKILL");
-        if (!(await this.waitForExit(5_000))) {
-          throw new Error(`Worker process did not exit after SIGKILL\n${this.tail()}`);
+    this.stopTrackingDescendants();
+    // A task subprocess is spawned detached (its own group), so collect the
+    // descendant tree before the worker exits and reparents any survivor. The
+    // tracking loop also holds children observed before an unexpected exit.
+    const descendants = this.descendantPids();
+    for (const pid of descendants) this.knownDescendants.add(pid);
+    const collected = [...this.knownDescendants];
+    this.knownDescendants.clear();
+    let failure: unknown;
+    try {
+      if (this.exitCode === undefined) {
+        this.signal("SIGTERM");
+        if (!(await this.waitForExit(timeoutMs))) {
+          this.signal("SIGKILL");
+          if (!(await this.waitForExit(5_000))) {
+            throw new Error(`Worker process did not exit after SIGKILL\n${this.tail()}`);
+          }
         }
       }
+      await this.exitPromise?.catch(() => undefined);
+    } catch (error) {
+      failure = error;
     }
-    await this.exitPromise?.catch(() => undefined);
+    const survivors = await this.stopDescendants(collected);
     this.child = null;
+    if (survivors.length > 0) {
+      throw new Error(`Could not stop worker child process(es): ${survivors.join(", ")}`);
+    }
+    if (failure) throw failure;
   }
 
   /**
@@ -818,7 +847,7 @@ export class WorkerFixture {
    * the `exited` handler, while the subprocess's own `exitCode` flips as soon
    * as the process is reaped.
    */
-  private assertRunning(label: string): void {
+  protected assertRunning(label: string): void {
     const exitCode = this.exitCode ?? this.child?.exitCode ?? undefined;
     if (exitCode === undefined) return;
     throw new Error(
@@ -827,7 +856,7 @@ export class WorkerFixture {
   }
 
   /** Run a read-only queue query, tolerating a database that is still absent. */
-  private query<T>(sql: string, params: Array<string | number> = [], dbPath = this.dbPath): T[] {
+  protected query<T>(sql: string, params: Array<string | number> = [], dbPath = this.dbPath): T[] {
     if (!existsSync(dbPath)) return [];
     let db: Database | undefined;
     try {
@@ -905,6 +934,110 @@ export class WorkerFixture {
         // Already gone.
       }
     }
+  }
+
+  /**
+   * Record daemon descendants while it is alive.
+   *
+   * The kernel reparents children when the daemon exits, so a snapshot taken
+   * only in {@link stop} misses detached task children that survive an
+   * unexpected exit. Polling keeps their pids for teardown.
+   */
+  private trackDescendants(): void {
+    this.stopTrackingDescendants();
+    const timer = setInterval(() => {
+      for (const pid of this.knownDescendants) {
+        if (!isAlive(pid)) this.knownDescendants.delete(pid);
+      }
+      for (const pid of this.descendantPids()) this.knownDescendants.add(pid);
+    }, 500);
+    timer.unref();
+    this.descendantTimer = timer;
+  }
+
+  private stopTrackingDescendants(): void {
+    if (!this.descendantTimer) return;
+    clearInterval(this.descendantTimer);
+    this.descendantTimer = undefined;
+  }
+
+  /** Direct and transitive child pids of the daemon, deepest last. */
+  private descendantPids(): number[] {
+    const rootPid = this.child?.pid;
+    if (!rootPid) return [];
+    let table: string;
+    try {
+      const result = Bun.spawnSync(["ps", "-eo", "pid=,ppid="], {
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      if (result.exitCode !== 0) return [];
+      table = result.stdout.toString();
+    } catch {
+      return [];
+    }
+    const childrenByParent = new Map<number, number[]>();
+    for (const line of table.split("\n")) {
+      const [pidText, parentText] = line.trim().split(/\s+/);
+      const pid = Number(pidText);
+      const parent = Number(parentText);
+      if (!Number.isInteger(pid) || !Number.isInteger(parent)) continue;
+      const siblings = childrenByParent.get(parent) ?? [];
+      siblings.push(pid);
+      childrenByParent.set(parent, siblings);
+    }
+    const descendants: number[] = [];
+    const stack = [...(childrenByParent.get(rootPid) ?? [])];
+    while (stack.length > 0) {
+      const pid = stack.pop()!;
+      descendants.push(pid);
+      stack.push(...(childrenByParent.get(pid) ?? []));
+    }
+    return descendants;
+  }
+
+  /** Terminate collected descendant groups, returning any pid still alive. */
+  private async stopDescendants(pids: number[]): Promise<number[]> {
+    const survivors = pids.filter(isAlive);
+    if (survivors.length === 0) return [];
+    for (const pid of survivors) {
+      this.signalPid(pid, "SIGTERM");
+    }
+    await this.waitForPidsToExit(survivors, 5_000);
+    for (const pid of survivors.filter(isAlive)) {
+      this.signalPid(pid, "SIGKILL");
+    }
+    await this.waitForPidsToExit(survivors, 2_000);
+    return survivors.filter(isAlive);
+  }
+
+  private signalPid(pid: number, signal: NodeJS.Signals): void {
+    try {
+      // A detached task child is its own group leader.
+      process.kill(-pid, signal);
+    } catch {
+      try {
+        process.kill(pid, signal);
+      } catch {
+        // Already gone.
+      }
+    }
+  }
+
+  private async waitForPidsToExit(pids: number[], timeoutMs: number): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline && pids.some(isAlive)) {
+      await Bun.sleep(50);
+    }
+  }
+}
+
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
   }
 }
 
