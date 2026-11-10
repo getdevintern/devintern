@@ -406,6 +406,14 @@ describe("detectUsageLimit", () => {
     ).toBe(true);
   });
 
+  test("detects OpenCode's short Go usage limit in stderr and structured logs", () => {
+    expect(detectUsageLimit("", "Error: Go usage limit exceeded\n").limited).toBe(true);
+    const log =
+      'timestamp=2026-11-09T23:00:05.176Z level=ERROR run=abc message="Failed to drain Session" cause="AI.Error: Go usage limit exceeded\\n    at SessionStep.attempt"';
+    expect(detectUsageLimit("", log).limited).toBe(true);
+    expect(detectUsageLimit("", 'throw new Error("Go usage limit exceeded");').limited).toBe(false);
+  });
+
   test("extracts a usage limit from OpenCode's printed structured log", () => {
     const out =
       'timestamp=2026-08-26T14:10:30.957Z level=ERROR run=be653f66 message="stream error" providerID=opencode-go modelID=glm-5.3 error.error="AI_APICallError: 5-hour usage limit reached. Resets in 4hr 9min."';
