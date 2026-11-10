@@ -363,14 +363,14 @@ Behavior to expect:
   prior branch and report. A task that never started is still `pending` and needs
   no resume.
 - **A graceful shutdown does not launder a real failure.** Draining the worker
-  aborts running task children; the aborted run is reported as *interrupted*,
+  aborts running task children; the aborted run is reported as _interrupted_,
   so its row stays `running` for the successor's startup recovery. A pipeline
   that fails on its own during the same shutdown window still settles `failed`
   with its real error and message — only an abort is treated as an unknown
   outcome.
 - **Hard kills keep a live child out of the resume path.** Task children run
   detached and are stopped through the worker's shutdown signal. The worker
-  records the spawned child pid *and its start time* on the queue row, so after
+  records the spawned child pid _and its start time_ on the queue row, so after
   a `SIGKILL` or OOM kill startup recovery probes the pid (and its detached
   process group) before auto-resuming. If it is still alive, the row stays
   `running` and is re-checked at the next startup: that child is the same task,
@@ -541,6 +541,8 @@ Only completed `failure` and `timed_out` workflow runs, plus failed legacy commi
 Pending, failing, and not-yet-reported CI is checked at the configured workspace poll interval. Once a PR's CI is terminal green and remains unchanged, the watcher progressively backs off that PR to 5, 15, and then 30 minutes. An observed PR or CI change returns it to the configured interval, and a worker restart performs an immediate reconciliation. The worker continues checking green PRs while they remain open so delayed reruns and newly added workflows are still detected.
 
 Relay-backed workspaces perform these API calls with the local `GITHUB_TOKEN`. A fine-grained token—or the customer-owned App used by a no-relay worker—needs **Actions: Read** and **Commit statuses: Read** in addition to the normal PR and contents permissions. Existing App installations must be re-approved after adding permissions. No extra webhook event subscription is required because CI is polled. GitHub does not currently expose its separate Checks permission for fine-grained PATs, so check-run-only CI providers are not watched unless they also publish a commit status; GitHub Actions is fully supported through the Actions API.
+
+A rejected or missing credential (HTTP 401, or no `GITHUB_TOKEN` at all) and a credential-scoped permission denial (HTTP 403 with a GitHub credential message such as `Resource not accessible`) are throttled per affected repository: the CI watcher logs at most one actionable warning per hour instead of repeating the same failure on every poll. The warning names the PR and explains whether the credential must be renewed or the missing CI-read permissions granted (Actions: Read and Commit statuses: Read). CI auto-fix resumes automatically once the credential can read CI again; the watcher logs one recovery line after the CI endpoints succeed (a metadata-only PR fetch does not count as recovery). In fleet mode each repository has its own token, so one repository's credential failure never hides another's in either the CI watcher or review polling. Other 403 responses — rate limits, archived read-only repositories, locked issues, and blocked repositories — keep their normal per-tick error reporting and retry path.
 
 ## Mention the bot on any PR
 

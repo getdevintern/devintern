@@ -40,6 +40,7 @@ import type { Acquirer } from "../../worker";
 import type { CiFailureFeedback } from "../review/formatter";
 import { classifyAgentPrState } from "../review/agent-pr-reconciler";
 import { serializePrRun } from "./review-polling";
+import { describeGitHubAuthFailure, isGitHubAuthError } from "../code-host/github/reviews";
 
 import type {
   CiProvider,
@@ -278,6 +279,22 @@ interface CachedCiSnapshot {
 
 type PollOutcome = "active" | "unchanged-green" | "removed";
 
+interface CiAuthFailureEntry {
+  repo: string;
+  lastWarnAt: number | null;
+  active: boolean;
+}
+
+/** What one PR poll actually exercised, so recovery is only claimed where tested. */
+interface CiPollProgress {
+  /**
+   * True once every configured CI stream was fetched for this PR. PR-state
+   * reads alone (fork PRs, a missing head SHA) are metadata-only and cannot
+   * prove the CI endpoints recovered.
+   */
+  ciQueried: boolean;
+}
+
 interface GreenPollSchedule {
   /** Index of the delay to use after the next unchanged-green observation. */
   nextBackoffIndex: number;
@@ -305,6 +322,10 @@ export class CiFailureWatcherAcquirer implements Acquirer {
   private timer: ReturnType<typeof setInterval> | null = null;
   private busy = false;
   private greenPollSchedules = new Map<string, GreenPollSchedule>();
+  /** Per-repo throttle state for permanent CI-read credential failures. */
+  private authFailures = new Map<string, CiAuthFailureEntry>();
+  /** Repos whose CI read failed authentication during the current tick. */
+  private tickAuthFailedRepos = new Set<string>();
 
   constructor(options: CiFailureWatcherAcquirerOptions) {
     this.options = {
@@ -359,13 +380,19 @@ export class CiFailureWatcherAcquirer implements Acquirer {
     this.busy = true;
 
     try {
+      this.tickAuthFailedRepos.clear();
       const watchedPrs =
         this.options.watchedChanges?.() ?? this.options.workerState.listOpenAgentPrs();
       const watchedKeys = new Set(watchedPrs.map((pr) => this.prKey(pr.repo, pr.prNumber)));
+      const watchedRepos = new Set(watchedPrs.map((pr) => pr.repo));
       for (const key of this.greenPollSchedules.keys()) {
         if (!watchedKeys.has(key)) this.greenPollSchedules.delete(key);
       }
+      for (const [key, entry] of this.authFailures) {
+        if (!watchedRepos.has(entry.repo)) this.authFailures.delete(key);
+      }
 
+      const ciSucceededRepos = new Set<string>();
       for (const pr of watchedPrs) {
         const key = this.prKey(pr.repo, pr.prNumber);
         const schedule = this.greenPollSchedules.get(key);
@@ -373,8 +400,10 @@ export class CiFailureWatcherAcquirer implements Acquirer {
           continue;
         }
 
+        const progress: CiPollProgress = { ciQueried: false };
         try {
-          const outcome = await this.pollPr(pr.repo, pr.prNumber);
+          const outcome = await this.pollPr(pr.repo, pr.prNumber, progress);
+          if (progress.ciQueried) ciSucceededRepos.add(pr.repo);
           if (outcome === "unchanged-green") {
             this.scheduleGreenPoll(key, schedule?.nextBackoffIndex ?? 0);
           } else {
@@ -384,14 +413,72 @@ export class CiFailureWatcherAcquirer implements Acquirer {
           }
         } catch (error) {
           this.greenPollSchedules.delete(key);
+          if (isGitHubAuthError(error)) {
+            // A rejected or under-scoped credential fails identically on every
+            // request, so re-reporting it per PR per tick floods the log.
+            this.warnAuthFailure(pr.repo, pr.prNumber, error as Error);
+            continue;
+          }
           console.warn(
             `⚠️  [${this.name}] polling ${pr.repo}#${pr.prNumber} failed: ${(error as Error).message}`,
           );
         }
       }
+      // Only a tick where every CI stream was fetched proves polling works
+      // again; a metadata-only success (fork PR, missing head SHA) must not
+      // clear a CI throttle it never re-tested.
+      for (const repo of ciSucceededRepos) {
+        if (!this.tickAuthFailedRepos.has(repo)) {
+          this.noteAuthRecovery(repo);
+        }
+      }
     } finally {
       this.busy = false;
     }
+  }
+
+  /** One credential warning per repo per rolling hour. */
+  private static AUTH_WARN_INTERVAL_MS = 60 * 60 * 1000;
+
+  private static authKey(repo: string): string {
+    return repo.toLowerCase();
+  }
+
+  private warnAuthFailure(repo: string, prNumber: number, error: Error): void {
+    const key = CiFailureWatcherAcquirer.authKey(repo);
+    this.tickAuthFailedRepos.add(repo);
+    const entry = this.authFailures.get(key) ?? {
+      repo,
+      lastWarnAt: null,
+      active: false,
+    };
+    entry.active = true;
+    const now = this.now();
+    if (
+      entry.lastWarnAt !== null &&
+      now - entry.lastWarnAt < CiFailureWatcherAcquirer.AUTH_WARN_INTERVAL_MS
+    ) {
+      this.authFailures.set(key, entry);
+      return;
+    }
+    entry.lastWarnAt = now;
+    this.authFailures.set(key, entry);
+    console.warn(
+      `⚠️  [${this.name}] GitHub rejected the credential while polling ${repo}#${prNumber}: ` +
+        `${error.message} ${describeGitHubAuthFailure(error, "ci")} ` +
+        "See docs/code/worker.md#ci-failures-on-the-agents-prs.",
+    );
+  }
+
+  /** Announce CI polling recovery and rearm its throttle. */
+  private noteAuthRecovery(repo: string): void {
+    const key = CiFailureWatcherAcquirer.authKey(repo);
+    const entry = this.authFailures.get(key);
+    if (!entry?.active) return;
+    this.authFailures.delete(key);
+    console.log(
+      `✅ [${this.name}] GitHub credential accepted again for ${repo}; CI polling recovered`,
+    );
   }
 
   /** Promptly reconcile one watched change after an authenticated provider hint. */
@@ -402,7 +489,7 @@ export class CiFailureWatcherAcquirer implements Acquirer {
     this.busy = true;
     const key = this.prKey(repo, prNumber);
     try {
-      const outcome = await this.pollPr(repo, prNumber);
+      const outcome = await this.pollPr(repo, prNumber, { ciQueried: false });
       if (outcome === "unchanged-green") {
         this.scheduleGreenPoll(key, 0);
       } else {
@@ -565,7 +652,11 @@ export class CiFailureWatcherAcquirer implements Acquirer {
   }
 
   /** Poll a single PR; triggers at most one fix attempt per poll. */
-  private async pollPr(repo: string, prNumber: number): Promise<PollOutcome> {
+  private async pollPr(
+    repo: string,
+    prNumber: number,
+    progress: CiPollProgress,
+  ): Promise<PollOutcome> {
     const { workerState, provider, verbose } = this.options;
 
     // 1. PR state (ETag-cached): unwatch closed/merged PRs, track head SHA.
@@ -622,6 +713,9 @@ export class CiFailureWatcherAcquirer implements Acquirer {
       headSha,
       prResult,
     );
+    // Every configured stream was fetched: CI polling genuinely exercised the
+    // endpoints a credential failure would have hit.
+    progress.ciQueried = true;
 
     // 4. Split failures into fresh vs already-handled. Mark only after a
     // successful invocation so crashes/no-op runs remain retryable.
