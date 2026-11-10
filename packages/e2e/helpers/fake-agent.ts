@@ -32,9 +32,12 @@ const mode =
       ? "ci"
       : agentInput.includes("E2E_REVIEW_GREETING")
         ? "review"
-        : agentInput.includes("E2E_NO_CHANGE")
-          ? "no-change"
-          : "implement");
+        : agentInput.includes("# Story Points Estimation") ||
+            agentInput.includes("## Task to Estimate")
+          ? "estimate"
+          : agentInput.includes("E2E_NO_CHANGE")
+            ? "no-change"
+            : "implement");
 // Opt-in start/end timeline for concurrency coverage. An `exit` handler records
 // the end exactly once, so early exits, failures and thrown errors still close
 // their interval. The existing E2E_AGENT_INVOCATIONS record stays unchanged.
@@ -137,6 +140,26 @@ if (failPromptMarker) {
     console.error("E2E deliberate prompt-marker failure");
     process.exit(18);
   }
+}
+// Estimation runs are read-only: print only the JSON object the CLI parses,
+// never touch the fixture project. A re-estimation scenario can ask for a
+// different deterministic value to prove the field was rewritten.
+if (mode === "estimate") {
+  const configuredPoints = Number(process.env.E2E_ESTIMATE_POINTS ?? "3");
+  const storyPoints = [1, 2, 3, 5, 8, 13, 21].includes(configuredPoints) ? configuredPoints : 3;
+  console.log(
+    JSON.stringify({
+      storyPoints,
+      confidence: "high",
+      implementationConfidence: 8,
+      reasoning:
+        "The fixture task has a clear, small scope and the deterministic agent can implement it.",
+      risks: [],
+      unclearAreas: [],
+      summary: "Deterministic E2E estimation fixture.",
+    }),
+  );
+  process.exit(0);
 }
 // A settled-but-failed attempt with an implementation report, for resume
 // coverage: exit 0 with failure language so the pipeline records an escalated

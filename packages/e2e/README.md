@@ -462,10 +462,10 @@ absent, like the other local Git tests.
 
 The fake binds `127.0.0.1:0`, accepts any Basic-auth credentials (and never logs
 them), and implements only the endpoints the product calls: `/myself`, enhanced
-JQL `search/jql`, issue read/update, comments (ADF and text), and workflow
-transitions. Any unmatched request returns a diagnostic 404 and fails the test,
-so a client change that starts calling a new route is visible instead of
-silently returning `{}`.
+JQL `search/jql`, issue read/update (including custom fields), comments (ADF and
+text, create and update), and workflow transitions. Any unmatched request
+returns a diagnostic 404 and fails the test, so a client change that starts
+calling a new route is visible instead of silently returning `{}`.
 
 The Jira fake covers `/myself`, enhanced JQL `search/jql`, issue read/update,
 comments (ADF and text), and workflow transitions. The Azure DevOps fake covers
@@ -521,6 +521,18 @@ record, the configured workflow state, surviving unrelated labels, the
 implementation summary comment, delivery of the seeded description/comment
 markers to the deterministic agent, and an untouched decoy. The local bare Git
 remote is the code host; no PR, GitHub token, or model credentials are required.
+
+`tests/local/tracker-jira-estimation.test.ts` covers the `--estimate` workflow
+against the same fake. Project settings configure `storyPointsField:
+"customfield_10016"` explicitly so discovery drift is not conflated with the
+write path. The deterministic agent detects the bundled estimation prompt and
+returns a Fibonacci value; the test reads the custom field, the single
+estimation comment (create, then in-place update whose body carries the new
+value), and `estimation-result.json` back from durable state. It also exercises
+the <24h skip, the already-estimated-and-unchanged skip, and `--skip-comments`
+field-only behavior with a repeated sweep proving it does not re-estimate.
+Estimation runs are read-only: no branch, commit, or push reaches the local
+bare remote. No extra prerequisites or credentials are needed.
 
 ## Remote tracker fixtures
 
@@ -801,3 +813,7 @@ PR CI.
 ### Azure DevOps fake
 
 `tests/local/tracker-azure-devops-fake.test.ts` exercises key and WIQL selection, state transitions, comments, and decoy isolation against a loopback fake API. The test subprocess opts in with `DEVINTERN_E2E_FAKE_AZURE_DEVOPS=1`; project configuration cannot enable the endpoint override.
+
+### Jira story-point estimation
+
+`tests/local/tracker-jira-estimation.test.ts` covers one-shot estimation, unchanged-task skips, re-estimation, and `--skip-comments` against the offline Jira fixture.

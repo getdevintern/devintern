@@ -224,7 +224,7 @@ export class JiraTaskTrackerClient implements TaskTrackerClient {
 
   async findEstimationComment(
     taskKey: string,
-  ): Promise<{ commentId: string; created: string } | null> {
+  ): Promise<{ commentId: string; created: string; updated: string } | null> {
     return this.jiraClient.findEstimationComment(taskKey);
   }
 
