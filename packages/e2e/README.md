@@ -775,3 +775,7 @@ PR CI.
 ### Multi-repo team routing
 
 `tests/local/worker-team-routing.test.ts` verifies team routing, ambiguous and unrouted task skips, and layered repo and team environment settings with local bare remotes.
+
+### Asana fake
+
+`tests/local/tracker-asana-fake.test.ts` exercises the built CLI against a loopback Asana API fixture, covering key and query selection, project sections, comments, and decoy isolation.

@@ -33,7 +33,7 @@ test data into the trackers a worker actually uses.
 | Local GitLab Issues | no                 | `test:e2e:tracker:gitlab`              | Existing live suite; creates and deletes a dedicated project.                                                                                                 |
 | GitLab.com Issues   | no                 | `test:e2e:tracker:gitlab-com`          | Existing live suite; pre-created project, issues only, project retained.                                                                                      |
 | Linear              | yes (offline fake) | none                                   | Fake lifecycle: key/`--query`, workflow state, comment, decoy isolation. Live Layer 2 team/project lifecycle, estimation, and attachments remain future work. |
-| Asana               | no                 | none                                   | Detection only in Layer 1.                                                                                                                                    |
+| Asana               | yes (offline fake) | none                                   | Fake lifecycle: key/`--query`, section transition, comment, decoy isolation.                                                                                  |
 | Azure DevOps        | no                 | none                                   | Detection only in Layer 1.                                                                                                                                    |
 
 The default local run reports these opt-in suites as skipped and planned
@@ -192,7 +192,7 @@ Acceptance criteria:
 - Missing fixture configuration fails before any remote mutation.
 - A rerun does not collide with leftovers from a previous run.
 
-## Layer 3 — fake tracker servers for the default local suite (Jira, Linear, and Trello implemented)
+## Layer 3 — fake tracker servers for the default local suite (Jira, Linear, Trello, and Asana implemented)
 
 Run the built CLI against in-process Bun servers that implement the subset of
 the tracker APIs the product uses. This gives deterministic, credential-free
