@@ -264,7 +264,7 @@ export class FixtureWorkspace {
     }
   }
 
-  agentInvocations(): Array<{ mode: string }> {
+  agentInvocations(): Array<{ mode: string; promptMarkers?: string[] }> {
     const path = this.env.E2E_AGENT_INVOCATIONS;
     if (!existsSync(path)) return [];
     return readFileSync(path, "utf8")
