@@ -129,3 +129,12 @@ Check the section names in your project against `settings.json`. Available secti
 **"Asana task search requires a project"**
 
 Pass `project:<gid>` in the query or set `ASANA_DEFAULT_PROJECT_GID`.
+
+**`ASANA_API_BASE_URL` has no effect**
+
+This override is reserved for the offline E2E fake server. It is only honored
+when `DEVINTERN_E2E_FAKE_ASANA=1` was exported before the CLI started — values
+loaded from a project `.env` are ignored — and the URL points at a loopback
+host. A project `.env` therefore cannot redirect your personal access token,
+and even an exported override cannot send it to a remote host. Production
+always uses `https://app.asana.com/api/1.0`.
