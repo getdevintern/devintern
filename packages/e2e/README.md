@@ -767,3 +767,7 @@ PR CI.
 ### Worker working windows
 
 `tests/local/worker-working-windows.test.ts` verifies that a ready task waits outside the configured UTC windows and that `worker run-now` drains it once.
+
+### Incomplete task retry gate
+
+`tests/local/tracker-force-retry-gate.test.ts` verifies that an unchanged incomplete Jira task is skipped until `--force` requests a retry.
