@@ -28,6 +28,7 @@ import { checkedCommand } from "./process";
 
 const packageRoot = resolve(import.meta.dir, "..");
 const fixture = join(packageRoot, "fixtures/simple-project");
+const runNowFileName = ".run-now";
 
 /** One row from the worker's durable injected-task queue. */
 export interface WorkerInjectedTask {
@@ -150,6 +151,10 @@ export interface WorkerFixtureOptions {
   workerTaskArgs?: string;
   /** Scheduled `[[automations]]` entries; the default workspace has none. */
   automations?: WorkerAutomation[];
+  /** Extra TOML inserted after `[defaults]` and before `[[repos]]`. */
+  workspaceTomlExtra?: string;
+  /** Extra environment variables for the daemon and built CLI. */
+  env?: Record<string, string>;
 }
 
 /** Log captured from the worker subprocess, for readiness and failure reports. */
@@ -193,6 +198,7 @@ export class WorkerFixture {
       AGENT_HARNESS: "claude-code",
       AGENT_SANDBOX: "none",
     });
+    Object.assign(this.env, options.env);
   }
 
   /** Shared workspace database (`<workspace>/state/queue.db`). */
@@ -220,6 +226,11 @@ export class WorkerFixture {
       .split("\n")
       .filter(Boolean)
       .map((line) => JSON.parse(line) as { mode: string; automation?: string });
+  }
+
+  /** Sentinel path a running daemon consumes for one manual drain. */
+  get runNowPath(): string {
+    return join(this.workspaceDir, runNowFileName);
   }
 
   /**
@@ -265,6 +276,7 @@ export class WorkerFixture {
         this.options.workerTaskArgs ?? "--create-pr --skip-clarity-check --skip-comments",
       )}`,
       "",
+      ...(this.options.workspaceTomlExtra ? [this.options.workspaceTomlExtra, ""] : []),
       "[[repos]]",
       `name = "${this.repoName}"`,
       `remote = "${this.remote}"`,
@@ -337,16 +349,16 @@ export class WorkerFixture {
   }
 
   /**
-   * Run the built CLI's `worker add` with arbitrary options.
+   * Run the built CLI with arbitrary arguments in the fixture environment.
    *
    * The default cwd is the fixture workspace; `stdin` is piped so
    * `--body-file -` can be exercised without a shell.
    */
-  async runAdd(
+  async runCli(
     args: string[],
     options: { stdin?: string; cwd?: string; env?: Record<string, string> } = {},
   ): Promise<WorkerAddResult> {
-    const child = Bun.spawn([process.execPath, cliPath, "worker", "add", ...args], {
+    const child = Bun.spawn([process.execPath, cliPath, ...args], {
       cwd: options.cwd ?? this.workspaceDir,
       env: { ...this.env, ...options.env },
       stdin: options.stdin === undefined ? "ignore" : "pipe",
@@ -355,7 +367,7 @@ export class WorkerFixture {
     });
     if (options.stdin !== undefined) {
       const stdin = child.stdin;
-      if (!stdin) throw new Error("worker add stdin pipe was not created");
+      if (!stdin) throw new Error("worker CLI stdin pipe was not created");
       stdin.write(options.stdin);
       await stdin.end();
     }
@@ -365,6 +377,22 @@ export class WorkerFixture {
       child.exited,
     ]);
     return { exitCode, stdout, stderr };
+  }
+
+  /** Run the built CLI's `worker add` with arbitrary options. */
+  runAdd(
+    args: string[],
+    options: { stdin?: string; cwd?: string; env?: Record<string, string> } = {},
+  ): Promise<WorkerAddResult> {
+    return this.runCli(["worker", "add", ...args], options);
+  }
+
+  /** Run the built CLI's `worker run-now` with arbitrary options. */
+  runRunNow(
+    args: string[],
+    options: { cwd?: string; env?: Record<string, string> } = {},
+  ): Promise<WorkerAddResult> {
+    return this.runCli(["worker", "run-now", ...args], options);
   }
 
   /** Enqueue one task through the built CLI and return its durable row. */
