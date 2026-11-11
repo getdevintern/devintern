@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 
 // A one-shot fixture run can pin its mode explicitly. A long-lived worker
 // cannot: the same daemon runs implementation, review, CI-repair and conflict
@@ -192,6 +192,20 @@ if (
 }
 if (missingMarkers.length > 0) {
   throw new Error(`Seeded ${missingMarkers.join(" and ")} marker(s) did not reach the agent input`);
+}
+// One-shot pre-edit failure. A long-lived worker cannot change AGENT mode
+// between attempts, so a dashboard retry test plants this sentinel for the
+// first invocation only. Unlinking it before exit leaves the fixture tree
+// untouched and lets the same daemon's next invocation implement normally.
+const failOnceFile = process.env.E2E_FAIL_ONCE_FILE;
+if (failOnceFile && existsSync(failOnceFile)) {
+  unlinkSync(failOnceFile);
+  // Stdout marks this as agent work. A fast non-zero exit with empty stdout
+  // is classified as a harness that could not start, and the worker defers
+  // that instead of recording a retriable failed run.
+  console.log("E2E deliberate one-shot failure");
+  console.error("E2E deliberate one-shot failure");
+  process.exit(18);
 }
 // Auto-review reviewer turn: print only the JSON verdict the loop parses. The
 // first iteration reports one blocking medium finding; a later iteration
