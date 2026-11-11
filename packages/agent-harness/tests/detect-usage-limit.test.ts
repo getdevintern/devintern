@@ -338,8 +338,7 @@ describe("detectUsageLimit", () => {
     // Observed in this package's own readme, streamed to stderr while an
     // agent was editing harness docs: the line starts like an HTTP status but
     // is explanatory prose, not a provider diagnostic.
-    const prose =
-      "  HTTP 429 — accepted only on lines that look like real diagnostics, never raw";
+    const prose = "  HTTP 429 — accepted only on lines that look like real diagnostics, never raw";
 
     expect(detectUsageLimit(prose, "").limited).toBe(false);
     expect(detectUsageLimit("", prose).limited).toBe(false);
@@ -408,9 +407,13 @@ describe("detectUsageLimit", () => {
 
   test("detects OpenCode's short Go usage limit in stderr and structured logs", () => {
     expect(detectUsageLimit("", "Error: Go usage limit exceeded\n").limited).toBe(true);
+    expect(detectUsageLimit("", "Error: OpenCode Go usage limit reached\n").limited).toBe(true);
     const log =
       'timestamp=2026-11-09T23:00:05.176Z level=ERROR run=abc message="Failed to drain Session" cause="AI.Error: Go usage limit exceeded\\n    at SessionStep.attempt"';
     expect(detectUsageLimit("", log).limited).toBe(true);
+    const currentLog =
+      'timestamp=2026-11-11T02:25:06.773Z level=ERROR run=abc message="Failed to drain Session" cause="AI.Error: OpenCode Go usage limit reached\\n    at SessionStep.attempt"';
+    expect(detectUsageLimit("", currentLog).limited).toBe(true);
     expect(detectUsageLimit("", 'throw new Error("Go usage limit exceeded");').limited).toBe(false);
   });
 
@@ -436,7 +439,7 @@ describe("detectUsageLimit", () => {
     // the agent ran `sed` over this repository's own usage-limit fixture. The
     // quoted string embeds a log line that used to be parsed as a live one.
     const quotedFixture =
-      "  'timestamp=2026-08-26T14:10:30.957Z level=ERROR message=\"stream error\" " +
+      '  \'timestamp=2026-08-26T14:10:30.957Z level=ERROR message="stream error" ' +
       'error.error="AI_APICallError: 5-hour usage limit reached. Resets in 4hr 9min."\';';
     expect(detectUsageLimit(quotedFixture, "").limited).toBe(false);
     expect(detectUsageLimit("", quotedFixture).limited).toBe(false);
@@ -444,9 +447,9 @@ describe("detectUsageLimit", () => {
 
   test("ignores a structured log line embedded in printed source", () => {
     const sourceLine =
-      'const OPENCODE_LIMIT_LOG = \'timestamp=2026-08-26T14:10:30.957Z level=ERROR ' +
+      "const OPENCODE_LIMIT_LOG = 'timestamp=2026-08-26T14:10:30.957Z level=ERROR " +
       'message="stream error" error.error="AI_APICallError: 5-hour usage limit reached. ' +
-      'Resets in 4hr 9min."\';';
+      "Resets in 4hr 9min.\"';";
     expect(detectUsageLimit(sourceLine, "").limited).toBe(false);
   });
 

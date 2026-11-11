@@ -12,8 +12,9 @@ import { AutomationStateStore } from "./state";
 import { workerTaskArgs } from "../acquirers/task-polling";
 import { resolveProjectConfigDir } from "../config/config-dir";
 import { RUN_ORIGIN_ENV } from "../observability/analytics";
-import { getWorkerFailover } from "../worker/failover";
+import { getWorkerFailover, HARNESS_UNAVAILABLE_COOLDOWN_MS } from "../worker/failover";
 import {
+  HARNESS_UNAVAILABLE_EXIT_CODE,
   readUsageLimitHint,
   USAGE_LIMIT_EXIT_CODE,
   USAGE_LIMIT_FILE_ENV,
@@ -744,10 +745,15 @@ export function spawnAutomationProcess(
         }
         return;
       }
-      if (code === USAGE_LIMIT_EXIT_CODE) {
+      if (code === USAGE_LIMIT_EXIT_CODE || code === HARNESS_UNAVAILABLE_EXIT_CODE) {
         const failover = getWorkerFailover();
-        if (failover && !failover.allLimited()) {
-          const outcome = failover.reportFromHint(readUsageLimitHint(env[USAGE_LIMIT_FILE_ENV]));
+        if (failover) {
+          const outcome =
+            code === USAGE_LIMIT_EXIT_CODE
+              ? failover.reportFromHint(readUsageLimitHint(env[USAGE_LIMIT_FILE_ENV]))
+              : failover.manager.reportHarnessUnavailable(
+                  Date.now() + HARNESS_UNAVAILABLE_COOLDOWN_MS,
+                );
           if (outcome.kind !== "exhausted") {
             cleanupHint();
             const nextEnv = pinAutomationEnv(options.env);

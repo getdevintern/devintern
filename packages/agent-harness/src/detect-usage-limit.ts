@@ -64,7 +64,7 @@ const USAGE_LIMIT_PATTERNS = [
   /^(?:error:\s*)?free usage exceeded(?:,\s*subscribe to go)?[.]?$/i,
   // OpenCode also emits this shorter Go quota error in its stderr and in the
   // cause of a structured "Failed to drain Session" log.
-  /^(?:(?:AI\.)?error:\s*)?go usage limit exceeded[.!]?(?:\n|$)/i,
+  /^(?:(?:AI\.)?error:\s*)?(?:opencode\s+)?go usage limit (?:exceeded|reached)[.!]?(?:\n|$)/i,
   /^(?:(?:AI_(?:APICall|Retry)Error|error):\s*)?(?:(?:\d+[-\s]?hour|weekly|daily|monthly)\s+)?usage limit reached\.(?:\s+it will reset in [^\n.]+(?:\.|$))?(?:\s+to continue using this model now, enable usage from your available balance\b[^\n]*)?$/i,
   /^subscription quota exceeded\.\s+you can continue using free models[.]?$/i,
   // Grok Build translates account/team exhaustion to these headless messages.

@@ -18,6 +18,8 @@ import {
 import { automationTaskArgs } from "../src/lib/automation/config";
 import { AutomationStateStore } from "../src/lib/automation/state";
 import type { AutomationConfig } from "../src/lib/automation/config";
+import { resetWorkerFailover, startWorkerFailover } from "../src/lib/worker/failover";
+import { HARNESS_UNAVAILABLE_EXIT_CODE } from "../src/lib/worker/usage-limit-protocol";
 
 describe("AutomationAcquirer", () => {
   describe("resolveAutomationRunArgs", () => {
@@ -59,6 +61,7 @@ describe("AutomationAcquirer", () => {
 
   const dbPaths: string[] = [];
   afterEach(() => {
+    resetWorkerFailover();
     for (const path of dbPaths.splice(0)) {
       for (const suffix of ["", "-wal", "-shm"]) rmSync(`${path}${suffix}`, { force: true });
     }
@@ -230,6 +233,24 @@ describe("AutomationAcquirer", () => {
       cwd: process.cwd(),
       env: process.env,
     });
+
+    expect(await run.completion).toBe(true);
+  });
+
+  test("tries Codex when the scheduled harness cannot start", async () => {
+    await startWorkerFailover({
+      raw: "opencode,codex",
+      checkInstalled: false,
+      sandboxName: "none",
+    });
+    const run = spawnAutomationProcess(
+      process.execPath,
+      [
+        "-e",
+        `process.exit(process.env.AGENT_HARNESS === "opencode" ? ${HARNESS_UNAVAILABLE_EXIT_CODE} : 0)`,
+      ],
+      { cwd: process.cwd(), env: process.env },
+    );
 
     expect(await run.completion).toBe(true);
   });

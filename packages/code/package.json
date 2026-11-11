@@ -20,7 +20,7 @@
     "typecheck": "bun run tsc --noEmit",
     "clean": "rm -rf dist",
     "test": "bun run tests/run-tests.ts",
-    "install-global": "bun run build && bun link",
+    "install-global": "bun run build && bun unlink && bun link",
     "uninstall-global": "bun unlink",
     "prepare": "bun run build",
     "prepublishOnly": "bun run clean && bun run build && bun run typecheck"
