@@ -134,13 +134,18 @@ function readQueueRows<T>(dbPath: string, table: string, sql: string): T[] {
  *
  * The handler rejects that overlap: the row is already pending/running, the
  * re-queue update lost the race, or the worker has already opened a run.
+ *
+ * Pending/running may omit the "not retriable:" prefix. Eligibility adds it
+ * (`resolveRetryEligibility` → `conflict`), and a loser that already passed
+ * that read gets the same sentence bare from `retryInjectedRun`. "Moved on"
+ * and "in progress" stay exact.
  */
 function isDuplicateRetryRejection(taskKey: string, error: string): boolean {
   const task = taskKey.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return (
     error === `ad-hoc task ${taskKey} moved on; reload the run and try again` ||
     new RegExp(
-      `^not retriable: ad-hoc task ${task} is already (?:pending|running) \\(task #\\d+\\)$`,
+      `^(?:not retriable: )?ad-hoc task ${task} is already (?:pending|running) \\(task #\\d+\\)$`,
     ).test(error) ||
     new RegExp(
       `^${task} already has a run in progress \\(run \\d+\\); wait for it to finish$`,
