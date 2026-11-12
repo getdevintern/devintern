@@ -48,6 +48,31 @@ For a smaller download, add the marketplace from a shell with a sparse checkout 
 claude plugin marketplace add getdevintern/devintern --sparse .claude-plugin plugins skills
 ```
 
+#### Share with your team
+
+To offer the plugin to everyone who works in a repository, commit this `.claude/settings.json` at the repository root:
+
+```json
+{
+  "extraKnownMarketplaces": {
+    "devintern": {
+      "source": {
+        "source": "github",
+        "repo": "getdevintern/devintern",
+        "sparsePaths": [".claude-plugin", "plugins", "skills"]
+      }
+    }
+  },
+  "enabledPlugins": {
+    "devintern@devintern": true
+  }
+}
+```
+
+Running `claude plugin marketplace add getdevintern/devintern --scope project --sparse .claude-plugin plugins skills` and then `claude plugin install devintern@devintern --scope project` from the repository root writes the same file.
+
+After a teammate accepts the workspace trust dialog for the repository, Claude Code registers the DevIntern marketplace for them. Enabling the plugin in project settings does not download it, so each teammate runs `claude plugin install devintern@devintern --scope project` once. For Codex and other agents, use `bunx skills add` as described above.
+
 ## Choose a skill
 
 | Skill                                                                                                 | When to use it                                                                                           | Example prompt                                                                                                                                            |
