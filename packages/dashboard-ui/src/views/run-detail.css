@@ -1,0 +1,167 @@
+/* Run detail: layout grid, stage timeline rail, reference tabs. */
+
+.rd-grid {
+  display: grid;
+  gap: 32px;
+  min-width: 0;
+}
+
+@media (min-width: 1024px) {
+  .rd-grid {
+    grid-template-columns: minmax(0, 1fr) 17rem;
+    column-gap: 40px;
+    row-gap: 40px;
+    align-items: start;
+  }
+
+  .rd-timeline-area {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .rd-rail {
+    grid-column: 2;
+    grid-row: 1 / span 2;
+    position: sticky;
+    top: 76px;
+  }
+
+  .rd-reference-area {
+    grid-column: 1;
+    grid-row: 2;
+  }
+}
+
+.rd-timeline {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.rd-stage {
+  position: relative;
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  column-gap: 14px;
+  padding-bottom: 18px;
+}
+
+/* Connector between nodes. */
+.rd-stage:not([data-last])::before {
+  content: "";
+  position: absolute;
+  top: 26px;
+  bottom: 2px;
+  left: 10.5px;
+  width: 1px;
+  background: var(--border-strong);
+}
+
+.rd-node {
+  display: inline-flex;
+  width: 22px;
+  height: 22px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid;
+  border-radius: 999px;
+}
+
+.rd-stage-head {
+  display: flex;
+  min-height: 24px;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  text-align: left;
+  font-size: 0.9375rem;
+  cursor: default;
+}
+
+button.rd-stage-head {
+  cursor: pointer;
+  transition: background-color 150ms ease-out;
+}
+
+button.rd-stage-head:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--ring) 60%, transparent);
+  outline-offset: 1px;
+}
+
+/* Reference tabs. */
+.rd-tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+}
+
+.rd-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 36px;
+  margin-bottom: -1px;
+  padding: 0 10px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--muted-foreground);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    color 150ms ease-out,
+    border-color 150ms ease-out;
+}
+
+.rd-tab:hover {
+  color: var(--foreground);
+}
+
+.rd-tab[aria-selected="true"] {
+  border-bottom-color: var(--primary);
+  color: var(--foreground);
+}
+
+.rd-tab:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--ring) 60%, transparent);
+  outline-offset: -2px;
+  border-radius: 6px;
+}
+
+/* Dense expandable reference row (transcripts, artifacts). */
+.rd-row {
+  display: flex;
+  width: 100%;
+  min-height: 34px;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 10px;
+  padding: 6px 10px;
+  border: 0;
+  background: transparent;
+  color: var(--foreground);
+  font-size: 0.8125rem;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 150ms ease-out;
+}
+
+.rd-row:hover {
+  background: var(--hover);
+}
+
+.rd-row:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--ring) 60%, transparent);
+  outline-offset: -2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rd-tab,
+  .rd-row,
+  button.rd-stage-head {
+    transition: none;
+  }
+}

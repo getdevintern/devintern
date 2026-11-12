@@ -1,0 +1,113 @@
+.auto-clamp {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+}
+
+@media (max-width: 767px) {
+  .auto-table thead {
+    display: none;
+  }
+  .auto-table,
+  .auto-table tbody {
+    display: block;
+    width: 100%;
+  }
+  .auto-table tr.auto-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "name action"
+      "schedule next"
+      "last last";
+    gap: 0.5rem 0.75rem;
+    align-items: center;
+    padding: 0.75rem 1rem;
+  }
+  .auto-table td {
+    display: block;
+    padding: 0 !important;
+    min-width: 0;
+    max-width: none !important;
+    border: 0 !important;
+    position: static !important;
+    background: transparent !important;
+  }
+  .auto-cell-name {
+    grid-area: name;
+  }
+  .auto-cell-schedule {
+    grid-area: schedule;
+  }
+  .auto-cell-next {
+    grid-area: next;
+    text-align: right;
+  }
+  .auto-cell-last {
+    grid-area: last;
+  }
+  .auto-cell-action {
+    grid-area: action;
+    text-align: right;
+  }
+  .auto-cell-repo {
+    display: none !important;
+  }
+}
+
+/* Automation detail: facts + recent runs rail, prompt as the main column. */
+.ad-grid {
+  display: grid;
+  gap: 32px;
+  min-width: 0;
+}
+
+@media (min-width: 1024px) {
+  .ad-grid {
+    grid-template-columns: minmax(0, 1fr) 18rem;
+    column-gap: 40px;
+    align-items: start;
+  }
+  .ad-rail {
+    grid-column: 2;
+    grid-row: 1;
+    position: sticky;
+    top: 76px;
+    max-height: calc(100vh - 92px);
+    overflow-y: auto;
+  }
+  .ad-main {
+    grid-column: 1;
+    grid-row: 1;
+  }
+  .ad-run-toggle {
+    display: none;
+  }
+}
+
+.ad-run {
+  display: grid;
+  grid-template-columns: 6.5rem minmax(0, 1fr);
+  gap: 0.25rem 0.5rem;
+  align-items: center;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid color-mix(in oklch, var(--border), transparent 30%);
+  transition: background-color 150ms;
+}
+.ad-run:last-child {
+  border-bottom: 0;
+}
+.ad-run:hover {
+  background: color-mix(in oklch, var(--hover, var(--card)), transparent 30%);
+}
+.ad-run-detail {
+  grid-column: 1 / -1;
+}
+
+@media (max-width: 1023px) {
+  .ad-run-extra {
+    display: none;
+  }
+}

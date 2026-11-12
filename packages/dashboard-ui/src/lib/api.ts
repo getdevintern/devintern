@@ -42,6 +42,8 @@ export interface RunRecord {
   prUrl?: string;
   status: RunStatus;
   outcomeReason?: string;
+  /** 1-based attempt number of this run for its task. */
+  attempt?: number;
   step?: string;
   stepStartedAt?: number;
   stepActive?: boolean;
@@ -71,6 +73,12 @@ export interface RunStageRecord {
 export interface TaskActivityResponse {
   runs: RunRecord[];
   recentLimit: number;
+}
+
+/** `/api/runs` URL for the most recent runs of one automation. */
+export function automationRunsUrl(automationId: string, limit = 10): string {
+  const params = new URLSearchParams({ automationId, limit: String(limit) });
+  return `/api/runs?${params}`;
 }
 
 export interface RunsResponse {

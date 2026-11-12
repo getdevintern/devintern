@@ -1,12 +1,4 @@
-import {
-  Activity,
-  CircleCheck,
-  CircleHelp,
-  CircleOff,
-  Clock,
-  GitPullRequest,
-  Inbox,
-} from "lucide-react";
+import { Activity, CircleHelp, Clock, GitPullRequest, Inbox, TriangleAlert } from "lucide-react";
 
 import { usePoll } from "@/lib/api";
 import type { ScheduleSnapshot, WorkerResponse, WorkerStatus } from "@/lib/api";
@@ -97,9 +89,36 @@ function Item({
   title?: string;
 }) {
   return (
-    <span title={title} className={cn("inline-flex items-center gap-1.5 text-sm", className)}>
+    <span title={title} className={cn("strip-item", className)}>
       {icon}
       {label}
+    </span>
+  );
+}
+
+type WorkerChipState = "running" | "stopped" | "unknown";
+
+function WorkerChip({
+  state,
+  label,
+  detail,
+  title,
+}: {
+  state: WorkerChipState;
+  label: string;
+  detail?: string;
+  title?: string;
+}) {
+  return (
+    <span className="worker-chip" data-state={state} title={title}>
+      <span
+        className={cn("status-dot", state === "running" && "status-dot-live")}
+        aria-hidden="true"
+      />
+      <span>
+        {label}
+        {detail ? <span className="font-normal text-subtle-foreground">{detail}</span> : null}
+      </span>
     </span>
   );
 }
@@ -112,26 +131,40 @@ function Item({
 export function WorkerStatusIndicator({ worker }: { worker: WorkerStatus }) {
   if (worker.status === "running") {
     return (
-      <Item
-        icon={<CircleCheck className="size-4 text-chart-4" />}
-        label={`worker running (pid ${worker.pid ?? "?"})`}
-        className="text-foreground"
-      />
+      <WorkerChip state="running" label="worker running" detail={` (pid ${worker.pid ?? "?"})`} />
     );
   }
   if (worker.status === "stopped") {
-    return <Item icon={<CircleOff className="size-4" />} label="worker stopped" />;
+    return <WorkerChip state="stopped" label="worker stopped" />;
   }
   return (
-    <Item
-      icon={<CircleHelp className="size-4" />}
+    <WorkerChip
+      state="unknown"
       label="worker status unknown"
       title="No worker lock file was found in this project or the workspace home, so liveness cannot be determined. The worker may be running from a different directory, or it has never run here."
     />
   );
 }
 
-/** Header strip: worker liveness, queue counts, and open agent PRs. */
+/** Polling indicator: pulses while the dashboard is refreshing every 5 seconds. */
+function LiveIndicator({ error }: { error: string | null }) {
+  if (error) {
+    return (
+      <span className="live-indicator" data-state="error" title={error} role="status">
+        <TriangleAlert className="size-3.5" aria-hidden="true" />
+        Connection interrupted; showing last known status
+      </span>
+    );
+  }
+  return (
+    <span className="live-indicator" title="Status refreshes every 5 seconds">
+      <span className="status-dot status-dot-live text-secondary" aria-hidden="true" />
+      Live · 5s
+    </span>
+  );
+}
+
+/** Header strip: worker liveness, queue counts, open agent PRs, and polling state. */
 export function StatusStrip() {
   const { data, error } = usePoll<WorkerResponse>("/api/worker");
   if (!data) {
@@ -165,8 +198,9 @@ export function StatusStrip() {
         icon={<Inbox className="size-4" />}
         label={queueLabelText}
         title={queueTitle(data.queue)}
+        className={data.queue.failed > 0 ? "text-danger" : undefined}
       />
-      <a href="#/prs" className="hover:text-foreground">
+      <a href="#/prs" className="strip-link">
         <Item
           icon={<GitPullRequest className="size-4" />}
           label={`${data.agentPrs.open} agent PR${data.agentPrs.open === 1 ? "" : "s"} open`}
@@ -178,13 +212,7 @@ export function StatusStrip() {
           label="no database yet: run the worker once to start recording"
         />
       ) : null}
-      {error ? (
-        <Item
-          icon={<CircleHelp className="size-4 text-chart-5" />}
-          label="Connection interrupted; showing last known status"
-          title={error}
-        />
-      ) : null}
+      <LiveIndicator error={error} />
     </div>
   );
 }

@@ -1,504 +1,197 @@
 import { useState } from "react";
-import { ArrowLeft, ChevronDown, ChevronRight, RefreshCcw } from "lucide-react";
+import {
+  Check,
+  CircleCheck,
+  CirclePause,
+  CircleX,
+  Copy,
+  ExternalLink,
+  Info,
+  OctagonAlert,
+  RefreshCcw,
+} from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 
 import { RunResult } from "@/components/RunResult";
-import { EmptyState, StageBadge, StatusBadge } from "@/components/shared";
-import { StageDetailFields } from "@/components/StageDetailFields";
-import { TaskDescription } from "@/components/TaskDescription";
+import { EmptyState, StatusBadge } from "@/components/shared";
+import type { StatusTone } from "@/components/shared";
 import { TicketKey } from "@/components/TicketKey";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Markdown } from "@/lib/markdown";
 import { triggerRunRetry, usePoll } from "@/lib/api";
-import type {
-  HarnessLogContent,
-  HarnessLogFile,
-  RetryAuditEntry,
-  RunDetailResponse,
-  RunStageRecord,
-  TaskArtifactContent,
-  TaskArtifactFile,
-} from "@/lib/api";
-import { groupHarnessLogs } from "@/lib/harness-log-groups";
-import { formatRunOrigin, formatRunOriginLabel } from "@/lib/run-origin";
-import { runWorkLink } from "@/lib/run-work";
-import { parseStageDetail } from "@/lib/stage-detail";
+import type { RunDetailResponse, RunRecord } from "@/lib/api";
+import { formatRunOrigin } from "@/lib/run-origin";
+import { runPrHref, runWorkLink } from "@/lib/run-work";
 import { cn, formatDuration, formatTime } from "@/lib/utils";
+import { attemptInfo, runTitle, statusTone } from "./run-detail/helpers";
+import { Reference } from "./run-detail/Reference";
+import { RetryAuditList, RetryConfirm, RetryFeedback } from "./run-detail/RetryParts";
+import { Timeline } from "./run-detail/Timeline";
+// oxlint-disable-next-line import/no-unassigned-import -- view styles
+import "./run-detail.css";
 
-const STAGE_LABELS: Record<RunStageRecord["stage"], string> = {
-  feasibility: "Feasibility check",
-  implementation: "Implementation",
-  verify: "Verification",
-  auto_review: "Self-review",
-  change_request: "Change request",
-  outcome: "Outcome",
+const PANEL_TONES: Record<StatusTone, string> = {
+  success: "border-transparent",
+  warning: "border-warning-border bg-warning-subtle",
+  danger: "border-danger-border bg-danger-subtle",
+  info: "border-info-border bg-info-subtle",
+  attention: "border-attention-border bg-attention-subtle",
+  neutral: "border-border bg-card",
 };
 
-function formatStageLabel(stage: string): string {
-  return (STAGE_LABELS as Record<string, string>)[stage] ?? stage;
-}
+const ICON_TONES: Record<StatusTone, string> = {
+  success: "text-success",
+  warning: "text-warning",
+  danger: "text-danger",
+  info: "text-info",
+  attention: "text-attention",
+  neutral: "text-neutral",
+};
 
-/**
- * Human-readable rendering of a stage's detail blob, surfaced directly under
- * the stage so the full content (markdown prose + structured fields) is
- * visible without expanding a toggle or scrolling inside a boxed region.
- *
- * The friendly view is always shown; the underlying raw JSON/text is available
- * behind a "raw" toggle so the original payload is never lost.
- *
- * `summary` is the stage's summary column (already rendered above the detail);
- * when the parsed markdown matches it we skip re-rendering the prose to avoid
- * duplicating the same text (notably the feasibility stage, where the detail
- * blob's `summary` field is the same string as the stage summary).
- */
-function StageDetail({
-  stage,
-  detail,
-  summary,
-}: {
-  stage: RunStageRecord["stage"];
-  detail: string;
-  summary?: string;
-}) {
-  const [rawOpen, setRawOpen] = useState(false);
-  const parsed = parseStageDetail(stage, detail);
+const PANEL_ICONS: Record<StatusTone, LucideIcon> = {
+  success: CircleCheck,
+  warning: CirclePause,
+  danger: CircleX,
+  info: Info,
+  attention: OctagonAlert,
+  neutral: Info,
+};
 
-  if (
-    parsed.fallback !== undefined &&
-    parsed.markdown === undefined &&
-    parsed.fields === undefined
-  ) {
-    return <pre className="mt-2 whitespace-pre-wrap break-words text-xs">{parsed.fallback}</pre>;
-  }
-
-  const markdown =
-    parsed.markdown !== undefined && parsed.markdown.trim() === (summary ?? "").trim()
-      ? undefined
-      : parsed.markdown;
-
-  return (
-    <div className="mt-2">
-      {markdown ? <Markdown>{markdown}</Markdown> : null}
-      {parsed.fields && parsed.fields.length > 0 ? (
-        <div className={markdown ? "mt-3" : ""}>
-          <StageDetailFields fields={parsed.fields} />
-        </div>
-      ) : null}
-      {parsed.raw ? (
-        <div className={markdown || parsed.fields ? "mt-3" : ""}>
-          <Button
-            variant="ghost"
-            size="xs"
-            onClick={() => setRawOpen((v) => !v)}
-            aria-expanded={rawOpen}
-            className="-ml-1 text-muted-foreground"
-          >
-            {rawOpen ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
-            {rawOpen ? "Hide raw details" : "View raw details"}
-          </Button>
-          {rawOpen ? (
-            <pre className="mt-1 overflow-auto rounded-md bg-muted p-3 font-mono text-xs">
-              {parsed.raw}
-            </pre>
-          ) : null}
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-function MetaItem({
-  label,
-  value,
-  className,
-}: {
-  label: string;
-  value: React.ReactNode;
-  className?: string;
-}) {
-  return (
-    <div className={className}>
-      <div className="text-xs text-muted-foreground">{label}</div>
-      <div className="mt-0.5 min-w-0 break-words text-sm">{value}</div>
-    </div>
-  );
-}
-
-/** Outcome banner after a retry attempt (success and failure are terminal). */
-function RetryFeedback({ kind, message }: { kind: "success" | "error"; message: string }) {
-  return (
-    <div
-      role="status"
-      className={cn(
-        "rounded-md border px-3 py-2 text-sm",
-        kind === "success"
-          ? "border-chart-4/30 bg-chart-4/10 text-chart-4"
-          : "border-destructive/30 bg-destructive/10 text-destructive",
-      )}
-    >
-      {message}
-    </div>
-  );
-}
-
-/** Inline confirmation strip shown between the first click and the POST. */
-function RetryConfirm({
-  taskKey,
-  kind = "task",
-  busy,
-  onCancel,
-  onConfirm,
-}: {
-  taskKey?: string;
-  kind?: "task" | "automation" | "injected";
-  busy: boolean;
-  onCancel: () => void;
-  onConfirm: () => void;
-}) {
-  const automation = kind === "automation";
-  const injected = kind === "injected";
-  return (
-    <div className="rounded-md border bg-muted/50 px-3 py-2">
-      <p className="text-xs text-muted-foreground">
-        {automation ? (
-          <>Start a new run of this automation? The current run stays in history.</>
-        ) : injected ? (
-          <>
-            Re-queue {taskKey ? <code className="font-mono">{taskKey}</code> : "this ad-hoc task"}?
-            The worker resumes the branch and report the interrupted run left behind, when it
-            recorded them. The current run stays in history.
-          </>
-        ) : (
-          <>
-            Schedule a new run of{" "}
-            {taskKey ? <code className="font-mono">{taskKey}</code> : "this task"}? This bypasses
-            the retry limit. The current run stays in history.
-          </>
-        )}
-      </p>
-      <div className="mt-2 flex gap-2">
-        <Button size="sm" variant="destructive" onClick={onConfirm} disabled={busy}>
-          {busy
-            ? automation
-              ? "Triggering…"
-              : injected
-                ? "Re-queuing…"
-                : "Scheduling…"
-            : automation
-              ? "Start new run"
-              : injected
-                ? "Re-queue task"
-                : "Schedule retry"}
-        </Button>
-        <Button size="sm" variant="ghost" onClick={onCancel} disabled={busy}>
-          Cancel
-        </Button>
-      </div>
-    </div>
-  );
-}
-
-/** Audited retry history: who re-ran this run's task, when, and how. */
-function RetryAuditList({ entries }: { entries: RetryAuditEntry[] }) {
-  if (entries.length === 0) {
+/** The one place every run answers "what happened": outcome, why, and retry state. */
+function OutcomePanel({ data, retry }: { data: RunDetailResponse; retry: RetryState }) {
+  const { confirming, setConfirming, posting, feedback, handleRetry } = retry;
+  const run = data.run;
+  const tone = statusTone(run.status);
+  const Icon = PANEL_ICONS[tone];
+  const prHref = runPrHref(run);
+  const headline =
+    run.outcomeReason ??
+    (run.status === "succeeded"
+      ? prHref && run.prNumber !== undefined
+        ? `Pull request #${run.prNumber} opened`
+        : "Completed"
+      : undefined);
+  const notRetriable = data.retry.eligible ? undefined : data.retry.reason;
+  const quiet = tone === "success";
+  if (!headline && !notRetriable && !confirming && !feedback) {
     return null;
   }
   return (
-    <Card>
-      <CardHeader className="text-sm font-medium">Retry history</CardHeader>
-      <CardContent className="space-y-2">
-        {entries.map((entry) => (
-          <div key={entry.id} className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-sm">
-            <span className={entry.action === "failed" ? "text-destructive" : "text-chart-4"}>
-              {entry.action}
-            </span>
-            <span>by {entry.actor}</span>
-            <span className="text-xs tabular-nums text-muted-foreground">
-              {formatTime(entry.createdAt)}
-            </span>
-            {entry.pid !== undefined ? (
-              <span className="text-xs tabular-nums text-muted-foreground">pid {entry.pid}</span>
-            ) : null}
-            {entry.message ? (
-              <span className="basis-full pl-4 text-xs text-muted-foreground">{entry.message}</span>
-            ) : null}
-          </div>
-        ))}
-      </CardContent>
-    </Card>
-  );
-}
-
-/** Compact human-readable byte size for a log file. */
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) {
-    return `${bytes} B`;
-  }
-  if (bytes < 1024 * 1024) {
-    return `${(bytes / 1024).toFixed(1)} KB`;
-  }
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-/** One harness transcript: a compact row that lazily loads its content. */
-function HarnessLogItem({ runId, file }: { runId: number; file: HarnessLogFile }) {
-  const [open, setOpen] = useState(false);
-  const [content, setContent] = useState<HarnessLogContent | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-
-  async function toggle(): Promise<void> {
-    if (open) {
-      setOpen(false);
-      return;
-    }
-    setOpen(true);
-    if (content || loading) {
-      return;
-    }
-    setLoading(true);
-    try {
-      const response = await fetch(
-        `/api/runs/${runId}/harness-logs/${encodeURIComponent(file.name)}`,
-      );
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
-      setContent((await response.json()) as HarnessLogContent);
-      setError(null);
-    } catch (cause: unknown) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  return (
-    <div className="rounded-md border">
-      <button
-        type="button"
-        onClick={() => void toggle()}
-        aria-expanded={open}
-        className="flex w-full flex-wrap items-center gap-x-2 gap-y-1 px-3 py-2 text-left text-sm hover:bg-accent"
-      >
-        {open ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
-        <span className="font-medium">{file.label ?? formatRunOriginLabel(file.origin)}</span>
-        {file.taskKey ? (
-          <span className="font-mono text-xs text-muted-foreground">{file.taskKey}</span>
-        ) : null}
-        <span className="ml-auto text-xs tabular-nums text-muted-foreground">
-          {file.startedAt ? formatTime(file.startedAt) : "–"} · {formatBytes(file.size)}
-        </span>
-      </button>
-      {open ? (
-        <div className="border-t px-3 py-2">
-          {loading ? <p className="text-xs text-muted-foreground">Loading…</p> : null}
-          {error ? <p className="text-xs text-destructive">{error}</p> : null}
-          {content ? (
-            <>
-              {content.truncated ? (
-                <p className="mb-2 text-xs text-muted-foreground">
-                  Showing the first 512 KiB of {formatBytes(content.totalBytes)}.
-                </p>
-              ) : null}
-              <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-all rounded-md bg-muted p-3 font-mono text-xs">
-                {content.content}
-              </pre>
-            </>
-          ) : null}
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-/**
- * Every harness execution recorded for a run (clarity, implementation, review…).
- *
- * The list is attributed by task key as well as run id, so retries contribute
- * earlier attempts' transcripts. Show them under per-attempt headers when more
- * than one attempt is present, and keep everything oldest first.
- */
-function HarnessLogsCard({ runId, logs }: { runId: number; logs: HarnessLogFile[] }) {
-  if (logs.length === 0) {
-    return null;
-  }
-  const { grouped, groups } = groupHarnessLogs(logs);
-
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="text-sm font-medium text-muted-foreground">
-          Harness logs ({logs.length})
-        </CardTitle>
-      </CardHeader>
-      <CardContent className={grouped ? "space-y-4" : "space-y-2"}>
-        {grouped
-          ? groups.map((group) => (
-              <section key={group.key} className="space-y-2">
-                <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
-                  <span className="text-xs font-medium text-foreground">{group.label}</span>
-                  {group.runId !== undefined ? (
-                    <span className="font-mono text-xs text-muted-foreground">
-                      run {group.runId}
-                    </span>
-                  ) : null}
-                  <span className="text-xs text-muted-foreground">
-                    {group.logs.length} {group.logs.length === 1 ? "log" : "logs"}
-                  </span>
-                </div>
-                {group.logs.map((file) => (
-                  <HarnessLogItem key={file.name} runId={runId} file={file} />
-                ))}
-              </section>
-            ))
-          : groups[0]?.logs.map((file) => (
-              <HarnessLogItem key={file.name} runId={runId} file={file} />
-            ))}
-      </CardContent>
-    </Card>
-  );
-}
-
-/** One task artifact (explainer, verify output, review iteration): lazily loads content. */
-function ArtifactItem({ runId, file }: { runId: number; file: TaskArtifactFile }) {
-  const [open, setOpen] = useState(false);
-  const [content, setContent] = useState<TaskArtifactContent | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-
-  async function toggle(): Promise<void> {
-    if (open) {
-      setOpen(false);
-      return;
-    }
-    setOpen(true);
-    if (content || loading || !file.available) {
-      return;
-    }
-    setLoading(true);
-    try {
-      const response = await fetch(`/api/runs/${runId}/artifacts/${file.id}`);
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
-      setContent((await response.json()) as TaskArtifactContent);
-      setError(null);
-    } catch (cause: unknown) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  const markdown = file.mediaType === "text/markdown";
-  const image = ["image/png", "image/jpeg", "image/gif", "image/webp"].includes(file.mediaType);
-  const fileUrl = `/api/runs/${runId}/artifacts/${file.id}/file`;
-  return (
-    <div className="rounded-md border">
-      <button
-        type="button"
-        onClick={() => void toggle()}
-        aria-expanded={open}
-        className="flex w-full flex-wrap items-center gap-x-2 gap-y-1 px-3 py-2 text-left text-sm hover:bg-accent"
-      >
-        {open ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
-        <span className="font-medium">{file.title}</span>
-        <span className="text-xs text-muted-foreground">
-          {formatStageLabel(file.step)} · execution {file.iteration}
-          {file.commitSha ? ` · ${file.commitSha.slice(0, 7)}` : ""}
-        </span>
-        <span className="ml-auto text-xs tabular-nums text-muted-foreground">
-          {formatTime(file.createdAt)} · {formatBytes(file.size)}
-          {!file.available ? " · expired or missing" : ""}
-        </span>
-      </button>
-      {open ? (
-        <div className="border-t px-3 py-2">
-          {file.available ? (
-            <a href={`${fileUrl}?download=1`} className="text-xs underline">
-              Download {file.name}
-            </a>
-          ) : (
-            <p className="text-xs text-muted-foreground">Artifact expired or missing.</p>
+    <div className={cn("space-y-2.5 rounded-lg border py-3", !quiet && "px-4", PANEL_TONES[tone])}>
+      {headline ? (
+        <p
+          className={cn(
+            "flex max-w-[72ch] items-start gap-2.5 leading-[1.5] text-foreground",
+            quiet ? "text-[0.875rem]" : "text-[0.9375rem]",
           )}
-          {file.publication ? (
-            <p className="mt-1 text-xs text-muted-foreground">
-              PR publication: {file.publication.status}
-              {file.publication.message ? ` — ${file.publication.message}` : ""}
-              {file.publication.commentUrl ? (
-                <>
-                  {" "}
-                  ·{" "}
-                  <a
-                    href={file.publication.commentUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="underline"
-                  >
-                    View comment
-                  </a>
-                </>
-              ) : null}
-            </p>
-          ) : null}
-          {file.upload?.status === "failed" ? (
-            <p className="text-xs text-destructive">Upload failed: {file.upload.message}</p>
-          ) : null}
-          {loading ? <p className="text-xs text-muted-foreground">Loading…</p> : null}
-          {error ? <p className="text-xs text-destructive">{error}</p> : null}
-          {content ? (
-            <>
-              {content.truncated ? (
-                <p className="mb-2 text-xs text-muted-foreground">
-                  Showing the first 512 KiB of {formatBytes(content.totalBytes)}.
-                </p>
-              ) : null}
-              {image ? (
-                <img
-                  src={fileUrl}
-                  alt={file.title}
-                  className="max-h-96 max-w-full object-contain"
-                />
-              ) : markdown && content.content !== null ? (
-                <Markdown>{content.content}</Markdown>
-              ) : (
-                <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-all rounded-md bg-muted p-3 font-mono text-xs">
-                  {content.content ?? "Binary artifact. Download to inspect."}
-                </pre>
-              )}
-            </>
-          ) : null}
-        </div>
+        >
+          <Icon className={cn("mt-[3px] size-4 shrink-0", ICON_TONES[tone])} aria-hidden="true" />
+          <span>{headline}</span>
+        </p>
       ) : null}
+      {notRetriable ? (
+        <p className="flex max-w-[72ch] items-start gap-2.5 text-[0.8125rem] leading-[1.5] text-muted-foreground">
+          <Info className="mt-0.5 size-4 shrink-0 opacity-60" aria-hidden="true" />
+          <span>Not retriable: {notRetriable}</span>
+        </p>
+      ) : null}
+      {confirming ? (
+        <RetryConfirm
+          taskKey={run.taskKey}
+          kind={data.retry.kind}
+          busy={posting}
+          onCancel={() => setConfirming(false)}
+          onConfirm={() => void handleRetry()}
+        />
+      ) : null}
+      {feedback ? <RetryFeedback {...feedback} /> : null}
     </div>
   );
 }
 
-/** Task artifacts written under the run's output directory. */
-function ArtifactsCard({ runId, artifacts }: { runId: number; artifacts: TaskArtifactFile[] }) {
-  if (artifacts.length === 0) {
-    return null;
+function CopyButton({ text, label }: { text: string; label: string }) {
+  const [copied, setCopied] = useState(false);
+  async function copy(): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // Clipboard unavailable (insecure context): leave the value selectable.
+    }
   }
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="text-sm font-medium text-muted-foreground">
-          Artifacts ({artifacts.length})
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-2">
-        {artifacts.map((file) => (
-          <ArtifactItem key={file.id} runId={runId} file={file} />
-        ))}
-      </CardContent>
-    </Card>
+    <Button
+      variant="ghost"
+      size="icon-xs"
+      aria-label={copied ? `${label} copied` : label}
+      title={label}
+      onClick={() => void copy()}
+    >
+      {copied ? <Check className="text-success" /> : <Copy />}
+    </Button>
   );
 }
 
-/** One run: metadata card plus a stage-by-stage timeline. */
-export function RunDetailView({ runId, onBack }: { runId: number; onBack: () => void }) {
-  const { data, error, loading, refresh } = usePoll<RunDetailResponse>(`/api/runs/${runId}`);
+function Fact({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="min-w-0 lg:flex lg:items-baseline lg:justify-between lg:gap-4">
+      <dt className="text-xs text-subtle-foreground">{label}</dt>
+      <dd className="mt-0.5 min-w-0 break-words text-[0.8125rem] lg:mt-0 lg:text-right">
+        {children}
+      </dd>
+    </div>
+  );
+}
+
+function Facts({ run, attempt, total }: { run: RunRecord; attempt?: number; total?: number }) {
+  const prHref = runPrHref(run);
+  return (
+    <dl className="grid grid-cols-2 gap-x-4 gap-y-3 lg:grid-cols-1 lg:gap-y-2.5">
+      <Fact label="Origin">{formatRunOrigin(run.origin)}</Fact>
+      {run.tracker ? <Fact label="Tracker">{run.tracker}</Fact> : null}
+      {run.harness ? <Fact label="Harness">{run.harness}</Fact> : null}
+      {attempt !== undefined ? (
+        <Fact label="Attempt">
+          <span className="tabular">
+            {attempt}
+            {total ? <span className="text-muted-foreground"> of {total}</span> : null}
+          </span>
+        </Fact>
+      ) : null}
+      <Fact label="Started">
+        <span className="tabular">{formatTime(run.startedAt)}</span>
+      </Fact>
+      <Fact label="Duration">
+        <span className="tabular">
+          {run.finishedAt ? formatDuration(run.finishedAt - run.startedAt) : "in progress"}
+        </span>
+      </Fact>
+      {run.repo ? <Fact label="Repository">{run.repo}</Fact> : null}
+      {prHref ? (
+        <Fact label="Pull request">
+          <RunResult run={{ prNumber: run.prNumber, prUrl: run.prUrl, repo: run.repo }} />
+        </Fact>
+      ) : null}
+      {run.ticketKey ? (
+        <Fact label="Ticket">
+          <RunResult run={{ ticketKey: run.ticketKey, ticketUrl: run.ticketUrl }} />
+        </Fact>
+      ) : null}
+      {run.branch ? (
+        <div className="col-span-full min-w-0">
+          <dt className="text-xs text-subtle-foreground">Branch</dt>
+          <dd className="mt-0.5 flex items-start gap-1">
+            <code className="min-w-0 break-all font-mono text-xs leading-5">{run.branch}</code>
+            <CopyButton text={run.branch} label="Copy branch name" />
+          </dd>
+        </div>
+      ) : null}
+    </dl>
+  );
+}
+
+/** Retry confirmation/POST state for a run, including terminal feedback. */
+function useRetry(data: RunDetailResponse | null | undefined, refresh: () => void) {
   const [confirming, setConfirming] = useState(false);
   const [posting, setPosting] = useState(false);
   const [feedback, setFeedback] = useState<{ kind: "success" | "error"; message: string } | null>(
@@ -551,21 +244,98 @@ export function RunDetailView({ runId, onBack }: { runId: number; onBack: () => 
     }
   }
 
-  return (
-    <div className="space-y-4">
-      <Button variant="ghost" size="sm" onClick={onBack} className="-ml-2 text-muted-foreground">
-        <ArrowLeft /> All runs
-      </Button>
+  return { confirming, setConfirming, posting, feedback, setFeedback, handleRetry };
+}
 
+type RetryState = ReturnType<typeof useRetry>;
+
+/** Answer-first header: identity, outcome and why, what to do next. */
+function RunHeader({ data, retry }: { data: RunDetailResponse; retry: RetryState }) {
+  const { confirming, setConfirming, setFeedback } = retry;
+  const run = data.run;
+  const title = runTitle(run);
+  const prHref = runPrHref(run);
+  return (
+    <header className="space-y-4">
+      <div className="flex flex-wrap items-start gap-x-6 gap-y-3">
+        <div className="min-w-0 flex-1 basis-80">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+            <h2 className="text-xl font-semibold tracking-tight [overflow-wrap:anywhere]">
+              {/* Same label rule as the runs list; PR-affected runs link
+                  the PR they operate on. */}
+              <TicketKey {...runWorkLink(run)} />
+            </h2>
+            <StatusBadge status={run.status} />
+          </div>
+          {title ? (
+            <p className="mt-1.5 max-w-[72ch] text-[0.9375rem] text-muted-foreground">{title}</p>
+          ) : null}
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          {data.retry.eligible && !confirming ? (
+            <Button
+              onClick={() => {
+                setFeedback(null);
+                setConfirming(true);
+              }}
+            >
+              <RefreshCcw />
+              {data.retry.kind === "automation"
+                ? "Re-run automation"
+                : data.retry.kind === "injected"
+                  ? "Re-queue task"
+                  : "Retry this run"}
+            </Button>
+          ) : null}
+          {prHref ? (
+            <Button variant="outline" asChild>
+              <a href={prHref} target="_blank" rel="noreferrer">
+                Open PR
+                <ExternalLink />
+              </a>
+            </Button>
+          ) : null}
+          {run.ticketUrl && run.ticketKey ? (
+            <Button variant="outline" asChild>
+              <a href={run.ticketUrl} target="_blank" rel="noreferrer">
+                Open ticket
+                <ExternalLink />
+              </a>
+            </Button>
+          ) : null}
+        </div>
+      </div>
+
+      <OutcomePanel data={data} retry={retry} />
+    </header>
+  );
+}
+
+/** One run: answer-first header, stage timeline, and reference tabs. */
+export function RunDetailView({ runId }: { runId: number; onBack?: () => void }) {
+  const { data, error, loading, refresh } = usePoll<RunDetailResponse>(`/api/runs/${runId}`);
+  const retry = useRetry(data, refresh);
+
+  const run = data?.run;
+  const logs = data?.harnessLogs ?? [];
+  const { attempt, total } = run ? attemptInfo(run, logs) : {};
+
+  return (
+    <div className="space-y-6">
       {!data && loading ? (
-        <p role="status" className="py-8 text-center text-sm text-muted-foreground">
-          Loading run details…
-        </p>
+        <div role="status" aria-label="Loading run details" className="space-y-3 py-2">
+          <div className="skeleton h-7 w-64" />
+          <div className="skeleton h-16 w-full" />
+          <div className="skeleton h-40 w-full" />
+        </div>
       ) : null}
 
       {error ? (
         data ? (
-          <div role="status" className="rounded-md border border-destructive/30 px-3 py-2 text-sm">
+          <div
+            role="status"
+            className="rounded-md border border-danger-border bg-danger-subtle px-3 py-2 text-sm"
+          >
             Could not refresh this run. Showing the last loaded details. {error}
           </div>
         ) : (
@@ -578,143 +348,22 @@ export function RunDetailView({ runId, onBack }: { runId: number; onBack: () => 
         )
       ) : null}
 
-      {data ? (
+      {data && run ? (
         <>
-          <Card>
-            <CardHeader>
-              <div className="flex flex-wrap items-center gap-3">
-                <h2 className="text-xl font-semibold">
-                  {/* Same label rule as the runs list; PR-affected runs link
-                      the PR they operate on. */}
-                  <TicketKey {...runWorkLink(data.run)} />
-                </h2>
-                <StatusBadge status={data.run.status} />
-                {data.retry.eligible && !confirming ? (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => {
-                      setFeedback(null);
-                      setConfirming(true);
-                    }}
-                  >
-                    <RefreshCcw />{" "}
-                    {data.retry.kind === "automation"
-                      ? "Re-run automation"
-                      : data.retry.kind === "injected"
-                        ? "Re-queue task"
-                        : "Retry this run"}
-                  </Button>
-                ) : null}
-              </div>
-              {!data.retry.eligible && data.retry.reason ? (
-                <p className="mt-1 text-xs text-muted-foreground">
-                  Not retriable: {data.retry.reason}
-                </p>
-              ) : null}
-              {confirming ? (
-                <div className="mt-2">
-                  <RetryConfirm
-                    taskKey={data.run.taskKey}
-                    kind={data.retry.kind}
-                    busy={posting}
-                    onCancel={() => setConfirming(false)}
-                    onConfirm={() => void handleRetry()}
-                  />
-                </div>
-              ) : null}
-              {feedback ? (
-                <div className="mt-2">
-                  <RetryFeedback {...feedback} />
-                </div>
-              ) : null}
-              {data.run.outcomeReason ? (
-                <p className="mt-1 text-sm text-muted-foreground">{data.run.outcomeReason}</p>
-              ) : null}
-            </CardHeader>
-            <CardContent className="grid grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-3 lg:grid-cols-5">
-              <MetaItem label="Origin" value={formatRunOrigin(data.run.origin)} />
-              <MetaItem label="Tracker" value={data.run.tracker ?? "–"} />
-              <MetaItem label="Harness" value={data.run.harness ?? "–"} />
-              <MetaItem label="Result" value={<RunResult run={data.run} />} />
-              <MetaItem
-                label="Duration"
-                value={
-                  data.run.finishedAt
-                    ? formatDuration(data.run.finishedAt - data.run.startedAt)
-                    : "in progress"
-                }
-              />
-              <MetaItem
-                label="Branch"
-                className="col-span-full"
-                value={
-                  data.run.branch ? (
-                    <code className="break-words font-mono text-xs">{data.run.branch}</code>
-                  ) : (
-                    "–"
-                  )
-                }
-              />
-            </CardContent>
-          </Card>
+          <RunHeader data={data} retry={retry} />
 
-          <section aria-labelledby="run-timeline-heading" className="pt-2">
-            <h2 id="run-timeline-heading" className="mb-5 text-lg font-semibold">
-              Run timeline
-            </h2>
-            <div className="space-y-0">
-              {data.stages.map((stage, index) => (
-                <div key={stage.id} className="relative flex gap-4 pb-6">
-                  {index < data.stages.length - 1 ? (
-                    <div className="absolute top-5 bottom-0 left-[7px] w-px bg-border" />
-                  ) : null}
-                  <div className="relative mt-1.5 size-[15px] shrink-0 rounded-full border-2 border-primary bg-background" />
-                  <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="font-medium">{STAGE_LABELS[stage.stage]}</span>
-                      <StageBadge status={stage.status} />
-                      <span className="text-xs tabular-nums text-muted-foreground">
-                        {formatTime(stage.createdAt)}
-                      </span>
-                    </div>
-                    {stage.summary ? (
-                      <p className="mt-1 text-sm text-muted-foreground">{stage.summary}</p>
-                    ) : null}
-                    {stage.detail ? (
-                      <StageDetail
-                        stage={stage.stage}
-                        detail={stage.detail}
-                        summary={stage.summary}
-                      />
-                    ) : null}
-                  </div>
-                </div>
-              ))}
-              {data.stages.length === 0 ? (
-                <EmptyState title="No stages recorded" body="This run has no stage records yet." />
-              ) : null}
+          <div className="rd-grid">
+            <div className="rd-timeline-area min-w-0">
+              <Timeline run={run} stages={data.stages} />
             </div>
-          </section>
-
-          {(data.run.taskKey || data.run.ticketUrl) && (
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-sm font-medium text-muted-foreground">
-                  Task description
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                <TaskDescription description={data.run.taskDescription} />
-              </CardContent>
-            </Card>
-          )}
-
-          <RetryAuditList entries={data.retry.audit} />
-
-          <HarnessLogsCard runId={data.run.id} logs={data.harnessLogs ?? []} />
-
-          <ArtifactsCard runId={data.run.id} artifacts={data.artifacts ?? []} />
+            <aside aria-label="Run facts" className="rd-rail space-y-6">
+              <Facts run={run} attempt={attempt} total={total} />
+              <RetryAuditList entries={data.retry.audit} />
+            </aside>
+            <div className="rd-reference-area min-w-0">
+              <Reference run={run} logs={logs} artifacts={data.artifacts ?? []} />
+            </div>
+          </div>
         </>
       ) : null}
     </div>
