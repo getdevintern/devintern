@@ -1,13 +1,13 @@
 ---
-title: "@devintern/pm Configuration"
+title: "DevIntern PM Configuration"
 sidebarLabel: "Configuration"
 description: "Environment variables, tracker credentials, and defaults for @devintern/pm."
 section: "Create Tasks"
 order: 2
-dateModified: 2026-08-08
+dateModified: 2026-11-12
 ---
 
-# @devintern/pm Configuration
+# DevIntern PM Configuration
 
 @devintern/pm uses per-project configuration stored in `.devintern-pm/.env` in your project directory. Run `devpm init` in a terminal for a guided setup: it asks which tracker you use, links to each provider's token creation page, validates the connection, and writes the file for you. Prefer editing by hand (or setting up in CI)? Run `devpm init --yes` to write the configuration template instead, then fill in values for your selected backend as described below.
 

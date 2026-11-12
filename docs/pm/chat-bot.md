@@ -1,10 +1,10 @@
 ---
 title: "Chat Bot Alpha (devpm serve)"
 description: "Try the alpha devpm chat bot for creating and refining tracker tasks from Slack or Telegram"
-section: "PM"
+section: "Create Tasks"
 order: 10
 sidebarHidden: true
-dateModified: 2026-08-12
+dateModified: 2026-11-12
 tags: ["devintern/pm", "chat", "slack", "telegram", "bot"]
 ---
 

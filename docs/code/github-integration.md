@@ -1,13 +1,13 @@
 ---
-title: "GitHub Integration"
+title: "GitHub Webhooks and PR Automation"
 description: "Advanced: deploy a repo-local GitHub webhook listener (`devintern webhook serve`)"
-section: "Server Automation"
+section: "Automation"
 order: 4
 sidebarHidden: true
-dateModified: 2026-09-01
+dateModified: 2026-11-12
 ---
 
-# GitHub Integration Guide
+# GitHub Webhooks and PR Automation
 
 Prefer the [worker](./worker.md) plus the [relay](./relay.md) for PR review feedback: polling is always on, the central DevIntern AI App delivers events in seconds, and only `GITHUB_TOKEN` is needed locally. This page is the advanced path—`devintern webhook serve` with a customer-owned GitHub App—for air-gapped or self-hosted installs that operate their own public GitHub webhook.
 

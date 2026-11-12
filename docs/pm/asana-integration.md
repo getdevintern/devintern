@@ -1,13 +1,14 @@
 ---
-title: "Create Asana Tasks with @devintern/pm"
+title: "Create Asana Tasks with DevIntern PM"
 sidebarLabel: "Asana Integration"
 description: "Create structured Asana tasks from AI drafts in the projects your team already uses."
-section: "PM"
+section: "Create Tasks"
 order: 7
+dateModified: 2026-11-12
 sidebarHidden: true
 ---
 
-# Create Asana Tasks with @devintern/pm
+# Create Asana Tasks with DevIntern PM
 
 @devintern/pm creates Asana tasks directly from AI-generated stories and tasks. Setup takes a few minutes: you need a Personal Access Token and optionally a default project.
 

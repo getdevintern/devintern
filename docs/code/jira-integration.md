@@ -1,15 +1,15 @@
 ---
-title: "Implement Jira Issues with @devintern/code"
+title: "Implement Jira Issues with DevIntern Code"
 sidebarLabel: "Jira Integration"
 description: "Fetch Jira Cloud issues, run the feasibility gate, implement with your coding agent, and post PRs and summaries back to the issue."
-section: "Code"
+section: "Automation"
 order: 4
 sidebarHidden: true
-dateModified: 2026-07-23
+dateModified: 2026-11-12
 tags: ["jira", "devintern/code", "integration", "jira cloud"]
 ---
 
-# Implement Jira Issues with @devintern/code
+# Implement Jira Issues with DevIntern Code
 
 @devintern/code implements work from Jira Cloud issues: fetch issue details, comments, and attachments, run a feasibility check, transition statuses, execute your AI agent, commit changes, open pull requests, and post results back to the issue.
 

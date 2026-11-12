@@ -1,10 +1,10 @@
 ---
 title: "Worker Daemon"
 sidebarLabel: "Worker"
-description: "Run devintern as a single long-running worker that reacts to PR reviews and tracker changes"
+description: "Use when running DevIntern as a long-running worker that picks up tracker tasks, handles PR reviews and CI failures, and runs as a service."
 section: "Automation"
 order: 2
-dateModified: 2026-10-16
+dateModified: 2026-11-12
 ---
 
 # Worker Daemon
@@ -588,7 +588,7 @@ Re-running `worker init` detects an existing DevIntern-managed service and offer
 loginctl enable-linger
 ```
 
-Running `devintern worker` in a terminal remains fully supported and is the only option on Windows, which has no generated service definition. For pm2 and tunnel setups (advanced webhook mode), see the [GitHub Integration guide](./github-integration.md). If you want the resident daemon idle during parts of the day, configure [working windows (quiet hours)](#working-windows-quiet-hours) instead of wrapping the CLI in cron.
+Running `devintern worker` in a terminal remains fully supported and is the only option on Windows, which has no generated service definition. For pm2 and tunnel setups (advanced webhook mode), see the [GitHub Webhooks and PR Automation guide](./github-integration.md). If you want the resident daemon idle during parts of the day, configure [working windows (quiet hours)](#working-windows-quiet-hours) instead of wrapping the CLI in cron.
 
 ## Worker Pilot and licenses
 

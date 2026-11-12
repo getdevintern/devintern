@@ -1,13 +1,13 @@
 ---
-title: "@devintern/code Usage Guide"
+title: "DevIntern Code Usage Guide"
 sidebarLabel: "CLI Reference"
-description: "Commands, flags, batch runs, and outputs for working with @devintern/code."
+description: "Use when looking up DevIntern Code CLI commands and flags for single tasks, markdown tasks, batch runs, git behavior, and outputs."
 section: "Automation Reference"
 order: 1
-dateModified: 2026-10-16
+dateModified: 2026-11-12
 ---
 
-# @devintern/code Usage Guide
+# DevIntern Code Usage Guide
 
 ## Single Task Processing
 

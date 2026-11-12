@@ -1,10 +1,10 @@
 ---
 title: "Worker Dashboard"
 sidebarLabel: "Dashboard"
-description: "See what the worker is doing, inspect failed runs, and retry work from a local dashboard"
+description: "Use when checking what the worker is doing, reading agent transcripts, diagnosing failed runs, or retrying work from the local dashboard."
 section: "Automation"
 order: 4
-dateModified: 2026-11-05
+dateModified: 2026-11-12
 ---
 
 # Worker Dashboard

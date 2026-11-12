@@ -1,14 +1,14 @@
 ---
-title: "@devintern/code Quick Start"
+title: "DevIntern Code Quick Start"
 sidebarLabel: "Quick Start"
-description: "Install @devintern/code and turn a markdown task or tracker ticket into working code."
+description: "Use when installing DevIntern Code for the first time and running your first markdown task or tracker ticket through a coding agent."
 section: "Automation"
 order: 0
-dateModified: 2026-10-16
+dateModified: 2026-11-12
 tags: ["devintern/code", "quick start", "jira", "trello", "cli"]
 ---
 
-# @devintern/code Quick Start
+# DevIntern Code Quick Start
 
 **@devintern/code** is your AI intern for automatically implementing tasks. Point it at a local markdown file or a ticket in your task tracker, and it runs your AI agent, creates a feature branch, commits the changes, and can open a pull request.
 
