@@ -693,15 +693,29 @@ and that the chosen port is still free afterwards; another starts the fixture
 with `--host ::1` (skipped only when the host cannot bind IPv6 loopback) and
 asserts the bracketed health URL answers.
 
+The same file also retries a real failed ad-hoc run. The deterministic agent
+exits once before editing (`E2E_FAIL_ONCE_FILE`), so the shared fixture and the
+base branch stay at the seeded greeting. After that run is `failed` and eligible
+(`kind: "injected"`), two near-concurrent `POST /api/runs/:id/retry` requests
+hit the running dashboard. Exactly one returns 202 `{ status: "scheduled",
+runId, taskKey }` and writes one `run_retry_audit` row (`action: "scheduled"`,
+actor `local-dashboard`); the other returns 409 with the documented in-flight
+rejection. The row goes back to `pending`/`running` in `injected_tasks` and
+`scheduled_retries` stays empty. The still-running worker drains that row once.
+The suite then asserts the durable records: the original run stays `failed`
+(attempt 1, nothing pushed), the new run is `succeeded` (attempt 2) on
+`feature/<task-key>-attempt-2`, and that branch's only change is
+`src/greeting.ts` exporting `Hello, world!`. No account, license, tracker, or
+network is involved. Prerequisites are the built CLI and a local bare Git
+remote, both created by the fixture:
+
 ```sh
 bun run --filter @getdevintern/code build
 bun run --filter @devintern/e2e test
 ```
 
-Only the successful write paths are intentionally out of scope: a retry that
-actually queues work and a "Run now" that starts an automation would spawn
-detached CLI work or mutate the fixture. Worker-embedded dashboard mode and log
-redaction readback are likewise out of scope for this suite.
+Worker-embedded dashboard mode, automation "Run now", and log redaction
+readback stay out of scope for this suite.
 
 ## Direct webhook serve
 

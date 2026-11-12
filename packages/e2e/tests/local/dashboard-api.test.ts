@@ -1,10 +1,11 @@
+import { Database } from "bun:sqlite";
 import { expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DashboardFixture } from "../../helpers/dashboard";
 import { isolatedEnvironment } from "../../helpers/environment";
-import { command } from "../../helpers/process";
+import { checkedCommand, command } from "../../helpers/process";
 import { freePort } from "../../helpers/webhook-server";
 import { cliPath, WorkerFixture } from "../../helpers/worker";
 
@@ -32,11 +33,36 @@ interface RunDetailResponse {
     startedAt: number;
     finishedAt?: number;
     taskDescription?: string;
+    branch?: string;
+    attempt?: number;
+    outcomeReason?: string;
   };
   stages: Array<{ runId: number; stage: string; status: string }>;
-  retry: { eligible: boolean };
+  retry: {
+    eligible: boolean;
+    kind?: string;
+    reason?: string;
+    audit: RetryAuditEntry[];
+  };
   harnessLogs: unknown[];
   artifacts: unknown[];
+}
+
+interface RetryAuditEntry {
+  runId: number;
+  taskKey?: string;
+  actor: string;
+  action: string;
+  message?: string;
+  createdAt: number;
+}
+
+interface RetryScheduledBody {
+  status: string;
+  runId: number;
+  taskKey: string;
+  pid?: number;
+  command?: string;
 }
 
 interface StatsResponse {
@@ -49,7 +75,13 @@ interface StatsResponse {
 
 interface WorkerResponse {
   worker: { status: string; pid?: number; lockFile?: string };
-  queue: { pending: number; processing: number; failed: number };
+  queue: {
+    pending: number;
+    processing: number;
+    failed: number;
+    injected: { pending: number; running: number };
+    retries: { pending: number; running: number };
+  };
   dbMissing: boolean;
 }
 
@@ -68,6 +100,57 @@ async function readJson<T>(response: Response): Promise<T> {
 
 async function workerStatus(baseUrl: string): Promise<WorkerResponse> {
   return await readJson<WorkerResponse>(await fetch(`${baseUrl}/api/worker`));
+}
+
+interface StoredRetryAudit {
+  run_id: number;
+  task_key: string | null;
+  actor: string;
+  action: string;
+  message: string | null;
+}
+
+/** Read committed queue rows. A missing table is empty, not a failed open. */
+function readQueueRows<T>(dbPath: string, table: string, sql: string): T[] {
+  if (!/^[A-Za-z0-9_]+$/.test(table)) {
+    throw new Error(`refusing to query unexpected table ${table}`);
+  }
+  if (!existsSync(dbPath)) return [];
+  const db = new Database(dbPath, { readonly: true });
+  try {
+    db.run("PRAGMA busy_timeout = 5000");
+    const known = db
+      .query("SELECT 1 AS one FROM sqlite_master WHERE type = 'table' AND name = ?")
+      .get(table) as { one: number } | null;
+    if (!known) return [];
+    return db.query(sql).all() as T[];
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * Second POST while an ad-hoc retry is queued or starting.
+ *
+ * The handler rejects that overlap: the row is already pending/running, the
+ * re-queue update lost the race, or the worker has already opened a run.
+ *
+ * Pending/running may omit the "not retriable:" prefix. Eligibility adds it
+ * (`resolveRetryEligibility` → `conflict`), and a loser that already passed
+ * that read gets the same sentence bare from `retryInjectedRun`. "Moved on"
+ * and "in progress" stay exact.
+ */
+function isDuplicateRetryRejection(taskKey: string, error: string): boolean {
+  const task = taskKey.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return (
+    error === `ad-hoc task ${taskKey} moved on; reload the run and try again` ||
+    new RegExp(
+      `^(?:not retriable: )?ad-hoc task ${task} is already (?:pending|running) \\(task #\\d+\\)$`,
+    ).test(error) ||
+    new RegExp(
+      `^${task} already has a run in progress \\(run \\d+\\); wait for it to finish$`,
+    ).test(error)
+  );
 }
 
 /** Whether this host can bind IPv6 loopback, so the `::1` case is not flaky. */
@@ -345,4 +428,260 @@ test.skipIf(!builtCli)(
     }
   },
   45_000,
+);
+
+test.skipIf(!builtCli)(
+  "POST /api/runs/:id/retry re-queues one failed ad-hoc run and the worker completes it",
+  async () => {
+    const worker = new WorkerFixture();
+    // The same daemon serves both attempts, so the agent cannot switch mode
+    // through the environment. The sentinel fails the first invocation before
+    // it edits; the retry then implements because the file is gone.
+    const failOnce = join(worker.root, "fail-once");
+    const marker = `E2E_DASHBOARD_RETRY_${crypto.randomUUID()}`;
+    worker.env.E2E_FAIL_ONCE_FILE = failOnce;
+    worker.env.E2E_EXPECT_DESCRIPTION_MARKER = marker;
+    const fixtureGreeting = join(import.meta.dir, "../../fixtures/simple-project/src/greeting.ts");
+    const seededGreeting = 'export const greeting = "Hello";\n';
+    let dashboard: DashboardFixture | undefined;
+    try {
+      await worker.prepare();
+      writeFileSync(failOnce, "1");
+      const task = await worker.addTask({
+        title: "Retry the dashboard run",
+        body: `Change the greeting to Hello, world! and run bun test.\n\n${marker}`,
+      });
+      worker.start();
+      await worker.waitForReady();
+
+      const failed = await worker.waitForSettled(task.id);
+      const failedDiagnostics = () =>
+        [
+          `injected task #${task.id} (${task.task_key}) settled as "${failed.task.status}": ${
+            failed.task.message ?? "no message"
+          }`,
+          `runs: ${JSON.stringify(failed.runs)}`,
+          `invocations: ${JSON.stringify(worker.agentInvocations())}`,
+          worker.tail(),
+        ].join("\n");
+      expect(failed.task.status, failedDiagnostics()).toBe("failed");
+      expect(failed.runs, failedDiagnostics()).toHaveLength(1);
+      const failedRun = failed.runs[0];
+      if (!failedRun) throw new Error(`fixture run was not recorded\n${failedDiagnostics()}`);
+      expect(failedRun.status, failedDiagnostics()).toBe("failed");
+      expect(failedRun.origin, failedDiagnostics()).toBe("local");
+      expect(failedRun.attempt, failedDiagnostics()).toBe(1);
+      expect(failedRun.outcome_reason ?? "", failedDiagnostics()).toContain("code 18");
+      const failedBranch = `feature/${task.task_key}`;
+      expect(failedRun.branch, failedDiagnostics()).toBe(failedBranch);
+      // The one-shot exit happens before the edit, so the shared fixture and
+      // the published base stay at the seed greeting.
+      expect(existsSync(failOnce), failedDiagnostics()).toBe(false);
+      expect(worker.agentInvocations(), failedDiagnostics()).toEqual([{ mode: "implement" }]);
+      expect(readFileSync(fixtureGreeting, "utf8")).toBe(seededGreeting);
+      expect(await worker.branchFile(worker.baseBranch, "src/greeting.ts")).toBe(
+        'export const greeting = "Hello";',
+      );
+      expect(await worker.remoteBranches(), failedDiagnostics()).not.toContain(failedBranch);
+
+      dashboard = await DashboardFixture.start(worker);
+      const baseUrl = dashboard.baseUrl;
+      const before = await readJson<RunDetailResponse>(
+        await fetch(`${baseUrl}/api/runs/${failedRun.id}`),
+      );
+      expect(before.run.status).toBe("failed");
+      expect(before.retry).toMatchObject({ eligible: true, kind: "injected", audit: [] });
+
+      const retryResponses = await Promise.all([
+        fetch(`${baseUrl}/api/runs/${failedRun.id}/retry`, { method: "POST" }),
+        fetch(`${baseUrl}/api/runs/${failedRun.id}/retry`, { method: "POST" }),
+      ]);
+      const retryBodies = await Promise.all(
+        retryResponses.map(async (response) => ({
+          status: response.status,
+          body: (await response.json()) as RetryScheduledBody | ErrorResponse,
+        })),
+      );
+      const accepted = retryBodies.filter((result) => result.status === 202);
+      const rejected = retryBodies.filter((result) => result.status === 409);
+      const retryDiagnostics = () =>
+        [
+          `retry responses: ${JSON.stringify(retryBodies)}`,
+          `injected: ${JSON.stringify(worker.injectedTask(task.id))}`,
+          worker.tail(),
+          dashboard?.stderr ?? "",
+        ].join("\n");
+      expect(accepted, retryDiagnostics()).toHaveLength(1);
+      expect(rejected, retryDiagnostics()).toHaveLength(1);
+      expect(accepted[0]?.body, retryDiagnostics()).toEqual({
+        status: "scheduled",
+        runId: failedRun.id,
+        taskKey: task.task_key,
+      });
+      const rejection = rejected[0]?.body as ErrorResponse;
+      expect(isDuplicateRetryRejection(task.task_key, rejection.error), retryDiagnostics()).toBe(
+        true,
+      );
+
+      const requeued = worker.injectedTask(task.id);
+      expect(
+        requeued?.status === "pending" || requeued?.status === "running",
+        retryDiagnostics(),
+      ).toBe(true);
+      const storedAudit = readQueueRows<StoredRetryAudit>(
+        worker.dbPath,
+        "run_retry_audit",
+        "SELECT run_id, task_key, actor, action, message FROM run_retry_audit ORDER BY id",
+      );
+      expect(storedAudit, retryDiagnostics()).toEqual([
+        {
+          run_id: failedRun.id,
+          task_key: task.task_key,
+          actor: "local-dashboard",
+          action: "scheduled",
+          message: "re-queued the interrupted ad-hoc task (resumes its branch)",
+        },
+      ]);
+      expect(
+        readQueueRows<{ id: number }>(
+          worker.dbPath,
+          "scheduled_retries",
+          "SELECT id FROM scheduled_retries",
+        ),
+        retryDiagnostics(),
+      ).toEqual([]);
+      const queued = await workerStatus(baseUrl);
+      expect(queued.queue.retries, retryDiagnostics()).toEqual({ pending: 0, running: 0 });
+      expect(
+        queued.queue.injected.pending + queued.queue.injected.running,
+        retryDiagnostics(),
+      ).toBe(1);
+
+      const auditing = await readJson<RunDetailResponse>(
+        await fetch(`${baseUrl}/api/runs/${failedRun.id}`),
+      );
+      expect(auditing.retry.audit, retryDiagnostics()).toEqual([
+        expect.objectContaining({
+          runId: failedRun.id,
+          taskKey: task.task_key,
+          actor: "local-dashboard",
+          action: "scheduled",
+          message: "re-queued the interrupted ad-hoc task (resumes its branch)",
+        }),
+      ]);
+      expect(auditing.retry.audit[0]?.createdAt, retryDiagnostics()).toBeTypeOf("number");
+
+      const settled = await worker.waitForSettled(task.id, 90_000);
+      const settledDiagnostics = () =>
+        [
+          `injected task #${task.id} settled as "${settled.task.status}": ${
+            settled.task.message ?? "no message"
+          }`,
+          `runs: ${JSON.stringify(settled.runs)}`,
+          `invocations: ${JSON.stringify(worker.agentInvocations())}`,
+          worker.tail(),
+        ].join("\n");
+      expect(settled.task.status, settledDiagnostics()).toBe("done");
+      expect(settled.runs, settledDiagnostics()).toHaveLength(2);
+      expect(settled.runs[0]?.id, settledDiagnostics()).toBe(failedRun.id);
+      expect(settled.runs[0]?.status, settledDiagnostics()).toBe("failed");
+      const successRun = settled.runs[1];
+      if (!successRun?.branch) {
+        throw new Error(`retried run recorded no branch\n${settledDiagnostics()}`);
+      }
+      // Nothing was committed on the failed attempt, so pickup starts a fresh
+      // attempt branch instead of resuming the empty one.
+      const successBranch = `${failedBranch}-attempt-2`;
+      expect(successRun.status, settledDiagnostics()).toBe("succeeded");
+      expect(successRun.attempt, settledDiagnostics()).toBe(2);
+      expect(successRun.branch, settledDiagnostics()).toBe(successBranch);
+      expect(successRun.pr_url, settledDiagnostics()).toBeNull();
+      expect(worker.agentInvocations(), settledDiagnostics()).toEqual([
+        { mode: "implement" },
+        { mode: "implement" },
+      ]);
+      expect(worker.running, settledDiagnostics()).toBe(true);
+
+      const list = await readJson<RunsResponse>(
+        await fetch(`${baseUrl}/api/runs?taskKey=${encodeURIComponent(task.task_key)}`),
+      );
+      expect(list.total).toBe(2);
+      expect(list.runs.map((run) => run.id)).toEqual([successRun.id, failedRun.id]);
+      const successDetail = await readJson<RunDetailResponse>(
+        await fetch(`${baseUrl}/api/runs/${successRun.id}`),
+      );
+      expect(successDetail.run).toMatchObject({
+        id: successRun.id,
+        status: "succeeded",
+        origin: "local",
+        taskKey: task.task_key,
+        branch: successBranch,
+        attempt: 2,
+      });
+      expect(successDetail.retry).toMatchObject({
+        eligible: false,
+        reason: "this run already succeeded",
+        audit: [],
+      });
+      const failedDetail = await readJson<RunDetailResponse>(
+        await fetch(`${baseUrl}/api/runs/${failedRun.id}`),
+      );
+      expect(failedDetail.run.status).toBe("failed");
+      expect(failedDetail.retry.audit).toHaveLength(1);
+      expect(failedDetail.retry.audit[0]?.action).toBe("scheduled");
+
+      const stats = await readJson<StatsResponse>(await fetch(`${baseUrl}/api/stats?window=all`));
+      expect(stats.stats.totals.byStatus.failed).toBeGreaterThanOrEqual(1);
+      expect(stats.stats.totals.byStatus.succeeded).toBeGreaterThanOrEqual(1);
+
+      const remoteBranches = await worker.remoteBranches();
+      expect(remoteBranches, settledDiagnostics()).toContain(successBranch);
+      expect(remoteBranches, settledDiagnostics()).not.toContain(failedBranch);
+      expect(await worker.branchFile(successBranch, "src/greeting.ts")).toBe(
+        'export const greeting = "Hello, world!";',
+      );
+      expect(await worker.branchFile(worker.baseBranch, "src/greeting.ts")).toBe(
+        'export const greeting = "Hello";',
+      );
+      const changedFiles = await checkedCommand(
+        [
+          "git",
+          "--git-dir",
+          worker.remote,
+          "diff",
+          "--name-only",
+          worker.baseBranch,
+          successBranch,
+        ],
+        worker.root,
+        worker.env,
+      );
+      expect(changedFiles.split("\n").filter(Boolean)).toEqual(["src/greeting.ts"]);
+      expect(readFileSync(fixtureGreeting, "utf8")).toBe(seededGreeting);
+      expect(readFileSync(join(worker.seed, "src/greeting.ts"), "utf8")).toBe(seededGreeting);
+
+      await worker.waitFor("the successful attempt's worktree to be removed", () =>
+        worker.taskWorktrees().length <= 1 ? true : undefined,
+      );
+      // The failed attempt keeps its worktree for debugging; the success does not.
+      expect(worker.taskWorktrees(), settledDiagnostics()).toHaveLength(1);
+      expect(
+        readQueueRows<StoredRetryAudit>(
+          worker.dbPath,
+          "run_retry_audit",
+          "SELECT run_id, task_key, actor, action, message FROM run_retry_audit ORDER BY id",
+        ),
+      ).toHaveLength(1);
+
+      expect(await dashboard.stop()).toBe(0);
+      dashboard = undefined;
+      expect(worker.running, settledDiagnostics()).toBe(true);
+    } finally {
+      await dashboard?.stop().catch(() => undefined);
+      await worker.dispose();
+    }
+  },
+  // Two pipeline attempts: 20s readiness + 45s failure + dashboard health +
+  // 90s successful retry + worktree cleanup, plus prepare and daemon stop.
+  300_000,
 );
