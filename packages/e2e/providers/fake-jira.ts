@@ -153,6 +153,14 @@ export class FakeJiraTracker implements TrackerFixture {
   /** Requests the fake could not route, for an explicit end-of-test assertion. */
   readonly unexpectedRequests: string[] = [];
 
+  /**
+   * JQL strings received by `GET /rest/api/3/search/jql`, in arrival order.
+   *
+   * The value is the decoded `jql` parameter, so a test can prove the worker
+   * sent its configured query without parsing access logs.
+   */
+  readonly searches: string[] = [];
+
   private readonly server: ReturnType<typeof Bun.serve>;
   private readonly baseUrl: string;
   private readonly issues = new Map<string, FakeJiraIssue>();
@@ -378,6 +386,7 @@ export class FakeJiraTracker implements TrackerFixture {
 
   private search(url: URL): Response {
     const jql = url.searchParams.get("jql") ?? "";
+    this.searches.push(jql);
     const startAt = Number(url.searchParams.get("startAt") ?? 0);
     const maxResults = Number(url.searchParams.get("maxResults") ?? 50);
     const matches = this.matchingIssues(jql);
