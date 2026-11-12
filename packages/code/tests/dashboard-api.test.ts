@@ -83,6 +83,31 @@ describe("dashboard API", () => {
     }
   });
 
+  test("activity task titles skip a leading frontmatter block", () => {
+    const store = new RunStore(dbPath);
+    try {
+      const withHeading = store.createRun({ origin: "local", taskKey: "local-a" });
+      store.setRunTicket(withHeading, {
+        description:
+          "---\nkey: local-a\ncreated_at: 2026-01-01\n---\n\n# Cover the review poll\n\nBody",
+      });
+      const withTitle = store.createRun({ origin: "local", taskKey: "local-b" });
+      store.setRunTicket(withTitle, {
+        description: '---\nkey: local-b\ntitle: "Add retries"\n---\n# Ignored heading\n',
+      });
+      const metaOnly = store.createRun({ origin: "local", taskKey: "local-c" });
+      store.setRunTicket(metaOnly, { description: "---\nkey: local-c\n---\n" });
+      const titles = new Map(
+        data.getTaskActivity().runs.map((r) => [r.id, (r as { taskTitle?: string }).taskTitle]),
+      );
+      expect(titles.get(withHeading)).toBe("Cover the review poll");
+      expect(titles.get(withTitle)).toBe("Add retries");
+      expect(titles.get(metaOnly)).toBeUndefined();
+    } finally {
+      store.close();
+    }
+  });
+
   /** Seed a finished run and return its id. */
   function seedRun(
     store: RunStore,

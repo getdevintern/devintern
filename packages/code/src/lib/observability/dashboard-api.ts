@@ -67,6 +67,7 @@ import {
 } from "./dashboard-db";
 import { WorkerState } from "../state/worker-state";
 import type { Cursor } from "../state/worker-state";
+import { deriveTaskTitle } from "./task-title";
 
 const RUN_STATUSES: RunStatus[] = [
   "in_progress",
@@ -403,13 +404,7 @@ export class DashboardData {
       return {
         runs: runs.map((run) => ({
           ...run,
-          taskTitle: run.taskDescription
-            ?.split("\n")
-            .map((line) => line.trim())
-            .find(Boolean)
-            ?.replace(/^#{1,6}\s+/, "")
-            .replace(/[*_`]/g, "")
-            .slice(0, 160),
+          taskTitle: deriveTaskTitle(run.taskDescription),
           taskDescription: undefined,
         })),
         recentLimit: 100,
