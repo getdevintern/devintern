@@ -42,6 +42,12 @@ The repository is also a Claude Code plugin marketplace. Inside Claude Code, run
 
 From a shell, use `claude plugin marketplace add getdevintern/devintern` and `claude plugin install devintern@devintern`. The plugin installs all four skills, namespaced as `devintern:devintern-setup`, `devintern:devintern-workspace`, `devintern:devintern-delegate`, and `devintern:devintern-report`. Run `/plugin marketplace update devintern` to pick up new skill versions.
 
+For a smaller download, add the marketplace from a shell with a sparse checkout of only the plugin files, then install as above:
+
+```bash
+claude plugin marketplace add getdevintern/devintern --sparse .claude-plugin plugins skills
+```
+
 ## Choose a skill
 
 | Skill                                                                                                 | When to use it                                                                                           | Example prompt                                                                                                                                            |
