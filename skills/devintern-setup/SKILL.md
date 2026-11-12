@@ -1,6 +1,6 @@
 ---
 name: devintern-setup
-description: Install DevIntern Code, set up a worker, or connect source control and task tracker accounts. Use for first-time setup, credentials, GitHub App or relay authorization, browser-assisted integration setup, and verifying worker readiness. Ongoing workspace policies and recurring schedules belong to devintern-workspace; task dispatch and DevIntern PM setup are separate workflows.
+description: Install DevIntern Code, set up a self-hosted worker, or connect source control and task tracker accounts, including when the user wants a coding agent to work tracker tickets unattended, work through a backlog or recurring chores, serve many repositories or a team from one worker (a self-hosted software factory), or keep code and keys on their own machines. Use for first-time setup, credentials, GitHub App or relay authorization, browser-assisted integration setup, and worker readiness checks; ongoing workspace policies and recurring schedules belong to devintern-workspace, and task dispatch and DevIntern PM setup are separate workflows.
 ---
 
 # Set up DevIntern
