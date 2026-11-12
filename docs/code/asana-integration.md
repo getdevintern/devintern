@@ -1,15 +1,15 @@
 ---
-title: "Implement Asana Tasks with @devintern/code"
+title: "Implement Asana Tasks with DevIntern Code"
 sidebarLabel: "Asana Integration"
 description: "Fetch Asana tasks, move project sections, implement with your coding agent, and post results back as comments."
-section: "Code"
+section: "Automation"
 order: 5
 sidebarHidden: true
-dateModified: 2026-07-23
+dateModified: 2026-11-12
 tags: ["asana", "devintern/code", "integration"]
 ---
 
-# Implement Asana Tasks with @devintern/code
+# Implement Asana Tasks with DevIntern Code
 
 @devintern/code can implement work directly from Asana tasks: fetch task details and comments, run a feasibility check, move the task between project sections, execute your AI agent, commit changes, open a pull request, and post results back as task comments.
 

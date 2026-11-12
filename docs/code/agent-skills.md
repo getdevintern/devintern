@@ -1,10 +1,10 @@
 ---
 title: "DevIntern Agent Skills"
 sidebarLabel: "Agent Skills"
-description: "Install DevIntern skills for Codex or Claude Code to set up a worker, configure a workspace, delegate implementation tasks, and report bugs."
+description: "Use when you want Codex or Claude Code to set up a DevIntern worker, configure a workspace, delegate tasks, or file a bug report."
 section: "Automation"
 order: 1
-dateModified: 2026-10-16
+dateModified: 2026-11-12
 tags: ["skills", "codex", "claude-code", "worker"]
 ---
 

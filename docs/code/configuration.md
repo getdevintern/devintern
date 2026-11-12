@@ -1,13 +1,13 @@
 ---
-title: "@devintern/code Configuration"
+title: "DevIntern Code Configuration"
 sidebarLabel: "Configuration"
-description: "Environment variables, settings.json, tracker credentials, and agent harness options for @devintern/code."
+description: "Use when setting tracker credentials, GitHub auth, agent harness, sandboxing, or other environment variables and settings for DevIntern Code."
 section: "Automation Reference"
 order: 0
-dateModified: 2026-10-16
+dateModified: 2026-11-12
 ---
 
-# @devintern/code Configuration
+# DevIntern Code Configuration
 
 @devintern/code uses per-project configuration stored in `.devintern-code/.env` in your project directory. This allows you to work with multiple projects without configuration conflicts.
 
@@ -100,7 +100,7 @@ Unattended runs also need a `LICENSE_KEY`. See [Pricing](https://devintern.com/p
 | Air-gapped mentions or `devintern webhook serve`              | Customer-owned GitHub App (advanced)                           |
 | Custom `slug[bot]` attribution                                | Customer-owned GitHub App (advanced)                           |
 
-See [GitHub Issues Integration](./github-issues-integration.md) and the advanced [GitHub Integration](./github-integration.md) guide.
+See [GitHub Issues Integration](./github-issues-integration.md) and the advanced [GitHub Webhooks and PR Automation](./github-integration.md) guide.
 
 **Precedence when both are set:**
 
@@ -180,7 +180,7 @@ Both the ID and a private key are required.
 3. Generate and save a private key
 4. Install the App on your repositories
 
-> These permissions cover task implementation, PR creation, and the 🎉 reaction left on addressed feedback. The reaction is cosmetic only — whether feedback needs action is decided from the local state database — so a missing reaction permission never causes re-processing. If reactions fail with a permissions error after a settings change, re-approve the installation; already-issued credentials keep working for up to an hour. If you also run the webhook server or mention sweep to auto-address PR feedback, that App needs additional **Pull request review comments** and **Issue comments** permissions plus event subscriptions; see [GitHub Integration](./github-integration.md#update-app-permissions).
+> These permissions cover task implementation, PR creation, and the 🎉 reaction left on addressed feedback. The reaction is cosmetic only — whether feedback needs action is decided from the local state database — so a missing reaction permission never causes re-processing. If reactions fail with a permissions error after a settings change, re-approve the installation; already-issued credentials keep working for up to an hour. If you also run the webhook server or mention sweep to auto-address PR feedback, that App needs additional **Pull request review comments** and **Issue comments** permissions plus event subscriptions; see [GitHub Webhooks and PR Automation](./github-integration.md#update-app-permissions).
 
 For CI/CD environments, you can use a base64-encoded key:
 

@@ -1,19 +1,19 @@
 ---
-title: "Implement GitHub Issues with @devintern/code"
+title: "Implement GitHub Issues with DevIntern Code"
 sidebarLabel: "GitHub Issues Integration"
 description: "Fetch GitHub issues, track status labels, implement with your coding agent, and open the PR in the same repository."
-section: "Code"
+section: "Automation"
 order: 5
 sidebarHidden: true
-dateModified: 2026-09-01
+dateModified: 2026-11-12
 tags: ["github", "github-issues", "devintern/code", "integration"]
 ---
 
-# Implement GitHub Issues with @devintern/code
+# Implement GitHub Issues with DevIntern Code
 
 @devintern/code can implement work directly from GitHub Issues: fetch issue details and comments, run a feasibility check, move status labels, execute your AI agent, commit changes, open a pull request in the same repository, and post results back on the issue.
 
-Looking for unattended PR review automation? Use the [worker](./worker.md) (polling plus the [relay](./relay.md)). Direct GitHub webhooks are an advanced path: [GitHub Integration](./github-integration.md).
+Looking for unattended PR review automation? Use the [worker](./worker.md) (polling plus the [relay](./relay.md)). Direct GitHub webhooks are an advanced path: [GitHub Webhooks and PR Automation](./github-integration.md).
 
 ## Prerequisites
 

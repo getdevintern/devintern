@@ -1,13 +1,14 @@
 ---
-title: "Create Trello Cards with @devintern/pm"
+title: "Create Trello Cards with DevIntern PM"
 sidebarLabel: "Trello Integration"
 description: "Create Trello cards from AI drafts on the boards your team already uses."
-section: "PM"
+section: "Create Tasks"
 order: 5
+dateModified: 2026-11-12
 sidebarHidden: true
 ---
 
-# Create Trello Cards with @devintern/pm
+# Create Trello Cards with DevIntern PM
 
 @devintern/pm creates Trello cards directly from AI-generated stories and tasks. Setup takes about a minute: you only need to generate an API token.
 

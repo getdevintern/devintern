@@ -1,13 +1,14 @@
 ---
-title: "Create Azure DevOps Work Items with @devintern/pm"
+title: "Create Azure DevOps Work Items with DevIntern PM"
 sidebarLabel: "Azure DevOps Integration"
 description: "File well-specified Azure DevOps work items from AI drafts in your project."
-section: "PM"
+section: "Create Tasks"
 order: 9
+dateModified: 2026-11-12
 sidebarHidden: true
 ---
 
-# Create Azure DevOps Work Items with @devintern/pm
+# Create Azure DevOps Work Items with DevIntern PM
 
 @devintern/pm creates Azure DevOps work items directly from AI-generated stories and tasks. Setup takes a few minutes: you need a Personal Access Token, your organization slug, and a target project.
 

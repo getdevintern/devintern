@@ -1,15 +1,15 @@
 ---
-title: "Implement Azure DevOps Work Items with @devintern/code"
+title: "Implement Azure DevOps Work Items with DevIntern Code"
 sidebarLabel: "Azure DevOps Integration"
 description: "Fetch Azure DevOps work items, run WIQL batches, implement with your coding agent, and post PRs and state transitions back."
-section: "Code"
+section: "Automation"
 order: 5
 sidebarHidden: true
-dateModified: 2026-07-23
+dateModified: 2026-11-12
 tags: ["azure-devops", "devintern/code", "integration"]
 ---
 
-# Implement Azure DevOps Work Items with @devintern/code
+# Implement Azure DevOps Work Items with DevIntern Code
 
 @devintern/code can implement work directly from Azure DevOps work items: fetch work item details and comments, run a feasibility check, move the item through workflow states, execute your AI agent, commit changes, open a pull request, and post results back to the work item.
 
