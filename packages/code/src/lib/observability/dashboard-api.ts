@@ -1227,7 +1227,7 @@ export async function handleRunAutomation(
  * `GET /api/runs` — paginated run list with optional filters.
  *
  * @param data - Dashboard data source
- * @param params - Query params: `limit`, `offset`, `status`, `origin`, `taskKey`
+ * @param params - Query params: `limit`, `offset`, `status`, `origin`, `taskKey`, `automationId`
  */
 export function handleRuns(data: DashboardData, params: URLSearchParams): ApiResponse {
   const rawLimit = params.get("limit");
@@ -1240,7 +1240,6 @@ export function handleRuns(data: DashboardData, params: URLSearchParams): ApiRes
   if (!Number.isFinite(offset) || offset < 0) {
     return badRequest("offset must be a non-negative integer");
   }
-
   const status = params.get("status") ?? undefined;
   if (status !== undefined && !RUN_STATUSES.includes(status as RunStatus)) {
     return badRequest(`status must be one of: ${RUN_STATUSES.join(", ")}`);
@@ -1254,6 +1253,7 @@ export function handleRuns(data: DashboardData, params: URLSearchParams): ApiRes
     taskKey: params.get("taskKey") ?? undefined,
     status: status as RunStatus | undefined,
     origin: origin as RunOrigin | undefined,
+    automationId: params.get("automationId") ?? undefined,
     limit,
     offset,
   });

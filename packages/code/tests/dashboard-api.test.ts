@@ -89,6 +89,7 @@ describe("dashboard API", () => {
     options: {
       taskKey?: string;
       origin?: "task" | "pr_mention" | "scheduled";
+      automationId?: string;
       harness?: string;
       status?: "succeeded" | "failed" | "escalated" | "abandoned" | "deferred";
       prUrl?: string;
@@ -97,6 +98,7 @@ describe("dashboard API", () => {
     const id = store.createRun({
       origin: options.origin ?? "task",
       taskKey: options.taskKey,
+      automationId: options.automationId,
       tracker: "jira",
       harness: options.harness ?? "claude-code",
     });
@@ -141,6 +143,23 @@ describe("dashboard API", () => {
 
     const byKey = handleRuns(data, new URLSearchParams("taskKey=PROJ-1"));
     expect((byKey.body as { total: number }).total).toBe(1);
+  });
+
+  test("handleRuns filters by automationId", () => {
+    const store = new RunStore(dbPath);
+    seedRun(store, { origin: "scheduled", automationId: "nightly", status: "succeeded" });
+    seedRun(store, { origin: "scheduled", automationId: "nightly", status: "failed" });
+    seedRun(store, { origin: "scheduled", automationId: "weekly", status: "succeeded" });
+    seedRun(store, { taskKey: "PROJ-1", status: "succeeded" });
+    store.close();
+
+    const nightly = handleRuns(data, new URLSearchParams("automationId=nightly"));
+    const body = nightly.body as { runs: { automationId?: string }[]; total: number };
+    expect(body.total).toBe(2);
+    expect(body.runs.every((run) => run.automationId === "nightly")).toBe(true);
+
+    const none = handleRuns(data, new URLSearchParams("automationId=missing"));
+    expect((none.body as { total: number }).total).toBe(0);
   });
 
   test("handleRuns rejects invalid params", () => {

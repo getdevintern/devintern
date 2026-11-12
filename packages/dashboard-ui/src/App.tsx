@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import {
   Activity,
+  TerminalSquare,
   ChartNoAxesCombined,
   GitPullRequest,
   ListTodo,
@@ -15,6 +16,7 @@ import { LogsView } from "@/views/LogsView";
 import { RunDetailView } from "@/views/RunDetailView";
 import { RunsView } from "@/views/RunsView";
 import { TaskActivityView } from "@/views/TaskActivityView";
+import { AutomationDetailView } from "@/views/AutomationDetailView";
 import { StatsView } from "@/views/StatsView";
 import { cn } from "@/lib/utils";
 
@@ -23,6 +25,7 @@ type Route =
   | { view: "runs" }
   | { view: "run"; id: number }
   | { view: "automations" }
+  | { view: "automation"; id: string }
   | { view: "prs" }
   | { view: "stats" }
   | { view: "logs" };
@@ -35,6 +38,14 @@ function parseHash(): Route {
     return { view: "run", id: parseInt(runMatch[1] ?? "0", 10) };
   }
   if (hash === "#/activity") return { view: "activity" };
+  const automationMatch = hash.match(/^#\/automations\/(.+)$/);
+  if (automationMatch) {
+    try {
+      return { view: "automation", id: decodeURIComponent(automationMatch[1] ?? "") };
+    } catch {
+      return { view: "automations" };
+    }
+  }
   if (hash === "#/automations") return { view: "automations" };
   if (hash === "#/stats") return { view: "stats" };
   if (hash === "#/prs") return { view: "prs" };
@@ -51,17 +62,15 @@ const sections = [
   { label: "Logs", hash: "#/logs", view: "logs", icon: ScrollText },
 ] as const;
 
-const pageCopy = {
-  activity: {
-    title: "Task activity",
-    description: "See how work is distributed across the pipeline.",
-  },
-  runs: { title: "Runs", description: "Follow work from pickup through delivery." },
-  run: { title: "Run details", description: "Review the timeline, output, and next steps." },
-  automations: { title: "Automations", description: "Manage scheduled work and run it on demand." },
-  prs: { title: "Pull requests", description: "Review work opened by your agents." },
-  stats: { title: "Statistics", description: "See how your agents perform over time." },
-  logs: { title: "Worker logs", description: "Inspect the worker's latest activity." },
+const pageTitles = {
+  activity: "Task activity",
+  runs: "Runs",
+  run: "Runs",
+  automations: "Automations",
+  automation: "Automations",
+  prs: "Pull requests",
+  stats: "Statistics",
+  logs: "Worker logs",
 };
 
 export function App() {
@@ -73,22 +82,21 @@ export function App() {
     return () => window.removeEventListener("hashchange", onHashChange);
   }, []);
 
-  const currentSection = route.view === "run" ? "runs" : route.view;
-  const page = pageCopy[route.view];
+  const currentSection =
+    route.view === "run" ? "runs" : route.view === "automation" ? "automations" : route.view;
 
   return (
     <div className="dashboard-shell">
       <aside className="dashboard-sidebar">
         <a className="dashboard-brand" href="#/" aria-label="DevIntern dashboard home">
           <span className="dashboard-brand-mark" aria-hidden="true">
-            <Activity size={22} strokeWidth={2.5} />
+            <TerminalSquare size={17} strokeWidth={2.25} />
           </span>
           <span className="dashboard-brand-name">
             DevIntern <small>Dashboard</small>
           </span>
         </a>
 
-        <div className="dashboard-nav-label">Workspace</div>
         <nav className="dashboard-nav" aria-label="Dashboard sections">
           {sections.map((section) => {
             const Icon = section.icon;
@@ -106,30 +114,27 @@ export function App() {
             );
           })}
         </nav>
-
-        <div className="dashboard-sidebar-foot">
-          <span className="dashboard-local-dot" />
-          Local workspace
-        </div>
       </aside>
 
       <div className="dashboard-main">
         <header className="dashboard-topbar">
-          <span className="dashboard-topbar-title">Worker overview</span>
+          <h1 className="dashboard-page-title">
+            {route.view === "run" ? (
+              <>
+                <a href="#/">Runs</a> <span>/ #{route.id}</span>
+              </>
+            ) : route.view === "automation" ? (
+              <>
+                <a href="#/automations">Automations</a> <span>/ {route.id}</span>
+              </>
+            ) : (
+              pageTitles[route.view]
+            )}
+          </h1>
           <StatusStrip />
         </header>
 
         <main className="dashboard-content">
-          <div className="dashboard-page-heading">
-            <div>
-              <h1>{page.title}</h1>
-              <p>{page.description}</p>
-            </div>
-            <span className="dashboard-live-label">
-              <span className="dashboard-live-dot" /> Checks every 5s
-            </span>
-          </div>
-
           {route.view === "activity" ? (
             <TaskActivityView onOpenRun={(id) => (window.location.hash = `#/runs/${id}`)} />
           ) : null}
@@ -145,6 +150,9 @@ export function App() {
           ) : null}
           {route.view === "automations" ? (
             <AutomationsView onOpenRun={(id) => (window.location.hash = `#/runs/${id}`)} />
+          ) : null}
+          {route.view === "automation" ? (
+            <AutomationDetailView key={route.id} automationId={route.id} />
           ) : null}
           {route.view === "prs" ? <AgentPrsView /> : null}
           {route.view === "stats" ? <StatsView /> : null}

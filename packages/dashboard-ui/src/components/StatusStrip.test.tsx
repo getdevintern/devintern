@@ -25,16 +25,17 @@ const mixedQueue: WorkerResponse["queue"] = {
 test("a live worker lock shows running with its pid", () => {
   const html = render({ status: "running", pid: 4242 });
 
-  expect(html).toContain("worker running (pid 4242)");
-  // The chart color class marks the healthy state.
-  expect(html).toContain("text-chart-4");
+  expect(html).toContain("worker running");
+  expect(html).toContain(" (pid 4242)");
+  // The running state drives the green chip styling.
+  expect(html).toContain('data-state="running"');
 });
 
 test("a stale worker lock (dead pid) shows stopped", () => {
   const html = render({ status: "stopped", pid: 999999999 });
 
   expect(html).toContain("worker stopped");
-  expect(html).not.toContain("text-chart-4");
+  expect(html).toContain('data-state="stopped"');
 });
 
 test("an undeterminable worker says unknown instead of claiming stopped", () => {

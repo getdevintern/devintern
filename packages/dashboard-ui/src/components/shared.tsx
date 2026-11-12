@@ -1,10 +1,11 @@
 /** Dashboard-specific composites built on the shadcn/ui primitives. */
 
+import { Inbox, TriangleAlert } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import type { ReactNode } from "react";
 
 import type { RunStatus, StageStatus } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import {
   Select,
@@ -16,13 +17,33 @@ import {
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 
-const STATUS_STYLES: Record<RunStatus, string> = {
-  in_progress: "bg-chart-1/15 text-chart-1 border-chart-1/30",
-  succeeded: "bg-chart-4/15 text-chart-4 border-chart-4/30",
-  failed: "bg-destructive/15 text-destructive border-destructive/30",
-  deferred: "bg-chart-5/15 text-chart-5 border-chart-5/30",
-  escalated: "bg-chart-3/15 text-chart-3 border-chart-3/30",
-  abandoned: "bg-muted text-muted-foreground border-border",
+export type StatusTone = "success" | "warning" | "danger" | "info" | "attention" | "neutral";
+
+const TONE_TEXT: Record<StatusTone, string> = {
+  success: "text-success",
+  warning: "text-warning",
+  danger: "text-danger",
+  info: "text-info",
+  attention: "text-attention",
+  neutral: "text-neutral",
+};
+
+const RUN_TONES: Record<RunStatus, StatusTone> = {
+  in_progress: "info",
+  succeeded: "success",
+  failed: "danger",
+  deferred: "warning",
+  escalated: "attention",
+  abandoned: "neutral",
+};
+
+const STAGE_TONES: Record<StageStatus, StatusTone> = {
+  succeeded: "success",
+  failed: "danger",
+  skipped: "neutral",
+  deferred: "warning",
+  escalated: "attention",
+  abandoned: "neutral",
 };
 
 const STATUS_LABELS: Record<RunStatus, string> = {
@@ -34,58 +55,110 @@ const STATUS_LABELS: Record<RunStatus, string> = {
   abandoned: "abandoned",
 };
 
+/** Tinted status pill: dot + label. `live` adds a reduced-motion-safe pulse. */
+export function StatusPill({
+  tone,
+  live = false,
+  children,
+  className,
+}: {
+  tone: StatusTone;
+  live?: boolean;
+  children: ReactNode;
+  className?: string;
+}) {
+  return (
+    <Badge variant={tone} className={className}>
+      <span className={cn("status-dot", live && "status-dot-live")} aria-hidden="true" />
+      {children}
+    </Badge>
+  );
+}
+
 export function StatusBadge({ status }: { status: RunStatus }) {
   return (
-    <Badge variant="outline" className={STATUS_STYLES[status]}>
+    <StatusPill tone={RUN_TONES[status]} live={status === "in_progress"}>
       {STATUS_LABELS[status]}
-    </Badge>
+    </StatusPill>
   );
 }
 
 export function StageBadge({ status }: { status: StageStatus }) {
-  const styles: Record<StageStatus, string> = {
-    succeeded: STATUS_STYLES.succeeded,
-    failed: STATUS_STYLES.failed,
-    skipped: STATUS_STYLES.abandoned,
-    deferred: STATUS_STYLES.deferred,
-    escalated: STATUS_STYLES.escalated,
-    abandoned: STATUS_STYLES.abandoned,
-  };
-  return (
-    <Badge variant="outline" className={styles[status]}>
-      {status}
-    </Badge>
-  );
+  return <StatusPill tone={STAGE_TONES[status]}>{status}</StatusPill>;
 }
 
+/**
+ * Compact metric: label, tabular value, optional context line. Optional `tone`
+ * colors the value for health metrics (e.g. failures).
+ */
 export function StatTile({
   label,
   value,
   hint,
+  tone,
 }: {
   label: string;
   value: ReactNode;
   hint?: string;
+  tone?: StatusTone;
 }) {
   return (
-    <Card size="sm">
-      <CardHeader>
-        <CardDescription>{label}</CardDescription>
-        <CardTitle className="text-2xl font-semibold tabular-nums">{value}</CardTitle>
-      </CardHeader>
-      {hint ? <CardContent className="text-xs text-muted-foreground">{hint}</CardContent> : null}
-    </Card>
+    <div
+      data-slot="stat-tile"
+      className="flex min-w-0 flex-col gap-1 rounded-lg border border-border bg-card px-4 py-3"
+    >
+      <div className="text-xs font-medium text-subtle-foreground">{label}</div>
+      <div
+        className={cn(
+          "text-xl leading-tight font-semibold tracking-tight tabular-nums",
+          tone && TONE_TEXT[tone],
+        )}
+      >
+        {value}
+      </div>
+      {hint ? <div className="text-xs text-subtle-foreground">{hint}</div> : null}
+    </div>
   );
 }
 
-export function EmptyState({ title, body }: { title: string; body: string }) {
+/**
+ * Teaching empty/error state: icon, title, one helpful line, optional action.
+ * Titles starting with "Could not" default to the danger tone and alert icon.
+ */
+export function EmptyState({
+  title,
+  body,
+  icon: Icon,
+  tone,
+  action,
+}: {
+  title: string;
+  body: string;
+  icon?: LucideIcon;
+  tone?: "default" | "danger";
+  action?: ReactNode;
+}) {
+  const isError = (tone ?? (title.startsWith("Could not") ? "danger" : "default")) === "danger";
+  const Glyph = Icon ?? (isError ? TriangleAlert : Inbox);
   return (
-    <Card className="py-10 text-center">
-      <CardContent>
-        <div className="text-lg font-medium">{title}</div>
-        <div className="mx-auto mt-2 max-w-md text-sm text-muted-foreground">{body}</div>
-      </CardContent>
-    </Card>
+    <div
+      data-slot="empty-state"
+      className="flex flex-col items-center rounded-lg border border-dashed border-border-strong px-6 py-10 text-center"
+    >
+      <span
+        className={cn(
+          "mb-3 grid size-10 place-items-center rounded-lg border",
+          isError
+            ? "border-danger-border bg-danger-subtle text-danger"
+            : "border-border bg-raised text-muted-foreground",
+        )}
+      >
+        <Glyph className="size-5" aria-hidden="true" />
+      </span>
+      <div className="text-sm font-semibold">{title}</div>
+      <div className="mt-1 max-w-md text-sm text-muted-foreground">{body}</div>
+      {action ? <div className="mt-4">{action}</div> : null}
+    </div>
   );
 }
 
@@ -157,7 +230,7 @@ export function FilterSelect<T extends string>({
   return (
     <Select value={value} onValueChange={(next) => onChange(next as T)}>
       <SelectTrigger size="sm" className={cn("max-w-full", className)}>
-        <span className="text-muted-foreground">{label}</span>
+        <span className="font-normal text-subtle-foreground">{label}</span>
         <SelectValue>{format(value)}</SelectValue>
       </SelectTrigger>
       <SelectContent>
