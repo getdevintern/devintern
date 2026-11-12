@@ -228,3 +228,21 @@ test("filter select trigger shows the formatted non-default selection", () => {
   expect(html).toContain("Origin");
   expect(html).toContain("Tracker task");
 });
+
+test("earlier attempts fold under the newest run behind a collapsed toggle", () => {
+  const html = renderToStaticMarkup(
+    createElement(RunsTable, {
+      runs: [
+        run({ id: 3, attempt: 3, status: "succeeded" }),
+        run({ id: 2, attempt: 2, status: "failed", outcomeReason: "Tests failed" }),
+        run({ id: 1, attempt: 1, status: "deferred", outcomeReason: "Usage limit" }),
+      ],
+      onOpenRun: () => {},
+    }),
+  );
+
+  expect(html).toContain("2 earlier");
+  expect(html).toContain('aria-expanded="false"');
+  expect(html).not.toContain("Tests failed");
+  expect(html).not.toContain("Attempt 2");
+});

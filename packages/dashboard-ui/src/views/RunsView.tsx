@@ -1,5 +1,5 @@
-import { useMemo, useState } from "react";
-import { ChevronLeft, ChevronRight, CornerDownRight } from "lucide-react";
+import { Fragment, useMemo, useState } from "react";
+import { ChevronDown, ChevronLeft, ChevronRight, CornerDownRight } from "lucide-react";
 
 import { RunResult } from "@/components/RunResult";
 import { EmptyState, FilterSelect, StatusBadge } from "@/components/shared";
@@ -15,6 +15,7 @@ import {
 } from "@/components/ui/table";
 import { usePoll } from "@/lib/api";
 import type { RunOrigin, RunRecord, RunStatus, RunsResponse } from "@/lib/api";
+import { groupRunAttempts } from "@/lib/run-groups";
 import { formatRunOrigin } from "@/lib/run-origin";
 import { runPrHref, runWorkLink } from "@/lib/run-work";
 import { cn, formatDuration, formatTime } from "@/lib/utils";
@@ -236,11 +237,52 @@ function RunsSkeleton() {
   );
 }
 
+function runDuration(run: RunRecord): string {
+  return run.finishedAt ? formatDuration(run.finishedAt - run.startedAt) : "…";
+}
+
+/** "3 earlier" toggle that reveals the earlier attempts folded under a run. */
+function AttemptsToggle({
+  count,
+  expanded,
+  onToggle,
+  label,
+}: {
+  count: number;
+  expanded: boolean;
+  onToggle: () => void;
+  label: string;
+}) {
+  return (
+    <button
+      type="button"
+      aria-expanded={expanded}
+      aria-label={`${expanded ? "Hide" : "Show"} ${count} earlier ${count === 1 ? "attempt" : "attempts"} of ${label}`}
+      onClick={(event) => {
+        event.stopPropagation();
+        onToggle();
+      }}
+      className="inline-flex shrink-0 items-center gap-1 rounded-md border border-border bg-raised px-1.5 py-0.5 text-[0.6875rem] font-medium text-muted-foreground transition-colors hover:border-border-strong hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring"
+    >
+      <ChevronDown
+        aria-hidden="true"
+        className={cn("size-3 transition-transform duration-150", !expanded && "-rotate-90")}
+      />
+      <span className="tabular-nums">{count} earlier</span>
+    </button>
+  );
+}
+
+function attemptLabel(run: RunRecord): string {
+  const attempt = runAttempt(run);
+  return attempt ? `Attempt ${attempt}` : "Earlier attempt";
+}
+
 /**
  * The runs list. Desktop reads in scanning order — work (with origin, attempt
  * and repo underneath), status, outcome, when, how long. Narrow screens get a
  * stacked list instead of a truncated table. Repeated attempts at the same
- * work stay visible but the follow-up rows quiet their repeated name.
+ * work fold under their newest run; an "N earlier" toggle reveals them.
  */
 export function RunsTable({
   runs,
@@ -251,12 +293,29 @@ export function RunsTable({
   onOpenRun: (id: number) => void;
   now?: number;
 }) {
-  const isRepeat = (index: number): boolean => {
-    const prev = runs[index - 1];
-    const cur = runs[index];
-    if (!prev || !cur) return false;
-    return runWorkLink(prev).label === runWorkLink(cur).label && prev.repo === cur.repo;
-  };
+  const groups = useMemo(() => groupRunAttempts(runs), [runs]);
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
+  const toggle = (key: string) =>
+    setExpanded((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+
+  const openButton = (run: RunRecord, label: string) => (
+    <Button
+      variant="ghost"
+      size="icon-sm"
+      aria-label={`Open run ${label}`}
+      onClick={(event) => {
+        event.stopPropagation();
+        onOpenRun(run.id);
+      }}
+    >
+      <ChevronRight aria-hidden="true" />
+    </Button>
+  );
 
   return (
     <>
@@ -285,67 +344,100 @@ export function RunsTable({
             </TableRow>
           </TableHeader>
           <TableBody>
-            {runs.map((run, index) => {
+            {groups.map((group) => {
+              const run = group.latest;
               const work = runWorkLink(run);
+              const isOpen = expanded.has(group.key);
               return (
-                <TableRow key={run.id} onClick={() => onOpenRun(run.id)} className="cursor-pointer">
-                  <TableCell className="px-4 py-2.5">
-                    <div
-                      className={cn(
-                        "flex items-start gap-1.5 font-medium",
-                        isRepeat(index) && "text-subtle-foreground",
-                      )}
-                      title={work.label}
+                <Fragment key={group.key}>
+                  <TableRow onClick={() => onOpenRun(run.id)} className="cursor-pointer">
+                    <TableCell className="px-4 py-2.5">
+                      <div className="flex items-start gap-2 font-medium" title={work.label}>
+                        <span className="line-clamp-2 min-w-0 whitespace-normal [overflow-wrap:anywhere] [&_.ref-link]:inline!">
+                          <TicketKey label={work.label} href={work.href} />
+                        </span>
+                      </div>
+                      <div className="mt-0.5 flex min-w-0 items-center gap-2">
+                        <span
+                          className="truncate text-xs text-subtle-foreground"
+                          title={run.branch ?? runContext(run)}
+                        >
+                          {runContext(run)}
+                        </span>
+                        {group.earlier.length > 0 ? (
+                          <AttemptsToggle
+                            count={group.earlier.length}
+                            expanded={isOpen}
+                            label={work.label}
+                            onToggle={() => toggle(group.key)}
+                          />
+                        ) : null}
+                      </div>
+                    </TableCell>
+                    <TableCell className="px-4 py-2.5">
+                      <StatusBadge status={run.status} />
+                    </TableCell>
+                    <TableCell className="px-4 py-2.5">
+                      <RunOutcome run={run} />
+                    </TableCell>
+                    <TableCell className="px-4 py-2.5 text-[0.8125rem] text-subtle-foreground">
+                      {run.harness ?? "–"}
+                    </TableCell>
+                    <TableCell
+                      className="whitespace-nowrap px-4 py-2.5 text-right tabular-nums text-muted-foreground"
+                      title={formatFullTime(run.startedAt)}
                     >
-                      {isRepeat(index) ? (
-                        <CornerDownRight
-                          className="size-3.5 shrink-0"
-                          aria-label="Repeat attempt"
-                        />
-                      ) : null}
-                      <span className="line-clamp-2 min-w-0 whitespace-normal [overflow-wrap:anywhere] [&_.ref-link]:inline!">
-                        <TicketKey label={work.label} href={work.href} />
-                      </span>
-                    </div>
-                    <div
-                      className="truncate text-xs text-subtle-foreground"
-                      title={run.branch ?? runContext(run)}
-                    >
-                      {runContext(run)}
-                    </div>
-                  </TableCell>
-                  <TableCell className="px-4 py-2.5">
-                    <StatusBadge status={run.status} />
-                  </TableCell>
-                  <TableCell className="px-4 py-2.5">
-                    <RunOutcome run={run} />
-                  </TableCell>
-                  <TableCell className="px-4 py-2.5 text-[0.8125rem] text-subtle-foreground">
-                    {run.harness ?? "–"}
-                  </TableCell>
-                  <TableCell
-                    className="whitespace-nowrap px-4 py-2.5 text-right tabular-nums text-muted-foreground"
-                    title={formatFullTime(run.startedAt)}
-                  >
-                    {formatStarted(run.startedAt, now)}
-                  </TableCell>
-                  <TableCell className="whitespace-nowrap py-2.5 pl-4 pr-2 text-right tabular-nums text-muted-foreground">
-                    {run.finishedAt ? formatDuration(run.finishedAt - run.startedAt) : "…"}
-                  </TableCell>
-                  <TableCell className="px-1 py-2.5">
-                    <Button
-                      variant="ghost"
-                      size="icon-sm"
-                      aria-label={`Open run ${work.label ?? run.id}`}
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        onOpenRun(run.id);
-                      }}
-                    >
-                      <ChevronRight aria-hidden="true" />
-                    </Button>
-                  </TableCell>
-                </TableRow>
+                      {formatStarted(run.startedAt, now)}
+                    </TableCell>
+                    <TableCell className="whitespace-nowrap py-2.5 pl-4 pr-2 text-right tabular-nums text-muted-foreground">
+                      {runDuration(run)}
+                    </TableCell>
+                    <TableCell className="px-1 py-2.5">{openButton(run, work.label)}</TableCell>
+                  </TableRow>
+                  {isOpen
+                    ? group.earlier.map((attempt) => (
+                        <TableRow
+                          key={attempt.id}
+                          onClick={() => onOpenRun(attempt.id)}
+                          className="cursor-pointer bg-muted/60"
+                        >
+                          <TableCell className="py-2 pl-6 pr-4">
+                            <div className="flex items-center gap-1.5 text-[0.8125rem] text-muted-foreground">
+                              <CornerDownRight
+                                className="size-3.5 shrink-0 text-subtle-foreground"
+                                aria-hidden="true"
+                              />
+                              <span>{attemptLabel(attempt)}</span>
+                            </div>
+                          </TableCell>
+                          <TableCell className="px-4 py-2">
+                            <StatusBadge status={attempt.status} />
+                          </TableCell>
+                          <TableCell className="px-4 py-2">
+                            <RunOutcome run={attempt} />
+                          </TableCell>
+                          <TableCell className="px-4 py-2 text-[0.8125rem] text-subtle-foreground">
+                            {attempt.harness ?? "–"}
+                          </TableCell>
+                          <TableCell
+                            className="whitespace-nowrap px-4 py-2 text-right tabular-nums text-muted-foreground"
+                            title={formatFullTime(attempt.startedAt)}
+                          >
+                            {formatStarted(attempt.startedAt, now)}
+                          </TableCell>
+                          <TableCell className="whitespace-nowrap py-2 pl-4 pr-2 text-right tabular-nums text-muted-foreground">
+                            {runDuration(attempt)}
+                          </TableCell>
+                          <TableCell className="px-1 py-2">
+                            {openButton(
+                              attempt,
+                              `${work.label} ${attemptLabel(attempt).toLowerCase()}`,
+                            )}
+                          </TableCell>
+                        </TableRow>
+                      ))
+                    : null}
+                </Fragment>
               );
             })}
           </TableBody>
@@ -353,61 +445,80 @@ export function RunsTable({
       </div>
 
       <ul className="overflow-hidden rounded-lg border border-border bg-card md:hidden">
-        {runs.map((run, index) => {
+        {groups.map((group) => {
+          const run = group.latest;
           const work = runWorkLink(run);
+          const isOpen = expanded.has(group.key);
           const showOutcome =
             hasResultLink(run) ||
             (run.status === "in_progress"
               ? Boolean(run.step)
               : run.status !== "succeeded" && Boolean(run.outcomeReason));
           return (
-            <li
-              key={run.id}
-              onClick={() => onOpenRun(run.id)}
-              className="flex cursor-pointer items-center gap-2 border-b border-border px-3 py-3 last:border-b-0 hover:bg-hover"
-            >
-              <div className="min-w-0 flex-1 space-y-1.5">
-                <div
-                  className={cn(
-                    "line-clamp-2 break-words font-medium [&_.ref-link]:inline!",
-                    isRepeat(index) && "text-subtle-foreground",
-                  )}
-                >
-                  {isRepeat(index) ? (
-                    <CornerDownRight
-                      className="mr-1 inline size-3.5 align-[-2px]"
-                      aria-label="Repeat attempt"
-                    />
-                  ) : null}
-                  <TicketKey label={work.label} href={work.href} />
-                </div>
-                <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
-                  <StatusBadge status={run.status} />
-                  <span className="tabular-nums" title={formatFullTime(run.startedAt)}>
-                    {formatStarted(run.startedAt, now)}
-                  </span>
-                  {run.finishedAt ? (
-                    <span className="tabular-nums text-subtle-foreground">
-                      {formatDuration(run.finishedAt - run.startedAt)}
-                    </span>
-                  ) : null}
-                </div>
-                {showOutcome ? <RunOutcome run={run} wrap /> : null}
-                <div className="truncate text-xs text-subtle-foreground">
-                  {[runContext(run), run.harness].filter(Boolean).join(" · ")}
-                </div>
-              </div>
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                aria-label={`Open run ${work.label ?? run.id}`}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onOpenRun(run.id);
-                }}
+            <li key={group.key} className="border-b border-border last:border-b-0">
+              <div
+                onClick={() => onOpenRun(run.id)}
+                className="flex cursor-pointer items-center gap-2 px-3 py-3 hover:bg-hover"
               >
-                <ChevronRight aria-hidden="true" />
-              </Button>
+                <div className="min-w-0 flex-1 space-y-1.5">
+                  <div className="line-clamp-2 break-words font-medium [&_.ref-link]:inline!">
+                    <TicketKey label={work.label} href={work.href} />
+                  </div>
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+                    <StatusBadge status={run.status} />
+                    <span className="tabular-nums" title={formatFullTime(run.startedAt)}>
+                      {formatStarted(run.startedAt, now)}
+                    </span>
+                    {run.finishedAt ? (
+                      <span className="tabular-nums text-subtle-foreground">
+                        {runDuration(run)}
+                      </span>
+                    ) : null}
+                    {group.earlier.length > 0 ? (
+                      <AttemptsToggle
+                        count={group.earlier.length}
+                        expanded={isOpen}
+                        label={work.label}
+                        onToggle={() => toggle(group.key)}
+                      />
+                    ) : null}
+                  </div>
+                  {showOutcome ? <RunOutcome run={run} wrap /> : null}
+                  <div className="truncate text-xs text-subtle-foreground">
+                    {[runContext(run), run.harness].filter(Boolean).join(" · ")}
+                  </div>
+                </div>
+                {openButton(run, work.label)}
+              </div>
+              {isOpen ? (
+                <ul className="border-t border-border bg-muted/60">
+                  {group.earlier.map((attempt) => (
+                    <li
+                      key={attempt.id}
+                      onClick={() => onOpenRun(attempt.id)}
+                      className="flex cursor-pointer items-center gap-2 border-b border-border/70 py-2 pl-6 pr-3 last:border-b-0 hover:bg-hover"
+                    >
+                      <CornerDownRight
+                        className="size-3.5 shrink-0 text-subtle-foreground"
+                        aria-hidden="true"
+                      />
+                      <div className="min-w-0 flex-1 space-y-1">
+                        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+                          <span className="text-[0.8125rem]">{attemptLabel(attempt)}</span>
+                          <StatusBadge status={attempt.status} />
+                          <span className="tabular-nums">
+                            {formatStarted(attempt.startedAt, now)}
+                          </span>
+                        </div>
+                        {attempt.status !== "succeeded" && attempt.outcomeReason ? (
+                          <RunOutcome run={attempt} wrap />
+                        ) : null}
+                      </div>
+                      {openButton(attempt, `${work.label} ${attemptLabel(attempt).toLowerCase()}`)}
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
             </li>
           );
         })}
