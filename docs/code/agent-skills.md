@@ -4,7 +4,7 @@ sidebarLabel: "Agent Skills"
 description: "Install DevIntern skills for Codex or Claude Code to set up a worker, configure a workspace, delegate implementation tasks, and report bugs."
 section: "Automation"
 order: 1
-dateModified: 2026-10-16
+dateModified: 2026-11-12
 tags: ["skills", "codex", "claude-code", "worker"]
 ---
 
@@ -48,7 +48,7 @@ Installing a skill gives your agent instructions. It does not install DevIntern,
 
 - **Setup:** the setup skill helps check or install Bun, Git, DevIntern Code, and your chosen coding agent. You still need to authorize source-control, tracker, and agent access on the worker host. See the [quick start](quick-start.md) and [relay guide](relay.md).
 - **Workspace configuration:** an existing workspace is required. The skill preserves existing settings and checks whether a change needs a live reload or restart. See [workspaces](workspaces.md).
-- **Delegation:** configure the target repository in the workspace and run a worker with automation access through the Worker Pilot or a paid license. The installed CLI must support `devintern worker add`, including the flags used by the skill; check `devintern worker add --help`. The agent checks repository identity and submits a self-contained brief. See [ad-hoc worker tasks](worker.md#ad-hoc-tasks-worker-add).
+- **Delegation:** configure the target repository in the workspace and run a worker with automation access through the Worker Pilot or a paid license. The installed CLI must support `devintern worker add`, including the flags used by the skill; check `devintern worker add --help`. The agent checks repository identity and submits a self-contained brief. See [Delegate Tasks to the Worker](delegation.md).
 - **Bug reports:** the installed CLI must support `devintern report`; check `devintern report --help`. Signed-in reports are preferred, while anonymous reports need a contact email. The skill previews the redacted payload and asks before submitting. See [reporting bugs](reporting-bugs.md).
 
 The skills operate DevIntern Code. DevIntern PM and PM Desktop setup use their own [quick start](../pm/quick-start.md).

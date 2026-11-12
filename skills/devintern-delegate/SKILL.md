@@ -46,4 +46,4 @@ A timeout, worker stop, or inconclusive wait can produce a `status: "failed"` re
 
 Return the repository, task ID/key, and whether this was a new enqueue or a deduplicated task. Say whether the task is queued, completed, failed, or its completion is unknown. Include a PR URL only when confirmed by the run artifacts or dashboard; the enqueue response itself does not provide one.
 
-For command behavior and troubleshooting, consult the [ad-hoc task guide](https://devintern.com/docs/code/worker#ad-hoc-tasks-worker-add). When working in the DevIntern source repository, the corresponding source is `docs/code/worker.md`; check the installed CLI's help when documentation and installed capabilities differ.
+For command behavior and troubleshooting, consult the [delegation guide](https://devintern.com/docs/code/delegation). When working in the DevIntern source repository, the corresponding source is `docs/code/delegation.md`; check the installed CLI's help when documentation and installed capabilities differ.
