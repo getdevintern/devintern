@@ -9,7 +9,7 @@
   "plugins": [
     {
       "name": "devintern",
-      "source": "./",
+      "source": "./plugins/devintern",
       "description": "Skills that teach Claude Code to set up and operate a self-hosted DevIntern worker.",
       "category": "development",
       "tags": ["skills", "worker", "automation"]
