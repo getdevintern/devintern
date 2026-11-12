@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "devintern",
+  "description": "DevIntern Agent Skills for setting up a worker, configuring a workspace, delegating tasks, and reporting bugs.",
+  "owner": {
+    "name": "DevIntern",
+    "url": "https://devintern.com"
+  },
+  "plugins": [
+    {
+      "name": "devintern",
+      "source": "./",
+      "description": "Skills that teach Claude Code to set up and operate a self-hosted DevIntern worker.",
+      "category": "development",
+      "tags": ["skills", "worker", "automation"]
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "name": "devintern",
+  "displayName": "DevIntern",
+  "description": "Skills that teach Claude Code to set up a DevIntern worker, configure its workspace, delegate implementation tasks, and file redacted bug reports.",
+  "author": {
+    "name": "DevIntern",
+    "url": "https://devintern.com"
+  },
+  "homepage": "https://devintern.com/docs/code/agent-skills",
+  "repository": "https://github.com/getdevintern/devintern",
+  "license": "FSL-1.1-ALv2",
+  "keywords": ["devintern", "skills", "worker", "coding-agent", "automation"]
+}

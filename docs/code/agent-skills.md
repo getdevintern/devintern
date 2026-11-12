@@ -4,7 +4,7 @@ sidebarLabel: "Agent Skills"
 description: "Install DevIntern skills for Codex or Claude Code to set up a worker, configure a workspace, delegate implementation tasks, and report bugs."
 section: "Automation"
 order: 1
-dateModified: 2026-10-16
+dateModified: 2026-11-12
 tags: ["skills", "codex", "claude-code", "worker"]
 ---
 
@@ -30,6 +30,17 @@ bunx skills add getdevintern/devintern --list
 ```
 
 The skills live in the repository's top-level [skills directory](https://github.com/getdevintern/devintern/tree/main/skills). The [Skills CLI](https://github.com/vercel-labs/skills) installs their instructions and supporting references for the selected agent.
+
+### Install as a Claude Code plugin
+
+The repository is also a Claude Code plugin marketplace. Inside Claude Code, run:
+
+```text
+/plugin marketplace add getdevintern/devintern
+/plugin install devintern@devintern
+```
+
+From a shell, use `claude plugin marketplace add getdevintern/devintern` and `claude plugin install devintern@devintern`. The plugin installs all four skills, namespaced as `devintern:devintern-setup`, `devintern:devintern-workspace`, `devintern:devintern-delegate`, and `devintern:devintern-report`. Run `/plugin marketplace update devintern` to pick up new skill versions.
 
 ## Choose a skill
 
