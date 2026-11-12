@@ -28,7 +28,7 @@ The overview also summarizes activity and success rates, which is useful for spo
 
 ## Follow task activity
 
-Open **Task activity** to see the step board. It includes all in-progress runs and the latest 100 runs, grouped by their explicitly recorded current or last step. Search by task, repository, branch, agent, or step, and filter by status. Select a card to see its activity and outcome, then choose **Show run details** for transcripts, artifacts, completed stages, and retry actions.
+Open **Task activity** to see what the worker is doing right now. It lists tasks that are not yet completed, one row per task with repeat attempts folded together. Each row shows a phase (Preparing, Assessing, Implementing, Reviewing, or Publishing), the exact step underneath (for example verify or repair 2, or "between steps"), and live elapsed time; open a row for its run details. Tasks whose latest attempt was deferred in the last 48 hours (for example after an agent usage limit) appear under **Waiting to retry** with the reason. Finished tasks leave the list and appear under a collapsed **Recently finished** section. When nothing is running, the page shows worker status and the queue size.
 
 Step tracking follows the task pipeline, including preparation, feasibility, implementation, commit, auto-review, publication, and custom steps. Repeated steps update their start time. Status badges distinguish running work from succeeded, failed, deferred, escalated, or abandoned runs; terminal runs retain their last recorded step without claiming it is still running. Between steps, the board identifies the last step explicitly.
 
