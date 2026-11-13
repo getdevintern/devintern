@@ -540,7 +540,7 @@ export function buildRetryQueueAcquirer(
   return new RetryQueueAcquirer({
     store,
     runDbPath: workspaceDbPath(deps.workspaceDir),
-    execute: (taskKey, routable, retry, onRepoResolved, queueClaim) => {
+    execute: (taskKey, routable, retry, queueClaim) => {
       const retryTeam = retry.team ? findTeam(deps.config, retry.team) : undefined;
       return createFleetTaskExecutor(
         {
@@ -553,7 +553,6 @@ export function buildRetryQueueAcquirer(
         {
           extraArgs: () => ["--force", ...fleetTaskArgs(deps.config)],
           repo: retry.repo,
-          onRepoResolved,
           queueClaim,
           source: "retry",
           // Pin the run this retry targets so session pickup resumes its

@@ -305,25 +305,9 @@ export class InjectedTaskStore {
         repo TEXT NOT NULL,
         status TEXT NOT NULL,
         message TEXT,
-        archived_at INTEGER
+        archived_at INTEGER NOT NULL
       )
     `);
-    const outcomeColumns = this.db
-      .query("PRAGMA table_info(pruned_injected_task_outcomes)")
-      .all() as Array<{ name: string }>;
-    if (!outcomeColumns.some((column) => column.name === "archived_at")) {
-      try {
-        this.db.run("ALTER TABLE pruned_injected_task_outcomes ADD COLUMN archived_at INTEGER");
-      } catch (error) {
-        if (!/duplicate column name/i.test((error as Error).message)) throw error;
-      }
-    }
-    // Old archives have no prune timestamp; give in-flight waiters one recovery
-    // window after upgrade rather than deleting those outcomes immediately.
-    this.db.run(
-      "UPDATE pruned_injected_task_outcomes SET archived_at = ? WHERE archived_at IS NULL",
-      [Date.now()],
-    );
     // Older databases predate the durable auto-resume budget; add the column
     // in place instead of requiring a migration step.
     const columns = this.db.query("PRAGMA table_info(injected_tasks)").all() as Array<{

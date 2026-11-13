@@ -104,7 +104,7 @@ describe("RetryQueueAcquirer", () => {
     const acquirer = new RetryQueueAcquirer({
       store,
       runDbPath: dbPath,
-      execute: async (_key, _routable, _retry, _onRepoResolved, queueClaim) => {
+      execute: async (_key, _routable, _retry, queueClaim) => {
         const current = runs.createRun({
           origin: "task",
           taskKey: "PROJ-1",
@@ -135,7 +135,7 @@ describe("RetryQueueAcquirer", () => {
     const acquirer = new RetryQueueAcquirer({
       store,
       runDbPath: dbPath,
-      execute: async (_key, _routable, _retry, _onRepoResolved, queueClaim) => {
+      execute: async (_key, _routable, _retry, queueClaim) => {
         const runs = new RunStore(dbPath);
         const current = runs.createRun({
           origin: "task",
@@ -171,8 +171,7 @@ describe("RetryQueueAcquirer", () => {
     const acquirer = new RetryQueueAcquirer({
       store,
       runDbPath: dbPath,
-      execute: async (_key, _routable, _retry, onRepoResolved, queueClaim) => {
-        onRepoResolved("backend");
+      execute: async (_key, _routable, _retry, queueClaim) => {
         const current = runs.createRun({
           origin: "task",
           taskKey: "PROJ-1",
@@ -206,8 +205,7 @@ describe("RetryQueueAcquirer", () => {
     const acquirer = new RetryQueueAcquirer({
       store,
       runDbPath: dbPath,
-      execute: async (_key, _routable, retry, onRepoResolved) => {
-        onRepoResolved("backend");
+      execute: async (_key, _routable, retry) => {
         const raw = new Database(dbPath);
         raw.run("UPDATE runs SET started_at = ? WHERE id = ?", [retry.startedAt!, earlier]);
         raw.close();

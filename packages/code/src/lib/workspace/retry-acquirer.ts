@@ -30,7 +30,6 @@ export interface RetryQueueAcquirerOptions {
     taskKey: string,
     routable: RoutableTask,
     retry: ScheduledRetry,
-    onRepoResolved: (repo: string) => void,
     queueClaim: string,
   ) => Promise<TaskExecutionResult>;
   intervalSeconds: number;
@@ -119,7 +118,6 @@ export class RetryQueueAcquirer implements Acquirer {
         retry.taskKey,
         toRoutableTask({ key: retry.taskKey, labels: [], components: [] }),
         retry,
-        () => {},
         queueClaim,
       );
       if (result === true) {

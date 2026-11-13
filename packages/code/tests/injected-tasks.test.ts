@@ -400,29 +400,6 @@ describe("InjectedTaskStore", () => {
     }
   });
 
-  test("opening an existing outcome archive gives old rows a recovery window", () => {
-    const legacyPath = join(dir, "legacy-outcomes.db");
-    const legacy = new Database(legacyPath);
-    legacy.run(`CREATE TABLE pruned_injected_task_outcomes (
-      task_id INTEGER PRIMARY KEY, repo TEXT NOT NULL, status TEXT NOT NULL, message TEXT
-    )`);
-    legacy.run(
-      "INSERT INTO pruned_injected_task_outcomes VALUES (42, 'backend', 'failed', 'legacy failure')",
-    );
-    legacy.close();
-
-    const migrated = new InjectedTaskStore(legacyPath);
-    try {
-      expect(migrated.getPrunedOutcome(42)?.message).toBe("legacy failure");
-      expect(migrated.pruneSettled(0)).toBe(0);
-      expect(migrated.getPrunedOutcome(42)?.message).toBe("legacy failure");
-      expect(migrated.pruneSettled(0, Date.now() + 24 * 60 * 60 * 1_000 + 1)).toBe(0);
-      expect(migrated.getPrunedOutcome(42)).toBeNull();
-    } finally {
-      migrated.close();
-    }
-  });
-
   test("pruneSettled unlinks each pruned row's prompt file", () => {
     const promptFile = join(dir, "prompt-done.md");
     writeFileSync(promptFile, "sensitive operator context");

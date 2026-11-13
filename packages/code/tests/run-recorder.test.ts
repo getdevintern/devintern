@@ -238,9 +238,6 @@ describe("RunStore", () => {
     expect(run?.repo).toBe("widgets");
     expect(run?.prNumber).toBe(7);
     expect(run?.prUrl).toBe("https://github.com/acme/widgets/pull/7");
-    expect(
-      store.latestRunForClaim({ taskKey: "PROJ-4", origin: "task", repo: "widgets" })?.id,
-    ).toBe(id);
   });
 
   test("setRunPr records the PR repo when the run has no repo", () => {

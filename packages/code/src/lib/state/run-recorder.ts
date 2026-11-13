@@ -267,13 +267,7 @@ export class RunStore {
     if (!columns.some((c) => c.name === "queue_claim")) {
       this.db.run("ALTER TABLE runs ADD COLUMN queue_claim TEXT");
     }
-    // One queue claim can produce several runs when the worker changes harnesses.
-    const claimIndex = this.db
-      .query("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_runs_queue_claim'")
-      .get() as { sql: string } | null;
-    if (claimIndex?.sql.startsWith("CREATE UNIQUE INDEX")) {
-      this.db.run("DROP INDEX idx_runs_queue_claim");
-    }
+    // Not unique: one queue claim can produce several runs when the worker changes harnesses.
     this.db.run("CREATE INDEX IF NOT EXISTS idx_runs_queue_claim ON runs(queue_claim)");
     this.db.run("CREATE INDEX IF NOT EXISTS idx_runs_automation_id ON runs(automation_id)");
 
@@ -668,35 +662,6 @@ export class RunStore {
       .query(`SELECT * FROM runs ${where} ORDER BY started_at DESC, id DESC LIMIT ? OFFSET ?`)
       .all(...params, limit, offset) as Record<string, unknown>[];
     return rows.map((row) => this.rowToRun(row));
-  }
-
-  /** Newest run in one queue claim's source and repo scope. */
-  latestRunForClaim(claim: {
-    taskKey: string;
-    origin: RunOrigin;
-    repo?: string;
-    team?: string;
-  }): RunRecord | null {
-    const clauses = ["task_key = ?", "origin = ?"];
-    const params: (string | number)[] = [claim.taskKey, claim.origin];
-    if (claim.repo === undefined) {
-      clauses.push("repo IS NULL");
-    } else {
-      clauses.push("repo = ?");
-      params.push(claim.repo);
-    }
-    if (claim.team === undefined) {
-      clauses.push("team IS NULL");
-    } else {
-      clauses.push("team = ?");
-      params.push(claim.team);
-    }
-    const row = this.db
-      .query(
-        `SELECT * FROM runs WHERE ${clauses.join(" AND ")} ORDER BY started_at DESC, id DESC LIMIT 1`,
-      )
-      .get(...params) as Record<string, unknown> | null;
-    return row ? this.rowToRun(row) : null;
   }
 
   /** Latest run from one queue execution, including harness failover attempts. */

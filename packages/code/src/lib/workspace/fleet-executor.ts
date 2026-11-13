@@ -255,8 +255,6 @@ export function createFleetTaskExecutor(
      * queue to persist the pid for interrupt recovery.
      */
     onChildSpawn?: (pid: number) => void;
-    /** Report the repo selected by live routing before the attempt starts. */
-    onRepoResolved?: (repo: string) => void;
   } = {},
 ): (taskKey: string, routable: RoutableTask) => Promise<TaskExecutionResult> {
   const { config, workspaceDir, skips, repoManager } = deps;
@@ -313,7 +311,6 @@ export function createFleetTaskExecutor(
       console.error(`❌ ${scope} routed ${taskKey} to unknown repo "${decision.repo}"`);
       return false;
     }
-    options.onRepoResolved?.(repo.name);
 
     // Defer before touching git: when the whole harness chain is usage-limited
     // or cooling down, the CLI child would exit without starting work, yet the
