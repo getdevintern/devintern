@@ -39,15 +39,24 @@ describe("AutomationAcquirer", () => {
         extraArgs: ["--create-pr"],
         automationArgs: (a: AutomationConfig) => automationTaskArgs(a, ["--create-pr"]),
       };
-      expect(resolveAutomationRunArgs(automationOn, options)).toEqual(["--create-pr"]);
-      expect(resolveAutomationRunArgs(automationOff, options)).toEqual(["--no-git"]);
+      expect(resolveAutomationRunArgs(automationOn, options)).toEqual([
+        "--create-pr",
+        "--skip-clarity-check",
+      ]);
+      expect(resolveAutomationRunArgs(automationOff, options)).toEqual([
+        "--no-git",
+        "--skip-clarity-check",
+      ]);
     });
 
     test("falls back to the shared flags with the open_pr policy applied", () => {
       expect(
         resolveAutomationRunArgs(automation(true), { extraArgs: () => ["--auto-review"] }),
-      ).toEqual(["--auto-review", "--create-pr"]);
-      expect(resolveAutomationRunArgs(automation(false), {})).toEqual(["--no-git"]);
+      ).toEqual(["--auto-review", "--create-pr", "--skip-clarity-check"]);
+      expect(resolveAutomationRunArgs(automation(false), {})).toEqual([
+        "--no-git",
+        "--skip-clarity-check",
+      ]);
     });
 
     test("the fallback strips PR flags from custom extraArgs when open_pr is off", () => {
@@ -55,7 +64,7 @@ describe("AutomationAcquirer", () => {
         resolveAutomationRunArgs(automation(false), {
           extraArgs: () => ["--create-pr", "--auto-review"],
         }),
-      ).toEqual(["--no-git"]);
+      ).toEqual(["--no-git", "--skip-clarity-check"]);
     });
   });
 
