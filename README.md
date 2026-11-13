@@ -188,7 +188,14 @@ bunx skills add getdevintern/devintern \
   --skill devintern-setup devintern-workspace devintern-delegate devintern-report --agent codex
 ```
 
-`--agent claude-code` for Claude Code, `--global` for user-wide availability. Four skills cover the whole worker lifecycle: [setup](skills/devintern-setup/SKILL.md), [workspace configuration](skills/devintern-workspace/SKILL.md), [delegating a task](skills/devintern-delegate/SKILL.md), and filing a [redacted bug report](skills/devintern-report/SKILL.md).
+In Claude Code, install them as a plugin instead:
+
+```text
+/plugin marketplace add getdevintern/devintern
+/plugin install devintern@devintern
+```
+
+For the Skills CLI, `--agent claude-code` targets Claude Code and `--global` makes the skills available user-wide. Four skills cover the whole worker lifecycle: [setup](plugins/devintern/skills/devintern-setup/SKILL.md), [workspace configuration](plugins/devintern/skills/devintern-workspace/SKILL.md), [delegating a task](plugins/devintern/skills/devintern-delegate/SKILL.md), and filing a [redacted bug report](plugins/devintern/skills/devintern-report/SKILL.md).
 
 The skills are instructions for your agent. They do not install the CLI, connect accounts, or start a worker by themselves. See the [agent skills guide](docs/code/agent-skills.md) for prerequisites and example prompts.
 

@@ -29,7 +29,7 @@ To list the skills available from the public repository without installing them:
 bunx skills add getdevintern/devintern --list
 ```
 
-The skills live in the repository's top-level [skills directory](https://github.com/getdevintern/devintern/tree/main/skills). The [Skills CLI](https://github.com/vercel-labs/skills) installs their instructions and supporting references for the selected agent.
+The skills live in the repository's [plugin skills directory](https://github.com/getdevintern/devintern/tree/main/plugins/devintern/skills). The [Skills CLI](https://github.com/vercel-labs/skills) installs their instructions and supporting references for the selected agent.
 
 ### Install as a Claude Code plugin
 
@@ -45,7 +45,7 @@ From a shell, use `claude plugin marketplace add getdevintern/devintern` and `cl
 For a smaller download, add the marketplace from a shell with a sparse checkout of only the plugin files, then install as above:
 
 ```bash
-claude plugin marketplace add getdevintern/devintern --sparse .claude-plugin plugins skills
+claude plugin marketplace add getdevintern/devintern --sparse .claude-plugin plugins
 ```
 
 #### Share with your team
@@ -59,7 +59,7 @@ To offer the plugin to everyone who works in a repository, commit this `.claude/
       "source": {
         "source": "github",
         "repo": "getdevintern/devintern",
-        "sparsePaths": [".claude-plugin", "plugins", "skills"]
+        "sparsePaths": [".claude-plugin", "plugins"]
       }
     }
   },
@@ -69,18 +69,18 @@ To offer the plugin to everyone who works in a repository, commit this `.claude/
 }
 ```
 
-Running `claude plugin marketplace add getdevintern/devintern --scope project --sparse .claude-plugin plugins skills` and then `claude plugin install devintern@devintern --scope project` from the repository root writes the same file.
+Running `claude plugin marketplace add getdevintern/devintern --scope project --sparse .claude-plugin plugins` and then `claude plugin install devintern@devintern --scope project` from the repository root writes the same file.
 
 After a teammate accepts the workspace trust dialog for the repository, Claude Code registers the DevIntern marketplace for them. Enabling the plugin in project settings does not download it, so each teammate runs `claude plugin install devintern@devintern --scope project` once. For Codex and other agents, use `bunx skills add` as described above.
 
 ## Choose a skill
 
-| Skill                                                                                                 | When to use it                                                                                           | Example prompt                                                                                                                                            |
-| ----------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [devintern-setup](https://github.com/getdevintern/devintern/tree/main/skills/devintern-setup)         | First-time installation, account connections, authorization, and worker activation.                      | "Set up a DevIntern worker for this repo using Codex and GitHub Issues. Help me connect the accounts and verify it is ready."                             |
-| [devintern-workspace](https://github.com/getdevintern/devintern/tree/main/skills/devintern-workspace) | Existing workspace repositories, teams, routing, schedules, monitors, pipelines, and runtime policy.     | "Add a weekly dependency-health automation for web-app on Mondays at 09:00 in the worker host's timezone, opening a PR for at most one verified upgrade." |
-| [devintern-delegate](https://github.com/getdevintern/devintern/tree/main/skills/devintern-delegate)   | Dispatch agreed implementation work to a registered worker repository without creating a tracker ticket. | "Delegate the checkout retry fix we agreed on to the backend repo through DevIntern. Include the acceptance criteria and return the task ID."             |
-| [devintern-report](https://github.com/getdevintern/devintern/tree/main/skills/devintern-report)       | Diagnose a DevIntern failure and file a redacted bug report without leaking secrets or task content.     | "The worker crashed after switching harnesses. Check whether this is a DevIntern bug and, if so, file a report with the last run and the log."            |
+| Skill                                                                                                                   | When to use it                                                                                           | Example prompt                                                                                                                                            |
+| ----------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [devintern-setup](https://github.com/getdevintern/devintern/tree/main/plugins/devintern/skills/devintern-setup)         | First-time installation, account connections, authorization, and worker activation.                      | "Set up a DevIntern worker for this repo using Codex and GitHub Issues. Help me connect the accounts and verify it is ready."                             |
+| [devintern-workspace](https://github.com/getdevintern/devintern/tree/main/plugins/devintern/skills/devintern-workspace) | Existing workspace repositories, teams, routing, schedules, monitors, pipelines, and runtime policy.     | "Add a weekly dependency-health automation for web-app on Mondays at 09:00 in the worker host's timezone, opening a PR for at most one verified upgrade." |
+| [devintern-delegate](https://github.com/getdevintern/devintern/tree/main/plugins/devintern/skills/devintern-delegate)   | Dispatch agreed implementation work to a registered worker repository without creating a tracker ticket. | "Delegate the checkout retry fix we agreed on to the backend repo through DevIntern. Include the acceptance criteria and return the task ID."             |
+| [devintern-report](https://github.com/getdevintern/devintern/tree/main/plugins/devintern/skills/devintern-report)       | Diagnose a DevIntern failure and file a redacted bug report without leaking secrets or task content.     | "The worker crashed after switching harnesses. Check whether this is a DevIntern bug and, if so, file a report with the last run and the log."            |
 
 Skills can be installed independently. Each includes instructions for its scope and links to the relevant DevIntern documentation.
 
