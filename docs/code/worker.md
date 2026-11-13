@@ -187,11 +187,43 @@ cron = "0 10 * * 3"
 query = "sprint in openSprints() AND \"Story Points\" is EMPTY"
 ```
 
-Each entry needs a unique `id`, boolean `enabled`, non-empty `query`, and exactly one of `cron` or `interval`. Omitting the table (or leaving every entry disabled) changes nothing: estimation is simply off, and `[defaults].task_query` is never estimated as a side effect. The workspace tracker must support estimation (Jira, Linear, Azure DevOps, Asana via a custom field; GitHub and GitLab post comment-only estimates); Trello/markdown workspaces fail at startup with a clear error. `worker init` does not ask about estimations — add tables by hand.
+Each entry needs a unique `id`, boolean `enabled`, non-empty `query`, and exactly one of `cron` or `interval`. Omitting the table (or leaving every entry disabled) changes nothing: estimation is simply off, and `[defaults].task_query` is never estimated as a side effect. Entries without `team` use the workspace tracker, which must support estimation (Jira, Linear, Azure DevOps, Asana via a custom field; GitHub and GitLab post comment-only estimates); Trello/markdown workspaces fail at startup with a clear error. `worker init` does not ask about estimations — add tables by hand.
 
 Estimation entries live-reload with `workspace.toml`: added and re-enabled entries schedule their next future occurrence, changed schedules reset their cursor, query edits apply to the next sweep, and removed entries stop scheduling without interrupting a sweep already in progress.
 
 When an entry comes due the worker runs one-shot `devintern --estimate --query "<query>"` from the workspace home. That path keeps all of the interactive behavior: tickets younger than 24 hours are skipped, already-estimated tickets are skipped unless the ticket changed since the estimate, changed tickets are re-estimated with the estimate comment updated in place, points are written to the tracker field, and usage-limit aborts exit cleanly so the next occurrence retries. Each sweep is recorded with its own `estimate` origin (plus the schedule id) in the [dashboard](./dashboard.md) — it never shows up as a scheduled implement run.
+
+### Per-team estimations
+
+In a [multi-team workspace](./workspaces.md#multiple-teams-and-tracker-boards), add `team = "<team name>"` to run a sweep against that team's tracker and credentials instead of `[defaults].tracker`. For example, a workspace with Jira defaults and a GitHub Issues team can estimate both:
+
+```toml
+[defaults]
+tracker = "jira"
+
+[[teams]]
+name = "oss"
+tracker = "github"
+task_query = "label:devintern"
+env_file = "teams/oss.env"   # GITHUB_TOKEN, GITHUB_REPO=acme/sdk
+
+[[estimations]]
+id = "jira-groom"            # no team: [defaults].tracker + shared .env
+enabled = true
+cron = "0 9 * * 1-5"
+query = "status = 'To Do' AND labels IN (NeedsEstimate)"
+
+[[estimations]]
+id = "oss-groom"
+enabled = true
+team = "oss"
+interval = "6h"
+query = "label:needs-estimate"
+```
+
+A team-scoped sweep gets the same environment layering as that team's task runs: the workspace `.env`, then the team's `env_file`, then its inline `[teams.env]`, with `TASK_TRACKER` pinned to the team's tracker. The `query` uses that tracker's query language. Run records are attributed to the team in the dashboard. A team's fixed `repo` is ignored, because estimation is tracker-only and never touches a repository. GitHub Issues teams must set `GITHUB_REPO` in their env, which the worker already requires at startup.
+
+The worker refuses to start when `team` names no `[[teams]]` entry, or when that team's tracker can't estimate (Trello, markdown). Entries with `team` don't need `[defaults].tracker`. Entries without `team` keep the existing behavior and still require it. You can add, change, or remove `team` on an entry with a live reload; the next occurrence uses the new team.
 
 ### Serialization
 

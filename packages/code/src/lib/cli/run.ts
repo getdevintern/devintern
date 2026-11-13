@@ -18,6 +18,7 @@ import { finishTaskRun } from "../state/task-run";
 import { TaskFormatter } from "../task/formatter";
 import { normalizeTaskKeys } from "../task/normalize-task-keys";
 import { TaskTrackerManager } from "../trackers/manager";
+import { WORKSPACE_TEAM_ENV } from "../workspace/env";
 import {
   isWorkerChild,
   USAGE_LIMIT_EXIT_CODE,
@@ -197,6 +198,9 @@ export async function runEstimationBatch(input: EstimationBatchInput): Promise<v
         origin: "estimate",
         taskKey,
         tracker: activeTrackerType,
+        // Team-scoped `[[estimations]]` sweeps carry the owning team, the
+        // same attribution team task runs record.
+        team: process.env[WORKSPACE_TEAM_ENV] || undefined,
         // Every origin records the harness that executed it.
         harness: resolvedAgent.harness.name,
         ...(estimationScheduleId ? { automationId: estimationScheduleId } : {}),
