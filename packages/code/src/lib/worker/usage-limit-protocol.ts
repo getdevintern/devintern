@@ -14,6 +14,7 @@
 import { readFileSync, writeFileSync } from "fs";
 
 import { resetHintToMs, UsageLimitError } from "@devintern/agent-harness";
+import type { UsageLimitPeriod } from "@devintern/agent-harness";
 
 /** sysexits EX_TEMPFAIL — the worker retries on the next harness. */
 export const USAGE_LIMIT_EXIT_CODE = 75;
@@ -49,14 +50,46 @@ export const WORKER_CHILD_ENV = "DEVINTERN_WORKER_CHILD";
 /** Absolute path the child writes a JSON usage-limit hint into. */
 export const USAGE_LIMIT_FILE_ENV = "DEVINTERN_USAGE_LIMIT_FILE";
 
-/** Fallback cooldown when the reset hint cannot be parsed. */
+/**
+ * First fallback cooldown when the reset hint cannot be parsed. The worker
+ * doubles it for each further limit on the same harness without a reset time
+ * (see `WorkerFailover`), up to {@link RATE_LIMIT_FALLBACK_MAX_MS}.
+ */
 export const RATE_LIMIT_FALLBACK_MS = 60 * 60 * 1000;
 
+/** Ceiling for the escalating no-reset-time fallback. */
+export const RATE_LIMIT_FALLBACK_MAX_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Minimum cooldown for a limit that names its quota period but no reset time.
+ * A monthly or weekly quota will not come back within the hour, so probing it
+ * hourly only launches tasks that fail.
+ */
+export const RATE_LIMIT_PERIOD_FLOOR_MS: Record<UsageLimitPeriod, number> = {
+  daily: 4 * 60 * 60 * 1000,
+  weekly: 24 * 60 * 60 * 1000,
+  monthly: 24 * 60 * 60 * 1000,
+};
+
 export interface UsageLimitHint {
-  /** Epoch ms when the limited harness's window ends. */
-  untilMs: number;
+  /**
+   * Epoch ms when the limited harness's window ends, when the agent output
+   * said so. Absent means the reset time is unknown and the parent worker
+   * picks the fallback cooldown.
+   */
+  untilMs?: number;
   /** Human-readable reset hint from the agent output, when present. */
   resetsAt?: string;
+  /** Quota period the limit message named, if any. */
+  period?: UsageLimitPeriod;
+}
+
+const USAGE_LIMIT_PERIODS: readonly string[] = ["daily", "weekly", "monthly"];
+
+function parsePeriod(value: unknown): UsageLimitPeriod | undefined {
+  return typeof value === "string" && USAGE_LIMIT_PERIODS.includes(value)
+    ? (value as UsageLimitPeriod)
+    : undefined;
 }
 
 /** True when this process was spawned by the worker for failover. */
@@ -75,12 +108,15 @@ export function writeUsageLimitHint(error: UsageLimitError): void {
   if (!path) {
     return;
   }
-  const untilMs = resetHintToMs(error.resetHint, Date.now()) ?? Date.now() + RATE_LIMIT_FALLBACK_MS;
+  // Leave `untilMs` null when the output had no parsable reset time: the
+  // parent owns the fallback so it can escalate across repeated limits.
+  const untilMs = resetHintToMs(error.resetHint, Date.now());
   writeFileSync(
     path,
     JSON.stringify({
       resetsAt: error.resetHint ?? null,
       untilMs,
+      period: error.period ?? null,
     }),
   );
 }
@@ -88,31 +124,36 @@ export function writeUsageLimitHint(error: UsageLimitError): void {
 /**
  * Read a hint file written by {@link writeUsageLimitHint}.
  *
- * Missing, empty, or malformed files fall back to a 1-hour cooldown so a
- * crashed child still trips failover instead of spinning.
+ * Missing, empty, or malformed files yield a hint with no `untilMs`, so the
+ * parent applies its fallback cooldown and a crashed child still trips
+ * failover instead of spinning.
  *
  * @param path - Hint file path (from {@link USAGE_LIMIT_FILE_ENV})
  */
 export function readUsageLimitHint(path: string | undefined): UsageLimitHint {
-  const fallback = Date.now() + RATE_LIMIT_FALLBACK_MS;
   if (!path) {
-    return { untilMs: fallback };
+    return {};
   }
   try {
     const raw = readFileSync(path, "utf8").trim();
     if (!raw) {
-      return { untilMs: fallback };
+      return {};
     }
-    const parsed = JSON.parse(raw) as { untilMs?: unknown; resetsAt?: unknown };
+    const parsed = JSON.parse(raw) as { untilMs?: unknown; resetsAt?: unknown; period?: unknown };
     const resetsAt = typeof parsed.resetsAt === "string" ? parsed.resetsAt : undefined;
+    const period = parsePeriod(parsed.period);
     const parsedUntil = typeof parsed.untilMs === "number" ? parsed.untilMs : NaN;
     const untilMs =
       Number.isFinite(parsedUntil) && parsedUntil > Date.now()
         ? parsedUntil
-        : (resetHintToMs(resetsAt, Date.now()) ?? fallback);
-    return { untilMs, resetsAt };
+        : (resetHintToMs(resetsAt, Date.now()) ?? undefined);
+    return {
+      ...(untilMs !== undefined ? { untilMs } : {}),
+      ...(resetsAt ? { resetsAt } : {}),
+      ...(period ? { period } : {}),
+    };
   } catch {
-    return { untilMs: fallback };
+    return {};
   }
 }
 

@@ -1,0 +1,326 @@
+/* Task activity: one row per task that is not yet completed. */
+.ta-section + .ta-section {
+  margin-top: 28px;
+}
+
+.ta-heading {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0 0 8px;
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+.ta-count {
+  color: var(--subtle-foreground);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.ta-idle {
+  margin: 0 0 24px;
+  color: var(--muted-foreground);
+  font-size: 0.875rem;
+  line-height: 1.5;
+}
+
+.ta-idle svg {
+  display: inline-block;
+  margin: -2px 8px 0 0;
+  vertical-align: middle;
+  color: var(--subtle-foreground);
+}
+
+.ta-list {
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card);
+  list-style: none;
+}
+
+.ta-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 19rem 5.5rem;
+  align-items: center;
+  gap: 4px 20px;
+  padding: 12px 16px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  transition: background-color 150ms ease-out;
+}
+
+.ta-row:last-child {
+  border-bottom: 0;
+}
+
+.ta-row:hover {
+  background: var(--hover);
+}
+
+.ta-main,
+.ta-status {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+/* The title button stretches over the row so the whole row opens the run. */
+.ta-open {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--foreground);
+  font-size: 0.875rem;
+  font-weight: 500;
+  line-height: 1.4;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.ta-open::after {
+  position: absolute;
+  inset: 0;
+  border-radius: 7px;
+  content: "";
+}
+
+.ta-open:focus-visible {
+  outline: none;
+}
+
+.ta-open:focus-visible::after {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+
+.ta-meta {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 8px;
+  color: var(--subtle-foreground);
+  font-size: 0.75rem;
+  line-height: 1.5;
+}
+
+.ta-meta > * {
+  min-width: 0;
+}
+
+.ta-meta .ref-link,
+.ta-meta a {
+  position: relative;
+  z-index: 1;
+}
+
+.ta-meta > * + *::before {
+  margin-right: 8px;
+  color: var(--border-strong);
+  content: "·";
+}
+
+.ta-meta .ref-link::before {
+  content: none;
+}
+
+.ta-phase {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.8125rem;
+  font-weight: 500;
+}
+
+.ta-phase-label {
+  display: inline-flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  gap: 6px;
+}
+
+.ta-detail {
+  overflow: hidden;
+  color: var(--muted-foreground);
+  font-size: 0.75rem;
+  line-height: 1.5;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.ta-time {
+  color: var(--muted-foreground);
+  font-size: 0.8125rem;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Pipeline position: filled segments are behind, the brightest is now. */
+.ta-track {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  color: var(--subtle-foreground);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+  cursor: default;
+}
+
+.ta-track-bar {
+  display: inline-flex;
+  gap: 2px;
+}
+
+.ta-track-bar > span {
+  width: 14px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--border-strong);
+}
+
+.ta-track-bar > .is-done {
+  background: color-mix(in srgb, var(--info) 60%, transparent);
+}
+
+.ta-track-bar > .is-current {
+  background: var(--info);
+}
+
+/* Finished tasks: closed by default, quiet. */
+.ta-finished > summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: fit-content;
+  padding: 4px 6px;
+  margin-left: -6px;
+  border-radius: 6px;
+  color: var(--muted-foreground);
+  font-size: 0.875rem;
+  font-weight: 600;
+  list-style: none;
+  cursor: pointer;
+  transition:
+    background-color 150ms ease-out,
+    color 150ms ease-out;
+}
+
+.ta-finished > summary::-webkit-details-marker {
+  display: none;
+}
+
+.ta-finished > summary:hover {
+  background: var(--hover);
+  color: var(--foreground);
+}
+
+.ta-finished > summary:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+
+.ta-finished > summary svg {
+  transition: transform 150ms ease-out;
+}
+
+.ta-finished[open] > summary svg {
+  transform: rotate(90deg);
+}
+
+.ta-finished .ta-list {
+  margin-top: 8px;
+}
+
+.ta-reason {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ta-result {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.8125rem;
+}
+
+.ta-result a {
+  position: relative;
+  z-index: 1;
+}
+
+.ta-footer {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 16px;
+  color: var(--primary);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  transition:
+    background-color 150ms ease-out,
+    color 150ms ease-out;
+}
+
+.ta-footer:hover {
+  background: var(--hover);
+  color: var(--foreground);
+}
+
+.ta-footer:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+
+@media (max-width: 1100px) {
+  .ta-row {
+    grid-template-columns: minmax(0, 1fr) 16rem 5rem;
+    gap: 4px 16px;
+  }
+}
+
+@media (max-width: 767px) {
+  .ta-row {
+    grid-template-columns: minmax(0, 1fr) 4.75rem;
+    gap: 8px 12px;
+    padding: 12px;
+  }
+
+  .ta-main {
+    grid-column: 1 / -1;
+  }
+
+  .ta-status {
+    grid-column: 1;
+  }
+
+  .ta-time {
+    grid-column: 2;
+    grid-row: 2;
+    align-self: start;
+  }
+
+  .ta-open {
+    white-space: normal;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ta-row,
+  .ta-finished > summary,
+  .ta-finished > summary svg {
+    transition: none;
+  }
+}

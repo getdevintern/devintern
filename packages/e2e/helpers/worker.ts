@@ -3,9 +3,9 @@
  *
  * Runs the real built CLI as a long-lived `devintern worker` subprocess against
  * a throwaway workspace: one local bare repository, a deterministic agent, and
- * no tracker credentials. The helper exposes the shared workspace queue so
- * tests can enqueue injected tasks and observe their rows without sleeping on a
- * fixed timer.
+ * no tracker credentials unless a test supplies a fixture tracker's environment.
+ * The helper exposes the shared workspace queue so tests can enqueue injected
+ * tasks and observe their rows without sleeping on a fixed timer.
  */
 
 import { Database } from "bun:sqlite";
@@ -98,6 +98,22 @@ function automationTable(automation: WorkerAutomation): string[] {
   return lines;
 }
 
+/** Serialize one scheduled estimation as a TOML `[[estimations]]` table. */
+function estimationTable(estimation: WorkerEstimation): string[] {
+  const lines = [
+    "[[estimations]]",
+    `id = ${JSON.stringify(estimation.id)}`,
+    `enabled = ${estimation.enabled ?? true}`,
+  ];
+  if (estimation.interval !== undefined) {
+    lines.push(`interval = ${JSON.stringify(estimation.interval)}`);
+  } else {
+    lines.push(`cron = ${JSON.stringify(estimation.cron ?? "* * * * *")}`);
+  }
+  lines.push(`query = ${JSON.stringify(estimation.query)}`);
+  return lines;
+}
+
 /** One start or end event from the deterministic agent timeline. */
 export interface WorkerAgentTimelineEvent {
   mode: string;
@@ -144,6 +160,22 @@ export interface WorkerAutomation {
   allowNoChanges?: boolean;
 }
 
+/**
+ * One `[[estimations]]` entry written into the generated workspace.toml.
+ *
+ * The body is a tracker query. There is no prompt and no repo: a due entry
+ * estimates and must not implement, branch, or open a pull request.
+ */
+export interface WorkerEstimation {
+  id: string;
+  /** Defaults to enabled. */
+  enabled?: boolean;
+  /** Exactly one of cron/interval; defaults to every minute when cron is omitted. */
+  cron?: string;
+  interval?: string;
+  query: string;
+}
+
 /** One durable schedule cursor from the workspace queue. */
 export interface WorkerAutomationSchedule {
   automation_id: string;
@@ -166,6 +198,18 @@ export interface WorkerFixtureOptions {
   workerTaskArgs?: string;
   /** Scheduled `[[automations]]` entries; the default workspace has none. */
   automations?: WorkerAutomation[];
+  /**
+   * Scheduled `[[estimations]]` entries; the default workspace has none.
+   *
+   * Pair with `tracker` and the fixture tracker's environment. Estimation
+   * reads `[defaults].tracker` and refuses trackers that cannot estimate.
+   */
+  estimations?: WorkerEstimation[];
+  /**
+   * `[defaults].tracker`. Defaults to `markdown` so the workspace stays
+   * credential-free unless a test points it at a fixture tracker.
+   */
+  tracker?: string;
   /** Extra TOML inserted after `[defaults]` and before `[[repos]]`. */
   workspaceTomlExtra?: string;
   /** Extra environment variables for the daemon and built CLI. */
@@ -325,7 +369,9 @@ export class WorkerFixture {
    * error monitor, so enqueue work before {@link start}: the worker then takes
    * the documented injection-only exception instead of exiting for lack of
    * configured work. Passing `automations` adds scheduled `[[automations]]`
-   * tables to the same generated config.
+   * tables, and passing `estimations` adds scheduled `[[estimations]]` tables,
+   * to the same generated config. The local bare remote and deterministic
+   * agent stay in place either way.
    */
   async prepare(): Promise<void> {
     const agent = join(this.root, "agent.ts");
@@ -346,7 +392,7 @@ export class WorkerFixture {
       `max_concurrency_per_repo = ${this.options.maxConcurrencyPerRepo ?? 1}`,
       "",
       "[defaults]",
-      'tracker = "markdown"',
+      `tracker = ${JSON.stringify(this.options.tracker ?? "markdown")}`,
       `worker_task_args = ${JSON.stringify(
         this.options.workerTaskArgs ?? "--create-pr --skip-clarity-check --skip-comments",
       )}`,
@@ -362,6 +408,9 @@ export class WorkerFixture {
     ];
     for (const automation of this.options.automations ?? []) {
       lines.push(...automationTable(automation), "");
+    }
+    for (const estimation of this.options.estimations ?? []) {
+      lines.push(...estimationTable(estimation), "");
     }
     writeFileSync(join(this.workspaceDir, "workspace.toml"), lines.join("\n"));
 
@@ -623,6 +672,48 @@ export class WorkerFixture {
       `SELECT automation_id, schedule_spec, next_due_at, last_scheduled_at
          FROM automation_schedules ORDER BY automation_id`,
     );
+  }
+
+  /**
+   * Move one durable schedule cursor to `nextDueAt`.
+   *
+   * The running daemon's timer does not observe this write, so stop the worker
+   * first. The next {@link start} keeps the row when the schedule spec is
+   * unchanged and the startup tick claims it when the cursor is already due.
+   * Missed windows still coalesce to one run; this only chooses when that
+   * single occurrence is due.
+   *
+   * @param scheduleId - Durable `automation_schedules.automation_id`
+   * @param nextDueAt - Epoch milliseconds stored in `next_due_at`
+   */
+  setScheduleNextDue(scheduleId: string, nextDueAt: number): void {
+    if (this.running) {
+      throw new Error(
+        `Cannot move schedule "${scheduleId}" while the worker is running; stop it first`,
+      );
+    }
+    if (!existsSync(this.dbPath)) {
+      throw new Error(`Queue database does not exist at ${this.dbPath}`);
+    }
+    const db = new Database(this.dbPath);
+    try {
+      db.run("PRAGMA busy_timeout = 5000");
+      const result = db.run(
+        "UPDATE automation_schedules SET next_due_at = ? WHERE automation_id = ?",
+        [nextDueAt, scheduleId],
+      );
+      if (result.changes !== 1) {
+        const present = db
+          .query("SELECT automation_id FROM automation_schedules ORDER BY automation_id")
+          .all() as Array<{ automation_id: string }>;
+        const ids = present.map((row) => row.automation_id).join(", ") || "(none)";
+        throw new Error(
+          `Schedule "${scheduleId}" was not updated (${result.changes} rows). Present schedules: ${ids}`,
+        );
+      }
+    } finally {
+      db.close();
+    }
   }
 
   /** Occurrence task-file names materialized for one automation, oldest first. */

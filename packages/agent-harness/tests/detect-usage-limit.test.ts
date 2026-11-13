@@ -417,6 +417,37 @@ describe("detectUsageLimit", () => {
     expect(detectUsageLimit("", 'throw new Error("Go usage limit exceeded");').limited).toBe(false);
   });
 
+  test("reports the quota period a limit names, with or without a reset time", () => {
+    expect(detectUsageLimit("", "Error: OpenCode Go usage limit reached (monthly)\n").period).toBe(
+      "monthly",
+    );
+    const weekly = detectUsageLimit("", "Weekly usage limit reached. It will reset in 3 days.");
+    expect(weekly.period).toBe("weekly");
+    expect(weekly.resetsAt).toBe("3 days");
+    expect(detectUsageLimit("", "Claude usage limit reached").period).toBeUndefined();
+  });
+
+  test("detects OpenCode's Go usage limit with a window and Extra Usage upsell", () => {
+    const upsell =
+      "To keep going now, turn on Extra Usage or upgrade to Go Plus at https://opencode.ai/console/wrk_x/go.";
+    const stderr = `Error: OpenCode Go usage limit reached (monthly, resets in 6d 23h). ${upsell}\n`;
+    const result = detectUsageLimit("", stderr);
+    expect(result.limited).toBe(true);
+    expect(result.resetsAt).toBe("6d 23h");
+    expect(resetHintToMs(result.resetsAt, 0)).toBe((6 * 24 + 23) * 3_600_000);
+
+    // The structured "Failed to drain Session" cause carries the same text.
+    const log = `timestamp=2026-11-13T05:06:00.487Z level=ERROR run=a0c283f5 message="Failed to drain Session" cause="AI.Error: OpenCode Go usage limit reached (monthly, resets in 7d). ${upsell}\\n    at MQ (/$bunfs/root/chunk.js:3:3547)"`;
+    const structured = detectUsageLimit("", log);
+    expect(structured.limited).toBe(true);
+    expect(resetHintToMs(structured.resetsAt, 0)).toBe(7 * 86_400_000);
+
+    // Source that merely quotes the message is still not a live diagnostic.
+    expect(
+      detectUsageLimit("", 'throw new Error("OpenCode Go usage limit reached (monthly)");').limited,
+    ).toBe(false);
+  });
+
   test("extracts a usage limit from OpenCode's printed structured log", () => {
     const out =
       'timestamp=2026-08-26T14:10:30.957Z level=ERROR run=be653f66 message="stream error" providerID=opencode-go modelID=glm-5.3 error.error="AI_APICallError: 5-hour usage limit reached. Resets in 4hr 9min."';

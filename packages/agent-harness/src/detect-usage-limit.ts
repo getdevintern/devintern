@@ -21,6 +21,8 @@
  *   Too Many Requests: {"error":{"code":"1302","message":"Rate limit reached for req..."}}
  *   rate_limit_error / quota exceeded
  *   Free usage exceeded, subscribe to Go
+ *   OpenCode Go usage limit reached (monthly, resets in 6d 23h). To keep going
+ *     now, turn on Extra Usage or upgrade to Go Plus at https://opencode.ai/...
  *   5 hour usage limit reached. It will reset in 5 hours 23 minutes. To continue
  *     using this model now, enable usage from your available balance
  *
@@ -63,8 +65,10 @@ const USAGE_LIMIT_PATTERNS = [
   // GoUsageLimitError are rewritten into these headless retry messages.
   /^(?:error:\s*)?free usage exceeded(?:,\s*subscribe to go)?[.]?$/i,
   // OpenCode also emits this shorter Go quota error in its stderr and in the
-  // cause of a structured "Failed to drain Session" log.
-  /^(?:(?:AI\.)?error:\s*)?(?:opencode\s+)?go usage limit (?:exceeded|reached)[.!]?(?:\n|$)/i,
+  // cause of a structured "Failed to drain Session" log. Newer builds append the
+  // window and an upsell, e.g. `OpenCode Go usage limit reached (monthly,
+  // resets in 6d 23h). To keep going now, turn on Extra Usage ...`.
+  /^(?:(?:AI\.)?error:\s*)?(?:opencode\s+)?go usage limit (?:exceeded|reached)(?:[.!]|\s*\([^)\n]*\)[.!]?)?(?:\s+to keep going now\b[^\n]*)?(?:\n|$)/i,
   /^(?:(?:AI_(?:APICall|Retry)Error|error):\s*)?(?:(?:\d+[-\s]?hour|weekly|daily|monthly)\s+)?usage limit reached\.(?:\s+it will reset in [^\n.]+(?:\.|$))?(?:\s+to continue using this model now, enable usage from your available balance\b[^\n]*)?$/i,
   /^subscription quota exceeded\.\s+you can continue using free models[.]?$/i,
   // Grok Build translates account/team exhaustion to these headless messages.
@@ -107,21 +111,55 @@ const RESET_PATTERNS = [
   /available again\s+(?:at|in)\s+([^\n.]+?)(?:\.|\n|$)/i,
 ] as const;
 
+/** Quota period named by a limit message (`monthly usage limit reached`). */
+export type UsageLimitPeriod = "daily" | "weekly" | "monthly";
+
 export interface UsageLimitResult {
   /** True when output indicates a usage/rate limit was hit. */
   limited: boolean;
   /** Human-readable reset hint when present, e.g. `7:20pm (Asia/Ho_Chi_Minh)`. */
   resetsAt?: string;
+  /**
+   * Quota period the message names, if any. Lets callers pick a long cooldown
+   * for a monthly quota that does not say when it resets.
+   */
+  period?: UsageLimitPeriod;
   /** The line that matched the limit pattern, for logging. */
   matchedLine?: string;
 }
 
 /** Error raised when a harness reaches an account-wide usage or rate limit. */
 export class UsageLimitError extends Error {
-  constructor(public readonly resetHint?: string) {
+  constructor(
+    public readonly resetHint?: string,
+    public readonly period?: UsageLimitPeriod,
+  ) {
     super(`Agent usage limit reached${resetHint ? ` (resets ${resetHint})` : ""}`);
     this.name = "UsageLimitError";
   }
+}
+
+/**
+ * Drop a closing paren the hint borrowed from its surrounding text, as in
+ * `limit reached (monthly, resets in 7d)`, while keeping a balanced one such
+ * as `7:20pm (Asia/Ho_Chi_Minh)`.
+ *
+ * @param hint - Trimmed reset hint
+ */
+function stripUnbalancedParen(hint: string): string {
+  const opens = hint.split("(").length - 1;
+  const closes = hint.split(")").length - 1;
+  return hint.endsWith(")") && closes > opens ? hint.slice(0, -1).trimEnd() : hint;
+}
+
+/**
+ * Read the quota period a limit diagnostic names (`monthly`, `weekly`, ...).
+ *
+ * @param text - The matched diagnostic line
+ */
+function extractPeriod(text: string): UsageLimitPeriod | undefined {
+  const match = text.match(/\b(daily|weekly|monthly)\b/i);
+  return match?.[1] ? (match[1].toLowerCase() as UsageLimitPeriod) : undefined;
 }
 
 /**
@@ -133,7 +171,7 @@ function extractResetHint(text: string): string | undefined {
   for (const pattern of RESET_PATTERNS) {
     const match = text.match(pattern);
     if (match?.[1]) {
-      return match[1].trim();
+      return stripUnbalancedParen(match[1].trim());
     }
   }
   return undefined;
@@ -395,8 +433,10 @@ export function detectUsageLimit(stdout: string, stderr: string): UsageLimitResu
     return { limited: false };
   }
 
+  const period = extractPeriod(matchedLine.normalized);
   return {
     limited: true,
+    ...(period ? { period } : {}),
     // Only extract a reset hint from the matched diagnostic line. Searching
     // the entire transcript can borrow an unrelated "try again" from source
     // code or a tool result, as happened with the Cloudflare tunnel bundle.

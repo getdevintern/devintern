@@ -36,7 +36,9 @@ import type { WebhookQueue } from "../state/webhook-queue";
 import {
   AUTOMATION_ACCESS_EXIT_CODE,
   HARNESS_UNAVAILABLE_EXIT_CODE,
+  RATE_LIMIT_FALLBACK_MAX_MS,
   RATE_LIMIT_FALLBACK_MS,
+  RATE_LIMIT_PERIOD_FLOOR_MS,
   readUsageLimitHint,
   TASK_SKIP_EXIT_CODE,
   USAGE_LIMIT_EXIT_CODE,
@@ -77,6 +79,8 @@ export interface WorkerFailoverOptions {
   }) => HarnessSandboxProbeResult | Promise<HarnessSandboxProbeResult>;
   /** Effective sandbox name override (tests). Defaults to `AGENT_SANDBOX`. */
   sandboxName?: string;
+  /** Clock for usage-limit windows (tests). */
+  now?: () => number;
 }
 
 /**
@@ -91,8 +95,17 @@ export class WorkerFailover {
   private readonly onPause?: WorkerFailoverOptions["onPause"];
   private readonly onResume?: WorkerFailoverOptions["onResume"];
   private readonly log: (message: string) => void;
+  /**
+   * Consecutive usage limits per harness that came without a reset time. Each
+   * one doubles the fallback cooldown so a quota that is gone for days is not
+   * re-probed hourly by launching real tasks. In memory only: a restart starts
+   * again from {@link RATE_LIMIT_FALLBACK_MS}.
+   */
+  private readonly unknownResetStreak = new Map<string, number>();
+  private readonly now: () => number;
 
   constructor(options: WorkerFailoverOptions = {}) {
+    this.now = options.now ?? Date.now;
     this.chain =
       options.chain ??
       resolveHarnessChainSync({
@@ -208,12 +221,18 @@ export class WorkerFailover {
    * Record a usage limit and fail over. Pauses via {@link onPause} when the
    * chain is exhausted; always rearms the failback timer.
    */
-  reportFromHint(hint?: Partial<UsageLimitHint> & { resetsAt?: string }): FailoverOutcome {
-    const until =
-      hint?.untilMs && hint.untilMs > Date.now()
-        ? hint.untilMs
-        : (resetHintToMs(hint?.resetsAt, Date.now()) ?? Date.now() + RATE_LIMIT_FALLBACK_MS);
+  reportFromHint(hint?: UsageLimitHint): FailoverOutcome {
     const harness = this.manager.activeName;
+    const now = this.now();
+    const known =
+      hint?.untilMs && hint.untilMs > now ? hint.untilMs : resetHintToMs(hint?.resetsAt, now);
+    let until: number;
+    if (known !== null) {
+      this.unknownResetStreak.delete(harness);
+      until = known;
+    } else {
+      until = now + this.unknownResetCooldownMs(harness, hint?.period);
+    }
     const outcome = this.manager.reportUsageLimit(until);
     if (outcome.kind === "exhausted") {
       this.paused = true;
@@ -221,6 +240,36 @@ export class WorkerFailover {
     }
     this.armTimers();
     return outcome;
+  }
+
+  /**
+   * A run on the active harness completed, so its quota is back: the next
+   * limit without a reset time starts again from the base fallback.
+   */
+  recordSuccess(): void {
+    this.unknownResetStreak.delete(this.manager.activeName);
+  }
+
+  /**
+   * Fallback cooldown for a limit with no reset time: doubles per consecutive
+   * occurrence on the same harness (1h, 2h, 4h, ... up to 24h), and never
+   * shorter than the floor for a named quota period (a monthly quota waits at
+   * least a day).
+   */
+  private unknownResetCooldownMs(harness: string, period?: UsageLimitHint["period"]): number {
+    const streak = (this.unknownResetStreak.get(harness) ?? 0) + 1;
+    this.unknownResetStreak.set(harness, streak);
+    const backoff = Math.min(
+      RATE_LIMIT_FALLBACK_MS * 2 ** Math.min(streak - 1, 10),
+      RATE_LIMIT_FALLBACK_MAX_MS,
+    );
+    const cooldown = Math.max(backoff, period ? RATE_LIMIT_PERIOD_FLOOR_MS[period] : 0);
+    const hours = Math.round((cooldown / 3_600_000) * 10) / 10;
+    this.log(
+      `⏱️  ${harness} reported a ${period ? `${period} ` : ""}usage limit without a reset time ` +
+        `(${streak} in a row); re-checking in ${hours}h.`,
+    );
+    return cooldown;
   }
 
   /** Start (or restart) the failback/resume timer at the earliest window. */
@@ -396,6 +445,7 @@ export async function runWithFailover(
         continue;
       }
       if (code !== USAGE_LIMIT_EXIT_CODE) {
+        if (code === 0) failover.recordSuccess();
         return code === 0 ? "ok" : "failed";
       }
       const hint = readUsageLimitHint(hintPath);

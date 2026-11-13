@@ -6,7 +6,10 @@ import { tmpdir } from "os";
 import { InjectedTaskStore } from "../src/lib/state/injected-tasks";
 import { resetWorkerFailover } from "../src/lib/worker/failover";
 import { createTaskSupervisor } from "../src/lib/worker/supervisor";
-import { InjectedTaskAcquirer } from "../src/lib/workspace/injected-acquirer";
+import {
+  InjectedTaskAcquirer,
+  injectedDeferBackoffMs,
+} from "../src/lib/workspace/injected-acquirer";
 import type { TaskExecutionResult } from "../src/lib/acquirers/task-polling";
 
 describe("InjectedTaskAcquirer", () => {
@@ -94,28 +97,86 @@ describe("InjectedTaskAcquirer", () => {
     expect(store.hasPending()).toBe(false);
   });
 
-  test("requeues deferred tasks for the next tick", async () => {
+  test("requeues deferred tasks and retries them once the backoff elapses", async () => {
     enqueue("local-a");
 
     const calls: string[] = [];
     let busy = true;
-    const acquirer = new InjectedTaskAcquirer({
-      store,
-      execute: async (task) => {
-        calls.push(task.taskKey);
-        return busy ? "deferred" : true;
-      },
-      intervalSeconds: 3600,
-    });
+    let now = 1_000_000;
+    const logs = spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const acquirer = new InjectedTaskAcquirer({
+        store,
+        execute: async (task) => {
+          calls.push(task.taskKey);
+          return busy ? "deferred" : true;
+        },
+        intervalSeconds: 3600,
+        now: () => now,
+      });
 
-    await acquirer.tick();
-    expect(calls).toEqual(["local-a"]);
-    expect(store.hasPending()).toBe(true);
+      await acquirer.tick();
+      expect(calls).toEqual(["local-a"]);
+      expect(store.hasPending()).toBe(true);
+      expect(store.getByTaskKey("local-a")?.deferCount).toBe(1);
+      expect(store.getByTaskKey("local-a")?.notBefore).toBe(now + 60_000);
 
-    busy = false;
-    await acquirer.tick();
-    expect(calls).toEqual(["local-a", "local-a"]);
-    expect(store.hasPending()).toBe(false);
+      // Still backing off: the next tick does not re-run it.
+      busy = false;
+      now += 30_000;
+      await acquirer.tick();
+      expect(calls).toEqual(["local-a"]);
+
+      now += 30_000;
+      await acquirer.tick();
+      expect(calls).toEqual(["local-a", "local-a"]);
+      expect(store.hasPending()).toBe(false);
+    } finally {
+      logs.mockRestore();
+    }
+  });
+
+  test("fails a task that keeps deferring once its deferral budget is spent", async () => {
+    enqueue("local-a");
+
+    let calls = 0;
+    const logs = spyOn(console, "log").mockImplementation(() => {});
+    const errors = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const acquirer = new InjectedTaskAcquirer({
+        store,
+        execute: async () => {
+          calls++;
+          return "deferred";
+        },
+        intervalSeconds: 3600,
+        maxDeferrals: 3,
+        deferBackoffMs: () => 0,
+      });
+      for (let i = 0; i < 5; i++) await acquirer.tick();
+
+      expect(calls).toBe(3);
+      const task = store.getByTaskKey("local-a");
+      expect(task?.status).toBe("failed");
+      expect(task?.deferCount).toBe(3);
+      expect(task?.message).toContain("devintern worker add --resume local-a");
+
+      // An explicit re-queue restores the full budget.
+      const requeued = store.requeueSettled("local-a");
+      expect(requeued?.deferCount).toBe(0);
+      expect(requeued?.notBefore).toBeUndefined();
+    } finally {
+      logs.mockRestore();
+      errors.mockRestore();
+    }
+  });
+
+  test("deferral backoff doubles from one minute and caps at one hour", () => {
+    expect(injectedDeferBackoffMs(1)).toBe(60_000);
+    expect(injectedDeferBackoffMs(2)).toBe(120_000);
+    expect(injectedDeferBackoffMs(6)).toBe(32 * 60_000);
+    expect(injectedDeferBackoffMs(7)).toBe(60 * 60_000);
+    expect(injectedDeferBackoffMs(500)).toBe(60 * 60_000);
   });
 
   test("leaves pending rows untouched and silent while the harness chain is paused", async () => {

@@ -900,6 +900,7 @@ function reportPrunedTask(
     status: run.status === "succeeded" ? "done" : "failed",
     message: run.outcomeReason,
     autoResumeCount: 0,
+    deferCount: 0,
     createdAt: run.startedAt,
   };
   if (!ctx.json) {
