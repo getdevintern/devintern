@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
-import { createElement } from "react";
-import { renderToStaticMarkup } from "react-dom/server";
 
-import type { RunRecord, WorkerResponse } from "@/lib/api";
+import type { OverviewRunningRun, RunRecord } from "@/lib/api";
 import {
+  FINISHED_LIMIT,
+  buildActiveWork,
   buildTaskActivity,
   cleanTitle,
   phaseIndex,
@@ -11,7 +11,6 @@ import {
   stepLabel,
   stepPhase,
 } from "@/lib/task-activity";
-import { TaskActivityList } from "@/views/TaskActivityView";
 
 const NOW = 1_800_000_000_000;
 const MIN = 60_000;
@@ -49,11 +48,20 @@ test("raw pipeline steps collapse into a few phases", () => {
 test("step detail names the exact step, or admits the gap between steps", () => {
   expect(stepLabel("__repair-1")).toBe("Repair 1");
   expect(stepLabel("security-audit")).toBe("security-audit");
-  expect(stepDetail(run, NOW)).toBe("Implementation · 3m 00s");
+  // Durations use the dashboard's shared compact span.
+  expect(stepDetail(run, NOW)).toBe("Implementation · 3m");
+  expect(stepDetail({ ...run, stepStartedAt: NOW - 42_000 }, NOW)).toBe("Implementation · 42s");
   expect(stepDetail({ ...run, step: "verify", stepActive: false }, NOW)).toBe(
     "Between steps, after verify",
   );
   expect(stepDetail({ ...run, step: undefined }, NOW)).toBe("Step not recorded");
+  // Unknown step timing is not a zero clock.
+  expect(stepDetail({ ...run, stepStartedAt: undefined }, NOW)).toBe("Implementation");
+});
+
+test("a stalled run names its step without a running clock", () => {
+  expect(stepDetail(run, NOW, true)).toBe("Holding at implementation");
+  expect(stepDetail({ ...run, step: undefined }, NOW, true)).toBe("Step not recorded");
 });
 
 test("attempts fold into one task and finished work leaves the active list", () => {
@@ -92,100 +100,84 @@ test("a frontmatter fence is never shown as a title", () => {
   expect(cleanTitle("  Fix it ")).toBe("Fix it");
 });
 
-const worker = (overrides: Partial<WorkerResponse["queue"]> = {}) =>
-  ({
-    worker: { status: "running" },
-    queue: {
-      pending: 0,
-      processing: 0,
-      failed: 0,
-      injected: { pending: 1, running: 0 },
-      retries: { pending: 0, running: 0 },
-      ...overrides,
-    },
-  }) as WorkerResponse;
-
-function render(runs: RunRecord[], w?: WorkerResponse) {
-  return renderToStaticMarkup(
-    createElement(TaskActivityList, {
-      activity: buildTaskActivity(runs, NOW),
-      worker: w,
-      now: NOW,
-      onOpenRun: () => {},
-    }),
-  );
-}
-
-test("rows show phase, exact step, title and live elapsed time", () => {
-  const html = render(
-    [run, { ...run, id: 2, taskKey: "T-2", step: "verify", stepActive: false }],
-    worker(),
-  );
-  expect(html).toContain("In progress");
-  expect(html).toContain("Implementing");
-  expect(html).toContain("Implementation · 3m 00s");
-  expect(html).toContain("Between steps, after verify");
-  expect(html).toContain("10m 00s");
-  expect(html).toContain("Fix the login");
-  expect(html).toContain("Open run 1: Fix the login");
-  expect(html).not.toContain("Waiting to retry");
+const done = (id: number, ago: number, extra: Partial<RunRecord> = {}): RunRecord => ({
+  ...run,
+  id,
+  taskKey: `T-${id}`,
+  status: "succeeded",
+  startedAt: NOW - ago - MIN,
+  finishedAt: NOW - ago,
+  ...extra,
 });
 
-test("waiting tasks give the reason; idle state reports the queue", () => {
-  const html = render(
-    [
-      {
-        ...run,
-        status: "deferred",
-        finishedAt: NOW - HOUR,
-        outcomeReason: "Agent usage limit reached",
-      },
-    ],
-    worker(),
-  );
-  expect(html).toContain("Waiting to retry");
-  expect(html).toContain("Agent usage limit reached");
-  expect(html).toContain("Stopped at implementation");
-  const idle = render([], worker());
-  expect(idle).toContain("Worker is idle");
-  expect(idle).toContain("1 task is queued");
-  expect(render([], { ...worker(), worker: { status: "stopped" } })).toContain(
-    "Worker is not running",
-  );
-});
-
-test("finished tasks sit in a closed disclosure with a link to all runs", () => {
-  const html = render([{ ...run, status: "succeeded", finishedAt: NOW - HOUR, taskTitle: "---" }]);
-  expect(html).toContain("<details");
-  expect(html).not.toContain("<details open");
-  expect(html).toContain("Recently finished");
-  expect(html).toContain('href="#/runs"');
-  expect(html).not.toContain(">---<");
-});
-
-test("finished tasks are newest first and succeeded rows link their result", () => {
-  const done = (id: number, ago: number, extra: Partial<RunRecord> = {}): RunRecord => ({
-    ...run,
-    id,
-    taskKey: `T-${id}`,
-    status: "succeeded",
-    startedAt: NOW - ago - MIN,
-    finishedAt: NOW - ago,
-    ...extra,
-  });
+test("finished tasks are newest first and capped to a few", () => {
   const { finished } = buildTaskActivity([done(1, 13 * HOUR), done(2, 12 * HOUR)], NOW);
   expect(finished.map((entry) => entry.latest.id)).toEqual([2, 1]);
-  const html = render([
-    done(3, HOUR, { prNumber: 42, prUrl: "https://github.com/acme/web/pull/42" }),
-    done(4, 2 * HOUR, { status: "failed", outcomeReason: "Verification failed" }),
-  ]);
-  expect(html).toContain("#42");
-  expect(html).toContain("Verification failed");
-  expect(html).toContain("View all runs");
+  const many = Array.from({ length: FINISHED_LIMIT + 3 }, (_, i) => done(i + 10, (i + 1) * HOUR));
+  const capped = buildTaskActivity(many, NOW);
+  expect(FINISHED_LIMIT).toBe(5);
+  expect(capped.finished).toHaveLength(FINISHED_LIMIT);
+  expect(capped.finishedHidden).toBe(3);
 });
 
-test("the phase track is described for assistive tech and hover", () => {
-  const html = render([run]);
-  expect(html).toContain("Phase 3 of 5: Implementing");
-  expect(html).toContain("3/5");
+const capacityRun = (overrides: Partial<OverviewRunningRun> = {}): OverviewRunningRun => ({
+  id: 1,
+  origin: "task",
+  taskKey: "TASK-1",
+  repo: "acme/web",
+  workspaceRepo: "web",
+  harness: "claude-code",
+  step: "implement",
+  startedAt: NOW - 10 * MIN,
+  ...overrides,
+});
+
+test("active work rows are the overview's running runs, enriched by task activity", () => {
+  const work = buildActiveWork(
+    [capacityRun({ id: 4, taskKey: "T-4", startedAt: NOW - 2 * MIN }), capacityRun()],
+    [run, { ...run, id: 3, taskKey: "T-3" }],
+    NOW,
+  );
+  // Membership and order come from capacity (longest-running first).
+  expect(work.active.map((entry) => entry.latest.id)).toEqual([1, 4]);
+  const [first, second] = work.active;
+  expect(first!.latest.taskTitle).toBe("Fix the login");
+  expect(first!.latest.stepStartedAt).toBe(NOW - 3 * MIN);
+  expect(first!.repoLabel).toBe("web");
+  // No task-activity record yet: the step still shows, without a zero clock.
+  expect(second!.latest.taskTitle).toBeUndefined();
+  expect(stepDetail(second!.latest, NOW)).toBe("Implementation");
+  // An in-progress run capacity does not count is not shown at all yet.
+  expect(work.active.some((entry) => entry.latest.id === 3)).toBe(false);
+  expect(work.finished).toHaveLength(0);
+});
+
+test("a run capacity still counts is never also listed as finished or waiting", () => {
+  const work = buildActiveWork(
+    [capacityRun()],
+    [
+      { ...run, status: "succeeded", finishedAt: NOW - 5_000 },
+      done(2, HOUR),
+      { ...done(3, HOUR), status: "deferred" },
+    ],
+    NOW,
+  );
+  expect(work.active.map((entry) => entry.latest.id)).toEqual([1]);
+  expect(work.active[0]!.latest.status).toBe("in_progress");
+  expect(work.finished.map((entry) => entry.latest.id)).toEqual([2]);
+  expect(work.waiting.map((entry) => entry.latest.id)).toEqual([3]);
+});
+
+test("active rows count earlier attempts at the same task", () => {
+  const work = buildActiveWork(
+    [capacityRun({ id: 9 })],
+    [
+      { ...run, id: 9 },
+      { ...run, id: 7, status: "failed", startedAt: NOW - 3 * HOUR, finishedAt: NOW - 2 * HOUR },
+    ],
+    NOW,
+  );
+  expect(work.active[0]!.attempts).toBe(2);
+  // The failed earlier attempt folds into the running task, not "finished".
+  expect(work.finished).toHaveLength(0);
 });

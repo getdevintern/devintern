@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import {
-  Activity,
   TerminalSquare,
   ChartNoAxesCombined,
   GitPullRequest,
@@ -17,19 +16,17 @@ import { AutomationsView } from "@/views/AutomationsView";
 import { LogsView } from "@/views/LogsView";
 import { RunDetailView } from "@/views/RunDetailView";
 import { RunsView } from "@/views/RunsView";
-import { TaskActivityView } from "@/views/TaskActivityView";
 import { AutomationDetailView } from "@/views/AutomationDetailView";
 import { StatsView } from "@/views/StatsView";
 import { OverviewView } from "@/views/OverviewView";
 import { WorkspaceView } from "@/views/WorkspaceView";
-import { parseHash, RUNS_HASH, runHash } from "@/lib/routes";
+import { parseHash, redirectHash, RUNS_HASH, runHash } from "@/lib/routes";
 import type { Route } from "@/lib/routes";
 import { cn } from "@/lib/utils";
 
 const sections = [
   { label: "Overview", hash: "#/", view: "overview", icon: LayoutDashboard },
   { label: "Runs", hash: RUNS_HASH, view: "runs", icon: ListTodo },
-  { label: "Task activity", hash: "#/activity", view: "activity", icon: Activity },
   { label: "Automations", hash: "#/automations", view: "automations", icon: Workflow },
   { label: "Pull requests", hash: "#/prs", view: "prs", icon: GitPullRequest },
   { label: "Statistics", hash: "#/stats", view: "stats", icon: ChartNoAxesCombined },
@@ -39,7 +36,6 @@ const sections = [
 
 const pageTitles: Record<Route["view"], string> = {
   overview: "Overview",
-  activity: "Task activity",
   runs: "Runs",
   run: "Runs",
   automations: "Automations",
@@ -50,7 +46,15 @@ const pageTitles: Record<Route["view"], string> = {
   workspace: "Workspace",
 };
 
-const currentHash = () => parseHash(window.location.hash);
+/** Route for the current hash, first rewriting a retired hash in place (no history entry). */
+const currentHash = (): Route => {
+  const redirect = redirectHash(window.location.hash);
+  if (redirect !== null) {
+    window.history.replaceState(null, "", redirect);
+    return parseHash(redirect);
+  }
+  return parseHash(window.location.hash);
+};
 const openRun = (id: number): void => {
   window.location.hash = runHash(id);
 };
@@ -138,7 +142,6 @@ export function App() {
 
         <main className="dashboard-content">
           {route.view === "overview" ? <OverviewView /> : null}
-          {route.view === "activity" ? <TaskActivityView onOpenRun={openRun} /> : null}
           {route.view === "runs" ? <RunsView onOpenRun={openRun} /> : null}
           {route.view === "run" ? (
             <RunDetailView

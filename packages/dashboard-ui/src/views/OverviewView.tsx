@@ -3,7 +3,6 @@ import type { ReactNode } from "react";
 import {
   ArrowRight,
   Check,
-  ChevronRight,
   CirclePause,
   Copy,
   FileWarning,
@@ -15,17 +14,10 @@ import {
 import type { LucideIcon } from "lucide-react";
 
 import { queueTitle } from "@/components/StatusStrip";
-import { EmptyState, StatusPill } from "@/components/shared";
+import { EmptyState } from "@/components/shared";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
+import { ActiveRows, RecentlyFinished, WaitingRows } from "@/components/overview/ActiveWork";
 import {
   consumeHarnessFocus,
   HARNESS_SECTION_ID,
@@ -56,14 +48,15 @@ import type {
   OverviewHarnessEntry,
   OverviewHarnesses,
   OverviewResponse,
-  OverviewRunningRun,
   OverviewTrackerSource,
   OverviewTrackers,
+  RunRecord,
   ScheduleSnapshot,
+  TaskActivityResponse,
   WorkerResponse,
 } from "@/lib/api";
 import { runHash } from "@/lib/routes";
-import { formatRunOrigin } from "@/lib/run-origin";
+import { buildActiveWork } from "@/lib/task-activity";
 import { cn, formatPastTime } from "@/lib/utils";
 // oxlint-disable-next-line import/no-unassigned-import -- meter and chain styles
 import "./overview.css";
@@ -588,192 +581,10 @@ function WorkerFacts({
   );
 }
 
-/* ---------- Running now ---------- */
-
-function runLabel(run: OverviewRunningRun): string {
-  return run.taskKey ?? formatRunOrigin(run.origin);
-}
-
-function runContext(run: OverviewRunningRun): string {
-  return [run.taskKey ? formatRunOrigin(run.origin) : `run #${run.id}`, run.team]
-    .filter(Boolean)
-    .join(" · ");
-}
-
-function StepPill({
-  run,
-  stalled,
-  reason,
-}: {
-  run: OverviewRunningRun;
-  stalled: boolean;
-  reason: string;
-}) {
-  const step = run.step ?? (stalled ? "waiting" : "starting");
-  // Custom pipeline steps can be long: cap the pill to its cell and keep the full name in the tooltip.
-  return (
-    <span
-      className="flex max-w-full min-w-0"
-      title={stalled ? `${step} · not advancing while ${reason}` : step}
-    >
-      <StatusPill
-        tone={stalled ? "neutral" : "info"}
-        live={!stalled}
-        className="max-w-full min-w-0"
-      >
-        <span className="min-w-0 truncate">{step}</span>
-      </StatusPill>
-    </span>
-  );
-}
-
-function Elapsed({
-  run,
-  stalled,
-  reason,
-  now,
-}: {
-  run: OverviewRunningRun;
-  stalled: boolean;
-  reason: string;
-  now: number;
-}) {
-  return (
-    <span
-      className={cn("tabular-nums", stalled ? "text-subtle-foreground" : "text-foreground")}
-      title={
-        stalled
-          ? `Started ${new Date(run.startedAt).toLocaleString()}; not advancing while ${reason}`
-          : `Started ${new Date(run.startedAt).toLocaleString()}`
-      }
-    >
-      {stalled ? formatAgo(run.startedAt, now) : formatSpan(now - run.startedAt)}
-    </span>
-  );
-}
+/* ---------- Active work ---------- */
 
 function openRun(id: number): void {
   window.location.hash = runHash(id);
-}
-
-function RunningRuns({
-  runs,
-  stalled,
-  reason,
-  now,
-}: {
-  runs: OverviewRunningRun[];
-  stalled: boolean;
-  /** Why runs are not advancing, e.g. "the worker is stopped". */
-  reason: string;
-  now: number;
-}) {
-  return (
-    <>
-      <div className="hidden border-t border-border md:block">
-        <Table className="table-fixed text-sm">
-          <colgroup>
-            <col />
-            <col className="w-[24%] min-w-[9.5rem]" />
-            <col className="w-[18%]" />
-            <col className="w-[7.5rem]" />
-            <col className="w-16" />
-            <col className="w-10" />
-          </colgroup>
-          <TableHeader>
-            <TableRow>
-              <TableHead className="px-4">Work</TableHead>
-              <TableHead className="px-4">Step</TableHead>
-              <TableHead className="px-4">Repo</TableHead>
-              <TableHead className="px-4">Harness</TableHead>
-              <TableHead className="px-4 text-right">{stalled ? "Started" : "Elapsed"}</TableHead>
-              <TableHead className="px-2">
-                <span className="sr-only">Open run</span>
-              </TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {runs.map((run) => (
-              <TableRow key={run.id} onClick={() => openRun(run.id)} className="cursor-pointer">
-                <TableCell className="px-4 py-2.5">
-                  <a
-                    href={runHash(run.id)}
-                    title={runLabel(run)}
-                    onClick={(event) => event.stopPropagation()}
-                    className="block truncate font-medium text-foreground hover:underline"
-                  >
-                    {runLabel(run)}
-                  </a>
-                  <div className="mt-0.5 truncate text-xs text-subtle-foreground">
-                    {runContext(run)}
-                  </div>
-                </TableCell>
-                <TableCell className="px-4 py-2.5">
-                  <StepPill run={run} stalled={stalled} reason={reason} />
-                </TableCell>
-                <TableCell
-                  className="truncate px-4 py-2.5 text-[0.8125rem] text-muted-foreground"
-                  title={run.repo}
-                >
-                  {run.workspaceRepo ?? run.repo ?? PLACEHOLDER}
-                </TableCell>
-                <TableCell className="truncate px-4 py-2.5 text-[0.8125rem] text-subtle-foreground">
-                  {run.harness ?? PLACEHOLDER}
-                </TableCell>
-                <TableCell className="px-4 py-2.5 text-right whitespace-nowrap">
-                  <Elapsed run={run} stalled={stalled} reason={reason} now={now} />
-                </TableCell>
-                <TableCell className="px-1 py-2.5">
-                  {/* Same target as the key link: a pointer affordance, not a second tab stop. */}
-                  <Button
-                    variant="ghost"
-                    size="icon-sm"
-                    tabIndex={-1}
-                    aria-hidden="true"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      openRun(run.id);
-                    }}
-                  >
-                    <ChevronRight aria-hidden="true" />
-                  </Button>
-                </TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-      </div>
-
-      <ul className="border-t border-border md:hidden" aria-label="Runs in progress">
-        {runs.map((run) => (
-          <li key={run.id} className="border-b border-border last:border-b-0">
-            <a
-              href={runHash(run.id)}
-              className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-3 gap-y-1.5 px-4 py-3 transition-colors hover:bg-hover"
-            >
-              <span className="min-w-0">
-                <span className="block truncate font-medium text-foreground" title={runLabel(run)}>
-                  {runLabel(run)}
-                </span>
-                <span className="block truncate text-xs text-subtle-foreground">
-                  {runContext(run)}
-                </span>
-              </span>
-              <span className="pt-0.5 text-[0.8125rem]">
-                <Elapsed run={run} stalled={stalled} reason={reason} now={now} />
-              </span>
-              <span className="col-span-2 flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
-                <StepPill run={run} stalled={stalled} reason={reason} />
-                <span className="truncate">
-                  {[run.workspaceRepo ?? run.repo, run.harness].filter(Boolean).join(" · ")}
-                </span>
-              </span>
-            </a>
-          </li>
-        ))}
-      </ul>
-    </>
-  );
 }
 
 const CAPACITY_HINT =
@@ -809,8 +620,9 @@ function idleNext({
     : "new work starts when a task is queued";
 }
 
-function RunningSection({
+function ActiveWorkSection({
   capacity,
+  activityRuns,
   configOk,
   hasTrackers,
   workerStopped,
@@ -820,6 +632,8 @@ function RunningSection({
   now,
 }: {
   capacity: OverviewCapacity;
+  /** `/api/task-activity` runs that enrich the rows; null until it loads. */
+  activityRuns: RunRecord[] | null;
   configOk: boolean;
   hasTrackers: boolean;
   schedule?: ScheduleSnapshot | null;
@@ -829,7 +643,7 @@ function RunningSection({
   paused: boolean;
   now: number;
 }) {
-  const runs = [...capacity.runs].sort((a, b) => a.startedAt - b.startedAt);
+  const work = buildActiveWork(capacity.runs, activityRuns ?? [], now);
   const { running, maxConcurrency: max } = capacity;
   const limit = configOk ? "no limit set" : "limit unknown until workspace.toml loads";
   const slots =
@@ -845,9 +659,9 @@ function RunningSection({
   return (
     <Section
       id="ov-running"
-      title="Running now"
+      title="Active work"
       meta={
-        runs.length > 0 ? (
+        running > 0 || work.waiting.length > 0 ? (
           <a href="#/runs" className="font-medium text-primary hover:underline">
             All runs
           </a>
@@ -906,9 +720,21 @@ function RunningSection({
             ) : null}
           </div>
         )}
-        {runs.length > 0 ? (
-          <RunningRuns runs={runs} stalled={stalled} reason={reason} now={now} />
+        {work.active.length > 0 ? (
+          <ActiveRows
+            entries={work.active}
+            now={now}
+            stalled={stalled ? reason : undefined}
+            onOpen={openRun}
+          />
         ) : null}
+        <WaitingRows entries={work.waiting} now={now} onOpen={openRun} />
+        <RecentlyFinished
+          entries={work.finished}
+          hidden={work.finishedHidden}
+          now={now}
+          onOpen={openRun}
+        />
       </div>
     </Section>
   );
@@ -1307,10 +1133,13 @@ function TrackerSection({
 export function OverviewScreen({
   overview,
   workerInfo,
+  activityRuns = null,
   now,
 }: {
   overview: OverviewResponse;
   workerInfo: WorkerResponse | null;
+  /** `/api/task-activity` runs: row detail plus the waiting and finished lists. */
+  activityRuns?: RunRecord[] | null;
   now: number;
 }) {
   const alerts = overviewAlerts(overview, now);
@@ -1336,8 +1165,9 @@ export function OverviewScreen({
 
       <div className="grid min-w-0 gap-7 min-[1180px]:grid-cols-[minmax(0,1fr)_minmax(20rem,24rem)] min-[1180px]:gap-x-8">
         <div className="grid min-w-0 content-start gap-7">
-          <RunningSection
+          <ActiveWorkSection
             capacity={overview.capacity}
+            activityRuns={activityRuns}
             configOk={configOk}
             hasTrackers={overview.trackers.sources.length > 0}
             workerStopped={overview.worker.status === "stopped"}
@@ -1404,6 +1234,8 @@ export function OverviewView() {
   // Shared with the status strip's harness pill: one request, one truth.
   const { data, error } = useOverviewPoll();
   const { data: workerInfo } = usePoll<WorkerResponse>("/api/worker");
+  // Row detail, waiting and finished tasks; the in-progress set stays the overview's.
+  const { data: activity } = usePoll<TaskActivityResponse>("/api/task-activity");
   // Elapsed times and countdowns tick between polls.
   const now = useNow(5_000);
   if (!data) {
@@ -1414,6 +1246,11 @@ export function OverviewView() {
     );
   }
   return (
-    <OverviewScreen overview={data} workerInfo={workerInfo} now={Math.max(now, data.generatedAt)} />
+    <OverviewScreen
+      overview={data}
+      workerInfo={workerInfo}
+      activityRuns={activity?.runs ?? null}
+      now={Math.max(now, data.generatedAt)}
+    />
   );
 }

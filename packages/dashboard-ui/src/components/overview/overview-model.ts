@@ -4,7 +4,12 @@
  * degraded-state alerts. Kept free of React so every rule is unit-testable.
  */
 
-import { formatAgo as formatAgoShared, formatClockTime, formatPastTime } from "@/lib/utils";
+import {
+  formatAgo as formatAgoShared,
+  formatClockTime,
+  formatPastTime,
+  formatSpan,
+} from "@/lib/utils";
 import type {
   OverviewHarnesses,
   OverviewResponse,
@@ -17,29 +22,13 @@ const MINUTE = 60 * SECOND;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
 
+export { formatSpan };
+
 /** A poll older than this many intervals is flagged as stale. */
 export const STALE_POLL_FACTOR = 3;
 
 /** `poll_interval_seconds` default when the config does not say. */
 export const DEFAULT_POLL_INTERVAL_SECONDS = 60;
-
-/**
- * Compact span: "45s", "12m", "2h 10m", "3d 4h". Two units at most, and the
- * second unit is dropped when it is zero.
- */
-export function formatSpan(ms: number): string {
-  const total = Math.max(0, ms);
-  if (total < MINUTE) return `${Math.floor(total / SECOND)}s`;
-  if (total < HOUR) return `${Math.floor(total / MINUTE)}m`;
-  if (total < DAY) {
-    const hours = Math.floor(total / HOUR);
-    const minutes = Math.floor((total % HOUR) / MINUTE);
-    return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
-  }
-  const days = Math.floor(total / DAY);
-  const hours = Math.floor((total % DAY) / HOUR);
-  return hours > 0 ? `${days}d ${hours}h` : `${days}d`;
-}
 
 /** "just now", "12m ago", "3h ago": the dashboard-wide relative age. */
 export function formatAgo(at: number, now: number): string {

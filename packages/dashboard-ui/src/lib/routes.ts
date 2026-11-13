@@ -1,7 +1,6 @@
 /** Hash routes of the dashboard SPA. */
 export type Route =
   | { view: "overview" }
-  | { view: "activity" }
   | { view: "runs" }
   | { view: "run"; id: number }
   | { view: "automations" }
@@ -19,6 +18,17 @@ export function runHash(id: number): string {
   return `#/runs/${id}`;
 }
 
+/** Retired hashes and where they now live, so old bookmarks keep working. */
+const LEGACY_HASHES: Record<string, string> = {
+  // Task activity was folded into the overview's "Active work" section.
+  "#/activity": "#/",
+};
+
+/** The hash a retired route redirects to, or null when the hash is current. */
+export function redirectHash(hash: string): string | null {
+  return LEGACY_HASHES[hash] ?? null;
+}
+
 /**
  * Parse a location hash into a route. `#/` (and anything unrecognized) is the
  * overview; the runs list lives at `#/runs`.
@@ -29,7 +39,6 @@ export function parseHash(hash: string): Route {
     return { view: "run", id: parseInt(runMatch[1] ?? "0", 10) };
   }
   if (hash === "#/runs") return { view: "runs" };
-  if (hash === "#/activity") return { view: "activity" };
   const automationMatch = hash.match(/^#\/automations\/(.+)$/);
   if (automationMatch) {
     try {

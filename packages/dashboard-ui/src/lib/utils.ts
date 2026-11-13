@@ -81,3 +81,24 @@ export function formatPastTime(epochMs: number, now: number = Date.now()): strin
   }
   return formatTime(epochMs);
 }
+
+const MINUTE_MS = 60_000;
+const HOUR_MS = 60 * MINUTE_MS;
+
+/**
+ * Compact span: "45s", "12m", "2h 10m", "3d 4h". Two units at most, and the
+ * second unit is dropped when it is zero.
+ */
+export function formatSpan(ms: number): string {
+  const total = Math.max(0, ms);
+  if (total < MINUTE_MS) return `${Math.floor(total / 1000)}s`;
+  if (total < HOUR_MS) return `${Math.floor(total / MINUTE_MS)}m`;
+  if (total < DAY_MS) {
+    const hours = Math.floor(total / HOUR_MS);
+    const minutes = Math.floor((total % HOUR_MS) / MINUTE_MS);
+    return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
+  }
+  const days = Math.floor(total / DAY_MS);
+  const hours = Math.floor((total % DAY_MS) / HOUR_MS);
+  return hours > 0 ? `${days}d ${hours}h` : `${days}d`;
+}
