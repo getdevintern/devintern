@@ -68,7 +68,7 @@ Ad-hoc tasks created with `devintern worker add` show **Re-queue task** instead:
 
 ## Run an automation now
 
-Open **Automations**, find the automation, and choose **Run now**. The worker runs it through the same pipeline as a scheduled occurrence, including its normal repository, environment, and overlap protection.
+Open **Automations**, find the automation, and choose **Run now**. When automations target more than one repository, the list groups them: automations without a `repo` come first under **General**, then one group per repository in name order, with enabled automations ahead of disabled ones and the soonest next run first. The worker runs it through the same pipeline as a scheduled occurrence, including its normal repository, environment, and overlap protection.
 
 Open an automation from the list to read its full prompt, see its schedule and next run, and review its recent runs.
 

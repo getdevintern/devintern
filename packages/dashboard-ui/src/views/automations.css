@@ -6,7 +6,49 @@
   overflow: hidden;
 }
 
-@media (max-width: 767px) {
+/* Repository groups: one <tbody> per group, headed by a full-width row. */
+.auto-group-row {
+  background: var(--muted);
+}
+.auto-group + .auto-group .auto-group-row {
+  border-top: 1px solid var(--border);
+}
+.auto-group-row:not(:last-child) {
+  border-bottom: 1px solid color-mix(in oklch, var(--border), transparent 30%);
+}
+.auto-group-cell {
+  padding: 0.5rem 1rem;
+  text-align: left;
+  font-weight: inherit;
+}
+.auto-group-heading {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+  color: var(--muted-foreground);
+  font-size: 0.75rem;
+  font-weight: 500;
+  line-height: 1.25rem;
+}
+.auto-group-heading svg {
+  color: var(--subtle-foreground);
+}
+.auto-group-count {
+  color: var(--subtle-foreground);
+  font-variant-numeric: tabular-nums;
+}
+
+/*
+ * Stack rows into cards when the table's own width cannot fit every column
+ * (about 760px with the schedule wrapping): a phone, a tablet, or a laptop
+ * with the sidebar open.
+ */
+.auto-table-wrap {
+  container-type: inline-size;
+}
+
+@container (max-width: 48rem) {
   .auto-table thead {
     display: none;
   }
@@ -14,6 +56,10 @@
   .auto-table tbody {
     display: block;
     width: 100%;
+  }
+  .auto-table tr.auto-group-row,
+  .auto-table th.auto-group-cell {
+    display: block;
   }
   .auto-table tr.auto-row {
     display: grid;
@@ -51,9 +97,6 @@
   .auto-cell-action {
     grid-area: action;
     text-align: right;
-  }
-  .auto-cell-repo {
-    display: none !important;
   }
 }
 
