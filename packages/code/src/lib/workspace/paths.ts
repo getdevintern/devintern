@@ -81,6 +81,15 @@ export function workspaceWorkerStartPath(workspaceDir: string = resolveWorkspace
   return join(workspaceDir, ".worker.starting");
 }
 
+/**
+ * Path of the record of which `workspace.toml` version the running worker
+ * last applied (and the last rejected reload), read by the dashboard to tell
+ * whether a saved edit is live. See `config-reload.ts`.
+ */
+export function workspaceAppliedConfigPath(workspaceDir: string = resolveWorkspaceDir()): string {
+  return join(workspaceDir, ".worker.config-state.json");
+}
+
 /** Shape of the worker's early startup marker. */
 export interface WorkerStartMarker {
   pid: number;

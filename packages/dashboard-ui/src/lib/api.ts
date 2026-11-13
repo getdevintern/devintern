@@ -352,6 +352,275 @@ export interface LogsResponse {
   truncated: boolean;
 }
 
+/** Dashboard API endpoints for the overview and workspace screens. */
+export const OVERVIEW_URL = "/api/overview";
+export const WORKSPACE_URL = "/api/workspace";
+
+/** One unfinished run, trimmed for the capacity panel. */
+export interface OverviewRunningRun {
+  id: number;
+  origin: RunOrigin;
+  taskKey?: string;
+  /** Repo as recorded on the run (a workspace repo name or `owner/repo`). */
+  repo?: string;
+  /** Workspace repo the run was attributed to, when it matched one. */
+  workspaceRepo?: string;
+  team?: string;
+  harness?: string;
+  step?: string;
+  startedAt: number;
+}
+
+export interface OverviewRepoCapacity {
+  /** Workspace repo name, or the run's raw repo when it matched none. */
+  repo: string;
+  running: number;
+  /** `max_concurrency_per_repo`; null without a valid config. */
+  maxConcurrency: number | null;
+  /** Whether the repo is declared in `workspace.toml`. */
+  configured: boolean;
+}
+
+export interface OverviewCapacity {
+  /** Unfinished (`in_progress`) runs. */
+  running: number;
+  /** `max_concurrency`; null without a valid config. */
+  maxConcurrency: number | null;
+  /** Configured repos first (config order), then unmatched run repos. */
+  perRepo: OverviewRepoCapacity[];
+  /** Running runs without any repo. */
+  unattributed: number;
+  runs: OverviewRunningRun[];
+}
+
+/**
+ * `unknown` = persisted failover state could not be read. `unconfirmed` = the
+ * last usage-limit window elapsed but no run has succeeded on the harness since,
+ * so its quota may still be exhausted.
+ */
+export type OverviewHarnessState = "healthy" | "limited" | "unconfirmed" | "unknown";
+
+export interface OverviewHarnessEntry {
+  name: string;
+  /** 0 = primary. */
+  priority: number;
+  /** Whether the name resolves to a registered harness. */
+  known: boolean;
+  active: boolean;
+  state: OverviewHarnessState;
+  /** Usage-limit window end (epoch ms), only while `limited`. */
+  limitedUntil?: number;
+  /** When the last usage limit was hit (epoch ms), only while `unconfirmed`. */
+  lastLimitedAt?: number;
+  /** When that limit window ended (epoch ms), only while `unconfirmed`. */
+  limitEndedAt?: number;
+}
+
+export interface OverviewHarnesses {
+  /** Where `AGENT_HARNESS` came from (workspace `.env` wins, like the worker). */
+  source: "workspace_env" | "process_env" | "default";
+  entries: OverviewHarnessEntry[];
+  /** Highest-priority entry without an open window (primary when exhausted); null when unknown. */
+  active: string | null;
+  /** Active harness last persisted by the worker. */
+  persistedActive?: string;
+  /** Every entry is limited; new agent work is paused. */
+  allExhausted: boolean;
+  /** Earliest window end while exhausted (epoch ms). */
+  resumesAt?: number;
+  /** False when persisted failover state could not be read. */
+  stateAvailable: boolean;
+}
+
+export interface OverviewTrackerSource {
+  /** Team name; absent for the single `[defaults]` poller. */
+  team?: string;
+  tracker: string;
+  taskQuery?: string;
+  repo?: string;
+  /** Cursor key the poller writes (`<tracker>:<team>` or `<tracker>`). */
+  cursorSource: string;
+  /** When the poller last advanced its cursor (epoch ms). */
+  lastPolledAt?: number;
+  cursorValue?: string;
+}
+
+export interface OverviewTrackers {
+  mode: "teams" | "defaults" | "none";
+  pollIntervalSeconds?: number;
+  sources: OverviewTrackerSource[];
+}
+
+/** `GET /api/overview` body. */
+export interface OverviewResponse {
+  generatedAt: number;
+  worker: WorkerStatus;
+  config: { status: "ok" | "missing" | "invalid"; path: string; error?: string };
+  capacity: OverviewCapacity;
+  harnesses: OverviewHarnesses;
+  trackers: OverviewTrackers;
+}
+
+/** Redacted env source: location plus variable NAMES only (never values). */
+export interface WorkspaceEnvFileView {
+  /** Path as written in `workspace.toml`. */
+  path: string;
+  resolvedPath: string;
+  exists: boolean;
+  keys: string[];
+}
+
+export interface WorkspaceScheduleView {
+  cron?: string;
+  interval?: string;
+}
+
+export interface WorkspaceTeamView {
+  name: string;
+  tracker: string;
+  taskQuery?: string;
+  repo?: string;
+  envFile?: WorkspaceEnvFileView;
+  /** Inline `[teams.env]` key names. */
+  envKeys: string[];
+}
+
+export interface WorkspaceRepoView {
+  name: string;
+  /** Remote with embedded credentials removed. */
+  remote: string;
+  defaultBranch?: string;
+  prLabels?: string[];
+  pipelineFile?: string;
+  envFile?: WorkspaceEnvFileView;
+  envKeys: string[];
+}
+
+export interface WorkspaceRoutingRule {
+  repo: string;
+  team?: string;
+  project?: string;
+  components: string[];
+  labels: string[];
+}
+
+export interface WorkspaceAutomationView extends WorkspaceScheduleView {
+  id: string;
+  enabled: boolean;
+  repo?: string;
+  openPr: boolean;
+  allowNoChanges: boolean;
+  prompt: string;
+}
+
+export interface WorkspaceEstimationView extends WorkspaceScheduleView {
+  id: string;
+  enabled: boolean;
+  query: string;
+}
+
+export interface WorkspaceErrorMonitorView {
+  id: string;
+  provider: string;
+  enabled: boolean;
+  repo: string;
+  team?: string;
+  query?: string;
+  intervalSeconds: number;
+  minOccurrences: number;
+  maxIssuesPerTick: number;
+  commentOnAction: boolean;
+  organization: string;
+  project: string;
+  baseUrl?: string;
+  envFile?: WorkspaceEnvFileView;
+  envKeys: string[];
+}
+
+/** `[worker.schedule]` time window as parsed by the worker. */
+export interface WorkspaceTimeWindow {
+  spec: string;
+  startMinutes: number;
+  endMinutes: number;
+}
+
+export interface WorkspaceConfigView {
+  workspace: {
+    execution: {
+      isolation?: "best_effort_host";
+      maxConcurrency: number;
+      maxConcurrencyPerRepo: number;
+    };
+    worktreesTtlDays: number;
+    dashboard: boolean;
+    dashboardPort?: number;
+    ciFailureFix: boolean;
+    conflictResolution: "auto" | "scheduled" | "disabled";
+    conflictSchedule?: WorkspaceScheduleView;
+  };
+  worker: {
+    autoUpdate: boolean;
+    schedule: {
+      active: WorkspaceTimeWindow[];
+      blocked: WorkspaceTimeWindow[];
+      timezone?: string;
+      catchUpMissed: boolean;
+    } | null;
+  };
+  defaults: {
+    tracker: string;
+    taskQuery?: string;
+    workerTaskArgs?: string;
+    prLabels?: string[];
+    pipelineFile?: string;
+    pollIntervalSeconds: number;
+  };
+  /** Shared workspace `.env` (key names only). */
+  sharedEnv: WorkspaceEnvFileView;
+  teams: WorkspaceTeamView[];
+  repos: WorkspaceRepoView[];
+  routing: WorkspaceRoutingRule[];
+  automations: WorkspaceAutomationView[];
+  estimations: WorkspaceEstimationView[];
+  errorMonitors: WorkspaceErrorMonitorView[];
+}
+
+export interface WorkspaceResponseMeta {
+  workspaceDir: string;
+  configPath: string;
+  /** Config file mtime (epoch ms); absent when missing. */
+  fileModifiedAt?: number;
+  /** Running worker's start time (epoch ms) from its lock. */
+  workerStartedAt?: number;
+  /**
+   * File modified after the running worker started (mtime only; true even
+   * after a successful hot reload). Prefer `configSync`.
+   */
+  staleSinceWorkerStart?: boolean;
+  /**
+   * Whether the running worker runs this file: `applied`, `pending` (not
+   * processed yet), `rejected` (kept its previous config; see
+   * `appliedConfig.rejectedReason`), or `unconfirmed` (older worker without a
+   * record, file newer than its start). Absent without a running worker.
+   */
+  configSync?: "applied" | "pending" | "rejected" | "unconfirmed";
+  /** The version the running worker last applied, when it keeps a record. */
+  appliedConfig?: {
+    appliedAt: number;
+    fileModifiedAt: number;
+    rejectedReason?: string;
+    rejectedAt?: number;
+  };
+}
+
+/** `GET /api/workspace` body. */
+export type WorkspaceResponse = WorkspaceResponseMeta &
+  (
+    | { status: "ok"; config: WorkspaceConfigView }
+    | { status: "missing"; error: string }
+    | { status: "invalid"; error: string; problems: string[] }
+  );
+
 export interface PollState<T> {
   data: T | null;
   error: string | null;

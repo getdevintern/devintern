@@ -3,7 +3,9 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import {
+  HarnessAlertPill,
   WorkerStatusIndicator,
+  scheduleLabel,
   queueLabel,
   queueTitle,
   showMissingDatabaseBanner,
@@ -52,7 +54,7 @@ test("the queued count includes relay deliveries, ad-hoc tasks, and scheduled re
   expect(queueLabel(mixedQueue)).toBe("5 queued");
 
   const title = queueTitle(mixedQueue);
-  expect(title).toContain("1 relay delivery");
+  expect(title).toContain("1 webhook delivery");
   expect(title).toContain("3 ad-hoc tasks");
   expect(title).toContain("1 scheduled retry");
 });
@@ -72,4 +74,61 @@ test("queued workspace work suppresses the no-database banner", () => {
   expect(showMissingDatabaseBanner({ dbMissing: true, queueDbMissing: true })).toBe(true);
   expect(showMissingDatabaseBanner({ dbMissing: false, queueDbMissing: true })).toBe(false);
   expect(showMissingDatabaseBanner({ dbMissing: false, queueDbMissing: false })).toBe(false);
+});
+
+test("the harness pill reads as paused when the whole chain is exhausted", () => {
+  const now = new Date(2026, 10, 13, 12, 0, 0).getTime();
+  const html = renderToStaticMarkup(
+    createElement(HarnessAlertPill, {
+      alert: { kind: "exhausted", resumesAt: now + 2 * 60 * 60_000 },
+      now,
+    }),
+  );
+
+  expect(html).toContain('href="#/"');
+  expect(html).toContain("agents paused until");
+  expect(html).toContain('data-state="exhausted"');
+  expect(html).toContain("work resumes in 2h");
+});
+
+test("the harness pill names a single limited harness", () => {
+  const html = renderToStaticMarkup(
+    createElement(HarnessAlertPill, { alert: { kind: "limited", names: ["claude"] }, now: 0 }),
+  );
+
+  expect(html).toContain("claude limited");
+  expect(html).toContain('data-state="limited"');
+});
+
+test("the harness pill flags a quota nothing has confirmed since its limit", () => {
+  const html = renderToStaticMarkup(
+    createElement(HarnessAlertPill, {
+      alert: { kind: "unconfirmed", names: ["opencode"] },
+      now: 0,
+    }),
+  );
+
+  expect(html).toContain("opencode quota unconfirmed");
+  expect(html).toContain('data-state="unconfirmed"');
+});
+
+test("the window item is short enough for a one-row strip", () => {
+  const now = new Date(2026, 10, 13, 12, 0, 0).getTime();
+  const closesAt = new Date(2026, 10, 13, 19, 0, 0).getTime();
+  const schedule = {
+    enabled: true,
+    pickupAllowed: true,
+    active: ["09:00-19:00"],
+    blocked: [],
+    timezone: "UTC",
+    catchUpMissed: true,
+    manualRequested: false,
+    nextChange: { at: closesAt, kind: "close" as const },
+  };
+  const clock = new Date(closesAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+
+  expect(scheduleLabel(schedule, now)).toBe(`window closes ${clock}`);
+  expect(scheduleLabel({ ...schedule, pickupAllowed: false }, now)).toBe(
+    `paused · window opens ${clock}`,
+  );
 });

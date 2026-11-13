@@ -51,7 +51,7 @@ function formatExpected(epochMs: number): string {
   return new Date(epochMs).toLocaleString(undefined, {
     month: "short",
     day: "numeric",
-    hour: "2-digit",
+    hour: "numeric",
     minute: "2-digit",
   });
 }

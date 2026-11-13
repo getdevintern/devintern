@@ -159,7 +159,7 @@ test("finished tasks sit in a closed disclosure with a link to all runs", () => 
   expect(html).toContain("<details");
   expect(html).not.toContain("<details open");
   expect(html).toContain("Recently finished");
-  expect(html).toContain('href="#/"');
+  expect(html).toContain('href="#/runs"');
   expect(html).not.toContain(">---<");
 });
 

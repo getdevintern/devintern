@@ -127,7 +127,7 @@ export function TaskActivityList({
               <TaskRow key={entry.key} entry={entry} kind="finished" now={now} onOpen={onOpenRun} />
             ))}
             <li>
-              <a className="ta-footer" href="#/">
+              <a className="ta-footer" href="#/runs">
                 {finishedHidden ? `${finishedHidden} more in Runs` : "View all runs"}
                 <ArrowRight className="size-3.5" aria-hidden="true" />
               </a>

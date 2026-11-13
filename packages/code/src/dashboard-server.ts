@@ -30,6 +30,8 @@ import {
   handleStats,
   handleWorkerStatus,
 } from "./lib/observability/dashboard-api";
+import { handleOverview } from "./lib/observability/dashboard-overview";
+import { handleWorkspace } from "./lib/observability/dashboard-workspace";
 import type { AutomationRunDeps, RetryHandlerDeps } from "./lib/observability/dashboard-api";
 import type { DashboardAutomationActions } from "./lib/automation/acquirer";
 
@@ -122,7 +124,7 @@ function serveStatic(uiDir: string, pathname: string): Response | null {
 
 const MISSING_UI_PAGE =
   "devintern dashboard: UI assets not found.\n\n" +
-  "The JSON API is available under /api (try /api/runs, /api/stats, /api/worker).\n" +
+  "The JSON API is available under /api (try /api/overview, /api/runs, /api/stats, /api/worker).\n" +
   "If you are running from source, build the UI first:\n" +
   "  bun run --filter @devintern/dashboard-ui build\n";
 
@@ -232,6 +234,12 @@ export function startDashboardServer(
         }
         if (pathname === "/api/worker") {
           return json(handleWorkerStatus(data));
+        }
+        if (pathname === "/api/overview") {
+          return json(handleOverview(data));
+        }
+        if (pathname === "/api/workspace") {
+          return json(handleWorkspace(data));
         }
         if (pathname === "/api/agent-prs") {
           return json(handleAgentPrs(data));

@@ -309,9 +309,11 @@
   display: flex;
   min-width: 0;
   flex: 1;
-  flex-wrap: wrap;
+  /* One row at every width: the window item truncates, Live stays pinned right. */
+  flex-wrap: nowrap;
   align-items: center;
-  gap: 6px 18px;
+  gap: 18px;
+  overflow: hidden;
   color: var(--muted-foreground);
   font-size: 0.8125rem;
 }
@@ -326,7 +328,39 @@
 }
 
 .strip-item svg {
+  flex: none;
   color: var(--subtle-foreground);
+}
+
+.dashboard-status-strip > * {
+  flex: none;
+}
+
+/*
+ * When the strip runs out of room, StatusStrip raises data-compact one step
+ * at a time instead of truncating: 1 collapses the window (and database)
+ * items to their icon, 2 drops the pid, 3 drops the long PR/Live wording,
+ * 4 collapses the harness pill to its icon. Collapsed text stays readable to
+ * screen readers and in each item's tooltip.
+ */
+.dashboard-status-strip:not([data-compact="0"]) .strip-item-shrink .strip-label,
+.dashboard-status-strip:is([data-compact="3"], [data-compact="4"]) .strip-wide,
+.dashboard-status-strip[data-compact="4"] .harness-pill .strip-label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.dashboard-status-strip:is([data-compact="2"], [data-compact="3"], [data-compact="4"])
+  .worker-chip-detail {
+  display: none;
+}
+
+.dashboard-status-strip[data-compact="4"] {
+  gap: 10px;
 }
 
 a.strip-link {
@@ -588,13 +622,16 @@ a.strip-link:hover .strip-item svg {
     overflow-x: auto;
     padding: 0 12px;
     scrollbar-width: none;
+    /* A wide right fade signals that the tab row scrolls when tabs clip. */
     mask-image: linear-gradient(
       to right,
       transparent 0,
       #000 12px,
-      #000 calc(100% - 20px),
+      #000 calc(100% - 48px),
       transparent
     );
+    scroll-padding-inline: 12px 48px;
+    padding-right: 48px;
   }
 
   .dashboard-nav::-webkit-scrollbar {
@@ -621,6 +658,10 @@ a.strip-link:hover .strip-item svg {
     min-height: 48px;
     padding: 8px 20px;
   }
+
+  .dashboard-status-strip {
+    gap: 14px;
+  }
 }
 
 @media (max-width: 560px) {
@@ -633,11 +674,7 @@ a.strip-link:hover .strip-item svg {
   }
 
   .dashboard-status-strip {
-    gap: 6px 14px;
-  }
-
-  .live-indicator {
-    margin-left: 0;
+    gap: 12px;
   }
 
   .dashboard-content {
@@ -657,4 +694,31 @@ a.strip-link:hover .strip-item svg {
   .skeleton {
     animation: none;
   }
+}
+
+/* Harness chain warning in the status strip (links to the overview). */
+.harness-pill {
+  display: inline-flex;
+  height: 28px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  border: 1px solid var(--warning-border);
+  border-radius: 999px;
+  background: var(--warning-subtle);
+  color: var(--warning);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: background-color 150ms ease-out;
+}
+
+.harness-pill:hover {
+  background: color-mix(in srgb, var(--warning) 20%, transparent);
+}
+
+.harness-pill[data-state="limited"] {
+  font-weight: 500;
 }
