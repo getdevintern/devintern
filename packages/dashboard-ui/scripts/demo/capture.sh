@@ -2,6 +2,7 @@
 # Regenerate the marketing dashboard screenshots from a seeded demo workspace.
 #
 #   bash scripts/demo/capture.sh <output-dir> [port]
+#   RECORD=1 bash scripts/demo/capture.sh <output-dir> [port]   # also writes tour.gif (needs ffmpeg)
 #
 # Runs the seed and the real dashboard inside a bubblewrap mount namespace so
 # the workspace appears at /srv/devintern (the path the Workspace view prints),
@@ -40,3 +41,19 @@ shoot pull-requests.png "/prs"
 shoot automations.png "/automations"
 shoot workspace.png "/workspace"
 echo "Screenshots written to $OUT"
+
+if [ -n "${RECORD:-}" ]; then
+  CDP_PORT=$((PORT + 1))
+  FRAMES="$(mktemp -d)"
+  /usr/bin/chromium --headless=new --hide-scrollbars --window-size=1280,800 \
+    --remote-debugging-port="$CDP_PORT" --user-data-dir="$PROFILE" about:blank >/dev/null 2>&1 &
+  CHROME_PID=$!
+  for _ in $(seq 40); do curl -sf "http://127.0.0.1:$CDP_PORT/json/version" >/dev/null && break; sleep 0.25; done
+  (cd "$HERE" && bun run scripts/demo/record.ts "http://127.0.0.1:$PORT" "$RUN_ID" "$FRAMES" "$CDP_PORT")
+  kill "$CHROME_PID" 2>/dev/null || true
+  ffmpeg -y -loglevel error -framerate 10 -i "$FRAMES/frame-%04d.png" \
+    -vf "scale=1000:-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=128:stats_mode=diff[p];[b][p]paletteuse=dither=none:diff_mode=rectangle" \
+    "$OUT/tour.gif"
+  rm -rf "$FRAMES"
+  echo "Tour written to $OUT/tour.gif"
+fi

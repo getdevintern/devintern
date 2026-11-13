@@ -93,10 +93,9 @@ Prefer guided setup through your coding agent? Use the [DevIntern setup skill](d
 
 ## See it working
 
-<p align="center">
-  <video src="https://github.com/user-attachments/assets/f62b17c0-4e5b-4a2f-ac3a-761c44af3680" width="100%" controls muted autoplay loop playsinline></video>
-</p>
-<p align="center"><em>Ready ticket → pull request → review feedback → follow-up commits.</em></p>
+![A tour of the local dashboard: the runs list, one run's timeline from feasibility check to opened pull request, the pull requests awaiting review, scheduled automations, and work routing across repositories.](assets/readme/dashboard-tour.gif)
+
+<p align="center"><em>The worker's local dashboard: runs, one run step by step, pull requests awaiting review, automations, and work routing. Example data.</em></p>
 
 Browse the [DevIntern-authored pull requests](https://github.com/getdevintern/devintern/pulls?q=is%3Apr+label%3Adevintern-authored) to inspect changes produced by DevIntern on this repository. Start with these merged examples:
 
