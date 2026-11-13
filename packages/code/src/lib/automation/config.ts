@@ -261,6 +261,10 @@ const CREATE_PR_PATTERN = /^--create-pr(?:=(?!false$).*)?$/;
  * `allow_no_changes = true` appends `--allow-no-changes`, so a run that ends
  * without repository changes is recorded as a successful no-op instead of a
  * failed delivery.
+ *
+ * Every occurrence also gets `--skip-clarity-check`. The prompt is written by
+ * the operator, not taken from a tracker ticket, so a feasibility pass only
+ * spends an extra agent call (and harness quota) on every run.
  */
 export function automationTaskArgs(
   automation: { openPr?: boolean; allowNoChanges?: boolean },
@@ -292,5 +296,6 @@ export function automationTaskArgs(
   if (automation.allowNoChanges && !args.includes("--allow-no-changes")) {
     args.push("--allow-no-changes");
   }
+  if (!args.includes("--skip-clarity-check")) args.push("--skip-clarity-check");
   return args;
 }
