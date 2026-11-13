@@ -24,6 +24,7 @@
 
 import {
   getHarness,
+  HARNESS_ALIASES,
   isHarnessInstalled,
   listHarnesses,
   parseAgentEffort,
@@ -111,6 +112,12 @@ export function parseAgentSelection(
       );
     } else {
       selection.harness = canonical[0]!.name;
+      // The child only ever sees the canonical name, so the resolver's
+      // deprecated-alias warning would never fire; surface it here instead.
+      const alias = HARNESS_ALIASES[names[0]!];
+      if (alias?.deprecated && alias.warning) {
+        console.warn(`⚠️  ${label}.${prefix}harness${entrySuffix}: ${alias.warning}`);
+      }
     }
   }
 

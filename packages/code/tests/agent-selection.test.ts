@@ -42,6 +42,51 @@ tracker = "jira"
 `;
 
 describe("parseAgentSelection", () => {
+  test("warns about a deprecated alias while canonicalizing it", () => {
+    const warnings: string[] = [];
+    const original = console.warn;
+    console.warn = (message: string) => warnings.push(message);
+    try {
+      const errors: string[] = [];
+      const selection = parseAgentSelection(
+        { harness: "gemini" },
+        { label: "[[automations]][0]", id: "daily" },
+        errors,
+      );
+      expect(errors).toEqual([]);
+      expect(selection.harness).toBe("antigravity");
+    } finally {
+      console.warn = original;
+    }
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('[[automations]][0].harness (entry "daily")');
+    expect(warnings[0]).toContain("deprecated");
+  });
+
+  test("does not warn for a non-deprecated alias", () => {
+    const warnings: string[] = [];
+    const original = console.warn;
+    console.warn = (message: string) => warnings.push(message);
+    try {
+      expect(parseAgentSelection({ harness: "agy" }, { label: "x" }, []).harness).toBe(
+        "antigravity",
+      );
+    } finally {
+      console.warn = original;
+    }
+    expect(warnings).toEqual([]);
+  });
+
+  test("matches the env chain's alias handling for the primary", () => {
+    // AGENT_HARNESS=agy and a pin of "antigravity" are the same agent, so the
+    // inherited model is kept rather than dropped as a cross-harness leak.
+    const env = applyAgentSelectionEnv(
+      { AGENT_HARNESS: "agy", AGENT_MODEL: "gemini-3-pro" },
+      { harness: "antigravity" },
+    );
+    expect(env.AGENT_MODEL).toBe("gemini-3-pro");
+  });
+
   test("accepts harness, model, and effort and canonicalizes aliases", () => {
     const errors: string[] = [];
     const selection = parseAgentSelection(
