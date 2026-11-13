@@ -1,5 +1,6 @@
 {
   "name": "devintern",
+  "version": "1.0.0",
   "displayName": "DevIntern",
   "description": "Skills that teach Claude Code to set up a DevIntern worker, configure its workspace, delegate implementation tasks, and file redacted bug reports.",
   "author": {
