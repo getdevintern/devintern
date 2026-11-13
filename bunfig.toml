@@ -1,3 +1,12 @@
+[install]
+# Supply-chain guard: only resolve package versions published at least 7 days
+# ago (value is in seconds). A hijacked or malicious release is usually
+# detected and unpublished within days, so it never reaches bun.lock. This
+# applies whenever Bun resolves new versions (`bun add`, `bun update`,
+# `bun install` without a matching lockfile entry); `--frozen-lockfile`
+# installs of already-locked versions are unaffected.
+minimumReleaseAge = 604800
+
 [test]
 # Root-level safety net: `bun test` run from the repo root discovers package
 # tests but does NOT read per-package bunfig.toml, so packages/code's guard
