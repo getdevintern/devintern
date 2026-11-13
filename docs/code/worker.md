@@ -158,7 +158,7 @@ When `open_pr = true`, occurrences receive the same flags as polled tasks: `[def
 By default every run uses the workspace `AGENT_HARNESS` / `AGENT_MODEL` / `AGENT_EFFORT` from the [environment layers](./configuration.md). An individual `[[automations]]` or `[[estimations]]` entry can override the agent for its own runs, so a cheap model can handle a daily triage job while a frontier model handles release work:
 
 ```toml
-# Same harness as the workspace, smaller model; failover still applies.
+# Smaller model on the workspace primary harness (here claude-code); failover still applies.
 [[automations]]
 id = "dependency-bump"
 enabled = true
@@ -171,7 +171,7 @@ id = "log-triage"
 enabled = true
 interval = "1d"
 harness = "codex"
-model = "gpt-5-codex"
+model = "gpt-5.2"
 effort = "low"
 prompt = "Summarize new errors and file at most one issue."
 

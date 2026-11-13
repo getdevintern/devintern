@@ -36,7 +36,7 @@ dashboard = true
 # conflict_resolution_cron = "0 3 * * *"      # worker host timezone
 # conflict_resolution_interval = "1d"         # exactly one of cron / interval
 # Or turn it off entirely: conflict_resolution = "disabled"
-# conflict_resolution_model = "sonnet"        # cheaper agent for conflict resolution
+# conflict_resolution_model = "sonnet"        # cheaper model for conflict resolution (primary harness)
 
 # Optional bounded host concurrency (see warning below):
 # [workspace.execution]
@@ -282,16 +282,16 @@ Two things are never delayed by scheduled mode: review feedback on the agent's P
 
 The setting is workspace-wide (per-repo overrides are not supported in v1) and live-reloads with the rest of the runtime configuration. The tradeoff to keep in mind: between windows a conflicted PR cannot be merged, so on fast-moving branches where an instant rebase unblocks a waiting reviewer, `auto` stays the better choice. See [Worker Daemon → Merge conflicts on the agent's PRs](./worker.md#merge-conflicts-on-the-agents-prs) for how resolution itself works.
 
-**Choosing the agent.** Conflict resolution is usually mechanical, so it can run on a cheaper model than feature work. Set any of `conflict_resolution_harness`, `conflict_resolution_model`, and `conflict_resolution_effort` under `[workspace]`; they behave exactly like an automation's `harness` / `model` / `effort` (see [Worker Daemon → Choosing the agent per schedule](./worker.md#choosing-the-agent-per-schedule)) and apply to automatic resolution on GitHub and GitLab in every mode:
+**Choosing the agent.** Conflict resolution is usually mechanical, so it can run on a cheaper model than feature work. Set any of `conflict_resolution_harness`, `conflict_resolution_model`, and `conflict_resolution_effort` under `[workspace]`; they behave exactly like an automation's `harness` / `model` / `effort` (see [Worker Daemon → Choosing the agent per schedule](./worker.md#choosing-the-agent-per-schedule)) and apply to automatic resolution on GitHub (`auto` and `scheduled`) and GitLab (`auto`):
 
 ```toml
 [workspace]
-conflict_resolution_model = "sonnet"     # primary harness only; failover still applies
+conflict_resolution_model = "sonnet"     # a model id for your primary harness (here claude-code); failover still applies
 # conflict_resolution_harness = "codex"  # pin one agent (opts out of failover)
 # conflict_resolution_effort = "low"
 ```
 
-A model-only setting applies to the workspace's primary harness and keeps failover. A pinned harness that hits a usage limit defers the resolution to a later poll instead of failing over. Changes live-reload; a manual `devintern resolve-conflicts <pr-url>` uses the normal environment.
+A model-only setting applies to the workspace's primary harness and keeps failover. A pinned harness that hits a usage limit does not fail over: the resolution is deferred and retried on later polls, and after three consecutive deferrals the PR waits until its head or base moves again (or until you run `devintern resolve-conflicts <pr-url>`). Changes live-reload; a manual `devintern resolve-conflicts <pr-url>` uses the normal environment.
 
 Set `conflict_resolution = "disabled"` to turn automatic conflict resolution off entirely: the worker stops watching for conflicts on the agent's PRs altogether — no detection, no queuing, no agent runs. A PR that conflicts with its base simply stays conflicted until someone resolves it (by hand, or on demand via `devintern resolve-conflicts <pr-url>`). Review feedback and @mention handling are unaffected. This is a valid choice when the team prefers to rebase manually, or when the agent is not trusted to resolve conflicts in a sensitive repository.
 
