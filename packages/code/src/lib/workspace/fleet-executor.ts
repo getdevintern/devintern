@@ -19,6 +19,7 @@ import { RUN_ORIGIN_ENV } from "../observability/analytics";
 import { AUTOMATION_ID_ENV } from "../automation/acquirer";
 import { PICKUP_RUN_ID_ENV } from "../state/session-pickup";
 import { actionedSourceKey } from "../task/actioned-state";
+import { QUEUE_CLAIM_ENV } from "./queue-failure-reason";
 
 /** Task shape the fleet acquirer needs (structural subset of `Task`). */
 export interface FleetTask {
@@ -247,6 +248,8 @@ export function createFleetTaskExecutor(
      * resolves from that specific run.
      */
     pickupRunId?: number;
+    /** Unique queue execution whose run record should receive this outcome. */
+    queueClaim?: string;
     /**
      * Called with the task child pid after it spawns. Used by the injected-task
      * queue to persist the pid for interrupt recovery.
@@ -358,6 +361,7 @@ export function createFleetTaskExecutor(
             env: {
               ...env,
               [RUN_ORIGIN_ENV]: options.runOrigin ?? "worker",
+              [QUEUE_CLAIM_ENV]: options.queueClaim,
               ...(options.pickupRunId !== undefined
                 ? { [PICKUP_RUN_ID_ENV]: String(options.pickupRunId) }
                 : {}),

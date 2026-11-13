@@ -15,17 +15,22 @@
 import type { Acquirer } from "../../worker";
 import type { ScheduledRetry, ScheduledRetryStore } from "../state/run-retry";
 import type { TaskExecutionResult } from "../acquirers/task-polling";
+import { randomUUID } from "crypto";
 import { getWorkerFailover } from "../worker/failover";
 import { toRoutableTask } from "./router";
+import { queueFailureReason } from "./queue-failure-reason";
 import type { RoutableTask } from "./router";
 
 export interface RetryQueueAcquirerOptions {
   store: ScheduledRetryStore;
+  /** Shared workspace queue DB, for best-effort failed-run diagnostics. */
+  runDbPath?: string;
   /** Fleet executor slice (same shape `createFleetTaskExecutor` returns). */
   execute: (
     taskKey: string,
     routable: RoutableTask,
     retry: ScheduledRetry,
+    queueClaim: string,
   ) => Promise<TaskExecutionResult>;
   intervalSeconds: number;
   /**
@@ -106,12 +111,14 @@ export class RetryQueueAcquirer implements Acquirer {
   /** Run one claimed retry; false when it was requeued for the next tick. */
   private async runOne(retry: ScheduledRetry): Promise<boolean> {
     const { store, execute, verbose } = this.options;
+    const queueClaim = randomUUID();
     console.log(`🔁 [${this.name}] re-running ${retry.taskKey} (scheduled by ${retry.actor})`);
     try {
       const result = await execute(
         retry.taskKey,
         toRoutableTask({ key: retry.taskKey, labels: [], components: [] }),
         retry,
+        queueClaim,
       );
       if (result === true) {
         store.finish(retry.id, "done");
@@ -127,7 +134,7 @@ export class RetryQueueAcquirer implements Acquirer {
         console.log(`⏳ [${this.name}] ${retry.taskKey} deferred; will retry next tick`);
         return false;
       } else {
-        store.finish(retry.id, "failed", "task pipeline did not complete cleanly");
+        store.finish(retry.id, "failed", queueFailureReason(this.options.runDbPath, queueClaim));
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

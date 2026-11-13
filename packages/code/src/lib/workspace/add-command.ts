@@ -24,8 +24,6 @@ import type { RepoConfig, WorkspaceConfig } from "./config";
 import { loadWorkspaceConfig } from "./config";
 import { InjectedTaskStore } from "../state/injected-tasks";
 import type { EnqueueInjectedTaskResult, InjectedTask } from "../state/injected-tasks";
-import { RunStore } from "../state/run-recorder";
-import type { RunRecord } from "../state/run-recorder";
 import { applyWorkspaceProcessEnv } from "./env";
 import {
   injectedChildStillRunningMessage,
@@ -627,11 +625,11 @@ async function enqueueNewTask(
       if (add.json) log(JSON.stringify({ ...serialize(task), deduplicated: false }));
       return 0;
     }
-    return await waitForTask(task.id, { ...ctx, deduplicated: false, taskKey: task.taskKey });
+    return await waitForTask(task.id, { ...ctx, deduplicated: false, taskKey: task.taskKey }, task);
   }
 }
 
-function serialize(task: InjectedTask): {
+function serialize(task: Pick<InjectedTask, "id" | "taskKey" | "repo" | "status">): {
   id: number;
   taskKey: string;
   repo: string;
@@ -644,9 +642,21 @@ function serialize(task: InjectedTask): {
  * Emit the single result for a settled task: the JSON object under `--json`,
  * otherwise a human success/failure line. Returns the process exit code.
  */
-function emitSettled(task: InjectedTask, deduplicated: boolean, ctx: TaskContext): number {
+function emitSettled(
+  task: Pick<InjectedTask, "id" | "taskKey" | "repo" | "status" | "message">,
+  deduplicated: boolean,
+  ctx: TaskContext,
+): number {
   if (ctx.json) {
-    ctx.log(JSON.stringify({ ...serialize(task), deduplicated }));
+    ctx.log(
+      JSON.stringify({
+        ...serialize(task),
+        deduplicated,
+        ...(task.status === "failed"
+          ? { error: task.message ?? "task pipeline did not complete cleanly" }
+          : {}),
+      }),
+    );
   } else if (task.status === "failed") {
     ctx.error(`❌ ${task.taskKey} failed${task.message ? `: ${task.message}` : ""}`);
   } else {
@@ -669,7 +679,7 @@ async function reportTask(task: InjectedTask, ctx: TaskContext): Promise<number>
   if (task.status === "done" || task.status === "failed") {
     return emitSettled(task, true, ctx);
   }
-  return await waitForTask(task.id, { ...ctx, deduplicated: true, taskKey: task.taskKey });
+  return await waitForTask(task.id, { ...ctx, deduplicated: true, taskKey: task.taskKey }, task);
 }
 
 /**
@@ -697,7 +707,7 @@ async function resumeTask(
       if (ctx.json) ctx.log(JSON.stringify({ ...serialize(task), deduplicated: true }));
       return 0;
     }
-    return await waitForTask(task.id, { ...ctx, deduplicated: true, taskKey });
+    return await waitForTask(task.id, { ...ctx, deduplicated: true, taskKey }, task);
   }
 
   // A hard-killed worker's detached child may still be running this attempt in
@@ -725,7 +735,7 @@ async function resumeTask(
     if (ctx.json) ctx.log(JSON.stringify({ ...serialize(revived), deduplicated: false }));
     return 0;
   }
-  return await waitForTask(revived.id, { ...ctx, deduplicated: false, taskKey });
+  return await waitForTask(revived.id, { ...ctx, deduplicated: false, taskKey }, revived);
 }
 
 /**
@@ -779,6 +789,7 @@ function isPidRunning(pid: number): boolean {
 async function waitForTask(
   id: number,
   ctx: TaskContext & { deduplicated: boolean; taskKey: string },
+  initialTask: InjectedTask,
 ): Promise<number> {
   ctx.status(`⏳ Waiting for task #${id} to finish (Ctrl-C to detach)...`);
   const timeoutSeconds = ctx.waitTimeoutSeconds ?? DEFAULT_WAIT_TIMEOUT_SECONDS;
@@ -788,7 +799,7 @@ async function waitForTask(
   for (;;) {
     const task = ctx.store.getById(id);
     if (!task) {
-      return reportPrunedTask(id, ctx);
+      return reportPrunedTask(id, ctx, initialTask.repo);
     }
     if (task.status === "done" || task.status === "failed") {
       return emitSettled(task, ctx.deduplicated, ctx);
@@ -872,54 +883,31 @@ async function waitForTask(
  * Report a task whose injected row was pruned by the worker's retention sweep
  * before `--wait` observed its terminal status.
  *
- * `pruneSettled` only removes settled (`done`/`failed`) rows, so a row that
- * vanished after the CLI enqueued it settled; its outcome is durably mirrored
- * in the run record (same DB, keyed by the task key) written before the row is
- * finished. Read that instead of reporting a spurious "disappeared" failure
- * for a successful run. A missing or non-terminal run (e.g. the DB was edited
- * out from under us) is genuinely inconclusive and still fails.
+ * `pruneSettled` retains each row's outcome under its immutable queue ID.
+ * This also keeps a later task with the same key from changing this result.
  */
 function reportPrunedTask(
   id: number,
   ctx: TaskContext & { deduplicated: boolean; taskKey: string },
+  repo: string,
 ): number {
-  const run = readLatestRun(ctx.selectedDir, ctx.taskKey);
-  if (!run || run.status === "in_progress" || run.status === "deferred") {
+  const outcome = ctx.store.getPrunedOutcome(id);
+  if (!outcome || outcome.repo !== repo) {
     return failWait(ctx, { id, error: `Injected task #${id} disappeared while waiting.` }, [
       `❌ Injected task #${id} disappeared while waiting.`,
     ]);
   }
-  const settled: InjectedTask = {
+  const settled = {
     id,
     taskKey: ctx.taskKey,
-    repo: run.repo ?? "",
-    title: "",
-    body: "",
-    taskFile: "",
-    actor: "",
-    status: run.status === "succeeded" ? "done" : "failed",
-    message: run.outcomeReason,
-    autoResumeCount: 0,
-    deferCount: 0,
-    createdAt: run.startedAt,
+    repo: outcome.repo,
+    status: outcome.status,
+    message: outcome.message,
   };
   if (!ctx.json) {
-    ctx.status(`ℹ️  Injected task #${id} was pruned after it settled; reporting its run outcome.`);
+    ctx.status(`ℹ️  Injected task #${id} was pruned after it settled; reporting its outcome.`);
   }
   return emitSettled(settled, ctx.deduplicated, ctx);
-}
-
-/** Latest run record for a task key (read-only; null when absent/unreadable). */
-function readLatestRun(selectedDir: string, taskKey: string): RunRecord | null {
-  let store: RunStore | null = null;
-  try {
-    store = new RunStore(workspaceDbPath(selectedDir), { readonly: true });
-    return store.latestRunByTaskKey([taskKey]).get(taskKey) ?? null;
-  } catch {
-    return null;
-  } finally {
-    store?.close();
-  }
 }
 
 /** Read all of stdin (used by `--body-file -`). */

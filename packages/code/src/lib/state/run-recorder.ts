@@ -55,6 +55,8 @@ export type StageStatus =
 
 export interface RunMeta {
   origin: RunOrigin;
+  /** Unique queue execution that created this run, when applicable. */
+  queueClaim?: string;
   taskKey?: string; // null for pr_mention runs
   tracker?: string;
   /** Workspace team that acquired this task, when multi-team mode is active. */
@@ -225,6 +227,7 @@ export class RunStore {
         ticket_key TEXT,
         ticket_url TEXT,
         task_description TEXT,
+        queue_claim TEXT,
         clean_stop INTEGER NOT NULL DEFAULT 0
       )
     `);
@@ -261,6 +264,11 @@ export class RunStore {
     if (!columns.some((c) => c.name === "step_active")) {
       this.db.run("ALTER TABLE runs ADD COLUMN step_active INTEGER NOT NULL DEFAULT 0");
     }
+    if (!columns.some((c) => c.name === "queue_claim")) {
+      this.db.run("ALTER TABLE runs ADD COLUMN queue_claim TEXT");
+    }
+    // Not unique: one queue claim can produce several runs when the worker changes harnesses.
+    this.db.run("CREATE INDEX IF NOT EXISTS idx_runs_queue_claim ON runs(queue_claim)");
     this.db.run("CREATE INDEX IF NOT EXISTS idx_runs_automation_id ON runs(automation_id)");
 
     this.db.run(`
@@ -294,8 +302,8 @@ export class RunStore {
     const attempt = meta.attempt ?? (meta.taskKey ? this.countRuns(meta.taskKey) + 1 : null);
     const result = this.db.run(
       `INSERT INTO runs (origin, task_key, tracker, team, harness, branch, repo, pr_number, pr_url,
-       automation_id, ticket_key, ticket_url, status, started_at, attempt)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'in_progress', ?, ?)`,
+       automation_id, ticket_key, ticket_url, queue_claim, status, started_at, attempt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'in_progress', ?, ?)`,
       [
         meta.origin,
         meta.taskKey ?? null,
@@ -309,6 +317,7 @@ export class RunStore {
         meta.automationId ?? null,
         meta.ticketKey ?? null,
         meta.ticketUrl ?? null,
+        meta.queueClaim ?? null,
         Date.now(),
         attempt,
       ],
@@ -415,12 +424,12 @@ export class RunStore {
    * Attach the created PR to a run.
    *
    * @param runId - Run id
-   * @param pr - Repo slug, PR number, and URL (all optional)
+   * @param pr - Repo slug (used only when the run has no repo), PR number, and URL
    */
   setRunPr(runId: number, pr: { repo?: string; prNumber?: number; url?: string }): void {
     this.db.run(
       `UPDATE runs SET
-         repo = COALESCE(?, repo),
+         repo = COALESCE(repo, ?),
          pr_number = COALESCE(?, pr_number),
          pr_url = COALESCE(?, pr_url)
        WHERE id = ?`,
@@ -655,6 +664,14 @@ export class RunStore {
     return rows.map((row) => this.rowToRun(row));
   }
 
+  /** Latest run from one queue execution, including harness failover attempts. */
+  runForQueueClaim(queueClaim: string): RunRecord | null {
+    const row = this.db
+      .query("SELECT * FROM runs WHERE queue_claim = ? ORDER BY id DESC LIMIT 1")
+      .get(queueClaim) as Record<string, unknown> | null;
+    return row ? this.rowToRun(row) : null;
+  }
+
   /**
    * Latest run per task key, using the same ordering as {@link listRuns}
    * (started_at DESC, id DESC). One query for all keys instead of one per key.
@@ -827,6 +844,7 @@ export class RunStore {
     return {
       id: row.id as number,
       origin: row.origin as RunOrigin,
+      queueClaim: (row.queue_claim as string | null) ?? undefined,
       taskKey: (row.task_key as string | null) ?? undefined,
       tracker: (row.tracker as string | null) ?? undefined,
       team: (row.team as string | null) ?? undefined,

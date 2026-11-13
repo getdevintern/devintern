@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { mkdirSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
 import { InjectedTaskStore } from "../src/lib/state/injected-tasks";
+import { RunStore } from "../src/lib/state/run-recorder";
 import { resetWorkerFailover } from "../src/lib/worker/failover";
 import { createTaskSupervisor } from "../src/lib/worker/supervisor";
 import {
@@ -399,6 +401,165 @@ describe("InjectedTaskAcquirer", () => {
     const row = store.getById(1);
     expect(row?.status).toBe("failed");
     expect(row?.message).toBe("task pipeline did not complete cleanly");
+  });
+
+  test("persists the current failed local run reason", async () => {
+    enqueue("local-a");
+    const dbPath = join(dir, "queue.db");
+    const acquirer = new InjectedTaskAcquirer({
+      store,
+      runDbPath: dbPath,
+      execute: async (task, queueClaim) => {
+        const runs = new RunStore(dbPath);
+        const id = runs.createRun({
+          origin: "local",
+          taskKey: task.taskKey,
+          repo: task.repo,
+          queueClaim,
+        });
+        runs.finishRun(id, "failed", "verification failed");
+        runs.close();
+        return false;
+      },
+      intervalSeconds: 3600,
+    });
+
+    await acquirer.tick();
+    expect(store.getByTaskKey("local-a")).toMatchObject({
+      status: "failed",
+      message: "verification failed",
+    });
+  });
+
+  test("keeps its own reason when another local run with the same scope finishes later", async () => {
+    enqueue("local-overlap");
+    const dbPath = join(dir, "queue.db");
+    const acquirer = new InjectedTaskAcquirer({
+      store,
+      runDbPath: dbPath,
+      execute: async (task, queueClaim) => {
+        const runs = new RunStore(dbPath);
+        const current = runs.createRun({
+          origin: "local",
+          taskKey: task.taskKey,
+          repo: task.repo,
+          queueClaim,
+        });
+        const other = runs.createRun({ origin: "local", taskKey: task.taskKey, repo: task.repo });
+        runs.finishRun(current, "failed", "this local failure");
+        runs.finishRun(other, "failed", "other local failure");
+        runs.close();
+        return false;
+      },
+      intervalSeconds: 3600,
+    });
+
+    await acquirer.tick();
+    expect(store.getByTaskKey("local-overlap")?.message).toBe("this local failure");
+  });
+
+  test("ignores old and unrelated run reasons", async () => {
+    const dbPath = join(dir, "queue.db");
+    enqueue("local-old");
+    enqueue("local-other-source");
+    const runs = new RunStore(dbPath);
+    const old = runs.createRun({ origin: "local", taskKey: "local-old", repo: "backend" });
+    runs.finishRun(old, "failed", "old failure");
+    const raw = new Database(dbPath);
+    raw.run("UPDATE runs SET started_at = 1 WHERE id = ?", [old]);
+    raw.close();
+    runs.close();
+
+    const acquirer = new InjectedTaskAcquirer({
+      store,
+      runDbPath: dbPath,
+      execute: async (task) => {
+        if (task.taskKey === "local-other-source") {
+          const records = new RunStore(dbPath);
+          const id = records.createRun({ origin: "task", taskKey: task.taskKey, repo: task.repo });
+          records.finishRun(id, "failed", "wrong source");
+          records.close();
+        }
+        return false;
+      },
+      intervalSeconds: 3600,
+    });
+
+    await acquirer.tick();
+    expect(store.getByTaskKey("local-old")?.message).toBe("task pipeline did not complete cleanly");
+    expect(store.getByTaskKey("local-other-source")?.message).toBe(
+      "task pipeline did not complete cleanly",
+    );
+  });
+
+  test("does not reuse a prior run that shares the claim millisecond", async () => {
+    const dbPath = join(dir, "queue.db");
+    enqueue("local-same-ms");
+    const runs = new RunStore(dbPath);
+    const old = runs.createRun({ origin: "local", taskKey: "local-same-ms", repo: "backend" });
+    runs.finishRun(old, "failed", "previous failure");
+    runs.close();
+    const acquirer = new InjectedTaskAcquirer({
+      store,
+      runDbPath: dbPath,
+      execute: async (task) => {
+        const raw = new Database(dbPath);
+        raw.run("UPDATE runs SET started_at = ? WHERE id = ?", [task.startedAt!, old]);
+        raw.close();
+        return false;
+      },
+      intervalSeconds: 3600,
+    });
+    await acquirer.tick();
+    expect(store.getByTaskKey("local-same-ms")?.message).toBe(
+      "task pipeline did not complete cleanly",
+    );
+  });
+
+  test("uses the current failed local run when another source records a newer run", async () => {
+    const dbPath = join(dir, "queue.db");
+    enqueue("local-mixed-source");
+    const acquirer = new InjectedTaskAcquirer({
+      store,
+      runDbPath: dbPath,
+      execute: async (task, queueClaim) => {
+        const runs = new RunStore(dbPath);
+        const current = runs.createRun({
+          origin: "local",
+          taskKey: task.taskKey,
+          repo: task.repo,
+          queueClaim,
+        });
+        runs.finishRun(current, "failed", "current failure");
+        const unrelated = runs.createRun({
+          origin: "task",
+          taskKey: task.taskKey,
+          repo: task.repo,
+        });
+        runs.finishRun(unrelated, "failed", "other source failure");
+        runs.close();
+        return false;
+      },
+      intervalSeconds: 3600,
+    });
+    await acquirer.tick();
+    expect(store.getByTaskKey("local-mixed-source")?.message).toBe("current failure");
+  });
+
+  test("settles a failed row even when run history cannot be read", async () => {
+    enqueue("local-a");
+    const acquirer = new InjectedTaskAcquirer({
+      store,
+      runDbPath: join(dir, "missing", "queue.db"),
+      execute: async () => false,
+      intervalSeconds: 3600,
+    });
+
+    await acquirer.tick();
+    expect(store.getByTaskKey("local-a")).toMatchObject({
+      status: "failed",
+      message: "task pipeline did not complete cleanly",
+    });
   });
 
   test("start returns without waiting for a slow injected task", async () => {

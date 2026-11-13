@@ -364,6 +364,42 @@ describe("InjectedTaskStore", () => {
     ).toEqual(["local-pending", "local-running"]);
   });
 
+  test("repeated sweeps expire archived outcomes after the wait recovery window", () => {
+    const first = store.enqueue(base).task;
+    store.finish(store.claimNext()!.id, "failed", "first failure");
+    const sweptAt = Date.now() + 1_000;
+    expect(store.pruneSettled(0, sweptAt)).toBe(1);
+    expect(store.getPrunedOutcome(first.id)).toMatchObject({
+      repo: "backend",
+      status: "failed",
+      message: "first failure",
+    });
+
+    const second = store.enqueue({
+      ...base,
+      taskKey: "local-second",
+      taskFile: "/ws/injected/local-second.md",
+    }).task;
+    store.finish(store.claimNext()!.id, "done");
+    expect(store.pruneSettled(0, sweptAt + 24 * 60 * 60 * 1_000 + 1)).toBe(1);
+    expect(store.getPrunedOutcome(first.id)).toBeNull();
+    expect(store.getPrunedOutcome(second.id)?.status).toBe("done");
+
+    expect(store.pruneSettled(0, sweptAt + 2 * 24 * 60 * 60 * 1_000 + 2)).toBe(0);
+    expect(store.getPrunedOutcome(second.id)).toBeNull();
+    const raw = new Database(dbPath, { readonly: true });
+    try {
+      const count = raw
+        .query("SELECT COUNT(*) AS count FROM pruned_injected_task_outcomes")
+        .get() as {
+        count: number;
+      };
+      expect(count.count).toBe(0);
+    } finally {
+      raw.close();
+    }
+  });
+
   test("pruneSettled unlinks each pruned row's prompt file", () => {
     const promptFile = join(dir, "prompt-done.md");
     writeFileSync(promptFile, "sensitive operator context");

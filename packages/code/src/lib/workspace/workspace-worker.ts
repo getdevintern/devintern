@@ -503,12 +503,14 @@ export function buildInjectedTaskAcquirer(
 ): InjectedTaskAcquirer {
   return new InjectedTaskAcquirer({
     store,
-    execute: (task) =>
+    runDbPath: workspaceDbPath(deps.workspaceDir),
+    execute: (task, queueClaim) =>
       createFleetTaskExecutor(deps, {
         extraArgs: () => fleetTaskArgs(deps.config),
         repo: task.repo,
         source: INJECTED_TASK_SOURCE,
         runOrigin: "local",
+        queueClaim,
         // The CLI resolves the local markdown file; the key still names the worktree.
         taskRef: task.taskFile,
         // Persist the detached child pid for hard-kill startup recovery.
@@ -537,7 +539,8 @@ export function buildRetryQueueAcquirer(
 ): RetryQueueAcquirer {
   return new RetryQueueAcquirer({
     store,
-    execute: (taskKey, routable, retry) => {
+    runDbPath: workspaceDbPath(deps.workspaceDir),
+    execute: (taskKey, routable, retry, queueClaim) => {
       const retryTeam = retry.team ? findTeam(deps.config, retry.team) : undefined;
       return createFleetTaskExecutor(
         {
@@ -550,6 +553,7 @@ export function buildRetryQueueAcquirer(
         {
           extraArgs: () => ["--force", ...fleetTaskArgs(deps.config)],
           repo: retry.repo,
+          queueClaim,
           source: "retry",
           // Pin the run this retry targets so session pickup resumes its
           // branch and prior report instead of the just-opened run.
