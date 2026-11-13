@@ -3,7 +3,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { FilterSelect } from "@/components/shared";
-import { RunsTable } from "@/views/RunsView";
+import { RunsTable, formatStarted } from "@/views/RunsView";
 import type { RunOrigin, RunRecord } from "@/lib/api";
 import { RUN_ORIGIN_LABELS } from "@/lib/run-origin";
 
@@ -27,44 +27,58 @@ function headerIndex(html: string, label: string): number {
   return html.indexOf(`>${label}<`);
 }
 
-test("columns read in scanning order: work, origin, harness, status, result, started, duration", () => {
+test("columns read in scanning order: work, status, outcome, harness, started, duration", () => {
   const html = renderToStaticMarkup(
     createElement(RunsTable, { runs: [run()], onOpenRun: () => {} }),
   );
 
-  const labels = ["Work", "Origin", "Harness", "Status", "Result", "Started", "Duration"];
+  const labels = ["Work", "Status", "Outcome", "Harness", "Started", "Duration"];
   const indices = labels.map((label) => headerIndex(html, label));
   expect(indices.every((index) => index >= 0)).toBe(true);
   expect([...indices].sort((a, b) => a - b)).toEqual(indices);
 });
 
-test("no branch column: branches stay on the run detail view", () => {
+test("no branch column: the branch is only a tooltip", () => {
   const html = renderToStaticMarkup(
     createElement(RunsTable, { runs: [run({ branch: "feature/dev-7" })], onOpenRun: () => {} }),
   );
 
   expect(headerIndex(html, "Branch")).toBe(-1);
-  expect(html).not.toContain("feature/dev-7");
+  expect(html).not.toContain(">feature/dev-7<");
+});
+
+test("failed and deferred runs surface the outcome reason; attempts show in the context line", () => {
+  const html = renderToStaticMarkup(
+    createElement(RunsTable, {
+      runs: [
+        {
+          ...run({ status: "deferred", outcomeReason: "Agent usage limit reached" }),
+          attempt: 7,
+        },
+      ],
+      onOpenRun: () => {},
+    }),
+  );
+
+  expect(html).toContain("Agent usage limit reached");
+  expect(html).toContain("attempt 7");
+});
+
+test("formatStarted uses relative time for recent starts", () => {
+  expect(formatStarted(STARTED_AT - 12 * 60_000, STARTED_AT)).toBe("12m ago");
+  expect(formatStarted(STARTED_AT - 3 * HOUR, STARTED_AT)).toBe("3h ago");
+  expect(formatStarted(STARTED_AT - 5_000, STARTED_AT)).toBe("just now");
 });
 
 test("started column shows the run start time; duration comes from finishedAt", () => {
   const html = renderToStaticMarkup(
-    createElement(RunsTable, { runs: [run()], onOpenRun: () => {} }),
+    createElement(RunsTable, { runs: [run()], onOpenRun: () => {}, now: STARTED_AT }),
   );
 
   expect(html).toContain(">Started<");
-  expect(html).toContain(formatExpected(STARTED_AT - HOUR));
+  expect(html).toContain("1h ago");
   expect(html).toContain("1h 0m");
 });
-
-function formatExpected(epochMs: number): string {
-  return new Date(epochMs).toLocaleString(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
 
 test("in-progress runs show a placeholder duration; missing harness degrades to a dash", () => {
   const html = renderToStaticMarkup(
@@ -213,4 +227,34 @@ test("filter select trigger shows the formatted non-default selection", () => {
 
   expect(html).toContain("Origin");
   expect(html).toContain("Tracker task");
+});
+
+test("earlier attempts fold under the newest run behind a collapsed toggle", () => {
+  const html = renderToStaticMarkup(
+    createElement(RunsTable, {
+      runs: [
+        run({ id: 3, attempt: 3, status: "succeeded" }),
+        run({ id: 2, attempt: 2, status: "failed", outcomeReason: "Tests failed" }),
+        run({ id: 1, attempt: 1, status: "deferred", outcomeReason: "Usage limit" }),
+      ],
+      onOpenRun: () => {},
+    }),
+  );
+
+  expect(html).toContain("2 earlier");
+  expect(html).toContain('aria-expanded="false"');
+  expect(html).not.toContain("Tests failed");
+  expect(html).not.toContain("Attempt 2");
+});
+
+test("formatStarted shows yesterday's time without a leading zero, like the overview", () => {
+  const now = new Date(2026, 10, 13, 12, 0, 0).getTime();
+  const yesterday = new Date(2026, 10, 12, 9, 25, 0).getTime();
+  const time = new Date(yesterday).toLocaleTimeString(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+  });
+
+  expect(formatStarted(yesterday, now)).toBe(`Yesterday ${time}`);
+  expect(time.startsWith("0")).toBe(false);
 });

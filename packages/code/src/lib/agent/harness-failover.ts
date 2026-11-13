@@ -60,6 +60,12 @@ export interface HarnessFailoverOptions {
 export class HarnessFailover {
   private readonly entries: HarnessChainEntry[];
   private readonly limited = new Map<string, number>();
+  /**
+   * Harnesses that could not start under the sandbox, with a short process-only
+   * cooldown. Unlike usage-limit windows these are not persisted: a restart or
+   * a config reload should get a fresh probe.
+   */
+  private readonly unavailable = new Map<string, number>();
   private activeIndex = 0;
   private readonly now: () => number;
   private readonly persistLimit?: (harness: string, untilMs: number) => void;
@@ -183,6 +189,37 @@ export class HarnessFailover {
     return until !== undefined && until > this.now();
   }
 
+  /** Whether the named harness is in a startup-failure cooldown. */
+  isUnavailable(harness: string): boolean {
+    const until = this.unavailable.get(harness);
+    if (until === undefined) return false;
+    if (until <= this.now()) {
+      this.unavailable.delete(harness);
+      return false;
+    }
+    return true;
+  }
+
+  /** Whether every chain entry is currently unavailable. */
+  allUnavailable(): boolean {
+    return this.entries.every((entry) => this.isUnavailable(entry.name));
+  }
+
+  /**
+   * Move off an unavailable/limited active entry when a higher-priority entry
+   * has become usable again (e.g. a startup-failure cooldown elapsed).
+   *
+   * @returns The entry that should be used for the next spawn.
+   */
+  ensureAvailableActive(): HarnessChainEntry {
+    const target = this.selectAvailable();
+    if (target && target.name !== this.activeName) {
+      this.activeIndex = this.entries.indexOf(target);
+      this.persistActive?.(this.activeName);
+    }
+    return this.active;
+  }
+
   /**
    * Record a usage limit for the active harness and fail over when possible.
    *
@@ -224,6 +261,52 @@ export class HarnessFailover {
     }
 
     return { kind: "stayed", entry: target.name, untilMs: resetUntilMs };
+  }
+
+  /**
+   * Mark the active harness as unable to start under the sandbox and switch to
+   * the next usable entry.
+   *
+   * The cooldown is in-memory only: a harness that cannot start is a
+   * configuration problem, not an account-global limit, so it must not be
+   * persisted as a usage window. When every entry is unavailable the outcome
+   * is `exhausted` and the caller defers the task.
+   *
+   * @param untilMs - Epoch ms when the process may retry this entry.
+   * @returns What the failover decided.
+   */
+  reportHarnessUnavailable(untilMs: number): FailoverOutcome {
+    const from = this.active;
+    const existing = this.unavailable.get(from.name) ?? 0;
+    this.unavailable.set(from.name, Math.max(existing, untilMs));
+
+    const target = this.selectAvailable();
+    if (!target) {
+      const retryMs = Math.min(
+        ...[...this.unavailable.values()].filter((until) => until > this.now()),
+      );
+      const resumeAt = Number.isFinite(retryMs) ? retryMs : untilMs;
+      this.log(
+        `⛔ Every harness in the chain failed to start (${this.describeChain()}); ` +
+          `deferring tasks until ${new Date(resumeAt).toISOString()}.`,
+      );
+      return { kind: "exhausted", untilMs: resumeAt };
+    }
+
+    const toIndex = this.entries.indexOf(target);
+    this.activeIndex = toIndex;
+    this.persistActive?.(this.activeName);
+    if (target.name !== from.name) {
+      const fallbackPosition =
+        toIndex === 0 ? "primary" : `fallback ${toIndex + 1}/${this.entries.length}`;
+      this.log(
+        `🛠️  ${from.name} could not start under the sandbox — trying ${target.name} ` +
+          `(${fallbackPosition} in the AGENT_HARNESS chain).`,
+      );
+      return { kind: "switched", from: from.name, to: target.name, untilMs };
+    }
+
+    return { kind: "stayed", entry: target.name, untilMs };
   }
 
   /**
@@ -276,9 +359,9 @@ export class HarnessFailover {
     return this.entries.every((e) => this.isLimited(e.name));
   }
 
-  /** Highest-priority entry without an open window, or null when all limited. */
+  /** Highest-priority entry that is neither limited nor unavailable. */
   private selectAvailable(): HarnessChainEntry | null {
-    return this.entries.find((e) => !this.isLimited(e.name)) ?? null;
+    return this.entries.find((e) => !this.isLimited(e.name) && !this.isUnavailable(e.name)) ?? null;
   }
 
   /** Store a window, keeping the furthest reset when one is already open. */

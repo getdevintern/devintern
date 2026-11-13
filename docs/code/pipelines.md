@@ -1,10 +1,10 @@
 ---
 title: "Customizing the Task Pipeline"
 sidebarLabel: "Pipelines"
-description: "Add verification and project-local TypeScript steps to task delivery, and customize the pipeline per repository or across a fleet."
+description: "Use when adding verification or custom TypeScript steps to task delivery, or giving repositories different pipelines across a fleet."
 section: "Automation Reference"
 order: 2
-dateModified: 2026-10-16
+dateModified: 2026-11-12
 ---
 
 # Customizing the Task Pipeline
@@ -262,7 +262,7 @@ The `context` passed to `run` is the same object across all steps and carries:
 | `loopbackFeedback`, `loopbackReason` | Set by a `repeat` for the next run. |
 | `runAgentPrompt(prompt)` | Run the configured agent and return its stdout. |
 | `getDiff()` | Unified diff against `prTargetBranch`. |
-| `parseReviewFeedback(output)` | Parse and validate a JSON review verdict. |
+| `parseReviewFeedback(output, options?)` | Parse a JSON review verdict. `options.minPriority` (default `medium`) sets the approval threshold; `options.enforceApproval: false` returns a contradictory approval for the caller to resolve. |
 | `filterByPriority(items, min)` | Filter findings at or above a priority. |
 
 `data` on a step result is how steps communicate: a later step reads

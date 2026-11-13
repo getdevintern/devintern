@@ -215,3 +215,48 @@ describe("GitHubPRClient.createPullRequest", () => {
     expect(result.message).toContain("Not Found");
   });
 });
+
+describe("GitHubPRClient adoption helpers", () => {
+  test("finds an open PR for a branch and returns its identity", async () => {
+    let requested = "";
+    globalThis.fetch = mockFetch(async (url) => {
+      requested = String(url);
+      return jsonResponse(200, [{ html_url: "https://github.com/owner/repo/pull/9" }]);
+    });
+
+    const client = new GitHubPRClient("test-token");
+    const identity = await client.findOpenChangeRequest("owner/repo", "feature/dev-1");
+
+    expect(requested).toContain("/repos/owner/repo/pulls?head=owner:feature/dev-1&state=open");
+    expect(identity).toEqual({
+      provider: "github",
+      instanceUrl: "https://github.com",
+      projectPath: "owner/repo",
+      number: 9,
+      webUrl: "https://github.com/owner/repo/pull/9",
+    });
+  });
+
+  test("returns undefined when no open PR exists", async () => {
+    globalThis.fetch = mockFetch(async () => jsonResponse(200, []));
+
+    const client = new GitHubPRClient("test-token");
+    expect(await client.findOpenChangeRequest("owner/repo", "feature/dev-1")).toBeUndefined();
+  });
+
+  test("applies labels to an adopted PR", async () => {
+    let labelRequested = "";
+    let labelBody: unknown;
+    globalThis.fetch = mockFetch(async (url, init) => {
+      labelRequested = String(url);
+      labelBody = JSON.parse(String(init?.body));
+      return jsonResponse(200, []);
+    });
+
+    const client = new GitHubPRClient("test-token");
+    await client.applyLabelsToChangeRequest("owner/repo", 9, ["devintern-authored"]);
+
+    expect(labelRequested).toBe("https://api.github.com/repos/owner/repo/issues/9/labels");
+    expect(labelBody).toEqual({ labels: ["devintern-authored"] });
+  });
+});

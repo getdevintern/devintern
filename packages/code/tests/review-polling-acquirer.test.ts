@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, setSystemTime, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, setSystemTime, spyOn, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -18,6 +18,7 @@ import { WebhookQueue } from "../src/lib/state/webhook-queue";
 import { RunStore } from "../src/lib/state/run-recorder";
 import { WorkerState } from "../src/lib/state/worker-state";
 import type { ConflictResolutionMode } from "../src/lib/workspace/config";
+import { resetUnusableStateWarnings } from "../src/lib/review/agent-pr-reconciler";
 
 describe("ReviewPollingAcquirer", () => {
   let dbPath: string;
@@ -25,6 +26,7 @@ describe("ReviewPollingAcquirer", () => {
   let queue: WebhookQueue;
 
   beforeEach(() => {
+    resetUnusableStateWarnings();
     dbPath = join(tmpdir(), `rp-test-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
     workerState = new WorkerState(dbPath);
     queue = new WebhookQueue({ dbPath });
@@ -246,6 +248,66 @@ describe("ReviewPollingAcquirer", () => {
     await acquirer.tick();
     expect(addressed).toEqual([]);
     expect(workerState.listOpenAgentPrs()).toHaveLength(0);
+  });
+
+  test("an unusable PR state keeps the row watched across ticks and warns once", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 77 });
+    const warnings: string[] = [];
+    const warn = spyOn(console, "warn").mockImplementation((message: unknown) => {
+      warnings.push(String(message));
+    });
+    const addressed: string[] = [];
+    try {
+      const acquirer = new ReviewPollingAcquirer({
+        intervalSeconds: 60,
+        workerState,
+        queue,
+        github: {
+          async fetchPr() {
+            return { data: {}, etag: 'W/"empty"', notModified: false };
+          },
+          async fetchReviews() {
+            return { data: [], etag: 'W/"reviews"', notModified: false };
+          },
+          async fetchReviewCommentsSince() {
+            return [];
+          },
+        },
+        addressPr: async (repo, n) => {
+          addressed.push(`${repo}#${n}`);
+          return true;
+        },
+      });
+
+      await acquirer.tick();
+      await acquirer.tick();
+    } finally {
+      warn.mockRestore();
+    }
+
+    expect(workerState.listOpenAgentPrs().map((pr) => pr.prNumber)).toEqual([77]);
+    expect(workerState.countAgentPrs()).toEqual({ open: 1, closed: 0 });
+    expect(addressed).toEqual([]);
+    expect(warnings.filter((message) => message.includes("unusable PR state"))).toHaveLength(1);
+  });
+
+  test("an unusable PR state defers feedback instead of marking it processed", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const gh: FakeGitHubState = {
+      prState: "draft",
+      reviews: [{ id: 1, state: "changes_requested", user: human }],
+      comments: [],
+    };
+    const { acquirer, addressed } = makeAcquirer(gh);
+
+    await acquirer.tick();
+    expect(addressed).toEqual([]);
+    // The review must stay unprocessed so it is retried once state is usable.
+    expect(queue.hasProcessed("github:reviews", "review:acme/widgets#42:1")).toBe(false);
+
+    gh.prState = "open";
+    await acquirer.tick();
+    expect(addressed).toEqual(["acme/widgets#42"]);
   });
 
   test("stored ETags are sent on subsequent ticks and 304 skips review parsing", async () => {
@@ -1120,6 +1182,239 @@ describe("ReviewPollingAcquirer", () => {
       now += 60 * 60_000;
       await acquirer.tick();
       expect(warns).toBe(2);
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
+
+  test("403 permission denials are throttled like rejected credentials", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 1 });
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 2 });
+
+    const forbidden = new Error(
+      "GitHub API error (403): Resource not accessible by personal access token",
+    );
+    const warns: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warns.push(args.join(" "));
+    };
+    try {
+      const acquirer = new ReviewPollingAcquirer({
+        intervalSeconds: 60,
+        workerState,
+        queue,
+        github: {
+          async fetchPr() {
+            throw forbidden;
+          },
+          async fetchReviews() {
+            throw new Error("must not be reached");
+          },
+          async fetchReviewCommentsSince() {
+            throw new Error("must not be reached");
+          },
+        },
+        addressPr: async () => true,
+      });
+
+      // Both PRs hit the same permanent permission failure, but only the
+      // first triggers a warning this hour.
+      await acquirer.tick();
+      expect(warns).toHaveLength(1);
+      // A 403 means the token may be valid but under-scoped, so the guidance
+      // must not tell the operator to renew it.
+      expect(warns[0]).toContain("lacks a permission");
+      expect(warns[0]).not.toContain("invalid, expired, or revoked");
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
+
+  test("fleet-mode credential failures are throttled per repository", async () => {
+    workerState.recordAgentPr({ repo: "acme/a", prNumber: 1 });
+    workerState.recordAgentPr({ repo: "acme/b", prNumber: 2 });
+    let now = 1_000;
+    const failures = new Map<string, Error>([
+      [
+        "acme/a",
+        new Error("GitHub API error (403): Resource not accessible by personal access token"),
+      ],
+      ["acme/b", new Error("GitHub API error (401): Bad credentials")],
+    ]);
+    const warns: string[] = [];
+    const logs: string[] = [];
+    const originalWarn = console.warn;
+    const originalLog = console.log;
+    console.warn = (...args: unknown[]) => {
+      warns.push(args.join(" "));
+    };
+    console.log = (...args: unknown[]) => {
+      logs.push(args.join(" "));
+    };
+    const recoveryLines = (repo: string) =>
+      logs.filter(
+        (line) => line.includes("GitHub credential accepted again") && line.includes(repo),
+      ).length;
+    try {
+      const acquirer = new ReviewPollingAcquirer({
+        intervalSeconds: 60,
+        now: () => now,
+        workerState,
+        queue,
+        github: {
+          async fetchPr(repo) {
+            const failure = failures.get(repo);
+            if (failure) throw failure;
+            return { data: { state: "open" }, etag: 'W/"pr"', notModified: false };
+          },
+          async fetchReviews() {
+            return { data: [], etag: 'W/"rev"', notModified: false };
+          },
+          async fetchReviewCommentsSince() {
+            return [];
+          },
+        },
+        addressPr: async () => true,
+      });
+
+      await acquirer.tick();
+      // A 403 in repo A must not hide repo B's 401.
+      expect(warns).toHaveLength(2);
+      expect(warns.find((line) => line.includes("acme/a#1"))).toContain("lacks a permission");
+      expect(warns.find((line) => line.includes("acme/b#2"))).toContain(
+        "invalid, expired, or revoked",
+      );
+
+      now += 60_000;
+      await acquirer.tick();
+      expect(warns).toHaveLength(2);
+      expect(recoveryLines("acme/a")).toBe(0);
+
+      // Repo B recovers while repo A still fails: B rearms and reports
+      // recovery, A stays throttled.
+      failures.delete("acme/b");
+      now += 60_000;
+      await acquirer.tick();
+      expect(warns).toHaveLength(2);
+      expect(recoveryLines("acme/b")).toBe(1);
+      expect(recoveryLines("acme/a")).toBe(0);
+    } finally {
+      console.warn = originalWarn;
+      console.log = originalLog;
+    }
+  });
+
+  test("metadata-only success does not clear a reviews/comments throttle", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    let now = 1_000;
+    let failReviews = true;
+    let pollFeedback = true;
+    const warns: string[] = [];
+    const logs: string[] = [];
+    const originalWarn = console.warn;
+    const originalLog = console.log;
+    console.warn = (...args: unknown[]) => {
+      warns.push(args.join(" "));
+    };
+    console.log = (...args: unknown[]) => {
+      logs.push(args.join(" "));
+    };
+    const recoveryLines = () =>
+      logs.filter((line) => line.includes("GitHub credential accepted again")).length;
+    try {
+      const acquirer = new ReviewPollingAcquirer({
+        intervalSeconds: 60,
+        now: () => now,
+        workerState,
+        queue,
+        shouldPollFeedback: () => pollFeedback,
+        github: {
+          async fetchPr() {
+            return {
+              data: { state: "open", mergeable_state: "clean" },
+              etag: 'W/"pr"',
+              notModified: false,
+            };
+          },
+          async fetchReviews() {
+            if (failReviews) {
+              throw new Error(
+                "GitHub API error (403): Resource not accessible by personal access token",
+              );
+            }
+            return { data: [], etag: 'W/"rev"', notModified: false };
+          },
+          async fetchReviewCommentsSince() {
+            return [];
+          },
+        },
+        addressPr: async () => true,
+      });
+
+      // The PR-state read works; only the reviews endpoint is rejected.
+      await acquirer.tick();
+      expect(warns).toHaveLength(1);
+      expect(warns[0]).toContain("reading reviews");
+
+      // Relay healthy again and feedback polling skipped: the PR-state fetch
+      // succeeds, but the reviews endpoint was never re-tested, so no recovery
+      // may be announced and the throttle must stay armed.
+      pollFeedback = false;
+      now += 60_000;
+      await acquirer.tick();
+      expect(recoveryLines()).toBe(0);
+      expect(warns).toHaveLength(1);
+
+      // Feedback polling resumed but reviews still fail: the old throttle
+      // holds, so no duplicate warning inside the hour.
+      pollFeedback = true;
+      now += 60_000;
+      await acquirer.tick();
+      expect(warns).toHaveLength(1);
+
+      // The reviews endpoint finally succeeds → recovery claimed exactly once.
+      failReviews = false;
+      now += 60_000;
+      await acquirer.tick();
+      expect(recoveryLines()).toBe(1);
+    } finally {
+      console.warn = originalWarn;
+      console.log = originalLog;
+    }
+  });
+
+  test("non-credential 403s keep the normal per-PR capture path", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 1 });
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 2 });
+
+    const warns: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warns.push(args.join(" "));
+    };
+    try {
+      const acquirer = new ReviewPollingAcquirer({
+        intervalSeconds: 60,
+        workerState,
+        queue,
+        github: {
+          async fetchPr() {
+            throw new Error("GitHub API error (403): Repository was archived so is read-only.");
+          },
+          async fetchReviews() {
+            throw new Error("must not be reached");
+          },
+          async fetchReviewCommentsSince() {
+            throw new Error("must not be reached");
+          },
+        },
+        addressPr: async () => true,
+      });
+
+      await acquirer.tick();
+      expect(warns).toHaveLength(2);
+      expect(warns.every((line) => !line.includes("lacks a permission"))).toBe(true);
     } finally {
       console.warn = originalWarn;
     }

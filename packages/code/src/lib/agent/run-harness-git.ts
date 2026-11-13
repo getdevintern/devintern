@@ -38,6 +38,12 @@ export interface FinalizeContext {
   autoReview: boolean;
   autoReviewIterations: number;
   isPlanRetry: boolean;
+  /**
+   * `HEAD` captured before the implementation agent started. When it differs
+   * after the run, the agent committed its own work, so a clean tree means
+   * "nothing left for the pipeline to commit", not "the agent only planned".
+   */
+  headBeforeRun?: string;
   prTargetBranchExplicit: boolean;
   requestedPrTargetBranch?: string;
   verify?: VerifyConfig;
@@ -50,6 +56,34 @@ export interface FinalizeContext {
   projectSettings: ReturnType<typeof loadProjectSettings>;
   resolve: () => void;
   reject: (error: Error) => void;
+}
+
+/**
+ * Read the current `HEAD` commit.
+ *
+ * @returns `HEAD` SHA as reported by git, or `undefined` when the working
+ * directory is not a git repository (or git is unavailable)
+ */
+export async function readHeadCommit(): Promise<string | undefined> {
+  const result = await Utils.executeGitCommand(["rev-parse", "HEAD"]);
+  const head = result.output.trim();
+  return result.success && head ? head : undefined;
+}
+
+/**
+ * Whether the implementation agent advanced `HEAD` during this run.
+ *
+ * Agents sometimes commit their own work and leave a clean tree, which the
+ * pipeline's follow-up commit reports as "No changes to commit". Comparing
+ * `HEAD` against the value captured before the agent started tells that apart
+ * from a plan-only run, which changes nothing.
+ *
+ * @param ctx - Delivery context carrying the pre-run `HEAD`
+ */
+export async function headAdvancedDuringRun(ctx: FinalizeContext): Promise<boolean> {
+  if (!ctx.headBeforeRun) return false;
+  const current = await readHeadCommit();
+  return current !== undefined && current !== ctx.headBeforeRun;
 }
 
 export function createGitHelpers(ctx: FinalizeContext) {

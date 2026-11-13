@@ -60,6 +60,9 @@ export interface WebhookQueueConfig {
 export const LEGACY_DB_PATH = "/tmp/devintern-webhooks/queue.db";
 
 /** How long processed-event ids are retained for dedupe (90 days). */
+/** `webhook_meta` key prefix for the most recent usage-limit hit per harness. */
+export const LAST_LIMIT_KEY_PREFIX = "last_limit:";
+
 const PROCESSED_EVENTS_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000;
 
 export const DEFAULT_MAX_RETRIES = 3;
@@ -252,6 +255,18 @@ export class WebhookQueue {
       )
     `);
 
+    // Durable retry bookkeeping for relayed envelopes. The control plane owns
+    // redelivery, so a delivery that keeps failing must stop pinning the local
+    // cursor after a bounded number of attempts.
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS relay_delivery_attempts (
+        external_id TEXT PRIMARY KEY,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        updated_at INTEGER NOT NULL
+      )
+    `);
+
     // Durable base-branch advancement events. This is deliberately separate
     // from webhook_events: eligibility is discovered by polling, deferrals do
     // not consume attempts, and the deterministic id is also the eventual
@@ -287,12 +302,42 @@ export class WebhookQueue {
    * @param harness - Harness name (e.g. `claude-code`)
    * @param untilMs - Epoch ms when the limit resets
    */
-  setRateLimit(harness: string, untilMs: number): void {
-    this.db.run(
-      `INSERT INTO webhook_meta (key, value) VALUES (?, ?)
-       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-      [this.rateLimitKey(harness), String(untilMs)],
-    );
+  setRateLimit(harness: string, untilMs: number, hitAtMs: number = Date.now()): void {
+    const upsert = `INSERT INTO webhook_meta (key, value) VALUES (?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`;
+    this.db.run(upsert, [this.rateLimitKey(harness), String(untilMs)]);
+    // Kept after the window elapses (unlike `rate_limit:`) so the dashboard can
+    // tell "quota confirmed available" from "window ran out, quota unchecked".
+    this.db.run(upsert, [
+      `${LAST_LIMIT_KEY_PREFIX}${harness}`,
+      JSON.stringify({ hitAt: hitAtMs, untilMs }),
+    ]);
+  }
+
+  /**
+   * The most recent usage-limit hit per harness, including windows that have
+   * already elapsed. Malformed rows are skipped.
+   */
+  getAllLastLimits(): Record<string, { hitAt: number; untilMs: number }> {
+    const rows = this.db
+      .query(`SELECT key, value FROM webhook_meta WHERE key LIKE '${LAST_LIMIT_KEY_PREFIX}%'`)
+      .all();
+    const result: Record<string, { hitAt: number; untilMs: number }> = {};
+    for (const row of rows) {
+      try {
+        const record = parseRowObject(row, "webhook_meta row");
+        const key = requireString(record, "key", "webhook_meta row");
+        const parsed: unknown = JSON.parse(requireString(record, "value", "webhook_meta row"));
+        if (typeof parsed !== "object" || parsed === null) continue;
+        const { hitAt, untilMs } = parsed as Record<string, unknown>;
+        if (typeof hitAt === "number" && typeof untilMs === "number") {
+          result[key.slice(LAST_LIMIT_KEY_PREFIX.length)] = { hitAt, untilMs };
+        }
+      } catch {
+        // Skip a corrupt row; the dashboard treats the harness as never limited.
+      }
+    }
+    return result;
   }
 
   /** Remove a harness's persisted rate-limit, if any. */
@@ -493,7 +538,40 @@ export class WebhookQueue {
     return this.inFlight.has(this.deliveryKey(source, externalId));
   }
 
-  /** Configured retry ceiling, shared by webhook and base-sync work. */
+  /**
+   * Consume one retryable relay-delivery failure and record its error.
+   *
+   * Relay redelivery is driven by the control plane (the local cursor stays
+   * put), so this durable counter is what stops a permanently failing
+   * envelope from pinning the cursor for every later delivery.
+   *
+   * @param externalId - Relay envelope id (source/team/delivery)
+   * @param error - Failure message to retain for diagnostics
+   * @returns The number of failed attempts recorded so far
+   */
+  beginRelayDeliveryAttempt(externalId: string, error: string, now: number = Date.now()): number {
+    this.db.run(
+      `INSERT INTO relay_delivery_attempts (external_id, attempts, last_error, updated_at)
+       VALUES (?, 1, ?, ?)
+       ON CONFLICT(external_id) DO UPDATE SET
+         attempts = relay_delivery_attempts.attempts + 1,
+         last_error = excluded.last_error,
+         updated_at = excluded.updated_at`,
+      [externalId, error, now],
+    );
+    const row = this.db
+      .query(`SELECT attempts FROM relay_delivery_attempts WHERE external_id = ?`)
+      .get(externalId);
+    const record = parseRowObject(row, "relay_delivery_attempts row");
+    return requireNonNegativeInteger(record, "attempts", "relay_delivery_attempts row");
+  }
+
+  /** Forget a relay delivery's retry history once it is handled or exhausted. */
+  clearRelayDeliveryAttempts(externalId: string): void {
+    this.db.run(`DELETE FROM relay_delivery_attempts WHERE external_id = ?`, [externalId]);
+  }
+
+  /** Configured retry ceiling, shared by webhook, base-sync, and relay work. */
   getMaxRetries(): number {
     return this.maxRetries;
   }
@@ -637,6 +715,9 @@ export class WebhookQueue {
          WHERE status IN ('completed', 'failed') AND updated_at < ?`,
         [cutoff],
       );
+      // Attempt rows are cleared when a delivery settles; this only reaps
+      // stale rows left behind by a crash before that bookkeeping ran.
+      this.db.run(`DELETE FROM relay_delivery_attempts WHERE updated_at < ?`, [cutoff]);
       return result.changes;
     })();
   }
@@ -940,4 +1021,33 @@ function parseBaseSyncEventRow(row: unknown): BaseSyncEvent {
     lastError: optionalString(record, "last_error", "base_sync_events row"),
     updatedAt: requireNumber(record, "updated_at", "base_sync_events row"),
   };
+}
+
+/**
+ * Read relay delivery counts without creating or mutating the database.
+ *
+ * The dashboard's run history and its durable queue can live in different
+ * files (standalone `devintern dashboard` with a workspace), so callers pass
+ * the queue DB path explicitly. A missing file, missing table (older DB), or
+ * transient read failure degrades to zeros.
+ *
+ * @param dbPath - Database holding `webhook_events`
+ */
+export function readRelayQueueStats(dbPath: string): {
+  pending: number;
+  processing: number;
+  failed: number;
+} {
+  if (!existsSync(dbPath)) {
+    return { pending: 0, processing: 0, failed: 0 };
+  }
+  let queue: WebhookQueue | null = null;
+  try {
+    queue = new WebhookQueue({ dbPath, readonly: true });
+    return queue.getStats();
+  } catch {
+    return { pending: 0, processing: 0, failed: 0 };
+  } finally {
+    queue?.close();
+  }
 }

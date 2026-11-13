@@ -74,11 +74,45 @@ function htmlToPlainText(html: string): string {
     .trim();
 }
 
+/**
+ * Markdown-ish view of the HTML description used only to parse execution
+ * preferences.
+ *
+ * Headings become ATX lines so `## Execution preferences` stays a real section,
+ * and `<pre>` / `<code>` sections are dropped so a pasted documentation example
+ * cannot be read as configuration. {@link htmlToPlainText} is intentionally not
+ * reused for this: it flattens headings and code blocks into ordinary text, and
+ * its output is the persisted identity digest.
+ *
+ * @param html - Raw `System.Description` HTML
+ * @returns Description text with headings preserved and code samples removed
+ */
+function htmlToPreferenceMarkdown(html: string): string {
+  return htmlToPlainText(
+    html
+      .replace(/<pre\b[^>]*>[\s\S]*?<\/pre>/gi, "\n")
+      .replace(/<code\b[^>]*>[\s\S]*?<\/code>/gi, "\n")
+      .replace(/<h([1-6])\b[^>]*>([\s\S]*?)<\/h\1>/gi, "\n## $2\n"),
+  );
+}
+
 export class AzureDevOpsTaskTrackerClient implements TaskTrackerClient {
   private azureClient: AzureDevOpsClient;
 
-  constructor(organization: string, pat: string, defaultProject: string) {
-    this.azureClient = new AzureDevOpsClient({ organization, pat, defaultProject });
+  constructor(
+    organization: string,
+    pat: string,
+    defaultProject: string,
+    options: { baseUrl?: string } = {},
+  ) {
+    this.azureClient = new AzureDevOpsClient({
+      organization,
+      pat,
+      defaultProject,
+      // Always pass an explicit value so this client never falls back to
+      // process.env; the manager threads the team's env map in instead.
+      baseUrl: options.baseUrl ?? "",
+    });
   }
 
   // ------------------------------------------------------------------
@@ -145,6 +179,11 @@ export class AzureDevOpsTaskTrackerClient implements TaskTrackerClient {
   extractDescriptionText(task: Task): string {
     const workItem = task.raw as AzureDevOpsWorkItemDetail;
     return htmlToPlainText((workItem.fields["System.Description"] as string) || "");
+  }
+
+  extractDescriptionMarkdown(task: Task): string {
+    const workItem = task.raw as AzureDevOpsWorkItemDetail;
+    return htmlToPreferenceMarkdown((workItem.fields["System.Description"] as string) || "");
   }
 
   // ------------------------------------------------------------------
@@ -355,11 +394,17 @@ export class AzureDevOpsTaskTrackerClient implements TaskTrackerClient {
 
   async findEstimationComment(
     taskKey: string,
-  ): Promise<{ commentId: string; created: string } | null> {
+  ): Promise<{ commentId: string; created: string; updated: string } | null> {
     try {
       const comments = await this.fetchRawComments(taskKey);
       const existing = comments.find((c) => (c.text || "").includes(ESTIMATION_COMMENT_MARKER));
-      return existing ? { commentId: String(existing.id), created: existing.createdDate } : null;
+      return existing
+        ? {
+            commentId: String(existing.id),
+            created: existing.createdDate,
+            updated: existing.modifiedDate || existing.createdDate,
+          }
+        : null;
     } catch (error) {
       console.warn(`⚠️  Failed to check for estimation comment on ${taskKey}: ${error}`);
       return null;

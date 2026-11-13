@@ -1,3 +1,5 @@
+import { beginRunStep } from "../state/run-recorder";
+
 import type { ReviewFeedback } from "../../types/auto-review";
 
 /** A phase of a task run. Steps share the same prepared task context. */
@@ -71,6 +73,7 @@ export async function runTaskSteps<Context>(
     executions.set(step.name, execution);
     shared.artifacts?.beginStep?.(step.name, execution);
     let result: TaskStepResult | void;
+    const completeStep = beginRunStep(step.name);
     try {
       result = await step.run(context);
     } catch (error) {
@@ -85,6 +88,8 @@ export async function runTaskSteps<Context>(
         return { kind: "halted", step: step.name, reason: error.message };
       }
       throw error;
+    } finally {
+      completeStep();
     }
     shared.results?.push({ step: step.name, result: result ?? { kind: "continue" } });
     if (!result || result.kind === "continue") {
@@ -120,10 +125,14 @@ export async function runTaskSteps<Context>(
 
     const repeats = (repeatCounts.get(index) ?? 0) + 1;
     if (repeats > result.maxRepeats) {
+      // Carry the last loopback reason (for verification: the blocking
+      // findings) into the halt so the ticket comment explains what kept
+      // failing instead of only naming the step that gave up.
+      const reason = `Task step '${step.name}' exceeded its repeat limit (${result.maxRepeats})`;
       return {
         kind: "halted",
         step: step.name,
-        reason: `Task step '${step.name}' exceeded its repeat limit (${result.maxRepeats})`,
+        reason: shared.loopbackReason ? `${reason}\n${shared.loopbackReason}` : reason,
       };
     }
     repeatCounts.set(index, repeats);

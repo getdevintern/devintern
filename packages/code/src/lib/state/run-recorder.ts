@@ -38,6 +38,7 @@ export type RunStatus =
 export type RunStage =
   | "feasibility"
   | "implementation"
+  | "verify"
   | "auto_review"
   | "change_request"
   | "outcome";
@@ -54,6 +55,8 @@ export type StageStatus =
 
 export interface RunMeta {
   origin: RunOrigin;
+  /** Unique queue execution that created this run, when applicable. */
+  queueClaim?: string;
   taskKey?: string; // null for pr_mention runs
   tracker?: string;
   /** Workspace team that acquired this task, when multi-team mode is active. */
@@ -94,6 +97,10 @@ export interface RunRecord extends RunMeta {
    * evidence that no duplicate crash comment is needed.
    */
   cleanStop?: boolean;
+  /** Explicit current/last step; never inferred from completed stage records. */
+  step?: string;
+  stepStartedAt?: number;
+  stepActive?: boolean;
 }
 
 export interface RunStageRecord {
@@ -220,6 +227,7 @@ export class RunStore {
         ticket_key TEXT,
         ticket_url TEXT,
         task_description TEXT,
+        queue_claim TEXT,
         clean_stop INTEGER NOT NULL DEFAULT 0
       )
     `);
@@ -247,6 +255,20 @@ export class RunStore {
     if (!columns.some((c) => c.name === "clean_stop")) {
       this.db.run("ALTER TABLE runs ADD COLUMN clean_stop INTEGER NOT NULL DEFAULT 0");
     }
+    if (!columns.some((c) => c.name === "step")) {
+      this.db.run("ALTER TABLE runs ADD COLUMN step TEXT");
+    }
+    if (!columns.some((c) => c.name === "step_started_at")) {
+      this.db.run("ALTER TABLE runs ADD COLUMN step_started_at INTEGER");
+    }
+    if (!columns.some((c) => c.name === "step_active")) {
+      this.db.run("ALTER TABLE runs ADD COLUMN step_active INTEGER NOT NULL DEFAULT 0");
+    }
+    if (!columns.some((c) => c.name === "queue_claim")) {
+      this.db.run("ALTER TABLE runs ADD COLUMN queue_claim TEXT");
+    }
+    // Not unique: one queue claim can produce several runs when the worker changes harnesses.
+    this.db.run("CREATE INDEX IF NOT EXISTS idx_runs_queue_claim ON runs(queue_claim)");
     this.db.run("CREATE INDEX IF NOT EXISTS idx_runs_automation_id ON runs(automation_id)");
 
     this.db.run(`
@@ -280,8 +302,8 @@ export class RunStore {
     const attempt = meta.attempt ?? (meta.taskKey ? this.countRuns(meta.taskKey) + 1 : null);
     const result = this.db.run(
       `INSERT INTO runs (origin, task_key, tracker, team, harness, branch, repo, pr_number, pr_url,
-       automation_id, ticket_key, ticket_url, status, started_at, attempt)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'in_progress', ?, ?)`,
+       automation_id, ticket_key, ticket_url, queue_claim, status, started_at, attempt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'in_progress', ?, ?)`,
       [
         meta.origin,
         meta.taskKey ?? null,
@@ -295,11 +317,30 @@ export class RunStore {
         meta.automationId ?? null,
         meta.ticketKey ?? null,
         meta.ticketUrl ?? null,
+        meta.queueClaim ?? null,
         Date.now(),
         attempt,
       ],
     );
     return Number(result.lastInsertRowid);
+  }
+
+  /** Record an actual step entry, including custom and repeated executions. */
+  startStep(runId: number, step: string): number {
+    const startedAt = Date.now();
+    this.db.run(
+      "UPDATE runs SET step = ?, step_started_at = ?, step_active = 1 WHERE id = ? AND status = 'in_progress'",
+      [step, startedAt, runId],
+    );
+    return startedAt;
+  }
+
+  /** Keep the last step, but do not claim it is still executing after exit. */
+  completeStep(runId: number, step: string, startedAt: number): void {
+    this.db.run(
+      "UPDATE runs SET step_active = 0 WHERE id = ? AND step = ? AND step_started_at = ?",
+      [runId, step, startedAt],
+    );
   }
 
   /** Number of recorded runs (attempts) for a task. */
@@ -341,15 +382,54 @@ export class RunStore {
   }
 
   /**
+   * Replace a run's stage row (all occurrences) with a single fresh record.
+   *
+   * Used when a stage is written early and a later phase learns a terminal
+   * fact that contradicts it (for example, finalize writes the incomplete
+   * summary after the implementation stage already recorded success). Replacing
+   * instead of appending keeps the stage timeline and the latest-stage lookup
+   * consistent: the corrected status is the only one a reader sees.
+   *
+   * @param runId - Run id
+   * @param stage - Pipeline stage name
+   * @param status - Corrected stage outcome
+   * @param summary - One-line human-readable summary
+   * @param detail - Structured detail (JSON-stringified), truncated if huge
+   */
+  replaceStage(
+    runId: number,
+    stage: RunStage,
+    status: StageStatus,
+    summary?: string,
+    detail?: string,
+  ): void {
+    this.db.transaction(() => {
+      this.db.run(`DELETE FROM run_stages WHERE run_id = ? AND stage = ?`, [runId, stage]);
+      this.db.run(
+        `INSERT INTO run_stages (run_id, stage, status, summary, detail, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [
+          runId,
+          stage,
+          status,
+          summary ?? null,
+          detail ? detail.slice(0, MAX_DETAIL_LENGTH) : null,
+          Date.now(),
+        ],
+      );
+    })();
+  }
+
+  /**
    * Attach the created PR to a run.
    *
    * @param runId - Run id
-   * @param pr - Repo slug, PR number, and URL (all optional)
+   * @param pr - Repo slug (used only when the run has no repo), PR number, and URL
    */
   setRunPr(runId: number, pr: { repo?: string; prNumber?: number; url?: string }): void {
     this.db.run(
       `UPDATE runs SET
-         repo = COALESCE(?, repo),
+         repo = COALESCE(repo, ?),
          pr_number = COALESCE(?, pr_number),
          pr_url = COALESCE(?, pr_url)
        WHERE id = ?`,
@@ -370,6 +450,20 @@ export class RunStore {
    */
   setRunBranch(runId: number, branch: string): void {
     this.db.run(`UPDATE runs SET branch = COALESCE(branch, ?) WHERE id = ?`, [branch, runId]);
+  }
+
+  /**
+   * Replace the harness recorded for a run.
+   *
+   * The run is opened with the harness resolved from the environment at
+   * startup, but a task description can override it; this keeps run history
+   * (and the dashboard's per-harness stats) aligned with what actually ran.
+   *
+   * @param runId - Run id
+   * @param harness - Effective harness id for the run
+   */
+  setRunHarness(runId: number, harness: string): void {
+    this.db.run(`UPDATE runs SET harness = ? WHERE id = ?`, [harness, runId]);
   }
 
   /**
@@ -452,12 +546,10 @@ export class RunStore {
    */
   finishRun(runId: number, status: Exclude<RunStatus, "in_progress">, reason?: string): void {
     this.db.transaction(() => {
-      this.db.run(`UPDATE runs SET status = ?, outcome_reason = ?, finished_at = ? WHERE id = ?`, [
-        status,
-        reason ?? null,
-        Date.now(),
-        runId,
-      ]);
+      this.db.run(
+        `UPDATE runs SET status = ?, outcome_reason = ?, finished_at = ?, step_active = 0 WHERE id = ?`,
+        [status, reason ?? null, Date.now(), runId],
+      );
       this.replaceOutcomeStage(runId, status, reason);
     })();
   }
@@ -504,7 +596,7 @@ export class RunStore {
               ? "worker stopped cleanly; interruption feedback already handled"
               : reason;
           const result = this.db.run(
-            `UPDATE runs SET status = 'failed', outcome_reason = ?, finished_at = ?
+            `UPDATE runs SET status = 'failed', outcome_reason = ?, finished_at = ?, step_active = 0
              WHERE id = ? AND status = 'in_progress'`,
             [orphanReason, now, orphan.id],
           );
@@ -570,6 +662,14 @@ export class RunStore {
       .query(`SELECT * FROM runs ${where} ORDER BY started_at DESC, id DESC LIMIT ? OFFSET ?`)
       .all(...params, limit, offset) as Record<string, unknown>[];
     return rows.map((row) => this.rowToRun(row));
+  }
+
+  /** Latest run from one queue execution, including harness failover attempts. */
+  runForQueueClaim(queueClaim: string): RunRecord | null {
+    const row = this.db
+      .query("SELECT * FROM runs WHERE queue_claim = ? ORDER BY id DESC LIMIT 1")
+      .get(queueClaim) as Record<string, unknown> | null;
+    return row ? this.rowToRun(row) : null;
   }
 
   /**
@@ -744,6 +844,7 @@ export class RunStore {
     return {
       id: row.id as number,
       origin: row.origin as RunOrigin,
+      queueClaim: (row.queue_claim as string | null) ?? undefined,
       taskKey: (row.task_key as string | null) ?? undefined,
       tracker: (row.tracker as string | null) ?? undefined,
       team: (row.team as string | null) ?? undefined,
@@ -761,6 +862,9 @@ export class RunStore {
       ticketKey: (row.ticket_key as string | null) ?? undefined,
       ticketUrl: (row.ticket_url as string | null) ?? undefined,
       taskDescription: (row.task_description as string | null) ?? undefined,
+      step: typeof row.step === "string" ? row.step : undefined,
+      stepStartedAt: typeof row.step_started_at === "number" ? row.step_started_at : undefined,
+      stepActive: row.status === "in_progress" && row.step_active === 1,
       cleanStop: (row.clean_stop as number | null) === 1 ? true : undefined,
     };
   }
@@ -834,6 +938,26 @@ export function beginRun(meta: RunMeta): void {
   }
 }
 
+/** Track step execution without allowing observability failures to stop work. */
+export function beginRunStep(step: string): () => void {
+  const store = currentStore;
+  const runId = currentRunId;
+  if (!store || runId === null) return () => {};
+  try {
+    const startedAt = store.startStep(runId, step);
+    return () => {
+      try {
+        store.completeStep(runId, step, startedAt);
+      } catch (error) {
+        warnOnce("step-exit", error);
+      }
+    };
+  } catch (error) {
+    warnOnce("step-entry", error);
+    return () => {};
+  }
+}
+
 /**
  * Record a pipeline stage for the current run (no-op when no run is active).
  *
@@ -852,6 +976,73 @@ export function recordRunStage(
     currentStore.addStage(currentRunId, stage, data.status, data.summary, detail);
   } catch (error) {
     warnOnce(`stage:${stage}`, error);
+  }
+}
+
+/**
+ * Replace a stage already recorded for the current run (no-op when no run is
+ * active or the stage was never written).
+ *
+ * Used when a later phase corrects an early record — the implementation stage
+ * is written before finalize, which may then discover that verification
+ * halted. Keeping a single row means the dashboard and session pickup both see
+ * the corrected status.
+ *
+ * @param stage - Pipeline stage name
+ * @param data - Corrected stage outcome, summary, and optional structured detail
+ */
+export function replaceRunStage(
+  stage: RunStage,
+  data: { status: StageStatus; summary?: string; detail?: unknown },
+): void {
+  if (currentStore === null || currentRunId === null) {
+    return;
+  }
+  try {
+    const detail = data.detail === undefined ? undefined : JSON.stringify(data.detail);
+    currentStore.replaceStage(currentRunId, stage, data.status, data.summary, detail);
+  } catch (error) {
+    warnOnce(`stage:${stage}`, error);
+  }
+}
+
+/**
+ * Latest record for a stage on the current run, when one exists.
+ *
+ * @param stage - Pipeline stage name
+ */
+export function latestRunStage(stage: RunStage): RunStageRecord | undefined {
+  if (currentStore === null || currentRunId === null) {
+    return undefined;
+  }
+  try {
+    return currentStore
+      .listStages(currentRunId)
+      .filter((record) => record.stage === stage)
+      .at(-1);
+  } catch {
+    // Recording is best-effort; a read failure means "not recorded yet".
+    return undefined;
+  }
+}
+
+/**
+ * Whether the current run already recorded a stage.
+ *
+ * Used where a stage is written early (before auto-review can interrupt the
+ * process) and the later pipeline pass must not duplicate or regress it.
+ *
+ * @param stage - Pipeline stage name
+ */
+export function hasRunStage(stage: RunStage): boolean {
+  if (currentStore === null || currentRunId === null) {
+    return false;
+  }
+  try {
+    return currentStore.listStages(currentRunId).some((record) => record.stage === stage);
+  } catch {
+    // Recording is best-effort; a read failure means "not recorded yet".
+    return false;
   }
 }
 
@@ -887,6 +1078,28 @@ export function recordRunBranch(branch: string): void {
     currentStore.setRunBranch(currentRunId, branch);
   } catch (error) {
     warnOnce("branch", error);
+  }
+}
+
+/**
+ * Override the harness recorded for the current run (no-op when no run is
+ * active). Called once a task description's execution preference resolved to a
+ * different harness than the one resolved at startup, so run history and the
+ * dashboard attribute the run correctly.
+ *
+ * @param harness - Effective harness id
+ */
+export function recordRunHarness(harness: string): void {
+  if (currentStore === null || currentRunId === null) {
+    return;
+  }
+  try {
+    currentStore.setRunHarness(currentRunId, harness);
+    if (currentRunMeta) {
+      currentRunMeta.harness = harness;
+    }
+  } catch (error) {
+    warnOnce("harness", error);
   }
 }
 

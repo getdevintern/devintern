@@ -189,6 +189,19 @@ describe("resolveSandbox", () => {
     expect(activeSandboxName({ SANDBOX_RUNTIME: "0" })).toBeUndefined();
   });
 
+  test("auto inherits an enclosing srt sandbox instead of adding another", async () => {
+    const warnings: string[] = [];
+    const resolved = await resolveSandbox({
+      sandboxName: "auto",
+      trustedEnv: { SANDBOX_RUNTIME: "1" },
+      detections: [],
+      onWarning: (m) => warnings.push(m),
+    });
+    expect(resolved).toBeNull();
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("Already running inside the srt sandbox");
+  });
+
   test("activeSandboxName ignores a NONO_CAP_FILE pointing at a missing path", () => {
     expect(activeSandboxName({ NONO_CAP_FILE: "/nonexistent/cap.json" })).toBeUndefined();
   });
@@ -214,18 +227,34 @@ describe("resolveSandbox", () => {
     expect(warnings[0]).toContain("Already running inside the nono sandbox");
   });
 
-  test("explicit same provider is not nested when already inside a sandbox", async () => {
-    const srt = makeProvider("srt");
-    const warnings: string[] = [];
-    const resolved = await resolveSandbox({
-      sandboxName: "srt",
-      trustedEnv: { SANDBOX_RUNTIME: "1" },
-      detections: await detectionsOf(srt),
-      onWarning: (m) => warnings.push(m),
-    });
-    expect(resolved).toBeNull();
-    expect(warnings).toHaveLength(1);
-    expect(warnings[0]).toContain("not nesting another sandbox");
+  test("explicit srt fails with the migration error instead of an unknown-provider list", async () => {
+    const migration = 'Sandbox provider "srt" has been removed. Use "nono"';
+    await expect(resolveSandbox({ sandboxName: "srt", trustedEnv: {} })).rejects.toThrow(migration);
+
+    process.env.AGENT_SANDBOX = "srt";
+    await expect(resolveSandbox({ trustedEnv: {} })).rejects.toThrow(migration);
+  });
+
+  test("explicit smolvm fails with the removal migration error", async () => {
+    const migration = 'Sandbox provider "smolvm" has been removed. Use "docker"';
+    await expect(resolveSandbox({ sandboxName: "smolvm", trustedEnv: {} })).rejects.toThrow(
+      migration,
+    );
+
+    process.env.AGENT_SANDBOX = "smolvm";
+    await expect(resolveSandbox({ trustedEnv: {} })).rejects.toThrow(migration);
+  });
+
+  test("Object.prototype member names are reported as unknown providers", async () => {
+    // The removed-provider lookup uses untrusted input, so inherited keys must
+    // not resolve to anything: every one of these must get the actionable
+    // unknown-provider list, never a prototype member masquerading as a
+    // migration message.
+    for (const name of ["constructor", "toString", "hasOwnProperty", "__proto__"]) {
+      await expect(resolveSandbox({ sandboxName: name, trustedEnv: {} })).rejects.toThrow(
+        `Unknown sandbox provider: "${name}"`,
+      );
+    }
   });
 
   test("explicit different non-nestable provider is not stacked on an active sandbox", async () => {

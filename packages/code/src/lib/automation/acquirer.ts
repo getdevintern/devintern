@@ -18,8 +18,9 @@ import {
 } from "../agent/selection";
 import { resolveProjectConfigDir } from "../config/config-dir";
 import { RUN_ORIGIN_ENV } from "../observability/analytics";
-import { getWorkerFailover } from "../worker/failover";
+import { getWorkerFailover, HARNESS_UNAVAILABLE_COOLDOWN_MS } from "../worker/failover";
 import {
+  HARNESS_UNAVAILABLE_EXIT_CODE,
   readUsageLimitHint,
   USAGE_LIMIT_EXIT_CODE,
   USAGE_LIMIT_FILE_ENV,
@@ -761,12 +762,17 @@ export function spawnAutomationProcess(
         }
         return;
       }
-      if (code === USAGE_LIMIT_EXIT_CODE) {
+      if (code === USAGE_LIMIT_EXIT_CODE || code === HARNESS_UNAVAILABLE_EXIT_CODE) {
         const failover = getWorkerFailover();
         // A harness pinned by the entry opts out of workspace failover, so an
         // explicit selection never silently runs a different agent.
-        if (!options.harnessPin && failover && !failover.allLimited()) {
-          const outcome = failover.reportFromHint(readUsageLimitHint(env[USAGE_LIMIT_FILE_ENV]));
+        if (!options.harnessPin && failover) {
+          const outcome =
+            code === USAGE_LIMIT_EXIT_CODE
+              ? failover.reportFromHint(readUsageLimitHint(env[USAGE_LIMIT_FILE_ENV]))
+              : failover.manager.reportHarnessUnavailable(
+                  Date.now() + HARNESS_UNAVAILABLE_COOLDOWN_MS,
+                );
           if (outcome.kind !== "exhausted") {
             cleanupHint();
             const nextEnv = pinAutomationEnv(options.env, options.harnessPin);
@@ -781,6 +787,7 @@ export function spawnAutomationProcess(
         return;
       }
       exitResult = code === 0;
+      if (exitResult) getWorkerFailover()?.recordSuccess();
       cleanupHint();
       settle(exitResult);
     });

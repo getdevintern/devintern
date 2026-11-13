@@ -17,6 +17,8 @@ export type {
   AgentRunMode,
   AgentRunOptions,
   AgentRunResult,
+  HarnessInvocation,
+  HarnessProbe,
   ResolvedHarness,
   StructuredOutputResult,
 } from "./types.js";
@@ -55,6 +57,8 @@ export {
 export {
   parseHarnessList,
   resolveHarnessChain,
+  resolveHarnessChainSync,
+  resetMiseShimWarnings,
   type HarnessChainEntry,
   type HarnessChainIssue,
   type HarnessChainOptions,
@@ -63,6 +67,16 @@ export {
 
 // Prompt argument construction
 export { buildPromptArgs } from "./prompt-args.js";
+
+// Harness capability probing (version-dependent flags, e.g. Opencode v1/v2)
+export {
+  buildHarnessInvocation,
+  parseMajorVersion,
+  parseVersion,
+  probeHarness,
+  readCliVersion,
+  resetHarnessProbeCache,
+} from "./probe.js";
 
 // Attachment helpers (path injection + native image args)
 export {
@@ -104,6 +118,7 @@ export { GooseHarness } from "./harnesses/goose.js";
 export { GrokHarness } from "./harnesses/grok.js";
 export { KiloCodeHarness } from "./harnesses/kilo-code.js";
 export { KimiHarness } from "./harnesses/kimi.js";
+export { MUSE_MIN_VERSION, MUSE_READONLY_PROFILE, MuseHarness } from "./harnesses/muse.js";
 export { OpencodeHarness } from "./harnesses/opencode.js";
 export { PiHarness } from "./harnesses/pi.js";
 export { QwenCodeHarness } from "./harnesses/qwen.js";
@@ -131,18 +146,45 @@ export {
 export {
   resolveSandbox,
   activeSandboxName,
+  removedSandboxProviderMessage,
   type SandboxResolutionOptions,
 } from "./sandbox/resolver.js";
 export { detectSandboxProviders, type DetectedSandboxProvider } from "./sandbox/detect.js";
+export { sandboxInheritsEnclosingSandbox, type SandboxNestingDecision } from "./sandbox/nesting.js";
 export { probeCommand, unsupportedPlatform } from "./sandbox/probe.js";
+export {
+  probeHarnessUnderSandbox,
+  resetHarnessSandboxProbeCache,
+  resolveProbeProvider,
+  inheritedSandboxProbeProvider,
+  firstActionableProbeLine,
+  type HarnessSandboxProbeOptions,
+  type HarnessSandboxProbeResult,
+} from "./sandbox/harness-probe.js";
+export {
+  detectMiseShim,
+  harnessCliPathEnvKey,
+  miseShimFixHint,
+  type MiseShimInfo,
+} from "./sandbox/shim-detect.js";
 export { NativeSandboxProvider } from "./sandbox/providers/native.js";
-export { NonoSandboxProvider } from "./sandbox/providers/nono.js";
-export { SrtSandboxProvider } from "./sandbox/providers/srt.js";
+export {
+  NonoSandboxProvider,
+  describeNonoPack,
+  resetNonoPackState,
+  type NonoPackStatus,
+} from "./sandbox/providers/nono.js";
+export {
+  defaultMuseCredentialPath,
+  harnessStatePaths,
+  museCredentialPath,
+  resolveHomeDir,
+} from "./sandbox/harness-state.js";
 export { DockerSandboxProvider } from "./sandbox/providers/docker.js";
-export { SmolvmSandboxProvider } from "./sandbox/providers/smolvm.js";
 export {
   spawnAgent,
   applyNestingGuard,
+  museCredentialGuard,
   buildDefaultSandboxPolicy,
   type SpawnAgentOptions,
   type SpawnedAgent,
@@ -158,6 +200,7 @@ export {
   UsageLimitError,
   detectUsageLimit,
   resetHintToMs,
+  type UsageLimitPeriod,
   type UsageLimitResult,
 } from "./detect-usage-limit.js";
 
@@ -166,6 +209,10 @@ export {
   detectIncompleteImplementation,
   type IncompleteImplementationResult,
 } from "./detect-incomplete-implementation.js";
+export {
+  IMPLEMENTATION_SUMMARY_END,
+  IMPLEMENTATION_SUMMARY_START,
+} from "./implementation-summary.js";
 
 // Open-question detection (agent blocked on user input)
 export { detectOpenQuestions, type OpenQuestionsResult } from "./detect-open-questions.js";

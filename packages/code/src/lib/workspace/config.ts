@@ -409,7 +409,7 @@ export function parseWorkspaceConfig(
   errors.push(...schedule.errors);
   const autoUpdate = readOptionalBoolean(workerTable, "auto_update", "[worker]", errors) ?? true;
 
-  const estimations = parseEstimationsSection(document, tracker, errors);
+  const estimations = parseEstimationsSection(document, tracker, teams, errors);
 
   if (errors.length > 0) {
     throw new Error(`Invalid ${sourceLabel}:\n- ${errors.join("\n- ")}`);
@@ -833,27 +833,56 @@ function validateTeamRouting(
   }
 }
 
-/** Parse `[[estimations]]` and check the fleet tracker supports `--estimate`. */
+/**
+ * Parse `[[estimations]]` and check each sweep's tracker supports `--estimate`.
+ *
+ * An entry with `team` runs against that team's tracker (resolved after
+ * {@link applyTeamDefaults}); an entry without one uses `[defaults].tracker`.
+ */
 function parseEstimationsSection(
   document: Record<string, unknown>,
   tracker: string | undefined,
+  teams: TeamConfig[],
   errors: string[],
 ): EstimationConfig[] {
   const estimationResult = parseEstimationEntries(document.estimations);
   errors.push(...estimationResult.errors);
   // Estimation sweeps run the one-shot `--estimate` engine, so only trackers
   // with estimate support can serve them; fail the job at startup otherwise.
-  if (estimationResult.estimations.length > 0 && !tracker) {
+  const unsupported = (estimationId: string, source: string): string =>
+    `Estimation "${estimationId}" requires a tracker that supports --estimate ` +
+    `(supported: ${trackersSupportingEstimate().join(", ")}); ${source} does not.`;
+
+  const defaultsEstimations = estimationResult.estimations.filter((item) => !item.team);
+  if (defaultsEstimations.length > 0 && !tracker) {
     errors.push(
-      "[[estimations]] uses [defaults].tracker; configure it explicitly in a multi-team workspace.",
+      "[[estimations]] uses [defaults].tracker; configure it explicitly in a multi-team workspace " +
+        "or set team on the estimation.",
     );
-  } else if (tracker && !supportsEstimate(tracker) && estimationResult.estimations.length > 0) {
-    for (const estimation of estimationResult.estimations) {
+  } else if (tracker && !supportsEstimate(tracker)) {
+    for (const estimation of defaultsEstimations) {
+      errors.push(unsupported(estimation.id, `[defaults].tracker "${tracker}"`));
+    }
+  }
+
+  for (const estimation of estimationResult.estimations) {
+    if (!estimation.team) continue;
+    const requested = estimation.team.toLowerCase();
+    const team = teams.find((item) => item.name.toLowerCase() === requested);
+    if (!team) {
       errors.push(
-        `Estimation "${estimation.id}" requires a tracker that supports --estimate ` +
-          `(supported: ${trackersSupportingEstimate().join(", ")}); ` +
-          `[defaults].tracker "${tracker}" does not.`,
+        teams.length > 0
+          ? `Estimation "${estimation.id}".team "${estimation.team}" does not match any [[teams]] name.`
+          : `Estimation "${estimation.id}".team "${estimation.team}" is set but no [[teams]] are configured.`,
       );
+      continue;
+    }
+    // Canonicalize so runtime lookups (`findTeam`) and run attribution use
+    // the declared spelling.
+    estimation.team = team.name;
+    // An empty tracker already produced a "needs a tracker" team error.
+    if (team.tracker && !supportsEstimate(team.tracker)) {
+      errors.push(unsupported(estimation.id, `team "${team.name}" tracker "${team.tracker}"`));
     }
   }
   return estimationResult.estimations;

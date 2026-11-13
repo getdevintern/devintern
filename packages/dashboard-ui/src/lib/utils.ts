@@ -12,9 +12,17 @@ export function formatTime(epochMs: number): string {
   return new Date(epochMs).toLocaleString(undefined, {
     month: "short",
     day: "numeric",
-    hour: "2-digit",
+    hour: "numeric",
     minute: "2-digit",
   });
+}
+
+/**
+ * Clock time in the viewer's locale without a leading zero, following the
+ * locale's 12/24-hour convention ("9:25 AM" or "9:25").
+ */
+export function formatClockTime(epochMs: number): string {
+  return new Date(epochMs).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
 }
 
 /** Format a duration in ms as a human-readable string (e.g. "12m 4s"). */
@@ -51,4 +59,46 @@ export function formatAge(epochMs: number, now: number = Date.now()): string {
     return `${hours}h`;
   }
   return `${Math.floor(hours / 24)}d`;
+}
+
+/**
+ * Relative age phrase shared by every past-time label: "just now" under a
+ * minute, then "12m ago", "3h ago", "2d ago".
+ */
+export function formatAgo(epochMs: number, now: number = Date.now()): string {
+  if (now - epochMs < 60_000) return "just now";
+  return `${formatAge(epochMs, now)} ago`;
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** Past instant: relative within a day, "Yesterday 9:25 AM", then "Nov 11, 9:25 AM". */
+export function formatPastTime(epochMs: number, now: number = Date.now()): string {
+  if (now - epochMs < DAY_MS) return formatAgo(epochMs, now);
+  const startOfToday = new Date(now).setHours(0, 0, 0, 0);
+  if (epochMs >= startOfToday - DAY_MS && epochMs < startOfToday) {
+    return `Yesterday ${formatClockTime(epochMs)}`;
+  }
+  return formatTime(epochMs);
+}
+
+const MINUTE_MS = 60_000;
+const HOUR_MS = 60 * MINUTE_MS;
+
+/**
+ * Compact span: "45s", "12m", "2h 10m", "3d 4h". Two units at most, and the
+ * second unit is dropped when it is zero.
+ */
+export function formatSpan(ms: number): string {
+  const total = Math.max(0, ms);
+  if (total < MINUTE_MS) return `${Math.floor(total / 1000)}s`;
+  if (total < HOUR_MS) return `${Math.floor(total / MINUTE_MS)}m`;
+  if (total < DAY_MS) {
+    const hours = Math.floor(total / HOUR_MS);
+    const minutes = Math.floor((total % HOUR_MS) / MINUTE_MS);
+    return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
+  }
+  const days = Math.floor(total / DAY_MS);
+  const hours = Math.floor((total % DAY_MS) / HOUR_MS);
+  return hours > 0 ? `${days}d ${hours}h` : `${days}d`;
 }

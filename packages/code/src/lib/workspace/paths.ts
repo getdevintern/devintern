@@ -1,4 +1,4 @@
-import { chmodSync, copyFileSync, existsSync, mkdirSync } from "fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
 
@@ -29,11 +29,19 @@ export function workspaceEnvPath(workspaceDir: string = resolveWorkspaceDir()): 
 }
 
 /**
+ * Directory holding worker runtime state: the shared queue database, the auth
+ * session, and the license cache. Kept outside repo checkouts.
+ */
+export function workspaceStateDir(workspaceDir: string = resolveWorkspaceDir()): string {
+  return join(workspaceDir, "state");
+}
+
+/**
  * Directory holding the worker's auth session and license cache. Runtime
  * state lives alongside the shared queue database, outside repo checkouts.
  */
 export function workspaceCodeStateDir(workspaceDir: string = resolveWorkspaceDir()): string {
-  return join(workspaceDir, "state", "code");
+  return join(workspaceStateDir(workspaceDir), "code");
 }
 
 /** Preserve worker credentials and relay pairing from the old workspace path. */
@@ -52,7 +60,70 @@ export function ensureWorkspaceCodeState(workspaceDir: string): void {
 
 /** Path of the central workspace SQLite database. */
 export function workspaceDbPath(workspaceDir: string = resolveWorkspaceDir()): string {
-  return join(workspaceDir, "state", "queue.db");
+  return join(workspaceStateDir(workspaceDir), "queue.db");
+}
+
+/**
+ * Directory holding automation state (managed prompts and agent-maintained
+ * cursors). Sandboxed automation agents write their cursor here.
+ */
+export function automationsDir(workspaceDir: string = resolveWorkspaceDir()): string {
+  return join(workspaceDir, "automations");
+}
+
+/**
+ * Path of the worker's early startup marker. The process writes this as soon
+ * as it resolves its workspace, before the slow pre-lock startup work (orphan
+ * recovery, worktree sweep, push probes), so `worker add --wait` can tell a
+ * replacement worker is starting rather than permanently gone.
+ */
+export function workspaceWorkerStartPath(workspaceDir: string = resolveWorkspaceDir()): string {
+  return join(workspaceDir, ".worker.starting");
+}
+
+/**
+ * Path of the record of which `workspace.toml` version the running worker
+ * last applied (and the last rejected reload), read by the dashboard to tell
+ * whether a saved edit is live. See `config-reload.ts`.
+ */
+export function workspaceAppliedConfigPath(workspaceDir: string = resolveWorkspaceDir()): string {
+  return join(workspaceDir, ".worker.config-state.json");
+}
+
+/** Shape of the worker's early startup marker. */
+export interface WorkerStartMarker {
+  pid: number;
+  startedAt: number;
+}
+
+/**
+ * Write the early startup marker. Failure is only a warning: the marker is an
+ * optimization for `--wait`, never a startup requirement.
+ */
+export function writeWorkerStartMarker(workspaceDir: string, pid: number = process.pid): void {
+  try {
+    writeFileSync(
+      workspaceWorkerStartPath(workspaceDir),
+      JSON.stringify({ pid, startedAt: Date.now() }),
+      { encoding: "utf8", mode: 0o600 },
+    );
+  } catch (error) {
+    console.warn(`⚠️  Could not write the worker startup marker: ${(error as Error).message}`);
+  }
+}
+
+/** Read the startup marker, or null when absent/unreadable/malformed. */
+export function readWorkerStartMarker(workspaceDir: string): WorkerStartMarker | null {
+  try {
+    const raw = JSON.parse(readFileSync(workspaceWorkerStartPath(workspaceDir), "utf8")) as {
+      pid?: unknown;
+      startedAt?: unknown;
+    };
+    if (typeof raw.pid !== "number" || typeof raw.startedAt !== "number") return null;
+    return { pid: raw.pid, startedAt: raw.startedAt };
+  } catch {
+    return null;
+  }
 }
 
 /**

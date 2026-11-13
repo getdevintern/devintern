@@ -1,14 +1,14 @@
 ---
-title: "Implement Trello Cards with @devintern/code"
+title: "Implement Trello Cards with DevIntern Code"
 sidebarLabel: "Trello Integration"
 description: "Fetch Trello cards, move lists, implement with your coding agent, and post results back to the card."
-section: "Code"
+section: "Automation"
 order: 5
 sidebarHidden: true
-dateModified: 2026-07-23
+dateModified: 2026-11-12
 ---
 
-# Implement Trello Cards with @devintern/code
+# Implement Trello Cards with DevIntern Code
 
 @devintern/code can implement work directly from Trello cards: fetch card details and comments, run a feasibility check, move the card between lists, execute your AI agent, commit changes, open a pull request, and post results back to the card.
 
@@ -119,7 +119,7 @@ The first 100 matching cards are processed in sequence.
 
 ## Limitations
 
-- **Story points:** Estimation mode (`--estimate`) is not supported for Trello (no estimation concept). Estimation works with Jira, Linear, Azure DevOps, and Asana.
+- **Story points:** Estimation mode (`--estimate`) is not supported for Trello (no estimation concept). Estimation works with Jira, Linear, Azure DevOps, Asana, GitHub, and GitLab (GitHub and GitLab are comment-only).
 - **Comments:** Use `--skip-comments` to skip Trello comments and list transitions for a run.
 
 ## Troubleshooting

@@ -1,13 +1,13 @@
 ---
-title: "@devintern/pm Usage Guide"
+title: "DevIntern PM Usage Guide"
 sidebarLabel: "Using DevIntern PM"
 description: "Interactive drafting, source inputs, and posting flows for @devintern/pm."
 section: "Create Tasks"
 order: 1
-dateModified: 2026-10-16
+dateModified: 2026-11-12
 ---
 
-# @devintern/pm Usage Guide
+# DevIntern PM Usage Guide
 
 [DevIntern PM](https://devintern.com/pm-desktop/) is the primary way to create and review tickets. This guide covers the CLI for terminal workflows and automation.
 
@@ -82,7 +82,7 @@ devpm --prompt <text> [options]
   - **pm**: Focuses on user stories and Given/When/Then acceptance criteria, non-goals, and success metrics
   - **technical**: Adds a Technical Considerations section on top of the PM rubric
 - `--model, -m <model>`: AI model to use (e.g., "sonnet", "opus", or full model name). Overrides the `AGENT_MODEL` environment variable. The model string is harness-specific (see your harness's CLI docs); unsupported by a few harnesses (e.g. Antigravity accepts slugs from `agy models`).
-- `--effort <level>`: Reasoning effort for agent runs — `low`, `medium`, or `high`. Overrides the `AGENT_EFFORT` environment variable. Emitted only by harnesses that support reasoning effort (Claude Code, Grok, Antigravity, and Reasonix via `--effort`; Cline via `--thinking`; Opencode and Kilo Code via `--variant`; Codex via its `model_reasoning_effort` config override; pi composes it into the model string); ignored by the others with a warning. Because pi encodes effort in the model string, it only applies when a model is set (`AGENT_MODEL` or `--model`); with no model, pi ignores the effort with a warning.
+- `--effort <level>`: Reasoning effort for agent runs — `low`, `medium`, or `high`. Overrides the `AGENT_EFFORT` environment variable. Emitted only by harnesses that support reasoning effort (Claude Code, Grok, Antigravity, and Reasonix via `--effort`, and Muse Code via `--reasoning-effort`; Cline via `--thinking`; Opencode v1 and Kilo Code via `--variant`; Codex via its `model_reasoning_effort` config override; pi composes it into the model string); ignored by the others with a warning. Because pi encodes effort in the model string, it only applies when a model is set (`AGENT_MODEL` or `--model`); with no model, pi ignores the effort with a warning. OpenCode v2 removed `--variant` and folds the effort into the model reference (`provider/model#variant`), so on v2 it likewise only applies when a model is set.
 - `--decompose`: Decompose the story into subtasks (default: off)
 - `--confirm`: Interactively confirm each subtask before creating
 - `--verbose, -v`: Enable verbose API logging for debugging (same as setting `DEVINTERN_VERBOSE=1`)

@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import {
+  buildHarnessInvocation,
   buildPromptArgs,
   detectIncompleteImplementation,
   detectMaxTurnsReached,
@@ -29,14 +30,28 @@ import type { PipelineConfig } from "../../types/settings";
 import type { Task } from "../../types/task-tracker";
 import { WORKSPACE_REPO_ENV } from "../workspace/env";
 import { finalizeAgentRun } from "./run-harness-finalize";
+import { readHeadCommit } from "./run-harness-git";
 import type { FinalizeContext } from "./run-harness-git";
 import { recordIncompleteAttempt } from "../state/retry-state";
+import {
+  hasRunStage,
+  latestRunStage,
+  recordRunStage,
+  replaceRunStage,
+} from "../state/run-recorder";
 import type { TaskTrackerClient } from "../trackers/client";
 import { formatAgentInputNeededMarkdown } from "../trackers/shared/markdown-comment-formatter";
+import {
+  HarnessUnavailableError,
+  describeAgentExitFailure,
+  detectHarnessStartupFailure,
+} from "./harness-startup";
 import { resolveAgentEffort, resolveAgentModel } from "./model";
-import { getSandbox } from "./sandbox";
+import { agentSandboxPolicy, getSandbox } from "./sandbox";
+import { harnessSpawnEnv } from "./spawn";
 import type { VerifyConfig } from "./verify";
 import { withImplementationSummary } from "./implementation-summary";
+import { readImplementationReport } from "./implementation-report";
 
 interface RunAgentHarnessOptions {
   taskFile: string;
@@ -122,13 +137,17 @@ export async function runAgentSession(
 
       const timeoutMinutes = parseInt(process.env.AGENT_HARNESS_TIMEOUT_MINUTES || "60", 10);
 
-      const agentArgs = harness.buildArgs({
-        maxTurns,
-        skipPermissions: true,
-        workingDir: process.cwd(),
-        model: resolveAgentModel(),
-        effort: resolveAgentEffort(),
-      });
+      const { args: agentArgs, env: agentEnv } = await buildHarnessInvocation(
+        harness,
+        resolvedPath,
+        {
+          maxTurns,
+          skipPermissions: true,
+          workingDir: process.cwd(),
+          model: resolveAgentModel(harness.name),
+          effort: resolveAgentEffort(),
+        },
+      );
       console.log(`🚀 Launching ${harness.displayName}...`);
       console.log(`   Command: ${executablePath} ${agentArgs.join(" ")}`);
       console.log(`   Input: ${taskFile}`);
@@ -144,16 +163,23 @@ export async function runAgentSession(
       let timedOut = false;
       let usageLimit: ReturnType<typeof detectUsageLimit> | undefined;
 
+      // Capture the starting HEAD before the agent runs. Delivery uses it to
+      // tell "the agent committed its own work" (HEAD moved) apart from "the
+      // agent only wrote a plan" (HEAD unchanged, clean tree).
+      const headBeforeRun = await readHeadCommit();
+
       // Spawn agent process with enhanced permissions and max turns
       const spawnArgs = [
         ...agentArgs,
         ...buildPromptArgs(harness, withImplementationSummary(promptOverride ?? taskContent)),
       ];
+      const runStartedAt = Date.now();
       const { child: codeAgent, cleanup: sandboxCleanup } = await spawnAgent({
         resolvedPath,
         args: spawnArgs,
-        spawnOptions: { stdio: ["ignore", "pipe", "pipe"] },
+        spawnOptions: { stdio: ["ignore", "pipe", "pipe"], env: harnessSpawnEnv(agentEnv) },
         sandbox: await getSandbox(harness.name),
+        policy: agentSandboxPolicy(),
         sink: createHarnessLogSink({
           harness,
           label: "implementation",
@@ -213,8 +239,9 @@ export async function runAgentSession(
         clearTimeout(timeout);
         if (error.code === "ENOENT") {
           reject(
-            new Error(
+            new HarnessUnavailableError(
               `${harness.displayName} CLI not found at: ${executablePath}\nPlease install ${harness.displayName} or specify the correct path with --agent-path`,
+              { harnessName: harness.name },
             ),
           );
         } else {
@@ -247,8 +274,30 @@ export async function runAgentSession(
           if (usage.matchedLine) {
             console.log(`   Matched output: ${usage.matchedLine}`);
           }
-          reject(new UsageLimitError(usage.resetsAt));
+          reject(new UsageLimitError(usage.resetsAt, usage.period));
           return;
+        }
+
+        // A sandbox denial, mise shim failure, or missing binary means the
+        // harness never started. Surface it as a harness problem so the
+        // worker can fail over/defer instead of burning a task attempt.
+        if (code !== 0) {
+          const startupFailure = detectHarnessStartupFailure({
+            exitCode: code,
+            stdout: stdoutOutput,
+            stderr: stderrOutput,
+            durationMs: Date.now() - runStartedAt,
+          });
+          if (startupFailure) {
+            console.log(`\n🛠️  ${harness.displayName} could not start: ${startupFailure.reason}`);
+            reject(
+              new HarnessUnavailableError(
+                `${harness.displayName} (${executablePath}) could not start: ${startupFailure.reason}`,
+                { harnessName: harness.name },
+              ),
+            );
+            return;
+          }
         }
 
         const maxTurnsReached = detectMaxTurnsReached(
@@ -455,6 +504,7 @@ export async function runAgentSession(
               autoReview,
               autoReviewIterations,
               isPlanRetry,
+              headBeforeRun,
               prTargetBranchExplicit,
               requestedPrTargetBranch,
               taskContent,
@@ -463,12 +513,108 @@ export async function runAgentSession(
             },
           });
         } else {
+          const failureDetail = describeAgentExitFailure(stdoutOutput, stderrOutput);
           console.log(`❌ Agent exited with non-zero code ${code}`);
+          if (failureDetail) {
+            console.log(`   Reason: ${failureDetail}`);
+          }
           console.log("   No JIRA comment will be posted due to execution failure");
-          reject(new Error(`Agent exited with code ${code}`));
+          reject(
+            new Error(`Agent exited with code ${code}${failureDetail ? `: ${failureDetail}` : ""}`),
+          );
         }
       });
     })().catch(reject);
+  });
+}
+
+/**
+ * Persist the implementation stage as soon as the agent session completes,
+ * before commit/verify/auto-review run.
+ *
+ * Auto-review can run for a long time and a worker restart during it used to
+ * leave a run with commits and a branch but no implementation stage, so
+ * session pickup could not reuse the work. Writing the stage here makes the
+ * agent's report durable before any post-implementation work can interrupt the
+ * process. The later pipeline pass sees the stage and does not duplicate it.
+ *
+ * @param input - The implementation run inputs
+ * @param startedAt - Epoch ms when the agent session started
+ */
+function recordCompletedImplementation(input: RunAgentHarnessOptions, startedAt: number): void {
+  const taskDir = input.taskKey ? join(resolveOutputDir(), input.taskKey.toLowerCase()) : undefined;
+  if (!taskDir) return;
+  const { incomplete, report } = readImplementationReport(taskDir, startedAt);
+  const model = resolveAgentModel(input.harness.name);
+  const effort = resolveAgentEffort();
+  recordRunStage("implementation", {
+    status: incomplete ? "failed" : "succeeded",
+    summary: incomplete
+      ? `incomplete implementation with ${input.harness.displayName}`
+      : `implemented with ${input.harness.displayName}`,
+    detail: {
+      harness: input.harness.displayName,
+      ...(model === undefined ? {} : { model }),
+      ...(effort === undefined ? {} : { effort }),
+      durationMs: Date.now() - startedAt,
+      ...(report === undefined ? {} : { report }),
+    },
+  });
+}
+
+/** Read the report string from an already-recorded implementation stage. */
+function recordedImplementationReport(): string | undefined {
+  const detail = latestRunStage("implementation")?.detail;
+  if (!detail) return undefined;
+  try {
+    const parsed = JSON.parse(detail) as { report?: unknown };
+    return typeof parsed.report === "string" && parsed.report.trim() ? parsed.report : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Correct the early implementation success when delivery halts afterwards.
+ *
+ * `recordCompletedImplementation` deliberately writes before commit/verify/
+ * auto-review so an interruption keeps resumable state. When finalize then
+ * rejects (commit, review, or publish halted), the run delivered nothing and
+ * the early row would otherwise keep claiming success; session pickup would
+ * also treat the agent report as proof of delivered work. Replacing the stage
+ * with a failure keeps the dashboard honest, and pickup additionally requires
+ * commits ahead before resuming a failed implementation.
+ *
+ * Usage limits are not corrected: the agent did complete its implementation and
+ * the branch remains genuinely resumable after the harness resumes.
+ *
+ * @param input - The implementation run inputs
+ * @param startedAt - Epoch ms when the agent session started
+ * @param error - The finalize rejection that ended the run
+ */
+function recordHaltedImplementation(
+  input: RunAgentHarnessOptions,
+  startedAt: number,
+  error: unknown,
+): void {
+  const taskDir = input.taskKey ? join(resolveOutputDir(), input.taskKey.toLowerCase()) : undefined;
+  if (!taskDir || !hasRunStage("implementation")) return;
+  const { report } = readImplementationReport(taskDir, startedAt);
+  const preservedReport = report ?? recordedImplementationReport();
+  const reason = error instanceof Error ? error.message : String(error);
+  const model = resolveAgentModel(input.harness.name);
+  const effort = resolveAgentEffort();
+  replaceRunStage("implementation", {
+    status: "failed",
+    summary: `implementation not delivered with ${input.harness.displayName}`,
+    detail: {
+      harness: input.harness.displayName,
+      ...(model === undefined ? {} : { model }),
+      ...(effort === undefined ? {} : { effort }),
+      durationMs: Date.now() - startedAt,
+      ...(preservedReport === undefined ? {} : { report: preservedReport }),
+      deliveryError: reason,
+    },
   });
 }
 
@@ -510,22 +656,33 @@ export async function runAgentHarness(input: RunAgentHarnessOptions): Promise<vo
   }
   console.log(`🧩 Pipeline: ${describePipelineSelection(selection, configuredPipeline)}`);
 
+  const implementationStartedAt = Date.now();
   const session = await runAgentSession(input);
   if (session.kind === "halted") return;
-  await new Promise<void>((resolve, reject) => {
-    finalizeAgentRun({
-      ...session.context,
-      pipelineSteps,
-      artifactPolicy: configuredPipeline?.artifacts,
-      artifactUploader,
-      runRepair: async (prompt) => {
-        const repair = await runAgentSession(input, prompt);
-        return repair.kind === "complete"
-          ? { kind: "complete", stdout: repair.context.stdoutOutput }
-          : { kind: "halted" };
-      },
-      resolve,
-      reject,
+  // Persist the report before commit/verify/auto-review: an interruption in
+  // any later phase must still leave resumable implementation state.
+  recordCompletedImplementation(input, implementationStartedAt);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      finalizeAgentRun({
+        ...session.context,
+        pipelineSteps,
+        artifactPolicy: configuredPipeline?.artifacts,
+        artifactUploader,
+        runRepair: async (prompt) => {
+          const repair = await runAgentSession(input, prompt);
+          return repair.kind === "complete"
+            ? { kind: "complete", stdout: repair.context.stdoutOutput }
+            : { kind: "halted" };
+        },
+        resolve,
+        reject,
+      });
     });
-  });
+  } catch (error) {
+    if (!(error instanceof UsageLimitError)) {
+      recordHaltedImplementation(input, implementationStartedAt, error);
+    }
+    throw error;
+  }
 }

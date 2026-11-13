@@ -15,6 +15,7 @@
 export type RunStage =
   | "feasibility"
   | "implementation"
+  | "verify"
   | "auto_review"
   | "change_request"
   | "outcome";
@@ -121,6 +122,8 @@ function parseKnownShape(
       return parseFeasibility(obj);
     case "implementation":
       return parseImplementation(obj);
+    case "verify":
+      return parseVerify(obj);
     case "auto_review":
       return parseAutoReview(obj);
     case "change_request":
@@ -246,14 +249,7 @@ function parseAutoReview(obj: Record<string, unknown>): KnownShape | null {
     }
     const items = (ff as { items?: unknown }).items;
     if (Array.isArray(items)) {
-      const reviewItems: ReviewItem[] = items.filter(isObject).map((item) => ({
-        priority: String((item as { priority?: unknown }).priority ?? "info"),
-        category: String((item as { category?: unknown }).category ?? "—"),
-        file: optionalString((item as { file?: unknown }).file),
-        line: optionalString((item as { line?: unknown }).line),
-        issue: String((item as { issue?: unknown }).issue ?? ""),
-        suggestion: optionalString((item as { suggestion?: unknown }).suggestion),
-      }));
+      const reviewItems = toReviewItems(items);
       if (reviewItems.length > 0) {
         fields.push({ label: "Feedback", value: { kind: "reviewItems", items: reviewItems } });
       }
@@ -261,6 +257,61 @@ function parseAutoReview(obj: Record<string, unknown>): KnownShape | null {
   }
 
   return knownShapeResult(markdown, fields);
+}
+
+/**
+ * Verification detail from `@getdevintern/code` (`verifyImplementation`):
+ * `{ approved, summary, blocking, total, items }`, or `{ error, attempts }`
+ * when the agent produced no parseable verdict.
+ */
+function parseVerify(obj: Record<string, unknown>): KnownShape | null {
+  if (!("approved" in obj) && !("summary" in obj) && !("error" in obj)) {
+    return null;
+  }
+  const fields: DetailField[] = [];
+  if (typeof obj.error === "string") {
+    fields.push({ label: "Error", value: { kind: "text", text: obj.error } });
+  }
+  if (typeof obj.approved === "boolean") {
+    fields.push({
+      label: "Approved",
+      value: { kind: "bool", value: obj.approved, yes: "yes", no: "no" },
+    });
+  }
+  if (typeof obj.blocking === "number") {
+    fields.push({
+      label: "Blocking findings",
+      value: { kind: "count", n: obj.blocking, noun: "finding" },
+    });
+  }
+  if (typeof obj.total === "number") {
+    fields.push({
+      label: "All findings",
+      value: { kind: "count", n: obj.total, noun: "finding" },
+    });
+  }
+  const items = obj.items;
+  if (Array.isArray(items)) {
+    const reviewItems = toReviewItems(items);
+    if (reviewItems.length > 0) {
+      fields.push({ label: "Findings", value: { kind: "reviewItems", items: reviewItems } });
+    }
+  }
+  const markdown =
+    typeof obj.summary === "string" && obj.summary.trim() !== "" ? obj.summary : undefined;
+  return knownShapeResult(markdown, fields);
+}
+
+/** Map raw review/verification findings to the shared render model. */
+function toReviewItems(items: unknown[]): ReviewItem[] {
+  return items.filter(isObject).map((item) => ({
+    priority: String((item as { priority?: unknown }).priority ?? "info"),
+    category: String((item as { category?: unknown }).category ?? "—"),
+    file: optionalString((item as { file?: unknown }).file),
+    line: optionalString((item as { line?: unknown }).line),
+    issue: String((item as { issue?: unknown }).issue ?? ""),
+    suggestion: optionalString((item as { suggestion?: unknown }).suggestion),
+  }));
 }
 
 function parseChangeRequest(obj: Record<string, unknown>): KnownShape | null {

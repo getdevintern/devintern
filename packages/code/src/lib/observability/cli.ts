@@ -1,10 +1,12 @@
 import { checkLicense } from "@devintern/license-check";
+import { dirname, resolve } from "path";
 import {
   enforceLicenseOrExit,
   getLoadedEnvPath,
   loadEnvironment,
   loadSupabaseConfig,
 } from "../cli/bootstrap";
+import { hasHelpArg } from "../cli/help";
 import { flushAnalytics, trackDoctorRun } from "./analytics";
 
 /**
@@ -16,6 +18,7 @@ export async function runDashboardCommand(args: string[]): Promise<void> {
 
   let port: number | undefined;
   let host: string | undefined;
+  let workspacePath: string | undefined;
 
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--port" && args[i + 1]) {
@@ -23,6 +26,13 @@ export async function runDashboardCommand(args: string[]): Promise<void> {
       i++;
     } else if (args[i] === "--host" && args[i + 1]) {
       host = args[i + 1];
+      i++;
+    } else if (args[i] === "--workspace") {
+      if (!args[i + 1] || args[i + 1].startsWith("-")) {
+        console.error("❌ --workspace requires a path to workspace.toml.");
+        process.exit(1);
+      }
+      workspacePath = args[i + 1];
       i++;
     } else if (args[i] === "--help" || args[i] === "-h") {
       console.log("Usage: devintern dashboard [options]");
@@ -35,9 +45,25 @@ export async function runDashboardCommand(args: string[]): Promise<void> {
       console.log("  --port <port>  Port to listen on (default: 4400 or DASHBOARD_PORT)");
       console.log("  --host <host>  Loopback host to bind to (default: 127.0.0.1;");
       console.log("                 accepted: 127.0.0.1, localhost, ::1)");
+      console.log("  --workspace <path>  Read queue counts, worker liveness, and run");
+      console.log("                      transcripts from this workspace.toml (or its");
+      console.log("                      workspace directory).");
+      console.log("                      (default: ~/.devintern/, or DEVINTERN_WORKSPACE_DIR)");
       console.log("  -h, --help     Display this help message");
       process.exit(0);
     }
+  }
+
+  let workspaceDir: string | undefined;
+  if (workspacePath) {
+    const { resolveWorkspaceArgPath } = await import("./dashboard-db");
+    const configPath = resolveWorkspaceArgPath(workspacePath);
+    if (!configPath) {
+      console.error(`❌ No workspace.toml at ${resolve(workspacePath)}.`);
+      console.error("   Pass an existing workspace.toml or the directory that contains it.");
+      process.exit(1);
+    }
+    workspaceDir = dirname(configPath);
   }
 
   // Same entitlement as the worker: the dashboard is part of the automation tier.
@@ -54,8 +80,26 @@ export async function runDashboardCommand(args: string[]): Promise<void> {
   }
   await enforceLicenseOrExit(licenseResult);
 
+  const { resolveDashboardQueueDbPath } = await import("./dashboard-db");
   const { startDashboardServer } = await import("../../dashboard-server");
-  const server = startDashboardServer({ port, host });
+  // A custom workspace redirects the durable queue counts, worker liveness,
+  // and harness transcripts; run history keeps reading the project-scoped DB
+  // unless WEBHOOK_QUEUE_DB pins one.
+  const queueDbPath = workspaceDir ? resolveDashboardQueueDbPath(workspaceDir) : undefined;
+  // With an explicit workspace, list its [[automations]] (read-only) instead of
+  // the project-scoped automations.toml of whatever directory this started in.
+  const automationActions = workspaceDir
+    ? (await import("../automation/workspace-dashboard")).loadWorkspaceAutomationActions(
+        workspaceDir,
+      )
+    : undefined;
+  const server = startDashboardServer({
+    port,
+    host,
+    queueDbPath,
+    workspaceDir,
+    automationActions,
+  });
 
   const shutdown = (): void => {
     console.log("\n👋 Dashboard stopped");
@@ -71,6 +115,20 @@ export async function runDashboardCommand(args: string[]): Promise<void> {
  * any check fails so scripts and CI can gate on it.
  */
 export async function runDoctorCommand(): Promise<never> {
+  if (hasHelpArg(process.argv.slice(2))) {
+    console.log(
+      [
+        "Usage: devintern doctor",
+        "",
+        "Check runtime, git, agent CLI, tracker credentials, sign-in, and license",
+        "readiness for a first run. Exits non-zero when any check fails.",
+        "",
+        "Options:",
+        "  -h, --help  Display this help message",
+      ].join("\n"),
+    );
+    process.exit(0);
+  }
   const { collectReadinessChecks, renderReadinessReport } = await import("./readiness");
   loadEnvironment();
   let supabaseConfig;

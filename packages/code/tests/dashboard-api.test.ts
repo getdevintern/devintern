@@ -1,6 +1,6 @@
 import { ArtifactStore } from "../src/lib/artifacts/store";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
@@ -13,11 +13,19 @@ import {
   handleStats,
   handleWorkerStatus,
 } from "../src/lib/observability/dashboard-api";
+import {
+  resolveDashboardHistoryDbPath,
+  resolveDashboardQueueDbPath,
+  resolveWorkspaceArgPath,
+} from "../src/lib/observability/dashboard-db";
 import { RunStore } from "../src/lib/state/run-recorder";
 import type { RunStats } from "../src/lib/state/run-recorder";
 import { WebhookQueue } from "../src/lib/state/webhook-queue";
 import { WorkerState } from "../src/lib/state/worker-state";
+import { InjectedTaskStore } from "../src/lib/state/injected-tasks";
+import { ScheduledRetryStore } from "../src/lib/state/run-retry";
 import { isLoopbackDashboardHost, startDashboardServer } from "../src/dashboard-server";
+import { workspaceConfigPath, workspaceDbPath } from "../src/lib/workspace/paths";
 
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -51,12 +59,62 @@ describe("dashboard API", () => {
     rmSync(workspaceDir, { recursive: true, force: true });
   });
 
+  test("activity includes older active runs, bounded recent history, and short task previews", () => {
+    const store = new RunStore(dbPath);
+    try {
+      const active = store.createRun({ origin: "task", taskKey: "ACTIVE-1" });
+      store.setRunTicket(active, { description: "# Fix the login\n\nLong description" });
+      store.startStep(active, "custom-check");
+      for (let i = 0; i < 105; i++) {
+        const id = store.createRun({ origin: "scheduled" });
+        store.finishRun(id, "succeeded");
+      }
+      const result = data.getTaskActivity();
+      expect(result.runs).toHaveLength(101);
+      expect(result.runs.find((run) => run.id === active)).toMatchObject({
+        step: "custom-check",
+        stepActive: true,
+        taskTitle: "Fix the login",
+        taskDescription: undefined,
+      });
+      expect(result.recentLimit).toBe(100);
+    } finally {
+      store.close();
+    }
+  });
+
+  test("activity task titles skip a leading frontmatter block", () => {
+    const store = new RunStore(dbPath);
+    try {
+      const withHeading = store.createRun({ origin: "local", taskKey: "local-a" });
+      store.setRunTicket(withHeading, {
+        description:
+          "---\nkey: local-a\ncreated_at: 2026-01-01\n---\n\n# Cover the review poll\n\nBody",
+      });
+      const withTitle = store.createRun({ origin: "local", taskKey: "local-b" });
+      store.setRunTicket(withTitle, {
+        description: '---\nkey: local-b\ntitle: "Add retries"\n---\n# Ignored heading\n',
+      });
+      const metaOnly = store.createRun({ origin: "local", taskKey: "local-c" });
+      store.setRunTicket(metaOnly, { description: "---\nkey: local-c\n---\n" });
+      const titles = new Map(
+        data.getTaskActivity().runs.map((r) => [r.id, (r as { taskTitle?: string }).taskTitle]),
+      );
+      expect(titles.get(withHeading)).toBe("Cover the review poll");
+      expect(titles.get(withTitle)).toBe("Add retries");
+      expect(titles.get(metaOnly)).toBeUndefined();
+    } finally {
+      store.close();
+    }
+  });
+
   /** Seed a finished run and return its id. */
   function seedRun(
     store: RunStore,
     options: {
       taskKey?: string;
       origin?: "task" | "pr_mention" | "scheduled";
+      automationId?: string;
       harness?: string;
       status?: "succeeded" | "failed" | "escalated" | "abandoned" | "deferred";
       prUrl?: string;
@@ -65,6 +123,7 @@ describe("dashboard API", () => {
     const id = store.createRun({
       origin: options.origin ?? "task",
       taskKey: options.taskKey,
+      automationId: options.automationId,
       tracker: "jira",
       harness: options.harness ?? "claude-code",
     });
@@ -109,6 +168,23 @@ describe("dashboard API", () => {
 
     const byKey = handleRuns(data, new URLSearchParams("taskKey=PROJ-1"));
     expect((byKey.body as { total: number }).total).toBe(1);
+  });
+
+  test("handleRuns filters by automationId", () => {
+    const store = new RunStore(dbPath);
+    seedRun(store, { origin: "scheduled", automationId: "nightly", status: "succeeded" });
+    seedRun(store, { origin: "scheduled", automationId: "nightly", status: "failed" });
+    seedRun(store, { origin: "scheduled", automationId: "weekly", status: "succeeded" });
+    seedRun(store, { taskKey: "PROJ-1", status: "succeeded" });
+    store.close();
+
+    const nightly = handleRuns(data, new URLSearchParams("automationId=nightly"));
+    const body = nightly.body as { runs: { automationId?: string }[]; total: number };
+    expect(body.total).toBe(2);
+    expect(body.runs.every((run) => run.automationId === "nightly")).toBe(true);
+
+    const none = handleRuns(data, new URLSearchParams("automationId=missing"));
+    expect((none.body as { total: number }).total).toBe(0);
   });
 
   test("handleRuns rejects invalid params", () => {
@@ -262,6 +338,411 @@ describe("dashboard API", () => {
     );
     const dead = handleWorkerStatus(data);
     expect((dead.body as { worker: { status: string } }).worker.status).toBe("stopped");
+  });
+
+  test("worker status counts ad-hoc tasks and scheduled retries alongside relay work", () => {
+    const injected = new InjectedTaskStore(dbPath);
+    for (const key of ["local-one", "local-two", "local-three"]) {
+      injected.enqueue({
+        taskKey: key,
+        repo: "acme/webapp",
+        title: key,
+        body: "",
+        taskFile: join(dir, `${key}.md`),
+      });
+    }
+    // Oldest row becomes running, then settles `done`; the next stays running
+    // and the last remains pending. The settled row must not be counted.
+    const doneTask = injected.claimNext();
+    expect(doneTask?.taskKey).toBe("local-one");
+    injected.finish(doneTask!.id, "done");
+    expect(injected.claimNext()?.taskKey).toBe("local-two");
+    injected.close();
+
+    const retries = new ScheduledRetryStore(dbPath);
+    // A retry that already ran and failed must not be counted either.
+    expect(retries.schedule({ taskKey: "PROJ-1", actor: "tester" }).scheduled).toBe(true);
+    const failedRetry = retries.claimNext();
+    expect(failedRetry?.taskKey).toBe("PROJ-1");
+    retries.finish(failedRetry!.id, "failed", "boom");
+    // One retry stays running, one stays pending.
+    expect(retries.schedule({ taskKey: "PROJ-2", actor: "tester" }).scheduled).toBe(true);
+    expect(retries.claimNext()?.taskKey).toBe("PROJ-2");
+    expect(retries.schedule({ taskKey: "PROJ-3", actor: "tester" }).scheduled).toBe(true);
+    retries.close();
+
+    const queue = new WebhookQueue({ dbPath });
+    queue.enqueue("issue_comment", { hello: true });
+    queue.close();
+
+    const body = handleWorkerStatus(data).body as {
+      queue: {
+        pending: number;
+        processing: number;
+        failed: number;
+        injected: { pending: number; running: number };
+        retries: { pending: number; running: number };
+      };
+    };
+    expect(body.queue.pending).toBe(1);
+    expect(body.queue.injected).toEqual({ pending: 1, running: 1 });
+    expect(body.queue.retries).toEqual({ pending: 1, running: 1 });
+
+    // Settle every remaining row: with no active work left, any settled row
+    // leaking into the counts would show up here (row order cannot mask it).
+    const drainedInjected = new InjectedTaskStore(dbPath);
+    drainedInjected.failRunning("settled");
+    const lastInjected = drainedInjected.claimNext();
+    if (lastInjected) drainedInjected.finish(lastInjected.id, "done");
+    drainedInjected.close();
+
+    const drainedRetries = new ScheduledRetryStore(dbPath);
+    drainedRetries.failRunning("settled");
+    const lastRetry = drainedRetries.claimNext();
+    if (lastRetry) drainedRetries.finish(lastRetry.id, "done");
+    drainedRetries.close();
+
+    const settled = handleWorkerStatus(data).body as {
+      queue: {
+        injected: { pending: number; running: number };
+        retries: { pending: number; running: number };
+      };
+    };
+    expect(settled.queue.injected).toEqual({ pending: 0, running: 0 });
+    expect(settled.queue.retries).toEqual({ pending: 0, running: 0 });
+  });
+
+  test("counts workspace queue work without moving project-scoped run history", () => {
+    const savedQueueDb = process.env.WEBHOOK_QUEUE_DB;
+    delete process.env.WEBHOOK_QUEUE_DB;
+    const projectDb = join(dir, ".devintern-code", "queue.db");
+    try {
+      // A direct `devintern TASK` run lands in the project DB even when the
+      // user also has a workspace worker.
+      mkdirSync(join(dir, ".devintern-code"), { recursive: true });
+      const runs = new RunStore(projectDb);
+      const runId = runs.createRun({ origin: "task", taskKey: "PROJ-LOCAL" });
+      runs.finishRun(runId, "succeeded");
+      runs.close();
+
+      writeFileSync(workspaceConfigPath(workspaceDir), "");
+      const workspaceDb = workspaceDbPath(workspaceDir);
+      const injected = new InjectedTaskStore(workspaceDb);
+      const retries = new ScheduledRetryStore(workspaceDb);
+      try {
+        injected.enqueue({
+          taskKey: "local-one",
+          repo: "acme/webapp",
+          title: "local-one",
+          body: "",
+          taskFile: join(workspaceDir, "local-one.md"),
+        });
+        expect(retries.schedule({ taskKey: "PROJ-1", actor: "tester" }).scheduled).toBe(true);
+
+        const defaulted = new DashboardData({ workingDir: dir, logDirs: [] });
+        try {
+          // History stays project scoped; the local run is still visible.
+          expect(defaulted.dbPath).toBe(projectDb);
+          expect(defaulted.queueDbPath).toBe(workspaceDb);
+          expect(
+            defaulted.listRuns({ taskKey: "PROJ-LOCAL", limit: 10, offset: 0 }).runs.length,
+          ).toBe(1);
+          expect(defaulted.getQueueStats()).toMatchObject({
+            injected: { pending: 1, running: 0 },
+            retries: { pending: 1, running: 0 },
+          });
+        } finally {
+          defaulted.close();
+        }
+      } finally {
+        injected.close();
+        retries.close();
+      }
+    } finally {
+      if (savedQueueDb === undefined) {
+        delete process.env.WEBHOOK_QUEUE_DB;
+      } else {
+        process.env.WEBHOOK_QUEUE_DB = savedQueueDb;
+      }
+    }
+  });
+
+  test("counts relay deliveries in the queue database, not the history database", () => {
+    // Split the two connections the way a standalone dashboard does: history
+    // stays project scoped, while the workspace worker's webhook events land in
+    // the queue DB. The history DB has no webhook events, so reading it would
+    // report zero pending deliveries.
+    const historyDb = join(dir, "history.db");
+    const queueDb = join(dir, "workspace-state", "queue.db");
+    mkdirSync(join(dir, "workspace-state"), { recursive: true });
+    const runs = new RunStore(historyDb);
+    const runId = runs.createRun({ origin: "task", taskKey: "PROJ-HIST" });
+    runs.finishRun(runId, "succeeded");
+    runs.close();
+    const queue = new WebhookQueue({ dbPath: queueDb });
+    queue.enqueue("issue_comment", { hello: "workspace" });
+    queue.close();
+
+    const scoped = new DashboardData({
+      dbPath: historyDb,
+      queueDbPath: queueDb,
+      workingDir: dir,
+      logDirs: [],
+    });
+    try {
+      expect(scoped.dbPath).not.toBe(scoped.queueDbPath);
+      expect(scoped.getQueueStats()).toMatchObject({
+        pending: 1,
+        processing: 0,
+        failed: 0,
+      });
+    } finally {
+      scoped.close();
+    }
+  });
+
+  test("sums relay deliveries written by a project-scoped webhook serve with workspace deliveries", () => {
+    // `devintern webhook serve` writes to the project-scoped DB while the
+    // workspace worker writes to the workspace DB. Both producers are
+    // disjoint, so the dashboard must report their pending relays together.
+    const historyDb = join(dir, "project-state", "queue.db");
+    const queueDb = join(dir, "workspace-state", "queue.db");
+    mkdirSync(join(dir, "project-state"), { recursive: true });
+    mkdirSync(join(dir, "workspace-state"), { recursive: true });
+    const projectQueue = new WebhookQueue({ dbPath: historyDb });
+    projectQueue.enqueue("issue_comment", { hello: "project" });
+    projectQueue.close();
+    const workspaceQueue = new WebhookQueue({ dbPath: queueDb });
+    workspaceQueue.enqueue("issue_comment", { hello: "workspace" });
+    workspaceQueue.close();
+
+    const scoped = new DashboardData({
+      dbPath: historyDb,
+      queueDbPath: queueDb,
+      workingDir: dir,
+      logDirs: [],
+    });
+    try {
+      expect(scoped.getQueueStats()).toMatchObject({
+        pending: 2,
+        processing: 0,
+        failed: 0,
+      });
+    } finally {
+      scoped.close();
+    }
+  });
+
+  test("resolves the --workspace argument from the config file or its directory", () => {
+    const ws = join(dir, "arg-workspace");
+    mkdirSync(ws, { recursive: true });
+    const config = workspaceConfigPath(ws);
+    writeFileSync(config, "");
+
+    // A directory means the workspace home; the file inside it is used.
+    expect(resolveWorkspaceArgPath(ws)).toBe(config);
+    expect(resolveWorkspaceArgPath(config)).toBe(config);
+
+    // Anything else must not silently fall back to the project-scoped DB.
+    expect(resolveWorkspaceArgPath(join(dir, "missing.toml"))).toBeNull();
+    const otherFile = join(dir, "other.toml");
+    writeFileSync(otherFile, "");
+    expect(resolveWorkspaceArgPath(otherFile)).toBeNull();
+    const emptyDir = join(dir, "no-config");
+    mkdirSync(emptyDir, { recursive: true });
+    expect(resolveWorkspaceArgPath(emptyDir)).toBeNull();
+  });
+
+  test("keeps both databases project scoped without a workspace and follows a configured one", () => {
+    const savedQueueDb = process.env.WEBHOOK_QUEUE_DB;
+    delete process.env.WEBHOOK_QUEUE_DB;
+    try {
+      const projectDb = join(dir, ".devintern-code", "queue.db");
+      // No workspace: history and queue counts share the legacy project DB.
+      expect(resolveDashboardHistoryDbPath(dir)).toBe(projectDb);
+      expect(resolveDashboardQueueDbPath(workspaceDir, dir)).toBe(projectDb);
+      // Once a workspace is configured, only the queue DB follows it; run
+      // history remains the same project-scoped DB as a direct CLI run.
+      writeFileSync(workspaceConfigPath(workspaceDir), "");
+      expect(resolveDashboardHistoryDbPath(dir)).toBe(projectDb);
+      expect(resolveDashboardQueueDbPath(workspaceDir, dir)).toBe(workspaceDbPath(workspaceDir));
+      // An explicit env pin (worker-embedded dashboard) always wins.
+      const pinned = join(dir, "pinned.db");
+      process.env.WEBHOOK_QUEUE_DB = pinned;
+      expect(resolveDashboardHistoryDbPath(dir)).toBe(pinned);
+      expect(resolveDashboardQueueDbPath(workspaceDir, dir)).toBe(pinned);
+    } finally {
+      if (savedQueueDb === undefined) {
+        delete process.env.WEBHOOK_QUEUE_DB;
+      } else {
+        process.env.WEBHOOK_QUEUE_DB = savedQueueDb;
+      }
+    }
+  });
+
+  test("follows a non-default workspace config for queue counts", async () => {
+    const savedQueueDb = process.env.WEBHOOK_QUEUE_DB;
+    delete process.env.WEBHOOK_QUEUE_DB;
+    const customWorkspace = join(dir, "custom-workspace");
+    try {
+      mkdirSync(customWorkspace, { recursive: true });
+      writeFileSync(workspaceConfigPath(customWorkspace), "");
+      const customDb = workspaceDbPath(customWorkspace);
+      expect(resolveDashboardQueueDbPath(customWorkspace, dir)).toBe(customDb);
+
+      const injected = new InjectedTaskStore(customDb);
+      injected.enqueue({
+        taskKey: "local-custom",
+        repo: "acme/webapp",
+        title: "local-custom",
+        body: "",
+        taskFile: join(customWorkspace, "local-custom.md"),
+      });
+      injected.close();
+
+      // The worker draining that queue holds the custom workspace's lock, not
+      // the default workspace home's.
+      writeFileSync(
+        join(customWorkspace, ".worker.lock"),
+        JSON.stringify({ pid: process.pid, timestamp: new Date().toISOString() }),
+      );
+
+      const server = startDashboardServer({
+        port: 0,
+        workingDir: dir,
+        workspaceDir: customWorkspace,
+        queueDbPath: resolveDashboardQueueDbPath(customWorkspace, dir),
+        logDirs: [],
+      });
+      try {
+        const body = (await (await fetch(`http://127.0.0.1:${server.port}/api/worker`)).json()) as {
+          worker: { status: string; pid: number; lockFile?: string };
+          queue: { injected: { pending: number; running: number } };
+        };
+        // Proves the --workspace value reaches the API through the server
+        // options, not just the resolver, and covers liveness as well as counts.
+        expect(body.queue.injected).toEqual({ pending: 1, running: 0 });
+        expect(body.worker.status).toBe("running");
+        expect(body.worker.pid).toBe(process.pid);
+        expect(body.worker.lockFile).toBe(join(customWorkspace, ".worker.lock"));
+      } finally {
+        server.stop();
+      }
+    } finally {
+      if (savedQueueDb === undefined) {
+        delete process.env.WEBHOOK_QUEUE_DB;
+      } else {
+        process.env.WEBHOOK_QUEUE_DB = savedQueueDb;
+      }
+    }
+  });
+
+  test("an explicit dbPath keeps one-database behavior for embeddings", () => {
+    const runs = new RunStore(dbPath);
+    runs.close();
+    const injected = new InjectedTaskStore(dbPath);
+    injected.enqueue({
+      taskKey: "local-one",
+      repo: "acme/webapp",
+      title: "local-one",
+      body: "",
+      taskFile: join(dir, "local-one.md"),
+    });
+    injected.close();
+
+    const explicit = new DashboardData({ dbPath, workingDir: dir, logDirs: [] });
+    try {
+      expect(explicit.dbPath).toBe(dbPath);
+      expect(explicit.queueDbPath).toBe(dbPath);
+      expect(explicit.getQueueStats().injected).toEqual({ pending: 1, running: 0 });
+    } finally {
+      explicit.close();
+    }
+  });
+
+  test("worker queue counts are zero and do not create a missing database", () => {
+    expect(existsSync(dbPath)).toBe(false);
+
+    const body = handleWorkerStatus(data).body as {
+      queue: {
+        pending: number;
+        processing: number;
+        failed: number;
+        injected: { pending: number; running: number };
+        retries: { pending: number; running: number };
+      };
+    };
+    expect(body.queue).toEqual({
+      pending: 0,
+      processing: 0,
+      failed: 0,
+      injected: { pending: 0, running: 0 },
+      retries: { pending: 0, running: 0 },
+    });
+    // The GET must stay read-only: no directory, database, or schema creation.
+    expect(existsSync(dbPath)).toBe(false);
+  });
+
+  test("run detail does not create a missing workspace queue database", () => {
+    const historyDb = join(dir, "history.db");
+    const missingQueueDb = join(dir, "workspace-state", "queue.db");
+    const runs = new RunStore(historyDb);
+    const runId = runs.createRun({ origin: "local", taskKey: "local-missing" });
+    runs.finishRun(runId, "failed");
+    runs.close();
+    expect(existsSync(missingQueueDb)).toBe(false);
+
+    const scoped = new DashboardData({
+      dbPath: historyDb,
+      queueDbPath: missingQueueDb,
+      workingDir: dir,
+      logDirs: [],
+    });
+    try {
+      const response = handleRunDetail(scoped, String(runId));
+      expect(response.status).toBe(200);
+      // Eligibility reads the ad-hoc row read-only; it must not create the
+      // workspace state directory, database, or schema just by being viewed.
+      expect(existsSync(missingQueueDb)).toBe(false);
+      expect(existsSync(join(dir, "workspace-state"))).toBe(false);
+    } finally {
+      scoped.close();
+    }
+  });
+
+  test("a fresh project with only workspace queue data is not reported as missing a database", () => {
+    const missingHistoryDb = join(dir, "history-missing.db");
+    const workspaceQueueDb = join(dir, "workspace-state", "queue.db");
+    const injected = new InjectedTaskStore(workspaceQueueDb);
+    injected.enqueue({
+      taskKey: "local-fresh",
+      repo: "acme/webapp",
+      title: "local-fresh",
+      body: "",
+      taskFile: join(dir, "local-fresh.md"),
+    });
+    injected.close();
+
+    const scoped = new DashboardData({
+      dbPath: missingHistoryDb,
+      queueDbPath: workspaceQueueDb,
+      workingDir: dir,
+      logDirs: [],
+    });
+    try {
+      const body = handleWorkerStatus(scoped).body as {
+        dbMissing: boolean;
+        queueDbMissing: boolean;
+        queue: { injected: { pending: number; running: number } };
+      };
+      // History DB absent, but the workspace queue DB is recording work: the
+      // status strip must not pair "no database yet" with "1 queued".
+      expect(body.dbMissing).toBe(true);
+      expect(body.queueDbMissing).toBe(false);
+      expect(body.queue.injected).toEqual({ pending: 1, running: 0 });
+    } finally {
+      scoped.close();
+    }
   });
 
   test("worker liveness falls back to the workspace home lock (fleet mode)", () => {
@@ -562,6 +1043,12 @@ describe("dashboard server", () => {
 
       const runs = (await (await fetch(`${base}/api/runs`)).json()) as { total: number };
       expect(runs.total).toBe(1);
+      const activity = await fetch(`${base}/api/task-activity`);
+      expect(activity.status).toBe(200);
+      expect(await activity.json()).toMatchObject({
+        runs: [{ id, status: "succeeded", stepActive: false }],
+        recentLimit: 100,
+      });
 
       const detail = await fetch(`${base}/api/runs/${id}`);
       expect(detail.status).toBe(200);

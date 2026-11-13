@@ -11,6 +11,7 @@ import {
 import type { RetryHandlerDeps } from "../src/lib/observability/dashboard-api";
 import { isRunRetriable, ScheduledRetryStore } from "../src/lib/state/run-retry";
 import type { SpawnedRetryProcess } from "../src/lib/state/run-retry";
+import { InjectedTaskStore } from "../src/lib/state/injected-tasks";
 import { RunStore } from "../src/lib/state/run-recorder";
 import type { RunStatus } from "../src/lib/state/run-recorder";
 
@@ -107,14 +108,23 @@ describe("isRunRetriable", () => {
     expect(result.reason).toContain("estimation");
   });
 
-  test("local injected runs are re-dispatched with worker add, not hand-retried", () => {
-    const result = isRunRetriable({
-      status: "failed",
+  test("local injected runs retry by re-queuing their ad-hoc task", () => {
+    for (const status of ["failed", "escalated", "abandoned"] as RunStatus[]) {
+      expect(
+        isRunRetriable({
+          status,
+          taskKey: "local-fix-flaky-test",
+          origin: "local",
+        }),
+      ).toEqual({ eligible: true, kind: "injected" });
+    }
+    const succeeded = isRunRetriable({
+      status: "succeeded",
       taskKey: "local-fix-flaky-test",
       origin: "local",
     });
-    expect(result.eligible).toBe(false);
-    expect(result.reason).toContain("worker add");
+    expect(succeeded.eligible).toBe(false);
+    expect(succeeded.reason).toBeString();
   });
 });
 
@@ -395,6 +405,112 @@ describe("handleRetryRun", () => {
     expect(response.status).toBe(409);
     expect((response.body as { error: string }).error).toContain("disabled");
     automationData.close();
+  });
+});
+
+describe("handleRetryRun (ad-hoc injected runs)", () => {
+  const TASK_KEY = "local-fix-flaky-test";
+  let dir: string;
+  let dbPath: string;
+  let data: DashboardData;
+
+  beforeEach(() => {
+    dir = join(tmpdir(), `retry-adhoc-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    mkdirSync(dir, { recursive: true });
+    dbPath = join(dir, "queue.db");
+    data = new DashboardData({ dbPath, workingDir: dir });
+  });
+
+  afterEach(() => {
+    data.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  /**
+   * Seed the interrupted state: a failed `local` run plus the queue row the
+   * worker left settled by startup recovery.
+   */
+  function seedInterrupted(rowState: "failed" | "pending" | "running" = "failed"): number {
+    const runs = new RunStore(dbPath);
+    const runId = runs.createRun({ origin: "local", taskKey: TASK_KEY, harness: "claude-code" });
+    runs.finishRun(runId, "failed", "worker restarted while this task was running");
+    runs.close();
+
+    const injected = new InjectedTaskStore(dbPath);
+    injected.enqueue({
+      taskKey: TASK_KEY,
+      repo: "backend",
+      title: "Fix flaky test",
+      body: "",
+      taskFile: join(dir, "injected", `${TASK_KEY}.md`),
+    });
+    if (rowState === "pending") {
+      injected.close();
+      return runId;
+    }
+    const claimed = injected.claimNext()!;
+    if (rowState === "failed") injected.finish(claimed.id, "failed", "worker restarted");
+    injected.close();
+    return runId;
+  }
+
+  test("re-queues the row under the same key instead of spawning", async () => {
+    const id = seedInterrupted();
+    const { deps, spawned } = stubDeps();
+
+    const response = await handleRetryRun(data, String(id), deps);
+    expect(response.status).toBe(202);
+    expect(response.body).toMatchObject({
+      status: "scheduled",
+      runId: id,
+      taskKey: TASK_KEY,
+    });
+    expect(spawned).toEqual([]);
+
+    const injected = new InjectedTaskStore(dbPath);
+    try {
+      expect(injected.getByTaskKey(TASK_KEY)?.status).toBe("pending");
+    } finally {
+      injected.close();
+    }
+
+    const detail = handleRunDetail(data, String(id)).body as {
+      retry: { eligible: boolean; kind?: string; audit: { action: string }[] };
+    };
+    expect(detail.retry.audit[0].action).toBe("scheduled");
+  });
+
+  test("reports the injected kind on the run detail", async () => {
+    const id = seedInterrupted();
+    const detail = handleRunDetail(data, String(id)).body as {
+      retry: { eligible: boolean; kind?: string };
+    };
+    expect(detail.retry.eligible).toBe(true);
+    expect(detail.retry.kind).toBe("injected");
+  });
+
+  test("refuses while the row is still queued", async () => {
+    const id = seedInterrupted("pending");
+    const response = await handleRetryRun(data, String(id), stubDeps().deps);
+    expect(response.status).toBe(409);
+    expect((response.body as { error: string }).error).toContain("already pending");
+  });
+
+  test("refuses when the queue row was pruned", async () => {
+    const runs = new RunStore(dbPath);
+    const runId = runs.createRun({ origin: "local", taskKey: TASK_KEY, harness: "claude-code" });
+    runs.finishRun(runId, "failed", "worker restarted");
+    runs.close();
+
+    const detail = handleRunDetail(data, String(runId)).body as {
+      retry: { eligible: boolean; reason?: string };
+    };
+    expect(detail.retry.eligible).toBe(false);
+    expect(detail.retry.reason).toContain("devintern worker add");
+
+    const response = await handleRetryRun(data, String(runId), stubDeps().deps);
+    expect(response.status).toBe(409);
+    expect((response.body as { error: string }).error).toContain("devintern worker add");
   });
 });
 

@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { TaskDescription } from "@/components/TaskDescription";
+import { TaskDescription, splitTaskDescription } from "@/components/TaskDescription";
 
 test("renders a description as markdown", () => {
   const html = renderToStaticMarkup(
@@ -36,4 +36,13 @@ test("short descriptions need no toggle", () => {
 
   expect(html).not.toContain("show more");
   expect(html).toContain("A short task.");
+});
+
+test("splitTaskDescription separates frontmatter and drops a duplicate title heading", () => {
+  const { meta, body } = splitTaskDescription(
+    "---\nkey: abc\ncreated_at: 2026-01-01\n---\n\n# My title\n\nBody text",
+    "My title",
+  );
+  expect(meta).toEqual(["key: abc", "created_at: 2026-01-01"]);
+  expect(body).toBe("Body text");
 });

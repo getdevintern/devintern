@@ -20,16 +20,40 @@
  *   `.local/bin` beneath it.
  * - `--allow` on the harness's own config dir (e.g. `~/.claude` +
  *   `~/.claude.json`): agents write session state there and hard-fail
- *   without it.
+ *   without it. When the policy denies a file inside such a grant (Muse's
+ *   stored credential), the grant is split into per-child grants that omit
+ *   the denied path instead of relying on deny-over-allow, which Landlock
+ *   cannot express.
  * - `--allow-file /dev/ptmx` so tools that allocate a PTY (lefthook,
  *   script(1), interactive CLIs) can open the master; without it git
  *   hooks fail with path_not_granted on /dev/ptmx.
+ * - `BUN_INSTALL`/`BUN_TMPDIR` in the child env point at a persistent,
+ *   per-workspace cache under `~/.cache` (explicitly granted here; stale roots
+ *   are evicted after 30 days of disuse). The base stays outside the default
+ *   writable set so one repository's agent cannot poison another's cache. Bun
+ *   otherwise defaults to the read-only `~/.bun`, so `bun install` / `bun add`
+ *   fails with "EACCES accessing temporary directory" before it resolves
+ *   anything. A configured
+ *   value is kept only when the final grant set gives the child write access to
+ *   it — host-level writability is irrelevant, because a top-level `$HOME`
+ *   entry is granted `--read` only. When the install root is redirected,
+ *   `<cache>/bin` is appended to `PATH` (installed launchers stay resolvable
+ *   without shadowing system tools) and the CLI self-updaters are disabled
+ *   (their skip cache is read-only here, so they would re-exec the unchanged
+ *   binary forever). When the cache cannot be created safely the overlay is
+ *   omitted and the reason is logged once, rather than aborting the run.
  * - `--allow-unix-socket $SSH_AUTH_SOCK` so `git push` over ssh works.
  * - Domain allowlists map to repeated `--allow-domain` (nono's proxy filter);
  *   network is otherwise open by default.
  *
  * `AGENT_SANDBOX_NONO_PROFILE` still selects a nono profile (`--profile`);
  * the explicit grants compose on top of it.
+ *
+ * Pack profiles: when nono has a pack installed for the harness, its profile
+ * is used (on Linux composed with `linux-host-compat`). Harnesses without a
+ * pack fall back to the generic profile plus the explicit grants above; that
+ * fallback is legitimate but was invisible, so it is now reported once per
+ * process (see {@link describeNonoPack}).
  *
  * Linux: Landlock cannot express "deny under an allowed parent", so nono
  * refuses to start when a broad grant contains one of its protected paths
@@ -44,23 +68,14 @@
 import { spawnSync } from "child_process";
 import { existsSync, mkdtempSync, readdirSync, statSync, writeFileSync } from "fs";
 import type { Dirent } from "fs";
-import { homedir, tmpdir } from "os";
+import { tmpdir } from "os";
 import { join } from "path";
 import { findInPath } from "../../resolver.js";
+import { bunSandboxOverlay, trySandboxBunEnv } from "../bun-env.js";
+import type { BunSandboxEnv } from "../bun-env.js";
+import { harnessStatePaths, resolveHomeDir } from "../harness-state.js";
 import { probeCommand, unsupportedPlatform } from "../probe.js";
 import type { SandboxDetection, SandboxPolicy, SandboxProvider, WrappedCommand } from "../types.js";
-
-/** Harness name → $HOME config paths the agent needs read+write access to. */
-const HARNESS_STATE_PATHS: Record<string, string[]> = {
-  "claude-code": [".claude", ".claude.json"],
-  codex: [".codex"],
-  // agy keeps state under ~/.gemini (legacy Gemini CLI layout)
-  antigravity: [".gemini"],
-  gemini: [".gemini"],
-  // cursor-agent writes chats under ~/.config/cursor; IDE state stays in ~/.cursor
-  cursor: [".cursor", ".config/cursor"],
-  opencode: [".config/opencode", ".local/share/opencode", ".local/state/opencode"],
-};
 
 /**
  * Harness name → nono registry pack profile name (used when installed).
@@ -95,6 +110,104 @@ function builtinProfileFor(harnessName: string): string | undefined {
       : undefined;
   profileProbeCache.set(harnessName, resolved);
   return resolved;
+}
+
+/** Pack-profile status for a harness under nono. */
+export interface NonoPackStatus {
+  /** Harness the status describes. */
+  harnessName: string;
+  /** Pack profile known for this harness, whether or not it is installed. */
+  expectedProfile?: string;
+  /** Installed pack profile used for the run, when the harness has one. */
+  profile?: string;
+  /** True when the run is backed by an installed nono pack profile. */
+  packBacked: boolean;
+  /**
+   * One-line explanation for harnesses that fall back to the generic profile.
+   * Undefined for pack-backed harnesses.
+   */
+  note?: string;
+}
+
+/**
+ * Name of the generic profile nono falls back to when no pack is installed.
+ *
+ * Linux composes `linux-host-compat` with the pack (see
+ * {@link linuxCompositeProfile}); macOS has no such base, so the run uses
+ * nono's own default profile.
+ */
+function genericProfileName(): string {
+  return process.platform === "linux" ? "linux-host-compat" : "nono's default profile";
+}
+
+/**
+ * Explain the generic fallback used for a harness without a usable pack.
+ *
+ * @param harnessName - Registered harness name.
+ * @param expectedProfile - Pack profile known for the harness, when any.
+ * @returns A one-line explanation naming the fallback and the state dirs.
+ */
+function missingPackNote(harnessName: string, expectedProfile?: string): string {
+  const state = harnessStatePaths(harnessName).map((rel) => `~/${rel}`);
+  const stateText = state.length > 0 ? ` (state: ${state.join(", ")})` : "";
+  const head = expectedProfile
+    ? `nono pack profile "${expectedProfile}" is not installed`
+    : `nono has no pack profile for "${harnessName}"`;
+  return `${head}; using ${genericProfileName()} + explicit grants${stateText}.`;
+}
+
+/**
+ * Describe the nono pack-profile situation for a harness.
+ *
+ * The fallback (no pack installed, or no pack published for the harness) is
+ * legitimate — the explicit grants still confine the run — but it used to be
+ * invisible, so callers surface {@link NonoPackStatus.note} to the user.
+ *
+ * @param harnessName - Registered harness name (e.g. "grok").
+ * @returns Whether the harness is pack-backed, and the fallback note if not.
+ */
+export function describeNonoPack(harnessName: string): NonoPackStatus {
+  const expectedProfile = HARNESS_NONO_PROFILES[harnessName];
+  const profile = builtinProfileFor(harnessName);
+  if (profile) {
+    return { harnessName, expectedProfile, profile, packBacked: true };
+  }
+  return {
+    harnessName,
+    expectedProfile,
+    packBacked: false,
+    note: missingPackNote(harnessName, expectedProfile),
+  };
+}
+
+/** Harnesses whose missing-pack note has already been logged in this process. */
+const packWarned = new Set<string>();
+
+/**
+ * Log the missing-pack note once per process per harness.
+ *
+ * `wrapCommand` runs for every agent spawn, so the note is deduplicated here:
+ * it surfaces once (at the first spawn of a process) instead of on every
+ * spawn.
+ *
+ * @param harnessName - Registered harness name.
+ */
+function warnMissingPackOnce(harnessName: string): void {
+  if (packWarned.has(harnessName)) return;
+  packWarned.add(harnessName);
+  const status = describeNonoPack(harnessName);
+  if (status.note) console.warn(status.note);
+}
+
+/**
+ * Forget the cached pack probes and the logged missing-pack notes.
+ *
+ * Exposed for tests and for long-lived hosts that install a pack while
+ * running (the next spawn then picks the pack profile up).
+ */
+export function resetNonoPackState(): void {
+  profileProbeCache.clear();
+  packWarned.clear();
 }
 
 /** A single filesystem grant flag for `nono run`. */
@@ -180,6 +293,13 @@ export function refineGrantsAgainstDenies(
 ): NonoGrant[] {
   const out: NonoGrant[] = [];
   for (const grant of grants) {
+    // A file grant naming a denied path is itself the conflict; drop it.
+    if (
+      (grant.flag === "--allow-file" || grant.flag === "--read-file") &&
+      denies.includes(grant.path)
+    ) {
+      continue;
+    }
     if (
       (grant.flag === "--allow" || grant.flag === "--read") &&
       denies.some((d) => isInside(d, grant.path))
@@ -194,6 +314,28 @@ export function refineGrantsAgainstDenies(
 
 function flattenGrants(grants: readonly NonoGrant[]): string[] {
   return grants.flatMap((g) => [g.flag, g.path]);
+}
+
+/**
+ * Compute the Bun env overlay against the grants the child will actually run
+ * with, and against the env it will actually be spawned with.
+ *
+ * Only directory `--allow` grants confer write access; a top-level `$HOME`
+ * entry is `--read`, which is the case that used to slip through a
+ * host-writability check.
+ */
+function bunEnvForGrants(
+  bun: BunSandboxEnv | undefined,
+  grants: readonly NonoGrant[],
+  childEnv: NodeJS.ProcessEnv,
+): Record<string, string> | undefined {
+  if (!bun) return undefined;
+  const overlay = bunSandboxOverlay(
+    bun,
+    grants.filter((grant) => grant.flag === "--allow").map((grant) => grant.path),
+    childEnv,
+  );
+  return Object.keys(overlay.env).length > 0 ? overlay.env : undefined;
 }
 
 /**
@@ -305,6 +447,12 @@ export class NonoSandboxProvider implements SandboxProvider {
     // host-compat and pack profiles, macOS uses the pack profile directly.
     const envProfile = process.env.AGENT_SANDBOX_NONO_PROFILE;
     const packProfile = builtinProfileFor(harnessName);
+    // An explicit AGENT_SANDBOX_NONO_PROFILE replaces the pack, so the
+    // missing-pack note would be misleading — only warn when nono is left to
+    // pick the profile itself.
+    if (!envProfile && !packProfile) {
+      warnMissingPackOnce(harnessName);
+    }
     const profile =
       envProfile ??
       (process.platform === "linux" ? linuxCompositeProfile(packProfile) : packProfile);
@@ -312,11 +460,21 @@ export class NonoSandboxProvider implements SandboxProvider {
       nonoArgs.push("--profile", profile);
     }
 
-    const home = homedir();
+    const home = resolveHomeDir();
     const grants: NonoGrant[] = [];
+
+    // Bun defaults BUN_INSTALL to ~/.bun, which stays read-only under the
+    // sandbox. Point the child at a per-workspace cache that is created here
+    // and explicitly granted below so `bun install`/`bun add` works on the
+    // first try instead of failing with "EACCES accessing temporary directory".
+    // A cache that cannot be created safely only loses the overlay (with a
+    // one-time warning from the shared helper); it must not prevent the agent
+    // from starting.
+    const bun = trySandboxBunEnv(undefined, policy.workingDir);
 
     // Read+write: the policy's writable set.
     const writable = new Set([policy.workingDir, ...policy.writablePaths]);
+    if (bun) writable.add(bun.writablePath);
     for (const p of writable) {
       if (existsSync(p)) grants.push({ flag: "--allow", path: p });
     }
@@ -324,7 +482,7 @@ export class NonoSandboxProvider implements SandboxProvider {
     // Read+write: the harness's own state (session files, settings). Without
     // this the agent exits at startup (observed with claude-code, which also
     // writes ~/.claude/projects during a run).
-    for (const rel of HARNESS_STATE_PATHS[harnessName] ?? []) {
+    for (const rel of harnessStatePaths(harnessName)) {
       const p = join(home, rel);
       if (!existsSync(p)) continue;
       grants.push({ flag: rel.endsWith(".json") ? "--allow-file" : "--allow", path: p });
@@ -349,7 +507,7 @@ export class NonoSandboxProvider implements SandboxProvider {
       if (existsSync(p)) grants.push({ flag: "--read", path: p });
     }
 
-    // Extra readable roots from the policy (parity with srt's allowRead).
+    // Extra readable roots from the policy.
     for (const p of policy.readablePaths ?? []) {
       if (existsSync(p)) grants.push({ flag: "--read", path: p });
     }
@@ -370,17 +528,25 @@ export class NonoSandboxProvider implements SandboxProvider {
 
     // Network: open by default in nono; a policy allowlist maps to the proxy
     // filter. (Programs that ignore proxy env vars lose connectivity when an
-    // allowlist is set — same caveat as srt.)
+    // allowlist is set.)
     if (policy.network !== "open") {
       for (const domain of policy.network.allowedDomains) {
         suffix.push("--allow-domain", domain);
       }
     }
 
-    const refined = preflightLandlockGrants(nonoArgs, grants, suffix);
+    const refined = preflightLandlockGrants(
+      nonoArgs,
+      (policy.denyReadPaths ?? []).length > 0
+        ? refineGrantsAgainstDenies(grants, policy.denyReadPaths ?? [])
+        : grants,
+      suffix,
+    );
+    const bunEnv = bunEnvForGrants(bun, refined, policy.env ?? process.env);
     return {
       path: "nono",
       args: [...nonoArgs, ...flattenGrants(refined), ...suffix, "--", path, ...args],
+      env: bunEnv,
     };
   }
 }

@@ -7,6 +7,7 @@ import type { PickupGate } from "../worker/schedule";
 import type { WebhookQueue } from "../state/webhook-queue";
 import type { WorkerState } from "../state/worker-state";
 import type { RoutingSkipStore } from "./state";
+import { getWorkerFailover } from "../worker/failover";
 import { createTaskSupervisor, JobNotStartedError } from "../worker/supervisor";
 import type { TaskSupervisor } from "../worker/supervisor";
 import { findRepo, findTeam, resolveWorkspacePipelinePath } from "./config";
@@ -15,8 +16,10 @@ import { buildRepoEnv, buildTeamTaskEnv } from "./env";
 import { effectiveRoutingRules, routeTask, routeTaskWithRules, toRoutableTask } from "./router";
 import type { RoutableTask } from "./router";
 import { RUN_ORIGIN_ENV } from "../observability/analytics";
+import { AUTOMATION_ID_ENV } from "../automation/acquirer";
 import { PICKUP_RUN_ID_ENV } from "../state/session-pickup";
 import { actionedSourceKey } from "../task/actioned-state";
+import { QUEUE_CLAIM_ENV } from "./queue-failure-reason";
 
 /** Task shape the fleet acquirer needs (structural subset of `Task`). */
 export interface FleetTask {
@@ -66,10 +69,21 @@ export interface WorkspaceTaskAcquirerDeps {
   runTask?: (
     taskKey: string,
     extraArgs: string[],
-    opts: { cwd: string; env: Record<string, string | undefined>; signal?: AbortSignal },
+    opts: {
+      cwd: string;
+      env: Record<string, string | undefined>;
+      signal?: AbortSignal;
+      onChildSpawn?: (pid: number) => void;
+    },
   ) => Promise<TaskExecutionResult>;
   /** Shared admission supervisor. A local instance is created only for focused tests. */
   supervisor?: TaskSupervisor;
+  /**
+   * Harness-chain gate: `true` when no chain entry can start a run (every entry
+   * usage-limited or cooling down after a startup failure). Injected for tests;
+   * defaults to the worker's failover controller.
+   */
+  isHarnessExhausted?: () => boolean;
 }
 
 /** Per-task CLI args from `[defaults].worker_task_args`, else `--create-pr`. */
@@ -81,10 +95,25 @@ export function fleetTaskArgs(config: WorkspaceConfig): string[] {
   return workerTaskArgs();
 }
 
-/** Error groups are pre-qualified by the monitor, so skip the generic feasibility agent pass. */
+/**
+ * Build the CLI args for an error-monitor remediation run.
+ *
+ * The monitor already qualified the error group, so the generic feasibility
+ * pass is skipped. A remediation that concludes no code change is needed (the
+ * issue was already fixed, is not reproducible, or belongs to the
+ * environment) is a legitimate outcome: without `--allow-no-changes` delivery
+ * fails the run with "Implementation was not committed", and that failure is
+ * reported back to the same Sentry issue, inflating it and feeding the next
+ * remediation attempt.
+ */
 export function errorMonitorTaskArgs(config: WorkspaceConfig): string[] {
   const args = fleetTaskArgs(config);
-  return args.includes("--skip-clarity-check") ? args : [...args, "--skip-clarity-check"];
+  const withClarity = args.includes("--skip-clarity-check")
+    ? args
+    : [...args, "--skip-clarity-check"];
+  return withClarity.includes("--allow-no-changes")
+    ? withClarity
+    : [...withClarity, "--allow-no-changes"];
 }
 
 /**
@@ -183,6 +212,7 @@ export type FleetExecutorDeps = Pick<
   | "team"
   | "supervisor"
   | "actionedSource"
+  | "isHarnessExhausted"
 >;
 
 /**
@@ -218,10 +248,19 @@ export function createFleetTaskExecutor(
      * resolves from that specific run.
      */
     pickupRunId?: number;
+    /** Unique queue execution whose run record should receive this outcome. */
+    queueClaim?: string;
+    /**
+     * Called with the task child pid after it spawns. Used by the injected-task
+     * queue to persist the pid for interrupt recovery.
+     */
+    onChildSpawn?: (pid: number) => void;
   } = {},
 ): (taskKey: string, routable: RoutableTask) => Promise<TaskExecutionResult> {
   const { config, workspaceDir, skips, repoManager } = deps;
   const runTask = deps.runTask ?? runTaskViaCli;
+  const isHarnessExhausted =
+    deps.isHarnessExhausted ?? (() => getWorkerFailover()?.allExhausted() ?? false);
   const supervisor =
     deps.supervisor ??
     createTaskSupervisor({
@@ -273,6 +312,14 @@ export function createFleetTaskExecutor(
       return false;
     }
 
+    // Defer before touching git: when the whole harness chain is usage-limited
+    // or cooling down, the CLI child would exit without starting work, yet the
+    // worktree created for it is kept "for debugging". Poll retries would then
+    // leak one disposable worktree per tick until the limit window ends.
+    if (isHarnessExhausted()) {
+      return "deferred";
+    }
+
     try {
       return await supervisor.schedule({
         id: randomUUID(),
@@ -302,19 +349,30 @@ export function createFleetTaskExecutor(
                 actionedSource: deps.actionedSource,
                 pipelineDefaultFile,
               });
+          if (options.runOrigin === "local") {
+            // An injected task is never an automation run. A marker leaked from
+            // the worker's parent env would make the pipeline record a
+            // `scheduled` origin/automationId, which no longer matches the
+            // local scope startup recovery looks runs up by.
+            delete env[AUTOMATION_ID_ENV];
+          }
           const ok = await runTask(options.taskRef ?? taskKey, extraArgs, {
             cwd: worktree,
             env: {
               ...env,
               [RUN_ORIGIN_ENV]: options.runOrigin ?? "worker",
+              [QUEUE_CLAIM_ENV]: options.queueClaim,
               ...(options.pickupRunId !== undefined
                 ? { [PICKUP_RUN_ID_ENV]: String(options.pickupRunId) }
                 : {}),
             },
             signal,
+            ...(options.onChildSpawn ? { onChildSpawn: options.onChildSpawn } : {}),
           });
 
-          if (ok === true) {
+          // A retry-gate skip is a clean outcome: no run was started, so the
+          // disposable worktree holds no work to debug.
+          if (ok === true || ok === "skipped") {
             await repoManager.removeTaskWorktree(repo.name, worktree);
           } else {
             console.warn(`⚠️  ${scope} keeping worktree for debugging: ${worktree}`);

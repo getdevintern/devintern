@@ -1,10 +1,18 @@
-import { existsSync, mkdirSync, readFileSync, statSync, unlinkSync } from "fs";
+import { mkdirSync, unlinkSync } from "fs";
 import { basename, join } from "path";
 import { UsageLimitError } from "@devintern/agent-harness";
 import { isMarkdownFilePath } from "@devintern/task-trackers";
 import { captureError, flushErrorTracking } from "@devintern/utils";
 import { runAnalysisWithFallback } from "../agent/analysis-mode";
+import { adoptAgentCreatedChangeRequest } from "../agent/adopt-change-request";
 import { runClarityCheck } from "../agent/clarity";
+import { resolveExecutionPreferences } from "../agent/execution-preferences";
+import type { EffectiveExecutionPreferences } from "../agent/execution-preferences";
+import { HarnessUnavailableError } from "../agent/harness-startup";
+import { readImplementationReport } from "../agent/implementation-report";
+import { resolveAgentEffort, resolveAgentModel } from "../agent/model";
+import { getAgentRuntimeOverrides, setAgentRuntimeOverrides } from "../agent/runtime-overrides";
+import type { AgentRuntimeOverrides } from "../agent/runtime-overrides";
 import { runAgentHarness } from "../agent/run-harness";
 import { flushAnalyticsAndExit } from "../cli/bootstrap";
 import { isWorkerTaskProcess, runContext } from "../cli/context";
@@ -18,23 +26,24 @@ import {
   resolveProjectKey,
 } from "../config/project-settings";
 import { validateEnvironment } from "../config/validate-environment";
-import {
-  RUN_ORIGIN_ENV,
-  flushAnalytics,
-  trackInteractiveTaskRun,
-} from "../observability/analytics";
+import { flushAnalytics, trackInteractiveTaskRun } from "../observability/analytics";
 import { DEFAULT_AUTO_REVIEW_ITERATIONS } from "../review/auto-review-config";
 import { shouldSkipRetry } from "../state/retry-gate";
 import { clearRetryState, getRetryState } from "../state/retry-state";
 import { actionedSourceKeyFromEnv, recordTaskActioned } from "./actioned-state";
 import { WorkerState } from "../state/worker-state";
+import { QUEUE_CLAIM_ENV } from "../workspace/queue-failure-reason";
 import {
   RunStore,
   beginRun,
   getActiveRunContext,
+  hasRunStage,
+  latestRunStage,
   recordRunBranch,
+  recordRunHarness,
   recordRunStage,
   recordRunTicket,
+  replaceRunStage,
 } from "../state/run-recorder";
 import { pickupSelection, resolveSessionPickup } from "../state/session-pickup";
 import type { SessionPickupDecision } from "../state/session-pickup";
@@ -48,6 +57,8 @@ import { isMarkdownTaskTracker } from "../trackers/markdown/markdown-task-tracke
 import type { MarkdownTaskRaw } from "../trackers/markdown/markdown-task-tracker-client";
 import { Utils } from "../utils";
 import {
+  HARNESS_UNAVAILABLE_EXIT_CODE,
+  TASK_SKIP_EXIT_CODE,
   USAGE_LIMIT_EXIT_CODE,
   isWorkerChild,
   writeUsageLimitHint,
@@ -55,6 +66,7 @@ import {
 import { WORKSPACE_REPO_ENV } from "../workspace/env";
 import { resolveWorkspaceDir, worktreesDir } from "../workspace/paths";
 import { reportProcessingFailure } from "./processing-failure";
+import { resolveRunIdentity } from "./run-identity";
 import { runTaskSteps } from "./step-runner";
 import type { TaskStep } from "./step-runner";
 
@@ -138,6 +150,11 @@ async function runFeasibilityCheck(input: FeasibilityCheckInput): Promise<void> 
     if (clarityError instanceof UsageLimitError) {
       throw clarityError;
     }
+    // A harness that could not start will fail implementation too. Let the
+    // worker fail over/defer instead of continuing on the same broken binary.
+    if (clarityError instanceof Error && clarityError.name === "HarnessUnavailableError") {
+      throw clarityError;
+    }
     recordRunStage("feasibility", {
       status: "failed",
       summary: `assessment errored: ${(clarityError as Error).message}`,
@@ -163,6 +180,82 @@ interface ImplementationInput {
   taskDetails: ReturnType<TaskTrackerClient["formatTaskDetails"]>;
   effectiveTargetBranch: string;
   resumeBranch?: string;
+}
+
+/** Extract the `report` string from a recorded stage's JSON detail. */
+function readStageReport(detail: string | undefined): string | undefined {
+  if (!detail) return undefined;
+  try {
+    const parsed = JSON.parse(detail) as { report?: unknown };
+    return typeof parsed.report === "string" && parsed.report.trim() ? parsed.report : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Record the implementation stage from this attempt's summary files, correcting
+ * an early record when a later phase changed the outcome.
+ *
+ * The harness writes the stage before commit/verify/auto-review so an
+ * interruption in those phases still leaves resumable state. Afterwards:
+ *
+ * - finalize writes `implementation-summary-incomplete.md` on a halt, turning
+ *   the early success into a failure; or
+ * - a successful verify/plan repair rewrites `implementation-summary.md`, so
+ *   the early report no longer describes what was actually implemented.
+ *
+ * Both cases replace the single row so the dashboard and session pickup never
+ * hand a stale status/report to the next agent, preserving the prior report
+ * under `agentReport`.
+ *
+ * @param taskDir - Per-task output directory holding the summary files
+ * @param implementationStartedAt - Epoch ms when the agent session started
+ * @param harnessName - Display name recorded on the stage
+ * @param execution - Effective model/effort for this task, when known
+ */
+export function recordImplementationStage(
+  taskDir: string,
+  implementationStartedAt: number,
+  harnessName: string,
+  execution: { model?: string; effort?: string } = {},
+): ReturnType<typeof readImplementationReport> {
+  const { incomplete, report } = readImplementationReport(taskDir, implementationStartedAt);
+
+  const stage = {
+    status: incomplete ? ("failed" as const) : ("succeeded" as const),
+    summary: incomplete
+      ? `incomplete implementation with ${harnessName}`
+      : `implemented with ${harnessName}`,
+    detail: {
+      harness: harnessName,
+      ...(execution.model === undefined ? {} : { model: execution.model }),
+      ...(execution.effort === undefined ? {} : { effort: execution.effort }),
+      durationMs: Date.now() - implementationStartedAt,
+      ...(report === undefined ? {} : { report }),
+    },
+  };
+
+  const recorded = hasRunStage("implementation") ? latestRunStage("implementation") : undefined;
+  if (!recorded) {
+    recordRunStage("implementation", stage);
+  } else {
+    const recordedReport = readStageReport(recorded.detail);
+    const reportChanged = report !== undefined && report !== recordedReport;
+    if (recorded.status !== stage.status || reportChanged) {
+      replaceRunStage("implementation", {
+        ...stage,
+        detail: {
+          ...stage.detail,
+          ...(recordedReport === undefined || recordedReport === report
+            ? {}
+            : { agentReport: recordedReport }),
+        },
+      });
+    }
+  }
+
+  return { incomplete, report };
 }
 
 /**
@@ -232,38 +325,22 @@ async function runImplementation(input: ImplementationInput): Promise<void> {
   // An incomplete-summary file written during this run means the agent
   // stopped short and handed back to a human (mtime check guards against
   // stale files from earlier attempts in the same task directory).
-  const incompleteSummaryPath = join(taskDir, "implementation-summary-incomplete.md");
-  const implementationIncomplete =
-    existsSync(incompleteSummaryPath) &&
-    statSync(incompleteSummaryPath).mtimeMs >= implementationStartedAt;
-
-  // Persist the agent's own report (implementation-summary[-incomplete].md)
-  // in the run record: the output directory is an ephemeral debug artifact,
-  // and for escalated runs this text is the "why" a human needs.
-  const REPORT_EXCERPT_LENGTH = 10_000;
-  const reportPath = implementationIncomplete
-    ? incompleteSummaryPath
-    : join(taskDir, "implementation-summary.md");
-  let implementationReport: string | undefined;
-  try {
-    if (existsSync(reportPath) && statSync(reportPath).mtimeMs >= implementationStartedAt) {
-      implementationReport = readFileSync(reportPath, "utf8").slice(0, REPORT_EXCERPT_LENGTH);
-    }
-  } catch {
-    /* best-effort: recording must never fail a run */
-  }
-
-  recordRunStage("implementation", {
-    status: implementationIncomplete ? "failed" : "succeeded",
-    summary: implementationIncomplete
-      ? `incomplete implementation with ${resolvedAgent.harness.displayName}`
-      : `implemented with ${resolvedAgent.harness.displayName}`,
-    detail: {
-      harness: resolvedAgent.harness.displayName,
-      durationMs: Date.now() - implementationStartedAt,
-      ...(implementationReport === undefined ? {} : { report: implementationReport }),
+  // The harness already records a completed implementation before commit and
+  // auto-review, so an interruption in those phases still leaves resumable
+  // state. Only halted sessions (which never reach that early write) and
+  // storage failures fall through to the recording pass, which also corrects an
+  // early success when finalize wrote the incomplete summary afterwards.
+  const effectiveModel = resolveAgentModel(resolvedAgent.harness.name);
+  const effectiveEffort = resolveAgentEffort();
+  const { incomplete: implementationIncomplete } = recordImplementationStage(
+    taskDir,
+    implementationStartedAt,
+    resolvedAgent.harness.displayName,
+    {
+      ...(effectiveModel === undefined ? {} : { model: effectiveModel }),
+      ...(effectiveEffort === undefined ? {} : { effort: effectiveEffort }),
     },
-  });
+  );
 
   if (isMarkdownTaskTracker(tracker)) {
     await tracker.markDoneIfSuccessful(workflowKey, taskDir);
@@ -348,8 +425,27 @@ async function handleTaskFailure(error: unknown, attempt: TaskAttempt): Promise<
     await flushAnalyticsAndExit(0);
   }
 
+  // A harness that could not start is a configuration problem, not a task
+  // attempt. In a worker child, signal the parent to fail over/defer without
+  // posting a failure comment, recording retry state, or transitioning the
+  // ticket. Interactive runs keep the normal failure path below.
+  if (error instanceof HarnessUnavailableError && isWorkerChild()) {
+    await finishTaskRun("deferred", error.message);
+    console.warn(`\n🛠️  ${error.message}. Signaling worker to try the next harness.`);
+    if (runContext.lockManager) {
+      runContext.lockManager.release();
+    }
+    await flushAnalyticsAndExit(HARNESS_UNAVAILABLE_EXIT_CODE);
+  }
+
   const err = error as Error;
   await finishTaskRun("failed", err.message);
+
+  // A failed run may still have pushed a branch and opened a PR itself (agents
+  // sometimes run `gh pr create`). Register and label it so review polling and
+  // PR metadata stay correct; the run remains failed.
+  await adoptAgentCreatedChangeRequest({ taskKey });
+
   const taskPrefix = totalTasks > 1 ? `[${taskIndex + 1}/${totalTasks}] ` : "";
   console.error(`${taskPrefix}❌ Error processing ${taskKey}: ${err.message}`);
   if (options.verbose && err.stack) {
@@ -404,7 +500,8 @@ interface PreparedTask {
 /**
  * Validate the environment, fetch the task and its context, apply the retry
  * gate, and open the run record. Returns `null` when the retry gate skips a
- * batch task; single-task skips exit directly.
+ * batch task; single-task skips exit directly (with
+ * {@link TASK_SKIP_EXIT_CODE} in a worker child, 0 otherwise).
  */
 async function prepareTask(input: {
   taskKey: string;
@@ -471,27 +568,17 @@ async function prepareTask(input: {
   // origin so run history distinguishes them from scheduled runs.
   const scheduledAutomationId = process.env.DEVINTERN_AUTOMATION_ID;
   const trackerName = process.env.TASK_TRACKER || "jira";
-  const isManualAutomationRun =
-    scheduledAutomationId !== undefined && process.env[RUN_ORIGIN_ENV] === "manual";
-  const isErrorMonitorRun = process.env[RUN_ORIGIN_ENV] === "error_monitor";
-  const isLocalInjectedRun = process.env[RUN_ORIGIN_ENV] === "local";
+  const identity = resolveRunIdentity(process.env);
   beginRun({
-    origin: scheduledAutomationId
-      ? isManualAutomationRun
-        ? "manual"
-        : "scheduled"
-      : isErrorMonitorRun
-        ? "error_monitor"
-        : isLocalInjectedRun
-          ? "local"
-          : "task",
+    origin: identity.origin,
+    queueClaim: process.env[QUEUE_CLAIM_ENV],
     taskKey: workflowKey,
-    tracker: isErrorMonitorRun ? "sentry" : isLocalInjectedRun ? "local" : trackerName,
-    team: process.env.DEVINTERN_WORKSPACE_TEAM,
-    repo: process.env.DEVINTERN_WORKSPACE_REPO,
+    tracker: identity.tracker,
+    team: identity.team,
+    repo: identity.repo,
     // The harness that will implement this run (resolved at startup).
     harness: resolvedAgent.harness.name,
-    ...(scheduledAutomationId ? { automationId: scheduledAutomationId } : {}),
+    ...(identity.automationId ? { automationId: identity.automationId } : {}),
     // Ticket link for remote trackers only: markdown-file inputs and
     // materialized automation prompts have no tracker page, and deriving
     // URLs from their synthetic keys would point nowhere.
@@ -570,7 +657,8 @@ interface RetryGateResult {
 
 /**
  * Skip an unchanged incomplete task. Returns `null` when the task should be
- * skipped (batch returns, single exits); otherwise returns the retry state.
+ * skipped (batch returns, single exits with {@link TASK_SKIP_EXIT_CODE} for a
+ * worker child); otherwise returns the retry state.
  */
 async function applyRetryGate(input: {
   tracker: TaskTrackerClient;
@@ -611,7 +699,10 @@ async function applyRetryGate(input: {
       if (runContext.lockManager) {
         runContext.lockManager.release();
       }
-      process.exit(0);
+      // A worker child must not report a skip as success: exit 0 makes the
+      // poller log "completed" and the fleet tear down the worktree even
+      // though no run happened. Interactive runs keep a plain zero exit.
+      process.exit(isWorkerChild() ? TASK_SKIP_EXIT_CODE : 0);
     }
 
     if (priorRetryState) {
@@ -1094,6 +1185,32 @@ export const taskSteps: readonly TaskStep<TaskExecutionContext>[] = [
 ];
 
 /**
+ * Apply a task's resolved execution selection to the process-wide runtime
+ * state and return a callback that restores the previous values.
+ *
+ * Task processing is strictly sequential, so swapping the module-level agent
+ * and override slot for the duration of one task is safe. The pipeline always
+ * calls the returned callback from a `finally` block, so a thrown step cannot
+ * leak the selection into the next task.
+ *
+ * @param execution - Resolved harness/model/effort selection for this task
+ * @returns Restore callback for the previous agent and overrides
+ */
+export function applyExecutionSelection(execution: EffectiveExecutionPreferences): () => void {
+  const previousAgent = runContext.resolvedAgent;
+  const previousOverrides = getAgentRuntimeOverrides();
+  runContext.resolvedAgent = execution.agent;
+  setAgentRuntimeOverrides(buildRuntimeOverrides(execution));
+  if (execution.agent.harness.name !== previousAgent.harness.name) {
+    recordRunHarness(execution.agent.harness.name);
+  }
+  return () => {
+    runContext.resolvedAgent = previousAgent;
+    setAgentRuntimeOverrides(previousOverrides);
+  };
+}
+
+/**
  * Run the full implementation workflow for one JIRA task key.
  *
  * @param taskKey - JIRA issue key
@@ -1127,6 +1244,25 @@ export async function processSingleTask(
 
     const effectiveTargetBranch = await resolveEffectiveTargetBranch(descriptionText);
 
+    // Per-task execution preferences (harness / model / effort), parsed from
+    // an explicit `Execution preferences` section or `devintern` HTML comment
+    // in the description. Trackers can expose a markdown view so headings and
+    // code fences survive formatting; identity hashing keeps using the plain
+    // `descriptionText` above.
+    const preferenceText = tracker.extractDescriptionMarkdown?.(task) ?? descriptionText;
+    // Invalid or conflicting preferences throw here and are surfaced as
+    // actionable task failures instead of silently falling back.
+    const execution = resolveExecutionPreferences({
+      description: preferenceText,
+      currentAgent: runContext.resolvedAgent,
+    });
+    if (execution.notes.length > 0) {
+      console.log("\n🧩 Execution preferences from task description:");
+      for (const note of execution.notes) {
+        console.log(note);
+      }
+    }
+
     // Session pickup: reconstruct branch + prior report from the run store so a
     // restart or dashboard retry resumes instead of redoing the work. Falls
     // back to a fresh run when the recorded state is incomplete.
@@ -1135,6 +1271,17 @@ export async function processSingleTask(
     // (branch + report) is selected instead of the current in_progress run.
     const currentRunId = getActiveRunContext()?.id;
     const pickupStore = new RunStore();
+    // Feature branches follow the checkout they were cut from: fleet task
+    // worktrees branch off the fetched remote base, while a normal CLI checkout
+    // branches off the local base. Comparing a local-checkout branch against a
+    // remote base that has not received local commits would present unrelated
+    // local commits as the branch's landed work.
+    const compareOptions = {
+      cwd: process.cwd(),
+      basePreference: process.env[WORKSPACE_REPO_ENV]
+        ? ("remote-first" as const)
+        : ("local-first" as const),
+    };
     let pickup: SessionPickupDecision;
     try {
       pickup = await resolveSessionPickup({
@@ -1152,8 +1299,12 @@ export async function processSingleTask(
         branchExists: async (branch) =>
           (await Utils.gitRefExists(`refs/heads/${branch}`)) ||
           (await Utils.gitRefExists(`refs/remotes/origin/${branch}`)),
+        // A legacy/interrupted run may have commits but no implementation
+        // stage; reuse its branch when the commits are really there.
+        hasLandedCommits: ({ branch }) =>
+          Utils.hasCommitsAhead(branch, effectiveTargetBranch, compareOptions),
         describeLanded: ({ branch }) =>
-          Utils.collectLandedWork(branch, effectiveTargetBranch, { cwd: process.cwd() }),
+          Utils.collectLandedWork(branch, effectiveTargetBranch, compareOptions),
       });
     } finally {
       pickupStore.close();
@@ -1167,25 +1318,34 @@ export async function processSingleTask(
       console.log(`\n🆕 Session pickup unavailable (${pickup.reason}); starting fresh`);
     }
 
-    const result = await runTaskSteps(taskSteps, {
-      taskKey,
-      totalTasks,
-      skipClarityCheck,
-      outputFile: "",
-      taskDir: "",
-      workflowKey,
-      tracker,
-      task,
-      taskDetails,
-      effectiveTargetBranch,
-      attachmentMap: new Map<string, string>(),
-      relatedIssues,
-      priorRetryState,
-      pickup,
-      projectSettings,
-      projectKey,
-      resumeBranch: pickup.kind === "resume" ? pickup.session.branch : undefined,
-    });
+    // Apply the per-task selection for the duration of the steps, then restore
+    // the process-wide defaults so the next task in a batch is unaffected.
+    const restoreExecution = applyExecutionSelection(execution);
+
+    let result: Awaited<ReturnType<typeof runTaskSteps>>;
+    try {
+      result = await runTaskSteps(taskSteps, {
+        taskKey,
+        totalTasks,
+        skipClarityCheck,
+        outputFile: "",
+        taskDir: "",
+        workflowKey,
+        tracker,
+        task,
+        taskDetails,
+        effectiveTargetBranch,
+        attachmentMap: new Map<string, string>(),
+        relatedIssues,
+        priorRetryState,
+        pickup,
+        projectSettings,
+        projectKey,
+        resumeBranch: pickup.kind === "resume" ? pickup.session.branch : undefined,
+      });
+    } finally {
+      restoreExecution();
+    }
     if (result.kind === "halted") {
       await finishTaskRun("escalated", result.reason);
       runContext.activeTaskContext = null;
@@ -1193,4 +1353,21 @@ export async function processSingleTask(
   } catch (error) {
     await handleTaskFailure(error, { taskKey, taskIndex, totalTasks });
   }
+}
+
+/** Translate a resolved selection into the runtime override slot (or null). */
+function buildRuntimeOverrides(
+  execution: EffectiveExecutionPreferences,
+): AgentRuntimeOverrides | null {
+  const overrides: AgentRuntimeOverrides = {};
+  if (execution.modelOverride !== undefined) {
+    overrides.model = execution.modelOverride;
+    // A per-task model is harness-specific; pin it to the harness it was
+    // resolved for so a fallback spawn does not receive it.
+    overrides.harness = execution.agent.harness.name;
+  }
+  if (execution.effort !== undefined) {
+    overrides.effort = execution.effort;
+  }
+  return Object.keys(overrides).length > 0 ? overrides : null;
 }

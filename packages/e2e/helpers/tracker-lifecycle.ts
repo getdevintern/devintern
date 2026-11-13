@@ -6,6 +6,9 @@ import type { TrackerScenario, TrackerStatusSettings } from "./tracker-scenario"
 /** Identifying header of the automated implementation-success comment. */
 export const IMPLEMENTATION_COMMENT_MARKER = "Implementation Completed by @devintern/code";
 
+/** Identifying text of the automated processing-failure comment. */
+export const PROCESSING_FAILURE_COMMENT_MARKER = "Automated implementation did not complete";
+
 /**
  * Keep only the pull requests created by a scenario's own run.
  *
@@ -68,12 +71,19 @@ export async function assertTrackerLifecycle(scenario: TrackerScenario): Promise
   // 4. Status transition: final status present, obsolete status labels removed,
   //    unrelated label preserved.
   const ticket = await scenario.getTicket(key);
+  const statusKind = scenario.tracker.statusKind;
+  const status =
+    statusKind === "state" && scenario.tracker.getStatus
+      ? await scenario.tracker.getStatus(key)
+      : undefined;
   assertTicketState({
     ticket,
     openState: scenario.tracker.openState,
     descriptionMarker: scenario.descriptionMarker,
     statuses,
     seedLabels: scenario.seedLabels,
+    statusKind,
+    status,
   });
 
   // 5. The implementation summary comment is read back from the tracker.
@@ -106,12 +116,14 @@ export async function assertTrackerLifecycle(scenario: TrackerScenario): Promise
 }
 
 /**
- * Assert a read-back ticket is still active with the expected labels.
+ * Assert a read-back ticket reached the expected workflow state.
  *
  * `openState` is the provider-native active state supplied by the fixture, so
- * the same check works for GitHub (`open`) and GitLab (`opened`). Keeping this
- * as a standalone function lets the offline suite exercise provider-native
- * values without a live tracker.
+ * the same check works for GitHub (`open`) and GitLab (`opened`). Label-based
+ * trackers keep the original label assertions; state-based trackers (Jira)
+ * assert the configured workflow status instead of pretending it is a label.
+ * Keeping this as a standalone function lets the offline suite exercise
+ * provider-native values without a live tracker.
  */
 export function assertTicketState(input: {
   ticket: TrackerTicketState;
@@ -119,13 +131,33 @@ export function assertTicketState(input: {
   descriptionMarker: string;
   statuses: Required<TrackerStatusSettings>;
   seedLabels: string[];
+  /** Defaults to `labels` so existing GitHub/GitLab callers are unchanged. */
+  statusKind?: "labels" | "state";
+  /** Current workflow status, required when `statusKind` is `state`. */
+  status?: string;
 }): void {
-  expect(input.ticket.state).toBe(input.openState);
   expect(input.ticket.body).toContain(input.descriptionMarker);
+  for (const label of input.seedLabels) expect(input.ticket.labels).toContain(label);
+
+  if (input.statusKind === "state") {
+    expect(input.status).toBeDefined();
+    expect(input.status).toBe(input.statuses.prStatus);
+    // The initial status is obsolete once the run has transitioned.
+    expect(input.status).not.toBe(input.statuses.todoStatus);
+    // When a distinct in-progress status is configured it must also be gone.
+    // A fixture may intentionally configure the same state for both (the
+    // offline bare-remote path cannot complete a PR), so only assert when the
+    // two names differ.
+    if (input.statuses.prStatus !== input.statuses.inProgressStatus) {
+      expect(input.status).not.toBe(input.statuses.inProgressStatus);
+    }
+    return;
+  }
+
+  expect(input.ticket.state).toBe(input.openState);
   expect(input.ticket.labels).toContain(input.statuses.prStatus);
   expect(input.ticket.labels).not.toContain(input.statuses.todoStatus);
   expect(input.ticket.labels).not.toContain(input.statuses.inProgressStatus);
-  for (const label of input.seedLabels) expect(input.ticket.labels).toContain(label);
 }
 
 /**
@@ -144,4 +176,13 @@ export function assertImplementationComment(comments: TrackerComment[]): void {
   expect(implementation).toBeDefined();
   expect(implementation?.body).toContain("## What changed");
   expect(implementation?.body).toContain("Updated src/greeting.ts");
+}
+
+/** Assert the tracker received the automated processing-failure comment. */
+export function assertProcessingFailureComment(comments: TrackerComment[]): void {
+  const failure = comments.find((comment) =>
+    comment.body.includes(PROCESSING_FAILURE_COMMENT_MARKER),
+  );
+  expect(failure).toBeDefined();
+  expect(failure?.body).toContain("no pull request was created for this attempt");
 }

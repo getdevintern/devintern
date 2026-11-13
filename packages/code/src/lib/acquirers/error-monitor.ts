@@ -46,6 +46,15 @@ export interface IssueValidity {
   reason?: string;
 }
 
+/**
+ * Re-emit an unchanged read-failure warning once per this many consecutive
+ * failed reads (and for the first failure of a streak). Keeps a long outage
+ * visible in the logs without one warning per poll interval.
+ */
+const FAILURE_LOG_EVERY = 10;
+/** Re-emit an unchanged failure at least this often, in case reads are rare. */
+const FAILURE_LOG_HEARTBEAT_MS = 15 * 60 * 1000;
+
 /** Adapter contract implemented once per error-monitoring vendor. */
 export interface ErrorMonitorProvider<TIssue extends ErrorMonitorIssue> {
   readonly providerName: string;
@@ -118,6 +127,15 @@ export class ErrorMonitorAcquirer<TIssue extends ErrorMonitorIssue> implements A
    * ok-to-ok writes on every poll; failures are always persisted.
    */
   private lastPersistedStatus: SourceFetchFailureStatus | "ok" | null = null;
+  /**
+   * Last failure detail that was logged. Repeated identical failures are
+   * suppressed so one upstream outage does not produce a warning every tick.
+   */
+  private lastLoggedFailure: { status: SourceFetchFailureStatus; message: string } | null = null;
+  /** Failed reads since the last successful one; drives the warning heartbeat. */
+  private consecutiveReadFailures = 0;
+  /** Wall-clock time of the last failure warning, for the heartbeat interval. */
+  private lastFailureLogAt: number | null = null;
 
   constructor(options: ErrorMonitorAcquirerOptions<TIssue>) {
     this.options = {
@@ -135,7 +153,12 @@ export class ErrorMonitorAcquirer<TIssue extends ErrorMonitorIssue> implements A
       `🔎 [${this.name}] polling every ${this.options.intervalSeconds}s ` +
         `(min occurrences: ${this.options.minOccurrences}, max per tick: ${this.options.maxIssuesPerTick})`,
     );
-    await this.tick();
+    // Startup must never block on a read: a slow, throttled, or retrying fetch
+    // (and any issue dispatched from it) must not delay other acquirers or the
+    // successor readiness marker. The first tick still starts immediately.
+    void this.tick().catch((error) => {
+      console.warn(`⚠️  [${this.name}] initial poll failed: ${(error as Error).message}`);
+    });
     this.timer = setInterval(() => void this.tick(), this.options.intervalSeconds * 1000);
   }
 
@@ -208,7 +231,16 @@ export class ErrorMonitorAcquirer<TIssue extends ErrorMonitorIssue> implements A
           break;
         }
         handled++;
-        await this.reportAction(issue, result);
+        if (result === "skipped") {
+          // A retry-gate skip started no run. The issue stays claimed so it
+          // does not re-enter the sweep until it changes, and reporting a
+          // "failed" action comment on the vendor would be wrong.
+          console.log(
+            `⏭️  [${this.name}] ${issue.displayId} skipped (previous attempt reported incomplete; ticket unchanged)`,
+          );
+          continue;
+        }
+        await this.reportAction(issue, result === true);
         console.log(
           result
             ? `✅ [${this.name}] fix for ${issue.displayId} completed`
@@ -258,6 +290,15 @@ export class ErrorMonitorAcquirer<TIssue extends ErrorMonitorIssue> implements A
 
   /** Record a successful read so health counters reset and the cursor may advance. */
   private recordReadSuccess(): void {
+    const recoveredFrom = this.lastLoggedFailure;
+    this.lastLoggedFailure = null;
+    this.consecutiveReadFailures = 0;
+    this.lastFailureLogAt = null;
+    if (recoveredFrom) {
+      console.log(
+        `✅ [${this.name}] source is readable again (was ${recoveredFrom.status}); polling resumed.`,
+      );
+    }
     // An ok source stays ok; skip the SQLite write (and WAL churn) on the
     // steady-state ok-to-ok transition. This is only an in-process hint, so a
     // source that failed and recovered is still persisted.
@@ -289,30 +330,53 @@ export class ErrorMonitorAcquirer<TIssue extends ErrorMonitorIssue> implements A
     }
   }
 
-  /** Make an unreadable source visible instead of silently treating it as empty. */
+  /**
+   * Make an unreadable source visible instead of silently treating it as empty.
+   * The first failure of a streak and every change of detail are always logged;
+   * an unchanged failure is repeated on a heartbeat so a long outage does not
+   * go silent and look like a dead worker.
+   */
   private logReadFailure(
     status: SourceFetchFailureStatus,
     message: string,
     retryAfterMs?: number,
   ): void {
+    this.consecutiveReadFailures++;
+    const previous = this.lastLoggedFailure;
+    this.lastLoggedFailure = { status, message };
+    const now = this.now();
+    const unchanged = previous?.status === status && previous.message === message;
+    const heartbeatDue =
+      this.lastFailureLogAt === null || now - this.lastFailureLogAt >= FAILURE_LOG_HEARTBEAT_MS;
+    const everyNth = this.consecutiveReadFailures % FAILURE_LOG_EVERY === 0;
+    // Log the transition into failure, and any new detail (for example a
+    // different HTTP status or classification), but not the same outage on
+    // every single tick.
+    if (unchanged && !heartbeatDue && !everyNth) return;
+    this.lastFailureLogAt = now;
+
+    const streak =
+      this.consecutiveReadFailures > 1
+        ? ` (${this.consecutiveReadFailures} consecutive failed reads)`
+        : "";
     const retry =
       retryAfterMs !== undefined ? ` (retry in ${Math.ceil(retryAfterMs / 1000)}s)` : "";
     switch (status) {
       case "auth-failed":
         console.error(
-          `🔒 [${this.name}] source is unreadable: authentication failed — ${message}. ` +
+          `🔒 [${this.name}] source is unreadable${streak}: authentication failed — ${message}. ` +
             "No issues were read; the cursor was left unchanged.",
         );
         break;
       case "rate-limited":
         console.warn(
-          `⏳ [${this.name}] source is unreadable: rate-limited${retry} — ${message}. ` +
+          `⏳ [${this.name}] source is unreadable${streak}: rate-limited${retry} — ${message}. ` +
             "No issues were read; the cursor was left unchanged and the next tick will retry.",
         );
         break;
       default:
         console.warn(
-          `⚠️  [${this.name}] source is unreadable: ${message}. ` +
+          `⚠️  [${this.name}] source is unreadable${streak}: ${message}. ` +
             "No issues were read; the cursor was left unchanged and the next tick will retry.",
         );
     }

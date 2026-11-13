@@ -22,6 +22,7 @@ import {
 } from "../worker/orphan-recovery";
 import { RunStore } from "../state/run-recorder";
 import type { RunRecord } from "../state/run-recorder";
+import { readImplementationReport } from "../state/session-pickup";
 import { RetryStateStore } from "../state/retry-state";
 import { ScheduledRetryStore } from "../state/run-retry";
 import { InjectedTaskStore } from "../state/injected-tasks";
@@ -34,16 +35,21 @@ import {
   buildErrorMonitorEnv,
   buildRepoEnv,
   buildTeamEnv,
+  buildTeamWorkspaceContextEnv,
   buildWorkspaceContextEnv,
+  WORKSPACE_TEAM_ENV,
 } from "./env";
 import {
+  automationsDir,
+  injectedTasksDir,
   resolveWorkspaceDir,
   workspaceConfigPath,
   workspaceDbPath,
   worktreesDir,
   workspaceRunNowPath,
+  writeWorkerStartMarker,
 } from "./paths";
-import { WorkspaceConfigReloader } from "./config-reload";
+import { appliedConfigRecorder, WorkspaceConfigReloader } from "./config-reload";
 import { createWorkspaceLock, openWorkspaceState } from "./state";
 import { BASE_WORKTREE_NAME, RepoManager } from "./repo-manager";
 import { Utils } from "../utils";
@@ -54,13 +60,15 @@ import { automationTaskArgs } from "../automation/config";
 import { AutomationStateStore } from "../automation/state";
 import { EstimationAcquirer } from "../automation/estimation-acquirer";
 import { pickAgentSelection, warnUninstalledHarnessPins } from "../agent/selection";
+import type { EstimationConfig } from "../automation/estimation-config";
 import { createTaskSupervisor, JobNotStartedError } from "../worker/supervisor";
 import type { TaskSupervisor } from "../worker/supervisor";
 import type { AutomationRunContext } from "../automation/acquirer";
 import { flushAnalytics, trackWorkerStarted } from "../observability/analytics";
-import { startWorkerFailover } from "../worker/failover";
+import { startWorkerFailover, getWorkerFailover } from "../worker/failover";
 import { RetryQueueAcquirer } from "./retry-acquirer";
 import { InjectedTaskAcquirer, INJECTED_TASK_SOURCE } from "./injected-acquirer";
+import { createInjectedStartupRecovery } from "./injected-recovery";
 import { toRoutableTask } from "./router";
 import { createIdleWorkerAutoUpdater } from "./worker-auto-update";
 import {
@@ -102,6 +110,22 @@ function pruneInjectedTasks(
 
 /** Interval between periodic injected-task prunes (1 hour). */
 export const INJECTED_TASK_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
+
+/**
+ * Create the workspace directories agent sandboxes grant write access to.
+ *
+ * A sandbox grant only applies to paths that already exist, and a sandboxed
+ * agent needs `injected/` (ad-hoc `worker add` prompts) plus `automations/`
+ * (automation cursors) writable before its first run. The worker owns these
+ * directories, so it creates them at startup.
+ *
+ * @param workspaceDir - Workspace home.
+ */
+function ensureAgentWritableWorkspaceDirs(workspaceDir: string): void {
+  for (const dir of [injectedTasksDir(workspaceDir), automationsDir(workspaceDir)]) {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+  }
+}
 
 /**
  * Keep pruning settled injected tasks (and their prompt files) while the
@@ -181,6 +205,95 @@ export async function recoverOrphanedWorkspaceRuns(options: {
     const trackerType = config.defaults.tracker || "multi-team";
     retryStore = new RetryStateStore(dbPath);
 
+    // Cheap local base: config wins, else the clone's cached origin/HEAD, so a
+    // repo with no resumable work costs no network on startup. The cached value
+    // is only a hint (`origin/HEAD` is written when the bare clone is created
+    // and `git fetch` never refreshes it, so it can still name the repo's *old*
+    // default branch); hasLandedCommits checks the conventional defaults too so
+    // a rename cannot make an empty branch look resumable. Resolve each repo once.
+    const repoManager = new RepoManager(workspaceDir);
+    const resolvedBases = new Map<string, Promise<string>>();
+    const baseBranchFor = (repo: string): Promise<string> => {
+      const configured = findRepo(config, repo)?.defaultBranch;
+      if (configured) {
+        return Promise.resolve(configured);
+      }
+      let pending = resolvedBases.get(repo);
+      if (!pending) {
+        pending = Utils.getCachedDefaultBranch({
+          cwd: join(worktreesDir(workspaceDir), repo, BASE_WORKTREE_NAME),
+        });
+        resolvedBases.set(repo, pending);
+      }
+      return pending;
+    };
+    // Candidate bases for a report-less pickup. A configured default branch is
+    // authoritative. Otherwise the clone's cached origin/HEAD is the starting
+    // point, but it can name the repo's *old* default (`git fetch` never
+    // refreshes origin/HEAD) and a branch cut from the new default would then
+    // look like it carried upstream commits as its own work. Requiring the
+    // branch to be ahead of every conventional remote default that exists
+    // locally avoids a network probe while covering that rename (the original
+    // iteration-3 live `ls-remote` check added up to 5s per repo to startup).
+    const conventionalBases = ["main", "master"];
+    const baseCandidates = new Map<string, Promise<string[]>>();
+    const baseCandidatesFor = (repo: string, repoCwd: string): Promise<string[]> => {
+      let pending = baseCandidates.get(repo);
+      if (!pending) {
+        pending = (async () => {
+          const base = await baseBranchFor(repo);
+          if (findRepo(config, repo)?.defaultBranch) {
+            return [base];
+          }
+          const candidates = [base];
+          for (const name of conventionalBases) {
+            if (name === base) continue;
+            if (await Utils.gitRefExists(`refs/remotes/origin/${name}`, { cwd: repoCwd })) {
+              candidates.push(`origin/${name}`);
+            }
+          }
+          return candidates;
+        })();
+        baseCandidates.set(repo, pending);
+      }
+      return pending;
+    };
+
+    // Report-less pickup decisions compare commits against remote refs. Refresh
+    // each affected repo once, in parallel, before recovery so the probe sees
+    // refs current as of the crash instead of whatever the last run fetched.
+    // The timeout bounds an unreachable remote to one wait for all repos, and
+    // the cached refs remain the fallback when it fails.
+    const probeRepos = new Set<string>();
+    try {
+      for (const run of runStore.listRuns({ status: "in_progress", origin: "task" })) {
+        if (
+          run.repo &&
+          run.branch &&
+          existsSync(join(worktreesDir(workspaceDir), run.repo, BASE_WORKTREE_NAME)) &&
+          existsSync(repoManager.bareClonePath(run.repo)) &&
+          !readImplementationReport(runStore, run.id)
+        ) {
+          probeRepos.add(run.repo);
+        }
+      }
+    } catch {
+      // Best-effort: recovery still probes the refs already on disk.
+    }
+    await Promise.allSettled(
+      [...probeRepos].map(async (repo) => {
+        try {
+          await repoManager.fetch(repo, { timeoutMs: 5000 });
+        } catch (error) {
+          console.warn(
+            `⚠️  [fleet] could not refresh refs for ${repo} before orphan recovery: ${
+              (error as Error).message
+            }`,
+          );
+        }
+      }),
+    );
+
     const recovery = await recoverOrphanedTaskRuns({
       runStore,
       tracker,
@@ -207,6 +320,31 @@ export async function recoverOrphanedWorkspaceRuns(options: {
           (await Utils.gitRefExists(`refs/heads/${branch}`, { cwd: repoCwd })) ||
           (await Utils.gitRefExists(`refs/remotes/origin/${branch}`, { cwd: repoCwd }))
         );
+      },
+      // A run interrupted before the implementation stage was persisted can
+      // still hold real commits. Verify them against the repo's base branch so
+      // orphan recovery resumes that work instead of restarting it. Without a
+      // checkout to inspect, stay conservative and do not claim resumable work.
+      hasLandedCommits: async (branch, run) => {
+        const repoCwd = run.repo
+          ? join(worktreesDir(workspaceDir), run.repo, BASE_WORKTREE_NAME)
+          : undefined;
+        if (!repoCwd || !run.repo || !existsSync(repoCwd)) {
+          return false;
+        }
+        const repoName = run.repo;
+        // The branch must carry commits beyond every plausible base. A stale
+        // cached origin/HEAD (old default branch) would otherwise make commits
+        // that belong to the repo's new default look like the branch's own
+        // work and resume an empty branch. A configured base is authoritative;
+        // otherwise main/master are checked too (see baseCandidatesFor).
+        const bases = await baseCandidatesFor(repoName, repoCwd);
+        for (const baseBranch of bases) {
+          if (!(await Utils.hasCommitsAhead(branch, baseBranch, { cwd: repoCwd }))) {
+            return false;
+          }
+        }
+        return true;
       },
     });
 
@@ -246,38 +384,6 @@ export async function recoverOrphanedWorkspaceRuns(options: {
     retryStore?.close();
     runStore.close();
   }
-}
-
-/**
- * Fail injected rows left `running` by a dead worker so `worker add --wait`
- * (or a retried automation) settles instead of hanging on a run that will
- * never finish.
- *
- * Call this only while holding the workspace singleton lock (the worker's
- * post-lock `beforeAcquirersStart` hook). A second `devintern worker` that has
- * not yet acquired the lock would otherwise fail the still-live worker's
- * `running` rows before exiting; the live worker's later `finish` is guarded
- * by `WHERE status = 'running'`, so the successful task would be recorded
- * `failed`.
- */
-export function recoverOrphanedInjectedTasks(store: InjectedTaskStore): void {
-  for (const orphan of store.failRunning("worker restarted while this task was running")) {
-    console.warn(`⚠️  [fleet] injected task ${orphan.taskKey} was interrupted by a worker restart`);
-  }
-}
-
-/**
- * Compose the post-lock startup hook: recover injected orphans (safe now that
- * this process owns the workspace lock), then run the caller's own hook.
- */
-export function makeBeforeAcquirersStart(
-  store: InjectedTaskStore,
-  next?: () => Promise<void> | void,
-): () => Promise<void> {
-  return async () => {
-    recoverOrphanedInjectedTasks(store);
-    await next?.();
-  };
 }
 
 /**
@@ -379,6 +485,15 @@ async function withSupervisorSlot(
 }
 
 /**
+ * Live harness-chain pause state for the short-interval drains: while every
+ * chain entry is usage-limited or cooling down, claiming a row would only
+ * requeue it and log the same pair of lines on each tick.
+ */
+export function isHarnessChainPaused(): boolean {
+  return getWorkerFailover()?.allExhausted() ?? false;
+}
+
+/**
  * Build the `worker add` drain acquirer: claims durable injected rows and runs
  * each through the fleet executor, pinned to the repo the row names.
  */
@@ -389,19 +504,117 @@ export function buildInjectedTaskAcquirer(
 ): InjectedTaskAcquirer {
   return new InjectedTaskAcquirer({
     store,
-    execute: (task) =>
+    runDbPath: workspaceDbPath(deps.workspaceDir),
+    execute: (task, queueClaim) =>
       createFleetTaskExecutor(deps, {
         extraArgs: () => fleetTaskArgs(deps.config),
         repo: task.repo,
         source: INJECTED_TASK_SOURCE,
         runOrigin: "local",
-        // The CLI resolves the local markdown file; the key still names the
-        // worktree and supervisor label.
+        queueClaim,
+        // The CLI resolves the local markdown file; the key still names the worktree.
         taskRef: task.taskFile,
+        // Persist the detached child pid for hard-kill startup recovery.
+        onChildSpawn: (pid) => {
+          if (!store.isClosed()) store.setChildPid(task.id, pid);
+        },
       })(task.taskKey, toRoutableTask({ key: task.taskKey, labels: [], components: [] })),
     intervalSeconds: parseEnvInteger("WORKER_INJECTED_INTERVAL_SECONDS", 5, { min: 1 }),
+    maxConcurrency: deps.config.workspace.execution.maxConcurrency,
+    maxConcurrencyPerRepo: deps.config.workspace.execution.maxConcurrencyPerRepo,
+    isDraining: () => deps.supervisor?.isDraining() ?? false,
+    isPaused: isHarnessChainPaused,
     verbose,
   });
+}
+
+/**
+ * Build the dashboard retry drain acquirer: claims durable retry rows and runs
+ * each through the fleet executor with the persisted repo/team pinned and
+ * `--force` prepended.
+ */
+export function buildRetryQueueAcquirer(
+  deps: FleetExecutorDeps,
+  store: ScheduledRetryStore,
+  verbose?: boolean,
+): RetryQueueAcquirer {
+  return new RetryQueueAcquirer({
+    store,
+    runDbPath: workspaceDbPath(deps.workspaceDir),
+    execute: (taskKey, routable, retry, queueClaim) => {
+      const retryTeam = retry.team ? findTeam(deps.config, retry.team) : undefined;
+      return createFleetTaskExecutor(
+        {
+          ...deps,
+          ...(retryTeam ? { team: retryTeam } : {}),
+          actionedSource: resolveActionedSource(deps.config, retryTeam),
+        },
+        // The persisted repo/team make retries deterministic even when
+        // task keys overlap or the original route depended on labels.
+        {
+          extraArgs: () => ["--force", ...fleetTaskArgs(deps.config)],
+          repo: retry.repo,
+          queueClaim,
+          source: "retry",
+          // Pin the run this retry targets so session pickup resumes its
+          // branch and prior report instead of the just-opened run.
+          pickupRunId: retry.runId,
+        },
+      )(taskKey, routable);
+    },
+    intervalSeconds: parseEnvInteger("WORKER_RETRY_INTERVAL_SECONDS", 5, { min: 1 }),
+    isPaused: isHarnessChainPaused,
+    verbose,
+  });
+}
+
+/**
+ * Resolve where/how one scheduled `[[estimations]]` sweep runs.
+ *
+ * Always the workspace home: estimation is `--no-git` and tracker-only, so it
+ * never clones, checks out, or locks a repository.
+ *
+ * - Without `team`: unchanged shared workspace env, with `[defaults].tracker`
+ *   inherited from the worker process. A team marker leaked from the shell is
+ *   cleared so the sweep is never attributed to a team.
+ * - With `team`: that team's tracker and credential layers (see
+ *   {@link buildTeamWorkspaceContextEnv}), attributed to the team via
+ *   `DEVINTERN_WORKSPACE_TEAM` like the team's task runs.
+ *
+ * A team's fixed `repo` is deliberately ignored: it only picks the
+ * destination of implement runs, while tracker coordinates (including
+ * `GITHUB_REPO` for GitHub Issues) come from the team's own env, which the
+ * worker already requires at startup to build that team's tracker client.
+ *
+ * @param estimation - The current (possibly live-reloaded) estimation entry.
+ * @param config - The live workspace config (mutated in place by reloads).
+ * @param workspaceDir - Workspace home.
+ * @returns The run context, or null to skip the occurrence when the team is
+ *          no longer configured.
+ */
+export function resolveWorkspaceEstimationContext(
+  estimation: EstimationConfig,
+  config: WorkspaceConfig,
+  workspaceDir: string,
+): AutomationRunContext | null {
+  const agentSelection = pickAgentSelection(estimation);
+  if (!estimation.team) {
+    const env = buildWorkspaceContextEnv(workspaceDir, { agentSelection });
+    delete env[WORKSPACE_TEAM_ENV];
+    return { cwd: workspaceDir, env, release() {} };
+  }
+  const team = findTeam(config, estimation.team);
+  if (!team) {
+    console.error(
+      `❌ [estimation:${estimation.id}] team "${estimation.team}" is not configured; skipping this occurrence.`,
+    );
+    return null;
+  }
+  return {
+    cwd: workspaceDir,
+    env: buildTeamWorkspaceContextEnv(team, workspaceDir, { agentSelection }),
+    release() {},
+  };
 }
 
 /** Resolve a scheduled run context while holding the repo lock during preparation. */
@@ -413,7 +626,7 @@ export async function resolveWorkspaceAutomationContext(
 ) {
   // Keep occurrence task files in the workspace home (next to repos/,
   // worktrees/, and the central DB) instead of inside a repo worktree.
-  const taskFileDir = join(workspaceDir, "automations");
+  const taskFileDir = automationsDir(workspaceDir);
   // The entry's own harness/model/effort override every env layer for this
   // occurrence only; other runs keep the workspace/repo defaults.
   const agentSelection = pickAgentSelection(automation);
@@ -704,8 +917,8 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
     ? resolve(options.workspacePath)
     : workspaceConfigPath(resolveWorkspaceDir());
   const workspaceDir = options.workspacePath ? dirname(configPath) : resolveWorkspaceDir();
+  writeWorkerStartMarker(workspaceDir);
   const config = loadWorkspaceConfig(configPath);
-
   if (config.repos.length === 0) {
     console.error(
       `❌ No repos configured in ${configPath}.\n` +
@@ -727,13 +940,14 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   // Ad-hoc `devintern worker add` tasks also ride the shared workspace DB and
   // drain through the same fleet executor.
   const injectedTasks = new InjectedTaskStore(workspaceDbPath(workspaceDir));
+  ensureAgentWritableWorkspaceDirs(workspaceDir);
   pruneInjectedTasks(injectedTasks);
   startInjectedTaskSweeper(injectedTasks);
 
-  assertWorkspaceHasWork(config, retryQueue, injectedTasks.hasPending(), multiTeam, initialQuery);
+  assertWorkspaceHasWork(config, retryQueue, injectedTasks, multiTeam, initialQuery);
 
   const state = openWorkspaceState(workspaceDir);
-  startWorkerFailover({
+  await startWorkerFailover({
     queue: state.queue,
     onPause: ({ untilMs, harness, resetHint }) => {
       console.warn(
@@ -750,12 +964,12 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
     maxConcurrency: config.workspace.execution.maxConcurrency,
     maxConcurrencyPerRepo: config.workspace.execution.maxConcurrencyPerRepo,
   });
-  // Recover what the previous worker left behind before acquiring new work.
-  await recoverOrphanedWorkspaceRuns({
-    config,
+  await recoverOrphanedWorkspaceRuns({ config, workspaceDir, dbPath: state.dbPath });
+  const injectedStartup = createInjectedStartupRecovery(
+    injectedTasks,
     workspaceDir,
-    dbPath: state.dbPath,
-  });
+    options.beforeAcquirersStart,
+  );
 
   // Working windows (quiet hours): gate only the ready-task drain; reviews,
   // mentions, automations, and relay events stay on their normal paths.
@@ -782,35 +996,11 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   // First in the list and on a short interval: a dashboard-scheduled retry
   // gets picked up ahead of the slower pollers.
   acquirers.push(
-    new RetryQueueAcquirer({
-      store: retryQueue,
-      execute: (taskKey, routable, retry) => {
-        const retryTeam = retry.team ? findTeam(config, retry.team) : undefined;
-        return createFleetTaskExecutor(
-          {
-            config,
-            workspaceDir,
-            skips: state.skips,
-            repoManager,
-            supervisor,
-            ...(retryTeam ? { team: retryTeam } : {}),
-            actionedSource: resolveActionedSource(config, retryTeam),
-          },
-          // The persisted repo/team make retries deterministic even when
-          // task keys overlap or the original route depended on labels.
-          {
-            extraArgs: () => ["--force", ...fleetTaskArgs(config)],
-            repo: retry.repo,
-            source: "retry",
-            // Pin the run this retry targets so session pickup resumes its
-            // branch and prior report instead of the just-opened run.
-            pickupRunId: retry.runId,
-          },
-        )(taskKey, routable);
-      },
-      intervalSeconds: parseEnvInteger("WORKER_RETRY_INTERVAL_SECONDS", 5, { min: 1 }),
-      verbose: options.verbose,
-    }),
+    buildRetryQueueAcquirer(
+      { config, workspaceDir, skips: state.skips, repoManager, supervisor },
+      retryQueue,
+      options.verbose,
+    ),
   );
 
   // Ad-hoc `worker add` tasks: drained on the same short interval as retries,
@@ -872,13 +1062,10 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
     dbPath: state.dbPath,
     resolveContext: (estimation) =>
       withSupervisorSlot(
-        async () => ({
-          cwd: workspaceDir,
-          env: buildWorkspaceContextEnv(workspaceDir, {
-            agentSelection: pickAgentSelection(estimation),
-          }),
-          release() {},
-        }),
+        // `config` is the live instance reloads mutate, and the acquirer
+        // hands over the current entry, so a reloaded `team` applies to the
+        // next occurrence.
+        async () => resolveWorkspaceEstimationContext(estimation, config, workspaceDir),
         supervisor,
         {
           source: `estimation:${estimation.id}`,
@@ -1085,6 +1272,11 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   // Live reload keeps queries, fixed team destinations, routing, repos,
   // automations, worker_task_args, and cadence live. Team identities and
   // credentials require rebuilding clients/detectors and therefore restart.
+  // The applied-config record is written only once this process holds the
+  // worker lock (see onStarted), so a second worker that loses the lock race
+  // never overwrites the running worker's record.
+  let holdsWorkerLock = false;
+  const recordReloadOutcome = appliedConfigRecorder(workspaceDir, configPath);
   const reloader = new WorkspaceConfigReloader({
     configPath,
     current: config,
@@ -1094,6 +1286,9 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
         sourceCount: sources.length,
       }),
     onApplied: applyReloadedConfig,
+    onOutcome: (outcome) => {
+      if (holdsWorkerLock) recordReloadOutcome(outcome);
+    },
   });
   reloader.start();
 
@@ -1163,7 +1358,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       // Capture logs in the workspace home: one daemon serves many repos, and
       // the dashboard's log tailer already searches this directory.
       logDir: workspaceDir,
-      beforeAcquirersStart: makeBeforeAcquirersStart(injectedTasks, options.beforeAcquirersStart),
+      beforeAcquirersStart: injectedStartup.hook,
       accessCheck: options.accessCheck,
       beginShutdown: () => supervisor.drain(),
       onShutdown: () => {
@@ -1171,6 +1366,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
         autoUpdater.stop();
         errorMonitorStatusStore?.close();
         errorMonitorStatusStore = null;
+        injectedStartup.close();
         injectedTasks.close();
         // Release the listening socket before finalExitCode: the handover
         // successor starts (binds the same dashboard port) while this
@@ -1187,6 +1383,10 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       },
       finalExitCode: () => autoUpdater.finalExitCode(),
       onStarted: async (acquirerNames) => {
+        holdsWorkerLock = true;
+        // Re-read the file now that the lock is held: records which version
+        // is live (or why the on-disk version was rejected) for the dashboard.
+        reloader.reload("worker started");
         trackWorkerStarted({
           cliVersion: options.cliVersion ?? "0.0.0",
           tracker: analyticsTracker,
@@ -1208,6 +1408,9 @@ function applyWorkspaceEnv(
   // Shared workspace values serve GitHub/review consumers and the legacy
   // single-defaults tracker. Team clients use explicit composed env maps.
   applyWorkspaceProcessEnv(workspaceDir);
+  // In-process spawn sites (webhook reviews, hook fixes) build the sandbox
+  // policy from this value; task subprocesses get it from `buildRepoEnv`.
+  process.env.DEVINTERN_WORKSPACE_DIR = workspaceDir;
   const multiTeam = config.teams.length > 0;
   if (config.defaults.tracker) process.env.TASK_TRACKER = config.defaults.tracker;
   // In-process consumers (dashboard, run records) follow the fleet DB.
@@ -1222,37 +1425,70 @@ function applyWorkspaceEnv(
   };
 }
 
+/** Whether the workspace config itself contains ongoing work. */
+export function workspaceHasConfiguredWork(
+  config: WorkspaceConfig,
+  multiTeam: boolean,
+  initialQuery: string | undefined,
+): boolean {
+  return (
+    multiTeam ||
+    Boolean(initialQuery) ||
+    config.automations.length > 0 ||
+    config.estimations.length > 0 ||
+    config.errorMonitors.some((source) => source.enabled)
+  );
+}
+
+/**
+ * Whether startup has any work to keep the worker alive.
+ *
+ * Scheduled dashboard retries and queued/in-flight injected tasks are the
+ * exceptions to the task-query requirement: the worker can still run to drain
+ * them (and to recover an interrupted injected row under the post-lock hook).
+ * A `running` injected row counts here because only that hook can resume or
+ * fail it.
+ */
+export function workspaceHasStartupWork(
+  config: WorkspaceConfig,
+  retryQueue: Pick<ScheduledRetryStore, "hasPending">,
+  injectedTasks: Pick<InjectedTaskStore, "hasPending" | "listRunning">,
+  multiTeam: boolean,
+  initialQuery: string | undefined,
+): boolean {
+  return (
+    workspaceHasConfiguredWork(config, multiTeam, initialQuery) ||
+    retryQueue.hasPending() ||
+    injectedTasks.hasPending() ||
+    injectedTasks.listRunning().length > 0
+  );
+}
+
 /**
  * Exit when workspace mode has no work configured.
  *
- * Scheduled dashboard retries and queued injected tasks are the exceptions:
- * the worker can still run to drain them.
+ * Scheduled dashboard retries and queued/in-flight injected tasks are the
+ * exceptions: the worker can still run to drain them (and to recover an
+ * interrupted injected row under the post-lock hook).
  */
 function assertWorkspaceHasWork(
   config: WorkspaceConfig,
   retryQueue: ScheduledRetryStore,
-  injectedPending: boolean,
+  injectedTasks: InjectedTaskStore,
   multiTeam: boolean,
   initialQuery: string | undefined,
 ): void {
-  const hasWork =
-    multiTeam ||
-    initialQuery ||
-    config.automations.length > 0 ||
-    config.estimations.length > 0 ||
-    config.errorMonitors.some((source) => source.enabled);
-  if (hasWork) return;
-
-  if (retryQueue.hasPending() || injectedPending) {
-    console.warn(
-      "⚠️  No task query or automations configured; the worker will only drain scheduled retries and injected tasks.",
+  if (!workspaceHasStartupWork(config, retryQueue, injectedTasks, multiTeam, initialQuery)) {
+    console.error(
+      "❌ Workspace mode needs a task query: set [defaults].task_query in workspace.toml.",
     );
-    return;
+    process.exit(1);
   }
-  console.error(
-    "❌ Workspace mode needs a task query: set [defaults].task_query in workspace.toml.",
+  if (workspaceHasConfiguredWork(config, multiTeam, initialQuery)) return;
+
+  console.warn(
+    "⚠️  No task query or automations configured; the worker will only drain scheduled retries and injected tasks.",
   );
-  process.exit(1);
 }
 
 export {

@@ -1,11 +1,26 @@
 import { readFileSync } from "fs";
 import {
   activeSandboxName,
+  describeNonoPack,
   detectSandboxProviders,
+  getHarness,
+  parseHarnessList,
   resolveHarness,
 } from "@devintern/agent-harness";
 import { getLoadedEnvPath, loadEnvironment } from "../cli/bootstrap";
-import { buildSandboxDoctorReport } from "./sandbox";
+import { hasHelpArg } from "../cli/help";
+import { buildSandboxDoctorReport, collectHarnessPreflight } from "./sandbox";
+
+const SANDBOX_USAGE = [
+  "Usage: devintern sandbox",
+  "",
+  "Report detected sandbox providers, the one-time setup each still needs, and",
+  "what the next agent run will do with the current AGENT_SANDBOX configuration.",
+  "Exits non-zero when the configured provider guarantees a failed run.",
+  "",
+  "Options:",
+  "  -h, --help  Display this help message",
+].join("\n");
 
 /**
  * `devintern sandbox` — report detected providers, remaining setup steps, and
@@ -13,6 +28,10 @@ import { buildSandboxDoctorReport } from "./sandbox";
  * the configured provider guarantees a failed run, so scripts/CI can gate.
  */
 export async function runSandboxCommand(): Promise<never> {
+  if (hasHelpArg(process.argv.slice(2))) {
+    console.log(SANDBOX_USAGE);
+    process.exit(0);
+  }
   loadEnvironment();
   const detections = await detectSandboxProviders();
   const configured = process.env.AGENT_SANDBOX || "none";
@@ -35,13 +54,20 @@ export async function runSandboxCommand(): Promise<never> {
       : "environment"
     : "default";
   const harnessName = resolveHarness().harness.name;
+  const activeSandbox = activeSandboxName();
+  const preflight = await collectHarnessPreflight(configured, detections, undefined, activeSandbox);
+  // Pack-profile status per chain entry: shows which harness runs are backed
+  // by a nono pack and which fall back to the generic profile.
+  const packStatuses = parseHarnessList(process.env.AGENT_HARNESS)
+    .filter((name) => getHarness(name) !== undefined)
+    .map((name) => describeNonoPack(name));
   const report = buildSandboxDoctorReport(
     detections,
     configured,
     configuredSource,
     harnessName,
     process.platform,
-    activeSandboxName(),
+    { activeSandbox, packStatuses, preflight },
   );
   console.log(report.lines.join("\n"));
   process.exit(report.nextRunFails ? 1 : 0);

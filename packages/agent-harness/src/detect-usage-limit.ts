@@ -21,6 +21,8 @@
  *   Too Many Requests: {"error":{"code":"1302","message":"Rate limit reached for req..."}}
  *   rate_limit_error / quota exceeded
  *   Free usage exceeded, subscribe to Go
+ *   OpenCode Go usage limit reached (monthly, resets in 6d 23h). To keep going
+ *     now, turn on Extra Usage or upgrade to Go Plus at https://opencode.ai/...
  *   5 hour usage limit reached. It will reset in 5 hours 23 minutes. To continue
  *     using this model now, enable usage from your available balance
  *
@@ -30,9 +32,12 @@
  *   https://github.com/anomalyco/opencode/blob/dev/packages/opencode/src/session/retry.ts
  *
  * OpenCode may keep `run` alive after a provider error and only expose the
- * diagnostic through `--print-logs`, as a timestamped line containing an
- * `error.error="AI_APICallError: ..."` field. Callers should scan output while
- * it streams and terminate the child as soon as this detector reports a limit.
+ * diagnostic through its logs. On v1 that is a `--print-logs --log-level ERROR`
+ * line with an `error.error="AI_APICallError: ..."` field; on v2 the structured
+ * log line carries the message under `message`/`cause`, and `--format json`
+ * emits a `{"type":"error","error":{"message":...}}` envelope on stdout. Callers
+ * should scan output while it streams and terminate the child as soon as this
+ * detector reports a limit.
  */
 
 import type { OutputLine } from "./output-lines.js";
@@ -59,6 +64,11 @@ const USAGE_LIMIT_PATTERNS = [
   // OpenCode Go (anomalyco/opencode session/retry.ts): FreeUsageLimitError and
   // GoUsageLimitError are rewritten into these headless retry messages.
   /^(?:error:\s*)?free usage exceeded(?:,\s*subscribe to go)?[.]?$/i,
+  // OpenCode also emits this shorter Go quota error in its stderr and in the
+  // cause of a structured "Failed to drain Session" log. Newer builds append the
+  // window and an upsell, e.g. `OpenCode Go usage limit reached (monthly,
+  // resets in 6d 23h). To keep going now, turn on Extra Usage ...`.
+  /^(?:(?:AI\.)?error:\s*)?(?:opencode\s+)?go usage limit (?:exceeded|reached)(?:[.!]|\s*\([^)\n]*\)[.!]?)?(?:\s+to keep going now\b[^\n]*)?(?:\n|$)/i,
   /^(?:(?:AI_(?:APICall|Retry)Error|error):\s*)?(?:(?:\d+[-\s]?hour|weekly|daily|monthly)\s+)?usage limit reached\.(?:\s+it will reset in [^\n.]+(?:\.|$))?(?:\s+to continue using this model now, enable usage from your available balance\b[^\n]*)?$/i,
   /^subscription quota exceeded\.\s+you can continue using free models[.]?$/i,
   // Grok Build translates account/team exhaustion to these headless messages.
@@ -70,7 +80,6 @@ const USAGE_LIMIT_PATTERNS = [
   // JSON Internal error (`"message": "API error (status 402 Payment Required): ..."`).
   // Allow a JSON `"...": "` prefix so the diagnostic still matches inside that object.
   /(?:^|:\s*")(?:api error \(status 402 payment required\):\s*)?grok build usage balance exhausted\b/i,
-  /(?:^|:\s*")api error \(status 402 payment required\)/i,
   // Goose maps provider HTTP 402 responses to this error and can exit zero.
   /^(?:error:\s*)?credits exhausted:\s+[^\n]+$/i,
   /^(?:⚠\s*)?individual quota reached\.\s+please upgrade your subscription to increase your limits[.]?$/i,
@@ -102,21 +111,55 @@ const RESET_PATTERNS = [
   /available again\s+(?:at|in)\s+([^\n.]+?)(?:\.|\n|$)/i,
 ] as const;
 
+/** Quota period named by a limit message (`monthly usage limit reached`). */
+export type UsageLimitPeriod = "daily" | "weekly" | "monthly";
+
 export interface UsageLimitResult {
   /** True when output indicates a usage/rate limit was hit. */
   limited: boolean;
   /** Human-readable reset hint when present, e.g. `7:20pm (Asia/Ho_Chi_Minh)`. */
   resetsAt?: string;
+  /**
+   * Quota period the message names, if any. Lets callers pick a long cooldown
+   * for a monthly quota that does not say when it resets.
+   */
+  period?: UsageLimitPeriod;
   /** The line that matched the limit pattern, for logging. */
   matchedLine?: string;
 }
 
 /** Error raised when a harness reaches an account-wide usage or rate limit. */
 export class UsageLimitError extends Error {
-  constructor(public readonly resetHint?: string) {
+  constructor(
+    public readonly resetHint?: string,
+    public readonly period?: UsageLimitPeriod,
+  ) {
     super(`Agent usage limit reached${resetHint ? ` (resets ${resetHint})` : ""}`);
     this.name = "UsageLimitError";
   }
+}
+
+/**
+ * Drop a closing paren the hint borrowed from its surrounding text, as in
+ * `limit reached (monthly, resets in 7d)`, while keeping a balanced one such
+ * as `7:20pm (Asia/Ho_Chi_Minh)`.
+ *
+ * @param hint - Trimmed reset hint
+ */
+function stripUnbalancedParen(hint: string): string {
+  const opens = hint.split("(").length - 1;
+  const closes = hint.split(")").length - 1;
+  return hint.endsWith(")") && closes > opens ? hint.slice(0, -1).trimEnd() : hint;
+}
+
+/**
+ * Read the quota period a limit diagnostic names (`monthly`, `weekly`, ...).
+ *
+ * @param text - The matched diagnostic line
+ */
+function extractPeriod(text: string): UsageLimitPeriod | undefined {
+  const match = text.match(/\b(daily|weekly|monthly)\b/i);
+  return match?.[1] ? (match[1].toLowerCase() as UsageLimitPeriod) : undefined;
 }
 
 /**
@@ -128,7 +171,7 @@ function extractResetHint(text: string): string | undefined {
   for (const pattern of RESET_PATTERNS) {
     const match = text.match(pattern);
     if (match?.[1]) {
-      return match[1].trim();
+      return stripUnbalancedParen(match[1].trim());
     }
   }
   return undefined;
@@ -152,7 +195,14 @@ function isLikelyProviderDiagnostic(line: OutputLine): boolean {
     /^(?:(?:api|provider)\s+)?(?:error|fatal|warning)\b/i.test(trimmed) ||
     /^\[API Error:\s*429\b[^\n]*\]$/i.test(trimmed) ||
     /^(?:AI_RetryError|Too Many Requests)\b/i.test(trimmed) ||
-    /^HTTP\s*429\b/i.test(trimmed) ||
+    // A bare `HTTP 429` prefix is not enough: agent transcripts often contain
+    // prose that starts with it (for example this package's own readme,
+    // "HTTP 429 — accepted only on lines that look like real diagnostics").
+    // Accept a status line, optionally with a status phrase, but not arbitrary
+    // text that merely begins with the code.
+    /^HTTP\s*429(?:\s*(?:[:(]\s*[^)\n]*\)?|[-–—]\s*too many requests|too many requests))?\s*[.!]?$/i.test(
+      trimmed,
+    ) ||
     /^(?:internal error|error:\s*internal error)\b/i.test(trimmed) ||
     /^\s*[{"[].*(?:rate_limit|quota|insufficient balance|add credits|payment required|usage balance exhausted).*[}\]]\s*$/i.test(
       trimmed,
@@ -166,7 +216,9 @@ function isLikelyProviderDiagnostic(line: OutputLine): boolean {
 
   // Preserve concise provider messages such as "rate limit exceeded" while
   // rejecting longer prose/source lines that merely mention the phrase.
-  return /^(?:rate[ _-]?limit(?: error| exceeded| reached)|rate_limit(?:_error)?|too many requests|quota exceeded|(?:error:\s*)?insufficient balance\.\s+please add credits to continue|(?:http\s*)?429(?:\s+too many requests)?)\s*[.!]?$/i.test(
+  // A bare `429` is not a diagnostic: numbered listings (`cat -n`, code blocks)
+  // routinely produce a line that trims to just the number 429.
+  return /^(?:rate[ _-]?limit(?: error| exceeded| reached)|rate_limit(?:_error)?|too many requests|quota exceeded|(?:error:\s*)?insufficient balance\.\s+please add credits to continue|429\s+too many requests)\s*[.!]?$/i.test(
     trimmed,
   );
 }
@@ -196,22 +248,18 @@ function findUsageLimitLine(stdout: string, stderr: string): OutputLine | undefi
   // Check stderr first because it is the conventional diagnostic channel, then
   // inspect stdout for explicit subscription-limit and structured SDK errors.
   const lines = [...outputLines(stderr), ...outputLines(stdout)].flatMap((line) => {
-    // `opencode run --print-logs --log-level ERROR` mirrors its structured log
-    // line to stderr. Match the provider error value without weakening the
-    // source/diff safeguards for ordinary agent transcript lines.
-    if (/\blevel=ERROR\b/.test(line.normalized)) {
-      const match = line.normalized.match(/\berror\.error="((?:\\.|[^"\\])*)"/);
-      if (match?.[1]) {
-        return [
-          line,
-          {
-            raw: line.raw,
-            normalized: match[1].replace(/\\"/g, '"').replace(/\\n/g, "\n"),
-          },
-        ];
-      }
+    // Structured diagnostics hide the provider message inside a wrapper:
+    //   v1 opencode  → `... level=ERROR ... error.error="AI_APICallError: ..."`
+    //   v2 opencode  → `... level=ERROR ... message="..."`
+    //   v2 --format json → `{"type":"error","error":{"message":"..."}}`
+    // Surface the extracted message as its own candidate line so the anchored
+    // subscription patterns can match it without weakening the source/diff
+    // safeguards for ordinary agent transcript lines.
+    const candidates = structuredLogCandidates(line.normalized);
+    if (candidates.length === 0) {
+      return [line];
     }
-    return [line];
+    return [line, ...candidates.map((value) => ({ raw: line.raw, normalized: value }))];
   });
 
   return lines.find((line) => {
@@ -235,6 +283,89 @@ function findUsageLimitLine(stdout: string, stderr: string): OutputLine | undefi
       isLikelyProviderDiagnostic(line)
     );
   });
+}
+
+/** Structured-log keys that carry the provider diagnostic message. */
+const STRUCTURED_LOG_KEYS = ["error.error", "error.message", "message", "cause"] as const;
+
+/**
+ * Shape of a structured harness log line: `level=ERROR` opens the line, after
+ * an optional logfmt `timestamp=`.
+ *
+ * Matching `level=ERROR` anywhere also matched *source code that quotes* a log
+ * line — a test fixture containing `level=ERROR message="…"` was parsed as a
+ * live diagnostic and killed a healthy run with a fake 4-hour usage window.
+ * Real logger output always starts with its fields, so anchor the shape.
+ */
+const STRUCTURED_LOG_LINE_PATTERN = /^(?:timestamp=\S+\s+)?level=ERROR\b/;
+
+/**
+ * Extract candidate diagnostic strings from a structured harness log line.
+ *
+ * Handles both the v1 opencode `error.error="..."` field and the v2 field set
+ * (`message`/`cause`/`error.message`), plus the v2 `--format json` error
+ * envelope. Returns an empty array when the line carries no diagnostic value.
+ *
+ * @param line - A single normalized output line.
+ * @returns Extracted, unescaped diagnostic strings (possibly empty).
+ */
+function structuredLogCandidates(line: string): string[] {
+  const candidates: string[] = [];
+
+  if (STRUCTURED_LOG_LINE_PATTERN.test(line.trim())) {
+    for (const key of STRUCTURED_LOG_KEYS) {
+      const pattern = new RegExp(`\\b${key.replace(/\./g, "\\.")}="((?:\\\\.|[^"\\\\])*)"`);
+      const match = line.match(pattern);
+      if (match?.[1]) {
+        candidates.push(unescapeStructuredValue(match[1]));
+      }
+    }
+  }
+
+  const json = jsonErrorCandidate(line);
+  if (json) {
+    candidates.push(json);
+  }
+
+  return candidates;
+}
+
+/**
+ * Extract the message from an Opencode v2 `--format json` error envelope
+ * (`{"type":"error",...,"error":{"type":"unknown","message":"..."}}`).
+ *
+ * Gated on `type === "error"` so arbitrary JSON the agent prints is not treated
+ * as a diagnostic.
+ *
+ * @param line - A single normalized output line.
+ * @returns The error message, or `undefined`.
+ */
+function jsonErrorCandidate(line: string): string | undefined {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith("{")) {
+    return undefined;
+  }
+  try {
+    const parsed = JSON.parse(trimmed) as {
+      type?: unknown;
+      error?: { message?: unknown };
+    };
+    if (parsed.type !== "error" || typeof parsed.error?.message !== "string") {
+      return undefined;
+    }
+    return parsed.error.message;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Unescape a value captured from a structured log line.
+ *
+ * @param value - Quoted field contents with JSON-style escapes.
+ */
+function unescapeStructuredValue(value: string): string {
+  return value.replace(/\\"/g, '"').replace(/\\n/g, "\n");
 }
 
 /**
@@ -302,8 +433,10 @@ export function detectUsageLimit(stdout: string, stderr: string): UsageLimitResu
     return { limited: false };
   }
 
+  const period = extractPeriod(matchedLine.normalized);
   return {
     limited: true,
+    ...(period ? { period } : {}),
     // Only extract a reset hint from the matched diagnostic line. Searching
     // the entire transcript can borrow an unrelated "try again" from source
     // code or a tool result, as happened with the Cloudflare tunnel bundle.

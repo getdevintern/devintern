@@ -1,17 +1,25 @@
 /**
  * Opencode harness.
  *
- * CLI: opencode run <prompt> [-m <model>] [--dangerously-skip-permissions]
+ * CLI: opencode run <prompt> [flags]
  *
  * Uses `opencode run` for non-interactive mode. The prompt is passed as a
  * positional argument. Permissions are auto-approved with
  * `--dangerously-skip-permissions`.
  *
- * Unlike most harnesses, `opencode run` does NOT inherit the spawned process's
- * working directory for its own tool calls — it defaults to `$HOME` unless the
- * directory is passed explicitly via `--dir`. We therefore forward
- * `options.workingDir` as `--dir` so the agent operates inside the intended
- * repo/worktree rather than wandering the home directory.
+ * Version handling (probed via `opencode --version`, see `src/probe.ts`):
+ *
+ * - v1 — `run --print-logs --log-level ERROR`, working directory via `--dir`
+ *   (opencode ignores the spawn cwd), and reasoning effort via `--variant`.
+ * - v2 — the flag surface changed: `--log-level`, `--dir`, and `--variant` were
+ *   removed. Logs are enabled through `OPENCODE_PRINT_LOGS=1` /
+ *   `OPENCODE_LOG_LEVEL=ERROR`, the working directory is read from `$PWD`, and
+ *   the model variant is folded into the model reference
+ *   (`--model provider/model#variant`). `--standalone` runs a private server so
+ *   a headless run never touches the user's shared background service.
+ *
+ * When the version cannot be determined the harness assumes v1 (the baseline),
+ * so a probe failure degrades to today's behavior instead of breaking a run.
  *
  * Modes:
  * - plan / readonly → `--agent plan` (built-in plan agent; edits denied)
@@ -23,11 +31,12 @@
  * for read-and-emit-JSON analysis; do not use for tasks that need shell.
  *
  * @see https://opencode.ai/docs/cli/
- * @see https://opencode.ai/docs/agents/
+ * @see https://opencode.ai/v2/docs/migrate-v1
  */
 
 import { effectiveSkipPermissions, isConstrainedMode, assertModeSupported } from "../modes.js";
-import type { AgentHarness, AgentRunOptions } from "../types.js";
+import { parseMajorVersion, readCliVersion } from "../probe.js";
+import type { AgentHarness, AgentRunOptions, HarnessProbe } from "../types.js";
 
 export class OpencodeHarness implements AgentHarness {
   readonly name = "opencode";
@@ -43,29 +52,51 @@ export class OpencodeHarness implements AgentHarness {
    */
   readonly endOfOptionsMarker = "--";
   /**
-   * Effort applies via `--variant <level>` — opencode's documented
-   * "model variant (provider-specific reasoning effort)" flag. Variant names
-   * are model-specific: standard effort variants (`low`/`medium`/`high`)
-   * exist on reasoning models; on models without them the CLI ignores the
-   * unknown variant (or fails model resolution on v2), mirroring the
-   * degrade-with-warning contract used here.
+   * Effort applies via `--variant <level>` on v1 (opencode's documented
+   * "model variant (provider-specific reasoning effort)" flag) and via the
+   * `provider/model#variant` model reference on v2.
    */
   readonly supportsEffort = true;
 
   /**
+   * Detect the installed OpenCode major version from `opencode --version`.
+   *
+   * @param executablePath - Resolved opencode executable path/command.
+   * @returns The version snapshot, or `{}` when it cannot be read.
+   */
+  probe(executablePath: string): HarnessProbe {
+    const version = readCliVersion(executablePath);
+    if (version === undefined) {
+      return {};
+    }
+    return { version, major: parseMajorVersion(version) };
+  }
+
+  /**
    * Build `opencode run` flags for non-interactive execution.
    *
-   * @param options - Supports `mode`, `skipPermissions`, `model`, `effort`
-   *   (`--variant`), `structuredOutput`, and `workingDir`.
+   * @param options - Supports `mode`, `skipPermissions`, `model`, `effort`,
+   *   `structuredOutput`, and `workingDir`.
+   * @param probe - Version snapshot controlling v1/v2 flag selection.
    * @returns Args starting with `run`; prompt is appended as a positional argument.
    */
-  buildArgs(options: AgentRunOptions): string[] {
+  buildArgs(options: AgentRunOptions, probe?: HarnessProbe): string[] {
     assertModeSupported(this, options.mode);
-    // OpenCode can keep `run` alive after an unrecoverable provider error while
-    // writing the only diagnostic to its private log file. Mirror ERROR-level
-    // logs to stderr so headless callers can detect the failure and terminate
-    // the stuck process instead of waiting for their outer timeout.
-    const args: string[] = ["run", "--print-logs", "--log-level", "ERROR"];
+    const v2 = isOpencodeV2(probe);
+    const args: string[] = ["run"];
+
+    if (v2) {
+      // v2 dropped --log-level; logs are enabled through the environment (see
+      // buildEnv). A private server keeps a headless run off the shared
+      // background service and is required for server logs on stderr.
+      args.push("--standalone");
+    } else {
+      // OpenCode can keep `run` alive after an unrecoverable provider error
+      // while writing the only diagnostic to its private log file. Mirror
+      // ERROR-level logs to stderr so headless callers can detect the failure
+      // and terminate the stuck process instead of waiting for their timeout.
+      args.push("--print-logs", "--log-level", "ERROR");
+    }
 
     if (isConstrainedMode(options.mode)) {
       args.push("--agent", "plan");
@@ -73,16 +104,28 @@ export class OpencodeHarness implements AgentHarness {
       args.push("--dangerously-skip-permissions");
     }
 
-    // opencode ignores the spawn cwd, so anchor it to the intended directory.
-    if (options.workingDir) {
+    // v1 ignores the spawn cwd, so anchor it with --dir. v2 has no --dir and
+    // reads the working directory from $PWD instead (see buildEnv).
+    if (options.workingDir && !v2) {
       args.push("--dir", options.workingDir);
     }
 
     if (options.model) {
-      args.push("--model", options.model);
+      const model =
+        v2 && options.effort && !options.model.includes("#")
+          ? `${options.model}#${options.effort}`
+          : options.model;
+      args.push("--model", model);
+    } else if (v2 && options.effort) {
+      // v2 has no --variant and no model to attach the variant to; skipping is
+      // the only viable behavior.
+      console.warn(
+        "⚠️  Opencode v2 takes reasoning effort via the model reference " +
+          "(--model provider/model#variant); set AGENT_MODEL to apply AGENT_EFFORT.",
+      );
     }
 
-    if (options.effort) {
+    if (options.effort && !v2) {
       args.push("--variant", options.effort);
     }
 
@@ -90,12 +133,37 @@ export class OpencodeHarness implements AgentHarness {
       args.push("--format", "json");
     }
 
-    // Opencode does not currently support --max-turns.
-    // If it adds support in the future, uncomment the following:
-    // if (options.maxTurns !== undefined) {
-    //   args.push("--max-turns", String(options.maxTurns));
-    // }
-
     return args;
   }
+
+  /**
+   * Environment overrides for v2: enable stderr logs, cap them at ERROR, and
+   * pin the working directory (v2 reads `$PWD`, not the spawn cwd).
+   *
+   * @param options - Uses `workingDir`.
+   * @param probe - Version snapshot controlling v1/v2 behavior.
+   * @returns Overlay for v2, or `undefined` on v1.
+   */
+  buildEnv(options: AgentRunOptions, probe?: HarnessProbe): Record<string, string> | undefined {
+    if (!isOpencodeV2(probe)) {
+      return undefined;
+    }
+    const env: Record<string, string> = {
+      OPENCODE_PRINT_LOGS: "1",
+      OPENCODE_LOG_LEVEL: "ERROR",
+    };
+    if (options.workingDir) {
+      env.PWD = options.workingDir;
+    }
+    return env;
+  }
+}
+
+/**
+ * Whether a probe indicates OpenCode v2 or newer.
+ *
+ * @param probe - Version snapshot; an unknown major is treated as v1.
+ */
+function isOpencodeV2(probe?: HarnessProbe): boolean {
+  return (probe?.major ?? 1) >= 2;
 }

@@ -24,15 +24,19 @@ import type { RepoConfig, WorkspaceConfig } from "./config";
 import { loadWorkspaceConfig } from "./config";
 import { InjectedTaskStore } from "../state/injected-tasks";
 import type { EnqueueInjectedTaskResult, InjectedTask } from "../state/injected-tasks";
-import { RunStore } from "../state/run-recorder";
-import type { RunRecord } from "../state/run-recorder";
 import { applyWorkspaceProcessEnv } from "./env";
+import {
+  injectedChildStillRunningMessage,
+  interruptedChildStillRunning,
+} from "./injected-recovery";
 import {
   injectedTasksDir,
   resolveWorkspaceDir,
   workspaceCodeStateDir,
   workspaceConfigPath,
   workspaceDbPath,
+  workspaceStateDir,
+  readWorkerStartMarker,
 } from "./paths";
 
 /** Maximum body size accepted (matches the run recorder's description cap). */
@@ -52,6 +56,17 @@ const WAIT_POLL_INTERVAL_MS = 1_000;
  */
 export const DEFAULT_WAIT_TIMEOUT_SECONDS = 6 * 60 * 60;
 
+/**
+ * How long `--wait` tolerates a missing worker for an already-claimed task.
+ *
+ * A claimed (`running`) row is mid-run, so the worker may have just been
+ * restarted and startup recovery can auto-resume it. A worker that never
+ * returns (crash without a restart, or a permanently stopped daemon) must
+ * still fail in bounded time instead of waiting out the six-hour overall
+ * deadline.
+ */
+export const WORKER_RESTART_GRACE_MS = 5 * 60 * 1_000;
+
 export interface WorkerAddOptions {
   /** Human-readable status sink (defaults to stdout). */
   log?: (message: string) => void;
@@ -59,6 +74,8 @@ export interface WorkerAddOptions {
   error?: (message: string) => void;
   /** Reads stdin for `--body-file -`; injectable for tests. */
   readStdin?: () => string;
+  /** Override {@link WORKER_RESTART_GRACE_MS}; injectable for tests. */
+  restartGraceMs?: number;
 }
 
 export interface AddOptions {
@@ -68,6 +85,8 @@ export interface AddOptions {
   body?: string;
   bodyFile?: string;
   idempotencyKey?: string;
+  /** Re-queue this settled ad-hoc task instead of enqueuing a new one. */
+  resume?: string;
   wait: boolean;
   json: boolean;
   /** `--wait` deadline in seconds; `0` waits without a limit (default 6h). */
@@ -81,18 +100,19 @@ export type ParsedAddArgs =
 
 function usage(): string {
   return [
-    "Usage: devintern worker add --title <text> [--repo <name>] [options]",
+    "Usage: devintern worker add (--title <text> | --resume <taskKey>) [options]",
     "",
     "Enqueue a one-off task against a workspace repo without a tracker ticket.",
     "The running worker runs it through the normal pipeline (checkout, agent,",
     "PR) on its next poll.",
     "",
     "Options:",
-    "  --title <text>            Task title (required)",
+    "  --title <text>            Task title (required unless --resume)",
     "  --repo <name>             [[repos]] name to target (default: the only repo)",
     "  --body <text>             Task description",
     "  --body-file <path>        Read the description from a file ('-' for stdin)",
     "  --idempotency-key <key>   Dedupe key; a retry reuses the existing task",
+    "  --resume <taskKey>        Re-queue a settled ad-hoc task (resumes its branch)",
     "  --wait                    Block until the run finishes; exit with its status",
     "  --wait-timeout <seconds>  Give up waiting after this long (0 = no limit; default 21600)",
     "  --json                    Emit a machine-readable result on stdout",
@@ -109,8 +129,35 @@ const VALUE_FLAGS = new Set([
   "--body",
   "--body-file",
   "--idempotency-key",
+  "--resume",
   "--wait-timeout",
 ]);
+
+/**
+ * Validate the `--resume` form.
+ *
+ * The row already holds its title, body, repo, and idempotency key; passing
+ * them again would silently disagree with what the worker will run.
+ *
+ * @returns An error message, or null when the arguments are acceptable
+ */
+function validateResumeArgs(options: AddOptions): string | null {
+  if (options.resume === undefined) return null;
+  if (!options.resume.trim()) {
+    return "--resume requires a task key.";
+  }
+  const conflicting = [
+    options.title.trim() ? "--title" : undefined,
+    options.body !== undefined ? "--body" : undefined,
+    options.bodyFile !== undefined ? "--body-file" : undefined,
+    options.repo !== undefined ? "--repo" : undefined,
+    options.idempotencyKey !== undefined ? "--idempotency-key" : undefined,
+  ].filter((flag): flag is string => flag !== undefined);
+  if (conflicting.length > 0) {
+    return `--resume re-queues the existing task; drop ${conflicting.join(", ")}.`;
+  }
+  return null;
+}
 
 /**
  * Parse `worker add` arguments. Kept separate from execution so help and arg
@@ -158,6 +205,9 @@ export function parseWorkerAddArgs(args: string[]): ParsedAddArgs {
         case "--idempotency-key":
           options.idempotencyKey = value;
           break;
+        case "--resume":
+          options.resume = value;
+          break;
         case "--wait-timeout": {
           const seconds = Number(value);
           if (!Number.isInteger(seconds) || seconds < 0) {
@@ -175,6 +225,13 @@ export function parseWorkerAddArgs(args: string[]): ParsedAddArgs {
     return { kind: "error", message: `Unknown option: ${arg}` };
   }
 
+  const resumeError = validateResumeArgs(options);
+  if (resumeError) {
+    return { kind: "error", message: resumeError };
+  }
+  if (options.resume !== undefined) {
+    return { kind: "ok", options };
+  }
   if (!options.title.trim()) {
     return { kind: "error", message: "--title is required and cannot be empty." };
   }
@@ -376,13 +433,17 @@ export async function runWorkerAdd(
     return 1;
   }
 
-  const repoResult = resolveTargetRepo(config, add.repo, error);
-  if (!repoResult.ok) return repoResult.code;
-  const repo = repoResult.repo;
+  // `--resume` re-queues an existing row, so title/body/repo resolution (and
+  // their validation) apply only to a new enqueue.
+  let target: { repo: RepoConfig; body: string } | null = null;
+  if (!add.resume) {
+    const repoResult = resolveTargetRepo(config, add.repo, error);
+    if (!repoResult.ok) return repoResult.code;
 
-  const bodyResult = resolveInjectedBody(add, options, error);
-  if (!bodyResult.ok) return 1;
-  const body = bodyResult.body;
+    const bodyResult = resolveInjectedBody(add, options, error);
+    if (!bodyResult.ok) return 1;
+    target = { repo: repoResult.repo, body: bodyResult.body };
+  }
 
   if (!(await checkAutomationAccess(selectedDir, status, error))) return 1;
 
@@ -396,26 +457,7 @@ export async function runWorkerAdd(
 
   const store = new InjectedTaskStore(workspaceDbPath(selectedDir));
   try {
-    if (add.idempotencyKey) {
-      // Only an active (pending/running) task dedupes; a settled one under the
-      // same key is history and a new occurrence is enqueued below.
-      const existing = store.findActiveByIdempotencyKey(add.idempotencyKey);
-      if (existing) {
-        // `await` is load-bearing: without it the surrounding `finally` would
-        // `store.close()` while `reportTask`/`waitForTask` is still polling.
-        return await reportTask(existing, {
-          log,
-          error,
-          status,
-          wait: add.wait,
-          json: add.json,
-          waitTimeoutSeconds: add.waitTimeoutSeconds,
-          store,
-          selectedDir,
-        });
-      }
-    }
-    return await enqueueNewTask(add, body, repo, {
+    const context: TaskContext & { workerRunning: boolean } = {
       store,
       selectedDir,
       workerRunning,
@@ -425,10 +467,62 @@ export async function runWorkerAdd(
       wait: add.wait,
       json: add.json,
       waitTimeoutSeconds: add.waitTimeoutSeconds,
-    });
+      restartGraceMs: options.restartGraceMs,
+    };
+    if (add.resume) {
+      return await resumeTask(add.resume, context);
+    }
+    if (!target) {
+      error("❌ Could not resolve the task's repo and body.");
+      return 1;
+    }
+    if (add.idempotencyKey) {
+      // Only an active (pending/running) task dedupes; a settled one under the
+      // same key is history and a new occurrence is enqueued below.
+      const existing = store.findActiveByIdempotencyKey(add.idempotencyKey);
+      if (existing) {
+        // `await` is load-bearing: without it the surrounding `finally` would
+        // `store.close()` while `reportTask`/`waitForTask` is still polling.
+        return await reportTask(existing, context);
+      }
+    }
+    return await enqueueNewTask(add, target.body, target.repo, context);
+  } catch (enqueueError) {
+    // Filesystem/DB failures (including a sandbox denying writes to the
+    // workspace state) must not escape as a minified stack trace: agents parse
+    // stderr and the exit code, and the raw Node error is not actionable.
+    return reportEnqueueFailure(enqueueError, selectedDir, error);
   } finally {
     store.close();
   }
+}
+
+/**
+ * Explain why an enqueue could not be written, with the fix for the common
+ * permission/sandbox denial.
+ *
+ * @param cause - Error thrown while writing the prompt file or queue row.
+ * @param workspaceDir - Workspace home, for the paths an operator must grant.
+ * @param error - Failure sink.
+ * @returns Exit code 1.
+ */
+function reportEnqueueFailure(
+  cause: unknown,
+  workspaceDir: string,
+  error: (message: string) => void,
+): number {
+  const detail = cause instanceof Error ? cause.message : String(cause);
+  const code = (cause as NodeJS.ErrnoException | undefined)?.code;
+  error(`❌ Could not enqueue the task: ${detail}`);
+  if (code === "EACCES" || code === "EPERM" || code === "EROFS") {
+    error("   The workspace state must be writable by this process.");
+    error(
+      `   Grant write access to ${displayPath(injectedTasksDir(workspaceDir))} and ` +
+        `${displayPath(workspaceStateDir(workspaceDir))}`,
+    );
+    error("   (under a sandbox, add them to AGENT_SANDBOX_WRITABLE_PATHS).");
+  }
+  return 1;
 }
 
 /** Shared sinks + task state threaded through the enqueue/report/wait paths. */
@@ -441,6 +535,8 @@ interface TaskContext {
   json: boolean;
   /** `--wait` deadline in seconds; `0` = no limit, undefined = the default. */
   waitTimeoutSeconds?: number;
+  /** How long `--wait` tolerates a missing worker; defaults to the constant. */
+  restartGraceMs?: number;
   store: InjectedTaskStore;
   selectedDir: string;
 }
@@ -529,11 +625,11 @@ async function enqueueNewTask(
       if (add.json) log(JSON.stringify({ ...serialize(task), deduplicated: false }));
       return 0;
     }
-    return await waitForTask(task.id, { ...ctx, deduplicated: false, taskKey: task.taskKey });
+    return await waitForTask(task.id, { ...ctx, deduplicated: false, taskKey: task.taskKey }, task);
   }
 }
 
-function serialize(task: InjectedTask): {
+function serialize(task: Pick<InjectedTask, "id" | "taskKey" | "repo" | "status">): {
   id: number;
   taskKey: string;
   repo: string;
@@ -546,9 +642,21 @@ function serialize(task: InjectedTask): {
  * Emit the single result for a settled task: the JSON object under `--json`,
  * otherwise a human success/failure line. Returns the process exit code.
  */
-function emitSettled(task: InjectedTask, deduplicated: boolean, ctx: TaskContext): number {
+function emitSettled(
+  task: Pick<InjectedTask, "id" | "taskKey" | "repo" | "status" | "message">,
+  deduplicated: boolean,
+  ctx: TaskContext,
+): number {
   if (ctx.json) {
-    ctx.log(JSON.stringify({ ...serialize(task), deduplicated }));
+    ctx.log(
+      JSON.stringify({
+        ...serialize(task),
+        deduplicated,
+        ...(task.status === "failed"
+          ? { error: task.message ?? "task pipeline did not complete cleanly" }
+          : {}),
+      }),
+    );
   } else if (task.status === "failed") {
     ctx.error(`❌ ${task.taskKey} failed${task.message ? `: ${task.message}` : ""}`);
   } else {
@@ -571,7 +679,63 @@ async function reportTask(task: InjectedTask, ctx: TaskContext): Promise<number>
   if (task.status === "done" || task.status === "failed") {
     return emitSettled(task, true, ctx);
   }
-  return await waitForTask(task.id, { ...ctx, deduplicated: true, taskKey: task.taskKey });
+  return await waitForTask(task.id, { ...ctx, deduplicated: true, taskKey: task.taskKey }, task);
+}
+
+/**
+ * Re-queue a settled ad-hoc task by key (`worker add --resume`).
+ *
+ * The row keeps its `task_key`, so the rerun targets the same
+ * `feature/local-<slug>` branch the interrupted attempt recorded and session
+ * pickup can hand the prior report to the next agent. An already-active row is
+ * reported instead of queued twice.
+ */
+async function resumeTask(
+  taskKey: string,
+  ctx: TaskContext & { workerRunning: boolean },
+): Promise<number> {
+  const { store, workerRunning } = ctx;
+  const task = store.getByTaskKey(taskKey);
+  if (!task) {
+    ctx.error(`❌ No ad-hoc task "${taskKey}" in this workspace.`);
+    ctx.error("   Enqueue it with `devintern worker add --title ...`.");
+    return 1;
+  }
+  if (task.status === "pending" || task.status === "running") {
+    ctx.status(`ℹ️  ${taskKey} is already ${task.status} (task #${task.id}); not re-queued.`);
+    if (!ctx.wait) {
+      if (ctx.json) ctx.log(JSON.stringify({ ...serialize(task), deduplicated: true }));
+      return 0;
+    }
+    return await waitForTask(task.id, { ...ctx, deduplicated: true, taskKey }, task);
+  }
+
+  // A hard-killed worker's detached child may still be running this attempt in
+  // the same worktree. Re-queueing would force-remove that worktree underneath
+  // it, so refuse until the operator confirms the process is gone.
+  if (interruptedChildStillRunning(task)) {
+    ctx.error(`❌ ${injectedChildStillRunningMessage(taskKey, task.childPid!)}`);
+    return 1;
+  }
+
+  const revived = store.requeueSettled(taskKey);
+  if (!revived) {
+    ctx.error(`❌ ${taskKey} could not be re-queued; it moved on. Reload and try again.`);
+    return 1;
+  }
+  if (!ctx.json) {
+    ctx.status(`♻️  Re-queued ${revived.taskKey} (task #${revived.id}, repo "${revived.repo}").`);
+    ctx.status(
+      workerRunning
+        ? "   The worker resumes it on its next poll (same branch when the prior attempt left one)."
+        : "⚠️  No worker is running; the task stays queued until one starts.",
+    );
+  }
+  if (!ctx.wait) {
+    if (ctx.json) ctx.log(JSON.stringify({ ...serialize(revived), deduplicated: false }));
+    return 0;
+  }
+  return await waitForTask(revived.id, { ...ctx, deduplicated: false, taskKey }, revived);
 }
 
 /**
@@ -604,6 +768,16 @@ function failWait(
   return 1;
 }
 
+/** Whether a process still exists (EPERM means it exists but is not signalable). */
+function isPidRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
 /**
  * Poll a task row until it settles and emit exactly one result. Fails fast when
  * the worker disappears, and again when the `--wait-timeout` deadline elapses
@@ -615,14 +789,17 @@ function failWait(
 async function waitForTask(
   id: number,
   ctx: TaskContext & { deduplicated: boolean; taskKey: string },
+  initialTask: InjectedTask,
 ): Promise<number> {
   ctx.status(`⏳ Waiting for task #${id} to finish (Ctrl-C to detach)...`);
   const timeoutSeconds = ctx.waitTimeoutSeconds ?? DEFAULT_WAIT_TIMEOUT_SECONDS;
   const deadline = timeoutSeconds > 0 ? Date.now() + timeoutSeconds * 1_000 : Infinity;
+  const restartGraceMs = ctx.restartGraceMs ?? WORKER_RESTART_GRACE_MS;
+  let workerGapSince: number | null = null;
   for (;;) {
     const task = ctx.store.getById(id);
     if (!task) {
-      return reportPrunedTask(id, ctx);
+      return reportPrunedTask(id, ctx, initialTask.repo);
     }
     if (task.status === "done" || task.status === "failed") {
       return emitSettled(task, ctx.deduplicated, ctx);
@@ -644,15 +821,59 @@ async function waitForTask(
     const workerRunning =
       LockManager.readLockStatus(ctx.selectedDir, ".worker.lock", { plainDir: true })?.running ??
       false;
-    if (!workerRunning) {
-      return failWait(
-        ctx,
-        { id, repo: task.repo, error: "The worker stopped before the task finished." },
-        [
-          "❌ The worker stopped before the task finished; it remains queued/failed.",
-          "   Start the worker again and inspect the dashboard run history.",
-        ],
-      );
+    if (workerRunning) {
+      // A replacement worker came back within the grace: a later restart gets
+      // its own grace window rather than inheriting an old one.
+      workerGapSince = null;
+    } else {
+      const now = Date.now();
+      // The replacement worker writes this marker before its slow pre-lock
+      // startup (orphan recovery, worktree sweep, push probes), so a live
+      // replacement is evidence the worker is coming back even while the lock
+      // is still absent. Only a marker written after this task was claimed can
+      // belong to the replacement; an older marker is from the dead worker and
+      // a recycled pid must not be mistaken for a new process.
+      const startingMarker = readWorkerStartMarker(ctx.selectedDir);
+      const replacementStarting =
+        startingMarker !== null &&
+        isPidRunning(startingMarker.pid) &&
+        (task.startedAt === undefined || startingMarker.startedAt >= task.startedAt);
+      if (replacementStarting) {
+        // Restart grace measures from evidence of a new worker, not from the
+        // lock disappearing while that process is still in startup.
+        workerGapSince = now;
+      } else if (workerGapSince === null) {
+        workerGapSince = now;
+        if (task.status === "running") {
+          ctx.status(
+            `ℹ️  No worker is running; task #${id} is still running and may auto-resume when ` +
+              "the worker restarts. Still waiting within the restart grace period.",
+          );
+        }
+      }
+      if (!replacementStarting && now - workerGapSince >= restartGraceMs) {
+        const graceSeconds = Math.max(1, Math.round(restartGraceMs / 1_000));
+        const error =
+          `The worker stopped and did not restart within ${graceSeconds}s while task #${id} ` +
+          "was running.";
+        return failWait(ctx, { id, repo: task.repo, error }, [
+          `❌ ${error}`,
+          "   Start the worker again to auto-resume the task, or inspect the dashboard run history.",
+        ]);
+      }
+      if (task.status !== "running" && !replacementStarting) {
+        // A `pending` row has nobody to claim it, so fail fast as before. While
+        // a replacement is starting it will be claimed, so it waits through the
+        // same bounded grace instead of reporting a transient restart failure.
+        return failWait(
+          ctx,
+          { id, repo: task.repo, error: "The worker stopped before the task finished." },
+          [
+            "❌ The worker stopped before the task finished; it remains queued/failed.",
+            "   Start the worker again and inspect the dashboard run history.",
+          ],
+        );
+      }
     }
     await new Promise((resolveWait) => setTimeout(resolveWait, WAIT_POLL_INTERVAL_MS));
   }
@@ -662,52 +883,31 @@ async function waitForTask(
  * Report a task whose injected row was pruned by the worker's retention sweep
  * before `--wait` observed its terminal status.
  *
- * `pruneSettled` only removes settled (`done`/`failed`) rows, so a row that
- * vanished after the CLI enqueued it settled; its outcome is durably mirrored
- * in the run record (same DB, keyed by the task key) written before the row is
- * finished. Read that instead of reporting a spurious "disappeared" failure
- * for a successful run. A missing or non-terminal run (e.g. the DB was edited
- * out from under us) is genuinely inconclusive and still fails.
+ * `pruneSettled` retains each row's outcome under its immutable queue ID.
+ * This also keeps a later task with the same key from changing this result.
  */
 function reportPrunedTask(
   id: number,
   ctx: TaskContext & { deduplicated: boolean; taskKey: string },
+  repo: string,
 ): number {
-  const run = readLatestRun(ctx.selectedDir, ctx.taskKey);
-  if (!run || run.status === "in_progress" || run.status === "deferred") {
+  const outcome = ctx.store.getPrunedOutcome(id);
+  if (!outcome || outcome.repo !== repo) {
     return failWait(ctx, { id, error: `Injected task #${id} disappeared while waiting.` }, [
       `❌ Injected task #${id} disappeared while waiting.`,
     ]);
   }
-  const settled: InjectedTask = {
+  const settled = {
     id,
     taskKey: ctx.taskKey,
-    repo: run.repo ?? "",
-    title: "",
-    body: "",
-    taskFile: "",
-    actor: "",
-    status: run.status === "succeeded" ? "done" : "failed",
-    message: run.outcomeReason,
-    createdAt: run.startedAt,
+    repo: outcome.repo,
+    status: outcome.status,
+    message: outcome.message,
   };
   if (!ctx.json) {
-    ctx.status(`ℹ️  Injected task #${id} was pruned after it settled; reporting its run outcome.`);
+    ctx.status(`ℹ️  Injected task #${id} was pruned after it settled; reporting its outcome.`);
   }
   return emitSettled(settled, ctx.deduplicated, ctx);
-}
-
-/** Latest run record for a task key (read-only; null when absent/unreadable). */
-function readLatestRun(selectedDir: string, taskKey: string): RunRecord | null {
-  let store: RunStore | null = null;
-  try {
-    store = new RunStore(workspaceDbPath(selectedDir), { readonly: true });
-    return store.latestRunByTaskKey([taskKey]).get(taskKey) ?? null;
-  } catch {
-    return null;
-  } finally {
-    store?.close();
-  }
 }
 
 /** Read all of stdin (used by `--body-file -`). */

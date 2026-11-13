@@ -1,12 +1,12 @@
-# Functional Source License, Version 1.1, Apache 2.0 Future License
+# Functional Source License, Version 1.1, ALv2 Future License
 
 ## Abbreviation
 
-FSL-1.1-Apache-2.0
+FSL-1.1-ALv2
 
 ## Notice
 
-Copyright 2026 Daniil Pokrovsky (devintern.com)
+Copyright 2026 Daniil Pokrovsky
 
 ## Terms and Conditions
 
@@ -70,24 +70,36 @@ remove any copyright notices provided in or with the Software.
 
 ### Disclaimer
 
-THE SOFTWARE IS PROVIDED "AS IS" AND WITHOUT WARRANTIES OF ANY KIND, INCLUDING
-WITHOUT LIMITATION WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
-PURPOSE, TITLE OR NON-INFRINGEMENT.
+THE SOFTWARE IS PROVIDED "AS IS" AND WITHOUT WARRANTIES OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING WITHOUT LIMITATION WARRANTIES OF FITNESS FOR A PARTICULAR
+PURPOSE, MERCHANTABILITY, TITLE OR NON-INFRINGEMENT.
 
 IN NO EVENT WILL WE HAVE ANY LIABILITY TO YOU ARISING OUT OF OR RELATED TO THE
 SOFTWARE, INCLUDING INDIRECT, SPECIAL, INCIDENTAL OR CONSEQUENTIAL DAMAGES,
 EVEN IF WE HAVE BEEN INFORMED OF THEIR POSSIBILITY IN ADVANCE.
 
-### Grant of Future License
+### Trademarks
+
+Except for displaying the License Details and identifying us as the origin of
+the Software, you have no right under these Terms and Conditions to use our
+trademarks, trade names, service marks or product names.
+
+## Grant of Future License
 
 We hereby irrevocably grant you an additional license to use the Software under
 the Apache License, Version 2.0 that is effective on the second anniversary of
 the date we make the Software available. On or after that date, you may use the
-Software under the Apache License, Version 2.0, in which case the following will
-apply:
+Software under the Apache License, Version 2.0, in which case the following
+will apply:
 
-Insofar as you have a separate license to the Software under the Apache License,
-Version 2.0, that license applies to your use of the Software beginning on the
-date it is effective. However, insofar as you use the Software under these Terms
-and Conditions, these Terms and Conditions govern your use of the Software until
-the Grant of Future License is effective.
+Licensed under the Apache License, Version 2.0 (the "License"); you may not use
+this file except in compliance with the License.
+
+You may obtain a copy of the License at
+
+http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software distributed
+under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
+CONDITIONS OF ANY KIND, either express or implied. See the License for the
+specific language governing permissions and limitations under the License.

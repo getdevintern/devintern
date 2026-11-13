@@ -211,6 +211,22 @@ describe("detectUsageLimit", () => {
     expect(detectUsageLimit(transcript, "").limited).toBe(false);
   });
 
+  test("ignores numbered source listings with quoted Grok payment errors", () => {
+    const transcript = [
+      '    75\t  // JSON Internal error (`"message": "API error (status 402 Payment Required): ..."`).',
+      '    76\t  /(?:^|:\\s*")api error \\(status 402 payment required\\)/i,',
+      '    77\t  // JSON Internal error (`"message": "API error (status 402 Payment Required): Grok Build usage balance exhausted"`).',
+    ].join("\n");
+
+    expect(detectUsageLimit("", transcript).limited).toBe(false);
+    expect(detectUsageLimit(transcript, "").limited).toBe(false);
+  });
+
+  test("ignores a quoted payment error without a balance-exhaustion diagnostic", () => {
+    const prose = 'Example: "API error (status 402 Payment Required): ..."';
+    expect(detectUsageLimit("", prose).limited).toBe(false);
+  });
+
   test("detects Goose credits exhaustion despite its successful exit", () => {
     const out = "Error: Credits exhausted: Insufficient credits to complete this request";
     expect(detectUsageLimit("", out).limited).toBe(true);
@@ -308,6 +324,26 @@ describe("detectUsageLimit", () => {
     expect(detectUsageLimit("Ran 429 tests across 47 files.", "").limited).toBe(false);
   });
 
+  test("ignores a numbered listing whose line number is 429", () => {
+    // `cat -n` / numbered code blocks produce a line that trims to `429`.
+    const listing = ["   427\t[Install]", "   428\t", "   429\t", "   430\tEnable and start:"].join(
+      "\n",
+    );
+
+    expect(detectUsageLimit(listing, "").limited).toBe(false);
+    expect(detectUsageLimit("", listing).limited).toBe(false);
+  });
+
+  test("ignores prose that starts with an HTTP 429 status", () => {
+    // Observed in this package's own readme, streamed to stderr while an
+    // agent was editing harness docs: the line starts like an HTTP status but
+    // is explanatory prose, not a provider diagnostic.
+    const prose = "  HTTP 429 — accepted only on lines that look like real diagnostics, never raw";
+
+    expect(detectUsageLimit(prose, "").limited).toBe(false);
+    expect(detectUsageLimit("", prose).limited).toBe(false);
+  });
+
   test("detects rate limit error phrasing", () => {
     expect(detectUsageLimit("rate limit exceeded", "").limited).toBe(true);
   });
@@ -369,6 +405,49 @@ describe("detectUsageLimit", () => {
     ).toBe(true);
   });
 
+  test("detects OpenCode's short Go usage limit in stderr and structured logs", () => {
+    expect(detectUsageLimit("", "Error: Go usage limit exceeded\n").limited).toBe(true);
+    expect(detectUsageLimit("", "Error: OpenCode Go usage limit reached\n").limited).toBe(true);
+    const log =
+      'timestamp=2026-11-09T23:00:05.176Z level=ERROR run=abc message="Failed to drain Session" cause="AI.Error: Go usage limit exceeded\\n    at SessionStep.attempt"';
+    expect(detectUsageLimit("", log).limited).toBe(true);
+    const currentLog =
+      'timestamp=2026-11-11T02:25:06.773Z level=ERROR run=abc message="Failed to drain Session" cause="AI.Error: OpenCode Go usage limit reached\\n    at SessionStep.attempt"';
+    expect(detectUsageLimit("", currentLog).limited).toBe(true);
+    expect(detectUsageLimit("", 'throw new Error("Go usage limit exceeded");').limited).toBe(false);
+  });
+
+  test("reports the quota period a limit names, with or without a reset time", () => {
+    expect(detectUsageLimit("", "Error: OpenCode Go usage limit reached (monthly)\n").period).toBe(
+      "monthly",
+    );
+    const weekly = detectUsageLimit("", "Weekly usage limit reached. It will reset in 3 days.");
+    expect(weekly.period).toBe("weekly");
+    expect(weekly.resetsAt).toBe("3 days");
+    expect(detectUsageLimit("", "Claude usage limit reached").period).toBeUndefined();
+  });
+
+  test("detects OpenCode's Go usage limit with a window and Extra Usage upsell", () => {
+    const upsell =
+      "To keep going now, turn on Extra Usage or upgrade to Go Plus at https://opencode.ai/console/wrk_x/go.";
+    const stderr = `Error: OpenCode Go usage limit reached (monthly, resets in 6d 23h). ${upsell}\n`;
+    const result = detectUsageLimit("", stderr);
+    expect(result.limited).toBe(true);
+    expect(result.resetsAt).toBe("6d 23h");
+    expect(resetHintToMs(result.resetsAt, 0)).toBe((6 * 24 + 23) * 3_600_000);
+
+    // The structured "Failed to drain Session" cause carries the same text.
+    const log = `timestamp=2026-11-13T05:06:00.487Z level=ERROR run=a0c283f5 message="Failed to drain Session" cause="AI.Error: OpenCode Go usage limit reached (monthly, resets in 7d). ${upsell}\\n    at MQ (/$bunfs/root/chunk.js:3:3547)"`;
+    const structured = detectUsageLimit("", log);
+    expect(structured.limited).toBe(true);
+    expect(resetHintToMs(structured.resetsAt, 0)).toBe(7 * 86_400_000);
+
+    // Source that merely quotes the message is still not a live diagnostic.
+    expect(
+      detectUsageLimit("", 'throw new Error("OpenCode Go usage limit reached (monthly)");').limited,
+    ).toBe(false);
+  });
+
   test("extracts a usage limit from OpenCode's printed structured log", () => {
     const out =
       'timestamp=2026-08-26T14:10:30.957Z level=ERROR run=be653f66 message="stream error" providerID=opencode-go modelID=glm-5.3 error.error="AI_APICallError: 5-hour usage limit reached. Resets in 4hr 9min."';
@@ -376,6 +455,63 @@ describe("detectUsageLimit", () => {
     expect(result.limited).toBe(true);
     expect(result.resetsAt).toBe("4hr 9min");
     expect(result.matchedLine).toBe(out);
+  });
+
+  test("extracts a usage limit from OpenCode v2's message field", () => {
+    const out =
+      'timestamp=2026-08-26T14:10:30.957Z level=ERROR run=abc123 message="5-hour usage limit reached. Resets in 4hr 9min."';
+    const result = detectUsageLimit("", out);
+    expect(result.limited).toBe(true);
+    expect(result.resetsAt).toBe("4hr 9min");
+  });
+
+  test("ignores a structured log line quoted inside source the agent printed", () => {
+    // Regression: a worker run was killed with a fake 4-hour usage window after
+    // the agent ran `sed` over this repository's own usage-limit fixture. The
+    // quoted string embeds a log line that used to be parsed as a live one.
+    const quotedFixture =
+      '  \'timestamp=2026-08-26T14:10:30.957Z level=ERROR message="stream error" ' +
+      'error.error="AI_APICallError: 5-hour usage limit reached. Resets in 4hr 9min."\';';
+    expect(detectUsageLimit(quotedFixture, "").limited).toBe(false);
+    expect(detectUsageLimit("", quotedFixture).limited).toBe(false);
+  });
+
+  test("ignores a structured log line embedded in printed source", () => {
+    const sourceLine =
+      "const OPENCODE_LIMIT_LOG = 'timestamp=2026-08-26T14:10:30.957Z level=ERROR " +
+      'message="stream error" error.error="AI_APICallError: 5-hour usage limit reached. ' +
+      "Resets in 4hr 9min.\"';";
+    expect(detectUsageLimit(sourceLine, "").limited).toBe(false);
+  });
+
+  test("still detects a structured log line that follows other logfmt fields", () => {
+    // Only the leading fields are anchored; a real logger line whose `level=`
+    // is preceded by another field must keep working.
+    const out =
+      'level=ERROR run=be653f66 message="stream error" error.error="AI_APICallError: 5-hour usage limit reached. Resets in 4hr 9min."';
+    const result = detectUsageLimit(out, "");
+    expect(result.limited).toBe(true);
+    expect(result.resetsAt).toBe("4hr 9min");
+  });
+
+  test("extracts a usage limit from OpenCode v2's --format json error envelope", () => {
+    const out = JSON.stringify({
+      type: "error",
+      timestamp: 1_787_000_000_000,
+      sessionID: "ses_abc",
+      error: {
+        type: "unknown",
+        message: "Usage limit reached. It will reset in 15 minutes.",
+      },
+    });
+    const result = detectUsageLimit(out, "");
+    expect(result.limited).toBe(true);
+    expect(result.resetsAt).toBe("15 minutes");
+  });
+
+  test("ignores a non-error JSON object the agent printed", () => {
+    const out = JSON.stringify({ type: "tool", message: "usage limit reached" });
+    expect(detectUsageLimit(out, "").limited).toBe(false);
   });
 
   test("detects provider 'Rate limit reached' JSON error", () => {

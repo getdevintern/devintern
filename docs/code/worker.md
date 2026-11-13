@@ -1,10 +1,10 @@
 ---
 title: "Worker Daemon"
 sidebarLabel: "Worker"
-description: "Run devintern as a single long-running worker that reacts to PR reviews and tracker changes"
+description: "Use when running DevIntern as a long-running worker that picks up tracker tasks, handles PR reviews and CI failures, and runs as a service."
 section: "Automation"
 order: 2
-dateModified: 2026-10-16
+dateModified: 2026-11-12
 ---
 
 # Worker Daemon
@@ -54,7 +54,7 @@ worker can safely serve multiple teams, repositories, and credentials. See
 
 Put recurring work in `workspace.toml`. Set `repo` when the workspace has multiple repositories; it is optional for a one-repo workspace:
 
-To configure this through a coding agent, use the [devintern-workspace skill](https://github.com/getdevintern/devintern/tree/main/skills/devintern-workspace). For example: "Add a weekly dependency-health automation for web-app, Mondays at 09:00 in the worker host's timezone, opening a PR for at most one verified upgrade." The skill covers prompt writing, schedule and PR settings, validation, and checking that the running worker accepted the change.
+To configure this through a coding agent, use the [devintern-workspace skill](https://github.com/getdevintern/devintern/tree/main/plugins/devintern/skills/devintern-workspace). For example: "Add a weekly dependency-health automation for web-app, Mondays at 09:00 in the worker host's timezone, opening a PR for at most one verified upgrade." The skill covers prompt writing, schedule and PR settings, validation, and checking that the running worker accepted the change.
 
 ```toml
 [[automations]]
@@ -117,6 +117,8 @@ make no changes and report that main is already green."""
 ```
 
 The equivalent CLI flag is `--allow-no-changes` for a one-off run. Scheduled occurrences receive it automatically from the automation setting.
+
+Automation occurrences always skip the clarity (feasibility) check, as if run with `--skip-clarity-check`. The prompt is operator-authored rather than a tracker ticket, so the extra assessment would only cost an agent call per run.
 
 Configuration is validated on load; while the worker runs it revalidates edits to `workspace.toml` automatically (SIGHUP forces a reload) — see [Workspaces → Editing workspace.toml while running](./workspaces.md#editing-workspace.toml-while-running). A non-boolean `open_pr` is rejected like every other invalid `[[automations]]` field, and the last valid config keeps serving. Automations are a valid event source, so `devintern worker` stays running without a task query when at least one automation entry is configured (disabled entries are validated but not scheduled).
 
@@ -217,13 +219,45 @@ cron = "0 10 * * 3"
 query = "sprint in openSprints() AND \"Story Points\" is EMPTY"
 ```
 
-Each entry needs a unique `id`, boolean `enabled`, non-empty `query`, and exactly one of `cron` or `interval`. Omitting the table (or leaving every entry disabled) changes nothing: estimation is simply off, and `[defaults].task_query` is never estimated as a side effect. The workspace tracker must support estimation (Jira, Linear, Azure DevOps, Asana, GitHub comment-only); Trello/markdown workspaces fail at startup with a clear error. `worker init` does not ask about estimations — add tables by hand.
+Each entry needs a unique `id`, boolean `enabled`, non-empty `query`, and exactly one of `cron` or `interval`. Omitting the table (or leaving every entry disabled) changes nothing: estimation is simply off, and `[defaults].task_query` is never estimated as a side effect. Entries without `team` use the workspace tracker, which must support estimation (Jira, Linear, Azure DevOps, Asana via a custom field; GitHub and GitLab post comment-only estimates); Trello/markdown workspaces fail at startup with a clear error. `worker init` does not ask about estimations — add tables by hand.
 
 Estimation entries accept the same optional `harness`, `model`, and `effort` overrides as `[[automations]]`, so a scheduled sweep can run on a cheap model — see [Choosing the agent per schedule](#choosing-the-agent-per-schedule). Because estimation never touches a repository, these fields do not require (and are unaffected by) a `repo`.
 
 Estimation entries live-reload with `workspace.toml`: added and re-enabled entries schedule their next future occurrence, changed schedules reset their cursor, query edits apply to the next sweep, and removed entries stop scheduling without interrupting a sweep already in progress.
 
 When an entry comes due the worker runs one-shot `devintern --estimate --query "<query>"` from the workspace home. That path keeps all of the interactive behavior: tickets younger than 24 hours are skipped, already-estimated tickets are skipped unless the ticket changed since the estimate, changed tickets are re-estimated with the estimate comment updated in place, points are written to the tracker field, and usage-limit aborts exit cleanly so the next occurrence retries. Each sweep is recorded with its own `estimate` origin (plus the schedule id) in the [dashboard](./dashboard.md) — it never shows up as a scheduled implement run.
+
+### Per-team estimations
+
+In a [multi-team workspace](./workspaces.md#multiple-teams-and-tracker-boards), add `team = "<team name>"` to run a sweep against that team's tracker and credentials instead of `[defaults].tracker`. For example, a workspace with Jira defaults and a GitHub Issues team can estimate both:
+
+```toml
+[defaults]
+tracker = "jira"
+
+[[teams]]
+name = "oss"
+tracker = "github"
+task_query = "label:devintern"
+env_file = "teams/oss.env"   # GITHUB_TOKEN, GITHUB_REPO=acme/sdk
+
+[[estimations]]
+id = "jira-groom"            # no team: [defaults].tracker + shared .env
+enabled = true
+cron = "0 9 * * 1-5"
+query = "status = 'To Do' AND labels IN (NeedsEstimate)"
+
+[[estimations]]
+id = "oss-groom"
+enabled = true
+team = "oss"
+interval = "6h"
+query = "label:needs-estimate"
+```
+
+A team-scoped sweep gets the same environment layering as that team's task runs: the workspace `.env`, then the team's `env_file`, then its inline `[teams.env]`, with `TASK_TRACKER` pinned to the team's tracker. The `query` uses that tracker's query language. Run records are attributed to the team in the dashboard. A team's fixed `repo` is ignored, because estimation is tracker-only and never touches a repository. GitHub Issues teams must set `GITHUB_REPO` in their env, which the worker already requires at startup.
+
+The worker refuses to start when `team` names no `[[teams]]` entry, or when that team's tracker can't estimate (Trello, markdown). Entries with `team` don't need `[defaults].tracker`. Entries without `team` keep the existing behavior and still require it. You can add, change, or remove `team` on an entry with a live reload; the next occurrence uses the new team.
 
 ### Serialization
 
@@ -247,13 +281,13 @@ How a poll cycle works:
 3. Each ready task is picked up once per change: the worker remembers the task's last seen update stamp, so a task re-enters only when it is updated again.
 4. Each ready task is handed to the workspace's admission supervisor and runs through the normal pipeline (branch, implementation, PR, tracker updates), with `[defaults].worker_task_args` controlling the flags (default `--create-pr`). Polling keeps running while tasks are in flight, so a task created during a run is picked up on the next tick and fills a free concurrency slot instead of waiting for the current batch to finish.
 
-Cursors persist in `.devintern-code/queue.db`; after a restart the worker resumes where it left off instead of starting from "now".
+Cursors persist in `~/.devintern/state/queue.db`; after a restart the worker resumes where it left off instead of starting from "now".
 
-Polling is available for all seven trackers: Jira, Linear, GitHub Issues, Azure DevOps, Asana, Trello, and markdown. Trello polling uses the board actions feed and requires `TRELLO_DEFAULT_BOARD_ID`; Asana polling uses the Events API and requires `ASANA_DEFAULT_PROJECT_GID`. A folder of markdown tasks is the fastest way to try the worker: no tracker account needed. Point `[defaults].tracker` at `markdown`, set `MARKDOWN_TASKS_DIR` in the workspace `.env`, and put the ready-tasks filter in `[defaults].task_query`.
+Polling is available for all eight trackers: Jira, Linear, GitHub Issues, GitLab Issues, Azure DevOps, Asana, Trello, and markdown. Trello polling uses the board actions feed and requires `TRELLO_DEFAULT_BOARD_ID`; Asana polling uses the Events API and requires `ASANA_DEFAULT_PROJECT_GID`; GitLab Issues polling requires `GITLAB_TOKEN` and `GITLAB_PROJECT`. A folder of markdown tasks is the fastest way to try the worker: no tracker account needed. Point `[defaults].tracker` at `markdown`, set `MARKDOWN_TASKS_DIR` in the workspace `.env`, and put the ready-tasks filter in `[defaults].task_query`.
 
 ### Delivery failures
 
-A run that cannot commit its implementation (including an agent that produces no changes), fails pre-push validation, or cannot push its branch is recorded as failed. It does not proceed to PR/MR creation or mark the task as completed. Agent process failures also stop delivery, even if the agent left local edits. Batch CLI exit status alone is not a per-task success signal; inspect the recorded run outcome in the [dashboard](./dashboard.md).
+A run that leaves no implementation to publish — no uncommitted changes and no commits ahead of the PR target — fails, as does a run that fails pre-push validation or cannot push its branch. If the agent committed its own changes on the feature branch, the worker verifies and publishes those commits instead of requiring an additional working-tree commit. A failed run does not proceed to PR/MR creation or mark the task as completed. Agent process failures also stop delivery, even if the agent left local edits. Batch CLI exit status alone is not a per-task success signal; inspect the recorded run outcome in the [dashboard](./dashboard.md).
 
 ### Re-running a task
 
@@ -265,17 +299,17 @@ When a run cannot finish, devintern posts an "Implementation Incomplete" comment
 
 The gate ignores the automation's own comments: posting the failure comment (and moving the ticket back) updates the tracker's timestamp, but neither of those counts as a change, so a failed ticket sits still until a human edits it. This applies to every failure kind — incomplete implementations as well as crash, interrupt, and usage-limit comments.
 
-Any of those actions bumps the ticket's update stamp, so the worker picks it up on the next change detection and the retry runs. On a retry the agent is told which attempt this is, why the previous attempt stopped, and which comments are new since then, so new guidance takes priority. When the previous attempt left complete recorded state — a branch plus its own implementation report — the retry **picks up where it stopped** (session pickup): the recorded branch is checked out and the prior report is handed to the agent so it inherits already-landed work instead of redoing it. When that state is incomplete (no branch, no report, or the branch is gone), the retry starts fresh and gets its own attempt branch (`feature/{key}`, then `feature/{key}-attempt-2`, and so on).
+Any of those actions bumps the ticket's update stamp, so the worker picks it up on the next change detection and the retry runs. On a retry the agent is told which attempt this is, why the previous attempt stopped, and which comments are new since then, so new guidance takes priority. When the previous attempt left complete recorded state — a branch with commits ahead of its base plus its own implementation report — the retry **picks up where it stopped** (session pickup): the recorded branch is checked out and the prior report is handed to the agent so it inherits already-landed work instead of redoing it. A report-less branch is still resumable when a commit probe confirms it has commits ahead of its base, which covers legacy and interrupted runs that delivered work before the implementation report was saved. A report recorded by an implementation stage that failed before delivery is held to the same commit check, so it cannot make an empty branch resumable. When the branch is gone, has no commits to resume, or cannot be verified, the retry starts fresh and gets its own attempt branch (`feature/{key}`, then `feature/{key}-attempt-2`, and so on).
 
 If a run completes but you want a different result, move the ticket back to your to-do status (optionally with a comment describing what to change) and it re-runs the same way.
 
 Pickup only inherits runs from the same tracker, team, repository, and run origin. A branch held by a user-owned checkout is left untouched; only disposable worktrees inside the worker's repository worktree directory can be removed for pickup, and Git's removal refusals are respected. If checkout cannot be resumed, the new attempt's prompt describes a fresh run. If the inherited implementation is already committed and needs no new edits, delivery still runs configured verification and hooks before publishing those commits.
 
-Retry bookkeeping lives in `.devintern-code/queue.db` next to the worker's cursors. For local one-off runs, `devintern TASK-123 --force` re-runs a task even if nothing on the ticket changed; do not put `--force` in `[defaults].worker_task_args`, since that would disable the gate for every polled task.
+Retry bookkeeping lives in `~/.devintern/state/queue.db` next to the worker's cursors. For local one-off runs, `devintern TASK-123 --force` re-runs a task even if nothing on the ticket changed; do not put `--force` in `[defaults].worker_task_args`, since that would disable the gate for every polled task.
 
 ### Tickets already actioned after a PR
 
-Once a ticket's pull request is created the worker records it as **actioned** in `.devintern-code/queue.db` and keeps it out of the sweep until the ticket genuinely changes — even when it still matches `[defaults].task_query`. This is what stops a label-based tracker (GitHub, GitLab) from re-implementing the same open issue in a loop, and it works for every polled tracker.
+Once a ticket's pull request is created the worker records it as **actioned** in `~/.devintern/state/queue.db` and keeps it out of the sweep until the ticket genuinely changes — even when it still matches `[defaults].task_query`. This is what stops a label-based tracker (GitHub, GitLab) from re-implementing the same open issue in a loop, and it works for every polled tracker.
 
 If the project configures `prStatus` in `.devintern-code/settings.json`, the worker also moves the ticket to that status/label first. The local marker is recorded even when no `prStatus` is set (the worker logs a warning suggesting one), and even when the transition fails — a missing label, missing permission, or transient API error never makes the worker lose track of the ticket or fail the run that just created the PR.
 
@@ -297,7 +331,7 @@ The worker now bridges that gap on startup. Before any new tickets are acquired,
 
 Recovery respects the retry gate: the requeued ticket is not re-run on restart (no duplicate execution). It sits in To Do like any other ticket whose last attempt failed, and runs again when the ticket changes — an edited description, a new comment, or `--force`.
 
-**Session pickup.** When an interrupted run left complete recorded state — a branch and its own implementation report — the worker does not post a failure and restart from scratch. It queues a pickup retry (`--force`) that reuses the same branch and hands the prior report to the agent, so the work already done is inherited rather than redone. Incomplete state (no branch, no report, or a branch that no longer exists) falls back to the normal failure-and-requeue path above; the recorded run is authoritative, and a ticket a human has already moved out of In Progress is never resumed.
+**Session pickup.** When an interrupted run left complete recorded state — a branch with landed commits and its own implementation report — the worker does not post a failure and restart from scratch. It queues a pickup retry (`--force`) that reuses the same branch and hands the prior report to the agent, so the work already done is inherited rather than redone. A report-less branch is also resumable when the commit probe confirms landed work ahead of its base, which recovers legacy and interrupted runs that finished implementation before the report was persisted; a report whose implementation stage failed before delivery needs that same commit confirmation. Incomplete state (no branch, a branch that no longer exists, or a branch with no verifiable commits to resume) falls back to the normal failure-and-requeue path above; the recorded run is authoritative, and a ticket a human has already moved out of In Progress is never resumed.
 
 Two guards keep the recovery from making noise or causing harm:
 
@@ -312,86 +346,17 @@ The worker log is the diagnostic. Look for `[poll:<tracker>]` (for Jira, `[poll:
 
 - `📌 picking up KEY` — it was claimed on this tick.
 - `⏳ KEY deferred; will retry next poll` — the target repository was busy, so the task was not attempted and its claim remains pending automatically.
+- `⏭️ KEY skipped (previous attempt reported incomplete; ticket unchanged)` — the retry gate declined the unchanged ticket, so no run started and no PR was attempted. Edit the description or comment to unlock a retry (see [Re-running a task](#re-running-a-task)); the ticket stays deduped until it changes.
 - `⏭️ skipping KEY (already processed at this update)` — this ticket was already claimed at this version. Edit or comment on it so its update stamp changes, then wait for the next change detection.
 - `⏭️ skipping KEY (already actioned; no change since the PR)` — a PR was already created for this ticket. Edit its summary/description, re-open it, or change its labels to re-arm it; see [Tickets already actioned after a PR](#tickets-already-actioned-after-a-pr).
 - `have no update stamp from the tracker` — search results are missing `updated`, so the worker cannot tell versions apart and will not retry after the first attempt. Restarting the worker does not help; a one-off `devintern KEY` still runs the ticket by hand.
-- No tracker pickup/skip lines at all — nothing has changed since the last cursor in `.devintern-code/queue.db`. A ticket last edited before that cursor is not re-evaluated until something on the tracker updates.
+- No tracker pickup/skip lines at all — nothing has changed since the last cursor in `~/.devintern/state/queue.db`. A ticket last edited before that cursor is not re-evaluated until something on the tracker updates.
 
-One exception: an edit that arrives while that ticket's run is still in flight advances the cursor but is remembered durably in `.devintern-code/queue.db` and re-admitted once the run settles — including after a worker crash or restart — so the edit is not lost. A task deferred because its repository was busy is tracked the same way and retried on the next poll.
+One exception: an edit that arrives while that ticket's run is still in flight advances the cursor but is remembered durably in `~/.devintern/state/queue.db` and re-admitted once the run settles — including after a worker crash or restart — so the edit is not lost. A task deferred because its repository was busy is tracked the same way and retried on the next poll.
 
 ## Ad-hoc tasks (`worker add`)
 
-To dispatch work from a coding agent, install the [devintern-delegate skill](agent-skills.md). It guides repository selection, self-contained task briefs, idempotent submission, and bounded waiting for results.
-
-Not every task comes from a tracker. `devintern worker add` enqueues a one-off
-task against a specific workspace repo, so dependency bumps, post-deploy fixes,
-generated docs, and CI/cron/agent follow-ups run through the full pipeline
-(checkout, agent, PR, retries) without polluting a tracker or driving the CLI by
-hand:
-
-```bash
-devintern worker add --repo backend --title "Bump the lockfile"
-devintern worker add --repo backend --title "Fix flaky checkout test" \
-  --body-file - < context.md
-devintern worker add --repo web --title "Regenerate API docs" \
-  --idempotency-key nightly-docs --json
-```
-
-The task is materialized as a local markdown prompt in `~/.devintern/injected/`
-and a durable row in the central DB, then picked up by the running worker on its
-next poll — no `[[routing.rules]]` entry is needed because the row names its repo
-explicitly. Tasks are attributed to the `local:add` source in worker logs, run
-records, and the dashboard, and start on a `feature/local-<slug>` branch (the
-`local-` prefix cannot collide with a tracker key).
-
-| Option                     | Description                                                                                                                     |
-| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `--repo <name>`            | `[[repos]]` name to target (default: the only repo, else required)                                                              |
-| `--title <text>`           | Task title (required)                                                                                                           |
-| `--body <text>`            | Task description                                                                                                                |
-| `--body-file <path>`       | Read the description from a file (`-` reads stdin)                                                                              |
-| `--idempotency-key <key>`  | Dedupe key; while a task with the key is pending/running a retry reuses it, and once it settles the key starts a new occurrence |
-| `--wait`                   | Block until the run finishes; exit `0` on success, `1` on failure                                                               |
-| `--wait-timeout <seconds>` | Give up waiting after this long (default 21600 = 6h; `0` waits without a limit)                                                 |
-| `--json`                   | Emit a single `{ id, taskKey, repo, status, deduplicated }` object on stdout (failed `--wait` runs add an `error` field)        |
-| `--workspace <path>`       | Use this `workspace.toml` (default `~/.devintern/workspace.toml`)                                                               |
-
-Behavior to expect:
-
-- **Durable.** Enqueue writes to `queue.db`, so a task survives worker restarts
-  and runs on the next poll. If no worker is running the task is still queued —
-  `worker add` says so — and `--wait` refuses to block.
-- **Non-interactive.** The command returns after enqueue. `--wait` is the
-  scripting hook: it polls the row and exits with the run's status. It fails fast
-  if the worker disappears, and exits non-zero with a clear message once
-  `--wait-timeout` (default 6 hours) elapses without the task settling — a live
-  worker that keeps deferring the task (a usage-limit pause, a permanently
-  saturated repo) can no longer make `--wait` hang forever. Pass
-  `--wait-timeout 0` to wait without a limit.
-- **Machine-readable.** With `--json`, stdout carries exactly one JSON object;
-  every human/status line (license notices, "Enqueued…", the `--wait` progress
-  line) goes to stderr, so `devintern worker add … --json | jq .` parses cleanly.
-  `--wait --json` still emits a single object — the settled state, or a
-  `status: "failed"` object with an `error` on a timeout/worker-stop/inconclusive
-  wait — not an interim pending object plus a final one. Without `--json`,
-  diagnostics and the result line print to stdout as usual.
-- **Idempotency.** A task carrying `--idempotency-key` is reused (reported as
-  `deduplicated`) only while an earlier task with that key is still pending or
-  running, so a retried automation cannot create a duplicate. Once that task
-  settles, enqueuing the same key starts a new task — a fixed key like
-  `--idempotency-key nightly-docs` therefore drives a recurring job without
-  changing the key each run.
-- **Licensing.** Enqueuing automation work runs the same entitlement check as
-  the daemon (paid automation license, or the no-card Worker Pilot).
-- **Quiet hours.** Injected tasks are operator-initiated, so they bypass working
-  windows like `devintern worker run-now`; no extra `run-now` is required.
-- **PR behavior.** Injected runs inherit `[defaults].worker_task_args` (default
-  `--create-pr`), so they open a pull request just like tracker tasks.
-
-`--repo` is optional only in a one-repo workspace. With several repos, omitting
-it fails and lists the valid names; an unknown `--repo` fails the same way. An
-empty title, a body over 20,000 characters, and a missing `--body-file` are
-rejected before anything is written.
+Not every task comes from a tracker. `devintern worker add --repo <name> --title "..."` enqueues a durable one-off task against a registered workspace repo, and the running worker takes it through the full pipeline (checkout, agent, PR, retries) on its next poll. Coding agents can use it to delegate agreed follow-ups through the [devintern-delegate skill](agent-skills.md). See [Delegate Tasks to the Worker](delegation.md) for prerequisites, choosing `--repo`, writing a self-contained brief, the full option table, JSON output, idempotency, `--wait`, and `--resume`.
 
 ## Working windows (quiet hours)
 
@@ -425,10 +390,10 @@ worker_task_args = "--create-pr"
 poll_interval = 60
 ```
 
-| Option               | Description                                                       |
-| -------------------- | ----------------------------------------------------------------- |
-| `--workspace <path>` | Use this `workspace.toml` (default `~/.devintern/workspace.toml`) |
-| `-v, --verbose`      | Verbose logging                                                   |
+| Option               | Description                                                                                     |
+| -------------------- | ----------------------------------------------------------------------------------------------- |
+| `--workspace <path>` | Use this `workspace.toml` (default `~/.devintern/workspace.toml`, or `DEVINTERN_WORKSPACE_DIR`) |
+| `-v, --verbose`      | Verbose logging                                                                                 |
 
 Unattended automation is exactly where sandboxing the agent matters most: set `AGENT_SANDBOX=auto` in the workspace `.env` to confine agent runs to the project workspace. See [Sandboxing the Agent](./configuration.md#sandboxing-the-agent) for providers and setup.
 
@@ -454,7 +419,9 @@ The opt-out is a live setting: removing it or flipping it back on applies withou
 
 ## Review feedback on the agent's PRs
 
-In polling mode the worker also watches the pull requests it created (no webhook needed). When a human requests changes or leaves new inline review comments on one of the agent's own PRs, the worker addresses the feedback automatically; no mention is required on its own PRs. Closed and merged PRs leave the watch list on their own: the watch list is reconciled with GitHub on every poll cycle, so PRs merged or closed outside the worker drop out of the open count within one poll. A GitHub 404 leaves the PR watched and warns about repository access, because GitHub can return 404 for an inaccessible PR that is still open.
+In polling mode the worker also watches the pull requests it created (no webhook needed). When a human requests changes or leaves new inline review comments on one of the agent's own PRs, the worker addresses the feedback automatically; no mention is required on its own PRs. Closed and merged PRs leave the watch list on their own: the watch list is reconciled with GitHub on every poll cycle, so PRs merged or closed outside the worker drop out of the open count within one poll. A GitHub 404 leaves the PR watched and warns about repository access, because GitHub can return 404 for an inaccessible PR that is still open. Rate limits (429, plus GitHub's 403 rate-limit responses), 5xx responses, and transport failures (DNS/connection errors) are transient: `fetchWithRetry` retries 429/5xx and transport errors with backoff, a 403 rate limit is retried on the next poll, and a poll that still fails is logged as a warning instead of being reported to Sentry, because the next tick retries it.
+
+If a run fails after the agent opened a PR itself (for example by running `gh pr create`), the worker adopts that open PR for the worktree's branch: it applies `pr_labels` and registers the PR in the watch list. The run still reports failed. This failure-path adoption currently looks up GitHub PRs only.
 
 The watch list is scoped to repos listed in `workspace.toml`. Registry entries for any other repo — typically left behind when a repository is renamed or transferred — are unwatched automatically at startup instead of being polled (and failing auth) forever.
 
@@ -468,7 +435,7 @@ Success is verified, not assumed: after a push the resolver re-fetches the PR (a
 
 Transient push problems recover on their own: a rejection caused by concurrent forward movement (someone pushed to the branch while the agent was resolving) triggers a bounded refresh-and-retry that rebuilds the merge on top of the new commits, keeping the eventual push a fast-forward. Rollbacks or history rewrites are left alone and deferred instead.
 
-This applies only to the agent's own PRs (the same watch list as review polling). Each base/head SHA pair is a durable event in `.devintern-code/queue.db`; new commits on the PR branch open a fresh event, so an exhausted attempt is retried after the next push. Failures retry up to `WEBHOOK_MAX_RETRIES` (default 3), including across worker restarts, waiting out an exponential backoff between attempts (30s after the first failure, doubling up to 10 minutes) so persistent failures do not hammer the API on every poll tick. Before acting, the worker requires the PR head SHA to remain unchanged for `WORKER_BASE_SYNC_QUIET_SECONDS` (default 30) and then re-fetches both SHAs. Recent or concurrent pushes defer the run without consuming an attempt; if a run defers several times in a row, the event is given up until the head or base moves again. GitHub's PR API can report an outdated `base.sha` for a while, so the resolver always merges the actual fetched tip of the base branch rather than trusting that field. Each resolve run is bounded by `WORKER_RESOLVE_TIMEOUT_SECONDS` (default 1800; `0` disables) — a hung resolver subprocess is killed and counted as a failed attempt, and runs left `in_progress` by a crashed or killed worker are marked failed at the next startup. The same merge logic is available manually for any PR via `devintern resolve-conflicts <pr-url>`; manual runs exit non-zero with a clear message when the fix could not be published.
+This applies only to the agent's own PRs (the same watch list as review polling). Each base/head SHA pair is a durable event in `~/.devintern/state/queue.db`; new commits on the PR branch open a fresh event, so an exhausted attempt is retried after the next push. Failures retry up to `WEBHOOK_MAX_RETRIES` (default 3), including across worker restarts, waiting out an exponential backoff between attempts (30s after the first failure, doubling up to 10 minutes) so persistent failures do not hammer the API on every poll tick. Before acting, the worker requires the PR head SHA to remain unchanged for `WORKER_BASE_SYNC_QUIET_SECONDS` (default 30) and then re-fetches both SHAs. Recent or concurrent pushes defer the run without consuming an attempt; if a run defers several times in a row, the event is given up until the head or base moves again. GitHub's PR API can report an outdated `base.sha` for a while, so the resolver always merges the actual fetched tip of the base branch rather than trusting that field. Each resolve run is bounded by `WORKER_RESOLVE_TIMEOUT_SECONDS` (default 1800; `0` disables) — a hung resolver subprocess is killed and counted as a failed attempt, and runs left `in_progress` by a crashed or killed worker are marked failed at the next startup. The same merge logic is available manually for any PR via `devintern resolve-conflicts <pr-url>`; manual runs exit non-zero with a clear message when the fix could not be published.
 
 #### Scheduled conflict resolution
 
@@ -500,6 +467,8 @@ Pending, failing, and not-yet-reported CI is checked at the configured workspace
 
 Relay-backed workspaces perform these API calls with the local `GITHUB_TOKEN`. A fine-grained token—or the customer-owned App used by a no-relay worker—needs **Actions: Read** and **Commit statuses: Read** in addition to the normal PR and contents permissions. Existing App installations must be re-approved after adding permissions. No extra webhook event subscription is required because CI is polled. GitHub does not currently expose its separate Checks permission for fine-grained PATs, so check-run-only CI providers are not watched unless they also publish a commit status; GitHub Actions is fully supported through the Actions API.
 
+A rejected or missing credential (HTTP 401, or no `GITHUB_TOKEN` at all) and a credential-scoped permission denial (HTTP 403 with a GitHub credential message such as `Resource not accessible`) are throttled per affected repository: the CI watcher logs at most one actionable warning per hour instead of repeating the same failure on every poll. The warning names the PR and explains whether the credential must be renewed or the missing CI-read permissions granted (Actions: Read and Commit statuses: Read). CI auto-fix resumes automatically once the credential can read CI again; the watcher logs one recovery line after the CI endpoints succeed (a metadata-only PR fetch does not count as recovery). In fleet mode each repository has its own token, so one repository's credential failure never hides another's in either the CI watcher or review polling. Other 403 responses — rate limits, archived read-only repositories, locked issues, and blocked repositories — keep their normal per-tick error reporting and retry path.
+
 ## Mention the bot on any PR
 
 The worker also reacts to mentions on pull requests it did not create. When a teammate writes a comment like `@devintern address the review feedback` on any PR in the repository, the worker picks it up on the next poll and handles it through the same pipeline. Detection is a repository-wide sweep of new comments (two requests per interval, regardless of how many PRs are open), so mentions work without any webhook setup.
@@ -515,7 +484,7 @@ In the standard setup, pair the workspace with the relay and install the central
 
 ## How events are handled
 
-- Events are persisted to a local SQLite queue (`.devintern-code/queue.db`) before processing, so a crash or restart never loses accepted work.
+- Events are persisted to a local SQLite queue (`~/.devintern/state/queue.db`) before processing, so a crash or restart never loses accepted work.
 - Runs interrupted by a dead worker are recovered on startup: their tickets get the failure comment and move back to To Do before new work is picked up.
 - Duplicate webhook deliveries are detected by GitHub's delivery id and skipped.
 - Review feedback is processed before new task pickup: a human waiting on feedback beats a ticket that can wait a minute.
@@ -544,7 +513,7 @@ Re-running `worker init` detects an existing DevIntern-managed service and offer
 loginctl enable-linger
 ```
 
-Running `devintern worker` in a terminal remains fully supported and is the only option on Windows, which has no generated service definition. For pm2 and tunnel setups (advanced webhook mode), see the [GitHub Integration guide](./github-integration.md). If you want the resident daemon idle during parts of the day, configure [working windows (quiet hours)](#working-windows-quiet-hours) instead of wrapping the CLI in cron.
+Running `devintern worker` in a terminal remains fully supported and is the only option on Windows, which has no generated service definition. For pm2 and tunnel setups (advanced webhook mode), see the [GitHub Webhooks and PR Automation guide](./github-integration.md). If you want the resident daemon idle during parts of the day, configure [working windows (quiet hours)](#working-windows-quiet-hours) instead of wrapping the CLI in cron.
 
 ## Worker Pilot and licenses
 

@@ -13,7 +13,7 @@
 
 import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { EventEmitter } from "node:events";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -23,6 +23,7 @@ import type { ReviewFeedback } from "../src/types/auto-review";
 import type { PipelineConfig } from "../src/types/settings";
 import { registerStep } from "../src/lib/task/pipeline-registry";
 import { runContext } from "../src/lib/cli/context";
+import { HarnessUnavailableError } from "../src/lib/agent/harness-startup";
 
 // --- snapshot real modules before any mock.module override ---
 const realHarness = { ...(await import("@devintern/agent-harness")) };
@@ -62,16 +63,20 @@ let tracker: {
   transitionStatus: ReturnType<typeof mock>;
   postComment: ReturnType<typeof mock>;
   extractDescriptionText: () => string;
+  getTask: ReturnType<typeof mock>;
 };
 let commitResult: { success: boolean; message: string; hookError?: string };
 let commitResults: Array<typeof commitResult>;
 let commitCalls: number;
 let inheritedCommitCount: number;
+let currentBranch: string;
+let protectedBranch: boolean;
+let headReads: number;
+let headMovedDuringRun: boolean;
 let pushResult: { success: boolean; message: string; hookError?: string };
 let hookResult: { success: boolean; message: string; hookError?: string };
 let hookCalls: number;
 let autoReviewCalls: number;
-let planPath: string | null;
 let verifyVerdicts: ReviewFeedback[];
 let verifyCalls: number;
 let deliveryEvents: string[];
@@ -81,6 +86,11 @@ let pipelineConfig: PipelineConfig | undefined;
 let prResult: { success: boolean; url?: string; message?: string; warnings?: string[] };
 let prCreateOptions: { artifactComment?: string } | undefined;
 let postImplementationCommentMock: ReturnType<typeof mock>;
+let recordedStages: Array<{ stage: string; data: unknown }>;
+let autoReviewError: Error | undefined;
+
+const HEAD_BEFORE = "1111111111111111111111111111111111111111";
+const HEAD_AFTER = "2222222222222222222222222222222222222222";
 
 class FakeChild extends EventEmitter {
   stdout = new PassThrough();
@@ -135,10 +145,21 @@ mock.module("../src/lib/utils", () => ({
       deliveryEvents.push("commit");
       return commitResults.shift() ?? commitResult;
     },
-    getCurrentBranch: async () => "feature/task-1",
+    getCurrentBranch: async () => currentBranch,
     gitRefExists: async () => true,
-    executeGitCommand: async () => ({ success: true, output: String(inheritedCommitCount) }),
-    isProtectedBranch: async () => false,
+    executeGitCommand: async (args: string[]) => {
+      if (args[0] === "rev-parse" && args[1] === "HEAD") {
+        headReads++;
+        // The first read is the pre-run capture; later reads reflect any
+        // commit the agent made while it was running.
+        return {
+          success: true,
+          output: headReads === 1 || !headMovedDuringRun ? HEAD_BEFORE : HEAD_AFTER,
+        };
+      }
+      return { success: true, output: String(inheritedCommitCount) };
+    },
+    isProtectedBranch: async () => protectedBranch,
     remoteBranchExists: async () => true,
     getMainBranchName: async () => "main",
   },
@@ -172,6 +193,7 @@ mock.module("../src/lib/review/auto-review-loop", () => ({
   runAutoReviewLoop: async (options: { maxIterations?: number; minPriority?: string }) => {
     autoReviewCalls++;
     autoReviewOptions.push(options);
+    if (autoReviewError) throw autoReviewError;
     return { success: true, iterations: 1, finalFeedback: [] };
   },
   getPRDiff: () => "diff --git a/file b/file",
@@ -187,7 +209,29 @@ mock.module("../src/lib/review/auto-review-loop", () => ({
 mock.module("../src/lib/state/retry-state", () => ({ recordIncompleteAttempt: () => {} }));
 mock.module("../src/lib/state/run-recorder", () => ({
   recordRunPr: () => {},
-  recordRunStage: () => {},
+  recordRunStage: (stage: string, data: unknown) => {
+    recordedStages.push({ stage, data });
+  },
+  replaceRunStage: (stage: string, data: unknown) => {
+    for (let i = recordedStages.length - 1; i >= 0; i -= 1) {
+      if (recordedStages[i]?.stage === stage) recordedStages.splice(i, 1);
+    }
+    recordedStages.push({ stage, data });
+  },
+  hasRunStage: (stage: string) => recordedStages.some((entry) => entry.stage === stage),
+  latestRunStage: (stage: string) => {
+    for (let i = recordedStages.length - 1; i >= 0; i -= 1) {
+      const entry = recordedStages[i];
+      if (entry?.stage !== stage) continue;
+      const data = entry.data as { status?: string; detail?: unknown };
+      return {
+        stage,
+        status: data.status,
+        detail: data.detail === undefined ? undefined : JSON.stringify(data.detail),
+      };
+    }
+    return undefined;
+  },
 }));
 mock.module("../src/lib/state/worker-state", () => ({
   ...realWorkerState,
@@ -206,11 +250,11 @@ mock.module("../src/lib/agent/model", () => ({
   resolveAgentModel: () => undefined,
 }));
 mock.module("../src/lib/agent/plan", () => ({
+  ...realPlan,
   createPlanImplementationPrompt: () => "prompt",
-  detectPlanOnlyBehavior: () => planPath,
   logHookErrorToFile: () => {},
 }));
-mock.module("../src/lib/agent/sandbox", () => ({ getSandbox: async () => null }));
+mock.module("../src/lib/agent/sandbox", () => ({ ...realSandbox, getSandbox: async () => null }));
 mock.module("@devintern/utils", () => ({ ...realUtilsPkg, captureError: () => {} }));
 
 const { runAgentHarness } = await import("../src/lib/agent/run-harness");
@@ -238,6 +282,10 @@ function baseInput() {
 
 beforeEach(() => {
   inheritedCommitCount = 0;
+  currentBranch = "feature/task-1";
+  protectedBranch = false;
+  headReads = 0;
+  headMovedDuringRun = false;
   scenario = {};
   commitResult = { success: true, message: "committed" };
   commitResults = [];
@@ -246,12 +294,13 @@ beforeEach(() => {
   hookResult = { success: true, message: "hook ok" };
   hookCalls = 0;
   autoReviewCalls = 0;
-  planPath = null;
   verifyVerdicts = [];
   verifyCalls = 0;
   deliveryEvents = [];
   agentPrompts = [];
   autoReviewOptions = [];
+  recordedStages = [];
+  autoReviewError = undefined;
   pipelineConfig = undefined;
   prResult = { success: true, url: "https://github.com/o/r/pull/1", warnings: [] };
   prCreateOptions = undefined;
@@ -265,6 +314,7 @@ beforeEach(() => {
     transitionStatus: mock(async () => {}),
     postComment: mock(async () => {}),
     extractDescriptionText: () => "description",
+    getTask: mock(async () => task),
   };
   runContext.options = { verbose: false } as never;
   delete process.env.AGENT_HARNESS_TIMEOUT_MINUTES;
@@ -312,9 +362,26 @@ describe("runAgentHarness early failures", () => {
     await expect(runAgentHarness(baseInput())).rejects.toThrow(realHarness.UsageLimitError);
   });
 
-  test("rejects on a non-zero exit code", async () => {
+  test("rejects on a non-zero exit code after the agent ran", async () => {
     scenario.closeCode = 1;
+    scenario.stdout = "The agent tried and failed.\n";
     await expect(runAgentHarness(baseInput())).rejects.toThrow("Agent exited with code 1");
+  });
+
+  test("includes the agent's last failure line in a non-zero exit error", async () => {
+    scenario.closeCode = 1;
+    scenario.stdout = "working...\n";
+    scenario.stderr = "warning: transient retry\nfatal: remote repository not found\n";
+    await expect(runAgentHarness(baseInput())).rejects.toThrow(
+      "Agent exited with code 1: fatal: remote repository not found",
+    );
+  });
+
+  test("classifies a sandbox/mise startup failure separately", async () => {
+    scenario.closeCode = 1;
+    scenario.stderr =
+      "mise ERROR Failed to install npm:@xai-official/grok: Permission denied (os error 13)";
+    await expect(runAgentHarness(baseInput())).rejects.toThrow(HarnessUnavailableError);
   });
 
   test("rejects when the agent times out", async () => {
@@ -363,9 +430,50 @@ describe("runAgentHarness non-commit outcomes", () => {
     expect(tracker.postComment).not.toHaveBeenCalled();
     expect(tracker.postIncompleteImplementationComment).not.toHaveBeenCalled();
   });
+
+  test("ignores a stale incomplete summary from a prior attempt when recording the stage", async () => {
+    const taskDir = join(outDir, "task-1");
+    mkdirSync(taskDir, { recursive: true });
+    const stalePath = join(taskDir, "implementation-summary-incomplete.md");
+    writeFileSync(stalePath, "stale halt from a prior attempt", "utf8");
+    const staleSeconds = (Date.now() - 60_000) / 1000;
+    utimesSync(stalePath, staleSeconds, staleSeconds);
+    scenario.stdout = "Implemented the parser and its tests.";
+
+    await runAgentHarness({ ...baseInput(), enableGit: false });
+
+    const implementation = recordedStages.find((entry) => entry.stage === "implementation");
+    const data = implementation?.data as {
+      status?: string;
+      detail?: { report?: string };
+    };
+    expect(data.status).toBe("succeeded");
+    expect(data.detail?.report).toContain("Implemented the parser");
+  });
 });
 
 describe("runAgentHarness git delivery", () => {
+  test("records the implementation stage before auto-review can interrupt delivery", async () => {
+    // The worker restart shape: the agent finished and wrote its report, then
+    // auto-review hit a usage limit before the pipeline could record the stage.
+    // The durable stage must already exist so session pickup can reuse it.
+    scenario.stdout = "Implemented the parser and its tests.";
+    autoReviewError = new realHarness.UsageLimitError();
+
+    await expect(
+      runAgentHarness({ ...baseInput(), createPr: true, autoReview: true }),
+    ).rejects.toThrow(realHarness.UsageLimitError);
+
+    const implementation = recordedStages.find((entry) => entry.stage === "implementation");
+    expect(implementation).toBeDefined();
+    const data = implementation?.data as {
+      status?: string;
+      detail?: { report?: string };
+    };
+    expect(data.status).toBe("succeeded");
+    expect(data.detail?.report).toContain("Implemented the parser");
+  });
+
   test("verifies and publishes inherited commits when pickup needs no new edits", async () => {
     scenario.stdout = "The inherited implementation is complete and validated.";
     commitResult = { success: false, message: "No changes to commit" };
@@ -381,19 +489,70 @@ describe("runAgentHarness git delivery", () => {
     expect(tracker.transitionStatus).toHaveBeenCalledWith("TASK-1", "In Review");
   });
 
-  test.each([undefined, "feature/other"])(
-    "does not publish a no-op without the inherited branch (%s)",
-    async (resumeBranch) => {
-      scenario.stdout = "No additional edits needed.";
-      commitResult = { success: false, message: "No changes to commit" };
-      inheritedCommitCount = 2;
-      await expect(
-        runAgentHarness({ ...baseInput(), createPr: true, resumeBranch }),
-      ).rejects.toThrow("Implementation was not committed");
-      expect(deliveryEvents).not.toContain("push");
-      expect(tracker.transitionStatus).not.toHaveBeenCalledWith("TASK-1", "In Review");
-    },
-  );
+  test("publishes commits the agent created on a fresh run", async () => {
+    scenario.stdout = "The implementation is complete.";
+    commitResult = { success: false, message: "No changes to commit" };
+    inheritedCommitCount = 2;
+    headMovedDuringRun = true;
+    await runAgentHarness({ ...baseInput(), createPr: true, verify: {} });
+    expect(deliveryEvents).toEqual(["commit", "verify", "push"]);
+    expect(commitCalls).toBe(1);
+    expect(hookCalls).toBeGreaterThan(0);
+    expect(tracker.transitionStatus).toHaveBeenCalledWith("TASK-1", "In Review");
+  });
+
+  test("does not publish a clean tree when the branch has no commits ahead", async () => {
+    scenario.stdout = "No additional edits needed.";
+    commitResult = { success: false, message: "No changes to commit" };
+    inheritedCommitCount = 0;
+    await expect(runAgentHarness({ ...baseInput(), createPr: true })).rejects.toThrow(
+      "Implementation was not committed",
+    );
+    expect(deliveryEvents).not.toContain("push");
+    expect(tracker.transitionStatus).not.toHaveBeenCalledWith("TASK-1", "In Review");
+  });
+
+  test("marks the early implementation stage failed when delivery halts", async () => {
+    scenario.stdout = "Implemented the parser and its tests.";
+    commitResult = { success: false, message: "No changes to commit" };
+
+    await expect(runAgentHarness({ ...baseInput(), createPr: true })).rejects.toThrow(
+      "Implementation was not committed",
+    );
+
+    const implementation = [...recordedStages]
+      .reverse()
+      .find((entry) => entry.stage === "implementation");
+    const data = implementation?.data as {
+      status?: string;
+      detail?: { report?: string; deliveryError?: string };
+    };
+    expect(data.status).toBe("failed");
+    expect(data.detail?.report).toContain("Implemented the parser");
+    expect(data.detail?.deliveryError).toContain("Implementation was not committed");
+  });
+
+  test("does not publish agent commits on the PR target branch", async () => {
+    scenario.stdout = "No additional edits needed.";
+    commitResult = { success: false, message: "No changes to commit" };
+    inheritedCommitCount = 2;
+    currentBranch = "main";
+    await expect(runAgentHarness({ ...baseInput(), createPr: true })).rejects.toThrow(
+      "Implementation was not committed",
+    );
+    expect(deliveryEvents).not.toContain("push");
+  });
+
+  test("does not publish agent commits on a protected branch", async () => {
+    scenario.stdout = "No additional edits needed.";
+    commitResult = { success: false, message: "No changes to commit" };
+    inheritedCommitCount = 2;
+    protectedBranch = true;
+    await expect(runAgentHarness({ ...baseInput(), createPr: true })).rejects.toThrow(
+      "Implementation was not committed",
+    );
+    expect(deliveryEvents).not.toContain("push");
+  });
 
   test("does not publish a resumed branch with no inherited implementation commits", async () => {
     scenario.stdout = "No additional edits needed.";
@@ -541,8 +700,7 @@ describe("runAgentHarness git delivery", () => {
   test.each([undefined, "feature/task-1"])(
     "retries a plan-only run before delivering inherited commits (%s)",
     async (resumeBranch) => {
-      scenario.stdout = "Created a plan";
-      planPath = "PLAN_DETECTED_NO_PATH";
+      scenario.stdout = "I've created a plan for the requested change.";
       commitResults = [{ success: false, message: "No changes to commit" }];
       inheritedCommitCount = 2;
 
@@ -556,6 +714,73 @@ describe("runAgentHarness git delivery", () => {
       expect(tracker.transitionStatus).toHaveBeenCalledWith("TASK-1", "In Review");
     },
   );
+
+  test("delivers commits the plan agent created itself", async () => {
+    // Regression: the plan retry committed its own work, so the follow-up
+    // pipeline commit found a clean tree and failed the run with
+    // "Implementation was not committed".
+    scenario.stdout = "I've created a plan for the requested change.";
+    commitResults = [
+      { success: false, message: "No changes to commit" },
+      { success: false, message: "No changes to commit" },
+    ];
+    inheritedCommitCount = 2;
+
+    await runAgentHarness({ ...baseInput(), createPr: true });
+
+    expect(commitCalls).toBe(2);
+    expect(deliveryEvents).toContain("push");
+    expect(tracker.transitionStatus).toHaveBeenCalledWith("TASK-1", "In Review");
+  });
+
+  test("does not retry a completed run whose transcript mentions plans and summaries", async () => {
+    // Regression for a redundant plan retry: the completion report talked
+    // about the plan, a summary, and the implementation, which the old
+    // generic fallback misread as plan-only behavior.
+    scenario.stdout = [
+      "## Summary",
+      "I followed the plan from the task and finished the implementation.",
+      "Implementation summary: the requested behavior now works.",
+    ].join("\n");
+    commitResults = [{ success: false, message: "No changes to commit" }];
+    inheritedCommitCount = 2;
+
+    await runAgentHarness({ ...baseInput(), createPr: true });
+
+    expect(agentPrompts).toHaveLength(1);
+    expect(commitCalls).toBe(1);
+    expect(deliveryEvents).toContain("push");
+    expect(tracker.transitionStatus).toHaveBeenCalledWith("TASK-1", "In Review");
+  });
+
+  test("retries an explicit plan-only run with no changes and no new commit", async () => {
+    scenario.stdout = "I've created a plan for the requested change.";
+    commitResults = [{ success: false, message: "No changes to commit" }];
+
+    await runAgentHarness({ ...baseInput(), createPr: true });
+
+    expect(agentPrompts).toHaveLength(2);
+    expect(commitCalls).toBe(2);
+    expect(deliveryEvents).toContain("push");
+    expect(tracker.transitionStatus).toHaveBeenCalledWith("TASK-1", "In Review");
+  });
+
+  test("delivers a self-committed run instead of retrying it as plan-only", async () => {
+    // Regression for a redundant plan retry: the agent committed its own work
+    // (HEAD advanced) and left a clean tree, so the pipeline saw
+    // "No changes to commit" even though the implementation was delivered.
+    scenario.stdout = "I've created a plan, then implemented and committed it.";
+    commitResults = [{ success: false, message: "No changes to commit" }];
+    inheritedCommitCount = 1;
+    headMovedDuringRun = true;
+
+    await runAgentHarness({ ...baseInput(), createPr: true });
+
+    expect(agentPrompts).toHaveLength(1);
+    expect(commitCalls).toBe(1);
+    expect(deliveryEvents).toContain("push");
+    expect(tracker.transitionStatus).toHaveBeenCalledWith("TASK-1", "In Review");
+  });
 
   test("validates hooks before and after auto-review", async () => {
     scenario.stdout = "done";

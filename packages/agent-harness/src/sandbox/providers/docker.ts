@@ -3,8 +3,7 @@
  *
  * Docker removed the `docker sandbox` CLI plugin; Docker Sandboxes now ships
  * as its own `sbx` binary (`brew install docker/tap/sbx`, `winget install
- * Docker.sbx`). Wrapping is a three-step flow, mirroring the smolvm provider
- * (verified against sbx v0.35.0):
+ * Docker.sbx`). Wrapping is a three-step flow (verified against sbx v0.35.0):
  *
  *   1. `sbx create --name X <agent> <workingDir>` boots the microVM with the
  *      working dir mounted as the workspace at its host path. Runs inside
@@ -114,7 +113,7 @@ export class DockerSandboxProvider implements SandboxProvider {
       throw new Error(
         `Docker Sandboxes does not support the "${harnessName}" harness. ` +
           `Supported: ${Object.keys(SBX_AGENT_NAMES).join(", ")}. ` +
-          "Use AGENT_SANDBOX=nono or AGENT_SANDBOX=srt for other harnesses.",
+          "Use AGENT_SANDBOX=nono for other harnesses.",
       );
     }
 
@@ -136,7 +135,7 @@ export class DockerSandboxProvider implements SandboxProvider {
       throw new Error(
         `Docker Sandboxes cannot sync the working directory "${policy.workingDir}" ` +
           "(host tmp paths are not part of the mounted workspace). " +
-          "Use AGENT_SANDBOX=nono or AGENT_SANDBOX=srt for worktree runs, or move " +
+          "Use AGENT_SANDBOX=nono for worktree runs, or move " +
           "DEVINTERN_OUTPUT_DIR out of /tmp.",
       );
     }

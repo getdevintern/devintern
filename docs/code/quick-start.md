@@ -1,29 +1,29 @@
 ---
-title: "@devintern/code Quick Start"
+title: "DevIntern Code Quick Start"
 sidebarLabel: "Quick Start"
-description: "Install @devintern/code and turn a markdown task or tracker ticket into working code."
+description: "Use when installing DevIntern Code for the first time and running your first markdown task or tracker ticket through a coding agent."
 section: "Automation"
 order: 0
-dateModified: 2026-10-16
+dateModified: 2026-11-12
 tags: ["devintern/code", "quick start", "jira", "trello", "cli"]
 ---
 
-# @devintern/code Quick Start
+# DevIntern Code Quick Start
 
 **@devintern/code** is your AI intern for automatically implementing tasks. Point it at a local markdown file or a ticket in your task tracker, and it runs your AI agent, creates a feature branch, commits the changes, and can open a pull request.
 
-For agent-assisted setup, use the [devintern-setup skill](https://github.com/getdevintern/devintern/tree/main/skills/devintern-setup). It covers prerequisites, source-control and tracker credentials, browser authorization when needed, and verifying worker activation. For changes to an existing worker's repositories, routing, automations, and policies, use [devintern-workspace](https://github.com/getdevintern/devintern/tree/main/skills/devintern-workspace).
+For agent-assisted setup, use the [devintern-setup skill](https://github.com/getdevintern/devintern/tree/main/plugins/devintern/skills/devintern-setup). It covers prerequisites, source-control and tracker credentials, browser authorization when needed, and verifying worker activation. For changes to an existing worker's repositories, routing, automations, and policies, use [devintern-workspace](https://github.com/getdevintern/devintern/tree/main/plugins/devintern/skills/devintern-workspace).
 
 See [Agent Skills](agent-skills.md) for installation commands for Codex and Claude Code, prerequisites, and example prompts for setup, workspace changes, and delegation.
 
 **Recommended for ongoing use:** set up a [workspace worker](./worker.md#quick-start), even for one repository, with relay-backed integrations. Start with `devintern worker init`; it includes tracker setup when needed and can install/start the service. The standalone CLI walkthrough below remains useful for an explicitly one-off task or trial run.
 
-Supported task trackers today: **Jira** (default), **Linear**, **Trello**, **Asana**, **Azure DevOps**, **GitHub Issues**, and **local markdown files** (no PM account required).
+Supported task trackers today: **Jira** (default), **Linear**, **Trello**, **Asana**, **Azure DevOps**, **GitHub Issues**, **GitLab Issues**, and **local markdown files** (no PM account required).
 
 ## Prerequisites
 
 - **[Bun](https://bun.sh) runtime** (required to run @devintern/code)
-- A local markdown file, or a task tracker account with API access (Jira, Linear, Trello, Asana, Azure DevOps, or GitHub Issues)
+- A local markdown file, or a task tracker account with API access (Jira, Linear, Trello, Asana, Azure DevOps, GitHub Issues, or GitLab Issues)
 - AI agent CLI installed (e.g., Claude Code, OpenCode, Codex, Cursor)
 - Git repository for your project
 
@@ -50,7 +50,7 @@ devintern init
 In a terminal, this starts an interactive setup wizard that:
 
 - Detects an existing @devintern/pm configuration (`.devintern-pm/.env`) in the same project and offers to reuse those tracker credentials, so you skip straight to validation
-- Asks which task tracker you use — local **markdown files** lead the menu as the zero-account way to try DevIntern in minutes, followed by Jira, Linear, GitHub Issues, Azure DevOps, Asana, and Trello
+- Asks which task tracker you use — local **markdown files** lead the menu as the zero-account way to try DevIntern in minutes, followed by Jira, Linear, GitHub Issues, GitLab Issues, Azure DevOps, Asana, and Trello
 - Links you directly to the provider's token creation page and prompts for each credential, with a pointer to the matching setup guide in these docs
 - Validates the connection with a real API call before finishing (you can retry, edit values, or skip)
 - Offers an optional GitHub token for pull request creation
@@ -83,6 +83,7 @@ The wizard handles credentials for you. If you skip `init`, running a task in an
 | **Asana**          | Asana tasks with project section transitions              | [Asana Integration](./asana-integration.md)                 |
 | **Azure DevOps**   | Azure DevOps work items by ID or URL                      | [Azure DevOps Integration](./azure-devops-integration.md)   |
 | **GitHub Issues**  | GitHub issues with status labels, PRs in the same repo    | [GitHub Issues Integration](./github-issues-integration.md) |
+| **GitLab Issues**  | GitLab issues with status labels, MRs in the same repo    | [GitLab Integration](./gitlab-integration.md)               |
 | **Markdown files** | Local `.md` specs, no PM account needed                   | [Markdown File Tasks](./markdown-tasks.md)                  |
 
 **Jira:** add `JIRA_BASE_URL`, `JIRA_EMAIL`, and `JIRA_API_TOKEN`. You do not need to set `TASK_TRACKER` (it defaults to `jira`).
@@ -93,7 +94,7 @@ Shared options (GitHub/Bitbucket PRs, agent harness, output directory) are cover
 
 ## Run Your First Task
 
-Not sure everything is wired up? Run `devintern doctor` for a readiness check (agent CLI, tracker credentials, sign-in) with a fix hint per issue.
+Not sure everything is wired up? Run `devintern doctor` for a readiness check (agent CLI, tracker credentials, sign-in) with a fix hint per issue. If a failure looks like a DevIntern defect rather than a setup problem, `devintern report` files a redacted report with the run and logs attached.
 
 If you chose Markdown during setup, add `TASK-1.md` to your configured task directory and pass its filename without the extension:
 

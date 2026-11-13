@@ -60,6 +60,12 @@ export interface TaskSupervisor {
    * re-admit work the drain is waiting on.
    */
   resume(): void;
+  /**
+   * Whether a shutdown {@link drain} has begun. A draining supervisor rejects
+   * new admissions and aborts running jobs, so acquirers use this to avoid
+   * settling their durable rows as failures while the process is exiting.
+   */
+  isDraining(): boolean;
   /** How many admitted jobs are currently running. */
   inFlightCount(): number;
   /**
@@ -305,6 +311,10 @@ export function createTaskSupervisor(initialLimits: SupervisorLimits): TaskSuper
       if (!holding) return;
       holding = false;
       pump();
+    },
+
+    isDraining(): boolean {
+      return draining;
     },
 
     inFlightCount(): number {

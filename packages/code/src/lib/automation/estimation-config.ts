@@ -16,6 +16,13 @@ export interface EstimationConfig extends AgentSelection {
   enabled: boolean;
   /** Tracker query selecting the tickets to estimate (same language as `--query`). */
   query: string;
+  /**
+   * Optional `[[teams]]` name whose tracker and credentials the sweep uses.
+   * Omitted: the sweep runs against `[defaults].tracker` with the shared
+   * workspace env. The workspace parser canonicalizes this to the declared
+   * team name (team names match case-insensitively).
+   */
+  team?: string;
   cron?: string;
   interval?: string;
   intervalMs?: number;
@@ -70,6 +77,9 @@ export function parseEstimationEntries(value: unknown): {
     if (typeof enabledValue !== "boolean") errors.push(`${label}.enabled must be a boolean.`);
     const query = stringValue("query");
     if (!query) errors.push(`${label}.query is required.`);
+    // Existence and estimate support are checked by the workspace parser,
+    // which knows the configured [[teams]].
+    const team = stringValue("team");
 
     const cron = stringValue("cron");
     const interval = stringValue("interval");
@@ -105,6 +115,7 @@ export function parseEstimationEntries(value: unknown): {
         id,
         enabled: enabledValue,
         query,
+        ...(team ? { team } : {}),
         cron,
         interval,
         intervalMs: intervalMs ?? undefined,

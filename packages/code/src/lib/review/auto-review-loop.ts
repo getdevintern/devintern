@@ -20,13 +20,17 @@ import {
 } from "@devintern/agent-harness";
 import type { AgentHarness } from "@devintern/agent-harness";
 import { parseAgentJsonObject } from "../agent/json";
-import { buildHeadlessAgentArgs, HEADLESS_AGENT_STDIO } from "../agent/spawn";
+import {
+  buildHeadlessAgentInvocation,
+  harnessSpawnEnv,
+  HEADLESS_AGENT_STDIO,
+} from "../agent/spawn";
 import { resolveAgentEffort, resolveAgentModel } from "../agent/model";
 import { loadPrompt } from "../prompts/loader";
 import { untrustedContentBlock } from "../prompts/untrusted-content";
-import { validateReviewFeedback } from "./feedback";
+import { validateReviewFeedback, validateReviewFeedbackStructure } from "./feedback";
 import { DEFAULT_AUTO_REVIEW_ITERATIONS } from "./auto-review-config";
-import { getSandbox } from "../agent/sandbox";
+import { agentSandboxPolicy, getSandbox } from "../agent/sandbox";
 import { createHarnessLogSink } from "../observability/harness-logs";
 import type {
   AutoReviewLoopOptions,
@@ -264,18 +268,40 @@ export function getPRDiff(baseBranch: string, workingDir: string): string {
   }
 }
 
+/** Options for {@link parseReviewFeedback}. */
+export interface ParseReviewFeedbackOptions {
+  /** Lowest finding priority that invalidates an approval. Defaults to `medium`. */
+  minPriority?: ReviewPriority;
+  /**
+   * Whether an approval that contradicts `minPriority` is rejected. Defaults to
+   * `true`, which is what the auto-review loop wants. A step that owns the
+   * policy passes `false`, gets the verdict, and decides for itself — `verify`
+   * downgrades the contradiction to a rejection so `onFail` governs.
+   */
+  enforceApproval?: boolean;
+}
+
 /**
  * Parse structured JSON review feedback from agent output.
  *
  * @param agentOutput - Raw stdout from the review agent
+ * @param options - Approval policy for this caller
  * @returns Validated {@link ReviewFeedback} object
  * @throws When no JSON is found or the structure is invalid
  */
-export function parseReviewFeedback(agentOutput: string): ReviewFeedback {
+export function parseReviewFeedback(
+  agentOutput: string,
+  options: ParseReviewFeedbackOptions = {},
+): ReviewFeedback {
   try {
     const feedback = parseAgentJsonObject(agentOutput, "approved");
 
-    validateReviewFeedback(feedback);
+    if (options.enforceApproval === false) {
+      // Schema only: the caller resolves contradictions against its own policy.
+      validateReviewFeedbackStructure(feedback);
+    } else {
+      validateReviewFeedback(feedback, options.minPriority);
+    }
     return feedback;
   } catch (error) {
     throw new Error(`Failed to parse review feedback JSON: ${error}`);
@@ -309,18 +335,28 @@ export async function runAgentPrompt(
     (async () => {
       const timeoutMinutes = parseInt(process.env.AGENT_HARNESS_TIMEOUT_MINUTES || "60", 10);
 
-      const agentArgs = buildHeadlessAgentArgs(harness, prompt, {
-        maxTurns: 500,
-        skipPermissions: true,
-        workingDir,
-        model: resolveAgentModel(),
-        effort: resolveAgentEffort(),
-      });
+      const { args: agentArgs, env: agentEnv } = await buildHeadlessAgentInvocation(
+        harness,
+        resolvedPath,
+        prompt,
+        {
+          maxTurns: 500,
+          skipPermissions: true,
+          workingDir,
+          model: resolveAgentModel(harness.name),
+          effort: resolveAgentEffort(),
+        },
+      );
       const { child: agentProcess, cleanup: sandboxCleanup } = await spawnAgent({
         resolvedPath,
         args: agentArgs,
-        spawnOptions: { cwd: workingDir, stdio: HEADLESS_AGENT_STDIO },
+        spawnOptions: {
+          cwd: workingDir,
+          stdio: HEADLESS_AGENT_STDIO,
+          env: harnessSpawnEnv(agentEnv),
+        },
         sandbox: await getSandbox(harness.name),
+        policy: agentSandboxPolicy(),
         sink: createHarnessLogSink({
           harness,
           label: "auto-review",
@@ -378,7 +414,7 @@ export async function runAgentPrompt(
         if (timedOut) {
           reject(new Error(`${harness.displayName} timed out after ${timeoutMinutes} minutes`));
         } else if (usageLimit?.limited) {
-          reject(new UsageLimitError(usageLimit.resetsAt));
+          reject(new UsageLimitError(usageLimit.resetsAt, usageLimit.period));
         } else if (code !== 0) {
           reject(new Error(`${harness.displayName} exited with code ${code}: ${stderr}`));
         } else {

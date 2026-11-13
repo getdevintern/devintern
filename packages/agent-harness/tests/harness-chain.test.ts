@@ -1,7 +1,14 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { parseHarnessList, resolveHarnessChain } from "../src/harness-chain.js";
+import {
+  parseHarnessList,
+  resetMiseShimWarnings,
+  resolveHarnessChain,
+} from "../src/harness-chain.js";
 import { resolveHarness } from "../src/resolver.js";
 import { getHarness } from "../src/registry.js";
+import { detectSandboxProviders } from "../src/sandbox/detect.js";
+import { registerSandboxProvider } from "../src/sandbox/registry.js";
+import type { SandboxProvider } from "../src/sandbox/types.js";
 
 describe("parseHarnessList", () => {
   test("defaults to claude-code when raw is undefined", () => {
@@ -94,11 +101,15 @@ describe("resolveHarnessChain", () => {
 
   beforeEach(() => {
     delete process.env.AGENT_HARNESS;
-    delete process.env.AGENT_CLI_PATH;
+    delete process.env.AGENT_SANDBOX;
+    for (const key of Object.keys(process.env)) {
+      if (key.endsWith("_CLI_PATH")) delete process.env[key];
+    }
     warnings = [];
     console.warn = (msg?: unknown) => {
       warnings.push(String(msg));
     };
+    resetMiseShimWarnings();
   });
 
   afterEach(() => {
@@ -111,21 +122,21 @@ describe("resolveHarnessChain", () => {
     Object.assign(process.env, originalEnv);
   });
 
-  test("returns a single entry for a single-harness value", () => {
-    const chain = resolveHarnessChain({ raw: "codex", isInstalled: alwaysInstalled });
+  test("returns a single entry for a single-harness value", async () => {
+    const chain = await resolveHarnessChain({ raw: "codex", isInstalled: alwaysInstalled });
     expect(chain.entries.map((e) => e.name)).toEqual(["codex"]);
     expect(chain.multiHarness).toBe(false);
     expect(chain.issues).toEqual([]);
   });
 
-  test("defaults to claude-code when raw is undefined", () => {
-    const chain = resolveHarnessChain({ isInstalled: alwaysInstalled });
+  test("defaults to claude-code when raw is undefined", async () => {
+    const chain = await resolveHarnessChain({ isInstalled: alwaysInstalled });
     expect(chain.entries.map((e) => e.name)).toEqual(["claude-code"]);
     expect(chain.parsed).toEqual(["claude-code"]);
   });
 
-  test("keeps priority order and flags multi-harness chains", () => {
-    const chain = resolveHarnessChain({
+  test("keeps priority order and flags multi-harness chains", async () => {
+    const chain = await resolveHarnessChain({
       raw: "codex, claude-code , grok",
       isInstalled: alwaysInstalled,
     });
@@ -133,8 +144,8 @@ describe("resolveHarnessChain", () => {
     expect(chain.multiHarness).toBe(true);
   });
 
-  test("skips unknown entries with a warning", () => {
-    const chain = resolveHarnessChain({
+  test("skips unknown entries with a warning", async () => {
+    const chain = await resolveHarnessChain({
       raw: "does-not-exist,codex",
       isInstalled: alwaysInstalled,
     });
@@ -146,8 +157,8 @@ describe("resolveHarnessChain", () => {
     expect(warnings).toEqual([]);
   });
 
-  test("skips not-installed entries with a warning", () => {
-    const chain = resolveHarnessChain({
+  test("skips not-installed entries with a warning", async () => {
+    const chain = await resolveHarnessChain({
       raw: "codex,grok",
       isInstalled: ({ name }) => name !== "codex",
     });
@@ -157,14 +168,14 @@ describe("resolveHarnessChain", () => {
     expect(chain.issues[0]!.message).toContain("CODEX_CLI_PATH");
   });
 
-  test("throws when every entry is unknown", () => {
-    expect(() =>
+  test("throws when every entry is unknown", async () => {
+    await expect(
       resolveHarnessChain({ raw: "nope, also-nope", isInstalled: alwaysInstalled }),
-    ).toThrow("Unknown agent harness");
+    ).rejects.toThrow("Unknown agent harness");
   });
 
-  test("keeps the full list when everything is not installed", () => {
-    const chain = resolveHarnessChain({
+  test("keeps the full list when everything is not installed", async () => {
+    const chain = await resolveHarnessChain({
       raw: "codex,grok",
       isInstalled: () => false,
     });
@@ -172,43 +183,315 @@ describe("resolveHarnessChain", () => {
     expect(chain.entries.every((e) => e.installed === false)).toBe(true);
   });
 
-  test("checkInstalled=false skips installability probing", () => {
-    const chain = resolveHarnessChain({ raw: "codex,grok", checkInstalled: false });
+  test("checkInstalled=false skips installability probing", async () => {
+    const chain = await resolveHarnessChain({ raw: "codex,grok", checkInstalled: false });
     expect(chain.entries.map((e) => e.name)).toEqual(["codex", "grok"]);
     expect(chain.issues).toEqual([]);
   });
 
-  test("AGENT_CLI_PATH applies to the primary entry only", () => {
+  test("AGENT_CLI_PATH applies to the primary entry only", async () => {
     process.env.AGENT_CLI_PATH = "/custom/agent";
-    const chain = resolveHarnessChain({ raw: "codex,grok", isInstalled: alwaysInstalled });
+    const chain = await resolveHarnessChain({ raw: "codex,grok", isInstalled: alwaysInstalled });
     expect(chain.entries[0]!.path).toBe("/custom/agent");
     expect(chain.entries[1]!.path).toBe("grok");
   });
 
-  test("harness-specific env overrides resolve per entry", () => {
+  test("harness-specific env overrides resolve per entry", async () => {
     process.env.GROK_CLI_PATH = "/custom/grok";
-    const chain = resolveHarnessChain({ raw: "codex,grok", isInstalled: alwaysInstalled });
+    const chain = await resolveHarnessChain({ raw: "codex,grok", isInstalled: alwaysInstalled });
     expect(chain.entries[0]!.path).toBe("codex");
     expect(chain.entries[1]!.path).toBe("/custom/grok");
   });
 
-  test("resolves registry harness objects on each entry", () => {
-    const chain = resolveHarnessChain({ raw: "codex", isInstalled: alwaysInstalled });
+  test("resolves registry harness objects on each entry", async () => {
+    const chain = await resolveHarnessChain({ raw: "codex", isInstalled: alwaysInstalled });
     expect(chain.entries[0]!.harness).toBe(getHarness("codex"));
   });
 
-  test("warns once for a deprecated alias inside the list", () => {
-    const chain = resolveHarnessChain({ raw: "gemini,codex", isInstalled: alwaysInstalled });
+  test("warns once for a deprecated alias inside the list", async () => {
+    const chain = await resolveHarnessChain({ raw: "gemini,codex", isInstalled: alwaysInstalled });
     expect(chain.entries.map((e) => e.name)).toEqual(["antigravity", "codex"]);
     expect(warnings.filter((w) => w.includes("deprecated"))).toHaveLength(1);
   });
 
-  test("warnDeprecated=false suppresses deprecation warnings", () => {
-    resolveHarnessChain({
+  test("warnDeprecated=false suppresses deprecation warnings", async () => {
+    await resolveHarnessChain({
       raw: "gemini",
       warnDeprecated: false,
       isInstalled: alwaysInstalled,
     });
     expect(warnings).toEqual([]);
+  });
+
+  test("does not probe when no sandbox is configured", async () => {
+    let probes = 0;
+    const chain = await resolveHarnessChain({
+      raw: "codex,grok",
+      isInstalled: alwaysInstalled,
+      probeSandbox: () => {
+        probes++;
+        return { ok: false, reason: "should not run" };
+      },
+    });
+    expect(probes).toBe(0);
+    expect(chain.entries.map((e) => e.name)).toEqual(["codex", "grok"]);
+  });
+
+  test("auto keeps fallbacks supported by a different provider", async () => {
+    const providers: SandboxProvider[] = [
+      { name: "auto-primary-test", harness: "codex", priority: 10000 },
+      { name: "auto-fallback-test", harness: "grok", priority: 9999 },
+    ].map(({ name, harness, priority }) => ({
+      name, displayName: name, priority,
+      detect: async () => ({ available: true }),
+      supportsHarness: (value: string) => value === harness,
+      wrapCommand: () => ({ path: process.execPath, args: ["--version"] }),
+    }));
+    for (const provider of providers) registerSandboxProvider(provider);
+    try {
+      // Earlier files may have populated the process-wide detection cache.
+      await detectSandboxProviders({ fresh: true });
+      const chain = await resolveHarnessChain({
+        raw: "codex,grok", isInstalled: alwaysInstalled, sandboxName: "auto", trustedEnv: {},
+      });
+      expect(chain.entries.map(entry => entry.name)).toEqual(["codex", "grok"]);
+      expect(chain.issues).toEqual([]);
+    } finally {
+      // Registered fixtures must not influence subsequent automatic selection.
+      for (const provider of providers) provider.priority = 0;
+      await detectSandboxProviders({ fresh: true });
+    }
+  });
+
+  test("probes directly when a non-nestable provider is already inside a sandbox", async () => {
+    let wraps = 0;
+    const provider: SandboxProvider = {
+      name: "chain-inherit-kernel",
+      displayName: "chain inherit kernel (test)",
+      priority: 1,
+      detect: async () => ({ available: true }),
+      wrapCommand: () => {
+        wraps++;
+        return { path: "/nonexistent/probe-binary", args: [] };
+      },
+    };
+    registerSandboxProvider(provider);
+    // `process.execPath --version` exits 0, while the wrapper above always
+    // fails: the chain stays usable only because the probe ran the real path.
+    process.env.CODEX_CLI_PATH = process.execPath;
+    process.env.GROK_CLI_PATH = process.execPath;
+
+    const chain = await resolveHarnessChain({
+      raw: "codex,grok",
+      isInstalled: alwaysInstalled,
+      sandboxName: provider.name,
+      trustedEnv: { NONO_CAP_FILE: process.execPath },
+    });
+
+    expect(wraps).toBe(0);
+    expect(chain.issues).toEqual([]);
+    expect(chain.entries.map((e) => e.name)).toEqual(["codex", "grok"]);
+  });
+
+  test("reports a harness that cannot start under the inherited sandbox", async () => {
+    // Regression guard for silently keeping a broken harness: inside an
+    // enclosing sandbox the probe must run the harness directly and surface
+    // the failure, not skip because the configured provider cannot nest.
+    const provider: SandboxProvider = {
+      name: "chain-inherit-fails",
+      displayName: "chain inherit fails (test)",
+      priority: 1,
+      detect: async () => ({ available: true }),
+      wrapCommand: () => ({ path: process.execPath, args: ["-e", ""] }),
+    };
+    registerSandboxProvider(provider);
+    process.env.OPENCODE_CLI_PATH = process.execPath;
+    process.env.GROK_CLI_PATH = "/nonexistent/devintern-inherited-harness";
+
+    const chain = await resolveHarnessChain({
+      raw: "opencode,grok",
+      isInstalled: alwaysInstalled,
+      sandboxName: provider.name,
+      trustedEnv: { NONO_CAP_FILE: process.execPath },
+    });
+
+    expect(chain.entries.map((e) => e.name)).toEqual(["opencode"]);
+    expect(chain.issues).toHaveLength(1);
+    expect(chain.issues[0]!.requested).toBe("grok");
+    expect(chain.issues[0]!.reason).toBe("sandbox-incompatible");
+    expect(chain.issues[0]!.message).toContain("nono (inherited) sandbox");
+    expect(chain.issues[0]!.message).toContain("GROK_CLI_PATH");
+  });
+
+  test("drops a fallback the explicit provider cannot wrap inside an enclosing sandbox", async () => {
+    // `resolveSandbox` rejects native+grok before the nesting decision, so the
+    // fallback would throw on failover even though the run inherits nono.
+    const provider: SandboxProvider = {
+      name: "chain-inherit-supported-primary",
+      displayName: "chain inherit supported primary (test)",
+      priority: 1,
+      detect: async () => ({ available: true }),
+      supportsHarness: (harnessName) => harnessName === "claude-code",
+      wrapCommand: () => ({ path: process.execPath, args: ["-e", ""] }),
+    };
+    registerSandboxProvider(provider);
+    process.env.CLAUDE_CLI_PATH = process.execPath;
+    process.env.GROK_CLI_PATH = process.execPath;
+
+    const chain = await resolveHarnessChain({
+      raw: "claude-code,grok",
+      isInstalled: alwaysInstalled,
+      sandboxName: provider.name,
+      trustedEnv: { NONO_CAP_FILE: process.execPath },
+    });
+
+    expect(chain.entries.map((e) => e.name)).toEqual(["claude-code"]);
+    expect(chain.issues).toHaveLength(1);
+    expect(chain.issues[0]!.requested).toBe("grok");
+    expect(chain.issues[0]!.reason).toBe("sandbox-incompatible");
+    expect(chain.issues[0]!.message).toContain("does not support");
+    expect(chain.issues[0]!.message).toContain("GROK_CLI_PATH");
+  });
+
+  test("auto probes directly inside an enclosing sandbox", async () => {
+    // `auto` never adds a layer inside an enclosing sandbox, so the real run
+    // spawns the harness unwrapped there. A broken fallback must still be
+    // dropped with a sandbox-incompatible issue instead of being silently kept.
+    process.env.OPENCODE_CLI_PATH = process.execPath;
+    process.env.GROK_CLI_PATH = "/nonexistent/devintern-auto-inherited-harness";
+
+    const chain = await resolveHarnessChain({
+      raw: "opencode,grok",
+      isInstalled: alwaysInstalled,
+      sandboxName: "auto",
+      trustedEnv: { NONO_CAP_FILE: process.execPath },
+    });
+
+    expect(chain.entries.map((e) => e.name)).toEqual(["opencode"]);
+    expect(chain.issues).toHaveLength(1);
+    expect(chain.issues[0]!.requested).toBe("grok");
+    expect(chain.issues[0]!.reason).toBe("sandbox-incompatible");
+    expect(chain.issues[0]!.message).toContain("nono (inherited) sandbox");
+    expect(chain.issues[0]!.message).toContain("GROK_CLI_PATH");
+  });
+
+  test("still probes a nesting-capable provider inside an enclosing sandbox", async () => {
+    let wraps = 0;
+    const provider: SandboxProvider = {
+      name: "chain-inherit-vm",
+      displayName: "chain inherit VM (test)",
+      priority: 1,
+      canNestInSandbox: true,
+      detect: async () => ({ available: true }),
+      wrapCommand: () => {
+        wraps++;
+        return { path: process.execPath, args: ["-e", ""] };
+      },
+    };
+    registerSandboxProvider(provider);
+
+    const chain = await resolveHarnessChain({
+      raw: "codex,grok",
+      isInstalled: alwaysInstalled,
+      sandboxName: provider.name,
+      trustedEnv: { NONO_CAP_FILE: process.execPath },
+    });
+
+    expect(wraps).toBe(2);
+    expect(chain.issues).toEqual([]);
+    expect(chain.entries.map((e) => e.name)).toEqual(["codex", "grok"]);
+  });
+
+  test("outside any enclosing sandbox a non-nestable provider is still probed", async () => {
+    let wraps = 0;
+    const provider: SandboxProvider = {
+      name: "chain-no-enclosing",
+      displayName: "chain no enclosing (test)",
+      priority: 1,
+      detect: async () => ({ available: true }),
+      wrapCommand: () => {
+        wraps++;
+        return { path: process.execPath, args: ["-e", ""] };
+      },
+    };
+    registerSandboxProvider(provider);
+
+    const chain = await resolveHarnessChain({
+      raw: "codex",
+      isInstalled: alwaysInstalled,
+      sandboxName: provider.name,
+      trustedEnv: {},
+    });
+
+    expect(wraps).toBe(1);
+    expect(chain.issues).toEqual([]);
+  });
+
+  test("drops a sandbox-incompatible fallback and reports the fix", async () => {
+    const chain = await resolveHarnessChain({
+      raw: "opencode,grok",
+      isInstalled: alwaysInstalled,
+      sandboxName: "nono",
+      probeSandbox: ({ name }) =>
+        name === "grok"
+          ? { ok: false, reason: "mise: Permission denied" }
+          : { ok: true },
+    });
+
+    expect(chain.entries.map((e) => e.name)).toEqual(["opencode"]);
+    expect(chain.issues).toHaveLength(1);
+    expect(chain.issues[0]!.reason).toBe("sandbox-incompatible");
+    expect(chain.issues[0]!.message).toContain("cannot start under the nono sandbox");
+    expect(chain.issues[0]!.message).toContain("mise: Permission denied");
+    expect(chain.issues[0]!.message).toContain("GROK_CLI_PATH");
+  });
+
+  test("keeps a failing primary and still drops failing fallbacks", async () => {
+    const chain = await resolveHarnessChain({
+      raw: "grok,opencode",
+      isInstalled: alwaysInstalled,
+      sandboxName: "nono",
+      probeSandbox: () => ({ ok: false, reason: "mise: Permission denied" }),
+    });
+
+    expect(chain.entries.map((e) => e.name)).toEqual(["grok"]);
+    expect(chain.issues.map((issue) => issue.reason)).toEqual([
+      "sandbox-incompatible",
+      "sandbox-incompatible",
+    ]);
+    expect(chain.issues[0]!.message).toContain("Keeping it as the primary entry");
+    expect(chain.issues[1]!.message).not.toContain("Keeping it as the primary entry");
+  });
+
+  test("probes entries in parallel", async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const chain = await resolveHarnessChain({
+      raw: "codex,grok,cursor",
+      isInstalled: alwaysInstalled,
+      sandboxName: "nono",
+      probeSandbox: async () => {
+        inFlight++;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        inFlight--;
+        return { ok: true };
+      },
+    });
+    expect(chain.entries).toHaveLength(3);
+    expect(maxInFlight).toBe(3);
+  });
+
+  test("fails open when the probe throws", async () => {
+    const chain = await resolveHarnessChain({
+      raw: "opencode,grok",
+      isInstalled: alwaysInstalled,
+      sandboxName: "nono",
+      probeSandbox: () => {
+        throw new Error("probe infrastructure unavailable");
+      },
+    });
+    expect(chain.entries.map((e) => e.name)).toEqual(["opencode", "grok"]);
+    expect(chain.issues).toEqual([]);
   });
 });

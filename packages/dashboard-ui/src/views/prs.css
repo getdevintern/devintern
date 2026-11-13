@@ -1,0 +1,179 @@
+/* Agent PRs list: grid rows on desktop, stacked on phones. */
+.prs-list {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card);
+}
+
+.prs-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(0, 0.9fr) minmax(0, 1.6fr) 5rem;
+  align-items: center;
+  gap: 0 16px;
+  padding: 0 16px;
+}
+
+.prs-head {
+  height: 36px;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted-foreground);
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+
+.prs-item {
+  min-height: 44px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  font-size: 0.8125rem;
+  transition: background-color 150ms ease-out;
+}
+
+.prs-item:last-child {
+  border-bottom: 0;
+}
+
+.prs-item:hover {
+  background: var(--hover);
+}
+
+.prs-ext {
+  align-self: center;
+  margin-left: 4px;
+  color: var(--subtle-foreground);
+  transition: color 150ms ease-out;
+}
+
+.prs-pr-link:hover .prs-ext,
+.prs-item:hover .prs-ext {
+  color: var(--foreground);
+}
+
+.prs-pr-link:hover .prs-ext {
+  color: var(--primary);
+}
+
+/* Linked and unlinked tickets share the same weight and color. */
+.prs-ticket,
+.prs-ticket .ref-link {
+  color: var(--foreground);
+  font-weight: 400;
+}
+
+.prs-ticket .ref-link:hover {
+  color: var(--primary);
+}
+
+.prs-pr-link {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 2px;
+  border-radius: 4px;
+  text-decoration: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.prs-num {
+  color: var(--foreground);
+  font-weight: 600;
+}
+
+.prs-pr-link:hover .prs-num {
+  color: var(--primary);
+  text-decoration: underline;
+}
+
+.prs-branch {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 4px;
+}
+
+.prs-branch code {
+  overflow: hidden;
+  color: var(--subtle-foreground);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.75rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.prs-copy {
+  display: inline-flex;
+  width: 24px;
+  height: 24px;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  color: var(--subtle-foreground);
+  opacity: 0;
+  transition:
+    opacity 150ms ease-out,
+    color 150ms ease-out;
+}
+
+.prs-item:hover .prs-copy,
+.prs-copy:focus-visible {
+  opacity: 1;
+}
+
+.prs-copy:hover {
+  color: var(--foreground);
+}
+
+.prs-age {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 639px) {
+  .prs-head {
+    display: none;
+  }
+
+  .prs-item {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "pr age"
+      "ticket ticket"
+      "branch branch";
+    gap: 4px 12px;
+    padding: 12px 16px;
+  }
+
+  .prs-pr {
+    grid-area: pr;
+  }
+
+  .prs-age {
+    grid-area: age;
+  }
+
+  .prs-ticket {
+    grid-area: ticket;
+  }
+
+  .prs-branch {
+    grid-area: branch;
+  }
+
+  .prs-copy {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .prs-item,
+  .prs-copy {
+    transition: none;
+  }
+}
+
+.prs-ticket {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

@@ -1,15 +1,15 @@
 ---
-title: "GitLab integration for @devintern/code"
+title: "GitLab integration for DevIntern Code"
 sidebarLabel: "GitLab Integration"
 description: "Implement GitLab issues and experimentally create merge requests on GitLab.com or GitLab Self-Managed."
-section: "Code"
+section: "Automation"
 order: 6
 sidebarHidden: true
-dateModified: 2026-09-10
+dateModified: 2026-11-12
 tags: ["gitlab", "gitlab-self-hosted", "devintern/code", "integration"]
 ---
 
-# GitLab integration for @devintern/code
+# GitLab integration for DevIntern Code
 
 @devintern/code can implement work directly from GitLab issues: fetch issue details and comments, run a feasibility check, move status labels, execute your AI agent, commit changes, and post results back on the issue. Both **GitLab Cloud** and **self-hosted instances** are supported.
 

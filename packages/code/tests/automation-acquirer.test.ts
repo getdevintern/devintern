@@ -20,7 +20,11 @@ import { spawnEstimationSweep } from "../src/lib/automation/estimation-acquirer"
 import { AutomationStateStore } from "../src/lib/automation/state";
 import type { AutomationConfig } from "../src/lib/automation/config";
 import { resetWorkerFailover, startWorkerFailover } from "../src/lib/worker/failover";
-import { USAGE_LIMIT_FILE_ENV, WORKER_CHILD_ENV } from "../src/lib/worker/usage-limit-protocol";
+import {
+  HARNESS_UNAVAILABLE_EXIT_CODE,
+  USAGE_LIMIT_FILE_ENV,
+  WORKER_CHILD_ENV,
+} from "../src/lib/worker/usage-limit-protocol";
 
 describe("AutomationAcquirer", () => {
   describe("resolveAutomationRunArgs", () => {
@@ -40,15 +44,24 @@ describe("AutomationAcquirer", () => {
         extraArgs: ["--create-pr"],
         automationArgs: (a: AutomationConfig) => automationTaskArgs(a, ["--create-pr"]),
       };
-      expect(resolveAutomationRunArgs(automationOn, options)).toEqual(["--create-pr"]);
-      expect(resolveAutomationRunArgs(automationOff, options)).toEqual(["--no-git"]);
+      expect(resolveAutomationRunArgs(automationOn, options)).toEqual([
+        "--create-pr",
+        "--skip-clarity-check",
+      ]);
+      expect(resolveAutomationRunArgs(automationOff, options)).toEqual([
+        "--no-git",
+        "--skip-clarity-check",
+      ]);
     });
 
     test("falls back to the shared flags with the open_pr policy applied", () => {
       expect(
         resolveAutomationRunArgs(automation(true), { extraArgs: () => ["--auto-review"] }),
-      ).toEqual(["--auto-review", "--create-pr"]);
-      expect(resolveAutomationRunArgs(automation(false), {})).toEqual(["--no-git"]);
+      ).toEqual(["--auto-review", "--create-pr", "--skip-clarity-check"]);
+      expect(resolveAutomationRunArgs(automation(false), {})).toEqual([
+        "--no-git",
+        "--skip-clarity-check",
+      ]);
     });
 
     test("the fallback strips PR flags from custom extraArgs when open_pr is off", () => {
@@ -56,12 +69,13 @@ describe("AutomationAcquirer", () => {
         resolveAutomationRunArgs(automation(false), {
           extraArgs: () => ["--create-pr", "--auto-review"],
         }),
-      ).toEqual(["--no-git"]);
+      ).toEqual(["--no-git", "--skip-clarity-check"]);
     });
   });
 
   const dbPaths: string[] = [];
   afterEach(() => {
+    resetWorkerFailover();
     for (const path of dbPaths.splice(0)) {
       for (const suffix of ["", "-wal", "-shm"]) rmSync(`${path}${suffix}`, { force: true });
     }
@@ -233,6 +247,24 @@ describe("AutomationAcquirer", () => {
       cwd: process.cwd(),
       env: process.env,
     });
+
+    expect(await run.completion).toBe(true);
+  });
+
+  test("tries Codex when the scheduled harness cannot start", async () => {
+    await startWorkerFailover({
+      raw: "opencode,codex",
+      checkInstalled: false,
+      sandboxName: "none",
+    });
+    const run = spawnAutomationProcess(
+      process.execPath,
+      [
+        "-e",
+        `process.exit(process.env.AGENT_HARNESS === "opencode" ? ${HARNESS_UNAVAILABLE_EXIT_CODE} : 0)`,
+      ],
+      { cwd: process.cwd(), env: process.env },
+    );
 
     expect(await run.completion).toBe(true);
   });

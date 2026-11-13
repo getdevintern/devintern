@@ -10,7 +10,8 @@ export default defineConfig({
   },
   server: {
     // Frontend iteration against a running `devintern dashboard` server.
-    proxy: { "/api": "http://127.0.0.1:4400" },
+    // DASHBOARD_API_PORT points the proxy at a source-run server (e.g. 4401).
+    proxy: { "/api": `http://127.0.0.1:${process.env.DASHBOARD_API_PORT || "4400"}` },
   },
   build: { outDir: "dist" },
 });

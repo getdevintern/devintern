@@ -12,16 +12,16 @@ steps, and configuration precedence.
 
 ## Examples
 
-| Example | What it shows | Kind |
-| ------- | ------------- | ---- |
-| [`run-tests/`](./run-tests) | Run a real Bun command after commit and halt on non-zero exit. | Deterministic |
-| [`check-policy/`](./check-policy) | Block newly added files under forbidden paths. | Deterministic |
-| [`verify-artifacts/`](./verify-artifacts) | Require a generated artifact to exist and match a schema; expose it via `context.results`. | Deterministic |
-| [`transient-retry/`](./transient-retry) | `StepExecutionError` single-retry semantics, contrasted with a permanent halt. | Deterministic |
-| [`agent-review/`](./agent-review) | Agent-backed review using `getDiff`/`runAgentPrompt`/`parseReviewFeedback`/`filterByPriority`, with a bounded repeat. | Agent |
-| [`pr-explainer-narrative/`](./pr-explainer-narrative) | Diff-grounded reviewer narrative. | Agent |
-| [`pr-explainer-visual/`](./pr-explainer-visual) | Visual Summary/Evidence/Merge-Danger explainer. | Agent |
-| [`pr-explainer-image/`](./pr-explainer-image) | Generate a PNG explainer and embed it in the PR through a reusable Files SDK uploader. | Agent + image tool |
+| Example                                               | What it shows                                                                                                         | Kind               |
+| ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- | ------------------ |
+| [`run-tests/`](./run-tests)                           | Run a real Bun command after commit and halt on non-zero exit.                                                        | Deterministic      |
+| [`check-policy/`](./check-policy)                     | Block newly added files under forbidden paths.                                                                        | Deterministic      |
+| [`verify-artifacts/`](./verify-artifacts)             | Require a generated artifact to exist and match a schema; expose it via `context.results`.                            | Deterministic      |
+| [`transient-retry/`](./transient-retry)               | `StepExecutionError` single-retry semantics, contrasted with a permanent halt.                                        | Deterministic      |
+| [`agent-review/`](./agent-review)                     | Agent-backed review using `getDiff`/`runAgentPrompt`/`parseReviewFeedback`/`filterByPriority`, with a bounded repeat. | Agent              |
+| [`pr-explainer-narrative/`](./pr-explainer-narrative) | Diff-grounded reviewer narrative.                                                                                     | Agent              |
+| [`pr-explainer-visual/`](./pr-explainer-visual)       | Visual Summary/Evidence/Merge-Danger explainer.                                                                       | Agent              |
+| [`pr-explainer-image/`](./pr-explainer-image)         | Generate a PNG explainer and embed it in the PR through a reusable Files SDK uploader.                                | Agent + image tool |
 
 The two explainer variants share an execution scaffold in
 [`shared/explainer.ts`](./shared/explainer.ts). Test scaffolding shared by every
@@ -100,7 +100,7 @@ Quality bar:
 - **Bound execution.** Cap captured output and any iteration count.
 - **Write useful failures.** A `halt` reason should say what failed, where, and
   what to do next.
-- **Validate the advertised behavior.** Test the substantive success *and*
+- **Validate the advertised behavior.** Test the substantive success _and_
   failure paths, not just that the plugin loads.
 - **Keep mutations honest.** If a step writes repo files after `commit`, add an
   explicit recommit path (a `repeat` to `commit`) before `finalize`.

@@ -62,10 +62,19 @@ export interface RelayHandlers {
   /**
    * Review submitted on one of the agent's own PRs → address it.
    * @returns Whether the run completed; `false` means it failed or matched
-   *          no workspace repo (never silently swallowed by the caller).
-   *          `"deferred"` means every harness is usage-limited.
+   *          no workspace repo. The delivery is acknowledged anyway, because
+   *          the run reports its own failure and retrying it would re-run the
+   *          whole review on every backoff cycle. `"deferred"` means every
+   *          harness is usage-limited and the delivery stays retryable;
+   *          `"skipped"` means the retry gate declined the run;
+   *          `"interrupted"` means a shutdown drain killed it before it
+   *          settled, so the delivery stays retryable without spending an
+   *          attempt.
    */
-  addressPr(repo: string, prNumber: number): Promise<boolean | "deferred">;
+  addressPr(
+    repo: string,
+    prNumber: number,
+  ): Promise<boolean | "deferred" | "skipped" | "interrupted">;
   /** New PR conversation comment → mention/permission gates decide inside. */
   handlePrComment(repo: string, prNumber: number, commentId: number): Promise<void>;
   /** Tracker task changed → re-evaluate the matching team/default source. */
@@ -92,6 +101,20 @@ export interface RelayAcquirerOptions {
 
 /** Dedupe source for relayed envelopes. */
 const SOURCE = "relay";
+
+/**
+ * Marker: a shutdown drain stopped the run before it settled. Its failure is
+ * an artifact of the drain, so the delivery is retried without spending an
+ * attempt budget.
+ */
+class RelayInterruptedError extends Error {}
+
+/**
+ * Marker: the run never started because every harness is usage-limited.
+ * Retried without spending an attempt budget, matching the polling acquirer's
+ * deferral semantics.
+ */
+class RelayDeferredError extends Error {}
 
 /** Client-side request timeout; the server holds long-polls up to 25s. */
 const REQUEST_TIMEOUT_MS = 35_000;
@@ -213,7 +236,17 @@ export class RelayAcquirer implements Acquirer {
       await this.runHandlers(envelope);
       // Success and intentional no-ops both count as handled.
       this.options.queue.completeDelivery(SOURCE, externalId);
+      this.options.queue.clearRelayDeliveryAttempts(externalId);
     } catch (error) {
+      if (error instanceof RelayInterruptedError) {
+        // The shutdown drain killed the run before it settled. That is not a
+        // failure of the delivery, so release the claim without advancing the
+        // cursor or spending an attempt — the relay redelivers it after the
+        // worker restarts.
+        this.options.queue.abandonDelivery(SOURCE, externalId);
+        console.warn(`⏸️  [relay] ${externalId} interrupted by worker shutdown; will retry`);
+        throw error;
+      }
       captureError(error, {
         acquirer: this.name,
         eventType: envelope.eventType,
@@ -228,16 +261,41 @@ export class RelayAcquirer implements Acquirer {
         // Terminal errors: acknowledge and record so
         // the relay stops redelivering.
         this.options.queue.completeDelivery(SOURCE, externalId);
+        this.options.queue.clearRelayDeliveryAttempts(externalId);
         console.warn(
           `⚠️  [relay] ${externalId} failed permanently and was acknowledged: ${(error as Error).message}`,
         );
         return;
       }
-      // 429/5xx/network: release the claim and rethrow so the poll loop backs
-      // off without advancing the cursor — the relay then redelivers.
+      if (error instanceof RelayDeferredError) {
+        // Every harness is usage-limited. Keep the delivery retryable but do
+        // not let a temporary capacity gap exhaust its attempt budget.
+        this.options.queue.abandonDelivery(SOURCE, externalId);
+        console.warn(`⏳ [relay] ${externalId} deferred until a harness is available (will retry)`);
+        throw error;
+      }
+      // 429/5xx/network/setup errors: count the failure. Release the claim and
+      // rethrow so the poll loop backs off without advancing the cursor — the
+      // relay then redelivers — until the bounded attempt budget runs out.
+      const attempts = this.options.queue.beginRelayDeliveryAttempt(
+        externalId,
+        (error as Error).message,
+      );
+      const maxAttempts = this.options.queue.getMaxRetries();
+      if (attempts >= maxAttempts) {
+        // One permanently failing envelope must not pin the cursor (and every
+        // later envelope) forever. Acknowledge it after the bounded retries.
+        this.options.queue.completeDelivery(SOURCE, externalId);
+        this.options.queue.clearRelayDeliveryAttempts(externalId);
+        console.warn(
+          `⚠️  [relay] ${externalId} failed ${attempts} times and was acknowledged: ${(error as Error).message}`,
+        );
+        return;
+      }
       this.options.queue.abandonDelivery(SOURCE, externalId);
       console.warn(
-        `⚠️  [relay] transient failure for ${externalId} (will retry): ${(error as Error).message}`,
+        `⚠️  [relay] transient failure for ${externalId} ` +
+          `(attempt ${attempts}/${maxAttempts}, will retry): ${(error as Error).message}`,
       );
       throw error;
     }
@@ -262,10 +320,33 @@ export class RelayAcquirer implements Acquirer {
         console.log(`📌 [relay] review feedback on ${repo}#${pr}`);
         const ok = await handlers.addressPr(repo, pr);
         if (ok === "deferred") {
-          throw new Error(`Relay review ${repo}#${pr} deferred until a harness is available`);
+          throw new RelayDeferredError(
+            `Relay review ${repo}#${pr} deferred until a harness is available`,
+          );
+        }
+        if (ok === "interrupted") {
+          // A shutdown drain killed the run; its outcome is unknown, not
+          // failed. Keep the delivery retryable so it is not lost.
+          throw new RelayInterruptedError(`Relay review ${repo}#${pr} was interrupted`);
+        }
+        if (ok === "skipped") {
+          console.log(`⏭️  [relay] ${repo}#${pr} skipped; nothing to address`);
+          return;
         }
         if (!ok) {
-          throw new Error(`Relay review ${repo}#${pr} did not complete cleanly`);
+          // The run started and reported failure (or the slug matched no
+          // workspace repo). `devintern address-review` already reports the
+          // concrete cause, so rethrowing here only adds a duplicate error and
+          // keeps the delivery transient: the relay redelivers it on every
+          // backoff cycle, re-running the whole review forever while pinning
+          // the cursor for every later envelope. Treat it as terminal for this
+          // delivery, matching the polling acquirer, which logs the same
+          // outcome as a warning and moves on.
+          console.warn(
+            `⚠️  [relay] ${repo}#${pr} feedback run did not complete cleanly; ` +
+              "acknowledging the delivery instead of retrying it",
+          );
+          return;
         }
         console.log(`✅ [relay] ${repo}#${pr} feedback addressed`);
         return;

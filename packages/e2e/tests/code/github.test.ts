@@ -50,6 +50,16 @@ describe.skipIf(!enabled)("GitHub built CLI E2E", () => {
     });
   });
 
+  test("applies PR_LABELS to the created pull request", async () => {
+    await scenario(async (run) => {
+      const label = "devintern-authored";
+      await run.github.ensureLabel(label);
+      await run.runCli(undefined, false, { prLabels: [label] });
+      const pull = await run.github.waitForPull(run.head, run.base);
+      expect(pull.labels.map((item) => item.name)).toContain(label);
+    });
+  });
+
   test("reports rejected PR credentials after pushing without creating a PR", async () => {
     await scenario(async (run) => {
       const result = await run.runCli("invalid-e2e-token");

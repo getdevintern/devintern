@@ -67,6 +67,8 @@ Subcommands:
                         the next run will do (exit 1 if it would fail)
   doctor               Readiness check: runtime, git, agent CLI, tracker
                         credentials, sign-in, license (exit 1 if anything fails)
+  report               File a redacted bug report for DevIntern itself
+                        (run 'devintern report --help' for options)
 
 Licensing:
   Interactive runs are free forever and need no sign-in. Unattended runs
@@ -75,3 +77,17 @@ Licensing:
   'devintern worker'. The pilot runs 14 days with no task limit.
 
 Run 'devintern <subcommand> --help' for subcommand-specific options.`;
+
+/**
+ * Whether an argv list requests help.
+ *
+ * Subcommand dispatchers must check this before doing any work: `devintern
+ * init --help` and `devintern logout --help` used to execute the command
+ * instead of printing its usage.
+ *
+ * @param args - Arguments following the subcommand name.
+ * @returns True when `--help` or `-h` is present.
+ */
+export function hasHelpArg(args: readonly string[]): boolean {
+  return args.some((arg) => arg === "--help" || arg === "-h");
+}

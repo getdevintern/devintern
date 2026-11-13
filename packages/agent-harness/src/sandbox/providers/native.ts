@@ -13,6 +13,13 @@
  *   harness) plus network/local-binding and
  *   `sandbox_workspace_write.writable_roots=[...]` config overrides.
  *
+ * Both harnesses also receive a per-workspace writable Bun install/temp root
+ * and its bin directory appended to PATH: `auto` selects this provider for
+ * claude-code and codex, so leaving BUN_INSTALL at the read-only `~/.bun` would
+ * keep `bun install` failing exactly as it did under nono before that fix.
+ * Scoping the root per workspace and appending the bin directory keeps planted
+ * launchers from shadowing system tools or leaking across repositories.
+ *
  * Antigravity (the Gemini CLI successor) is deliberately not wired: its
  * `--sandbox` confines shell commands only (agent file tools bypass it),
  * exposes no writable-roots or network config, and under
@@ -27,13 +34,15 @@
  * The trade-off versus the external wrappers: the boundary is configured
  * and enforced inside the harness process rather than by the parent, and
  * (for claude-code) covers a narrower scope. Users who want the stronger
- * parent-enforced guarantee choose nono/srt explicitly.
+ * parent-enforced guarantee choose nono explicitly.
  */
 
 import { mkdtempSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { applyCodexNetworkArgs } from "../../harnesses/codex.js";
+import { bunSandboxOverlay, isPathWithin, trySandboxBunEnv } from "../bun-env.js";
+import type { BunSandboxOverlay } from "../bun-env.js";
 import { unsupportedPlatform } from "../probe.js";
 import type { SandboxDetection, SandboxPolicy, SandboxProvider, WrappedCommand } from "../types.js";
 
@@ -72,7 +81,7 @@ export class NativeSandboxProvider implements SandboxProvider {
         throw new Error(
           `The "${harnessName}" harness has no built-in sandbox. ` +
             `Native sandboxing supports: ${NATIVE_CAPABLE.join(", ")}. ` +
-            "Use AGENT_SANDBOX=nono or AGENT_SANDBOX=srt for other harnesses.",
+            "Use AGENT_SANDBOX=nono for other harnesses.",
         );
     }
   }
@@ -102,6 +111,11 @@ export class NativeSandboxProvider implements SandboxProvider {
     policy: SandboxPolicy,
   ): WrappedCommand {
     const sshAgentSocket = process.env.SSH_AUTH_SOCK;
+    const overlay = this.bunOverlay(policy);
+    const allowWrite = [...policy.writablePaths];
+    if (overlay?.usesCache && !isPathWithin(overlay.writablePath, allowWrite)) {
+      allowWrite.push(overlay.writablePath);
+    }
     const settings = {
       sandbox: {
         enabled: true,
@@ -110,7 +124,7 @@ export class NativeSandboxProvider implements SandboxProvider {
         failIfUnavailable: true,
         excludedCommands: ["docker *", "gh *"],
         filesystem: {
-          allowWrite: policy.writablePaths,
+          allowWrite,
         },
         network: {
           allowedDomains: policy.network === "open" ? ["*"] : policy.network.allowedDomains,
@@ -123,7 +137,7 @@ export class NativeSandboxProvider implements SandboxProvider {
     const settingsFile = join(settingsDir, "sandbox-settings.json");
     writeFileSync(settingsFile, JSON.stringify(settings, null, 2));
 
-    return { path, args: [...args, "--settings", settingsFile] };
+    return { path, args: [...args, "--settings", settingsFile], env: overlay?.env };
   }
 
   /**
@@ -137,13 +151,32 @@ export class NativeSandboxProvider implements SandboxProvider {
       outArgs.unshift("--sandbox", "workspace-write");
     }
     const configuredArgs = applyCodexNetworkArgs(outArgs, policy.network);
-    const extraRoots = policy.writablePaths.filter((p) => p !== policy.workingDir);
+    const overlay = this.bunOverlay(policy);
+    const writable = [...policy.writablePaths];
+    if (overlay?.usesCache && !isPathWithin(overlay.writablePath, writable)) {
+      writable.push(overlay.writablePath);
+    }
+    const extraRoots = writable.filter((p) => p !== policy.workingDir);
     if (extraRoots.length > 0) {
       configuredArgs.push(
         "-c",
         `sandbox_workspace_write.writable_roots=${JSON.stringify(extraRoots)}`,
       );
     }
-    return { path, args: configuredArgs };
+    return { path, args: configuredArgs, env: overlay?.env };
+  }
+
+  /**
+   * Adapt the child env (and report the root to grant) for Bun installs.
+   *
+   * Auto mode selects this provider for claude-code and codex, so the writable
+   * Bun root has to be applied here too: without it `bun install` inside the
+   * harness's own sandbox still hits the read-only `~/.bun`. The shared helper
+   * keeps this aligned with nono instead of re-implementing the overlay.
+   */
+  private bunOverlay(policy: SandboxPolicy): BunSandboxOverlay | undefined {
+    const bun = trySandboxBunEnv(undefined, policy.workingDir);
+    if (!bun) return undefined;
+    return bunSandboxOverlay(bun, policy.writablePaths, policy.env ?? process.env);
   }
 }

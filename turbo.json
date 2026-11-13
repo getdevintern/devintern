@@ -45,7 +45,13 @@
     "format:check": {},
     "lint": {},
     "test": {
-      "env": ["AGENT_CLI_PATH"]
+      "env": ["AGENT_CLI_PATH"],
+      "passThroughEnv": ["NONO_CAP_FILE", "SANDBOX_RUNTIME"]
+    },
+    "@devintern/e2e#test": {
+      "dependsOn": ["@getdevintern/code#build"],
+      "env": ["AGENT_CLI_PATH"],
+      "cache": false
     },
     "typecheck": {}
   }

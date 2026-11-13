@@ -59,3 +59,38 @@ test("GitHub waitForPull still rejects an ambiguous head when no base scopes the
     fetchMock.mockRestore();
   }
 });
+
+test("GitHub ensureLabel names the missing Issues permission when label creation is forbidden", async () => {
+  const fetchMock = spyOn(globalThis, "fetch").mockResolvedValueOnce(
+    Response.json({ message: "Resource not accessible by personal access token" }, { status: 403 }),
+  );
+  try {
+    await expect(
+      new GitHub("org/fixture", "token").ensureLabel("devintern-authored"),
+    ).rejects.toThrow("Creating labels requires Issues: write on the fixture repository");
+    expect(new URL(String(fetchMock.mock.calls[0][0])).pathname).toBe("/repos/org/fixture/labels");
+  } finally {
+    fetchMock.mockRestore();
+  }
+});
+
+test("GitHub ensureLabel tolerates an existing label and rethrows other failures", async () => {
+  const fetchMock = spyOn(globalThis, "fetch")
+    .mockResolvedValueOnce(
+      Response.json(
+        {
+          message: "Validation Failed",
+          errors: [{ resource: "Label", code: "already_exists", field: "name" }],
+        },
+        { status: 422 },
+      ),
+    )
+    .mockResolvedValueOnce(new Response("server error", { status: 500 }));
+  try {
+    const github = new GitHub("org/fixture", "token");
+    await github.ensureLabel("devintern-authored");
+    await expect(github.ensureLabel("devintern-authored")).rejects.toThrow("HTTP 500");
+  } finally {
+    fetchMock.mockRestore();
+  }
+});

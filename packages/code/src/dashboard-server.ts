@@ -30,6 +30,8 @@ import {
   handleStats,
   handleWorkerStatus,
 } from "./lib/observability/dashboard-api";
+import { handleOverview } from "./lib/observability/dashboard-overview";
+import { handleWorkspace } from "./lib/observability/dashboard-workspace";
 import type { AutomationRunDeps, RetryHandlerDeps } from "./lib/observability/dashboard-api";
 import type { DashboardAutomationActions } from "./lib/automation/acquirer";
 
@@ -48,9 +50,20 @@ export function isLoopbackDashboardHost(host: string): boolean {
 export interface DashboardServerOptions {
   port?: number;
   host?: string;
+  /** Database owning run history (defaults to the project-scoped worker DB). */
   dbPath?: string;
+  /**
+   * Database owning durable queue counts (ad-hoc tasks, scheduled retries).
+   * Defaults to `dbPath` when supplied, else the configured workspace DB.
+   */
+  queueDbPath?: string;
   /** Project root used to locate the worker lock file. */
   workingDir?: string;
+  /**
+   * Workspace home holding the worker lock, capture files, and harness
+   * transcripts (defaults to `resolveWorkspaceDir()`, or `DEVINTERN_WORKSPACE_DIR`).
+   */
+  workspaceDir?: string;
   /** Live working-window snapshot provider (embedded dashboard). */
   scheduleSnapshot?: () => import("./lib/worker/schedule").ScheduleSnapshot | null;
   /**
@@ -111,7 +124,7 @@ function serveStatic(uiDir: string, pathname: string): Response | null {
 
 const MISSING_UI_PAGE =
   "devintern dashboard: UI assets not found.\n\n" +
-  "The JSON API is available under /api (try /api/runs, /api/stats, /api/worker).\n" +
+  "The JSON API is available under /api (try /api/overview, /api/runs, /api/stats, /api/worker).\n" +
   "If you are running from source, build the UI first:\n" +
   "  bun run --filter @devintern/dashboard-ui build\n";
 
@@ -137,7 +150,9 @@ export function startDashboardServer(
   }
   const data = new DashboardData({
     dbPath: options.dbPath,
+    queueDbPath: options.queueDbPath,
     workingDir: options.workingDir,
+    workspaceDir: options.workspaceDir,
     scheduleSnapshot: options.scheduleSnapshot,
     retryMode: options.retryMode,
     automationActions: options.automationActions,
@@ -180,6 +195,9 @@ export function startDashboardServer(
         if (pathname === "/api/automations") {
           return json(handleAutomations(data));
         }
+        if (pathname === "/api/task-activity") {
+          return json({ status: 200, body: data.getTaskActivity() });
+        }
         if (pathname === "/api/runs") {
           return json(handleRuns(data, url.searchParams));
         }
@@ -217,6 +235,12 @@ export function startDashboardServer(
         if (pathname === "/api/worker") {
           return json(handleWorkerStatus(data));
         }
+        if (pathname === "/api/overview") {
+          return json(handleOverview(data));
+        }
+        if (pathname === "/api/workspace") {
+          return json(handleWorkspace(data));
+        }
         if (pathname === "/api/agent-prs") {
           return json(handleAgentPrs(data));
         }
@@ -243,6 +267,11 @@ export function startDashboardServer(
 
   console.log(`📊 Dashboard running at http://${host}:${port}`);
   console.log(`   Database: ${data.dbPath}${data.dbMissing ? " (not created yet)" : ""}`);
+  if (data.queueDbPath !== data.dbPath) {
+    console.log(
+      `   Queue database: ${data.queueDbPath}${existsSync(data.queueDbPath) ? "" : " (not created yet)"}`,
+    );
+  }
   if (!uiDir) {
     console.log("   UI assets not found — JSON API only (see /api/runs, /api/stats).");
   }

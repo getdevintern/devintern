@@ -39,8 +39,15 @@ export interface ReadyTask {
   updated?: string;
 }
 
-/** A deferred task was not attempted and must be evaluated again next tick. */
-export type TaskExecutionResult = boolean | "deferred";
+/**
+ * Outcome of one task execution. `true` means the run completed; `"deferred"`
+ * means it never started (repo busy or every harness usage-limited) and must be
+ * evaluated again next tick; `"skipped"` means the retry gate skipped an
+ * unchanged incomplete ticket, which is deliberately not a run; `"interrupted"`
+ * means a shutdown drain killed the run before it settled, so its outcome is
+ * unknown rather than failed.
+ */
+export type TaskExecutionResult = boolean | "deferred" | "skipped" | "interrupted";
 
 /** Dedupe key for a ready task: one execution per `(key, update stamp)`. */
 export function processedTaskId(task: ReadyTask): string {
@@ -123,7 +130,9 @@ export function workerTaskArgs(): string[] {
  *               the workspace worker routes each task to its repo's worktree
  *               with per-repo env; direct callers inherit both
  * @returns true when the CLI exited 0, `"deferred"` when every harness in
- *   the failover chain is usage-limited, false on any other failure
+ *   the failover chain is usage-limited, `"skipped"` when the retry gate
+ *   skipped the task, `"interrupted"` when a shutdown drain killed the child
+ *   (its exit code is meaningless then), false on any other failure
  */
 export async function runTaskViaCli(
   taskKey: string,
@@ -132,8 +141,15 @@ export async function runTaskViaCli(
     cwd?: string;
     env?: Record<string, string | undefined>;
     signal?: AbortSignal;
+    /** Called once with the spawned child pid, for durable interrupt recovery. */
+    onChildSpawn?: (pid: number) => void;
   } = {},
 ): Promise<TaskExecutionResult> {
+  // Distinguishes "the drain killed this run" from "the run failed and the
+  // drain happened to start around the same time". Only the abort handler (or
+  // an already-aborted signal) sets it, so the SIGTERM exit code of a drained
+  // child is never mistaken for a genuine pipeline failure.
+  let interrupted = false;
   const result = await runWithFailover(
     (env) =>
       new Promise<number>((resolve) => {
@@ -149,6 +165,7 @@ export async function runTaskViaCli(
           resolve(code);
         };
         if (opts.signal?.aborted) {
+          interrupted = true;
           finish(1);
           return;
         }
@@ -159,8 +176,18 @@ export async function runTaskViaCli(
           env,
           detached,
         });
+        if (child.pid !== undefined) {
+          try {
+            opts.onChildSpawn?.(child.pid);
+          } catch (error) {
+            console.warn(
+              `⚠️  Could not record the task child pid for ${taskKey}: ${(error as Error).message}`,
+            );
+          }
+        }
         abort = () => {
           if (child.pid === undefined) return;
+          interrupted = true;
           try {
             if (detached) process.kill(-child.pid, "SIGTERM");
             else child.kill("SIGTERM");
@@ -188,6 +215,7 @@ export async function runTaskViaCli(
       }),
     opts.env ?? process.env,
   );
+  if (interrupted) return "interrupted";
   return cliResultToTaskResult(result);
 }
 
@@ -384,6 +412,13 @@ export class TaskPollingAcquirer implements Acquirer {
                   this.rememberPendingRescan(detector.source, task.key, externalId);
                   tickDeferred = true;
                   console.log(`⏳ [${this.name}] ${task.key} deferred; will retry next poll`);
+                } else if (result === "skipped") {
+                  // The retry gate skipped an unchanged incomplete ticket. This
+                  // is not a run: report it as skipped, and keep the dedupe
+                  // claim so it stays out of the sweep until the ticket changes.
+                  console.log(
+                    `⏭️  [${this.name}] ${task.key} skipped (previous attempt reported incomplete; ticket unchanged)`,
+                  );
                 } else {
                   console.log(
                     result

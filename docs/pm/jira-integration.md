@@ -1,15 +1,15 @@
 ---
-title: "Create Jira Issues with @devintern/pm"
+title: "Create Jira Issues with DevIntern PM"
 sidebarLabel: "Jira Integration"
 description: "Turn AI-drafted stories into Jira Cloud issues with ADF descriptions, subtasks, and epic links."
-section: "PM"
+section: "Create Tasks"
 order: 4
 sidebarHidden: true
-dateModified: 2026-07-23
+dateModified: 2026-11-12
 tags: ["jira", "devintern/pm", "integration", "jira cloud"]
 ---
 
-# Create Jira Issues with @devintern/pm
+# Create Jira Issues with DevIntern PM
 
 @devintern/pm creates Jira Cloud issues directly from AI-generated stories and tasks. Setup takes a few minutes: you need your site URL, account email, an API token, and a default project key.
 

@@ -1,10 +1,10 @@
 ---
 title: "Workspaces (Multi-Repo Fleet)"
 sidebarLabel: "Multiple Repositories"
-description: "Drive repositories and tracker teams with one devintern worker: workspace.toml routing and isolated per-task worktrees"
+description: "Use when one worker should serve several repositories or tracker teams: workspace.toml, routing rules, and isolated per-task worktrees."
 section: "Automation"
 order: 3
-dateModified: 2026-10-16
+dateModified: 2026-11-12
 ---
 
 # Workspaces (Multi-Repo Fleet)
@@ -107,7 +107,7 @@ prompt = "Review the frontend and clean up one source of recurring noise."
 - `[worker.schedule]` gates only new-task pickup: multiple windows union, windows may cross midnight, `blocked` wins on overlap, and a missed whole window triggers one catch-up drain at startup. Timezone/DST semantics and `devintern worker run-now` are covered in [Running the Worker Unattended: Working windows](./automated-task-processing.md#working-windows-quiet-hours).
 - `[worker].auto_update` keeps a globally installed CLI current while the worker is idle (checked at most daily, installed without interrupting work, restart on success). See [Running the Worker Unattended: Keeping the worker up to date](./worker.md#keeping-the-worker-up-to-date).
 - `[[automations]]` uses the same schema as single-repo `.devintern-code/automations.toml`. An entry must name `repo` when the workspace has more than one repository. `open_pr` (boolean, default `false`) decides whether occurrences open a pull request: opt-in per automation, and workspace-level `worker_task_args` never overrides it. `allow_no_changes` (boolean, default `false`) records an occurrence that changes nothing as a successful no-op instead of a failed run — use it for jobs whose prompt says to make no changes when nothing needs doing. See [Worker Daemon → Recurring automations](./worker.md#recurring-automations) for prompt-writing guidance and schedule semantics.
-- `[[estimations]]` schedules unattended story-point sweeps (tracker query + cron/interval, no `prompt`, no `repo`). The workspace tracker must support estimation. See [Worker Daemon → Scheduled story-point estimation](./worker.md#scheduled-story-point-estimation).
+- `[[estimations]]` schedules unattended story-point sweeps (tracker query + cron/interval, no `prompt`, no `repo`). An entry runs against `[defaults].tracker`, or against one team's tracker and credentials when it sets `team = "<team name>"`. That tracker must support estimation. See [Worker Daemon → Scheduled story-point estimation](./worker.md#scheduled-story-point-estimation).
 - `[[automations]]` and `[[estimations]]` entries may each set `harness` (one agent name), `model`, and `effort` (`"low"`, `"medium"`, or `"high"`) to run that schedule on a different agent than the workspace default. Precedence for an entry's runs is **entry field > team/repo env > workspace env > harness default**; omitted fields keep the existing workspace/repo/team values, and `model`/`effort` are harness-specific so they apply only when the entry also sets `harness` (an entry without `harness` keeps normal failover and never sends a harness-specific model to a fallback). When the pin names a different agent than the workspace primary, an inherited `model`/`effort` and the primary's `AGENT_CLI_PATH` (plus the `CLAUDE_CLI_PATH` fallback for a non-`claude-code` pin) are dropped so the pinned agent uses its own binary and defaults. An unknown `harness` or an `effort` outside the three levels fails validation naming the entry id and field. A pinned `harness` whose CLI is not installed is warned about at worker startup and on reload (the pin opts out of failover), naming the entry. `effort` on a harness that does not support reasoning effort is ignored with a warning instead of failing the run. These overrides apply on live reload to subsequent occurrences; in-flight runs finish under the selection they started with. See [Worker Daemon → Choosing the agent per schedule](./worker.md#choosing-the-agent-per-schedule).
 - `[[error_monitors]]` maps each Sentry project to one repo and an optional team, with per-source credential layers for multi-project setups. See [Sentry Auto-fixes](./sentry-integration.md).
 
@@ -122,7 +122,7 @@ max_concurrency = 4
 max_concurrency_per_repo = 1
 ```
 
-`max_concurrency` bounds all agent work across polling, relay events, retries, error monitors, reviews, mentions, CI fixes, conflict resolution, automations, and estimations. `max_concurrency_per_repo` bounds task jobs that receive disposable worktrees in one repository. Shared-base jobs such as reviews and CI fixes remain serialized per repository even when the per-repository task limit is larger.
+`max_concurrency` bounds all agent work across polling, relay events, retries, error monitors, reviews, mentions, CI fixes, conflict resolution, automations, estimations, and ad-hoc `worker add` tasks. `max_concurrency_per_repo` bounds task jobs that receive disposable worktrees in one repository. Shared-base jobs such as reviews and CI fixes remain serialized per repository even when the per-repository task limit is larger.
 
 The limits are a live cap, not a one-time batch gate: polling keeps running while jobs are in flight, so each poll fills every free slot with newly available tasks, and a task is admitted as soon as an in-flight job frees its slot. The worker never admits more than the configured limits at once.
 
@@ -197,7 +197,7 @@ Credentials layer as workspace `.env` < team `env_file` < inline `[teams.env]` f
 
 The shared `.env` can also namespace credentials as `<TRACKER>_<TEAM>_<SETTING>`. For example, `JIRA_PLATFORM_URL`, `JIRA_PLATFORM_EMAIL`, and `JIRA_PLATFORM_API_TOKEN` are projected onto Jira's normal variables only for team `platform`. Team names are uppercased and punctuation becomes `_`; team `env_file` and inline values still win.
 
-`[defaults].tracker` and `[defaults].task_query` are optional fallbacks for team entries. Once any `[[teams]]` exist, there is no separate defaults poller. Scheduled estimations still use `[defaults].tracker`; configure it explicitly when using `[[estimations]]`.
+`[defaults].tracker` and `[defaults].task_query` are optional fallbacks for team entries. Once any `[[teams]]` exist, there is no separate defaults poller. Scheduled estimations without `team` still use `[defaults].tracker`; configure it explicitly for them, or set `team` on each `[[estimations]]` entry to estimate against that team's tracker ([per-team estimations](./worker.md#per-team-estimations)).
 
 Team `task_query` and `repo` changes live-reload along with routing rules. Team names, tracker types, `env_file`, and inline credentials are startup-only because changing them requires rebuilding tracker clients and detectors; restart the worker after changing those fields.
 
@@ -287,7 +287,7 @@ Set `conflict_resolution = "disabled"` to turn automatic conflict resolution off
 
 The scheduling is identical; only where the work runs changes:
 
-- Each occurrence runs in the repo's persistent base worktree (`~/.devintern/worktrees/<repo>/base`) with the same layered environment as review work: shared `.env` → repo `env_file` → `[repos.env]`. When `open_pr = true`, dependencies are reinstalled after the occurrence prepares its final branch, so they stay aligned with its lockfile.
+- Each occurrence runs in the repo's persistent base worktree (`~/.devintern/worktrees/<repo>/base`) with the same layered environment as review work: shared `.env` → repo `env_file` → `[repos.env]`. When `open_pr = true`, dependencies are reinstalled after the occurrence prepares its final branch, so they stay aligned with its lockfile. Reuse resets the checkout to the fetched default branch first, so a previous occurrence's branch, stale commit, or tracked edits cannot become the next run's starting point; the previous branch itself is left intact.
 - It takes the normal per-repo run lock, so it never mutates a checkout concurrently with a task or PR run.
 - Occurrence task files land under the workspace home (`~/.devintern/automations/<id>/`), next to `repos/`, `worktrees/`, and the central database — not inside the repo worktrees.
 
@@ -311,7 +311,7 @@ devintern worker connect sentry # add a Sentry auto-fix project
 - Re-running `add-repo` for the same repo is a no-op. Hand-written comments in `workspace.toml` are preserved; new entries are appended.
 - `.devintern-code/settings.json` needs no migration: it travels with the repo and applies inside each task worktree.
 
-Once repos are registered you can dispatch one-off work without a tracker ticket. `devintern worker add --repo <name> --title "..."` enqueues a durable task pinned to that repo; see [Ad-hoc tasks](./worker.md#ad-hoc-tasks-worker-add).
+Once repos are registered you can dispatch one-off work without a tracker ticket. `devintern worker add --repo <name> --title "..."` enqueues a durable task pinned to that repo; see [Delegate Tasks to the Worker](./delegation.md).
 
 ## Environment
 

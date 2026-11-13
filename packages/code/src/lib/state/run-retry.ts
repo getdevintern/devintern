@@ -43,8 +43,13 @@ export interface RetryEligibility {
  * `devintern <stem>` would 404 against the tracker. Such runs report
  * `kind: "automation"` so the retry handler re-triggers the automation
  * instead. Estimation sweeps re-run on their schedule, not by hand.
+ *
+ * Ad-hoc runs (`origin: "local"`, enqueued by `devintern worker add`) report
+ * `kind: "injected"`: their task key names no tracker ticket either, so the
+ * handler re-queues the durable injected row instead of forcing the CLI. The
+ * row keeps its key, so the retried run resumes the recorded branch and report.
  */
-export type RetryKind = "task" | "automation";
+export type RetryKind = "task" | "automation" | "injected";
 
 export interface RetryEligibility {
   eligible: boolean;
@@ -56,11 +61,15 @@ export interface RetryEligibility {
 export function isRunRetriable(
   run: Pick<RunRecord, "status" | "taskKey" | "automationId"> & { origin?: RunRecord["origin"] },
 ): RetryEligibility {
-  if (run.origin === "local") {
-    return {
-      eligible: false,
-      reason: "re-dispatch ad-hoc tasks with `devintern worker add` (optionally --idempotency-key)",
-    };
+  if (run.origin === "local" && run.taskKey) {
+    // Ad-hoc work: the retry re-queues the durable injected row under the same
+    // key, so the pipeline targets the same `feature/local-<slug>` branch and
+    // session pickup can inherit the interrupted attempt. The row itself is
+    // resolved by the handler (it may already be gone or still active).
+    if (RETRIABLE_RUN_STATUSES.includes(run.status)) {
+      return { eligible: true, kind: "injected" };
+    }
+    return notRetriableByStatus(run.status);
   }
   if (run.automationId) {
     if (run.origin === "estimate") {

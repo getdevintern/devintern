@@ -291,7 +291,17 @@ export class JiraClient {
       if (this.verbose) {
         console.error("Failed to search issues:", error);
       }
-      throw new Error(`Failed to search issues with JQL: ${jql}`);
+      // Surface the underlying failure (HTTP status/body, DNS, TLS, ...) instead of
+      // collapsing every cause into the same JQL-only message. Jira may echo the
+      // JQL back in its error body, so keep the query in the message exactly once.
+      const causeMessage = error instanceof Error ? error.message : String(error);
+      const details =
+        causeMessage.length === 0
+          ? jql
+          : causeMessage.includes(jql)
+            ? causeMessage
+            : `${jql}: ${causeMessage}`;
+      throw new Error(`Failed to search issues with JQL: ${details}`, { cause: error });
     }
   }
 
@@ -813,7 +823,7 @@ export class JiraClient {
    */
   async findEstimationComment(
     issueKey: string,
-  ): Promise<{ commentId: string; created: string } | null> {
+  ): Promise<{ commentId: string; created: string; updated: string } | null> {
     return findEstimationComment(this, issueKey);
   }
 

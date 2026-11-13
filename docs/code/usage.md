@@ -1,13 +1,13 @@
 ---
-title: "@devintern/code Usage Guide"
+title: "DevIntern Code Usage Guide"
 sidebarLabel: "CLI Reference"
-description: "Commands, flags, batch runs, and outputs for working with @devintern/code."
+description: "Use when looking up DevIntern Code CLI commands and flags for single tasks, markdown tasks, batch runs, git behavior, and outputs."
 section: "Automation Reference"
 order: 1
-dateModified: 2026-10-16
+dateModified: 2026-11-12
 ---
 
-# @devintern/code Usage Guide
+# DevIntern Code Usage Guide
 
 ## Single Task Processing
 
@@ -42,6 +42,9 @@ devintern TASK-123 --agent-path /path/to/claude
 
 # Override max turns for very complex tasks (default: 500)
 devintern TASK-123 --max-turns 1000
+
+# Retry git hook failures N times (default: 10)
+devintern TASK-123 --hook-retries 3
 
 # Skip automatic commit after AI agent completes
 devintern TASK-123 --no-auto-commit
@@ -176,6 +179,37 @@ devintern MYAPP-456
 - PR body uses a fixed template — `Why`, `What changed`, `Scope`, `Tradeoffs`, `Blast Radius`, and `Verification`. Implementation and repair agents are asked to supply all six sections in a marked final briefing, which is published without progress messages. Raw agent output remains in the task files and harness logs for diagnostics. If an agent omits or truncates the briefing markers, devintern falls back to parsing its original output and marks missing sections `N/A` (meaning no section was supplied, not that it is necessarily inapplicable).
 - Target branch can be specified with `--pr-target-branch`. If omitted (or if the named branch does not exist on the remote), the repository default branch is used
 - Target branch can also be auto-detected from the task description. Add a line like `Target branch: develop` to the card or issue and `devintern` will pick it up. Supported patterns: `Target branch:`, `Base branch:`, `PR target:`. Falls back to `--pr-target-branch` if no pattern matches.
+
+### Per-Task Execution Preferences
+
+Just like the target branch, you can override the agent harness, model, and reasoning effort for a single task from the task description — without changing your defaults or restarting the worker. Preferences are read only from an explicit block, so ordinary ticket prose is never mistaken for configuration:
+
+```markdown
+## Execution preferences
+Harness: opencode
+Model: anthropic/claude-opus-4-6
+Effort: high
+```
+
+The block starts at an `Execution preferences` (or `Agent execution preferences`) heading and ends at the next heading. Trackers that flatten headings to plain text (Jira ADF, Azure DevOps HTML) are also recognized: a line containing only `Execution preferences` opens a block, which ends at the next heading or at a blank line followed by ordinary prose (blank lines between the heading and its fields, or between fields, are ignored). Fenced code samples and `<pre>` / `<code>` sections are ignored, so pasting the example above does not configure the task. If the heading disappears entirely for your tracker, use the comment form below. You can also put the lines in a `devintern` HTML comment, which stays hidden in rendered descriptions:
+
+```markdown
+<!-- devintern: Harness: codex -->
+<!-- devintern
+Model: gpt-5.2
+Effort: high
+-->
+```
+
+- All three are optional and independent. Omitted preferences use your existing defaults (`AGENT_HARNESS`, `AGENT_MODEL`, `AGENT_EFFORT`).
+- Recognized labels (case-insensitive, markdown formatting tolerated): `Harness:` / `Agent harness:`, `Model:` / `Agent model:`, `Effort:` / `Reasoning effort:` / `Agent effort:`. Each label and value must be on its own line; a bare `Harness:`/`Model:`/`Effort:` line elsewhere in the description is ignored.
+- `Model:` is passed unchanged to the selected harness. Use a model identifier or a native alias supported by that CLI (including OpenCode v2 `provider/model#variant` references). DevIntern does not define model aliases, choose model versions, or validate model availability.
+- `Effort:` is `low`, `medium`, or `high`. It is applied only when the selected harness supports reasoning effort; otherwise the preference is ignored with a warning and the task proceeds.
+- Unknown harnesses, conflicting values (the same label twice with different values), and invalid effort values fail the task with an actionable message. Model compatibility and availability are validated by the selected harness.
+- When only `Harness:` is set, `AGENT_MODEL` is **not** carried over (it is harness-specific); the task uses that harness's `<HARNESS>_MODEL` when configured, otherwise its own default model. `Model:` still wins when present.
+- A task-selected harness resolves its CLI from `<HARNESS>_CLI_PATH` (or your `PATH`); `AGENT_CLI_PATH` applies only to the environment-selected primary harness.
+- In unattended worker runs, failover pins each attempt to the active harness. If the description names a different harness, that preference is ignored with a warning so the worker can still fail over correctly; reorder `AGENT_HARNESS` to change which harness the worker uses.
+- The effective harness, resolved model, and applied (or ignored) effort are printed before the run starts and recorded in the run history.
 
 ## What It Does
 

@@ -1,11 +1,17 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RunArtifactRegistry } from "../src/lib/artifacts/registry";
+import { beginShutdown, resetShutdownState } from "../src/lib/cli/shutdown-state";
 import { UsageLimitError } from "@devintern/agent-harness";
-import { buildRepairPrompt, verifyImplementation } from "../src/lib/agent/verify";
+import {
+  buildRepairPrompt,
+  describeVerificationFailure,
+  verifyImplementation,
+} from "../src/lib/agent/verify";
 import type { VerifyDependencies } from "../src/lib/agent/verify";
+import { parseReviewFeedback } from "../src/lib/review/auto-review-loop";
 import {
   UNTRUSTED_CONTENT_NOTICE,
   untrustedContentBlock,
@@ -79,6 +85,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  resetShutdownState();
   rmSync(outputDir, { recursive: true, force: true });
 });
 
@@ -91,6 +98,72 @@ describe("verifyImplementation", () => {
     expect(run.pendingFeedback).toBeUndefined();
   });
 
+  test("accepts an approval whose findings sit below the configured threshold", async () => {
+    // `minSeverity: "high"` makes medium findings advisory. A verdict that
+    // approves the work while listing them must not die in the parser, whose
+    // default threshold is the auto-review loop's `medium`.
+    const verdict = JSON.stringify({
+      summary: "Requirements met; advisory notes remain",
+      approved: true,
+      items: [
+        {
+          priority: "medium",
+          confidence: "medium",
+          category: "documentation",
+          file: "docs/code/configuration.md",
+          issue: "The new flag is undocumented",
+          suggestion: "Add a row to the flags table",
+        },
+      ],
+    });
+    const run = state({ minSeverity: "high" });
+    const withRealParser: VerifyDependencies = {
+      ...deps(),
+      runAgent: async () => verdict,
+      parseFeedback: parseReviewFeedback,
+    };
+
+    expect(await verifyImplementation(run, withRealParser)).toBeUndefined();
+    expect(run.pendingFeedback).toBeUndefined();
+  });
+
+  test("resolves a contradictory approval with onFail instead of retrying", async () => {
+    // The verdict is schema-valid but says approved while listing a blocking
+    // finding. Retrying cannot fix a deterministic contradiction; the step
+    // downgrades it to a rejection and lets onFail decide.
+    const contradictory: ReviewFeedback = {
+      summary: "Approved despite a known bug",
+      approved: true,
+      items: [{ priority: "high", category: "bug", issue: "Still broken", suggestion: "Fix it" }],
+    };
+    const parse = (): VerifyDependencies => ({
+      ...deps(contradictory),
+      runAgent: async () => JSON.stringify(contradictory),
+      parseFeedback: (output, options) => {
+        expect(options).toEqual({ enforceApproval: false });
+        return parseReviewFeedback(output, options);
+      },
+    });
+    const reason = describeVerificationFailure(contradictory, contradictory.items);
+
+    expect(await verifyImplementation(state({ onFail: "warn" }), parse())).toEqual({
+      kind: "warn",
+      reason,
+    });
+    expect(await verifyImplementation(state({ onFail: "halt" }), parse())).toEqual({
+      kind: "halt",
+      reason,
+    });
+    const loopback = state({ maxIterations: 2 });
+    expect(await verifyImplementation(loopback, parse())).toEqual({
+      kind: "repeat",
+      from: "repair",
+      maxRepeats: 2,
+      reason,
+    });
+    expect(loopback.pendingFeedback?.approved).toBe(false);
+  });
+
   test("loops back with feedback and a bounded repair prompt", async () => {
     const run = state({ maxIterations: 2 });
 
@@ -98,20 +171,74 @@ describe("verifyImplementation", () => {
       kind: "repeat",
       from: "repair",
       maxRepeats: 2,
+      reason: describeVerificationFailure(feedback, feedback.items),
     });
     expect(run.pendingFeedback).toEqual(feedback);
     expect(buildRepairPrompt(run.context.taskContent, feedback)).toContain("Missing case");
   });
 
   test("supports halt and warn policies", async () => {
+    // The reason carries the blocking findings, not only the summary: it is
+    // what the tracker comment and the dashboard show the operator.
+    const reason = describeVerificationFailure(feedback, feedback.items);
+    expect(reason).toContain("Verification found 1 blocking finding(s)");
+    expect(reason).toContain("Missing case");
+
     expect(await verifyImplementation(state({ onFail: "halt" }), deps())).toEqual({
       kind: "halt",
-      reason: feedback.summary,
+      reason,
     });
     expect(await verifyImplementation(state({ onFail: "warn" }), deps())).toEqual({
       kind: "warn",
-      reason: feedback.summary,
+      reason,
     });
+  });
+
+  test("stops retrying and reports an interruption while shutting down", async () => {
+    // SIGTERM kills the agent child; retrying would spawn into a dying process
+    // and the shutdown handler already owns the interruption report.
+    const run = state({});
+    let calls = 0;
+    const interrupted: VerifyDependencies = {
+      ...deps(),
+      runAgent: async () => {
+        calls += 1;
+        throw new Error("Opencode exited with code 130: ");
+      },
+    };
+
+    beginShutdown();
+    try {
+      expect(await verifyImplementation(run, interrupted)).toEqual({
+        kind: "halt",
+        haltKind: "stop",
+        reason: "Interrupted during verification",
+      });
+      expect(calls).toBe(1);
+    } finally {
+      resetShutdownState();
+    }
+  });
+
+  test("keeps the prompt and raw answer when no verdict can be parsed", async () => {
+    const run = state({});
+    const failing: VerifyDependencies = {
+      ...deps(),
+      runAgent: async () => "the agent wrote prose instead of JSON",
+      parseFeedback: () => {
+        throw new Error('No valid JSON object containing "approved" found in Agent response');
+      },
+    };
+
+    expect(await verifyImplementation(run, failing)).toEqual({
+      kind: "halt",
+      reason:
+        'Verification failed twice: No valid JSON object containing "approved" found in Agent response',
+    });
+    expect(existsSync(join(outputDir, "verify-prompt.txt"))).toBe(true);
+    expect(readFileSync(join(outputDir, "verify-output.txt"), "utf8")).toBe(
+      "the agent wrote prose instead of JSON",
+    );
   });
 
   test("warns when Git delivery is disabled", async () => {
@@ -137,16 +264,24 @@ describe("verifyImplementation", () => {
     expect(attempts).toBe(2);
   });
 
-  test("halts after repeated verdicts that approve unresolved blocking findings", async () => {
+  test("does not retry a verdict that approves unresolved blocking findings", async () => {
+    // Schema-valid but contradictory: the parser accepts it, the step downgrades
+    // it to a rejection, and `loopback` repairs instead of re-running the agent.
     const injected = deps({ ...feedback, approved: true });
     let attempts = 0;
     injected.runAgent = async () => {
       attempts++;
       return "verdict";
     };
-    const result = await verifyImplementation(state({}), injected);
-    expect(result?.kind).toBe("halt");
-    expect(attempts).toBe(2);
+    const run = state({});
+    expect(await verifyImplementation(run, injected)).toEqual({
+      kind: "repeat",
+      from: "repair",
+      maxRepeats: 3,
+      reason: describeVerificationFailure(feedback, feedback.items),
+    });
+    expect(attempts).toBe(1);
+    expect(run.pendingFeedback?.approved).toBe(false);
   });
 
   test("propagates usage limits without retrying", async () => {

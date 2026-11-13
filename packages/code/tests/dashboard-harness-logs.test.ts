@@ -74,6 +74,33 @@ describe("dashboard harness logs", () => {
     expect(body.harnessLogs[0]?.label).toBe("implementation");
   });
 
+  test("annotates each log with the attempt of the run that produced it", () => {
+    const store = new RunStore(dbPath);
+    const firstRunId = store.createRun({ origin: "task", taskKey: "DEV-128", attempt: 1 });
+    const secondRunId = store.createRun({ origin: "task", taskKey: "DEV-128", attempt: 2 });
+    store.close();
+
+    for (const [runId, label] of [
+      [firstRunId, "implementation"],
+      [secondRunId, "implementation"],
+    ] as const) {
+      const name = harnessLogFileName({
+        startedAt: new Date(),
+        origin: "task",
+        runId,
+        taskKey: "DEV-128",
+        label,
+      });
+      mkdirSync(harnessLogsDir(workspaceDir), { recursive: true });
+      writeFileSync(join(harnessLogsDir(workspaceDir), name), "=== devintern harness run ===\n");
+    }
+
+    // The current run sees both attempts, each with its own number.
+    const logs = data.listRunHarnessLogs(secondRunId);
+    expect(logs).toHaveLength(2);
+    expect(logs.map((file) => file.attempt).sort()).toEqual([1, 2]);
+  });
+
   test("serves a redacted log scoped to its run", () => {
     const { runId, name } = seedRunWithLog();
     const response = handleRunHarnessLog(data, String(runId), encodeURIComponent(name));
@@ -89,5 +116,36 @@ describe("dashboard harness logs", () => {
     expect(handleRunHarnessLog(data, String(runId), "missing.log").status).toBe(404);
     expect(handleRunHarnessLog(data, "99999", encodeURIComponent(name)).status).toBe(404);
     expect(handleRunHarnessLog(data, "abc", encodeURIComponent(name)).status).toBe(400);
+  });
+
+  test("reads harness transcripts from an explicitly selected workspace", () => {
+    const customWorkspace = join(dir, "custom-workspace");
+    const store = new RunStore(dbPath);
+    const runId = store.createRun({ origin: "task", taskKey: "DEV-200", harness: "claude-code" });
+    store.close();
+    const name = harnessLogFileName({
+      startedAt: new Date(),
+      origin: "task",
+      runId,
+      taskKey: "DEV-200",
+      label: "implementation",
+    });
+    mkdirSync(harnessLogsDir(customWorkspace), { recursive: true });
+    writeFileSync(join(harnessLogsDir(customWorkspace), name), "=== devintern harness run ===\n");
+
+    const custom = new DashboardData({
+      dbPath,
+      workingDir: dir,
+      workspaceDir: customWorkspace,
+    });
+    try {
+      const logs = custom.listRunHarnessLogs(runId);
+      expect(logs.map((file) => file.name)).toEqual([name]);
+      expect(custom.readRunHarnessLog(runId, name)?.content).toContain(
+        "=== devintern harness run ===",
+      );
+    } finally {
+      custom.close();
+    }
   });
 });

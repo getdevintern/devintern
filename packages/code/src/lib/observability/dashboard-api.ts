@@ -11,6 +11,9 @@
  * state instead of failing, so the dashboard always renders.
  */
 
+import { existsSync } from "fs";
+import { resolve } from "path";
+
 import { LockManager } from "../lock-manager";
 import type { LockStatus } from "../lock-manager";
 import type {
@@ -28,6 +31,8 @@ import type {
   RunStats,
   RunStatus,
 } from "../state/run-recorder";
+import { InjectedTaskStore } from "../state/injected-tasks";
+import type { InjectedTask } from "../state/injected-tasks";
 import type { ScheduleSnapshot } from "../worker/schedule";
 import {
   isRunRetriable,
@@ -37,20 +42,32 @@ import {
 } from "../state/run-retry";
 import type {
   RetryActor,
+  RetryEligibility,
   RetryKind,
   RunRetryAuditEntry,
   SpawnedRetryProcess,
 } from "../state/run-retry";
 import { readWorkerLogs } from "./worker-logs";
 import type { LogEntry, WorkerLogLevel, WorkerLogsResult } from "./worker-logs";
-import { listHarnessLogs, readHarnessLogContent } from "./harness-logs";
+import { harnessLogsDir, listHarnessLogs, readHarnessLogContent } from "./harness-logs";
 import type { HarnessLogContent, HarnessLogFile } from "./harness-logs";
 import { listRunArtifacts, readRunArtifact } from "./task-artifacts";
 import type { TaskArtifactContent, TaskArtifactFile } from "./task-artifacts";
-import { resolveQueueDbPath, WebhookQueue } from "../state/webhook-queue";
+import { WebhookQueue } from "../state/webhook-queue";
+import {
+  injectedChildStillRunningMessage,
+  interruptedChildStillRunning,
+} from "../workspace/injected-recovery";
 import { resolveWorkspaceDir } from "../workspace/paths";
+import {
+  readDashboardQueueStatuses,
+  readDashboardRelayStats,
+  resolveDashboardHistoryDbPath,
+  resolveDashboardQueueDbPath,
+} from "./dashboard-db";
 import { WorkerState } from "../state/worker-state";
 import type { Cursor } from "../state/worker-state";
+import { deriveTaskTitle } from "./task-title";
 
 const RUN_STATUSES: RunStatus[] = [
   "in_progress",
@@ -96,8 +113,16 @@ export interface ApiResponse {
 
 export interface DashboardDataOptions {
   dbPath?: string;
+  queueDbPath?: string;
   /** Project root used to locate the worker lock file. */
   workingDir?: string;
+  /**
+   * Workspace home holding the worker lock, worker capture files, and harness
+   * transcripts. Defaults to `resolveWorkspaceDir()`; a standalone dashboard
+   * passes its `--workspace` value here so liveness and transcripts follow the
+   * same workspace as the queue counts.
+   */
+  workspaceDir?: string;
   /**
    * Live working-window snapshot from the worker process (embedded
    * dashboard only; standalone servers return null).
@@ -147,7 +172,9 @@ export interface RunRetryInfo {
   /**
    * How the retry dispatches: `task` forces the task key through the CLI
    * (`devintern <TASK> --force`), `automation` re-runs the automation that
-   * produced the run (its markdown stem is not a tracker key).
+   * produced the run (its markdown stem is not a tracker key), and `injected`
+   * re-queues the ad-hoc `worker add` row so the retry can resume the branch
+   * and report the interrupted attempt recorded.
    */
   kind?: RetryKind;
   reason?: string;
@@ -159,6 +186,30 @@ export interface RunRetryInfo {
 export interface EnrichedLogEntry extends LogEntry {
   runId?: number;
   runStatus?: RunStatus;
+}
+
+/** A harness log extended with the attempt metadata of the run that produced it. */
+export interface RunHarnessLogFile extends HarnessLogFile {
+  /** 1-based attempt number of the producing run, when its row still exists. */
+  attempt?: number;
+}
+
+/** Pending/running counts for one durable work queue. */
+export interface QueueStatusCounts {
+  pending: number;
+  running: number;
+}
+
+/** Every durable queue the worker may be waiting on, as served by `GET /api/worker`. */
+export interface WorkerQueueStats {
+  /** Relay/webhook deliveries awaiting or inside the normal poll loop. */
+  pending: number;
+  processing: number;
+  failed: number;
+  /** Ad-hoc tasks enqueued by `devintern worker add`. */
+  injected: QueueStatusCounts;
+  /** Retries scheduled by the dashboard's Retry action. */
+  retries: QueueStatusCounts;
 }
 
 /** Worker liveness as reported by `GET /api/worker`. */
@@ -214,7 +265,9 @@ export interface DashboardAutomationView {
  */
 export class DashboardData {
   readonly dbPath: string;
+  readonly queueDbPath: string;
   readonly workingDir: string;
+  readonly workspaceDir: string;
   readonly retryMode: "spawn" | "schedule";
   private readonly logDirs: string[];
   private readonly maxLogBytesPerFile: number | undefined;
@@ -224,6 +277,10 @@ export class DashboardData {
   private retryAuditStore: RunRetryAuditStore | null = null;
   /** Lazy read-write connection for scheduled retries (schedule mode). */
   private scheduledRetryStore: ScheduledRetryStore | null = null;
+  /** Lazy read-write connection for ad-hoc (`worker add`) rows. */
+  private injectedTaskStore: InjectedTaskStore | null = null;
+  /** Lazy read-only connection for eligibility checks (GETs must not create). */
+  private injectedTaskReadStore: InjectedTaskStore | null = null;
   /**
    * Task keys with a dashboard-triggered retry in flight (task key → claimed
    * at). The spawned CLI needs a moment to create its run row, so claims are
@@ -242,8 +299,13 @@ export class DashboardData {
   private automationActionsOverride?: DashboardAutomationActions;
 
   constructor(options: DashboardDataOptions = {}) {
-    this.dbPath = options.dbPath ?? resolveQueueDbPath();
     this.workingDir = options.workingDir ?? process.cwd();
+    this.workspaceDir = options.workspaceDir ?? resolveWorkspaceDir();
+    this.dbPath = options.dbPath ?? resolveDashboardHistoryDbPath(this.workingDir);
+    this.queueDbPath =
+      options.queueDbPath ??
+      options.dbPath ??
+      resolveDashboardQueueDbPath(undefined, this.workingDir);
     this.scheduleSnapshot = options.scheduleSnapshot ?? (() => null);
     this.retryMode = options.retryMode ?? "spawn";
     this.inflightRetryTtlMs = options.inflightRetryTtlMs ?? INFLIGHT_RETRY_TTL_MS;
@@ -254,7 +316,7 @@ export class DashboardData {
       this.logDirs = options.logDirs;
     } else {
       const dirs = [this.workingDir];
-      const workspaceDir = resolveWorkspaceDir();
+      const workspaceDir = this.workspaceDir;
       if (!dirs.includes(workspaceDir)) {
         // Standalone `devintern dashboard` often runs outside the workspace
         // home where the daemon's service definition drops its capture files.
@@ -302,6 +364,18 @@ export class DashboardData {
   }
 
   /**
+   * Whether the durable queue database is absent. The history DB and queue DB
+   * can differ, so the UI must not claim "no database yet" while a workspace
+   * DB is actively recording ad-hoc/retry work.
+   */
+  get queueDbMissing(): boolean {
+    if (resolve(this.queueDbPath) === resolve(this.dbPath)) {
+      return this.dbMissing;
+    }
+    return !existsSync(this.queueDbPath);
+  }
+
+  /**
    * List runs for `/api/runs`.
    *
    * Task descriptions are stripped here: they are polled every few seconds
@@ -321,6 +395,23 @@ export class DashboardData {
     }));
   }
 
+  /** All unfinished runs plus a bounded recent history, without per-run queries. */
+  getTaskActivity(): { runs: RunRecord[]; recentLimit: number } {
+    return this.read({ runs: [], recentLimit: 100 }, (stores) => {
+      const active = stores.runs.listRuns({ status: "in_progress", limit: -1 });
+      const recent = stores.runs.listRuns({ limit: 100 });
+      const runs = [...new Map([...active, ...recent].map((run) => [run.id, run])).values()];
+      return {
+        runs: runs.map((run) => ({
+          ...run,
+          taskTitle: deriveTaskTitle(run.taskDescription),
+          taskDescription: undefined,
+        })),
+        recentLimit: 100,
+      };
+    });
+  }
+
   getRunDetail(id: number): { run: RunRecord; stages: RunStageRecord[] } | null {
     return this.read(null, (stores) => {
       const run = stores.runs.getRun(id);
@@ -336,14 +427,32 @@ export class DashboardData {
    * run id or by the run's task key, so executions that started before the run
    * row existed (or outside a run context) still associate with the ticket.
    *
+   * Each log carries its producing run's attempt number so the dashboard can
+   * group transcripts from earlier attempts of the same ticket.
+   *
    * @param runId - Run id
    */
-  listRunHarnessLogs(runId: number): HarnessLogFile[] {
+  listRunHarnessLogs(runId: number): RunHarnessLogFile[] {
     const run = this.read<RunRecord | null>(null, (stores) => stores.runs.getRun(runId));
     if (!run) {
       return [];
     }
-    return listHarnessLogs({ runId, taskKey: run.taskKey });
+    // Resolve each producing run once; logs can outlive their run row.
+    const attempts = new Map<number, number | undefined>();
+    const dir = harnessLogsDir(this.workspaceDir);
+    return listHarnessLogs({ runId, taskKey: run.taskKey }, dir).map((file) => {
+      const id = file.runId;
+      if (id === undefined) {
+        return file;
+      }
+      if (!attempts.has(id)) {
+        attempts.set(
+          id,
+          this.read<RunRecord | null>(null, (stores) => stores.runs.getRun(id))?.attempt,
+        );
+      }
+      return { ...file, attempt: attempts.get(id) };
+    });
   }
 
   /**
@@ -357,7 +466,7 @@ export class DashboardData {
     if (!match) {
       return null;
     }
-    return readHarnessLogContent(name);
+    return readHarnessLogContent(name, { dir: harnessLogsDir(this.workspaceDir) });
   }
 
   /** Registered immutable outputs belonging to this exact attempt. */
@@ -376,7 +485,7 @@ export class DashboardData {
     if (!detail) {
       return null;
     }
-    const eligibility = isRunRetriable(detail.run);
+    const eligibility = resolveRetryEligibility(this, detail.run);
     return {
       eligible: eligibility.eligible,
       kind: eligibility.kind,
@@ -401,9 +510,31 @@ export class DashboardData {
   /** Store backing the schedule mode of the retry action. */
   getScheduledRetryStore(): ScheduledRetryStore {
     if (!this.scheduledRetryStore) {
-      this.scheduledRetryStore = new ScheduledRetryStore(this.dbPath);
+      this.scheduledRetryStore = new ScheduledRetryStore(this.queueDbPath);
     }
     return this.scheduledRetryStore;
+  }
+
+  /** Store backing the ad-hoc retry action; rows live in the durable queue DB. */
+  getInjectedTaskStore(): InjectedTaskStore {
+    if (!this.injectedTaskStore) {
+      this.injectedTaskStore = new InjectedTaskStore(this.queueDbPath);
+    }
+    return this.injectedTaskStore;
+  }
+
+  /**
+   * Read-only view of the ad-hoc queue, used by GET eligibility checks.
+   *
+   * Opening the read-write store here would create `<workspace>/state/queue.db`
+   * (and its schema) merely by viewing a run, violating the dashboard's
+   * read-only GET contract.
+   */
+  getInjectedTaskReadStore(): InjectedTaskStore {
+    if (!this.injectedTaskReadStore) {
+      this.injectedTaskReadStore = new InjectedTaskStore(this.queueDbPath, { readonly: true });
+    }
+    return this.injectedTaskReadStore;
   }
 
   /** Claim the retry slot for a task; false when one is already held. */
@@ -499,8 +630,12 @@ export class DashboardData {
     return this.read(null, (stores) => stores.runs.getStats(windowMs));
   }
 
-  getQueueStats(): { pending: number; processing: number; failed: number } {
-    return this.read({ pending: 0, processing: 0, failed: 0 }, (stores) => stores.queue.getStats());
+  getQueueStats(): WorkerQueueStats {
+    return {
+      ...readDashboardRelayStats(this.dbPath, this.queueDbPath),
+      injected: readDashboardQueueStatuses(this.queueDbPath, "injected_tasks"),
+      retries: readDashboardQueueStatuses(this.queueDbPath, "scheduled_retries"),
+    };
   }
 
   getAgentPrCounts(): { open: number; closed: number } {
@@ -605,6 +740,10 @@ export class DashboardData {
     this.retryAuditStore = null;
     this.scheduledRetryStore?.close();
     this.scheduledRetryStore = null;
+    this.injectedTaskStore?.close();
+    this.injectedTaskStore = null;
+    this.injectedTaskReadStore?.close();
+    this.injectedTaskReadStore = null;
   }
 }
 
@@ -638,6 +777,46 @@ export interface RetryHandlerDeps {
 /** How long a triggered retry blocks further retries of the same task. */
 const INFLIGHT_RETRY_TTL_MS = 60_000;
 
+/** Resolve an ad-hoc row, treating an unreadable/missing store as "no row". */
+function findInjectedTask(data: DashboardData, taskKey: string): InjectedTask | null {
+  try {
+    return data.getInjectedTaskReadStore().getByTaskKey(taskKey);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Retry eligibility with the ad-hoc queue row resolved.
+ *
+ * An ad-hoc run whose row was pruned (or is still pending/running) cannot be
+ * re-queued, so the UI gets the concrete reason instead of a Retry button that
+ * would fail at POST time.
+ *
+ * @param data - Dashboard data source (owns the injected-task store)
+ * @param run - Run whose retry eligibility is being rendered
+ */
+function resolveRetryEligibility(data: DashboardData, run: RunRecord): RetryEligibility {
+  const eligibility = isRunRetriable(run);
+  if (eligibility.kind !== "injected" || !run.taskKey) {
+    return eligibility;
+  }
+  const task = findInjectedTask(data, run.taskKey);
+  if (!task) {
+    return {
+      eligible: false,
+      reason: `the ad-hoc queue row for ${run.taskKey} is gone; re-dispatch it with \`devintern worker add\``,
+    };
+  }
+  if (task.status === "pending" || task.status === "running") {
+    return {
+      eligible: false,
+      reason: `ad-hoc task ${run.taskKey} is already ${task.status} (task #${task.id})`,
+    };
+  }
+  return eligibility;
+}
+
 /**
  * `POST /api/runs/:id/retry` — re-run this run's task.
  *
@@ -658,6 +837,10 @@ const INFLIGHT_RETRY_TTL_MS = 60_000;
  *   "Run now" pipeline with the same overlap safeguards). Their `taskKey` is
  *   the markdown occurrence file's stem — not a tracker key — so forcing it
  *   would only 404 against the tracker.
+ * - Ad-hoc runs (`origin: "local"`) re-queue their durable `injected_tasks`
+ *   row under the same key, which the worker's injected-task acquirer drains on
+ *   its next poll. The row keeps its branch name, so session pickup can resume
+ *   the interrupted attempt instead of starting a second branch/PR.
  *
  * Returns 202 once the retry is queued; the new attempt then shows up in the
  * run list like any other run.
@@ -682,7 +865,7 @@ export async function handleRetryRun(
   }
   const run = detail.run;
 
-  const eligibility = isRunRetriable(run);
+  const eligibility = resolveRetryEligibility(data, run);
   if (!eligibility.eligible) {
     return conflict(`not retriable: ${eligibility.reason ?? "unknown reason"}`);
   }
@@ -701,15 +884,8 @@ export async function handleRetryRun(
   }
   const taskKey = run.taskKey;
 
-  // Concurrent retries: another dashboard retry for this task, or a live run
-  // for the task (the worker records one as soon as it picks the ticket up).
-  if (data.retryMode === "schedule") {
-    if (data.getScheduledRetryStore().hasActive(taskKey, run.team)) {
-      return conflict(`a retry of ${taskKey} is already scheduled or running`);
-    }
-  } else if (data.hasInflightRetry(taskKey)) {
-    return conflict(`a retry of ${taskKey} was just triggered and is starting`);
-  }
+  // A live run for the task blocks every kind of retry: the worker records one
+  // as soon as it picks the ticket (or the re-queued ad-hoc row) up.
   const activeRun = data
     .listRuns({ taskKey, limit: MAX_LIMIT, offset: 0 })
     .runs.find(
@@ -722,6 +898,23 @@ export async function handleRetryRun(
     return conflict(
       `${taskKey} already has a run in progress (run ${activeRun.id}); wait for it to finish`,
     );
+  }
+
+  // Ad-hoc runs: re-queue the durable injected row under the same key. Forcing
+  // a `local-…` key through the CLI would 404 against the tracker, and a fresh
+  // `worker add` would start a new branch instead of resuming this attempt.
+  if (eligibility.kind === "injected") {
+    return retryInjectedRun(data, id, taskKey, actorLabel);
+  }
+
+  // Concurrent retries: another dashboard retry for this task, or a live run
+  // for the task (the worker records one as soon as it picks the ticket up).
+  if (data.retryMode === "schedule") {
+    if (data.getScheduledRetryStore().hasActive(taskKey, run.team)) {
+      return conflict(`a retry of ${taskKey} is already scheduled or running`);
+    }
+  } else if (data.hasInflightRetry(taskKey)) {
+    return conflict(`a retry of ${taskKey} was just triggered and is starting`);
   }
 
   if (data.retryMode === "schedule") {
@@ -793,6 +986,54 @@ export async function handleRetryRun(
       command: spawned.command,
     },
   };
+}
+
+/**
+ * Re-queue the durable `injected_tasks` row behind an ad-hoc run.
+ *
+ * The row keeps its `task_key`, so the retried run targets the same
+ * `feature/local-<slug>` branch the interrupted attempt recorded and session
+ * pickup can hand the prior report to the next agent. Nothing is spawned here:
+ * the workspace worker's injected-task acquirer drains the row on its next
+ * poll, exactly like a fresh `worker add`.
+ *
+ * @param data - Dashboard data source (owns the injected-task and audit stores)
+ * @param runId - The retried run's id (audit anchor)
+ * @param taskKey - Ad-hoc key (`local-…`) naming the row and its branch
+ * @param actorLabel - Audit identity for the trail
+ */
+function retryInjectedRun(
+  data: DashboardData,
+  runId: number,
+  taskKey: string,
+  actorLabel: string,
+): ApiResponse {
+  const store = data.getInjectedTaskStore();
+  const task = store.getByTaskKey(taskKey);
+  if (!task) {
+    return conflict(
+      `not retriable: the ad-hoc queue row for ${taskKey} is gone; re-dispatch it with \`devintern worker add\``,
+    );
+  }
+  if (task.status === "pending" || task.status === "running") {
+    return conflict(`ad-hoc task ${taskKey} is already ${task.status} (task #${task.id})`);
+  }
+  // Re-queueing force-removes the worktree the surviving child is working in.
+  if (interruptedChildStillRunning(task)) {
+    return conflict(injectedChildStillRunningMessage(taskKey, task.childPid!));
+  }
+  const revived = store.requeueSettled(taskKey);
+  if (!revived) {
+    return conflict(`ad-hoc task ${taskKey} moved on; reload the run and try again`);
+  }
+  data.getRetryAuditStore().record({
+    runId,
+    taskKey,
+    actor: actorLabel,
+    action: "scheduled",
+    message: "re-queued the interrupted ad-hoc task (resumes its branch)",
+  });
+  return { status: 202, body: { status: "scheduled", runId, taskKey } };
 }
 
 /**
@@ -981,7 +1222,7 @@ export async function handleRunAutomation(
  * `GET /api/runs` — paginated run list with optional filters.
  *
  * @param data - Dashboard data source
- * @param params - Query params: `limit`, `offset`, `status`, `origin`, `taskKey`
+ * @param params - Query params: `limit`, `offset`, `status`, `origin`, `taskKey`, `automationId`
  */
 export function handleRuns(data: DashboardData, params: URLSearchParams): ApiResponse {
   const rawLimit = params.get("limit");
@@ -994,7 +1235,6 @@ export function handleRuns(data: DashboardData, params: URLSearchParams): ApiRes
   if (!Number.isFinite(offset) || offset < 0) {
     return badRequest("offset must be a non-negative integer");
   }
-
   const status = params.get("status") ?? undefined;
   if (status !== undefined && !RUN_STATUSES.includes(status as RunStatus)) {
     return badRequest(`status must be one of: ${RUN_STATUSES.join(", ")}`);
@@ -1008,6 +1248,7 @@ export function handleRuns(data: DashboardData, params: URLSearchParams): ApiRes
     taskKey: params.get("taskKey") ?? undefined,
     status: status as RunStatus | undefined,
     origin: origin as RunOrigin | undefined,
+    automationId: params.get("automationId") ?? undefined,
     limit,
     offset,
   });
@@ -1030,7 +1271,7 @@ export function handleRunDetail(data: DashboardData, idParam: string): ApiRespon
   if (!detail) {
     return { status: 404, body: { error: `run ${id} not found` } };
   }
-  const eligibility = isRunRetriable(detail.run);
+  const eligibility = resolveRetryEligibility(data, detail.run);
   const retry: RunRetryInfo = {
     eligible: eligibility.eligible,
     kind: eligibility.kind,
@@ -1168,11 +1409,15 @@ export function handleStats(data: DashboardData, params: URLSearchParams): ApiRe
  * running elsewhere, and claiming "stopped" would be wrong.
  *
  * @param workingDir - Project root the dashboard was started from
+ * @param workspaceDir - Workspace home whose lock is also consulted
  */
-function resolveWorkerStatus(workingDir: string): WorkerStatusView {
+export function resolveWorkerStatus(
+  workingDir: string,
+  workspaceDir: string = resolveWorkspaceDir(),
+): WorkerStatusView {
   const locks = [
     LockManager.readLockStatus(workingDir, WORKER_LOCK_FILE),
-    LockManager.readLockStatus(resolveWorkspaceDir(), WORKER_LOCK_FILE, { plainDir: true }),
+    LockManager.readLockStatus(workspaceDir, WORKER_LOCK_FILE, { plainDir: true }),
   ].filter((lock): lock is LockStatus => lock !== null);
   if (locks.length === 0) {
     return { status: "unknown" };
@@ -1196,7 +1441,7 @@ export function handleWorkerStatus(data: DashboardData): ApiResponse {
   return {
     status: 200,
     body: {
-      worker: resolveWorkerStatus(data.workingDir),
+      worker: resolveWorkerStatus(data.workingDir, data.workspaceDir),
       queue: data.getQueueStats(),
       agentPrs: data.getAgentPrCounts(),
       schedule: data.getScheduleSnapshot(),
@@ -1207,6 +1452,8 @@ export function handleWorkerStatus(data: DashboardData): ApiResponse {
       })),
       dbPath: data.dbPath,
       dbMissing: data.dbMissing,
+      queueDbPath: data.queueDbPath,
+      queueDbMissing: data.queueDbMissing,
     },
   };
 }

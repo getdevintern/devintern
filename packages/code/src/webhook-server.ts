@@ -79,6 +79,14 @@ async function handleWebhook(request: Request, config: WebhookServerConfig): Pro
     return jsonResponse({ error: "Request not from GitHub" }, 403);
   }
 
+  // GitHub webhooks require their own secret. Without this guard an
+  // empty secret still verifies HMACs keyed with "" — which anyone can
+  // compute — so a GitLab-only deployment would accept forged GitHub events.
+  // Mirrors the GitLab guard in lib/webhook/gitlab-webhook.ts.
+  if (!config.webhookSecret) {
+    return jsonResponse({ error: "GitHub webhooks are not configured" }, 503);
+  }
+
   // Get raw body for signature verification
   const rawBody = await request.text();
 
@@ -416,7 +424,7 @@ export async function startWebhookServer(
   // Shared failover controller: same chain, windows, and failback timers the
   // fleet worker uses. Persist through the queue DB so a restart resumes on
   // the right harness.
-  runtime.failover = startWorkerFailover({
+  runtime.failover = await startWorkerFailover({
     queue: runtime.queue,
     onPause: ({ untilMs, harness, resetHint }) => {
       if (!reviewQueue.isPaused) {

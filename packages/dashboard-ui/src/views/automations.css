@@ -1,0 +1,156 @@
+.auto-clamp {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+}
+
+/* Repository groups: one <tbody> per group, headed by a full-width row. */
+.auto-group-row {
+  background: var(--muted);
+}
+.auto-group + .auto-group .auto-group-row {
+  border-top: 1px solid var(--border);
+}
+.auto-group-row:not(:last-child) {
+  border-bottom: 1px solid color-mix(in oklch, var(--border), transparent 30%);
+}
+.auto-group-cell {
+  padding: 0.5rem 1rem;
+  text-align: left;
+  font-weight: inherit;
+}
+.auto-group-heading {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+  color: var(--muted-foreground);
+  font-size: 0.75rem;
+  font-weight: 500;
+  line-height: 1.25rem;
+}
+.auto-group-heading svg {
+  color: var(--subtle-foreground);
+}
+.auto-group-count {
+  color: var(--subtle-foreground);
+  font-variant-numeric: tabular-nums;
+}
+
+/*
+ * Stack rows into cards when the table's own width cannot fit every column
+ * (about 760px with the schedule wrapping): a phone, a tablet, or a laptop
+ * with the sidebar open.
+ */
+.auto-table-wrap {
+  container-type: inline-size;
+}
+
+@container (max-width: 48rem) {
+  .auto-table thead {
+    display: none;
+  }
+  .auto-table,
+  .auto-table tbody {
+    display: block;
+    width: 100%;
+  }
+  .auto-table tr.auto-group-row,
+  .auto-table th.auto-group-cell {
+    display: block;
+  }
+  .auto-table tr.auto-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "name action"
+      "schedule next"
+      "last last";
+    gap: 0.5rem 0.75rem;
+    align-items: center;
+    padding: 0.75rem 1rem;
+  }
+  .auto-table td {
+    display: block;
+    padding: 0 !important;
+    min-width: 0;
+    max-width: none !important;
+    border: 0 !important;
+    position: static !important;
+    background: transparent !important;
+  }
+  .auto-cell-name {
+    grid-area: name;
+  }
+  .auto-cell-schedule {
+    grid-area: schedule;
+  }
+  .auto-cell-next {
+    grid-area: next;
+    text-align: right;
+  }
+  .auto-cell-last {
+    grid-area: last;
+  }
+  .auto-cell-action {
+    grid-area: action;
+    text-align: right;
+  }
+}
+
+/* Automation detail: facts + recent runs rail, prompt as the main column. */
+.ad-grid {
+  display: grid;
+  gap: 32px;
+  min-width: 0;
+}
+
+@media (min-width: 1024px) {
+  .ad-grid {
+    grid-template-columns: minmax(0, 1fr) 18rem;
+    column-gap: 40px;
+    align-items: start;
+  }
+  .ad-rail {
+    grid-column: 2;
+    grid-row: 1;
+    position: sticky;
+    top: 76px;
+    max-height: calc(100vh - 92px);
+    overflow-y: auto;
+  }
+  .ad-main {
+    grid-column: 1;
+    grid-row: 1;
+  }
+  .ad-run-toggle {
+    display: none;
+  }
+}
+
+.ad-run {
+  display: grid;
+  grid-template-columns: 6.5rem minmax(0, 1fr);
+  gap: 0.25rem 0.5rem;
+  align-items: center;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid color-mix(in oklch, var(--border), transparent 30%);
+  transition: background-color 150ms;
+}
+.ad-run:last-child {
+  border-bottom: 0;
+}
+.ad-run:hover {
+  background: color-mix(in oklch, var(--hover, var(--card)), transparent 30%);
+}
+.ad-run-detail {
+  grid-column: 1 / -1;
+}
+
+@media (max-width: 1023px) {
+  .ad-run-extra {
+    display: none;
+  }
+}
