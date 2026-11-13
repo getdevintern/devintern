@@ -78,6 +78,14 @@ export interface InjectedTask {
    * mismatched (recycled) pid as dead.
    */
   childStartedAt?: number;
+  /**
+   * Consecutive times a claimed run came back `deferred` (the harness chain
+   * could not start or was usage-limited). Persisted so a harness that keeps
+   * failing cannot re-run the task forever; reset by an explicit re-queue.
+   */
+  deferCount: number;
+  /** Earliest claim time (epoch ms) after a deferral backoff; unset = now. */
+  notBefore?: number;
   createdAt: number;
   startedAt?: number;
   finishedAt?: number;
@@ -97,6 +105,8 @@ interface InjectedTaskRow {
   auto_resume_count: number | null;
   child_pid: number | null;
   child_started_at: number | null;
+  defer_count: number | null;
+  not_before: number | null;
   created_at: number;
   started_at: number | null;
   finished_at: number | null;
@@ -117,6 +127,8 @@ function rowToInjectedTask(row: InjectedTaskRow): InjectedTask {
     autoResumeCount: row.auto_resume_count ?? 0,
     childPid: row.child_pid ?? undefined,
     childStartedAt: row.child_started_at ?? undefined,
+    deferCount: row.defer_count ?? 0,
+    notBefore: row.not_before ?? undefined,
     createdAt: row.created_at,
     startedAt: row.started_at ?? undefined,
     finishedAt: row.finished_at ?? undefined,
@@ -170,6 +182,32 @@ export function addChildStartedAtColumn(db: Database): void {
       throw error;
     }
   }
+}
+
+/**
+ * Add a column to a legacy table. Same race rule as
+ * {@link addAutoResumeColumn}: a concurrent opener's duplicate-column error
+ * means the migration already applied.
+ */
+function addColumnIfMissing(db: Database, ddl: string): void {
+  try {
+    db.run(`ALTER TABLE injected_tasks ADD COLUMN ${ddl}`);
+  } catch (error) {
+    if (!/duplicate column name/i.test((error as Error).message)) {
+      throw error;
+    }
+  }
+}
+
+/** Deferral budget and backoff applied by {@link InjectedTaskStore.defer}. */
+export interface DeferInjectedTaskOptions {
+  /** Settle the row `failed` once this many consecutive deferrals happened. */
+  maxDeferrals: number;
+  /** Delay before the row may be claimed again, given the new defer count. */
+  backoffMs: (deferCount: number) => number;
+  /** Message stored on a row that ran out of deferrals. */
+  exhaustedMessage: string;
+  now?: number;
 }
 
 export interface EnqueueInjectedTaskInput {
@@ -251,6 +289,8 @@ export class InjectedTaskStore {
         auto_resume_count INTEGER NOT NULL DEFAULT 0,
         child_pid INTEGER,
         child_started_at INTEGER,
+        defer_count INTEGER NOT NULL DEFAULT 0,
+        not_before INTEGER,
         created_at INTEGER NOT NULL,
         started_at INTEGER,
         finished_at INTEGER
@@ -269,6 +309,12 @@ export class InjectedTaskStore {
     }
     if (!columns.some((column) => column.name === "child_started_at")) {
       addChildStartedAtColumn(this.db);
+    }
+    if (!columns.some((column) => column.name === "defer_count")) {
+      addColumnIfMissing(this.db, "defer_count INTEGER NOT NULL DEFAULT 0");
+    }
+    if (!columns.some((column) => column.name === "not_before")) {
+      addColumnIfMissing(this.db, "not_before INTEGER");
     }
     this.db.run("CREATE INDEX IF NOT EXISTS idx_injected_tasks_status ON injected_tasks(status)");
     this.db.run(
@@ -398,9 +444,10 @@ export class InjectedTaskStore {
    * @param excludeIds Rows to skip for this drain. A deferred (busy-repo) row
    *   is requeued but must not be re-claimed immediately, or it would starve
    *   newer pending tasks for other repos; callers pass the ids already seen.
+   * @param now Claim time; rows backing off until after it are skipped.
    */
-  claimNext(excludeIds: readonly number[] = []): InjectedTask | null {
-    const params: number[] = [Date.now()];
+  claimNext(excludeIds: readonly number[] = [], now: number = Date.now()): InjectedTask | null {
+    const params: number[] = [now, now];
     let exclusion = "";
     if (excludeIds.length > 0) {
       exclusion = ` AND id NOT IN (${excludeIds.map(() => "?").join(", ")})`;
@@ -411,7 +458,8 @@ export class InjectedTaskStore {
         `UPDATE injected_tasks
          SET status = 'running', started_at = ?
          WHERE id = (
-           SELECT id FROM injected_tasks WHERE status = 'pending'${exclusion}
+           SELECT id FROM injected_tasks
+           WHERE status = 'pending' AND (not_before IS NULL OR not_before <= ?)${exclusion}
            ORDER BY created_at ASC, id ASC LIMIT 1
          )
          RETURNING *`,
@@ -455,6 +503,58 @@ export class InjectedTaskStore {
   }
 
   /**
+   * Requeue a claimed row whose run was deferred, with backoff, or settle it
+   * `failed` once its consecutive-deferral budget is spent.
+   *
+   * A deferral means the harness chain did not do the work (usage limit or a
+   * harness that cannot start). Without a budget, a misclassified failure loops
+   * every tick forever, creating a fresh worktree and run record each time.
+   *
+   * @returns The updated row and whether it was requeued; `null` when the row
+   *   is no longer running (a concurrent settle won).
+   */
+  defer(
+    id: number,
+    options: DeferInjectedTaskOptions,
+  ): { task: InjectedTask; requeued: boolean } | null {
+    const db = this.ensureDb();
+    const now = options.now ?? Date.now();
+    const row = db
+      .query("SELECT * FROM injected_tasks WHERE id = ?")
+      .get(id) as InjectedTaskRow | null;
+    if (!row || row.status !== "running") return null;
+
+    const deferCount = (row.defer_count ?? 0) + 1;
+    if (deferCount >= options.maxDeferrals) {
+      const failed = db
+        .query(
+          `UPDATE injected_tasks
+           SET status = 'failed', message = ?, finished_at = ?, defer_count = ?,
+               not_before = NULL, child_pid = NULL, child_started_at = NULL
+           WHERE id = ? AND status = 'running'
+           RETURNING *`,
+        )
+        .get(options.exhaustedMessage, now, deferCount, id) as InjectedTaskRow | null;
+      return failed ? { task: rowToInjectedTask(failed), requeued: false } : null;
+    }
+
+    const requeued = db
+      .query(
+        `UPDATE injected_tasks
+         SET status = 'pending', started_at = NULL, defer_count = ?, not_before = ?,
+             child_pid = NULL, child_started_at = NULL
+         WHERE id = ? AND status = 'running'
+         RETURNING *`,
+      )
+      .get(
+        deferCount,
+        now + Math.max(0, options.backoffMs(deferCount)),
+        id,
+      ) as InjectedTaskRow | null;
+    return requeued ? { task: rowToInjectedTask(requeued), requeued: true } : null;
+  }
+
+  /**
    * Return a settled row to the queue after an explicit retry (`worker add
    * --resume`, dashboard "re-queue").
    *
@@ -464,8 +564,9 @@ export class InjectedTaskStore {
    * pending/running (or disappeared) is left alone: `null` tells the caller the
    * retry did not start.
    *
-   * An explicit retry also resets the automatic-resume budget: the operator has
-   * intervened, so a later interruption may be resumed automatically again.
+   * An explicit retry also resets the automatic-resume and deferral budgets:
+   * the operator has intervened, so a later interruption may be resumed (or a
+   * later limit deferred) automatically again.
    *
    * The recorded child pid/start time are intentionally left in place: callers
    * must refuse the re-queue while that process is alive, because the retried
@@ -478,7 +579,7 @@ export class InjectedTaskStore {
       .query(
         `UPDATE injected_tasks
          SET status = 'pending', started_at = NULL, finished_at = NULL, message = NULL,
-             auto_resume_count = 0
+             auto_resume_count = 0, defer_count = 0, not_before = NULL
          WHERE task_key = ? AND status IN ('done', 'failed')
          RETURNING *`,
       )

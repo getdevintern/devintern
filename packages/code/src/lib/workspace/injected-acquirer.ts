@@ -21,6 +21,28 @@ import { getWorkerFailover } from "../worker/failover";
 /** Source label surfaced in worker logs, run records, and the dashboard. */
 export const INJECTED_TASK_SOURCE = "local:add";
 
+/**
+ * Consecutive deferrals after which an injected task is settled `failed`.
+ * A real usage limit pauses the drain for its whole window, so a healthy task
+ * defers about once per window; dozens of deferrals mean the harness keeps
+ * failing in a way the worker does not recognize.
+ */
+export const MAX_INJECTED_DEFERRALS = 24;
+
+/** Backoff cap between deferred attempts of one injected task. */
+export const MAX_INJECTED_DEFER_BACKOFF_MS = 60 * 60_000;
+
+/**
+ * Exponential backoff after the Nth consecutive deferral: 1m, 2m, 4m, ...,
+ * capped at {@link MAX_INJECTED_DEFER_BACKOFF_MS}.
+ *
+ * @param deferCount - Consecutive deferrals including this one (1-based).
+ */
+export function injectedDeferBackoffMs(deferCount: number): number {
+  const exponent = Math.min(Math.max(0, deferCount - 1), 20);
+  return Math.min(60_000 * 2 ** exponent, MAX_INJECTED_DEFER_BACKOFF_MS);
+}
+
 export interface InjectedTaskAcquirerOptions {
   store: InjectedTaskStore;
   /** Run one claimed task through the fleet executor. */
@@ -52,6 +74,12 @@ export interface InjectedTaskAcquirerOptions {
    * Defaults to the process-wide worker failover state.
    */
   isPaused?: () => boolean;
+  /** Consecutive-deferral budget (defaults to {@link MAX_INJECTED_DEFERRALS}). */
+  maxDeferrals?: number;
+  /** Backoff after a deferral (defaults to {@link injectedDeferBackoffMs}). */
+  deferBackoffMs?: (deferCount: number) => number;
+  /** Clock for claims and backoff (tests). */
+  now?: () => number;
   verbose?: boolean;
 }
 
@@ -139,7 +167,7 @@ export class InjectedTaskAcquirer implements Acquirer {
         if (this.options.store.isClosed()) {
           break;
         }
-        const task = this.options.store.claimNext(excluded);
+        const task = this.options.store.claimNext(excluded, this.now());
         if (!task) {
           break;
         }
@@ -156,6 +184,10 @@ export class InjectedTaskAcquirer implements Acquirer {
       this.claiming = false;
     }
     await Promise.allSettled(executions);
+  }
+
+  private now(): number {
+    return this.options.now?.() ?? Date.now();
   }
 
   /** Whether the harness chain is exhausted and the drain must stay idle. */
@@ -191,6 +223,32 @@ export class InjectedTaskAcquirer implements Acquirer {
     }
   }
 
+  /** Requeue a deferred row with backoff, or fail it once its budget is spent. */
+  private settleDeferred(task: InjectedTask): void {
+    const maxDeferrals = this.options.maxDeferrals ?? MAX_INJECTED_DEFERRALS;
+    const outcome = this.options.store.defer(task.id, {
+      maxDeferrals,
+      backoffMs: this.options.deferBackoffMs ?? injectedDeferBackoffMs,
+      exhaustedMessage:
+        `deferred ${maxDeferrals} times in a row without the agent harness doing the work; ` +
+        `check the harness logs, then re-queue with \`devintern worker add --resume ${task.taskKey}\``,
+      now: this.now(),
+    });
+    if (!outcome) return;
+    if (outcome.requeued) {
+      const retryAt = outcome.task.notBefore ?? this.now();
+      console.log(
+        `⏳ [${this.name}] ${task.taskKey} deferred (${outcome.task.deferCount}/${maxDeferrals}); ` +
+          `next attempt after ${new Date(retryAt).toISOString()}`,
+      );
+    } else {
+      console.error(
+        `❌ [${this.name}] ${task.taskKey} failed: deferred ${outcome.task.deferCount} times in a row; ` +
+          "giving up until it is re-queued",
+      );
+    }
+  }
+
   /** Run one claimed task and settle its row. */
   private async runOne(task: InjectedTask): Promise<void> {
     const { store, execute, verbose } = this.options;
@@ -208,11 +266,10 @@ export class InjectedTaskAcquirer implements Acquirer {
         store.finish(task.id, "done", "skipped: ticket unchanged since the incomplete attempt");
         console.log(`⏭️  [${this.name}] ${task.taskKey} skipped; ticket unchanged`);
       } else if (result === "deferred") {
-        // Repo busy (or harness exhausted): back to the queue for the next
-        // interval tick. Every row is claimed at most once per drain, so this
-        // cannot spin.
-        store.requeue(task.id);
-        console.log(`⏳ [${this.name}] ${task.taskKey} deferred; will retry next tick`);
+        // Harness exhausted or unable to start: back to the queue with backoff,
+        // under a durable consecutive-deferral budget so an unrecognized
+        // harness failure cannot re-run the task every tick forever.
+        this.settleDeferred(task);
       } else if (result === "interrupted") {
         // A graceful shutdown aborted this run's child, so its failure is an
         // artifact of the drain, not the pipeline. Leave the row claimed: the

@@ -217,6 +217,12 @@ work.
   limits, sharing capacity with polled, review, and automation work. A task
   deferred because its repo is busy is requeued for the next poll without
   blocking independent repos behind it.
+- **Harness deferrals.** A claimed task whose run is deferred because the
+  agent harness chain was usage-limited or could not start is requeued with
+  exponential backoff (1 minute, doubling, capped at 1 hour). After 24
+  consecutive deferrals the task is settled `failed` with a message pointing
+  at `devintern worker add --resume <taskKey>`, which re-queues it with a fresh
+  budget.
 - **Licensing.** Enqueuing automation work runs the same entitlement check as
   the daemon (paid automation license, or the no-card Worker Pilot).
 - **Quiet hours.** Injected tasks are operator-initiated, so they bypass
