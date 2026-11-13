@@ -1,22 +1,25 @@
 /**
- * Per-entry agent selection for workspace `[[automations]]` / `[[estimations]]`.
+ * Per-job agent selection for workspace `[[automations]]`, `[[estimations]]`,
+ * and automatic conflict resolution (`[workspace].conflict_resolution_*`).
  *
- * A scheduled entry may name the agent (`harness`) and `model` / reasoning
- * `effort` for its own runs, overriding the workspace-wide `AGENT_HARNESS` /
- * `AGENT_MODEL` / `AGENT_EFFORT` resolved from the environment layers. The
- * selection is validated here so a bad value fails `workspace.toml` parsing
- * with an actionable message instead of silently falling back.
+ * A job may name the agent (`harness`) and `model` / reasoning `effort` for its
+ * own runs, overriding the workspace-wide `AGENT_HARNESS` / `AGENT_MODEL` /
+ * `AGENT_EFFORT` resolved from the environment layers. The selection is
+ * validated here so a bad value fails `workspace.toml` parsing with an
+ * actionable message instead of silently falling back.
  *
- * Precedence for an entry's runs: entry field > team/repo env > workspace
- * env > harness default. `model`/`effort` are harness-specific, so they apply
- * only when the entry also names a `harness`; a model- or effort-only entry
- * leaves the inherited env value untouched rather than sending a string chosen
- * for one harness to whichever harness a failover chain later selects. When the
- * entry pins a harness other than the env's primary, an inherited
- * `AGENT_MODEL`/`AGENT_EFFORT` was chosen for that primary and is dropped too,
- * unless the entry sets its own. Disallowed effort on a harness that does not
- * support it is ignored at run time by the harness runners, which warn instead
- * of failing.
+ * Precedence for the job's runs: selection field > team/repo env > workspace
+ * env > harness default.
+ *
+ * - With `harness`: the run is pinned to that one agent and opts out of the
+ *   workspace failover chain. When the pin differs from the env's primary, an
+ *   inherited `AGENT_MODEL`/`AGENT_EFFORT` (chosen for that primary) is dropped
+ *   unless the selection sets its own.
+ * - Without `harness`: the workspace chain (and failover) is kept. `model` is
+ *   written to the primary harness's own `<HARNESS>_MODEL`, so it applies to
+ *   the primary only and a fallback harness never receives a model id from a
+ *   different provider. `effort` is harness-neutral and written to
+ *   `AGENT_EFFORT`; a harness without effort support ignores it with a warning.
  */
 
 import {
@@ -27,6 +30,9 @@ import {
   DEFAULT_HARNESS_NAME,
 } from "@devintern/agent-harness";
 import type { AgentEffort } from "@devintern/agent-harness";
+
+import { harnessModelEnvKey } from "./model";
+import { USAGE_LIMIT_FILE_ENV, WORKER_CHILD_ENV } from "../worker/usage-limit-protocol";
 
 /** Optional per-entry agent overrides parsed from an automation/estimation. */
 export interface AgentSelection {
@@ -58,19 +64,23 @@ export function pickAgentSelection(source: AgentSelection): AgentSelection {
  * `parseAgentEffort` validator.
  *
  * @param table - Raw entry table.
- * @param options - `label` used in messages and the owning `id`, when known.
+ * @param options - `label` used in messages, the owning `id` when known, and
+ *   an optional `keyPrefix` (e.g. `conflict_resolution_`) prepended to the
+ *   `harness` / `model` / `effort` key names.
  * @param errors - Shared error accumulator.
  */
 export function parseAgentSelection(
   table: Record<string, unknown>,
-  options: { label: string; id?: string },
+  options: { label: string; id?: string; keyPrefix?: string },
   errors: string[],
 ): AgentSelection {
   const { label } = options;
+  const prefix = options.keyPrefix ?? "";
   const entrySuffix = options.id ? ` (entry "${options.id}")` : "";
   const selection: AgentSelection = {};
 
-  const readNonEmptyString = (key: string): string | undefined => {
+  const readNonEmptyString = (field: string): string | undefined => {
+    const key = `${prefix}${field}`;
     const value = table[key];
     if (value === undefined || value === null) return undefined;
     if (typeof value !== "string" || !value.trim()) {
@@ -89,14 +99,14 @@ export function parseAgentSelection(
     const canonical = names.map((name) => getHarness(name)).filter((h) => h !== undefined);
     if (names.length !== 1) {
       errors.push(
-        `${label}.harness must name a single agent harness, got "${harness}"${entrySuffix}.`,
+        `${label}.${prefix}harness must name a single agent harness, got "${harness}"${entrySuffix}.`,
       );
     } else if (canonical.length !== 1) {
       const available = listHarnesses()
         .map((h) => `"${h.name}"`)
         .join(", ");
       errors.push(
-        `${label}.harness "${harness}" is not a known agent harness${entrySuffix}. ` +
+        `${label}.${prefix}harness "${harness}" is not a known agent harness${entrySuffix}. ` +
           `Available harnesses: ${available}.`,
       );
     } else {
@@ -114,7 +124,9 @@ export function parseAgentSelection(
     try {
       selection.effort = parseAgentEffort(effort);
     } catch {
-      errors.push(`${label}.effort "${effort}" must be one of low, medium, or high${entrySuffix}.`);
+      errors.push(
+        `${label}.${prefix}effort "${effort}" must be one of low, medium, or high${entrySuffix}.`,
+      );
     }
   }
 
@@ -181,7 +193,7 @@ export function warnUninstalledHarnessPins(
     if (ok) continue;
     const envKey = harness.name.toUpperCase().replace(/-/g, "_");
     log(
-      `⚠️  Schedule "${entry.id}" is pinned to harness "${harness.name}", which is not installed. ` +
+      `⚠️  Job "${entry.id}" is pinned to harness "${harness.name}", which is not installed. ` +
         `It opts out of failover, so it will fail until the CLI is installed or ${envKey}_CLI_PATH is set.`,
     );
   }
@@ -215,23 +227,22 @@ export function dropForeignHarnessCliPaths(
 }
 
 /**
- * Overlay an entry's agent selection onto a composed environment.
+ * Overlay a job's agent selection onto a composed environment.
  *
- * Only fields the entry set are written, so omitted fields keep the value
+ * Only fields the selection set are written, so omitted fields keep the value
  * from the environment layers (team/repo/workspace) or the harness default.
  *
- * `model` and `effort` are harness-specific, so they are written only when the
- * entry also pins a `harness`. Without a `harness` the entry keeps the
- * workspace failover chain, and a model chosen for one harness must not be
- * handed to whichever fallback harness the chain selects.
+ * With `harness`, the env is pinned to that agent. When the pin differs from
+ * the env's primary, the global `AGENT_CLI_PATH` and the resolver's
+ * `CLAUDE_CLI_PATH` fallback (which name the primary/claude binary) are
+ * dropped so the child resolves the pinned harness's own `<HARNESS>_CLI_PATH`
+ * or default, and an inherited `AGENT_MODEL` / `AGENT_EFFORT` (chosen for the
+ * primary) is dropped unless the selection sets its own value.
  *
- * When the entry pins a harness other than the env's primary, the global
- * `AGENT_CLI_PATH` and the resolver's `CLAUDE_CLI_PATH` fallback (which name
- * the primary/claude binary) are dropped so the child resolves the pinned
- * harness's own `<HARNESS>_CLI_PATH` or default instead of spawning another
- * harness's executable. For the same reason an inherited `AGENT_MODEL` /
- * `AGENT_EFFORT` (chosen for the primary) is dropped unless the entry sets its
- * own value.
+ * `model` is always written to the target harness's own `<HARNESS>_MODEL`
+ * (the pin, or the env's primary when no harness is set), which outranks
+ * `AGENT_MODEL` and applies only to that harness. Without a pin, a failover
+ * fallback therefore keeps its own default model.
  *
  * Mutates and returns `env` for chaining.
  */
@@ -240,8 +251,9 @@ export function applyAgentSelectionEnv(
   selection: AgentSelection | undefined,
 ): Record<string, string | undefined> {
   if (!selection) return env;
+  const envPrimary = primaryHarnessName(env.AGENT_HARNESS);
+  const target = selection.harness ?? envPrimary;
   if (selection.harness) {
-    const envPrimary = primaryHarnessName(env.AGENT_HARNESS);
     const changedHarness = envPrimary !== selection.harness;
     dropForeignHarnessCliPaths(env, selection.harness, envPrimary);
     env.AGENT_HARNESS = selection.harness;
@@ -250,11 +262,39 @@ export function applyAgentSelectionEnv(
     } else if (changedHarness) {
       delete env.AGENT_MODEL;
     }
-    if (selection.effort) {
-      env.AGENT_EFFORT = selection.effort;
-    } else if (changedHarness) {
+    if (!selection.effort && changedHarness) {
       delete env.AGENT_EFFORT;
     }
   }
+  if (selection.model) env[harnessModelEnvKey(target)] = selection.model;
+  if (selection.effort) env.AGENT_EFFORT = selection.effort;
+  return env;
+}
+
+/**
+ * Child env for a run pinned to one harness, bypassing worker failover.
+ *
+ * Neither the active failover entry nor a usage-limit failover can re-route a
+ * job that named its agent. The worker-child marker is kept — and any hint
+ * path inherited from an ancestor worker dropped — so a usage-limit abort
+ * still exits 75 to the parent instead of falling through to one-shot success
+ * handling; the caller decides what that exit means (it never re-spawns on
+ * another harness).
+ *
+ * @param base - Composed environment (already carrying the selection).
+ * @param harnessPin - Canonical harness the run is pinned to.
+ */
+export function pinnedHarnessChildEnv(
+  base: Record<string, string | undefined>,
+  harnessPin: string,
+): Record<string, string | undefined> {
+  const env: Record<string, string | undefined> = {
+    ...base,
+    AGENT_HARNESS: harnessPin,
+    [WORKER_CHILD_ENV]: "1",
+  };
+  delete env[USAGE_LIMIT_FILE_ENV];
+  // Guards direct callers that pin without pre-composing the selection.
+  dropForeignHarnessCliPaths(env, harnessPin, primaryHarnessName(base.AGENT_HARNESS));
   return env;
 }

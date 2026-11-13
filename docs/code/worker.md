@@ -39,7 +39,7 @@ devintern webhook serve
 
 ## Agent failover
 
-Set `AGENT_HARNESS=codex,grok` (comma-separated, priority first) in the workspace `.env` so the worker keeps going when one agent hits a usage limit. Failover applies to every worker job: tracker tasks, PR review addressing, `@mention` runs, conflict resolution, scheduled automations, estimations, dashboard retries, and relay-driven work — except automations or estimations that pin their own `harness` (see [Choosing the agent per schedule](#choosing-the-agent-per-schedule)). Details: [Failover across multiple harnesses](./configuration.md#failover-across-multiple-harnesses).
+Set `AGENT_HARNESS=codex,grok` (comma-separated, priority first) in the workspace `.env` so the worker keeps going when one agent hits a usage limit. Failover applies to every worker job: tracker tasks, PR review addressing, `@mention` runs, conflict resolution, scheduled automations, estimations, dashboard retries, and relay-driven work — except automations, estimations, or conflict resolution that pin their own `harness` (see [Choosing the agent per schedule](#choosing-the-agent-per-schedule)). Details: [Failover across multiple harnesses](./configuration.md#failover-across-multiple-harnesses).
 
 ## Error-monitor auto-fixes
 
@@ -158,6 +158,14 @@ When `open_pr = true`, occurrences receive the same flags as polled tasks: `[def
 By default every run uses the workspace `AGENT_HARNESS` / `AGENT_MODEL` / `AGENT_EFFORT` from the [environment layers](./configuration.md). An individual `[[automations]]` or `[[estimations]]` entry can override the agent for its own runs, so a cheap model can handle a daily triage job while a frontier model handles release work:
 
 ```toml
+# Same harness as the workspace, smaller model; failover still applies.
+[[automations]]
+id = "dependency-bump"
+enabled = true
+interval = "1d"
+model = "sonnet"
+prompt = "Upgrade one outdated patch-level dependency and run the tests."
+
 [[automations]]
 id = "log-triage"
 enabled = true
@@ -178,10 +186,10 @@ prompt = "Cut the next release and update the changelog."
 ```
 
 - `harness` names **one** registered agent (aliases such as `agy` resolve to their canonical name). An unknown name fails validation, naming the entry id and the `harness` field. Because a pin opts out of failover, the worker warns at startup (and on config reload) when an entry's `harness` is registered but its CLI is not installed or its `<HARNESS>_CLI_PATH` points at a missing executable, so the problem is visible before the first occurrence.
-- `model` is a harness-specific string (see that agent's CLI docs) and is never validated cross-harness. Because it only makes sense for one agent, it is applied only when the entry also sets `harness`; without `harness` the inherited `AGENT_MODEL` (if any) is kept. When `harness` names a different agent than the workspace primary, an inherited `AGENT_MODEL` chosen for that primary is dropped unless the entry sets `model`.
-- `effort` accepts only `low`, `medium`, or `high`; anything else fails validation. Like `model`, it is applied only when the entry also sets `harness`, and an inherited `AGENT_EFFORT` is dropped when the pin changes the harness unless the entry sets `effort`. It is applied only for harnesses that support reasoning effort — on any other harness it is ignored with a warning, and the run proceeds.
+- `model` is a harness-specific string (see that agent's CLI docs) and is never validated cross-harness. Without `harness`, it applies to the workspace's primary harness only (it is passed as that harness's `<HARNESS>_MODEL`, e.g. `CLAUDE_CODE_MODEL`), so the entry keeps normal failover and a fallback harness runs on its own default model. With `harness`, it applies to the pinned agent; when `harness` names a different agent than the workspace primary, an inherited `AGENT_MODEL` chosen for that primary is dropped unless the entry sets `model`.
+- `effort` accepts only `low`, `medium`, or `high`; anything else fails validation. It applies to whichever harness runs the entry (effort levels are harness-neutral); when a pin changes the harness, an inherited `AGENT_EFFORT` is dropped unless the entry sets `effort`. It is applied only for harnesses that support reasoning effort — on any other harness it is ignored with a warning, and the run proceeds.
 - Precedence for the entry's runs is **entry field > team/repo env > workspace env > harness default**. Fields you omit fall through to the existing workspace/repo/team values, and entries that set none of the three fields behave exactly as before.
-- An entry that pins `harness` uses exactly that agent and opts out of the workspace `AGENT_HARNESS` failover chain for its runs; entries without `harness` keep normal failover and never receive a harness-specific `model`/`effort` the entry did not pair with a `harness`. A pinned harness also drops the inherited global `AGENT_CLI_PATH` (which names the workspace primary's binary) and, for a non-`claude-code` pin, the resolver's `CLAUDE_CLI_PATH` fallback, so it resolves its own `<HARNESS>_CLI_PATH` or default. The selection applies to subsequent occurrences after a live reload; a run already in flight keeps the agent it started with.
+- An entry that pins `harness` uses exactly that agent and opts out of the workspace `AGENT_HARNESS` failover chain for its runs; entries without `harness` keep normal failover, and their `model` never reaches a fallback harness. A pinned harness also drops the inherited global `AGENT_CLI_PATH` (which names the workspace primary's binary) and, for a non-`claude-code` pin, the resolver's `CLAUDE_CLI_PATH` fallback, so it resolves its own `<HARNESS>_CLI_PATH` or default. The selection applies to subsequent occurrences after a live reload; a run already in flight keeps the agent it started with.
 
 ### Schedule semantics
 

@@ -201,9 +201,12 @@ export function createFleetResolveConflicts(
       await repoManager.ensureBareClone(repo);
       await repoManager.fetch(repo.name);
       const base = await repoManager.ensureBaseWorktree(repo);
+      // Read at run time so a live reload of the conflict agent applies.
+      const agentSelection = config.workspace.conflictAgent;
       return runResolve(slug, prNumber, {
         cwd: base,
-        env: buildRepoEnv(repo, workspaceDir),
+        env: buildRepoEnv(repo, workspaceDir, { agentSelection }),
+        harnessPin: agentSelection?.harness,
         expectedHeadSha: expected.headSha,
         expectedBaseSha: expected.baseSha,
         signal,

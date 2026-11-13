@@ -32,6 +32,7 @@ import type {
 import { HarnessFailover } from "../agent/harness-failover";
 import type { FailoverOutcome } from "../agent/harness-failover";
 import { HARNESS_CHAIN_ENV, resolveAgentModel } from "../agent/model";
+import { pinnedHarnessChildEnv } from "../agent/selection";
 import type { WebhookQueue } from "../state/webhook-queue";
 import {
   AUTOMATION_ACCESS_EXIT_CODE,
@@ -403,14 +404,28 @@ export function resetWorkerFailover(): void {
  * another harness would make the same decision. When failover has not been
  * started, the spawn runs once with the caller's env (one-shot / tests).
  *
+ * With `options.harnessPin` the job named its own agent: the child runs once
+ * pinned to that harness, outside the failover chain, and a usage-limit or
+ * harness-startup exit is reported as `"deferred"` instead of failing over.
+ *
  * @param spawnOnce - Spawn the child with the given env; return its exit code
  * @param baseEnv - Environment to pin the active harness onto
+ * @param options.harnessPin - Harness the job pinned (skips failover)
  */
 export async function runWithFailover(
   spawnOnce: (env: Record<string, string | undefined>) => Promise<number>,
   baseEnv: Record<string, string | undefined> = { ...process.env },
+  options: { harnessPin?: string } = {},
 ): Promise<CliFailoverResult> {
   const failover = getWorkerFailover();
+  if (options.harnessPin) {
+    const code = await spawnOnce(pinnedHarnessChildEnv(baseEnv, options.harnessPin));
+    if (code === USAGE_LIMIT_EXIT_CODE) return "deferred";
+    if (code === AUTOMATION_ACCESS_EXIT_CODE) return "deferred";
+    if (code === HARNESS_UNAVAILABLE_EXIT_CODE) return "deferred";
+    if (code === TASK_SKIP_EXIT_CODE) return "skipped";
+    return code === 0 ? "ok" : "failed";
+  }
   if (!failover) {
     const code = await spawnOnce(baseEnv);
     if (code === AUTOMATION_ACCESS_EXIT_CODE) return "deferred";

@@ -113,6 +113,7 @@ describe("fleet event handlers", () => {
     expectedHeadSha?: string;
     expectedBaseSha?: string;
   }> = [];
+  const resolveAgents: Array<Record<string, string | undefined>> = [];
 
   const deps = () => ({
     config: CONFIG,
@@ -149,6 +150,7 @@ describe("fleet event handlers", () => {
         env?: Record<string, string | undefined>;
         expectedHeadSha?: string;
         expectedBaseSha?: string;
+        harnessPin?: string;
       } = {},
     ) => {
       resolutions.push({
@@ -157,6 +159,12 @@ describe("fleet event handlers", () => {
         cwd: opts.cwd,
         expectedHeadSha: opts.expectedHeadSha,
         expectedBaseSha: opts.expectedBaseSha,
+      });
+      resolveAgents.push({
+        harnessPin: opts.harnessPin,
+        harness: opts.env?.AGENT_HARNESS,
+        model: opts.env?.AGENT_MODEL,
+        effort: opts.env?.AGENT_EFFORT,
       });
       return { outcome: "clean" as const, message: "merged" };
     },
@@ -169,6 +177,7 @@ describe("fleet event handlers", () => {
     reviews = [];
     pushAccess = true;
     resolutions.length = 0;
+    resolveAgents.length = 0;
     ciFixes.length = 0;
   });
 
@@ -299,6 +308,24 @@ describe("fleet event handlers", () => {
       },
     ]);
     expect(repoManager.calls).toContain("fetch:backend");
+  });
+
+  test("base sync runs on the configured conflict-resolution agent", async () => {
+    const previous = CONFIG.workspace.conflictAgent;
+    // Mutated in place like a live reload; read at run time.
+    CONFIG.workspace.conflictAgent = { harness: "claude-code", model: "sonnet", effort: "low" };
+    try {
+      const resolve = createFleetResolveConflicts(deps());
+      await resolve("acme/backend", 42, { headSha: "head1", baseSha: "base1" });
+    } finally {
+      CONFIG.workspace.conflictAgent = previous;
+    }
+    expect(resolveAgents.at(-1)).toEqual({
+      harnessPin: "claude-code",
+      harness: "claude-code",
+      model: "sonnet",
+      effort: "low",
+    });
   });
 
   test("mention handler gates on push access and fails closed", async () => {

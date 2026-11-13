@@ -1043,6 +1043,8 @@ fs.appendFileSync(
     cliPath: process.env.AGENT_CLI_PATH ?? null,
     claudeCliPath: process.env.CLAUDE_CLI_PATH ?? null,
     model: process.env.AGENT_MODEL ?? null,
+    codexModel: process.env.CODEX_MODEL ?? null,
+    grokModel: process.env.GROK_MODEL ?? null,
     effort: process.env.AGENT_EFFORT ?? null,
     argv: process.argv.slice(2),
   }) + "\\n",
@@ -1074,7 +1076,7 @@ process.exit(75);
 
   test("pins the entry harness, keeps the worker-child marker, and never fails over", async () => {
     const { probePath, probeLog } = fixture();
-    startWorkerFailover({ raw: "codex,grok", checkInstalled: false, log: () => {} });
+    await startWorkerFailover({ raw: "codex,grok", checkInstalled: false, log: () => {} });
     const inheritedHint = join(tmpdir(), `acquirer-inherited-${Date.now()}.json`);
 
     const run = spawnAutomationProcess(process.execPath, [probePath], {
@@ -1096,7 +1098,7 @@ process.exit(75);
 
   test("fails over to the next harness when the entry did not pin one", async () => {
     const { probePath, probeLog } = fixture();
-    startWorkerFailover({ raw: "codex,grok", checkInstalled: false, log: () => {} });
+    await startWorkerFailover({ raw: "codex,grok", checkInstalled: false, log: () => {} });
 
     const run = spawnAutomationProcess(process.execPath, [probePath], {
       cwd: process.cwd(),
@@ -1113,7 +1115,7 @@ process.exit(75);
 
   test("an estimation sweep pins the entry harness and never fails over", async () => {
     const { probePath, probeLog } = fixture();
-    startWorkerFailover({ raw: "codex,grok", checkInstalled: false, log: () => {} });
+    await startWorkerFailover({ raw: "codex,grok", checkInstalled: false, log: () => {} });
 
     const previousEntry = process.argv[1];
     process.argv[1] = probePath;
@@ -1146,7 +1148,7 @@ process.exit(75);
 
   test("a pin to a non-primary harness drops the inherited AGENT_CLI_PATH", async () => {
     const { probePath, probeLog } = fixture();
-    startWorkerFailover({ raw: "claude-code,codex", checkInstalled: false, log: () => {} });
+    await startWorkerFailover({ raw: "claude-code,codex", checkInstalled: false, log: () => {} });
 
     const run = spawnAutomationProcess(process.execPath, [probePath], {
       cwd: process.cwd(),
@@ -1166,7 +1168,7 @@ process.exit(75);
 
   test("a pin to the primary harness keeps AGENT_CLI_PATH", async () => {
     const { probePath, probeLog } = fixture();
-    startWorkerFailover({ raw: "claude-code,codex", checkInstalled: false, log: () => {} });
+    await startWorkerFailover({ raw: "claude-code,codex", checkInstalled: false, log: () => {} });
 
     const run = spawnAutomationProcess(process.execPath, [probePath], {
       cwd: process.cwd(),
@@ -1189,7 +1191,7 @@ process.exit(75);
 
   test("a pin to a non-claude harness drops the inherited CLAUDE_CLI_PATH fallback", async () => {
     const { probePath, probeLog } = fixture();
-    startWorkerFailover({ raw: "claude-code,codex", checkInstalled: false, log: () => {} });
+    await startWorkerFailover({ raw: "claude-code,codex", checkInstalled: false, log: () => {} });
 
     const run = spawnAutomationProcess(process.execPath, [probePath], {
       cwd: process.cwd(),
@@ -1209,7 +1211,7 @@ process.exit(75);
 
   test("a pin to claude-code keeps the inherited CLAUDE_CLI_PATH", async () => {
     const { probePath, probeLog } = fixture();
-    startWorkerFailover({ raw: "codex,claude-code", checkInstalled: false, log: () => {} });
+    await startWorkerFailover({ raw: "codex,claude-code", checkInstalled: false, log: () => {} });
 
     const run = spawnAutomationProcess(process.execPath, [probePath], {
       cwd: process.cwd(),
@@ -1232,7 +1234,7 @@ process.exit(75);
 
   test("a pin that changes the harness drops the inherited model", async () => {
     const { probePath, probeLog } = fixture();
-    startWorkerFailover({ raw: "claude-code,codex", checkInstalled: false, log: () => {} });
+    await startWorkerFailover({ raw: "claude-code,codex", checkInstalled: false, log: () => {} });
 
     const env = automationRunEnv(
       {
@@ -1262,9 +1264,9 @@ process.exit(75);
     expect(records[0]).toMatchObject({ harness: "codex", model: null });
   });
 
-  test("a model-only entry cannot leak its model onto a failover harness", async () => {
+  test("a model-only entry scopes its model to the primary and keeps failover", async () => {
     const { probePath, probeLog } = fixture();
-    startWorkerFailover({ raw: "codex,grok", checkInstalled: false, log: () => {} });
+    await startWorkerFailover({ raw: "codex,grok", checkInstalled: false, log: () => {} });
 
     const base = cleanBase({ PROBE_LOG: probeLog, AGENT_HARNESS: "codex,grok" });
     delete base.AGENT_MODEL;
@@ -1289,7 +1291,9 @@ process.exit(75);
 
     const records = readSpawns(probeLog);
     expect(records.length).toBeGreaterThanOrEqual(2);
-    expect(records[0]).toMatchObject({ harness: "codex", model: null });
-    expect(records[1]).toMatchObject({ harness: "grok", model: null });
+    // The model rides on the primary's own CODEX_MODEL, which the grok
+    // fallback never reads, so failover still runs with grok's default model.
+    expect(records[0]).toMatchObject({ harness: "codex", model: null, codexModel: "gpt-5-codex" });
+    expect(records[1]).toMatchObject({ harness: "grok", model: null, grokModel: null });
   });
 });

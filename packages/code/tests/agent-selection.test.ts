@@ -10,7 +10,14 @@ import {
   pickAgentSelection,
   warnUninstalledHarnessPins,
 } from "../src/lib/agent/selection";
-import { parseWorkspaceConfig } from "../src/lib/workspace/config";
+import { harnessPinnedJobs, parseWorkspaceConfig } from "../src/lib/workspace/config";
+import { HARNESS_CHAIN_ENV, resolveAgentModel } from "../src/lib/agent/model";
+import {
+  resetWorkerFailover,
+  runWithFailover,
+  startWorkerFailover,
+} from "../src/lib/worker/failover";
+import { USAGE_LIMIT_EXIT_CODE, WORKER_CHILD_ENV } from "../src/lib/worker/usage-limit-protocol";
 import { buildRepoEnv, buildWorkspaceContextEnv } from "../src/lib/workspace/env";
 import { automationRunEnv } from "../src/lib/automation/acquirer";
 import { estimationRunEnv } from "../src/lib/automation/estimation-acquirer";
@@ -110,9 +117,19 @@ describe("applyAgentSelectionEnv", () => {
     expect(env).toEqual({
       AGENT_HARNESS: "codex",
       AGENT_MODEL: "gpt-5-codex",
+      CODEX_MODEL: "gpt-5-codex",
       AGENT_EFFORT: "medium",
       KEEP: "1",
     });
+  });
+
+  test("a pinned model outranks an inherited <HARNESS>_MODEL for that harness", () => {
+    const env = applyAgentSelectionEnv(
+      { AGENT_HARNESS: "codex", CODEX_MODEL: "workspace-codex-model" },
+      { harness: "codex", model: "gpt-5-codex-mini" },
+    );
+    expect(env.CODEX_MODEL).toBe("gpt-5-codex-mini");
+    expect(env.AGENT_MODEL).toBe("gpt-5-codex-mini");
   });
 
   test("drops an inherited model/effort when the pin changes the harness", () => {
@@ -149,9 +166,9 @@ describe("applyAgentSelectionEnv", () => {
     expect(env).toEqual({ AGENT_MODEL: "workspace-model" });
   });
 
-  test("ignores model and effort when the entry does not pin a harness", () => {
-    // A model-only entry keeps the workspace failover chain, so writing a
-    // harness-specific model would leak it onto whichever fallback runs.
+  test("scopes a model-only selection to the primary harness and keeps the chain", () => {
+    // A model-only entry keeps the workspace failover chain. The model goes to
+    // the primary's own <HARNESS>_MODEL, which a fallback never reads.
     const env = applyAgentSelectionEnv(
       { AGENT_HARNESS: "codex,grok", AGENT_MODEL: "workspace-model", KEEP: "1" },
       { model: "gpt-5-codex", effort: "high" },
@@ -159,8 +176,31 @@ describe("applyAgentSelectionEnv", () => {
     expect(env).toEqual({
       AGENT_HARNESS: "codex,grok",
       AGENT_MODEL: "workspace-model",
+      CODEX_MODEL: "gpt-5-codex",
+      AGENT_EFFORT: "high",
       KEEP: "1",
     });
+  });
+
+  test("a model-only selection resolves on the primary but not on a fallback", () => {
+    const env = applyAgentSelectionEnv({ AGENT_HARNESS: "codex,grok" }, { model: "gpt-5-codex" });
+    const saved = { ...process.env };
+    try {
+      for (const key of ["AGENT_MODEL", "CODEX_MODEL", "GROK_MODEL", HARNESS_CHAIN_ENV]) {
+        delete process.env[key];
+      }
+      Object.assign(process.env, env);
+      expect(resolveAgentModel("codex")).toBe("gpt-5-codex");
+      expect(resolveAgentModel("grok")).toBeUndefined();
+    } finally {
+      for (const key of Object.keys(process.env)) delete process.env[key];
+      Object.assign(process.env, saved);
+    }
+  });
+
+  test("a model-only selection targets the default harness when none is configured", () => {
+    const env = applyAgentSelectionEnv({}, { model: "sonnet" });
+    expect(env).toEqual({ CLAUDE_CODE_MODEL: "sonnet" });
   });
 
   test("drops a stale AGENT_CLI_PATH when pinning a non-primary harness", () => {
@@ -485,5 +525,67 @@ describe("warnUninstalledHarnessPins", () => {
       warnUninstalledHarnessPins([{ id: "dep" }], (m) => warnings.push(m));
       expect(warnings).toEqual([]);
     });
+  });
+});
+
+describe("conflict resolution agent", () => {
+  afterEach(() => resetWorkerFailover());
+
+  test("parses [workspace].conflict_resolution_harness/model/effort", () => {
+    const config = parseWorkspaceConfig(`${BASE_CONFIG}
+[workspace]
+conflict_resolution_harness = "claude-code"
+conflict_resolution_model = "sonnet"
+conflict_resolution_effort = "low"
+`);
+    expect(config.workspace.conflictAgent).toEqual({
+      harness: "claude-code",
+      model: "sonnet",
+      effort: "low",
+    });
+    expect(harnessPinnedJobs(config)).toContainEqual({
+      id: "conflict resolution",
+      harness: "claude-code",
+    });
+  });
+
+  test("omits the conflict agent when no key is set", () => {
+    expect(parseWorkspaceConfig(BASE_CONFIG).workspace.conflictAgent).toBeUndefined();
+  });
+
+  test("rejects an unknown conflict_resolution_harness naming the key", () => {
+    expect(() =>
+      parseWorkspaceConfig(`${BASE_CONFIG}
+[workspace]
+conflict_resolution_harness = "nope"
+`),
+    ).toThrow(/\[workspace\]\.conflict_resolution_harness "nope" is not a known agent harness/);
+  });
+
+  test("a pinned run spawns once on the pin and defers on a usage limit", async () => {
+    await startWorkerFailover({ raw: "codex,grok", checkInstalled: false, log: () => {} });
+    const seen: Array<Record<string, string | undefined>> = [];
+    const status = await runWithFailover(
+      async (env) => {
+        seen.push(env);
+        return USAGE_LIMIT_EXIT_CODE;
+      },
+      { AGENT_HARNESS: "claude-code" },
+      { harnessPin: "claude-code" },
+    );
+    expect(status).toBe("deferred");
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.AGENT_HARNESS).toBe("claude-code");
+    expect(seen[0]?.[WORKER_CHILD_ENV]).toBe("1");
+  });
+
+  test("an unpinned run still fails over across the chain", async () => {
+    await startWorkerFailover({ raw: "codex,grok", checkInstalled: false, log: () => {} });
+    const harnesses: Array<string | undefined> = [];
+    await runWithFailover(async (env) => {
+      harnesses.push(env.AGENT_HARNESS);
+      return USAGE_LIMIT_EXIT_CODE;
+    }, {});
+    expect(harnesses).toEqual(["codex", "grok"]);
   });
 });
