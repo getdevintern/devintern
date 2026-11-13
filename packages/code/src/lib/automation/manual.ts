@@ -27,6 +27,7 @@ import type {
 } from "./acquirer";
 import { RUN_ORIGIN_ENV } from "../observability/analytics";
 import { workerTaskArgs } from "../acquirers/task-polling";
+import { SKIP_PROJECT_ENV_ENV } from "../config/config-dir";
 
 /** Test-only spawn override so manual-run tests never launch a real CLI. */
 export interface StandaloneAutomationOptions {
@@ -80,6 +81,16 @@ export function loadStandaloneAutomationActions(
         ...process.env,
         [RUN_ORIGIN_ENV]: MANUAL_ORIGIN_ENV_VALUE,
         [AUTOMATION_ID_ENV]: automation.id,
+        // The spawn applies the entry's harness/model selection and drops the
+        // workspace primary's AGENT_CLI_PATH/AGENT_MODEL, exactly like a
+        // scheduled run. Mark the child so its `loadEnvironment()` skips
+        // `.devintern-code/.env` — otherwise dotenv re-populates those dropped
+        // keys and the child spawns the primary harness's binary under the
+        // pinned harness. This is the narrow skip marker, not the worker
+        // marker: a single-repo manual run must keep resolving its runtime
+        // state and license/auth session to the project config dir rather than
+        // the workspace state dir the worker marker would select.
+        [SKIP_PROJECT_ENV_ENV]: "1",
       },
       release() {},
     };

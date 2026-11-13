@@ -348,6 +348,8 @@ export function runResolveConflictsViaCli(
     outputStdio?: "inherit" | "ignore";
     webUrl?: string;
     signal?: AbortSignal;
+    /** Harness pinned by `[workspace].conflict_resolution_harness` (skips failover). */
+    harnessPin?: string;
   } = {},
 ): Promise<AutomaticResolveResult> {
   const args = [
@@ -368,6 +370,8 @@ export function runResolveConflictsUrlViaCli(
     expectedBaseSha?: string;
     timeoutMs?: number;
     signal?: AbortSignal;
+    /** Harness pinned by `[workspace].conflict_resolution_harness` (skips failover). */
+    harnessPin?: string;
     entrypoint?: string;
     outputStdio?: "inherit" | "ignore";
   } = {},
@@ -387,6 +391,8 @@ function runResolveSubcommand(
     outputStdio?: "inherit" | "ignore";
     webUrl?: string;
     signal?: AbortSignal;
+    /** Harness pinned by `[workspace].conflict_resolution_harness` (skips failover). */
+    harnessPin?: string;
   },
 ): Promise<AutomaticResolveResult> {
   return runResolveWithFailover(repo, prNumber, extraArgs, opts);
@@ -404,14 +410,20 @@ async function runResolveWithFailover(
     outputStdio?: "inherit" | "ignore";
     webUrl?: string;
     signal?: AbortSignal;
+    /** Harness pinned by `[workspace].conflict_resolution_harness` (skips failover). */
+    harnessPin?: string;
   },
 ): Promise<AutomaticResolveResult> {
   let last: AutomaticResolveResult | null = null;
-  const status = await runWithFailover(async (env) => {
-    const spawned = await spawnResolveOnce(repo, prNumber, extraArgs, { ...opts, env });
-    last = spawned.result;
-    return spawned.code;
-  }, opts.env ?? process.env);
+  const status = await runWithFailover(
+    async (env) => {
+      const spawned = await spawnResolveOnce(repo, prNumber, extraArgs, { ...opts, env });
+      last = spawned.result;
+      return spawned.code;
+    },
+    opts.env ?? process.env,
+    { harnessPin: opts.harnessPin },
+  );
   if (status === "deferred") {
     return {
       outcome: "deferred",

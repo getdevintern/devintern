@@ -14,6 +14,8 @@ import type { WorkerScheduleConfig } from "../worker/schedule";
 import { parseEstimationEntries } from "../automation/estimation-config";
 import type { EstimationConfig } from "../automation/estimation-config";
 import { parseToml } from "./toml";
+import { parseAgentSelection } from "../agent/selection";
+import type { AgentSelection, HarnessPinnedEntry } from "../agent/selection";
 
 /** When automatic conflict resolution on the agent's PRs runs. */
 export type ConflictResolutionMode = "auto" | "scheduled" | "disabled";
@@ -57,6 +59,13 @@ export interface WorkspaceSettings {
    * `"scheduled"`.
    */
   conflictSchedule?: CronOrIntervalSchedule;
+  /**
+   * Agent for automatic conflict resolution, from the optional
+   * `conflict_resolution_harness` / `_model` / `_effort` keys. Same semantics
+   * as an automation's `harness` / `model` / `effort` (see
+   * `agent/selection.ts`). Omitted when none of the keys is set.
+   */
+  conflictAgent?: AgentSelection;
 }
 
 /** Fleet-wide defaults from the `[defaults]` table. */
@@ -492,6 +501,11 @@ function parseWorkspaceSettings(
     readOptionalBoolean(workspaceTable, "ci_failure_fix", "[workspace]", errors) ??
     DEFAULT_CI_FAILURE_FIX;
   const { conflictResolution, conflictSchedule } = parseConflictPolicy(workspaceTable, errors);
+  const conflictAgent = parseAgentSelection(
+    workspaceTable,
+    { label: "[workspace]", keyPrefix: "conflict_resolution_" },
+    errors,
+  );
 
   return {
     execution: { isolation, maxConcurrency, maxConcurrencyPerRepo },
@@ -501,6 +515,7 @@ function parseWorkspaceSettings(
     ciFailureFix,
     conflictResolution,
     conflictSchedule,
+    ...(Object.keys(conflictAgent).length > 0 ? { conflictAgent } : {}),
   };
 }
 
@@ -937,4 +952,16 @@ export function findRepo(config: WorkspaceConfig, name: string): RepoConfig | un
  */
 export function findTeam(config: WorkspaceConfig, name: string): TeamConfig | undefined {
   return config.teams.find((team) => team.name === name);
+}
+
+/**
+ * Every workspace job that may pin its own harness: automations,
+ * estimations, and automatic conflict resolution.
+ */
+export function harnessPinnedJobs(config: WorkspaceConfig): HarnessPinnedEntry[] {
+  return [
+    ...config.automations,
+    ...config.estimations,
+    { id: "conflict resolution", harness: config.workspace.conflictAgent?.harness },
+  ];
 }
