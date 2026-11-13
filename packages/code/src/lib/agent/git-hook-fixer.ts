@@ -361,7 +361,7 @@ ${hookType === "push" ? "- Make sure to amend the commit (git commit --amend --n
         }
         if (usageLimited) {
           const usage = detectUsageLimit(stdoutOutput, stderrOutput);
-          reject(new UsageLimitError(usage.resetsAt));
+          reject(new UsageLimitError(usage.resetsAt, usage.period));
           return;
         }
         if (code === 0) {

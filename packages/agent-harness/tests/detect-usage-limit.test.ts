@@ -417,6 +417,16 @@ describe("detectUsageLimit", () => {
     expect(detectUsageLimit("", 'throw new Error("Go usage limit exceeded");').limited).toBe(false);
   });
 
+  test("reports the quota period a limit names, with or without a reset time", () => {
+    expect(detectUsageLimit("", "Error: OpenCode Go usage limit reached (monthly)\n").period).toBe(
+      "monthly",
+    );
+    const weekly = detectUsageLimit("", "Weekly usage limit reached. It will reset in 3 days.");
+    expect(weekly.period).toBe("weekly");
+    expect(weekly.resetsAt).toBe("3 days");
+    expect(detectUsageLimit("", "Claude usage limit reached").period).toBeUndefined();
+  });
+
   test("detects OpenCode's Go usage limit with a window and Extra Usage upsell", () => {
     const upsell =
       "To keep going now, turn on Extra Usage or upgrade to Go Plus at https://opencode.ai/console/wrk_x/go.";

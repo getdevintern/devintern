@@ -111,18 +111,29 @@ const RESET_PATTERNS = [
   /available again\s+(?:at|in)\s+([^\n.]+?)(?:\.|\n|$)/i,
 ] as const;
 
+/** Quota period named by a limit message (`monthly usage limit reached`). */
+export type UsageLimitPeriod = "daily" | "weekly" | "monthly";
+
 export interface UsageLimitResult {
   /** True when output indicates a usage/rate limit was hit. */
   limited: boolean;
   /** Human-readable reset hint when present, e.g. `7:20pm (Asia/Ho_Chi_Minh)`. */
   resetsAt?: string;
+  /**
+   * Quota period the message names, if any. Lets callers pick a long cooldown
+   * for a monthly quota that does not say when it resets.
+   */
+  period?: UsageLimitPeriod;
   /** The line that matched the limit pattern, for logging. */
   matchedLine?: string;
 }
 
 /** Error raised when a harness reaches an account-wide usage or rate limit. */
 export class UsageLimitError extends Error {
-  constructor(public readonly resetHint?: string) {
+  constructor(
+    public readonly resetHint?: string,
+    public readonly period?: UsageLimitPeriod,
+  ) {
     super(`Agent usage limit reached${resetHint ? ` (resets ${resetHint})` : ""}`);
     this.name = "UsageLimitError";
   }
@@ -139,6 +150,16 @@ function stripUnbalancedParen(hint: string): string {
   const opens = hint.split("(").length - 1;
   const closes = hint.split(")").length - 1;
   return hint.endsWith(")") && closes > opens ? hint.slice(0, -1).trimEnd() : hint;
+}
+
+/**
+ * Read the quota period a limit diagnostic names (`monthly`, `weekly`, ...).
+ *
+ * @param text - The matched diagnostic line
+ */
+function extractPeriod(text: string): UsageLimitPeriod | undefined {
+  const match = text.match(/\b(daily|weekly|monthly)\b/i);
+  return match?.[1] ? (match[1].toLowerCase() as UsageLimitPeriod) : undefined;
 }
 
 /**
@@ -412,8 +433,10 @@ export function detectUsageLimit(stdout: string, stderr: string): UsageLimitResu
     return { limited: false };
   }
 
+  const period = extractPeriod(matchedLine.normalized);
   return {
     limited: true,
+    ...(period ? { period } : {}),
     // Only extract a reset hint from the matched diagnostic line. Searching
     // the entire transcript can borrow an unrelated "try again" from source
     // code or a tool result, as happened with the Cloudflare tunnel bundle.

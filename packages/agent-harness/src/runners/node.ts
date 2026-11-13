@@ -202,7 +202,7 @@ export async function runAgentNode(
       if (timedOut) {
         reject(new Error(`${harness.displayName} timed out after ${timeoutMinutes} minutes`));
       } else if (usageLimit?.limited) {
-        reject(new UsageLimitError(usageLimit.resetsAt));
+        reject(new UsageLimitError(usageLimit.resetsAt, usageLimit.period));
       } else {
         const result: AgentRunResult = {
           stdout,

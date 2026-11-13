@@ -200,6 +200,7 @@ export {
   UsageLimitError,
   detectUsageLimit,
   resetHintToMs,
+  type UsageLimitPeriod,
   type UsageLimitResult,
 } from "./detect-usage-limit.js";
 
