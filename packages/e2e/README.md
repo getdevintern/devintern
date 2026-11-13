@@ -196,6 +196,38 @@ bun run --filter @getdevintern/code build
 bun run --filter @devintern/e2e test
 ```
 
+## Scheduled Jira story-point estimation
+
+`tests/local/worker-scheduled-estimation.test.ts` starts one real
+`devintern worker` with an `[[estimations]]` table against the in-process Jira
+fake (`providers/fake-jira.ts`). No Jira project, token, or network access is
+required. Build the CLI first; the test skips only when `packages/code/dist`
+is absent, and a skip is not a pass.
+
+The workspace is the usual temp worker fixture: isolated HOME, local bare Git
+remote, deterministic agent, telemetry and license checks disabled. `[defaults].tracker`
+is `jira` and the fake's environment is passed only into that process. Project
+settings name `storyPointsField: "customfield_10016"`. The enabled entry uses
+`interval = "15m"` and a JQL query. A second entry is disabled and would match
+a decoy; it must not be scheduled.
+
+The test does not sleep for the interval. It waits until the durable schedule
+row is a future occurrence and no search has run, stops the worker, moves that
+cursor into the past (several missed windows the first time), and starts again.
+Startup coalesces those windows into one sweep. The fake records the JQL. The
+sweep writes story points and one estimation comment on the issue created 48
+hours earlier, records origin `estimate` with the schedule id, and invokes the
+agent in estimate mode. An issue the same query selects but that was just
+created is skipped for the 24 hour rule. The workspace defaults still contain
+`--create-pr`; the sweep does not create a branch, pull request, or commit. A
+second driven occurrence searches again and does not estimate the unchanged
+issue.
+
+```sh
+bun run --filter @getdevintern/code build
+bun run --filter @devintern/e2e test
+```
+
 ## Agent harness invocation checks
 
 The ordinary local suite also probes every registered agent harness whose CLI is
@@ -830,4 +862,4 @@ PR CI.
 
 ### Jira story-point estimation
 
-`tests/local/tracker-jira-estimation.test.ts` covers one-shot estimation, unchanged-task skips, re-estimation, and `--skip-comments` against the offline Jira fixture.
+`tests/local/tracker-jira-estimation.test.ts` covers one-shot estimation, unchanged-task skips, re-estimation, and `--skip-comments` against the offline Jira fixture. `tests/local/worker-scheduled-estimation.test.ts` covers the same fake from a worker `[[estimations]]` schedule: one coalesced sweep, `estimate` run attribution, read-only git, and a later sweep that leaves the unchanged issue alone.
