@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Check, GitPullRequest, Play } from "lucide-react";
+import { Check, FolderGit2, GitPullRequest, Layers, Play } from "lucide-react";
 
 import { RunResult } from "@/components/RunResult";
 import { EmptyState, StatusBadge, StatusPill } from "@/components/shared";
@@ -14,6 +14,8 @@ import {
 } from "@/components/ui/table";
 import { triggerAutomation, usePoll } from "@/lib/api";
 import type { AutomationSchedule, AutomationsResponse } from "@/lib/api";
+import { groupAutomationsByRepo } from "@/lib/automation-groups";
+import type { AutomationGroup } from "@/lib/automation-groups";
 import { formatRunOrigin } from "@/lib/run-origin";
 import { cn, formatAge, formatTime } from "@/lib/utils";
 import { formatNextRun, humanizeSchedule } from "@/views/automation-schedule";
@@ -51,7 +53,6 @@ function AutomationRow({
   automation,
   busyId,
   startedId,
-  showRepo,
   isNext,
   onRunNow,
   onOpenRun,
@@ -60,7 +61,6 @@ function AutomationRow({
   automation: AutomationSchedule;
   busyId: string | null;
   startedId: string | null;
-  showRepo: boolean;
   isNext: boolean;
   onRunNow: (automation: AutomationSchedule) => void;
   onOpenRun: (id: number) => void;
@@ -96,7 +96,7 @@ function AutomationRow({
         </span>
       </TableCell>
       <TableCell
-        className="auto-cell-schedule px-4 py-2.5 align-middle"
+        className="auto-cell-schedule px-4 py-2.5 align-middle whitespace-normal"
         title={automation.schedule ? `Cron: ${automation.schedule}` : undefined}
       >
         {automation.schedule ? (
@@ -120,14 +120,6 @@ function AutomationRow({
           <span className="text-muted-foreground">–</span>
         )}
       </TableCell>
-      {showRepo ? (
-        <TableCell
-          className="auto-cell-repo hidden max-w-32 truncate px-4 py-2.5 align-middle text-xs text-subtle-foreground lg:table-cell"
-          title={automation.repo}
-        >
-          {automation.repo ?? "–"}
-        </TableCell>
-      ) : null}
       <TableCell className="auto-cell-last min-w-0 px-4 py-2.5 align-middle">
         {lastRun ? (
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
@@ -186,11 +178,48 @@ function AutomationRow({
   );
 }
 
+/** Number of columns in the automations table (for full-width group rows). */
+const COLUMN_COUNT = 5;
+
+/**
+ * Group header row: a `rowgroup` header carrying an h2, so the group is
+ * announced with its rows and reachable by heading navigation.
+ */
+function GroupHeaderRow({ group }: { group: AutomationGroup }) {
+  const count = group.automations.length;
+  const label = group.repo ?? "General";
+  return (
+    <tr className="auto-group-row">
+      <th scope="rowgroup" colSpan={COLUMN_COUNT} className="auto-group-cell">
+        <h2 className="auto-group-heading">
+          {group.repo ? (
+            <FolderGit2 className="size-3.5 shrink-0" aria-hidden="true" />
+          ) : (
+            <Layers className="size-3.5 shrink-0" aria-hidden="true" />
+          )}
+          <span className={cn("truncate", group.repo && "font-mono")} title={label}>
+            {label}
+          </span>
+          <span className="auto-group-count">
+            <span aria-hidden="true">{count}</span>
+            <span className="sr-only">{count === 1 ? "1 automation" : `${count} automations`}</span>
+          </span>
+        </h2>
+      </th>
+    </tr>
+  );
+}
+
 /**
  * The automations table: humanized schedule (raw cron secondary), relative
  * next run with the soonest emphasized, and a one-line last run. On narrow
- * screens each row collapses into a stacked card via `automations.css`. The
- * repo column is dropped when every automation targets the same repository.
+ * screens each row collapses into a stacked card via `automations.css`.
+ *
+ * Rows are grouped by target repository (general automations first, then
+ * repos by name), each group a `<tbody>` with its own header row so columns
+ * stay aligned across groups. A single group gets no header: a lone
+ * "General" or repo heading would only repeat the page title, so a shared
+ * repo is stated once under the table instead.
  */
 export function AutomationsTable({
   automations,
@@ -207,44 +236,48 @@ export function AutomationsTable({
   onOpenRun: (id: number) => void;
   onOpenAutomation?: (id: string) => void;
 }) {
-  const repos = new Set(automations.map((automation) => automation.repo));
-  const showRepo = repos.size > 1;
-  const sorted = [...automations].sort(
-    (a, b) =>
-      (a.enabled ? 0 : 1) - (b.enabled ? 0 : 1) ||
-      (a.nextDueAt ?? Infinity) - (b.nextDueAt ?? Infinity),
-  );
-  const nextId = sorted.find((automation) => automation.enabled && automation.nextDueAt)?.id;
-  const commonRepo = !showRepo ? automations[0]?.repo : undefined;
+  const groups = groupAutomationsByRepo(automations);
+  const grouped = groups.length > 1;
+  const nextId = automations
+    .filter((automation) => automation.enabled && automation.nextDueAt)
+    .reduce<AutomationSchedule | undefined>(
+      (soonest, automation) =>
+        !soonest || (automation.nextDueAt ?? Infinity) < (soonest.nextDueAt ?? Infinity)
+          ? automation
+          : soonest,
+      undefined,
+    )?.id;
+  const commonRepo = !grouped ? groups[0]?.repo : undefined;
   return (
     <div className="space-y-2">
-      <div className="overflow-hidden rounded-lg border border-border bg-card">
-        <Table className="auto-table text-sm">
+      <div className="auto-table-wrap overflow-hidden rounded-lg border border-border bg-card">
+        <Table className={cn("auto-table text-sm", grouped && "auto-table-grouped")}>
           <TableHeader>
             <TableRow>
               <TableHead className="px-4">Automation</TableHead>
               <TableHead className="px-4">Schedule</TableHead>
               <TableHead className="px-4">Next run</TableHead>
-              {showRepo ? <TableHead className="hidden px-4 lg:table-cell">Repo</TableHead> : null}
               <TableHead className="px-4">Last run</TableHead>
               <TableHead className="px-4 text-right">Actions</TableHead>
             </TableRow>
           </TableHeader>
-          <TableBody>
-            {sorted.map((automation) => (
-              <AutomationRow
-                key={automation.id}
-                automation={automation}
-                busyId={busyId}
-                startedId={startedId}
-                showRepo={showRepo}
-                isNext={automation.id === nextId}
-                onRunNow={onRunNow}
-                onOpenRun={onOpenRun}
-                onOpenAutomation={onOpenAutomation}
-              />
-            ))}
-          </TableBody>
+          {groups.map((group) => (
+            <TableBody key={group.key} className="auto-group">
+              {grouped ? <GroupHeaderRow group={group} /> : null}
+              {group.automations.map((automation) => (
+                <AutomationRow
+                  key={automation.id}
+                  automation={automation}
+                  busyId={busyId}
+                  startedId={startedId}
+                  isNext={automation.id === nextId}
+                  onRunNow={onRunNow}
+                  onOpenRun={onOpenRun}
+                  onOpenAutomation={onOpenAutomation}
+                />
+              ))}
+            </TableBody>
+          ))}
         </Table>
       </div>
       {commonRepo ? (

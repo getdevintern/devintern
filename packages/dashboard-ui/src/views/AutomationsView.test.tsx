@@ -85,14 +85,64 @@ test("PR-creating automations show a quiet indicator, not a pill", () => {
   expect(off).not.toContain("open_pr = true");
 });
 
-test("repo column shows only when repos differ; a shared repo is stated once", () => {
+test("a single repo renders one ungrouped body and states the repo once", () => {
   const same = render([automation({ id: "a" }), automation({ id: "b" })]);
   expect(same).not.toContain(">Repo<");
+  expect(same).not.toContain('scope="rowgroup"');
+  expect(same).not.toContain("<h2");
   expect(same).toContain("All automations run in");
+});
 
-  const mixed = render([automation({ id: "a" }), automation({ id: "b", repo: "acme/other" })]);
-  expect(mixed).toContain(">Repo<");
-  expect(mixed).toContain("acme/other");
+test("all-general automations render without group chrome or a repo note", () => {
+  const html = render([
+    automation({ id: "a", repo: undefined }),
+    automation({ id: "b", repo: "" }),
+  ]);
+  expect(html).not.toContain('scope="rowgroup"');
+  expect(html).not.toContain(">General<");
+  expect(html).not.toContain("All automations run in");
+});
+
+test("mixed repos group into rowgroups: General first, then repos by name", () => {
+  const html = render([
+    automation({ id: "web-job", repo: "web" }),
+    automation({ id: "loose-job", repo: undefined }),
+    automation({ id: "api-job", repo: "api" }),
+    automation({ id: "api-two", repo: "api", nextDueAt: STARTED_AT + 1 }),
+  ]);
+
+  expect(html).not.toContain(">Repo<");
+  expect(html).not.toContain("All automations run in");
+  expect(html.split("<tbody").length - 1).toBe(3);
+  expect(html.split('scope="rowgroup"').length - 1).toBe(3);
+  expect(html.split("<h2").length - 1).toBe(3);
+  expect(html).toContain("2 automations");
+  expect(html).toContain("1 automation<");
+
+  const order = [
+    ">General<",
+    ">loose-job<",
+    ">api<",
+    ">api-job<",
+    ">api-two<",
+    ">web<",
+    ">web-job<",
+  ];
+  const indices = order.map((label) => html.indexOf(label));
+  expect(indices.every((index) => index >= 0)).toBe(true);
+  expect([...indices].sort((a, b) => a - b)).toEqual(indices);
+});
+
+test("only one Next marker across groups, on the soonest enabled automation", () => {
+  const html = render([
+    automation({ id: "a", repo: "api", nextDueAt: Date.now() + 7_200_000 }),
+    automation({ id: "b", repo: "web", nextDueAt: Date.now() + 3_600_000 }),
+    automation({ id: "c", repo: "web", enabled: false, nextDueAt: Date.now() + 60_000 }),
+  ]);
+  expect(html.split(">Next<").length - 1).toBe(1);
+  const next = html.indexOf(">Next<");
+  expect(next).toBeGreaterThan(html.indexOf(">b<"));
+  expect(next).toBeLessThan(html.indexOf(">c<"));
 });
 
 test("list rows omit the prompt and link to the automation detail page", () => {
