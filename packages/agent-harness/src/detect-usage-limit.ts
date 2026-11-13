@@ -21,6 +21,8 @@
  *   Too Many Requests: {"error":{"code":"1302","message":"Rate limit reached for req..."}}
  *   rate_limit_error / quota exceeded
  *   Free usage exceeded, subscribe to Go
+ *   OpenCode Go usage limit reached (monthly, resets in 6d 23h). To keep going
+ *     now, turn on Extra Usage or upgrade to Go Plus at https://opencode.ai/...
  *   5 hour usage limit reached. It will reset in 5 hours 23 minutes. To continue
  *     using this model now, enable usage from your available balance
  *
@@ -63,8 +65,10 @@ const USAGE_LIMIT_PATTERNS = [
   // GoUsageLimitError are rewritten into these headless retry messages.
   /^(?:error:\s*)?free usage exceeded(?:,\s*subscribe to go)?[.]?$/i,
   // OpenCode also emits this shorter Go quota error in its stderr and in the
-  // cause of a structured "Failed to drain Session" log.
-  /^(?:(?:AI\.)?error:\s*)?(?:opencode\s+)?go usage limit (?:exceeded|reached)[.!]?(?:\n|$)/i,
+  // cause of a structured "Failed to drain Session" log. Newer builds append the
+  // window and an upsell, e.g. `OpenCode Go usage limit reached (monthly,
+  // resets in 6d 23h). To keep going now, turn on Extra Usage ...`.
+  /^(?:(?:AI\.)?error:\s*)?(?:opencode\s+)?go usage limit (?:exceeded|reached)(?:[.!]|\s*\([^)\n]*\)[.!]?)?(?:\s+to keep going now\b[^\n]*)?(?:\n|$)/i,
   /^(?:(?:AI_(?:APICall|Retry)Error|error):\s*)?(?:(?:\d+[-\s]?hour|weekly|daily|monthly)\s+)?usage limit reached\.(?:\s+it will reset in [^\n.]+(?:\.|$))?(?:\s+to continue using this model now, enable usage from your available balance\b[^\n]*)?$/i,
   /^subscription quota exceeded\.\s+you can continue using free models[.]?$/i,
   // Grok Build translates account/team exhaustion to these headless messages.
@@ -125,6 +129,19 @@ export class UsageLimitError extends Error {
 }
 
 /**
+ * Drop a closing paren the hint borrowed from its surrounding text, as in
+ * `limit reached (monthly, resets in 7d)`, while keeping a balanced one such
+ * as `7:20pm (Asia/Ho_Chi_Minh)`.
+ *
+ * @param hint - Trimmed reset hint
+ */
+function stripUnbalancedParen(hint: string): string {
+  const opens = hint.split("(").length - 1;
+  const closes = hint.split(")").length - 1;
+  return hint.endsWith(")") && closes > opens ? hint.slice(0, -1).trimEnd() : hint;
+}
+
+/**
  * Extract a human-readable reset hint from limit output, if present.
  *
  * @param text - One diagnostic line
@@ -133,7 +150,7 @@ function extractResetHint(text: string): string | undefined {
   for (const pattern of RESET_PATTERNS) {
     const match = text.match(pattern);
     if (match?.[1]) {
-      return match[1].trim();
+      return stripUnbalancedParen(match[1].trim());
     }
   }
   return undefined;
