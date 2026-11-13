@@ -33,11 +33,26 @@ The overview also summarizes activity and success rates, which is useful for spo
 **Overview** is the landing page. It shows:
 
 - **Uptime, working window, and queue mix.** How long the worker has been up, when its working window opens or closes, and what kind of work is queued (webhook deliveries, ad-hoc tasks, scheduled retries).
-- **Running now.** Runs in progress against `max_concurrency`, with a per-repository breakdown against `max_concurrency_per_repo`. The count includes every in-progress run, including PR review, CI fix, and conflict runs. When the worker is stopped, those runs are shown as stalled.
+- **Active work.** Runs in progress against `max_concurrency`, with a per-repository breakdown against `max_concurrency_per_repo`. The count includes every in-progress run, including PR review, CI fix, and conflict runs. See [Follow active work](#follow-active-work) for the rows underneath.
 - **Agent harnesses.** Your `AGENT_HARNESS` failover chain in priority order, which harness is active, and any usage-limit window with the time it ends. When every harness is limited, a banner shows when agent work resumes. After a limit window ends, the harness reads **quota unconfirmed** until a run on it succeeds, because the worker only learns the quota is back when an agent run goes through. The header shows the same warning on every page.
 - **Tracker sources.** Each team's tracker and when it was last polled. A source that has not polled for more than three poll intervals is flagged.
 
 Startup-failure cooldowns are kept in worker memory only, so the dashboard does not show them.
+
+### Follow active work
+
+Under the capacity meter, **Active work** lists every run in progress, longest-running first. Each row shows the task title (or its ticket key), the repository, harness, and attempt number, then a phase (Preparing, Assessing, Implementing, Reviewing, or Publishing) with its position in the pipeline, the exact step underneath (for example verify or repair 2, or "between steps"), and elapsed time. Select a row to open its run details.
+
+Step tracking follows the task pipeline, including preparation, feasibility, implementation, commit, auto-review, publication, and custom steps. Repeated steps update their start time. Between steps, the row names the last step explicitly. Older runs and workflows that do not use the task step runner show **Step not recorded**; the dashboard never guesses the current step from a completed stage.
+
+When the worker is stopped or every agent harness is usage-limited, in-progress runs are not advancing. Their rows turn neutral, stop pulsing, show when they started instead of a running clock, and say why in a tooltip. A run interrupted before recovery may still be recorded as in progress until the worker reconciles its history.
+
+Two lists sit below the running rows:
+
+- **Waiting to retry** appears only when a task's latest attempt was deferred in the last 48 hours (for example after an agent usage limit), with the reason and the step it stopped at.
+- **Recently finished** is collapsed by default and holds the last five finished tasks with their outcome and pull request. **View all runs** opens the full history in **Runs**.
+
+Repeat attempts at the same task are folded into one row. The former **Task activity** page now lives here; old `#/activity` links open **Overview**.
 
 ## Review your workspace configuration
 
@@ -49,14 +64,6 @@ Startup-failure cooldowns are kept in worker memory only, so the dashboard does 
 - **Policy.** Concurrency, task pickup, pull request, and maintenance settings.
 
 The page also tells you whether the running worker has applied the latest version of the file. A save that changes a setting that needs a restart (the default tracker, a team's name, tracker, or env, error monitors, the dashboard port, or the working-hours schedule) is rejected as a whole, so nothing else in that save applies either; the page shows the rejection reason. Workers that predate this check cannot report it, and the page says so.
-
-## Follow task activity
-
-Open **Task activity** to see what the worker is doing right now. It lists tasks that are not yet completed, one row per task with repeat attempts folded together. Each row shows a phase (Preparing, Assessing, Implementing, Reviewing, or Publishing), the exact step underneath (for example verify or repair 2, or "between steps"), and live elapsed time; open a row for its run details. Tasks whose latest attempt was deferred in the last 48 hours (for example after an agent usage limit) appear under **Waiting to retry** with the reason. Finished tasks leave the list and appear under a collapsed **Recently finished** section. When nothing is running, the page shows worker status and the queue size.
-
-Step tracking follows the task pipeline, including preparation, feasibility, implementation, commit, auto-review, publication, and custom steps. Repeated steps update their start time. Status badges distinguish running work from succeeded, failed, deferred, escalated, or abandoned runs; terminal runs retain their last recorded step without claiming it is still running. Between steps, the board identifies the last step explicitly.
-
-Older runs and workflows that do not use the task step runner appear under **Step unavailable**. The board never guesses the current step from a completed stage. A run interrupted before recovery may still be recorded as in progress until the worker reconciles its history.
 
 ## Retry a failed run
 

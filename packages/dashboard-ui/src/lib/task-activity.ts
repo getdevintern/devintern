@@ -1,6 +1,7 @@
-import type { RunRecord } from "@/lib/api";
-import { groupRunAttempts } from "@/lib/run-groups";
+import type { OverviewRunningRun, RunRecord } from "@/lib/api";
+import { groupRunAttempts, runGroupKey } from "@/lib/run-groups";
 import type { RunGroup } from "@/lib/run-groups";
+import { formatSpan } from "@/lib/utils";
 
 /** The few stages a task passes through while it is not yet completed. */
 export const PHASES = [
@@ -79,22 +80,16 @@ export function phaseIndex(step: string | undefined): number {
 
 /**
  * One-line detail under the phase: the exact step, with how long it has run,
- * or an honest "between steps" when nothing is executing right now.
+ * or an honest "between steps" when nothing is executing right now. A stalled
+ * run (worker stopped, agents paused) names its step without a running clock.
  */
-export function stepDetail(run: RunRecord, now = Date.now()): string {
+export function stepDetail(run: RunRecord, now = Date.now(), stalled = false): string {
   if (!run.step) return "Step not recorded";
   const label = stepLabel(run.step);
+  if (stalled) return `Holding at ${label.toLowerCase()}`;
   if (!run.stepActive) return `Between steps, after ${label.toLowerCase()}`;
-  return `${label} · ${formatClock(now - (run.stepStartedAt ?? now))}`;
-}
-
-/** Live clock for a running step: `42s`, `3m 05s`, `1h 02m`. */
-export function formatClock(ms: number): string {
-  const seconds = Math.max(0, Math.floor(ms / 1000));
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ${String(seconds % 60).padStart(2, "0")}s`;
-  return `${Math.floor(minutes / 60)}h ${String(minutes % 60).padStart(2, "0")}m`;
+  if (run.stepStartedAt === undefined) return label;
+  return `${label} · ${formatSpan(now - run.stepStartedAt)}`;
 }
 
 /**
@@ -103,7 +98,7 @@ export function formatClock(ms: number): string {
  * them, so they go straight to history.
  */
 export const WAITING_WINDOW_MS = 48 * 60 * 60 * 1000;
-export const FINISHED_LIMIT = 8;
+export const FINISHED_LIMIT = 5;
 
 /** One task (attempts folded) shown in a list row. */
 export interface TaskEntry {
@@ -111,6 +106,8 @@ export interface TaskEntry {
   latest: RunRecord;
   /** Attempts at this task on the page, including the latest. */
   attempts: number;
+  /** Workspace repo the run was attributed to, shown instead of the raw repo. */
+  repoLabel?: string;
 }
 
 export interface TaskActivity {
@@ -176,4 +173,58 @@ export function phaseTrackLabel(step: string | undefined): string {
 export function cleanTitle(title: string | undefined): string | undefined {
   const trimmed = title?.trim();
   return trimmed && !/^-{3,}$/.test(trimmed) ? trimmed : undefined;
+}
+
+/**
+ * Overview's active work. Which runs are in progress (and so how many) comes
+ * from the `/api/overview` capacity snapshot, the same one behind the meter
+ * and the per-repo counts, so the rows never disagree with the count. The
+ * `/api/task-activity` snapshot only enriches those rows (title, step timing,
+ * attempts) and supplies the waiting and finished lists. The two polls can be
+ * a few seconds apart: a run capacity still counts is never also listed as
+ * finished, and a run only task activity has started yet waits for the next
+ * overview poll.
+ */
+export function buildActiveWork(
+  running: OverviewRunningRun[],
+  runs: RunRecord[],
+  now = Date.now(),
+): TaskActivity {
+  const runningIds = new Set(running.map((run) => run.id));
+  const byId = new Map(runs.map((run) => [run.id, run]));
+  const history = buildTaskActivity(
+    runs.map((run) => (runningIds.has(run.id) ? { ...run, status: "in_progress" as const } : run)),
+    now,
+  );
+  const active = [...running]
+    .sort((a, b) => a.startedAt - b.startedAt || a.id - b.id)
+    .map((run): TaskEntry => {
+      const record = byId.get(run.id);
+      const latest: RunRecord = {
+        ...record,
+        id: run.id,
+        origin: run.origin,
+        taskKey: run.taskKey,
+        repo: run.repo,
+        harness: run.harness,
+        // The step's timing travels with the record's step; keep the pair together.
+        step: record ? record.step : run.step,
+        status: "in_progress",
+        startedAt: run.startedAt,
+      };
+      // Without its task-activity record the step timing is unknown, not zero.
+      if (!record) latest.stepActive = true;
+      const key = runGroupKey(latest);
+      const earlier = runs.filter(
+        (other) =>
+          other.id !== run.id && other.startedAt <= run.startedAt && runGroupKey(other) === key,
+      ).length;
+      return {
+        key: `run:${run.id}`,
+        latest,
+        attempts: Math.max(earlier + 1, latest.attempt ?? 0),
+        repoLabel: run.workspaceRepo ?? run.repo,
+      };
+    });
+  return { ...history, active };
 }

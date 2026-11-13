@@ -9,7 +9,7 @@ import {
   queueParts,
   queueProgress,
 } from "@/views/OverviewView";
-import type { OverviewResponse, WorkerResponse } from "@/lib/api";
+import type { OverviewResponse, RunRecord, WorkerResponse } from "@/lib/api";
 
 const NOW = new Date(2026, 10, 13, 12, 20, 0).getTime();
 const MINUTE = 60_000;
@@ -110,17 +110,19 @@ test("a healthy worker renders calm facts, running work and fresh polls without 
   // Capacity semantics live in a hint, not an always-on footnote.
   expect(html).not.toContain("<code");
   expect(html).toContain("How capacity is counted");
-  // The running run links to its detail page with its live step and elapsed time.
-  expect(html).toContain('href="#/runs/77"');
-  expect(html).toContain("DEV-9");
+  // The section is "Active work"; the running run opens its detail page and
+  // shows its live step and elapsed time.
+  expect(html).toContain("Active work");
+  expect(html).not.toContain("Running now");
+  expect(html).toContain("Open run 77: DEV-9");
   expect(html).toContain("implementation");
   expect(html).toContain("status-dot-live");
-  expect(html).toContain("23m");
-  expect(html).toContain("<th");
-  expect(html).not.toContain('aria-label="Open run DEV-9" href');
+  expect(html).toContain(">23m<");
+  expect(html).toContain("web");
   expect(html).toContain('aria-valuetext="1 of 4"');
-  // One tab stop per run: the chevron is a pointer-only affordance.
-  expect(html).toMatch(/<button[^>]*tabindex="-1"[^>]*aria-hidden="true"/);
+  // One tab stop per run: the row-wide title button, no table or chevron.
+  expect(html).not.toContain("<th");
+  expect(html).not.toMatch(/<button[^>]*tabindex="-1"/);
   expect(html).toContain('title="DEV-9"');
   expect(html).toContain("just now");
   expect(html).not.toContain('data-freshness="stale"');
@@ -342,9 +344,133 @@ test("a long custom step is capped to its cell with the full name in the tooltip
     overview({ capacity: { ...base.capacity, runs: run ? [{ ...run, step }] : [] } }),
   );
 
-  expect(html).toContain(`title="${step}"`);
-  expect(html).toMatch(/max-w-full min-w-0[^"]*"><span class="status-dot/);
-  expect(html).toContain(`<span class="min-w-0 truncate">${step}</span>`);
+  // The detail line truncates in CSS and keeps the full name in its tooltip.
+  expect(html).toContain(`<span class="aw-detail" title="${step}">${step}</span>`);
+});
+
+const activityRun: RunRecord = {
+  id: 77,
+  origin: "task",
+  taskKey: "DEV-9",
+  taskTitle: "Fix the login",
+  repo: "acme/web",
+  harness: "codex",
+  status: "in_progress",
+  startedAt: NOW - 23 * MINUTE,
+  step: "implement",
+  stepStartedAt: NOW - 3 * MINUTE,
+  stepActive: true,
+};
+
+function renderWork(
+  activityRuns: RunRecord[],
+  data: OverviewResponse = overview(),
+  info: WorkerResponse | null = workerInfo,
+): string {
+  return renderToStaticMarkup(
+    createElement(OverviewScreen, { overview: data, workerInfo: info, activityRuns, now: NOW }),
+  );
+}
+
+test("active rows show title, phase track, exact step and elapsed time", () => {
+  const html = renderWork([activityRun]);
+  expect(html).toContain("Fix the login");
+  expect(html).toContain("Open run 77: Fix the login");
+  expect(html).toContain("Implementing");
+  expect(html).toContain("Phase 3 of 5: Implementing");
+  expect(html).toContain("3/5");
+  expect(html).toContain("Implementation · 3m");
+  expect(html).toContain(">23m<");
+  expect(html).toContain("status-dot-live");
+  // Nothing waiting or finished: neither sub-list renders.
+  expect(html).not.toContain("Waiting to retry");
+  expect(html).not.toContain("Recently finished");
+});
+
+test("between steps the dot stops pulsing and the detail says so", () => {
+  const html = renderWork([{ ...activityRun, step: "verify", stepActive: false }]);
+  expect(html).toContain("Between steps, after verify");
+  expect(html).not.toContain("status-dot-live");
+});
+
+test("stalled rows neither pulse nor count up, and say why", () => {
+  const stopped = renderWork([activityRun], overview({ worker: { status: "stopped", pid: 99 } }));
+  expect(stopped).not.toContain("status-dot-live");
+  expect(stopped).toContain("data-stalled");
+  expect(stopped).toContain("Implementing · not advancing while the worker is stopped");
+  expect(stopped).toContain("Holding at implementation");
+  expect(stopped).toContain("23m ago");
+  expect(stopped).not.toContain("text-info");
+
+  const base = overview();
+  const paused = renderWork(
+    [activityRun],
+    overview({ harnesses: { ...base.harnesses, allExhausted: true } }),
+  );
+  expect(paused).not.toContain("status-dot-live");
+  expect(paused).toContain("not advancing while agent work is paused");
+});
+
+test("waiting tasks get their own sub-list with the reason", () => {
+  const html = renderWork([
+    activityRun,
+    {
+      ...activityRun,
+      id: 80,
+      taskKey: "DEV-12",
+      status: "deferred",
+      finishedAt: NOW - HOUR,
+      outcomeReason: "Agent usage limit reached",
+    },
+  ]);
+  expect(html).toContain("Waiting to retry");
+  expect(html).toContain("Agent usage limit reached");
+  expect(html).toContain("Stopped at implementation");
+  expect(html).toContain("1h ago");
+});
+
+test("finished tasks sit in a closed disclosure with a link to all runs", () => {
+  const html = renderWork([
+    {
+      ...activityRun,
+      id: 60,
+      taskKey: "DEV-1",
+      status: "succeeded",
+      finishedAt: NOW - HOUR,
+      taskTitle: "---",
+      prNumber: 42,
+      prUrl: "https://github.com/acme/web/pull/42",
+    },
+    {
+      ...activityRun,
+      id: 61,
+      taskKey: "DEV-2",
+      status: "failed",
+      finishedAt: NOW - 2 * HOUR,
+      outcomeReason: "Verification failed",
+    },
+  ]);
+  expect(html).toContain("<details");
+  expect(html).not.toContain("<details open");
+  expect(html).toContain("Recently finished");
+  expect(html).toContain("View all runs");
+  expect(html).toContain('href="#/runs"');
+  expect(html).toContain("#42");
+  expect(html).toContain("Verification failed");
+  expect(html).not.toContain(">---<");
+});
+
+test("idle with history keeps the calm line and a closed finished list", () => {
+  const html = renderWork(
+    [{ ...activityRun, status: "succeeded", finishedAt: NOW - HOUR }],
+    overview({
+      capacity: { running: 0, maxConcurrency: 4, perRepo: [], unattributed: 0, runs: [] },
+    }),
+  );
+  expect(html).toContain("Idle");
+  expect(html).toContain("0 of 4 slots in use");
+  expect(html).toContain("Recently finished");
+  expect(html).not.toContain('aria-label="Runs in progress"');
 });
 
 test("without a config the window is unknown, not around the clock", () => {
