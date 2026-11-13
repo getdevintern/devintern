@@ -218,7 +218,7 @@ cliTest(
       worker.start();
       await worker.waitForReady();
       await worker.waitForOutput(/All harnesses in the chain are usage-limited/);
-      await worker.waitForOutput(/deferred; will retry next tick/);
+      await worker.waitForOutput(/deferred \(1\/\d+\); next attempt after /);
 
       const limits = await worker.waitFor("both harnesses to be persisted as usage-limited", () => {
         const windows = worker.rateLimits();
