@@ -120,7 +120,7 @@ export async function processReviewWithPersistence(
       // Deferred by an account-global usage limit — fail over to the next
       // harness (or pause and re-queue for after reset) instead of counting
       // a failure. The delivery stays in flight until the retry settles.
-      handleUsageLimit(error.resetHint);
+      handleUsageLimit(error.resetHint, error.period);
       if (eventId && runtime.queue) {
         runtime.queue.requeuePending(eventId);
       }
@@ -182,7 +182,7 @@ export async function processIssueCommentWithPersistence(
     }
   } catch (error) {
     if (error instanceof UsageLimitError) {
-      handleUsageLimit(error.resetHint);
+      handleUsageLimit(error.resetHint, error.period);
       if (eventId && runtime.queue) {
         runtime.queue.requeuePending(eventId);
       }

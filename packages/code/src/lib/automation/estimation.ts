@@ -230,7 +230,7 @@ export async function runEstimation(
           if (usage.matchedLine) {
             console.log(`   Matched output: ${usage.matchedLine}`);
           }
-          reject(new UsageLimitError(usage.resetsAt));
+          reject(new UsageLimitError(usage.resetsAt, usage.period));
           return;
         }
 

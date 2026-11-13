@@ -414,7 +414,7 @@ export async function runAgentPrompt(
         if (timedOut) {
           reject(new Error(`${harness.displayName} timed out after ${timeoutMinutes} minutes`));
         } else if (usageLimit?.limited) {
-          reject(new UsageLimitError(usageLimit.resetsAt));
+          reject(new UsageLimitError(usageLimit.resetsAt, usageLimit.period));
         } else if (code !== 0) {
           reject(new Error(`${harness.displayName} exited with code ${code}: ${stderr}`));
         } else {

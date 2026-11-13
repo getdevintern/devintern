@@ -768,6 +768,7 @@ export function spawnAutomationProcess(
         return;
       }
       exitResult = code === 0;
+      if (exitResult) getWorkerFailover()?.recordSuccess();
       cleanupHint();
       settle(exitResult);
     });

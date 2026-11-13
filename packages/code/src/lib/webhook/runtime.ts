@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "http";
 import PQueue from "p-queue";
-import type { ResolvedHarness } from "@devintern/agent-harness";
+import type { ResolvedHarness, UsageLimitPeriod } from "@devintern/agent-harness";
 import { ensureWorkerFailover } from "../worker/failover";
 import type { WorkerFailover } from "../worker/failover";
 import { DEFAULT_AUTO_REVIEW_ITERATIONS } from "../review/auto-review-config";
@@ -93,9 +93,13 @@ export function resolveActiveHarness(): ResolvedHarness {
  * harness as soon as its window ends.
  *
  * @param resetHint - Human-readable reset hint from the agent output
+ * @param period - Quota period the limit message named, if any
  */
-export function handleUsageLimit(resetHint?: string): void {
-  ensureFailover().reportFromHint({ resetsAt: resetHint });
+export function handleUsageLimit(resetHint?: string, period?: UsageLimitPeriod): void {
+  ensureFailover().reportFromHint({
+    ...(resetHint ? { resetsAt: resetHint } : {}),
+    ...(period ? { period } : {}),
+  });
 }
 
 /**
