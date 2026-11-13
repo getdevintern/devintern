@@ -246,3 +246,15 @@ test("earlier attempts fold under the newest run behind a collapsed toggle", () 
   expect(html).not.toContain("Tests failed");
   expect(html).not.toContain("Attempt 2");
 });
+
+test("formatStarted shows yesterday's time without a leading zero, like the overview", () => {
+  const now = new Date(2026, 10, 13, 12, 0, 0).getTime();
+  const yesterday = new Date(2026, 10, 12, 9, 25, 0).getTime();
+  const time = new Date(yesterday).toLocaleTimeString(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+  });
+
+  expect(formatStarted(yesterday, now)).toBe(`Yesterday ${time}`);
+  expect(time.startsWith("0")).toBe(false);
+});

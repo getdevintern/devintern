@@ -1416,7 +1416,7 @@ export function handleStats(data: DashboardData, params: URLSearchParams): ApiRe
  * @param workingDir - Project root the dashboard was started from
  * @param workspaceDir - Workspace home whose lock is also consulted
  */
-function resolveWorkerStatus(
+export function resolveWorkerStatus(
   workingDir: string,
   workspaceDir: string = resolveWorkspaceDir(),
 ): WorkerStatusView {

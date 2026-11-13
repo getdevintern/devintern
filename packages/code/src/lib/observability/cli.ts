@@ -86,7 +86,20 @@ export async function runDashboardCommand(args: string[]): Promise<void> {
   // and harness transcripts; run history keeps reading the project-scoped DB
   // unless WEBHOOK_QUEUE_DB pins one.
   const queueDbPath = workspaceDir ? resolveDashboardQueueDbPath(workspaceDir) : undefined;
-  const server = startDashboardServer({ port, host, queueDbPath, workspaceDir });
+  // With an explicit workspace, list its [[automations]] (read-only) instead of
+  // the project-scoped automations.toml of whatever directory this started in.
+  const automationActions = workspaceDir
+    ? (await import("../automation/workspace-dashboard")).loadWorkspaceAutomationActions(
+        workspaceDir,
+      )
+    : undefined;
+  const server = startDashboardServer({
+    port,
+    host,
+    queueDbPath,
+    workspaceDir,
+    automationActions,
+  });
 
   const shutdown = (): void => {
     console.log("\n👋 Dashboard stopped");

@@ -4,17 +4,19 @@ sidebarLabel: "Dashboard"
 description: "Use when checking what the worker is doing, reading agent transcripts, diagnosing failed runs, or retrying work from the local dashboard."
 section: "Automation"
 order: 4
-dateModified: 2026-11-12
+dateModified: 2026-11-13
 ---
 
 # Worker Dashboard
 
 The dashboard answers a simple question: **what has the worker been doing?** It gives you a local view of current and past runs without making you read terminal output or inspect the worker database.
 
-It starts automatically with `devintern worker`. Open [http://localhost:4400](http://localhost:4400) on the machine running the worker.
+It starts automatically with `devintern worker`. Open [http://localhost:4400](http://localhost:4400) on the machine running the worker. The page opens on **Overview**; run history is under **Runs**.
 
 ## What you can do
 
+- Check worker health at a glance on **Overview**: running work against your concurrency limits, agent harness quota, and tracker polling
+- Review your connected trackers, routing, repositories, and automations on **Workspace** without opening `workspace.toml`
 - See whether the worker is running, waiting for its next working window, or processing a task
 - See how much work is waiting in the status strip, including queued ad-hoc tasks and scheduled retries as well as relay deliveries
 - Follow each run from task pickup through implementation and pull request creation
@@ -25,6 +27,28 @@ It starts automatically with `devintern worker`. Open [http://localhost:4400](ht
 - Review recent worker logs when something needs attention
 
 The overview also summarizes activity and success rates, which is useful for spotting repeated failures without checking every run individually.
+
+## Check worker health
+
+**Overview** is the landing page. It shows:
+
+- **Uptime, working window, and queue mix.** How long the worker has been up, when its working window opens or closes, and what kind of work is queued (webhook deliveries, ad-hoc tasks, scheduled retries).
+- **Running now.** Runs in progress against `max_concurrency`, with a per-repository breakdown against `max_concurrency_per_repo`. The count includes every in-progress run, including PR review, CI fix, and conflict runs. When the worker is stopped, those runs are shown as stalled.
+- **Agent harnesses.** Your `AGENT_HARNESS` failover chain in priority order, which harness is active, and any usage-limit window with the time it ends. When every harness is limited, a banner shows when agent work resumes. After a limit window ends, the harness reads **quota unconfirmed** until a run on it succeeds, because the worker only learns the quota is back when an agent run goes through. The header shows the same warning on every page.
+- **Tracker sources.** Each team's tracker and when it was last polled. A source that has not polled for more than three poll intervals is flagged.
+
+Startup-failure cooldowns are kept in worker memory only, so the dashboard does not show them.
+
+## Review your workspace configuration
+
+**Workspace** is a read-only view of `workspace.toml`:
+
+- **Work routing.** Which tracker source, automation, or error monitor sends work to which repository, and what happens to tasks no routing rule matches. Hover or focus a source or repository to trace its routes.
+- **Repositories, automations, estimations, and error monitors.**
+- **Credentials.** Which env files each scope loads and which keys they define. Values are never shown.
+- **Policy.** Concurrency, task pickup, pull request, and maintenance settings.
+
+The page also tells you whether the running worker has applied the latest version of the file. A save that changes a setting that needs a restart (the default tracker, a team's name, tracker, or env, error monitors, the dashboard port, or the working-hours schedule) is rejected as a whole, so nothing else in that save applies either; the page shows the rejection reason. Workers that predate this check cannot report it, and the page says so.
 
 ## Follow task activity
 
@@ -65,6 +89,8 @@ Run history (runs, stats, agent PRs, artifacts, retry audit) comes from the same
 ```bash
 devintern dashboard --workspace /path/to/workspace.toml
 ```
+
+With `--workspace`, **Automations** lists that workspace's `[[automations]]` with their next scheduled run. **Run now** needs the worker, because workspace automations run through its routing and repository pipeline; start `devintern worker` and use its dashboard to trigger them.
 
 ## Local by design
 

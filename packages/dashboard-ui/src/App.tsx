@@ -4,7 +4,9 @@ import {
   TerminalSquare,
   ChartNoAxesCombined,
   GitPullRequest,
+  LayoutDashboard,
   ListTodo,
+  Settings2,
   ScrollText,
   Workflow,
 } from "lucide-react";
@@ -18,51 +20,25 @@ import { RunsView } from "@/views/RunsView";
 import { TaskActivityView } from "@/views/TaskActivityView";
 import { AutomationDetailView } from "@/views/AutomationDetailView";
 import { StatsView } from "@/views/StatsView";
+import { OverviewView } from "@/views/OverviewView";
+import { WorkspaceView } from "@/views/WorkspaceView";
+import { parseHash, RUNS_HASH, runHash } from "@/lib/routes";
+import type { Route } from "@/lib/routes";
 import { cn } from "@/lib/utils";
 
-type Route =
-  | { view: "activity" }
-  | { view: "runs" }
-  | { view: "run"; id: number }
-  | { view: "automations" }
-  | { view: "automation"; id: string }
-  | { view: "prs" }
-  | { view: "stats" }
-  | { view: "logs" };
-
-/** Parse the location hash (#/, #/runs/:id, #/automations, #/prs, #/stats, #/logs) into a route. */
-function parseHash(): Route {
-  const hash = window.location.hash;
-  const runMatch = hash.match(/^#\/runs\/(\d+)$/);
-  if (runMatch) {
-    return { view: "run", id: parseInt(runMatch[1] ?? "0", 10) };
-  }
-  if (hash === "#/activity") return { view: "activity" };
-  const automationMatch = hash.match(/^#\/automations\/(.+)$/);
-  if (automationMatch) {
-    try {
-      return { view: "automation", id: decodeURIComponent(automationMatch[1] ?? "") };
-    } catch {
-      return { view: "automations" };
-    }
-  }
-  if (hash === "#/automations") return { view: "automations" };
-  if (hash === "#/stats") return { view: "stats" };
-  if (hash === "#/prs") return { view: "prs" };
-  if (hash === "#/logs") return { view: "logs" };
-  return { view: "runs" };
-}
-
 const sections = [
-  { label: "Runs", hash: "#/", view: "runs", icon: ListTodo },
+  { label: "Overview", hash: "#/", view: "overview", icon: LayoutDashboard },
+  { label: "Runs", hash: RUNS_HASH, view: "runs", icon: ListTodo },
   { label: "Task activity", hash: "#/activity", view: "activity", icon: Activity },
   { label: "Automations", hash: "#/automations", view: "automations", icon: Workflow },
   { label: "Pull requests", hash: "#/prs", view: "prs", icon: GitPullRequest },
   { label: "Statistics", hash: "#/stats", view: "stats", icon: ChartNoAxesCombined },
+  { label: "Workspace", hash: "#/workspace", view: "workspace", icon: Settings2 },
   { label: "Logs", hash: "#/logs", view: "logs", icon: ScrollText },
 ] as const;
 
-const pageTitles = {
+const pageTitles: Record<Route["view"], string> = {
+  overview: "Overview",
   activity: "Task activity",
   runs: "Runs",
   run: "Runs",
@@ -71,16 +47,42 @@ const pageTitles = {
   prs: "Pull requests",
   stats: "Statistics",
   logs: "Worker logs",
+  workspace: "Workspace",
+};
+
+const currentHash = () => parseHash(window.location.hash);
+const openRun = (id: number): void => {
+  window.location.hash = runHash(id);
 };
 
 export function App() {
-  const [route, setRoute] = useState<Route>(parseHash);
+  const [route, setRoute] = useState<Route>(currentHash);
 
   useEffect(() => {
-    const onHashChange = () => setRoute(parseHash());
+    const onHashChange = () => setRoute(currentHash());
     window.addEventListener("hashchange", onHashChange);
     return () => window.removeEventListener("hashchange", onHashChange);
   }, []);
+
+  // Keep the active tab visible when the tab row scrolls (narrow screens).
+  useEffect(() => {
+    const reveal = () =>
+      document
+        .querySelector(".dashboard-nav-link-active")
+        ?.scrollIntoView({ inline: "nearest", block: "nearest" });
+    reveal();
+    // A resize can clip the active tab again; debounce so a drag costs one scroll.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const onResize = () => {
+      clearTimeout(timer);
+      timer = setTimeout(reveal, 100);
+    };
+    window.addEventListener("resize", onResize);
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener("resize", onResize);
+    };
+  }, [route.view]);
 
   const currentSection =
     route.view === "run" ? "runs" : route.view === "automation" ? "automations" : route.view;
@@ -121,7 +123,7 @@ export function App() {
           <h1 className="dashboard-page-title">
             {route.view === "run" ? (
               <>
-                <a href="#/">Runs</a> <span>/ #{route.id}</span>
+                <a href={RUNS_HASH}>Runs</a> <span>/ #{route.id}</span>
               </>
             ) : route.view === "automation" ? (
               <>
@@ -135,28 +137,24 @@ export function App() {
         </header>
 
         <main className="dashboard-content">
-          {route.view === "activity" ? (
-            <TaskActivityView onOpenRun={(id) => (window.location.hash = `#/runs/${id}`)} />
-          ) : null}
-          {route.view === "runs" ? (
-            <RunsView onOpenRun={(id) => (window.location.hash = `#/runs/${id}`)} />
-          ) : null}
+          {route.view === "overview" ? <OverviewView /> : null}
+          {route.view === "activity" ? <TaskActivityView onOpenRun={openRun} /> : null}
+          {route.view === "runs" ? <RunsView onOpenRun={openRun} /> : null}
           {route.view === "run" ? (
             <RunDetailView
               key={route.id}
               runId={route.id}
-              onBack={() => (window.location.hash = "#/")}
+              onBack={() => (window.location.hash = RUNS_HASH)}
             />
           ) : null}
-          {route.view === "automations" ? (
-            <AutomationsView onOpenRun={(id) => (window.location.hash = `#/runs/${id}`)} />
-          ) : null}
+          {route.view === "automations" ? <AutomationsView onOpenRun={openRun} /> : null}
           {route.view === "automation" ? (
             <AutomationDetailView key={route.id} automationId={route.id} />
           ) : null}
           {route.view === "prs" ? <AgentPrsView /> : null}
           {route.view === "stats" ? <StatsView /> : null}
           {route.view === "logs" ? <LogsView /> : null}
+          {route.view === "workspace" ? <WorkspaceView /> : null}
         </main>
       </div>
     </div>

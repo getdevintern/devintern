@@ -25,7 +25,7 @@ import { existsSync, statSync } from "fs";
 import { basename, join, resolve } from "path";
 
 import { configureSqliteConnection } from "../state/sqlite";
-import { readRelayQueueStats, resolveQueueDbPath } from "../state/webhook-queue";
+import { readRelayQueueStats, resolveQueueDbPath, WebhookQueue } from "../state/webhook-queue";
 import { hasWorkspace, resolveWorkspaceDir, workspaceDbPath } from "../workspace/paths";
 
 /**
@@ -164,4 +164,54 @@ export function readDashboardRelayStats(
     processing: queueStats.processing + historyStats.processing,
     failed: queueStats.failed + historyStats.failed,
   };
+}
+
+/** Persisted harness failover state as read from `webhook_meta`. */
+export interface DashboardFailoverState {
+  /** Harness name → limit-until epoch ms (may already be in the past). */
+  rateLimits: Record<string, number>;
+  /** Persisted active harness, when one was recorded (and readable). */
+  activeHarness: string | null;
+  /** Most recent usage-limit hit per harness, kept after its window elapses. */
+  lastLimits: Record<string, { hitAt: number; untilMs: number }>;
+}
+
+/**
+ * Read the persisted harness failover state without changing it.
+ *
+ * Same read-only contract as {@link readDashboardQueueStatuses}: a missing
+ * file is reported as `null` (state unknown) instead of creating a database.
+ * A corrupt active-harness row degrades to `null` without discarding the
+ * per-row tolerant rate-limit windows.
+ *
+ * @param dbPath - Database the worker persists failover state into
+ * @returns The persisted state, or null when the database cannot be read
+ */
+export function readDashboardFailoverState(dbPath: string): DashboardFailoverState | null {
+  if (!existsSync(dbPath)) {
+    return null;
+  }
+  let queue: WebhookQueue | null = null;
+  try {
+    queue = new WebhookQueue({ dbPath, readonly: true });
+    const rateLimits = queue.getAllRateLimits();
+    let activeHarness: string | null = null;
+    try {
+      activeHarness = queue.getActiveHarness();
+    } catch {
+      activeHarness = null;
+    }
+    let lastLimits: DashboardFailoverState["lastLimits"] = {};
+    try {
+      lastLimits = queue.getAllLastLimits();
+    } catch {
+      lastLimits = {};
+    }
+    return { rateLimits, activeHarness, lastLimits };
+  } catch {
+    // Missing webhook_meta table (older DB), locked or corrupt file.
+    return null;
+  } finally {
+    queue?.close();
+  }
 }

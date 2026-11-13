@@ -309,9 +309,11 @@
   display: flex;
   min-width: 0;
   flex: 1;
-  flex-wrap: wrap;
+  /* One row at every width: the window item truncates, Live stays pinned right. */
+  flex-wrap: nowrap;
   align-items: center;
-  gap: 6px 18px;
+  gap: 18px;
+  overflow: hidden;
   color: var(--muted-foreground);
   font-size: 0.8125rem;
 }
@@ -326,7 +328,39 @@
 }
 
 .strip-item svg {
+  flex: none;
   color: var(--subtle-foreground);
+}
+
+.dashboard-status-strip > * {
+  flex: none;
+}
+
+/*
+ * When the strip runs out of room, StatusStrip raises data-compact one step
+ * at a time instead of truncating: 1 collapses the window (and database)
+ * items to their icon, 2 drops the pid, 3 drops the long PR/Live wording,
+ * 4 collapses the harness pill to its icon. Collapsed text stays readable to
+ * screen readers and in each item's tooltip.
+ */
+.dashboard-status-strip:not([data-compact="0"]) .strip-item-shrink .strip-label,
+.dashboard-status-strip:is([data-compact="3"], [data-compact="4"]) .strip-wide,
+.dashboard-status-strip[data-compact="4"] .harness-pill .strip-label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.dashboard-status-strip:is([data-compact="2"], [data-compact="3"], [data-compact="4"])
+  .worker-chip-detail {
+  display: none;
+}
+
+.dashboard-status-strip[data-compact="4"] {
+  gap: 10px;
 }
 
 a.strip-link {
@@ -588,7 +622,16 @@ a.strip-link:hover .strip-item svg {
     overflow-x: auto;
     padding: 0 12px;
     scrollbar-width: none;
-    mask-image: linear-gradient(to right, transparent 0, #000 12px, #000 calc(100% - 20px), transparent);
+    /* A wide right fade signals that the tab row scrolls when tabs clip. */
+    mask-image: linear-gradient(
+      to right,
+      transparent 0,
+      #000 12px,
+      #000 calc(100% - 48px),
+      transparent
+    );
+    scroll-padding-inline: 12px 48px;
+    padding-right: 48px;
   }
 
   .dashboard-nav::-webkit-scrollbar {
@@ -615,6 +658,10 @@ a.strip-link:hover .strip-item svg {
     min-height: 48px;
     padding: 8px 20px;
   }
+
+  .dashboard-status-strip {
+    gap: 14px;
+  }
 }
 
 @media (max-width: 560px) {
@@ -627,17 +674,12 @@ a.strip-link:hover .strip-item svg {
   }
 
   .dashboard-status-strip {
-    gap: 6px 14px;
-  }
-
-  .live-indicator {
-    margin-left: 0;
+    gap: 12px;
   }
 
   .dashboard-content {
     padding: 20px 16px 40px;
   }
-
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -655,18 +697,139 @@ a.strip-link:hover .strip-item svg {
 }
 
 /* Task activity shares the dashboard surfaces and status palette. */
-.activity-search { min-width: 0; width: min(100%, 20rem); padding: .5rem .75rem; border: 1px solid var(--border); border-radius: .5rem; background: var(--card); color: var(--foreground); font: inherit; font-size: .875rem; }
-.activity-search::placeholder { color: var(--muted-foreground); }
-.activity-board { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(245px, 1fr); gap: 1rem; overflow-x: auto; padding-bottom: .75rem; scrollbar-color: var(--border) var(--background); }
-.activity-lane { min-width: 0; min-height: 24rem; background: var(--muted); border-radius: .75rem; padding: .75rem; }
-.activity-lane h2 { display: flex; justify-content: space-between; align-items: baseline; gap: .75rem; font-size: .8125rem; font-weight: 600; margin: .25rem 0 1rem; overflow-wrap: anywhere; }
-.activity-lane h2 span { color: var(--muted-foreground); font-variant-numeric: tabular-nums; }
-.activity-task { background: var(--card); border: 1px solid var(--border); border-radius: .75rem; padding: .875rem; margin-bottom: .75rem; overflow-wrap: anywhere; }
-.activity-task-selected { border-color: var(--primary); }
-.activity-task-select { display: flex; flex-direction: column; align-items: flex-start; gap: .75rem; width: 100%; text-align: left; padding-top: .75rem; cursor: pointer; }
-.activity-task-select:hover { color: var(--primary); }
-.activity-task-select:focus-visible, .activity-search:focus-visible, .activity-board:focus-visible { outline: 2px solid var(--ring); outline-offset: 3px; }
-.activity-lane-empty { padding: 1.5rem .5rem; border: 1px dashed var(--border); border-radius: .5rem; font-size: .75rem; text-align: center; color: var(--muted-foreground); }
-.activity-selection { display: flex; align-items: center; justify-content: space-between; gap: 1.5rem; background: var(--card); padding: 1.25rem; border-radius: .75rem; border: 1px solid var(--border); }
-.activity-reason { font-size: .875rem; white-space: pre-wrap; overflow-wrap: anywhere; }
-@media (max-width: 650px) { .activity-selection { flex-direction: column; align-items: flex-start; } .activity-search { width: 100%; } .activity-board { grid-auto-columns: min(80vw, 280px); } }
+.activity-search {
+  min-width: 0;
+  width: min(100%, 20rem);
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  background: var(--card);
+  color: var(--foreground);
+  font: inherit;
+  font-size: 0.875rem;
+}
+.activity-search::placeholder {
+  color: var(--muted-foreground);
+}
+.activity-board {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(245px, 1fr);
+  gap: 1rem;
+  overflow-x: auto;
+  padding-bottom: 0.75rem;
+  scrollbar-color: var(--border) var(--background);
+}
+.activity-lane {
+  min-width: 0;
+  min-height: 24rem;
+  background: var(--muted);
+  border-radius: 0.75rem;
+  padding: 0.75rem;
+}
+.activity-lane h2 {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.75rem;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  margin: 0.25rem 0 1rem;
+  overflow-wrap: anywhere;
+}
+.activity-lane h2 span {
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+}
+.activity-task {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  padding: 0.875rem;
+  margin-bottom: 0.75rem;
+  overflow-wrap: anywhere;
+}
+.activity-task-selected {
+  border-color: var(--primary);
+}
+.activity-task-select {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.75rem;
+  width: 100%;
+  text-align: left;
+  padding-top: 0.75rem;
+  cursor: pointer;
+}
+.activity-task-select:hover {
+  color: var(--primary);
+}
+.activity-task-select:focus-visible,
+.activity-search:focus-visible,
+.activity-board:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 3px;
+}
+.activity-lane-empty {
+  padding: 1.5rem 0.5rem;
+  border: 1px dashed var(--border);
+  border-radius: 0.5rem;
+  font-size: 0.75rem;
+  text-align: center;
+  color: var(--muted-foreground);
+}
+.activity-selection {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1.5rem;
+  background: var(--card);
+  padding: 1.25rem;
+  border-radius: 0.75rem;
+  border: 1px solid var(--border);
+}
+.activity-reason {
+  font-size: 0.875rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 650px) {
+  .activity-selection {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  .activity-search {
+    width: 100%;
+  }
+  .activity-board {
+    grid-auto-columns: min(80vw, 280px);
+  }
+}
+
+/* Harness chain warning in the status strip (links to the overview). */
+.harness-pill {
+  display: inline-flex;
+  height: 28px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  border: 1px solid var(--warning-border);
+  border-radius: 999px;
+  background: var(--warning-subtle);
+  color: var(--warning);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: background-color 150ms ease-out;
+}
+
+.harness-pill:hover {
+  background: color-mix(in srgb, var(--warning) 20%, transparent);
+}
+
+.harness-pill[data-state="limited"] {
+  font-weight: 500;
+}

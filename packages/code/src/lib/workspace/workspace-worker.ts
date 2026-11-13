@@ -47,7 +47,7 @@ import {
   workspaceRunNowPath,
   writeWorkerStartMarker,
 } from "./paths";
-import { WorkspaceConfigReloader } from "./config-reload";
+import { appliedConfigRecorder, WorkspaceConfigReloader } from "./config-reload";
 import { createWorkspaceLock, openWorkspaceState } from "./state";
 import { BASE_WORKTREE_NAME, RepoManager } from "./repo-manager";
 import { Utils } from "../utils";
@@ -1211,6 +1211,11 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   // Live reload keeps queries, fixed team destinations, routing, repos,
   // automations, worker_task_args, and cadence live. Team identities and
   // credentials require rebuilding clients/detectors and therefore restart.
+  // The applied-config record is written only once this process holds the
+  // worker lock (see onStarted), so a second worker that loses the lock race
+  // never overwrites the running worker's record.
+  let holdsWorkerLock = false;
+  const recordReloadOutcome = appliedConfigRecorder(workspaceDir, configPath);
   const reloader = new WorkspaceConfigReloader({
     configPath,
     current: config,
@@ -1220,6 +1225,9 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
         sourceCount: sources.length,
       }),
     onApplied: applyReloadedConfig,
+    onOutcome: (outcome) => {
+      if (holdsWorkerLock) recordReloadOutcome(outcome);
+    },
   });
   reloader.start();
 
@@ -1314,6 +1322,10 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       },
       finalExitCode: () => autoUpdater.finalExitCode(),
       onStarted: async (acquirerNames) => {
+        holdsWorkerLock = true;
+        // Re-read the file now that the lock is held: records which version
+        // is live (or why the on-disk version was rejected) for the dashboard.
+        reloader.reload("worker started");
         trackWorkerStarted({
           cliVersion: options.cliVersion ?? "0.0.0",
           tracker: analyticsTracker,

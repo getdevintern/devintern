@@ -18,7 +18,7 @@ import type { RunOrigin, RunRecord, RunStatus, RunsResponse } from "@/lib/api";
 import { groupRunAttempts } from "@/lib/run-groups";
 import { formatRunOrigin } from "@/lib/run-origin";
 import { runPrHref, runWorkLink } from "@/lib/run-work";
-import { cn, formatDuration, formatTime } from "@/lib/utils";
+import { cn, formatDuration, formatPastTime } from "@/lib/utils";
 
 const PAGE_SIZE = 25;
 
@@ -137,8 +137,6 @@ export function RunsView({ onOpenRun }: { onOpenRun: (id: number) => void }) {
   );
 }
 
-const DAY_MS = 24 * 60 * 60 * 1000;
-
 function runAttempt(run: RunRecord): number | undefined {
   return run.attempt && run.attempt > 0 ? run.attempt : undefined;
 }
@@ -148,19 +146,7 @@ function formatFullTime(epochMs: number): string {
 }
 
 /** Relative time for recent starts, clock time for yesterday, date beyond that. */
-export function formatStarted(epochMs: number, now: number = Date.now()): string {
-  const diff = Math.max(0, now - epochMs);
-  if (diff < 60_000) return "just now";
-  if (diff < 60 * 60_000) return `${Math.floor(diff / 60_000)}m ago`;
-  if (diff < DAY_MS) return `${Math.floor(diff / (60 * 60_000))}h ago`;
-  const time = new Date(epochMs).toLocaleTimeString(undefined, {
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-  const startOfToday = new Date(now).setHours(0, 0, 0, 0);
-  if (epochMs >= startOfToday - DAY_MS && epochMs < startOfToday) return `Yesterday ${time}`;
-  return formatTime(epochMs);
-}
+export const formatStarted = formatPastTime;
 
 const OUTCOME_TONE: Partial<Record<RunStatus, string>> = {
   failed: "text-danger",
