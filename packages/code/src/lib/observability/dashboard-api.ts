@@ -21,6 +21,8 @@ import type {
   DashboardAutomationActions,
   ManualTriggerOutcome,
 } from "../automation/acquirer";
+import { pickAgentSelection } from "../agent/selection";
+import type { AgentSelection } from "../agent/selection";
 import { loadStandaloneAutomationActions } from "../automation/manual";
 import type { CodeHostProvider } from "../code-host/index";
 import { RunStore } from "../state/run-recorder";
@@ -239,8 +241,8 @@ export interface OpenAgentPrView {
   updatedAt: number;
 }
 
-/** One configured scheduled automation as served by `GET /api/automations`. */
-export interface DashboardAutomationView {
+/** One configured scheduled automation (plus agent override) as served by `GET /api/automations`. */
+export interface DashboardAutomationView extends AgentSelection {
   id: string;
   enabled: boolean;
   /** Cron expression or interval as configured (`0 9 * * 1`, `6h`). */
@@ -599,6 +601,7 @@ export class DashboardData {
         repo: status.repo,
         prompt: status.prompt,
         openPr: status.openPr === true,
+        ...pickAgentSelection(status),
         nextDueAt: status.nextDueAt,
         lastRun: lastRun ? { ...lastRun, taskDescription: undefined } : undefined,
       };

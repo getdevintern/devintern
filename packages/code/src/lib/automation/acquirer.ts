@@ -7,6 +7,7 @@ import { join } from "path";
 
 import type { Acquirer } from "../../worker";
 import type { AutomationConfig } from "./config";
+import type { AgentSelection } from "../agent/selection";
 import { automationTaskArgs, nextScheduleOccurrence } from "./config";
 import { AutomationStateStore } from "./state";
 import { workerTaskArgs } from "../acquirers/task-polling";
@@ -56,8 +57,8 @@ export interface SpawnedAutomationRun {
 /** Result of a dashboard "Run now" trigger for one automation. */
 export type ManualTriggerOutcome = { ok: true } | { ok: false; reason: string };
 
-/** One configured schedule as exposed to the dashboard. */
-export interface AutomationScheduleStatus {
+/** One configured schedule as exposed to the dashboard, with its agent override. */
+export interface AutomationScheduleStatus extends AgentSelection {
   id: string;
   enabled: boolean;
   cron?: string;
@@ -570,6 +571,7 @@ export class AutomationAcquirer implements Acquirer {
         repo: automation.repo,
         prompt: automation.prompt,
         openPr: automation.openPr === true,
+        ...pickAgentSelection(automation),
         nextDueAt: state?.nextDueAt,
       };
     });

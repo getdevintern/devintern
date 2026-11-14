@@ -210,6 +210,12 @@ export interface AutomationSchedule {
   prompt: string;
   /** Whether occurrences open a pull request (opt-in; default off). */
   openPr?: boolean;
+  /** Per-automation agent harness override; absent inherits the workspace agent. */
+  harness?: string;
+  /** Per-automation model override; absent keeps the harness default. */
+  model?: string;
+  /** Per-automation reasoning effort override; absent keeps the harness default. */
+  effort?: string;
   /** Next scheduled occurrence (epoch ms). */
   nextDueAt?: number;
   /** Most recent run of this automation (any origin). */
@@ -511,6 +517,12 @@ export interface WorkspaceAutomationView extends WorkspaceScheduleView {
   openPr: boolean;
   allowNoChanges: boolean;
   prompt: string;
+  /** Per-automation agent harness override; absent inherits the workspace agent. */
+  harness?: string;
+  /** Per-automation model override; absent keeps the harness default. */
+  model?: string;
+  /** Per-automation reasoning effort override; absent keeps the harness default. */
+  effort?: string;
 }
 
 export interface WorkspaceEstimationView extends WorkspaceScheduleView {

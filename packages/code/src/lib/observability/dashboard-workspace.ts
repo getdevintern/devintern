@@ -21,6 +21,7 @@
 import { existsSync, statSync } from "fs";
 import { isAbsolute, join } from "path";
 
+import { pickAgentSelection } from "../agent/selection";
 import type { CronOrIntervalSchedule } from "../automation/config";
 import { fingerprintConfigFile, readAppliedConfigRecord } from "../workspace/config-reload";
 import type { AppliedConfigRecord, ConfigFileFingerprint } from "../workspace/config-reload";
@@ -137,6 +138,12 @@ export interface WorkspaceAutomationView extends WorkspaceScheduleView {
   openPr: boolean;
   allowNoChanges: boolean;
   prompt: string;
+  /** Per-automation agent harness override; absent inherits the workspace agent. */
+  harness?: string;
+  /** Per-automation model override. */
+  model?: string;
+  /** Per-automation reasoning effort override. */
+  effort?: string;
 }
 
 export interface WorkspaceEstimationView extends WorkspaceScheduleView {
@@ -337,6 +344,7 @@ export function toWorkspaceConfigView(
       openPr: automation.openPr === true,
       allowNoChanges: automation.allowNoChanges === true,
       prompt: automation.prompt,
+      ...pickAgentSelection(automation),
     })),
     estimations: config.estimations.map((estimation) => ({
       id: estimation.id,

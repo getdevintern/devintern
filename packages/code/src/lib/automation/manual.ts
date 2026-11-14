@@ -28,6 +28,7 @@ import type {
 import { RUN_ORIGIN_ENV } from "../observability/analytics";
 import { workerTaskArgs } from "../acquirers/task-polling";
 import { SKIP_PROJECT_ENV_ENV } from "../config/config-dir";
+import { pickAgentSelection } from "../agent/selection";
 
 /** Test-only spawn override so manual-run tests never launch a real CLI. */
 export interface StandaloneAutomationOptions {
@@ -49,6 +50,7 @@ export function loadStandaloneAutomationActions(
         repo: automation.repo,
         prompt: automation.prompt,
         openPr: automation.openPr === true,
+        ...pickAgentSelection(automation),
       }));
     } catch {
       // A malformed automations.toml must not take the dashboard down; the

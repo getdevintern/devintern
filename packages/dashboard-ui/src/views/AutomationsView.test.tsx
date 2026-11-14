@@ -85,12 +85,13 @@ test("PR-creating automations show a quiet indicator, not a pill", () => {
   expect(off).not.toContain("open_pr = true");
 });
 
-test("a single repo renders one ungrouped body and states the repo once", () => {
+test("a single repo still renders its group header", () => {
   const same = render([automation({ id: "a" }), automation({ id: "b" })]);
   expect(same).not.toContain(">Repo<");
-  expect(same).not.toContain('scope="rowgroup"');
-  expect(same).not.toContain("<h2");
-  expect(same).toContain("All automations run in");
+  expect(same.split("<tbody").length - 1).toBe(1);
+  expect(same.split('scope="rowgroup"').length - 1).toBe(1);
+  expect(same.split("<h2").length - 1).toBe(1);
+  expect(same).toContain("2 automations");
 });
 
 test("all-general automations render without group chrome or a repo note", () => {
