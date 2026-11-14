@@ -32,6 +32,8 @@ import {
 } from "./lib/observability/dashboard-api";
 import { handleOverview } from "./lib/observability/dashboard-overview";
 import { handleCreateTask } from "./lib/observability/dashboard-tasks";
+import { DashboardReports } from "./lib/observability/dashboard-report";
+import type { DashboardReportDeps } from "./lib/observability/dashboard-report";
 import { handleWorkspace } from "./lib/observability/dashboard-workspace";
 import type {
   ApiResponse,
@@ -202,6 +204,8 @@ export interface DashboardServerOptions {
   tailscaleAutodetect?: boolean;
   /** Replacement for `tailscale serve status --json` (tests). */
   tailscaleProbe?: TailscaleStatusProbe;
+  /** Collaborator overrides for bug-report preview/submission (tests). */
+  reportDeps?: DashboardReportDeps;
 }
 
 /** Log trusted origins and the access warning they carry. */
@@ -258,6 +262,15 @@ async function createTaskFromRequest(data: DashboardData, request: Request): Pro
   return handleCreateTask(data, payload);
 }
 
+/** Parse a JSON request body; undefined when it is missing or malformed. */
+async function readJsonBody(request: Request): Promise<unknown> {
+  try {
+    return await request.json();
+  } catch {
+    return undefined;
+  }
+}
+
 /** Serve a file from the UI dir, confined to it; null on miss/traversal. */
 function serveStatic(uiDir: string, pathname: string): Response | null {
   const relative = pathname === "/" ? "index.html" : pathname.slice(1);
@@ -307,6 +320,7 @@ export function startDashboardServer(
     automationActions: options.automationActions,
     logDirs: options.logDirs,
   });
+  const reports = new DashboardReports(data, options.reportDeps);
   const uiDir = resolveUiDir();
 
   const runDetailPattern = /^\/api\/runs\/([^/]+)$/;
@@ -316,6 +330,7 @@ export function startDashboardServer(
   const runArtifactFilePattern = /^\/api\/runs\/([1-9][0-9]*)\/artifacts\/([a-f0-9-]{36})\/file$/;
   const runArtifactPattern = /^\/api\/runs\/([^/]+)\/artifacts\/([^/]+)$/;
   const runRetryPattern = /^\/api\/runs\/([^/]+)\/retry$/;
+  const runReportPreviewPattern = /^\/api\/runs\/([^/]+)\/report\/preview$/;
   const automationRunPattern = /^\/api\/automations\/([^/]+)\/run$/;
 
   const envOrigins = parseDashboardAllowedOriginsEnv(process.env.DASHBOARD_ALLOWED_ORIGINS);
@@ -353,6 +368,13 @@ export function startDashboardServer(
     }
     if (pathname === "/api/tasks") {
       return createTaskFromRequest(data, request);
+    }
+    const reportPreview = pathname.match(runReportPreviewPattern);
+    if (reportPreview) {
+      return reports.preview(reportPreview[1], await readJsonBody(request));
+    }
+    if (pathname === "/api/reports") {
+      return reports.submit(await readJsonBody(request));
     }
     return { status: 405, body: { error: "method not allowed" } };
   };

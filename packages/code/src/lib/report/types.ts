@@ -151,6 +151,10 @@ export interface BugReporterOptions {
   now?: () => Date;
   /** Submission timeout. Default 10 seconds. */
   timeoutMs?: number;
+  /** Run database for run lookup; defaults to `WEBHOOK_QUEUE_DB` or the nearest `queue.db`. */
+  runDbPath?: string;
+  /** Directories holding worker capture files; defaults to the workspace home. */
+  workerLogDirs?: string[];
 }
 
 export interface BugReporter {

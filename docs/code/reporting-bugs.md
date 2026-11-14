@@ -1,10 +1,10 @@
 ---
 title: "Reporting Bugs"
 sidebarLabel: "Bug Reports"
-description: "File a redacted DevIntern bug report from the CLI, attach a relevant run, and preview the evidence before sending."
+description: "File a redacted DevIntern bug report from the CLI or the dashboard, attach a relevant run, and preview the evidence before sending."
 section: "Automation Reference"
 order: 2
-dateModified: 2026-10-21
+dateModified: 2026-11-14
 tags: ["troubleshooting", "bug-report", "diagnostics", "privacy"]
 ---
 
@@ -46,6 +46,16 @@ devintern report --last --log /tmp/devintern-run.log
 ```
 
 Log attachment is bounded (64 KB per source) and credentials are masked.
+
+## Report from the dashboard
+
+The [worker dashboard](dashboard.md) can file the same report for a run without a terminal. Open the run and choose **Report a problem** (shown prominently for failed, escalated, and abandoned runs and as a secondary action for runs that completed with the wrong behavior).
+
+1. Enter a title and describe what you expected and what happened. Do not paste secrets, credentials, or customer data. Leave **Share identifiers** off unless the task key and repository slug help triage (it matches `--share-identifiers`).
+2. Choose **Preview report**. The dashboard collects the bundle exactly like `devintern report --run <id>` and shows what is attached, what is never sent, and the full redacted payload. Nothing has been sent yet.
+3. Choose **Send report**. The dashboard submits the payload you previewed. Anonymous reports need a contact email on this step, which is added as the report contact; signed-in users follow up through their account.
+
+The preview is held in the dashboard's memory for 15 minutes; after that, preview again. On success the dialog shows the report id. If the endpoint cannot be reached, the report is saved to `.devintern-code/reports/` like a CLI submission and the dialog shows the `devintern report --from <path>` command to retry later.
 
 ## Preview, save, and retry
 
