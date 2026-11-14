@@ -117,6 +117,19 @@ export class AutomationStateStore {
     return result.changes === 1;
   }
 
+  /**
+   * Skip a due occurrence without running it (no lease taken), advancing the
+   * cursor. Used when no agent harness can start a run right now.
+   */
+  skipDue(automationId: string, now: number, nextDueAt: number): boolean {
+    const result = this.db.run(
+      `UPDATE automation_schedules SET last_scheduled_at = next_due_at, next_due_at = ?
+       WHERE automation_id = ? AND next_due_at <= ?`,
+      [nextDueAt, automationId, now],
+    );
+    return result.changes === 1;
+  }
+
   /** Coalesce a due occurrence skipped because the previous run is still active. */
   skipOverlap(automationId: string, now: number, nextDueAt: number): boolean {
     const result = this.db.run(

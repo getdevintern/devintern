@@ -41,6 +41,8 @@ devintern webhook serve
 
 Set `AGENT_HARNESS=codex,grok` (comma-separated, priority first) in the workspace `.env` so the worker keeps going when one agent hits a usage limit. Failover applies to every worker job: tracker tasks, PR review addressing, `@mention` runs, conflict resolution, scheduled automations, estimations, dashboard retries, and relay-driven work — except automations, estimations, or conflict resolution that pin their own `harness` (see [Choosing the agent per schedule](#choosing-the-agent-per-schedule)). Details: [Failover across multiple harnesses](./configuration.md#failover-across-multiple-harnesses).
 
+When every harness in the chain is usage-limited, automation and estimation occurrences that come due are skipped (logged as `occurrence skipped: no agent harness is available until …`) and the schedule moves on to its next occurrence. They are not queued for catch-up. Dashboard **Run now** is rejected with the same reason. An entry that pins its own `harness` is skipped only while that harness is limited.
+
 ## Error-monitor auto-fixes
 
 `[[error_monitors]]` entries let the worker turn unresolved production errors

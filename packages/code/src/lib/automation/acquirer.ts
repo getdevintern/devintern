@@ -116,11 +116,35 @@ export interface AutomationAcquirerOptions {
   jobKind?: string;
   /** Acquirer name override (worker banner / analytics worker mode). */
   name?: string;
+  /**
+   * Epoch ms until which no agent harness can run this entry, or `null` when
+   * one is available. Defaults to the worker failover state: the whole chain
+   * for unpinned entries, the pinned harness's own window otherwise.
+   */
+  harnessBlockedUntil?: (automation: AutomationConfig) => number | null;
 }
 
 interface ActiveAutomationRun {
   run: SpawnedAutomationRun;
   lifecycle: Promise<void>;
+}
+
+/**
+ * Default harness gate: while every chain entry is usage-limited or cooling
+ * down, a spawned run would only fail within seconds and re-report the limit.
+ */
+export function defaultHarnessBlockedUntil(automation: AutomationConfig): number | null {
+  const failover = getWorkerFailover();
+  if (!failover) return null;
+  const windows = failover.windows();
+  if (automation.harness) {
+    const until = windows[automation.harness];
+    return until !== undefined && until > Date.now() ? until : null;
+  }
+  if (!failover.allExhausted()) return null;
+  const now = Date.now();
+  const until = Math.min(...Object.values(windows).filter((value) => value > now));
+  return Number.isFinite(until) ? until : now;
 }
 
 /** Calculate the first future occurrence after `afterMs` (cron uses host timezone). */
@@ -285,6 +309,17 @@ export class AutomationAcquirer implements Acquirer {
       }
       if (this.paused || state.nextDueAt > this.now()) continue;
 
+      const blockedUntil = this.harnessBlockedUntil(automation);
+      if (blockedUntil !== null) {
+        const skipNow = this.now();
+        if (this.store.skipDue(stateId, skipNow, nextAutomationDue(automation, skipNow))) {
+          console.warn(
+            `⏭️  [${kind}:${automation.id}] occurrence skipped: ${harnessBlockedReason(blockedUntil)}`,
+          );
+        }
+        continue;
+      }
+
       const overlapNow = this.now();
       if (state.leaseOwner && (state.leaseExpiresAt ?? 0) > overlapNow) {
         const skipNow = this.now();
@@ -428,6 +463,10 @@ export class AutomationAcquirer implements Acquirer {
     if (this.active.has(automationId)) {
       return { ok: false, reason: `automation "${automationId}" is already running` };
     }
+    const blockedUntil = this.harnessBlockedUntil(automation);
+    if (blockedUntil !== null) {
+      return { ok: false, reason: harnessBlockedReason(blockedUntil) };
+    }
 
     const stateId = this.stateId(automation);
     const state = this.store.get(stateId);
@@ -541,6 +580,10 @@ export class AutomationAcquirer implements Acquirer {
     return resolveAutomationRunArgs(automation, this.options);
   }
 
+  private harnessBlockedUntil(automation: AutomationConfig): number | null {
+    return (this.options.harnessBlockedUntil ?? defaultHarnessBlockedUntil)(automation);
+  }
+
   private jobKind(): string {
     return this.options.jobKind ?? "automation";
   }
@@ -571,6 +614,10 @@ export class AutomationAcquirer implements Acquirer {
       Math.min(MAX_TIMER_DELAY_MS, Math.max(0, wakeAt - now)),
     );
   }
+}
+
+function harnessBlockedReason(untilMs: number): string {
+  return `no agent harness is available until ${new Date(untilMs).toISOString()} (usage limit)`;
 }
 
 /**
