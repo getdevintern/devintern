@@ -55,6 +55,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # turbo --affected needs the merge base with the PR's base branch.
+          fetch-depth: 0
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -68,7 +71,12 @@ jobs:
       # Offline fakes only (local git remotes, fake trackers, stub agent); no
       # credentials. turbo builds packages/code/dist first (e2e#test depends on
       # code#build), so the built-CLI tests run instead of skipping.
+      #
+      # On pull requests the suite runs only when e2e or one of its workspace
+      # dependencies (packages/code and everything it uses) changed since the
+      # base branch; otherwise turbo selects no task and the job passes. Pushes
+      # to main always run the full suite.
       - name: Local e2e suite
-        run: bun run turbo run test --filter=@devintern/e2e
+        run: bun run turbo run test --filter=@devintern/e2e ${{ github.event_name == 'pull_request' && '--affected' || '' }}
         env:
           AGENT_CLI_PATH: bun
