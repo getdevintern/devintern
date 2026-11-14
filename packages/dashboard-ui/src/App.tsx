@@ -11,6 +11,7 @@ import {
   Workflow,
 } from "lucide-react";
 
+import { NewTaskDialog } from "@/components/NewTaskDialog";
 import { StatusStrip } from "@/components/StatusStrip";
 import { Button } from "@/components/ui/button";
 import { AgentPrsView } from "@/views/AgentPrsView";
@@ -21,9 +22,8 @@ import { RunsView } from "@/views/RunsView";
 import { AutomationDetailView } from "@/views/AutomationDetailView";
 import { StatsView } from "@/views/StatsView";
 import { OverviewView } from "@/views/OverviewView";
-import { NewTaskView } from "@/views/NewTaskView";
 import { WorkspaceView } from "@/views/WorkspaceView";
-import { NEW_TASK_HASH, parseHash, redirectHash, RUNS_HASH, runHash } from "@/lib/routes";
+import { parseHash, redirectHash, RUNS_HASH, runHash } from "@/lib/routes";
 import type { Route } from "@/lib/routes";
 import { cn } from "@/lib/utils";
 
@@ -47,7 +47,6 @@ const pageTitles: Record<Route["view"], string> = {
   stats: "Statistics",
   logs: "Worker logs",
   workspace: "Workspace",
-  "new-task": "New task",
 };
 
 /** Route for the current hash, first rewriting a retired hash in place (no history entry). */
@@ -65,6 +64,7 @@ const openRun = (id: number): void => {
 
 export function App() {
   const [route, setRoute] = useState<Route>(currentHash);
+  const [newTaskOpen, setNewTaskOpen] = useState(false);
 
   useEffect(() => {
     const onHashChange = () => setRoute(currentHash());
@@ -142,14 +142,11 @@ export function App() {
             )}
           </h1>
           <StatusStrip />
-          {route.view === "new-task" ? null : (
-            <Button asChild size="sm" className="dashboard-new-task">
-              <a href={NEW_TASK_HASH}>
-                <Plus aria-hidden="true" />
-                New task
-              </a>
-            </Button>
-          )}
+          <Button size="sm" className="dashboard-new-task" onClick={() => setNewTaskOpen(true)}>
+            <Plus aria-hidden="true" />
+            New task
+          </Button>
+          <NewTaskDialog open={newTaskOpen} onOpenChange={setNewTaskOpen} />
         </header>
 
         <main className="dashboard-content">
@@ -170,7 +167,6 @@ export function App() {
           {route.view === "stats" ? <StatsView /> : null}
           {route.view === "logs" ? <LogsView /> : null}
           {route.view === "workspace" ? <WorkspaceView /> : null}
-          {route.view === "new-task" ? <NewTaskView /> : null}
         </main>
       </div>
     </div>

@@ -13,6 +13,8 @@
 
 @theme inline {
   --color-ring: var(--ring);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
   --color-input: var(--input);
   --color-border: var(--border);
   --color-border-strong: var(--border-strong);
@@ -77,6 +79,8 @@
   --accent: #1e2842;
   --foreground: #dae2fd;
   --card-foreground: #dae2fd;
+  --popover: #131b2e;
+  --popover-foreground: #dae2fd;
   --muted-foreground: #b4bad2;
   --subtle-foreground: #8f97b6;
   --accent-foreground: #dae2fd;

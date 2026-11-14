@@ -8,11 +8,7 @@ export type Route =
   | { view: "prs" }
   | { view: "stats" }
   | { view: "logs" }
-  | { view: "workspace" }
-  | { view: "new-task" };
-
-/** Hash of the "New task" form (enqueue an ad-hoc task). */
-export const NEW_TASK_HASH = "#/tasks/new";
+  | { view: "workspace" };
 
 /** Hash of the runs list (the landing `#/` is the overview). */
 export const RUNS_HASH = "#/runs";
@@ -56,6 +52,5 @@ export function parseHash(hash: string): Route {
   if (hash === "#/prs") return { view: "prs" };
   if (hash === "#/logs") return { view: "logs" };
   if (hash === "#/workspace") return { view: "workspace" };
-  if (hash === NEW_TASK_HASH) return { view: "new-task" };
   return { view: "overview" };
 }

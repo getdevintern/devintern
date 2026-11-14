@@ -2,18 +2,21 @@ import { afterEach, expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { createTask, parseCreatedTask, TASKS_URL } from "@/lib/api";
-import type { CreatedTask } from "@/lib/api";
-import { NEW_TASK_HASH, parseHash, runHash } from "@/lib/routes";
 import {
   emptyTaskDraft,
+  isSubmitShortcut,
+  isTaskDraftDirty,
   MAX_TASK_BODY_CHARS,
   newIdempotencyKey,
+  NewTaskDialog,
   NewTaskForm,
   NewTaskResult,
   taskDraftError,
-} from "@/views/NewTaskView";
-import type { NewTaskFormProps, TaskDraft } from "@/views/NewTaskView";
+} from "@/components/NewTaskDialog";
+import type { NewTaskFormProps, TaskDraft } from "@/components/NewTaskDialog";
+import { createTask, parseCreatedTask, TASKS_URL } from "@/lib/api";
+import type { CreatedTask } from "@/lib/api";
+import { parseHash, runHash } from "@/lib/routes";
 
 const REPOS = ["backend", "web"];
 
@@ -24,10 +27,17 @@ function renderForm(overrides: Partial<NewTaskFormProps> = {}): string {
       draft: { repo: "web", title: "Fix the flake", body: "Details" },
       onDraftChange: () => {},
       onSubmit: () => {},
+      onCancel: () => {},
       submitting: false,
       error: null,
       ...overrides,
     }),
+  );
+}
+
+function renderResult(task: CreatedTask, runId?: number): string {
+  return renderToStaticMarkup(
+    createElement(NewTaskResult, { task, runId, onCreateAnother: () => {}, onNavigate: () => {} }),
   );
 }
 
@@ -44,8 +54,12 @@ afterEach(() => {
   globalThis.fetch = realFetch;
 });
 
-test("the new-task hash routes to the form", () => {
-  expect(parseHash(NEW_TASK_HASH)).toEqual({ view: "new-task" });
+test("New task is a dialog, not a route", () => {
+  expect(parseHash("#/tasks/new")).toEqual({ view: "overview" });
+  // Closed: nothing renders (the session mounts only while open).
+  expect(
+    renderToStaticMarkup(createElement(NewTaskDialog, { open: false, onOpenChange: () => {} })),
+  ).toBe("");
 });
 
 test("a single-repo workspace preselects its repo", () => {
@@ -65,23 +79,41 @@ test("draft validation requires a known repo, a title, and a body within the cap
   );
 });
 
-test("idempotency keys are unique per form instance", () => {
+test("a draft is dirty once it holds a title or description", () => {
+  expect(isTaskDraftDirty({ repo: "web", title: "", body: "" })).toBe(false);
+  expect(isTaskDraftDirty({ repo: "web", title: "  ", body: "\n" })).toBe(false);
+  expect(isTaskDraftDirty({ repo: "", title: "x", body: "" })).toBe(true);
+  expect(isTaskDraftDirty({ repo: "", title: "", body: "notes" })).toBe(true);
+});
+
+test("Cmd/Ctrl+Enter submits; plain Enter does not", () => {
+  expect(isSubmitShortcut({ key: "Enter", metaKey: true, ctrlKey: false })).toBe(true);
+  expect(isSubmitShortcut({ key: "Enter", metaKey: false, ctrlKey: true })).toBe(true);
+  expect(isSubmitShortcut({ key: "Enter", metaKey: false, ctrlKey: false })).toBe(false);
+  expect(isSubmitShortcut({ key: "a", metaKey: true, ctrlKey: false })).toBe(false);
+});
+
+test("idempotency keys are unique per dialog session", () => {
   const a = newIdempotencyKey();
   const b = newIdempotencyKey();
   expect(a).toStartWith("dashboard-");
   expect(a).not.toBe(b);
 });
 
-test("the form shows the quiet-hours and PR notice, fields, and a character counter", () => {
+test("the form uses the shared field components with the notice and a character counter", () => {
   const html = renderForm();
   expect(html).toContain("bypass quiet hours");
   expect(html).toContain("[defaults].worker_task_args");
   expect(html).toContain("--create-pr");
+  expect(html).toContain('data-slot="field"');
+  expect(html).toContain('data-slot="input"');
+  expect(html).toContain('data-slot="textarea"');
   expect(html).toContain('for="new-task-repo"');
   expect(html).toContain('id="new-task-title"');
   expect(html).toContain('id="new-task-body"');
   expect(html).toContain(`7 / ${MAX_TASK_BODY_CHARS.toLocaleString("en-US")}`);
   expect(html).toContain("Enqueue task");
+  expect(html).toContain("Cancel");
   expect(html).not.toMatch(/<button[^>]*type="submit"[^>]*disabled/);
 });
 
@@ -97,34 +129,35 @@ test("an incomplete or oversized draft disables submit and flags the counter", (
   expect(over).toContain("text-danger");
 });
 
-test("submitting and server errors are visible", () => {
-  expect(renderForm({ submitting: true })).toContain("Enqueuing…");
+test("submitting disables the inputs and Cancel", () => {
+  const html = renderForm({ submitting: true });
+  expect(html).toContain("Enqueuing…");
+  expect(html).toMatch(/<input[^>]*id="new-task-title"[^>]*disabled/);
+  expect(html).toMatch(/<textarea[^>]*disabled/);
+  expect(html).toMatch(/<button[^>]*type="button"[^>]*disabled[^>]*>Cancel/);
+});
+
+test("server errors are visible", () => {
   expect(renderForm({ error: 'unknown repo "mobile"' })).toContain(
     "Could not enqueue the task: unknown repo &quot;mobile&quot;",
   );
 });
 
-test("the result links to the run once it exists, else to the runs list", () => {
-  const waiting = renderToStaticMarkup(
-    createElement(NewTaskResult, { task: TASK, onCreateAnother: () => {} }),
-  );
+test("the result links to the run once it exists, and always to the runs list", () => {
+  const waiting = renderResult(TASK);
   expect(waiting).toContain("Enqueued <code>local-fix-the-flake</code>");
   expect(waiting).toContain('href="#/runs"');
+  expect(waiting).toContain("Create another task");
+  expect(waiting).not.toContain("Open run");
 
-  const started = renderToStaticMarkup(
-    createElement(NewTaskResult, { task: TASK, runId: 42, onCreateAnother: () => {} }),
-  );
+  const started = renderResult(TASK, 42);
   expect(started).toContain(`href="${runHash(42)}"`);
   expect(started).toContain("Open run #42");
+  expect(started).toContain('href="#/runs"');
 });
 
 test("a deduplicated submission says so", () => {
-  const html = renderToStaticMarkup(
-    createElement(NewTaskResult, {
-      task: { ...TASK, deduplicated: true, status: "running" },
-      onCreateAnother: () => {},
-    }),
-  );
+  const html = renderResult({ ...TASK, deduplicated: true, status: "running" });
   expect(html).toContain("Already queued");
   expect(html).toContain("no duplicate");
 });

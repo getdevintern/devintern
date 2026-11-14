@@ -84,11 +84,13 @@ This is useful for testing a new automation prompt or running routine work early
 
 ## Delegate a task
 
-Choose **New task** in the header to hand the worker a one-off task, the dashboard equivalent of [`devintern worker add`](delegation.md). Pick a registered `[[repos]]` repository (preselected when the workspace has only one), give the task a title, and describe the work in Markdown. The description is limited to 20,000 characters, and a counter shows how much is left. The worker sees only this text, so keep the brief self-contained; see [Write a self-contained brief](delegation.md#write-a-self-contained-brief).
+Choose **New task** in the header to open a dialog that hands the worker a one-off task, the dashboard equivalent of [`devintern worker add`](delegation.md). Pick a registered `[[repos]]` repository (preselected when the workspace has only one), give the task a title, and describe the work in Markdown. The description is limited to 20,000 characters, and a counter shows how much is left. The worker sees only this text, so keep the brief self-contained; see [Write a self-contained brief](delegation.md#write-a-self-contained-brief). Press <kbd>Ctrl</kbd>+<kbd>Enter</kbd> (<kbd>⌘</kbd>+<kbd>Enter</kbd> on macOS) in the description to enqueue; <kbd>Enter</kbd> in the title does not submit.
 
 The task is queued in the workspace and the running worker picks it up on its next poll. The dashboard never starts a worker for you: with no worker running, the task waits in the queue until one starts. Like every ad-hoc task, it bypasses [working windows](worker.md#working-windows-quiet-hours) and inherits `[defaults].worker_task_args` (default `--create-pr`), so the worker can start right away and open a pull request.
 
-After you submit, the page shows the task key (`local-<slug>`) and links to its run as soon as the worker records one. Each form submits with its own idempotency key, so a double-click or a retry after a network error returns the task that is already queued (shown as **Already queued**) instead of creating a duplicate. **Create another task** starts a fresh form.
+After you submit, the dialog shows the task key (`local-<slug>`) and status, links to **Runs**, and adds **Open run** as soon as the worker records the run. Each time you open the dialog it uses its own idempotency key, so a double-click or a retry after a network error returns the task that is already queued (shown as **Already queued**) instead of creating a duplicate. **Create another task**, or reopening the dialog, starts a fresh draft with a new key.
+
+The dialog protects unsent drafts: once a title or description is typed, clicking outside does nothing, and <kbd>Esc</kbd>, **Cancel**, or closing asks before discarding it. While a task is being submitted, the fields are locked and the dialog cannot be closed.
 
 **New task** needs a workspace with at least one registered repository. A dashboard without one, for example a standalone `devintern dashboard` on a legacy single-project setup, explains that and points at `devintern worker add-repo`.
 
