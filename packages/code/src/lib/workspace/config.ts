@@ -16,6 +16,8 @@ import type { EstimationConfig } from "../automation/estimation-config";
 import { parseToml } from "./toml";
 import { parseAgentSelection } from "../agent/selection";
 import type { AgentSelection, HarnessPinnedEntry } from "../agent/selection";
+import { parseDashboardAllowedOriginList } from "../observability/dashboard-origins";
+import type { DashboardAllowedOrigin } from "../observability/dashboard-origins";
 
 /** When automatic conflict resolution on the agent's PRs runs. */
 export type ConflictResolutionMode = "auto" | "scheduled" | "disabled";
@@ -188,9 +190,18 @@ export interface WorkerSettings {
   autoUpdate: boolean;
 }
 
+/** Dashboard access settings from the `[dashboard]` table. */
+export interface DashboardSettings {
+  /** Explicitly trusted non-loopback origins (`allowed_origins`). */
+  allowedOrigins: DashboardAllowedOrigin[];
+  /** Trust names `tailscale serve` proxies to the dashboard (`tailscale_autodetect`, default true). */
+  tailscaleAutodetect: boolean;
+}
+
 /** Parsed and validated `workspace.toml`. */
 export interface WorkspaceConfig {
   workspace: WorkspaceSettings;
+  dashboard: DashboardSettings;
   worker: WorkerSettings;
   defaults: WorkspaceDefaults;
   /** Team tracker sources; empty means the single `[defaults]` fleet query. */
@@ -420,12 +431,15 @@ export function parseWorkspaceConfig(
 
   const estimations = parseEstimationsSection(document, tracker, teams, errors);
 
+  const dashboard = parseDashboardSection(document, errors);
+
   if (errors.length > 0) {
     throw new Error(`Invalid ${sourceLabel}:\n- ${errors.join("\n- ")}`);
   }
 
   return {
     workspace,
+    dashboard,
     worker: { schedule: schedule.config, autoUpdate },
     defaults,
     teams,
@@ -434,6 +448,31 @@ export function parseWorkspaceConfig(
     routing,
     automations: automationResult.automations,
     estimations,
+  };
+}
+
+const DASHBOARD_KEYS = new Set(["allowed_origins", "tailscale_autodetect"]);
+
+/** Parse `[dashboard]` access settings. */
+function parseDashboardSection(
+  document: Record<string, unknown>,
+  errors: string[],
+): DashboardSettings {
+  const table = asTable(document.dashboard, "[dashboard]", errors);
+  for (const key of Object.keys(table)) {
+    if (!DASHBOARD_KEYS.has(key)) {
+      errors.push(
+        `[dashboard].${key} is not supported; known keys: ${[...DASHBOARD_KEYS].join(", ")}.`,
+      );
+    }
+  }
+  const entries = readStringList(table, "allowed_origins", "[dashboard]", errors);
+  const parsed = parseDashboardAllowedOriginList(entries, "[dashboard].allowed_origins");
+  errors.push(...parsed.errors);
+  return {
+    allowedOrigins: parsed.origins,
+    tailscaleAutodetect:
+      readOptionalBoolean(table, "tailscale_autodetect", "[dashboard]", errors) ?? true,
   };
 }
 

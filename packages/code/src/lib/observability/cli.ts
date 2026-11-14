@@ -19,9 +19,20 @@ export async function runDashboardCommand(args: string[]): Promise<void> {
   let port: number | undefined;
   let host: string | undefined;
   let workspacePath: string | undefined;
+  const allowOriginArgs: string[] = [];
+  let tailscaleAutodetect = true;
 
   for (let i = 0; i < args.length; i++) {
-    if (args[i] === "--port" && args[i + 1]) {
+    if (args[i] === "--allow-origin") {
+      if (!args[i + 1] || args[i + 1].startsWith("-")) {
+        console.error("❌ --allow-origin requires an origin, e.g. https://box.tailnet.ts.net.");
+        process.exit(1);
+      }
+      allowOriginArgs.push(args[i + 1]);
+      i++;
+    } else if (args[i] === "--no-tailscale-autodetect") {
+      tailscaleAutodetect = false;
+    } else if (args[i] === "--port" && args[i + 1]) {
       port = parseInt(args[i + 1], 10);
       i++;
     } else if (args[i] === "--host" && args[i + 1]) {
@@ -49,10 +60,25 @@ export async function runDashboardCommand(args: string[]): Promise<void> {
       console.log("                      transcripts from this workspace.toml (or its");
       console.log("                      workspace directory).");
       console.log("                      (default: ~/.devintern/, or DEVINTERN_WORKSPACE_DIR)");
+      console.log("  --allow-origin <origin>  Also trust this non-loopback origin, e.g. a");
+      console.log("                      reverse proxy (https://dash.example.internal).");
+      console.log("                      Repeatable; also DASHBOARD_ALLOWED_ORIGINS.");
+      console.log("  --no-tailscale-autodetect  Do not trust names `tailscale serve`");
+      console.log("                      proxies to this dashboard (also");
+      console.log("                      DASHBOARD_TAILSCALE_AUTODETECT=0).");
       console.log("  -h, --help     Display this help message");
       process.exit(0);
     }
   }
+
+  const { parseDashboardAllowedOriginList, mergeDashboardAllowedOrigins } =
+    await import("./dashboard-origins");
+  const flagOrigins = parseDashboardAllowedOriginList(allowOriginArgs, "--allow-origin");
+  if (flagOrigins.errors.length > 0) {
+    for (const error of flagOrigins.errors) console.error(`❌ ${error}`);
+    process.exit(1);
+  }
+  let allowedOrigins = flagOrigins.origins;
 
   let workspaceDir: string | undefined;
   if (workspacePath) {
@@ -64,6 +90,18 @@ export async function runDashboardCommand(args: string[]): Promise<void> {
       process.exit(1);
     }
     workspaceDir = dirname(configPath);
+    // The workspace's [dashboard] access settings apply to the standalone
+    // dashboard too, so it is reachable the same way as the worker's.
+    try {
+      const { loadWorkspaceConfig } = await import("../workspace/config");
+      const { dashboard } = loadWorkspaceConfig(configPath);
+      allowedOrigins = mergeDashboardAllowedOrigins(allowedOrigins, dashboard.allowedOrigins);
+      tailscaleAutodetect &&= dashboard.tailscaleAutodetect;
+    } catch (error) {
+      console.warn(
+        `⚠️  Ignoring [dashboard] settings: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   // Same entitlement as the worker: the dashboard is part of the automation tier.
@@ -93,13 +131,22 @@ export async function runDashboardCommand(args: string[]): Promise<void> {
         workspaceDir,
       )
     : undefined;
-  const server = startDashboardServer({
-    port,
-    host,
-    queueDbPath,
-    workspaceDir,
-    automationActions,
-  });
+  let server: ReturnType<typeof startDashboardServer>;
+  try {
+    server = startDashboardServer({
+      port,
+      host,
+      queueDbPath,
+      workspaceDir,
+      automationActions,
+      allowedOrigins,
+      tailscaleAutodetect,
+    });
+  } catch (error) {
+    // Non-loopback --host, malformed DASHBOARD_ALLOWED_ORIGINS, busy port.
+    console.error(`❌ ${error instanceof Error ? error.message : String(error)}`);
+    process.exit(1);
+  }
 
   const shutdown = (): void => {
     console.log("\n👋 Dashboard stopped");

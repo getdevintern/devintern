@@ -4,7 +4,7 @@ sidebarLabel: "Multiple Repositories"
 description: "Use when one worker should serve several repositories or tracker teams: workspace.toml, routing rules, and isolated per-task worktrees."
 section: "Automation"
 order: 3
-dateModified: 2026-11-12
+dateModified: 2026-11-14
 ---
 
 # Workspaces (Multi-Repo Fleet)
@@ -43,6 +43,12 @@ dashboard = true
 # isolation = "best_effort_host"
 # max_concurrency = 4
 # max_concurrency_per_repo = 1
+
+# Optional non-loopback dashboard origins (reverse proxy); `tailscale serve`
+# is detected automatically. See dashboard.md#allowed-origins.
+# [dashboard]
+# allowed_origins = ["https://dash.example.internal"]
+# tailscale_autodetect = true
 
 [defaults]
 tracker = "jira"
