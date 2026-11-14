@@ -80,3 +80,7 @@ jobs:
         run: bun run turbo run test --filter=@devintern/e2e ${{ github.event_name == 'pull_request' && '--affected' || '' }}
         env:
           AGENT_CLI_PATH: bun
+          # The checkout has origin/<base> but no local <base> branch, which is
+          # what turbo looks up by default; without this it assumes every file
+          # changed and never skips.
+          TURBO_SCM_BASE: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || '' }}
