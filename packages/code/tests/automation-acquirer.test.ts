@@ -100,6 +100,92 @@ describe("AutomationAcquirer", () => {
     expect(nextAutomationDue(cron, after)).toBeGreaterThan(after);
   });
 
+  describe("harness usage-limit gate", () => {
+    const hourly = (extra: Partial<AutomationConfig> = {}): AutomationConfig => ({
+      id: "hourly",
+      enabled: true,
+      prompt: "p",
+      interval: "1h",
+      intervalMs: 3_600_000,
+      ...extra,
+    });
+
+    function build(blockedUntil: number | null, now: { value: number }) {
+      const dbPath = join(tmpdir(), `acquirer-gate-${Date.now()}-${Math.random()}.db`);
+      dbPaths.push(dbPath);
+      let spawned = 0;
+      let resolved = 0;
+      const acquirer = new AutomationAcquirer({
+        automations: [hourly()],
+        dbPath,
+        now: () => now.value,
+        setTimer: () => 1 as unknown as ReturnType<typeof setTimeout>,
+        clearTimer: () => {},
+        harnessBlockedUntil: () => blockedUntil,
+        resolveContext: async () => {
+          resolved++;
+          return { cwd: tmpdir(), env: {}, release: () => {} };
+        },
+        spawnRun: () => {
+          spawned++;
+          return { completion: Promise.resolve(true), terminate: () => {} };
+        },
+        spawnManualRun: () => {
+          spawned++;
+          return { completion: Promise.resolve(true), terminate: () => {} };
+        },
+      });
+      return { acquirer, dbPath, counts: () => ({ spawned, resolved }) };
+    }
+
+    test("skips due occurrences and advances the cursor while the chain is exhausted", async () => {
+      const now = { value: 0 };
+      const { acquirer, dbPath, counts } = build(10 * 3_600_000, now);
+      await acquirer.start();
+      now.value = 3_600_000;
+      await acquirer.tick();
+      expect(counts()).toEqual({ spawned: 0, resolved: 0 });
+      const store = new AutomationStateStore(dbPath);
+      expect(store.get("hourly")?.nextDueAt).toBe(2 * 3_600_000);
+      expect(store.get("hourly")?.leaseOwner).toBeUndefined();
+      store.close();
+      await acquirer.stop();
+    });
+
+    test("rejects manual runs while the chain is exhausted", async () => {
+      const now = { value: 0 };
+      const { acquirer, counts } = build(10 * 3_600_000, now);
+      await acquirer.start();
+      const outcome = await acquirer.triggerManual("hourly");
+      expect(outcome.ok).toBe(false);
+      expect(!outcome.ok && outcome.reason).toContain("no agent harness is available");
+      expect(counts().spawned).toBe(0);
+      await acquirer.stop();
+    });
+
+    test("runs normally when a harness is available", async () => {
+      const now = { value: 0 };
+      const { acquirer, counts } = build(null, now);
+      await acquirer.start();
+      now.value = 3_600_000;
+      await acquirer.tick();
+      expect(counts()).toEqual({ spawned: 1, resolved: 1 });
+      await acquirer.stop();
+    });
+
+    test("default gate reads the worker failover chain and pinned-harness windows", async () => {
+      const { defaultHarnessBlockedUntil } = await import("../src/lib/automation/acquirer");
+      await startWorkerFailover({ raw: "codex", checkInstalled: false, log: () => {} });
+      expect(defaultHarnessBlockedUntil(hourly())).toBeNull();
+      const { getWorkerFailover } = await import("../src/lib/worker/failover");
+      const until = Date.now() + 3_600_000;
+      getWorkerFailover()?.reportFromHint({ untilMs: until });
+      expect(defaultHarnessBlockedUntil(hourly())).toBe(until);
+      expect(defaultHarnessBlockedUntil(hourly({ harness: "codex" }))).toBe(until);
+      expect(defaultHarnessBlockedUntil(hourly({ harness: "grok" }))).toBeNull();
+    });
+  });
+
   test.each([
     {
       label: "interval",
