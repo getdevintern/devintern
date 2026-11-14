@@ -47,6 +47,87 @@ export function isLoopbackDashboardHost(host: string): boolean {
   return LOOPBACK_DASHBOARD_HOSTS.has(normalized);
 }
 
+/** Why {@link checkDashboardRequest} refused a request. */
+export interface DashboardRequestRejection {
+  status: 403 | 415;
+  error: string;
+}
+
+/** Whether a `host[:port]` authority names a loopback host on `boundPort`. */
+function isOwnLoopbackAuthority(authority: string, boundPort: number): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(`http://${authority}`);
+  } catch {
+    return false;
+  }
+  if (parsed.username || parsed.password || parsed.pathname !== "/" || parsed.search) {
+    return false;
+  }
+  const port = parsed.port === "" ? 80 : Number(parsed.port);
+  return isLoopbackDashboardHost(parsed.hostname) && port === boundPort;
+}
+
+/** Whether an `Origin` header value is the dashboard's own http loopback origin. */
+function isOwnDashboardOrigin(origin: string, boundPort: number): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(origin);
+  } catch {
+    return false;
+  }
+  return (
+    parsed.protocol === "http:" &&
+    parsed.origin === origin &&
+    isOwnLoopbackAuthority(parsed.host, boundPort)
+  );
+}
+
+/**
+ * Central CSRF / DNS-rebinding guard for every `/api` request.
+ *
+ * - Every request: `Host` must be a loopback name (`127.0.0.1`, `localhost`,
+ *   `[::1]`) with the server's bound port, so a page served from a rebound
+ *   attacker hostname cannot read or write the API.
+ * - Non-GET/HEAD requests: `Origin` must be the dashboard's own http loopback
+ *   origin on the bound port (a missing `Origin` passes only with
+ *   `Sec-Fetch-Site: same-origin`), and `Content-Type` must be
+ *   `application/json`, which a cross-origin page cannot send without a CORS
+ *   preflight the server never approves.
+ *
+ * @param request - Incoming request
+ * @param boundPort - Port the server actually listens on (`server.port`)
+ * @returns null when the request may proceed, else the rejection to send
+ */
+export function checkDashboardRequest(
+  request: Request,
+  boundPort: number,
+): DashboardRequestRejection | null {
+  const host = request.headers.get("host");
+  if (!host || !isOwnLoopbackAuthority(host, boundPort)) {
+    return {
+      status: 403,
+      error: `forbidden host; open the dashboard at http://127.0.0.1:${boundPort} or http://localhost:${boundPort}`,
+    };
+  }
+  if (request.method === "GET" || request.method === "HEAD") {
+    return null;
+  }
+  const origin = request.headers.get("origin");
+  if (origin === null) {
+    if (request.headers.get("sec-fetch-site") !== "same-origin") {
+      return { status: 403, error: "forbidden: missing Origin header" };
+    }
+  } else if (!isOwnDashboardOrigin(origin, boundPort)) {
+    return { status: 403, error: "forbidden: cross-origin request" };
+  }
+  const contentType = request.headers.get("content-type") ?? "";
+  if (!contentType.toLowerCase().startsWith("application/json")) {
+    return { status: 415, error: "unsupported media type: expected application/json" };
+  }
+  return null;
+}
+
 export interface DashboardServerOptions {
   port?: number;
   host?: string;
@@ -172,11 +253,16 @@ export function startDashboardServer(
   const server = Bun.serve({
     port,
     hostname: host,
-    async fetch(request: Request): Promise<Response> {
+    async fetch(request, activeServer): Promise<Response> {
       const url = new URL(request.url);
       const { pathname } = url;
 
       if (pathname.startsWith("/api")) {
+        // Central CSRF / DNS-rebinding guard; must stay ahead of every route.
+        const rejection = checkDashboardRequest(request, activeServer.port ?? port);
+        if (rejection) {
+          return json({ status: rejection.status, body: { error: rejection.error } });
+        }
         const retry = request.method === "POST" ? pathname.match(runRetryPattern) : null;
         if (retry) {
           return json(await handleRetryRun(data, retry[1], options.retryDeps));

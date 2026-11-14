@@ -327,7 +327,7 @@ describe("dashboard server automation routes", () => {
 
       const run = await fetch(`${base}/api/automations/dependency-health/run`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", Origin: base },
         body: "{}",
       });
       expect(run.status).toBe(202);
@@ -336,7 +336,10 @@ describe("dashboard server automation routes", () => {
       expect(runBody.automationId).toBe("dependency-health");
       expect(triggers).toEqual(["dependency-health"]);
 
-      const missing = await fetch(`${base}/api/automations/nope/run`, { method: "POST" });
+      const missing = await fetch(`${base}/api/automations/nope/run`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Origin: base },
+      });
       expect(missing.status).toBe(404);
 
       const wrongMethod = await fetch(`${base}/api/automations/dependency-health/run`);
@@ -357,6 +360,7 @@ describe("dashboard server automation routes", () => {
       const base = `http://127.0.0.1:${server.port}`;
       const response = await fetch(`${base}/api/automations/dependency-health/run`, {
         method: "POST",
+        headers: { "Content-Type": "application/json", Origin: base },
       });
       expect(response.status).toBe(202);
     } finally {

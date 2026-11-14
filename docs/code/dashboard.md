@@ -4,7 +4,7 @@ sidebarLabel: "Dashboard"
 description: "Use when checking what the worker is doing, reading agent transcripts, diagnosing failed runs, or retrying work from the local dashboard."
 section: "Automation"
 order: 4
-dateModified: 2026-11-13
+dateModified: 2026-11-14
 ---
 
 # Worker Dashboard
@@ -103,6 +103,13 @@ With `--workspace`, **Automations** lists that workspace's `[[automations]]` wit
 
 The dashboard and its data stay on the worker machine. It listens only on a loopback address, so it is not exposed to your network or the public internet. There is no setting that binds it to another address: a non-loopback bind fails before the server starts, because the dashboard has no built-in authentication and its write endpoints retry runs and trigger automations.
 
+The listener also rejects requests that do not look like they come from the dashboard page itself, so a website open in your browser cannot use it behind your back:
+
+- Every `/api` request must be addressed to `127.0.0.1`, `localhost`, or `[::1]` at the dashboard's own port. A request for any other host name gets `403`, which blocks DNS-rebinding attacks that point a hostile domain at your loopback address.
+- Requests that change something (retry, run now, and any other non-GET action) must come from the dashboard's own origin (`http://<loopback host>:<port>`) and send `Content-Type: application/json`. Cross-origin requests get `403`; other content types get `415`.
+
+Open the dashboard at `http://localhost:<port>` or `http://127.0.0.1:<port>`. A tunnel or proxy that forwards a different host name or port is rejected unless it rewrites `Host` and `Origin` to the loopback address, as the options below do.
+
 Worker run history lives in the worker's workspace, alongside its other local state. The embedded dashboard remains available when an expired Worker Pilot pauses acquisition. Starting a standalone dashboard requires an active Worker Pilot or automation license.
 
 To disable the dashboard or change its port, edit the workspace settings:
@@ -115,7 +122,7 @@ dashboard = false
 
 ## Access the dashboard from another device
 
-Watching a long run from your laptop or phone does not require opening the dashboard port. Put an authenticating boundary in front of the loopback listener instead — your SSH client, your Tailscale tailnet, or a reverse proxy with its own login. All three options below leave the dashboard bound to `127.0.0.1`, and they work the same for the worker-embedded dashboard and for `devintern dashboard`.
+Watching a long run from your laptop or phone does not require opening the dashboard port. Put an authenticating boundary in front of the loopback listener instead — your SSH client, an SSH tunnel over your Tailscale tailnet, or a reverse proxy with its own login. All three options below leave the dashboard bound to `127.0.0.1`, and they work the same for the worker-embedded dashboard and for `devintern dashboard`.
 
 **Treat the dashboard as sensitive.** Run transcripts, logs, and artifacts can contain credentials or customer data, and `POST /api/runs/:id/retry` and `POST /api/automations/:id/run` act with your repository credentials. That is why the recipes below add a login rather than just moving the bind address.
 
@@ -129,19 +136,19 @@ ssh -N -L 4400:127.0.0.1:4400 you@worker-host
 
 Open [http://localhost:4400](http://localhost:4400) on your own machine and the traffic is forwarded over the SSH connection. Add `-f` to background the tunnel, or configure a `LocalForward 4400 127.0.0.1:4400` entry in `~/.ssh/config` to make it permanent. Mobile SSH clients such as Termius and Blink support local port forwarding too.
 
-If port 4400 is busy locally, forward a different local port: `-L 8440:127.0.0.1:4400` and open `http://localhost:8440`.
+Keep the local port equal to the dashboard port. The dashboard only accepts requests addressed to its own port, so `-L 8440:127.0.0.1:4400` opened as `http://localhost:8440` is rejected. If port 4400 is busy locally, start the dashboard on a free port on both ends instead (`dashboard_port` in `workspace.toml`, or `devintern dashboard --port 8440`) and forward `-L 8440:127.0.0.1:8440`.
 
-### Option 2: Tailscale Serve
+### Option 2: SSH over Tailscale
 
-Best for phone and multi-device access. The dashboard becomes a private HTTPS origin on your tailnet, and no other device on the network can reach it.
+Best for phone and multi-device access without opening a port. Use Option 1 across your tailnet: Tailscale provides the private network path and device identity, and the SSH tunnel presents the dashboard as `localhost:4400` on your device.
 
 ```bash
-tailscale serve --bg 4400
+ssh -N -L 4400:127.0.0.1:4400 you@<machine>.<tailnet>.ts.net
 ```
 
-Tailscale terminates TLS and forwards to `http://127.0.0.1:4400`, so open the `https://<machine>.<tailnet>.ts.net/` URL the command prints. Only devices in your tailnet can connect, and Tailscale's device identity is the access boundary.
+Mobile SSH clients with port forwarding (Termius, Blink) work the same way over the tailnet.
 
-Do not use `tailscale funnel` for the dashboard. Funnel publishes the port on the public internet with no login prompt in front of it.
+`tailscale serve` is not supported: it forwards the `*.ts.net` host name, which the dashboard rejects as a possible DNS-rebinding request. Do not use `tailscale funnel` either. Funnel publishes the port on the public internet with no login prompt in front of it.
 
 ### Option 3: Reverse proxy with its own login
 
@@ -152,11 +159,14 @@ http://192.168.1.50:8088 {
 	basic_auth {
 		you $2a$14$REPLACE_WITH_OUTPUT_OF_CADDY_HASH_PASSWORD
 	}
-	reverse_proxy 127.0.0.1:4400
+	reverse_proxy 127.0.0.1:4400 {
+		header_up Host 127.0.0.1:4400
+		header_up Origin http://127.0.0.1:4400
+	}
 }
 ```
 
-Generate the hash with `caddy hash-password`, then reload Caddy. Anything the proxy authenticates is forwarded to loopback, so the dashboard itself still refuses to listen on the LAN address.
+Generate the hash with `caddy hash-password`, then reload Caddy. The `header_up` lines are required: the dashboard rejects requests whose `Host` or `Origin` is not its own loopback address, so the proxy must present every authenticated request as coming from `127.0.0.1:4400`. Write actions still require `Content-Type: application/json`, which the dashboard page sends. Anything the proxy authenticates is forwarded to loopback, so the dashboard itself still refuses to listen on the LAN address.
 
 Plain HTTP means the password and the dashboard data cross your network unencrypted. Do this only on a trusted internal network, and prefer Options 1 and 2 elsewhere. Add `tls internal` and use an `https://` site address if you want Caddy-managed certificates for a private hostname.
 

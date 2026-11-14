@@ -43,6 +43,14 @@ function baseUrlFor(host: string, port: number): string {
   return `http://${normalized.includes(":") ? `[${normalized}]` : normalized}:${port}`;
 }
 
+/**
+ * Headers the dashboard's CSRF guard requires on a write (non-GET) request:
+ * its own loopback origin and a JSON content type, as the dashboard UI sends.
+ */
+export function dashboardWriteHeaders(baseUrl: string): Record<string, string> {
+  return { "Content-Type": "application/json", Origin: new URL(baseUrl).origin };
+}
+
 /** Collect a child stream into memory without blocking the spawned process. */
 async function capture(stream: ReadableStream<Uint8Array>, chunks: string[]): Promise<void> {
   const reader = stream.getReader();
