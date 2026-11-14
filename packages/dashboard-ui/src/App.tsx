@@ -5,12 +5,15 @@ import {
   GitPullRequest,
   LayoutDashboard,
   ListTodo,
+  Plus,
   Settings2,
   ScrollText,
   Workflow,
 } from "lucide-react";
 
+import { NewTaskDialog } from "@/components/NewTaskDialog";
 import { StatusStrip } from "@/components/StatusStrip";
+import { Button } from "@/components/ui/button";
 import { AgentPrsView } from "@/views/AgentPrsView";
 import { AutomationsView } from "@/views/AutomationsView";
 import { LogsView } from "@/views/LogsView";
@@ -61,6 +64,7 @@ const openRun = (id: number): void => {
 
 export function App() {
   const [route, setRoute] = useState<Route>(currentHash);
+  const [newTaskOpen, setNewTaskOpen] = useState(false);
 
   useEffect(() => {
     const onHashChange = () => setRoute(currentHash());
@@ -138,6 +142,11 @@ export function App() {
             )}
           </h1>
           <StatusStrip />
+          <Button size="sm" className="dashboard-new-task" onClick={() => setNewTaskOpen(true)}>
+            <Plus aria-hidden="true" />
+            New task
+          </Button>
+          <NewTaskDialog open={newTaskOpen} onOpenChange={setNewTaskOpen} />
         </header>
 
         <main className="dashboard-content">

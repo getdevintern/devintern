@@ -4,13 +4,15 @@ sidebarLabel: "Delegate Tasks"
 description: "Use when a coding agent or script should hand agreed implementation work to a running DevIntern worker with `devintern worker add`, without creating a tracker ticket."
 section: "Automation"
 order: 1.5
-dateModified: 2026-11-12
+dateModified: 2026-11-14
 tags: ["worker", "delegation", "worker-add", "agents", "automation"]
 ---
 
 # Delegate Tasks to the Worker
 
 Delegation hands a piece of agreed implementation work to a DevIntern worker that is already running on your machine. `devintern worker add` enqueues a one-off task against one registered workspace repository. The worker picks it up on its next poll and runs it through the full pipeline (checkout in a separate worktree, agent, PR, retries), just like a tracker ticket. The calling agent does not need to stay in the loop unless it chooses to wait.
+
+To delegate by hand without a terminal, use **New task** in the [dashboard](dashboard.md#delegate-a-task). It takes the same repository, title, and Markdown description, applies the same validation and idempotency rules, and returns the same task key and status.
 
 Coding agents can install the [devintern-delegate skill](agent-skills.md), which follows the steps on this page: repository selection, self-contained briefs, idempotent submission, and bounded waiting for results.
 
@@ -226,7 +228,9 @@ work.
   at `devintern worker add --resume <taskKey>`, which re-queues it with a fresh
   budget.
 - **Licensing.** Enqueuing automation work runs the same entitlement check as
-  the daemon (paid automation license, or the no-card Worker Pilot).
+  the daemon (paid automation license, or the no-card Worker Pilot). The
+  dashboard's **New task** relies on the same check, which the dashboard runs
+  when it starts.
 - **Quiet hours.** Injected tasks are operator-initiated, so they bypass
   [working windows](worker.md#working-windows-quiet-hours) like
   `devintern worker run-now`; no extra `run-now` is required.
