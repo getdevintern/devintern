@@ -142,6 +142,8 @@ export function createBugReporter(options: BugReporterOptions = {}): BugReporter
       last: draft.last,
       shareIdentifiers: draft.shareIdentifiers,
       command: draft.command,
+      ...(options.runDbPath ? { runDbPath: options.runDbPath } : {}),
+      ...(options.workerLogDirs ? { workerLogDirs: options.workerLogDirs } : {}),
     });
     const redaction = redactionFor(draft, collected, cwd);
     const contactEmail = (draft.contactEmail ?? options.contactEmail)?.trim();

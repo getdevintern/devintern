@@ -199,6 +199,117 @@ export async function triggerRunRetry(runId: number): Promise<{
   return { ok: response.ok, body };
 }
 
+/** What the user typed in the "Report a problem" form. */
+export interface ReportDraft {
+  title: string;
+  description: string;
+  shareIdentifiers: boolean;
+}
+
+/** Redacted bug-report payload exactly as it will be sent (opaque to the UI). */
+export interface ReportPayload {
+  reportId: string;
+  title: string;
+  description: string;
+  [key: string]: unknown;
+}
+
+/** `POST /api/runs/:id/report/preview` response: what will be sent. */
+export interface ReportPreview {
+  previewId: string;
+  expiresAt: number;
+  runId: number;
+  signedIn: boolean;
+  /** Anonymous reports need a contact email to submit. */
+  contactRequired: boolean;
+  destination: string;
+  title: string;
+  description: string;
+  bytes: number;
+  attachments: {
+    environment: {
+      cliVersion: string;
+      installKind: string;
+      os: string;
+      arch: string;
+      ci: boolean;
+      harness?: string;
+      tracker?: string;
+      sandbox?: string;
+      signedIn: boolean;
+    };
+    run: {
+      id?: number;
+      status: string;
+      failedStep?: string;
+      durationMs?: number;
+      stageCount: number;
+      hasReason: boolean;
+    } | null;
+    logs: { source: string; lines: number; bytes: number; truncated: boolean }[];
+    evidenceCount: number;
+    identifiersShared: boolean;
+  };
+  omitted: string[];
+  payload: ReportPayload;
+}
+
+/** `POST /api/reports` outcome. */
+export type ReportSubmitResult =
+  | { status: "sent"; reportId: string; shortId: string; url?: string; receipt?: string }
+  | {
+      status: "saved";
+      error: string;
+      authExpired: boolean;
+      savedPath: string;
+      retryCommand: string;
+    };
+
+/** Read an error message from a JSON error body. */
+function errorMessage(body: unknown, fallback: string): string {
+  if (body !== null && typeof body === "object" && "error" in body) {
+    const { error } = body as { error: unknown };
+    if (typeof error === "string" && error.trim()) return error;
+  }
+  return fallback;
+}
+
+/**
+ * Build the redacted report for a run without sending it. Throws with the
+ * server's message on failure.
+ */
+export async function previewRunReport(runId: number, draft: ReportDraft): Promise<ReportPreview> {
+  const response = await fetch(`/api/runs/${runId}/report/preview`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(draft),
+  });
+  const body: unknown = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(errorMessage(body, `Preview failed (HTTP ${response.status})`));
+  }
+  return body as ReportPreview;
+}
+
+/**
+ * Send a previewed report. A failed delivery that was saved locally resolves
+ * with `status: "saved"`; validation errors (missing email, expired preview)
+ * throw with the server's message.
+ */
+export async function submitReport(previewId: string, email?: string): Promise<ReportSubmitResult> {
+  const response = await fetch("/api/reports", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(email ? { previewId, email } : { previewId }),
+  });
+  const body: unknown = await response.json().catch(() => ({}));
+  if (body !== null && typeof body === "object" && "status" in body) {
+    const { status } = body as { status: unknown };
+    if (status === "sent" || status === "saved") return body as ReportSubmitResult;
+  }
+  throw new Error(errorMessage(body, `Send failed (HTTP ${response.status})`));
+}
+
 /** One configured scheduled automation as served by `GET /api/automations`. */
 export interface AutomationSchedule {
   id: string;
