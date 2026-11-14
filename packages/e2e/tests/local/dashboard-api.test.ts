@@ -3,7 +3,7 @@ import { expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DashboardFixture } from "../../helpers/dashboard";
+import { DashboardFixture, dashboardWriteHeaders } from "../../helpers/dashboard";
 import { isolatedEnvironment } from "../../helpers/environment";
 import { checkedCommand, command } from "../../helpers/process";
 import { freePort } from "../../helpers/webhook-server";
@@ -313,9 +313,17 @@ test.skipIf(!builtCli)(
       expect(automations.automations).toEqual([]);
 
       // --- write-route refusals (no work is spawned) -------------------------
+      // A bare POST (no Origin, no JSON content type) never reaches a route:
+      // the CSRF guard rejects it first.
+      const bareRetry = await fetch(`${baseUrl}/api/runs/${run.id}/retry`, { method: "POST" });
+      expect(bareRetry.status).toBe(403);
+
       // The fixture run succeeded, so the retry handler refuses before it can
       // spawn detached CLI work (run-retry.ts:95-96).
-      const retrySettled = await fetch(`${baseUrl}/api/runs/${run.id}/retry`, { method: "POST" });
+      const retrySettled = await fetch(`${baseUrl}/api/runs/${run.id}/retry`, {
+        method: "POST",
+        headers: dashboardWriteHeaders(baseUrl),
+      });
       expect(retrySettled.status).toBe(409);
       expect(await retrySettled.json()).toEqual({
         error: "not retriable: this run already succeeded",
@@ -323,12 +331,14 @@ test.skipIf(!builtCli)(
 
       const retryMalformed = await fetch(`${baseUrl}/api/runs/not-an-int/retry`, {
         method: "POST",
+        headers: dashboardWriteHeaders(baseUrl),
       });
       expect(retryMalformed.status).toBe(400);
       expect(await retryMalformed.json()).toEqual({ error: "run id must be an integer" });
 
       const missingAutomationRun = await fetch(`${baseUrl}/api/automations/nope/run`, {
         method: "POST",
+        headers: dashboardWriteHeaders(baseUrl),
       });
       expect(missingAutomationRun.status).toBe(404);
       expect(await missingAutomationRun.json()).toEqual({
@@ -336,7 +346,10 @@ test.skipIf(!builtCli)(
       });
 
       // A POST that matches no write route still falls through to the guard.
-      const post = await fetch(`${baseUrl}/api/runs`, { method: "POST" });
+      const post = await fetch(`${baseUrl}/api/runs`, {
+        method: "POST",
+        headers: dashboardWriteHeaders(baseUrl),
+      });
       expect(post.status).toBe(405);
       expect(await post.json()).toEqual({ error: "method not allowed" });
 
@@ -493,8 +506,14 @@ test.skipIf(!builtCli)(
       expect(before.retry).toMatchObject({ eligible: true, kind: "injected", audit: [] });
 
       const retryResponses = await Promise.all([
-        fetch(`${baseUrl}/api/runs/${failedRun.id}/retry`, { method: "POST" }),
-        fetch(`${baseUrl}/api/runs/${failedRun.id}/retry`, { method: "POST" }),
+        fetch(`${baseUrl}/api/runs/${failedRun.id}/retry`, {
+          method: "POST",
+          headers: dashboardWriteHeaders(baseUrl),
+        }),
+        fetch(`${baseUrl}/api/runs/${failedRun.id}/retry`, {
+          method: "POST",
+          headers: dashboardWriteHeaders(baseUrl),
+        }),
       ]);
       const retryBodies = await Promise.all(
         retryResponses.map(async (response) => ({

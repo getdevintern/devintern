@@ -31,6 +31,7 @@ export function isolatedEnvironment(root: string): Record<string, string> {
     DEVINTERN_NO_UPDATE: "1",
     DEVINTERN_TELEMETRY_DISABLED: "1",
     SENTRY_DISABLED: "1",
+    DASHBOARD_TAILSCALE_AUTODETECT: "0",
     TASK_TRACKER: "markdown",
     AGENT_HARNESS: "claude-code",
     AGENT_SANDBOX: "none",

@@ -66,6 +66,8 @@ const child = Bun.spawn(
       WEBHOOK_QUEUE_DB: join(queueDbTempDir, "queue.db"),
       DEVINTERN_WORKSPACE_DIR: join(queueDbTempDir, "workspace"),
       SENTRY_DISABLED: "1",
+      // Test dashboards never shell out to the developer's real `tailscale`.
+      DASHBOARD_TAILSCALE_AUTODETECT: "0",
     },
     stdin: "inherit",
     stdout: "inherit",

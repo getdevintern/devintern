@@ -4,7 +4,7 @@ sidebarLabel: "Dashboard"
 description: "Use when checking what the worker is doing, reading agent transcripts, diagnosing failed runs, or retrying work from the local dashboard."
 section: "Automation"
 order: 4
-dateModified: 2026-11-13
+dateModified: 2026-11-14
 ---
 
 # Worker Dashboard
@@ -89,7 +89,7 @@ You can inspect existing run history even when the worker is stopped:
 devintern dashboard
 ```
 
-The command reads the local history without changing it. Use `--port <number>` if port 4400 is already occupied (or set `DASHBOARD_PORT`), and `--host <host>` to bind a different loopback address (default `127.0.0.1`; `localhost` and `::1` are also accepted).
+The command reads the local history without changing it. Use `--port <number>` if port 4400 is already occupied (or set `DASHBOARD_PORT`), and `--host <host>` to bind a different loopback address (default `127.0.0.1`; `localhost` and `::1` are also accepted). `--allow-origin <origin>` (repeatable) and `--no-tailscale-autodetect` control [allowed origins](#allowed-origins).
 
 Run history (runs, stats, agent PRs, artifacts, retry audit) comes from the same project-scoped `.devintern-code/queue.db` that a direct `devintern <TASK>` run writes, so local runs stay visible when a workspace is also configured. The pending ad-hoc and scheduled-retry counts in the header come from the workspace queue database (`~/.devintern/state/queue.db`). If you started the worker with a custom `--workspace /path/to/workspace.toml`, pass the same flag to the dashboard so queue counts, worker liveness, and harness-log transcripts follow it. The value can be the `workspace.toml` file or the directory that contains it:
 
@@ -97,11 +97,16 @@ Run history (runs, stats, agent PRs, artifacts, retry audit) comes from the same
 devintern dashboard --workspace /path/to/workspace.toml
 ```
 
-With `--workspace`, **Automations** lists that workspace's `[[automations]]` with their next scheduled run. **Run now** needs the worker, because workspace automations run through its routing and repository pipeline; start `devintern worker` and use its dashboard to trigger them.
+With `--workspace`, the dashboard also applies that workspace's [`[dashboard]` access settings](#allowed-origins), and **Automations** lists that workspace's `[[automations]]` with their next scheduled run. **Run now** needs the worker, because workspace automations run through its routing and repository pipeline; start `devintern worker` and use its dashboard to trigger them.
 
 ## Local by design
 
 The dashboard and its data stay on the worker machine. It listens only on a loopback address, so it is not exposed to your network or the public internet. There is no setting that binds it to another address: a non-loopback bind fails before the server starts, because the dashboard has no built-in authentication and its write endpoints retry runs and trigger automations.
+
+The API also refuses requests that did not come from the dashboard page itself, so a website open in your browser cannot use it behind your back:
+
+- Every `/api` request must be addressed to `localhost`, `127.0.0.1`, or `[::1]` (any port, so remapped SSH tunnels work), or to an [allowed origin](#allowed-origins). Any other host name gets `403`. This blocks DNS-rebinding attacks, where a hostile domain is pointed at your loopback address.
+- Requests that change something (retry, run now, and any other non-GET action) must come from the same origin as the address they were sent to, for example `Origin: http://localhost:8440` for `localhost:8440`, and must send `Content-Type: application/json`. Cross-origin requests get `403`; other content types get `415`. A page served on another local port cannot read the API or act on it.
 
 Worker run history lives in the worker's workspace, alongside its other local state. The embedded dashboard remains available when an expired Worker Pilot pauses acquisition. Starting a standalone dashboard requires an active Worker Pilot or automation license.
 
@@ -129,7 +134,7 @@ ssh -N -L 4400:127.0.0.1:4400 you@worker-host
 
 Open [http://localhost:4400](http://localhost:4400) on your own machine and the traffic is forwarded over the SSH connection. Add `-f` to background the tunnel, or configure a `LocalForward 4400 127.0.0.1:4400` entry in `~/.ssh/config` to make it permanent. Mobile SSH clients such as Termius and Blink support local port forwarding too.
 
-If port 4400 is busy locally, forward a different local port: `-L 8440:127.0.0.1:4400` and open `http://localhost:8440`.
+If port 4400 is busy locally, forward a different local port: `-L 8440:127.0.0.1:4400` and open `http://localhost:8440`. Loopback addresses are trusted on any port, so this needs no extra configuration.
 
 ### Option 2: Tailscale Serve
 
@@ -141,7 +146,16 @@ tailscale serve --bg 4400
 
 Tailscale terminates TLS and forwards to `http://127.0.0.1:4400`, so open the `https://<machine>.<tailnet>.ts.net/` URL the command prints. Only devices in your tailnet can connect, and Tailscale's device identity is the access boundary.
 
-Do not use `tailscale funnel` for the dashboard. Funnel publishes the port on the public internet with no login prompt in front of it.
+This works without dashboard configuration. At startup, and again when a request arrives for an unknown host name (at most every 30 seconds), the dashboard runs `tailscale serve status --json` and trusts each `https://<name>` whose handler proxies to its own port. The startup log lists the detected origins. A `tailscale serve` set up after the dashboard started is picked up on the next request. If the `tailscale` binary is missing or fails, detection is skipped. To turn detection off, set `[dashboard].tailscale_autodetect = false`, `DASHBOARD_TAILSCALE_AUTODETECT=0`, or pass `devintern dashboard --no-tailscale-autodetect`. If detection does not find your setup, list the origin explicitly:
+
+```toml
+[dashboard]
+allowed_origins = ["https://box.tailnet.ts.net"]
+```
+
+Use [Tailscale ACLs](https://tailscale.com/kb/1018/acls) to control which tailnet devices and users can reach the machine.
+
+Do not use `tailscale funnel` for the dashboard. Funnel publishes the port on the public internet with no login prompt in front of it. If the dashboard detects a Funnel-published name, it still trusts it but logs a prominent warning at startup.
 
 ### Option 3: Reverse proxy with its own login
 
@@ -156,11 +170,32 @@ http://192.168.1.50:8088 {
 }
 ```
 
-Generate the hash with `caddy hash-password`, then reload Caddy. Anything the proxy authenticates is forwarded to loopback, so the dashboard itself still refuses to listen on the LAN address.
+Then allow the proxy's origin, because the browser addresses the dashboard as `192.168.1.50:8088`:
+
+```toml
+[dashboard]
+allowed_origins = ["http://192.168.1.50:8088"]
+```
+
+Generate the hash with `caddy hash-password`, then reload Caddy and restart the worker. Caddy forwards the original `Host`, which now matches the allowed origin; proxies that rewrite `Host` to `127.0.0.1:4400` (nginx's default) also work, because a write from an allowed origin is accepted on a loopback host. Anything the proxy authenticates is forwarded to loopback, so the dashboard itself still refuses to listen on the LAN address.
 
 Plain HTTP means the password and the dashboard data cross your network unencrypted. Do this only on a trusted internal network, and prefer Options 1 and 2 elsewhere. Add `tls internal` and use an `https://` site address if you want Caddy-managed certificates for a private hostname.
 
 Whichever proxy you choose, it must authenticate every request itself; do not run an unauthenticated forwarder, and do not add a second listener that reaches the dashboard without a credential check.
+
+### Allowed origins
+
+An allowed origin is a full `scheme://host[:port]` the dashboard trusts in addition to loopback. Requests whose `Host` is that host and port are accepted, and writes from that exact `Origin` are accepted. Matching is exact: no wildcards. Case, default ports (`:443` for https, `:80` for http), and a trailing slash are normalized, and entries with a path, query, or `user@` are rejected. `X-Forwarded-*` headers are never consulted. The list is merged from three places:
+
+| Source | Example |
+| --- | --- |
+| `workspace.toml` (worker and `devintern dashboard --workspace`) | `[dashboard]` `allowed_origins = ["https://dash.example.internal"]` |
+| Environment variable (comma-separated) | `DASHBOARD_ALLOWED_ORIGINS=https://dash.example.internal,http://192.168.1.50:8088` |
+| `devintern dashboard` flag (repeatable) | `--allow-origin https://dash.example.internal` |
+
+A malformed entry stops the worker or dashboard at startup with an error naming it. `[dashboard]` is startup-only: restart the worker after changing it. When the list is not empty, the startup log prints it with a warning that anyone who can reach those addresses gets full dashboard access, including write actions.
+
+Allowed origins stop other websites from using your browser against the dashboard. They do not authenticate anyone. Who can reach the address is still decided by your Tailscale ACLs or by the proxy's login (for example Caddy `basic_auth`).
 
 ## Artifacts
 

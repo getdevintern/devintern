@@ -803,6 +803,9 @@ export function validateReloadedWorkspaceConfig(
       "[workspace].dashboard and dashboard_port are startup-only; restart the worker to change them.",
     );
   }
+  if (JSON.stringify(next.dashboard) !== JSON.stringify(current.dashboard)) {
+    throw new Error("[dashboard] is startup-only; restart the worker to change it.");
+  }
   if (JSON.stringify(next.worker.schedule) !== JSON.stringify(current.worker.schedule)) {
     throw new Error("[worker.schedule] is startup-only; restart the worker to change it.");
   }
@@ -1207,6 +1210,8 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       // automation "Run now" triggers go through the in-process scheduler.
       dashboardServer = startDashboardServer({
         port: config.workspace.dashboardPort,
+        allowedOrigins: config.dashboard.allowedOrigins,
+        tailscaleAutodetect: config.dashboard.tailscaleAutodetect,
         retryMode: "schedule",
         automationActions,
         scheduleSnapshot: () => (pickupGate.enabled ? pickupGate.snapshot() : null),

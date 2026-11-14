@@ -1069,7 +1069,10 @@ describe("dashboard server", () => {
       const missing = await fetch(`${base}/api/nope`);
       expect(missing.status).toBe(404);
 
-      const post = await fetch(`${base}/api/runs`, { method: "POST" });
+      const post = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Origin: base },
+      });
       expect(post.status).toBe(405);
     } finally {
       server.stop(true);
@@ -1191,7 +1194,7 @@ describe("dashboard server", () => {
 
       const response = await fetch(`${base}/api/runs/${id}/retry`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", Origin: base },
         body: "{}",
       });
       expect(response.status).toBe(202);
@@ -1210,7 +1213,7 @@ describe("dashboard server", () => {
       // A second POST immediately afterwards hits the in-flight guard.
       const repeat = await fetch(`${base}/api/runs/${id}/retry`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", Origin: base },
         body: "{}",
       });
       expect(repeat.status).toBe(409);
@@ -1230,8 +1233,10 @@ describe("dashboard server", () => {
         retryDeps: { resolveActor: async () => null, spawn: () => ({ command: "" }) },
       });
       try {
-        const local = await fetch(`http://127.0.0.1:${noSession.port}/api/runs/${localId}/retry`, {
+        const localBase = `http://127.0.0.1:${noSession.port}`;
+        const local = await fetch(`${localBase}/api/runs/${localId}/retry`, {
           method: "POST",
+          headers: { "Content-Type": "application/json", Origin: localBase },
         });
         expect(local.status).toBe(202);
       } finally {

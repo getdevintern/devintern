@@ -244,7 +244,7 @@ export interface WorkspaceResponseMeta {
    * hot-reloads most sections (repos, routing, automations, estimations,
    * cadence) but some are startup-only — `[defaults].tracker`, team
    * names/trackers/env, `[[error_monitors]]`, `[workspace].dashboard` /
-   * `dashboard_port`, and `[worker.schedule]` — and an invalid edit is
+   * `dashboard_port`, `[dashboard]`, and `[worker.schedule]` — and an invalid edit is
    * ignored, so a true value means "the worker may not be running this".
    * Absent when no running worker start time is known. Prefer `configSync`,
    * which also knows about hot reloads.
