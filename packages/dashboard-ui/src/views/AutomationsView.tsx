@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
-import { Check, FolderGit2, GitPullRequest, Layers, Play } from "lucide-react";
+import { Check, GitPullRequest, Play } from "lucide-react";
 
+import { AutomationGroupHeaderRow } from "@/components/AutomationGroupHeader";
 import { RunResult } from "@/components/RunResult";
 import { EmptyState, StatusBadge, StatusPill } from "@/components/shared";
 import { Button } from "@/components/ui/button";
@@ -14,8 +15,7 @@ import {
 } from "@/components/ui/table";
 import { triggerAutomation, usePoll } from "@/lib/api";
 import type { AutomationSchedule, AutomationsResponse } from "@/lib/api";
-import { groupAutomationsByRepo } from "@/lib/automation-groups";
-import type { AutomationGroup } from "@/lib/automation-groups";
+import { groupAutomationsByRepo, showsGroupHeaders } from "@/lib/automation-groups";
 import { formatRunOrigin } from "@/lib/run-origin";
 import { cn, formatAge, formatTime } from "@/lib/utils";
 import { formatNextRun, humanizeSchedule } from "@/views/automation-schedule";
@@ -182,44 +182,15 @@ function AutomationRow({
 const COLUMN_COUNT = 5;
 
 /**
- * Group header row: a `rowgroup` header carrying an h2, so the group is
- * announced with its rows and reachable by heading navigation.
- */
-function GroupHeaderRow({ group }: { group: AutomationGroup }) {
-  const count = group.automations.length;
-  const label = group.repo ?? "General";
-  return (
-    <tr className="auto-group-row">
-      <th scope="rowgroup" colSpan={COLUMN_COUNT} className="auto-group-cell">
-        <h2 className="auto-group-heading">
-          {group.repo ? (
-            <FolderGit2 className="size-3.5 shrink-0" aria-hidden="true" />
-          ) : (
-            <Layers className="size-3.5 shrink-0" aria-hidden="true" />
-          )}
-          <span className={cn("truncate", group.repo && "font-mono")} title={label}>
-            {label}
-          </span>
-          <span className="auto-group-count">
-            <span aria-hidden="true">{count}</span>
-            <span className="sr-only">{count === 1 ? "1 automation" : `${count} automations`}</span>
-          </span>
-        </h2>
-      </th>
-    </tr>
-  );
-}
-
-/**
  * The automations table: humanized schedule (raw cron secondary), relative
  * next run with the soonest emphasized, and a one-line last run. On narrow
  * screens each row collapses into a stacked card via `automations.css`.
  *
  * Rows are grouped by target repository (general automations first, then
  * repos by name), each group a `<tbody>` with its own header row so columns
- * stay aligned across groups. A single group gets no header: a lone
- * "General" or repo heading would only repeat the page title, so a shared
- * repo is stated once under the table instead.
+ * stay aligned across groups. Headers show whenever any automation names a
+ * repo, even a single one, so the target repo is always visible; only an
+ * all-general list stays flat.
  */
 export function AutomationsTable({
   automations,
@@ -237,7 +208,7 @@ export function AutomationsTable({
   onOpenAutomation?: (id: string) => void;
 }) {
   const groups = groupAutomationsByRepo(automations);
-  const grouped = groups.length > 1;
+  const grouped = showsGroupHeaders(groups);
   const nextId = automations
     .filter((automation) => automation.enabled && automation.nextDueAt)
     .reduce<AutomationSchedule | undefined>(
@@ -247,7 +218,6 @@ export function AutomationsTable({
           : soonest,
       undefined,
     )?.id;
-  const commonRepo = !grouped ? groups[0]?.repo : undefined;
   return (
     <div className="space-y-2">
       <div className="auto-table-wrap overflow-hidden rounded-lg border border-border bg-card">
@@ -263,7 +233,7 @@ export function AutomationsTable({
           </TableHeader>
           {groups.map((group) => (
             <TableBody key={group.key} className="auto-group">
-              {grouped ? <GroupHeaderRow group={group} /> : null}
+              {grouped ? <AutomationGroupHeaderRow group={group} colSpan={COLUMN_COUNT} /> : null}
               {group.automations.map((automation) => (
                 <AutomationRow
                   key={automation.id}
@@ -280,11 +250,6 @@ export function AutomationsTable({
           ))}
         </Table>
       </div>
-      {commonRepo ? (
-        <p className="text-xs text-subtle-foreground">
-          All automations run in <span className="font-mono">{commonRepo}</span>
-        </p>
-      ) : null}
     </div>
   );
 }

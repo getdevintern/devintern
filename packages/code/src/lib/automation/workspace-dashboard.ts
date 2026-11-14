@@ -23,6 +23,7 @@ import type {
 } from "./acquirer";
 import { loadWorkspaceConfig } from "../workspace/config";
 import { workspaceConfigPath, workspaceDbPath } from "../workspace/paths";
+import { pickAgentSelection } from "../agent/selection";
 
 /** Reason shown when "Run now" is pressed on a standalone workspace dashboard. */
 export const WORKSPACE_MANUAL_RUN_UNAVAILABLE =
@@ -80,6 +81,7 @@ export function loadWorkspaceAutomationActions(workspaceDir: string): DashboardA
       repo: automation.repo,
       prompt: automation.prompt,
       openPr: automation.openPr === true,
+      ...pickAgentSelection(automation),
       nextDueAt: nextDue.get(automation.id),
     }));
   };

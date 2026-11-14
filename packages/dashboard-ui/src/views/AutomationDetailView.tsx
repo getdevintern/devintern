@@ -243,6 +243,21 @@ export function AutomationDetailView({ automationId }: { automationId: string })
               )}
             </Fact>
             <Fact label="Repository">{automation.repo ?? "–"}</Fact>
+            <Fact label="Agent">
+              {automation.harness ?? (
+                <span className="text-muted-foreground">Workspace default</span>
+              )}
+            </Fact>
+            <Fact label="Model">
+              {automation.model ? (
+                <code className="font-mono text-xs">{automation.model}</code>
+              ) : (
+                <span className="text-muted-foreground">Harness default</span>
+              )}
+            </Fact>
+            <Fact label="Effort">
+              {automation.effort ?? <span className="text-muted-foreground">Harness default</span>}
+            </Fact>
             <Fact label="Opens PR">
               {automation.openPr ? (
                 <span className="inline-flex items-center gap-1">

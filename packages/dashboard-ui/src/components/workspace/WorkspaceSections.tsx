@@ -11,6 +11,7 @@ import {
   TriangleAlert,
 } from "lucide-react";
 
+import { AutomationGroupHeaderRow } from "@/components/AutomationGroupHeader";
 import { SectionLink } from "@/components/workspace/SectionLink";
 import { Button } from "@/components/ui/button";
 import {
@@ -29,6 +30,7 @@ import type {
   WorkspaceEstimationView,
   WorkspaceRepoView,
 } from "@/lib/api";
+import { groupAutomationsByRepo, showsGroupHeaders } from "@/lib/automation-groups";
 import { Markdown } from "@/lib/markdown";
 import { cn } from "@/lib/utils";
 import {
@@ -383,14 +385,13 @@ function AutomationRows({
   automation,
   expanded,
   onToggle,
-  showRepo,
 }: {
   automation: WorkspaceAutomationView;
   expanded: boolean;
   onToggle: () => void;
-  showRepo: boolean;
 }) {
   const panelId = `ws-prompt-${automation.id}`;
+  const agent = agentSummary(automation);
   return (
     <>
       <TableRow
@@ -428,11 +429,6 @@ function AutomationRows({
         <TableCell className="px-4">
           <ScheduleCell cron={automation.cron} interval={automation.interval} />
         </TableCell>
-        {showRepo ? (
-          <TableCell className="px-4 text-muted-foreground">
-            {automation.repo ?? <Dash />}
-          </TableCell>
-        ) : null}
         <TableCell className="px-4">
           {automation.openPr ? (
             <span className="inline-flex items-center gap-1.5 text-xs">
@@ -450,7 +446,7 @@ function AutomationRows({
       {expanded ? (
         <TableRow className="ws-prompt-row hover:bg-transparent">
           <TableCell
-            colSpan={showRepo ? 6 : 5}
+            colSpan={AUTOMATION_COLUMNS}
             className="px-4 pt-1 pb-4 whitespace-normal"
             id={panelId}
           >
@@ -458,6 +454,7 @@ function AutomationRows({
               <div className="ws-prompt-meta">
                 <span>Prompt</span>
                 {automation.allowNoChanges ? <span>May finish without changes</span> : null}
+                {agent ? <span>Agent: {agent}</span> : null}
                 <a href={automationHref(automation.id)} className="ref-link ml-auto">
                   Open automation <ChevronRight className="size-3" aria-hidden="true" />
                 </a>
@@ -471,9 +468,27 @@ function AutomationRows({
   );
 }
 
+/** Columns in the workspace automations table (for full-width rows). */
+const AUTOMATION_COLUMNS = 5;
+
+/** "claude-code · opus · medium effort" for an entry's agent override, if any. */
+function agentSummary(automation: WorkspaceAutomationView): string | undefined {
+  const parts = [
+    automation.harness,
+    automation.model,
+    automation.effort ? `${automation.effort} effort` : undefined,
+  ].filter((part): part is string => Boolean(part));
+  return parts.length > 0 ? parts.join(" · ") : undefined;
+}
+
+/**
+ * Workspace automations grouped by target repository (general first, then
+ * repos by name), one `<tbody>` per group under a header row.
+ */
 export function AutomationsTable({ automations }: { automations: WorkspaceAutomationView[] }) {
   const [open, setOpen] = useState<Set<string>>(() => new Set());
-  const showRepo = new Set(automations.map((automation) => automation.repo)).size > 1;
+  const groups = groupAutomationsByRepo(automations);
+  const grouped = showsGroupHeaders(groups);
   const toggle = (id: string) =>
     setOpen((current) => {
       const next = new Set(current);
@@ -481,42 +496,36 @@ export function AutomationsTable({ automations }: { automations: WorkspaceAutoma
       else next.add(id);
       return next;
     });
-  const commonRepo = showRepo ? undefined : automations[0]?.repo;
   return (
-    <div className="space-y-2">
-      <div className="overflow-hidden rounded-lg border border-border bg-card">
-        <Table className="ws-table">
-          <TableHeader>
-            <TableRow>
-              <TableHead className="w-8 pr-0 pl-2">
-                <span className="sr-only">Prompt</span>
-              </TableHead>
-              <TableHead className="px-3">Automation</TableHead>
-              <TableHead className="px-4">Schedule</TableHead>
-              {showRepo ? <TableHead className="px-4">Repository</TableHead> : null}
-              <TableHead className="px-4">Output</TableHead>
-              <TableHead className="px-4">Status</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {automations.map((automation) => (
+    <div className="overflow-hidden rounded-lg border border-border bg-card">
+      <Table className="ws-table">
+        <TableHeader>
+          <TableRow>
+            <TableHead className="w-8 pr-0 pl-2">
+              <span className="sr-only">Prompt</span>
+            </TableHead>
+            <TableHead className="px-3">Automation</TableHead>
+            <TableHead className="px-4">Schedule</TableHead>
+            <TableHead className="px-4">Output</TableHead>
+            <TableHead className="px-4">Status</TableHead>
+          </TableRow>
+        </TableHeader>
+        {groups.map((group) => (
+          <TableBody key={group.key} className="auto-group">
+            {grouped ? (
+              <AutomationGroupHeaderRow group={group} colSpan={AUTOMATION_COLUMNS} level={3} />
+            ) : null}
+            {group.automations.map((automation) => (
               <AutomationRows
                 key={automation.id}
                 automation={automation}
                 expanded={open.has(automation.id)}
                 onToggle={() => toggle(automation.id)}
-                showRepo={showRepo}
               />
             ))}
           </TableBody>
-        </Table>
-      </div>
-      {commonRepo ? (
-        <p className="text-xs text-subtle-foreground">
-          All automations run in{" "}
-          <span className="font-mono text-muted-foreground">{commonRepo}</span>
-        </p>
-      ) : null}
+        ))}
+      </Table>
     </div>
   );
 }
