@@ -722,3 +722,9 @@ a.strip-link:hover .strip-item svg {
 .harness-pill[data-state="limited"] {
   font-weight: 500;
 }
+
+/* Topbar "New task" action: pinned right of the one-row status strip. */
+.dashboard-new-task {
+  flex: none;
+  margin-left: 16px;
+}

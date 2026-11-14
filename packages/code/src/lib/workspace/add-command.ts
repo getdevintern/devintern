@@ -12,9 +12,8 @@
  * single machine-readable object on stdout (human diagnostics go to stderr).
  */
 
-import { randomBytes } from "crypto";
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "fs";
-import { dirname, join, resolve } from "path";
+import { existsSync, readFileSync } from "fs";
+import { dirname, resolve } from "path";
 
 import { checkLicense } from "@devintern/license-check";
 
@@ -23,8 +22,9 @@ import { loadSupabaseConfig } from "../cli/bootstrap";
 import type { RepoConfig, WorkspaceConfig } from "./config";
 import { loadWorkspaceConfig } from "./config";
 import { InjectedTaskStore } from "../state/injected-tasks";
-import type { EnqueueInjectedTaskResult, InjectedTask } from "../state/injected-tasks";
+import type { InjectedTask } from "../state/injected-tasks";
 import { applyWorkspaceProcessEnv } from "./env";
+import { enqueueInjectedTask, MAX_INJECTED_BODY_CHARS } from "./injected-enqueue";
 import {
   injectedChildStillRunningMessage,
   interruptedChildStillRunning,
@@ -38,9 +38,6 @@ import {
   workspaceStateDir,
   readWorkerStartMarker,
 } from "./paths";
-
-/** Maximum body size accepted (matches the run recorder's description cap). */
-export const MAX_INJECTED_BODY_CHARS = 20_000;
 
 /** How often `--wait` re-reads the task row. */
 const WAIT_POLL_INTERVAL_MS = 1_000;
@@ -246,55 +243,6 @@ export function parseWorkerAddArgs(args: string[]): ParsedAddArgs {
   return { kind: "ok", options };
 }
 
-/** Filesystem-safe slug derived from a task title. */
-export function slugifyTitle(title: string): string {
-  return title
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 40)
-    .replace(/-+$/g, "");
-}
-
-/**
- * Derive a unique `local-<slug>` task key.
- *
- * The `local-` prefix keeps generated keys (and therefore `feature/local-…`
- * branches) from colliding with tracker keys, which always carry a
- * `PROJ-123`-style shape.
- */
-export function deriveInjectedTaskKey(title: string, isTaken: (key: string) => boolean): string {
-  const base = `local-${slugifyTitle(title) || "task"}`;
-  if (!isTaken(base)) return base;
-  for (let suffix = 2; ; suffix++) {
-    const candidate = `${base}-${suffix}`;
-    if (!isTaken(candidate)) return candidate;
-  }
-}
-
-/** Render the local markdown task file the pipeline consumes. */
-export function buildInjectedTaskMarkdown(input: {
-  taskKey: string;
-  title: string;
-  body: string;
-  now?: Date;
-}): string {
-  const title = input.title.replace(/\s+/g, " ").trim();
-  const created = (input.now ?? new Date()).toISOString();
-  const body = input.body.trimEnd();
-  return [
-    "---",
-    `key: ${input.taskKey}`,
-    `created_at: ${created}`,
-    "---",
-    "",
-    `# ${title}`,
-    "",
-    body,
-    "",
-  ].join("\n");
-}
-
 function displayPath(path: string): string {
   const home = process.env.HOME;
   return home && path.startsWith(home) ? `~${path.slice(home.length)}` : path;
@@ -479,16 +427,8 @@ export async function runWorkerAdd(
       error("❌ Could not resolve the task's repo and body.");
       return 1;
     }
-    if (add.idempotencyKey) {
-      // Only an active (pending/running) task dedupes; a settled one under the
-      // same key is history and a new occurrence is enqueued below.
-      const existing = store.findActiveByIdempotencyKey(add.idempotencyKey);
-      if (existing) {
-        // `await` is load-bearing: without it the surrounding `finally` would
-        // `store.close()` while `reportTask`/`waitForTask` is still polling.
-        return await reportTask(existing, context);
-      }
-    }
+    // `await` is load-bearing: without it the surrounding `finally` would
+    // `store.close()` while `reportTask`/`waitForTask` is still polling.
     return await enqueueNewTask(add, target.body, target.repo, context);
   } catch (enqueueError) {
     // Filesystem/DB failures (including a sandbox denying writes to the
@@ -546,19 +486,6 @@ interface TaskContext {
   selectedDir: string;
 }
 
-/** A per-invocation filename so concurrent callers never share a prompt path. */
-function injectedTaskFileName(taskKey: string): string {
-  return `${taskKey}-${randomBytes(4).toString("hex")}.md`;
-}
-
-/** Whether an insert failed on the `task_key` unique index (lost a key race). */
-function isTaskKeyConflict(error: unknown): boolean {
-  return /UNIQUE constraint failed: injected_tasks\.task_key/i.test(String(error));
-}
-
-/** Bound the re-derive/retry loop if many callers race the same title. */
-const MAX_TASK_KEY_ATTEMPTS = 50;
-
 /** Create the markdown file + durable row, then optionally wait. */
 async function enqueueNewTask(
   add: AddOptions,
@@ -567,71 +494,34 @@ async function enqueueNewTask(
   ctx: TaskContext & { workerRunning: boolean },
 ): Promise<number> {
   const { store, selectedDir, workerRunning, log, status } = ctx;
-  const dir = injectedTasksDir(selectedDir);
-  // Prompts hold arbitrary operator context, so keep them owner-only like the
-  // workspace .env. `mode` only applies to newly created paths.
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
-
-  for (let attempt = 0; ; attempt++) {
-    const taskKey = deriveInjectedTaskKey(add.title, (key) => store.hasTaskKey(key));
-    // Unique per call: if a concurrent caller wins the same key or idempotency
-    // row, unlinking our own file can never delete the winner's prompt.
-    const taskFile = join(dir, injectedTaskFileName(taskKey));
-    writeFileSync(taskFile, buildInjectedTaskMarkdown({ taskKey, title: add.title, body }), {
-      encoding: "utf8",
-      mode: 0o600,
-    });
-
-    let enqueued: EnqueueInjectedTaskResult;
-    try {
-      enqueued = store.enqueue({
-        taskKey,
-        repo: repo.name,
-        title: add.title.trim(),
-        body,
-        taskFile,
-        idempotencyKey: add.idempotencyKey,
-        actor: "local:add",
-      });
-    } catch (enqueueError) {
-      try {
-        unlinkSync(taskFile);
-      } catch {
-        // Best-effort cleanup.
-      }
-      // A concurrent caller claimed this task_key first; re-derive (now seeing
-      // their committed row) and retry with a suffixed key.
-      if (isTaskKeyConflict(enqueueError) && attempt < MAX_TASK_KEY_ATTEMPTS) continue;
-      throw enqueueError;
-    }
-
-    const { task, deduplicated } = enqueued;
-    if (deduplicated) {
-      // Lost an idempotency race: drop our own file and report their row.
-      try {
-        unlinkSync(taskFile);
-      } catch {
-        // Best-effort cleanup.
-      }
-      return reportTask(task, ctx);
-    }
-
-    if (!add.json) {
-      status(`✅ Enqueued ${task.taskKey} for repo "${task.repo}" (task #${task.id}).`);
-      status(
-        workerRunning
-          ? "   The worker picks it up on its next poll."
-          : "⚠️  No worker is running; the task stays queued until one starts.",
-      );
-      status(`   Prompt: ${displayPath(task.taskFile)}`);
-    }
-
-    if (!add.wait) {
-      if (add.json) log(JSON.stringify({ ...serialize(task), deduplicated: false }));
-      return 0;
-    }
-    return await waitForTask(task.id, { ...ctx, deduplicated: false, taskKey: task.taskKey }, task);
+  // Only an active (pending/running) task dedupes; a settled one under the
+  // same key is history and a new occurrence is enqueued.
+  const { task, deduplicated } = enqueueInjectedTask(store, selectedDir, {
+    repo: repo.name,
+    title: add.title,
+    body,
+    idempotencyKey: add.idempotencyKey,
+    actor: "local:add",
+  });
+  if (deduplicated) {
+    return await reportTask(task, ctx);
   }
+
+  if (!add.json) {
+    status(`✅ Enqueued ${task.taskKey} for repo "${task.repo}" (task #${task.id}).`);
+    status(
+      workerRunning
+        ? "   The worker picks it up on its next poll."
+        : "⚠️  No worker is running; the task stays queued until one starts.",
+    );
+    status(`   Prompt: ${displayPath(task.taskFile)}`);
+  }
+
+  if (!add.wait) {
+    if (add.json) log(JSON.stringify({ ...serialize(task), deduplicated: false }));
+    return 0;
+  }
+  return await waitForTask(task.id, { ...ctx, deduplicated: false, taskKey: task.taskKey }, task);
 }
 
 function serialize(task: Pick<InjectedTask, "id" | "taskKey" | "repo" | "status">): {
