@@ -177,6 +177,8 @@ describe("runWorkerAdd", () => {
         log: (message: string) => out.push(message),
         error: (message: string) => err.push(message),
         readStdin: () => "piped body\n",
+        // A fast poll keeps --wait tests from idling on the 1s production cadence.
+        waitPollIntervalMs: 20,
       },
     };
   }
@@ -1374,7 +1376,7 @@ describe("runWorkerAdd", () => {
         // Simulate the restart gap: the worker lock disappears while the task
         // is still claimed, then a replacement worker takes over.
         rmSync(lockPath, { force: true });
-        await new Promise((resolve) => setTimeout(resolve, 1_300));
+        await new Promise((resolve) => setTimeout(resolve, 300));
         writeLock();
         seed.finish(claimed.id, "done");
       } finally {
@@ -1436,7 +1438,7 @@ describe("runWorkerAdd", () => {
           workspaceWorkerStartPath(dir),
           JSON.stringify({ pid: process.pid, startedAt: Date.now() }),
         );
-        await new Promise((resolve) => setTimeout(resolve, 1_300));
+        await new Promise((resolve) => setTimeout(resolve, 600));
         writeLock();
         seed.finish(claimed.id, "done");
       } finally {
@@ -1497,7 +1499,7 @@ describe("runWorkerAdd", () => {
           workspaceWorkerStartPath(dir),
           JSON.stringify({ pid: process.pid, startedAt: Date.now() }),
         );
-        await new Promise((resolve) => setTimeout(resolve, 1_300));
+        await new Promise((resolve) => setTimeout(resolve, 600));
         writeLock();
         const claimed = seed.claimNext()!;
         seed.finish(claimed.id, "done");
@@ -1611,7 +1613,8 @@ describe("runWorkerAdd", () => {
         "--wait",
         "--json",
       ],
-      { ...cap.options, restartGraceMs: 1_000 },
+      // Rounds up to the reported 1s minimum.
+      { ...cap.options, restartGraceMs: 200 },
     );
     await companion;
 

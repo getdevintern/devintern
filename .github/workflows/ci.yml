@@ -37,13 +37,50 @@ jobs:
       - name: Typecheck
         run: bun run typecheck
 
-      # Build before tests so the built-CLI smoke tests (e2e local suite) run
-      # instead of being skipped because packages/code/dist is absent.
       - name: Build workspace graph
         run: bun run build
 
+      # The offline e2e suite runs in its own job (e2e-local) so its worker
+      # spin-ups do not hold back unit-test feedback.
       - name: Test
-        run: bun run test
+        run: bun run turbo run test --filter='!@devintern/e2e' && bun run test:examples
         env:
           # CLI argument tests resolve the configured harness but fail before invoking it.
           AGENT_CLI_PATH: bun
+
+  e2e-local:
+    runs-on: ubuntu-latest
+    env:
+      TURBO_TELEMETRY_DISABLED: 1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # turbo --affected needs the merge base with the PR's base branch.
+          fetch-depth: 0
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          # Keep in sync with the verify job.
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # Offline fakes only (local git remotes, fake trackers, stub agent); no
+      # credentials. turbo builds packages/code/dist first (e2e#test depends on
+      # code#build), so the built-CLI tests run instead of skipping.
+      #
+      # On pull requests the suite runs only when e2e or one of its workspace
+      # dependencies (packages/code and everything it uses) changed since the
+      # base branch; otherwise turbo selects no task and the job passes. Pushes
+      # to main always run the full suite.
+      - name: Local e2e suite
+        run: bun run turbo run test --filter=@devintern/e2e ${{ github.event_name == 'pull_request' && '--affected' || '' }}
+        env:
+          AGENT_CLI_PATH: bun
+          # The checkout has origin/<base> but no local <base> branch, which is
+          # what turbo looks up by default; without this it assumes every file
+          # changed and never skips.
+          TURBO_SCM_BASE: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || '' }}

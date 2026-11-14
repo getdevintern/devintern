@@ -99,6 +99,9 @@
       "dependencies": {
         "@devintern/agent-harness": "workspace:*",
       },
+      "devDependencies": {
+        "@getdevintern/code": "workspace:*",
+      },
     },
     "packages/license-check": {
       "name": "@devintern/license-check",

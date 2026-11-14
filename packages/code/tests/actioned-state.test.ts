@@ -144,6 +144,7 @@ describe("actionedSourceKey", () => {
         const tracker = fakeTracker(() => task, jiraDescribe);
         // The subprocess records under the env-derived key...
         await recordTaskActioned({
+          rereadDelayMs: 0,
           workerState: state,
           source: actionedSourceKeyFromEnv(teamEnv),
           tracker,
@@ -270,6 +271,7 @@ describe("recordTaskActioned + createTaskActionedGate", () => {
     const source = actionedSourceKey("jira");
 
     await recordTaskActioned({
+      rereadDelayMs: 0,
       workerState,
       source,
       tracker,
@@ -309,6 +311,7 @@ describe("recordTaskActioned + createTaskActionedGate", () => {
     const tracker = fakeTracker(githubTask, githubDescribe);
     const source = "github";
     await recordTaskActioned({
+      rereadDelayMs: 0,
       workerState,
       source,
       tracker,
@@ -334,6 +337,7 @@ describe("recordTaskActioned + createTaskActionedGate", () => {
     } as unknown as TaskTrackerClient;
     const source = "github";
     const ok = await recordTaskActioned({
+      rereadDelayMs: 0,
       workerState,
       source,
       tracker: broken,
@@ -376,6 +380,7 @@ describe("recordTaskActioned + createTaskActionedGate", () => {
     } as unknown as TaskTrackerClient;
     const source = "github";
     await recordTaskActioned({
+      rereadDelayMs: 0,
       workerState,
       source,
       tracker: broken,
@@ -401,6 +406,7 @@ describe("recordTaskActioned + createTaskActionedGate", () => {
     } as unknown as TaskTrackerClient;
     const source = "jira";
     await recordTaskActioned({
+      rereadDelayMs: 0,
       workerState,
       source,
       tracker: broken,
@@ -431,6 +437,7 @@ describe("recordTaskActioned + createTaskActionedGate", () => {
     } as unknown as TaskTrackerClient;
     const source = "jira";
     await recordTaskActioned({
+      rereadDelayMs: 0,
       workerState,
       source,
       tracker: broken,
@@ -457,6 +464,7 @@ describe("recordTaskActioned + createTaskActionedGate", () => {
     } as unknown as TaskTrackerClient;
     const source = "github";
     await recordTaskActioned({
+      rereadDelayMs: 0,
       workerState,
       source,
       tracker: broken,
@@ -487,6 +495,7 @@ describe("recordTaskActioned + createTaskActionedGate", () => {
     } as unknown as TaskTrackerClient;
     const source = "github";
     await recordTaskActioned({
+      rereadDelayMs: 0,
       workerState,
       source,
       tracker: broken,
@@ -514,6 +523,7 @@ describe("recordTaskActioned + createTaskActionedGate", () => {
     } as unknown as TaskTrackerClient;
     const source = "github";
     await recordTaskActioned({
+      rereadDelayMs: 0,
       workerState,
       source,
       tracker: broken,

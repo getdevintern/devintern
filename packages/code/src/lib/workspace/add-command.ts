@@ -76,6 +76,8 @@ export interface WorkerAddOptions {
   readStdin?: () => string;
   /** Override {@link WORKER_RESTART_GRACE_MS}; injectable for tests. */
   restartGraceMs?: number;
+  /** Override how often `--wait` re-reads the task row; injectable for tests. */
+  waitPollIntervalMs?: number;
 }
 
 export interface AddOptions {
@@ -468,6 +470,7 @@ export async function runWorkerAdd(
       json: add.json,
       waitTimeoutSeconds: add.waitTimeoutSeconds,
       restartGraceMs: options.restartGraceMs,
+      waitPollIntervalMs: options.waitPollIntervalMs,
     };
     if (add.resume) {
       return await resumeTask(add.resume, context);
@@ -537,6 +540,8 @@ interface TaskContext {
   waitTimeoutSeconds?: number;
   /** How long `--wait` tolerates a missing worker; defaults to the constant. */
   restartGraceMs?: number;
+  /** How often `--wait` re-reads the task row; defaults to the constant. */
+  waitPollIntervalMs?: number;
   store: InjectedTaskStore;
   selectedDir: string;
 }
@@ -795,6 +800,7 @@ async function waitForTask(
   const timeoutSeconds = ctx.waitTimeoutSeconds ?? DEFAULT_WAIT_TIMEOUT_SECONDS;
   const deadline = timeoutSeconds > 0 ? Date.now() + timeoutSeconds * 1_000 : Infinity;
   const restartGraceMs = ctx.restartGraceMs ?? WORKER_RESTART_GRACE_MS;
+  const pollIntervalMs = ctx.waitPollIntervalMs ?? WAIT_POLL_INTERVAL_MS;
   let workerGapSince: number | null = null;
   for (;;) {
     const task = ctx.store.getById(id);
@@ -875,7 +881,7 @@ async function waitForTask(
         );
       }
     }
-    await new Promise((resolveWait) => setTimeout(resolveWait, WAIT_POLL_INTERVAL_MS));
+    await new Promise((resolveWait) => setTimeout(resolveWait, pollIntervalMs));
   }
 }
 

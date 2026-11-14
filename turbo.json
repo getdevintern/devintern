@@ -1,6 +1,6 @@
 {
   "$schema": "https://turbo.build/schema.json",
-  "globalDependencies": [".oxlintrc.json"],
+  "globalDependencies": [".oxlintrc.json", ".github/workflows/ci.yml"],
   "tasks": {
     "build": {
       "dependsOn": ["^build"],

@@ -27,7 +27,12 @@ export interface ReportRedactionOptions {
   maxChars?: number;
 }
 
-const EMAIL_PATTERN = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
+// The lookbehind anchors a match to the start of a local-part run. Without it,
+// a long run with no `@` (a base64 blob, a minified line) is rescanned from
+// every offset, which is quadratic: 100k characters took over two seconds.
+// Leftmost-greedy matching always starts at the run start anyway, so the
+// matches are unchanged.
+const EMAIL_PATTERN = /(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
 // oxlint-disable-next-line no-control-regex -- control characters are removed by design
 const CONTROL_CHARACTERS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g;
 /** Uppercase prefixes that look like tracker keys but are not. */

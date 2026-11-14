@@ -24,5 +24,8 @@
   },
   "dependencies": {
     "@devintern/agent-harness": "workspace:*"
+  },
+  "devDependencies": {
+    "@getdevintern/code": "workspace:*"
   }
 }
