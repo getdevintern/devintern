@@ -204,11 +204,14 @@ describe.concurrent("CLI Argument Handling", () => {
   });
 
   test("should reject removed worker flags", async () => {
-    for (const flag of ["--listen", "--no-workspace", "--port", "--host", "--query", "--no-ui"]) {
-      const result = await runCLI(["worker", flag]);
-      expect(result.stderr).toContain(`${flag} has been removed from devintern worker`);
-      expect(result.exitCode).toBe(1);
-    }
+    const flags = ["--listen", "--no-workspace", "--port", "--host", "--query", "--no-ui"];
+    // Each invocation runs in its own isolated temp dir, so the subprocesses
+    // are independent and can overlap instead of paying startup cost serially.
+    const results = await Promise.all(flags.map((flag) => runCLI(["worker", flag])));
+    flags.forEach((flag, i) => {
+      expect(results[i].stderr).toContain(`${flag} has been removed from devintern worker`);
+      expect(results[i].exitCode).toBe(1);
+    });
   });
 
   test("should show version with --version", async () => {
