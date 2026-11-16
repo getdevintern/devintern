@@ -70,6 +70,25 @@ export interface PullRequestInfo {
    * recent push; absent while GitHub has never computed it.
    */
   mergeable_state?: string;
+  /** Draft PRs are never auto-merged. */
+  draft?: boolean;
+  /** Total changed files (the files API stops listing at 3000). */
+  changed_files?: number;
+}
+
+/** One changed file from `GET /pulls/{n}/files`. */
+export interface PullRequestFile {
+  filename: string;
+  status: string;
+  /** Set for renamed/copied files. */
+  previous_filename?: string;
+}
+
+/** Result of `PUT /pulls/{n}/merge`. */
+export interface PullRequestMergeResult {
+  merged: boolean;
+  sha?: string;
+  message?: string;
 }
 
 export interface FileContent {
@@ -919,6 +938,69 @@ export class GitHubReviewsClient {
       },
     );
     return response.ok ? response.text() : null;
+  }
+
+  /**
+   * List every changed file of a pull request (paginated; GitHub stops at
+   * 3000 files, so callers compare the count with `changed_files`).
+   */
+  async listPullRequestFiles(
+    owner: string,
+    repo: string,
+    prNumber: number,
+  ): Promise<PullRequestFile[]> {
+    const files: PullRequestFile[] = [];
+    for (let page = 1; page <= 30; page++) {
+      const batch = await this.apiRequest<PullRequestFile[]>(
+        "GET",
+        `/repos/${owner}/${repo}/pulls/${prNumber}/files?per_page=100&page=${page}`,
+        owner,
+        repo,
+      );
+      files.push(...batch);
+      if (batch.length < 100) break;
+    }
+    return files;
+  }
+
+  /** List every submitted review on a pull request (paginated). */
+  async listPullRequestReviews(
+    owner: string,
+    repo: string,
+    prNumber: number,
+  ): Promise<Array<{ state: string; user: { login: string } | null }>> {
+    const reviews: Array<{ state: string; user: { login: string } | null }> = [];
+    for (let page = 1; page <= 10; page++) {
+      const batch = await this.apiRequest<Array<{ state: string; user: { login: string } | null }>>(
+        "GET",
+        `/repos/${owner}/${repo}/pulls/${prNumber}/reviews?per_page=100&page=${page}`,
+        owner,
+        repo,
+      );
+      reviews.push(...batch);
+      if (batch.length < 100) break;
+    }
+    return reviews;
+  }
+
+  /**
+   * Merge a pull request, pinned to the head SHA that was evaluated: GitHub
+   * rejects the merge (409) when the head moved since, so commits pushed
+   * after the safety check can never ride along.
+   */
+  async mergePullRequest(
+    owner: string,
+    repo: string,
+    prNumber: number,
+    options: { sha: string; method: "merge" | "squash" | "rebase" },
+  ): Promise<PullRequestMergeResult> {
+    return this.apiRequest<PullRequestMergeResult>(
+      "PUT",
+      `/repos/${owner}/${repo}/pulls/${prNumber}/merge`,
+      owner,
+      repo,
+      { sha: options.sha, merge_method: options.method },
+    );
   }
 
   /**

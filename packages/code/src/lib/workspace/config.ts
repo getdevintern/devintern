@@ -17,6 +17,8 @@ import { parseToml } from "./toml";
 import { parseAgentSelection } from "../agent/selection";
 import type { AgentSelection, HarnessPinnedEntry } from "../agent/selection";
 import { parseDashboardAllowedOriginList } from "../observability/dashboard-origins";
+import { AUTO_MERGE_METHODS } from "../review/merge-gate";
+import type { AutoMergeMethod } from "../review/merge-gate";
 import type { DashboardAllowedOrigin } from "../observability/dashboard-origins";
 
 /** When automatic conflict resolution on the agent's PRs runs. */
@@ -68,6 +70,30 @@ export interface WorkspaceSettings {
    * `agent/selection.ts`). Omitted when none of the keys is set.
    */
   conflictAgent?: AgentSelection;
+  /** Auto-merge of the agent's own PRs (off by default). */
+  autoMerge: AutoMergeSettings;
+}
+
+/**
+ * Auto-merge of the agent's own PRs, from the `[workspace].auto_merge*` keys.
+ * Off by default. See `review/auto-merge.ts` for the gate order.
+ */
+export interface AutoMergeSettings {
+  enabled: boolean;
+  /** GitHub merge strategy (`auto_merge_method`, default `squash`). */
+  method: AutoMergeMethod;
+  /**
+   * Ask the agent about PRs that touch paths outside `safePaths`
+   * (`auto_merge_review`, default true). When false, only PRs entirely
+   * inside the safe paths merge.
+   */
+  review: boolean;
+  /** Globs safe to merge without review (`auto_merge_safe_paths`). */
+  safePaths: string[];
+  /** Globs that block auto-merge entirely (`auto_merge_deny_paths`). */
+  denyPaths: string[];
+  /** Agent for the merge-safety review (`auto_merge_harness` / `_model` / `_effort`). */
+  agent?: AgentSelection;
 }
 
 /** Fleet-wide defaults from the `[defaults]` table. */
@@ -127,6 +153,10 @@ export interface RepoConfig {
    * over `[defaults].pipeline_file`.
    */
   pipelineFile?: string;
+  /** Per-repo `auto_merge_safe_paths`; replaces the workspace list when set. */
+  autoMergeSafePaths?: string[];
+  /** Per-repo `auto_merge_deny_paths`; replaces the workspace list when set. */
+  autoMergeDenyPaths?: string[];
   /** Optional env file path, relative to the workspace directory. */
   envFile?: string;
   /** Inline env overrides (highest precedence). */
@@ -219,6 +249,7 @@ export const DEFAULT_POLL_INTERVAL_SECONDS = 60;
 export const DEFAULT_DASHBOARD = true;
 export const DEFAULT_CI_FAILURE_FIX = false;
 export const DEFAULT_CONFLICT_RESOLUTION: ConflictResolutionMode = "auto";
+export const DEFAULT_AUTO_MERGE_METHOD: AutoMergeMethod = "squash";
 export const DEFAULT_MAX_CONCURRENCY = 1;
 export const DEFAULT_MAX_CONCURRENCY_PER_REPO = 1;
 
@@ -545,6 +576,7 @@ function parseWorkspaceSettings(
     { label: "[workspace]", keyPrefix: "conflict_resolution_" },
     errors,
   );
+  const autoMerge = parseAutoMergePolicy(workspaceTable, errors);
 
   return {
     execution: { isolation, maxConcurrency, maxConcurrencyPerRepo },
@@ -555,6 +587,50 @@ function parseWorkspaceSettings(
     conflictResolution,
     conflictSchedule,
     ...(Object.keys(conflictAgent).length > 0 ? { conflictAgent } : {}),
+    autoMerge,
+  };
+}
+
+/** Read an auto-merge glob list, rejecting absolute and parent-relative globs. */
+function readGlobList(
+  table: Record<string, unknown>,
+  key: string,
+  label: string,
+  errors: string[],
+): string[] {
+  const globs = readStringList(table, key, label, errors);
+  for (const glob of globs) {
+    if (glob.startsWith("/") || glob.split("/").includes("..")) {
+      errors.push(`${label}.${key} entry "${glob}" must be a repo-relative glob.`);
+    }
+  }
+  return globs;
+}
+
+/** Parse the `[workspace].auto_merge*` keys. */
+function parseAutoMergePolicy(
+  workspaceTable: Record<string, unknown>,
+  errors: string[],
+): AutoMergeSettings {
+  const label = "[workspace]";
+  const enabled = readOptionalBoolean(workspaceTable, "auto_merge", label, errors) ?? false;
+  const rawMethod = readString(workspaceTable, "auto_merge_method", label, errors);
+  let method = DEFAULT_AUTO_MERGE_METHOD;
+  if (rawMethod) {
+    if ((AUTO_MERGE_METHODS as readonly string[]).includes(rawMethod)) {
+      method = rawMethod as AutoMergeMethod;
+    } else {
+      errors.push(`${label}.auto_merge_method must be one of: ${AUTO_MERGE_METHODS.join(", ")}.`);
+    }
+  }
+  const agent = parseAgentSelection(workspaceTable, { label, keyPrefix: "auto_merge_" }, errors);
+  return {
+    enabled,
+    method,
+    review: readOptionalBoolean(workspaceTable, "auto_merge_review", label, errors) ?? true,
+    safePaths: readGlobList(workspaceTable, "auto_merge_safe_paths", label, errors),
+    denyPaths: readGlobList(workspaceTable, "auto_merge_deny_paths", label, errors),
+    ...(Object.keys(agent).length > 0 ? { agent } : {}),
   };
 }
 
@@ -718,6 +794,12 @@ function parseReposSection(
           ? defaultPrLabels
           : readStringList(table, "pr_labels", label, errors),
       pipelineFile: readString(table, "pipeline_file", label, errors),
+      ...(table.auto_merge_safe_paths === undefined
+        ? {}
+        : { autoMergeSafePaths: readGlobList(table, "auto_merge_safe_paths", label, errors) }),
+      ...(table.auto_merge_deny_paths === undefined
+        ? {}
+        : { autoMergeDenyPaths: readGlobList(table, "auto_merge_deny_paths", label, errors) }),
       envFile: readString(table, "env_file", label, errors),
       env: readEnvTable(table, label, errors),
     });
@@ -1002,5 +1084,17 @@ export function harnessPinnedJobs(config: WorkspaceConfig): HarnessPinnedEntry[]
     ...config.automations,
     ...config.estimations,
     { id: "conflict resolution", harness: config.workspace.conflictAgent?.harness },
+    { id: "auto-merge review", harness: config.workspace.autoMerge.agent?.harness },
   ];
+}
+
+/** Effective auto-merge path policy for one repository (repo lists replace workspace lists). */
+export function autoMergePathsFor(
+  settings: AutoMergeSettings,
+  repo: Pick<RepoConfig, "autoMergeSafePaths" | "autoMergeDenyPaths">,
+): { safePaths: string[]; denyPaths: string[] } {
+  return {
+    safePaths: repo.autoMergeSafePaths ?? settings.safePaths,
+    denyPaths: repo.autoMergeDenyPaths ?? settings.denyPaths,
+  };
 }
