@@ -33,6 +33,7 @@ function pr(overrides: Partial<PullRequestInfo> = {}): PullRequestInfo {
 interface FakeGitHub extends AutoMergeGitHub {
   merges: Array<{ sha: string; method: string }>;
   comments: string[];
+  labels: string[];
 }
 
 function fakeGitHub(
@@ -41,6 +42,7 @@ function fakeGitHub(
     prs?: PullRequestInfo[];
     reviews?: Array<{ state: string; user: { login: string } | null }>;
     mergeError?: Error;
+    labelError?: Error;
   } = {},
 ): FakeGitHub {
   const prs = overrides.prs ?? [pr()];
@@ -48,6 +50,7 @@ function fakeGitHub(
   const github: FakeGitHub = {
     merges: [],
     comments: [],
+    labels: [],
     getPullRequest: async () => prs[Math.min(fetches++, prs.length - 1)] as PullRequestInfo,
     listFiles: async () => files,
     listReviews: async () => overrides.reviews ?? [],
@@ -59,6 +62,14 @@ function fakeGitHub(
     },
     upsertStatusComment: async (body) => {
       github.comments.push(body);
+    },
+    addLabel: async (label) => {
+      if (overrides.labelError) throw overrides.labelError;
+      github.labels.push(`+${label}`);
+    },
+    removeLabel: async (label) => {
+      if (overrides.labelError) throw overrides.labelError;
+      github.labels.push(`-${label}`);
     },
   };
   return github;
@@ -75,6 +86,7 @@ const basePolicy: AutoMergePolicy = {
   denyPaths: [],
   review: true,
   method: "squash",
+  reviewLabel: "needs-human-review",
 };
 
 function options(
@@ -188,6 +200,40 @@ describe("autoMergePr", () => {
     expect(github.comments[0]).toContain("deny path `db/migrations/**`");
   });
 
+  test("labels PRs left open and unlabels merged ones", async () => {
+    const open = fakeGitHub([file("src/x.ts")]);
+    await autoMergePr(URL, options(open, { verdict: '{"safe": false, "reason": "risky"}' }));
+    expect(open.labels).toEqual(["+needs-human-review"]);
+
+    const merged = fakeGitHub([file("README.md")]);
+    await autoMergePr(URL, options(merged));
+    expect(merged.labels).toEqual(["-needs-human-review"]);
+
+    const failing = fakeGitHub([file("src/x.ts")]);
+    await autoMergePr(URL, options(failing, { verdict: "no json" }));
+    expect(failing.labels).toEqual([]);
+    await autoMergePr(URL, options(failing, { verdict: "no json", lastAttempt: true }));
+    expect(failing.labels).toEqual(["+needs-human-review"]);
+  });
+
+  test("label calls are skipped when disabled, in dry runs, and never fail the run", async () => {
+    const disabled = fakeGitHub([file("src/x.ts")]);
+    await autoMergePr(URL, options(disabled, { policy: { ...basePolicy, reviewLabel: "" } }));
+    expect(disabled.labels).toEqual([]);
+
+    const dry = fakeGitHub([file("src/x.ts")]);
+    await autoMergePr(
+      URL,
+      options(dry, { dryRun: true, verdict: '{"safe": false, "reason": "x"}' }),
+    );
+    expect(dry.labels).toEqual([]);
+
+    const broken = fakeGitHub([file("README.md")], { labelError: new Error("403") });
+    const result = await autoMergePr(URL, options(broken));
+    expect(result.outcome).toBe("merged");
+    expect(broken.merges).toHaveLength(1);
+  });
+
   test("a truncated file list is rejected", async () => {
     const github = fakeGitHub([file("README.md")], { prs: [pr({ changed_files: 3500 })] });
     expect((await autoMergePr(URL, options(github))).outcome).toBe("rejected");
@@ -208,6 +254,7 @@ describe("autoMergePr", () => {
     expect(github.merges).toHaveLength(0);
     // "Not ready yet" is not a decision: nothing is posted.
     expect(github.comments).toHaveLength(0);
+    expect(github.labels).toHaveLength(0);
   });
 
   test("outstanding change requests block the merge", async () => {

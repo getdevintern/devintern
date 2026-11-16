@@ -18,6 +18,9 @@ export type AutoMergeMethod = "merge" | "squash" | "rebase";
 
 export const AUTO_MERGE_METHODS: readonly AutoMergeMethod[] = ["merge", "squash", "rebase"];
 
+/** Default label for PRs auto-merge leaves open (`auto_merge_review_label`). */
+export const DEFAULT_AUTO_MERGE_REVIEW_LABEL = "needs-human-review";
+
 /**
  * Paths that are never auto-merged, regardless of configuration: CI
  * workflows can exfiltrate secrets or weaken checks, CODEOWNERS controls who

@@ -60,6 +60,12 @@ export function autoMergeCliArgs(
     ...(policy.review ? [] : ["--no-review"]),
     ...policy.safePaths.flatMap((glob) => ["--safe-path", glob]),
     ...policy.denyPaths.flatMap((glob) => ["--deny-path", glob]),
+    // Unset keeps the CLI default label; empty disables labeling.
+    ...(policy.reviewLabel === undefined
+      ? []
+      : policy.reviewLabel
+        ? ["--review-label", policy.reviewLabel]
+        : ["--no-review-label"]),
   ];
 }
 

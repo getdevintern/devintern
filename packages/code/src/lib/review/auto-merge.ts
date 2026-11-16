@@ -39,6 +39,11 @@ export interface AutoMergePolicy extends MergePathPolicy {
   /** Ask the agent about PRs that leave the safe paths (otherwise skip them). */
   review: boolean;
   method: AutoMergeMethod;
+  /**
+   * Label added to PRs left open for a human and removed when auto-merge
+   * merges them. Unset or empty disables labeling.
+   */
+  reviewLabel?: string;
 }
 
 /**
@@ -86,6 +91,10 @@ export interface AutoMergeGitHub {
   merge(sha: string, method: AutoMergeMethod): Promise<PullRequestMergeResult>;
   /** Create or edit the PR's auto-merge status comment. */
   upsertStatusComment(body: string): Promise<void>;
+  /** Add a label to the PR (GitHub creates a missing label). */
+  addLabel(label: string): Promise<void>;
+  /** Remove a label from the PR; absent labels are not an error. */
+  removeLabel(label: string): Promise<void>;
 }
 
 export interface AutoMergeOptions {
@@ -201,6 +210,8 @@ function defaultGitHub(owner: string, repo: string, prNumber: number): AutoMerge
     merge: (sha, method) => client.mergePullRequest(owner, repo, prNumber, { sha, method }),
     upsertStatusComment: (body) =>
       client.upsertMarkedIssueComment(owner, repo, prNumber, AUTO_MERGE_COMMENT_MARKER, body),
+    addLabel: (label) => client.addIssueLabels(owner, repo, prNumber, [label]),
+    removeLabel: (label) => client.removeIssueLabel(owner, repo, prNumber, label),
   };
 }
 
@@ -487,12 +498,26 @@ async function reviewWithAgent(params: {
   }
 }
 
-/** Create or edit the PR's status comment (never in dry runs); failures only warn. */
+/**
+ * Create or edit the PR's status comment and sync the review label: added
+ * when the PR is left open, removed on merge. Never in dry runs; failures
+ * only warn.
+ */
 async function postStatus(ctx: GateContext, status: AutoMergeCommentStatus): Promise<void> {
   if (ctx.options.dryRun || ctx.options.noComment) return;
   try {
     await ctx.github.upsertStatusComment(buildAutoMergeStatusComment(status));
   } catch (error) {
     console.warn(`⚠️  Failed to update the auto-merge status comment: ${(error as Error).message}`);
+  }
+  const label = ctx.options.policy.reviewLabel?.trim();
+  if (!label) return;
+  const leftOpen = status.kind === "left-open";
+  try {
+    await (leftOpen ? ctx.github.addLabel(label) : ctx.github.removeLabel(label));
+  } catch (error) {
+    console.warn(
+      `⚠️  Failed to ${leftOpen ? "add" : "remove"} the ${label} label: ${(error as Error).message}`,
+    );
   }
 }
