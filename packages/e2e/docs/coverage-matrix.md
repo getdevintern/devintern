@@ -5,7 +5,7 @@ partially exercises, and what is still missing. The `e2e-expander` workspace
 automation scouts this file and delegates the highest-value gaps to the worker
 as separate ad-hoc tasks. Each delegated task updates this file in its own PR.
 
-Last reviewed: 2026-11-16.
+Last reviewed: 2026-11-17.
 
 ## Status legend
 
@@ -148,7 +148,8 @@ Run: `bun run --filter @devintern/e2e test` (build the CLI first); the sandbox s
 | Behavior                                                                                                | Status             | Evidence                                                                                   | Missing                                                                          |
 | ------------------------------------------------------------------------------------------------------- | ------------------ | ------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------- |
 | Daemon: injected task drain, branch/PR, run record, worktree cleanup, graceful stop                     | `default` / `live` | `tests/local/worker.test.ts`, `tests/code/gitlab-worker.test.ts`                           | —                                                                                |
-| Tracker polling and actioned deduplication                                                              | `live`             | GitLab worker suite                                                                        | GitHub/Jira/Trello/Linear/Asana/Azure worker paths.                              |
+| Tracker polling and actioned deduplication                                                              | `live`             | GitLab worker suite                                                                        | GitHub/Jira/Trello/Linear/Asana worker paths (Azure DevOps: next row).           |
+| Azure DevOps polling: `ChangedDate` day delta, exactly-once pickup, dedupe, re-arm, cursor restart      | `default`          | `tests/local/worker-azure-devops-polling.test.ts` (`bun run --filter @devintern/e2e test`) | Live project; actioned-with-PR gate (no PR on a bare remote); WIQL time zone.    |
 | Scheduled `[[automations]]`: schedule, no-op, branch/push policy, hot reload                            | `default`          | `tests/local/worker-automations.test.ts` (`bun run --filter @devintern/e2e test`)          | PR creation on a live code host (bare remote exposes no platform).               |
 | Scheduled `[[estimations]]`                                                                             | `default`          | `tests/local/worker-scheduled-estimation.test.ts` (`bun run --filter @devintern/e2e test`) | Live Jira project field behavior.                                                |
 | Working windows / quiet hours                                                                           | `default`          | `tests/local/worker-working-windows.test.ts`                                               | Additional timezone and daylight-saving scenarios.                               |
