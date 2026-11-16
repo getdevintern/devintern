@@ -31,6 +31,7 @@ import { DEFAULT_AUTO_REVIEW_ITERATIONS } from "../review/auto-review-config";
 import { shouldSkipRetry } from "../state/retry-gate";
 import { clearRetryState, getRetryState } from "../state/retry-state";
 import { actionedSourceKeyFromEnv, recordTaskActioned } from "./actioned-state";
+import { recordActionedWithoutPr } from "./actioned-without-pr";
 import { WorkerState } from "../state/worker-state";
 import { QUEUE_CLAIM_ENV } from "../workspace/queue-failure-reason";
 import {
@@ -364,53 +365,19 @@ async function runImplementation(input: ImplementationInput): Promise<void> {
       } finally {
         workerState.close();
       }
-    } else if (isWorkerTaskProcess()) {
-      await recordActionedWithoutPr(tracker, task, workflowKey);
+    } else {
+      await recordActionedWithoutPr({
+        tracker,
+        task,
+        taskKey: workflowKey,
+        prCreationFailure: runContext.activeTaskContext?.prCreationFailure,
+      });
     }
     await finishTaskRun("succeeded");
     // A later reopen of the ticket starts with a clean retry slate.
     clearRetryState(workflowKey);
   }
   runContext.activeTaskContext = null;
-}
-
-/**
- * Record a successful worker run that produced no PR as actioned.
- *
- * `applyActionedTransition` only runs after a PR is created. When PR creation
- * fails (for example an unsupported code host) or `--create-pr` is not in
- * `worker_task_args`, the run still succeeds, but the worker's own comment and
- * status transition bump the ticket's `updated` stamp. Without a marker the
- * polling dedupe sees a new stamp and re-implements the unchanged ticket on
- * every tick. The marker is captured after those writes, so only a human edit
- * (summary, description, status, labels) re-arms the ticket. A marker already
- * written by the PR path is left untouched. Never fails the run.
- */
-async function recordActionedWithoutPr(
-  tracker: TaskTrackerClient,
-  task: Parameters<typeof recordTaskActioned>[0]["fallbackTask"],
-  taskKey: string,
-): Promise<void> {
-  let workerState: WorkerState | undefined;
-  try {
-    workerState = new WorkerState();
-    const source = actionedSourceKeyFromEnv();
-    if (workerState.getTaskActioned(source, taskKey)) return;
-    const marked = await recordTaskActioned({
-      workerState,
-      source,
-      tracker,
-      taskKey,
-      fallbackTask: task,
-    });
-    if (marked) {
-      console.log(`✅ Recorded ${taskKey} as actioned (no PR) so it is not re-implemented`);
-    }
-  } catch (error) {
-    console.warn(`⚠️  Failed to record ${taskKey} as actioned: ${(error as Error).message}`);
-  } finally {
-    workerState?.close();
-  }
 }
 
 /** Identifies the task attempt for failure handling. */
