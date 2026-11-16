@@ -16,6 +16,13 @@ import {
 import { triggerAutomation, usePoll } from "@/lib/api";
 import type { AutomationSchedule, AutomationsResponse } from "@/lib/api";
 import { groupAutomationsByRepo, showsGroupHeaders } from "@/lib/automation-groups";
+import {
+  jobKind,
+  jobKindLabel,
+  jobTitle,
+  runNowHint,
+  runStartedMessage,
+} from "@/lib/scheduled-jobs";
 import { formatRunOrigin } from "@/lib/run-origin";
 import { cn, formatAge, formatTime } from "@/lib/utils";
 import { formatNextRun, humanizeSchedule } from "@/views/automation-schedule";
@@ -70,6 +77,9 @@ function AutomationRow({
   const started = startedId === automation.id;
   const lastRun = automation.lastRun;
   const human = automation.schedule ? humanizeSchedule(automation.schedule) : undefined;
+  const kind = jobKind(automation);
+  const kindLabel = jobKindLabel(kind);
+  const title = jobTitle(automation);
   return (
     <TableRow onClick={() => onOpenAutomation(automation.id)} className="auto-row cursor-pointer">
       <TableCell className="auto-cell-name max-w-xs px-4 py-2.5 font-medium md:max-w-md">
@@ -80,8 +90,20 @@ function AutomationRow({
             title={automation.id}
             onClick={(event) => event.stopPropagation()}
           >
-            {automation.id}
+            {title}
           </a>
+          {kindLabel ? (
+            <span
+              className="shrink-0 rounded-sm border border-border px-1 text-[0.6875rem] font-normal text-subtle-foreground"
+              title={
+                kind === "estimation"
+                  ? `Story-point estimation sweep${automation.query ? ` · ${automation.query}` : ""}`
+                  : "Scheduled conflict resolution on the agent's pull requests"
+              }
+            >
+              {kindLabel}
+            </span>
+          ) : null}
           {automation.openPr ? (
             <span
               className="inline-flex shrink-0 text-subtle-foreground"
@@ -126,7 +148,7 @@ function AutomationRow({
             <button
               type="button"
               className="inline-flex items-center gap-2 rounded-sm focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:outline-none"
-              aria-label={`Open last run for ${automation.id}`}
+              aria-label={`Open last run for ${title}`}
               title={`${formatRunOrigin(lastRun.origin)} · ${formatTime(lastRun.startedAt)}`}
               onClick={(event) => {
                 event.stopPropagation();
@@ -159,8 +181,8 @@ function AutomationRow({
             disabled={busy}
             aria-busy={busy || undefined}
             onClick={() => onRunNow(automation)}
-            aria-label={`Run ${automation.id} now`}
-            title="Runs through the same pipeline as a scheduled run and is recorded with the manual origin"
+            aria-label={`Run ${title} now`}
+            title={runNowHint(kind)}
           >
             {started ? <Check className="text-success" /> : <Play />}{" "}
             {busy ? "Starting…" : started ? "Started" : "Run now"}
@@ -276,15 +298,12 @@ export function useRunNow(refresh: () => void) {
       const { ok, body } = await triggerAutomation(automation.id);
       if (ok) {
         setStartedId(automation.id);
-        setFeedback({
-          kind: "success",
-          message: `Manual run of ${automation.id} started. It will appear in the run list with origin "Manual run" shortly.`,
-        });
+        setFeedback({ kind: "success", message: runStartedMessage(automation) });
         refresh();
       } else {
         setFeedback({
           kind: "error",
-          message: body.error ?? `Could not trigger ${automation.id}.`,
+          message: body.error ?? `Could not trigger ${jobTitle(automation)}.`,
         });
       }
     } catch (cause: unknown) {
@@ -300,7 +319,11 @@ export function useRunNow(refresh: () => void) {
   return { busyId, startedId, feedback, runNow };
 }
 
-/** Scheduled automations; open one for its prompt and recent runs. */
+/**
+ * Scheduled jobs — prompt automations, estimation sweeps, and the scheduled
+ * conflict-resolution window — each with an on-demand "Run now"; open one for
+ * its prompt (or query) and recent runs.
+ */
 export function AutomationsView({ onOpenRun }: { onOpenRun: (id: number) => void }) {
   const { data, error, refresh } = usePoll<AutomationsResponse>("/api/automations");
   const { busyId, startedId, feedback, runNow } = useRunNow(refresh);
@@ -313,8 +336,8 @@ export function AutomationsView({ onOpenRun }: { onOpenRun: (id: number) => void
 
       {data && data.automations.length === 0 ? (
         <EmptyState
-          title="No automations configured"
-          body='Add [[automations]] entries (a schedule plus a prompt) to workspace.toml — or .devintern-code/automations.toml for a single repo. The worker reloads workspace changes automatically; "Run now" then appears here for instant validation.'
+          title="No scheduled jobs configured"
+          body='Add [[automations]] entries (a schedule plus a prompt) or [[estimations]] sweeps to workspace.toml — or .devintern-code/automations.toml for a single repo — or set conflict_resolution = "scheduled". The worker reloads workspace changes automatically; "Run now" then appears here for instant validation.'
         />
       ) : null}
 

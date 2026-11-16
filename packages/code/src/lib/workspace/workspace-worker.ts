@@ -55,6 +55,7 @@ import type { AutomationConfig } from "../automation/config";
 import { automationTaskArgs } from "../automation/config";
 import { AutomationStateStore } from "../automation/state";
 import { EstimationAcquirer } from "../automation/estimation-acquirer";
+import { composeScheduledJobActions } from "../automation/scheduled-jobs";
 import { warnUninstalledHarnessPins } from "../agent/selection";
 import { createTaskSupervisor, JobNotStartedError } from "../worker/supervisor";
 import type { TaskSupervisor } from "../worker/supervisor";
@@ -951,10 +952,6 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       );
     },
   });
-  const automationActions = {
-    list: () => fleetAutomationAcquirer.listSchedules(),
-    trigger: (automationId: string) => fleetAutomationAcquirer.triggerManual(automationId),
-  };
   acquirers.push(fleetAutomationAcquirer);
 
   // Cadence reconciliation: applied on successful reloads of poll_interval.
@@ -983,6 +980,16 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       ),
   });
   acquirers.push(estimationAcquirer);
+
+  // Dashboard Automations page: prompt automations, estimation sweeps, and the
+  // scheduled conflict window, each with an on-demand "Run now". The conflict
+  // hooks are published later by buildFleetEventAcquirers, so resolve lazily.
+  const automationActions = composeScheduledJobActions({
+    automations: fleetAutomationAcquirer,
+    estimations: estimationAcquirer,
+    conflicts: () => eventReloadHooks.hooks,
+    conflictAgent: () => config.workspace.conflictAgent,
+  });
 
   // Error-monitor adapters share one provider-neutral acquirer. Each source
   // is pinned to a repo (and optionally a team), so projects with different
