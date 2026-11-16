@@ -15,8 +15,12 @@
  * applies to a correct route with an unexpected organization, project, or
  * issue id.
  *
- * The server binds `127.0.0.1:0`, accepts any Bearer token, never reads or logs
- * credentials, and never makes outbound requests.
+ * The server binds `127.0.0.1:0` and never makes outbound requests. By default
+ * it accepts any Bearer token; with `expectedToken` set, issue-list reads with
+ * any other `Authorization` header get Sentry's 401. Received headers are kept
+ * in memory only so a test can ask `receivedBearer(token)`. They are never
+ * logged or included in diagnostics, so a failing assertion cannot print a
+ * credential.
  */
 
 /** Issue fields the product reads from a Sentry issue-list row. */
@@ -47,6 +51,11 @@ export interface FakeSentryOptions {
   project?: string;
   /** Override fields on the one seeded issue. */
   issue?: Partial<FakeSentryIssue>;
+  /**
+   * When set, issue-list reads must send `Authorization: Bearer <expectedToken>`;
+   * anything else gets a 401 like Sentry's invalid-token response.
+   */
+  expectedToken?: string;
 }
 
 /** One captured issue-list request, for assertions about the query the client sends. */
@@ -95,6 +104,9 @@ export class FakeSentryServer {
   private readonly organization: string;
   private readonly project: string;
   private readonly issue: FakeSentryIssue;
+  private readonly expectedToken: string | undefined;
+  private readonly authorizationHeaders: Array<string | null> = [];
+  private rejectedAuth = 0;
   private readonly comments: FakeSentryComment[] = [];
   private readCount = 0;
   private readonly server: ReturnType<typeof Bun.serve>;
@@ -104,6 +116,7 @@ export class FakeSentryServer {
     this.organization = options.organization ?? "e2e-org";
     this.project = options.project ?? "e2e-project";
     this.issue = { ...DEFAULT_ISSUE, ...options.issue };
+    this.expectedToken = options.expectedToken;
     this.server = Bun.serve({
       hostname: "127.0.0.1",
       port: 0,
@@ -138,6 +151,24 @@ export class FakeSentryServer {
     return this.readCount;
   }
 
+  /** Number of seeded unresolved issues every list read returns. */
+  get seededIssueCount(): number {
+    return this.issuePayloads().length;
+  }
+
+  /** Issue-list reads rejected with 401 because of a wrong or missing token. */
+  get rejectedAuthCount(): number {
+    return this.rejectedAuth;
+  }
+
+  /**
+   * Whether any issue-list read carried `Authorization: Bearer <token>`.
+   * Returns a boolean so assertions never echo the header value.
+   */
+  receivedBearer(token: string): boolean {
+    return this.authorizationHeaders.includes(`Bearer ${token}`);
+  }
+
   /** Captured comment bodies, in the order the worker posted them. */
   get commentBodies(): string[] {
     return this.comments.map((comment) => comment.text);
@@ -165,12 +196,18 @@ export class FakeSentryServer {
 
     const projectIssues = path.match(/^\/api\/0\/projects\/([^/]+)\/([^/]+)\/issues\/$/);
     if (method === "GET" && projectIssues) {
-      return this.listIssues(url, path, decode(projectIssues[1]), decode(projectIssues[2]));
+      return this.listIssues(
+        request,
+        url,
+        path,
+        decode(projectIssues[1]),
+        decode(projectIssues[2]),
+      );
     }
 
     const organizationIssues = path.match(/^\/api\/0\/organizations\/([^/]+)\/issues\/$/);
     if (method === "GET" && organizationIssues) {
-      return this.listIssues(url, path, decode(organizationIssues[1]));
+      return this.listIssues(request, url, path, decode(organizationIssues[1]));
     }
 
     const comments = path.match(/^\/api\/0\/organizations\/([^/]+)\/issues\/([^/]+)\/comments\/$/);
@@ -181,7 +218,19 @@ export class FakeSentryServer {
     return this.unmatched(method, path);
   }
 
-  private listIssues(url: URL, path: string, organization: string, project?: string): Response {
+  private listIssues(
+    request: Request,
+    url: URL,
+    path: string,
+    organization: string,
+    project?: string,
+  ): Response {
+    const authorization = request.headers.get("authorization");
+    this.authorizationHeaders.push(authorization);
+    if (this.expectedToken !== undefined && authorization !== `Bearer ${this.expectedToken}`) {
+      this.rejectedAuth++;
+      return json({ detail: "Invalid token" }, 401);
+    }
     if (organization !== this.organization || (project !== undefined && project !== this.project)) {
       return this.unmatched(
         "GET",
@@ -200,7 +249,7 @@ export class FakeSentryServer {
       perPage: url.searchParams.get("per_page"),
     });
 
-    return json([this.issuePayload()]);
+    return json(this.issuePayloads());
   }
 
   private async addComment(
@@ -229,6 +278,10 @@ export class FakeSentryServer {
     // Sentry's comment endpoint answers with a comment payload; the client
     // only checks the status, so an empty successful response is sufficient.
     return new Response(null, { status: 201 });
+  }
+
+  private issuePayloads(): Array<Record<string, unknown>> {
+    return [this.issuePayload()];
   }
 
   private issuePayload(): Record<string, unknown> {

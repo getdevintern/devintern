@@ -155,6 +155,33 @@ bun run --filter @getdevintern/code build
 bun run --filter @devintern/e2e test
 ```
 
+## Worker connect validation and Sentry connect
+
+`tests/local/worker-connect.test.ts` runs the built CLI's `devintern worker
+connect` against a workspace bootstrapped with `worker scaffold` and
+`worker add-repo`. `WORKER_RELAY_URL` and `DEVINTERN_API_BASE` point at a
+loopback recorder, and every case asserts it received zero requests.
+
+- Unsupported targets, `--team` with `status`/`sentry`, `--repo` with a
+  non-Sentry target, `--disconnect` with a non-GitLab target, and a missing
+  `--workspace` each exit 1 with their exact error. `workspace.toml`, `.env`,
+  and `env/` stay byte-identical. `--help` lists every target.
+- `connect sentry` with piped (non-TTY) stdin exits 1 and writes nothing.
+- The interactive Sentry flow runs on a Bun pseudo-terminal
+  (`Bun.spawn({ terminal })`) against `providers/fake-sentry.ts`. A valid token
+  writes exactly one `[[error_monitors]]` entry and a mode-`0600` token file,
+  and the token stays out of `workspace.toml`. A re-run with `SENTRY_AUTH_TOKEN`
+  in the environment adds no duplicate. A token the fake rejects with 401
+  writes nothing. An unknown `--repo` fails before any prompt, and in a
+  two-repo workspace cwd's `origin` selects the repository.
+- The token prompt is visible by design, so the PTY echoes the typed token once.
+  The suite asserts it appears exactly once, right after its prompt, so the
+  CLI's own log lines never repeat it.
+
+PTY cases skip with a logged reason only where Bun has no pseudo-terminal
+support (Windows). Relay targets need a signed-in relay session and stay out of
+this offline suite.
+
 ## Scheduled workspace automations
 
 `tests/local/worker-automations.test.ts` starts one real `devintern worker`
