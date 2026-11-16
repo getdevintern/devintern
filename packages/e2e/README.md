@@ -60,6 +60,22 @@ hooks and agent configuration are excluded. Tokens are passed through the
 environment and Git askpass, never embedded in remote URLs or command arguments.
 Telemetry, updates and license checks are disabled for the test subprocesses.
 
+### Proxy environments
+
+The suite can run where an HTTP proxy is configured, such as a DevIntern worker,
+a CI sandbox, or a corporate network. A preload (`bunfig.toml` →
+`tests/setup/loopback-no-proxy.ts`) appends `localhost`, `127.0.0.1`, `::1` and
+the bracketed `[::1]` to both `NO_PROXY` and `no_proxy`. The dashboard and
+webhook fixtures apply the same step when they start, which covers runs from the
+repo root that skip this package's bunfig. With these entries, health polls and
+API fetches against `http://[::1]:<port>` go straight to the fixture. Some Bun
+versions (seen on 1.4.2) do not match a bare `::1` entry against a bracketed URL
+host. In that case the request goes through the proxy and times out, which looks
+like a dashboard bug. Proxy variables are not unset, so suites that reach remote
+endpoints still use the proxy. When a test needs to change these variables,
+assign new values instead of using `delete`. On Bun 1.4.2, fetch falls back to
+the process's startup value of a deleted variable.
+
 Cleanup closes PRs and deletes the exact branches owned by each scenario,
 including when an assertion fails. Closed PRs remain as GitHub history. Cleanup
 failures fail the test and identify the branches. A forcibly killed runner can
