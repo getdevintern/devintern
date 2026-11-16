@@ -473,6 +473,57 @@ test("idle with history keeps the calm line and a closed finished list", () => {
   expect(html).not.toContain('aria-label="Runs in progress"');
 });
 
+test("queued work sits in a closed disclosure with per-item details", () => {
+  const html = renderToStaticMarkup(
+    createElement(OverviewScreen, {
+      overview: overview(),
+      workerInfo,
+      activityRuns: [],
+      queuedWork: {
+        total: 3,
+        items: [
+          {
+            id: "ad-hoc:1",
+            kind: "ad-hoc",
+            title: "Add dark mode",
+            taskKey: "local-add-dark-mode",
+            repo: "acme/web",
+            actor: "local:add",
+            createdAt: NOW - 5 * MINUTE,
+            body: "Use the **system** preference.",
+          },
+          {
+            id: "retry:4",
+            kind: "retry",
+            title: "Fix flaky checkout",
+            taskKey: "DEV-12",
+            createdAt: NOW - 2 * MINUTE,
+            notBefore: NOW + 10 * MINUTE,
+            deferCount: 2,
+            runId: 31,
+          },
+        ],
+      },
+      now: NOW,
+    }),
+  );
+  expect(html).toContain('aria-label="Queued work"');
+  expect(html).not.toContain("<details open");
+  expect(html).toContain("next: Add dark mode");
+  expect(html).toContain("Ad-hoc task");
+  expect(html).toContain("Queued by local:add");
+  expect(html).toContain(">system</strong>");
+  expect(html).toContain("Backing off · deferred 2×");
+  expect(html).toContain("in 10m");
+  expect(html).toContain('href="#/runs/31"');
+  expect(html).toContain("1 more queued item not shown");
+});
+
+test("an empty queue renders no queued disclosure", () => {
+  const html = renderWork([]);
+  expect(html).not.toContain("Queued work");
+});
+
 test("without a config the window is unknown, not around the clock", () => {
   const html = render(overview({ config: { status: "missing", path: "/w/workspace.toml" } }));
 

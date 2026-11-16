@@ -49,9 +49,10 @@ Step tracking follows the task pipeline, including preparation, feasibility, imp
 
 When the worker is stopped or every agent harness is usage-limited, in-progress runs are not advancing. Their rows turn neutral, stop pulsing, show when they started instead of a running clock, and say why in a tooltip. A run interrupted before recovery may still be recorded as in progress until the worker reconciles its history.
 
-Two lists sit below the running rows:
+Three lists sit below the running rows:
 
 - **Waiting to retry** appears only when a task's latest attempt was deferred in the last 48 hours (for example after an agent usage limit), with the reason and the step it stopped at.
+- **Queued** appears only when the worker has accepted work it has not started yet: ad-hoc tasks from `devintern worker add` or **New task**, retries scheduled from the dashboard, and pull request events waiting for pickup. It is collapsed by default, and its header names the next item. Rows are ordered by when they become eligible and show the source, repository, and how long the item has waited, or when a deferred task's backoff ends. Select a row to expand its details: who queued it, deferrals and attempts, the last error, the full ad-hoc prompt, or a link to the run being retried. Up to 50 items per source are listed; `GET /api/queue` returns the same list as JSON.
 - **Recently finished** is collapsed by default and holds the last five finished tasks with their outcome and pull request. **View all runs** opens the full history in **Runs**.
 
 Repeat attempts at the same task are folded into one row. The former **Task activity** page now lives here; old `#/activity` links open **Overview**.
