@@ -587,7 +587,8 @@ The fake binds `127.0.0.1:0` on a single `POST /graphql` endpoint, accepts any
 Todo/In Progress/In Review workflow states, issues, labels, and markdown
 comments. It implements only the operations the product calls: `IssueById`,
 `IssueComments`, `TeamStates`, `CommentCreate`, `IssueUpdate`, and
-`SearchIssues`. Any other operation or malformed payload returns a diagnostic
+`SearchIssues` (filters on `title`/`description`, `state.name`, `team.key`,
+and `updatedAt` comparators; anything else is rejected). Any other operation or malformed payload returns a diagnostic
 GraphQL error and fails the test through `unexpectedOperations`.
 
 The fixture supplies `TASK_TRACKER=linear`, a synthetic `LINEAR_API_KEY`, and
@@ -949,6 +950,34 @@ PR CI.
 ### Incomplete task retry gate
 
 `tests/local/tracker-force-retry-gate.test.ts` verifies that an unchanged incomplete Jira task is skipped until `--force` requests a retry.
+
+### Linear worker polling
+
+`tests/local/worker-linear-polling.test.ts` runs the built `devintern worker`
+daemon with `tracker = "linear"`, a status-based JSON IssueFilter
+`task_query` (team key plus the `Todo` state), `poll_interval = 1`, the
+deterministic agent, and a local bare remote, against the same in-process
+Linear fake (`LINEAR_API_URL` points at loopback; `NO_PROXY` covers loopback).
+It records every `SearchIssues` request the fake receives and asserts:
+
+- the first tick evaluates the user's query directly (no cursor yet), picks up
+  the one ready issue, pushes `feature/<key>`, writes a run record and the
+  implementation comment, and moves the issue to In Progress; a Backlog decoy
+  is never touched;
+- later ticks send the bare change-detector filter
+  `{"updatedAt":{"gt":"<ISO>"}}`, whose bound is the previous tick's detection
+  time minus the 5-minute `DELTA_LOOKBACK_MS`;
+- idle polls start no run, moving a Backlog issue to `Todo` runs it exactly
+  once, and after a graceful stop/start on the same queue DB the first request
+  is the delta built from the saved cursor;
+- with `--skip-comments` (no tracker writes) an unchanged ready issue keeps
+  matching the query yet is skipped by the `(key, updatedAt)` dedupe across
+  polls and the restart, and a new comment (new `updatedAt`) runs it once more.
+
+The fake runs with `clock: "wall"` so its `updatedAt` stamps fall inside the
+detector's real-time window. No prerequisites beyond the built CLI; the test
+skips when `packages/code/dist/index.js` is absent. Run it alone with
+`bun test tests/local/worker-linear-polling.test.ts` from `packages/e2e`.
 
 ### Multi-repo team routing
 

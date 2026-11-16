@@ -32,7 +32,7 @@ test data into the trackers a worker actually uses.
 | GitHub Issues       | no                 | `test:e2e:tracker`                     | Existing live suite; dedicated tracker repository doubles as code host.                                                                                                                 |
 | Local GitLab Issues | no                 | `test:e2e:tracker:gitlab`              | Existing live suite; creates and deletes a dedicated project.                                                                                                                           |
 | GitLab.com Issues   | no                 | `test:e2e:tracker:gitlab-com`          | Existing live suite; pre-created project, issues only, project retained.                                                                                                                |
-| Linear              | yes (offline fake) | none                                   | Fake lifecycle: key/`--query`, workflow state, comment, decoy isolation. Live Layer 2 team/project lifecycle, estimation, and attachments remain future work.                           |
+| Linear              | yes (offline fake) | none                                   | Fake lifecycle: key/`--query`, workflow state, comment, decoy isolation; offline worker polling. Live Layer 2 team/project lifecycle, estimation, attachments remain future work.       |
 | Asana               | yes (offline fake) | none                                   | Fake lifecycle: key/`--query`, section transition, comment, decoy isolation.                                                                                                            |
 | Azure DevOps        | yes (offline fake) | none                                   | Fake lifecycle: key/`--query`, state transition, comment, decoy isolation.                                                                                                              |
 
@@ -280,7 +280,16 @@ Operations covered:
 - `CommentCreate` (markdown comment bodies)
 - `IssueUpdate` (`stateId`, plus `estimate`/`labelIds`/title/description fields)
 - `SearchIssues` (JSON IssueFilter with `title`/`description` string
-  conditions and `and`/`or`, plus plain-text title contains)
+  conditions, `state.name`/`team.key` equality, `updatedAt`
+  `gt`/`gte`/`lt`/`lte` date bounds, and `and`/`or`, plus plain-text title
+  contains); every request is recorded in `searchRequests`
+
+`tests/local/worker-linear-polling.test.ts` drives the worker daemon against
+the same fake (with `clock: "wall"` so `updatedAt` falls inside the detector's
+real-time window). It pins the change detector's bare
+`{"updatedAt":{"gt":"<cursor - 5m>"}}` request, status-query pickup and re-arm,
+`(key, updatedAt)` dedupe for an unchanged ready issue, and reuse of the saved
+cursor after a graceful restart on the same queue DB.
 
 Any other operation or malformed payload returns a diagnostic GraphQL error and
 is recorded in `unexpectedOperations`, which both scenarios assert is empty.
