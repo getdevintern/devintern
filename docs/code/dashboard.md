@@ -23,6 +23,7 @@ It starts automatically with `devintern worker`. Open [http://localhost:4400](ht
 - Read the raw agent transcript for any harness execution under the run (clarity, implementation, review, and more)
 - Open the task or pull request behind a run
 - Understand why a run failed and retry it after fixing the cause
+- Report a DevIntern bug for a run, with a preview of exactly what is sent
 - Run a recurring automation immediately instead of waiting for its next scheduled time
 - Hand the worker a one-off task with **New task**, without creating a tracker ticket
 - Review recent worker logs when something needs attention
@@ -73,6 +74,12 @@ Open the failed run and choose **Retry**. The worker queues a fresh attempt usin
 Retry after correcting the underlying problem, for example missing credentials, unclear task details, or a temporary agent failure. The dashboard prevents duplicate retries while another attempt is already queued or running.
 
 Ad-hoc tasks created with `devintern worker add` show **Re-queue task** instead: the queue row is put back as `pending` under its existing key, so the worker resumes the interrupted attempt's branch and report rather than opening a second branch and pull request. The worker also auto-resumes an interrupted ad-hoc task once at startup when its prior local run recorded a resumable branch with either an implementation report or commits ahead of the repo's base (unless the interrupted attempt's child process is still alive; the row then stays `running` and is re-checked at the next startup, and re-queueing is refused with the pid to stop first); **Re-queue task** remains available for rows that were not resumable or whose automatic-resume budget is exhausted. If the row was already pruned (30 days by default) or is still queued/running, the run detail explains why it cannot be re-queued and points at `devintern worker add`.
+
+## Report a problem with a run
+
+When a run fails in a way the output does not explain, or completes with the wrong result, open it and choose **Report a problem**. It files the same redacted bug report as `devintern report --run <id>`; see [Reporting Bugs](reporting-bugs.md#report-from-the-dashboard).
+
+Missing credentials, usage limits, and failed verification checks are configuration issues, not DevIntern bugs: fix those and retry instead.
 
 ## Run an automation now
 
@@ -130,7 +137,7 @@ The dashboard and its data stay on the worker machine. It listens only on a loop
 The API also refuses requests that did not come from the dashboard page itself, so a website open in your browser cannot use it behind your back:
 
 - Every `/api` request must be addressed to `localhost`, `127.0.0.1`, or `[::1]` (any port, so remapped SSH tunnels work), or to an [allowed origin](#allowed-origins). Any other host name gets `403`. This blocks DNS-rebinding attacks, where a hostile domain is pointed at your loopback address.
-- Requests that change something (retry, run now, new task, and any other non-GET action) must come from the same origin as the address they were sent to, for example `Origin: http://localhost:8440` for `localhost:8440`, and must send `Content-Type: application/json`. Cross-origin requests get `403`; other content types get `415`. A page served on another local port cannot read the API or act on it.
+- Requests that change something (retry, run now, new task, sending a bug report, and any other non-GET action) must come from the same origin as the address they were sent to, for example `Origin: http://localhost:8440` for `localhost:8440`, and must send `Content-Type: application/json`. Cross-origin requests get `403`; other content types get `415`. A page served on another local port cannot read the API or act on it.
 
 Worker run history lives in the worker's workspace, alongside its other local state. The embedded dashboard remains available when an expired Worker Pilot pauses acquisition. Starting a standalone dashboard requires an active Worker Pilot or automation license.
 
@@ -146,7 +153,7 @@ dashboard = false
 
 Watching a long run from your laptop or phone does not require opening the dashboard port. Put an authenticating boundary in front of the loopback listener instead — your SSH client, your Tailscale tailnet, or a reverse proxy with its own login. All three options below leave the dashboard bound to `127.0.0.1`, and they work the same for the worker-embedded dashboard and for `devintern dashboard`.
 
-**Treat the dashboard as sensitive.** Run transcripts, logs, and artifacts can contain credentials or customer data, and `POST /api/runs/:id/retry`, `POST /api/automations/:id/run`, and `POST /api/tasks` act with your repository credentials. That is why the recipes below add a login rather than just moving the bind address.
+**Treat the dashboard as sensitive.** Run transcripts, logs, and artifacts can contain credentials or customer data. `POST /api/runs/:id/retry`, `POST /api/automations/:id/run`, and `POST /api/tasks` act with your repository credentials, and `POST /api/reports` sends a bug report as your signed-in DevIntern account. That is why the recipes below add a login rather than just moving the bind address.
 
 ### Option 1: SSH tunnel
 
@@ -217,7 +224,7 @@ An allowed origin is a full `scheme://host[:port]` the dashboard trusts in addit
 | Environment variable (comma-separated) | `DASHBOARD_ALLOWED_ORIGINS=https://dash.example.internal,http://192.168.1.50:8088` |
 | `devintern dashboard` flag (repeatable) | `--allow-origin https://dash.example.internal` |
 
-A malformed entry stops the worker or dashboard at startup with an error naming it. `[dashboard]` is startup-only: restart the worker after changing it. When the list is not empty, the startup log prints it with a warning that anyone who can reach those addresses gets full dashboard access, including write actions.
+A malformed entry stops the worker or dashboard at startup with an error naming it. `[dashboard]` is startup-only: restart the worker after changing it. When the list is not empty, the startup log prints it with a warning that anyone who can reach those addresses gets full dashboard access, including write actions such as retries and bug reports.
 
 Allowed origins stop other websites from using your browser against the dashboard. They do not authenticate anyone. Who can reach the address is still decided by your Tailscale ACLs or by the proxy's login (for example Caddy `basic_auth`).
 

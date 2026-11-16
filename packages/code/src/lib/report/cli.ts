@@ -10,29 +10,24 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
-import { detectInstallKind } from "@devintern/utils";
 import { VERSION, loadEnvironment } from "../cli/bootstrap";
 import { resolveRuntimeStateDir } from "../config/config-dir";
 import { createBugReporter, resolveReportEndpoint } from "./api";
 import { resolveReportDir } from "./paths";
-import { DEFAULT_REPORT_ENDPOINT, ReportSubmitError } from "./client";
+import { DEFAULT_REPORT_ENDPOINT } from "./client";
 import { resolveIdentity } from "./identity";
 import { readStoredIdentity } from "./session";
+import { REPORT_IDENTIFIERS, summarizeReportPayload } from "./preview";
 import {
   findSpoolEntry,
-  findSpoolEntryFile,
   isBugReportPayload,
   isSpoolEntry,
   listSpoolEntries,
-  markSpoolError,
-  markSpoolSubmitted,
   pruneSpool,
   readSpoolFile,
-  saveSpoolEntry,
 } from "./store";
+import { currentInstallKind, isValidContactEmail, submitWithSpool } from "./submission";
 import type { BugReportPayload, PreparedReport } from "./types";
-
-const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 interface ReportCliOptions {
   title?: string;
@@ -298,13 +293,16 @@ async function promptMultiline(): Promise<string | null> {
 
 /** Human-readable preview of what the payload contains. */
 function renderPreview(payload: BugReportPayload, bytes: number): string {
+  const summary = summarizeReportPayload(payload, {
+    shareIdentifiers: Boolean(payload.context?.run?.taskKey),
+  });
+  const { environment, run, logs } = summary;
   const lines = ["", "Attachments:"];
   lines.push(
-    `  ✓ environment: devintern ${payload.environment.cliVersion}, ` +
-      `${payload.environment.runtime.os}/${payload.environment.runtime.arch}` +
-      (payload.environment.harness ? `, harness ${payload.environment.harness.name}` : ""),
+    `  ✓ environment: devintern ${environment.cliVersion}, ` +
+      `${environment.os}/${environment.arch}` +
+      (environment.harness ? `, harness ${environment.harness}` : ""),
   );
-  const run = payload.context?.run;
   if (run) {
     lines.push(
       `  ✓ run #${run.id ?? "?"}: ${run.status}` +
@@ -312,34 +310,21 @@ function renderPreview(payload: BugReportPayload, bytes: number): string {
         (run.durationMs !== undefined ? `, ${Math.round(run.durationMs / 1000)}s` : ""),
     );
   }
-  const logs = payload.context?.logs ?? [];
   if (logs.length > 0) {
-    const logBytes = Buffer.byteLength(JSON.stringify(logs), "utf8");
+    const logBytes = Buffer.byteLength(JSON.stringify(payload.context?.logs ?? []), "utf8");
     lines.push(`  ✓ logs: ${logs.length} attachment(s), ${formatBytes(logBytes)}`);
   }
-  if (payload.context?.evidence?.length) {
-    lines.push(`  ✓ evidence: ${payload.context.evidence.length} item(s)`);
+  if (summary.evidenceCount > 0) {
+    lines.push(`  ✓ evidence: ${summary.evidenceCount} item(s)`);
   }
   lines.push("  ✗ never sent: task description, prompts, diffs, env values, credentials");
   lines.push(
-    payload.context?.run?.taskKey
-      ? "  • identifiers: task key and repository included"
-      : "  • identifiers: task key and repository redacted",
+    summary.identifiersShared
+      ? `  • identifiers: ${REPORT_IDENTIFIERS} included`
+      : `  • identifiers: ${REPORT_IDENTIFIERS} redacted`,
   );
   lines.push("", `Payload: ${formatBytes(bytes)}`);
   return lines.join("\n");
-}
-
-/** Best-effort install kind for triage. */
-function currentInstallKind(): string {
-  try {
-    return detectInstallKind({
-      scriptPath: process.argv[1] ?? "",
-      packageName: "@getdevintern/code",
-    });
-  } catch {
-    return "unknown";
-  }
 }
 
 /** Print a report and exit. */
@@ -439,7 +424,7 @@ async function resolveContactEmail(
   if (needsContact && !email && interactive) {
     email = (await promptLine("Contact email (so we can follow up): "))?.trim();
   }
-  if (needsContact && (!email || !EMAIL_PATTERN.test(email))) {
+  if (needsContact && !isValidContactEmail(email)) {
     console.error(
       "❌ Anonymous reports need a valid contact email. " +
         "Use --email <address> or run `devintern login`.",
@@ -456,14 +441,9 @@ async function submitReport(
   context: { options: ReportCliOptions; reportDir: string },
 ): Promise<never> {
   const { options, reportDir } = context;
-  const reportId = prepared.payload.reportId;
-  let savedPath = findSpoolEntryFile(reportDir, reportId)?.path;
-  if (!savedPath) {
-    savedPath = saveSpoolEntry(reportDir, prepared.payload);
-  }
-  try {
-    const result = await reporter.submitPrepared(prepared);
-    markSpoolSubmitted(reportDir, reportId, result);
+  const outcome = await submitWithSpool(reporter, prepared, reportDir);
+  if (outcome.ok) {
+    const { result } = outcome;
     if (options.json) {
       console.log(JSON.stringify({ ok: true, ...result }));
     } else {
@@ -476,22 +456,20 @@ async function submitReport(
       console.log("   A saved copy is in your local report history (`devintern report list`).");
     }
     finish(0);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    markSpoolError(reportDir, reportId, message);
-    if (options.json) {
-      console.log(JSON.stringify({ ok: false, error: message, savedPath }));
-    } else {
-      console.error(`\n❌ ${message}`);
-      if (error instanceof ReportSubmitError && error.status === 401) {
-        console.error("   Your sign-in may have expired. Run `devintern login` and retry.");
-        console.error("   To file anonymously instead, run `devintern logout` and add --email.");
-      }
-      console.error(`   Saved the report to ${savedPath}`);
-      console.error(`   Retry with: devintern report --from ${savedPath}`);
-    }
-    finish(1);
   }
+  const { error: message, savedPath } = outcome;
+  if (options.json) {
+    console.log(JSON.stringify({ ok: false, error: message, savedPath }));
+  } else {
+    console.error(`\n❌ ${message}`);
+    if (outcome.authExpired) {
+      console.error("   Your sign-in may have expired. Run `devintern login` and retry.");
+      console.error("   To file anonymously instead, run `devintern logout` and add --email.");
+    }
+    console.error(`   Saved the report to ${savedPath}`);
+    console.error(`   Retry with: devintern report --from ${savedPath}`);
+  }
+  finish(1);
 }
 
 /** Handle `--from`: resubmit an already prepared payload. */

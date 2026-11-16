@@ -24,6 +24,7 @@ import { runPrHref, runWorkLink } from "@/lib/run-work";
 import { cn, formatDuration, formatTime } from "@/lib/utils";
 import { attemptInfo, runTitle, statusTone } from "./run-detail/helpers";
 import { Reference } from "./run-detail/Reference";
+import { ReportProblem } from "./run-detail/ReportProblem";
 import { RetryAuditList, RetryConfirm, RetryFeedback } from "./run-detail/RetryParts";
 import { Timeline } from "./run-detail/Timeline";
 // oxlint-disable-next-line import/no-unassigned-import -- view styles
@@ -303,6 +304,7 @@ function RunHeader({ data, retry }: { data: RunDetailResponse; retry: RetryState
               </a>
             </Button>
           ) : null}
+          <ReportProblem run={run} />
         </div>
       </div>
 
