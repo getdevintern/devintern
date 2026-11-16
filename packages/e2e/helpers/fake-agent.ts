@@ -125,6 +125,102 @@ recordInvocation();
 if (Number.isFinite(delayMs) && delayMs > 0) {
   await Bun.sleep(delayMs);
 }
+
+/** Outcome of one write the sandbox-grant probe attempted. */
+interface SandboxWriteAttempt {
+  ok: boolean;
+  code?: string;
+}
+
+/**
+ * Try one write and report whether the sandbox allowed it, never throwing.
+ *
+ * `append` touches an existing file (workspace.toml, .env) with a harmless
+ * comment line, so even an unconfined run cannot break the workspace; the
+ * other probes create a new file exclusively.
+ */
+function attemptWrite(path: string, kind: "append" | "create"): SandboxWriteAttempt {
+  try {
+    if (kind === "append") appendFileSync(path, "\n# e2e sandbox escape probe\n");
+    else writeFileSync(path, "e2e sandbox escape probe\n", { flag: "wx" });
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, code: (error as NodeJS.ErrnoException).code ?? String(error) };
+  }
+}
+
+function requiredEnv(name: string): string {
+  const value = process.env[name];
+  if (!value) throw new Error(`sandbox probe requires ${name}`);
+  return value;
+}
+
+// Sandbox workspace-grant probes, keyed on alphanumeric prompt markers (Markdown
+// escaping would mangle `_`). They run as side effects before the normal mode,
+// so the delegating task still implements and the automation still no-ops.
+//
+// E2ESANDBOXDELEGATE: from inside the (sandboxed) agent, delegate a follow-up
+// through the built CLI's `worker add` — the devintern-delegate skill's path,
+// which writes `<workspace>/injected/` and `<workspace>/state/queue.db` — then
+// attempt the writes the policy must deny. The delegated body omits the marker
+// so the follow-up implements instead of delegating again.
+if (agentInput.includes("E2ESANDBOXDELEGATE")) {
+  const workspace = requiredEnv("DEVINTERN_WORKSPACE_DIR");
+  const add = Bun.spawnSync(
+    [
+      process.execPath,
+      requiredEnv("E2E_DEVINTERN_CLI"),
+      "worker",
+      "add",
+      "--repo",
+      requiredEnv("E2E_SANDBOX_DELEGATE_REPO"),
+      "--title",
+      "Delegated sandbox follow-up",
+      "--body",
+      "Change the greeting to Hello, world! and run bun test. E2EPROMPTMARKERDELEGATED",
+      "--idempotency-key",
+      requiredEnv("E2E_SANDBOX_DELEGATE_KEY"),
+      "--json",
+    ],
+    { stdout: "pipe", stderr: "pipe", env: process.env },
+  );
+  const stdout = add.stdout.toString();
+  let json: unknown = null;
+  try {
+    json = JSON.parse(stdout.trim());
+  } catch {
+    json = null;
+  }
+  const outside = process.env.E2E_SANDBOX_OUTSIDE;
+  const capFile = process.env.NONO_CAP_FILE;
+  const report = {
+    nono: Boolean(capFile && existsSync(capFile)),
+    workerAdd: { exitCode: add.exitCode, json, stdout, stderr: add.stderr.toString().slice(-2000) },
+    writes: {
+      workspaceToml: attemptWrite(`${workspace}/workspace.toml`, "append"),
+      workspaceEnv: attemptWrite(`${workspace}/.env`, "append"),
+      // Directly under repos/: the repo's own bare clone is the worktree's git
+      // common dir, which the default policy grants so `git commit` works.
+      repos: attemptWrite(`${workspace}/repos/e2e-sandbox-escape`, "create"),
+      ...(outside ? { outside: attemptWrite(`${outside}/sandbox-escape`, "create") } : {}),
+    },
+  };
+  writeFileSync(
+    `${requiredEnv("DEVINTERN_OUTPUT_DIR")}/e2e-sandbox-delegate.json`,
+    JSON.stringify(report, null, 2),
+  );
+}
+// E2ESANDBOXAUTOMATIONWRITE: an automation run writes under its own
+// `<workspace>/automations/<id>/` directory, the grant automations rely on for
+// reports and cursors.
+if (agentInput.includes("E2ESANDBOXAUTOMATIONWRITE")) {
+  const target = `${requiredEnv("DEVINTERN_WORKSPACE_DIR")}/automations/${requiredEnv("DEVINTERN_AUTOMATION_ID")}/e2e-sandbox-write.txt`;
+  const write = attemptWrite(target, "create");
+  writeFileSync(
+    `${requiredEnv("DEVINTERN_OUTPUT_DIR")}/e2e-sandbox-automation.json`,
+    JSON.stringify({ target, ...write }),
+  );
+}
 // Narrow, explicit per-task failure for batch-isolation coverage. Unlike the
 // process-wide E2E_AGENT_MODE, this only affects a prompt carrying the marker,
 // so one task in a batch can fail while the others still implement.

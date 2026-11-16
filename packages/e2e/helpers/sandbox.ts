@@ -132,18 +132,22 @@ function sandboxHomeBases(): string[] {
  * because a kernel sandbox can deny the write while `access()` still reports
  * the path writable.
  *
+ * Also used for whole fixture roots (a worker workspace plus its home) that
+ * must stay outside nono's `/tmp` write grant, so `prefix` is configurable.
+ *
+ * @param prefix - `mkdtemp` prefix (defaults to `devintern-e2e-home-`).
  * @returns Path to a fresh temporary home outside the OS temp dir when possible.
  */
-export function createSandboxHome(): string {
+export function createSandboxHome(prefix = "devintern-e2e-home-"): string {
   for (const base of sandboxHomeBases()) {
     try {
       mkdirSync(base, { recursive: true });
-      return mkdtempSync(join(base, "devintern-e2e-home-"));
+      return mkdtempSync(join(base, prefix));
     } catch {
       // Try the next candidate: an enclosing sandbox may deny this base.
     }
   }
-  return mkdtempSync(join(tmpdir(), "devintern-e2e-home-"));
+  return mkdtempSync(join(tmpdir(), prefix));
 }
 
 /**

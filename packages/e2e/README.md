@@ -402,6 +402,43 @@ that grant makes nono refuse its own per-user deny rules. Real user homes are
 normally outside `/tmp`, so the fixture mirrors that. Other providers use a
 workspace-local isolated home.
 
+### Workspace grants under nono (`worker add`, automations)
+
+`tests/local/sandbox-workspace-grants.test.ts` runs the real built `devintern
+worker` with `AGENT_SANDBOX=nono` and the deterministic fake agent. A prompt
+marker (`E2ESANDBOXDELEGATE`) makes the sandboxed agent call the built CLI's
+`worker add --repo --title --body --idempotency-key --json` against the same
+workspace, the devintern-delegate skill's path. The test asserts the nested
+enqueue exits 0, writes its prompt under `<workspace>/injected/` and its row in
+`<workspace>/state/queue.db`, and that the worker then completes the delegated
+task. In the same run the agent tries to write `workspace.toml`, `.env`, a file
+directly under `repos/`, and a directory outside the workspace. Every one of
+those writes must fail and leave the files unchanged. A scheduled automation
+(marker `E2ESANDBOXAUTOMATIONWRITE`) then writes under `automations/<id>/`.
+Nothing pre-creates `injected/`, `automations/` or `state/`. The worker creates
+the first two at startup and the queue creates `state/`, which matters because
+the grant lists only existing paths.
+
+A second test runs the same probes with `AGENT_SANDBOX=none` and asserts that
+the forbidden writes succeed there. That proves the nono denials are real and
+not a fixture artifact. The nono test skips with a named reason when nono or
+the built CLI is missing; the unsandboxed control needs only the built CLI.
+
+Fixture layout notes. The whole fixture root (workspace plus `HOME`) lives
+outside `/tmp`, because nono's Linux profile grants write on `/tmp`.
+`TMPDIR` is a separate subdirectory, because the default policy grants the temp
+dir. The agent, the Bun runtime, the CLI bundle and the workspace are reachable
+as top-level `$HOME` entries, the way a real install keeps them under `$HOME`.
+nono's policy grants read on those entries and never write. The `repos/`
+probe writes directly under `repos/` because the repo's own bare clone is the
+task worktree's git common dir, which the default policy grants so `git
+commit` works.
+
+```sh
+bun run --filter @getdevintern/code build
+bun test packages/e2e/tests/local/sandbox-workspace-grants.test.ts
+```
+
 ## Local GitLab Self-Managed
 
 Docker Engine and Docker Compose must be installed and accessible to your user.
