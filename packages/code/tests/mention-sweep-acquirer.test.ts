@@ -401,6 +401,32 @@ describe("MentionSweepAcquirer", () => {
     expect(handled).toHaveLength(3);
   });
 
+  test("a throwing mention holds the cursor but does not block later mentions", async () => {
+    const first = comment({ id: 1, created_at: new Date(Date.now() + 60_000).toISOString() });
+    const second = comment({ id: 2, created_at: new Date(Date.now() + 120_000).toISOString() });
+    const { acquirer, handled } = makeAcquirer({
+      issueComments: [first, second],
+      feedbackMaxAttempts: 3,
+      outcome: (_call, c) => (c.id === 1 ? new Error("GitHub API 502") : true),
+    });
+
+    await acquirer.tick();
+    // The later mention runs in the same sweep despite the earlier throw.
+    expect(handled).toEqual([
+      { id: 1, prNumber: 5 },
+      { id: 2, prNumber: 5 },
+    ]);
+    expect(queue.hasProcessed("github:mentions", "comment:1")).toBe(false);
+    expect(queue.hasProcessed("github:mentions", "comment:2")).toBe(true);
+    // The cursor stays before the failing mention, not at the later one.
+    expect((workerState.getCursor(ISSUE_CURSOR)?.cursorValue ?? "") < first.created_at).toBe(true);
+
+    // Next sweep re-reads both: only the failing one is retried, the
+    // already-handled one is deduped.
+    await acquirer.tick();
+    expect(handled.map((h) => h.id)).toEqual([1, 2, 1]);
+  });
+
   test("a settled run clears the attempt history left by earlier throws", async () => {
     const { acquirer, handled } = makeAcquirer({
       issueComments: [comment({})],
@@ -414,6 +440,62 @@ describe("MentionSweepAcquirer", () => {
     expect(handled).toHaveLength(2);
     expect(queue.hasProcessed("github:mentions", "comment:1")).toBe(true);
     expect(queue.beginFeedbackAttempt("github:mentions:comment:1", "probe")).toBe(1);
+  });
+
+  test("a permanent PR lookup failure (plain issue 404) is handled after one call", async () => {
+    let lookups = 0;
+    const handled: number[] = [];
+    const c = comment({});
+    const acquirer = new MentionSweepAcquirer({
+      repo: "acme/widgets",
+      intervalSeconds: 60,
+      workerState,
+      queue,
+      feedbackMaxAttempts: 3,
+      github: {
+        fetchIssueCommentsSince: async () => [c],
+        fetchReviewCommentsSince: async () => [],
+        getBotUsername: async () => "devintern[bot]",
+        getPr: async () => {
+          lookups++;
+          throw new Error("GitHub API error (404): Not Found");
+        },
+        postComment: async () => {},
+      },
+      handleMention: async (m) => {
+        handled.push(m.id);
+        return true;
+      },
+    });
+
+    await acquirer.tick();
+    expect(lookups).toBe(1);
+    expect(queue.hasProcessed("github:mentions", "comment:1")).toBe(true);
+    expect(workerState.getCursor(ISSUE_CURSOR)?.cursorValue).toBe(c.created_at);
+    // No attempt was recorded: a fresh failure would start from one.
+    expect(queue.beginFeedbackAttempt("github:mentions:comment:1", "probe")).toBe(1);
+
+    await acquirer.tick();
+    expect(lookups).toBe(1);
+    expect(handled).toEqual([]);
+  });
+
+  test("a permanent handler failure (permission 404) is not retried", async () => {
+    const c = comment({});
+    const err = Object.assign(new Error("Not Found"), { status: 404 });
+    const { acquirer, handled } = makeAcquirer({
+      issueComments: [c],
+      feedbackMaxAttempts: 3,
+      outcome: () => err,
+    });
+
+    await acquirer.tick();
+    expect(handled).toHaveLength(1);
+    expect(queue.hasProcessed("github:mentions", "comment:1")).toBe(true);
+    expect(workerState.getCursor(ISSUE_CURSOR)?.cursorValue).toBe(c.created_at);
+
+    await acquirer.tick();
+    expect(handled).toHaveLength(1);
   });
 
   test("a transient PR lookup failure is retried rather than dropped", async () => {

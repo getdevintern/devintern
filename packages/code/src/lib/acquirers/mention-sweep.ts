@@ -27,9 +27,12 @@
  * before the comment, and is retried on the next sweep without spending an
  * attempt. A handler that throws (for example a transient permission-API
  * error) is retried the same way up to `feedbackMaxAttempts` times (durable
- * ledger in `WebhookQueue`), then marked handled.
+ * ledger in `WebhookQueue`), then marked handled. A throw that
+ * `classifyWebhookError` deems permanent (e.g. a 404 for a plain issue) is
+ * marked handled immediately.
  */
 
+import { classifyWebhookError } from "../webhook/webhook-errors";
 import type { WebhookQueue } from "../state/webhook-queue";
 import type { WorkerState } from "../state/worker-state";
 import type { TaskExecutionResult } from "./task-polling";
@@ -285,6 +288,11 @@ export class MentionSweepAcquirer implements Acquirer {
 
     const comments = await fetchSince(sinceIso);
     let maxCreatedAt = sinceIso;
+    // Earliest cursor a comment that must be retried needs held. A throw holds
+    // it but lets the sweep continue, so one failing mention does not delay
+    // the rest of the feed; comments handled past the hold are deduped by
+    // `processed_events` when the next sweep re-reads them.
+    let holdCursor: string | null = null;
 
     for (const comment of comments) {
       // Cursor to hold when this comment must be retried: its value before
@@ -351,9 +359,11 @@ export class MentionSweepAcquirer implements Acquirer {
           // The run did not settle (shutdown drain) or never started (every
           // harness usage-limited). Neither is an attempt: release the claim
           // and stop before the cursor passes this comment so the next sweep
-          // retries it, matching the relay path.
+          // retries it, matching the relay path. Stopping (rather than
+          // continuing) is deliberate: a shutdown must not start new runs, and
+          // with no harness available later mentions would defer too.
           queue.unmarkProcessed(SOURCE, externalId);
-          maxCreatedAt = retryCursor;
+          holdCursor = earlierIso(holdCursor, retryCursor);
           console.log(
             outcome === "interrupted"
               ? `⏸️  [${this.name}] mention on PR #${prNumber} interrupted by worker shutdown; will retry`
@@ -365,6 +375,17 @@ export class MentionSweepAcquirer implements Acquirer {
         queue.clearFeedbackAttempts(ledgerId(externalId));
       } catch (error) {
         const message = (error as Error).message;
+        if (classifyWebhookError(error) === "permanent") {
+          // A terminal failure (e.g. a 404 because the mention is on a plain
+          // issue, not a PR) never succeeds on retry: keep the claim and do
+          // not spend attempts or hold the cursor.
+          queue.clearFeedbackAttempts(ledgerId(externalId));
+          console.warn(
+            `⚠️  [${this.name}] handling mention on #${prNumber} failed permanently; ` +
+              `marking it handled: ${message}`,
+          );
+          continue;
+        }
         // The claim is provisional until the handler settles. A throw (for
         // example a transient permission-API error) releases it and holds the
         // cursor; the durable ledger bounds the retries so a deterministic
@@ -375,12 +396,12 @@ export class MentionSweepAcquirer implements Acquirer {
         );
         if (attempts < maxAttempts) {
           queue.unmarkProcessed(SOURCE, externalId);
-          maxCreatedAt = retryCursor;
+          holdCursor = earlierIso(holdCursor, retryCursor);
           console.warn(
             `⚠️  [${this.name}] handling mention on #${prNumber} failed ` +
               `(attempt ${attempts}/${maxAttempts}); will retry: ${message}`,
           );
-          break;
+          continue;
         }
         queue.clearFeedbackAttempts(ledgerId(externalId));
         console.warn(
@@ -390,10 +411,16 @@ export class MentionSweepAcquirer implements Acquirer {
       }
     }
 
-    if (maxCreatedAt !== sinceIso) {
-      workerState.setCursor(cursorSource, maxCreatedAt);
+    const nextCursor = earlierIso(holdCursor, maxCreatedAt);
+    if (nextCursor !== sinceIso) {
+      workerState.setCursor(cursorSource, nextCursor);
     }
   }
+}
+
+/** The earlier of two ISO timestamps, treating `null` as unset. */
+function earlierIso(held: string | null, candidate: string): string {
+  return held !== null && held < candidate ? held : candidate;
 }
 
 /** Attempt-ledger key for a swept comment's dedupe id. */
