@@ -15,7 +15,7 @@ describe("enableEnvProxy", () => {
     const state = enableEnvProxy({ env, runtime: "node", setGlobalProxyFromEnv: setup });
     expect(setup).toHaveBeenCalledTimes(1);
     expect(setup.mock.calls[0]?.[0]).toBe(env);
-    expect(state).toEqual({ status: "enabled", proxyVar: "HTTPS_PROXY" });
+    expect(state).toEqual({ status: "enabled", runtime: "node", proxyVar: "HTTPS_PROXY" });
   });
 
   test.each(["https_proxy", "HTTP_PROXY", "http_proxy"])("detects %s", (name) => {
@@ -46,6 +46,14 @@ describe("enableEnvProxy", () => {
     expect(state.status).toBe("preconfigured");
   });
 
+  test("calls setup when NODE_USE_ENV_PROXY is set to a value other than 1", () => {
+    const setup = mock(() => {});
+    const env = { HTTPS_PROXY: PROXY_URL, NODE_USE_ENV_PROXY: "0" };
+    const state = enableEnvProxy({ env, runtime: "node", setGlobalProxyFromEnv: setup });
+    expect(setup).toHaveBeenCalledWith(env);
+    expect(state.status).toBe("enabled");
+  });
+
   test("does not call setup under Bun", () => {
     const setup = mock(() => {});
     const state = enableEnvProxy({
@@ -63,7 +71,7 @@ describe("enableEnvProxy", () => {
       runtime: "node",
       setGlobalProxyFromEnv: undefined,
     });
-    expect(state).toEqual({ status: "unsupported", proxyVar: "HTTPS_PROXY" });
+    expect(state).toEqual({ status: "unsupported", runtime: "node", proxyVar: "HTTPS_PROXY" });
   });
 
   test("swallows setup errors without leaking the URL", () => {
@@ -74,7 +82,7 @@ describe("enableEnvProxy", () => {
         throw new Error("Invalid proxy URL: not a url");
       },
     });
-    expect(state).toEqual({ status: "invalid", proxyVar: "HTTPS_PROXY" });
+    expect(state).toEqual({ status: "invalid", runtime: "node", proxyVar: "HTTPS_PROXY" });
   });
 });
 
@@ -86,9 +94,13 @@ describe("findProxyVar", () => {
 });
 
 describe("formatCliError", () => {
-  const noProxy: EnvProxyState = { status: "no-proxy" };
-  const unsupported: EnvProxyState = { status: "unsupported", proxyVar: "HTTPS_PROXY" };
-  const enabled: EnvProxyState = { status: "enabled", proxyVar: "HTTPS_PROXY" };
+  const noProxy: EnvProxyState = { status: "no-proxy", runtime: "node" };
+  const unsupported: EnvProxyState = {
+    status: "unsupported",
+    runtime: "node",
+    proxyVar: "HTTPS_PROXY",
+  };
+  const enabled: EnvProxyState = { status: "enabled", runtime: "node", proxyVar: "HTTPS_PROXY" };
 
   test("renders the cause code of a fetch failure", () => {
     const out = formatCliError(fetchFailed({ code: "ECONNREFUSED" }), {
@@ -140,13 +152,38 @@ describe("formatCliError", () => {
     expect(
       formatCliError(err, {
         env,
-        proxyState: { status: "preconfigured", proxyVar: "HTTPS_PROXY" },
+        proxyState: { status: "preconfigured", runtime: "node", proxyVar: "HTTPS_PROXY" },
       }),
     ).not.toContain(hint);
     expect(
-      formatCliError(err, { env, proxyState: { status: "bun", proxyVar: "HTTPS_PROXY" } }),
+      formatCliError(err, {
+        env,
+        proxyState: { status: "bun", runtime: "bun", proxyVar: "HTTPS_PROXY" },
+      }),
     ).not.toContain(hint);
     expect(formatCliError(err, { env: {}, proxyState: noProxy })).not.toContain(hint);
+  });
+
+  test("explains a proxy variable set after startup (e.g. from .devintern-pm/.env)", () => {
+    const err = fetchFailed({ code: "ECONNREFUSED" });
+    const lateHint = "A proxy variable (HTTPS_PROXY) was set after startup";
+
+    // Real startup state with no proxy, then the variable appears later.
+    const nodeState = enableEnvProxy({ env: {}, runtime: "node", setGlobalProxyFromEnv: () => {} });
+    const env = { HTTPS_PROXY: PROXY_URL };
+    const nodeOut = formatCliError(err, { env, proxyState: nodeState });
+    expect(nodeOut).toContain(lateHint);
+    expect(nodeOut).toContain("set it in your shell instead");
+    expect(nodeOut).not.toContain("upgrade Node");
+    expect(nodeOut).not.toContain("NODE_USE_ENV_PROXY");
+    expect(nodeOut).not.toContain(PROXY_URL);
+
+    // Bun's fetch reads proxy variables per request, so no hint at all.
+    const bunState = enableEnvProxy({ env: {}, runtime: "bun" });
+    expect(bunState).toEqual({ status: "no-proxy", runtime: "bun" });
+    expect(formatCliError(err, { env, proxyState: bunState })).toBe(
+      "fetch failed (cause: ECONNREFUSED)",
+    );
   });
 
   test("never prints the proxy URL or its credentials", () => {

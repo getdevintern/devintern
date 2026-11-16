@@ -28,9 +28,9 @@ export type ProxyVarName = (typeof PROXY_VARS)[number];
 /**
  * Outcome of {@link enableEnvProxy}.
  *
- * - `no-proxy`: no proxy variable set; nothing to do.
+ * - `no-proxy`: no proxy variable set at startup; nothing to do.
  * - `bun`: running under Bun, whose `fetch` already honors proxy variables.
- * - `preconfigured`: `NODE_USE_ENV_PROXY` is set, so Node handles it itself.
+ * - `preconfigured`: `NODE_USE_ENV_PROXY=1` is set, so Node handles it itself.
  * - `enabled`: `http.setGlobalProxyFromEnv` was called.
  * - `unsupported`: this Node has no `http.setGlobalProxyFromEnv`.
  * - `invalid`: Node rejected the proxy configuration (e.g. an unparsable URL).
@@ -45,6 +45,8 @@ export type EnvProxyStatus =
 
 export interface EnvProxyState {
   status: EnvProxyStatus;
+  /** Runtime detected at startup, recorded for every status. */
+  runtime: JsRuntime;
   /** Name (never the value) of the first proxy variable found. */
   proxyVar?: ProxyVarName;
 }
@@ -78,7 +80,7 @@ function defaultSetGlobalProxyFromEnv(): SetGlobalProxyFromEnv | undefined {
   return typeof candidate === "function" ? (candidate as SetGlobalProxyFromEnv) : undefined;
 }
 
-let currentState: EnvProxyState = { status: "no-proxy" };
+let currentState: EnvProxyState = { status: "no-proxy", runtime: detectRuntime() };
 
 /** State recorded by the last {@link enableEnvProxy} call (CLI runs only). */
 export function getEnvProxyState(): EnvProxyState {
@@ -106,26 +108,28 @@ export function enableEnvProxy(options: EnableEnvProxyOptions = {}): EnvProxySta
 
   let state: EnvProxyState;
   if (!proxyVar) {
-    state = { status: "no-proxy" };
+    state = { status: "no-proxy", runtime };
   } else if (runtime === "bun") {
-    state = { status: "bun", proxyVar };
-  } else if ((env.NODE_USE_ENV_PROXY ?? "") !== "") {
-    state = { status: "preconfigured", proxyVar };
+    state = { status: "bun", runtime, proxyVar };
+  } else if (env.NODE_USE_ENV_PROXY === "1") {
+    // Node only enables env-proxy support for exactly "1"; other values
+    // (e.g. "0") leave it off, so fall through to setGlobalProxyFromEnv.
+    state = { status: "preconfigured", runtime, proxyVar };
   } else {
     const setup =
       "setGlobalProxyFromEnv" in options
         ? options.setGlobalProxyFromEnv
         : defaultSetGlobalProxyFromEnv();
     if (!setup) {
-      state = { status: "unsupported", proxyVar };
+      state = { status: "unsupported", runtime, proxyVar };
     } else {
       try {
         setup(env);
-        state = { status: "enabled", proxyVar };
+        state = { status: "enabled", runtime, proxyVar };
       } catch {
         // e.g. ERR_PROXY_INVALID_CONFIG. Its message embeds the proxy URL, so
         // only the status is kept.
-        state = { status: "invalid", proxyVar };
+        state = { status: "invalid", runtime, proxyVar };
       }
     }
   }
@@ -207,7 +211,8 @@ export interface FormatCliErrorOptions {
 /**
  * Format an error for the CLI's top-level `❌ Error:` line. Network-level
  * `fetch failed` errors get their underlying cause code (e.g. `ECONNREFUSED`)
- * and, when a proxy variable is set but Node is not using it, a hint. Proxy
+ * and, when a proxy variable is set but Node is not using it, a hint (none on
+ * Bun, whose `fetch` reads proxy variables per request). Proxy
  * URLs are never included.
  *
  * @param error - Thrown value.
@@ -220,12 +225,19 @@ export function formatCliError(error: unknown, options: FormatCliErrorOptions = 
   const { text, fetchFailed } = describeError(error);
 
   let hint: string | undefined;
-  const proxyVar = state.proxyVar ?? findProxyVar(env);
-  if (fetchFailed && proxyVar) {
-    if (state.status === "invalid") {
-      hint = `A proxy is configured (${proxyVar}) but Node rejected its URL; check the proxy variable's format.`;
-    } else if (state.status === "unsupported" || state.status === "no-proxy") {
-      hint = `A proxy is configured (${proxyVar}) but this Node runtime is not using it; upgrade Node or run with NODE_USE_ENV_PROXY=1.`;
+  if (fetchFailed) {
+    if (state.status === "invalid" && state.proxyVar) {
+      hint = `A proxy is configured (${state.proxyVar}) but Node rejected its URL; check the proxy variable's format.`;
+    } else if (state.status === "unsupported" && state.proxyVar) {
+      hint = `A proxy is configured (${state.proxyVar}) but this Node runtime is not using it; upgrade Node or run with NODE_USE_ENV_PROXY=1.`;
+    } else if (state.status === "no-proxy" && state.runtime === "node") {
+      // The variable appeared after startup (e.g. from .devintern-pm/.env).
+      // Node reads proxy settings once at startup, so neither upgrading nor
+      // NODE_USE_ENV_PROXY helps. Bun's fetch reads them per request: no hint.
+      const lateVar = findProxyVar(env);
+      if (lateVar) {
+        hint = `A proxy variable (${lateVar}) was set after startup (e.g. in .devintern-pm/.env), so Node is not using it; set it in your shell instead.`;
+      }
     }
   }
 
