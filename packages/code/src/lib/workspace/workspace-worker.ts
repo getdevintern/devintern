@@ -76,6 +76,7 @@ import {
 } from "./fleet-executor";
 import type { FleetExecutorDeps, RepoManagerLike } from "./fleet-executor";
 import { buildFleetEventAcquirers } from "./fleet-event-acquirers";
+import { assertTeamPrSyncSandbox } from "./team-pr-sync";
 import type { FleetEventReloadHooks, FleetSourceRuntime } from "./fleet-event-acquirers";
 
 /** Orphaned-run feedback cutoff: `WORKER_ORPHAN_MAX_AGE_HOURS`, default 7 days. */
@@ -757,6 +758,11 @@ export interface ReloadValidationContext {
   multiTeam: boolean;
   /** Running change-detector sources; 0 means none could be initialized. */
   sourceCount: number;
+  /**
+   * Workspace home, for resolving each repo's effective env (the
+   * `sync_team_prs` sandbox gate). Defaults to the resolved workspace dir.
+   */
+  workspaceDir?: string;
 }
 
 function teamRuntimeShape(value: WorkspaceConfig) {
@@ -810,6 +816,9 @@ export function validateReloadedWorkspaceConfig(
   if (JSON.stringify(next.worker.schedule) !== JSON.stringify(current.worker.schedule)) {
     throw new Error("[worker.schedule] is startup-only; restart the worker to change it.");
   }
+  // A reload enabling `sync_team_prs` (or dropping a repo's sandbox) must
+  // meet the same bar as startup.
+  assertTeamPrSyncSandbox(next, context.workspaceDir);
 }
 
 /**
@@ -841,6 +850,9 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   if (initialFleetAutomations.problems.length > 0) {
     throw new Error(`Invalid ${configPath}:\n- ${initialFleetAutomations.problems.join("\n- ")}`);
   }
+  // Fail before taking the lock or opening state; buildFleetEventAcquirers
+  // re-checks for callers that wire acquirers directly.
+  assertTeamPrSyncSandbox(config, workspaceDir);
 
   // Dashboard retries ride the shared workspace DB: the dashboard inserts a
   // pending row, this worker drains it through the fleet executor below.
@@ -1199,6 +1211,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       validateReloadedWorkspaceConfig(next, active, {
         multiTeam,
         sourceCount: sources.length,
+        workspaceDir,
       }),
     onApplied: applyReloadedConfig,
     onOutcome: (outcome) => {

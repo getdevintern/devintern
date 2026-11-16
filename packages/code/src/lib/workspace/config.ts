@@ -111,6 +111,16 @@ export interface TeamConfig {
   env: Record<string, string>;
 }
 
+/**
+ * Extract the `owner/repo` slug from a github.com remote URL (SSH or HTTPS).
+ *
+ * @returns The slug, or `null` for non-GitHub remotes.
+ */
+export function gitHubSlugFromRemote(remote: string): string | null {
+  const match = remote.match(/github\.com[:/]([^/]+\/[^/]+?)(?:\.git)?\/?$/);
+  return match?.[1] ?? null;
+}
+
 /** One managed repository from a `[[repos]]` entry. */
 export interface RepoConfig {
   /** Unique name; also the directory name under `repos/` and `worktrees/`. */
@@ -129,6 +139,13 @@ export interface RepoConfig {
   pipelineFile?: string;
   /** Optional env file path, relative to the workspace directory. */
   envFile?: string;
+  /**
+   * `sync_team_prs`: extend automatic base sync beyond the agent's own PRs to
+   * this repo's open, non-draft, same-repo PRs authored by team members
+   * (OWNER/MEMBER/COLLABORATOR/MAINTAIN). GitHub-only; requires an explicit
+   * agent sandbox provider in the repo's effective env. Off by default.
+   */
+  syncTeamPrs?: boolean;
   /** Inline env overrides (highest precedence). */
   env: Record<string, string>;
 }
@@ -709,6 +726,17 @@ function parseReposSection(
     if (!name || !remote) {
       continue;
     }
+    const env = readEnvTable(table, label, errors);
+    const syncTeamPrs = readOptionalBoolean(table, "sync_team_prs", label, errors);
+    // Team-PR discovery uses GitHub's open-PR list and author_association;
+    // there is no GitLab/Bitbucket equivalent wired, so reject instead of
+    // silently doing nothing.
+    if (syncTeamPrs === true && !(env.GITHUB_REPO ?? gitHubSlugFromRemote(remote))) {
+      errors.push(
+        `${label}.sync_team_prs is GitHub-only; "${name}" does not use a github.com remote ` +
+          "(or an inline GITHUB_REPO).",
+      );
+    }
     repos.push({
       name,
       remote,
@@ -719,7 +747,8 @@ function parseReposSection(
           : readStringList(table, "pr_labels", label, errors),
       pipelineFile: readString(table, "pipeline_file", label, errors),
       envFile: readString(table, "env_file", label, errors),
-      env: readEnvTable(table, label, errors),
+      ...(syncTeamPrs === undefined ? {} : { syncTeamPrs }),
+      env,
     });
   }
   return { repos, repoNames };
