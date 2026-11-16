@@ -33,7 +33,7 @@ test data into the trackers a worker actually uses.
 | Local GitLab Issues | no                 | `test:e2e:tracker:gitlab`              | Existing live suite; creates and deletes a dedicated project.                                                                                                                           |
 | GitLab.com Issues   | no                 | `test:e2e:tracker:gitlab-com`          | Existing live suite; pre-created project, issues only, project retained.                                                                                                                |
 | Linear              | yes (offline fake) | none                                   | Fake lifecycle: key/`--query`, workflow state, comment, decoy isolation. Live Layer 2 team/project lifecycle, estimation, and attachments remain future work.                           |
-| Asana               | yes (offline fake) | none                                   | Fake lifecycle: key/`--query`, section transition, comment, decoy isolation.                                                                                                            |
+| Asana               | yes (offline fake) | none                                   | Fake lifecycle: key/`--query`, section transition, comment, decoy isolation. Worker polling through the Events API (412 handshake, sync-token rotation, expiry resync) is offline.      |
 | Azure DevOps        | yes (offline fake) | none                                   | Fake lifecycle: key/`--query`, state transition, comment, decoy isolation.                                                                                                              |
 
 The default local run reports these opt-in suites as skipped and planned
@@ -238,6 +238,16 @@ mode, and the run record has origin `estimate` plus the schedule id. No branch,
 pull request, or commit is created. A second driven occurrence runs the sweep
 again and does not estimate the unchanged issue. No live tracker or credential
 is required. The only skip is the built-CLI guard.
+
+`tests/local/worker-asana-polling.test.ts` drives worker polling against the
+Asana fake's Events API (`GET /api/1.0/events?resource=&sync=`). A missing or
+expired token returns 412 with a fresh `sync`, and a live token returns the
+events since it was issued plus a rotated `sync`. Fake writes append events, and
+a test hook expires every token. The test covers the 412 first-tick drain, the
+rotated-token chain on empty pages (no evaluate, no run), an edit-triggered
+single run, expired-token full resync without re-runs, the `(key, updated)`
+dedupe for an unchanged still-matching task, and the startup refusal without
+`ASANA_DEFAULT_PROJECT_GID`.
 
 Endpoints covered:
 
