@@ -574,6 +574,29 @@ bun run --filter @devintern/e2e test
 bun test tests/local/tracker-azure-devops-fake.test.ts
 ```
 
+#### Worker Azure DevOps polling
+
+`tests/local/worker-azure-devops-polling.test.ts` starts the built worker
+daemon with `tracker = "azure-devops"`, a ready-state WIQL `task_query`,
+`poll_interval = 1`, the deterministic agent, a local bare remote, and the same
+fake (constructed with `realClock: true` so `System.ChangedDate` falls on the
+real UTC day). It asserts the fake received the product's day-precision delta
+`SELECT [System.Id] FROM WorkItems WHERE [System.ChangedDate] >= '<YYYY-MM-DD>'`,
+that the ready item is implemented once (branch, run record, comment, state)
+while a decoy in another state is untouched, that several over-reported
+same-day ticks add no run, agent invocation, or comment, that moving another
+item into the ready state runs it once, and that a graceful restart on the same
+queue database resumes from the persisted cursor. After the restart the
+workspace switches to `--skip-comments`, so a processed item keeps matching the
+query at the same `ChangedDate`. Only the `(key, updated)` dedupe then keeps it
+from re-running. The prerequisite is the built CLI
+(`bun run --filter @getdevintern/code build`); no credentials are needed.
+
+```sh
+# from packages/e2e
+bun test tests/local/worker-azure-devops-polling.test.ts
+```
+
 ### Offline fake Linear server
 
 The same default suite also includes an in-process Linear GraphQL fake
@@ -960,7 +983,7 @@ PR CI.
 
 ### Azure DevOps fake
 
-`tests/local/tracker-azure-devops-fake.test.ts` exercises key and WIQL selection, state transitions, comments, and decoy isolation against a loopback fake API. The test subprocess opts in with `DEVINTERN_E2E_FAKE_AZURE_DEVOPS=1`; project configuration cannot enable the endpoint override.
+`tests/local/tracker-azure-devops-fake.test.ts` exercises key and WIQL selection, state transitions, comments, and decoy isolation against a loopback fake API. The test subprocess opts in with `DEVINTERN_E2E_FAKE_AZURE_DEVOPS=1`; project configuration cannot enable the endpoint override. `tests/local/worker-azure-devops-polling.test.ts` drives the worker daemon's Azure DevOps change detector against the same fake: delta WIQL shape, exactly-once pickup, over-reported same-day ticks, re-arm, cursor persistence across a restart, and the `(key, updated)` dedupe.
 
 ### Jira story-point estimation
 
