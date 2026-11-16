@@ -485,10 +485,12 @@ The worker also reacts to mentions on pull requests it did not create. When a te
 
 Guardrails apply before the agent acts:
 
-- Only users with push access (write, maintain, or admin) can direct the agent. Mentions from read-only users and non-collaborators are ignored, and the check fails closed on errors.
+- Only users with push access (write, maintain, or admin) can direct the agent. Mentions from read-only users and non-collaborators are ignored. A GitHub API error during the permission check (a 5xx or rate limit) is not treated as a denial: the agent never acts without a confirmed grant, and the mention is retried.
 - Fork PRs are skipped with an explanatory comment unless the PR allows maintainer edits.
 - The worker never force-pushes; if a human pushed to the branch meanwhile, the push is rejected instead of overwriting.
 - Mentions posted before the worker first started are not dug up.
+
+Mentions are not dropped when a run cannot finish. If a worker shutdown interrupts the run, or every configured harness is usage-limited, the mention is retried on the next sweep and does not count as a failed attempt. If handling the mention fails with an error (for example, a transient GitHub API failure), the worker retries it on later sweeps, up to `WORKER_FEEDBACK_MAX_ATTEMPTS` times (default `3`), and then gives up with a warning. Relay-delivered mentions follow the same rules within the relay's own bounded retry budget.
 
 In the standard setup, pair the workspace with the relay and install the central DevIntern AI App. The worker recognizes `@devintern-ai` and uses your local `GITHUB_TOKEN` to fetch the comment, enforce the permission gate, and perform changes. No `GITHUB_APP_ID` or private key is stored locally. Without the relay, configure a customer-owned App for mention identity; see [GitHub authentication](./configuration.md#advanced-customer-owned-github-app).
 

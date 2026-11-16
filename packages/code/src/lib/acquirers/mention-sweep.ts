@@ -13,17 +13,26 @@
  *    nothing to match, and the sweep stays dormant.
  * 2. Fork PRs are skipped (with an explanatory comment) unless
  *    `maintainer_can_modify` allows pushing to the contributor's branch.
- * 3. The permission gate (write/maintain/admin, fails closed) and the
- *    mention gate both apply inside the shared review pipeline this feeds.
+ * 3. The permission gate (write/maintain/admin; API errors are retried, never
+ *    treated as a grant) and the mention gate both apply inside the shared
+ *    review pipeline this feeds.
  * 4. Pushes go through regular fast-forward `git push` — if a human moved
  *    the branch meanwhile, the push is rejected rather than clobbering.
  *
  * Comment ids dedupe via `processed_events`; cursors start at worker start
  * (old mentions are not dug up) and persist across restarts.
+ *
+ * Retry semantics: a run interrupted by a shutdown drain or deferred because
+ * every harness is usage-limited releases its dedupe claim, holds the cursor
+ * before the comment, and is retried on the next sweep without spending an
+ * attempt. A handler that throws (for example a transient permission-API
+ * error) is retried the same way up to `feedbackMaxAttempts` times (durable
+ * ledger in `WebhookQueue`), then marked handled.
  */
 
 import type { WebhookQueue } from "../state/webhook-queue";
 import type { WorkerState } from "../state/worker-state";
+import type { TaskExecutionResult } from "./task-polling";
 import type { Acquirer } from "../../worker";
 
 export interface SweptComment {
@@ -70,13 +79,41 @@ export interface MentionSweepAcquirerOptions {
   workerState: WorkerState;
   queue: WebhookQueue;
   github: MentionSweepGitHub;
-  /** Feed one mention into the review pipeline (injected for tests). */
-  handleMention: (comment: SweptComment, prNumber: number) => Promise<void>;
+  /**
+   * Feed one mention into the review pipeline (injected for tests).
+   *
+   * Returns the run outcome so an `"interrupted"`/`"deferred"` run can release
+   * the comment's dedupe claim and be retried instead of being lost.
+   */
+  handleMention: (comment: SweptComment, prNumber: number) => Promise<TaskExecutionResult>;
+  /**
+   * Failed (throwing) handler attempts tolerated per comment before the
+   * mention is marked handled anyway. Defaults to
+   * `WORKER_FEEDBACK_MAX_ATTEMPTS`, or 3.
+   */
+  feedbackMaxAttempts?: number;
   verbose?: boolean;
 }
 
 /** Dedupe source for swept comment ids. */
 const SOURCE = "github:mentions";
+
+/** Default per-comment attempt budget for throwing mention handlers. */
+export const DEFAULT_FEEDBACK_MAX_ATTEMPTS = 3;
+
+/**
+ * Resolve the per-comment attempt budget: explicit option, then
+ * `WORKER_FEEDBACK_MAX_ATTEMPTS`, then {@link DEFAULT_FEEDBACK_MAX_ATTEMPTS}.
+ *
+ * @param explicit - Option override (tests/embedders)
+ */
+export function feedbackMaxAttempts(explicit?: number): number {
+  if (explicit !== undefined && Number.isFinite(explicit) && explicit > 0) {
+    return Math.floor(explicit);
+  }
+  const parsed = parseInt(process.env.WORKER_FEEDBACK_MAX_ATTEMPTS || "", 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_FEEDBACK_MAX_ATTEMPTS;
+}
 
 /**
  * Whether a comment body mentions the bot (`@name`, with or without the
@@ -237,6 +274,7 @@ export class MentionSweepAcquirer implements Acquirer {
     botNames: string[],
   ): Promise<void> {
     const { workerState, queue, github, handleMention, verbose } = this.options;
+    const maxAttempts = feedbackMaxAttempts(this.options.feedbackMaxAttempts);
 
     const cursor = workerState.getCursor(cursorSource);
     // Mentions predating the first worker start are not dug up.
@@ -249,6 +287,11 @@ export class MentionSweepAcquirer implements Acquirer {
     let maxCreatedAt = sinceIso;
 
     for (const comment of comments) {
+      // Cursor to hold when this comment must be retried: its value before
+      // the comment, but never past the comment itself (feeds are not
+      // guaranteed to be created_at-ordered) nor behind this sweep's start.
+      const beforeComment = comment.created_at < maxCreatedAt ? comment.created_at : maxCreatedAt;
+      const retryCursor = beforeComment > sinceIso ? beforeComment : sinceIso;
       if (comment.created_at > maxCreatedAt) {
         maxCreatedAt = comment.created_at;
       }
@@ -303,10 +346,46 @@ export class MentionSweepAcquirer implements Acquirer {
         console.log(
           `\n📌 [${this.name}] @${matchedBot} mentioned on PR #${prNumber} by @${comment.user.login}`,
         );
-        await handleMention(comment, prNumber);
+        const outcome = await handleMention(comment, prNumber);
+        if (outcome === "interrupted" || outcome === "deferred") {
+          // The run did not settle (shutdown drain) or never started (every
+          // harness usage-limited). Neither is an attempt: release the claim
+          // and stop before the cursor passes this comment so the next sweep
+          // retries it, matching the relay path.
+          queue.unmarkProcessed(SOURCE, externalId);
+          maxCreatedAt = retryCursor;
+          console.log(
+            outcome === "interrupted"
+              ? `⏸️  [${this.name}] mention on PR #${prNumber} interrupted by worker shutdown; will retry`
+              : `⏳ [${this.name}] mention on PR #${prNumber} deferred; will retry when a harness is available`,
+          );
+          break;
+        }
+        // Settled: forget any retry history left by earlier throws.
+        queue.clearFeedbackAttempts(ledgerId(externalId));
       } catch (error) {
+        const message = (error as Error).message;
+        // The claim is provisional until the handler settles. A throw (for
+        // example a transient permission-API error) releases it and holds the
+        // cursor; the durable ledger bounds the retries so a deterministic
+        // failure still becomes terminal.
+        const attempts = queue.beginFeedbackAttempt(
+          ledgerId(externalId),
+          `mention on ${this.options.repo}#${prNumber} threw: ${message}`,
+        );
+        if (attempts < maxAttempts) {
+          queue.unmarkProcessed(SOURCE, externalId);
+          maxCreatedAt = retryCursor;
+          console.warn(
+            `⚠️  [${this.name}] handling mention on #${prNumber} failed ` +
+              `(attempt ${attempts}/${maxAttempts}); will retry: ${message}`,
+          );
+          break;
+        }
+        queue.clearFeedbackAttempts(ledgerId(externalId));
         console.warn(
-          `⚠️  [${this.name}] handling mention on #${prNumber} failed: ${(error as Error).message}`,
+          `⚠️  [${this.name}] handling mention on #${prNumber} failed ` +
+            `${attempts} times; marking it handled: ${message}`,
         );
       }
     }
@@ -315,6 +394,11 @@ export class MentionSweepAcquirer implements Acquirer {
       workerState.setCursor(cursorSource, maxCreatedAt);
     }
   }
+}
+
+/** Attempt-ledger key for a swept comment's dedupe id. */
+function ledgerId(externalId: string): string {
+  return `${SOURCE}:${externalId}`;
 }
 
 /** Resolve the PR number from either comment feed's URL fields. */

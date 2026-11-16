@@ -60,6 +60,7 @@ describe("RelayAcquirer", () => {
       agentPrs?: [string, number][];
       evaluateTask?: RelayHandlers["evaluateTask"];
       addressPr?: RelayHandlers["addressPr"];
+      handlePrComment?: RelayHandlers["handlePrComment"];
       /** Override the shared queue (e.g. a lower retry ceiling for a test). */
       queue?: WebhookQueue;
     } = {},
@@ -108,9 +109,12 @@ describe("RelayAcquirer", () => {
             log.addressed.push([repo, pr]);
             return true;
           }),
-        handlePrComment: async (repo, pr, commentId) => {
-          log.comments.push([repo, pr, commentId]);
-        },
+        handlePrComment:
+          options.handlePrComment ??
+          (async (repo, pr, commentId) => {
+            log.comments.push([repo, pr, commentId]);
+            return true;
+          }),
         evaluateTask:
           options.evaluateTask ??
           (async (taskKey, trackerSource, team) => {
@@ -282,7 +286,7 @@ describe("RelayAcquirer", () => {
       isAgentPr: () => false,
       handlers: {
         addressPr: async () => false,
-        handlePrComment: async () => {},
+        handlePrComment: async () => "skipped",
         evaluateTask: async () => {},
       },
       onPollSuccess: () => {
@@ -441,6 +445,62 @@ describe("RelayAcquirer", () => {
     }
     expect(queue.hasProcessed("relay", "github:interrupted-review")).toBe(true);
     expect(workerState.getCursor(`relay:${RELAY_URL}`)?.cursorValue).toBe("2");
+  });
+
+  for (const outcome of ["interrupted", "deferred"] as const) {
+    test(`an ${outcome} mention run stays retryable and holds the cursor`, async () => {
+      const mention = envelope({
+        seq: 1,
+        eventType: "pr.comment_created",
+        ref: { pr: 5, commentId: 77 },
+        deliveryId: `${outcome}-mention`,
+      });
+      let calls = 0;
+      const { acquirer } = makeAcquirer([{ events: [mention], cursor: 1 }], {
+        handlePrComment: async () => {
+          calls++;
+          return outcome;
+        },
+      });
+
+      acquirer.start();
+      try {
+        await waitFor(() => calls === 1);
+      } finally {
+        await acquirer.stop();
+      }
+
+      expect(queue.hasProcessed("relay", `github:${outcome}-mention`)).toBe(false);
+      expect(queue.isInFlight("relay", `github:${outcome}-mention`)).toBe(false);
+      expect(workerState.getCursor(`relay:${RELAY_URL}`)?.cursorValue ?? "0").toBe("0");
+      // Neither outcome spends a transient-retry attempt.
+      expect(queue.beginRelayDeliveryAttempt(`github:${outcome}-mention`, "probe")).toBe(1);
+    });
+  }
+
+  test("a skipped mention is acknowledged", async () => {
+    const mention = envelope({
+      seq: 1,
+      eventType: "pr.comment_created",
+      ref: { pr: 5, commentId: 78 },
+      deliveryId: "skipped-mention",
+    });
+    let calls = 0;
+    const { acquirer } = makeAcquirer([{ events: [mention], cursor: 1 }], {
+      handlePrComment: async () => {
+        calls++;
+        return "skipped";
+      },
+    });
+
+    acquirer.start();
+    try {
+      await waitFor(() => workerState.getCursor(`relay:${RELAY_URL}`)?.cursorValue === "1");
+    } finally {
+      await acquirer.stop();
+    }
+    expect(calls).toBe(1);
+    expect(queue.hasProcessed("relay", "github:skipped-mention")).toBe(true);
   });
 
   test("a transiently failing delivery is acknowledged once its attempt budget is spent", async () => {
