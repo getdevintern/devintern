@@ -690,6 +690,22 @@ export class InjectedTaskStore {
     return rows.map(rowToInjectedTask);
   }
 
+  /**
+   * Pending rows in pickup order: rows backing off after a deferral sort by
+   * when they become claimable, so the list reads as "what runs next".
+   *
+   * @param limit - Maximum rows to return
+   */
+  listPending(limit = 50): InjectedTask[] {
+    const rows = this.ensureDb()
+      .query(
+        `SELECT * FROM injected_tasks WHERE status = 'pending'
+         ORDER BY MAX(created_at, COALESCE(not_before, 0)) ASC, id ASC LIMIT ?`,
+      )
+      .all(limit) as InjectedTaskRow[];
+    return rows.map(rowToInjectedTask);
+  }
+
   /** Whether any pending task exists (worker startup diagnostics). */
   hasPending(): boolean {
     const row = this.ensureDb()

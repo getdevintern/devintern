@@ -44,6 +44,7 @@ import {
   workingHoursLabel,
 } from "@/components/workspace/workspace-model";
 import type { EnvSource } from "@/components/workspace/workspace-model";
+import { ESTIMATION_JOB_PREFIX } from "@/lib/scheduled-jobs";
 
 /** Hash route of one automation's detail page (mirrors `automationHash`). */
 function automationHref(id: string): string {
@@ -551,7 +552,14 @@ export function EstimationsTable({
         <TableBody>
           {estimations.map((estimation) => (
             <TableRow key={estimation.id} className={cn(!estimation.enabled && "ws-row-disabled")}>
-              <TableCell className="px-4 font-medium">{estimation.id}</TableCell>
+              <TableCell className="px-4 font-medium">
+                <a
+                  href={automationHref(`${ESTIMATION_JOB_PREFIX}${estimation.id}`)}
+                  className="hover:underline focus-visible:underline"
+                >
+                  {estimation.id}
+                </a>
+              </TableCell>
               <TableCell className="px-4">
                 <ScheduleCell cron={estimation.cron} interval={estimation.interval} />
               </TableCell>

@@ -33,7 +33,7 @@ devintern worker add --repo backend \
 
 Replace the example repo, file, title, and key with the actual task values. Add `--workspace /absolute/path/to/workspace.toml` when using a nondefault workspace. `--body-file -` reads the brief from stdin. Use a stable idempotency key for retries of the same intended dispatch, and different keys for distinct work.
 
-- `--json` reserves stdout for one result object with `id`, `taskKey`, `repo`, `status`, and `deduplicated`; human diagnostics go to stderr. Check the exit code as well as the result. Validation failures may have no result object.
+- `--json` reserves stdout for one result object with `id`, `taskKey`, `repo`, `status`, and `deduplicated`; human diagnostics go to stderr. When every harness in the worker's `AGENT_HARNESS` chain is usage-limited, the object also has `harnessPausedUntil` (ISO-8601): the task is queued but cannot start before that time. Check the exit code as well as the result. Validation failures may have no result object.
 - Without `--wait`, success means the task was durably enqueued, not implemented. It remains queued if the daemon is stopped. Do not start a daemon implicitly just because a task is pending.
 - Deduplication applies only while the matching task is pending or running. Reusing a key after settlement creates another occurrence. It is not permanent exactly-once delivery; do not blindly resubmit after an ambiguous response.
 - Injected tasks bypass quiet hours. They inherit `[defaults].worker_task_args`, whose default is `--create-pr`; dispatch can therefore start work immediately and open a PR. They use the worker's automation entitlement.
@@ -44,6 +44,6 @@ A timeout, worker stop, or inconclusive wait can produce a `status: "failed"` re
 
 ## Report the outcome
 
-Return the repository, task ID/key, and whether this was a new enqueue or a deduplicated task. Say whether the task is queued, completed, failed, or its completion is unknown. Include a PR URL only when confirmed by the run artifacts or dashboard; the enqueue response itself does not provide one.
+Return the repository, task ID/key, and whether this was a new enqueue or a deduplicated task. Say whether the task is queued, completed, failed, or its completion is unknown. If the result carried `harnessPausedUntil`, say the task is queued behind a usage limit until that time. Include a PR URL only when confirmed by the run artifacts or dashboard; the enqueue response itself does not provide one.
 
 For command behavior and troubleshooting, consult the [delegation guide](https://devintern.com/docs/code/delegation). When working in the DevIntern source repository, the corresponding source is `docs/code/delegation.md`; check the installed CLI's help when documentation and installed capabilities differ.

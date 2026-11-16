@@ -20,19 +20,6 @@ import { createHarnessLogSink } from "../observability/harness-logs";
 import { Utils } from "../utils";
 import { resolveOutputDir } from "../config/output-dir";
 
-/** Default message when the agent fixed hooks but left the commit unfinished. */
-export const MANUAL_HOOK_FIX_COMMIT_MESSAGE = "fix: resolve pre-commit hook failures";
-
-/**
- * Args for a non-interactive fallback commit after a hook-fix agent run.
- * Always includes `-m` so git never opens an editor (which hangs unattended).
- */
-export function manualHookFixCommitArgs(
-  message: string = MANUAL_HOOK_FIX_COMMIT_MESSAGE,
-): string[] {
-  return ["commit", "--no-verify", "-m", message];
-}
-
 /**
  * Check whether the working tree is clean after a hook-fix attempt.
  *
@@ -382,12 +369,14 @@ ${hookType === "push" ? "- Make sure to amend the commit (git commit --amend --n
                 resolve(true);
               } else {
                 console.log(
-                  `⚠️  ${harness.displayName} fixed the code but didn't commit - committing manually...`,
+                  `⚠️  ${harness.displayName} fixed the code but didn't commit - staging the fix for a hooked retry...`,
                 );
                 console.log(`   Changes: ${statusResult.output}`);
 
-                // Attempt to stage and commit manually. Use -A (whole tree) and
-                // an explicit -m so unattended runs never open GIT_EDITOR.
+                // Stage the repair and let the caller retry its own commit.
+                // That commit runs the hooks again (so an unrepaired failure
+                // counts against --hook-retries instead of being bypassed with
+                // --no-verify) and keeps the caller's message and author.
                 const stageResult = await Utils.executeGitCommand(["add", "-A"], {
                   cwd,
                 });
@@ -397,18 +386,7 @@ ${hookType === "push" ? "- Make sure to amend the commit (git commit --amend --n
                   resolve(false);
                   return;
                 }
-
-                const commitResult = await Utils.executeGitCommand(manualHookFixCommitArgs(), {
-                  cwd,
-                });
-                if (commitResult.success) {
-                  console.log("✅ Successfully committed changes manually!");
-                  resolve(true);
-                } else {
-                  console.log("❌ Failed to commit changes:");
-                  console.log(`   ${commitResult.error}`);
-                  resolve(false);
-                }
+                resolve(true);
               }
             } else {
               const verification = await verifyPushHookFix({ cwd, expectedBranch });

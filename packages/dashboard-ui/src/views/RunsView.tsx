@@ -38,6 +38,7 @@ const ORIGIN_FILTERS: (RunOrigin | "all")[] = [
   "pr_mention",
   "ci_fix",
   "conflict_resolution",
+  "auto_merge",
   "scheduled",
   "estimate",
   "manual",

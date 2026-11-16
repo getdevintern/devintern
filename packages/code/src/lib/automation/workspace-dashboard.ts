@@ -24,6 +24,7 @@ import type {
 import { loadWorkspaceConfig } from "../workspace/config";
 import { workspaceConfigPath, workspaceDbPath } from "../workspace/paths";
 import { pickAgentSelection } from "../agent/selection";
+import { ESTIMATION_JOB_PREFIX } from "./scheduled-jobs";
 
 /** Reason shown when "Run now" is pressed on a standalone workspace dashboard. */
 export const WORKSPACE_MANUAL_RUN_UNAVAILABLE =
@@ -65,16 +66,18 @@ function readNextDue(dbPath: string): Map<string, number> {
 export function loadWorkspaceAutomationActions(workspaceDir: string): DashboardAutomationActions {
   const list = (): AutomationScheduleStatus[] => {
     let automations;
+    let estimations;
     try {
-      automations = loadWorkspaceConfig(workspaceConfigPath(workspaceDir)).automations;
+      ({ automations, estimations } = loadWorkspaceConfig(workspaceConfigPath(workspaceDir)));
     } catch {
       // An invalid workspace.toml must not take the dashboard down; the
       // Workspace page reports the problems.
       return [];
     }
     const nextDue = readNextDue(workspaceDbPath(workspaceDir));
-    return automations.map((automation) => ({
+    const jobs: AutomationScheduleStatus[] = automations.map((automation) => ({
       id: automation.id,
+      kind: "automation" as const,
       enabled: automation.enabled,
       cron: automation.cron,
       interval: automation.interval,
@@ -84,6 +87,25 @@ export function loadWorkspaceAutomationActions(workspaceDir: string): DashboardA
       ...pickAgentSelection(automation),
       nextDueAt: nextDue.get(automation.id),
     }));
+    // Estimation sweeps share the scheduler table under a namespaced state id.
+    for (const estimation of estimations) {
+      jobs.push({
+        id: `${ESTIMATION_JOB_PREFIX}${estimation.id}`,
+        title: estimation.id,
+        kind: "estimation",
+        enabled: estimation.enabled,
+        cron: estimation.cron,
+        interval: estimation.interval,
+        prompt: "",
+        openPr: false,
+        query: estimation.query,
+        team: estimation.team,
+        ...pickAgentSelection(estimation),
+        nextDueAt: nextDue.get(`${ESTIMATION_JOB_PREFIX}${estimation.id}`),
+        runFilter: { automationId: estimation.id, origin: "estimate" },
+      });
+    }
+    return jobs;
   };
 
   const trigger = async (): Promise<ManualTriggerOutcome> => ({

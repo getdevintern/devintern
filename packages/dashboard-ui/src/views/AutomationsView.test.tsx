@@ -230,3 +230,32 @@ test("disabled automations render a hint instead of the Run now action", () => {
   expect(html).not.toContain("Run nightly-triage now");
   expect(html).toContain("Enable this automation in the config to run it manually");
 });
+
+test("estimation sweeps and the conflict window list beside automations with their own Run now", () => {
+  const html = render([
+    automation(),
+    automation({
+      id: "estimation:groom",
+      title: "groom",
+      kind: "estimation",
+      repo: undefined,
+      prompt: "",
+      query: "labels = needs-estimate",
+    }),
+    automation({
+      id: "workspace:conflict-resolution",
+      title: "Conflict resolution",
+      kind: "conflict_resolution",
+      repo: undefined,
+    }),
+  ]);
+  expect(html).toContain(">groom</a>");
+  expect(html).toContain(">Estimation</span>");
+  expect(html).toContain("labels = needs-estimate");
+  expect(html).toContain(">Conflict resolution</a>");
+  expect(html).toContain(">Conflicts</span>");
+  expect(html).toContain('aria-label="Run groom now"');
+  expect(html).toContain('aria-label="Run Conflict resolution now"');
+  expect(html).toContain('href="#/automations/estimation%3Agroom"');
+  expect(html).toContain("Opens the conflict-resolution window now");
+});
