@@ -246,6 +246,78 @@ export async function triggerAutomation(automationId: string): Promise<{
   return { ok: response.ok, body };
 }
 
+export const TASKS_URL = "/api/tasks";
+
+/** `POST /api/tasks` body: an ad-hoc task (equivalent of `devintern worker add`). */
+export interface CreateTaskInput {
+  repo: string;
+  title: string;
+  body: string;
+  /** Dedupes a resubmission while the first task is pending/running. */
+  idempotencyKey: string;
+}
+
+/** `POST /api/tasks` success body (same shape as `worker add --json`). */
+export interface CreatedTask {
+  id: number;
+  taskKey: string;
+  repo: string;
+  status: string;
+  deduplicated: boolean;
+}
+
+export type CreateTaskResult = { ok: true; task: CreatedTask } | { ok: false; error: string };
+
+/** Parse the `POST /api/tasks` success body, or null when it has the wrong shape. */
+export function parseCreatedTask(value: unknown): CreatedTask | null {
+  if (typeof value !== "object" || value === null) return null;
+  const record = value as Record<string, unknown>;
+  if (
+    typeof record.id !== "number" ||
+    typeof record.taskKey !== "string" ||
+    typeof record.repo !== "string" ||
+    typeof record.status !== "string" ||
+    typeof record.deduplicated !== "boolean"
+  ) {
+    return null;
+  }
+  return {
+    id: record.id,
+    taskKey: record.taskKey,
+    repo: record.repo,
+    status: record.status,
+    deduplicated: record.deduplicated,
+  };
+}
+
+/**
+ * Enqueue an ad-hoc task for the workspace worker. Same-origin JSON POST, so
+ * it passes the dashboard's Origin/Content-Type guard on write requests.
+ */
+export async function createTask(input: CreateTaskInput): Promise<CreateTaskResult> {
+  let response: Response;
+  try {
+    response = await fetch(TASKS_URL, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    });
+  } catch (cause) {
+    return { ok: false, error: cause instanceof Error ? cause.message : String(cause) };
+  }
+  const body: unknown = await response.json().catch(() => null);
+  if (!response.ok) {
+    const error =
+      typeof body === "object" && body !== null && "error" in body && typeof body.error === "string"
+        ? body.error
+        : `HTTP ${response.status}`;
+    return { ok: false, error };
+  }
+  const task = parseCreatedTask(body);
+  return task ? { ok: true, task } : { ok: false, error: "unexpected response from the server" };
+}
+
 export interface StatsResponse {
   window: string;
   stats: {

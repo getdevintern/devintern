@@ -12,13 +12,12 @@ import {
 import { join } from "path";
 import { tmpdir } from "os";
 
+import { parseWorkerAddArgs, runWorkerAdd } from "../src/lib/workspace/add-command";
 import {
   buildInjectedTaskMarkdown,
   deriveInjectedTaskKey,
-  parseWorkerAddArgs,
-  runWorkerAdd,
   slugifyTitle,
-} from "../src/lib/workspace/add-command";
+} from "../src/lib/workspace/injected-enqueue";
 import { InjectedTaskStore } from "../src/lib/state/injected-tasks";
 import { RunStore } from "../src/lib/state/run-recorder";
 import { LockManager } from "../src/lib/lock-manager";

@@ -31,8 +31,13 @@ import {
   handleWorkerStatus,
 } from "./lib/observability/dashboard-api";
 import { handleOverview } from "./lib/observability/dashboard-overview";
+import { handleCreateTask } from "./lib/observability/dashboard-tasks";
 import { handleWorkspace } from "./lib/observability/dashboard-workspace";
-import type { AutomationRunDeps, RetryHandlerDeps } from "./lib/observability/dashboard-api";
+import type {
+  ApiResponse,
+  AutomationRunDeps,
+  RetryHandlerDeps,
+} from "./lib/observability/dashboard-api";
 import type { DashboardAutomationActions } from "./lib/automation/acquirer";
 import {
   dashboardOriginMatchesHost,
@@ -239,6 +244,20 @@ function json(payload: { status: number; body: unknown }): Response {
   });
 }
 
+/**
+ * `POST /api/tasks`: decode the JSON body and enqueue the ad-hoc task. The
+ * Origin/Content-Type checks already ran in {@link checkDashboardRequest}.
+ */
+async function createTaskFromRequest(data: DashboardData, request: Request): Promise<ApiResponse> {
+  let payload: unknown;
+  try {
+    payload = await request.json();
+  } catch {
+    return { status: 400, body: { error: "request body must be valid JSON" } };
+  }
+  return handleCreateTask(data, payload);
+}
+
 /** Serve a file from the UI dir, confined to it; null on miss/traversal. */
 function serveStatic(uiDir: string, pathname: string): Response | null {
   const relative = pathname === "/" ? "index.html" : pathname.slice(1);
@@ -319,6 +338,25 @@ export function startDashboardServer(
         : explicitOrigins,
     });
 
+  /** Non-GET `/api` routes (already past the guard); anything else is 405. */
+  const routeWrite = async (request: Request, pathname: string): Promise<ApiResponse> => {
+    if (request.method !== "POST") {
+      return { status: 405, body: { error: "method not allowed" } };
+    }
+    const retry = pathname.match(runRetryPattern);
+    if (retry) {
+      return handleRetryRun(data, retry[1], options.retryDeps);
+    }
+    const automationRun = pathname.match(automationRunPattern);
+    if (automationRun) {
+      return handleRunAutomation(data, automationRun[1], options.automationDeps);
+    }
+    if (pathname === "/api/tasks") {
+      return createTaskFromRequest(data, request);
+    }
+    return { status: 405, body: { error: "method not allowed" } };
+  };
+
   const server = Bun.serve({
     port,
     hostname: host,
@@ -338,17 +376,8 @@ export function startDashboardServer(
         if (rejection) {
           return json({ status: rejection.status, body: { error: rejection.error } });
         }
-        const retry = request.method === "POST" ? pathname.match(runRetryPattern) : null;
-        if (retry) {
-          return json(await handleRetryRun(data, retry[1], options.retryDeps));
-        }
-        const automationRun =
-          request.method === "POST" ? pathname.match(automationRunPattern) : null;
-        if (automationRun) {
-          return json(await handleRunAutomation(data, automationRun[1], options.automationDeps));
-        }
         if (request.method !== "GET") {
-          return json({ status: 405, body: { error: "method not allowed" } });
+          return json(await routeWrite(request, pathname));
         }
         if (pathname === "/api/health") {
           return json({ status: 200, body: { status: "ok" } });

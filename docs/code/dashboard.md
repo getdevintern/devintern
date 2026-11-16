@@ -1,7 +1,7 @@
 ---
 title: "Worker Dashboard"
 sidebarLabel: "Dashboard"
-description: "Use when checking what the worker is doing, reading agent transcripts, diagnosing failed runs, or retrying work from the local dashboard."
+description: "Use when checking what the worker is doing, reading agent transcripts, diagnosing failed runs, retrying work, or delegating an ad-hoc task from the local dashboard."
 section: "Automation"
 order: 4
 dateModified: 2026-11-14
@@ -24,6 +24,7 @@ It starts automatically with `devintern worker`. Open [http://localhost:4400](ht
 - Open the task or pull request behind a run
 - Understand why a run failed and retry it after fixing the cause
 - Run a recurring automation immediately instead of waiting for its next scheduled time
+- Hand the worker a one-off task with **New task**, without creating a tracker ticket
 - Review recent worker logs when something needs attention
 
 The overview also summarizes activity and success rates, which is useful for spotting repeated failures without checking every run individually.
@@ -81,6 +82,29 @@ Open an automation from the list to read its full prompt, see its schedule and n
 
 This is useful for testing a new automation prompt or running routine work early.
 
+## Delegate a task
+
+Choose **New task** in the header to open a dialog that hands the worker a one-off task, the dashboard equivalent of [`devintern worker add`](delegation.md). Pick a registered `[[repos]]` repository (preselected when the workspace has only one), give the task a title, and describe the work in Markdown. The description is limited to 20,000 characters, and a counter shows how much is left. The worker sees only this text, so keep the brief self-contained; see [Write a self-contained brief](delegation.md#write-a-self-contained-brief). Press <kbd>Ctrl</kbd>+<kbd>Enter</kbd> (<kbd>⌘</kbd>+<kbd>Enter</kbd> on macOS) in the description to enqueue; <kbd>Enter</kbd> in the title does not submit.
+
+The task is queued in the workspace and the running worker picks it up on its next poll. The dashboard never starts a worker for you: with no worker running, the task waits in the queue until one starts. Like every ad-hoc task, it bypasses [working windows](worker.md#working-windows-quiet-hours) and inherits `[defaults].worker_task_args` (default `--create-pr`), so the worker can start right away and open a pull request.
+
+After you submit, the dialog shows the task key (`local-<slug>`) and status, links to **Runs**, and adds **Open run** as soon as the worker records the run. Each time you open the dialog it uses its own idempotency key, so a double-click or a retry after a network error returns the task that is already queued (shown as **Already queued**) instead of creating a duplicate. **Create another task**, or reopening the dialog, starts a fresh draft with a new key.
+
+The dialog protects unsent drafts: once a title or description is typed, clicking outside does nothing, and <kbd>Esc</kbd>, **Cancel**, or closing asks before discarding it. While a task is being submitted, the fields are locked and the dialog cannot be closed.
+
+**New task** needs a workspace with at least one registered repository. A dashboard without one, for example a standalone `devintern dashboard` on a legacy single-project setup, explains that and points at `devintern worker add-repo`.
+
+For scripts, prefer [`devintern worker add`](delegation.md): it needs no running dashboard and can wait for the result. To call the endpoint directly, send JSON with an `Origin` that matches the address you call. Browsers add `Origin` automatically, but curl does not, and the dashboard refuses writes without it (see [Local by design](#local-by-design)):
+
+```bash
+curl -s http://127.0.0.1:4400/api/tasks \
+  -H 'Content-Type: application/json' \
+  -H 'Origin: http://127.0.0.1:4400' \
+  -d '{"repo":"backend","title":"Bump the lockfile","body":"","idempotencyKey":"lockfile-1"}'
+```
+
+The response has the same shape as `devintern worker add --json`: `{ id, taskKey, repo, status, deduplicated }`, with HTTP 201 for a new task and 200 when an active task with the same idempotency key was reused. An unknown repository, an empty title, or an oversized body returns 400 with an `error` message; a dashboard without a usable workspace returns 409. A missing or mismatched `Origin` returns 403, and a non-JSON body returns 415.
+
 ## View the dashboard without the worker
 
 You can inspect existing run history even when the worker is stopped:
@@ -89,7 +113,7 @@ You can inspect existing run history even when the worker is stopped:
 devintern dashboard
 ```
 
-The command reads the local history without changing it. Use `--port <number>` if port 4400 is already occupied (or set `DASHBOARD_PORT`), and `--host <host>` to bind a different loopback address (default `127.0.0.1`; `localhost` and `::1` are also accepted). `--allow-origin <origin>` (repeatable) and `--no-tailscale-autodetect` control [allowed origins](#allowed-origins).
+The command reads the local history without changing it; only explicit actions such as **Retry** and **New task** write to the queue. Use `--port <number>` if port 4400 is already occupied (or set `DASHBOARD_PORT`), and `--host <host>` to bind a different loopback address (default `127.0.0.1`; `localhost` and `::1` are also accepted). `--allow-origin <origin>` (repeatable) and `--no-tailscale-autodetect` control [allowed origins](#allowed-origins).
 
 Run history (runs, stats, agent PRs, artifacts, retry audit) comes from the same project-scoped `.devintern-code/queue.db` that a direct `devintern <TASK>` run writes, so local runs stay visible when a workspace is also configured. The pending ad-hoc and scheduled-retry counts in the header come from the workspace queue database (`~/.devintern/state/queue.db`). If you started the worker with a custom `--workspace /path/to/workspace.toml`, pass the same flag to the dashboard so queue counts, worker liveness, and harness-log transcripts follow it. The value can be the `workspace.toml` file or the directory that contains it:
 
@@ -101,12 +125,12 @@ With `--workspace`, the dashboard also applies that workspace's [`[dashboard]` a
 
 ## Local by design
 
-The dashboard and its data stay on the worker machine. It listens only on a loopback address, so it is not exposed to your network or the public internet. There is no setting that binds it to another address: a non-loopback bind fails before the server starts, because the dashboard has no built-in authentication and its write endpoints retry runs and trigger automations.
+The dashboard and its data stay on the worker machine. It listens only on a loopback address, so it is not exposed to your network or the public internet. There is no setting that binds it to another address: a non-loopback bind fails before the server starts, because the dashboard has no built-in authentication and its write endpoints retry runs, trigger automations, and enqueue tasks.
 
 The API also refuses requests that did not come from the dashboard page itself, so a website open in your browser cannot use it behind your back:
 
 - Every `/api` request must be addressed to `localhost`, `127.0.0.1`, or `[::1]` (any port, so remapped SSH tunnels work), or to an [allowed origin](#allowed-origins). Any other host name gets `403`. This blocks DNS-rebinding attacks, where a hostile domain is pointed at your loopback address.
-- Requests that change something (retry, run now, and any other non-GET action) must come from the same origin as the address they were sent to, for example `Origin: http://localhost:8440` for `localhost:8440`, and must send `Content-Type: application/json`. Cross-origin requests get `403`; other content types get `415`. A page served on another local port cannot read the API or act on it.
+- Requests that change something (retry, run now, new task, and any other non-GET action) must come from the same origin as the address they were sent to, for example `Origin: http://localhost:8440` for `localhost:8440`, and must send `Content-Type: application/json`. Cross-origin requests get `403`; other content types get `415`. A page served on another local port cannot read the API or act on it.
 
 Worker run history lives in the worker's workspace, alongside its other local state. The embedded dashboard remains available when an expired Worker Pilot pauses acquisition. Starting a standalone dashboard requires an active Worker Pilot or automation license.
 
@@ -122,7 +146,7 @@ dashboard = false
 
 Watching a long run from your laptop or phone does not require opening the dashboard port. Put an authenticating boundary in front of the loopback listener instead — your SSH client, your Tailscale tailnet, or a reverse proxy with its own login. All three options below leave the dashboard bound to `127.0.0.1`, and they work the same for the worker-embedded dashboard and for `devintern dashboard`.
 
-**Treat the dashboard as sensitive.** Run transcripts, logs, and artifacts can contain credentials or customer data, and `POST /api/runs/:id/retry` and `POST /api/automations/:id/run` act with your repository credentials. That is why the recipes below add a login rather than just moving the bind address.
+**Treat the dashboard as sensitive.** Run transcripts, logs, and artifacts can contain credentials or customer data, and `POST /api/runs/:id/retry`, `POST /api/automations/:id/run`, and `POST /api/tasks` act with your repository credentials. That is why the recipes below add a login rather than just moving the bind address.
 
 ### Option 1: SSH tunnel
 
