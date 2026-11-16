@@ -281,6 +281,52 @@ bun run --filter @getdevintern/code build
 bun run --filter @devintern/e2e test
 ```
 
+## Relay `task.changed` delivery (offline)
+
+`tests/local/worker-relay-task-events.test.ts` starts one real
+`devintern worker` with fake Linear (`providers/fake-linear.ts`) as the tracker
+and a loopback relay fake (`helpers/fake-relay.ts`) in place of the hosted
+control plane. No relay account, Supabase session, Linear workspace, or network
+access is required, and `worker connect` is never run. The test writes a fake
+pairing into `<workspace>/state/code/relay.json` (`relayUrl`, `customerId`, and
+a synthetic `drt_e2e…` token) and points `WORKER_RELAY_URL` at the fake.
+
+The fake implements `GET /v1/events?cursor=<n>`: it returns buffered envelopes
+with a `seq` above the cursor, holds empty long polls for up to a second, and
+can answer the next N polls with a scripted 5xx. Its request log keeps the
+cursor and a bearer-token-matched boolean, never the header value.
+
+`[defaults].task_query` is a Linear title filter and `poll_interval = 3600`, so
+Mode 1 polling only runs its startup tick. That tick finishes before the
+eligible issue exists, so the relay is what triggers the run. The test proves:
+
+- a `task.changed` envelope for the eligible issue produces exactly one
+  implementation run (pushed `feature/<key>` branch, Linear state moved to In
+  Progress, one implementation comment), and an envelope for a decoy that does
+  not match `task_query` produces no run, branch, comment, or state change;
+- the cursor advances to the last `seq`, and replaying the same `deliveryId`
+  under a new `seq` does not run the task again;
+- after a graceful restart, the first poll carries the persisted cursor (never
+  `0`). That poll gets a scripted 503: the worker logs the 5s backoff, keeps
+  running, retries with the same cursor, and then consumes a later envelope;
+- every poll carried the bearer token, and neither it nor the fake Linear key
+  appears in worker output.
+
+Linear workflow states are committed to the fixture repo's base branch as
+`.devintern-code/settings.json`, because the task child reads settings from
+its worktree.
+
+Not covered: GitHub relay PR events (`pr.review_submitted`,
+`pr.comment_created`); a new `deliveryId` for an unchanged task; and a later
+poll sweep re-evaluating a task the relay already ran. Those last two rely on
+the actioned marker, which is written only after a PR is created, and the local
+bare remote exposes no code host.
+
+```sh
+bun run --filter @getdevintern/code build
+bun run --filter @devintern/e2e test
+```
+
 ## Agent harness invocation checks
 
 The ordinary local suite also probes every registered agent harness whose CLI is
@@ -972,9 +1018,11 @@ workspace. Coverage includes an injected task producing a labelled MR, GitLab
 Issues polling with status transition and actioned deduplication, registered-MR
 review polling, CI repair through an external failed commit status, retry-budget
 escalation, and automatic conflict resolution after the base branch advances.
-Relay delivery, `worker connect gitlab` hook installation, and real project-hook
-callbacks remain out of scope for the ordinary worker suite: they need relay
-infrastructure or a GitLab container-to-worker callback path.
+Hosted relay delivery, `worker connect gitlab` hook installation, and real
+project-hook callbacks remain out of scope for the ordinary worker suite: they
+need relay infrastructure or a GitLab container-to-worker callback path. The
+relay's tracker `task.changed` contract is covered offline against a loopback
+fake; see [Relay `task.changed` delivery (offline)](#relay-taskchanged-delivery-offline).
 
 The separate opt-in `test:e2e:gitlab-relay` suite uses the **deployed** relay.
 It installs a real managed project hook, proves review feedback arrives with
