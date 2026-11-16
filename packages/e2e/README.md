@@ -380,6 +380,24 @@ sandboxed run when `sbx` cannot list its daemon, a missing harness CLI surfacing
 as a preflight failure with the `*_CLI_PATH` fix, and the removed `srt`/`smolvm`
 providers reporting a migration error instead of an unknown-provider list.
 
+`tests/local/sandbox-workspace-grants.test.ts` proves the workspace-owned grants a
+sandboxed agent needs outside the checkout: writes to an existing
+`<workspace>/injected/`, `<workspace>/state/`, and `<workspace>/automations/`
+succeed, a non-granted sibling under the workspace stays denied, and an absent
+directory is neither granted nor created implicitly. The fixture root lives
+outside the OS temp dir because nono's Linux profile already grants write on
+`/tmp` itself; a workspace under `/tmp` would make the grant assertion pass
+without exercising the explicit policy. The fixture also keeps the workspace
+outside its root: `TMPDIR` lives under the root, and the macOS default policy
+grants `dirname(TMPDIR)` (the per-user temp/cache parent), so a workspace inside
+the root would be writable on the default temp grant alone. `SandboxWorkspace`
+asserts that no default writable path covers the workspace before each run.
+
+This test exercises the filesystem grants directly. It does not invoke
+`devintern worker add` or a scheduled automation, so those command paths under
+nono remain uncovered; the worker-option and automation suites run without a
+sandbox.
+
 Docker Sandboxes (`sbx`) stays optional. Its real-boundary test skips unless the
 prerequisite below is present; the fail-closed test still runs by shadowing the
 executable. `sbx` only runs agents pre-installed in its guest microVM and
@@ -389,6 +407,9 @@ fail-closed behavior.
 
 ### Optional real-provider prerequisites
 
+- **nono**: `nono` on `PATH` (`nono --version` succeeds). Every real-nono
+  boundary test, including the workspace grants, reports an explicit skip when
+  nono is absent instead of falling back to an unsandboxed run.
 - **Docker Sandboxes**: the `sbx` CLI signed in (`sbx login`) with a reachable
   daemon; `sbx ls` must succeed.
 
