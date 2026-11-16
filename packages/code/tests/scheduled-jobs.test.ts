@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 
 import type { AutomationScheduleStatus } from "../src/lib/automation/acquirer";
 import {
+  AUTO_MERGE_JOB_ID,
+  autoMergeDescription,
   composeScheduledJobActions,
   CONFLICT_RESOLUTION_JOB_ID,
 } from "../src/lib/automation/scheduled-jobs";
@@ -111,5 +113,65 @@ describe("composeScheduledJobActions", () => {
       ok: false,
       reason: "conflict resolution is not available on this worker",
     });
+  });
+});
+
+describe("auto-merge job", () => {
+  const settings = {
+    enabled: true,
+    method: "squash" as const,
+    review: false,
+    safePaths: ["docs/**"],
+    denyPaths: ["**/prompts/**"],
+    reviewLabel: "needs-human-review",
+    agent: { model: "sonnet" },
+  };
+
+  test("is listed while enabled and Run now triggers the watcher", async () => {
+    let triggered = 0;
+    const actions = composeScheduledJobActions({
+      automations: source([], []),
+      autoMerge: () => ({
+        autoMergeStatus: () => ({ intervalSeconds: 60, nextTickAt: 999, running: false }),
+        runAutoMergeNow: () => {
+          triggered += 1;
+          return { ok: true };
+        },
+      }),
+      autoMergeSettings: () => settings,
+    });
+    const [job] = actions.list();
+    expect(job).toMatchObject({
+      id: AUTO_MERGE_JOB_ID,
+      kind: "auto_merge",
+      interval: "60s",
+      nextDueAt: 999,
+      runFilter: { origin: "auto_merge" },
+    });
+    // Review is off, so the review agent override is not shown.
+    expect(job?.model).toBeUndefined();
+    expect(await actions.trigger(AUTO_MERGE_JOB_ID)).toEqual({ ok: true });
+    expect(triggered).toBe(1);
+  });
+
+  test("is hidden while disabled and unavailable without GitHub wiring", async () => {
+    const hidden = composeScheduledJobActions({
+      automations: source([], []),
+      autoMerge: () => ({
+        autoMergeStatus: () => null,
+        runAutoMergeNow: () => ({ ok: false, reason: "disabled" }),
+      }),
+    });
+    expect(hidden.list()).toEqual([]);
+    const unwired = composeScheduledJobActions({ automations: source([], []) });
+    expect(await unwired.trigger(AUTO_MERGE_JOB_ID)).toMatchObject({ ok: false });
+  });
+
+  test("description summarizes the live policy", () => {
+    const text = autoMergeDescription(settings);
+    expect(text).toContain("`docs/**`");
+    expect(text).toContain("`**/prompts/**`");
+    expect(text).toContain("`.github/**`");
+    expect(text).toContain("off (they stay open)");
   });
 });

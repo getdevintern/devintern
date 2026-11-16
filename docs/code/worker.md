@@ -463,6 +463,10 @@ The setting applies to the whole workspace and live-reloads with `workspace.toml
 
 To turn automatic conflict resolution off entirely — no detection, no queuing, no agent runs — set `conflict_resolution = "disabled"`: conflicted PRs stay conflicted until resolved by hand or via `devintern resolve-conflicts <pr-url>`.
 
+## Auto-merge of the agent's PRs
+
+With `[workspace].auto_merge = true` (off by default), the worker merges its own green PRs when they are safe. PRs that change only `auto_merge_safe_paths` merge without an agent run. PRs that touch other files merge only on an explicit "safe" verdict from the agent's merge-safety review. Deny paths never merge. See [Workspaces → Auto-merging safe PRs](./workspaces.md#auto-merging-safe-prs) for the configuration and gate order. The GitHub credential needs `Pull requests: Read and write` and `Contents: Read and write` to merge.
+
 ## CI failures on the agent's PRs
 
 Set `[workspace].ci_failure_fix = true` to watch GitHub Actions and commit statuses on every open PR the worker created and ask the agent to repair failures. The switch is off by default because each repair spends agent tokens and can push a commit. It live-reloads with `workspace.toml`.

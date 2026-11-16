@@ -1,4 +1,5 @@
 import { randomUUID } from "crypto";
+import { existsSync, readFileSync } from "fs";
 
 import { TaskPollingAcquirer, runTaskViaCli, workerTaskArgs } from "../acquirers/task-polling";
 import type { TaskExecutionResult } from "../acquirers/task-polling";
@@ -20,6 +21,62 @@ import { AUTOMATION_ID_ENV } from "../automation/acquirer";
 import { PICKUP_RUN_ID_ENV } from "../state/session-pickup";
 import { actionedSourceKey } from "../task/actioned-state";
 import { QUEUE_CLAIM_ENV } from "./queue-failure-reason";
+import { workspaceDbPath } from "./paths";
+import { RunStore } from "../state/run-recorder";
+import { resolveRunIdentity } from "../task/run-identity";
+
+/** Cap the description snapshot read from an ad-hoc task file. */
+const MAX_SETUP_FAILURE_DESCRIPTION = 20_000;
+
+/**
+ * Record a failed run for a task whose worktree setup failed before the task
+ * subprocess (which normally owns the run record) could start.
+ *
+ * Best-effort: recording must never mask the setup failure itself.
+ */
+function recordSetupFailedRun(input: {
+  dbPath: string;
+  env: NodeJS.ProcessEnv;
+  taskKey: string;
+  repo: string;
+  queueClaim?: string;
+  /** Ad-hoc task markdown; its text becomes the run's title/description. */
+  descriptionFile?: string;
+  reason: string;
+}): void {
+  let store: RunStore | undefined;
+  try {
+    store = new RunStore(input.dbPath);
+    const identity = resolveRunIdentity(input.env);
+    const runId = store.createRun({
+      origin: identity.origin,
+      tracker: identity.tracker,
+      team: identity.team,
+      repo: input.repo,
+      taskKey: input.taskKey,
+      ...(input.queueClaim ? { queueClaim: input.queueClaim } : {}),
+      ...(identity.automationId ? { automationId: identity.automationId } : {}),
+    });
+    if (input.descriptionFile && existsSync(input.descriptionFile)) {
+      const description = readFileSync(input.descriptionFile, "utf8").slice(
+        0,
+        MAX_SETUP_FAILURE_DESCRIPTION,
+      );
+      store.setRunTicket(runId, { description });
+    }
+    store.finishRun(runId, "failed", input.reason);
+  } catch (error) {
+    console.warn(
+      `⚠️  could not record setup failure for ${input.taskKey}: ${(error as Error).message}`,
+    );
+  } finally {
+    try {
+      store?.close();
+    } catch {
+      // Closing a best-effort recorder must not mask the setup failure.
+    }
+  }
+}
 
 /** Task shape the fleet acquirer needs (structural subset of `Task`). */
 export interface FleetTask {
@@ -329,11 +386,6 @@ export function createFleetTaskExecutor(
         label: taskKey,
         checkoutClass: "task_worktree",
         run: async (signal) => {
-          await repoManager.ensureBareClone(repo);
-          await repoManager.fetch(repo.name);
-          const worktree = await repoManager.createTaskWorktree(repo, taskKey);
-          console.log(`🏗️  ${scope} ${taskKey} → ${repo.name} (${worktree})`);
-
           // Read per run so a live-reloaded `[defaults].pipeline_file` applies
           // to subsequent tasks.
           const pipelineDefaultFile = config.defaults.pipelineFile
@@ -356,16 +408,41 @@ export function createFleetTaskExecutor(
             // local scope startup recovery looks runs up by.
             delete env[AUTOMATION_ID_ENV];
           }
+          const childEnv = {
+            ...env,
+            [RUN_ORIGIN_ENV]: options.runOrigin ?? "worker",
+            [QUEUE_CLAIM_ENV]: options.queueClaim,
+            ...(options.pickupRunId !== undefined
+              ? { [PICKUP_RUN_ID_ENV]: String(options.pickupRunId) }
+              : {}),
+          };
+
+          let worktree: string;
+          try {
+            await repoManager.ensureBareClone(repo);
+            await repoManager.fetch(repo.name);
+            worktree = await repoManager.createTaskWorktree(repo, taskKey);
+          } catch (error) {
+            // The task subprocess records the run, so a failure before it
+            // spawns would otherwise leave no run: the task would be invisible
+            // in the dashboard and its queue row would keep only a generic
+            // reason. Record the attempt here instead.
+            recordSetupFailedRun({
+              dbPath: workspaceDbPath(workspaceDir),
+              env: childEnv,
+              taskKey,
+              repo: repo.name,
+              queueClaim: options.queueClaim,
+              descriptionFile: options.runOrigin === "local" ? options.taskRef : undefined,
+              reason: `Worktree setup failed: ${(error as Error).message}`,
+            });
+            throw error;
+          }
+          console.log(`🏗️  ${scope} ${taskKey} → ${repo.name} (${worktree})`);
+
           const ok = await runTask(options.taskRef ?? taskKey, extraArgs, {
             cwd: worktree,
-            env: {
-              ...env,
-              [RUN_ORIGIN_ENV]: options.runOrigin ?? "worker",
-              [QUEUE_CLAIM_ENV]: options.queueClaim,
-              ...(options.pickupRunId !== undefined
-                ? { [PICKUP_RUN_ID_ENV]: String(options.pickupRunId) }
-                : {}),
-            },
+            env: childEnv,
             signal,
             ...(options.onChildSpawn ? { onChildSpawn: options.onChildSpawn } : {}),
           });

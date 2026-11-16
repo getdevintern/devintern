@@ -70,6 +70,25 @@ export interface PullRequestInfo {
    * recent push; absent while GitHub has never computed it.
    */
   mergeable_state?: string;
+  /** Draft PRs are never auto-merged. */
+  draft?: boolean;
+  /** Total changed files (the files API stops listing at 3000). */
+  changed_files?: number;
+}
+
+/** One changed file from `GET /pulls/{n}/files`. */
+export interface PullRequestFile {
+  filename: string;
+  status: string;
+  /** Set for renamed/copied files. */
+  previous_filename?: string;
+}
+
+/** Result of `PUT /pulls/{n}/merge`. */
+export interface PullRequestMergeResult {
+  merged: boolean;
+  sha?: string;
+  message?: string;
 }
 
 export interface FileContent {
@@ -722,6 +741,60 @@ export class GitHubReviewsClient {
   }
 
   /**
+   * Login that comments made with this client's credential are authored by:
+   * `<app-slug>[bot]` for GitHub App auth, otherwise the token's user.
+   */
+  async getCommentAuthorLogin(owner: string, repo: string): Promise<string> {
+    if (!this.token && this.appAuth) {
+      return `${(await this.appAuth.getAppInfo()).slug}[bot]`;
+    }
+    const user = await this.apiRequest<{ login: string }>("GET", "/user", owner, repo);
+    return user.login;
+  }
+
+  /**
+   * Create or edit this credential's comment that starts with `marker`. Only
+   * comments authored by this credential are ever edited, so a human
+   * comment copying the marker is never overwritten.
+   */
+  async upsertMarkedIssueComment(
+    owner: string,
+    repo: string,
+    prNumber: number,
+    marker: string,
+    body: string,
+  ): Promise<void> {
+    const login = (await this.getCommentAuthorLogin(owner, repo)).toLowerCase();
+    let existingId: number | undefined;
+    for (let page = 1; page <= 30 && existingId === undefined; page++) {
+      const batch = await this.apiRequest<
+        Array<{ id: number; body: string | null; user: { login: string } | null }>
+      >(
+        "GET",
+        `/repos/${owner}/${repo}/issues/${prNumber}/comments?per_page=100&page=${page}`,
+        owner,
+        repo,
+      );
+      existingId = batch.find(
+        (comment) =>
+          comment.user?.login.toLowerCase() === login && comment.body?.startsWith(marker),
+      )?.id;
+      if (batch.length < 100) break;
+    }
+    if (existingId !== undefined) {
+      await this.apiRequest(
+        "PATCH",
+        `/repos/${owner}/${repo}/issues/comments/${existingId}`,
+        owner,
+        repo,
+        { body },
+      );
+      return;
+    }
+    await this.postPullRequestComment(owner, repo, prNumber, body);
+  }
+
+  /**
    * Fetch conversation-tab issue comments on a pull request.
    *
    * @param owner - Repository owner
@@ -919,6 +992,104 @@ export class GitHubReviewsClient {
       },
     );
     return response.ok ? response.text() : null;
+  }
+
+  /**
+   * List every changed file of a pull request (paginated; GitHub stops at
+   * 3000 files, so callers compare the count with `changed_files`).
+   */
+  async listPullRequestFiles(
+    owner: string,
+    repo: string,
+    prNumber: number,
+  ): Promise<PullRequestFile[]> {
+    const files: PullRequestFile[] = [];
+    for (let page = 1; page <= 30; page++) {
+      const batch = await this.apiRequest<PullRequestFile[]>(
+        "GET",
+        `/repos/${owner}/${repo}/pulls/${prNumber}/files?per_page=100&page=${page}`,
+        owner,
+        repo,
+      );
+      files.push(...batch);
+      if (batch.length < 100) break;
+    }
+    return files;
+  }
+
+  /** List every submitted review on a pull request (paginated). */
+  async listPullRequestReviews(
+    owner: string,
+    repo: string,
+    prNumber: number,
+  ): Promise<Array<{ state: string; user: { login: string } | null }>> {
+    const reviews: Array<{ state: string; user: { login: string } | null }> = [];
+    for (let page = 1; page <= 10; page++) {
+      const batch = await this.apiRequest<Array<{ state: string; user: { login: string } | null }>>(
+        "GET",
+        `/repos/${owner}/${repo}/pulls/${prNumber}/reviews?per_page=100&page=${page}`,
+        owner,
+        repo,
+      );
+      reviews.push(...batch);
+      if (batch.length < 100) break;
+    }
+    return reviews;
+  }
+
+  /** Add labels to an issue or PR; GitHub creates labels that don't exist yet. */
+  async addIssueLabels(
+    owner: string,
+    repo: string,
+    issueNumber: number,
+    labels: string[],
+  ): Promise<void> {
+    await this.apiRequest(
+      "POST",
+      `/repos/${owner}/${repo}/issues/${issueNumber}/labels`,
+      owner,
+      repo,
+      { labels },
+    );
+  }
+
+  /** Remove a label from an issue or PR; a label that isn't there (404) is not an error. */
+  async removeIssueLabel(
+    owner: string,
+    repo: string,
+    issueNumber: number,
+    label: string,
+  ): Promise<void> {
+    try {
+      await this.apiRequest(
+        "DELETE",
+        `/repos/${owner}/${repo}/issues/${issueNumber}/labels/${encodeURIComponent(label)}`,
+        owner,
+        repo,
+      );
+    } catch (error) {
+      if (!isGitHubNotFound(error)) throw error;
+    }
+  }
+
+  /**
+   * Merge a pull request, pinned to the head SHA that was evaluated: GitHub
+   * rejects the merge (409) when the head moved since, so commits pushed
+   * after the safety check can never ride along.
+   */
+  async mergePullRequest(
+    owner: string,
+    repo: string,
+    prNumber: number,
+    options: { sha: string; method: "merge" | "squash" | "rebase" },
+  ): Promise<PullRequestMergeResult> {
+    return this.apiRequest<PullRequestMergeResult>(
+      "PUT",
+      `/repos/${owner}/${repo}/pulls/${prNumber}/merge`,
+      owner,
+      repo,
+      { sha: options.sha, merge_method: options.method },
+    );
   }
 
   /**
