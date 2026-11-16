@@ -380,6 +380,29 @@ export function getWorkerFailover(): WorkerFailover | null {
 }
 
 /**
+ * When every harness in the chain is usage-limited, the earliest time one of
+ * them becomes usable again; `undefined` while any entry can start a run (or
+ * when the chain is only cooling down after startup failures, which has no
+ * exposed resume time and is short-lived).
+ *
+ * Pickup loops use this to pause once with a reason instead of claiming and
+ * deferring every ready task on each tick.
+ */
+export function harnessChainBlockedUntil(
+  failover: WorkerFailover | null = getWorkerFailover(),
+  now: number = Date.now(),
+): number | undefined {
+  if (!failover?.allLimited()) return undefined;
+  const until = Math.min(...Object.values(failover.windows()).filter((value) => value > now));
+  return Number.isFinite(until) ? until : undefined;
+}
+
+/** Human-readable reason for a harness-chain pause, shared by pickup loops. */
+export function harnessBlockedReason(untilMs: number): string {
+  return `no agent harness is available until ${new Date(untilMs).toISOString()} (usage limit)`;
+}
+
+/**
  * Lazy fallback for in-process callers (webhook-server tests) that spawn
  * before {@link startWorkerFailover}. Does not persist or probe PATH.
  */
