@@ -37,6 +37,11 @@ dashboard = true
 # conflict_resolution_interval = "1d"         # exactly one of cron / interval
 # Or turn it off entirely: conflict_resolution = "disabled"
 # conflict_resolution_model = "sonnet"        # cheaper model for conflict resolution (primary harness)
+# Merge the agent's own PRs once they are green and safe (off by default):
+# auto_merge = true
+# auto_merge_safe_paths = ["**/*.md", "docs/**"]   # merge with no agent run
+# auto_merge_deny_paths = ["**/migrations/**"]     # never auto-merge
+# auto_merge_review = true                          # agent decides the rest
 
 # Optional bounded host concurrency (see warning below):
 # [workspace.execution]
@@ -300,6 +305,47 @@ conflict_resolution_model = "sonnet"     # a model id for your primary harness (
 A model-only setting applies to the workspace's primary harness and keeps failover. A pinned harness that hits a usage limit does not fail over: the resolution is deferred and retried on later polls, and after three consecutive deferrals the PR waits until its head or base moves again (or until you run `devintern resolve-conflicts <pr-url>`). Changes live-reload; a manual `devintern resolve-conflicts <pr-url>` uses the normal environment.
 
 Set `conflict_resolution = "disabled"` to turn automatic conflict resolution off entirely: the worker stops watching for conflicts on the agent's PRs altogether — no detection, no queuing, no agent runs. A PR that conflicts with its base simply stays conflicted until someone resolves it (by hand, or on demand via `devintern resolve-conflicts <pr-url>`). Review feedback and @mention handling are unaffected. This is a valid choice when the team prefers to rebase manually, or when the agent is not trusted to resolve conflicts in a sensitive repository.
+
+### Auto-merging safe PRs
+
+Set `auto_merge = true` to have the worker merge its own pull requests once they are green and safe, so docs fixes or new e2e tests do not wait in a review queue. It is off by default, applies only to the PRs the worker opened (the same watch list as review polling), and is GitHub-only for now.
+
+```toml
+[workspace]
+auto_merge = true
+auto_merge_safe_paths = ["**/*.md", "docs/**", "packages/*/tests/e2e/**"]
+auto_merge_deny_paths = ["**/migrations/**", "**/package.json", "bun.lock"]
+auto_merge_review = true          # ask the agent about PRs that leave the safe paths
+auto_merge_method = "squash"      # merge | squash | rebase
+auto_merge_review_label = "needs-human-review"  # label PRs left open; "" disables
+# auto_merge_model = "sonnet"     # also auto_merge_harness / auto_merge_effort
+
+[[repos]]
+name = "api"
+remote = "git@github.com:acme/api.git"
+auto_merge_safe_paths = ["e2e/**"]  # replaces the workspace list for this repo
+```
+
+Each candidate PR goes through these gates in order, and any "no" leaves it open for a human:
+
+1. **Ready.** The PR is open, not a draft, not from a fork, and GitHub reports it mergeable with passing checks (`mergeable_state` is `clean`), so failing, pending, or conflicting PRs wait. Branch protection still applies: a PR that needs an approval is `blocked` and waits. No reviewer's latest review requests changes, and the head commit has not moved for 5 minutes (`WORKER_AUTO_MERGE_QUIET_SECONDS`).
+2. **Deny paths.** If any changed file matches `auto_merge_deny_paths`, or a built-in deny path (`.github/**`, `**/CODEOWNERS`, `.devintern-code/**`), the PR is never auto-merged.
+3. **Safe paths.** If every changed file matches `auto_merge_safe_paths`, the PR merges right away. No agent runs, so no tokens are spent.
+4. **Agent review.** Otherwise, with `auto_merge_review = true` (the default), the agent reads the diff in a checkout of the PR and returns a verdict. The PR merges only on an explicit "safe". A missing or malformed verdict never merges. With `auto_merge_review = false`, PRs outside the safe paths are left open.
+
+Globs are repo-relative ([`Bun.Glob`](https://bun.sh/docs/api/glob) syntax). `docs/` is shorthand for `docs/**`. A rename counts both its old and new path, so moving a source file into `docs/` is not docs-only. A per-repo list replaces the workspace list rather than extending it.
+
+The merge is pinned to the head SHA that passed the gates, and the PR is re-checked right before merging, so a commit pushed during the review is never merged unreviewed. Each decision is made once per head SHA and policy: a PR that was left open is evaluated again after new commits, or after you change its safe paths, deny paths, or `auto_merge_review`. The agent review runs at most once per head and policy. Changes to these settings live-reload.
+
+Every decision is also stated on the PR itself, in a single **status comment** that devintern creates on the first decision and edits in place afterwards, so pushes do not add new comments. A merged PR's comment names the merge method and commit, and the reason (safe paths, or the merge-safety review's verdict). A PR left open gets the reason and the next steps: for paths outside the safe list, the comment lists the files (up to 10) and suggests widening `auto_merge_safe_paths` or enabling `auto_merge_review`; for a deny-path hit, it names the file and the deny path; for a negative review, it quotes the agent's reason. "Not ready yet" checks post nothing. Only comments written by the worker's own GitHub credential are edited, and editing needs the same `Pull requests: Read and write` permission as posting.
+
+PRs left open for a human (including a check that kept failing) also get a **review label**, `needs-human-review` by default, so they stand out in the pull request list. GitHub creates the label on first use. When auto-merge later merges the PR, it removes the label. Set `auto_merge_review_label` to another name to use your own label, or to `""` to turn labeling off. Renaming the label does not re-evaluate PRs that were already decided. A failure to add or remove the label only logs a warning; it never blocks the merge.
+
+**Agent usage limits.** A review that hits the agent's usage limit never drops the PR. With failover, the next harness in the chain takes over. When every harness is limited, or `auto_merge_harness` pins one that is, the check is **Deferred** until the quota resets, using the reset time from the agent's limit message, or the same fallback cooldown as other worker jobs. The PR is not checked again before then, so no check is relaunched into the limit, and it is reviewed on the first pass after the quota returns. A deferral never counts against the PR's attempts. Ordinary failures (for example, an agent that returns no verdict) retry after 5 and then 10 minutes. After the third failure for the same commit, the status comment says the check kept failing, and the PR waits for new commits or a policy change.
+
+In the dashboard, each check shows in the run list with the **Auto-merge** origin while it runs. Merges stay as **Succeeded**, PRs left open as **Escalated** with the reason, and errors as **Failed**. Checks that end in "not ready yet" (for example, changes requested) are removed once they finish. The **Automations** page lists an **Auto-merge** entry while it is enabled, with the current policy. Its **Run now** checks every open PR immediately, skipping the quiet period and retry backoff. GitHub must still report each PR green and conflict-free.
+
+To check a PR by hand without merging it, run `devintern auto-merge <pr-url> --safe-path '**/*.md' --dry-run`. Flags: `--safe-path` and `--deny-path` (repeatable), `--no-review`, `--method`, `--review-label <name>` and `--no-review-label` (a manual run labels PRs it leaves open with `needs-human-review` by default). The dry run goes through every gate, including the agent review.
 
 ### How workspace automations differ from single-repo ones
 

@@ -181,6 +181,33 @@ bun run --filter @getdevintern/code build
 bun run --filter @devintern/e2e test
 ```
 
+## Worker connect validation and Sentry connect
+
+`tests/local/worker-connect.test.ts` runs the built CLI's `devintern worker
+connect` against a workspace bootstrapped with `worker scaffold` and
+`worker add-repo`. `WORKER_RELAY_URL` and `DEVINTERN_API_BASE` point at a
+loopback recorder, and every case asserts it received zero requests.
+
+- Unsupported targets, `--team` with `status`/`sentry`, `--repo` with a
+  non-Sentry target, `--disconnect` with a non-GitLab target, and a missing
+  `--workspace` each exit 1 with their exact error. `workspace.toml`, `.env`,
+  and `env/` stay byte-identical. `--help` lists every target.
+- `connect sentry` with piped (non-TTY) stdin exits 1 and writes nothing.
+- The interactive Sentry flow runs on a Bun pseudo-terminal
+  (`Bun.spawn({ terminal })`) against `providers/fake-sentry.ts`. A valid token
+  writes exactly one `[[error_monitors]]` entry and a mode-`0600` token file,
+  and the token stays out of `workspace.toml`. A re-run with `SENTRY_AUTH_TOKEN`
+  in the environment adds no duplicate. A token the fake rejects with 401
+  writes nothing. An unknown `--repo` fails before any prompt, and in a
+  two-repo workspace cwd's `origin` selects the repository.
+- The token prompt is visible by design, so the PTY echoes the typed token once.
+  The suite asserts it appears exactly once, right after its prompt, so the
+  CLI's own log lines never repeat it.
+
+PTY cases skip with a logged reason only where Bun has no pseudo-terminal
+support (Windows). Relay targets need a signed-in relay session and stay out of
+this offline suite.
+
 ## Scheduled workspace automations
 
 `tests/local/worker-automations.test.ts` starts one real `devintern worker`
@@ -426,6 +453,24 @@ sandboxed run when `sbx` cannot list its daemon, a missing harness CLI surfacing
 as a preflight failure with the `*_CLI_PATH` fix, and the removed `srt`/`smolvm`
 providers reporting a migration error instead of an unknown-provider list.
 
+`tests/local/sandbox-workspace-grants.test.ts` proves the workspace-owned grants a
+sandboxed agent needs outside the checkout: writes to an existing
+`<workspace>/injected/`, `<workspace>/state/`, and `<workspace>/automations/`
+succeed, a non-granted sibling under the workspace stays denied, and an absent
+directory is neither granted nor created implicitly. The fixture root lives
+outside the OS temp dir because nono's Linux profile already grants write on
+`/tmp` itself; a workspace under `/tmp` would make the grant assertion pass
+without exercising the explicit policy. The fixture also keeps the workspace
+outside its root: `TMPDIR` lives under the root, and the macOS default policy
+grants `dirname(TMPDIR)` (the per-user temp/cache parent), so a workspace inside
+the root would be writable on the default temp grant alone. `SandboxWorkspace`
+asserts that no default writable path covers the workspace before each run.
+
+This test exercises the filesystem grants directly. It does not invoke
+`devintern worker add` or a scheduled automation, so those command paths under
+nono remain uncovered; the worker-option and automation suites run without a
+sandbox.
+
 Docker Sandboxes (`sbx`) stays optional. Its real-boundary test skips unless the
 prerequisite below is present; the fail-closed test still runs by shadowing the
 executable. `sbx` only runs agents pre-installed in its guest microVM and
@@ -435,6 +480,9 @@ fail-closed behavior.
 
 ### Optional real-provider prerequisites
 
+- **nono**: `nono` on `PATH` (`nono --version` succeeds). Every real-nono
+  boundary test, including the workspace grants, reports an explicit skip when
+  nono is absent instead of falling back to an unsandboxed run.
 - **Docker Sandboxes**: the `sbx` CLI signed in (`sbx login`) with a reachable
   daemon; `sbx ls` must succeed.
 
@@ -597,6 +645,29 @@ Run just the Azure DevOps lifecycle with:
 bun run --filter @devintern/e2e test
 # or directly, from packages/e2e
 bun test tests/local/tracker-azure-devops-fake.test.ts
+```
+
+#### Worker Azure DevOps polling
+
+`tests/local/worker-azure-devops-polling.test.ts` starts the built worker
+daemon with `tracker = "azure-devops"`, a ready-state WIQL `task_query`,
+`poll_interval = 1`, the deterministic agent, a local bare remote, and the same
+fake (constructed with `realClock: true` so `System.ChangedDate` falls on the
+real UTC day). It asserts the fake received the product's day-precision delta
+`SELECT [System.Id] FROM WorkItems WHERE [System.ChangedDate] >= '<YYYY-MM-DD>'`,
+that the ready item is implemented once (branch, run record, comment, state)
+while a decoy in another state is untouched, that several over-reported
+same-day ticks add no run, agent invocation, or comment, that moving another
+item into the ready state runs it once, and that a graceful restart on the same
+queue database resumes from the persisted cursor. After the restart the
+workspace switches to `--skip-comments`, so a processed item keeps matching the
+query at the same `ChangedDate`. Only the `(key, updated)` dedupe then keeps it
+from re-running. The prerequisite is the built CLI
+(`bun run --filter @getdevintern/code build`); no credentials are needed.
+
+```sh
+# from packages/e2e
+bun test tests/local/worker-azure-devops-polling.test.ts
 ```
 
 ### Offline fake Linear server
@@ -818,8 +889,63 @@ bun run --filter @getdevintern/code build
 bun run --filter @devintern/e2e test
 ```
 
-Worker-embedded dashboard mode, automation "Run now", and log redaction
-readback stay out of scope for this suite.
+Worker-embedded dashboard mode, automation "Run now", the Host/Origin guard,
+and log redaction are covered by `tests/local/dashboard-embedded.test.ts`
+(below).
+
+## Worker-embedded dashboard, Run now, and the Host/Origin guard
+
+`tests/local/dashboard-embedded.test.ts` runs in the default offline suite. Its
+first case starts a `WorkerFixture` with `dashboard: { port }`, which writes
+`[workspace].dashboard = true`, `dashboard_port` (a free `127.0.0.1` port), and
+a `[dashboard]` table with one `allowed_origins` entry and
+`tailscale_autodetect = false`; the isolated environment also sets
+`DASHBOARD_TAILSCALE_AUTODETECT=0`, so the host's `tailscale` state never
+widens trust. One `[[automations]]` entry uses a January 1st cron, so it never
+fires by itself. The case asserts:
+
+- the embedded server answers `/api/health`, `/api/worker` (the daemon's pid,
+  `running`), and `/api/automations` (the configured entry, its far-future next
+  occurrence, no last run);
+- rejected requests: a foreign `Origin`, a rebound `Host:
+attacker.example:<port>` (on writes and on a GET), an allowlisted origin with
+  a foreign Host, an allowlisted Host with a foreign Origin, and a missing
+  Origin all return 403 with the documented error; a loopback Origin with
+  `text/plain` returns 415. None of them creates a run, an occurrence file, or
+  an agent invocation;
+- the allowlisted origin with its own Host reads (200) and reaches the write
+  route (404 for an unknown automation id);
+- `POST /api/automations/<id>/run` with the loopback Origin returns 202
+  `{ status: "triggered" }` and runs the automation once through the pipeline
+  with the deterministic agent (held for 4s by `E2E_AGENT_DELAY_MS`). A second
+  trigger while it runs returns 409, either the scheduler's "already running"
+  or the dashboard's "already has a run in progress" refusal. The run record
+  has origin `manual` and the automation id, and appears in
+  `/api/runs?automationId=…`, `/api/runs?origin=manual`, and as the
+  automation's `lastRun`;
+- `GET /api/logs` returns the daemon's banner and its "starting manual run
+  (dashboard)" line. A live edit to `workspace.toml` that the worker rejects
+  echoes two seeded fake values (a `ghp_`-shaped token and an
+  `E2E_API_TOKEN=…` assignment) into the raw daemon output; the dashboard log
+  view shows them as `[redacted]`, and neither raw value nor its URL-encoded
+  form appears in the response. The worker keeps its previous config.
+
+The second case starts the standalone `devintern dashboard` with
+`--allow-origin https://flag.e2e.example`, `DASHBOARD_ALLOWED_ORIGINS=
+https://env.e2e.example:8443`, and `--no-tailscale-autodetect` against an
+unstarted worker workspace. Writes go to `POST /api/tasks`, so each accepted
+write is an `injected_tasks` row and each rejected one is not. Foreign Origin,
+rebound Host, an allowlisted origin with a foreign Host or the wrong port, and
+another loopback port's Origin are all refused with 403 and leave the queue
+empty. Both allowlisted origins (with their own Host) and the loopback Origin
+enqueue one row each with actor `local:dashboard`.
+
+```sh
+bun run --filter @getdevintern/code build
+bun run --filter @devintern/e2e test
+# or just this file
+cd packages/e2e && bun test tests/local/dashboard-embedded.test.ts
+```
 
 ## Direct webhook serve
 
@@ -932,8 +1058,12 @@ PR CI.
 
 ### Azure DevOps fake
 
-`tests/local/tracker-azure-devops-fake.test.ts` exercises key and WIQL selection, state transitions, comments, and decoy isolation against a loopback fake API. The test subprocess opts in with `DEVINTERN_E2E_FAKE_AZURE_DEVOPS=1`; project configuration cannot enable the endpoint override.
+`tests/local/tracker-azure-devops-fake.test.ts` exercises key and WIQL selection, state transitions, comments, and decoy isolation against a loopback fake API. The test subprocess opts in with `DEVINTERN_E2E_FAKE_AZURE_DEVOPS=1`; project configuration cannot enable the endpoint override. `tests/local/worker-azure-devops-polling.test.ts` drives the worker daemon's Azure DevOps change detector against the same fake: delta WIQL shape, exactly-once pickup, over-reported same-day ticks, re-arm, cursor persistence across a restart, and the `(key, updated)` dedupe.
 
 ### Jira story-point estimation
 
 `tests/local/tracker-jira-estimation.test.ts` covers one-shot estimation, unchanged-task skips, re-estimation, and `--skip-comments` against the offline Jira fixture. `tests/local/worker-scheduled-estimation.test.ts` covers the same fake from a worker `[[estimations]]` schedule: one coalesced sweep, `estimate` run attribution, read-only git, and a later sweep that leaves the unchanged issue alone.
+
+### No-op runs (`--allow-no-changes`)
+
+`tests/local/cli-allow-no-changes.test.ts` runs the built CLI with the fixture agent's `no-change` mode against a local bare remote. Without the flag, `--create-pr` exits non-zero with `Implementation was not committed` and records a `failed` run. With `--allow-no-changes`, it exits 0, records a `succeeded` run with no `pr_url`, and pushes no branch or commit. With `--no-git` the commit step is skipped, so the flag has no effect there: a no-op succeeds with or without it, and the suite runs both forms as a regression guard. Against the offline Jira fake, the failure path posts a failure comment and moves the ticket back to its todo status. The no-op path currently posts no comment and leaves the ticket in its in-progress status. The test asserts this as observed behaviour, not as a confirmed product contract.

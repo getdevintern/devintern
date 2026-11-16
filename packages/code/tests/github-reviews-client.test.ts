@@ -317,3 +317,85 @@ describe("GitHubReviewsClient auth failure path", () => {
     }
   });
 });
+
+describe("GitHubReviewsClient.upsertMarkedIssueComment", () => {
+  const MARKER = "<!-- marker -->";
+
+  function recorder(comments: Array<{ id: number; body: string; user: { login: string } }>) {
+    const calls: Array<{ method: string; url: string; body?: string }> = [];
+    globalThis.fetch = mockFetch(async (url, init) => {
+      const method = init?.method ?? "GET";
+      const target = String(url);
+      calls.push({ method, url: target, body: init?.body as string | undefined });
+      if (target.endsWith("/user")) return jsonResponse(200, { login: "devintern-bot" });
+      if (method === "GET") return jsonResponse(200, comments);
+      return jsonResponse(200, { id: 99 });
+    });
+    return calls;
+  }
+
+  test("edits this credential's marked comment in place", async () => {
+    const calls = recorder([
+      { id: 1, body: `${MARKER}\nhuman copy`, user: { login: "alice" } },
+      { id: 2, body: `${MARKER}\nold status`, user: { login: "Devintern-Bot" } },
+    ]);
+    const client = new GitHubReviewsClient({ token: "t", authMode: "token-only" });
+    await client.upsertMarkedIssueComment("acme", "widgets", 7, MARKER, `${MARKER}\nnew`);
+    const write = calls.at(-1)!;
+    expect(write.method).toBe("PATCH");
+    expect(write.url).toEndWith("/repos/acme/widgets/issues/comments/2");
+    expect(JSON.parse(write.body!)).toEqual({ body: `${MARKER}\nnew` });
+  });
+
+  test("creates a comment when only other authors carry the marker", async () => {
+    const calls = recorder([{ id: 1, body: `${MARKER}\nhuman copy`, user: { login: "alice" } }]);
+    const client = new GitHubReviewsClient({ token: "t", authMode: "token-only" });
+    await client.upsertMarkedIssueComment("acme", "widgets", 7, MARKER, `${MARKER}\nnew`);
+    const write = calls.at(-1)!;
+    expect(write.method).toBe("POST");
+    expect(write.url).toEndWith("/repos/acme/widgets/issues/7/comments");
+  });
+});
+
+describe("GitHubReviewsClient issue labels", () => {
+  function recorder(status: number) {
+    const calls: Array<{ method: string; url: string; body?: string }> = [];
+    globalThis.fetch = mockFetch(async (url, init) => {
+      calls.push({
+        method: init?.method ?? "GET",
+        url: String(url),
+        body: init?.body as string | undefined,
+      });
+      return jsonResponse(status, status === 404 ? { message: "Label does not exist" } : []);
+    });
+    return calls;
+  }
+
+  test("adds labels with one POST", async () => {
+    const calls = recorder(200);
+    const client = new GitHubReviewsClient({ token: "t", authMode: "token-only" });
+    await client.addIssueLabels("acme", "widgets", 7, ["needs-human-review"]);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.method).toBe("POST");
+    expect(calls[0]!.url).toEndWith("/repos/acme/widgets/issues/7/labels");
+    expect(JSON.parse(calls[0]!.body!)).toEqual({ labels: ["needs-human-review"] });
+  });
+
+  test("removes a label by its URL-encoded name", async () => {
+    const calls = recorder(200);
+    const client = new GitHubReviewsClient({ token: "t", authMode: "token-only" });
+    await client.removeIssueLabel("acme", "widgets", 7, "needs review/human");
+    expect(calls[0]!.method).toBe("DELETE");
+    expect(calls[0]!.url).toEndWith("/repos/acme/widgets/issues/7/labels/needs%20review%2Fhuman");
+  });
+
+  test("removing an absent label (404) succeeds; other errors throw", async () => {
+    recorder(404);
+    const client = new GitHubReviewsClient({ token: "t", authMode: "token-only" });
+    await client.removeIssueLabel("acme", "widgets", 7, "needs-human-review");
+    recorder(403);
+    await expect(client.removeIssueLabel("acme", "widgets", 7, "x")).rejects.toThrow(
+      "GitHub API error (403)",
+    );
+  });
+});

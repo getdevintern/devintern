@@ -11,6 +11,7 @@ export type RunOrigin =
   | "pr_mention"
   | "ci_fix"
   | "conflict_resolution"
+  | "auto_merge"
   | "scheduled"
   | "estimate"
   | "manual"
@@ -326,7 +327,7 @@ export async function submitReport(previewId: string, email?: string): Promise<R
 }
 
 /** One configured scheduled automation as served by `GET /api/automations`. */
-export type ScheduledJobKind = "automation" | "estimation" | "conflict_resolution";
+export type ScheduledJobKind = "automation" | "estimation" | "conflict_resolution" | "auto_merge";
 
 /** Which recorded runs belong to one scheduled job (`GET /api/runs` filters). */
 export interface ScheduledJobRunFilter {

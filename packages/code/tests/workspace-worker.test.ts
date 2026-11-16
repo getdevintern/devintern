@@ -1,6 +1,6 @@
 import { GitLabReviewPollingAcquirer } from "../src/lib/acquirers/gitlab-review-polling";
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { existsSync, mkdirSync, rmSync } from "fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
@@ -23,7 +23,9 @@ import {
 } from "../src/lib/workspace/workspace-worker";
 import type { FleetTask, RepoManagerLike } from "../src/lib/workspace/workspace-worker";
 import { InjectedTaskStore } from "../src/lib/state/injected-tasks";
-import { ScheduledRetryStore } from "../src/lib/state/run-retry";
+import { ScheduledRetryStore, isRunRetriable } from "../src/lib/state/run-retry";
+import { RunStore } from "../src/lib/state/run-recorder";
+import { workspaceDbPath } from "../src/lib/workspace/paths";
 import { resetWorkerFailover, startWorkerFailover } from "../src/lib/worker/failover";
 import { RUN_ORIGIN_ENV } from "../src/lib/observability/analytics";
 import { resolveRunIdentity } from "../src/lib/task/run-identity";
@@ -470,6 +472,48 @@ describe("createFleetTaskExecutor serialization", () => {
     rmSync(workspaceDir, { recursive: true, force: true });
   });
 
+  test("a tracker task whose worktree setup fails gets a retriable failed run", async () => {
+    repoManager.createTaskWorktree = async () => {
+      throw new Error("Failed to add worktree at /x (origin/main): disk full");
+    };
+    const savedTracker = process.env.TASK_TRACKER;
+    process.env.TASK_TRACKER = "jira";
+    try {
+      const executor = createFleetTaskExecutor({
+        config: CONFIG,
+        workspaceDir,
+        skips: state.skips,
+        repoManager,
+        runTask: async () => true,
+      });
+
+      const result = await executor(
+        "BACK-77",
+        toRoutableTask({ key: "BACK-77", labels: ["backend"], components: [] }),
+      );
+
+      expect(result).toBe(false);
+      const runs = new RunStore(workspaceDbPath(workspaceDir), { readonly: true });
+      try {
+        const [run] = runs.listRuns({ taskKey: "BACK-77" });
+        expect(run).toMatchObject({
+          origin: "task",
+          tracker: "jira",
+          repo: "backend",
+          status: "failed",
+          outcomeReason:
+            "Worktree setup failed: Failed to add worktree at /x (origin/main): disk full",
+        });
+        expect(isRunRetriable(run!)).toEqual({ eligible: true, kind: "task" });
+      } finally {
+        runs.close();
+      }
+    } finally {
+      if (savedTracker === undefined) delete process.env.TASK_TRACKER;
+      else process.env.TASK_TRACKER = savedTracker;
+    }
+  });
+
   test("task runs wait for held supervisor slots", async () => {
     const supervisor = createTaskSupervisor({ maxConcurrency: 1, maxConcurrencyPerRepo: 1 });
     let agentStarted = false;
@@ -844,6 +888,69 @@ describe("buildInjectedTaskAcquirer", () => {
       expect(persistedDuringRun).toBe(process.pid);
       // A clean settle clears it so a later startup never probes a stale pid.
       expect(store.getById(task.id)?.childPid).toBeUndefined();
+    } finally {
+      store.close();
+    }
+  });
+
+  test("a worktree setup failure records a retriable failed run with the real reason", async () => {
+    const repoManager = new FakeRepoManager(workspaceDir);
+    const lockError =
+      'Failed to configure worktrees for repo "backend": error: could not lock config file /x/config: File exists';
+    repoManager.ensureBareClone = async () => {
+      throw new Error(lockError);
+    };
+    const store = new InjectedTaskStore(join(workspaceDir, "injected-tasks.db"));
+    const taskFile = join(workspaceDir, "injected", "local-setup-fails.md");
+    mkdirSync(join(workspaceDir, "injected"), { recursive: true });
+    writeFileSync(taskFile, "# Setup fails\n\nBody.\n");
+    let spawned = false;
+    try {
+      const { task } = store.enqueue({
+        taskKey: "local-setup-fails",
+        repo: "backend",
+        title: "Setup fails",
+        body: "",
+        taskFile,
+      });
+      const acquirer = buildInjectedTaskAcquirer(
+        {
+          config: CONFIG,
+          workspaceDir,
+          skips: state.skips,
+          repoManager,
+          runTask: async () => {
+            spawned = true;
+            return true;
+          },
+        },
+        store,
+      );
+
+      await acquirer.tick();
+
+      expect(spawned).toBe(false);
+      // The queue row keeps the concrete cause instead of the generic fallback.
+      const row = store.getById(task.id);
+      expect(row?.status).toBe("failed");
+      expect(row?.message).toBe(`Worktree setup failed: ${lockError}`);
+
+      // A run exists, so the dashboard lists the failure and offers Retry.
+      const runs = new RunStore(workspaceDbPath(workspaceDir), { readonly: true });
+      try {
+        const [run] = runs.listRuns({ taskKey: "local-setup-fails" });
+        expect(run).toMatchObject({
+          origin: "local",
+          tracker: "local",
+          repo: "backend",
+          status: "failed",
+          outcomeReason: `Worktree setup failed: ${lockError}`,
+          taskDescription: "# Setup fails\n\nBody.\n",
+        });
+        expect(isRunRetriable(run!)).toEqual({ eligible: true, kind: "injected" });
+      } finally {
+        runs.close();
+      }
     } finally {
       store.close();
     }
@@ -1441,6 +1548,7 @@ remote = "https://forgejo.example/acme/forgejo.git"
       expect(acquirers.map((acquirer) => acquirer.name)).toEqual([
         "poll:reviews",
         "poll:ci-failures",
+        "poll:auto-merge",
       ]);
       expect(hooksOut.hooks?.mentionSweepRepos()).toEqual([]);
 
