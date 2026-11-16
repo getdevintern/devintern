@@ -29,8 +29,15 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { createSandboxHome, createSandboxOutside, nonoPath } from "../../helpers/sandbox";
+import { buildDefaultSandboxPolicy } from "@devintern/agent-harness";
+import {
+  createSandboxHome,
+  createSandboxOutside,
+  isAtOrBelow,
+  nonoPath,
+} from "../../helpers/sandbox";
 import { cliPath, WorkerFixture } from "../../helpers/worker";
 
 const AUTOMATION_ID = "sandbox-write";
@@ -58,6 +65,42 @@ interface DelegateReport {
   >;
 }
 
+/**
+ * Temp roots nono grants write on that contain `path` (empty when none do).
+ *
+ * @param path - Existing directory to check.
+ * @returns The OS temp dir and, on Linux, `/tmp`, when `path` is at or below them.
+ */
+function tempRootsContaining(path: string): string[] {
+  const real = realpathSync(path);
+  const roots = [tmpdir(), ...(process.platform === "linux" ? ["/tmp"] : [])];
+  return roots.filter((r) => existsSync(r) && isAtOrBelow(real, realpathSync(r)));
+}
+
+/**
+ * Default-policy writable paths that contain the workspace, computed by the
+ * real `buildDefaultSandboxPolicy` with the fixture's TMPDIR and HOME.
+ *
+ * @param worker - Prepared worker fixture.
+ * @returns Writable paths at or above `worker.workspaceDir` (should be empty).
+ */
+function defaultGrantsContainingWorkspace(worker: WorkerFixture): string[] {
+  const saved = { TMPDIR: process.env.TMPDIR, HOME: process.env.HOME };
+  let writable: string[];
+  try {
+    process.env.TMPDIR = worker.env.TMPDIR;
+    process.env.HOME = worker.env.HOME;
+    writable = buildDefaultSandboxPolicy(worker.env.DEVINTERN_OUTPUT_DIR!).writablePaths;
+  } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+  const workspace = realpathSync(worker.workspaceDir);
+  return writable.filter((p) => existsSync(p) && isAtOrBelow(workspace, realpathSync(p)));
+}
+
 /** Every resource one scenario creates, so `finally` can release all of it. */
 interface GrantScenario {
   worker: WorkerFixture;
@@ -76,9 +119,22 @@ interface GrantScenario {
 function createScenario(provider: "nono" | "none"): GrantScenario {
   const outside = createSandboxOutside();
   const root = createSandboxHome("devintern-e2e-sandbox-grants-");
+  if (provider === "nono") {
+    const under = tempRootsContaining(root);
+    if (under.length > 0) {
+      rmSync(root, { recursive: true, force: true });
+      if (outside) rmSync(outside, { recursive: true, force: true });
+      throw new Error(
+        `fixture root ${root} landed under the temp dir (${under.join(", ")}), which nono grants write on; denials cannot be proven. Make /var/tmp or packages/e2e/node_modules/.cache writable.`,
+      );
+    }
+  }
   // The fixture's default TMPDIR is its root; the default policy grants the
-  // temp dir, which would make the whole workspace writable. Keep it separate.
-  const temp = join(root, "tmp");
+  // temp scope, which would make the whole workspace writable. Keep it
+  // separate, and one level deeper: on macOS the policy grants
+  // dirname(tmpdir()) (the /var/folders/<x>/<hash> parent of T), so a TMPDIR
+  // of <root>/tmp would grant <root> itself, workspace included.
+  const temp = join(root, "tmp", "T");
   mkdirSync(temp, { recursive: true });
   const worker = new WorkerFixture({
     root,
@@ -187,6 +243,9 @@ test.skipIf(nonoSkipReason !== undefined)(
       const injectedDir = join(worker.workspaceDir, "injected");
       const automationsDir = join(worker.workspaceDir, "automations");
       const stateDir = join(worker.workspaceDir, "state");
+      // No default grant (temp scope included) may cover the workspace, or the
+      // denial assertions below would fail for a fixture reason.
+      expect(defaultGrantsContainingWorkspace(worker)).toEqual([]);
       // Nothing pre-creates the granted directories: the grant only lists
       // existing paths (workspaceAgentWritablePaths), so the worker must create
       // the ones it owns at startup (ensureAgentWritableWorkspaceDirs in

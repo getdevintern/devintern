@@ -194,7 +194,7 @@ function sandboxOutsideBases(): string[] {
  * @param parent - Real path of the supposed ancestor.
  * @returns True when `candidate` is at or below `parent`.
  */
-function isAtOrBelow(candidate: string, parent: string): boolean {
+export function isAtOrBelow(candidate: string, parent: string): boolean {
   if (candidate === parent) return true;
   return candidate.startsWith(parent.endsWith(sep) ? parent : `${parent}${sep}`);
 }

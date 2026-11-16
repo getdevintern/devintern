@@ -425,9 +425,13 @@ not a fixture artifact. The nono test skips with a named reason when nono or
 the built CLI is missing; the unsandboxed control needs only the built CLI.
 
 Fixture layout notes. The whole fixture root (workspace plus `HOME`) lives
-outside `/tmp`, because nono's Linux profile grants write on `/tmp`.
-`TMPDIR` is a separate subdirectory, because the default policy grants the temp
-dir. The agent, the Bun runtime, the CLI bundle and the workspace are reachable
+outside `/tmp`, because nono's Linux profile grants write on `/tmp`; if no
+base outside the temp dir is creatable, the nono test fails with that reason
+instead of a misleading denial assertion. `TMPDIR` is `<root>/tmp/T`, two levels
+down, because the default policy grants the temp dir on Linux and its parent on
+macOS (the `/var/folders/<x>/<hash>` dir above `T`); a shallower `TMPDIR` would
+put the workspace under that grant. The test asserts no default grant contains
+the workspace. The agent, the Bun runtime, the CLI bundle and the workspace are reachable
 as top-level `$HOME` entries, the way a real install keeps them under `$HOME`.
 nono's policy grants read on those entries and never write. The `repos/`
 probe writes directly under `repos/` because the repo's own bare clone is the
