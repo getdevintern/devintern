@@ -57,7 +57,7 @@ function fakeGitHub(
       github.merges.push({ sha, method });
       return { merged: true, sha: "c".repeat(40) };
     },
-    comment: async (body) => {
+    upsertStatusComment: async (body) => {
       github.comments.push(body);
     },
   };
@@ -107,6 +107,8 @@ describe("autoMergePr", () => {
     expect(result).toMatchObject({ outcome: "merged", reviewed: false });
     expect(opts.agentCalls).toHaveLength(0);
     expect(github.merges).toEqual([{ sha: HEAD, method: "squash" }]);
+    expect(github.comments).toHaveLength(1);
+    expect(github.comments[0]).toContain("Auto-merge: merged** (squash)");
     expect(github.comments[0]).toContain("safe paths");
   });
 
@@ -128,6 +130,7 @@ describe("autoMergePr", () => {
     );
     expect(result).toMatchObject({ outcome: "rejected", reviewed: true });
     expect(github.merges).toHaveLength(0);
+    expect(github.comments[0]).toContain("left open for human review");
     expect(github.comments[0]).toContain("changes auth");
     expect(github.comments[0]).not.toContain("@team");
   });
@@ -145,6 +148,11 @@ describe("autoMergePr", () => {
     const result = await autoMergePr(URL, opts);
     expect(result).toMatchObject({ outcome: "rejected", reviewed: false });
     expect(opts.agentCalls).toHaveLength(0);
+    // The PR itself says why it was left open, listing the offending files.
+    expect(github.comments).toHaveLength(1);
+    expect(github.comments[0]).toContain("left open for human review");
+    expect(github.comments[0]).toContain("- `src/x.ts`");
+    expect(github.comments[0]).toContain("`auto_merge_review`");
   });
 
   test("a deny-path hit rejects even when the agent would approve", async () => {
@@ -154,6 +162,7 @@ describe("autoMergePr", () => {
     expect(result.outcome).toBe("rejected");
     expect(result.message).toContain("db/migrations/001.sql");
     expect(opts.agentCalls).toHaveLength(0);
+    expect(github.comments[0]).toContain("deny path `db/migrations/**`");
   });
 
   test("a truncated file list is rejected", async () => {
@@ -174,6 +183,8 @@ describe("autoMergePr", () => {
     const github = fakeGitHub([file("README.md")], { prs: [pr(overrides)] });
     expect((await autoMergePr(URL, options(github))).outcome).toBe(expected as never);
     expect(github.merges).toHaveLength(0);
+    // "Not ready yet" is not a decision: nothing is posted.
+    expect(github.comments).toHaveLength(0);
   });
 
   test("outstanding change requests block the merge", async () => {
