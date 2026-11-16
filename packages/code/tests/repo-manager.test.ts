@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { execSync } from "child_process";
 import { existsSync, mkdirSync, rmSync, utimesSync, writeFileSync } from "fs";
 import { join } from "path";
@@ -157,6 +157,51 @@ describe("RepoManager", () => {
     expect(git(clonePath, "rev-parse --is-bare-repository")).toBe("true");
     expect(git(worktree, "rev-parse --is-bare-repository")).toBe("false");
     expect(git(worktree, "rev-parse --is-inside-work-tree")).toBe("true");
+  });
+
+  test("ensureBareClone and task worktrees skip shared-config writes once configured", async () => {
+    const clonePath = await manager.ensureBareClone(repo);
+    // Another writer (a concurrent task's `git push -u`, or a sandbox's
+    // deny-write placeholder) holds the shared config lock. Git fails any
+    // write immediately, so a steady-state task start must not write.
+    const lockPath = join(clonePath, "config.lock");
+    writeFileSync(lockPath, "");
+    try {
+      await manager.ensureBareClone(repo);
+      const worktree = await manager.createTaskWorktree(repo, "BACK-60");
+      expect(git(worktree, "config --show-origin --get core.hooksPath")).toContain(
+        "config.worktree",
+      );
+    } finally {
+      rmSync(lockPath, { force: true });
+    }
+  });
+
+  test("a needed shared-config write retries until a transient lock clears", async () => {
+    const clonePath = await manager.ensureBareClone(repo);
+    git(clonePath, "config --unset extensions.worktreeConfig");
+    const lockPath = join(clonePath, "config.lock");
+    writeFileSync(lockPath, "");
+    // Release the lock only after a write has actually lost the race, so the
+    // test needs a retry rather than depending on git's timing.
+    const original = Utils.executeGitCommand;
+    let lockFailures = 0;
+    const spy = spyOn(Utils, "executeGitCommand").mockImplementation(async (args, options) => {
+      const result = await original(args, options);
+      if (!result.success && /could not lock config file/.test(result.error ?? "")) {
+        lockFailures++;
+        rmSync(lockPath, { force: true });
+      }
+      return result;
+    });
+    try {
+      await manager.ensureBareClone(repo);
+    } finally {
+      spy.mockRestore();
+      rmSync(lockPath, { force: true });
+    }
+    expect(lockFailures).toBe(1);
+    expect(git(clonePath, "config --get extensions.worktreeConfig")).toBe("true");
   });
 
   test("resolveDefaultBranch falls back to origin/HEAD when unset in config", async () => {
