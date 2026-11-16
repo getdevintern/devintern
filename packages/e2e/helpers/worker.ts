@@ -407,6 +407,11 @@ export class WorkerFixture {
     return this.child !== null && this.child.exitCode === null && this.exitCode === undefined;
   }
 
+  /** Daemon exit code once it has exited on its own, otherwise undefined. */
+  get exitStatus(): number | undefined {
+    return this.exitCode ?? this.child?.exitCode ?? undefined;
+  }
+
   /**
    * Seed the local bare repository and write a credential-free workspace.
    *
