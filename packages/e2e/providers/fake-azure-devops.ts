@@ -54,6 +54,25 @@ export interface FakeAzureDevOpsOptions {
   project?: string;
   /** Override one or more workflow state names. */
   statuses?: Partial<FakeAzureDevOpsStatuses>;
+  /**
+   * Stamp `System.CreatedDate`/`System.ChangedDate` from the wall clock
+   * (strictly increasing) instead of the deterministic 2026-01-01 clock.
+   *
+   * Worker polling needs this: the product's change detector asks WIQL for
+   * `[System.ChangedDate] >= '<today UTC>'`, so fixture timestamps must fall
+   * on the real calendar day for a change to be visible.
+   */
+  realClock?: boolean;
+}
+
+/** One WIQL request the fake received, with the ids it returned. */
+export interface FakeAzureDevOpsWiqlRequest {
+  /** Raw WIQL text from the request body. */
+  query: string;
+  /** Matched work-item ids; empty when the query was rejected. */
+  ids: number[];
+  /** Fake-side receive time (epoch ms). */
+  at: number;
 }
 
 const FAKE_IDENTITY = { displayName: "E2E Azure DevOps User" } as const;
@@ -155,14 +174,42 @@ function serializeTags(tags: string[]): string {
     .join("; ");
 }
 
+/** Date fields that accept the ordering operators (`>=`, `>`, `<=`, `<`). */
+const DATE_FIELDS = new Set(["system.createddate", "system.changeddate"]);
+
+const DAY_LITERAL = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * Compare a stored ISO timestamp against a WIQL date literal.
+ *
+ * A `YYYY-MM-DD` literal is day-precision, as in real WIQL: the stored value is
+ * reduced to its UTC calendar day before comparing. (Azure DevOps resolves the
+ * day in the user's time zone; the fake fixes it to UTC, which is the zone the
+ * product's change detector formats its literal in.) A full timestamp literal
+ * compares instants. Returns undefined when either side is not a date.
+ */
+function compareDate(actual: string, literal: string): number | undefined {
+  const actualMs = Date.parse(actual);
+  if (!Number.isFinite(actualMs)) return undefined;
+  if (DAY_LITERAL.test(literal)) {
+    if (!Number.isFinite(Date.parse(`${literal}T00:00:00.000Z`))) return undefined;
+    const actualDay = new Date(actualMs).toISOString().slice(0, 10);
+    return actualDay < literal ? -1 : actualDay > literal ? 1 : 0;
+  }
+  const literalMs = Date.parse(literal);
+  if (!Number.isFinite(literalMs)) return undefined;
+  return Math.sign(actualMs - literalMs);
+}
+
 /**
  * Evaluate the WIQL subset the offline scenario uses.
  *
  * Supported: a `WHERE` containing `AND`-joined `[Field] OP 'value'` clauses
- * with `=`, `<>`, `CONTAINS`, or `NOT CONTAINS`. Field values are compared
- * case-insensitively over the stored text. A query with a `WHERE` the fake
- * cannot parse returns no rows instead of every row, so a selector regression
- * cannot pass by matching the decoy.
+ * with `=`, `<>`, `CONTAINS`, or `NOT CONTAINS`, plus `>=`, `>`, `<=`, `<` on
+ * `System.CreatedDate`/`System.ChangedDate` (see {@link compareDate}). Text
+ * values are compared case-insensitively over the stored text. A query with a
+ * `WHERE` the fake cannot parse returns no rows instead of every row, so a
+ * selector regression cannot pass by matching the decoy.
  */
 function matchWorkItems(
   query: string,
@@ -173,7 +220,7 @@ function matchWorkItems(
 
   const whereClause = query.slice(whereIndex + "WHERE".length);
   const clausePattern =
-    /\[([^\]]+)\]\s*(=|<>|!=|CONTAINS\s+WORDS|CONTAINS|NOT\s+CONTAINS)\s*'([^']*)'/gi;
+    /\[([^\]]+)\]\s*(<>|!=|>=|<=|=|>|<|CONTAINS\s+WORDS|CONTAINS|NOT\s+CONTAINS)\s*'([^']*)'/gi;
   const clauseMatches = [...whereClause.matchAll(clausePattern)];
   const clauses = clauseMatches.map((match) => ({
     field: (match[1] ?? "").trim().toLowerCase(),
@@ -191,6 +238,15 @@ function matchWorkItems(
     return { matches: [], error: `Unsupported fake Azure DevOps WIQL: ${query}` };
   }
 
+  // Ordering operators are only meaningful on date fields, and only with a
+  // literal the fake can parse as a date.
+  for (const clause of clauses) {
+    if (![">=", ">", "<=", "<"].includes(clause.operator)) continue;
+    if (!DATE_FIELDS.has(clause.field) || !Number.isFinite(Date.parse(clause.value))) {
+      return { matches: [], error: `Unsupported fake Azure DevOps WIQL: ${query}` };
+    }
+  }
+
   const matches = workItems.filter((workItem) =>
     clauses.every((clause) => {
       const actual = fieldText(workItem, clause.field);
@@ -205,6 +261,17 @@ function matchWorkItems(
           return actual.toLowerCase().includes(clause.value.toLowerCase());
         case "NOT CONTAINS":
           return !actual.toLowerCase().includes(clause.value.toLowerCase());
+        case ">=":
+        case ">":
+        case "<=":
+        case "<": {
+          const order = compareDate(actual, clause.value);
+          if (order === undefined) return false;
+          if (clause.operator === ">=") return order >= 0;
+          if (clause.operator === ">") return order > 0;
+          if (clause.operator === "<=") return order <= 0;
+          return order < 0;
+        }
         default:
           return false;
       }
@@ -254,17 +321,22 @@ export class FakeAzureDevOpsTracker implements TrackerFixture {
   /** Requests the fake could not route, for an explicit end-of-test assertion. */
   readonly unexpectedRequests: string[] = [];
 
+  /** Every WIQL request received, in arrival order (CLI, worker, and fixture). */
+  readonly wiqlRequests: FakeAzureDevOpsWiqlRequest[] = [];
+
   private readonly server: ReturnType<typeof Bun.serve>;
   private readonly workItems = new Map<number, FakeAzureDevOpsWorkItem>();
   private nextWorkItemId = 100;
   private nextCommentId = 10_000;
   private now = Date.parse("2026-01-01T00:00:00.000Z");
+  private readonly realClock: boolean;
 
   constructor(options: FakeAzureDevOpsOptions = {}) {
     this.organization = options.organization ?? "fakeorg";
     this.project = options.project ?? "FixtureProject";
     this.statuses = { ...FAKE_AZURE_DEVOPS_STATUSES, ...options.statuses };
     this.openState = this.statuses.todo;
+    this.realClock = options.realClock ?? false;
 
     this.server = Bun.serve({
       hostname: "127.0.0.1",
@@ -337,6 +409,23 @@ export class FakeAzureDevOpsTracker implements TrackerFixture {
     });
     workItem.fields["System.ChangedDate"] = timestamp;
     return String(id);
+  }
+
+  /**
+   * Move a work item to another workflow state, as a human would in the board.
+   *
+   * Bumps `System.ChangedDate`, so the worker sees a fresh `(key, updated)`
+   * stamp on its next evaluate.
+   */
+  async setState(ticketKey: string, state: string): Promise<void> {
+    const workItem = this.requireWorkItem(ticketKey);
+    workItem.fields["System.State"] = state;
+    workItem.fields["System.ChangedDate"] = this.timestamp();
+  }
+
+  /** Current `System.ChangedDate` (the `updated` stamp the worker dedupes on). */
+  changedDate(ticketKey: string): string {
+    return String(this.requireWorkItem(ticketKey).fields["System.ChangedDate"] ?? "");
   }
 
   /** Close a scenario-owned work item by moving it to its terminal state. */
@@ -480,6 +569,11 @@ export class FakeAzureDevOpsTracker implements TrackerFixture {
       return json({ message: diagnostic }, 400);
     }
     const { matches, error } = matchWorkItems(query, [...this.workItems.values()]);
+    this.wiqlRequests.push({
+      query,
+      ids: matches.map((workItem) => workItem.id),
+      at: Date.now(),
+    });
     if (error) {
       this.unexpectedRequests.push(error);
       return json({ message: error }, 400);
@@ -614,6 +708,11 @@ export class FakeAzureDevOpsTracker implements TrackerFixture {
   }
 
   private timestamp(): string {
+    if (this.realClock) {
+      // Strictly increasing so every mutation yields a distinct stamp.
+      this.now = Math.max(Date.now(), this.now + 1);
+      return new Date(this.now).toISOString();
+    }
     this.now += 1000;
     return new Date(this.now).toISOString();
   }

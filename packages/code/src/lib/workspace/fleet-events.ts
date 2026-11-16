@@ -12,10 +12,13 @@
 
 import { runAddressReviewViaCli, runResolveConflictsViaCli } from "../acquirers/review-polling";
 import { runCiFixViaCli } from "../acquirers/ci-failure-watcher";
+import { runAutoMergeViaCli } from "../acquirers/auto-merge-cli";
+import type { AutoMergeResult } from "../review/auto-merge";
 import { randomUUID } from "crypto";
 import type { CiFixResult } from "../acquirers/ci-failure-watcher";
 import type { AutomaticResolveResult } from "../acquirers/review-polling";
 import type { TaskExecutionResult } from "../acquirers/task-polling";
+import { autoMergePathsFor } from "./config";
 import type { RepoConfig, WorkspaceConfig } from "./config";
 import { buildRepoEnv, gitHubSlugFromRemote } from "./env";
 import { toRoutableTask } from "./router";
@@ -53,6 +56,8 @@ export interface FleetEventDeps {
   ) => Promise<boolean>;
   /** Base-sync runner (injected for tests; defaults to the CLI subprocess). */
   runResolve?: typeof runResolveConflictsViaCli;
+  /** Auto-merge runner (injected for tests; defaults to the CLI subprocess). */
+  runAutoMerge?: typeof runAutoMergeViaCli;
   verbose?: boolean;
   /** Shared workspace admission supervisor. */
   supervisor?: TaskSupervisor;
@@ -228,6 +233,89 @@ export function createFleetResolveConflicts(
     } catch (error) {
       if (error instanceof JobNotStartedError) {
         return { outcome: "deferred", message: error.message };
+      }
+      throw error;
+    }
+  };
+}
+
+/**
+ * Fingerprint of the auto-merge policy that decides a repo's PRs (paths and
+ * review switch; not the merge method or review label, which don't change
+ * the decision, so renaming the label doesn't re-evaluate every PR).
+ * Changing it re-evaluates PRs that were decided under the previous policy.
+ */
+export function fleetAutoMergePolicyFingerprint(config: WorkspaceConfig, slug: string): string {
+  const settings = config.workspace.autoMerge;
+  const repo = repoBySlug(config, slug);
+  const paths = repo
+    ? autoMergePathsFor(settings, repo)
+    : { safePaths: settings.safePaths, denyPaths: settings.denyPaths };
+  const material = JSON.stringify({ ...paths, review: settings.review });
+  return Bun.hash(material).toString(16);
+}
+
+/**
+ * Build the fleet auto-merge runner: the repo's live policy (repo path lists
+ * replace the workspace's), its checkout and env, and the shared supervisor.
+ */
+export function createFleetAutoMerge(
+  deps: FleetEventDeps,
+): (
+  slug: string,
+  prNumber: number,
+  expectedHeadSha: string,
+  options?: { lastAttempt: boolean },
+) => Promise<AutoMergeResult> {
+  const { config, workspaceDir, repoManager } = deps;
+  const runAutoMerge = deps.runAutoMerge ?? runAutoMergeViaCli;
+  return async (slug, prNumber, expectedHeadSha, options) => {
+    const repo = repoBySlug(config, slug);
+    if (!repo) {
+      return {
+        outcome: "skipped",
+        message: "repository is not configured in this workspace",
+        reviewed: false,
+      };
+    }
+    const invoke = async (signal?: AbortSignal) => {
+      await repoManager.ensureBareClone(repo);
+      await repoManager.fetch(repo.name);
+      const base = await repoManager.ensureBaseWorktree(repo);
+      // Read at run time so live reloads of the policy and agent apply.
+      const settings = config.workspace.autoMerge;
+      const agentSelection = settings.agent;
+      return runAutoMerge(slug, prNumber, {
+        policy: {
+          ...autoMergePathsFor(settings, repo),
+          review: settings.review,
+          method: settings.method,
+          reviewLabel: settings.reviewLabel,
+        },
+        expectedHeadSha,
+        lastAttempt: options?.lastAttempt ?? false,
+        cwd: base,
+        env: buildRepoEnv(repo, workspaceDir, { agentSelection }),
+        harnessPin: agentSelection?.harness,
+        signal,
+      });
+    };
+    try {
+      if (deps.supervisor) {
+        return await deps.supervisor.schedule({
+          id: randomUUID(),
+          source: "github:auto-merge",
+          repo: repo.name,
+          kind: "auto_merge",
+          label: `${slug}#${prNumber}`,
+          checkoutClass: "shared_base",
+          run: invoke,
+        });
+      }
+      return await invoke();
+    } catch (error) {
+      if (error instanceof JobNotStartedError) {
+        return { outcome: "deferred", message: error.message, reviewed: false };
       }
       throw error;
     }
