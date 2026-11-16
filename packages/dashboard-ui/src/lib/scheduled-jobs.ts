@@ -4,6 +4,8 @@ import type { AutomationSchedule, ScheduledJobKind, ScheduledJobRunFilter } from
 export const ESTIMATION_JOB_PREFIX = "estimation:";
 /** Dashboard id of the scheduled conflict-resolution window (mirrors the worker). */
 export const CONFLICT_RESOLUTION_JOB_ID = "workspace:conflict-resolution";
+/** Dashboard id of the auto-merge watcher (mirrors the worker). */
+export const AUTO_MERGE_JOB_ID = "workspace:auto-merge";
 
 /** Job kind, treating entries from older servers as prompt automations. */
 export function jobKind(job: Pick<AutomationSchedule, "kind">): ScheduledJobKind {
@@ -19,6 +21,7 @@ export function jobTitle(job: Pick<AutomationSchedule, "id" | "title">): string 
 export function jobKindLabel(kind: ScheduledJobKind): string | undefined {
   if (kind === "estimation") return "Estimation";
   if (kind === "conflict_resolution") return "Conflicts";
+  if (kind === "auto_merge") return "Auto-merge";
   return undefined;
 }
 
@@ -28,6 +31,7 @@ export function jobKindLabel(kind: ScheduledJobKind): string | undefined {
  */
 export function runFilterForJobId(id: string): ScheduledJobRunFilter {
   if (id === CONFLICT_RESOLUTION_JOB_ID) return { origin: "conflict_resolution" };
+  if (id === AUTO_MERGE_JOB_ID) return { origin: "auto_merge" };
   if (id.startsWith(ESTIMATION_JOB_PREFIX)) {
     return { automationId: id.slice(ESTIMATION_JOB_PREFIX.length), origin: "estimate" };
   }
@@ -42,6 +46,9 @@ export function runNowHint(kind: ScheduledJobKind): string {
   if (kind === "conflict_resolution") {
     return "Opens the conflict-resolution window now, so queued conflicts on the agent's PRs resolve on the next review poll instead of at the next scheduled time";
   }
+  if (kind === "auto_merge") {
+    return "Checks every open agent PR for auto-merge now, skipping the quiet period and retry backoff; PRs must still be green and conflict-free";
+  }
   return "Runs through the same pipeline as a scheduled run and is recorded with the manual origin";
 }
 
@@ -54,6 +61,9 @@ export function runStartedMessage(job: Pick<AutomationSchedule, "id" | "title" |
   }
   if (kind === "conflict_resolution") {
     return 'Conflict-resolution window opened. Queued conflicts on the agent\'s PRs resolve on the next review poll; each appears in the run list with origin "Conflict resolution".';
+  }
+  if (kind === "auto_merge") {
+    return 'Auto-merge check started. Each PR it merges or leaves open appears in the run list with origin "Auto-merge".';
   }
   return `Manual run of ${title} started. It will appear in the run list with origin "Manual run" shortly.`;
 }

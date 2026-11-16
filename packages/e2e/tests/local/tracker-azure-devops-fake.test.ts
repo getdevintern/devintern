@@ -302,3 +302,42 @@ test("rejects unsupported WIQL operators instead of dropping the clause", async 
     await tracker.cleanup();
   }
 });
+
+test("evaluates day-precision ChangedDate windows combined with a state clause", async () => {
+  const tracker = new FakeAzureDevOpsTracker({ realClock: true });
+  try {
+    const ready = await tracker.createTicket({ title: "Ready", body: "body" });
+    const active = await tracker.createTicket({ title: "Active", body: "body" });
+    await tracker.setState(active.key, tracker.statuses.inProgress);
+    const today = tracker.changedDate(ready.key).slice(0, 10);
+    const tomorrow = new Date(Date.parse(`${today}T00:00:00.000Z`) + 86_400_000)
+      .toISOString()
+      .slice(0, 10);
+
+    const delta = `SELECT [System.Id] FROM WorkItems WHERE [System.ChangedDate] >= '${today}'`;
+    expect((await tracker.findTickets(delta)).map((entry) => entry.key)).toEqual([
+      ready.key,
+      active.key,
+    ]);
+    const future = `SELECT [System.Id] FROM WorkItems WHERE [System.ChangedDate] >= '${tomorrow}'`;
+    expect(await tracker.findTickets(future)).toEqual([]);
+    const combined =
+      `SELECT [System.Id] FROM WorkItems WHERE [System.ChangedDate] >= '${today}' ` +
+      `AND [System.State] = '${tracker.statuses.todo}'`;
+    expect((await tracker.findTickets(combined)).map((entry) => entry.key)).toEqual([ready.key]);
+    expect(tracker.wiqlRequests.map((request) => request.query)).toEqual([delta, future, combined]);
+
+    // Ordering operators are only supported on date fields with a date literal.
+    for (const unsupported of [
+      `SELECT [System.Id] FROM WorkItems WHERE [System.Title] >= 'A'`,
+      `SELECT [System.Id] FROM WorkItems WHERE [System.ChangedDate] >= 'yesterday'`,
+    ]) {
+      await expect(tracker.findTickets(unsupported)).rejects.toThrow(
+        /Unsupported fake Azure DevOps WIQL/,
+      );
+    }
+    expect(tracker.unexpectedRequests).toHaveLength(2);
+  } finally {
+    await tracker.cleanup();
+  }
+});

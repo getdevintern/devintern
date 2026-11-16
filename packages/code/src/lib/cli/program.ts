@@ -37,6 +37,7 @@ const SUBCOMMANDS = [
   "webhook",
   "address-review",
   "resolve-conflicts",
+  "auto-merge",
   "login",
   "logout",
   "whoami",

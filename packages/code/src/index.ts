@@ -52,7 +52,11 @@ import { runInitCommand } from "./lib/init/cli";
 import { runWorkerCli } from "./lib/worker/cli";
 import { runDashboardCommand, runDoctorCommand } from "./lib/observability/cli";
 import { runWebhookCommand } from "./lib/code-host/cli";
-import { runAddressReviewCommand, runResolveConflictsCommand } from "./lib/review/cli";
+import {
+  runAddressReviewCommand,
+  runAutoMergeCommand,
+  runResolveConflictsCommand,
+} from "./lib/review/cli";
 import { runLoginCommand, runLogoutCommand, runWhoamiCommand } from "./lib/account/cli";
 import { runSandboxCommand } from "./lib/agent/cli";
 import { runReportCommand } from "./lib/report/cli";
@@ -120,6 +124,8 @@ if (process.argv[2] === "init") {
   await runAddressReviewCommand(process.argv.slice(3));
 } else if (process.argv[2] === "resolve-conflicts") {
   await runResolveConflictsCommand(process.argv.slice(3));
+} else if (process.argv[2] === "auto-merge") {
+  await runAutoMergeCommand(process.argv.slice(3));
 } else if (process.argv[2] === "login") {
   await runLoginCommand(process.argv);
 } else if (process.argv[2] === "logout") {

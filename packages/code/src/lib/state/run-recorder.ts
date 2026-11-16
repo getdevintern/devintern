@@ -22,6 +22,7 @@ export type RunOrigin =
   | "pr_mention"
   | "ci_fix"
   | "conflict_resolution"
+  | "auto_merge"
   | "scheduled"
   | "estimate"
   | "manual"
@@ -533,6 +534,19 @@ export class RunStore {
   }
 
   /**
+   * Delete a run and its stages. For runs opened only to show work live that
+   * turned out to be no-ops (an auto-merge check whose PR was not ready).
+   *
+   * @param runId - Run id
+   */
+  discardRun(runId: number): void {
+    this.db.transaction(() => {
+      this.db.run("DELETE FROM run_stages WHERE run_id = ?", [runId]);
+      this.db.run("DELETE FROM runs WHERE id = ?", [runId]);
+    })();
+  }
+
+  /**
    * Mark a run terminal and record an `outcome` stage row.
    *
    * The row update and the outcome stage are one transaction, and the outcome
@@ -758,6 +772,7 @@ export class RunStore {
       pr_mention: 0,
       ci_fix: 0,
       conflict_resolution: 0,
+      auto_merge: 0,
       scheduled: 0,
       estimate: 0,
       manual: 0,
