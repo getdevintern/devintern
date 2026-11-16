@@ -8,6 +8,8 @@
  * 2. Every changed path matches a safe glob → `safe`. Merged without spending
  *    agent tokens.
  * 3. Otherwise → `needs-review`. Merged only if the agent review says so.
+ *    The verdict is read only from the agent's stdout, and only from its
+ *    last non-empty line (see `parseMergeSafetyVerdict`).
  *
  * Fails closed: an empty file list, a truncated file list, or a path that is
  * not a normalized repo-relative path is never classified `safe`.
@@ -125,26 +127,40 @@ export interface MergeSafetyVerdict {
   reason: string;
 }
 
+/** ANSI escape sequences: CSI (colors, cursor control) and OSC (titles, links). */
+// oxlint-disable-next-line no-control-regex -- matching terminal escape codes is the point
+const ANSI_PATTERN = /\x1B\[[0-9;?]*[A-Za-z]|\x1B\][^\x07\x1B]*(?:\x07|\x1B\\)/g;
+
 /**
- * Extract the agent's verdict: the LAST JSON object in the output carrying a
- * boolean `safe`. Anything else (no JSON, `safe` not a boolean) is `null`,
- * which callers treat as "not safe" — the agent can only ever veto by
- * omission, never approve by accident.
+ * Extract the agent's verdict from its **stdout** only (never stderr, which
+ * carries transcripts that echo the prompt and PR diff). After stripping ANSI
+ * codes and trailing whitespace, the LAST non-empty line must be a JSON object
+ * with a boolean `safe`. Anything else (prose last, JSON only earlier in the
+ * output, malformed JSON, `safe` not a boolean) is `null`, which callers treat
+ * as "not safe" — the agent can only ever veto by omission, never approve by
+ * accident. No trailing text is skipped, so a harness that prints anything
+ * after the final answer fails closed.
  */
-export function parseMergeSafetyVerdict(output: string): MergeSafetyVerdict | null {
-  const candidates = output.match(/\{[^{}]*"safe"[^{}]*\}/g) ?? [];
-  for (let index = candidates.length - 1; index >= 0; index--) {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(candidates[index] as string);
-    } catch {
-      continue;
+export function parseMergeSafetyVerdict(stdout: string): MergeSafetyVerdict | null {
+  const lines = stdout.replace(ANSI_PATTERN, "").replace(/\r/g, "").split("\n");
+  let last: string | undefined;
+  for (let index = lines.length - 1; index >= 0; index--) {
+    const line = (lines[index] as string).trim();
+    if (line) {
+      last = line;
+      break;
     }
-    if (typeof parsed !== "object" || parsed === null) continue;
-    const record = parsed as Record<string, unknown>;
-    if (typeof record.safe !== "boolean") continue;
-    const reason = typeof record.reason === "string" ? record.reason.trim() : "";
-    return { safe: record.safe, reason: reason || "(no reason given)" };
   }
-  return null;
+  if (!last?.startsWith("{")) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(last);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+  const record = parsed as Record<string, unknown>;
+  if (typeof record.safe !== "boolean") return null;
+  const reason = typeof record.reason === "string" ? record.reason.trim() : "";
+  return { safe: record.safe, reason: reason || "(no reason given)" };
 }
