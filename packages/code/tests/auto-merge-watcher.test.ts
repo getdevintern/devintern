@@ -351,6 +351,16 @@ process.exit(75);
     ]);
   });
 
+  test("the review label maps to --review-label, empty to --no-review-label", () => {
+    const policy = { safePaths: [], denyPaths: [], review: true, method: "squash" as const };
+    expect(autoMergeCliArgs({ ...policy, reviewLabel: "triage" }, HEAD).slice(-2)).toEqual([
+      "--review-label",
+      "triage",
+    ]);
+    expect(autoMergeCliArgs({ ...policy, reviewLabel: "" }, HEAD).at(-1)).toBe("--no-review-label");
+    expect(autoMergeCliArgs(policy, HEAD)).not.toContain("--review-label");
+  });
+
   test("parses the last valid result record", () => {
     expect(
       parseAutoMergeResultLine(

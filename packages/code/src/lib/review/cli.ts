@@ -209,7 +209,7 @@ export async function runResolveConflictsCommand(args: string[]): Promise<void> 
  * the worker for its own PRs with the workspace's policy as flags.
  */
 export async function runAutoMergeCommand(args: string[]): Promise<void> {
-  const { AUTO_MERGE_METHODS } = await import("./merge-gate");
+  const { AUTO_MERGE_METHODS, DEFAULT_AUTO_MERGE_REVIEW_LABEL } = await import("./merge-gate");
   type Method = (typeof AUTO_MERGE_METHODS)[number];
   let prUrl: string | undefined;
   let expectedHeadSha: string | undefined;
@@ -218,6 +218,7 @@ export async function runAutoMergeCommand(args: string[]): Promise<void> {
   let review = true;
   let verbose = false;
   let method: Method = "squash";
+  let reviewLabel = DEFAULT_AUTO_MERGE_REVIEW_LABEL;
   const safePaths: string[] = [];
   const denyPaths: string[] = [];
 
@@ -232,11 +233,17 @@ export async function runAutoMergeCommand(args: string[]): Promise<void> {
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i] as string;
-    if (arg === "--safe-path" || arg === "--deny-path" || arg === "--expected-head") {
+    if (
+      arg === "--safe-path" ||
+      arg === "--deny-path" ||
+      arg === "--expected-head" ||
+      arg === "--review-label"
+    ) {
       const value = takeValue(arg, args[++i]);
       if (value === undefined) return;
       if (arg === "--safe-path") safePaths.push(value);
       else if (arg === "--deny-path") denyPaths.push(value);
+      else if (arg === "--review-label") reviewLabel = value;
       else expectedHeadSha = value;
     } else if (arg === "--method") {
       const value = takeValue(arg, args[++i]);
@@ -249,6 +256,8 @@ export async function runAutoMergeCommand(args: string[]): Promise<void> {
       method = value as Method;
     } else if (arg === "--no-review") {
       review = false;
+    } else if (arg === "--no-review-label") {
+      reviewLabel = "";
     } else if (arg === "--dry-run") {
       dryRun = true;
     } else if (arg === "--last-attempt") {
@@ -269,6 +278,10 @@ export async function runAutoMergeCommand(args: string[]): Promise<void> {
       console.log("  --deny-path <glob>     Never-merge glob (repeatable)");
       console.log("  --no-review            Skip the agent review; only safe-path PRs merge");
       console.log("  --method <m>           merge | squash | rebase (default: squash)");
+      console.log(
+        `  --review-label <name>  Label for PRs left open for a human (default: ${DEFAULT_AUTO_MERGE_REVIEW_LABEL})`,
+      );
+      console.log("  --no-review-label      Don't label PRs left open");
       console.log(
         "  --dry-run              Evaluate every gate, including the review, but don't merge",
       );
@@ -296,7 +309,7 @@ export async function runAutoMergeCommand(args: string[]): Promise<void> {
     await loadReviewEnvironment(prUrl);
     const { autoMergePr } = await import("./auto-merge");
     const result = await autoMergePr(prUrl, {
-      policy: { safePaths, denyPaths, review, method },
+      policy: { safePaths, denyPaths, review, method, reviewLabel },
       expectedHeadSha,
       dryRun,
       lastAttempt,

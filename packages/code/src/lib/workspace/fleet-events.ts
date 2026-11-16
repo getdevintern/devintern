@@ -241,8 +241,9 @@ export function createFleetResolveConflicts(
 
 /**
  * Fingerprint of the auto-merge policy that decides a repo's PRs (paths and
- * review switch; not the merge method). Changing it re-evaluates PRs that
- * were decided under the previous policy.
+ * review switch; not the merge method or review label, which don't change
+ * the decision, so renaming the label doesn't re-evaluate every PR).
+ * Changing it re-evaluates PRs that were decided under the previous policy.
  */
 export function fleetAutoMergePolicyFingerprint(config: WorkspaceConfig, slug: string): string {
   const settings = config.workspace.autoMerge;
@@ -289,6 +290,7 @@ export function createFleetAutoMerge(
           ...autoMergePathsFor(settings, repo),
           review: settings.review,
           method: settings.method,
+          reviewLabel: settings.reviewLabel,
         },
         expectedHeadSha,
         lastAttempt: options?.lastAttempt ?? false,

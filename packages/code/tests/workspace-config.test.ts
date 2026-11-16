@@ -1076,7 +1076,19 @@ remote = "git@github.com:acme/api.git"
       review: true,
       safePaths: [],
       denyPaths: [],
+      reviewLabel: "needs-human-review",
     });
+  });
+
+  test("auto_merge_review_label renames the label; an empty string disables it", () => {
+    const parse = (value: string) =>
+      parseWorkspaceConfig(`
+[workspace]
+auto_merge_review_label = ${value}
+${base}`).workspace.autoMerge.reviewLabel;
+    expect(parse('"  triage  "')).toBe("triage");
+    expect(parse('""')).toBe("");
+    expect(() => parse("true")).toThrow(/auto_merge_review_label must be a string/);
   });
 
   test("parses the policy, agent override, and per-repo path lists", () => {
@@ -1107,6 +1119,7 @@ remote = "git@github.com:acme/web.git"
       review: false,
       safePaths: ["**/*.md", "docs/"],
       denyPaths: ["db/migrations/**"],
+      reviewLabel: "needs-human-review",
       agent: { model: "sonnet" },
     });
     const [api, web] = config.repos;

@@ -17,7 +17,7 @@ import { parseToml } from "./toml";
 import { parseAgentSelection } from "../agent/selection";
 import type { AgentSelection, HarnessPinnedEntry } from "../agent/selection";
 import { parseDashboardAllowedOriginList } from "../observability/dashboard-origins";
-import { AUTO_MERGE_METHODS } from "../review/merge-gate";
+import { AUTO_MERGE_METHODS, DEFAULT_AUTO_MERGE_REVIEW_LABEL } from "../review/merge-gate";
 import type { AutoMergeMethod } from "../review/merge-gate";
 import type { DashboardAllowedOrigin } from "../observability/dashboard-origins";
 
@@ -92,6 +92,11 @@ export interface AutoMergeSettings {
   safePaths: string[];
   /** Globs that block auto-merge entirely (`auto_merge_deny_paths`). */
   denyPaths: string[];
+  /**
+   * Label for PRs left open for a human, removed on merge
+   * (`auto_merge_review_label`, default `needs-human-review`; `""` disables).
+   */
+  reviewLabel: string;
   /** Agent for the merge-safety review (`auto_merge_harness` / `_model` / `_effort`). */
   agent?: AgentSelection;
 }
@@ -607,6 +612,21 @@ function readGlobList(
   return globs;
 }
 
+/** `auto_merge_review_label`: default label when unset, `""` disables. */
+function readReviewLabel(
+  workspaceTable: Record<string, unknown>,
+  label: string,
+  errors: string[],
+): string {
+  const value = workspaceTable.auto_merge_review_label;
+  if (value === undefined || value === null) return DEFAULT_AUTO_MERGE_REVIEW_LABEL;
+  if (typeof value !== "string") {
+    errors.push(`${label}.auto_merge_review_label must be a string ("" disables labeling).`);
+    return DEFAULT_AUTO_MERGE_REVIEW_LABEL;
+  }
+  return value.trim();
+}
+
 /** Parse the `[workspace].auto_merge*` keys. */
 function parseAutoMergePolicy(
   workspaceTable: Record<string, unknown>,
@@ -630,6 +650,7 @@ function parseAutoMergePolicy(
     review: readOptionalBoolean(workspaceTable, "auto_merge_review", label, errors) ?? true,
     safePaths: readGlobList(workspaceTable, "auto_merge_safe_paths", label, errors),
     denyPaths: readGlobList(workspaceTable, "auto_merge_deny_paths", label, errors),
+    reviewLabel: readReviewLabel(workspaceTable, label, errors),
     ...(Object.keys(agent).length > 0 ? { agent } : {}),
   };
 }

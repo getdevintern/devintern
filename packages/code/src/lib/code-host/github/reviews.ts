@@ -1037,6 +1037,41 @@ export class GitHubReviewsClient {
     return reviews;
   }
 
+  /** Add labels to an issue or PR; GitHub creates labels that don't exist yet. */
+  async addIssueLabels(
+    owner: string,
+    repo: string,
+    issueNumber: number,
+    labels: string[],
+  ): Promise<void> {
+    await this.apiRequest(
+      "POST",
+      `/repos/${owner}/${repo}/issues/${issueNumber}/labels`,
+      owner,
+      repo,
+      { labels },
+    );
+  }
+
+  /** Remove a label from an issue or PR; a label that isn't there (404) is not an error. */
+  async removeIssueLabel(
+    owner: string,
+    repo: string,
+    issueNumber: number,
+    label: string,
+  ): Promise<void> {
+    try {
+      await this.apiRequest(
+        "DELETE",
+        `/repos/${owner}/${repo}/issues/${issueNumber}/labels/${encodeURIComponent(label)}`,
+        owner,
+        repo,
+      );
+    } catch (error) {
+      if (!isGitHubNotFound(error)) throw error;
+    }
+  }
+
   /**
    * Merge a pull request, pinned to the head SHA that was evaluated: GitHub
    * rejects the merge (409) when the head moved since, so commits pushed
