@@ -90,6 +90,15 @@ Open an automation from the list to read its full prompt, see its schedule and n
 
 This is useful for testing a new automation prompt or running routine work early.
 
+### Estimations and scheduled conflict resolution
+
+**Automations** also lists the worker's other scheduled jobs, so you can trigger them on demand instead of waiting for the next occurrence:
+
+- **Estimation** rows are your `[[estimations]]` sweeps. **Run now** runs the same story-point sweep as a scheduled occurrence (`devintern --estimate --query …`), with the same skip rules: tickets estimated in the last 24 hours, or unchanged since their last estimate, are left alone. The run appears in the run list with the **Estimate run** origin. Open one to see its query, team, and recent sweeps.
+- **Conflicts** appears when `[workspace].conflict_resolution = "scheduled"`. **Run now** opens the conflict-resolution window immediately, for the usual grace period (`WORKER_RESOLVE_WINDOW_GRACE_MINUTES`), so conflicts already queued on the agent's pull requests resolve on the next review poll. The next scheduled window stays where it was. Each resolution appears in the run list with the **Conflict resolution** origin. In `auto` mode conflicts already resolve as soon as they are detected, so the row is not shown.
+
+A standalone `devintern dashboard --workspace` lists estimation sweeps too, but **Run now** still needs the worker.
+
 ## Delegate a task
 
 Choose **New task** in the header to open a dialog that hands the worker a one-off task, the dashboard equivalent of [`devintern worker add`](delegation.md). Pick a registered `[[repos]]` repository (preselected when the workspace has only one), give the task a title, and describe the work in Markdown. The description is limited to 20,000 characters, and a counter shows how much is left. The worker sees only this text, so keep the brief self-contained; see [Write a self-contained brief](delegation.md#write-a-self-contained-brief). Press <kbd>Ctrl</kbd>+<kbd>Enter</kbd> (<kbd>⌘</kbd>+<kbd>Enter</kbd> on macOS) in the description to enqueue; <kbd>Enter</kbd> in the title does not submit.

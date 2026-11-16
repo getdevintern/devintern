@@ -2,6 +2,10 @@ import { createGitHubCiProvider } from "../code-host/github/ci-provider";
 import { parseEnvInteger } from "../config/env-integer";
 import { RunStore } from "../state/run-recorder";
 import type { TaskExecutionResult } from "../acquirers/task-polling";
+import type {
+  ConflictWindowStatus,
+  ConflictWindowTriggerOutcome,
+} from "../acquirers/review-polling";
 import type { ChangeDetector } from "../acquirers/change-detector";
 import type { TeamConfig, WorkspaceConfig } from "./config";
 import { buildRepoEnv, buildTeamTaskEnv, gitHubSlugFromRemote } from "./env";
@@ -24,6 +28,10 @@ export interface FleetEventReloadHooks {
   reconcileConflictResolution(): void;
   /** Slugs currently served by a mention sweep (sorted). */
   mentionSweepRepos(): string[];
+  /** Scheduled conflict window state for the dashboard (null unless scheduled). */
+  conflictWindowStatus(): ConflictWindowStatus | null;
+  /** Dashboard "Run now": open the scheduled conflict window immediately. */
+  openConflictWindowNow(): ConflictWindowTriggerOutcome;
 }
 
 /** One tracker source served by the workspace worker. */
@@ -487,6 +495,8 @@ export async function buildFleetEventAcquirers(options: {
             config.workspace.conflictSchedule,
           ),
         mentionSweepRepos: () => [...mentionSweeps.keys()].sort(),
+        conflictWindowStatus: () => reviewAcquirer.conflictWindowStatus(),
+        openConflictWindowNow: () => reviewAcquirer.openConflictWindowNow(),
       };
     }
   } else if (verbose) {

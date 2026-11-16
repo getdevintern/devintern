@@ -21,8 +21,6 @@ import type {
   DashboardAutomationActions,
   ManualTriggerOutcome,
 } from "../automation/acquirer";
-import { pickAgentSelection } from "../agent/selection";
-import type { AgentSelection } from "../agent/selection";
 import { loadStandaloneAutomationActions } from "../automation/manual";
 import type { CodeHostProvider } from "../code-host/index";
 import { RunStore } from "../state/run-recorder";
@@ -70,6 +68,8 @@ import {
 import { WorkerState } from "../state/worker-state";
 import type { Cursor } from "../state/worker-state";
 import { deriveTaskTitle } from "./task-title";
+import { scheduledJobRunFilter, toAutomationView } from "./dashboard-automation-view";
+import type { DashboardAutomationView } from "./dashboard-automation-view";
 
 const RUN_STATUSES: RunStatus[] = [
   "in_progress",
@@ -241,22 +241,7 @@ export interface OpenAgentPrView {
   updatedAt: number;
 }
 
-/** One configured scheduled automation (plus agent override) as served by `GET /api/automations`. */
-export interface DashboardAutomationView extends AgentSelection {
-  id: string;
-  enabled: boolean;
-  /** Cron expression or interval as configured (`0 9 * * 1`, `6h`). */
-  schedule?: string;
-  repo?: string;
-  /** The prompt executed per occurrence. */
-  prompt: string;
-  /** Whether occurrences open a pull request (opt-in; default off). */
-  openPr: boolean;
-  /** Next scheduled occurrence (epoch ms), when the scheduler registered it. */
-  nextDueAt?: number;
-  /** Most recent run of this automation (any origin), description stripped. */
-  lastRun?: RunRecord;
-}
+export type { DashboardAutomationView } from "./dashboard-automation-view";
 
 /**
  * Lazily opened read-only view over the worker's SQLite database.
@@ -590,21 +575,9 @@ export class DashboardData {
       return [];
     }
     return statuses.map((status) => {
-      const lastRun = this.read(
-        undefined,
-        (stores) => stores.runs.listRuns({ automationId: status.id, limit: 1, offset: 0 })[0],
-      );
-      return {
-        id: status.id,
-        enabled: status.enabled,
-        schedule: status.cron ?? status.interval,
-        repo: status.repo,
-        prompt: status.prompt,
-        openPr: status.openPr === true,
-        ...pickAgentSelection(status),
-        nextDueAt: status.nextDueAt,
-        lastRun: lastRun ? { ...lastRun, taskDescription: undefined } : undefined,
-      };
+      const filter = { ...scheduledJobRunFilter(status), limit: 1, offset: 0 };
+      const lastRun = this.read(undefined, (stores) => stores.runs.listRuns(filter)[0]);
+      return toAutomationView(status, lastRun);
     });
   }
 
@@ -1183,8 +1156,8 @@ export async function handleRunAutomation(
     return conflict(`automation "${automationId}" is disabled; enable it in the config first`);
   }
 
-  const activeRun = data.listRuns({ automationId, status: "in_progress", limit: 1, offset: 0 })
-    .runs[0];
+  const active = { ...automation.runFilter, status: "in_progress" as const, limit: 1, offset: 0 };
+  const activeRun = data.listRuns(active).runs[0];
   if (activeRun) {
     return conflict(
       `automation "${automationId}" already has a run in progress (run ${activeRun.id}); wait for it to finish`,
