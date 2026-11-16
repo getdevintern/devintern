@@ -94,7 +94,7 @@ records, and the [dashboard](dashboard.md), and start on a `feature/local-<slug>
 | `--resume <taskKey>`       | Re-queue a settled ad-hoc task under its existing key (a failed or interrupted attempt resumes its branch and prior report)     |
 | `--wait`                   | Block until the run finishes; exit `0` on success, `1` on failure                                                               |
 | `--wait-timeout <seconds>` | Give up waiting after this long (default 21600 = 6h; `0` waits without a limit)                                                 |
-| `--json`                   | Emit a single `{ id, taskKey, repo, status, deduplicated }` object on stdout (failed `--wait` runs add an `error` field)        |
+| `--json`                   | Emit a single `{ id, taskKey, repo, status, deduplicated }` object on stdout (failed `--wait` runs add an `error` field; see [JSON output](#json-output) for `harnessPausedUntil`) |
 | `--workspace <path>`       | Use this `workspace.toml` (default `~/.devintern/workspace.toml`, or `DEVINTERN_WORKSPACE_DIR`)                                 |
 
 Validation happens before anything is written. An empty title, a body over
@@ -113,6 +113,34 @@ failure reason when it failed, or a `status: "failed"` object with an `error` on
 a timeout/worker-stop/inconclusive wait, not an interim pending object plus a
 final one. Successful results have no `error`. Without `--json`, diagnostics and
 the result line print to stdout as usual.
+
+### When every agent harness is usage-limited
+
+While every harness in the worker's `AGENT_HARNESS` chain (the workspace `.env`
+wins over the process environment) has an open usage-limit window persisted in
+`queue.db`, the worker defers all new agent work and the task cannot start yet.
+`worker add` still enqueues the task and exits `0`, but instead of "The worker
+picks it up on its next poll." it prints:
+
+```text
+⏳ Every agent harness in AGENT_HARNESS (opencode) is usage-limited until 2026-11-20T04:00:00.000Z; the worker starts this task after that.
+   Add a fallback harness (e.g. AGENT_HARNESS=opencode,codex in ~/.devintern/.env) to keep working through limits.
+```
+
+The reset time is the earliest open window, the moment the worker resumes. With
+`--json` these lines go to stderr and the result object gains an
+`harnessPausedUntil` field (ISO-8601 string with that same time). With `--wait`
+and a non-zero `--wait-timeout` whose deadline ends before the reset, a further
+warning says the wait will likely time out; the wait and its exit code are
+unchanged, and a timed-out `--wait --json` object keeps `harnessPausedUntil`.
+The same warning and field appear when an `--idempotency-key` hits a still
+pending task and for `--resume` (re-queued or already pending). When at least
+one chain entry is available, or the state cannot be read, the output is
+unchanged and `harnessPausedUntil` is absent. Startup-failure cooldowns are not
+persisted and are not considered.
+
+Delegating agents should report a task with `harnessPausedUntil` as queued
+behind a usage limit until that time, not as about to start.
 
 Check the exit code as well as the object; validation failures may produce no
 result object. The enqueue response does not include a PR URL. Confirm a PR from

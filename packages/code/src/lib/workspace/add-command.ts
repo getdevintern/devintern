@@ -15,9 +15,12 @@
 import { existsSync, readFileSync } from "fs";
 import { dirname, resolve } from "path";
 
+import { listHarnesses } from "@devintern/agent-harness";
 import { checkLicense } from "@devintern/license-check";
 
 import { LockManager } from "../lock-manager";
+import { readWorkerHarnessPause } from "../observability/harness-pause";
+import type { WorkerHarnessPause } from "../observability/harness-pause";
 import { loadSupabaseConfig } from "../cli/bootstrap";
 import type { RepoConfig, WorkspaceConfig } from "./config";
 import { loadWorkspaceConfig } from "./config";
@@ -35,6 +38,7 @@ import {
   workspaceCodeStateDir,
   workspaceConfigPath,
   workspaceDbPath,
+  workspaceEnvPath,
   workspaceStateDir,
   readWorkerStartMarker,
 } from "./paths";
@@ -484,6 +488,11 @@ interface TaskContext {
   waitPollIntervalMs?: number;
   store: InjectedTaskStore;
   selectedDir: string;
+  /**
+   * ISO-8601 end of the earliest usage-limit window when every harness in the
+   * worker's chain is limited (set once the task row is known to be pending).
+   */
+  harnessPausedUntil?: string;
 }
 
 /** Create the markdown file + durable row, then optionally wait. */
@@ -507,21 +516,27 @@ async function enqueueNewTask(
     return await reportTask(task, ctx);
   }
 
+  const pause = readHarnessPause(selectedDir);
   if (!add.json) {
     status(`✅ Enqueued ${task.taskKey} for repo "${task.repo}" (task #${task.id}).`);
-    status(
-      workerRunning
-        ? "   The worker picks it up on its next poll."
-        : "⚠️  No worker is running; the task stays queued until one starts.",
-    );
-    status(`   Prompt: ${displayPath(task.taskFile)}`);
+    if (!workerRunning) {
+      status("⚠️  No worker is running; the task stays queued until one starts.");
+    } else if (!pause) {
+      status("   The worker picks it up on its next poll.");
+    }
   }
+  const paused = warnHarnessPause(pause, ctx);
+  if (!add.json) status(`   Prompt: ${displayPath(task.taskFile)}`);
 
   if (!add.wait) {
-    if (add.json) log(JSON.stringify({ ...serialize(task), deduplicated: false }));
+    if (add.json) log(JSON.stringify({ ...serialize(task), deduplicated: false, ...paused }));
     return 0;
   }
-  return await waitForTask(task.id, { ...ctx, deduplicated: false, taskKey: task.taskKey }, task);
+  return await waitForTask(
+    task.id,
+    { ...ctx, ...paused, deduplicated: false, taskKey: task.taskKey },
+    task,
+  );
 }
 
 function serialize(task: Pick<InjectedTask, "id" | "taskKey" | "repo" | "status">): {
@@ -531,6 +546,62 @@ function serialize(task: Pick<InjectedTask, "id" | "taskKey" | "repo" | "status"
   status: string;
 } {
   return { id: task.id, taskKey: task.taskKey, repo: task.repo, status: task.status };
+}
+
+/** Best-effort read of the worker's harness-chain pause; never throws. */
+function readHarnessPause(selectedDir: string): WorkerHarnessPause | null {
+  try {
+    return readWorkerHarnessPause(selectedDir, workspaceDbPath(selectedDir));
+  } catch {
+    return null;
+  }
+}
+
+/** Fallback harness suggested when the whole chain is usage-limited. */
+const FALLBACK_HARNESS_SUGGESTIONS = ["codex", "claude-code", "opencode"];
+
+/** A registered harness not already in the chain, for the fallback hint. */
+function suggestFallbackHarness(chain: readonly string[]): string {
+  const candidates = [
+    ...FALLBACK_HARNESS_SUGGESTIONS,
+    ...listHarnesses().map((harness) => harness.name),
+  ];
+  return candidates.find((name) => !chain.includes(name)) ?? "codex";
+}
+
+/**
+ * Warn (on the status sink, so stderr under `--json`) that the pending task
+ * cannot start until the earliest usage-limit window of the worker's chain
+ * elapses, plus a `--wait` timeout warning when its deadline ends earlier.
+ *
+ * @returns The `harnessPausedUntil` JSON field, or `{}` when not exhausted.
+ */
+function warnHarnessPause(
+  pause: WorkerHarnessPause | null,
+  ctx: TaskContext,
+): { harnessPausedUntil?: string } {
+  if (!pause) return {};
+  const until = new Date(pause.untilMs).toISOString();
+  const chain = pause.chain.join(",");
+  ctx.status(
+    `⏳ Every agent harness in AGENT_HARNESS (${chain}) is usage-limited until ${until}; ` +
+      "the worker starts this task after that.",
+  );
+  const example = [...pause.chain, suggestFallbackHarness(pause.chain)].join(",");
+  ctx.status(
+    `   Add a fallback harness (e.g. AGENT_HARNESS=${example} in ` +
+      `${displayPath(workspaceEnvPath(ctx.selectedDir))}) to keep working through limits.`,
+  );
+  if (ctx.wait) {
+    const timeoutSeconds = ctx.waitTimeoutSeconds ?? DEFAULT_WAIT_TIMEOUT_SECONDS;
+    if (timeoutSeconds > 0 && Date.now() + timeoutSeconds * 1000 < pause.untilMs) {
+      ctx.status(
+        `⚠️  --wait-timeout (${timeoutSeconds}s) ends before that reset; ` +
+          "the wait will likely time out before the task can start.",
+      );
+    }
+  }
+  return { harnessPausedUntil: until };
 }
 
 /**
@@ -567,14 +638,21 @@ async function reportTask(task: InjectedTask, ctx: TaskContext): Promise<number>
       `ℹ️  Idempotency key already used by ${task.taskKey} (task #${task.id}, status: ${task.status}).`,
     );
   }
+  // Only a still-pending row is waiting on a harness; a running one started.
+  const paused =
+    task.status === "pending" ? warnHarnessPause(readHarnessPause(ctx.selectedDir), ctx) : {};
   if (!ctx.wait) {
-    if (ctx.json) ctx.log(JSON.stringify({ ...serialize(task), deduplicated: true }));
+    if (ctx.json) ctx.log(JSON.stringify({ ...serialize(task), deduplicated: true, ...paused }));
     return 0;
   }
   if (task.status === "done" || task.status === "failed") {
     return emitSettled(task, true, ctx);
   }
-  return await waitForTask(task.id, { ...ctx, deduplicated: true, taskKey: task.taskKey }, task);
+  return await waitForTask(
+    task.id,
+    { ...ctx, ...paused, deduplicated: true, taskKey: task.taskKey },
+    task,
+  );
 }
 
 /**
@@ -598,11 +676,13 @@ async function resumeTask(
   }
   if (task.status === "pending" || task.status === "running") {
     ctx.status(`ℹ️  ${taskKey} is already ${task.status} (task #${task.id}); not re-queued.`);
+    const paused =
+      task.status === "pending" ? warnHarnessPause(readHarnessPause(ctx.selectedDir), ctx) : {};
     if (!ctx.wait) {
-      if (ctx.json) ctx.log(JSON.stringify({ ...serialize(task), deduplicated: true }));
+      if (ctx.json) ctx.log(JSON.stringify({ ...serialize(task), deduplicated: true, ...paused }));
       return 0;
     }
-    return await waitForTask(task.id, { ...ctx, deduplicated: true, taskKey }, task);
+    return await waitForTask(task.id, { ...ctx, ...paused, deduplicated: true, taskKey }, task);
   }
 
   // A hard-killed worker's detached child may still be running this attempt in
@@ -618,19 +698,28 @@ async function resumeTask(
     ctx.error(`❌ ${taskKey} could not be re-queued; it moved on. Reload and try again.`);
     return 1;
   }
+  const pause = readHarnessPause(ctx.selectedDir);
   if (!ctx.json) {
     ctx.status(`♻️  Re-queued ${revived.taskKey} (task #${revived.id}, repo "${revived.repo}").`);
-    ctx.status(
-      workerRunning
-        ? "   The worker resumes it on its next poll (same branch when the prior attempt left one)."
-        : "⚠️  No worker is running; the task stays queued until one starts.",
-    );
+    if (!workerRunning) {
+      ctx.status("⚠️  No worker is running; the task stays queued until one starts.");
+    } else if (!pause) {
+      ctx.status(
+        "   The worker resumes it on its next poll (same branch when the prior attempt left one).",
+      );
+    }
   }
+  const paused = warnHarnessPause(pause, ctx);
   if (!ctx.wait) {
-    if (ctx.json) ctx.log(JSON.stringify({ ...serialize(revived), deduplicated: false }));
+    if (ctx.json)
+      ctx.log(JSON.stringify({ ...serialize(revived), deduplicated: false, ...paused }));
     return 0;
   }
-  return await waitForTask(revived.id, { ...ctx, deduplicated: false, taskKey }, revived);
+  return await waitForTask(
+    revived.id,
+    { ...ctx, ...paused, deduplicated: false, taskKey },
+    revived,
+  );
 }
 
 /**
@@ -657,6 +746,7 @@ function failWait(
         status: "failed",
         deduplicated: ctx.deduplicated,
         error: result.error,
+        ...(ctx.harnessPausedUntil ? { harnessPausedUntil: ctx.harnessPausedUntil } : {}),
       }),
     );
   }
