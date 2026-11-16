@@ -989,6 +989,8 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
     estimations: estimationAcquirer,
     conflicts: () => eventReloadHooks.hooks,
     conflictAgent: () => config.workspace.conflictAgent,
+    autoMerge: () => eventReloadHooks.hooks,
+    autoMergeSettings: () => config.workspace.autoMerge,
   });
 
   // Error-monitor adapters share one provider-neutral acquirer. Each source

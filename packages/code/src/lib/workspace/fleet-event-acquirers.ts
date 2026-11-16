@@ -16,6 +16,12 @@ import type { TaskSupervisor } from "../worker/supervisor";
 import type { TaskTrackerClient } from "../trackers/client";
 
 type FleetGitHubClient = import("../code-host/github/reviews").GitHubReviewsClient;
+type AutoMergeWatcherAcquirer = import("../acquirers/auto-merge-watcher").AutoMergeWatcherAcquirer;
+type AutoMergeWatcherOptions = import("../acquirers/auto-merge-watcher").AutoMergeWatcherOptions;
+type AutoMergeWatcherStatus = import("../acquirers/auto-merge-watcher").AutoMergeWatcherStatus;
+type WorkerState = import("../state/worker-state").WorkerState;
+type WebhookQueue = import("../state/webhook-queue").WebhookQueue;
+type AutoMergeRunNowOutcome = import("../acquirers/auto-merge-watcher").AutoMergeRunNowOutcome;
 
 /**
  * Reconciliation hooks exposed to the live config reload path by the fleet
@@ -32,6 +38,10 @@ export interface FleetEventReloadHooks {
   conflictWindowStatus(): ConflictWindowStatus | null;
   /** Dashboard "Run now": open the scheduled conflict window immediately. */
   openConflictWindowNow(): ConflictWindowTriggerOutcome;
+  /** Auto-merge watcher status for the dashboard (null while disabled). */
+  autoMergeStatus(): AutoMergeWatcherStatus | null;
+  /** Dashboard "Run now": check every watched PR for auto-merge immediately. */
+  runAutoMergeNow(): AutoMergeRunNowOutcome;
 }
 
 /** One tracker source served by the workspace worker. */
@@ -178,6 +188,70 @@ function buildFleetCiProvider(
     },
     postComment: (repo, n, body) =>
       gh(repo).postPullRequestComment(ownerOf(repo), nameOf(repo), n, body),
+  });
+}
+
+/**
+ * Auto-merge watcher (off by default): same PR registry and supervisor as
+ * reviews; the switch and policy are read live so reloads need no restart.
+ */
+async function buildAutoMergeWatcher(params: {
+  config: WorkspaceConfig;
+  workerState: WorkerState;
+  queue: WebhookQueue;
+  gh: (slug: string) => FleetGitHubClient;
+  mergePr: AutoMergeWatcherOptions["mergePr"];
+  runStore: RunStore;
+  intervalSeconds: number;
+  verbose: boolean | undefined;
+}): Promise<AutoMergeWatcherAcquirer> {
+  const { config, gh } = params;
+  const { AutoMergeWatcherAcquirer: Watcher, DEFAULT_AUTO_MERGE_QUIET_SECONDS } =
+    await import("../acquirers/auto-merge-watcher");
+  const { parseHarnessList } = await import("@devintern/agent-harness");
+  const { isGitHubNotFound } = await import("../code-host/github/reviews");
+  const { fleetAutoMergePolicyFingerprint } = await import("./fleet-events");
+  const settings = config.workspace.autoMerge;
+  if (
+    settings.enabled &&
+    !settings.review &&
+    settings.safePaths.length === 0 &&
+    config.repos.every((repo) => !repo.autoMergeSafePaths?.length)
+  ) {
+    console.warn(
+      "⚠️  [workspace].auto_merge is on with auto_merge_review = false and no " +
+        "auto_merge_safe_paths, so no pull request can ever qualify.",
+    );
+  }
+  return new Watcher({
+    intervalSeconds: params.intervalSeconds,
+    enabled: () => config.workspace.autoMerge.enabled,
+    workerState: params.workerState,
+    queue: params.queue,
+    fetchPr: async (repo, n, etag) => {
+      const [owner = "", name = ""] = repo.split("/");
+      try {
+        return await gh(repo).conditionalGet(`/repos/${repo}/pulls/${n}`, owner, name, etag);
+      } catch (error) {
+        if (isGitHubNotFound(error)) return { data: null, notModified: false, gone: true };
+        throw error;
+      }
+    },
+    mergePr: params.mergePr,
+    runStore: params.runStore,
+    // Only a run that can reach the agent review names a harness.
+    harness: () =>
+      config.workspace.autoMerge.review
+        ? (config.workspace.autoMerge.agent?.harness ??
+          parseHarnessList(process.env.AGENT_HARNESS)[0])
+        : undefined,
+    policyFingerprint: (slug) => fleetAutoMergePolicyFingerprint(config, slug),
+    quietSeconds: parseEnvInteger(
+      "WORKER_AUTO_MERGE_QUIET_SECONDS",
+      DEFAULT_AUTO_MERGE_QUIET_SECONDS,
+      { min: 0 },
+    ),
+    verbose: params.verbose,
   });
 }
 
@@ -392,51 +466,14 @@ export async function buildFleetEventAcquirers(options: {
     acquirers.push(ciWatcher);
     intervalUpdaters.push((seconds) => ciWatcher.updateInterval(seconds));
 
-    // Auto-merge (off by default): same registry and supervisor; the switch
-    // and policy are read live so workspace reloads apply without a restart.
-    const { AutoMergeWatcherAcquirer, DEFAULT_AUTO_MERGE_QUIET_SECONDS } =
-      await import("../acquirers/auto-merge-watcher");
-    const { parseHarnessList } = await import("@devintern/agent-harness");
-    const mergePr = createFleetAutoMerge(eventDeps);
-    const autoMergeSettings = config.workspace.autoMerge;
-    if (
-      autoMergeSettings.enabled &&
-      !autoMergeSettings.review &&
-      autoMergeSettings.safePaths.length === 0 &&
-      config.repos.every((repo) => !repo.autoMergeSafePaths?.length)
-    ) {
-      console.warn(
-        "⚠️  [workspace].auto_merge is on with auto_merge_review = false and no " +
-          "auto_merge_safe_paths, so no pull request can ever qualify.",
-      );
-    }
-    const autoMergeWatcher = new AutoMergeWatcherAcquirer({
-      intervalSeconds,
-      enabled: () => config.workspace.autoMerge.enabled,
+    const autoMergeWatcher = await buildAutoMergeWatcher({
+      config,
       workerState: state.workerState,
       queue: state.queue,
-      fetchPr: async (repo, n, etag) => {
-        try {
-          return await gh(repo).conditionalGet(
-            `/repos/${repo}/pulls/${n}`,
-            ownerOf(repo),
-            nameOf(repo),
-            etag,
-          );
-        } catch (error) {
-          if (isGitHubNotFound(error)) return { data: null, notModified: false, gone: true };
-          throw error;
-        }
-      },
-      mergePr,
+      gh,
+      mergePr: createFleetAutoMerge(eventDeps),
       runStore,
-      harness: () =>
-        config.workspace.autoMerge.agent?.harness ?? parseHarnessList(process.env.AGENT_HARNESS)[0],
-      quietSeconds: parseEnvInteger(
-        "WORKER_AUTO_MERGE_QUIET_SECONDS",
-        DEFAULT_AUTO_MERGE_QUIET_SECONDS,
-        { min: 0 },
-      ),
+      intervalSeconds,
       verbose,
     });
     acquirers.push(autoMergeWatcher);
@@ -548,6 +585,8 @@ export async function buildFleetEventAcquirers(options: {
         mentionSweepRepos: () => [...mentionSweeps.keys()].sort(),
         conflictWindowStatus: () => reviewAcquirer.conflictWindowStatus(),
         openConflictWindowNow: () => reviewAcquirer.openConflictWindowNow(),
+        autoMergeStatus: () => autoMergeWatcher.status(),
+        runAutoMergeNow: () => autoMergeWatcher.runNow(),
       };
     }
   } else if (verbose) {
