@@ -334,7 +334,9 @@ Each candidate PR goes through these gates in order, and any "no" leaves it open
 
 Globs are repo-relative ([`Bun.Glob`](https://bun.sh/docs/api/glob) syntax). `docs/` is shorthand for `docs/**`. A rename counts both its old and new path, so moving a source file into `docs/` is not docs-only. A per-repo list replaces the workspace list rather than extending it.
 
-The merge is pinned to the head SHA that passed the gates, and the PR is re-checked right before merging, so a commit pushed during the review is never merged unreviewed. Each decision is made once per head SHA: a rejected PR is evaluated again only after new commits, and the agent review runs at most once per head. Merges and rejections appear in the dashboard's run list with the **Auto-merge** origin. Changes to these settings live-reload.
+The merge is pinned to the head SHA that passed the gates, and the PR is re-checked right before merging, so a commit pushed during the review is never merged unreviewed. Each decision is made once per head SHA and policy: a PR that was left open is evaluated again after new commits, or after you change its safe paths, deny paths, or `auto_merge_review`. The agent review runs at most once per head and policy. Changes to these settings live-reload.
+
+In the dashboard, each check shows in the run list with the **Auto-merge** origin while it runs. Merges stay as **Succeeded**, PRs left open as **Escalated** with the reason, and errors as **Failed**. Checks that end in "not ready yet" (for example, changes requested) are removed once they finish. The **Automations** page lists an **Auto-merge** entry while it is enabled, with the current policy. Its **Run now** checks every open PR immediately, skipping the quiet period and retry backoff. GitHub must still report each PR green and conflict-free.
 
 To check a PR by hand without merging it, run `devintern auto-merge <pr-url> --safe-path '**/*.md' --dry-run`. Flags: `--safe-path` and `--deny-path` (repeatable), `--no-review`, `--method`. The dry run goes through every gate, including the agent review.
 

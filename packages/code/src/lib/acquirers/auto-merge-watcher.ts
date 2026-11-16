@@ -9,10 +9,15 @@
  * `devintern auto-merge <pr-url> --expected-head <sha>`, which runs the real
  * gates (reviews, path policy, optional agent review) and merges.
  *
- * Decisions are per head SHA: a merge or a rejection is recorded in
- * `processed_events`, so the agent review runs at most once per head and a
- * rejected PR is only re-evaluated after new commits. `waiting` outcomes
- * back off without consuming attempts; failures retry up to a cap.
+ * Decisions are per head SHA and policy: a merge or a rejection is recorded
+ * in `processed_events`, so the agent review runs at most once per head and
+ * a rejected PR is only re-evaluated after new commits or a policy change
+ * (for example widening the safe paths or enabling the review). `waiting`
+ * outcomes back off without consuming attempts; failures retry up to a cap.
+ *
+ * Each evaluation is recorded as a run while it executes, so the dashboard
+ * shows it live. Evaluations that end in "not ready yet" (waiting, skipped,
+ * deferred) are discarded afterwards; only decisions stay in the run list.
  */
 
 import type { Acquirer } from "../../worker";
@@ -42,9 +47,14 @@ export interface AutoMergeWatcherOptions {
   ): Promise<ConditionalResult<AutoMergePolledPr>>;
   /** Run the full gates and merge (the `devintern auto-merge` subprocess). */
   mergePr(repo: string, prNumber: number, expectedHeadSha: string): Promise<AutoMergeResult>;
-  runStore?: Pick<RunStore, "createRun" | "finishRun">;
-  /** Harness recorded on runs that spent tokens. */
+  runStore?: Pick<RunStore, "createRun" | "finishRun" | "discardRun">;
+  /** Harness recorded on runs; undefined when no agent review can run. */
   harness?: () => string | undefined;
+  /**
+   * Fingerprint of the effective policy for a repo. Part of the decision
+   * key, so a policy change re-evaluates PRs decided under the old one.
+   */
+  policyFingerprint?: (repo: string) => string;
   /** Seconds a head SHA must stay unchanged before evaluation (default 300). */
   quietSeconds?: number;
   /** Failed evaluations per head SHA before giving up (default 3). */
@@ -80,9 +90,27 @@ interface PrTracking {
 }
 
 /** Durable key of one auto-merge decision. */
-export function autoMergeDecisionKey(repo: string, prNumber: number, headSha: string): string {
-  return `${repo.toLowerCase()}#${prNumber}@${headSha}`;
+export function autoMergeDecisionKey(
+  repo: string,
+  prNumber: number,
+  headSha: string,
+  policyFingerprint?: string,
+): string {
+  const base = `${repo.toLowerCase()}#${prNumber}@${headSha}`;
+  return policyFingerprint ? `${base}:${policyFingerprint}` : base;
 }
+
+/** Dashboard view of the watcher. */
+export interface AutoMergeWatcherStatus {
+  intervalSeconds: number;
+  /** Next scheduled pass (ms epoch); absent before the timer started. */
+  nextTickAt?: number;
+  /** A pass is running right now. */
+  running: boolean;
+}
+
+/** Result of a dashboard "Run now". */
+export type AutoMergeRunNowOutcome = { ok: true } | { ok: false; reason: string };
 
 /**
  * Watches the agent's open PRs and merges the safe ones.
@@ -94,6 +122,11 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
   private busy = false;
   private tracking = new Map<string, PrTracking>();
   private authWarnedAt = new Map<string, number>();
+  private nextTickAt: number | undefined;
+  /** "Run now" arrived during a pass: run another one right after it. */
+  private rerunRequested = false;
+  /** The current/next pass ignores the quiet period and retry backoff. */
+  private forceNextPass = false;
 
   constructor(options: AutoMergeWatcherOptions) {
     this.options = options;
@@ -107,7 +140,44 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
       );
     }
     await this.tick();
-    this.timer = setInterval(() => void this.tick(), this.options.intervalSeconds * 1000);
+    this.startTimer();
+  }
+
+  private startTimer(): void {
+    const ms = this.options.intervalSeconds * 1000;
+    this.nextTickAt = this.now() + ms;
+    this.timer = setInterval(() => {
+      this.nextTickAt = this.now() + ms;
+      void this.tick();
+    }, ms);
+  }
+
+  /** Dashboard status; null while auto-merge is disabled. */
+  status(): AutoMergeWatcherStatus | null {
+    if (!this.options.enabled()) return null;
+    return {
+      intervalSeconds: this.options.intervalSeconds,
+      ...(this.nextTickAt !== undefined ? { nextTickAt: this.nextTickAt } : {}),
+      running: this.busy,
+    };
+  }
+
+  /**
+   * Dashboard "Run now": check every watched PR immediately, skipping the
+   * quiet period and retry backoff. GitHub's readiness checks and per-head
+   * decisions still apply, so a decided PR is not re-evaluated.
+   */
+  runNow(): AutoMergeRunNowOutcome {
+    if (!this.options.enabled()) {
+      return { ok: false, reason: "auto-merge is disabled ([workspace].auto_merge = false)" };
+    }
+    this.forceNextPass = true;
+    if (this.busy) {
+      this.rerunRequested = true;
+    } else {
+      void this.tick();
+    }
+    return { ok: true };
   }
 
   stop(): void {
@@ -122,7 +192,7 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
     this.options.intervalSeconds = seconds;
     if (!this.timer) return;
     clearInterval(this.timer);
-    this.timer = setInterval(() => void this.tick(), seconds * 1000);
+    this.startTimer();
   }
 
   private now(): number {
@@ -133,6 +203,8 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
   async tick(): Promise<void> {
     if (this.busy || !this.options.enabled()) return;
     this.busy = true;
+    const force = this.forceNextPass;
+    this.forceNextPass = false;
     try {
       const watched = this.options.workerState.listOpenAgentPrs();
       const keys = new Set(watched.map((pr) => `${pr.repo.toLowerCase()}#${pr.prNumber}`));
@@ -143,7 +215,7 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
         // A live disable takes effect between PRs, not only between ticks.
         if (!this.options.enabled()) break;
         try {
-          await this.pollPr(pr.repo, pr.prNumber);
+          await this.pollPr(pr.repo, pr.prNumber, force);
         } catch (error) {
           if (isGitHubAuthError(error)) {
             this.warnAuthFailure(pr.repo, error as Error);
@@ -156,6 +228,10 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
       }
     } finally {
       this.busy = false;
+    }
+    if (this.rerunRequested) {
+      this.rerunRequested = false;
+      await this.tick();
     }
   }
 
@@ -171,11 +247,11 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
     );
   }
 
-  private async pollPr(repo: string, prNumber: number): Promise<void> {
+  private async pollPr(repo: string, prNumber: number, force = false): Promise<void> {
     const key = `${repo.toLowerCase()}#${prNumber}`;
     const now = this.now();
     const previous = this.tracking.get(key);
-    if (previous && previous.nextAttemptAt > now) return;
+    if (!force && previous && previous.nextAttemptAt > now) return;
 
     const fetched = await this.options.fetchPr(repo, prNumber, previous?.etag);
     if (fetched.gone) return;
@@ -200,8 +276,13 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
     }
     if (!READY_STATES.has(pr.mergeable_state ?? "")) return;
     const quietMs = (this.options.quietSeconds ?? DEFAULT_AUTO_MERGE_QUIET_SECONDS) * 1000;
-    if (now - state.headSeenAt < quietMs) return;
-    const decisionKey = autoMergeDecisionKey(repo, prNumber, headSha);
+    if (!force && now - state.headSeenAt < quietMs) return;
+    const decisionKey = autoMergeDecisionKey(
+      repo,
+      prNumber,
+      headSha,
+      this.options.policyFingerprint?.(repo),
+    );
     if (this.options.queue.hasProcessed(AUTO_MERGE_SOURCE, decisionKey)) return;
 
     await this.evaluate(repo, prNumber, state, decisionKey);
@@ -213,7 +294,7 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
     state: PrTracking,
     decisionKey: string,
   ): Promise<void> {
-    const startedAt = this.now();
+    const runId = this.beginRun(repo, prNumber);
     let result: AutoMergeResult;
     try {
       result = await this.options.mergePr(repo, prNumber, state.headSha);
@@ -265,39 +346,44 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
     if (result.outcome !== "waiting" || this.options.verbose) {
       console.log(`${icon} [${this.name}] ${label} ${result.outcome}: ${result.message}`);
     }
-    this.recordRun(repo, prNumber, startedAt, result);
+    this.endRun(runId, result);
   }
 
-  /** Record decisions (not "not ready yet" checks) on the dashboard. */
-  private recordRun(
-    repo: string,
-    prNumber: number,
-    startedAt: number,
-    result: AutoMergeResult,
-  ): void {
+  /** Open an in-progress run so the dashboard shows the evaluation live. */
+  private beginRun(repo: string, prNumber: number): number | null {
     const { runStore } = this.options;
-    if (!runStore) return;
-    if (!["merged", "rejected", "failed"].includes(result.outcome)) return;
+    if (!runStore) return null;
     try {
-      const runId = runStore.createRun({
+      const harness = this.options.harness?.();
+      return runStore.createRun({
         origin: "auto_merge",
         repo,
         prNumber,
         prUrl: `https://github.com/${repo}/pull/${prNumber}`,
-        ...(result.reviewed ? { harness: this.options.harness?.() } : {}),
-        startedAt,
+        ...(harness ? { harness } : {}),
       });
-      runStore.finishRun(
-        runId,
-        result.outcome === "merged"
-          ? "succeeded"
-          : result.outcome === "rejected"
-            ? "escalated"
-            : "failed",
-        result.message,
-      );
     } catch (error) {
-      console.warn(`⚠️  Run recording (auto-merge) failed: ${(error as Error).message}`);
+      console.warn(`⚠️  Run recording (auto-merge begin) failed: ${(error as Error).message}`);
+      return null;
+    }
+  }
+
+  /** Keep decisions in the run list; drop "not ready yet" checks. */
+  private endRun(runId: number | null, result: AutoMergeResult): void {
+    const { runStore } = this.options;
+    if (!runStore || runId === null) return;
+    try {
+      if (result.outcome === "merged") {
+        runStore.finishRun(runId, "succeeded", result.message);
+      } else if (result.outcome === "rejected") {
+        runStore.finishRun(runId, "escalated", result.message);
+      } else if (result.outcome === "failed") {
+        runStore.finishRun(runId, "failed", result.message);
+      } else {
+        runStore.discardRun(runId);
+      }
+    } catch (error) {
+      console.warn(`⚠️  Run recording (auto-merge end) failed: ${(error as Error).message}`);
     }
   }
 }

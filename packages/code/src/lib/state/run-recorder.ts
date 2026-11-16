@@ -75,8 +75,6 @@ export interface RunMeta {
   ticketUrl?: string;
   /** Explicit attempt for non-task durable events. */
   attempt?: number;
-  /** Start time (ms epoch) for runs recorded after the fact; defaults to now. */
-  startedAt?: number;
 }
 
 /** Cap persisted ticket descriptions so a huge ticket cannot bloat the DB. */
@@ -321,7 +319,7 @@ export class RunStore {
         meta.ticketKey ?? null,
         meta.ticketUrl ?? null,
         meta.queueClaim ?? null,
-        meta.startedAt ?? Date.now(),
+        Date.now(),
         attempt,
       ],
     );
@@ -533,6 +531,19 @@ export class RunStore {
        VALUES (?, 'outcome', ?, ?, NULL, ?)`,
       [runId, status, reason ?? null, Date.now()],
     );
+  }
+
+  /**
+   * Delete a run and its stages. For runs opened only to show work live that
+   * turned out to be no-ops (an auto-merge check whose PR was not ready).
+   *
+   * @param runId - Run id
+   */
+  discardRun(runId: number): void {
+    this.db.transaction(() => {
+      this.db.run("DELETE FROM run_stages WHERE run_id = ?", [runId]);
+      this.db.run("DELETE FROM runs WHERE id = ?", [runId]);
+    })();
   }
 
   /**

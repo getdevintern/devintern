@@ -240,6 +240,21 @@ export function createFleetResolveConflicts(
 }
 
 /**
+ * Fingerprint of the auto-merge policy that decides a repo's PRs (paths and
+ * review switch; not the merge method). Changing it re-evaluates PRs that
+ * were decided under the previous policy.
+ */
+export function fleetAutoMergePolicyFingerprint(config: WorkspaceConfig, slug: string): string {
+  const settings = config.workspace.autoMerge;
+  const repo = repoBySlug(config, slug);
+  const paths = repo
+    ? autoMergePathsFor(settings, repo)
+    : { safePaths: settings.safePaths, denyPaths: settings.denyPaths };
+  const material = JSON.stringify({ ...paths, review: settings.review });
+  return Bun.hash(material).toString(16);
+}
+
+/**
  * Build the fleet auto-merge runner: the repo's live policy (repo path lists
  * replace the workspace's), its checkout and env, and the shared supervisor.
  */

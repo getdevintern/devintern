@@ -26,9 +26,12 @@ describe("AutoMergeWatcherAcquirer", () => {
   let calls: Array<{ prNumber: number; sha: string }>;
   let results: AutoMergeResult[];
   let enabled: boolean;
-  let runs: Array<{ origin: string; status?: string }>;
+  let runs: Array<{ origin: string; status?: string; harness?: string } | null>;
+  let statusDuringMerge: Array<string | undefined>;
+  let fingerprint: string | undefined;
 
-  const watcher = (extra: { quietSeconds?: number } = {}) =>
+  const liveRuns = () => runs.filter((run) => run !== null);
+  const watcher = (extra: { quietSeconds?: number; harness?: string } = {}) =>
     new AutoMergeWatcherAcquirer({
       intervalSeconds: 60,
       workerState,
@@ -39,15 +42,25 @@ describe("AutoMergeWatcherAcquirer", () => {
       fetchPr: async () => ({ data: pr, notModified: false }),
       mergePr: async (_repo, prNumber, sha) => {
         calls.push({ prNumber, sha });
+        statusDuringMerge.push(runs.at(-1)?.status);
         return results.shift() ?? { outcome: "merged", message: "ok", reviewed: false };
       },
+      harness: () => extra.harness,
+      policyFingerprint: () => fingerprint ?? "",
       runStore: {
         createRun: (meta) => {
-          runs.push({ origin: meta.origin });
+          runs.push({
+            origin: meta.origin,
+            status: "in_progress",
+            ...(meta.harness ? { harness: meta.harness } : {}),
+          });
           return runs.length;
         },
         finishRun: (id, status) => {
           (runs[id - 1] as { status?: string }).status = status;
+        },
+        discardRun: (id) => {
+          runs[id - 1] = null;
         },
       },
     });
@@ -70,6 +83,8 @@ describe("AutoMergeWatcherAcquirer", () => {
     results = [];
     enabled = true;
     runs = [];
+    statusDuringMerge = [];
+    fingerprint = undefined;
   });
 
   afterEach(() => {
@@ -93,6 +108,8 @@ describe("AutoMergeWatcherAcquirer", () => {
     expect(calls).toEqual([{ prNumber: 7, sha: HEAD }]);
     expect(queue.hasProcessed(AUTO_MERGE_SOURCE, autoMergeDecisionKey(REPO, 7, HEAD))).toBe(true);
     expect(runs).toEqual([{ origin: "auto_merge", status: "succeeded" }]);
+    // The run existed (in progress) while the evaluation ran.
+    expect(statusDuringMerge).toEqual(["in_progress"]);
   });
 
   test.each([
@@ -138,7 +155,8 @@ describe("AutoMergeWatcherAcquirer", () => {
     now += 10 * 60_000;
     await w.tick();
     expect(calls).toHaveLength(2);
-    expect(runs).toHaveLength(1); // the second (merged) attempt only
+    // The waiting check was shown live, then discarded.
+    expect(liveRuns()).toEqual([{ origin: "auto_merge", status: "succeeded" }]);
   });
 
   test("failures retry with backoff and give up after the cap", async () => {
@@ -154,6 +172,85 @@ describe("AutoMergeWatcherAcquirer", () => {
     }
     expect(calls).toHaveLength(3);
     expect(queue.hasProcessed(AUTO_MERGE_SOURCE, autoMergeDecisionKey(REPO, 7, HEAD))).toBe(true);
+  });
+});
+
+describe("AutoMergeWatcherAcquirer dashboard hooks", () => {
+  let dbPath: string;
+  let workerState: WorkerState;
+  let queue: WebhookQueue;
+  let calls: number;
+  let enabled: boolean;
+  let fingerprint: string;
+  let now: number;
+
+  const make = (quietSeconds = 300) =>
+    new AutoMergeWatcherAcquirer({
+      intervalSeconds: 60,
+      workerState,
+      queue,
+      enabled: () => enabled,
+      now: () => now,
+      quietSeconds,
+      policyFingerprint: () => fingerprint,
+      fetchPr: async () => ({
+        data: { state: "open", mergeable_state: "clean", head: { sha: HEAD, repo: null } },
+        notModified: false,
+      }),
+      mergePr: async () => {
+        calls += 1;
+        return { outcome: "rejected", message: "outside safe paths", reviewed: false };
+      },
+    });
+
+  beforeEach(() => {
+    dbPath = join(
+      tmpdir(),
+      `auto-merge-hooks-${Date.now()}-${Math.random().toString(36).slice(2)}.db`,
+    );
+    workerState = new WorkerState(dbPath);
+    queue = new WebhookQueue({ dbPath });
+    workerState.recordAgentPr({ repo: REPO, prNumber: 7 });
+    calls = 0;
+    enabled = true;
+    fingerprint = "p1";
+    now = 1_000_000;
+  });
+
+  afterEach(() => {
+    workerState.close();
+    queue.close();
+    rmSync(dbPath, { force: true });
+    rmSync(`${dbPath}-wal`, { force: true });
+    rmSync(`${dbPath}-shm`, { force: true });
+  });
+
+  test("status is null while disabled and Run now refuses", () => {
+    enabled = false;
+    const w = make();
+    expect(w.status()).toBeNull();
+    expect(w.runNow()).toEqual({ ok: false, reason: expect.stringContaining("disabled") });
+  });
+
+  test("Run now skips the quiet period", async () => {
+    const w = make();
+    await w.tick();
+    expect(calls).toBe(0); // head not quiet yet
+    expect(w.runNow()).toEqual({ ok: true });
+    await Bun.sleep(0);
+    await w.tick(); // settle the triggered pass
+    expect(calls).toBe(1);
+    expect(w.status()).toMatchObject({ intervalSeconds: 60, running: false });
+  });
+
+  test("a policy change re-evaluates a PR decided under the old policy", async () => {
+    const w = make(0);
+    await w.tick();
+    await w.tick();
+    expect(calls).toBe(1);
+    fingerprint = "p2";
+    await w.tick();
+    expect(calls).toBe(2);
   });
 });
 
