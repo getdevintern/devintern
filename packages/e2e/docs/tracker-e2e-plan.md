@@ -28,7 +28,7 @@ test data into the trackers a worker actually uses.
 | ------------------- | ------------------ | -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Markdown            | no                 | `test:trackers` (read-only path)       | Plain files, no credentials.                                                                                                                                                            |
 | Jira                | yes (offline fake) | `test:trackers` (read-only live smoke) | Fake lifecycle: key/`--query`, transition, comment, `--skip-comments`. One-shot and scheduled worker estimation are offline. Real project lifecycle and live estimation remain Layer 2. |
-| Trello              | no                 | `test:trackers` (read-only smoke)      | Full lifecycle planned in Layer 2.                                                                                                                                                      |
+| Trello              | yes (offline fake) | `test:trackers` (read-only smoke)      | Fake lifecycle: key/`--query`, list move, comment. Worker board-actions polling (`since` cursor, re-run on new action) is offline. Real board lifecycle remains Layer 2.                |
 | GitHub Issues       | no                 | `test:e2e:tracker`                     | Existing live suite; dedicated tracker repository doubles as code host.                                                                                                                 |
 | Local GitLab Issues | no                 | `test:e2e:tracker:gitlab`              | Existing live suite; creates and deletes a dedicated project.                                                                                                                           |
 | GitLab.com Issues   | no                 | `test:e2e:tracker:gitlab-com`          | Existing live suite; pre-created project, issues only, project retained.                                                                                                                |
@@ -311,6 +311,10 @@ Endpoints covered:
 - `GET /cards/{id}/checklists`, `POST /checklists`, `POST /checklists/{id}/checkItems`
 - `GET` / `POST /cards/{id}/attachments`
 - `GET /search` (optional `idBoards` scope, `is:open`, `list:"<name>"`, free text)
+- `GET /boards/{id}/actions` (newest first; `since` as an action id or ISO
+  date returns only newer actions; comma-separated `filter`; `limit` default 50,
+  max 1000). Every card create/update/move/archive/comment/checklist/attachment
+  appends one board action with a monotonic 24-hex id.
 
 Any other route returns a diagnostic 404 naming the method and path, and the
 test asserts no unexpected request occurred. The fake accepts any query
@@ -321,6 +325,12 @@ unrelated label, the implementation comment, the seeded comment, and
 `--skip-comments` on a second run. The local bare Git remote is the code host; no
 PR, GitHub token, Trello credentials, or model credentials are required. The
 only skip is the existing built-CLI guard.
+
+`tests/local/worker-trello-polling.test.ts` drives the same fake from a real
+worker: the board-actions change detector's null-cursor backlog drain, the
+`since=<newest action id>` idle ticks with no `/search`, the worker's own list
+move and comment not looping, a human edit re-running the card exactly once,
+and the startup refusal without `TRELLO_DEFAULT_BOARD_ID`.
 
 What remains live: creating, moving, commenting on, and archiving cards on a real
 dedicated board (Layer 2), including Trello's eventual search indexing. Trello

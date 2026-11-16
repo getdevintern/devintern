@@ -307,6 +307,11 @@ export class WorkerFixture {
     }
   }
 
+  /** Daemon exit code once it has exited, or undefined while running/unstarted. */
+  get exitStatus(): number | undefined {
+    return this.exitCode ?? this.child?.exitCode ?? undefined;
+  }
+
   /** Complete stdout/stderr captured from the worker so far. */
   get logs(): string {
     return this.output;

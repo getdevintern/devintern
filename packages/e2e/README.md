@@ -222,6 +222,38 @@ bun run --filter @getdevintern/code build
 bun run --filter @devintern/e2e test
 ```
 
+## Worker Trello polling (board actions feed)
+
+`tests/local/worker-trello-polling.test.ts` starts the real `devintern worker`
+with `[defaults].tracker = "trello"`, a one-second `poll_interval`, and a
+`task_query` of `list:"To Do" is:open <marker>` against the in-process Trello
+fake (`providers/fake-trello.ts`). Trello polling detects changes through
+`GET /1/boards/{id}/actions`, not card search, so the fake appends a board
+action for every card create, update, list move, archive, comment, checklist,
+and attachment, honors `since` (action id or date), `filter`, and `limit`, and
+records the parameters of every request in `boardActionRequests`.
+
+The suite proves that the first tick (null cursor) drains the backlog once and
+leaves a decoy on the same board untouched; that later ticks send
+`since=<newest action id>` and, with an empty feed, never call `/search` or
+re-run the card; that the worker's own list move and implementation comment
+are detected but do not loop (the in-progress move takes the card out of the
+query); and that a human edit (new description, moved back to To Do) triggers
+exactly one more run. A second test drops `TRELLO_DEFAULT_BOARD_ID` and proves
+the worker refuses to start ("Could not initialize the trello change
+detector") without polling or running cards.
+
+No Trello account, PR, or network access is needed; the local bare remote is
+the code host. Build the CLI first; the tests skip only when
+`packages/code/dist` is absent, and a skip is not a pass.
+
+```bash
+bun run --filter @getdevintern/code build
+bun run --filter @devintern/e2e test
+# or only this suite, from packages/e2e:
+bun test tests/local/worker-trello-polling.test.ts
+```
+
 ## Scheduled Jira story-point estimation
 
 `tests/local/worker-scheduled-estimation.test.ts` starts one real
