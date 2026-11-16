@@ -98,7 +98,9 @@ function AutomationRow({
               title={
                 kind === "estimation"
                   ? `Story-point estimation sweep${automation.query ? ` · ${automation.query}` : ""}`
-                  : "Scheduled conflict resolution on the agent's pull requests"
+                  : kind === "auto_merge"
+                    ? "Merges the agent's green pull requests when they are safe"
+                    : "Scheduled conflict resolution on the agent's pull requests"
               }
             >
               {kindLabel}

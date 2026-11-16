@@ -184,6 +184,33 @@ export interface WorkerAutomationSchedule {
   last_scheduled_at: number | null;
 }
 
+/** Worker-embedded dashboard settings written into the generated workspace.toml. */
+export interface WorkerDashboardOptions {
+  /** `[workspace].dashboard_port`; the embedded server binds `127.0.0.1`. */
+  port: number;
+  /** `[dashboard].allowed_origins`; defaults to none. */
+  allowedOrigins?: string[];
+  /** `[dashboard].tailscale_autodetect`; defaults to `false` for hermetic tests. */
+  tailscaleAutodetect?: boolean;
+}
+
+/** `[workspace]` dashboard keys plus the `[dashboard]` table, as TOML lines. */
+function dashboardTomlLines(dashboard: WorkerDashboardOptions | undefined): {
+  workspace: string[];
+  table: string[];
+} {
+  if (!dashboard) return { workspace: ["dashboard = false"], table: [] };
+  return {
+    workspace: ["dashboard = true", `dashboard_port = ${dashboard.port}`],
+    table: [
+      "[dashboard]",
+      `allowed_origins = ${JSON.stringify(dashboard.allowedOrigins ?? [])}`,
+      `tailscale_autodetect = ${dashboard.tailscaleAutodetect ?? false}`,
+      "",
+    ],
+  };
+}
+
 export interface WorkerFixtureOptions {
   /** Global agent concurrency; defaults to one. */
   maxConcurrency?: number;
@@ -210,6 +237,15 @@ export interface WorkerFixtureOptions {
    * credential-free unless a test points it at a fixture tracker.
    */
   tracker?: string;
+  /**
+   * Enable the worker-embedded dashboard (`[workspace].dashboard = true`).
+   *
+   * Omitted keeps `dashboard = false`, so existing fixtures never bind a port.
+   * Pass a free loopback port (see `freePort`); the generated `[dashboard]`
+   * table disables Tailscale Serve autodetection by default so the host's
+   * `tailscale` state cannot widen the trusted origins under test.
+   */
+  dashboard?: WorkerDashboardOptions;
   /** Extra TOML inserted after `[defaults]` and before `[[repos]]`. */
   workspaceTomlExtra?: string;
   /** Extra environment variables for the daemon and built CLI. */
@@ -382,10 +418,12 @@ export class WorkerFixture {
     this.env.E2E_AGENT_TIMELINE = join(this.root, "agent-timeline.jsonl");
 
     mkdirSync(this.workspaceDir, { recursive: true });
+    const dashboard = dashboardTomlLines(this.options.dashboard);
     const lines = [
       "[workspace]",
-      "dashboard = false",
+      ...dashboard.workspace,
       "",
+      ...dashboard.table,
       "[workspace.execution]",
       'isolation = "best_effort_host"',
       `max_concurrency = ${this.options.maxConcurrency ?? 1}`,

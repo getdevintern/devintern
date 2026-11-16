@@ -85,6 +85,7 @@ const RUN_ORIGINS: RunOrigin[] = [
   "pr_mention",
   "ci_fix",
   "conflict_resolution",
+  "auto_merge",
   "scheduled",
   "estimate",
   "manual",

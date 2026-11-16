@@ -10,6 +10,7 @@ import {
   DEFAULT_MAX_CONCURRENCY_PER_REPO,
   DEFAULT_POLL_INTERVAL_SECONDS,
   DEFAULT_WORKTREES_TTL_DAYS,
+  autoMergePathsFor,
   findRepo,
   loadWorkspaceConfig,
   parseWorkspaceConfig,
@@ -1111,5 +1112,96 @@ describe("workspace paths", () => {
     expect(() => loadWorkspaceConfig(join(workspaceDir, "missing.toml"))).toThrow(
       /devintern worker scaffold/,
     );
+  });
+});
+
+describe("[workspace].auto_merge", () => {
+  const base = `
+[defaults]
+tracker = "jira"
+
+[[repos]]
+name = "api"
+remote = "git@github.com:acme/api.git"
+`;
+
+  test("is off by default with review on and squash", () => {
+    const { workspace } = parseWorkspaceConfig(base);
+    expect(workspace.autoMerge).toEqual({
+      enabled: false,
+      method: "squash",
+      review: true,
+      safePaths: [],
+      denyPaths: [],
+      reviewLabel: "needs-human-review",
+    });
+  });
+
+  test("auto_merge_review_label renames the label; an empty string disables it", () => {
+    const parse = (value: string) =>
+      parseWorkspaceConfig(`
+[workspace]
+auto_merge_review_label = ${value}
+${base}`).workspace.autoMerge.reviewLabel;
+    expect(parse('"  triage  "')).toBe("triage");
+    expect(parse('""')).toBe("");
+    expect(() => parse("true")).toThrow(/auto_merge_review_label must be a string/);
+  });
+
+  test("parses the policy, agent override, and per-repo path lists", () => {
+    const config = parseWorkspaceConfig(`
+[workspace]
+auto_merge = true
+auto_merge_method = "rebase"
+auto_merge_review = false
+auto_merge_safe_paths = ["**/*.md", "docs/"]
+auto_merge_deny_paths = ["db/migrations/**"]
+auto_merge_model = "sonnet"
+
+[defaults]
+tracker = "jira"
+
+[[repos]]
+name = "api"
+remote = "git@github.com:acme/api.git"
+auto_merge_safe_paths = ["e2e/**"]
+
+[[repos]]
+name = "web"
+remote = "git@github.com:acme/web.git"
+`);
+    expect(config.workspace.autoMerge).toEqual({
+      enabled: true,
+      method: "rebase",
+      review: false,
+      safePaths: ["**/*.md", "docs/"],
+      denyPaths: ["db/migrations/**"],
+      reviewLabel: "needs-human-review",
+      agent: { model: "sonnet" },
+    });
+    const [api, web] = config.repos;
+    expect(autoMergePathsFor(config.workspace.autoMerge, api!)).toEqual({
+      safePaths: ["e2e/**"],
+      denyPaths: ["db/migrations/**"],
+    });
+    expect(autoMergePathsFor(config.workspace.autoMerge, web!)).toEqual({
+      safePaths: ["**/*.md", "docs/"],
+      denyPaths: ["db/migrations/**"],
+    });
+  });
+
+  test("rejects unknown merge methods and non-relative globs", () => {
+    expect(() =>
+      parseWorkspaceConfig(`
+[workspace]
+auto_merge_method = "octopus"
+${base}`),
+    ).toThrow(/auto_merge_method must be one of: merge, squash, rebase/);
+    expect(() =>
+      parseWorkspaceConfig(`
+[workspace]
+auto_merge_safe_paths = ["../outside/**"]
+${base}`),
+    ).toThrow(/must be a repo-relative glob/);
   });
 });

@@ -24,6 +24,10 @@ export interface DashboardFixtureOptions {
   host?: string;
   /** Port to bind; defaults to a free ephemeral port. */
   port?: number;
+  /** Extra CLI arguments, e.g. `--allow-origin <origin>` or `--no-tailscale-autodetect`. */
+  args?: string[];
+  /** Extra environment layered over the worker's, e.g. `DASHBOARD_ALLOWED_ORIGINS`. */
+  env?: Record<string, string>;
 }
 
 /** Strip IPv6 brackets so the authority is never double-bracketed. */
@@ -38,7 +42,7 @@ function bareHost(host: string): string {
  * the address colons as the port separator. `localhost` and IPv4 hosts pass
  * through unchanged so the client resolves the same name the server bound.
  */
-function baseUrlFor(host: string, port: number): string {
+export function dashboardBaseUrl(host: string, port: number): string {
   const normalized = bareHost(host);
   return `http://${normalized.includes(":") ? `[${normalized}]` : normalized}:${port}`;
 }
@@ -49,6 +53,41 @@ function baseUrlFor(host: string, port: number): string {
  */
 export function dashboardWriteHeaders(baseUrl: string): Record<string, string> {
   return { "Content-Type": "application/json", Origin: new URL(baseUrl).origin };
+}
+
+/**
+ * Poll `GET /api/health` until it returns the documented `{ status: "ok" }`.
+ *
+ * Shared by the standalone fixture and the worker-embedded dashboard, whose
+ * server starts inside the daemon. `assertAlive` should throw once the owning
+ * process has exited so a crash fails fast instead of waiting for the deadline.
+ */
+export async function waitForDashboardHealth(
+  baseUrl: string,
+  options: {
+    timeoutMs?: number;
+    assertAlive?: () => void;
+    describe?: () => string;
+  } = {},
+): Promise<void> {
+  const deadline = Date.now() + (options.timeoutMs ?? HEALTH_TIMEOUT_MS);
+  while (Date.now() < deadline) {
+    options.assertAlive?.();
+    try {
+      const response = await fetch(`${baseUrl}/api/health`);
+      if (response.status === 200) {
+        const payload = (await response.json()) as { status?: unknown };
+        if (payload.status === "ok") return;
+      }
+    } catch {
+      // The socket is not accepting connections yet.
+    }
+    await Bun.sleep(HEALTH_POLL_INTERVAL_MS);
+  }
+  throw new Error(
+    `dashboard did not become healthy at ${baseUrl}` +
+      (options.describe ? `\n${options.describe()}` : ""),
+  );
 }
 
 /** Collect a child stream into memory without blocking the spawned process. */
@@ -102,7 +141,7 @@ export class DashboardFixture {
     readonly port: number,
     private readonly child: Bun.Subprocess<"ignore", "pipe", "pipe">,
   ) {
-    this.baseUrl = baseUrlFor(host, port);
+    this.baseUrl = dashboardBaseUrl(host, port);
     this.captured = [
       capture(child.stdout, this.stdoutChunks),
       capture(child.stderr, this.stderrChunks),
@@ -117,16 +156,25 @@ export class DashboardFixture {
     const host = options.host ?? "127.0.0.1";
     const port = options.port ?? (await freePort(host));
     const child = Bun.spawn(
-      [process.execPath, cliPath, "dashboard", "--host", host, "--port", String(port)],
+      [
+        process.execPath,
+        cliPath,
+        "dashboard",
+        "--host",
+        host,
+        "--port",
+        String(port),
+        ...(options.args ?? []),
+      ],
       {
         cwd: options.cwd ?? worker.workspaceDir,
-        env: worker.env,
+        env: { ...worker.env, ...options.env },
         stdin: "ignore",
         stdout: "pipe",
         stderr: "pipe",
       },
     );
-    const fixture = new DashboardFixture(worker.env, host, port, child);
+    const fixture = new DashboardFixture({ ...worker.env, ...options.env }, host, port, child);
     try {
       await fixture.waitForHealth();
       return fixture;
@@ -156,36 +204,19 @@ export class DashboardFixture {
     return this.child.exitCode === null;
   }
 
-  /**
-   * Poll the health endpoint until the server is ready or the child exits.
-   *
-   * Uses the documented `{ status: "ok" }` payload rather than waiting on a
-   * fixed timer, so a route or handler regression fails immediately.
-   */
+  /** Poll the health endpoint until the server is ready or the child exits. */
   private async waitForHealth(): Promise<void> {
-    const deadline = Date.now() + HEALTH_TIMEOUT_MS;
-    while (Date.now() < deadline) {
-      if (this.child.exitCode !== null) {
-        throw new Error(
-          `dashboard exited before becoming healthy (${this.child.exitCode})\n` +
-            `stdout:\n${this.stdout}\nstderr:\n${this.stderr}`,
-        );
-      }
-      try {
-        const response = await fetch(`${this.baseUrl}/api/health`);
-        if (response.status === 200) {
-          const payload = (await response.json()) as { status?: unknown };
-          if (payload.status === "ok") return;
+    await waitForDashboardHealth(this.baseUrl, {
+      assertAlive: () => {
+        if (this.child.exitCode !== null) {
+          throw new Error(
+            `dashboard exited before becoming healthy (${this.child.exitCode})\n` +
+              `stdout:\n${this.stdout}\nstderr:\n${this.stderr}`,
+          );
         }
-      } catch {
-        // The socket is not accepting connections yet.
-      }
-      await Bun.sleep(HEALTH_POLL_INTERVAL_MS);
-    }
-    throw new Error(
-      `dashboard did not become healthy at ${this.baseUrl}\n` +
-        `stdout:\n${this.stdout}\nstderr:\n${this.stderr}`,
-    );
+      },
+      describe: () => `stdout:\n${this.stdout}\nstderr:\n${this.stderr}`,
+    });
   }
 
   /** SIGTERM the child, wait for its graceful exit, then force-kill it. */

@@ -62,7 +62,7 @@ export type ManualTriggerOutcome = { ok: true } | { ok: false; reason: string };
  * Scheduled job types the dashboard lists side by side: prompt automations,
  * story-point estimation sweeps, and the scheduled conflict-resolution window.
  */
-export type ScheduledJobKind = "automation" | "estimation" | "conflict_resolution";
+export type ScheduledJobKind = "automation" | "estimation" | "conflict_resolution" | "auto_merge";
 
 /** Which recorded runs belong to one scheduled job (see `RunFilter`). */
 export interface ScheduledJobRunFilter {

@@ -480,6 +480,10 @@ A PR is eligible only when it is open, not a draft, its branch lives in the same
 
 Because conflict resolution hands teammates' code to the coding agent, `sync_team_prs` requires an explicit sandbox provider in each opted-in repo's effective environment (workspace `.env`, then the repo's `env_file`, then `[repos.env]`): `AGENT_SANDBOX=native`, `nono`, or `docker` (see `devintern sandbox`). Unset, `none`, and `auto` are refused — `auto` falls back to running unsandboxed when no provider fits the harness, which the worker cannot rule out ahead of time. The worker refuses to start, and rejects a live reload, listing each offending repo. `sync_team_prs` is GitHub-only: setting it on a GitLab (or any non-github.com) repo is a config error. The flag live-reloads; turning it off drops that repo's discovery state on the next poll.
 
+## Auto-merge of the agent's PRs
+
+With `[workspace].auto_merge = true` (off by default), the worker merges its own green PRs when they are safe. PRs that change only `auto_merge_safe_paths` merge without an agent run. PRs that touch other files merge only on an explicit "safe" verdict from the agent's merge-safety review. Deny paths never merge. See [Workspaces → Auto-merging safe PRs](./workspaces.md#auto-merging-safe-prs) for the configuration and gate order. The GitHub credential needs `Pull requests: Read and write` and `Contents: Read and write` to merge.
+
 ## CI failures on the agent's PRs
 
 Set `[workspace].ci_failure_fix = true` to watch GitHub Actions and commit statuses on every open PR the worker created and ask the agent to repair failures. The switch is off by default because each repair spends agent tokens and can push a commit. It live-reloads with `workspace.toml`.

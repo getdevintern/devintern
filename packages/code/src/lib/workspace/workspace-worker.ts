@@ -850,8 +850,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   if (initialFleetAutomations.problems.length > 0) {
     throw new Error(`Invalid ${configPath}:\n- ${initialFleetAutomations.problems.join("\n- ")}`);
   }
-  // Fail before taking the lock or opening state; buildFleetEventAcquirers
-  // re-checks for callers that wire acquirers directly.
+  // Fail before lock/state; buildFleetEventAcquirers re-checks for direct callers.
   assertTeamPrSyncSandbox(config, workspaceDir);
 
   // Dashboard retries ride the shared workspace DB: the dashboard inserts a
@@ -1001,6 +1000,8 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
     estimations: estimationAcquirer,
     conflicts: () => eventReloadHooks.hooks,
     conflictAgent: () => config.workspace.conflictAgent,
+    autoMerge: () => eventReloadHooks.hooks,
+    autoMergeSettings: () => config.workspace.autoMerge,
   });
 
   // Error-monitor adapters share one provider-neutral acquirer. Each source
