@@ -70,7 +70,7 @@ export class OpencodeHarness implements AgentHarness {
    * @returns The version snapshot, or `{}` when it cannot be read.
    */
   probe(executablePath: string, options: HarnessProbeOptions = {}): HarnessProbe {
-    const { output, failure } = probeCliVersion(executablePath, options);
+    const { output, failure } = probeCliVersion(executablePath, options, "opencode");
     const major = output === undefined ? undefined : parseMajorVersion(output);
     if (output === undefined || major === undefined) {
       const reason = failure ?? `unrecognized version output: ${output}`;

@@ -6,6 +6,7 @@ import { OpencodeHarness } from "../src/harnesses/opencode.js";
 import {
   buildHarnessInvocation,
   parseMajorVersion,
+  parseVersion,
   probeCliVersion,
   probeHarness,
   readCliVersion,
@@ -70,7 +71,27 @@ describe("readCliVersion", () => {
     const cli = makeCli(
       'echo "opencode v2.1.2"; echo "PlatformError: EROFS: read-only file system (log 1.2)" >&2; exit 1',
     );
-    expect(readCliVersion(cli)).toBe("opencode v2.1.2");
+    expect(readCliVersion(cli, {}, "opencode")).toBe("opencode v2.1.2");
+  });
+
+  test("keeps stdout and stderr on separate lines on a zero exit", () => {
+    if (process.platform === "win32") return;
+    const cli = makeCli('echo "1.2.3"; echo "4 plugins loaded" >&2');
+    expect(probeCliVersion(cli)).toEqual({ output: "1.2.3\n4 plugins loaded" });
+    expect(parseVersion(readCliVersion(cli) ?? "")).toEqual({ major: 1, minor: 2, patch: 3 });
+  });
+
+  test("rejects a version prefixed by anything but the program name on a non-zero exit", () => {
+    if (process.platform === "win32") return;
+    const cli = makeCli('echo "Error 1.2" >&2; exit 1');
+    expect(probeCliVersion(cli, {}, "opencode")).toEqual({ failure: "exit 1: Error 1.2" });
+    expect(probeCliVersion(cli)).toEqual({ failure: "exit 1: Error 1.2" });
+  });
+
+  test("accepts a bare version line on a non-zero exit", () => {
+    if (process.platform === "win32") return;
+    const cli = makeCli('echo "2.1.2"; echo "boom" >&2; exit 1');
+    expect(probeCliVersion(cli, {}, "opencode")).toEqual({ output: "2.1.2" });
   });
 
   test("ignores version-like numbers inside error text on a non-zero exit", () => {
@@ -115,6 +136,19 @@ describe("OpencodeHarness.probe", () => {
       expect(message).toContain("exit 1: PlatformError");
       expect(message).toContain("EROFS");
       expect(message).toContain("assuming v1 flags");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test("warns instead of reading a major from error text like `Error 1.2`", async () => {
+    if (process.platform === "win32") return;
+    const cli = makeCli('echo "Error 1.2" >&2; exit 1');
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(await probeHarness(new OpencodeHarness(), cli)).toEqual({});
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0]?.[0])).toContain("exit 1: Error 1.2");
     } finally {
       warn.mockRestore();
     }

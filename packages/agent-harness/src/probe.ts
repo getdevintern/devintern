@@ -76,8 +76,12 @@ export interface CliVersionProbeResult {
   failure?: string;
 }
 
-/** A line that is only a version, optionally prefixed by a program name (e.g. `opencode v2.1.2`). */
-const VERSION_LINE = /^(?:[\w.@/-]+\s+)?v?\d+\.\d+(?:\.\d+)?(?:[-+][\w.-]+)?$/;
+/**
+ * A line that is only a version, optionally prefixed by one word (e.g.
+ * `opencode v2.1.2`). The prefix is captured so callers can require it to be
+ * the CLI's own program name rather than error text such as `Error 1.2`.
+ */
+const VERSION_LINE = /^(?:([\w.@/-]+)\s+)?v?\d+\.\d+(?:\.\d+)?(?:[-+][\w.-]+)?$/;
 const MAX_FAILURE_REASON = 160;
 
 /** Collapse whitespace and cap a probe failure reason to one short line. */
@@ -88,12 +92,25 @@ function summarizeFailure(text: string): string {
     : oneLine;
 }
 
-/** Find the first standalone version line in `text`. */
-function findVersionLine(text: string): string | undefined {
+/**
+ * Find the first standalone version line in `text`.
+ *
+ * A prefixed line is accepted only when the prefix is `programName`
+ * (case-insensitive); without a `programName` only bare versions match.
+ */
+function findVersionLine(text: string, programName?: string): string | undefined {
+  const expected = programName?.toLowerCase();
   return text
     .split(/\r?\n/)
     .map((line) => line.trim())
-    .find((line) => VERSION_LINE.test(line));
+    .find((line) => {
+      const match = VERSION_LINE.exec(line);
+      if (!match) {
+        return false;
+      }
+      const prefix = match[1];
+      return prefix === undefined || prefix.toLowerCase() === expected;
+    });
 }
 
 /**
@@ -102,16 +119,21 @@ function findVersionLine(text: string): string | undefined {
  * A zero exit returns the combined output. A non-zero exit still returns a
  * version when stdout/stderr contains a standalone version line (some CLIs
  * print the version and then fail on unrelated startup work, e.g. opening a
- * log file). Otherwise `failure` carries a trimmed reason for diagnostics.
+ * log file); that line must be a bare version or one prefixed by
+ * `programName`, so error text like `Error 1.2` is not mistaken for a
+ * version. Otherwise `failure` carries a trimmed reason for diagnostics.
  * Never throws.
  *
  * @param executablePath - Resolved path/command of the CLI.
  * @param options - Optional spawn environment.
+ * @param programName - The CLI's own name as printed before its version
+ *   (e.g. `opencode`); only consulted on a non-zero exit.
  * @returns The version output or a failure reason.
  */
 export function probeCliVersion(
   executablePath: string,
   options: HarnessProbeOptions = {},
+  programName?: string,
 ): CliVersionProbeResult {
   try {
     const result = spawnSync(executablePath, ["--version"], {
@@ -126,10 +148,12 @@ export function probeCliVersion(
     const stdout = (result.stdout ?? "").trim();
     const stderr = (result.stderr ?? "").trim();
     if (result.status === 0) {
-      const output = `${stdout}${stderr}`.trim();
+      // Keep the streams on separate lines: `1.2.3` + `4 plugins` must not
+      // fuse into `1.2.34 plugins`.
+      const output = [stdout, stderr].filter(Boolean).join("\n");
       return output ? { output } : { failure: "empty output" };
     }
-    const version = findVersionLine(stdout) ?? findVersionLine(stderr);
+    const version = findVersionLine(stdout, programName) ?? findVersionLine(stderr, programName);
     if (version) {
       return { output: version };
     }
@@ -151,13 +175,15 @@ export function probeCliVersion(
  *
  * @param executablePath - Resolved path/command of the CLI.
  * @param options - Optional spawn environment.
+ * @param programName - See {@link probeCliVersion}.
  * @returns Version output trimmed, or `undefined`.
  */
 export function readCliVersion(
   executablePath: string,
   options: HarnessProbeOptions = {},
+  programName?: string,
 ): string | undefined {
-  return probeCliVersion(executablePath, options).output;
+  return probeCliVersion(executablePath, options, programName).output;
 }
 
 /**

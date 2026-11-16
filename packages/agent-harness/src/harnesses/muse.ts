@@ -113,7 +113,7 @@ export class MuseHarness implements AgentHarness {
    * @returns The version snapshot, or `{}` when it cannot be read.
    */
   probe(executablePath: string, options: HarnessProbeOptions = {}): HarnessProbe {
-    const version = readCliVersion(executablePath, options);
+    const version = readCliVersion(executablePath, options, "muse");
     if (version === undefined) {
       return {};
     }
