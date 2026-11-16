@@ -50,7 +50,7 @@
 
 import { assertModeSupported, effectiveSkipPermissions, isConstrainedMode } from "../modes.js";
 import { parseVersion, readCliVersion } from "../probe.js";
-import type { AgentHarness, AgentRunOptions, HarnessProbe } from "../types.js";
+import type { AgentHarness, AgentRunOptions, HarnessProbe, HarnessProbeOptions } from "../types.js";
 
 /** Muse's built-in read-only permission profile id. */
 export const MUSE_READONLY_PROFILE = ":read-only";
@@ -109,10 +109,11 @@ export class MuseHarness implements AgentHarness {
    * Detect the installed Muse Code version from `muse --version`.
    *
    * @param executablePath - Resolved muse executable path/command.
+   * @param options - Optional environment for the `--version` process.
    * @returns The version snapshot, or `{}` when it cannot be read.
    */
-  probe(executablePath: string): HarnessProbe {
-    const version = readCliVersion(executablePath);
+  probe(executablePath: string, options: HarnessProbeOptions = {}): HarnessProbe {
+    const version = readCliVersion(executablePath, options);
     if (version === undefined) {
       return {};
     }

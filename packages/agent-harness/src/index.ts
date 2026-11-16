@@ -19,6 +19,7 @@ export type {
   AgentRunResult,
   HarnessInvocation,
   HarnessProbe,
+  HarnessProbeOptions,
   ResolvedHarness,
   StructuredOutputResult,
 } from "./types.js";
@@ -73,8 +74,10 @@ export {
   buildHarnessInvocation,
   parseMajorVersion,
   parseVersion,
+  probeCliVersion,
   probeHarness,
   readCliVersion,
+  type CliVersionProbeResult,
   resetHarnessProbeCache,
 } from "./probe.js";
 
