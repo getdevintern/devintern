@@ -299,7 +299,7 @@ export function orderFlowRepos(config: WorkspaceConfigView, sources: FlowSource[
   const idle = ordered.filter((repo) => !rows.has(repo.name));
   const names = fed.map((repo) => repo.name);
   let best = countFlowCrossings(sources, names);
-  for (let improved = true; improved && best > 0; ) {
+  for (let improved = true; improved && best > 0;) {
     improved = false;
     for (let i = 0; i < names.length - 1; i++) {
       [names[i], names[i + 1]] = [names[i + 1]!, names[i]!];
