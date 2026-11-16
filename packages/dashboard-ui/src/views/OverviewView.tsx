@@ -18,6 +18,7 @@ import { EmptyState } from "@/components/shared";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ActiveRows, RecentlyFinished, WaitingRows } from "@/components/overview/ActiveWork";
+import { QueuedWork } from "@/components/overview/QueuedWork";
 import {
   consumeHarnessFocus,
   HARNESS_SECTION_ID,
@@ -50,6 +51,7 @@ import type {
   OverviewResponse,
   OverviewTrackerSource,
   OverviewTrackers,
+  QueuedWorkResponse,
   RunRecord,
   ScheduleSnapshot,
   TaskActivityResponse,
@@ -623,6 +625,7 @@ function idleNext({
 function ActiveWorkSection({
   capacity,
   activityRuns,
+  queuedWork,
   configOk,
   hasTrackers,
   workerStopped,
@@ -634,6 +637,8 @@ function ActiveWorkSection({
   capacity: OverviewCapacity;
   /** `/api/task-activity` runs that enrich the rows; null until it loads. */
   activityRuns: RunRecord[] | null;
+  /** `/api/queue` pending work; null until it loads. */
+  queuedWork: QueuedWorkResponse | null;
   configOk: boolean;
   hasTrackers: boolean;
   schedule?: ScheduleSnapshot | null;
@@ -729,6 +734,7 @@ function ActiveWorkSection({
           />
         ) : null}
         <WaitingRows entries={work.waiting} now={now} onOpen={openRun} />
+        <QueuedWork items={queuedWork?.items ?? []} total={queuedWork?.total ?? 0} now={now} />
         <RecentlyFinished
           entries={work.finished}
           hidden={work.finishedHidden}
@@ -1134,10 +1140,13 @@ export function OverviewScreen({
   overview,
   workerInfo,
   activityRuns = null,
+  queuedWork = null,
   now,
 }: {
   overview: OverviewResponse;
   workerInfo: WorkerResponse | null;
+  /** `/api/queue`: pending work listed under Active work. */
+  queuedWork?: QueuedWorkResponse | null;
   /** `/api/task-activity` runs: row detail plus the waiting and finished lists. */
   activityRuns?: RunRecord[] | null;
   now: number;
@@ -1168,6 +1177,7 @@ export function OverviewScreen({
           <ActiveWorkSection
             capacity={overview.capacity}
             activityRuns={activityRuns}
+            queuedWork={queuedWork}
             configOk={configOk}
             hasTrackers={overview.trackers.sources.length > 0}
             workerStopped={overview.worker.status === "stopped"}
@@ -1236,6 +1246,8 @@ export function OverviewView() {
   const { data: workerInfo } = usePoll<WorkerResponse>("/api/worker");
   // Row detail, waiting and finished tasks; the in-progress set stays the overview's.
   const { data: activity } = usePoll<TaskActivityResponse>("/api/task-activity");
+  // Pending work the worker has accepted but not started.
+  const { data: queuedWork } = usePoll<QueuedWorkResponse>("/api/queue");
   // Elapsed times and countdowns tick between polls.
   const now = useNow(5_000);
   if (!data) {
@@ -1250,6 +1262,7 @@ export function OverviewView() {
       overview={data}
       workerInfo={workerInfo}
       activityRuns={activity?.runs ?? null}
+      queuedWork={queuedWork}
       now={Math.max(now, data.generatedAt)}
     />
   );

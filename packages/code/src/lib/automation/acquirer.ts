@@ -18,6 +18,7 @@ import {
 } from "../agent/selection";
 import { resolveProjectConfigDir } from "../config/config-dir";
 import { RUN_ORIGIN_ENV } from "../observability/analytics";
+import type { RunOrigin } from "../state/run-recorder";
 import { getWorkerFailover, HARNESS_UNAVAILABLE_COOLDOWN_MS } from "../worker/failover";
 import {
   HARNESS_UNAVAILABLE_EXIT_CODE,
@@ -57,9 +58,25 @@ export interface SpawnedAutomationRun {
 /** Result of a dashboard "Run now" trigger for one automation. */
 export type ManualTriggerOutcome = { ok: true } | { ok: false; reason: string };
 
+/**
+ * Scheduled job types the dashboard lists side by side: prompt automations,
+ * story-point estimation sweeps, and the scheduled conflict-resolution window.
+ */
+export type ScheduledJobKind = "automation" | "estimation" | "conflict_resolution" | "auto_merge";
+
+/** Which recorded runs belong to one scheduled job (see `RunFilter`). */
+export interface ScheduledJobRunFilter {
+  automationId?: string;
+  origin?: RunOrigin;
+}
+
 /** One configured schedule as exposed to the dashboard, with its agent override. */
 export interface AutomationScheduleStatus extends AgentSelection {
   id: string;
+  /** Job type; absent means a prompt automation. */
+  kind?: ScheduledJobKind;
+  /** Display name when it differs from `id` (namespaced estimation / conflict ids). */
+  title?: string;
   enabled: boolean;
   cron?: string;
   interval?: string;
@@ -69,6 +86,12 @@ export interface AutomationScheduleStatus extends AgentSelection {
   openPr?: boolean;
   /** Durable next occurrence (epoch ms); absent before first registration. */
   nextDueAt?: number;
+  /** Estimation sweeps: tracker query selecting the tickets to estimate. */
+  query?: string;
+  /** Estimation sweeps: `[[teams]]` name whose tracker the sweep uses. */
+  team?: string;
+  /** Recorded runs attributed to this job; defaults to `{ automationId: id }`. */
+  runFilter?: ScheduledJobRunFilter;
 }
 
 /**
@@ -515,7 +538,10 @@ export class AutomationAcquirer implements Acquirer {
     if (!context) {
       return {
         ok: false,
-        reason: `the repository for "${automationId}" is busy with another run; try again shortly`,
+        reason:
+          this.options.jobKind === undefined
+            ? `the repository for "${automationId}" is busy with another run; try again shortly`
+            : `the worker is busy with another run; try again shortly`,
       };
     }
     if (this.stopped || this.paused) {

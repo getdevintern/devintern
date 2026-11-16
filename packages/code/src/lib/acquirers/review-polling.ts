@@ -190,6 +190,18 @@ const prRunTails = new Map<string, Promise<void>>();
 export const DEFAULT_CONFLICT_WINDOW_GRACE_MINUTES = 60;
 
 /** Durable state for scheduled conflict resolution (persisted per worker). */
+/** Dashboard view of the scheduled conflict-resolution window. */
+export interface ConflictWindowStatus {
+  schedule: CronOrIntervalSchedule;
+  /** Next scheduled window (ms epoch); absent before the first tick registered it. */
+  nextWindowAt?: number;
+  /** A window (scheduled or opened on demand) is open until this instant. */
+  openUntil?: number;
+}
+
+/** Result of opening the conflict window on demand (dashboard "Run now"). */
+export type ConflictWindowTriggerOutcome = { ok: true } | { ok: false; reason: string };
+
 interface ConflictWindowState {
   /** Next scheduled occurrence (ms epoch). */
   nextWindowAt: number;
@@ -1364,6 +1376,64 @@ export class ReviewPollingAcquirer implements Acquirer {
         ).toISOString()}; queued conflicts will resolve now`,
       );
     }
+  }
+
+  /**
+   * Scheduled mode only: the configured window and its durable state, or
+   * `null` when conflicts resolve immediately (`auto`) or never (`disabled`).
+   */
+  conflictWindowStatus(): ConflictWindowStatus | null {
+    const schedule = this.options.conflictSchedule;
+    if (this.options.conflictResolution === "disabled" || !schedule) return null;
+    if (!this.options.resolveConflicts) return null;
+    const state = this.conflictWindowState ?? undefined;
+    const now = this.now();
+    return {
+      schedule,
+      nextWindowAt: state?.nextWindowAt,
+      openUntil: state && now <= state.windowOpenUntil ? state.windowOpenUntil : undefined,
+    };
+  }
+
+  /**
+   * Dashboard "Run now" for scheduled conflict resolution: open the window
+   * immediately (for the usual grace period) instead of waiting for the next
+   * occurrence, then start a tick so queued conflicts resolve right away. The
+   * next scheduled occurrence is unchanged. Per-PR safeguards still apply
+   * (mergeability re-check, quiet period, retry backoff, repo locks).
+   */
+  openConflictWindowNow(): ConflictWindowTriggerOutcome {
+    if (this.options.conflictResolution === "disabled") {
+      return { ok: false, reason: "conflict resolution is disabled in workspace.toml" };
+    }
+    if (!this.options.conflictSchedule) {
+      return {
+        ok: false,
+        reason: "conflict resolution runs automatically as soon as a conflict is detected",
+      };
+    }
+    if (!this.options.resolveConflicts) {
+      return { ok: false, reason: "conflict resolution is not available on this worker" };
+    }
+    // Load (or initialize) the durable cursor so the next occurrence is kept.
+    this.syncConflictWindow();
+    const now = this.now();
+    const nextWindowAt =
+      this.conflictWindowState?.nextWindowAt ??
+      nextScheduleOccurrence(this.options.conflictSchedule, now);
+    this.deferCounts.clear();
+    this.saveConflictWindowState({
+      nextWindowAt,
+      windowOpenUntil: now + this.conflictWindowGraceMs(),
+    });
+    console.log(
+      `⏰ [${this.name}] conflict-resolution window opened on demand (dashboard) until ${new Date(
+        now + this.conflictWindowGraceMs(),
+      ).toISOString()}`,
+    );
+    // An in-flight tick finishes its pass; the open window covers the next one.
+    if (this.timer) void this.tick();
+    return { ok: true };
   }
 
   /** Scheduled mode only: are resolution attempts currently allowed? */

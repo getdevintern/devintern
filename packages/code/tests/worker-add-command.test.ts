@@ -20,6 +20,7 @@ import {
 } from "../src/lib/workspace/injected-enqueue";
 import { InjectedTaskStore } from "../src/lib/state/injected-tasks";
 import { RunStore } from "../src/lib/state/run-recorder";
+import { WebhookQueue } from "../src/lib/state/webhook-queue";
 import { LockManager } from "../src/lib/lock-manager";
 import {
   workspaceDbPath,
@@ -1784,5 +1785,321 @@ describe("runWorkerAdd", () => {
     );
     expect(code).toBe(1);
     expect(cap.err.join("\n")).toContain("--wait needs a running worker");
+  });
+});
+
+describe("worker add harness usage-limit warning", () => {
+  let dir: string;
+  let configPath: string;
+  const savedHarness = process.env.AGENT_HARNESS;
+  const POLL_LINE = "The worker picks it up on its next poll.";
+
+  beforeEach(() => {
+    dir = join(tmpdir(), `worker-add-pause-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    mkdirSync(dir, { recursive: true });
+    configPath = join(dir, "workspace.toml");
+    writeFileSync(configPath, WORKSPACE_TOML);
+    // A live worker lock, so the "next poll" line is what an unpaused run prints.
+    writeFileSync(
+      join(dir, ".worker.lock"),
+      JSON.stringify({ pid: process.pid, timestamp: new Date().toISOString() }),
+    );
+    process.env.DEVINTERN_SKIP_LICENSE_CHECK = "1";
+    delete process.env.AGENT_HARNESS;
+  });
+
+  afterEach(() => {
+    delete process.env.DEVINTERN_SKIP_LICENSE_CHECK;
+    if (savedHarness === undefined) delete process.env.AGENT_HARNESS;
+    else process.env.AGENT_HARNESS = savedHarness;
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  function setChain(raw: string): void {
+    writeFileSync(join(dir, ".env"), `AGENT_HARNESS=${raw}\n`);
+  }
+
+  function setLimit(harness: string, untilMs: number): void {
+    mkdirSync(workspaceStateDir(dir), { recursive: true });
+    const queue = new WebhookQueue({ dbPath: workspaceDbPath(dir) });
+    try {
+      queue.setRateLimit(harness, untilMs);
+    } finally {
+      queue.close();
+    }
+  }
+
+  function capture() {
+    const out: string[] = [];
+    const err: string[] = [];
+    return {
+      out,
+      err,
+      options: {
+        log: (message: string) => out.push(message),
+        error: (message: string) => err.push(message),
+        readStdin: () => "",
+        waitPollIntervalMs: 20,
+      },
+    };
+  }
+
+  // Whole seconds keep the ISO string free of sub-second rounding surprises.
+  const futureMs = () => Math.floor(Date.now() / 1000) * 1000 + 6 * 24 * 60 * 60 * 1000;
+
+  test("warns instead of promising the next poll when the whole chain is limited", async () => {
+    setChain("opencode");
+    const untilMs = futureMs();
+    setLimit("opencode", untilMs);
+
+    const cap = capture();
+    const code = await runWorkerAdd(
+      ["--workspace", configPath, "--repo", "backend", "--title", "x"],
+      cap.options,
+    );
+    expect(code).toBe(0);
+    const text = cap.out.join("\n");
+    expect(text).toContain(
+      `⏳ Every agent harness in AGENT_HARNESS (opencode) is usage-limited until ${new Date(untilMs).toISOString()}; the worker starts this task after that.`,
+    );
+    expect(text).toContain("Add a fallback harness (e.g. AGENT_HARNESS=opencode,codex in");
+    expect(text).toContain(".env) to keep working through limits.");
+    expect(text).not.toContain(POLL_LINE);
+
+    const store = new InjectedTaskStore(workspaceDbPath(dir));
+    try {
+      expect(store.getByTaskKey("local-x")?.status).toBe("pending");
+    } finally {
+      store.close();
+    }
+  });
+
+  test("--json adds harnessPausedUntil and keeps the warning on stderr", async () => {
+    setChain("opencode");
+    const untilMs = futureMs();
+    setLimit("opencode", untilMs);
+
+    const cap = capture();
+    const code = await runWorkerAdd(
+      ["--workspace", configPath, "--repo", "backend", "--title", "x", "--json"],
+      cap.options,
+    );
+    expect(code).toBe(0);
+    expect(cap.out).toHaveLength(1);
+    expect(JSON.parse(cap.out[0]!)).toMatchObject({
+      taskKey: "local-x",
+      status: "pending",
+      deduplicated: false,
+      harnessPausedUntil: new Date(untilMs).toISOString(),
+    });
+    expect(cap.err.join("\n")).toContain("is usage-limited until");
+  });
+
+  test("uses the earliest window when every entry is limited", async () => {
+    setChain("opencode,codex");
+    const later = futureMs();
+    const earlier = later - 3 * 24 * 60 * 60 * 1000;
+    setLimit("opencode", later);
+    setLimit("codex", earlier);
+
+    const cap = capture();
+    await runWorkerAdd(
+      ["--workspace", configPath, "--repo", "backend", "--title", "x", "--json"],
+      cap.options,
+    );
+    expect(JSON.parse(cap.out[0]!).harnessPausedUntil).toBe(new Date(earlier).toISOString());
+    expect(cap.err.join("\n")).toContain("AGENT_HARNESS (opencode,codex)");
+  });
+
+  async function expectUnchanged(): Promise<void> {
+    const human = capture();
+    expect(
+      await runWorkerAdd(
+        ["--workspace", configPath, "--repo", "backend", "--title", "x"],
+        human.options,
+      ),
+    ).toBe(0);
+    expect(human.out.join("\n")).toContain(POLL_LINE);
+    expect(human.out.join("\n")).not.toContain("usage-limited");
+
+    const json = capture();
+    expect(
+      await runWorkerAdd(
+        ["--workspace", configPath, "--repo", "backend", "--title", "y", "--json"],
+        json.options,
+      ),
+    ).toBe(0);
+    expect(json.out).toHaveLength(1);
+    expect(JSON.parse(json.out[0]!)).not.toHaveProperty("harnessPausedUntil");
+    expect(json.err.join("\n")).not.toContain("usage-limited");
+  }
+
+  test("a partially limited chain keeps the output unchanged", async () => {
+    setChain("opencode,codex");
+    setLimit("opencode", futureMs());
+    await expectUnchanged();
+  });
+
+  test("an expired window keeps the output unchanged", async () => {
+    setChain("opencode");
+    setLimit("opencode", Date.now() - 60_000);
+    await expectUnchanged();
+  });
+
+  test("no persisted window keeps the output unchanged", async () => {
+    setChain("opencode");
+    await expectUnchanged();
+  });
+
+  test("an unreadable DB never fails the enqueue or adds the warning", async () => {
+    setChain("opencode");
+    const store = new InjectedTaskStore(workspaceDbPath(dir));
+    store.close();
+    // No `webhook_meta` table: the failover read fails and is swallowed.
+    const cap = capture();
+    expect(
+      await runWorkerAdd(
+        ["--workspace", configPath, "--repo", "backend", "--title", "x"],
+        cap.options,
+      ),
+    ).toBe(0);
+    expect(cap.out.join("\n")).toContain(POLL_LINE);
+    expect(cap.out.join("\n")).not.toContain("usage-limited");
+  });
+
+  test("the deduplicated path shows the same warning and field", async () => {
+    setChain("opencode");
+    const untilMs = futureMs();
+    setLimit("opencode", untilMs);
+    const args = [
+      "--workspace",
+      configPath,
+      "--repo",
+      "backend",
+      "--title",
+      "x",
+      "--idempotency-key",
+      "k1",
+    ];
+    expect(await runWorkerAdd(args, capture().options)).toBe(0);
+
+    const human = capture();
+    expect(await runWorkerAdd(args, human.options)).toBe(0);
+    expect(human.out.join("\n")).toContain("Idempotency key already used");
+    expect(human.out.join("\n")).toContain("is usage-limited until");
+
+    const json = capture();
+    expect(await runWorkerAdd([...args, "--json"], json.options)).toBe(0);
+    expect(json.out).toHaveLength(1);
+    expect(JSON.parse(json.out[0]!)).toMatchObject({
+      deduplicated: true,
+      harnessPausedUntil: new Date(untilMs).toISOString(),
+    });
+    expect(json.err.join("\n")).toContain("is usage-limited until");
+  });
+
+  test("--resume of a settled task shows the warning instead of the next-poll line", async () => {
+    setChain("opencode");
+    const untilMs = futureMs();
+    setLimit("opencode", untilMs);
+    const seeded = new InjectedTaskStore(workspaceDbPath(dir));
+    seeded.enqueue({
+      taskKey: "local-interrupted",
+      repo: "backend",
+      title: "Interrupted",
+      body: "",
+      taskFile: join(dir, "injected", "local-interrupted.md"),
+    });
+    seeded.finish(seeded.claimNext()!.id, "failed", "worker restarted");
+    seeded.close();
+
+    const human = capture();
+    expect(
+      await runWorkerAdd(
+        ["--workspace", configPath, "--resume", "local-interrupted"],
+        human.options,
+      ),
+    ).toBe(0);
+    expect(human.out.join("\n")).toContain("Re-queued local-interrupted");
+    expect(human.out.join("\n")).toContain("is usage-limited until");
+    expect(human.out.join("\n")).not.toContain("resumes it on its next poll");
+
+    // Now pending: a second --resume reports the active row with the field.
+    const json = capture();
+    expect(
+      await runWorkerAdd(
+        ["--workspace", configPath, "--resume", "local-interrupted", "--json"],
+        json.options,
+      ),
+    ).toBe(0);
+    expect(json.out).toHaveLength(1);
+    expect(JSON.parse(json.out[0]!)).toMatchObject({
+      deduplicated: true,
+      harnessPausedUntil: new Date(untilMs).toISOString(),
+    });
+  });
+
+  test("--resume --json of a settled task adds harnessPausedUntil", async () => {
+    setChain("opencode");
+    const untilMs = futureMs();
+    setLimit("opencode", untilMs);
+    const seeded = new InjectedTaskStore(workspaceDbPath(dir));
+    seeded.enqueue({
+      taskKey: "local-again",
+      repo: "backend",
+      title: "Again",
+      body: "",
+      taskFile: join(dir, "injected", "local-again.md"),
+    });
+    seeded.finish(seeded.claimNext()!.id, "failed", "boom");
+    seeded.close();
+
+    const cap = capture();
+    expect(
+      await runWorkerAdd(
+        ["--workspace", configPath, "--resume", "local-again", "--json"],
+        cap.options,
+      ),
+    ).toBe(0);
+    expect(cap.out).toHaveLength(1);
+    expect(JSON.parse(cap.out[0]!)).toMatchObject({
+      deduplicated: false,
+      harnessPausedUntil: new Date(untilMs).toISOString(),
+    });
+    expect(cap.err.join("\n")).toContain("is usage-limited until");
+  });
+
+  test("--wait with a short --wait-timeout warns that it will likely time out", async () => {
+    setChain("opencode");
+    const untilMs = futureMs();
+    setLimit("opencode", untilMs);
+
+    const cap = capture();
+    const code = await runWorkerAdd(
+      [
+        "--workspace",
+        configPath,
+        "--repo",
+        "backend",
+        "--title",
+        "x",
+        "--wait",
+        "--wait-timeout",
+        "1",
+        "--json",
+      ],
+      cap.options,
+    );
+    // Wait and exit-code semantics are unchanged: the row never settles.
+    expect(code).toBe(1);
+    expect(cap.err.join("\n")).toContain(
+      "--wait-timeout (1s) ends before that reset; the wait will likely time out",
+    );
+    expect(cap.err.join("\n")).toContain("Timed out after 1s");
+    expect(cap.out).toHaveLength(1);
+    expect(JSON.parse(cap.out[0]!)).toMatchObject({
+      status: "failed",
+      harnessPausedUntil: new Date(untilMs).toISOString(),
+    });
   });
 });

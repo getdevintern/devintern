@@ -18,11 +18,15 @@ const promptMarkers = [...agentInput.matchAll(/E2EPROMPTMARKER[A-Z0-9]+/g)].map(
 // same one-shot CLI run that implemented the task. Detect those turns before
 // the explicit E2E_AGENT_MODE so a single run can exercise
 // implement → review → fix → review without the fixture pinning one mode.
+// The git-hook repair turn (`runAgentHarnessToFixGitHook`) is likewise sent from
+// the same run that implemented the task, so it is keyed on its bundled prompt.
 const promptMode = agentInput.includes("You are reviewing a pull request")
   ? "auto-review-feedback"
   : agentInput.includes("## Feedback to Address")
     ? "auto-review-fix"
-    : undefined;
+    : agentInput.includes("# Git Hook Error - Fix Required")
+      ? "hook-fix"
+      : undefined;
 // Per-prompt `incomplete` mode for a long-lived worker that must succeed on one
 // ticket and report another incomplete. Like E2E_FAIL_PROMPT_MARKER below, the
 // marker must be alphanumeric so Markdown escaping cannot hide it.
@@ -271,6 +275,38 @@ if (mode === "auto-review-fix") {
   console.log("Applied the review suggestion: src/greeting.ts now exports Hello, reviewer!");
   process.exit(0);
 }
+// Git-hook repair turn. The implementation edit carried E2E_HOOK_MARKER, which
+// the fixture's pre-commit hook rejects. `E2E_HOOK_FIX` picks the outcome:
+// `fix` removes the marker and leaves the commit to the production retry,
+// `fix-commit` also commits itself (through the hook), and `noop` (default)
+// leaves the marker in place so every retry fails the hook again.
+if (mode === "hook-fix") {
+  const marker = process.env.E2E_HOOK_MARKER;
+  const behavior = process.env.E2E_HOOK_FIX ?? "noop";
+  if (!marker) throw new Error("hook-fix mode requires E2E_HOOK_MARKER");
+  if (behavior === "fix" || behavior === "fix-commit") {
+    const fixedPath = "src/greeting.ts";
+    if (!readFileSync(fixedPath, "utf8").includes(marker)) {
+      throw new Error("Hook marker is missing; refusing to edit this workspace");
+    }
+    writeFileSync(fixedPath, 'export const greeting = "Hello, world!";\n');
+    if (behavior === "fix-commit") {
+      for (const args of [
+        ["git", "add", "-A"],
+        ["git", "commit", "-m", "fix: resolve pre-commit hook failures"],
+      ]) {
+        const step = Bun.spawnSync(args, { stdout: "pipe", stderr: "pipe" });
+        if (step.exitCode !== 0) {
+          throw new Error(step.stdout.toString() + step.stderr.toString());
+        }
+      }
+    }
+    console.log("Removed the hook marker from src/greeting.ts.");
+  } else {
+    console.log("Inspected the hook failure and left src/greeting.ts unchanged.");
+  }
+  process.exit(0);
+}
 const path = "src/greeting.ts";
 if (mode === "no-change") {
   console.log(
@@ -299,7 +335,10 @@ const replacement =
       : mode === "conflict"
         ? 'export const greeting = "Hello, merged!";\n'
         : 'export const greeting = "Hello, world!";\n';
-writeFileSync(path, replacement);
+// Hook-repair coverage plants a token the fixture's pre-commit hook rejects,
+// so the first production commit fails and the repair loop must engage.
+const hookMarker = mode === "implement" ? process.env.E2E_HOOK_MARKER : undefined;
+writeFileSync(path, hookMarker ? `${replacement}// ${hookMarker}\n` : replacement);
 if (mode === "conflict") {
   // The merge resolver trusts the index, not the agent's output: stage the
   // resolved file so `git diff --diff-filter=U` no longer reports it.

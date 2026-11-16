@@ -18,6 +18,7 @@ import {
   resolveDashboardQueueDbPath,
   resolveWorkspaceArgPath,
 } from "../src/lib/observability/dashboard-db";
+import { handleQueuedWork } from "../src/lib/observability/queued-work";
 import { RunStore } from "../src/lib/state/run-recorder";
 import type { RunStats } from "../src/lib/state/run-recorder";
 import { WebhookQueue } from "../src/lib/state/webhook-queue";
@@ -338,6 +339,81 @@ describe("dashboard API", () => {
     );
     const dead = handleWorkerStatus(data);
     expect((dead.body as { worker: { status: string } }).worker.status).toBe("stopped");
+  });
+
+  test("queued work lists pending ad-hoc tasks, retries, and webhooks in pickup order", () => {
+    const store = new RunStore(dbPath);
+    const runId = store.createRun({ origin: "task", taskKey: "PROJ-9", repo: "acme/api" });
+    store.setRunTicket(runId, { description: "# Fix flaky checkout\n\nDetails" });
+    store.finishRun(runId, "failed");
+    store.close();
+
+    const injected = new InjectedTaskStore(dbPath);
+    injected.enqueue({
+      taskKey: "local-running",
+      repo: "acme/webapp",
+      title: "Already running",
+      body: "",
+      taskFile: join(dir, "running.md"),
+      createdAt: 1_000,
+    });
+    injected.enqueue({
+      taskKey: "local-next",
+      repo: "acme/webapp",
+      title: "Add dark mode",
+      body: "x".repeat(5_000),
+      taskFile: join(dir, "next.md"),
+      createdAt: 2_000,
+    });
+    expect(injected.claimNext([], 10_000)?.taskKey).toBe("local-running");
+    injected.close();
+
+    const retries = new ScheduledRetryStore(dbPath);
+    retries.schedule({ taskKey: "PROJ-9", runId, actor: "dashboard", createdAt: 3_000 });
+    retries.close();
+
+    const queue = new WebhookQueue({ dbPath });
+    queue.enqueue("issue_comment", {
+      repository: { full_name: "acme/webapp" },
+      issue: {
+        number: 42,
+        title: "Tidy routes",
+        html_url: "https://github.com/acme/webapp/pull/42",
+      },
+      comment: { user: { login: "octo" } },
+    });
+    queue.close();
+
+    const body = handleQueuedWork(data).body as {
+      items: Array<Record<string, unknown>>;
+      total: number;
+    };
+    expect(body.total).toBe(3);
+    expect(body.items.map((item) => item.kind)).toEqual(["ad-hoc", "retry", "webhook"]);
+    expect(body.items[0]).toMatchObject({
+      title: "Add dark mode",
+      taskKey: "local-next",
+      repo: "acme/webapp",
+      bodyTruncated: true,
+    });
+    expect((body.items[0].body as string).length).toBe(4_000);
+    expect(body.items[1]).toMatchObject({
+      title: "Fix flaky checkout",
+      taskKey: "PROJ-9",
+      repo: "acme/api",
+      runId,
+    });
+    expect(body.items[2]).toMatchObject({
+      title: "Comment on #42: Tidy routes (by octo)",
+      repo: "acme/webapp",
+      prNumber: 42,
+      prUrl: "https://github.com/acme/webapp/pull/42",
+    });
+  });
+
+  test("queued work is empty, and creates nothing, without a database", () => {
+    expect(handleQueuedWork(data).body).toEqual({ items: [], total: 0 });
+    expect(existsSync(dbPath)).toBe(false);
   });
 
   test("worker status counts ad-hoc tasks and scheduled retries alongside relay work", () => {

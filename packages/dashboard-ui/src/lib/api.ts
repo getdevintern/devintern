@@ -11,6 +11,7 @@ export type RunOrigin =
   | "pr_mention"
   | "ci_fix"
   | "conflict_resolution"
+  | "auto_merge"
   | "scheduled"
   | "estimate"
   | "manual"
@@ -77,8 +78,23 @@ export interface TaskActivityResponse {
 
 /** `/api/runs` URL for the most recent runs of one automation. */
 export function automationRunsUrl(automationId: string, limit = 10): string {
-  const params = new URLSearchParams({ automationId, limit: String(limit) });
+  return scheduledJobRunsUrl({ automationId }, limit);
+}
+
+/** Run-list URL for one scheduled job's run filter. */
+export function scheduledJobRunsUrl(filter: ScheduledJobRunFilter, limit = 10): string {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (filter.automationId) params.set("automationId", filter.automationId);
+  if (filter.origin) params.set("origin", filter.origin);
   return `/api/runs?${params}`;
+}
+
+/** Whether a recorded run belongs to a scheduled job's run filter. */
+export function runMatchesFilter(run: RunRecord, filter: ScheduledJobRunFilter): boolean {
+  return (
+    (!filter.automationId || run.automationId === filter.automationId) &&
+    (!filter.origin || run.origin === filter.origin)
+  );
 }
 
 export interface RunsResponse {
@@ -311,8 +327,23 @@ export async function submitReport(previewId: string, email?: string): Promise<R
 }
 
 /** One configured scheduled automation as served by `GET /api/automations`. */
+export type ScheduledJobKind = "automation" | "estimation" | "conflict_resolution" | "auto_merge";
+
+/** Which recorded runs belong to one scheduled job (`GET /api/runs` filters). */
+export interface ScheduledJobRunFilter {
+  automationId?: string;
+  origin?: RunOrigin;
+}
+
 export interface AutomationSchedule {
   id: string;
+  /**
+   * Job type: a prompt automation, a story-point estimation sweep, or the
+   * scheduled conflict-resolution window. Absent (older servers) = automation.
+   */
+  kind?: ScheduledJobKind;
+  /** Display name when it differs from `id` (namespaced ids). */
+  title?: string;
   enabled: boolean;
   /** Cron expression or interval as configured (`0 9 * * 1`, `6h`). */
   schedule?: string;
@@ -329,6 +360,12 @@ export interface AutomationSchedule {
   effort?: string;
   /** Next scheduled occurrence (epoch ms). */
   nextDueAt?: number;
+  /** Estimation sweeps: tracker query selecting the tickets to estimate. */
+  query?: string;
+  /** Estimation sweeps: `[[teams]]` name whose tracker the sweep uses. */
+  team?: string;
+  /** Recorded runs attributed to this job; absent (older servers) = `{ automationId: id }`. */
+  runFilter?: ScheduledJobRunFilter;
   /** Most recent run of this automation (any origin). */
   lastRun?: RunRecord;
 }
@@ -491,6 +528,42 @@ export interface WorkerResponse {
   queueDbPath: string;
   /** Whether the durable queue database file is absent. */
   queueDbMissing: boolean;
+}
+
+/** Where a queued item came from. */
+export type QueuedWorkKind = "ad-hoc" | "retry" | "webhook";
+
+/** One pending item from `GET /api/queue`; running rows are active work instead. */
+export interface QueuedWorkItem {
+  /** Stable across polls: `<kind>:<row id>`. */
+  id: string;
+  kind: QueuedWorkKind;
+  title: string;
+  taskKey?: string;
+  repo?: string;
+  actor?: string;
+  createdAt: number;
+  /** Earliest pickup time while backing off after a deferral. */
+  notBefore?: number;
+  deferCount?: number;
+  message?: string;
+  /** Ad-hoc prompt body, clipped server-side. */
+  body?: string;
+  bodyTruncated?: boolean;
+  /** Retry: the run being retried. */
+  runId?: number;
+  eventType?: string;
+  prNumber?: number;
+  prUrl?: string;
+  attempts?: number;
+  lastError?: string;
+}
+
+export interface QueuedWorkResponse {
+  /** Pending items in the order they become claimable. */
+  items: QueuedWorkItem[];
+  /** Every pending item, including any beyond the listed ones. */
+  total: number;
 }
 
 /** One open agent-created PR (registry rows reconciled with GitHub by the worker). */

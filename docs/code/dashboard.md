@@ -49,9 +49,10 @@ Step tracking follows the task pipeline, including preparation, feasibility, imp
 
 When the worker is stopped or every agent harness is usage-limited, in-progress runs are not advancing. Their rows turn neutral, stop pulsing, show when they started instead of a running clock, and say why in a tooltip. A run interrupted before recovery may still be recorded as in progress until the worker reconciles its history.
 
-Two lists sit below the running rows:
+Three lists sit below the running rows:
 
 - **Waiting to retry** appears only when a task's latest attempt was deferred in the last 48 hours (for example after an agent usage limit), with the reason and the step it stopped at.
+- **Queued** appears only when the worker has accepted work it has not started yet: ad-hoc tasks from `devintern worker add` or **New task**, retries scheduled from the dashboard, and pull request events waiting for pickup. It is collapsed by default, and its header names the next item. Rows are ordered by when they become eligible and show the source, repository, and how long the item has waited, or when a deferred task's backoff ends. Select a row to expand its details: who queued it, deferrals and attempts, the last error, the full ad-hoc prompt, or a link to the run being retried. Up to 50 items per source are listed; `GET /api/queue` returns the same list as JSON.
 - **Recently finished** is collapsed by default and holds the last five finished tasks with their outcome and pull request. **View all runs** opens the full history in **Runs**.
 
 Repeat attempts at the same task are folded into one row. The former **Task activity** page now lives here; old `#/activity` links open **Overview**.
@@ -88,6 +89,16 @@ Open **Automations**, find the automation, and choose **Run now**. When automati
 Open an automation from the list to read its full prompt, see its schedule and next run, and review its recent runs.
 
 This is useful for testing a new automation prompt or running routine work early.
+
+### Estimations and scheduled conflict resolution
+
+**Automations** also lists the worker's other scheduled jobs, so you can trigger them on demand instead of waiting for the next occurrence:
+
+- **Estimation** rows are your `[[estimations]]` sweeps. **Run now** runs the same story-point sweep as a scheduled occurrence (`devintern --estimate --query …`), with the same skip rules: tickets estimated in the last 24 hours, or unchanged since their last estimate, are left alone. The run appears in the run list with the **Estimate run** origin. Open one to see its query, team, and recent sweeps.
+- **Conflicts** appears when `[workspace].conflict_resolution = "scheduled"`. **Run now** opens the conflict-resolution window immediately, for the usual grace period (`WORKER_RESOLVE_WINDOW_GRACE_MINUTES`), so conflicts already queued on the agent's pull requests resolve on the next review poll. The next scheduled window stays where it was. Each resolution appears in the run list with the **Conflict resolution** origin. In `auto` mode conflicts already resolve as soon as they are detected, so the row is not shown.
+- **Auto-merge** appears when `[workspace].auto_merge = true`. Its page shows the active safe and deny paths and whether agent review is on. **Run now** checks every open agent PR right away instead of on the next poll, skipping the quiet period and retry backoff. GitHub must still report the PR green and conflict-free, and a PR already decided for its current commit and policy is not re-evaluated. Each check appears in the run list with the **Auto-merge** origin while it runs.
+
+A standalone `devintern dashboard --workspace` lists estimation sweeps too, but **Run now** still needs the worker.
 
 ## Delegate a task
 

@@ -411,3 +411,55 @@ describe("usage limit without a reset time", () => {
     }
   });
 });
+
+describe("startWorkerFailover restore", () => {
+  let dir: string | null = null;
+  afterEach(() => {
+    if (dir) rmSync(dir, { recursive: true, force: true });
+    dir = null;
+  });
+
+  test("restoring windows that cover the whole chain calls onPause once", async () => {
+    dir = mkdtempSync(join(tmpdir(), "failover-restore-"));
+    const queue = new WebhookQueue({ dbPath: join(dir, "queue.db") });
+    const untilMs = Date.now() + 6 * 24 * 60 * 60 * 1000;
+    try {
+      queue.setRateLimit("opencode", untilMs);
+      const pauses: Array<{ untilMs: number; harness: string }> = [];
+      await startWorkerFailover({
+        checkInstalled: false,
+        sandboxName: "none",
+        raw: "opencode",
+        queue,
+        log: () => {},
+        onPause: (info) => pauses.push(info),
+      });
+      expect(pauses).toEqual([{ untilMs, harness: "opencode" }]);
+      expect(getWorkerFailover()?.allLimited()).toBe(true);
+    } finally {
+      resetWorkerFailover();
+      queue.close();
+    }
+  });
+
+  test("restoring a partially limited chain does not pause", async () => {
+    dir = mkdtempSync(join(tmpdir(), "failover-restore-"));
+    const queue = new WebhookQueue({ dbPath: join(dir, "queue.db") });
+    try {
+      queue.setRateLimit("opencode", Date.now() + 60_000);
+      let pauses = 0;
+      await startWorkerFailover({
+        checkInstalled: false,
+        sandboxName: "none",
+        raw: "opencode,codex",
+        queue,
+        log: () => {},
+        onPause: () => pauses++,
+      });
+      expect(pauses).toBe(0);
+    } finally {
+      resetWorkerFailover();
+      queue.close();
+    }
+  });
+});

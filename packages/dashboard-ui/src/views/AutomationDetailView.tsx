@@ -4,10 +4,17 @@ import { ArrowLeft, Check, Copy, GitPullRequest, Play, RefreshCcw } from "lucide
 import { RunResult } from "@/components/RunResult";
 import { EmptyState, StatusBadge, StatusPill } from "@/components/shared";
 import { Button } from "@/components/ui/button";
-import { automationRunsUrl, usePoll } from "@/lib/api";
-import type { AutomationsResponse, RunRecord, RunsResponse } from "@/lib/api";
+import { runMatchesFilter, scheduledJobRunsUrl, usePoll } from "@/lib/api";
+import type { AutomationSchedule, AutomationsResponse, RunRecord, RunsResponse } from "@/lib/api";
 import { Markdown } from "@/lib/markdown";
 import { formatRunOrigin } from "@/lib/run-origin";
+import {
+  jobKind,
+  jobKindLabel,
+  jobTitle,
+  runFilterForJobId,
+  runNowHint,
+} from "@/lib/scheduled-jobs";
 import { cn, formatAge, formatDuration, formatTime } from "@/lib/utils";
 import { formatNextRun, humanizeSchedule } from "@/views/automation-schedule";
 import { RunFeedback, useRunNow } from "@/views/AutomationsView";
@@ -15,7 +22,7 @@ import { RunFeedback, useRunNow } from "@/views/AutomationsView";
 const RECENT_RUNS = 10;
 /** Runs shown before "Show all" on narrow screens. */
 const COLLAPSED_RUNS = 5;
-/** Over-fetch so client-side filtering stays correct against servers that ignore `automationId`. */
+/** Over-fetch so client-side filtering stays correct against servers that ignore the run filter. */
 const FETCH_RUNS = 100;
 
 function Fact({ label, children }: { label: string; children: React.ReactNode }) {
@@ -129,18 +136,146 @@ function RecentRuns({
   );
 }
 
-/** One automation: prompt as the main content, facts rail, and its recent runs. */
+/** Facts rail: schedule, next run, target, agent, and last run. */
+function JobFacts({ automation }: { automation: AutomationSchedule }) {
+  const human = automation.schedule ? humanizeSchedule(automation.schedule) : undefined;
+  const lastRun = automation.lastRun;
+  const kind = jobKind(automation);
+  const title = jobTitle(automation);
+  return (
+    <dl className="grid grid-cols-2 gap-x-4 gap-y-3 lg:grid-cols-1 lg:gap-y-2.5">
+      <Fact label="Schedule">
+        {automation.schedule ? (
+          <>
+            {human ?? <code className="font-mono text-xs">{automation.schedule}</code>}
+            {human ? (
+              <code className="block font-mono text-xs text-subtle-foreground">
+                {automation.schedule}
+              </code>
+            ) : null}
+          </>
+        ) : (
+          "–"
+        )}
+      </Fact>
+      <Fact label="Next run">
+        {automation.nextDueAt ? (
+          <>
+            {formatNextRun(automation.nextDueAt)}
+            <span className="tabular block text-xs text-subtle-foreground">
+              {formatTime(automation.nextDueAt)}
+            </span>
+          </>
+        ) : (
+          "–"
+        )}
+      </Fact>
+      {kind === "automation" ? <Fact label="Repository">{automation.repo ?? "–"}</Fact> : null}
+      {kind === "estimation" ? (
+        <Fact label="Team">
+          {automation.team ?? <span className="text-muted-foreground">Default tracker</span>}
+        </Fact>
+      ) : null}
+      <Fact label="Agent">
+        {automation.harness ?? <span className="text-muted-foreground">Workspace default</span>}
+      </Fact>
+      <Fact label="Model">
+        {automation.model ? (
+          <code className="font-mono text-xs">{automation.model}</code>
+        ) : (
+          <span className="text-muted-foreground">Harness default</span>
+        )}
+      </Fact>
+      <Fact label="Effort">
+        {automation.effort ?? <span className="text-muted-foreground">Harness default</span>}
+      </Fact>
+      {kind === "automation" ? (
+        <Fact label="Opens PR">
+          {automation.openPr ? (
+            <span className="inline-flex items-center gap-1">
+              <GitPullRequest className="size-3.5" aria-hidden="true" /> Yes
+            </span>
+          ) : (
+            <span className="text-muted-foreground">No</span>
+          )}
+        </Fact>
+      ) : null}
+      <Fact label="Last run">
+        {lastRun ? (
+          <a
+            href={`#/runs/${lastRun.id}`}
+            className="inline-flex items-center gap-2"
+            aria-label={`Open last run for ${title}`}
+          >
+            <StatusBadge status={lastRun.status} />
+            <span className="text-xs text-muted-foreground">
+              {formatAge(lastRun.startedAt)} ago
+            </span>
+          </a>
+        ) : (
+          "–"
+        )}
+      </Fact>
+    </dl>
+  );
+}
+
+/** Main content: the prompt, the estimation query, or the conflict-window description. */
+function JobBody({ automation }: { automation: AutomationSchedule }) {
+  const kind = jobKind(automation);
+  const prompt = automation.prompt.trim();
+  if (kind === "estimation") {
+    return (
+      <>
+        <div className="flex max-w-[72ch] items-center gap-2">
+          <h3 id="ad-prompt" className="section-title">
+            Query
+          </h3>
+          {automation.query ? <CopyPromptButton text={automation.query} /> : null}
+        </div>
+        <pre className="max-w-[72ch] overflow-x-auto rounded-md border border-border bg-card px-3 py-2 font-mono text-xs whitespace-pre-wrap">
+          {automation.query ?? "–"}
+        </pre>
+        <p className="max-w-[72ch] text-sm text-muted-foreground">
+          Each sweep estimates story points for the tickets this query selects. Tickets estimated
+          less than a day ago, or unchanged since their last estimate, are skipped. No branches or
+          pull requests are created.
+        </p>
+      </>
+    );
+  }
+  return (
+    <>
+      <div className="flex max-w-[72ch] items-center gap-2">
+        <h3 id="ad-prompt" className="section-title">
+          {kind === "automation" ? "Prompt" : "About"}
+        </h3>
+        {kind === "automation" ? <CopyPromptButton text={prompt} /> : null}
+      </div>
+      <div className="max-w-[72ch]">
+        <Markdown>{prompt}</Markdown>
+      </div>
+    </>
+  );
+}
+
+/**
+ * One scheduled job: prompt (automation), query (estimation sweep), or a
+ * description (conflict window) as the main content, a facts rail, and its
+ * recent runs.
+ */
 export function AutomationDetailView({ automationId }: { automationId: string }) {
   const { data, error, loading, refresh } = usePoll<AutomationsResponse>("/api/automations");
-  const runsState = usePoll<RunsResponse>(automationRunsUrl(automationId, FETCH_RUNS));
+  const automation = data?.automations.find((candidate) => candidate.id === automationId);
+  const runFilter = automation?.runFilter ?? runFilterForJobId(automationId);
+  const runsState = usePoll<RunsResponse>(scheduledJobRunsUrl(runFilter, FETCH_RUNS));
   const { busyId, startedId, feedback, runNow } = useRunNow(() => {
     refresh();
     runsState.refresh();
   });
 
-  const automation = data?.automations.find((candidate) => candidate.id === automationId);
   const runs = (runsState.data?.runs ?? [])
-    .filter((run) => run.automationId === automationId)
+    .filter((run) => runMatchesFilter(run, runFilter))
     .slice(0, RECENT_RUNS);
 
   if (!data && loading) {
@@ -179,14 +314,17 @@ export function AutomationDetailView({ automationId }: { automationId: string })
 
   const busy = busyId === automation.id;
   const started = startedId === automation.id;
-  const human = automation.schedule ? humanizeSchedule(automation.schedule) : undefined;
-  const prompt = automation.prompt.trim();
-  const lastRun = automation.lastRun;
+  const kind = jobKind(automation);
+  const kindLabel = jobKindLabel(kind);
+  const title = jobTitle(automation);
 
   return (
     <div className="space-y-6">
       <header className="flex flex-wrap items-center gap-x-4 gap-y-2">
-        <h2 className="min-w-0 text-lg font-semibold break-words">{automation.id}</h2>
+        <h2 className="min-w-0 text-lg font-semibold break-words" title={automation.id}>
+          {title}
+        </h2>
+        {kindLabel ? <StatusPill tone="info">{kindLabel}</StatusPill> : null}
         <StatusPill tone={automation.enabled ? "success" : "neutral"}>
           {automation.enabled ? "Enabled" : "Disabled"}
         </StatusPill>
@@ -197,7 +335,7 @@ export function AutomationDetailView({ automationId }: { automationId: string })
             disabled={busy}
             aria-busy={busy || undefined}
             onClick={() => void runNow(automation)}
-            title="Runs through the same pipeline as a scheduled run and is recorded with the manual origin"
+            title={runNowHint(kind)}
           >
             {started ? <Check /> : <Play />} {busy ? "Starting…" : started ? "Started" : "Run now"}
           </Button>
@@ -215,75 +353,7 @@ export function AutomationDetailView({ automationId }: { automationId: string })
 
       <div className="ad-grid">
         <aside aria-label="Automation facts" className="ad-rail">
-          <dl className="grid grid-cols-2 gap-x-4 gap-y-3 lg:grid-cols-1 lg:gap-y-2.5">
-            <Fact label="Schedule">
-              {automation.schedule ? (
-                <>
-                  {human ?? <code className="font-mono text-xs">{automation.schedule}</code>}
-                  {human ? (
-                    <code className="block font-mono text-xs text-subtle-foreground">
-                      {automation.schedule}
-                    </code>
-                  ) : null}
-                </>
-              ) : (
-                "–"
-              )}
-            </Fact>
-            <Fact label="Next run">
-              {automation.nextDueAt ? (
-                <>
-                  {formatNextRun(automation.nextDueAt)}
-                  <span className="tabular block text-xs text-subtle-foreground">
-                    {formatTime(automation.nextDueAt)}
-                  </span>
-                </>
-              ) : (
-                "–"
-              )}
-            </Fact>
-            <Fact label="Repository">{automation.repo ?? "–"}</Fact>
-            <Fact label="Agent">
-              {automation.harness ?? (
-                <span className="text-muted-foreground">Workspace default</span>
-              )}
-            </Fact>
-            <Fact label="Model">
-              {automation.model ? (
-                <code className="font-mono text-xs">{automation.model}</code>
-              ) : (
-                <span className="text-muted-foreground">Harness default</span>
-              )}
-            </Fact>
-            <Fact label="Effort">
-              {automation.effort ?? <span className="text-muted-foreground">Harness default</span>}
-            </Fact>
-            <Fact label="Opens PR">
-              {automation.openPr ? (
-                <span className="inline-flex items-center gap-1">
-                  <GitPullRequest className="size-3.5" aria-hidden="true" /> Yes
-                </span>
-              ) : (
-                <span className="text-muted-foreground">No</span>
-              )}
-            </Fact>
-            <Fact label="Last run">
-              {lastRun ? (
-                <a
-                  href={`#/runs/${lastRun.id}`}
-                  className="inline-flex items-center gap-2"
-                  aria-label={`Open last run for ${automation.id}`}
-                >
-                  <StatusBadge status={lastRun.status} />
-                  <span className="text-xs text-muted-foreground">
-                    {formatAge(lastRun.startedAt)} ago
-                  </span>
-                </a>
-              ) : (
-                "–"
-              )}
-            </Fact>
-          </dl>
+          <JobFacts automation={automation} />
           <RecentRuns
             runs={runs}
             loading={runsState.loading}
@@ -291,15 +361,7 @@ export function AutomationDetailView({ automationId }: { automationId: string })
           />
         </aside>
         <section aria-labelledby="ad-prompt" className="ad-main min-w-0 space-y-3">
-          <div className="flex max-w-[72ch] items-center gap-2">
-            <h3 id="ad-prompt" className="section-title">
-              Prompt
-            </h3>
-            <CopyPromptButton text={prompt} />
-          </div>
-          <div className="max-w-[72ch]">
-            <Markdown>{prompt}</Markdown>
-          </div>
+          <JobBody automation={automation} />
         </section>
       </div>
     </div>

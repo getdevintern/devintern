@@ -214,6 +214,22 @@ DEVINTERN_VERBOSE=1
 
 When set to `1` or `true`, every API request, response status, and retry attempt is printed to the console. This is useful for diagnosing authentication or connectivity issues. The same effect can be achieved at runtime by passing `--verbose` (or `-v`) to `devpm`.
 
+## Behind an HTTP Proxy
+
+devpm sends tracker, update, and other requests through a proxy when one of these variables is set in your shell environment:
+
+- `HTTPS_PROXY` / `https_proxy`
+- `HTTP_PROXY` / `http_proxy`
+- `NO_PROXY` / `no_proxy` (comma-separated hosts that bypass the proxy)
+
+On Node.js v24.14+ or v25.4+, devpm turns on Node's built-in proxy support at startup automatically. On older Node versions, run devpm with `NODE_USE_ENV_PROXY=1` (supported for `fetch` from Node v22.21 and v24.0), or upgrade Node:
+
+```bash
+NODE_USE_ENV_PROXY=1 devpm --prompt "..."
+```
+
+Set proxy variables in your shell, not in `.devintern-pm/.env`: that file loads after startup, too late to configure the proxy. When a request fails at the network level, devpm prints the underlying cause (for example `ECONNREFUSED` or `ENOTFOUND`), plus a hint if a proxy variable is set but Node is not using it. devpm never prints the proxy URL, since it can contain credentials.
+
 ## No License Required
 
 @devintern/pm is free to use under the FSL license: it performs no license check, trial gate, or `LICENSE_KEY` validation. Just run `devpm init` and start creating tasks.

@@ -916,6 +916,55 @@ describe("ReviewPollingAcquirer", () => {
     expect(queue.getBaseSyncEvent("base-sync:acme/widgets#42:base3:head1")?.status).toBe("pending");
   });
 
+  test("opening the window on demand resolves queued conflicts now and keeps the next occurrence", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const start = 1_750_000_000_000;
+    let now = start;
+    const made = makeAcquirer(conflictGh(), {
+      conflictSchedule: dailySchedule,
+      conflictWindowGraceMs: 60 * 60_000,
+      now: () => now,
+    });
+
+    await made.acquirer.tick();
+    expect(made.resolved).toEqual([]);
+    expect(made.acquirer.conflictWindowStatus()).toEqual({
+      schedule: dailySchedule,
+      nextWindowAt: start + DAY_MS,
+      openUntil: undefined,
+    });
+
+    now += 5_000;
+    expect(made.acquirer.openConflictWindowNow()).toEqual({ ok: true });
+    expect(windowState()).toEqual({
+      nextWindowAt: start + DAY_MS,
+      windowOpenUntil: now + 60 * 60_000,
+    });
+    expect(made.acquirer.conflictWindowStatus()?.openUntil).toBe(now + 60 * 60_000);
+
+    await made.acquirer.tick();
+    expect(made.resolved).toEqual(["acme/widgets#42"]);
+    expect(queue.getBaseSyncEvent("base-sync:acme/widgets#42:base1:head1")?.status).toBe(
+      "completed",
+    );
+  });
+
+  test("on-demand window is refused outside scheduled mode", () => {
+    const auto = makeAcquirer(conflictGh());
+    expect(auto.acquirer.conflictWindowStatus()).toBeNull();
+    expect(auto.acquirer.openConflictWindowNow().ok).toBe(false);
+
+    const disabled = makeAcquirer(conflictGh(), {
+      conflictSchedule: dailySchedule,
+      conflictResolution: "disabled",
+    });
+    expect(disabled.acquirer.conflictWindowStatus()).toBeNull();
+    expect(disabled.acquirer.openConflictWindowNow()).toEqual({
+      ok: false,
+      reason: "conflict resolution is disabled in workspace.toml",
+    });
+  });
+
   test("a window missed while the worker was down catches up on the first tick after restart", async () => {
     workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
     let now = 1_750_000_000_000;

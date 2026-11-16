@@ -143,6 +143,66 @@ describe("dashboard automations (Run now)", () => {
     }
   });
 
+  test("estimation and conflict jobs resolve their last run and in-progress guard via runFilter", async () => {
+    const store = new RunStore(dbPath);
+    // Same bare id as an automation run: only the estimate-origin run counts.
+    store.createRun({ origin: "scheduled", automationId: "groom" });
+    const sweep = store.createRun({ origin: "estimate", automationId: "groom" });
+    store.finishRun(sweep, "succeeded");
+    const resolving = store.createRun({ origin: "conflict_resolution", taskKey: "PR-42" });
+    store.close();
+
+    const triggers: string[] = [];
+    const data = new DashboardData({
+      dbPath,
+      workingDir: dir,
+      automationActions: {
+        list: () => [
+          {
+            id: "estimation:groom",
+            kind: "estimation",
+            title: "groom",
+            enabled: true,
+            interval: "1d",
+            prompt: "",
+            query: "labels = needs-estimate",
+            runFilter: { automationId: "groom", origin: "estimate" },
+          },
+          {
+            id: "workspace:conflict-resolution",
+            kind: "conflict_resolution",
+            enabled: true,
+            cron: "0 2 * * *",
+            prompt: "Resolves conflicts.",
+            runFilter: { origin: "conflict_resolution" },
+          },
+        ],
+        trigger: async (id) => {
+          triggers.push(id);
+          return { ok: true };
+        },
+      },
+    });
+    try {
+      const body = handleAutomations(data).body as { automations: DashboardAutomationView[] };
+      const [estimation, conflicts] = body.automations;
+      expect(estimation?.kind).toBe("estimation");
+      expect(estimation?.query).toBe("labels = needs-estimate");
+      expect(estimation?.lastRun?.id).toBe(sweep);
+      expect(conflicts?.kind).toBe("conflict_resolution");
+      expect(conflicts?.lastRun?.id).toBe(resolving);
+
+      // A conflict resolution still running blocks opening another window.
+      const refused = await handleRunAutomation(data, "workspace%3Aconflict-resolution");
+      expect(refused.status).toBe(409);
+      const started = await handleRunAutomation(data, "estimation%3Agroom");
+      expect(started.status).toBe(202);
+      expect(triggers).toEqual(["estimation:groom"]);
+    } finally {
+      data.close();
+    }
+  });
+
   test("handleAutomations degrades to an empty list without configuration", () => {
     const data = new DashboardData({ dbPath, workingDir: dir });
     try {
