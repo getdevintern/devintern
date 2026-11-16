@@ -793,8 +793,63 @@ bun run --filter @getdevintern/code build
 bun run --filter @devintern/e2e test
 ```
 
-Worker-embedded dashboard mode, automation "Run now", and log redaction
-readback stay out of scope for this suite.
+Worker-embedded dashboard mode, automation "Run now", the Host/Origin guard,
+and log redaction are covered by `tests/local/dashboard-embedded.test.ts`
+(below).
+
+## Worker-embedded dashboard, Run now, and the Host/Origin guard
+
+`tests/local/dashboard-embedded.test.ts` runs in the default offline suite. Its
+first case starts a `WorkerFixture` with `dashboard: { port }`, which writes
+`[workspace].dashboard = true`, `dashboard_port` (a free `127.0.0.1` port), and
+a `[dashboard]` table with one `allowed_origins` entry and
+`tailscale_autodetect = false`; the isolated environment also sets
+`DASHBOARD_TAILSCALE_AUTODETECT=0`, so the host's `tailscale` state never
+widens trust. One `[[automations]]` entry uses a January 1st cron, so it never
+fires by itself. The case asserts:
+
+- the embedded server answers `/api/health`, `/api/worker` (the daemon's pid,
+  `running`), and `/api/automations` (the configured entry, its far-future next
+  occurrence, no last run);
+- rejected requests: a foreign `Origin`, a rebound `Host:
+attacker.example:<port>` (on writes and on a GET), an allowlisted origin with
+  a foreign Host, an allowlisted Host with a foreign Origin, and a missing
+  Origin all return 403 with the documented error; a loopback Origin with
+  `text/plain` returns 415. None of them creates a run, an occurrence file, or
+  an agent invocation;
+- the allowlisted origin with its own Host reads (200) and reaches the write
+  route (404 for an unknown automation id);
+- `POST /api/automations/<id>/run` with the loopback Origin returns 202
+  `{ status: "triggered" }` and runs the automation once through the pipeline
+  with the deterministic agent (held for 4s by `E2E_AGENT_DELAY_MS`). A second
+  trigger while it runs returns 409, either the scheduler's "already running"
+  or the dashboard's "already has a run in progress" refusal. The run record
+  has origin `manual` and the automation id, and appears in
+  `/api/runs?automationId=…`, `/api/runs?origin=manual`, and as the
+  automation's `lastRun`;
+- `GET /api/logs` returns the daemon's banner and its "starting manual run
+  (dashboard)" line. A live edit to `workspace.toml` that the worker rejects
+  echoes two seeded fake values (a `ghp_`-shaped token and an
+  `E2E_API_TOKEN=…` assignment) into the raw daemon output; the dashboard log
+  view shows them as `[redacted]`, and neither raw value nor its URL-encoded
+  form appears in the response. The worker keeps its previous config.
+
+The second case starts the standalone `devintern dashboard` with
+`--allow-origin https://flag.e2e.example`, `DASHBOARD_ALLOWED_ORIGINS=
+https://env.e2e.example:8443`, and `--no-tailscale-autodetect` against an
+unstarted worker workspace. Writes go to `POST /api/tasks`, so each accepted
+write is an `injected_tasks` row and each rejected one is not. Foreign Origin,
+rebound Host, an allowlisted origin with a foreign Host or the wrong port, and
+another loopback port's Origin are all refused with 403 and leave the queue
+empty. Both allowlisted origins (with their own Host) and the loopback Origin
+enqueue one row each with actor `local:dashboard`.
+
+```sh
+bun run --filter @getdevintern/code build
+bun run --filter @devintern/e2e test
+# or just this file
+cd packages/e2e && bun test tests/local/dashboard-embedded.test.ts
+```
 
 ## Direct webhook serve
 
