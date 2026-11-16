@@ -181,6 +181,33 @@ bun run --filter @getdevintern/code build
 bun run --filter @devintern/e2e test
 ```
 
+## Worker connect validation and Sentry connect
+
+`tests/local/worker-connect.test.ts` runs the built CLI's `devintern worker
+connect` against a workspace bootstrapped with `worker scaffold` and
+`worker add-repo`. `WORKER_RELAY_URL` and `DEVINTERN_API_BASE` point at a
+loopback recorder, and every case asserts it received zero requests.
+
+- Unsupported targets, `--team` with `status`/`sentry`, `--repo` with a
+  non-Sentry target, `--disconnect` with a non-GitLab target, and a missing
+  `--workspace` each exit 1 with their exact error. `workspace.toml`, `.env`,
+  and `env/` stay byte-identical. `--help` lists every target.
+- `connect sentry` with piped (non-TTY) stdin exits 1 and writes nothing.
+- The interactive Sentry flow runs on a Bun pseudo-terminal
+  (`Bun.spawn({ terminal })`) against `providers/fake-sentry.ts`. A valid token
+  writes exactly one `[[error_monitors]]` entry and a mode-`0600` token file,
+  and the token stays out of `workspace.toml`. A re-run with `SENTRY_AUTH_TOKEN`
+  in the environment adds no duplicate. A token the fake rejects with 401
+  writes nothing. An unknown `--repo` fails before any prompt, and in a
+  two-repo workspace cwd's `origin` selects the repository.
+- The token prompt is visible by design, so the PTY echoes the typed token once.
+  The suite asserts it appears exactly once, right after its prompt, so the
+  CLI's own log lines never repeat it.
+
+PTY cases skip with a logged reason only where Bun has no pseudo-terminal
+support (Windows). Relay targets need a signed-in relay session and stay out of
+this offline suite.
+
 ## Scheduled workspace automations
 
 `tests/local/worker-automations.test.ts` starts one real `devintern worker`
@@ -248,6 +275,52 @@ created is skipped for the 24 hour rule. The workspace defaults still contain
 `--create-pr`; the sweep does not create a branch, pull request, or commit. A
 second driven occurrence searches again and does not estimate the unchanged
 issue.
+
+```sh
+bun run --filter @getdevintern/code build
+bun run --filter @devintern/e2e test
+```
+
+## Relay `task.changed` delivery (offline)
+
+`tests/local/worker-relay-task-events.test.ts` starts one real
+`devintern worker` with fake Linear (`providers/fake-linear.ts`) as the tracker
+and a loopback relay fake (`helpers/fake-relay.ts`) in place of the hosted
+control plane. No relay account, Supabase session, Linear workspace, or network
+access is required, and `worker connect` is never run. The test writes a fake
+pairing into `<workspace>/state/code/relay.json` (`relayUrl`, `customerId`, and
+a synthetic `drt_e2e…` token) and points `WORKER_RELAY_URL` at the fake.
+
+The fake implements `GET /v1/events?cursor=<n>`: it returns buffered envelopes
+with a `seq` above the cursor, holds empty long polls for up to a second, and
+can answer the next N polls with a scripted 5xx. Its request log keeps the
+cursor and a bearer-token-matched boolean, never the header value.
+
+`[defaults].task_query` is a Linear title filter and `poll_interval = 3600`, so
+Mode 1 polling only runs its startup tick. That tick finishes before the
+eligible issue exists, so the relay is what triggers the run. The test proves:
+
+- a `task.changed` envelope for the eligible issue produces exactly one
+  implementation run (pushed `feature/<key>` branch, Linear state moved to In
+  Progress, one implementation comment), and an envelope for a decoy that does
+  not match `task_query` produces no run, branch, comment, or state change;
+- the cursor advances to the last `seq`, and replaying the same `deliveryId`
+  under a new `seq` does not run the task again;
+- after a graceful restart, the first poll carries the persisted cursor (never
+  `0`). That poll gets a scripted 503: the worker logs the 5s backoff, keeps
+  running, retries with the same cursor, and then consumes a later envelope;
+- every poll carried the bearer token, and neither it nor the fake Linear key
+  appears in worker output.
+
+Linear workflow states are committed to the fixture repo's base branch as
+`.devintern-code/settings.json`, because the task child reads settings from
+its worktree.
+
+Not covered: GitHub relay PR events (`pr.review_submitted`,
+`pr.comment_created`); a new `deliveryId` for an unchanged task; and a later
+poll sweep re-evaluating a task the relay already ran. Those last two rely on
+the actioned marker, which is written only after a PR is created, and the local
+bare remote exposes no code host.
 
 ```sh
 bun run --filter @getdevintern/code build
@@ -394,9 +467,9 @@ the root would be writable on the default temp grant alone. `SandboxWorkspace`
 asserts that no default writable path covers the workspace before each run.
 
 This test exercises the filesystem grants directly. It does not invoke
-`devintern worker add` or a scheduled automation, so those command paths under
-nono remain uncovered; the worker-option and automation suites run without a
-sandbox.
+`devintern worker add` or a scheduled automation; those command paths under
+nono are covered by `tests/local/sandbox-workspace-grants-worker.test.ts`
+(below).
 
 Docker Sandboxes (`sbx`) stays optional. Its real-boundary test skips unless the
 prerequisite below is present; the fail-closed test still runs by shadowing the
@@ -422,6 +495,47 @@ nono's Linux profile grants a broad read on `/tmp`, and a home nested under
 that grant makes nono refuse its own per-user deny rules. Real user homes are
 normally outside `/tmp`, so the fixture mirrors that. Other providers use a
 workspace-local isolated home.
+
+### Workspace grants under nono (`worker add`, automations)
+
+`tests/local/sandbox-workspace-grants-worker.test.ts` runs the real built `devintern
+worker` with `AGENT_SANDBOX=nono` and the deterministic fake agent. A prompt
+marker (`E2ESANDBOXDELEGATE`) makes the sandboxed agent call the built CLI's
+`worker add --repo --title --body --idempotency-key --json` against the same
+workspace, the devintern-delegate skill's path. The test asserts the nested
+enqueue exits 0, writes its prompt under `<workspace>/injected/` and its row in
+`<workspace>/state/queue.db`, and that the worker then completes the delegated
+task. In the same run the agent tries to write `workspace.toml`, `.env`, a file
+directly under `repos/`, and a directory outside the workspace. Every one of
+those writes must fail and leave the files unchanged. A scheduled automation
+(marker `E2ESANDBOXAUTOMATIONWRITE`) then writes under `automations/<id>/`.
+Nothing pre-creates `injected/`, `automations/` or `state/`. The worker creates
+the first two at startup and the queue creates `state/`, which matters because
+the grant lists only existing paths.
+
+A second test runs the same probes with `AGENT_SANDBOX=none` and asserts that
+the forbidden writes succeed there. That proves the nono denials are real and
+not a fixture artifact. The nono test skips with a named reason when nono or
+the built CLI is missing; the unsandboxed control needs only the built CLI.
+
+Fixture layout notes. The whole fixture root (workspace plus `HOME`) lives
+outside `/tmp`, because nono's Linux profile grants write on `/tmp`; if no
+base outside the temp dir is creatable, the nono test fails with that reason
+instead of a misleading denial assertion. `TMPDIR` is `<root>/tmp/T`, two levels
+down, because the default policy grants the temp dir on Linux and its parent on
+macOS (the `/var/folders/<x>/<hash>` dir above `T`); a shallower `TMPDIR` would
+put the workspace under that grant. The test asserts no default grant contains
+the workspace. The agent, the Bun runtime, the CLI bundle and the workspace are reachable
+as top-level `$HOME` entries, the way a real install keeps them under `$HOME`.
+nono's policy grants read on those entries and never write. The `repos/`
+probe writes directly under `repos/` because the repo's own bare clone is the
+task worktree's git common dir, which the default policy grants so `git
+commit` works.
+
+```sh
+bun run --filter @getdevintern/code build
+bun test packages/e2e/tests/local/sandbox-workspace-grants.test.ts packages/e2e/tests/local/sandbox-workspace-grants-worker.test.ts
+```
 
 ## Local GitLab Self-Managed
 
@@ -572,6 +686,29 @@ Run just the Azure DevOps lifecycle with:
 bun run --filter @devintern/e2e test
 # or directly, from packages/e2e
 bun test tests/local/tracker-azure-devops-fake.test.ts
+```
+
+#### Worker Azure DevOps polling
+
+`tests/local/worker-azure-devops-polling.test.ts` starts the built worker
+daemon with `tracker = "azure-devops"`, a ready-state WIQL `task_query`,
+`poll_interval = 1`, the deterministic agent, a local bare remote, and the same
+fake (constructed with `realClock: true` so `System.ChangedDate` falls on the
+real UTC day). It asserts the fake received the product's day-precision delta
+`SELECT [System.Id] FROM WorkItems WHERE [System.ChangedDate] >= '<YYYY-MM-DD>'`,
+that the ready item is implemented once (branch, run record, comment, state)
+while a decoy in another state is untouched, that several over-reported
+same-day ticks add no run, agent invocation, or comment, that moving another
+item into the ready state runs it once, and that a graceful restart on the same
+queue database resumes from the persisted cursor. After the restart the
+workspace switches to `--skip-comments`, so a processed item keeps matching the
+query at the same `ChangedDate`. Only the `(key, updated)` dedupe then keeps it
+from re-running. The prerequisite is the built CLI
+(`bun run --filter @getdevintern/code build`); no credentials are needed.
+
+```sh
+# from packages/e2e
+bun test tests/local/worker-azure-devops-polling.test.ts
 ```
 
 ### Offline fake Linear server
@@ -923,9 +1060,11 @@ workspace. Coverage includes an injected task producing a labelled MR, GitLab
 Issues polling with status transition and actioned deduplication, registered-MR
 review polling, CI repair through an external failed commit status, retry-budget
 escalation, and automatic conflict resolution after the base branch advances.
-Relay delivery, `worker connect gitlab` hook installation, and real project-hook
-callbacks remain out of scope for the ordinary worker suite: they need relay
-infrastructure or a GitLab container-to-worker callback path.
+Hosted relay delivery, `worker connect gitlab` hook installation, and real
+project-hook callbacks remain out of scope for the ordinary worker suite: they
+need relay infrastructure or a GitLab container-to-worker callback path. The
+relay's tracker `task.changed` contract is covered offline against a loopback
+fake; see [Relay `task.changed` delivery (offline)](#relay-taskchanged-delivery-offline).
 
 The separate opt-in `test:e2e:gitlab-relay` suite uses the **deployed** relay.
 It installs a real managed project hook, proves review feedback arrives with
@@ -989,7 +1128,7 @@ skips when `packages/code/dist/index.js` is absent. Run it alone with
 
 ### Azure DevOps fake
 
-`tests/local/tracker-azure-devops-fake.test.ts` exercises key and WIQL selection, state transitions, comments, and decoy isolation against a loopback fake API. The test subprocess opts in with `DEVINTERN_E2E_FAKE_AZURE_DEVOPS=1`; project configuration cannot enable the endpoint override.
+`tests/local/tracker-azure-devops-fake.test.ts` exercises key and WIQL selection, state transitions, comments, and decoy isolation against a loopback fake API. The test subprocess opts in with `DEVINTERN_E2E_FAKE_AZURE_DEVOPS=1`; project configuration cannot enable the endpoint override. `tests/local/worker-azure-devops-polling.test.ts` drives the worker daemon's Azure DevOps change detector against the same fake: delta WIQL shape, exactly-once pickup, over-reported same-day ticks, re-arm, cursor persistence across a restart, and the `(key, updated)` dedupe.
 
 ### Jira story-point estimation
 

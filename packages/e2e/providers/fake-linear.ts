@@ -129,6 +129,13 @@ export class FakeLinearTracker implements TrackerFixture {
   /** Every `SearchIssues` request, oldest first (detector deltas and evaluate queries). */
   readonly searchRequests: FakeLinearSearchRequest[] = [];
 
+  /**
+   * GraphQL operation names answered so far, in order (names only; never
+   * variables or headers). Recorded after the response is computed, so a test
+   * that sees an operation here knows the fake already read its state.
+   */
+  readonly operations: string[] = [];
+
   private readonly server: ReturnType<typeof Bun.serve>;
   private readonly baseUrl: string;
   private readonly states: FakeLinearState[];
@@ -342,7 +349,12 @@ export class FakeLinearTracker implements TrackerFixture {
     }
     const variables = asRecord(body?.variables) ?? {};
     const operation = operationName(query);
+    const response = this.route(operation, variables);
+    this.operations.push(operation ?? "<anonymous>");
+    return response;
+  }
 
+  private route(operation: string | undefined, variables: Record<string, unknown>): Response {
     switch (operation) {
       case "IssueById":
         return this.issueById(variables);
