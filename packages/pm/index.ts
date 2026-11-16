@@ -443,6 +443,7 @@ async function runInteractiveSession(engine: PmEngine, config: LoadedConfig): Pr
       config.agent = resolved;
       // An explicit harness pick disables AGENT_HARNESS failover, like --harness.
       config.agentFallbacks = [];
+      config.agentIsFallback = false;
     }
 
     const shouldContinue = await runCreateFlow({

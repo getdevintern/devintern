@@ -111,4 +111,39 @@ describe("loadConfig harness resolution", () => {
     }
     expect(warnings.some((w) => w.includes('Unknown agent harness "nope"'))).toBe(true);
   });
+
+  test("a dropped first entry flags the stand-in primary and ignores cliPath", async () => {
+    const grokCli = join(testDir, "grok-cli");
+    const explicitCli = join(testDir, "explicit-cli");
+    writeExecutable(grokCli);
+    writeExecutable(explicitCli);
+    process.env.AGENT_HARNESS = "opencode,grok";
+    process.env.OPENCODE_CLI_PATH = join(testDir, "missing-opencode");
+    process.env.GROK_CLI_PATH = grokCli;
+
+    const originalWarn = console.warn;
+    console.warn = () => {};
+    try {
+      const config = await loadConfig({ baseDir: testDir, cliPath: explicitCli });
+      expect(config.agent.harness.name).toBe("grok");
+      expect(config.agent.path).toBe(grokCli);
+      expect(config.agentIsFallback).toBe(true);
+      expect(config.agentFallbacks).toEqual([]);
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
+
+  test("an installed first entry is not flagged as a fallback", async () => {
+    const opencodeCli = join(testDir, "opencode-cli");
+    const grokCli = join(testDir, "grok-cli");
+    writeExecutable(opencodeCli);
+    writeExecutable(grokCli);
+    process.env.AGENT_HARNESS = "opencode,grok";
+    process.env.OPENCODE_CLI_PATH = opencodeCli;
+    process.env.GROK_CLI_PATH = grokCli;
+
+    const config = await loadConfig({ baseDir: testDir });
+    expect(config.agentIsFallback).toBeUndefined();
+  });
 });

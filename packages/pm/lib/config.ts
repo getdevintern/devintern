@@ -29,6 +29,13 @@ export interface Config extends TrackerConfig {
    * given or the chain has a single entry, which disables failover.
    */
   agentFallbacks?: HarnessChainEntry[];
+  /**
+   * `true` when the configured first `AGENT_HARNESS` entry was dropped
+   * (unknown / not installed) and {@link Config.agent} is a later entry taking
+   * its place. The engine then treats it like a fallback: its own
+   * `<HARNESS>_MODEL`, default effort, and no caller CLI path override.
+   */
+  agentIsFallback?: boolean;
 }
 
 export interface LoadConfigOptions {
@@ -88,7 +95,7 @@ export async function loadConfig(optionsOrBaseDir?: LoadConfigOptions | string):
   const options =
     typeof optionsOrBaseDir === "string" ? { baseDir: optionsOrBaseDir } : optionsOrBaseDir;
   const trackerConfig = await loadTrackerConfig(".devintern-pm", options?.baseDir);
-  const { agent, agentFallbacks } = resolveAgentChain(options);
+  const { agent, agentFallbacks, agentIsFallback } = resolveAgentChain(options);
   // Locate the CLI on PATH and fail fast with an actionable error if missing,
   // instead of surfacing a cryptic spawn error mid-run.
   agent.path = resolveExecutablePathStrict(agent.path, agent.harness.displayName);
@@ -97,6 +104,7 @@ export async function loadConfig(optionsOrBaseDir?: LoadConfigOptions | string):
     ...trackerConfig,
     agent,
     agentFallbacks,
+    ...(agentIsFallback ? { agentIsFallback } : {}),
   };
 }
 
@@ -107,7 +115,8 @@ export async function loadConfig(optionsOrBaseDir?: LoadConfigOptions | string):
  * `AGENT_HARNESS` resolves exactly like {@link resolveHarness}. A multi-entry
  * chain is resolved by `resolveHarnessChainSync`, whose dropped entries
  * (unknown / not installed) are reported as warnings and never tried; the first
- * usable entry becomes the primary, later ones the fallbacks.
+ * usable entry becomes the primary, later ones the fallbacks. When that
+ * primary is not the configured first entry it is flagged `agentIsFallback`.
  *
  * @param options - Harness overrides from the caller.
  * @returns The primary harness and its ordered fallbacks.
@@ -115,6 +124,7 @@ export async function loadConfig(optionsOrBaseDir?: LoadConfigOptions | string):
 function resolveAgentChain(options: LoadConfigOptions | undefined): {
   agent: ResolvedHarness;
   agentFallbacks: HarnessChainEntry[];
+  agentIsFallback?: boolean;
 } {
   const single = (): { agent: ResolvedHarness; agentFallbacks: HarnessChainEntry[] } => ({
     agent: resolveHarness({ harnessName: options?.harnessName, cliPath: options?.cliPath }),
@@ -138,8 +148,11 @@ function resolveAgentChain(options: LoadConfigOptions | undefined): {
     return { agent: single().agent, agentFallbacks: rest };
   }
   // The configured primary was dropped; the first usable entry takes over.
+  // AGENT_CLI_PATH / cliPath target the configured primary, so it keeps its
+  // own resolved path (`<HARNESS>_CLI_PATH` or PATH).
   return {
-    agent: { harness: first.harness, path: options?.cliPath ?? first.path },
+    agent: { harness: first.harness, path: first.path },
     agentFallbacks: rest,
+    agentIsFallback: true,
   };
 }

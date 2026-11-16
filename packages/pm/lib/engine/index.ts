@@ -223,7 +223,8 @@ export function harnessModelEnvKey(harnessName: string): string {
 }
 
 /**
- * Build the failover order: the primary with the caller's model/effort, then
+ * Build the failover order: the primary with the caller's model/effort (unless
+ * it stands in for a dropped first entry, see `Config.agentIsFallback`), then
  * each configured fallback with only its own `<HARNESS>_MODEL` (never the
  * primary's model or effort, which are harness-specific).
  *
@@ -237,18 +238,23 @@ function agentCandidates(
   model: string | undefined,
   effort: AgentEffort | undefined,
 ): AgentCandidate[] {
-  const primary: AgentCandidate = {
-    harness: config.agent.harness,
-    path: config.agent.path,
-    model,
-    effort,
-  };
+  const ownModel = (name: string): string | undefined =>
+    process.env[harnessModelEnvKey(name)]?.trim() || undefined;
+  // A primary standing in for a dropped first entry gets fallback treatment:
+  // the caller's model/effort were meant for the configured first entry.
+  const primary: AgentCandidate = config.agentIsFallback
+    ? {
+        harness: config.agent.harness,
+        path: config.agent.path,
+        model: ownModel(config.agent.harness.name),
+      }
+    : { harness: config.agent.harness, path: config.agent.path, model, effort };
   const fallbacks = (config.agentFallbacks ?? [])
     .filter((entry) => entry.name !== config.agent.harness.name)
     .map((entry): AgentCandidate => ({
       harness: entry.harness,
       path: entry.path,
-      model: process.env[harnessModelEnvKey(entry.name)]?.trim() || undefined,
+      model: ownModel(entry.name),
     }));
   return [primary, ...fallbacks];
 }

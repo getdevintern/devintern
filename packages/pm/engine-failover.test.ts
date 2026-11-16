@@ -123,12 +123,14 @@ describe("engine harness failover on usage limits", () => {
   beforeEach(() => {
     stderr = [];
     console.error = (...args: unknown[]) => stderr.push(args.join(" "));
+    delete process.env.A_MODEL;
     delete process.env.B_MODEL;
     delete process.env.C_MODEL;
   });
 
   afterEach(() => {
     console.error = originalError;
+    delete process.env.A_MODEL;
     delete process.env.B_MODEL;
     delete process.env.C_MODEL;
   });
@@ -155,6 +157,17 @@ describe("engine harness failover on usage limits", () => {
 
     await run();
     expect(calls[1]?.model).toBe("b-model");
+  });
+
+  test("a primary standing in for a dropped first entry gets fallback model/effort", async () => {
+    process.env.A_MODEL = "a-own-model";
+    const { calls, runAgent } = scriptedRunner({ a: () => ({ stdout: GOOD }) });
+    const config = { ...stubConfig(), agentIsFallback: true } as Config;
+    const { run } = await generate(config, runAgent);
+
+    await run();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ harness: "a", model: "a-own-model", effort: undefined });
   });
 
   test("throws an EngineError listing every harness when all are limited", async () => {

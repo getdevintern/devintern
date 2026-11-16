@@ -175,14 +175,14 @@ AGENT_HARNESS=opencode,grok
 # GROK_MODEL=grok-4.7
 ```
 
-- Unknown or not-installed entries are skipped with a warning; the first usable entry runs first.
+- Unknown or not-installed entries are skipped with a warning; the first usable entry runs first. If the first entry is the one skipped, the entry that runs in its place is treated as a fallback: the first-entry settings below do not apply to it.
 - When a harness hits its usage limit, devpm prints one line on stderr (limited harness, reset time when known, next harness) and re-runs the same request on the next entry. Other failures, such as a non-zero exit or the turn limit, do not fail over.
 - Once a fallback succeeds, devpm keeps using it for the rest of that process, including the strict-JSON retry. Nothing is persisted; the next `devpm` run starts with the first entry again.
 - If every entry is usage-limited, the run fails with a message listing each limited harness.
 - `AGENT_MODEL`/`--model` and `AGENT_EFFORT`/`--effort` apply to the first entry only, because model ids are harness-specific. A fallback uses its own `<HARNESS>_MODEL` (for example `GROK_MODEL`, `CLAUDE_CODE_MODEL`) or its CLI default, and runs with its default effort. Likewise, `AGENT_CLI_PATH` applies to the first entry only; a fallback uses `<HARNESS>_CLI_PATH` or `PATH`.
 - `--harness <name>`, or picking a harness in the interactive picker, disables failover: only that harness runs.
 
-The DevIntern PM desktop app uses the same engine, so it fails over the same way when the project's `AGENT_HARNESS` lists several harnesses.
+The DevIntern PM desktop app uses the same engine, so it fails over the same way when the project's `AGENT_HARNESS` lists several harnesses. Picking a harness in the desktop app moves it to the front of the list in `.devintern-pm/.env` and keeps the other entries as fallbacks. For example, picking `grok` with `AGENT_HARNESS=opencode,grok` saves `AGENT_HARNESS=grok,opencode`.
 
 ### Model selection
 
