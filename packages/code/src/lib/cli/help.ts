@@ -60,6 +60,7 @@ Subcommands:
   webhook serve        Start the advanced repo-local direct-webhook server
   address-review       Address review feedback on an existing pull request
   resolve-conflicts    Merge a PR's base branch into it, resolving conflicts
+  auto-merge           Merge a PR if it is green and safe (safe paths or agent review)
   login [method]       Sign in (github | google | x | email; prompts if omitted)
   logout               Clear local auth session
   whoami               Show current authenticated user

@@ -1441,6 +1441,7 @@ remote = "https://forgejo.example/acme/forgejo.git"
       expect(acquirers.map((acquirer) => acquirer.name)).toEqual([
         "poll:reviews",
         "poll:ci-failures",
+        "poll:auto-merge",
       ]);
       expect(hooksOut.hooks?.mentionSweepRepos()).toEqual([]);
 

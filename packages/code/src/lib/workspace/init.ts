@@ -41,6 +41,16 @@ ci_failure_fix = false
 # conflict_resolution = "scheduled"
 # conflict_resolution_cron = "0 3 * * *"      # worker host timezone
 # conflict_resolution_interval = "1d"
+# Merge the agent's own PRs once they are green and safe (off by default).
+# PRs touching only auto_merge_safe_paths merge with no agent run; others
+# merge only if the agent's merge-safety review says so (auto_merge_review).
+# Deny paths (plus built-ins: .github/**, CODEOWNERS, .devintern-code/**)
+# never auto-merge. Changes apply without a restart.
+# auto_merge = true
+# auto_merge_safe_paths = ["**/*.md", "docs/**"]
+# auto_merge_deny_paths = ["**/migrations/**"]
+# auto_merge_review = true
+# auto_merge_method = "squash"                # merge | squash | rebase
 
 # Optional bounded host concurrency. This is throughput, not VM isolation:
 # concurrent jobs share ports, processes, Docker, caches, and linked Git data.

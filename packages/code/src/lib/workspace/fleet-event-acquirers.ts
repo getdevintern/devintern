@@ -235,6 +235,7 @@ export async function buildFleetEventAcquirers(options: {
 
   const {
     createFleetAddressPr,
+    createFleetAutoMerge,
     createFleetCiFix,
     coalescePrFeedbackRuns,
     createFleetResolveConflicts,
@@ -390,6 +391,56 @@ export async function buildFleetEventAcquirers(options: {
     });
     acquirers.push(ciWatcher);
     intervalUpdaters.push((seconds) => ciWatcher.updateInterval(seconds));
+
+    // Auto-merge (off by default): same registry and supervisor; the switch
+    // and policy are read live so workspace reloads apply without a restart.
+    const { AutoMergeWatcherAcquirer, DEFAULT_AUTO_MERGE_QUIET_SECONDS } =
+      await import("../acquirers/auto-merge-watcher");
+    const { parseHarnessList } = await import("@devintern/agent-harness");
+    const mergePr = createFleetAutoMerge(eventDeps);
+    const autoMergeSettings = config.workspace.autoMerge;
+    if (
+      autoMergeSettings.enabled &&
+      !autoMergeSettings.review &&
+      autoMergeSettings.safePaths.length === 0 &&
+      config.repos.every((repo) => !repo.autoMergeSafePaths?.length)
+    ) {
+      console.warn(
+        "⚠️  [workspace].auto_merge is on with auto_merge_review = false and no " +
+          "auto_merge_safe_paths, so no pull request can ever qualify.",
+      );
+    }
+    const autoMergeWatcher = new AutoMergeWatcherAcquirer({
+      intervalSeconds,
+      enabled: () => config.workspace.autoMerge.enabled,
+      workerState: state.workerState,
+      queue: state.queue,
+      fetchPr: async (repo, n, etag) => {
+        try {
+          return await gh(repo).conditionalGet(
+            `/repos/${repo}/pulls/${n}`,
+            ownerOf(repo),
+            nameOf(repo),
+            etag,
+          );
+        } catch (error) {
+          if (isGitHubNotFound(error)) return { data: null, notModified: false, gone: true };
+          throw error;
+        }
+      },
+      mergePr,
+      runStore,
+      harness: () =>
+        config.workspace.autoMerge.agent?.harness ?? parseHarnessList(process.env.AGENT_HARNESS)[0],
+      quietSeconds: parseEnvInteger(
+        "WORKER_AUTO_MERGE_QUIET_SECONDS",
+        DEFAULT_AUTO_MERGE_QUIET_SECONDS,
+        { min: 0 },
+      ),
+      verbose,
+    });
+    acquirers.push(autoMergeWatcher);
+    intervalUpdaters.push((seconds) => autoMergeWatcher.updateInterval(seconds));
 
     // Tier 2: one mention sweep per GitHub repo (cursor sources are already
     // namespaced by slug). The permission gate runs in the fleet handler.

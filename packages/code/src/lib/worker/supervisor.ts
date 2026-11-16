@@ -6,7 +6,14 @@
  * replacing the callback with executor dispatch.
  */
 
-export type JobKind = "task" | "review" | "ci_fix" | "conflict" | "automation" | "estimation";
+export type JobKind =
+  | "task"
+  | "review"
+  | "ci_fix"
+  | "conflict"
+  | "auto_merge"
+  | "automation"
+  | "estimation";
 
 export type HostCheckoutClass = "task_worktree" | "shared_base" | "workspace";
 

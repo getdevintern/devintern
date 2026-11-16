@@ -22,6 +22,7 @@ export type RunOrigin =
   | "pr_mention"
   | "ci_fix"
   | "conflict_resolution"
+  | "auto_merge"
   | "scheduled"
   | "estimate"
   | "manual"
@@ -74,6 +75,8 @@ export interface RunMeta {
   ticketUrl?: string;
   /** Explicit attempt for non-task durable events. */
   attempt?: number;
+  /** Start time (ms epoch) for runs recorded after the fact; defaults to now. */
+  startedAt?: number;
 }
 
 /** Cap persisted ticket descriptions so a huge ticket cannot bloat the DB. */
@@ -318,7 +321,7 @@ export class RunStore {
         meta.ticketKey ?? null,
         meta.ticketUrl ?? null,
         meta.queueClaim ?? null,
-        Date.now(),
+        meta.startedAt ?? Date.now(),
         attempt,
       ],
     );
@@ -758,6 +761,7 @@ export class RunStore {
       pr_mention: 0,
       ci_fix: 0,
       conflict_resolution: 0,
+      auto_merge: 0,
       scheduled: 0,
       estimate: 0,
       manual: 0,
