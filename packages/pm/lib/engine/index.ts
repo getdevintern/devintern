@@ -8,7 +8,13 @@
 
 import { runAgent as defaultRunAgent } from "../agent.js";
 import { dumpAgentOutput } from "../agent-debug.js";
-import type { AgentEffort, AgentRunResult } from "@devintern/agent-harness";
+import { UsageLimitError } from "@devintern/agent-harness";
+import type {
+  AgentEffort,
+  AgentHarness,
+  AgentRunResult,
+  ResolvedHarness,
+} from "@devintern/agent-harness";
 import {
   attachmentsGuidanceBlurb,
   cleanupAttachmentStaging,
@@ -195,6 +201,63 @@ export interface CreateEngineOptions {
   baseDir?: string;
 }
 
+/** One harness the engine may run, in failover order. */
+interface AgentCandidate {
+  readonly harness: AgentHarness;
+  readonly path: string;
+  /** Model passed to this harness (`undefined` → CLI default). */
+  readonly model?: string;
+  /** Effort passed to this harness (primary only). */
+  readonly effort?: AgentEffort;
+}
+
+/**
+ * Per-harness model env var (`claude-code` → `CLAUDE_CODE_MODEL`), matching the
+ * worker's `<HARNESS>_MODEL` convention.
+ *
+ * @param harnessName - Canonical harness name.
+ * @returns The env var naming that harness's model.
+ */
+export function harnessModelEnvKey(harnessName: string): string {
+  return `${harnessName.toUpperCase().replace(/-/g, "_")}_MODEL`;
+}
+
+/**
+ * Build the failover order: the primary with the caller's model/effort, then
+ * each configured fallback with only its own `<HARNESS>_MODEL` (never the
+ * primary's model or effort, which are harness-specific).
+ *
+ * @param config - Loaded config (primary + optional fallbacks).
+ * @param model - Model for the primary (`--model` / `AGENT_MODEL`).
+ * @param effort - Effort for the primary (`--effort` / `AGENT_EFFORT`).
+ * @returns Ordered candidates, primary first.
+ */
+function agentCandidates(
+  config: Config,
+  model: string | undefined,
+  effort: AgentEffort | undefined,
+): AgentCandidate[] {
+  const primary: AgentCandidate = {
+    harness: config.agent.harness,
+    path: config.agent.path,
+    model,
+    effort,
+  };
+  const fallbacks = (config.agentFallbacks ?? [])
+    .filter((entry) => entry.name !== config.agent.harness.name)
+    .map((entry): AgentCandidate => ({
+      harness: entry.harness,
+      path: entry.path,
+      model: process.env[harnessModelEnvKey(entry.name)]?.trim() || undefined,
+    }));
+  return [primary, ...fallbacks];
+}
+
+/** Harness name plus its reset hint, for usage-limit messages. */
+function describeLimited(name: string, error: UsageLimitError): string {
+  return error.resetHint ? `"${name}" (resets ${error.resetHint})` : `"${name}"`;
+}
+
 function isStoryPayload(value: unknown): value is StoryDraft {
   if (typeof value !== "object" || value === null) return false;
   const record = value as Record<string, unknown>;
@@ -228,6 +291,13 @@ export async function createEngine(
   const promptsDir = options.promptsDir ?? defaultPromptsDir();
   const model = options.model;
   const effort = options.effort;
+  /**
+   * Failover position that last ran without a usage limit, for the primary it
+   * was computed against. Kept for the rest of the process so later calls (and
+   * the strict-JSON re-run) skip a primary that is already limited; reset when
+   * a host swaps `config.agent` (e.g. the interactive harness picker).
+   */
+  let sticky: { primary: ResolvedHarness; index: number } | undefined;
 
   const defaultProjectKey =
     config.jira?.defaultProjectKey ||
@@ -355,25 +425,77 @@ export async function createEngine(
     agentFiles?: { attachmentPaths: string[]; imagePaths: string[] },
   ): Promise<T> {
     const onAgentChunk = events?.onAgentChunk;
-    const dumpContext = { harness: config.agent.harness.name, cliPath: config.agent.path };
 
     type AttemptOutcome =
       | { ok: true; payload: T }
       | { ok: false; stage: "agent"; error: EngineError }
-      | { ok: false; stage: "parse"; error: EngineError; rawResult: AgentRunResult };
+      | {
+          ok: false;
+          stage: "parse";
+          error: EngineError;
+          rawResult: AgentRunResult;
+          dumpContext: { harness: string; cliPath: string };
+        };
+
+    /**
+     * Run one attempt, failing over down the configured harness chain while
+     * the active harness reports a usage limit. Any other outcome (including
+     * non-zero exits) is returned as-is for {@link attemptParse} to judge.
+     */
+    async function runWithFailover(
+      currentPrompt: string,
+    ): Promise<{ result: AgentRunResult; candidate: AgentCandidate }> {
+      const candidates = agentCandidates(config, model, effort);
+      const start =
+        sticky?.primary === config.agent && sticky.index < candidates.length ? sticky.index : 0;
+      // Start at the harness that last worked, then wrap around so every
+      // configured entry is tried once before giving up.
+      const order = candidates.map((_, offset) => (start + offset) % candidates.length);
+      const limited: { name: string; error: UsageLimitError }[] = [];
+      for (const [position, index] of order.entries()) {
+        const candidate = candidates[index];
+        if (!candidate) continue;
+        try {
+          const result = await runAgent(candidate.harness, candidate.path, currentPrompt, {
+            maxTurns: 100,
+            skipPermissions: true,
+            model: candidate.model,
+            effort: candidate.effort,
+            silent: true,
+            attachmentPaths: agentFiles?.attachmentPaths,
+            imagePaths: agentFiles?.imagePaths,
+            onStdout: onAgentChunk ? (chunk) => onAgentChunk(chunk, "stdout") : undefined,
+            onStderr: onAgentChunk ? (chunk) => onAgentChunk(chunk, "stderr") : undefined,
+          });
+          sticky = { primary: config.agent, index };
+          return { result, candidate };
+        } catch (error) {
+          if (!(error instanceof UsageLimitError)) throw error;
+          const name = candidate.harness.name;
+          limited.push({ name, error });
+          const nextIndex = order[position + 1];
+          const next = nextIndex === undefined ? undefined : candidates[nextIndex];
+          if (next) {
+            const hint = error.resetHint ? ` (resets ${error.resetHint})` : "";
+            console.error(
+              `⚠️  Agent harness "${name}" hit its usage limit${hint}; switching to "${next.harness.name}".`,
+            );
+          }
+        }
+      }
+      const names = limited.map(({ name, error }) => describeLimited(name, error)).join(", ");
+      throw new EngineError(
+        "agent-failed",
+        limited.length > 1
+          ? `All configured agent harnesses are usage-limited: ${names}.`
+          : `Agent harness ${names} is usage-limited and no fallback harness is configured.`,
+        limited.map(({ name, error }) => `${name}: ${error.message}`).join("\n"),
+      );
+    }
 
     async function attemptParse(currentPrompt: string): Promise<AttemptOutcome> {
-      const result = await runAgent(config.agent.harness, config.agent.path, currentPrompt, {
-        maxTurns: 100,
-        skipPermissions: true,
-        model,
-        effort,
-        silent: true,
-        attachmentPaths: agentFiles?.attachmentPaths,
-        imagePaths: agentFiles?.imagePaths,
-        onStdout: onAgentChunk ? (chunk) => onAgentChunk(chunk, "stdout") : undefined,
-        onStderr: onAgentChunk ? (chunk) => onAgentChunk(chunk, "stderr") : undefined,
-      });
+      const { result, candidate } = await runWithFailover(currentPrompt);
+      const dumpContext = { harness: candidate.harness.name, cliPath: candidate.path };
 
       // A completed turn is not a successful turn: harnesses such as Muse Code
       // may report a model-step/time limit through the result instead of (or in
@@ -400,7 +522,7 @@ export async function createEngine(
         return { ok: true, payload: extractJsonPayload(result.stdout, validate, messages.invalid) };
       } catch (error) {
         if (!(error instanceof EngineError)) throw error;
-        return { ok: false, stage: "parse", error, rawResult: result };
+        return { ok: false, stage: "parse", error, rawResult: result, dumpContext };
       }
     }
 
@@ -420,7 +542,7 @@ export async function createEngine(
 
     // Both attempts failed to parse — surface the latest failure alongside a
     // dump of the final attempt so users can inspect exactly what came back.
-    const dumpFile = await dumpAgentOutput(`${label}-parse`, retry.rawResult, dumpContext);
+    const dumpFile = await dumpAgentOutput(`${label}-parse`, retry.rawResult, retry.dumpContext);
     throw new EngineError(
       retry.error.code,
       retry.error.message,

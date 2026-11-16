@@ -18,6 +18,7 @@ describe("loadConfig harness resolution", () => {
     delete process.env.OPENCODE_CLI_PATH;
     delete process.env.CLAUDE_CLI_PATH;
     delete process.env.AGENT_HARNESS;
+    delete process.env.GROK_CLI_PATH;
   });
 
   afterEach(() => {
@@ -48,5 +49,66 @@ describe("loadConfig harness resolution", () => {
     const config = await loadConfig({ harnessName: harness, baseDir: testDir });
     expect(config.agent.harness.name).toBe("opencode");
     expect(config.agent.path).toBe(opencodeCli);
+  });
+
+  test("multi-entry AGENT_HARNESS carries fallbacks with their own CLI paths", async () => {
+    const globalCli = join(testDir, "global-agent");
+    const grokCli = join(testDir, "grok-cli");
+    writeExecutable(globalCli);
+    writeExecutable(grokCli);
+    process.env.AGENT_HARNESS = "opencode,grok";
+    process.env.AGENT_CLI_PATH = globalCli;
+    process.env.GROK_CLI_PATH = grokCli;
+
+    const config = await loadConfig({ baseDir: testDir });
+    expect(config.agent.harness.name).toBe("opencode");
+    expect(config.agent.path).toBe(globalCli);
+    expect(config.agentFallbacks?.map((e) => [e.name, e.path])).toEqual([["grok", grokCli]]);
+  });
+
+  test("--harness disables failover even with a multi-entry AGENT_HARNESS", async () => {
+    const opencodeCli = join(testDir, "opencode-cli");
+    const grokCli = join(testDir, "grok-cli");
+    writeExecutable(opencodeCli);
+    writeExecutable(grokCli);
+    process.env.AGENT_HARNESS = "opencode,grok";
+    process.env.OPENCODE_CLI_PATH = opencodeCli;
+    process.env.GROK_CLI_PATH = grokCli;
+
+    const config = await loadConfig({ harnessName: "opencode", baseDir: testDir });
+    expect(config.agent.harness.name).toBe("opencode");
+    expect(config.agentFallbacks).toEqual([]);
+  });
+
+  test("single-entry AGENT_HARNESS has no fallbacks", async () => {
+    const opencodeCli = join(testDir, "opencode-cli");
+    writeExecutable(opencodeCli);
+    process.env.AGENT_HARNESS = "opencode";
+    process.env.OPENCODE_CLI_PATH = opencodeCli;
+
+    const config = await loadConfig({ baseDir: testDir });
+    expect(config.agent.path).toBe(opencodeCli);
+    expect(config.agentFallbacks).toEqual([]);
+  });
+
+  test("unknown chain entries are warned about and skipped", async () => {
+    const opencodeCli = join(testDir, "opencode-cli");
+    const grokCli = join(testDir, "grok-cli");
+    writeExecutable(opencodeCli);
+    writeExecutable(grokCli);
+    process.env.AGENT_HARNESS = "opencode,nope,grok";
+    process.env.OPENCODE_CLI_PATH = opencodeCli;
+    process.env.GROK_CLI_PATH = grokCli;
+
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => warnings.push(args.join(" "));
+    try {
+      const config = await loadConfig({ baseDir: testDir });
+      expect(config.agentFallbacks?.map((e) => e.name)).toEqual(["grok"]);
+    } finally {
+      console.warn = originalWarn;
+    }
+    expect(warnings.some((w) => w.includes('Unknown agent harness "nope"'))).toBe(true);
   });
 });

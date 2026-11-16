@@ -441,6 +441,8 @@ async function runInteractiveSession(engine: PmEngine, config: LoadedConfig): Pr
       const resolved = resolveHarness({ harnessName: interactiveConfig.harnessName });
       resolved.path = resolveExecutablePathStrict(resolved.path, resolved.harness.displayName);
       config.agent = resolved;
+      // An explicit harness pick disables AGENT_HARNESS failover, like --harness.
+      config.agentFallbacks = [];
     }
 
     const shouldContinue = await runCreateFlow({

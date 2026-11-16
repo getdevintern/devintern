@@ -164,6 +164,26 @@ Common `AGENT_HARNESS` values include `claude-code` (alias `claude`), `opencode`
 
 **Qwen note:** Qwen Code accepts a model via `--model` (e.g. `qwen3-coder-plus`); you can also keep the model in `~/.qwen/settings.json`.
 
+### Failover on usage limits
+
+`AGENT_HARNESS` may list several harnesses, comma-separated, in priority order. The first entry is your preferred harness; later entries are fallbacks devpm switches to when the active harness reports a usage limit:
+
+```bash
+# .devintern-pm/.env
+AGENT_HARNESS=opencode,grok
+# Optional: model for the fallback (otherwise grok's CLI default applies)
+# GROK_MODEL=grok-4.7
+```
+
+- Unknown or not-installed entries are skipped with a warning; the first usable entry runs first.
+- When a harness hits its usage limit, devpm prints one line on stderr (limited harness, reset time when known, next harness) and re-runs the same request on the next entry. Other failures, such as a non-zero exit or the turn limit, do not fail over.
+- Once a fallback succeeds, devpm keeps using it for the rest of that process, including the strict-JSON retry. Nothing is persisted; the next `devpm` run starts with the first entry again.
+- If every entry is usage-limited, the run fails with a message listing each limited harness.
+- `AGENT_MODEL`/`--model` and `AGENT_EFFORT`/`--effort` apply to the first entry only, because model ids are harness-specific. A fallback uses its own `<HARNESS>_MODEL` (for example `GROK_MODEL`, `CLAUDE_CODE_MODEL`) or its CLI default, and runs with its default effort. Likewise, `AGENT_CLI_PATH` applies to the first entry only; a fallback uses `<HARNESS>_CLI_PATH` or `PATH`.
+- `--harness <name>`, or picking a harness in the interactive picker, disables failover: only that harness runs.
+
+The DevIntern PM desktop app uses the same engine, so it fails over the same way when the project's `AGENT_HARNESS` lists several harnesses.
+
 ### Model selection
 
 Set the model the agent harness runs with using `AGENT_MODEL` in `.devintern-pm/.env`:
