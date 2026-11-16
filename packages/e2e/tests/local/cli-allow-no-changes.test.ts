@@ -119,37 +119,40 @@ test.skipIf(!existsSync(cliPath))(
   60_000,
 );
 
-test.skipIf(!existsSync(cliPath))(
-  "--allow-no-changes --no-git exits 0 on the base branch with nothing delivered",
-  async () => {
-    const run = new FixtureWorkspace();
-    try {
-      await prepareLocalRemote(run);
-      const baseTip = await run.git("rev-parse", run.base);
+// With `--no-git` the commit step is skipped before `commitImplementation`
+// ever reads `allowNoChanges`, so a no-op succeeds with or without the flag.
+// Run both forms so the flag is never mistaken for what makes this pass.
+for (const extraArgs of [["--no-git"], ["--allow-no-changes", "--no-git"]]) {
+  test.skipIf(!existsSync(cliPath))(
+    `${extraArgs.join(" ")}: a no-op exits 0 on the base branch with nothing delivered`,
+    async () => {
+      const run = new FixtureWorkspace();
+      try {
+        await prepareLocalRemote(run);
+        const baseTip = await run.git("rev-parse", run.base);
 
-      const result = await run.runTask({
-        agentMode: "no-change",
-        extraArgs: ["--allow-no-changes", "--no-git"],
-      });
+        const result = await run.runTask({ agentMode: "no-change", extraArgs });
 
-      expect(result.exitCode).toBe(0);
-      // `--no-git` skips the commit step entirely, so the no-op branch of
-      // delivery is never reached and no feature branch is created.
-      expect(result.stdout).not.toContain("Committing changes");
-      expect(await run.git("branch", "--show-current")).toBe(run.base);
-      expect(await run.git("branch", "--list", run.head)).toBe("");
-      await assertNothingDelivered(run, baseTip);
-      assertNoDeliveryClaims(result.stdout);
+        expect(result.exitCode).toBe(0);
+        // The no-op branch of delivery is never reached: no commit attempt,
+        // no acceptance line, and no feature branch.
+        expect(result.stdout).not.toContain("Committing changes");
+        expect(result.stdout).not.toContain(NO_OP_ACCEPTED);
+        expect(await run.git("branch", "--show-current")).toBe(run.base);
+        expect(await run.git("branch", "--list", run.head)).toBe("");
+        await assertNothingDelivered(run, baseTip);
+        assertNoDeliveryClaims(result.stdout);
 
-      expect(run.runRecords()).toEqual([
-        expect.objectContaining({ status: "succeeded", pr_url: null, outcome_reason: null }),
-      ]);
-    } finally {
-      run.dispose();
-    }
-  },
-  60_000,
-);
+        expect(run.runRecords()).toEqual([
+          expect.objectContaining({ status: "succeeded", pr_url: null, outcome_reason: null }),
+        ]);
+      } finally {
+        run.dispose();
+      }
+    },
+    60_000,
+  );
+}
 
 test.skipIf(!existsSync(cliPath))(
   "offline Jira: a no-op run is reported as a failure without the flag and left in progress with it",
@@ -196,9 +199,16 @@ test.skipIf(!existsSync(cliPath))(
       expect(failedTracker.unexpectedRequests).toEqual([]);
 
       // With the flag: the run succeeds, posts no comment, and keeps the
-      // in-progress status it set before the agent ran. The no-op halt stops
-      // delivery before publish, so neither the implementation comment nor
-      // the post-PR transition happens.
+      // in-progress status it set before the agent ran. The no-op halt
+      // (`haltKind: "noop"` in packages/code/src/lib/agent/run-harness-finalize.ts)
+      // stops delivery before publish, so neither the implementation comment
+      // nor the post-PR transition happens.
+      //
+      // CURRENT BEHAVIOUR, NOT A CONTRACT: leaving the ticket In Progress with
+      // no comment is what the code does today, not a confirmed product
+      // decision. If no-op runs start transitioning the ticket or posting a
+      // "no changes needed" comment, update the status/comment assertions
+      // below rather than treating the change as a regression.
       const noOpSeed = await seedJiraScenario(noOpTracker);
       const noOpStatuses = statusesFor(noOpTracker);
       // The default fake keeps in-progress and PR statuses distinct, which is
