@@ -114,6 +114,32 @@ bun run --filter @getdevintern/code build
 bun run --filter @devintern/e2e test
 ```
 
+## Local git-hook repair loop
+
+`tests/local/cli-hook-retries.test.ts` installs a real executable pre-commit
+hook (by repointing the fixture's pinned `core.hooksPath` at a per-test hooks
+directory) that rejects the commit while staged `src/greeting.ts` carries a
+per-test marker. With `E2E_HOOK_MARKER` set, the fixture agent's implementation
+edit plants that marker, so the production commit fails through real
+`git commit`. The bundled hook-fix prompt selects the prompt-driven `hook-fix`
+mode, whose outcome `E2E_HOOK_FIX` controls: `fix` removes the marker and leaves
+the commit to the production retry, `fix-commit` also commits itself, and `noop`
+leaves the marker in place. Each repair turn is recorded in
+`E2E_AGENT_INVOCATIONS` as `hook-fix`.
+
+The scenarios prove a repaired retry pushes one marker-free implementation
+commit to a local bare remote and writes
+`DEVINTERN_OUTPUT_DIR/<task-key>/git-hook-errors.log` for attempt 1;
+`--hook-retries 1` with an unrepairable hook runs exactly one repair turn,
+prints `Max retries (1) exceeded`, exits non-zero, and pushes nothing;
+`--hook-retries 0` fails without any repair turn; and an agent that commits
+during the fix is delivered without a duplicate commit.
+
+```sh
+bun run --filter @getdevintern/code build
+bun run --filter @devintern/e2e test
+```
+
 ## Worker `worker add` option matrix
 
 The default local suite (`tests/local/worker-add-options.test.ts`) drives the built
