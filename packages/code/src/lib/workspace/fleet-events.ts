@@ -260,10 +260,15 @@ export function fleetAutoMergePolicyFingerprint(config: WorkspaceConfig, slug: s
  */
 export function createFleetAutoMerge(
   deps: FleetEventDeps,
-): (slug: string, prNumber: number, expectedHeadSha: string) => Promise<AutoMergeResult> {
+): (
+  slug: string,
+  prNumber: number,
+  expectedHeadSha: string,
+  options?: { lastAttempt: boolean },
+) => Promise<AutoMergeResult> {
   const { config, workspaceDir, repoManager } = deps;
   const runAutoMerge = deps.runAutoMerge ?? runAutoMergeViaCli;
-  return async (slug, prNumber, expectedHeadSha) => {
+  return async (slug, prNumber, expectedHeadSha, options) => {
     const repo = repoBySlug(config, slug);
     if (!repo) {
       return {
@@ -286,6 +291,7 @@ export function createFleetAutoMerge(
           method: settings.method,
         },
         expectedHeadSha,
+        lastAttempt: options?.lastAttempt ?? false,
         cwd: base,
         env: buildRepoEnv(repo, workspaceDir, { agentSelection }),
         harnessPin: agentSelection?.harness,

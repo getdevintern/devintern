@@ -16,8 +16,13 @@
  * outcomes back off without consuming attempts; failures retry up to a cap.
  *
  * Each evaluation is recorded as a run while it executes, so the dashboard
- * shows it live. Evaluations that end in "not ready yet" (waiting, skipped,
- * deferred) are discarded afterwards; only decisions stay in the run list.
+ * shows it live. Evaluations that end in "not ready yet" (waiting, skipped)
+ * are discarded afterwards; decisions stay in the run list.
+ *
+ * Agent usage limits never drop a PR: the evaluation is `deferred` with the
+ * quota's reset time, kept in the run list as **Deferred**, and the PR is
+ * not touched again until then, so no check is relaunched into the limit.
+ * The PR is reviewed on the first pass after the quota returns.
  */
 
 import type { Acquirer } from "../../worker";
@@ -45,8 +50,17 @@ export interface AutoMergeWatcherOptions {
     prNumber: number,
     etag?: string,
   ): Promise<ConditionalResult<AutoMergePolledPr>>;
-  /** Run the full gates and merge (the `devintern auto-merge` subprocess). */
-  mergePr(repo: string, prNumber: number, expectedHeadSha: string): Promise<AutoMergeResult>;
+  /**
+   * Run the full gates and merge (the `devintern auto-merge` subprocess).
+   * `lastAttempt` marks the head's final allowed attempt, so a failure is
+   * stated on the PR instead of ending silently.
+   */
+  mergePr(
+    repo: string,
+    prNumber: number,
+    expectedHeadSha: string,
+    options: { lastAttempt: boolean },
+  ): Promise<AutoMergeResult>;
   runStore?: Pick<RunStore, "createRun" | "finishRun" | "discardRun">;
   /** Harness recorded on runs; undefined when no agent review can run. */
   harness?: () => string | undefined;
@@ -71,9 +85,10 @@ export const DEFAULT_AUTO_MERGE_MAX_ATTEMPTS = 3;
 
 /** Re-check delay after a `waiting` outcome (changes requested, head moved). */
 const WAITING_BACKOFF_MS = 10 * 60_000;
-/** Re-check delay after a `deferred` outcome (agent usage limit). */
+/** Minimum re-check delay after a `deferred` outcome (agent usage limit). */
 const DEFERRED_BACKOFF_MS = 5 * 60_000;
-const FAILURE_BACKOFF_BASE_MS = 60_000;
+/** Failure retry delay: 5 min, then 10, so a misread quota error does not exhaust attempts in minutes. */
+const FAILURE_BACKOFF_BASE_MS = 5 * 60_000;
 const FAILURE_BACKOFF_MAX_MS = 30 * 60_000;
 
 /** `mergeable_state` values meaning "mergeable and checks passing". */
@@ -295,9 +310,12 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
     decisionKey: string,
   ): Promise<void> {
     const runId = this.beginRun(repo, prNumber);
+    const maxAttempts = this.options.maxAttempts ?? DEFAULT_AUTO_MERGE_MAX_ATTEMPTS;
     let result: AutoMergeResult;
     try {
-      result = await this.options.mergePr(repo, prNumber, state.headSha);
+      result = await this.options.mergePr(repo, prNumber, state.headSha, {
+        lastAttempt: state.failures + 1 >= maxAttempts,
+      });
     } catch (error) {
       result = { outcome: "failed", message: (error as Error).message, reviewed: false };
     }
@@ -315,12 +333,13 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
         state.nextAttemptAt = finishedAt + WAITING_BACKOFF_MS;
         break;
       case "deferred":
-        state.nextAttemptAt = finishedAt + DEFERRED_BACKOFF_MS;
+        // Not an attempt: wait for the quota's reset (never less than the
+        // floor), then evaluate this head again.
+        state.nextAttemptAt = Math.max(finishedAt + DEFERRED_BACKOFF_MS, result.retryAt ?? 0);
         break;
       case "failed": {
         state.failures += 1;
-        const max = this.options.maxAttempts ?? DEFAULT_AUTO_MERGE_MAX_ATTEMPTS;
-        if (state.failures >= max) {
+        if (state.failures >= maxAttempts) {
           console.warn(
             `⛔ [${this.name}] ${label} auto-merge failed ${state.failures} time(s); ` +
               "giving up until new commits land",
@@ -379,6 +398,9 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
         runStore.finishRun(runId, "escalated", result.message);
       } else if (result.outcome === "failed") {
         runStore.finishRun(runId, "failed", result.message);
+      } else if (result.outcome === "deferred" && result.retryAt !== undefined) {
+        // Visible as waiting on quota until the review resumes.
+        runStore.finishRun(runId, "deferred", result.message);
       } else {
         runStore.discardRun(runId);
       }

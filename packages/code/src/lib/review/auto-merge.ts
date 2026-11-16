@@ -73,6 +73,8 @@ export interface AutoMergeResult {
   message: string;
   /** Whether the agent review ran (tokens were spent). */
   reviewed: boolean;
+  /** `deferred` on an agent usage limit: when the quota returns (ms epoch). */
+  retryAt?: number;
 }
 
 /** GitHub operations on one PR (injected for tests). */
@@ -92,6 +94,11 @@ export interface AutoMergeOptions {
   expectedHeadSha?: string;
   /** Evaluate every gate (including the agent review) but do not merge. */
   dryRun?: boolean;
+  /**
+   * This is the head's final allowed attempt (the worker gives up after it):
+   * a failure is stated on the PR instead of ending silently.
+   */
+  lastAttempt?: boolean;
   /** Skip PR comments (tests). */
   noComment?: boolean;
   verbose?: boolean;
@@ -408,13 +415,24 @@ export async function autoMergePr(
 
   const ctx: GateContext = { options, github, baseRepo, prNumber, pr };
   const decision = await decideMerge(ctx);
-  if (decision.kind === "stop") {
-    if (decision.leftOpen) {
-      await postStatus(ctx, { kind: "left-open", headSha: pr.head.sha, reason: decision.leftOpen });
-    }
-    return { outcome: decision.outcome, message: decision.message, reviewed: decision.reviewed };
+  const result: AutoMergeResult =
+    decision.kind === "stop"
+      ? { outcome: decision.outcome, message: decision.message, reviewed: decision.reviewed }
+      : { ...(await mergeAtHead(ctx, decision)), reviewed: decision.reviewed };
+  if (decision.kind === "stop" && decision.leftOpen) {
+    await postStatus(ctx, { kind: "left-open", headSha: pr.head.sha, reason: decision.leftOpen });
+  } else if (result.outcome === "failed" && options.lastAttempt) {
+    // The worker stops retrying this head after this attempt.
+    await postStatus(ctx, {
+      kind: "left-open",
+      headSha: pr.head.sha,
+      reason: {
+        kind: "not-evaluable",
+        detail: `the automatic check kept failing (${result.message})`,
+      },
+    });
   }
-  return { ...(await mergeAtHead(ctx, decision)), reviewed: decision.reviewed };
+  return result;
 }
 
 type AgentReview =
