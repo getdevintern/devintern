@@ -142,6 +142,29 @@ describe("autoMergePr", () => {
     expect(github.merges).toHaveLength(0);
   });
 
+  test("a failure on the last attempt is stated on the PR; earlier failures are not", async () => {
+    const github = fakeGitHub([file("src/x.ts")]);
+    const early = await autoMergePr(URL, options(github, { verdict: "no json" }));
+    expect(early.outcome).toBe("failed");
+    expect(github.comments).toHaveLength(0);
+    const last = await autoMergePr(URL, options(github, { verdict: "no json", lastAttempt: true }));
+    expect(last.outcome).toBe("failed");
+    expect(github.comments).toHaveLength(1);
+    expect(github.comments[0]).toContain("kept failing");
+  });
+
+  test("a usage limit during review propagates (the worker defers) and posts nothing", async () => {
+    const { UsageLimitError } = await import("@devintern/agent-harness");
+    const github = fakeGitHub([file("src/x.ts")]);
+    const opts = options(github, { lastAttempt: true });
+    opts.agentRunner = async () => {
+      throw new UsageLimitError("in 2 hours");
+    };
+    await expect(autoMergePr(URL, opts)).rejects.toBeInstanceOf(UsageLimitError);
+    expect(github.comments).toHaveLength(0);
+    expect(github.merges).toHaveLength(0);
+  });
+
   test("review disabled rejects PRs that leave the safe paths, without the agent", async () => {
     const github = fakeGitHub([file("src/x.ts")]);
     const opts = options(github, { policy: { ...basePolicy, review: false } });

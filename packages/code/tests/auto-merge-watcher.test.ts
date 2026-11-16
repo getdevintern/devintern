@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { rmSync } from "fs";
+import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
@@ -9,7 +9,12 @@ import {
   autoMergeDecisionKey,
 } from "../src/lib/acquirers/auto-merge-watcher";
 import type { AutoMergePolledPr } from "../src/lib/acquirers/auto-merge-watcher";
-import { autoMergeCliArgs, parseAutoMergeResultLine } from "../src/lib/acquirers/auto-merge-cli";
+import {
+  autoMergeCliArgs,
+  parseAutoMergeResultLine,
+  runAutoMergeViaCli,
+  usageLimitRetryAt,
+} from "../src/lib/acquirers/auto-merge-cli";
 import type { AutoMergeResult } from "../src/lib/review/auto-merge";
 import { WebhookQueue } from "../src/lib/state/webhook-queue";
 import { WorkerState } from "../src/lib/state/worker-state";
@@ -23,7 +28,7 @@ describe("AutoMergeWatcherAcquirer", () => {
   let queue: WebhookQueue;
   let now: number;
   let pr: AutoMergePolledPr;
-  let calls: Array<{ prNumber: number; sha: string }>;
+  let calls: Array<{ prNumber: number; sha: string; lastAttempt?: boolean }>;
   let results: AutoMergeResult[];
   let enabled: boolean;
   let runs: Array<{ origin: string; status?: string; harness?: string } | null>;
@@ -40,8 +45,8 @@ describe("AutoMergeWatcherAcquirer", () => {
       now: () => now,
       quietSeconds: extra.quietSeconds ?? 0,
       fetchPr: async () => ({ data: pr, notModified: false }),
-      mergePr: async (_repo, prNumber, sha) => {
-        calls.push({ prNumber, sha });
+      mergePr: async (_repo, prNumber, sha, { lastAttempt }) => {
+        calls.push({ prNumber, sha, ...(lastAttempt ? { lastAttempt } : {}) });
         statusDuringMerge.push(runs.at(-1)?.status);
         return results.shift() ?? { outcome: "merged", message: "ok", reviewed: false };
       },
@@ -171,7 +176,42 @@ describe("AutoMergeWatcherAcquirer", () => {
       now += 60 * 60_000;
     }
     expect(calls).toHaveLength(3);
+    // Only the final attempt is flagged, so only it states the failure on the PR.
+    expect(calls.map((call) => call.lastAttempt ?? false)).toEqual([false, false, true]);
     expect(queue.hasProcessed(AUTO_MERGE_SOURCE, autoMergeDecisionKey(REPO, 7, HEAD))).toBe(true);
+  });
+
+  test("a usage limit waits for the quota reset, keeps the PR, and shows as deferred", async () => {
+    const resetAt = now + 3 * 60 * 60_000;
+    results = [
+      { outcome: "deferred", message: "agent usage limit", reviewed: false, retryAt: resetAt },
+    ];
+    const w = watcher();
+    await w.tick();
+    expect(calls).toHaveLength(1);
+    expect(liveRuns()).toEqual([{ origin: "auto_merge", status: "deferred" }]);
+    // Hourly passes before the reset never relaunch the check into the limit.
+    for (let i = 0; i < 2; i++) {
+      now += 60 * 60_000;
+      await w.tick();
+    }
+    expect(calls).toHaveLength(1);
+    expect(queue.hasProcessed(AUTO_MERGE_SOURCE, autoMergeDecisionKey(REPO, 7, HEAD))).toBe(false);
+    // The first pass after the reset reviews it; the deferral cost no attempt.
+    now = resetAt + 1;
+    await w.tick();
+    expect(calls).toHaveLength(2);
+    expect(calls[1]?.lastAttempt).toBeUndefined();
+  });
+
+  test("a deferral without a reset time retries after the floor and is not kept as a run", async () => {
+    results = [{ outcome: "deferred", message: "queue full", reviewed: false }];
+    const w = watcher();
+    await w.tick();
+    expect(liveRuns()).toEqual([]);
+    now += 5 * 60_000 + 1;
+    await w.tick();
+    expect(calls).toHaveLength(2);
   });
 });
 
@@ -255,15 +295,52 @@ describe("AutoMergeWatcherAcquirer dashboard hooks", () => {
 });
 
 describe("auto-merge CLI protocol", () => {
+  test("retry time comes from the child's usage-limit hint", () => {
+    const now = 1_000_000;
+    expect(usageLimitRetryAt({ untilMs: now + 5_000 }, now)).toBe(now + 5_000);
+    // A stale hint falls back to the period floor, then the generic fallback.
+    expect(usageLimitRetryAt({ untilMs: now - 1, period: "daily" }, now)).toBe(
+      now + 4 * 60 * 60_000,
+    );
+    expect(usageLimitRetryAt({}, now)).toBe(now + 60 * 60_000);
+  });
+
+  test("a pinned harness's usage limit defers until the child's reset hint", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "auto-merge-cli-"));
+    const entrypoint = join(dir, "stub-cli.ts");
+    // Stands in for `devintern auto-merge`: reports a usage limit like the CLI does.
+    writeFileSync(
+      entrypoint,
+      `import { writeFileSync } from "fs";
+writeFileSync(process.env.DEVINTERN_USAGE_LIMIT_FILE!, JSON.stringify({ untilMs: 4102444800000 }));
+process.exit(75);
+`,
+    );
+    try {
+      const result = await runAutoMergeViaCli("acme/pinned", 1, {
+        policy: { safePaths: [], denyPaths: [], review: true, method: "squash" },
+        expectedHeadSha: HEAD,
+        harnessPin: "claude-code",
+        entrypoint,
+        env: { ...process.env },
+      });
+      expect(result).toMatchObject({ outcome: "deferred", retryAt: 4102444800000 });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("policy round-trips into flags", () => {
     expect(
       autoMergeCliArgs(
         { safePaths: ["docs/**"], denyPaths: ["db/**"], review: false, method: "merge" },
         HEAD,
+        { lastAttempt: true },
       ),
     ).toEqual([
       "--expected-head",
       HEAD,
+      "--last-attempt",
       "--method",
       "merge",
       "--no-review",

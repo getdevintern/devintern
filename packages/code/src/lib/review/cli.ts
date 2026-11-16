@@ -214,6 +214,7 @@ export async function runAutoMergeCommand(args: string[]): Promise<void> {
   let prUrl: string | undefined;
   let expectedHeadSha: string | undefined;
   let dryRun = false;
+  let lastAttempt = false;
   let review = true;
   let verbose = false;
   let method: Method = "squash";
@@ -250,6 +251,9 @@ export async function runAutoMergeCommand(args: string[]): Promise<void> {
       review = false;
     } else if (arg === "--dry-run") {
       dryRun = true;
+    } else if (arg === "--last-attempt") {
+      // Worker-internal: a failure on this attempt is stated on the PR.
+      lastAttempt = true;
     } else if (arg === "-v" || arg === "--verbose") {
       verbose = true;
     } else if (arg === "--help" || arg === "-h") {
@@ -295,6 +299,7 @@ export async function runAutoMergeCommand(args: string[]): Promise<void> {
       policy: { safePaths, denyPaths, review, method },
       expectedHeadSha,
       dryRun,
+      lastAttempt,
       verbose,
     });
     const resultFd = Number(process.env.DEVINTERN_RESULT_FD);
