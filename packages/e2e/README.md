@@ -863,3 +863,7 @@ PR CI.
 ### Jira story-point estimation
 
 `tests/local/tracker-jira-estimation.test.ts` covers one-shot estimation, unchanged-task skips, re-estimation, and `--skip-comments` against the offline Jira fixture. `tests/local/worker-scheduled-estimation.test.ts` covers the same fake from a worker `[[estimations]]` schedule: one coalesced sweep, `estimate` run attribution, read-only git, and a later sweep that leaves the unchanged issue alone.
+
+### No-op runs (`--allow-no-changes`)
+
+`tests/local/cli-allow-no-changes.test.ts` runs the built CLI with the fixture agent's `no-change` mode against a local bare remote. Without the flag, `--create-pr` exits non-zero with `Implementation was not committed` and records a `failed` run. With `--allow-no-changes` (alone or with `--no-git`), it exits 0, records a `succeeded` run with no `pr_url`, and pushes no branch or commit. Against the offline Jira fake, the failure path posts a failure comment and moves the ticket back to its todo status. The no-op path posts no comment and leaves the ticket in its in-progress status.
