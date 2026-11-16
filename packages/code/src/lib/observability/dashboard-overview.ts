@@ -16,13 +16,14 @@ import { getHarness, parseHarnessList } from "@devintern/agent-harness";
 
 import type { RunOrigin, RunRecord } from "../state/run-recorder";
 import type { WorkspaceConfig } from "../workspace/config";
-import { parseEnvFile } from "../workspace/env";
-import { workspaceConfigPath, workspaceEnvPath } from "../workspace/paths";
+import { workspaceConfigPath } from "../workspace/paths";
 import type { ApiResponse, DashboardData, WorkerStatusView } from "./dashboard-api";
 import { resolveWorkerStatus } from "./dashboard-api";
 import { readDashboardFailoverState } from "./dashboard-db";
 import type { DashboardFailoverState } from "./dashboard-db";
 import { loadDashboardWorkspaceConfig } from "./dashboard-workspace";
+import { resolveHarnessChainSource } from "./harness-pause";
+import type { HarnessChainSource } from "./harness-pause";
 
 /** One unfinished run, trimmed for the capacity panel. */
 export interface OverviewRunningRun {
@@ -93,7 +94,7 @@ export interface OverviewHarnessEntry {
 
 export interface OverviewHarnesses {
   /** Where `AGENT_HARNESS` came from (workspace `.env` wins, like the worker). */
-  source: "workspace_env" | "process_env" | "default";
+  source: HarnessChainSource;
   entries: OverviewHarnessEntry[];
   /**
    * Entry the worker selects: the highest-priority one without an open
@@ -223,27 +224,6 @@ export function buildCapacity(runs: RunRecord[], config: WorkspaceConfig | null)
     unattributed,
     runs: trimmed,
   };
-}
-
-/**
- * Resolve the raw `AGENT_HARNESS` the worker would use. The workspace worker
- * applies the workspace `.env` over its process env at startup, so that file
- * wins; a non-workspace worker only has its process env.
- */
-export function resolveHarnessChainSource(workspaceDir: string): {
-  raw: string | undefined;
-  source: OverviewHarnesses["source"];
-} {
-  let fromWorkspace: string | undefined;
-  try {
-    fromWorkspace = parseEnvFile(workspaceEnvPath(workspaceDir)).AGENT_HARNESS;
-  } catch {
-    fromWorkspace = undefined;
-  }
-  if (fromWorkspace?.trim()) return { raw: fromWorkspace, source: "workspace_env" };
-  const fromProcess = process.env.AGENT_HARNESS;
-  if (fromProcess?.trim()) return { raw: fromProcess, source: "process_env" };
-  return { raw: undefined, source: "default" };
 }
 
 /**

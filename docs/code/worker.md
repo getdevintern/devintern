@@ -366,7 +366,7 @@ One exception: an edit that arrives while that ticket's run is still in flight a
 
 ## Ad-hoc tasks (`worker add`)
 
-Not every task comes from a tracker. `devintern worker add --repo <name> --title "..."` enqueues a durable one-off task against a registered workspace repo, and the running worker takes it through the full pipeline (checkout, agent, PR, retries) on its next poll. Coding agents can use it to delegate agreed follow-ups through the [devintern-delegate skill](agent-skills.md). See [Delegate Tasks to the Worker](delegation.md) for prerequisites, choosing `--repo`, writing a self-contained brief, the full option table, JSON output, idempotency, `--wait`, and `--resume`.
+Not every task comes from a tracker. `devintern worker add --repo <name> --title "..."` enqueues a durable one-off task against a registered workspace repo, and the running worker takes it through the full pipeline (checkout, agent, PR, retries) on its next poll. When every harness in the worker's `AGENT_HARNESS` chain has an open usage-limit window, `worker add` still enqueues the task but warns that it starts only after the earliest window resets (and suggests adding a fallback harness); `--json` results then carry a `harnessPausedUntil` ISO-8601 timestamp. Coding agents can use it to delegate agreed follow-ups through the [devintern-delegate skill](agent-skills.md). See [Delegate Tasks to the Worker](delegation.md) for prerequisites, choosing `--repo`, writing a self-contained brief, the full option table, JSON output, idempotency, `--wait`, and `--resume`.
 
 ## Working windows (quiet hours)
 
