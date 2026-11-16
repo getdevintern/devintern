@@ -493,6 +493,42 @@ export interface WorkerResponse {
   queueDbMissing: boolean;
 }
 
+/** Where a queued item came from. */
+export type QueuedWorkKind = "ad-hoc" | "retry" | "webhook";
+
+/** One pending item from `GET /api/queue`; running rows are active work instead. */
+export interface QueuedWorkItem {
+  /** Stable across polls: `<kind>:<row id>`. */
+  id: string;
+  kind: QueuedWorkKind;
+  title: string;
+  taskKey?: string;
+  repo?: string;
+  actor?: string;
+  createdAt: number;
+  /** Earliest pickup time while backing off after a deferral. */
+  notBefore?: number;
+  deferCount?: number;
+  message?: string;
+  /** Ad-hoc prompt body, clipped server-side. */
+  body?: string;
+  bodyTruncated?: boolean;
+  /** Retry: the run being retried. */
+  runId?: number;
+  eventType?: string;
+  prNumber?: number;
+  prUrl?: string;
+  attempts?: number;
+  lastError?: string;
+}
+
+export interface QueuedWorkResponse {
+  /** Pending items in the order they become claimable. */
+  items: QueuedWorkItem[];
+  /** Every pending item, including any beyond the listed ones. */
+  total: number;
+}
+
 /** One open agent-created PR (registry rows reconciled with GitHub by the worker). */
 export interface AgentPrRecord {
   repo: string;

@@ -31,6 +31,7 @@ import {
   handleWorkerStatus,
 } from "./lib/observability/dashboard-api";
 import { handleOverview } from "./lib/observability/dashboard-overview";
+import { handleQueuedWork } from "./lib/observability/queued-work";
 import { handleCreateTask } from "./lib/observability/dashboard-tasks";
 import { DashboardReports } from "./lib/observability/dashboard-report";
 import type { DashboardReportDeps } from "./lib/observability/dashboard-report";
@@ -446,6 +447,9 @@ export function startDashboardServer(
         }
         if (pathname === "/api/worker") {
           return json(handleWorkerStatus(data));
+        }
+        if (pathname === "/api/queue") {
+          return json(handleQueuedWork(data));
         }
         if (pathname === "/api/overview") {
           return json(handleOverview(data));
