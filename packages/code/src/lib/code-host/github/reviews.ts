@@ -741,6 +741,60 @@ export class GitHubReviewsClient {
   }
 
   /**
+   * Login that comments made with this client's credential are authored by:
+   * `<app-slug>[bot]` for GitHub App auth, otherwise the token's user.
+   */
+  async getCommentAuthorLogin(owner: string, repo: string): Promise<string> {
+    if (!this.token && this.appAuth) {
+      return `${(await this.appAuth.getAppInfo()).slug}[bot]`;
+    }
+    const user = await this.apiRequest<{ login: string }>("GET", "/user", owner, repo);
+    return user.login;
+  }
+
+  /**
+   * Create or edit this credential's comment that starts with `marker`. Only
+   * comments authored by this credential are ever edited, so a human
+   * comment copying the marker is never overwritten.
+   */
+  async upsertMarkedIssueComment(
+    owner: string,
+    repo: string,
+    prNumber: number,
+    marker: string,
+    body: string,
+  ): Promise<void> {
+    const login = (await this.getCommentAuthorLogin(owner, repo)).toLowerCase();
+    let existingId: number | undefined;
+    for (let page = 1; page <= 30 && existingId === undefined; page++) {
+      const batch = await this.apiRequest<
+        Array<{ id: number; body: string | null; user: { login: string } | null }>
+      >(
+        "GET",
+        `/repos/${owner}/${repo}/issues/${prNumber}/comments?per_page=100&page=${page}`,
+        owner,
+        repo,
+      );
+      existingId = batch.find(
+        (comment) =>
+          comment.user?.login.toLowerCase() === login && comment.body?.startsWith(marker),
+      )?.id;
+      if (batch.length < 100) break;
+    }
+    if (existingId !== undefined) {
+      await this.apiRequest(
+        "PATCH",
+        `/repos/${owner}/${repo}/issues/comments/${existingId}`,
+        owner,
+        repo,
+        { body },
+      );
+      return;
+    }
+    await this.postPullRequestComment(owner, repo, prNumber, body);
+  }
+
+  /**
    * Fetch conversation-tab issue comments on a pull request.
    *
    * @param owner - Repository owner

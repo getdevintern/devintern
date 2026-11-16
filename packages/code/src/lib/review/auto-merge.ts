@@ -29,6 +29,8 @@ import type {
 import { loadPrompt } from "../prompts/loader";
 import { untrustedContentBlock } from "../prompts/untrusted-content";
 import { Utils } from "../utils";
+import { AUTO_MERGE_COMMENT_MARKER, buildAutoMergeStatusComment } from "./auto-merge-comment";
+import type { AutoMergeCommentStatus, LeftOpenReason } from "./auto-merge-comment";
 import { classifyChangedPaths, parseMergeSafetyVerdict } from "./merge-gate";
 import type { AutoMergeMethod, MergePathPolicy } from "./merge-gate";
 
@@ -80,7 +82,8 @@ export interface AutoMergeGitHub {
   listReviews(): Promise<Array<{ state: string; user: { login: string } | null }>>;
   getDiff(): Promise<string>;
   merge(sha: string, method: AutoMergeMethod): Promise<PullRequestMergeResult>;
-  comment(body: string): Promise<void>;
+  /** Create or edit the PR's auto-merge status comment. */
+  upsertStatusComment(body: string): Promise<void>;
 }
 
 export interface AutoMergeOptions {
@@ -147,12 +150,6 @@ export function outstandingChangeRequests(
   return [...latest].filter(([, state]) => state === "CHANGES_REQUESTED").map(([login]) => login);
 }
 
-/** Strip mentions so a posted reason can never ping or trigger anyone. */
-function neutralizeForComment(text: string, maxLength = 600): string {
-  const flattened = text.replace(/\s+/g, " ").trim().replace(/@/g, "@​");
-  return flattened.length > maxLength ? `${flattened.slice(0, maxLength)}…` : flattened;
-}
-
 /** HTTP status embedded in a GitHub client error message, if any. */
 function gitHubErrorStatus(error: unknown): number | undefined {
   const match = /GitHub API error \((\d{3})\)/.exec(
@@ -195,7 +192,8 @@ function defaultGitHub(owner: string, repo: string, prNumber: number): AutoMerge
     listReviews: () => client.listPullRequestReviews(owner, repo, prNumber),
     getDiff: () => client.getPullRequestDiff(owner, repo, prNumber),
     merge: (sha, method) => client.mergePullRequest(owner, repo, prNumber, { sha, method }),
-    comment: (body) => client.postPullRequestComment(owner, repo, prNumber, body),
+    upsertStatusComment: (body) =>
+      client.upsertMarkedIssueComment(owner, repo, prNumber, AUTO_MERGE_COMMENT_MARKER, body),
   };
 }
 
@@ -231,7 +229,14 @@ interface GateContext {
 /** Outcome of gates 1 and 2: merge (with why) or stop (with a result). */
 type MergeDecision =
   | { kind: "merge"; reason: string; viaReview: boolean; reviewed: boolean }
-  | { kind: "stop"; outcome: AutoMergeOutcome; message: string; reviewed: boolean };
+  | {
+      kind: "stop";
+      outcome: AutoMergeOutcome;
+      message: string;
+      reviewed: boolean;
+      /** Set for rejections: what the PR's status comment explains. */
+      leftOpen?: LeftOpenReason;
+    };
 
 const stop = (outcome: AutoMergeOutcome, message: string, reviewed = false): MergeDecision => ({
   kind: "stop",
@@ -240,48 +245,56 @@ const stop = (outcome: AutoMergeOutcome, message: string, reviewed = false): Mer
   reviewed,
 });
 
+/** A rejection: the PR stays open, and its status comment says why. */
+const leaveOpen = (message: string, leftOpen: LeftOpenReason, reviewed = false): MergeDecision => ({
+  kind: "stop",
+  outcome: "rejected",
+  message,
+  reviewed,
+  leftOpen,
+});
+
 /** Gates 1 (path policy) and 2 (agent review). */
 async function decideMerge(ctx: GateContext): Promise<MergeDecision> {
   const { options, github, baseRepo, prNumber, pr } = ctx;
-  const { policy, dryRun = false, noComment = false } = options;
+  const { policy } = options;
 
   const files = await github.listFiles();
   if (pr.changed_files !== undefined && files.length < pr.changed_files) {
-    return stop(
-      "rejected",
-      `GitHub listed ${files.length} of ${pr.changed_files} changed files; too large to evaluate`,
-    );
+    const detail = `GitHub listed only ${files.length} of ${pr.changed_files} changed files`;
+    return leaveOpen(`${detail}; too large to evaluate`, { kind: "not-evaluable", detail });
   }
   const classification = classifyChangedPaths(
     files.map((file) => ({ path: file.filename, previousPath: file.previous_filename })),
     policy,
   );
   if (classification.kind === "denied") {
-    return stop(
-      "rejected",
-      `${classification.path} matches deny pattern ${classification.pattern}`,
-    );
+    const { path, pattern } = classification;
+    return leaveOpen(`${path} matches deny pattern ${pattern}`, { kind: "denied", path, pattern });
   }
-  if (classification.kind === "invalid") return stop("rejected", classification.reason);
+  if (classification.kind === "invalid") {
+    return leaveOpen(classification.reason, {
+      kind: "not-evaluable",
+      detail: classification.reason,
+    });
+  }
   if (classification.kind === "safe") {
     const reason = "every change is inside the configured safe paths";
     console.log(`✅ ${baseRepo}#${prNumber}: ${reason}; no agent review needed`);
     return { kind: "merge", reason, viaReview: false, reviewed: false };
   }
   if (!policy.review) {
-    return stop(
-      "rejected",
+    return leaveOpen(
       `${classification.outside.length} changed path(s) outside the safe paths ` +
         `(e.g. ${classification.outside[0]}) and agent review is disabled`,
+      { kind: "outside-safe-paths", paths: classification.outside },
     );
   }
 
   const diff = await github.getDiff();
   if (diff.length > MAX_REVIEW_DIFF_CHARS) {
-    return stop(
-      "rejected",
-      `diff is ${diff.length} characters, above the ${MAX_REVIEW_DIFF_CHARS} review limit`,
-    );
+    const detail = `the diff is ${diff.length} characters, above the ${MAX_REVIEW_DIFF_CHARS}-character review limit`;
+    return leaveOpen(detail, { kind: "not-evaluable", detail });
   }
   console.log(
     `🔎 ${baseRepo}#${prNumber}: ${classification.outside.length} path(s) outside the safe ` +
@@ -301,14 +314,11 @@ async function decideMerge(ctx: GateContext): Promise<MergeDecision> {
   });
   if (verdict.kind !== "verdict") return stop(verdict.kind, verdict.message, verdict.ran);
   if (!verdict.safe) {
-    if (!noComment && !dryRun) {
-      await postComment(
-        github,
-        `🛑 devintern did not auto-merge this pull request. The merge-safety review found: ` +
-          `${neutralizeForComment(verdict.reason)}\n\nMerge it manually if you disagree.`,
-      );
-    }
-    return stop("rejected", `agent review: ${verdict.reason}`, true);
+    return leaveOpen(
+      `agent review: ${verdict.reason}`,
+      { kind: "agent-unsafe", reason: verdict.reason },
+      true,
+    );
   }
   return { kind: "merge", reason: verdict.reason, viaReview: true, reviewed: true };
 }
@@ -319,7 +329,7 @@ async function mergeAtHead(
   decision: Extract<MergeDecision, { kind: "merge" }>,
 ): Promise<Pick<AutoMergeResult, "outcome" | "message">> {
   const { options, github, baseRepo, pr } = ctx;
-  const { policy, dryRun = false, noComment = false, verbose = false } = options;
+  const { policy, dryRun = false, verbose = false } = options;
   const message = decision.viaReview ? `agent review: ${decision.reason}` : decision.reason;
 
   // Re-check right before merging: the review can take minutes.
@@ -347,15 +357,12 @@ async function mergeAtHead(
       message: `GitHub did not merge the PR: ${merge.message ?? "no reason given"}`,
     };
   }
-  if (!noComment) {
-    const why = decision.viaReview
-      ? `the merge-safety review judged it safe: ${neutralizeForComment(decision.reason)}`
-      : "every change is inside the workspace's safe paths";
-    await postComment(
-      github,
-      `🤖 devintern auto-merged this pull request (${policy.method}) because ${why}.`,
-    );
-  }
+  await postStatus(ctx, {
+    kind: "merged",
+    method: policy.method,
+    headSha: pr.head.sha,
+    ...(decision.viaReview ? { agentReason: decision.reason } : {}),
+  });
   if (verbose) console.log(`   merge commit ${merge.sha ?? "(unknown)"}`);
   return { outcome: "merged", message };
 }
@@ -402,6 +409,9 @@ export async function autoMergePr(
   const ctx: GateContext = { options, github, baseRepo, prNumber, pr };
   const decision = await decideMerge(ctx);
   if (decision.kind === "stop") {
+    if (decision.leftOpen) {
+      await postStatus(ctx, { kind: "left-open", headSha: pr.head.sha, reason: decision.leftOpen });
+    }
     return { outcome: decision.outcome, message: decision.message, reviewed: decision.reviewed };
   }
   return { ...(await mergeAtHead(ctx, decision)), reviewed: decision.reviewed };
@@ -459,10 +469,12 @@ async function reviewWithAgent(params: {
   }
 }
 
-async function postComment(github: AutoMergeGitHub, body: string): Promise<void> {
+/** Create or edit the PR's status comment (never in dry runs); failures only warn. */
+async function postStatus(ctx: GateContext, status: AutoMergeCommentStatus): Promise<void> {
+  if (ctx.options.dryRun || ctx.options.noComment) return;
   try {
-    await github.comment(body);
+    await ctx.github.upsertStatusComment(buildAutoMergeStatusComment(status));
   } catch (error) {
-    console.warn(`⚠️  Failed to post auto-merge comment: ${(error as Error).message}`);
+    console.warn(`⚠️  Failed to update the auto-merge status comment: ${(error as Error).message}`);
   }
 }

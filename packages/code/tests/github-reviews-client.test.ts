@@ -317,3 +317,42 @@ describe("GitHubReviewsClient auth failure path", () => {
     }
   });
 });
+
+describe("GitHubReviewsClient.upsertMarkedIssueComment", () => {
+  const MARKER = "<!-- marker -->";
+
+  function recorder(comments: Array<{ id: number; body: string; user: { login: string } }>) {
+    const calls: Array<{ method: string; url: string; body?: string }> = [];
+    globalThis.fetch = mockFetch(async (url, init) => {
+      const method = init?.method ?? "GET";
+      const target = String(url);
+      calls.push({ method, url: target, body: init?.body as string | undefined });
+      if (target.endsWith("/user")) return jsonResponse(200, { login: "devintern-bot" });
+      if (method === "GET") return jsonResponse(200, comments);
+      return jsonResponse(200, { id: 99 });
+    });
+    return calls;
+  }
+
+  test("edits this credential's marked comment in place", async () => {
+    const calls = recorder([
+      { id: 1, body: `${MARKER}\nhuman copy`, user: { login: "alice" } },
+      { id: 2, body: `${MARKER}\nold status`, user: { login: "Devintern-Bot" } },
+    ]);
+    const client = new GitHubReviewsClient({ token: "t", authMode: "token-only" });
+    await client.upsertMarkedIssueComment("acme", "widgets", 7, MARKER, `${MARKER}\nnew`);
+    const write = calls.at(-1)!;
+    expect(write.method).toBe("PATCH");
+    expect(write.url).toEndWith("/repos/acme/widgets/issues/comments/2");
+    expect(JSON.parse(write.body!)).toEqual({ body: `${MARKER}\nnew` });
+  });
+
+  test("creates a comment when only other authors carry the marker", async () => {
+    const calls = recorder([{ id: 1, body: `${MARKER}\nhuman copy`, user: { login: "alice" } }]);
+    const client = new GitHubReviewsClient({ token: "t", authMode: "token-only" });
+    await client.upsertMarkedIssueComment("acme", "widgets", 7, MARKER, `${MARKER}\nnew`);
+    const write = calls.at(-1)!;
+    expect(write.method).toBe("POST");
+    expect(write.url).toEndWith("/repos/acme/widgets/issues/7/comments");
+  });
+});
