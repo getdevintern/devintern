@@ -196,6 +196,41 @@ bun run --filter @getdevintern/code build
 bun run --filter @devintern/e2e test
 ```
 
+## Worker Jira polling
+
+`tests/local/worker-jira-polling.test.ts` starts one real `devintern worker`
+with `[defaults].tracker = "jira"`, `[defaults].task_query = 'text ~ "<run
+marker>"'`, and `poll_interval = 1` against the in-process Jira fake
+(`providers/fake-jira.ts`, created with `wallClock: true` so tracker stamps
+follow the real clock that the detector window and retry gate compare with).
+It needs no Jira project, token, or network access. Build the CLI first. The
+test skips only when `packages/code/dist` is absent, and a skip is not a pass.
+
+In one workflow it proves:
+
+1. Pickup. The eligible issue is implemented once: its branch is pushed to the
+   bare remote, a `succeeded` run record exists, the issue gets one
+   implementation comment, and it moves to In Progress. A decoy outside the
+   query is never touched. `tracker.searches` contains the user query and the
+   detector's `updated >= "-Nm"` window (N >= 6).
+2. No re-run while unchanged. Over several further ticks the issue is not run
+   again. A bare remote has no code-host platform, so the run succeeds without
+   a PR, and the worker records the actioned marker for it.
+3. Re-arm on change. Editing the description on the fake runs it exactly once
+   more.
+4. Retry gate. A second issue whose agent reports incomplete
+   (`E2E_INCOMPLETE_PROMPT_MARKER`) gets the "Implementation Incomplete"
+   comment and moves back to To Do. Its bot comment and transition do not
+   trigger a retry. One human comment unlocks exactly one retry.
+5. Cursor persistence. After a graceful stop and restart on the same
+   workspace, the first search is the detector window from the persisted
+   cursor, and nothing already processed runs again.
+
+```bash
+bun run --filter @getdevintern/code build
+bun run --filter @devintern/e2e test
+```
+
 ## Scheduled Jira story-point estimation
 
 `tests/local/worker-scheduled-estimation.test.ts` starts one real

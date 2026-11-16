@@ -239,6 +239,18 @@ pull request, or commit is created. A second driven occurrence runs the sweep
 again and does not estimate the unchanged issue. No live tracker or credential
 is required. The only skip is the built-CLI guard.
 
+`tests/local/worker-jira-polling.test.ts` drives the worker's polling loop
+(`[defaults].task_query`, `poll_interval = 1`) against the same fake. The fake
+evaluates a documented JQL subset: clauses split on top-level `AND`, outer
+parentheses stripped, `updated >= "-Nm"` against each issue's `updated` stamp
+relative to the wall clock, and quoted text terms as before. The test covers
+single pickup of the matching issue (branch, run record, comment, transition),
+a decoy that is never run, no re-run while the issue is unchanged (the no-PR
+actioned marker), exactly one re-run after a description edit, the retry gate
+after an incomplete run (unlocked by exactly one human comment), and cursor
+resume after a graceful restart. The PR-created actioned marker on a real code
+host remains live-only.
+
 Endpoints covered:
 
 - `GET /rest/api/3/myself`

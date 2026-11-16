@@ -23,8 +23,18 @@ const promptMode = agentInput.includes("You are reviewing a pull request")
   : agentInput.includes("## Feedback to Address")
     ? "auto-review-fix"
     : undefined;
+// Per-prompt `incomplete` mode for a long-lived worker that must succeed on one
+// ticket and report another incomplete. Like E2E_FAIL_PROMPT_MARKER below, the
+// marker must be alphanumeric so Markdown escaping cannot hide it.
+const incompletePromptMarker = process.env.E2E_INCOMPLETE_PROMPT_MARKER;
+if (incompletePromptMarker && !/^[A-Za-z0-9]+$/.test(incompletePromptMarker)) {
+  throw new Error("E2E_INCOMPLETE_PROMPT_MARKER must be alphanumeric");
+}
+const markerMode =
+  incompletePromptMarker && agentInput.includes(incompletePromptMarker) ? "incomplete" : undefined;
 const mode =
   promptMode ??
+  markerMode ??
   process.env.E2E_AGENT_MODE ??
   (agentInput.includes("# Resolve Merge Conflicts")
     ? "conflict"

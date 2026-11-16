@@ -321,6 +321,8 @@ Retry bookkeeping lives in `~/.devintern/state/queue.db` next to the worker's cu
 
 Once a ticket's pull request is created the worker records it as **actioned** in `~/.devintern/state/queue.db` and keeps it out of the sweep until the ticket genuinely changes — even when it still matches `[defaults].task_query`. This is what stops a label-based tracker (GitHub, GitLab) from re-implementing the same open issue in a loop, and it works for every polled tracker.
 
+A worker run that completes successfully without creating a PR is recorded the same way. That happens when PR creation fails (for example, a remote that is not GitHub, GitLab, or Bitbucket) or when `[defaults].worker_task_args` omits `--create-pr`. Without the marker, the worker's own completion comment and status change would look like a ticket update and re-run the task on every poll.
+
 If the project configures `prStatus` in `.devintern-code/settings.json`, the worker also moves the ticket to that status/label first. The local marker is recorded even when no `prStatus` is set (the worker logs a warning suggesting one), and even when the transition fails — a missing label, missing permission, or transient API error never makes the worker lose track of the ticket or fail the run that just created the PR.
 
 A ticket re-arms when any field the marker records changes:
