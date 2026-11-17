@@ -625,6 +625,7 @@ describe("createIdleWorkerAutoUpdater", () => {
         held = true;
       },
       resume: () => undefined,
+      isDraining: () => false,
       inFlightCount: () => 0,
       queuedCount: () => 2,
     };

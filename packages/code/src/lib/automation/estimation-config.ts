@@ -1,6 +1,8 @@
 import { CronExpressionParser } from "cron-parser";
 
 import { parseAutomationInterval } from "./config";
+import { parseAgentSelection } from "../agent/selection";
+import type { AgentSelection } from "../agent/selection";
 
 /**
  * One workspace `[[estimations]]` entry: a scheduled story-point sweep.
@@ -9,11 +11,18 @@ import { parseAutomationInterval } from "./config";
  * `query` — the automation prompt pipeline is never used, and there is no
  * `repo` because estimation never touches a repository.
  */
-export interface EstimationConfig {
+export interface EstimationConfig extends AgentSelection {
   id: string;
   enabled: boolean;
   /** Tracker query selecting the tickets to estimate (same language as `--query`). */
   query: string;
+  /**
+   * Optional `[[teams]]` name whose tracker and credentials the sweep uses.
+   * Omitted: the sweep runs against `[defaults].tracker` with the shared
+   * workspace env. The workspace parser canonicalizes this to the declared
+   * team name (team names match case-insensitively).
+   */
+  team?: string;
   cron?: string;
   interval?: string;
   intervalMs?: number;
@@ -68,6 +77,9 @@ export function parseEstimationEntries(value: unknown): {
     if (typeof enabledValue !== "boolean") errors.push(`${label}.enabled must be a boolean.`);
     const query = stringValue("query");
     if (!query) errors.push(`${label}.query is required.`);
+    // Existence and estimate support are checked by the workspace parser,
+    // which knows the configured [[teams]].
+    const team = stringValue("team");
 
     const cron = stringValue("cron");
     const interval = stringValue("interval");
@@ -90,6 +102,8 @@ export function parseEstimationEntries(value: unknown): {
       errors.push(`${label}.interval must use a positive duration such as 15m, 6h, or 1d.`);
     }
 
+    const selection = parseAgentSelection(table, { label, id }, errors);
+
     if (
       id &&
       typeof enabledValue === "boolean" &&
@@ -101,9 +115,11 @@ export function parseEstimationEntries(value: unknown): {
         id,
         enabled: enabledValue,
         query,
+        ...(team ? { team } : {}),
         cron,
         interval,
         intervalMs: intervalMs ?? undefined,
+        ...selection,
       });
     }
   }

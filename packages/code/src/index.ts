@@ -8,6 +8,7 @@ import type { ResolvedHarness } from "@devintern/agent-harness";
 import { isMarkdownFilePath } from "@devintern/task-trackers";
 import { captureError, flushErrorTracking } from "@devintern/utils";
 import { setSandboxOverride } from "./lib/agent/sandbox";
+import { beginShutdown, isShuttingDown } from "./lib/cli/shutdown-state";
 import { initSentryOnce } from "./lib/observability/sentry-init";
 import { flushAnalytics, isAnonymousIdNewlyCreated, track } from "./lib/observability/analytics";
 import type { AnalyticsPropValue } from "./lib/observability/analytics";
@@ -30,6 +31,7 @@ import {
   VERSION,
   checkForCliUpdate,
   enforceLicenseOrExit,
+  findEnvFileArg,
   getLoadedEnvPath,
   loadEnvironment,
   loadSupabaseConfig,
@@ -38,6 +40,7 @@ import {
 } from "./lib/cli/bootstrap";
 import { isSubcommandCommand, createProgram } from "./lib/cli/program";
 import type { ProgramOptions } from "./lib/cli/program";
+import { hasHelpArg } from "./lib/cli/help";
 import { validateEnvironment } from "./lib/config/validate-environment";
 import { isWorkerTaskProcess, runContext } from "./lib/cli/context";
 import { AUTOMATION_ACCESS_EXIT_CODE } from "./lib/worker/usage-limit-protocol";
@@ -49,7 +52,11 @@ import { runInitCommand } from "./lib/init/cli";
 import { runWorkerCli } from "./lib/worker/cli";
 import { runDashboardCommand, runDoctorCommand } from "./lib/observability/cli";
 import { runWebhookCommand } from "./lib/code-host/cli";
-import { runAddressReviewCommand, runResolveConflictsCommand } from "./lib/review/cli";
+import {
+  runAddressReviewCommand,
+  runAutoMergeCommand,
+  runResolveConflictsCommand,
+} from "./lib/review/cli";
 import { runLoginCommand, runLogoutCommand, runWhoamiCommand } from "./lib/account/cli";
 import { runSandboxCommand } from "./lib/agent/cli";
 import { runAutomationsCommand } from "./lib/automation/cli";
@@ -60,15 +67,7 @@ const __filename_resolved = fileURLToPath(import.meta.url);
 const __dirname_resolved = dirname(__filename_resolved);
 setEnvironmentEntryDir(__dirname_resolved);
 
-const KNOWN_SANDBOX_PROVIDERS = new Set([
-  "none",
-  "auto",
-  "native",
-  "nono",
-  "srt",
-  "docker",
-  "smolvm",
-]);
+const KNOWN_SANDBOX_PROVIDERS = new Set(["none", "auto", "native", "nono", "docker"]);
 
 /** Allowlisted, non-identifying props for the `cli_run` analytics event. */
 function buildCliRunProps(tracker: string): Record<string, AnalyticsPropValue | undefined> {
@@ -107,6 +106,13 @@ if (process.argv[2] === "init") {
   // Handle worker command - long-running workspace daemon.
   await runWorkerCli(process.argv.slice(3));
 } else if (process.argv[2] === "workspace") {
+  if (hasHelpArg(process.argv.slice(3))) {
+    console.log("Usage: devintern worker <command>");
+    console.log("");
+    console.log("Workspace setup and management live under `devintern worker`.");
+    console.log("Run `devintern worker --help` for available commands.");
+    process.exit(0);
+  }
   console.error("❌ Unknown command: workspace");
   console.error("   Workspace setup and management live under `devintern worker`.");
   console.error("   Run `devintern worker --help` for available commands.");
@@ -119,6 +125,8 @@ if (process.argv[2] === "init") {
   await runAddressReviewCommand(process.argv.slice(3));
 } else if (process.argv[2] === "resolve-conflicts") {
   await runResolveConflictsCommand(process.argv.slice(3));
+} else if (process.argv[2] === "auto-merge") {
+  await runAutoMergeCommand(process.argv.slice(3));
 } else if (process.argv[2] === "login") {
   await runLoginCommand(process.argv);
 } else if (process.argv[2] === "logout") {
@@ -134,8 +142,12 @@ if (process.argv[2] === "init") {
 } else if (process.argv[2] === "whoami") {
   await runWhoamiCommand();
 } else {
-  // Load environment variables early (before CLI parsing)
-  loadEnvironment();
+  // Load environment variables early (before CLI parsing). Peek `--env-file`
+  // from argv so an explicit file is the only `.env` source: loading the
+  // implicit project `.env` first would leave its values in place for every
+  // key the explicit file omits (for example, a project-controlled
+  // JIRA_BASE_URL paired with the user's real token).
+  loadEnvironment(findEnvFileArg(process.argv));
 }
 
 /**
@@ -379,11 +391,9 @@ process.on("unhandledRejection", (error: Error) => {
 });
 
 // Handle process termination signals
-let shuttingDown = false;
-
 async function gracefulShutdown(signal: "SIGINT" | "SIGTERM", exitCode: number): Promise<void> {
-  if (shuttingDown) return;
-  shuttingDown = true;
+  if (isShuttingDown()) return;
+  beginShutdown();
   console.log(`\n\n⚠️  Received ${signal}, cleaning up...`);
   // If a task is mid-flight, tell the tracker it was interrupted instead of
   // leaving it silently in "In Progress" with no PR and no feedback.

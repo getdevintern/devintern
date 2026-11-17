@@ -50,6 +50,13 @@ export interface TrackerFixture {
    */
   readonly openState: string;
   /**
+   * Where the workflow status lives. Issue trackers such as GitHub and GitLab
+   * use labels (default); workflow trackers such as Jira use a state/status
+   * field. Assertions branch on this value instead of treating every provider
+   * status as a label.
+   */
+  readonly statusKind?: "labels" | "state";
+  /**
    * Explicit tracker configuration/credentials for the CLI subprocess. This is
    * merged into the isolated environment; nothing is inherited implicitly.
    */
@@ -75,6 +82,12 @@ export interface TrackerFixture {
   deleteComment(commentId: string): Promise<void>;
   /** Read the current state/labels/body of a scenario-owned ticket. */
   getTicket(ticketKey: string): Promise<TrackerTicketState>;
+  /**
+   * Current workflow status for a state-based tracker. Optional for
+   * label-based trackers, whose status is already visible in
+   * {@link TrackerTicketState.labels}.
+   */
+  getStatus?(ticketKey: string): Promise<string>;
   /** List all comments on a scenario-owned ticket (oldest first). */
   listComments(ticketKey: string): Promise<TrackerComment[]>;
   /**

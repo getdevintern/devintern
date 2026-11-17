@@ -16,13 +16,15 @@ interface GitLabIssueNote {
 }
 
 /**
- * Local GitLab Issues tracker fixture.
+ * Local or hosted GitLab Issues tracker fixture.
  *
- * The tracker source is a dedicated private project created by the scenario on
- * the local Self-Managed instance. The code host stays GitHub (see
- * {@link TrackerScenario}), so this fixture never touches repository contents
- * and only manages the project's issues, notes and labels. The project is
- * owned by the fixture and permanently removed in {@link cleanup}.
+ * The tracker source is a dedicated private project. On the local Self-Managed
+ * instance the scenario creates the project and permanently removes it during
+ * cleanup. Hosted GitLab.com cannot permanently delete projects on demand, so
+ * the suite there reuses a pre-created project and only closes its issues.
+ * The code host stays GitHub (see {@link TrackerScenario}), so this fixture
+ * never touches repository contents and only manages the project's issues,
+ * notes and labels.
  */
 export class GitLabTracker implements TrackerFixture {
   readonly type = "gitlab";
@@ -37,6 +39,7 @@ export class GitLabTracker implements TrackerFixture {
     private readonly token: string,
     private readonly baseUrl: string,
     private readonly statusLabels: string[] = [],
+    private readonly options: { deleteProject?: boolean } = {},
   ) {
     if (!token.trim()) throw new Error("GitLab tracker token must not be empty");
     if (!Number.isInteger(project.id) || project.id <= 0) {
@@ -161,6 +164,9 @@ export class GitLabTracker implements TrackerFixture {
 
   /** Permanently remove the scenario-owned issue project and its contents. */
   async cleanup(): Promise<void> {
+    // Hosted GitLab.com retains deleted projects and does not allow the suite
+    // to create/remove a project per run, so it reuses a configured project.
+    if (this.options.deleteProject === false) return;
     await this.gitlab.deleteProject(this.project);
   }
 

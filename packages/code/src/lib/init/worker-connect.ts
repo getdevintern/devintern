@@ -490,6 +490,24 @@ async function runGitLabConnectTargets(
   return 0;
 }
 
+/**
+ * Group repositories by owning account.
+ *
+ * A GitHub App installation lives on one account, so repositories from the same
+ * owner can share one install selection; repositories from different owners
+ * each need their own authorization step.
+ */
+function groupReposByOwner(repos: string[]): string[][] {
+  const groups = new Map<string, string[]>();
+  for (const repo of repos) {
+    const owner = repo.split("/")[0]?.toLowerCase() ?? repo.toLowerCase();
+    const group = groups.get(owner);
+    if (group) group.push(repo);
+    else groups.set(owner, [repo]);
+  }
+  return [...groups.values()];
+}
+
 /** Verify every workspace GitHub repository, skipping ones already paired. */
 async function runGitHubConnectTargets(
   config: WorkspaceConfig,
@@ -502,14 +520,17 @@ async function runGitHubConnectTargets(
     console.error("❌ No GitHub repositories found in workspace.toml.");
     return 1;
   }
-  const state = loadRelayState(workspaceDir);
   let failures = 0;
-  for (const repo of repos) {
-    if (hasGitHubRelayRegistration(state, repo)) {
+  for (const group of groupReposByOwner(repos)) {
+    // Re-read after every pairing: the previous group's callback updated the
+    // verified repositories in the relay state.
+    const state = loadRelayState(workspaceDir);
+    const unverified = group.filter((repo) => !hasGitHubRelayRegistration(state, repo));
+    for (const repo of group.filter((repo) => hasGitHubRelayRegistration(state, repo))) {
       console.log(`✅ ${repo} is already verified; skipping.`);
-      continue;
     }
-    const result = await runConnect("github", { ...connectDeps, repo });
+    if (unverified.length === 0) continue;
+    const result = await runConnect("github", { ...connectDeps, repos: unverified });
     if (result !== 0) failures++;
   }
   if (failures > 0) {

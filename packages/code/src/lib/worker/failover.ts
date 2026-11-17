@@ -32,11 +32,15 @@ import type {
 import { HarnessFailover } from "../agent/harness-failover";
 import type { FailoverOutcome } from "../agent/harness-failover";
 import { HARNESS_CHAIN_ENV, resolveAgentModel } from "../agent/model";
+import { pinnedHarnessChildEnv } from "../agent/selection";
+import { resetSandboxResolutionCache } from "../agent/sandbox";
 import type { WebhookQueue } from "../state/webhook-queue";
 import {
   AUTOMATION_ACCESS_EXIT_CODE,
   HARNESS_UNAVAILABLE_EXIT_CODE,
+  RATE_LIMIT_FALLBACK_MAX_MS,
   RATE_LIMIT_FALLBACK_MS,
+  RATE_LIMIT_PERIOD_FLOOR_MS,
   readUsageLimitHint,
   TASK_SKIP_EXIT_CODE,
   USAGE_LIMIT_EXIT_CODE,
@@ -77,6 +81,8 @@ export interface WorkerFailoverOptions {
   }) => HarnessSandboxProbeResult | Promise<HarnessSandboxProbeResult>;
   /** Effective sandbox name override (tests). Defaults to `AGENT_SANDBOX`. */
   sandboxName?: string;
+  /** Clock for usage-limit windows (tests). */
+  now?: () => number;
 }
 
 /**
@@ -91,8 +97,17 @@ export class WorkerFailover {
   private readonly onPause?: WorkerFailoverOptions["onPause"];
   private readonly onResume?: WorkerFailoverOptions["onResume"];
   private readonly log: (message: string) => void;
+  /**
+   * Consecutive usage limits per harness that came without a reset time. Each
+   * one doubles the fallback cooldown so a quota that is gone for days is not
+   * re-probed hourly by launching real tasks. In memory only: a restart starts
+   * again from {@link RATE_LIMIT_FALLBACK_MS}.
+   */
+  private readonly unknownResetStreak = new Map<string, number>();
+  private readonly now: () => number;
 
   constructor(options: WorkerFailoverOptions = {}) {
+    this.now = options.now ?? Date.now;
     this.chain =
       options.chain ??
       resolveHarnessChainSync({
@@ -166,6 +181,18 @@ export class WorkerFailover {
     return this.manager.allLimited();
   }
 
+  /**
+   * Whether no chain entry can start a run right now: every entry is either
+   * usage-limited or cooling down after a startup failure.
+   *
+   * Callers that would otherwise touch the repository first (fleet worktree
+   * creation, for example) use this to defer before doing disposable work that
+   * no child will use.
+   */
+  allExhausted(): boolean {
+    return this.manager.allLimited() || this.manager.allUnavailable();
+  }
+
   /** Startup banner line (`Agent harness: a → b (failover enabled)`). */
   describeStartup(): string {
     return `Agent harness: ${this.manager.describeChain()}${
@@ -196,12 +223,18 @@ export class WorkerFailover {
    * Record a usage limit and fail over. Pauses via {@link onPause} when the
    * chain is exhausted; always rearms the failback timer.
    */
-  reportFromHint(hint?: Partial<UsageLimitHint> & { resetsAt?: string }): FailoverOutcome {
-    const until =
-      hint?.untilMs && hint.untilMs > Date.now()
-        ? hint.untilMs
-        : (resetHintToMs(hint?.resetsAt, Date.now()) ?? Date.now() + RATE_LIMIT_FALLBACK_MS);
+  reportFromHint(hint?: UsageLimitHint): FailoverOutcome {
     const harness = this.manager.activeName;
+    const now = this.now();
+    const known =
+      hint?.untilMs && hint.untilMs > now ? hint.untilMs : resetHintToMs(hint?.resetsAt, now);
+    let until: number;
+    if (known !== null) {
+      this.unknownResetStreak.delete(harness);
+      until = known;
+    } else {
+      until = now + this.unknownResetCooldownMs(harness, hint?.period);
+    }
     const outcome = this.manager.reportUsageLimit(until);
     if (outcome.kind === "exhausted") {
       this.paused = true;
@@ -209,6 +242,36 @@ export class WorkerFailover {
     }
     this.armTimers();
     return outcome;
+  }
+
+  /**
+   * A run on the active harness completed, so its quota is back: the next
+   * limit without a reset time starts again from the base fallback.
+   */
+  recordSuccess(): void {
+    this.unknownResetStreak.delete(this.manager.activeName);
+  }
+
+  /**
+   * Fallback cooldown for a limit with no reset time: doubles per consecutive
+   * occurrence on the same harness (1h, 2h, 4h, ... up to 24h), and never
+   * shorter than the floor for a named quota period (a monthly quota waits at
+   * least a day).
+   */
+  private unknownResetCooldownMs(harness: string, period?: UsageLimitHint["period"]): number {
+    const streak = (this.unknownResetStreak.get(harness) ?? 0) + 1;
+    this.unknownResetStreak.set(harness, streak);
+    const backoff = Math.min(
+      RATE_LIMIT_FALLBACK_MS * 2 ** Math.min(streak - 1, 10),
+      RATE_LIMIT_FALLBACK_MAX_MS,
+    );
+    const cooldown = Math.max(backoff, period ? RATE_LIMIT_PERIOD_FLOOR_MS[period] : 0);
+    const hours = Math.round((cooldown / 3_600_000) * 10) / 10;
+    this.log(
+      `⏱️  ${harness} reported a ${period ? `${period} ` : ""}usage limit without a reset time ` +
+        `(${streak} in a row); re-checking in ${hours}h.`,
+    );
+    return cooldown;
   }
 
   /** Start (or restart) the failback/resume timer at the earliest window. */
@@ -296,8 +359,10 @@ export async function startWorkerFailover(
 ): Promise<WorkerFailover> {
   instance?.stop();
   // A fresh start is a configuration reload: drop cached sandbox readiness so
-  // a fixed <HARNESS>_CLI_PATH is probed again.
+  // a fixed <HARNESS>_CLI_PATH is probed again, and spawn-time sandbox
+  // selection runs again for each harness instead of reusing stale picks.
   resetHarnessSandboxProbeCache();
+  resetSandboxResolutionCache();
   const chain =
     options.chain ??
     (await resolveHarnessChain({
@@ -315,6 +380,29 @@ export async function startWorkerFailover(
 /** The process-wide controller, or null when failover has not been started. */
 export function getWorkerFailover(): WorkerFailover | null {
   return instance;
+}
+
+/**
+ * When every harness in the chain is usage-limited, the earliest time one of
+ * them becomes usable again; `undefined` while any entry can start a run (or
+ * when the chain is only cooling down after startup failures, which has no
+ * exposed resume time and is short-lived).
+ *
+ * Pickup loops use this to pause once with a reason instead of claiming and
+ * deferring every ready task on each tick.
+ */
+export function harnessChainBlockedUntil(
+  failover: WorkerFailover | null = getWorkerFailover(),
+  now: number = Date.now(),
+): number | undefined {
+  if (!failover?.allLimited()) return undefined;
+  const until = Math.min(...Object.values(failover.windows()).filter((value) => value > now));
+  return Number.isFinite(until) ? until : undefined;
+}
+
+/** Human-readable reason for a harness-chain pause, shared by pickup loops. */
+export function harnessBlockedReason(untilMs: number): string {
+  return `no agent harness is available until ${new Date(untilMs).toISOString()} (usage limit)`;
 }
 
 /**
@@ -342,14 +430,28 @@ export function resetWorkerFailover(): void {
  * another harness would make the same decision. When failover has not been
  * started, the spawn runs once with the caller's env (one-shot / tests).
  *
+ * With `options.harnessPin` the job named its own agent: the child runs once
+ * pinned to that harness, outside the failover chain, and a usage-limit or
+ * harness-startup exit is reported as `"deferred"` instead of failing over.
+ *
  * @param spawnOnce - Spawn the child with the given env; return its exit code
  * @param baseEnv - Environment to pin the active harness onto
+ * @param options.harnessPin - Harness the job pinned (skips failover)
  */
 export async function runWithFailover(
   spawnOnce: (env: Record<string, string | undefined>) => Promise<number>,
   baseEnv: Record<string, string | undefined> = { ...process.env },
+  options: { harnessPin?: string } = {},
 ): Promise<CliFailoverResult> {
   const failover = getWorkerFailover();
+  if (options.harnessPin) {
+    const code = await spawnOnce(pinnedHarnessChildEnv(baseEnv, options.harnessPin));
+    if (code === USAGE_LIMIT_EXIT_CODE) return "deferred";
+    if (code === AUTOMATION_ACCESS_EXIT_CODE) return "deferred";
+    if (code === HARNESS_UNAVAILABLE_EXIT_CODE) return "deferred";
+    if (code === TASK_SKIP_EXIT_CODE) return "skipped";
+    return code === 0 ? "ok" : "failed";
+  }
   if (!failover) {
     const code = await spawnOnce(baseEnv);
     if (code === AUTOMATION_ACCESS_EXIT_CODE) return "deferred";
@@ -360,7 +462,7 @@ export async function runWithFailover(
 
   const attempts = Math.max(1, failover.chain.entries.length);
   for (let attempt = 0; attempt < attempts; attempt++) {
-    if (failover.allLimited() || failover.manager.allUnavailable()) {
+    if (failover.allExhausted()) {
       return "deferred";
     }
     // A cooldown may have expired on a higher-priority entry while we were
@@ -384,6 +486,7 @@ export async function runWithFailover(
         continue;
       }
       if (code !== USAGE_LIMIT_EXIT_CODE) {
+        if (code === 0) failover.recordSuccess();
         return code === 0 ? "ok" : "failed";
       }
       const hint = readUsageLimitHint(hintPath);

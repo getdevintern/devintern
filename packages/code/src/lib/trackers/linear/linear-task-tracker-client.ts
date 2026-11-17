@@ -312,11 +312,17 @@ export class LinearTaskTrackerClient implements TaskTrackerClient {
 
   async findEstimationComment(
     taskKey: string,
-  ): Promise<{ commentId: string; created: string } | null> {
+  ): Promise<{ commentId: string; created: string; updated: string } | null> {
     try {
       const comments = await this.fetchRawComments(taskKey);
       const existing = comments.find((c) => c.body.includes(ESTIMATION_COMMENT_MARKER));
-      return existing ? { commentId: existing.id, created: existing.createdAt } : null;
+      return existing
+        ? {
+            commentId: existing.id,
+            created: existing.createdAt,
+            updated: existing.updatedAt || existing.createdAt,
+          }
+        : null;
     } catch (error) {
       console.warn(`⚠️  Failed to check for estimation comment on ${taskKey}: ${error}`);
       return null;

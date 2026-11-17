@@ -1,15 +1,15 @@
 ---
-title: "Implement Asana Tasks with @devintern/code"
+title: "Implement Asana Tasks with DevIntern Code"
 sidebarLabel: "Asana Integration"
 description: "Fetch Asana tasks, move project sections, implement with your coding agent, and post results back as comments."
-section: "Code"
+section: "Automation"
 order: 5
 sidebarHidden: true
-dateModified: 2026-07-23
+dateModified: 2026-11-12
 tags: ["asana", "devintern/code", "integration"]
 ---
 
-# Implement Asana Tasks with @devintern/code
+# Implement Asana Tasks with DevIntern Code
 
 @devintern/code can implement work directly from Asana tasks: fetch task details and comments, run a feasibility check, move the task between project sections, execute your AI agent, commit changes, open a pull request, and post results back as task comments.
 
@@ -129,3 +129,12 @@ Check the section names in your project against `settings.json`. Available secti
 **"Asana task search requires a project"**
 
 Pass `project:<gid>` in the query or set `ASANA_DEFAULT_PROJECT_GID`.
+
+**`ASANA_API_BASE_URL` has no effect**
+
+This override is reserved for the offline E2E fake server. It is only honored
+when `DEVINTERN_E2E_FAKE_ASANA=1` was exported before the CLI started — values
+loaded from a project `.env` are ignored — and the URL points at a loopback
+host. A project `.env` therefore cannot redirect your personal access token,
+and even an exported override cannot send it to a remote host. Production
+always uses `https://app.asana.com/api/1.0`.

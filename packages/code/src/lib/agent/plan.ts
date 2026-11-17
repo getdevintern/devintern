@@ -49,10 +49,48 @@ ${"=".repeat(80)}
 }
 
 /**
- * Detect plan-only agent behavior and extract a plan file path if present.
+ * Extract a plan markdown path mentioned in the agent output.
+ *
+ * Recognized shapes:
+ * - "available at `/path/to/plan.md`"
+ * - "saved to: /path/to/plan.md"
+ * - `~/.claude/plans/something.md`
  *
  * @param agentOutput - Raw agent stdout
- * @returns Plan file path, or `null` when implementation appears complete
+ * @returns Absolute plan path, or `null` when the output names no plan file
+ */
+function extractPlanFilePath(agentOutput: string): string | null {
+  const pathPatterns = [
+    /(?:available at|saved to:?)\s*[`"]?((?:\/[^\s`"]+|~\/\.claude\/plans\/[^\s`"]+)\.md)[`"]?/i,
+    /[`"]((?:\/home\/[^\s`"]+|~)\/\.claude\/plans\/[^\s`"]+\.md)[`"]/,
+    /(\/home\/[^\s]+\/\.claude\/plans\/[^\s]+\.md)/,
+  ];
+
+  for (const pattern of pathPatterns) {
+    const match = agentOutput.match(pattern);
+    if (match && match[1]) {
+      const planPath = match[1];
+      // Expand ~ to home directory
+      return planPath.startsWith("~")
+        ? planPath.replace("~", process.env.HOME || "/tmp")
+        : planPath;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Detect plan-only agent behavior and extract a plan file path if present.
+ *
+ * Only explicit plan-creation language or a plan file path counts. A bare
+ * mention of "plan" next to "summary" or "implementation" appears in most
+ * ordinary completion reports, so it must never suppress delivery on its own.
+ * Callers additionally require that `HEAD` did not move during the run.
+ *
+ * @param agentOutput - Raw agent stdout
+ * @returns Plan file path, a sentinel when a plan is claimed without a path, or
+ * `null` when implementation appears complete
  */
 export function detectPlanOnlyBehavior(agentOutput: string): string | null {
   // Check for common plan creation patterns (specific phrases first)
@@ -71,48 +109,20 @@ export function detectPlanOnlyBehavior(agentOutput: string): string | null {
   ];
 
   const hasPlanCreationLanguage = planCreationPatterns.some((pattern) => pattern.test(agentOutput));
+  const planPath = extractPlanFilePath(agentOutput);
 
-  // Fallback: if "plan" appears with context suggesting plan-only behavior
-  // (since this function is only called when there are no changes to commit)
-  const hasPlanFallback =
-    !hasPlanCreationLanguage &&
-    /\bplan\b/i.test(agentOutput) &&
-    /summary|review|ready|created|implementation|approach|steps|changes (required|needed)/i.test(
-      agentOutput,
-    );
-
-  if (!hasPlanCreationLanguage && !hasPlanFallback) {
-    return null;
+  // A path that is itself a plan file is a plan-only signal even without the
+  // explicit phrasing above.
+  if (planPath && /plan/i.test(planPath)) {
+    return planPath;
   }
-
-  // Try to extract the plan file path
-  // Common patterns:
-  // - "available at `/path/to/plan.md`"
-  // - "available at /path/to/plan.md"
-  // - "saved to: /path/to/plan.md"
-  // - ~/.claude/plans/something.md
-  const pathPatterns = [
-    /(?:available at|saved to:?)\s*[`"]?((?:\/[^\s`"]+|~\/\.claude\/plans\/[^\s`"]+)\.md)[`"]?/i,
-    /[`"]((?:\/home\/[^\s`"]+|~)\/\.claude\/plans\/[^\s`"]+\.md)[`"]/,
-    /(\/home\/[^\s]+\/\.claude\/plans\/[^\s]+\.md)/,
-  ];
-
-  for (const pattern of pathPatterns) {
-    const match = agentOutput.match(pattern);
-    if (match && match[1]) {
-      let planPath = match[1];
-      // Expand ~ to home directory
-      if (planPath.startsWith("~")) {
-        const homeDir = process.env.HOME || "/tmp";
-        planPath = planPath.replace("~", homeDir);
-      }
-      return planPath;
-    }
+  if (!hasPlanCreationLanguage) {
+    return null;
   }
 
   // If we detected plan creation language but couldn't extract the path,
   // return a sentinel value to indicate plan-only behavior
-  return "PLAN_DETECTED_NO_PATH";
+  return planPath ?? "PLAN_DETECTED_NO_PATH";
 }
 
 /**

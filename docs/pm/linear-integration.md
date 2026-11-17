@@ -1,15 +1,15 @@
 ---
-title: "Create Linear Issues with @devintern/pm"
+title: "Create Linear Issues with DevIntern PM"
 sidebarLabel: "Linear Integration"
 description: "Create well-specified Linear issues and sub-issues from AI drafts in your workspace."
-section: "PM"
+section: "Create Tasks"
 order: 8
 sidebarHidden: true
-dateModified: 2026-07-23
+dateModified: 2026-11-12
 tags: ["linear", "devintern/pm", "integration"]
 ---
 
-# Create Linear Issues with @devintern/pm
+# Create Linear Issues with DevIntern PM
 
 @devintern/pm creates Linear issues directly from AI-generated stories and tasks. Setup takes a few minutes: you need a Personal API key and optionally a default team.
 

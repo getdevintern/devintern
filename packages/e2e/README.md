@@ -1,10 +1,16 @@
 # End-to-end tests
 
 Private Bun workspace for workflows against real services. The suites run the built
-Code CLI against GitHub.com, Bitbucket Cloud, GitLab.com and GitLab Self-Managed
-using a local Markdown task
-and a deterministic agent. Git operations and GitHub API calls are real; no AI account
-or task tracker is needed.
+Code CLI, both one-shot and as the workspace worker daemon, against GitHub.com,
+Bitbucket Cloud, GitLab.com and GitLab Self-Managed using a local Markdown task
+and a deterministic agent. Git operations and provider API calls are real; no AI
+account or task tracker is needed.
+
+The maintained coverage inventory and gap backlog live in per-area files under
+[docs/coverage/](docs/coverage/), indexed by
+[docs/coverage-matrix.md](docs/coverage-matrix.md). The recurring `e2e-expander`
+workspace automation scouts those files and delegates each accepted gap to the
+worker as a separate task and pull request.
 
 ## Run locally
 
@@ -17,6 +23,10 @@ gh auth login --hostname github.com # once, if not already logged in
 bun run --filter @getdevintern/code build
 bun run --filter @devintern/e2e test:e2e
 ```
+
+The local suite lists opt-in suites as skipped and planned tracker coverage as
+todo, so `bun run test` (or the Turbo command above) shows what it does not
+exercise. Use the explicit commands below to run those suites.
 
 Local runs default to the private `getdevintern/devintern-e2e` repository and read
 credentials from `gh auth token` in memory. Your GitHub account must have write
@@ -51,6 +61,22 @@ hooks and agent configuration are excluded. Tokens are passed through the
 environment and Git askpass, never embedded in remote URLs or command arguments.
 Telemetry, updates and license checks are disabled for the test subprocesses.
 
+### Proxy environments
+
+The suite can run where an HTTP proxy is configured, such as a DevIntern worker,
+a CI sandbox, or a corporate network. A preload (`bunfig.toml` →
+`tests/setup/loopback-no-proxy.ts`) appends `localhost`, `127.0.0.1`, `::1` and
+the bracketed `[::1]` to both `NO_PROXY` and `no_proxy`. The dashboard and
+webhook fixtures apply the same step when they start, which covers runs from the
+repo root that skip this package's bunfig. With these entries, health polls and
+API fetches against `http://[::1]:<port>` go straight to the fixture. Some Bun
+versions (seen on 1.4.2) do not match a bare `::1` entry against a bracketed URL
+host. In that case the request goes through the proxy and times out, which looks
+like a dashboard bug. Proxy variables are not unset, so suites that reach remote
+endpoints still use the proxy. When a test needs to change these variables,
+assign new values instead of using `delete`. On Bun 1.4.2, fetch falls back to
+the process's startup value of a deleted variable.
+
 Cleanup closes PRs and deletes the exact branches owned by each scenario,
 including when an assertion fails. Closed PRs remain as GitHub history. Cleanup
 failures fail the test and identify the branches. A forcibly killed runner can
@@ -77,25 +103,14 @@ and secret `E2E_GITHUB_TOKEN` before running it. Do not expose these
 credentials to untrusted pull-request code. Build the CLI in that job before
 running the suite so the artifact matches the checkout.
 
-## Agent harness invocation checks
+## Test descriptions
 
-The ordinary local suite also probes every registered agent harness whose CLI is
-installed on the machine. Harnesses that are not installed are reported as
-skipped, so the suite behaves the same on a laptop with six agent CLIs and in CI
-with none.
-
-Each installed harness is launched with the exact non-interactive invocation
-DevIntern generates (subcommand, flags, and prompt) inside a temporary home and
-workspace. The check asserts only that the CLI accepts that invocation: a
-removed flag, renamed subcommand, or changed prompt mode fails with a
-parser/usage error. Sign-in prompts, missing provider keys, model errors, and
-runs that exceed the probe timeout are expected and do not fail the suite, so no
-AI account, credentials, or model calls are required. The probe environment
-excludes ambient provider keys and harness configuration.
-
-Set `E2E_HARNESS_PROBE_TIMEOUT_MS` to tune the per-harness timeout (default
-`10000`). These checks do not run full agent tasks; the deterministic fake agent
-continues to cover the implementation, git, and pull-request lifecycle.
+What each test covers, its scenarios, and any extra run command live in the
+`## Test notes` section of its area file under [docs/coverage/](docs/coverage/),
+next to the coverage rows. See the
+[coverage index](docs/coverage-matrix.md#areas) for the list of areas. A new
+test documents itself in its area file, not in this README; most offline tests
+run with the commands in [Run locally](#run-locally).
 
 ## Local GitLab Self-Managed
 
@@ -203,9 +218,9 @@ fails the explicit live command before it mutates a remote repository.
 
 ## Remote tracker fixtures
 
-The Markdown suites above need no task tracker. Separate opt-in suites exercise
+The Markdown suites need no task tracker. Separate opt-in suites exercise
 the same built CLI against a real remote tracker ticket through the reusable
-`TrackerScenario` fixture. There are two providers, both published to GitHub:
+`TrackerScenario` fixture. There are three providers, all published to GitHub:
 
 - **GitHub Issues** uses a dedicated GitHub tracker repository that is also the
   code host (the initial pairing).
@@ -213,6 +228,9 @@ the same built CLI against a real remote tracker ticket through the reusable
   instance as the issue source while GitHub remains the publication host. The
   GitLab project is created from the fixture and permanently deleted in cleanup;
   the suite does not require hosted GitLab.com.
+- **GitLab.com Issues** uses a pre-created project on GitLab.com as the issue
+  source while GitHub remains the publication host. The project is never
+  deleted; scenario issues are closed in cleanup.
 
 No model or AI-agent credentials are needed: the deterministic fixture agent
 verifies that unique markers seeded into the ticket description and a seeded
@@ -235,9 +253,9 @@ read back from the tracker API rather than trusted from CLI output. Status
 labels are shared tracker configuration the scenario creates but intentionally
 never deletes. Ownership is recorded the moment a resource is created; cleanup
 attempts every operation even after a failure and reports the ids of anything it
-could not remove. The GitHub suite never creates or deletes the containing
-repository and never touches pre-existing tickets; the GitLab suite removes only
-the project it created.
+could not remove. The GitHub and GitLab.com suites never create or delete the
+containing repository/project and never touch pre-existing tickets; the local
+GitLab suite removes only the project it created.
 
 ### GitHub Issues tracker
 
@@ -276,26 +294,52 @@ contents and pull-request write access on the code-host repository. As with the
 other local GitLab suites, `E2E_GITLAB_URL` and `E2E_GITLAB_TOKEN` override the
 generated `.local/gitlab.json` credentials.
 
+### GitLab.com Issues tracker
+
+Configure a dedicated GitLab.com project with Issues enabled in
+`packages/e2e/.env.local` (the hosted source-control project works when Issues is
+enabled), provide a GitHub code host, and run:
+
+```sh
+bun run --filter @getdevintern/code build
+bun run --filter @devintern/e2e test:e2e:tracker:gitlab-com
+```
+
+| Variable                 | Meaning                                                             |
+| ------------------------ | ------------------------------------------------------------------- |
+| `E2E_GITLAB_COM_PROJECT` | Existing GitLab.com project path that will host test issues         |
+| `E2E_GITLAB_COM_TOKEN`   | Token with `api` scope and issues/labels write access               |
+| `E2E_GITHUB_REPOSITORY`  | GitHub code host; defaults to the local `gh` login's E2E repo       |
+| `E2E_GITHUB_TOKEN`       | Optional explicit GitHub token; otherwise uses the local `gh` login |
+
+The suite creates issues, labels, seeded comments and a decoy in the configured
+project, then opens a GitHub PR and verifies status transitions. Cleanup closes
+the scenario issues and deletes only the seeded comments and branches; the
+GitLab.com project, its labels and the closed issues remain (GitLab.com does not
+permanently delete projects on demand). Missing project/token configuration fails
+the opt-in command before any remote mutation.
+
 Ordinary `bun run test` runs only local harness checks and never the live tracker
 suites.
 
-## Delivery lifecycle coverage
+### Workspace tracker smoke (read-only)
 
-GitHub and local GitLab also cover an agent exiting unsuccessfully after editing,
-an agent producing no changes, and an existing remote feature branch. Failure
-scenarios verify the recorded run is failed, no PR/MR or remote implementation
-branch appears, and the target branch is unchanged. Collision scenarios verify
-the existing commit survives and the new PR/MR uses `-attempt-2`.
+The worker's shared env can be validated without creating any tracker data:
 
-Local GitLab additionally covers an actual rejected push using a read-only project
-token, plus a review round trip. A Developer project bot opens an MR, a separate
-human identity posts feedback, and `address-review` edits and pushes to that same
-MR and replies to the discussion. A second CLI invocation must add no commit,
-reply, or agent invocation. GitLab updates MR metadata asynchronously; the suite
-waits for the pushed SHA before asserting the new head. Both project tokens expire
-the next day and are removed with their disposable project.
+```sh
+bun run --filter @devintern/e2e test:trackers
+```
 
-All four areas run through the existing GitHub/GitLab commands above; no task
-tracker, model credentials, or additional local environment variables are needed.
-These lifecycle scenarios currently run against GitHub and local GitLab; the
-hosted GitLab.com and Bitbucket suites retain their publication smoke tests.
+The command reads `DEVINTERN_ENV_FILE`, `DEVINTERN_WORKSPACE_DIR/.env`, or
+`~/.devintern/.env` (in that order), detects every configured tracker, and runs
+read-only checks. Jira auth/project/status/create-metadata/search, Trello
+auth/board/lists/search, and the Markdown task directory are covered today. No
+ticket, card, comment, label, or status is created or changed, and credentials
+are never printed. The active `TASK_TRACKER` must be configured;
+`JIRA_DEFAULT_PROJECT_KEY` is optional and the first accessible project is
+inspected when it is absent.
+
+This smoke is opt-in and is not part of `test`, Turbo, or CI. See
+[docs/coverage/trackers.md](docs/coverage/trackers.md) for the staged expansion to
+full Jira/Trello lifecycles and the implemented Jira/Linear fake-server coverage
+(Trello fake planned).

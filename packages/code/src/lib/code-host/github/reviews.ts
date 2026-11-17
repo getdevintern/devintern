@@ -4,6 +4,7 @@
  * Handles fetching and responding to PR review comments via the GitHub API.
  */
 
+import { isRetryableNetworkError } from "@devintern/utils";
 import type { GitHubReviewComment, ProcessedReviewComment } from "../../../types/github-webhooks";
 import { GitHubAppAuth } from "./app-auth";
 import { Utils } from "../../utils";
@@ -69,6 +70,25 @@ export interface PullRequestInfo {
    * recent push; absent while GitHub has never computed it.
    */
   mergeable_state?: string;
+  /** Draft PRs are never auto-merged. */
+  draft?: boolean;
+  /** Total changed files (the files API stops listing at 3000). */
+  changed_files?: number;
+}
+
+/** One changed file from `GET /pulls/{n}/files`. */
+export interface PullRequestFile {
+  filename: string;
+  status: string;
+  /** Set for renamed/copied files. */
+  previous_filename?: string;
+}
+
+/** Result of `PUT /pulls/{n}/merge`. */
+export interface PullRequestMergeResult {
+  merged: boolean;
+  sha?: string;
+  message?: string;
 }
 
 export interface FileContent {
@@ -129,21 +149,159 @@ export function isGitHubNotFound(error: unknown): boolean {
 }
 
 /**
- * Whether an error thrown by a GitHub API client call is an HTTP 401
- * (`Bad credentials`) or a missing-credential failure: the credential is
- * expired, revoked, or rejected. Unlike 5xx/429 responses this is not
- * transient — every request with the same credential fails identically, so
- * long-running callers treat it as a configuration problem (renew
- * `GITHUB_TOKEN`) instead of re-reporting it as a per-tick failure forever.
+ * Whether an error thrown by a GitHub API client call is a credential failure:
+ * an HTTP 401 (`Bad credentials`), a missing-credential failure, or a 403
+ * permission denial with a known credential body (`Resource not accessible`,
+ * `Must have admin rights`). The credential is expired, revoked, rejected, or
+ * under-scoped. Unlike 5xx/429 responses this is not transient — every request
+ * with the same credential fails identically, so long-running callers treat it
+ * as a configuration problem (renew `GITHUB_TOKEN` or grant the missing
+ * permission) instead of re-reporting it as a per-tick failure forever.
+ *
+ * 404 remains false because callers cannot distinguish a deleted resource from
+ * one this credential cannot see. 403 responses without a credential-denial
+ * body also remain false: GitHub reuses 403 for rate limits, abuse detection,
+ * archived read-only repositories, locked issues, and blocked repositories.
+ * Those are either transient or genuine per-request failures and must keep
+ * their normal capture/retry handling.
  *
  * @param error - Error thrown by `apiRequest` / `conditionalGet`
  */
 export function isGitHubAuthError(error: unknown): boolean {
+  return classifyGitHubAuthError(error) !== null;
+}
+
+/** Credential failure classes that need different operator action. */
+export type GitHubAuthFailureKind = "invalid-credential" | "missing-permission";
+
+/**
+ * 403 bodies that prove the credential itself lacks access rather than the
+ * resource being temporarily unavailable (rate limit, archived repo, locked
+ * issue, blocked repository). Matched case-insensitively against the API
+ * error detail.
+ */
+const GITHUB_CREDENTIAL_DENIAL_PATTERNS = [
+  "resource not accessible",
+  "bad credentials",
+  "must have admin rights",
+] as const;
+
+/**
+ * Classify a GitHub credential failure so callers can give correct guidance:
+ * a 401/missing token must be renewed, while a 403 with a credential-denial
+ * body may be a valid token that simply lacks a permission. Unknown 403s are
+ * not credential failures and keep the normal error path.
+ *
+ * @param error - Error thrown by `apiRequest` / `conditionalGet`
+ * @returns The failure class, or `null` when this is not a credential failure
+ */
+export function classifyGitHubAuthError(error: unknown): GitHubAuthFailureKind | null {
   const message = error instanceof Error ? error.message : String(error);
-  return (
+  if (
     message.includes("GitHub API error (401)") ||
     message.includes("No GitHub authentication configured")
+  ) {
+    return "invalid-credential";
+  }
+  if (!message.includes("GitHub API error (403)")) {
+    return null;
+  }
+  const lower = message.toLowerCase();
+  const credentialDenied = GITHUB_CREDENTIAL_DENIAL_PATTERNS.some((pattern) =>
+    lower.includes(pattern),
   );
+  return credentialDenied ? "missing-permission" : null;
+}
+
+/**
+ * API surface a credential failure came from. Read contexts need different
+ * permissions than the write context used for posting PR comments, so the
+ * guidance must not name permissions the failing request does not use.
+ */
+export type GitHubAuthFailureContext = "reviews" | "ci" | "comment";
+
+/** Permission hint for each context, or "" when the read path has no extra scope. */
+function requiredPermissionHint(context: GitHubAuthFailureContext): string {
+  switch (context) {
+    case "ci":
+      return " (CI polling needs Actions: Read and Commit statuses: Read)";
+    case "comment":
+      return " (posting pull-request comments needs Issues: Write or Pull requests: Write)";
+    default:
+      return "";
+  }
+}
+
+/**
+ * Build actionable guidance for a credential failure. Non-credential errors
+ * yield an empty string.
+ *
+ * @param error - Error thrown by `apiRequest` / `conditionalGet`
+ * @param context - API surface that failed; selects the permission hint
+ * @returns Guidance sentence(s) for the operator
+ */
+export function describeGitHubAuthFailure(
+  error: unknown,
+  context: GitHubAuthFailureContext = "reviews",
+): string {
+  const kind = classifyGitHubAuthError(error);
+  if (kind === "invalid-credential") {
+    return (
+      "The GitHub credential is invalid, expired, or revoked. " +
+      "Renew GITHUB_TOKEN (or reconnect the workspace's GitHub credentials); " +
+      (context === "comment"
+        ? "the escalation retries and resumes automatically once the credential works."
+        : "polling continues and resumes automatically once the credential works.")
+    );
+  }
+  if (kind === "missing-permission") {
+    return (
+      "The GitHub token is valid but lacks a permission this request needs. " +
+      "Grant the missing permission" +
+      requiredPermissionHint(context) +
+      (context === "comment"
+        ? "; the escalation retries and lands automatically once the permission is granted."
+        : "; polling continues and recovers automatically once the permission is granted.")
+    );
+  }
+  return "";
+}
+
+/** GitHub statuses that represent a momentary upstream failure. */
+const TRANSIENT_GITHUB_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
+
+/** Detail markers GitHub uses for primary/secondary rate-limit 403s. */
+const GITHUB_RATE_LIMIT_PATTERN = /rate limit|abuse detection/i;
+
+/**
+ * Whether an error thrown by a GitHub API client call is a transient upstream
+ * failure that the next poll can simply retry.
+ *
+ * Covers HTTP 408/429/5xx, GitHub's rate-limit 403s (primary and secondary
+ * rate limits use 403, not only 429), and transport failures such as DNS or
+ * connection errors. A plain 403 (permission denied) is not transient.
+ *
+ * `fetchWithRetry` retries the retryable HTTP statuses and transport errors
+ * with backoff; rate-limit 403s are not retried by that helper, but the next
+ * poll retries them. When a call still fails the error escapes into
+ * long-running polling loops; reporting each occurrence to error tracking
+ * turns a normal GitHub outage into a recurring defect, so callers warn
+ * instead of capturing it.
+ *
+ * @param error - Error thrown by `apiRequest` / `conditionalGet`
+ */
+export function isGitHubTransientError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  const match = message.match(/GitHub API error \((\d{3})\)(?::\s*([\s\S]*))?/);
+  if (match?.[1]) {
+    const status = Number(match[1]);
+    if (TRANSIENT_GITHUB_STATUSES.has(status)) return true;
+    if (status === 403 && GITHUB_RATE_LIMIT_PATTERN.test(match[2] ?? "")) return true;
+    // A recognized status that is not transient stays non-transient; do not
+    // let incidental transport-looking words in the detail reclassify it.
+    return false;
+  }
+  return isRetryableNetworkError(error instanceof Error ? error : new Error(message));
 }
 
 /** Build an API error message; 401s get actionable credential guidance. */
@@ -152,8 +310,8 @@ function apiErrorMessage(status: number, detail: string): string {
   if (status === 401) {
     return (
       `${base}. The GitHub credential was rejected as expired or revoked. ` +
-      "Set a valid GITHUB_TOKEN (or reconnect the workspace's GitHub credentials), " +
-      "then restart the worker."
+      "Set a valid GITHUB_TOKEN (or reconnect the workspace's GitHub credentials) " +
+      "to restore access."
     );
   }
   return base;
@@ -406,6 +564,27 @@ export class GitHubReviewsClient {
   }
 
   /**
+   * Check whether a user can push to the repository (write/maintain/admin),
+   * propagating API failures.
+   *
+   * Unlike {@link userHasPushAccess}, a transient API error (5xx, rate limit)
+   * is not reported as a denial, so retry-capable callers can retry instead of
+   * permanently dropping a valid @mention.
+   *
+   * @param owner - Repository owner
+   * @param repo - Repository name
+   * @param username - GitHub login to check
+   * @returns Whether the user has write/maintain/admin permission
+   */
+  async userHasPushAccessOrThrow(owner: string, repo: string, username: string): Promise<boolean> {
+    const { permission, roleName } = await this.getCollaboratorPermission(owner, repo, username);
+    if (permission === "admin" || permission === "write") {
+      return true;
+    }
+    return roleName === "maintain" || roleName === "write" || roleName === "admin";
+  }
+
+  /**
    * Check whether a user can push to the repository (write/maintain/admin).
    * Fails closed: an API error is reported as no push access.
    *
@@ -415,11 +594,7 @@ export class GitHubReviewsClient {
    */
   async userHasPushAccess(owner: string, repo: string, username: string): Promise<boolean> {
     try {
-      const { permission, roleName } = await this.getCollaboratorPermission(owner, repo, username);
-      if (permission === "admin" || permission === "write") {
-        return true;
-      }
-      return roleName === "maintain" || roleName === "write" || roleName === "admin";
+      return await this.userHasPushAccessOrThrow(owner, repo, username);
     } catch {
       return false;
     }
@@ -580,6 +755,60 @@ export class GitHubReviewsClient {
       repo,
       { body },
     );
+  }
+
+  /**
+   * Login that comments made with this client's credential are authored by:
+   * `<app-slug>[bot]` for GitHub App auth, otherwise the token's user.
+   */
+  async getCommentAuthorLogin(owner: string, repo: string): Promise<string> {
+    if (!this.token && this.appAuth) {
+      return `${(await this.appAuth.getAppInfo()).slug}[bot]`;
+    }
+    const user = await this.apiRequest<{ login: string }>("GET", "/user", owner, repo);
+    return user.login;
+  }
+
+  /**
+   * Create or edit this credential's comment that starts with `marker`. Only
+   * comments authored by this credential are ever edited, so a human
+   * comment copying the marker is never overwritten.
+   */
+  async upsertMarkedIssueComment(
+    owner: string,
+    repo: string,
+    prNumber: number,
+    marker: string,
+    body: string,
+  ): Promise<void> {
+    const login = (await this.getCommentAuthorLogin(owner, repo)).toLowerCase();
+    let existingId: number | undefined;
+    for (let page = 1; page <= 30 && existingId === undefined; page++) {
+      const batch = await this.apiRequest<
+        Array<{ id: number; body: string | null; user: { login: string } | null }>
+      >(
+        "GET",
+        `/repos/${owner}/${repo}/issues/${prNumber}/comments?per_page=100&page=${page}`,
+        owner,
+        repo,
+      );
+      existingId = batch.find(
+        (comment) =>
+          comment.user?.login.toLowerCase() === login && comment.body?.startsWith(marker),
+      )?.id;
+      if (batch.length < 100) break;
+    }
+    if (existingId !== undefined) {
+      await this.apiRequest(
+        "PATCH",
+        `/repos/${owner}/${repo}/issues/comments/${existingId}`,
+        owner,
+        repo,
+        { body },
+      );
+      return;
+    }
+    await this.postPullRequestComment(owner, repo, prNumber, body);
   }
 
   /**
@@ -780,6 +1009,104 @@ export class GitHubReviewsClient {
       },
     );
     return response.ok ? response.text() : null;
+  }
+
+  /**
+   * List every changed file of a pull request (paginated; GitHub stops at
+   * 3000 files, so callers compare the count with `changed_files`).
+   */
+  async listPullRequestFiles(
+    owner: string,
+    repo: string,
+    prNumber: number,
+  ): Promise<PullRequestFile[]> {
+    const files: PullRequestFile[] = [];
+    for (let page = 1; page <= 30; page++) {
+      const batch = await this.apiRequest<PullRequestFile[]>(
+        "GET",
+        `/repos/${owner}/${repo}/pulls/${prNumber}/files?per_page=100&page=${page}`,
+        owner,
+        repo,
+      );
+      files.push(...batch);
+      if (batch.length < 100) break;
+    }
+    return files;
+  }
+
+  /** List every submitted review on a pull request (paginated). */
+  async listPullRequestReviews(
+    owner: string,
+    repo: string,
+    prNumber: number,
+  ): Promise<Array<{ state: string; user: { login: string } | null }>> {
+    const reviews: Array<{ state: string; user: { login: string } | null }> = [];
+    for (let page = 1; page <= 10; page++) {
+      const batch = await this.apiRequest<Array<{ state: string; user: { login: string } | null }>>(
+        "GET",
+        `/repos/${owner}/${repo}/pulls/${prNumber}/reviews?per_page=100&page=${page}`,
+        owner,
+        repo,
+      );
+      reviews.push(...batch);
+      if (batch.length < 100) break;
+    }
+    return reviews;
+  }
+
+  /** Add labels to an issue or PR; GitHub creates labels that don't exist yet. */
+  async addIssueLabels(
+    owner: string,
+    repo: string,
+    issueNumber: number,
+    labels: string[],
+  ): Promise<void> {
+    await this.apiRequest(
+      "POST",
+      `/repos/${owner}/${repo}/issues/${issueNumber}/labels`,
+      owner,
+      repo,
+      { labels },
+    );
+  }
+
+  /** Remove a label from an issue or PR; a label that isn't there (404) is not an error. */
+  async removeIssueLabel(
+    owner: string,
+    repo: string,
+    issueNumber: number,
+    label: string,
+  ): Promise<void> {
+    try {
+      await this.apiRequest(
+        "DELETE",
+        `/repos/${owner}/${repo}/issues/${issueNumber}/labels/${encodeURIComponent(label)}`,
+        owner,
+        repo,
+      );
+    } catch (error) {
+      if (!isGitHubNotFound(error)) throw error;
+    }
+  }
+
+  /**
+   * Merge a pull request, pinned to the head SHA that was evaluated: GitHub
+   * rejects the merge (409) when the head moved since, so commits pushed
+   * after the safety check can never ride along.
+   */
+  async mergePullRequest(
+    owner: string,
+    repo: string,
+    prNumber: number,
+    options: { sha: string; method: "merge" | "squash" | "rebase" },
+  ): Promise<PullRequestMergeResult> {
+    return this.apiRequest<PullRequestMergeResult>(
+      "PUT",
+      `/repos/${owner}/${repo}/pulls/${prNumber}/merge`,
+      owner,
+      repo,
+      { sha: options.sha, merge_method: options.method },
+    );
   }
 
   /**

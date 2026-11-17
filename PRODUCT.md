@@ -33,7 +33,7 @@ DevIntern is a neutral layer around the user's existing tracker, coding agent, m
 - The worker can poll for ready tasks, route work across repositories, run scheduled work, process review feedback on the same branch, and recover from crashes or provider rate limits.
 - The dashboard and its data stay on the worker machine and bind to loopback by default.
 - Source code, diffs, ticket contents, and credentials are not sent to DevIntern services as part of the worker workflow. Optional services and anonymous product analytics have narrower data flows; describe those using the current security and privacy pages rather than claiming that no data ever leaves the machine.
-- The source is available under FSL-1.1-Apache-2.0, with each release converting to Apache-2.0 after two years.
+- The source is available under FSL-1.1-ALv2, with each release converting to Apache-2.0 after two years.
 - The public repository contains the CLIs, desktop app, dashboard, shared packages, and product docs. The marketing site and server code are maintained elsewhere.
 - This monorepo uses Bun for development. The `devintern` CLI requires Bun; `devpm` also supports Node.js 20+.
 

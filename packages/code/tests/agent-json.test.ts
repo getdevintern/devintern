@@ -81,6 +81,23 @@ That is the final review.`;
     });
   });
 
+  test("escapes unescaped quotes inside pasted code with brackets", () => {
+    // Regression: a verification verdict was rejected because its summary
+    // quoted `["headless", prompt]`. The quote before the comma looked like the
+    // end of the string, so the object was never balanced and the run failed
+    // verification twice with "no valid JSON object containing approved".
+    const summary =
+      'The adapter emits ["headless", prompt] with no warnings, and `dsh headless --help` matches.';
+    // The inner quotes are intentionally unescaped, exactly as the model wrote them.
+    const output = `{"summary":"${summary}","items":[],"approved":true}`;
+
+    expect(parseAgentJsonObject(output, "approved")).toEqual({
+      summary,
+      items: [],
+      approved: true,
+    });
+  });
+
   test("tolerates literal \\n junk between the final value and the closing brace", () => {
     const output = "Narration." + String.raw`{"approved": true, "summary": "D."\n}`;
     expect(parseAgentJsonObject(output, "approved")).toEqual({

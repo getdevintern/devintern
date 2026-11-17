@@ -9,6 +9,7 @@ import {
 } from "@devintern/agent-harness";
 import { captureError } from "@devintern/utils";
 import { runContext } from "../cli/context";
+import { isShuttingDown } from "../cli/shutdown-state";
 import { uploadSelectedArtifacts } from "../artifacts/upload";
 import { RunArtifactRegistry } from "../artifacts/registry";
 import { buildArtifactComment } from "../artifacts/publication";
@@ -28,9 +29,9 @@ import { Utils } from "../utils";
 import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "./git-hook-fixer";
 import { resolveAgentEffort, resolveAgentModel } from "./model";
 import { createPlanImplementationPrompt, detectPlanOnlyBehavior, logHookErrorToFile } from "./plan";
-import { createGitHelpers } from "./run-harness-git";
+import { createGitHelpers, headAdvancedDuringRun } from "./run-harness-git";
 import type { FinalizeContext } from "./run-harness-git";
-import { getSandbox } from "./sandbox";
+import { agentSandboxPolicy, getSandbox } from "./sandbox";
 import { harnessSpawnEnv } from "./spawn";
 import { createHarnessLogSink } from "../observability/harness-logs";
 import { runTaskSteps } from "../task/step-runner";
@@ -131,6 +132,7 @@ async function implementPlan(
     args: spawnArgs,
     spawnOptions: { stdio: ["ignore", "pipe", "pipe"], env: harnessSpawnEnv(agentEnv) },
     sandbox: await getSandbox(ctx.harness.name),
+    policy: agentSandboxPolicy(),
     sink: createHarnessLogSink({
       harness: ctx.harness,
       label: "plan-retry",
@@ -185,11 +187,36 @@ async function implementPlan(
     console.log(`✅ ${result.message}`);
     return output;
   }
+  if (result.message === "No changes to commit" && (await hasAgentCommitsToDeliver(ctx))) {
+    // The plan agent committed its own work, so the tree is clean even though
+    // the branch now holds the implementation. Deliver those commits instead
+    // of failing the run for lacking an extra pipeline commit.
+    console.log("✅ Delivering implementation commits created by the plan agent");
+    return output;
+  }
   console.log(`⚠️  ${result.message}`);
   console.log(
     'You can commit changes manually with: git add . && git commit -m "feat: implement task"',
   );
   return undefined;
+}
+
+/**
+ * Whether the branch already carries commits the pipeline should deliver
+ * instead of requiring an extra commit for a clean-tree assumption.
+ *
+ * The agent (or the plan retry) may have committed its own work. The branch is
+ * created from the PR target, so commits ahead of it are this run's
+ * implementation; a protected or target branch is never accepted.
+ *
+ * @param ctx - Delivery context providing the PR target branch.
+ */
+async function hasAgentCommitsToDeliver(ctx: FinalizeContext): Promise<boolean> {
+  const currentBranch = await Utils.getCurrentBranch();
+  const targetBranch = ctx.prTargetBranch.replace(/^origin\//, "");
+  if (!currentBranch || currentBranch === targetBranch) return false;
+  if (await Utils.isProtectedBranch(currentBranch)) return false;
+  return (await commitsAheadOfTarget(ctx)) > 0;
 }
 
 /**
@@ -220,8 +247,21 @@ export async function commitImplementation(state: DeliveryState): Promise<boolea
     return true;
   }
 
-  const planPath =
-    outcome.result.message === "No changes to commit" ? detectPlanOnlyBehavior(state.output) : null;
+  const noChanges = outcome.result.message === "No changes to commit";
+  const headAdvanced = noChanges && (await headAdvancedDuringRun(ctx));
+
+  // The agent committed its own work during this run. A clean tree only means
+  // the pipeline has nothing left to commit, so deliver those commits instead
+  // of misreading the completion summary as plan-only work.
+  if (noChanges && headAdvanced && (await hasAgentCommitsToDeliver(ctx))) {
+    state.committed = true;
+    console.log("✅ Delivering implementation commits created by the agent");
+    return true;
+  }
+
+  // Only a run whose HEAD never moved can be plan-only. Plan language in the
+  // transcript is otherwise just part of an ordinary completion report.
+  const planPath = noChanges && !headAdvanced ? detectPlanOnlyBehavior(state.output) : null;
   if (planPath && !ctx.isPlanRetry) {
     const output = await implementPlan(ctx, taskKey, taskSummary, planPath);
     if (output !== undefined) {
@@ -233,11 +273,12 @@ export async function commitImplementation(state: DeliveryState): Promise<boolea
     return false;
   }
 
-  if (outcome.result.message === "No changes to commit") {
-    // Agents sometimes commit their own work. The pipeline creates the branch
-    // from the PR target, so commits ahead of it are this run's implementation;
-    // deliver them instead of requiring an extra commit just to satisfy the
-    // clean-tree assumption. A protected or target branch is never accepted.
+  if (noChanges) {
+    // Fallback for runs where the pre-run HEAD could not be captured: agents
+    // sometimes commit their own work. The pipeline creates the branch from the
+    // PR target, so commits ahead of it are this run's implementation; deliver
+    // them instead of requiring an extra commit just to satisfy the clean-tree
+    // assumption. A protected or target branch is never accepted.
     const currentBranch = await Utils.getCurrentBranch();
     const targetBranch = ctx.prTargetBranch.replace(/^origin\//, "");
     if (
@@ -469,6 +510,12 @@ async function repairImplementation(state: DeliveryState) {
 }
 
 async function reportPipelineHalt(state: DeliveryState, reason: string): Promise<void> {
+  // The shutdown handler already reported the interruption; a second comment
+  // and a retry-gate entry would contradict it.
+  if (isShuttingDown()) {
+    console.log(`⚠️  Pipeline halted during shutdown: ${reason}`);
+    return;
+  }
   const ctx = state.context;
   const { taskKey, tracker, task } = ctx;
   const report = `Pipeline stopped: ${reason}\n\n${state.output}`;
@@ -567,7 +614,7 @@ function verifyDependencies(state: DeliveryState): VerifyDependencies {
   return {
     getDiff: () => state.getDiff(),
     runAgent: (prompt) => state.runAgentPrompt(prompt),
-    parseFeedback: (output) => state.parseReviewFeedback(output),
+    parseFeedback: (output) => state.parseReviewFeedback(output, { enforceApproval: false }),
     filterItems: (items, minPriority) => state.filterByPriority(items, minPriority),
   };
 }

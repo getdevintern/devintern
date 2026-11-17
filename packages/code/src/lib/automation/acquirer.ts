@@ -7,13 +7,25 @@ import { join } from "path";
 
 import type { Acquirer } from "../../worker";
 import type { AutomationConfig } from "./config";
+import type { AgentSelection } from "../agent/selection";
 import { automationTaskArgs, nextScheduleOccurrence } from "./config";
 import { AutomationStateStore } from "./state";
 import { workerTaskArgs } from "../acquirers/task-polling";
+import {
+  applyAgentSelectionEnv,
+  pickAgentSelection,
+  pinnedHarnessChildEnv,
+} from "../agent/selection";
 import { resolveProjectConfigDir } from "../config/config-dir";
 import { RUN_ORIGIN_ENV } from "../observability/analytics";
-import { getWorkerFailover } from "../worker/failover";
+import type { RunOrigin } from "../state/run-recorder";
 import {
+  getWorkerFailover,
+  harnessBlockedReason,
+  HARNESS_UNAVAILABLE_COOLDOWN_MS,
+} from "../worker/failover";
+import {
+  HARNESS_UNAVAILABLE_EXIT_CODE,
   readUsageLimitHint,
   USAGE_LIMIT_EXIT_CODE,
   USAGE_LIMIT_FILE_ENV,
@@ -50,9 +62,44 @@ export interface SpawnedAutomationRun {
 /** Result of a dashboard "Run now" trigger for one automation. */
 export type ManualTriggerOutcome = { ok: true } | { ok: false; reason: string };
 
-/** One configured schedule as exposed to the dashboard. */
-export interface AutomationScheduleStatus {
+/**
+ * Scheduled job types the dashboard lists side by side: prompt automations,
+ * story-point estimation sweeps, and the scheduled conflict-resolution window.
+ */
+export type ScheduledJobKind = "automation" | "estimation" | "conflict_resolution" | "auto_merge";
+
+/** Which recorded runs belong to one scheduled job (see `RunFilter`). */
+export interface ScheduledJobRunFilter {
+  automationId?: string;
+  origin?: RunOrigin;
+}
+
+/**
+ * What an occurrence is doing before its run record exists. The task
+ * subprocess creates the run row, so without this a run that is waiting for a
+ * free slot (the repo's base checkout or a worker slot) or still starting up
+ * is invisible on the dashboard.
+ */
+export interface AutomationActivity {
+  /** `waiting`: holding the lease, not yet admitted. `running`: subprocess spawned. */
+  state: "waiting" | "running";
+  /** When the occurrence entered this state (epoch ms). */
+  since: number;
+  /** What started the occurrence. */
+  trigger: "scheduled" | "manual";
+  /** Why a waiting occurrence has not started yet. */
+  reason?: string;
+}
+
+/** One configured schedule as exposed to the dashboard, with its agent override. */
+export interface AutomationScheduleStatus extends AgentSelection {
   id: string;
+  /** In-flight occurrence held by this worker; absent when idle. */
+  activity?: AutomationActivity;
+  /** Job type; absent means a prompt automation. */
+  kind?: ScheduledJobKind;
+  /** Display name when it differs from `id` (namespaced estimation / conflict ids). */
+  title?: string;
   enabled: boolean;
   cron?: string;
   interval?: string;
@@ -62,6 +109,12 @@ export interface AutomationScheduleStatus {
   openPr?: boolean;
   /** Durable next occurrence (epoch ms); absent before first registration. */
   nextDueAt?: number;
+  /** Estimation sweeps: tracker query selecting the tickets to estimate. */
+  query?: string;
+  /** Estimation sweeps: `[[teams]]` name whose tracker the sweep uses. */
+  team?: string;
+  /** Recorded runs attributed to this job; defaults to `{ automationId: id }`. */
+  runFilter?: ScheduledJobRunFilter;
 }
 
 /**
@@ -110,11 +163,37 @@ export interface AutomationAcquirerOptions {
   jobKind?: string;
   /** Acquirer name override (worker banner / analytics worker mode). */
   name?: string;
+  /**
+   * Epoch ms until which no agent harness can run this entry, or `null` when
+   * one is available. Defaults to the worker failover state: the whole chain
+   * for unpinned entries, the pinned harness's own window otherwise.
+   */
+  harnessBlockedUntil?: (automation: AutomationConfig) => number | null;
 }
 
 interface ActiveAutomationRun {
   run: SpawnedAutomationRun;
   lifecycle: Promise<void>;
+  startedAt: number;
+  trigger: AutomationActivity["trigger"];
+}
+
+/**
+ * Default harness gate: while every chain entry is usage-limited or cooling
+ * down, a spawned run would only fail within seconds and re-report the limit.
+ */
+export function defaultHarnessBlockedUntil(automation: AutomationConfig): number | null {
+  const failover = getWorkerFailover();
+  if (!failover) return null;
+  const windows = failover.windows();
+  if (automation.harness) {
+    const until = windows[automation.harness];
+    return until !== undefined && until > Date.now() ? until : null;
+  }
+  if (!failover.allExhausted()) return null;
+  const now = Date.now();
+  const until = Math.min(...Object.values(windows).filter((value) => value > now));
+  return Number.isFinite(until) ? until : now;
 }
 
 /** Calculate the first future occurrence after `afterMs` (cron uses host timezone). */
@@ -150,6 +229,8 @@ export class AutomationAcquirer implements Acquirer {
   private owner = `${process.pid}:${randomUUID()}`;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private active = new Map<string, ActiveAutomationRun>();
+  /** Occurrences holding the lease while `resolveContext` waits for a slot. */
+  private waiting = new Map<string, { since: number; trigger: AutomationActivity["trigger"] }>();
   private tickPromise: Promise<void> | null = null;
   private stopped = true;
   private paused = false;
@@ -279,6 +360,17 @@ export class AutomationAcquirer implements Acquirer {
       }
       if (this.paused || state.nextDueAt > this.now()) continue;
 
+      const blockedUntil = this.harnessBlockedUntil(automation);
+      if (blockedUntil !== null) {
+        const skipNow = this.now();
+        if (this.store.skipDue(stateId, skipNow, nextAutomationDue(automation, skipNow))) {
+          console.warn(
+            `⏭️  [${kind}:${automation.id}] occurrence skipped: ${harnessBlockedReason(blockedUntil)}`,
+          );
+        }
+        continue;
+      }
+
       const overlapNow = this.now();
       if (state.leaseOwner && (state.leaseExpiresAt ?? 0) > overlapNow) {
         const skipNow = this.now();
@@ -307,10 +399,12 @@ export class AutomationAcquirer implements Acquirer {
           Math.max(1, heartbeatMs),
         );
         (preparationHeartbeat as { unref?: () => void }).unref?.();
+        this.waiting.set(automation.id, { since: this.now(), trigger: "scheduled" });
         try {
           context = await this.options.resolveContext(automation);
         } finally {
           clearHeartbeatInterval(preparationHeartbeat);
+          this.waiting.delete(automation.id);
         }
         if (!context) {
           console.warn(
@@ -340,7 +434,7 @@ export class AutomationAcquirer implements Acquirer {
               "scheduled",
               this.options.terminationGraceMs,
             );
-        this.trackActiveRun(automation, stateId, context, run);
+        this.trackActiveRun(automation, stateId, context, run, "scheduled");
       } catch (error) {
         this.store.release(stateId, this.owner);
         await context?.release();
@@ -364,11 +458,14 @@ export class AutomationAcquirer implements Acquirer {
     stateId: string,
     context: AutomationRunContext,
     run: SpawnedAutomationRun,
+    trigger: AutomationActivity["trigger"],
   ): void {
     const kind = this.jobKind();
     const active: ActiveAutomationRun = {
       run,
       lifecycle: Promise.resolve(),
+      startedAt: this.now(),
+      trigger,
     };
     active.lifecycle = run.completion
       .then((ok) =>
@@ -422,6 +519,10 @@ export class AutomationAcquirer implements Acquirer {
     if (this.active.has(automationId)) {
       return { ok: false, reason: `automation "${automationId}" is already running` };
     }
+    const blockedUntil = this.harnessBlockedUntil(automation);
+    if (blockedUntil !== null) {
+      return { ok: false, reason: harnessBlockedReason(blockedUntil) };
+    }
 
     const stateId = this.stateId(automation);
     const state = this.store.get(stateId);
@@ -454,12 +555,14 @@ export class AutomationAcquirer implements Acquirer {
       Math.max(1, heartbeatMs),
     );
     (preparationHeartbeat as { unref?: () => void }).unref?.();
+    this.waiting.set(automation.id, { since: this.now(), trigger: "manual" });
     try {
       context = await this.options.resolveContext(automation);
     } catch (error) {
       return { ok: false, reason: (error as Error).message };
     } finally {
       clearHeartbeatInterval(preparationHeartbeat);
+      this.waiting.delete(automation.id);
       if (context === null) {
         // Declined (busy repo) or rejected — give the lease back so the
         // scheduler can proceed with the next occurrence.
@@ -469,7 +572,10 @@ export class AutomationAcquirer implements Acquirer {
     if (!context) {
       return {
         ok: false,
-        reason: `the repository for "${automationId}" is busy with another run; try again shortly`,
+        reason:
+          this.options.jobKind === undefined
+            ? `the repository for "${automationId}" is busy with another run; try again shortly`
+            : `the worker is busy with another run; try again shortly`,
       };
     }
     if (this.stopped || this.paused) {
@@ -509,7 +615,7 @@ export class AutomationAcquirer implements Acquirer {
       }
       throw error;
     }
-    this.trackActiveRun(automation, stateId, context, run);
+    this.trackActiveRun(automation, stateId, context, run, "manual");
     return { ok: true };
   }
 
@@ -517,14 +623,17 @@ export class AutomationAcquirer implements Acquirer {
   listSchedules(): AutomationScheduleStatus[] {
     return this.options.automations.map((automation) => {
       const state = this.store.get(this.stateId(automation));
+      const activity = this.activityOf(automation);
       return {
         id: automation.id,
+        ...(activity ? { activity } : {}),
         enabled: automation.enabled,
         cron: automation.cron,
         interval: automation.interval,
         repo: automation.repo,
         prompt: automation.prompt,
         openPr: automation.openPr === true,
+        ...pickAgentSelection(automation),
         nextDueAt: state?.nextDueAt,
       };
     });
@@ -535,8 +644,29 @@ export class AutomationAcquirer implements Acquirer {
     return resolveAutomationRunArgs(automation, this.options);
   }
 
+  private harnessBlockedUntil(automation: AutomationConfig): number | null {
+    return (this.options.harnessBlockedUntil ?? defaultHarnessBlockedUntil)(automation);
+  }
+
   private jobKind(): string {
     return this.options.jobKind ?? "automation";
+  }
+
+  /** In-flight occurrence of one automation, for the dashboard. */
+  private activityOf(automation: AutomationConfig): AutomationActivity | undefined {
+    const active = this.active.get(automation.id);
+    if (active) return { state: "running", since: active.startedAt, trigger: active.trigger };
+    const waiting = this.waiting.get(automation.id);
+    if (!waiting) return undefined;
+    return { state: "waiting", ...waiting, reason: this.waitingReason(automation) };
+  }
+
+  /** Why an admitted-but-not-started occurrence is still waiting. */
+  private waitingReason(automation: AutomationConfig): string {
+    if (this.options.jobKind !== undefined || !automation.repo) {
+      return "waiting for a free worker slot";
+    }
+    return `waiting for the ${automation.repo} checkout, which another run is using`;
   }
 
   /** Reason logged when `resolveContext` declines a due occurrence. */
@@ -618,7 +748,7 @@ export function automationRunEnv(
   originValue: string = "scheduled",
 ): Record<string, string | undefined> {
   return {
-    ...base,
+    ...applyAgentSelectionEnv({ ...base }, pickAgentSelection(automation)),
     [AUTOMATION_ORIGIN_ENV]: originValue,
     [AUTOMATION_ID_ENV]: automation.id,
   };
@@ -638,6 +768,9 @@ function defaultSpawnRun(
     {
       cwd: context.cwd,
       env: automationRunEnv(automation, context.env, originValue),
+      // A pinned harness must survive the failover child-env pin (see
+      // `pinAutomationEnv`); entries without one keep workspace failover.
+      harnessPin: automation.harness,
       terminationGraceMs,
     },
   );
@@ -674,6 +807,13 @@ export function spawnAutomationProcess(
   options: {
     cwd: string;
     env: Record<string, string | undefined>;
+    /**
+     * Explicit harness pinned by the scheduled entry (`harness` field). When
+     * set, the child is pinned to it and the workspace failover overlay is
+     * skipped so the entry always uses the agent it named. Entries without a
+     * `harness` keep normal workspace failover.
+     */
+    harnessPin?: string;
     terminationGraceMs?: number;
   },
 ): SpawnedAutomationRun {
@@ -744,13 +884,20 @@ export function spawnAutomationProcess(
         }
         return;
       }
-      if (code === USAGE_LIMIT_EXIT_CODE) {
+      if (code === USAGE_LIMIT_EXIT_CODE || code === HARNESS_UNAVAILABLE_EXIT_CODE) {
         const failover = getWorkerFailover();
-        if (failover && !failover.allLimited()) {
-          const outcome = failover.reportFromHint(readUsageLimitHint(env[USAGE_LIMIT_FILE_ENV]));
+        // A harness pinned by the entry opts out of workspace failover, so an
+        // explicit selection never silently runs a different agent.
+        if (!options.harnessPin && failover) {
+          const outcome =
+            code === USAGE_LIMIT_EXIT_CODE
+              ? failover.reportFromHint(readUsageLimitHint(env[USAGE_LIMIT_FILE_ENV]))
+              : failover.manager.reportHarnessUnavailable(
+                  Date.now() + HARNESS_UNAVAILABLE_COOLDOWN_MS,
+                );
           if (outcome.kind !== "exhausted") {
             cleanupHint();
-            const nextEnv = pinAutomationEnv(options.env);
+            const nextEnv = pinAutomationEnv(options.env, options.harnessPin);
             hintDir = nextEnv.hintDir;
             start(nextEnv.env);
             return;
@@ -762,6 +909,7 @@ export function spawnAutomationProcess(
         return;
       }
       exitResult = code === 0;
+      if (exitResult) getWorkerFailover()?.recordSuccess();
       cleanupHint();
       settle(exitResult);
     });
@@ -773,7 +921,7 @@ export function spawnAutomationProcess(
     });
   };
 
-  const initial = pinAutomationEnv(options.env);
+  const initial = pinAutomationEnv(options.env, options.harnessPin);
   hintDir = initial.hintDir;
   start(initial.env);
 
@@ -783,10 +931,19 @@ export function spawnAutomationProcess(
   };
 }
 
-function pinAutomationEnv(base: Record<string, string | undefined>): {
+function pinAutomationEnv(
+  base: Record<string, string | undefined>,
+  harnessPin?: string,
+): {
   env: Record<string, string | undefined>;
   hintDir?: string;
 } {
+  if (harnessPin) {
+    // The entry named its agent: pin it and skip the workspace failover
+    // overlay. `spawnAutomationProcess`'s `!options.harnessPin` guard ignores
+    // a usage-limit exit rather than re-spawning on another harness.
+    return { env: pinnedHarnessChildEnv(base, harnessPin) };
+  }
   const failover = getWorkerFailover();
   if (!failover) {
     return { env: base };

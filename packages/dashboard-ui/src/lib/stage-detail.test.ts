@@ -73,6 +73,61 @@ test("implementation stage splits report markdown from structured fields", () =>
   ]);
 });
 
+test("verify stage surfaces the verdict summary and blocking findings", () => {
+  // Matches `verifyImplementation`'s `recordRunStage("verify", ...)` detail.
+  const detail = JSON.stringify({
+    approved: false,
+    summary: "Two requirements are unmet",
+    blocking: 1,
+    total: 3,
+    items: [
+      {
+        priority: "high",
+        category: "bug",
+        file: "packages/code/src/lib/agent/verify.ts",
+        line: "143",
+        issue: "Blocking finding is not surfaced",
+        suggestion: "Record it on the stage",
+      },
+    ],
+  });
+
+  const result = parseStageDetail("verify", detail);
+  expect(result.markdown).toBe("Two requirements are unmet");
+  expect(result.fields).toEqual([
+    { label: "Approved", value: { kind: "bool", value: false, yes: "yes", no: "no" } },
+    { label: "Blocking findings", value: { kind: "count", n: 1, noun: "finding" } },
+    { label: "All findings", value: { kind: "count", n: 3, noun: "finding" } },
+    {
+      label: "Findings",
+      value: {
+        kind: "reviewItems",
+        items: [
+          {
+            priority: "high",
+            category: "bug",
+            file: "packages/code/src/lib/agent/verify.ts",
+            line: "143",
+            issue: "Blocking finding is not surfaced",
+            suggestion: "Record it on the stage",
+          },
+        ],
+      },
+    },
+  ]);
+});
+
+test("verify stage reports a missing verdict without findings", () => {
+  const result = parseStageDetail(
+    "verify",
+    JSON.stringify({ error: "No valid JSON object containing approved", attempts: 2 }),
+  );
+  expect(result.markdown).toBeUndefined();
+  expect(result.fields).toEqual([
+    { label: "Error", value: { kind: "text", text: "No valid JSON object containing approved" } },
+  ]);
+});
+
 test("auto_review stage surfaces ReviewFeedback summary and items", () => {
   // Matches `@getdevintern/code` `ReviewFeedback` / `AutoReviewLoopResult`.
   const detail = JSON.stringify({

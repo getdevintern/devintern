@@ -1,0 +1,7 @@
+[test]
+# Preloaded before every e2e test. loopback-no-proxy.ts appends the loopback
+# hosts (including the bracketed `[::1]` form Bun needs for IPv6 URLs) to
+# NO_PROXY/no_proxy so fixture health polls and API fetches against
+# `http://[::1]:<port>` never go through an ambient HTTP proxy. Proxy variables
+# themselves are left intact for suites that talk to remote endpoints.
+preload = ["./tests/setup/loopback-no-proxy.ts"]

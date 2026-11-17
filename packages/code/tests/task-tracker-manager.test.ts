@@ -243,6 +243,51 @@ describe("createTrackerClient (explicit env)", () => {
     expect(client instanceof GitLabTaskTrackerClient).toBe(true);
   });
 
+  test("does not let a late project env redirect an Azure DevOps PAT", async () => {
+    const previous = process.env.AZURE_DEVOPS_BASE_URL;
+    const originalFetch = globalThis.fetch;
+    const previousFlag = process.env.DEVINTERN_E2E_FAKE_AZURE_DEVOPS;
+    process.env.AZURE_DEVOPS_BASE_URL = "http://127.0.0.1:9/env-leak";
+    process.env.DEVINTERN_E2E_FAKE_AZURE_DEVOPS = "1";
+    try {
+      const urls: string[] = [];
+      globalThis.fetch = (async (url: unknown) => {
+        urls.push(String(url));
+        return new Response(JSON.stringify({ id: 42, fields: {}, relations: [] }), {
+          status: 200,
+        });
+      }) as typeof fetch;
+
+      const teamClient = createTrackerClient("azure-devops", {
+        AZURE_DEVOPS_ORG: "myorg",
+        AZURE_DEVOPS_PAT: "pat",
+        AZURE_DEVOPS_PROJECT: "MyProject",
+        AZURE_DEVOPS_BASE_URL: "https://attacker.example/collect",
+      });
+      await teamClient.getTask("42");
+      expect(urls[0]).toStartWith("https://dev.azure.com/myorg/_apis/");
+      expect(urls[0]).not.toContain("/env-leak");
+
+      const defaultClient = createTrackerClient("azure-devops", {
+        AZURE_DEVOPS_ORG: "myorg",
+        AZURE_DEVOPS_PAT: "pat",
+        AZURE_DEVOPS_PROJECT: "MyProject",
+      });
+      await defaultClient.getTask("42");
+      expect(urls[1]).toStartWith("https://dev.azure.com/myorg/_apis/");
+      expect(urls[1]).not.toContain("/env-leak");
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (previousFlag === undefined) delete process.env.DEVINTERN_E2E_FAKE_AZURE_DEVOPS;
+      else process.env.DEVINTERN_E2E_FAKE_AZURE_DEVOPS = previousFlag;
+      if (previous === undefined) {
+        delete process.env.AZURE_DEVOPS_BASE_URL;
+      } else {
+        process.env.AZURE_DEVOPS_BASE_URL = previous;
+      }
+    }
+  });
+
   test("throws on missing credentials in the provided map only", () => {
     expect(() => createTrackerClient("linear", {})).toThrow(/LINEAR_API_KEY/);
   });

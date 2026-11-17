@@ -117,13 +117,21 @@ export async function probeHarnessInvocation(
     const workingDir = join(root, "repo");
     mkdirSync(workingDir, { recursive: true });
     const environment = isolatedEnvironment(root);
-    const invocation = await buildHarnessInvocation(entry.harness, entry.path, {
-      // Match the CLI's implementation run: non-interactive, permissions
-      // skipped, and a bounded turn count where the harness supports it.
-      skipPermissions: true,
-      maxTurns: 2,
-      workingDir,
-    });
+    const invocation = await buildHarnessInvocation(
+      entry.harness,
+      entry.path,
+      {
+        // Match the CLI's implementation run: non-interactive, permissions
+        // skipped, and a bounded turn count where the harness supports it.
+        skipPermissions: true,
+        maxTurns: 2,
+        workingDir,
+      },
+      // Probe the version under the same isolated environment as the run. The
+      // ambient HOME may be read-only here, which makes e.g. `opencode
+      // --version` fail and silently select the wrong flag set.
+      { env: environment },
+    );
     const args = [...invocation.args, ...buildPromptArgs(entry.harness, HARNESS_PROBE_PROMPT)];
     const child = spawnReapable(entry.path, args, {
       cwd: workingDir,

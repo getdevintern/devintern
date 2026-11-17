@@ -11,6 +11,7 @@ export type RunOrigin =
   | "pr_mention"
   | "ci_fix"
   | "conflict_resolution"
+  | "auto_merge"
   | "scheduled"
   | "estimate"
   | "manual"
@@ -42,6 +43,8 @@ export interface RunRecord {
   prUrl?: string;
   status: RunStatus;
   outcomeReason?: string;
+  /** 1-based attempt number of this run for its task. */
+  attempt?: number;
   step?: string;
   stepStartedAt?: number;
   stepActive?: boolean;
@@ -61,7 +64,7 @@ export type StageStatus =
 export interface RunStageRecord {
   id: number;
   runId: number;
-  stage: "feasibility" | "implementation" | "auto_review" | "change_request" | "outcome";
+  stage: "feasibility" | "implementation" | "verify" | "auto_review" | "change_request" | "outcome";
   status: StageStatus;
   summary?: string;
   detail?: string;
@@ -71,6 +74,27 @@ export interface RunStageRecord {
 export interface TaskActivityResponse {
   runs: RunRecord[];
   recentLimit: number;
+}
+
+/** `/api/runs` URL for the most recent runs of one automation. */
+export function automationRunsUrl(automationId: string, limit = 10): string {
+  return scheduledJobRunsUrl({ automationId }, limit);
+}
+
+/** Run-list URL for one scheduled job's run filter. */
+export function scheduledJobRunsUrl(filter: ScheduledJobRunFilter, limit = 10): string {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (filter.automationId) params.set("automationId", filter.automationId);
+  if (filter.origin) params.set("origin", filter.origin);
+  return `/api/runs?${params}`;
+}
+
+/** Whether a recorded run belongs to a scheduled job's run filter. */
+export function runMatchesFilter(run: RunRecord, filter: ScheduledJobRunFilter): boolean {
+  return (
+    (!filter.automationId || run.automationId === filter.automationId) &&
+    (!filter.origin || run.origin === filter.origin)
+  );
 }
 
 export interface RunsResponse {
@@ -191,9 +215,135 @@ export async function triggerRunRetry(runId: number): Promise<{
   return { ok: response.ok, body };
 }
 
+/** What the user typed in the "Report a problem" form. */
+export interface ReportDraft {
+  title: string;
+  description: string;
+  shareIdentifiers: boolean;
+}
+
+/** Redacted bug-report payload exactly as it will be sent (opaque to the UI). */
+export interface ReportPayload {
+  reportId: string;
+  title: string;
+  description: string;
+  [key: string]: unknown;
+}
+
+/** `POST /api/runs/:id/report/preview` response: what will be sent. */
+export interface ReportPreview {
+  previewId: string;
+  expiresAt: number;
+  runId: number;
+  signedIn: boolean;
+  /** Anonymous reports need a contact email to submit. */
+  contactRequired: boolean;
+  destination: string;
+  title: string;
+  description: string;
+  bytes: number;
+  attachments: {
+    environment: {
+      cliVersion: string;
+      installKind: string;
+      os: string;
+      arch: string;
+      ci: boolean;
+      harness?: string;
+      tracker?: string;
+      sandbox?: string;
+      signedIn: boolean;
+    };
+    run: {
+      id?: number;
+      status: string;
+      failedStep?: string;
+      durationMs?: number;
+      stageCount: number;
+      hasReason: boolean;
+    } | null;
+    logs: { source: string; lines: number; bytes: number; truncated: boolean }[];
+    evidenceCount: number;
+    identifiersShared: boolean;
+  };
+  omitted: string[];
+  payload: ReportPayload;
+}
+
+/** `POST /api/reports` outcome. */
+export type ReportSubmitResult =
+  | { status: "sent"; reportId: string; shortId: string; url?: string; receipt?: string }
+  | {
+      status: "saved";
+      error: string;
+      authExpired: boolean;
+      savedPath: string;
+      retryCommand: string;
+    };
+
+/** Read an error message from a JSON error body. */
+function errorMessage(body: unknown, fallback: string): string {
+  if (body !== null && typeof body === "object" && "error" in body) {
+    const { error } = body as { error: unknown };
+    if (typeof error === "string" && error.trim()) return error;
+  }
+  return fallback;
+}
+
+/**
+ * Build the redacted report for a run without sending it. Throws with the
+ * server's message on failure.
+ */
+export async function previewRunReport(runId: number, draft: ReportDraft): Promise<ReportPreview> {
+  const response = await fetch(`/api/runs/${runId}/report/preview`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(draft),
+  });
+  const body: unknown = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(errorMessage(body, `Preview failed (HTTP ${response.status})`));
+  }
+  return body as ReportPreview;
+}
+
+/**
+ * Send a previewed report. A failed delivery that was saved locally resolves
+ * with `status: "saved"`; validation errors (missing email, expired preview)
+ * throw with the server's message.
+ */
+export async function submitReport(previewId: string, email?: string): Promise<ReportSubmitResult> {
+  const response = await fetch("/api/reports", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(email ? { previewId, email } : { previewId }),
+  });
+  const body: unknown = await response.json().catch(() => ({}));
+  if (body !== null && typeof body === "object" && "status" in body) {
+    const { status } = body as { status: unknown };
+    if (status === "sent" || status === "saved") return body as ReportSubmitResult;
+  }
+  throw new Error(errorMessage(body, `Send failed (HTTP ${response.status})`));
+}
+
 /** One configured scheduled automation as served by `GET /api/automations`. */
+export type ScheduledJobKind = "automation" | "estimation" | "conflict_resolution" | "auto_merge";
+
+/** Which recorded runs belong to one scheduled job (`GET /api/runs` filters). */
+export interface ScheduledJobRunFilter {
+  automationId?: string;
+  origin?: RunOrigin;
+}
+
 export interface AutomationSchedule {
   id: string;
+  /**
+   * Job type: a prompt automation, a story-point estimation sweep, or the
+   * scheduled conflict-resolution window. Absent (older servers) = automation.
+   */
+  kind?: ScheduledJobKind;
+  /** Display name when it differs from `id` (namespaced ids). */
+  title?: string;
   enabled: boolean;
   /** Cron expression or interval as configured (`0 9 * * 1`, `6h`). */
   schedule?: string;
@@ -202,10 +352,38 @@ export interface AutomationSchedule {
   prompt: string;
   /** Whether occurrences open a pull request (opt-in; default off). */
   openPr?: boolean;
+  /** Per-automation agent harness override; absent inherits the workspace agent. */
+  harness?: string;
+  /** Per-automation model override; absent keeps the harness default. */
+  model?: string;
+  /** Per-automation reasoning effort override; absent keeps the harness default. */
+  effort?: string;
   /** Next scheduled occurrence (epoch ms). */
   nextDueAt?: number;
+  /** Estimation sweeps: tracker query selecting the tickets to estimate. */
+  query?: string;
+  /** Estimation sweeps: `[[teams]]` name whose tracker the sweep uses. */
+  team?: string;
+  /** Recorded runs attributed to this job; absent (older servers) = `{ automationId: id }`. */
+  runFilter?: ScheduledJobRunFilter;
   /** Most recent run of this automation (any origin). */
   lastRun?: RunRecord;
+  /** Occurrence in flight on this worker, including one still waiting for a slot. */
+  activity?: AutomationActivity;
+}
+
+/**
+ * What an occurrence is doing before (or while) its run record exists. A run
+ * waiting for a free slot has no run row yet, so this is its only trace.
+ */
+export interface AutomationActivity {
+  /** `waiting`: not admitted yet. `running`: the run's process has started. */
+  state: "waiting" | "running";
+  /** When the occurrence entered this state (epoch ms). */
+  since: number;
+  trigger: "scheduled" | "manual";
+  /** Why a waiting occurrence has not started yet. */
+  reason?: string;
 }
 
 export interface AutomationsResponse {
@@ -230,6 +408,78 @@ export async function triggerAutomation(automationId: string): Promise<{
     status?: string;
   };
   return { ok: response.ok, body };
+}
+
+export const TASKS_URL = "/api/tasks";
+
+/** `POST /api/tasks` body: an ad-hoc task (equivalent of `devintern worker add`). */
+export interface CreateTaskInput {
+  repo: string;
+  title: string;
+  body: string;
+  /** Dedupes a resubmission while the first task is pending/running. */
+  idempotencyKey: string;
+}
+
+/** `POST /api/tasks` success body (same shape as `worker add --json`). */
+export interface CreatedTask {
+  id: number;
+  taskKey: string;
+  repo: string;
+  status: string;
+  deduplicated: boolean;
+}
+
+export type CreateTaskResult = { ok: true; task: CreatedTask } | { ok: false; error: string };
+
+/** Parse the `POST /api/tasks` success body, or null when it has the wrong shape. */
+export function parseCreatedTask(value: unknown): CreatedTask | null {
+  if (typeof value !== "object" || value === null) return null;
+  const record = value as Record<string, unknown>;
+  if (
+    typeof record.id !== "number" ||
+    typeof record.taskKey !== "string" ||
+    typeof record.repo !== "string" ||
+    typeof record.status !== "string" ||
+    typeof record.deduplicated !== "boolean"
+  ) {
+    return null;
+  }
+  return {
+    id: record.id,
+    taskKey: record.taskKey,
+    repo: record.repo,
+    status: record.status,
+    deduplicated: record.deduplicated,
+  };
+}
+
+/**
+ * Enqueue an ad-hoc task for the workspace worker. Same-origin JSON POST, so
+ * it passes the dashboard's Origin/Content-Type guard on write requests.
+ */
+export async function createTask(input: CreateTaskInput): Promise<CreateTaskResult> {
+  let response: Response;
+  try {
+    response = await fetch(TASKS_URL, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    });
+  } catch (cause) {
+    return { ok: false, error: cause instanceof Error ? cause.message : String(cause) };
+  }
+  const body: unknown = await response.json().catch(() => null);
+  if (!response.ok) {
+    const error =
+      typeof body === "object" && body !== null && "error" in body && typeof body.error === "string"
+        ? body.error
+        : `HTTP ${response.status}`;
+    return { ok: false, error };
+  }
+  const task = parseCreatedTask(body);
+  return task ? { ok: true, task } : { ok: false, error: "unexpected response from the server" };
 }
 
 export interface StatsResponse {
@@ -276,12 +526,62 @@ export interface WorkerStatus {
 
 export interface WorkerResponse {
   worker: WorkerStatus;
-  queue: { pending: number; processing: number; failed: number };
+  queue: {
+    /** Relay/webhook deliveries awaiting or inside the normal poll loop. */
+    pending: number;
+    processing: number;
+    failed: number;
+    /** Ad-hoc tasks enqueued by `devintern worker add`. */
+    injected: { pending: number; running: number };
+    /** Retries scheduled by the dashboard's Retry action. */
+    retries: { pending: number; running: number };
+  };
   agentPrs: { open: number; closed: number };
   schedule?: ScheduleSnapshot | null;
   cursors: { source: string; cursorValue: string; updatedAt: number }[];
   dbPath: string;
   dbMissing: boolean;
+  queueDbPath: string;
+  /** Whether the durable queue database file is absent. */
+  queueDbMissing: boolean;
+}
+
+/** Where a queued item came from. */
+export type QueuedWorkKind = "ad-hoc" | "retry" | "webhook" | "automation";
+
+/** One pending item from `GET /api/queue`; running rows are active work instead. */
+export interface QueuedWorkItem {
+  /** Stable across polls: `<kind>:<row id>`. */
+  id: string;
+  kind: QueuedWorkKind;
+  title: string;
+  taskKey?: string;
+  repo?: string;
+  actor?: string;
+  createdAt: number;
+  /** Earliest pickup time while backing off after a deferral. */
+  notBefore?: number;
+  deferCount?: number;
+  message?: string;
+  /** Ad-hoc prompt body, clipped server-side. */
+  body?: string;
+  bodyTruncated?: boolean;
+  /** Retry: the run being retried. */
+  runId?: number;
+  eventType?: string;
+  prNumber?: number;
+  prUrl?: string;
+  attempts?: number;
+  lastError?: string;
+  /** Automation: the scheduled job waiting for a slot. */
+  automationId?: string;
+}
+
+export interface QueuedWorkResponse {
+  /** Pending items in the order they become claimable. */
+  items: QueuedWorkItem[];
+  /** Every pending item, including any beyond the listed ones. */
+  total: number;
 }
 
 /** One open agent-created PR (registry rows reconciled with GitHub by the worker). */
@@ -331,6 +631,281 @@ export interface LogsResponse {
   sources: LogSourceInfo[];
   truncated: boolean;
 }
+
+/** Dashboard API endpoints for the overview and workspace screens. */
+export const OVERVIEW_URL = "/api/overview";
+export const WORKSPACE_URL = "/api/workspace";
+
+/** One unfinished run, trimmed for the capacity panel. */
+export interface OverviewRunningRun {
+  id: number;
+  origin: RunOrigin;
+  taskKey?: string;
+  /** Repo as recorded on the run (a workspace repo name or `owner/repo`). */
+  repo?: string;
+  /** Workspace repo the run was attributed to, when it matched one. */
+  workspaceRepo?: string;
+  team?: string;
+  harness?: string;
+  step?: string;
+  startedAt: number;
+}
+
+export interface OverviewRepoCapacity {
+  /** Workspace repo name, or the run's raw repo when it matched none. */
+  repo: string;
+  running: number;
+  /** `max_concurrency_per_repo`; null without a valid config. */
+  maxConcurrency: number | null;
+  /** Whether the repo is declared in `workspace.toml`. */
+  configured: boolean;
+}
+
+export interface OverviewCapacity {
+  /** Unfinished (`in_progress`) runs. */
+  running: number;
+  /** `max_concurrency`; null without a valid config. */
+  maxConcurrency: number | null;
+  /** Configured repos first (config order), then unmatched run repos. */
+  perRepo: OverviewRepoCapacity[];
+  /** Running runs without any repo. */
+  unattributed: number;
+  runs: OverviewRunningRun[];
+}
+
+/**
+ * `unknown` = persisted failover state could not be read. `unconfirmed` = the
+ * last usage-limit window elapsed but no run has succeeded on the harness since,
+ * so its quota may still be exhausted.
+ */
+export type OverviewHarnessState = "healthy" | "limited" | "unconfirmed" | "unknown";
+
+export interface OverviewHarnessEntry {
+  name: string;
+  /** 0 = primary. */
+  priority: number;
+  /** Whether the name resolves to a registered harness. */
+  known: boolean;
+  active: boolean;
+  state: OverviewHarnessState;
+  /** Usage-limit window end (epoch ms), only while `limited`. */
+  limitedUntil?: number;
+  /** When the last usage limit was hit (epoch ms), only while `unconfirmed`. */
+  lastLimitedAt?: number;
+  /** When that limit window ended (epoch ms), only while `unconfirmed`. */
+  limitEndedAt?: number;
+}
+
+export interface OverviewHarnesses {
+  /** Where `AGENT_HARNESS` came from (workspace `.env` wins, like the worker). */
+  source: "workspace_env" | "process_env" | "default";
+  entries: OverviewHarnessEntry[];
+  /** Highest-priority entry without an open window (primary when exhausted); null when unknown. */
+  active: string | null;
+  /** Active harness last persisted by the worker. */
+  persistedActive?: string;
+  /** Every entry is limited; new agent work is paused. */
+  allExhausted: boolean;
+  /** Earliest window end while exhausted (epoch ms). */
+  resumesAt?: number;
+  /** False when persisted failover state could not be read. */
+  stateAvailable: boolean;
+}
+
+export interface OverviewTrackerSource {
+  /** Team name; absent for the single `[defaults]` poller. */
+  team?: string;
+  tracker: string;
+  taskQuery?: string;
+  repo?: string;
+  /** Cursor key the poller writes (`<tracker>:<team>` or `<tracker>`). */
+  cursorSource: string;
+  /** When the poller last advanced its cursor (epoch ms). */
+  lastPolledAt?: number;
+  cursorValue?: string;
+}
+
+export interface OverviewTrackers {
+  mode: "teams" | "defaults" | "none";
+  pollIntervalSeconds?: number;
+  sources: OverviewTrackerSource[];
+}
+
+/** `GET /api/overview` body. */
+export interface OverviewResponse {
+  generatedAt: number;
+  worker: WorkerStatus;
+  config: { status: "ok" | "missing" | "invalid"; path: string; error?: string };
+  capacity: OverviewCapacity;
+  harnesses: OverviewHarnesses;
+  trackers: OverviewTrackers;
+}
+
+/** Redacted env source: location plus variable NAMES only (never values). */
+export interface WorkspaceEnvFileView {
+  /** Path as written in `workspace.toml`. */
+  path: string;
+  resolvedPath: string;
+  exists: boolean;
+  keys: string[];
+}
+
+export interface WorkspaceScheduleView {
+  cron?: string;
+  interval?: string;
+}
+
+export interface WorkspaceTeamView {
+  name: string;
+  tracker: string;
+  taskQuery?: string;
+  repo?: string;
+  envFile?: WorkspaceEnvFileView;
+  /** Inline `[teams.env]` key names. */
+  envKeys: string[];
+}
+
+export interface WorkspaceRepoView {
+  name: string;
+  /** Remote with embedded credentials removed. */
+  remote: string;
+  defaultBranch?: string;
+  prLabels?: string[];
+  pipelineFile?: string;
+  envFile?: WorkspaceEnvFileView;
+  envKeys: string[];
+}
+
+export interface WorkspaceRoutingRule {
+  repo: string;
+  team?: string;
+  project?: string;
+  components: string[];
+  labels: string[];
+}
+
+export interface WorkspaceAutomationView extends WorkspaceScheduleView {
+  id: string;
+  enabled: boolean;
+  repo?: string;
+  openPr: boolean;
+  allowNoChanges: boolean;
+  prompt: string;
+  /** Per-automation agent harness override; absent inherits the workspace agent. */
+  harness?: string;
+  /** Per-automation model override; absent keeps the harness default. */
+  model?: string;
+  /** Per-automation reasoning effort override; absent keeps the harness default. */
+  effort?: string;
+}
+
+export interface WorkspaceEstimationView extends WorkspaceScheduleView {
+  id: string;
+  enabled: boolean;
+  query: string;
+}
+
+export interface WorkspaceErrorMonitorView {
+  id: string;
+  provider: string;
+  enabled: boolean;
+  repo: string;
+  team?: string;
+  query?: string;
+  intervalSeconds: number;
+  minOccurrences: number;
+  maxIssuesPerTick: number;
+  commentOnAction: boolean;
+  organization: string;
+  project: string;
+  baseUrl?: string;
+  envFile?: WorkspaceEnvFileView;
+  envKeys: string[];
+}
+
+/** `[worker.schedule]` time window as parsed by the worker. */
+export interface WorkspaceTimeWindow {
+  spec: string;
+  startMinutes: number;
+  endMinutes: number;
+}
+
+export interface WorkspaceConfigView {
+  workspace: {
+    execution: {
+      isolation?: "best_effort_host";
+      maxConcurrency: number;
+      maxConcurrencyPerRepo: number;
+    };
+    worktreesTtlDays: number;
+    dashboard: boolean;
+    dashboardPort?: number;
+    ciFailureFix: boolean;
+    conflictResolution: "auto" | "scheduled" | "disabled";
+    conflictSchedule?: WorkspaceScheduleView;
+  };
+  worker: {
+    autoUpdate: boolean;
+    schedule: {
+      active: WorkspaceTimeWindow[];
+      blocked: WorkspaceTimeWindow[];
+      timezone?: string;
+      catchUpMissed: boolean;
+    } | null;
+  };
+  defaults: {
+    tracker: string;
+    taskQuery?: string;
+    workerTaskArgs?: string;
+    prLabels?: string[];
+    pipelineFile?: string;
+    pollIntervalSeconds: number;
+  };
+  /** Shared workspace `.env` (key names only). */
+  sharedEnv: WorkspaceEnvFileView;
+  teams: WorkspaceTeamView[];
+  repos: WorkspaceRepoView[];
+  routing: WorkspaceRoutingRule[];
+  automations: WorkspaceAutomationView[];
+  estimations: WorkspaceEstimationView[];
+  errorMonitors: WorkspaceErrorMonitorView[];
+}
+
+export interface WorkspaceResponseMeta {
+  workspaceDir: string;
+  configPath: string;
+  /** Config file mtime (epoch ms); absent when missing. */
+  fileModifiedAt?: number;
+  /** Running worker's start time (epoch ms) from its lock. */
+  workerStartedAt?: number;
+  /**
+   * File modified after the running worker started (mtime only; true even
+   * after a successful hot reload). Prefer `configSync`.
+   */
+  staleSinceWorkerStart?: boolean;
+  /**
+   * Whether the running worker runs this file: `applied`, `pending` (not
+   * processed yet), `rejected` (kept its previous config; see
+   * `appliedConfig.rejectedReason`), or `unconfirmed` (older worker without a
+   * record, file newer than its start). Absent without a running worker.
+   */
+  configSync?: "applied" | "pending" | "rejected" | "unconfirmed";
+  /** The version the running worker last applied, when it keeps a record. */
+  appliedConfig?: {
+    appliedAt: number;
+    fileModifiedAt: number;
+    rejectedReason?: string;
+    rejectedAt?: number;
+  };
+}
+
+/** `GET /api/workspace` body. */
+export type WorkspaceResponse = WorkspaceResponseMeta &
+  (
+    | { status: "ok"; config: WorkspaceConfigView }
+    | { status: "missing"; error: string }
+    | { status: "invalid"; error: string; problems: string[] }
+  );
 
 export interface PollState<T> {
   data: T | null;

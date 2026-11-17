@@ -114,6 +114,17 @@ export interface AgentRunResult {
   structured?: StructuredOutputResult;
 }
 
+/** Options for {@link AgentHarness.probe} and the shared version probe helpers. */
+export interface HarnessProbeOptions {
+  /**
+   * Environment for the spawned probe process. Defaults to `process.env`.
+   * Pass the environment the real run will use so the probe sees the same
+   * HOME/XDG directories (a CLI may fail `--version` when its log directory
+   * is read-only).
+   */
+  env?: NodeJS.ProcessEnv | Record<string, string>;
+}
+
 /**
  * Best-effort capability snapshot of an installed harness CLI, produced by
  * {@link AgentHarness.probe} before {@link AgentHarness.buildArgs} runs.
@@ -126,6 +137,10 @@ export interface HarnessProbe {
   version?: string;
   /** Parsed major version (e.g. `2` for `"2.0.23"`). */
   major?: number;
+  /** Parsed minor version (e.g. `0` for `"2.0.23"`). */
+  minor?: number;
+  /** Parsed patch version (e.g. `23` for `"2.0.23"`). */
+  patch?: number;
 }
 
 /** Complete invocation for a harness run: argv plus spawn-environment overlays. */
@@ -221,9 +236,14 @@ export interface AgentHarness {
    * unknown so callers fall back to baseline behavior.
    *
    * @param executablePath - Resolved path/command of the CLI to probe.
+   * @param options - Optional environment for the probe process (defaults to
+   *   `process.env`).
    * @returns Capability snapshot, or `{}` when nothing could be determined.
    */
-  probe?(executablePath: string): Promise<HarnessProbe> | HarnessProbe;
+  probe?(
+    executablePath: string,
+    options?: HarnessProbeOptions,
+  ): Promise<HarnessProbe> | HarnessProbe;
   /**
    * Build CLI arguments for the given run options.
    *
@@ -256,6 +276,17 @@ export interface AgentHarness {
    * Use this when the CLI expects the prompt as a flag value.
    */
   readonly promptFlag?: string;
+  /**
+   * Native file-input flag (e.g. Muse Code `--prompt-file`) that accepts a path
+   * holding the full prompt. Used only when the prompt is too large for one
+   * argv entry: {@link buildPromptArgs} writes the prompt to a private temp
+   * file and emits this flag instead of a short "read this file" pointer, so
+   * the CLI receives the complete prompt through its own file surface.
+   *
+   * Falls back to `promptFlag` or a positional argument when the temp file
+   * cannot be written.
+   */
+  readonly promptFileFlag?: string;
   /**
    * End-of-options marker (e.g. `--`) that this CLI honors before positional
    * arguments. When set and a positional prompt starts with `-`,

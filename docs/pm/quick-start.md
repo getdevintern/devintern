@@ -1,14 +1,14 @@
 ---
-title: "@devintern/pm Quick Start"
+title: "DevIntern PM Quick Start"
 sidebarLabel: "Quick Start"
-description: "Install @devintern/pm and create your first AI-drafted ticket in your tracker."
+description: "Use when installing DevIntern PM (desktop app or CLI) and creating your first AI-drafted ticket in Jira, Linear, Trello, or another tracker."
 section: "Create Tasks"
 order: 0
-dateModified: 2026-09-01
+dateModified: 2026-11-12
 tags: ["devintern/pm", "quick start", "jira", "linear", "cli"]
 ---
 
-# @devintern/pm Quick Start
+# DevIntern PM Quick Start
 
 **@devintern/pm** automates story and task creation across multiple project management tools with AI. Transform Figma designs, error logs, or requirements into well-structured issues in seconds.
 

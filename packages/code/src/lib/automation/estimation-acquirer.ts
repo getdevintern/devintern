@@ -4,8 +4,13 @@ import {
   AutomationAcquirer,
   spawnAutomationProcess,
 } from "./acquirer";
-import type { AutomationRunContext, SpawnedAutomationRun } from "./acquirer";
+import type {
+  AutomationRunContext,
+  AutomationScheduleStatus,
+  SpawnedAutomationRun,
+} from "./acquirer";
 import type { AutomationConfig } from "./config";
+import { applyAgentSelectionEnv, pickAgentSelection } from "../agent/selection";
 import type { EstimationConfig } from "./estimation-config";
 
 /** Value of the run-origin marker that attributes CLI runs to scheduled estimation. */
@@ -49,7 +54,7 @@ export function estimationRunEnv(
   base?: Record<string, string | undefined>,
 ): Record<string, string | undefined> {
   return {
-    ...base,
+    ...applyAgentSelectionEnv({ ...base }, pickAgentSelection(estimation)),
     [AUTOMATION_ORIGIN_ENV]: ESTIMATION_ORIGIN_ENV_VALUE,
     [AUTOMATION_ID_ENV]: estimation.id,
   };
@@ -73,6 +78,7 @@ export function spawnEstimationSweep(
     {
       cwd: context.cwd,
       env: estimationRunEnv(estimation, context.env),
+      harnessPin: estimation.harness,
       terminationGraceMs,
     },
   );
@@ -98,6 +104,15 @@ export class EstimationAcquirer extends AutomationAcquirer {
           ? options.spawnRun(estimation, context)
           : spawnEstimationSweep(estimation, context);
       },
+      // Dashboard "Run now" runs the same estimate sweep (never the automation
+      // prompt pipeline). It keeps the `estimate` origin so the sweep's run
+      // history stays in one place; the run list still shows it immediately.
+      spawnManualRun: (schedule, context) => {
+        const estimation = schedule as ScheduledEstimation;
+        return options.spawnRun
+          ? options.spawnRun(estimation, context)
+          : spawnEstimationSweep(estimation, context, options.terminationGraceMs);
+      },
       now: options.now,
       leaseMs: options.leaseMs,
       heartbeatMs: options.heartbeatMs,
@@ -107,11 +122,36 @@ export class EstimationAcquirer extends AutomationAcquirer {
       setInterval: options.setInterval,
       clearInterval: options.clearInterval,
     });
+    this.estimations = options.estimations;
   }
+
+  private estimations: EstimationConfig[];
 
   /** Reconcile scheduled estimation entries after a live workspace reload. */
   applyEstimations(estimations: EstimationConfig[]): void {
+    this.estimations = estimations;
     this.applyAutomations(estimationSchedules(estimations));
+  }
+
+  /**
+   * Dashboard catalog: each sweep with its durable next-due state, query and
+   * team. Ids stay bare here; the dashboard composition namespaces them.
+   */
+  override listSchedules(): AutomationScheduleStatus[] {
+    const byId = new Map(this.estimations.map((estimation) => [estimation.id, estimation]));
+    return super.listSchedules().map((status) => {
+      const estimation = byId.get(status.id);
+      return {
+        ...status,
+        kind: "estimation" as const,
+        prompt: "",
+        openPr: false,
+        query: estimation?.query,
+        team: estimation?.team,
+        // Sweeps record runs with the `estimate` origin and the bare entry id.
+        runFilter: { automationId: status.id, origin: "estimate" as const },
+      };
+    });
   }
 }
 

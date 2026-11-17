@@ -1,6 +1,8 @@
 /** Delimit the final reviewer briefing independently of streamed progress. */
-const SUMMARY_START = "<!-- devintern:summary:start -->";
-const SUMMARY_END = "<!-- devintern:summary:end -->";
+import {
+  IMPLEMENTATION_SUMMARY_END as SUMMARY_END,
+  IMPLEMENTATION_SUMMARY_START as SUMMARY_START,
+} from "@devintern/agent-harness";
 
 /** Request a complete final summary in implementation and repair sessions. */
 export function withImplementationSummary(prompt: string): string {

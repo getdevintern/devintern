@@ -2,6 +2,10 @@ import { createGitHubCiProvider } from "../code-host/github/ci-provider";
 import { parseEnvInteger } from "../config/env-integer";
 import { RunStore } from "../state/run-recorder";
 import type { TaskExecutionResult } from "../acquirers/task-polling";
+import type {
+  ConflictWindowStatus,
+  ConflictWindowTriggerOutcome,
+} from "../acquirers/review-polling";
 import type { ChangeDetector } from "../acquirers/change-detector";
 import type { TeamConfig, WorkspaceConfig } from "./config";
 import { buildRepoEnv, buildTeamTaskEnv, gitHubSlugFromRemote } from "./env";
@@ -12,6 +16,12 @@ import type { TaskSupervisor } from "../worker/supervisor";
 import type { TaskTrackerClient } from "../trackers/client";
 
 type FleetGitHubClient = import("../code-host/github/reviews").GitHubReviewsClient;
+type AutoMergeWatcherAcquirer = import("../acquirers/auto-merge-watcher").AutoMergeWatcherAcquirer;
+type AutoMergeWatcherOptions = import("../acquirers/auto-merge-watcher").AutoMergeWatcherOptions;
+type AutoMergeWatcherStatus = import("../acquirers/auto-merge-watcher").AutoMergeWatcherStatus;
+type WorkerState = import("../state/worker-state").WorkerState;
+type WebhookQueue = import("../state/webhook-queue").WebhookQueue;
+type AutoMergeRunNowOutcome = import("../acquirers/auto-merge-watcher").AutoMergeRunNowOutcome;
 
 /**
  * Reconciliation hooks exposed to the live config reload path by the fleet
@@ -24,6 +34,14 @@ export interface FleetEventReloadHooks {
   reconcileConflictResolution(): void;
   /** Slugs currently served by a mention sweep (sorted). */
   mentionSweepRepos(): string[];
+  /** Scheduled conflict window state for the dashboard (null unless scheduled). */
+  conflictWindowStatus(): ConflictWindowStatus | null;
+  /** Dashboard "Run now": open the scheduled conflict window immediately. */
+  openConflictWindowNow(): ConflictWindowTriggerOutcome;
+  /** Auto-merge watcher status for the dashboard (null while disabled). */
+  autoMergeStatus(): AutoMergeWatcherStatus | null;
+  /** Dashboard "Run now": check every watched PR for auto-merge immediately. */
+  runAutoMergeNow(): AutoMergeRunNowOutcome;
 }
 
 /** One tracker source served by the workspace worker. */
@@ -174,6 +192,70 @@ function buildFleetCiProvider(
 }
 
 /**
+ * Auto-merge watcher (off by default): same PR registry and supervisor as
+ * reviews; the switch and policy are read live so reloads need no restart.
+ */
+async function buildAutoMergeWatcher(params: {
+  config: WorkspaceConfig;
+  workerState: WorkerState;
+  queue: WebhookQueue;
+  gh: (slug: string) => FleetGitHubClient;
+  mergePr: AutoMergeWatcherOptions["mergePr"];
+  runStore: RunStore;
+  intervalSeconds: number;
+  verbose: boolean | undefined;
+}): Promise<AutoMergeWatcherAcquirer> {
+  const { config, gh } = params;
+  const { AutoMergeWatcherAcquirer: Watcher, DEFAULT_AUTO_MERGE_QUIET_SECONDS } =
+    await import("../acquirers/auto-merge-watcher");
+  const { parseHarnessList } = await import("@devintern/agent-harness");
+  const { isGitHubNotFound } = await import("../code-host/github/reviews");
+  const { fleetAutoMergePolicyFingerprint } = await import("./fleet-events");
+  const settings = config.workspace.autoMerge;
+  if (
+    settings.enabled &&
+    !settings.review &&
+    settings.safePaths.length === 0 &&
+    config.repos.every((repo) => !repo.autoMergeSafePaths?.length)
+  ) {
+    console.warn(
+      "⚠️  [workspace].auto_merge is on with auto_merge_review = false and no " +
+        "auto_merge_safe_paths, so no pull request can ever qualify.",
+    );
+  }
+  return new Watcher({
+    intervalSeconds: params.intervalSeconds,
+    enabled: () => config.workspace.autoMerge.enabled,
+    workerState: params.workerState,
+    queue: params.queue,
+    fetchPr: async (repo, n, etag) => {
+      const [owner = "", name = ""] = repo.split("/");
+      try {
+        return await gh(repo).conditionalGet(`/repos/${repo}/pulls/${n}`, owner, name, etag);
+      } catch (error) {
+        if (isGitHubNotFound(error)) return { data: null, notModified: false, gone: true };
+        throw error;
+      }
+    },
+    mergePr: params.mergePr,
+    runStore: params.runStore,
+    // Only a run that can reach the agent review names a harness.
+    harness: () =>
+      config.workspace.autoMerge.review
+        ? (config.workspace.autoMerge.agent?.harness ??
+          parseHarnessList(process.env.AGENT_HARNESS)[0])
+        : undefined,
+    policyFingerprint: (slug) => fleetAutoMergePolicyFingerprint(config, slug),
+    quietSeconds: parseEnvInteger(
+      "WORKER_AUTO_MERGE_QUIET_SECONDS",
+      DEFAULT_AUTO_MERGE_QUIET_SECONDS,
+      { min: 0 },
+    ),
+    verbose: params.verbose,
+  });
+}
+
+/**
  * Wire the fleet's event acquirers: review polling on the agent's own PRs,
  * a mention sweep per GitHub repo, and the relay when configured.
  *
@@ -227,6 +309,7 @@ export async function buildFleetEventAcquirers(options: {
 
   const {
     createFleetAddressPr,
+    createFleetAutoMerge,
     createFleetCiFix,
     coalescePrFeedbackRuns,
     createFleetResolveConflicts,
@@ -277,7 +360,11 @@ export async function buildFleetEventAcquirers(options: {
   let githubFor: ((slug: string) => FleetGitHubClient) | undefined;
   let addressPr: ((repo: string, prNumber: number) => Promise<TaskExecutionResult>) | undefined;
   let handleMention:
-    | ((repo: string, comment: { user: { login: string } }, prNumber: number) => Promise<void>)
+    | ((
+        repo: string,
+        comment: { user: { login: string } },
+        prNumber: number,
+      ) => Promise<TaskExecutionResult>)
     | undefined;
 
   // Built whenever credentials exist — even with zero GitHub repos today —
@@ -298,7 +385,9 @@ export async function buildFleetEventAcquirers(options: {
       workspaceDir,
       repoManager,
       userHasPushAccess: (owner: string, repo: string, user: string) =>
-        gh(`${owner}/${repo}`).userHasPushAccess(owner, repo, user),
+        // Throwing variant: a transient permission-API error must be retried by
+        // the relay / mention sweep, not treated as a denial.
+        gh(`${owner}/${repo}`).userHasPushAccessOrThrow(owner, repo, user),
       verbose,
       supervisor: options.supervisor,
     };
@@ -382,6 +471,19 @@ export async function buildFleetEventAcquirers(options: {
     });
     acquirers.push(ciWatcher);
     intervalUpdaters.push((seconds) => ciWatcher.updateInterval(seconds));
+
+    const autoMergeWatcher = await buildAutoMergeWatcher({
+      config,
+      workerState: state.workerState,
+      queue: state.queue,
+      gh,
+      mergePr: createFleetAutoMerge(eventDeps),
+      runStore,
+      intervalSeconds,
+      verbose,
+    });
+    acquirers.push(autoMergeWatcher);
+    intervalUpdaters.push((seconds) => autoMergeWatcher.updateInterval(seconds));
 
     // Tier 2: one mention sweep per GitHub repo (cursor sources are already
     // namespaced by slug). The permission gate runs in the fleet handler.
@@ -487,6 +589,10 @@ export async function buildFleetEventAcquirers(options: {
             config.workspace.conflictSchedule,
           ),
         mentionSweepRepos: () => [...mentionSweeps.keys()].sort(),
+        conflictWindowStatus: () => reviewAcquirer.conflictWindowStatus(),
+        openConflictWindowNow: () => reviewAcquirer.openConflictWindowNow(),
+        autoMergeStatus: () => autoMergeWatcher.status(),
+        runAutoMergeNow: () => autoMergeWatcher.runNow(),
       };
     }
   } else if (verbose) {
@@ -584,7 +690,7 @@ export async function buildFleetEventAcquirers(options: {
                       "(GITHUB_TOKEN is not set in this relay-backed workspace).",
                   );
                 }
-                return;
+                return "skipped";
               }
               const [repoOwner, repoName] = repo.split("/") as [string, string];
               const { data: comment } = await githubFor(repo).conditionalGet<{
@@ -594,11 +700,13 @@ export async function buildFleetEventAcquirers(options: {
                 created_at: string;
                 html_url: string;
               }>(`/repos/${repo}/issues/comments/${commentId}`, repoOwner, repoName);
-              if (!comment) return;
+              if (!comment) return "skipped";
               const botName = await githubFor(repo).getBotUsername(repoOwner, repoName);
               const botNames = botMentionCandidates(botName);
-              if (botNames.length === 0 || !mentionsAnyBot(comment.body, botNames)) return;
-              await handleMention(repo, comment, prNumber);
+              if (botNames.length === 0 || !mentionsAnyBot(comment.body, botNames)) {
+                return "skipped";
+              }
+              return handleMention(repo, comment, prNumber);
             },
             evaluateTask,
             reconcileCodeHost: async (envelope) => {

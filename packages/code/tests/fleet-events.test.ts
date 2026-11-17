@@ -113,6 +113,7 @@ describe("fleet event handlers", () => {
     expectedHeadSha?: string;
     expectedBaseSha?: string;
   }> = [];
+  const resolveAgents: Array<Record<string, string | undefined>> = [];
 
   const deps = () => ({
     config: CONFIG,
@@ -149,6 +150,7 @@ describe("fleet event handlers", () => {
         env?: Record<string, string | undefined>;
         expectedHeadSha?: string;
         expectedBaseSha?: string;
+        harnessPin?: string;
       } = {},
     ) => {
       resolutions.push({
@@ -157,6 +159,12 @@ describe("fleet event handlers", () => {
         cwd: opts.cwd,
         expectedHeadSha: opts.expectedHeadSha,
         expectedBaseSha: opts.expectedBaseSha,
+      });
+      resolveAgents.push({
+        harnessPin: opts.harnessPin,
+        harness: opts.env?.AGENT_HARNESS,
+        model: opts.env?.AGENT_MODEL,
+        effort: opts.env?.AGENT_EFFORT,
       });
       return { outcome: "clean" as const, message: "merged" };
     },
@@ -169,6 +177,7 @@ describe("fleet event handlers", () => {
     reviews = [];
     pushAccess = true;
     resolutions.length = 0;
+    resolveAgents.length = 0;
     ciFixes.length = 0;
   });
 
@@ -301,21 +310,45 @@ describe("fleet event handlers", () => {
     expect(repoManager.calls).toContain("fetch:backend");
   });
 
-  test("mention handler gates on push access and fails closed", async () => {
+  test("base sync runs on the configured conflict-resolution agent", async () => {
+    const previous = CONFIG.workspace.conflictAgent;
+    // Mutated in place like a live reload; read at run time.
+    CONFIG.workspace.conflictAgent = { harness: "claude-code", model: "sonnet", effort: "low" };
+    try {
+      const resolve = createFleetResolveConflicts(deps());
+      await resolve("acme/backend", 42, { headSha: "head1", baseSha: "base1" });
+    } finally {
+      CONFIG.workspace.conflictAgent = previous;
+    }
+    expect(resolveAgents.at(-1)).toEqual({
+      harnessPin: "claude-code",
+      harness: "claude-code",
+      model: "sonnet",
+      effort: "low",
+    });
+  });
+
+  test("mention handler skips a confirmed denial and runs for push access", async () => {
     const handle = createFleetMentionHandler(deps());
 
     pushAccess = false;
-    await handle("acme/backend", { user: { login: "driveby" } }, 5);
-    expect(reviews).toHaveLength(0);
-
-    pushAccess = new Error("api down");
-    await handle("acme/backend", { user: { login: "maintainer" } }, 5);
+    expect(await handle("acme/backend", { user: { login: "driveby" } }, 5)).toBe("skipped");
     expect(reviews).toHaveLength(0);
 
     pushAccess = true;
-    await handle("acme/backend", { user: { login: "maintainer" } }, 5);
+    expect(await handle("acme/backend", { user: { login: "maintainer" } }, 5)).toBe(true);
     expect(reviews).toHaveLength(1);
     expect(reviews[0].prNumber).toBe(5);
+  });
+
+  test("mention handler propagates permission API errors instead of denying", async () => {
+    const handle = createFleetMentionHandler(deps());
+
+    pushAccess = new Error("GitHub API 502");
+    await expect(handle("acme/backend", { user: { login: "maintainer" } }, 5)).rejects.toThrow(
+      "GitHub API 502",
+    );
+    expect(reviews).toHaveLength(0);
   });
 });
 

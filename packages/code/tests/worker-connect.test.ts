@@ -76,20 +76,49 @@ GITHUB_REPO = "acme/api"
       },
       workspaceDir,
     );
-    const calls: Array<{ target: string; repo?: string }> = [];
+    const calls: Array<{ target: string; repos?: string[] }> = [];
 
     const result = await runWorkerConnectCommand([], {
       workspaceDir,
       runConnect: async (target, deps) => {
-        calls.push({ target, repo: deps?.repo });
-        return deps?.repo === "acme/web" ? 1 : 0;
+        calls.push({ target, repos: deps?.repos });
+        return deps?.repos?.includes("acme/web") ? 1 : 0;
       },
     });
 
     expect(result).toBe(1);
-    expect(calls).toEqual([{ target: "github", repo: "acme/web" }]);
+    expect(calls).toEqual([{ target: "github", repos: ["acme/web"] }]);
     expect(logs.join("\n")).toContain("acme/api is already verified");
     expect(errors.join("\n")).toContain("1 workspace repository pairing(s) failed");
+  });
+
+  test("pairs repositories from the same owner in one installation", async () => {
+    const calls: Array<{ target: string; repos?: string[] }> = [];
+
+    const result = await runWorkerConnectCommand([], {
+      workspaceDir,
+      runConnect: async (target, deps) => {
+        calls.push({ target, repos: deps.repos });
+        saveRelayState(
+          {
+            relayUrl: "https://relay.test",
+            customerId: "customer-1",
+            connectedAt: new Date().toISOString(),
+            registrations: [],
+            relayToken: "drt_test",
+            githubRepositories: [
+              { repo: "acme/api", installationId: 10, repositoryId: 20 },
+              { repo: "acme/web", installationId: 10, repositoryId: 21 },
+            ],
+          },
+          workspaceDir,
+        );
+        return 0;
+      },
+    });
+
+    expect(result).toBe(0);
+    expect(calls).toEqual([{ target: "github", repos: ["acme/api", "acme/web"] }]);
   });
 
   test("bare connect configures both GitHub and GitLab code hosts", async () => {
@@ -109,14 +138,14 @@ remote = "git@gitlab.com:acme/platform.git"
 GITLAB_WEBHOOK_ADMIN_TOKEN = "admin"
 `,
     );
-    const calls: Array<{ target: string; repo?: string; projectPath?: string }> = [];
+    const calls: Array<{ target: string; repos?: string[]; projectPath?: string }> = [];
 
     const result = await runWorkerConnectCommand([], {
       workspaceDir,
       runConnect: async (target, deps) => {
         calls.push({
           target,
-          repo: deps.repo,
+          repos: deps.repos,
           projectPath: deps.gitlabProject?.projectPath,
         });
         return 0;
@@ -125,8 +154,8 @@ GITLAB_WEBHOOK_ADMIN_TOKEN = "admin"
 
     expect(result).toBe(0);
     expect(calls).toEqual([
-      { target: "github", repo: "acme/api", projectPath: undefined },
-      { target: "gitlab", repo: undefined, projectPath: "acme/platform" },
+      { target: "github", repos: ["acme/api"], projectPath: undefined },
+      { target: "gitlab", repos: undefined, projectPath: "acme/platform" },
     ]);
   });
 

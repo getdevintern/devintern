@@ -174,6 +174,55 @@ describe("pipeline session pickup wiring", () => {
     expect(resumed).toEqual(["feature/proj-1"]);
   });
 
+  test("reuses a report-less branch with commits instead of creating an attempt branch", async () => {
+    // Interrupted during auto-review: the branch holds the implementation but
+    // no implementation stage was saved. Pickup must resume the same branch.
+    const prior = store.createRun({
+      origin: "task",
+      taskKey: "PROJ-1",
+      branch: "feature/proj-1",
+    });
+    store.finishRun(prior, "failed", "worker restarted during auto-review");
+    const current = store.createRun({ origin: "task", taskKey: "PROJ-1" });
+
+    const pickup = await resolveSessionPickup({
+      runStore: store,
+      taskKey: "PROJ-1",
+      ...pickupSelection(current, {} as NodeJS.ProcessEnv),
+      branchExists: () => true,
+      hasLandedCommits: () => true,
+    });
+
+    expect(pickup.kind).toBe("resume");
+    if (pickup.kind !== "resume") return;
+    expect(pickup.session.runId).toBe(prior);
+    expect(pickup.session.report).toBeUndefined();
+
+    const resumed: string[] = [];
+    let createdFresh = false;
+    Utils.continueFeatureBranch = async (branch) => {
+      resumed.push(branch);
+      return { success: true, branchName: branch, message: `Resumed '${branch}'` };
+    };
+    Utils.createFeatureBranch = async () => {
+      createdFresh = true;
+      return { success: true, branchName: "feature/proj-1-attempt-2", message: "fresh" };
+    };
+    runContext.options = { git: true } as never;
+
+    const step = taskSteps.find((candidate) => candidate.name === "prepare-branch");
+    expect(step).toBeDefined();
+    await runTaskSteps([step!], {
+      taskKey: "PROJ-1",
+      workflowKey: "PROJ-1",
+      effectiveTargetBranch: "main",
+      resumeBranch: pickup.session.branch,
+    } as never);
+
+    expect(resumed).toEqual(["feature/proj-1"]);
+    expect(createdFresh).toBe(false);
+  });
+
   test("--no-git yields no resume branch claim in the prompt context", () => {
     const pickup: SessionPickupDecision = {
       kind: "resume",

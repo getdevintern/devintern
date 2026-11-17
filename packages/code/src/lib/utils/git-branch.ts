@@ -100,6 +100,39 @@ export async function getMainBranchName(options?: { cwd?: string }): Promise<str
 }
 
 /**
+ * Detect the repository default branch from local refs only.
+ *
+ * Same precedence as {@link getMainBranchName} after its remote probe, without
+ * ever contacting the remote. Fleet startup probes one orphaned run per repo
+ * and `ls-remote` carries a 5s timeout, so an offline or slow remote would
+ * serialise worker startup for minutes. The clone's cached `origin/HEAD`
+ * (written by `RepoManager.ensureBareClone`) is authoritative here.
+ *
+ * @param options - Optional working directory
+ */
+export async function getCachedDefaultBranch(options?: { cwd?: string }): Promise<string> {
+  const cachedRemoteHead = await Utils.executeGitCommand(
+    ["symbolic-ref", "refs/remotes/origin/HEAD"],
+    options?.cwd ? { cwd: options.cwd } : undefined,
+  );
+  if (cachedRemoteHead.success) {
+    const branchName = cachedRemoteHead.output.replace("refs/remotes/origin/", "").trim();
+    if (branchName) return branchName;
+  }
+
+  for (const branch of ["main", "master"]) {
+    if (await Utils.gitRefExists(`refs/heads/${branch}`, options)) {
+      return branch;
+    }
+    if (await Utils.gitRefExists(`refs/remotes/origin/${branch}`, options)) {
+      return branch;
+    }
+  }
+
+  return "main";
+}
+
+/**
  * Fetch a branch from `origin` so `refs/remotes/origin/<branch>` exists locally.
  *
  * @param branch - Remote branch name
@@ -259,6 +292,7 @@ export async function pullLatestChanges(
 Object.assign(Utils, {
   resolveDefaultBranch,
   getMainBranchName,
+  getCachedDefaultBranch,
   fetchRemoteBranch,
   pullLatestChanges,
 });

@@ -2,6 +2,8 @@
 
 import { Collapsible as CollapsiblePrimitive } from "radix-ui";
 
+import { cn } from "@/lib/utils";
+
 function Collapsible({ ...props }: React.ComponentProps<typeof CollapsiblePrimitive.Root>) {
   return <CollapsiblePrimitive.Root data-slot="collapsible" {...props} />;
 }
@@ -9,7 +11,16 @@ function Collapsible({ ...props }: React.ComponentProps<typeof CollapsiblePrimit
 function CollapsibleTrigger({
   ...props
 }: React.ComponentProps<typeof CollapsiblePrimitive.CollapsibleTrigger>) {
-  return <CollapsiblePrimitive.CollapsibleTrigger data-slot="collapsible-trigger" {...props} />;
+  return (
+    <CollapsiblePrimitive.CollapsibleTrigger
+      data-slot="collapsible-trigger"
+      {...props}
+      className={cn(
+        "cursor-pointer rounded-md outline-none focus-visible:ring-2 focus-visible:ring-ring/50",
+        props.className,
+      )}
+    />
+  );
 }
 
 function CollapsibleContent({

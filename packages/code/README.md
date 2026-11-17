@@ -1,7 +1,7 @@
 # @getdevintern/code
 
 [![npm](https://img.shields.io/npm/v/%40getdevintern%2Fcode?label=%40getdevintern%2Fcode)](https://www.npmjs.com/package/@getdevintern/code)
-[![License](https://img.shields.io/badge/License-FSL--1.1--Apache--2.0-blue)](./LICENSE.md)
+[![License](https://img.shields.io/badge/License-FSL--1.1--ALv2-blue)](./LICENSE.md)
 [![Docs](https://img.shields.io/badge/Docs-devintern.com-blue)](https://devintern.com/docs/code/quick-start)
 
 **Run a self-hosted worker that turns tracker tickets across repositories into pull requests — with any coding agent, on your keys.**
@@ -61,4 +61,4 @@ Source monorepo: [getdevintern/devintern](https://github.com/getdevintern/devint
 
 ## License
 
-[FSL-1.1-Apache-2.0](./LICENSE.md). Interactive use free forever; unattended automation requires a license — see [pricing](https://devintern.com/pricing/).
+[FSL-1.1-ALv2](./LICENSE.md). Interactive use free forever; unattended automation requires a license — see [pricing](https://devintern.com/pricing/).

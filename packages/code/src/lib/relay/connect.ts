@@ -236,6 +236,10 @@ interface ConnectResponse {
   licenseSource: string;
   registrations: RelayRegistration[];
   repo?: string;
+  /** Repositories requested by this pairing. */
+  repos?: string[];
+  /** Repositories the installation verified, when the relay reports them. */
+  repositories?: Array<{ repo: string; installationId: number; repositoryId: number }>;
   installationId?: number;
   repositoryId?: number;
 }
@@ -265,8 +269,14 @@ export type RelayConnectTarget =
 
 export interface WorkspaceRelayConnectDeps extends RelayConnectDeps {
   workingDir: string;
-  /** GitHub repository selected from workspace.toml by the fleet orchestrator. */
+  /** Single GitHub repository selected from workspace.toml (legacy callers). */
   repo?: string;
+  /**
+   * GitHub repositories from the same account to verify with one App
+   * installation, so a workspace with several repositories needs one install
+   * instead of one per repository.
+   */
+  repos?: string[];
   /** Stable workspace team slug for tracker registration. */
   team?: string;
   /** GitLab project selected from workspace.toml by the fleet orchestrator. */
@@ -403,23 +413,16 @@ function mergeConnectState(
 ): RelayConnectState {
   const previous = loadRelayState(workingDir);
   const previousForCustomer = previous?.customerId === data.customerId ? previous : null;
-  const verifiedRepository =
-    data.repo && typeof data.installationId === "number" && typeof data.repositoryId === "number"
-      ? {
-          repo: data.repo.toLowerCase(),
-          installationId: data.installationId,
-          repositoryId: data.repositoryId,
-        }
-      : undefined;
+  const verified = verifiedRepositoriesFromResponse(data);
   const githubRepositories = verifiedGitHubRelayRepositories(previousForCustomer);
-  if (verifiedRepository && isVerifiedGitHubRepository(verifiedRepository)) {
+  for (const repository of verified) {
+    if (!isVerifiedGitHubRepository(repository)) continue;
     const existingIndex = githubRepositories.findIndex(
-      (repository) =>
-        repository.repositoryId === verifiedRepository.repositoryId ||
-        repository.repo === verifiedRepository.repo,
+      (candidate) =>
+        candidate.repositoryId === repository.repositoryId || candidate.repo === repository.repo,
     );
-    if (existingIndex === -1) githubRepositories.push(verifiedRepository);
-    else githubRepositories[existingIndex] = verifiedRepository;
+    if (existingIndex === -1) githubRepositories.push(repository);
+    else githubRepositories[existingIndex] = repository;
   }
   const state: RelayConnectState = {
     relayUrl,
@@ -427,12 +430,48 @@ function mergeConnectState(
     connectedAt: new Date().toISOString(),
     registrations: data.registrations,
     relayToken: relayToken ?? previousForCustomer?.relayToken,
-    github: verifiedRepository ?? previousForCustomer?.github,
+    github: verified[0] ?? previousForCustomer?.github,
     githubRepositories,
     gitlabRepositories: previousForCustomer?.gitlabRepositories,
   };
   saveRelayState(state, workingDir);
   return state;
+}
+
+/**
+ * Read the repositories a pairing verified.
+ *
+ * Newer relays return one entry per repository; older relays only return the
+ * single primary repository fields, which stay supported.
+ */
+function verifiedRepositoriesFromResponse(data: ConnectResponse): VerifiedGitHubRelayRepository[] {
+  const listed = (data.repositories ?? [])
+    .filter(
+      (repository): repository is { repo: string; installationId: number; repositoryId: number } =>
+        typeof repository?.repo === "string" &&
+        typeof repository.installationId === "number" &&
+        typeof repository.repositoryId === "number",
+    )
+    .map((repository) => ({
+      repo: repository.repo.toLowerCase(),
+      installationId: repository.installationId,
+      repositoryId: repository.repositoryId,
+    }));
+  if (listed.length > 0) return listed;
+  if (
+    data.repo &&
+    typeof data.installationId === "number" &&
+    typeof data.repositoryId === "number"
+  ) {
+    return [
+      {
+        repo: data.repo.toLowerCase(),
+        installationId: data.installationId,
+        repositoryId: data.repositoryId,
+      },
+    ];
+  }
+  return [];
 }
 
 export interface GitLabRelayRegistrationBegin {
@@ -605,7 +644,11 @@ export async function removeGitLabRelayRegistration(options: {
  * @param options - Repo slug plus signed-in access token
  */
 export async function connectGitHubRepo(options: {
-  repo: string;
+  /**
+   * Repositories to verify with one App installation. All must belong to the
+   * same GitHub account so one installation selection can grant them all.
+   */
+  repos: string[];
   accessToken: string;
   workingDir?: string;
   relayUrl?: string;
@@ -619,13 +662,22 @@ export async function connectGitHubRepo(options: {
     fetchImpl: options.fetchImpl,
     sleep: options.sleep,
   };
+  const repos = [
+    ...new Set(
+      options.repos.map((repo) => repo.trim().toLowerCase()).filter((repo) => repo.length > 0),
+    ),
+  ];
+  if (repos.length === 0) {
+    throw new Error("At least one repository is required to pair with the relay.");
+  }
+
   const { relayToken } = await ensureRelayToken(options.accessToken, deps);
   const relayUrl = (options.relayUrl ?? resolveRelayUrl()).replace(/\/+$/, "");
   const workingDir = options.workingDir ?? process.cwd();
 
   const response = await connectRequest(
     options.accessToken,
-    { action: "begin-github-pairing", repo: options.repo },
+    { action: "begin-github-pairing", repo: repos[0], repos },
     deps,
   );
   if (!response.ok) {
@@ -993,20 +1045,21 @@ const TRACKER_CONNECT_HANDLERS: Record<
   jira: connectJiraTarget,
 };
 
-/** Pair a workspace repository with the central DevIntern GitHub App. */
+/** Pair workspace repositories from one account with the central DevIntern GitHub App. */
 async function connectGitHubTarget(
-  repo: string | undefined,
+  repos: string[] | undefined,
   deps: WorkspaceRelayConnectDeps,
   connectOpts: RelayConnectOptions,
 ): Promise<number> {
-  if (!repo) {
+  if (!repos || repos.length === 0) {
     console.error("❌ GitHub relay connection requires a workspace repository.");
     return 1;
   }
+  const requested = [...new Set(repos.map((repo) => repo.toLowerCase()))];
   try {
     let installUrl = "";
     const state = await connectGitHubRepo({
-      repo,
+      repos: requested,
       ...connectOpts,
       sleep: deps.sleep,
       onInstallUrl(url) {
@@ -1017,22 +1070,39 @@ async function connectGitHubTarget(
         console.log("Waiting for GitHub verification...");
       },
     });
-    console.log(`✅ Connected ${repo} to the relay (${state.relayUrl})`);
+    const connected = verifiedGitHubRelayRepositories(state).filter((repository) =>
+      requested.includes(repository.repo),
+    );
+    console.log(
+      `✅ Connected ${connected.map((repository) => repository.repo).join(", ") || requested.join(", ")} ` +
+        `to the relay (${state.relayUrl})`,
+    );
     console.log(`   Customer: ${state.customerId}`);
     console.log(`   GitHub App authorization verified${installUrl ? "." : ""}`);
-    saveGitHubAppRecord(
-      {
-        repo: state.github?.repo.toLowerCase() ?? repo.toLowerCase(),
-        enabled: true,
-        connectedAt: new Date().toISOString(),
-        installationId: state.github?.installationId,
-        repositoryId: state.github?.repositoryId,
-      },
-      connectOpts.workingDir,
+    for (const repository of connected) {
+      saveGitHubAppRecord(
+        {
+          repo: repository.repo,
+          enabled: true,
+          connectedAt: new Date().toISOString(),
+          installationId: repository.installationId,
+          repositoryId: repository.repositoryId,
+        },
+        connectOpts.workingDir,
+      );
+    }
+    const missing = requested.filter(
+      (repo) => !connected.some((repository) => repository.repo === repo),
     );
+    if (missing.length > 0) {
+      console.warn(`⚠️  The installation did not grant: ${missing.join(", ")}`);
+      console.warn(
+        "   Add them to the App installation, then run `devintern worker connect github` again.",
+      );
+    }
     console.log("   Keep GITHUB_TOKEN configured locally for GitHub API reads/writes.");
     console.log("   Run the worker as usual: devintern worker");
-    return 0;
+    return missing.length > 0 ? 1 : 0;
   } catch (error) {
     console.error(`❌ Relay connect failed: ${(error as Error).message}`);
     return 1;
@@ -1057,7 +1127,8 @@ export async function connectRelayTarget(
     );
     return 1;
   }
-  const repo = target === "github" ? deps.repo : undefined;
+  const repos =
+    target === "github" ? (deps.repos ?? (deps.repo ? [deps.repo] : undefined)) : undefined;
   const env = deps.env ?? process.env;
   const workingDir = deps.workingDir;
   const resolvedDeps: RelayConnectDeps = { ...deps, workingDir };
@@ -1085,7 +1156,7 @@ export async function connectRelayTarget(
     return connectGitLabTarget(deps, env, connectOpts);
   }
   if (target === "github") {
-    return connectGitHubTarget(repo, deps, connectOpts);
+    return connectGitHubTarget(repos, deps, connectOpts);
   }
   return TRACKER_CONNECT_HANDLERS[target as TrackerRelayTarget]({ env, connectOpts });
 }

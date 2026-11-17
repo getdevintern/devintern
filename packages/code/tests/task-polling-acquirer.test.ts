@@ -4,7 +4,11 @@ import { join } from "path";
 import { tmpdir } from "os";
 
 import { createMarkdownChangeDetector } from "../src/lib/acquirers/change-detector";
-import { processedTaskId, TaskPollingAcquirer } from "../src/lib/acquirers/task-polling";
+import {
+  processedTaskId,
+  runTaskViaCli,
+  TaskPollingAcquirer,
+} from "../src/lib/acquirers/task-polling";
 import type { ReadyTask, TaskExecutionResult } from "../src/lib/acquirers/task-polling";
 import type { PickupGate } from "../src/lib/worker/schedule";
 import { TASK_POLL_LAST_DRAIN_KEY, WorkerState } from "../src/lib/state/worker-state";
@@ -30,6 +34,70 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
   });
   return { promise, resolve };
 }
+
+describe("runTaskViaCli", () => {
+  test("reports the spawned child pid before the run settles", async () => {
+    const dir = uniqueDir("task-via-cli");
+    mkdirSync(dir, { recursive: true });
+    const script = join(dir, "fake-task.ts");
+    writeFileSync(script, "process.exit(0)\n");
+    const originalArgv1 = process.argv[1];
+    const spawnedPids: number[] = [];
+    try {
+      process.argv[1] = script;
+      const result = await runTaskViaCli("local-child-pid", [], {
+        env: { ...process.env },
+        onChildSpawn: (pid) => spawnedPids.push(pid),
+      });
+      expect(result).toBe(true);
+      expect(spawnedPids).toHaveLength(1);
+      expect(spawnedPids[0]).toBeGreaterThan(0);
+    } finally {
+      process.argv[1] = originalArgv1;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("reports a child killed by a shutdown abort as interrupted, not failed", async () => {
+    const dir = uniqueDir("task-via-cli-abort");
+    mkdirSync(dir, { recursive: true });
+    // Hangs so the abort always arrives while the child is alive.
+    const script = join(dir, "fake-hang.ts");
+    writeFileSync(script, "setInterval(() => {}, 1000)\n");
+    const originalArgv1 = process.argv[1];
+    const controller = new AbortController();
+    try {
+      process.argv[1] = script;
+      const result = await runTaskViaCli("local-abort", [], {
+        env: { ...process.env },
+        signal: controller.signal,
+        // The listener is registered right after the spawn callback, so abort
+        // on a later tick instead of inside it.
+        onChildSpawn: () => setTimeout(() => controller.abort(), 50),
+      });
+      expect(result).toBe("interrupted");
+    } finally {
+      process.argv[1] = originalArgv1;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("keeps a genuine non-zero exit a failure even when it is not interrupted", async () => {
+    const dir = uniqueDir("task-via-cli-fail");
+    mkdirSync(dir, { recursive: true });
+    const script = join(dir, "fake-fail.ts");
+    writeFileSync(script, "process.exit(1)\n");
+    const originalArgv1 = process.argv[1];
+    try {
+      process.argv[1] = script;
+      const result = await runTaskViaCli("local-fail", [], { env: { ...process.env } });
+      expect(result).toBe(false);
+    } finally {
+      process.argv[1] = originalArgv1;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("createMarkdownChangeDetector", () => {
   let tasksDir: string;
@@ -129,6 +197,7 @@ describe("TaskPollingAcquirer", () => {
     executeResult?: TaskExecutionResult;
     gate?: PickupGate;
     isTaskActionedUnchanged?: (task: ReadyTask) => Promise<boolean>;
+    harnessBlockedUntil?: () => number | undefined;
   }) {
     let call = 0;
     const seenCursors: (string | null)[] = [];
@@ -138,6 +207,7 @@ describe("TaskPollingAcquirer", () => {
       intervalSeconds: 60,
       gate: options.gate,
       isTaskActionedUnchanged: options.isTaskActionedUnchanged,
+      harnessBlockedUntil: options.harnessBlockedUntil,
       detector: {
         source: "markdown",
         async changesSince(cursor) {
@@ -1085,6 +1155,126 @@ describe("TaskPollingAcquirer", () => {
       expect(logs.some((line) => line.includes("DEV-9") && line.includes("already actioned"))).toBe(
         true,
       );
+    });
+  });
+
+  describe("harness-chain pause", () => {
+    test("pauses pickup once while every harness is usage-limited, then resumes", async () => {
+      const blockedUntil = Date.parse("2099-11-20T04:00:12.689Z");
+      let blocked: number | undefined;
+      let harnessDown = true;
+      let searches = 0;
+      const executed: string[] = [];
+      const acquirer = new TaskPollingAcquirer({
+        trackerType: "jira:jira-default",
+        query: "status=todo",
+        intervalSeconds: 60,
+        detector: {
+          source: "jira",
+          async changesSince() {
+            return { changed: true, nextCursor: "100" };
+          },
+        },
+        workerState,
+        queue,
+        searchTasks: async () => {
+          searches++;
+          return {
+            tasks: [
+              { key: "DEV-191", updated: "a" },
+              { key: "DEV-192", updated: "b" },
+            ],
+          };
+        },
+        executeTask: async (key) => {
+          executed.push(key);
+          return harnessDown ? "deferred" : true;
+        },
+        harnessBlockedUntil: () => blocked,
+      });
+
+      const logs: string[] = [];
+      const logSpy = spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+        logs.push(args.map(String).join(" "));
+      });
+      try {
+        // The limit is hit by the first runs: both tasks defer and wait.
+        await acquirer.tick();
+        expect(executed).toEqual(["DEV-191", "DEV-192"]);
+        executed.length = 0;
+        const searchesBeforePause = searches;
+
+        // The failover state now reports the whole chain limited.
+        blocked = blockedUntil;
+        logs.length = 0;
+        for (let i = 0; i < 4; i++) {
+          await acquirer.tick();
+        }
+        expect(executed).toEqual([]);
+        expect(searches).toBe(searchesBeforePause);
+        expect(logs.some((line) => line.includes("picking up"))).toBe(false);
+        expect(logs.some((line) => line.includes("deferred"))).toBe(false);
+        const paused = logs.filter((line) => line.includes("pickup paused"));
+        expect(paused).toEqual([
+          "⏳ [poll:jira:jira-default] pickup paused: no agent harness is available until " +
+            "2099-11-20T04:00:12.689Z (usage limit); 2 task(s) waiting",
+        ]);
+
+        // The limit clears: the next tick picks each waiting task up once.
+        blocked = undefined;
+        harnessDown = false;
+        logs.length = 0;
+        await acquirer.tick();
+        expect([...executed].sort()).toEqual(["DEV-191", "DEV-192"]);
+        expect(logs.filter((line) => line.includes("pickup resumed"))).toHaveLength(1);
+        await acquirer.tick();
+        expect(executed).toHaveLength(2);
+        expect(logs.filter((line) => line.includes("pickup paused"))).toEqual([]);
+      } finally {
+        logSpy.mockRestore();
+      }
+    });
+
+    test("logs the pause again only when the resume time changes", async () => {
+      let blocked: number | undefined = Date.parse("2099-01-01T00:00:00.000Z");
+      const { acquirer } = makeAcquirer({
+        detectorResults: [{ changed: true, nextCursor: "1" }],
+        tasks: [],
+        executed: [],
+        harnessBlockedUntil: () => blocked,
+      });
+      const logs: string[] = [];
+      const logSpy = spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+        logs.push(args.map(String).join(" "));
+      });
+      try {
+        await acquirer.tick();
+        await acquirer.tick();
+        blocked = Date.parse("2099-01-02T00:00:00.000Z");
+        await acquirer.tick();
+        await acquirer.tick();
+        const paused = logs.filter((line) => line.includes("pickup paused"));
+        expect(paused).toHaveLength(2);
+        expect(paused[0]).toContain("2099-01-01T00:00:00.000Z");
+        expect(paused[1]).toContain("2099-01-02T00:00:00.000Z");
+        expect(paused[0]).not.toContain("waiting");
+        // A paused tick never touches the cursor.
+        expect(workerState.getCursor("markdown")).toBeNull();
+      } finally {
+        logSpy.mockRestore();
+      }
+    });
+
+    test("ignores a resume time that has already passed", async () => {
+      const executed: string[] = [];
+      const { acquirer } = makeAcquirer({
+        detectorResults: [{ changed: true, nextCursor: "1" }],
+        tasks: [{ key: "TASK-1", updated: "a" }],
+        executed,
+        harnessBlockedUntil: () => Date.now() - 1_000,
+      });
+      await acquirer.tick();
+      expect(executed).toEqual(["TASK-1"]);
     });
   });
 

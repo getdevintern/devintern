@@ -13,7 +13,13 @@
  */
 
 import { spawnSync } from "child_process";
-import type { AgentHarness, AgentRunOptions, HarnessInvocation, HarnessProbe } from "./types.js";
+import type {
+  AgentHarness,
+  AgentRunOptions,
+  HarnessInvocation,
+  HarnessProbe,
+  HarnessProbeOptions,
+} from "./types.js";
 
 /** Probe cache keyed by `harness name` + executable path, so each CLI runs once. */
 const probeCache = new Map<string, Promise<HarnessProbe>>();
@@ -37,30 +43,147 @@ export function parseMajorVersion(output: string): number | undefined {
 }
 
 /**
- * Run `<executable> --version` synchronously and return the raw output.
+ * Parse a full `major.minor.patch` version from a CLI version string.
  *
- * Best-effort: returns `undefined` on a spawn failure, non-zero exit, timeout,
- * or empty output rather than throwing.
+ * Accepts `X.Y.Z` and `X.Y` shapes (a missing patch is `0`) and ignores any
+ * surrounding text (e.g. `"muse 1.4.11"`). Returns `undefined` when no
+ * version is present.
+ *
+ * @param output - Raw `--version` output.
+ * @returns The parsed components, or `undefined`.
+ */
+export function parseVersion(
+  output: string,
+): { major: number; minor: number; patch: number } | undefined {
+  const match = output.match(/(\d+)\.(\d+)(?:\.(\d+))?/);
+  if (!match?.[1] || !match[2]) {
+    return undefined;
+  }
+  const major = Number.parseInt(match[1], 10);
+  const minor = Number.parseInt(match[2], 10);
+  const patch = match[3] ? Number.parseInt(match[3], 10) : 0;
+  if ([major, minor, patch].some((n) => Number.isNaN(n))) {
+    return undefined;
+  }
+  return { major, minor, patch };
+}
+
+/** Outcome of running `<executable> --version`. */
+export interface CliVersionProbeResult {
+  /** Version text when one could be read (possibly despite a non-zero exit). */
+  output?: string;
+  /** Concise reason the version could not be read; set only when `output` is absent. */
+  failure?: string;
+}
+
+/**
+ * A line that is only a version, optionally prefixed by one word (e.g.
+ * `opencode v2.1.2`). The prefix is captured so callers can require it to be
+ * the CLI's own program name rather than error text such as `Error 1.2`.
+ */
+const VERSION_LINE = /^(?:([\w.@/-]+)\s+)?v?\d+\.\d+(?:\.\d+)?(?:[-+][\w.-]+)?$/;
+const MAX_FAILURE_REASON = 160;
+
+/** Collapse whitespace and cap a probe failure reason to one short line. */
+function summarizeFailure(text: string): string {
+  const oneLine = text.replace(/\s+/g, " ").trim();
+  return oneLine.length > MAX_FAILURE_REASON
+    ? `${oneLine.slice(0, MAX_FAILURE_REASON - 1)}…`
+    : oneLine;
+}
+
+/**
+ * Find the first standalone version line in `text`.
+ *
+ * A prefixed line is accepted only when the prefix is `programName`
+ * (case-insensitive); without a `programName` only bare versions match.
+ */
+function findVersionLine(text: string, programName?: string): string | undefined {
+  const expected = programName?.toLowerCase();
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => {
+      const match = VERSION_LINE.exec(line);
+      if (!match) {
+        return false;
+      }
+      const prefix = match[1];
+      return prefix === undefined || prefix.toLowerCase() === expected;
+    });
+}
+
+/**
+ * Run `<executable> --version` synchronously and describe the outcome.
+ *
+ * A zero exit returns the combined output. A non-zero exit still returns a
+ * version when stdout/stderr contains a standalone version line (some CLIs
+ * print the version and then fail on unrelated startup work, e.g. opening a
+ * log file); that line must be a bare version or one prefixed by
+ * `programName`, so error text like `Error 1.2` is not mistaken for a
+ * version. Otherwise `failure` carries a trimmed reason for diagnostics.
+ * Never throws.
  *
  * @param executablePath - Resolved path/command of the CLI.
- * @returns Combined stdout/stderr trimmed, or `undefined`.
+ * @param options - Optional spawn environment.
+ * @param programName - The CLI's own name as printed before its version
+ *   (e.g. `opencode`); only consulted on a non-zero exit.
+ * @returns The version output or a failure reason.
  */
-export function readCliVersion(executablePath: string): string | undefined {
+export function probeCliVersion(
+  executablePath: string,
+  options: HarnessProbeOptions = {},
+  programName?: string,
+): CliVersionProbeResult {
   try {
     const result = spawnSync(executablePath, ["--version"], {
       encoding: "utf8",
       timeout: 5000,
       stdio: ["ignore", "pipe", "pipe"],
-      env: process.env,
+      env: options.env ?? process.env,
     });
-    if (result.error || result.status !== 0) {
-      return undefined;
+    if (result.error) {
+      return { failure: summarizeFailure(result.error.message) };
     }
-    const output = `${result.stdout ?? ""}${result.stderr ?? ""}`.trim();
-    return output || undefined;
-  } catch {
-    return undefined;
+    const stdout = (result.stdout ?? "").trim();
+    const stderr = (result.stderr ?? "").trim();
+    if (result.status === 0) {
+      // Keep the streams on separate lines: `1.2.3` + `4 plugins` must not
+      // fuse into `1.2.34 plugins`.
+      const output = [stdout, stderr].filter(Boolean).join("\n");
+      return output ? { output } : { failure: "empty output" };
+    }
+    const version = findVersionLine(stdout, programName) ?? findVersionLine(stderr, programName);
+    if (version) {
+      return { output: version };
+    }
+    const exit =
+      result.status === null ? `signal ${result.signal ?? "unknown"}` : `exit ${result.status}`;
+    const detail = stderr || stdout;
+    return { failure: detail ? `${exit}: ${summarizeFailure(detail)}` : exit };
+  } catch (error) {
+    return { failure: summarizeFailure(error instanceof Error ? error.message : String(error)) };
   }
+}
+
+/**
+ * Run `<executable> --version` synchronously and return the raw output.
+ *
+ * Best-effort: returns `undefined` on a spawn failure, timeout, empty output,
+ * or a non-zero exit without a recognizable version line, rather than
+ * throwing. See {@link probeCliVersion} for the failure reason.
+ *
+ * @param executablePath - Resolved path/command of the CLI.
+ * @param options - Optional spawn environment.
+ * @param programName - See {@link probeCliVersion}.
+ * @returns Version output trimmed, or `undefined`.
+ */
+export function readCliVersion(
+  executablePath: string,
+  options: HarnessProbeOptions = {},
+  programName?: string,
+): string | undefined {
+  return probeCliVersion(executablePath, options, programName).output;
 }
 
 /**
@@ -70,25 +193,36 @@ export function readCliVersion(executablePath: string): string | undefined {
  * without any I/O. Probe failures are swallowed so a run is never aborted by an
  * inability to determine the CLI version.
  *
+ * The cache only covers probes against the ambient `process.env`. A probe with
+ * an explicit `env` (e.g. an isolated HOME) can see a different result, so it
+ * bypasses the cache entirely.
+ *
  * @param harness - Harness to probe.
  * @param executablePath - Resolved path/command of the CLI.
+ * @param options - Optional environment for the probe process.
  * @returns The capability snapshot (possibly empty).
  */
 export async function probeHarness(
   harness: AgentHarness,
   executablePath: string,
+  options: HarnessProbeOptions = {},
 ): Promise<HarnessProbe> {
   if (!harness.probe) {
     return {};
   }
   const command = executablePath || harness.defaultPath;
+  const run = (): Promise<HarnessProbe> =>
+    Promise.resolve()
+      .then(() => harness.probe!(command, options))
+      .then((probe) => probe ?? {})
+      .catch(() => ({}));
+  if (options.env) {
+    return run();
+  }
   const key = `${harness.name}\0${command}`;
   let pending = probeCache.get(key);
   if (!pending) {
-    pending = Promise.resolve()
-      .then(() => harness.probe!(command))
-      .then((probe) => probe ?? {})
-      .catch(() => ({}));
+    pending = run();
     probeCache.set(key, pending);
   }
   return pending;
@@ -103,14 +237,17 @@ export async function probeHarness(
  * @param harness - Harness being run.
  * @param executablePath - Resolved path/command of the CLI.
  * @param options - Per-run options.
+ * @param probeOptions - Optional environment for the version probe; pass the
+ *   environment the run will use when it differs from `process.env`.
  * @returns Args (prompt excluded) and any environment overlay.
  */
 export async function buildHarnessInvocation(
   harness: AgentHarness,
   executablePath: string,
   options: AgentRunOptions,
+  probeOptions: HarnessProbeOptions = {},
 ): Promise<HarnessInvocation> {
-  const probe = await probeHarness(harness, executablePath);
+  const probe = await probeHarness(harness, executablePath, probeOptions);
   return {
     args: harness.buildArgs(options, probe),
     env: harness.buildEnv?.(options, probe),

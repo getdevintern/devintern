@@ -1,7 +1,7 @@
 # @getdevintern/pm
 
 [![npm](https://img.shields.io/npm/v/%40getdevintern%2Fpm?label=%40getdevintern%2Fpm)](https://www.npmjs.com/package/@getdevintern/pm)
-[![License](https://img.shields.io/badge/License-FSL--1.1--Apache--2.0-blue)](./LICENSE.md)
+[![License](https://img.shields.io/badge/License-FSL--1.1--ALv2-blue)](./LICENSE.md)
 [![Docs](https://img.shields.io/badge/Docs-devintern.com-blue)](https://devintern.com/docs/pm/quick-start)
 
 **Turn rough notes, logs, and Figma into well-specified tracker tickets — with any coding agent, on your keys.**
@@ -48,4 +48,4 @@ Source monorepo: [getdevintern/devintern](https://github.com/getdevintern/devint
 
 ## License
 
-[FSL-1.1-Apache-2.0](./LICENSE.md). See [pricing](https://devintern.com/pricing/) for commercial terms.
+[FSL-1.1-ALv2](./LICENSE.md). See [pricing](https://devintern.com/pricing/) for commercial terms.

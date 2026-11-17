@@ -17,10 +17,10 @@ export function TicketKey({ label, href }: { label: string | undefined; href?: s
       target="_blank"
       rel="noreferrer"
       onClick={(event) => event.stopPropagation()}
-      className="inline-flex items-center gap-1 text-primary hover:underline"
+      className="ref-link"
     >
       {label}
-      <ExternalLink className="size-3" />
+      <ExternalLink className="size-3" aria-hidden="true" />
     </a>
   );
 }
