@@ -47,6 +47,7 @@ import {
 } from "./paths";
 import { appliedConfigRecorder, WorkspaceConfigReloader } from "./config-reload";
 import { createWorkspaceLock, openWorkspaceState } from "./state";
+import type { WorkerState } from "../state/worker-state";
 import { BASE_WORKTREE_NAME, RepoManager } from "./repo-manager";
 import { Utils } from "../utils";
 import { probePushAccess } from "../code-host/github/push-probe";
@@ -104,6 +105,40 @@ function pruneInjectedTasks(
   if (pruned > 0) {
     console.log(`🧹 [fleet] pruned ${pruned} settled injected task row(s)`);
   }
+}
+
+/**
+ * Drop per-PR poll cursors of change requests already closed in the registry
+ * (databases from before cursors were pruned on close). Housekeeping only: a
+ * failure is logged and never blocks worker startup.
+ */
+function pruneClosedChangeRequestCursors(
+  workerState: Pick<WorkerState, "pruneClosedChangeRequestCursors">,
+): void {
+  try {
+    const pruned = workerState.pruneClosedChangeRequestCursors();
+    if (pruned > 0) {
+      console.log(`🧹 [fleet] pruned ${pruned} poll cursor(s) of closed agent PR(s)`);
+    }
+  } catch (error) {
+    console.warn(`⚠️  [fleet] could not prune closed PR cursors: ${(error as Error).message}`);
+  }
+}
+
+/**
+ * Working windows (quiet hours): gate only the ready-task drain; reviews,
+ * mentions, automations, and relay events stay on their normal paths.
+ */
+function startWorkspacePickupGate(
+  config: { worker: { schedule: Parameters<typeof createPickupGate>[0] } },
+  workspaceDir: string,
+): ReturnType<typeof createPickupGate> {
+  const pickupGate = createPickupGate(config.worker.schedule, {
+    runNowPath: workspaceRunNowPath(workspaceDir),
+  });
+  describePickupSchedule(pickupGate);
+  attachPickupScheduleLogger(pickupGate);
+  return pickupGate;
 }
 
 /** Interval between periodic injected-task prunes (1 hour). */
@@ -886,19 +921,14 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
     maxConcurrencyPerRepo: config.workspace.execution.maxConcurrencyPerRepo,
   });
   await recoverOrphanedWorkspaceRuns({ config, workspaceDir, dbPath: state.dbPath });
+  pruneClosedChangeRequestCursors(state.workerState);
   const injectedStartup = createInjectedStartupRecovery(
     injectedTasks,
     workspaceDir,
     options.beforeAcquirersStart,
   );
 
-  // Working windows (quiet hours): gate only the ready-task drain; reviews,
-  // mentions, automations, and relay events stay on their normal paths.
-  const pickupGate = createPickupGate(config.worker.schedule, {
-    runNowPath: workspaceRunNowPath(workspaceDir),
-  });
-  describePickupSchedule(pickupGate);
-  attachPickupScheduleLogger(pickupGate);
+  const pickupGate = startWorkspacePickupGate(config, workspaceDir);
 
   await sweepAllWorktrees(config.repos, repoManager, config.workspace.worktreesTtlDays);
   // Keep sweeping while the worker runs, not only at startup: a long-lived
