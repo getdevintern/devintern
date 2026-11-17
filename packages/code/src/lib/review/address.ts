@@ -60,7 +60,13 @@ function readCiFeedbackFile(filePath: string): CiFailureFeedback {
  */
 export interface AgentRunResult {
   success: boolean;
+  /** Combined stdout + stderr (stderr appended), for logs and failure reasons. */
   output: string;
+  /**
+   * The agent's stdout alone. Callers that parse the agent's final answer
+   * must use this: stderr can carry a transcript echoing the prompt.
+   */
+  stdout?: string;
   maxTurnsReached?: boolean;
   /** Why the run failed; absent on success and on the max-turns path. */
   failureReason?: string;
@@ -207,6 +213,7 @@ export async function runAgent(
         resolve({
           success: false,
           output: `Failed to run ${harness.displayName}: ${error.message}`,
+          stdout: stdoutOutput,
           failureReason: `failed to run ${harness.displayName}: ${error.message}`,
         });
       });
@@ -236,6 +243,7 @@ export async function runAgent(
         resolve({
           success,
           output: timedOut ? output + `\n\nTimed out after ${timeoutMinutes} minutes` : output,
+          stdout: stdoutOutput,
           maxTurnsReached,
           ...(failureReason ? { failureReason } : {}),
         });
@@ -249,6 +257,7 @@ export async function runAgent(
       resolve({
         success: false,
         output: `Failed to run ${harness.displayName}: ${detail}`,
+        stdout: "",
         failureReason: `failed to run ${harness.displayName}: ${detail}`,
       });
     });
