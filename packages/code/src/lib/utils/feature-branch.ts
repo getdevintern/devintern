@@ -2,6 +2,7 @@ import { lstatSync, realpathSync, rmSync } from "fs";
 import { basename, dirname, join } from "path";
 import type { GitCommandResult, GitOptions } from "./types";
 import { GIT_CLEAN_ARGS } from "./constants";
+import { executeGitCommandWithConfigLockRetry } from "./git-exec";
 import { Utils } from "./registry";
 
 /**
@@ -113,8 +114,8 @@ export async function createFeatureBranch(
 /**
  * Check out an existing feature branch so a re-run can inherit a prior
  * attempt's work (session pickup). Prefers a local branch; falls back to
- * creating a tracking branch from `origin/<branch>` when only the remote ref
- * exists. Never creates a new branch name and never runs the destructive
+ * creating the branch from `origin/<branch>` when only the remote ref exists
+ * (without upstream tracking, see {@link createBranchWithoutTracking}). Never creates a new branch name and never runs the destructive
  * pre-branch cleanup, so already-landed changes survive.
  *
  * @param branch - Recorded branch to resume
@@ -168,10 +169,9 @@ export async function continueFeatureBranch(
 
     const remoteExists = await Utils.gitRefExists(`refs/remotes/origin/${branch}`, { cwd });
     if (remoteExists && !conflict) {
-      const create = await Utils.executeGitCommand(
-        ["checkout", "-b", branch, `origin/${branch}`],
-        gitOpts,
-      );
+      // No upstream config: every push/compare names `origin/<branch>`
+      // explicitly, and a tracking write would contend for the shared lock.
+      const create = await createBranchWithoutTracking(branch, `origin/${branch}`, gitOpts);
       if (create.success) {
         return { success: true, branchName: branch, message: `Resumed remote branch '${branch}'` };
       }
@@ -634,18 +634,12 @@ async function createFeatureBranchRef(
   // conflict), so create from the remote or local reference instead.
   const createFromRef = createFromRemote ? `origin/${targetBranch}` : undefined; // undefined means create from HEAD (current branch)
 
-  let createResult = await Utils.executeGitCommand(
-    createFromRef ? ["checkout", "-b", branchName, createFromRef] : ["checkout", "-b", branchName],
-    gitOpts,
-  );
+  let createResult = await createBranchWithoutTracking(branchName, createFromRef, gitOpts);
 
   // If creating from remote ref failed, try the local branch ref
   if (!createResult.success && createFromRemote) {
     console.log(`⚠️  Failed to create from origin/${targetBranch}, trying local ref...`);
-    createResult = await Utils.executeGitCommand(
-      ["checkout", "-b", branchName, targetBranch],
-      gitOpts,
-    );
+    createResult = await createBranchWithoutTracking(branchName, targetBranch, gitOpts);
   }
 
   // Handle worktree conflict that wasn't caught by the proactive check
@@ -676,16 +670,78 @@ async function createFeatureBranchRef(
       console.log(`✅ Force cleaned up worktree at ${worktreePath}`);
 
       // Retry branch creation with same ref strategy
-      createResult = await Utils.executeGitCommand(
-        createFromRef
-          ? ["checkout", "-b", branchName, createFromRef]
-          : ["checkout", "-b", branchName],
-        gitOpts,
-      );
+      createResult = await createBranchWithoutTracking(branchName, createFromRef, gitOpts);
     }
   }
 
   return createResult;
+}
+
+/**
+ * Create and check out `branchName` at `startRef` (HEAD when omitted) without
+ * writing any upstream tracking config.
+ *
+ * With git's default `branch.autoSetupMerge`, `checkout -b <name> origin/<x>`
+ * records `branch.<name>.remote/merge` in the config. Fleet worktrees share one
+ * bare clone's config, and git fails that write immediately when another
+ * process holds `config.lock` — after the ref is already created, leaving HEAD
+ * detached. `--no-track` avoids the shared write altogether (tracking the base
+ * branch is wrong for a feature branch anyway; the first push sets the real
+ * upstream). As defense in depth, a lock failure is retried with backoff, and
+ * a branch the failed command half-created is checked out instead of failing.
+ */
+async function createBranchWithoutTracking(
+  branchName: string,
+  startRef: string | undefined,
+  gitOpts: GitOptions,
+): Promise<GitCommandResult> {
+  const cwd = gitOpts?.cwd;
+  const existedBefore = await Utils.gitRefExists(`refs/heads/${branchName}`, { cwd });
+  const startCommit = await resolveCommit(startRef ?? "HEAD", gitOpts);
+
+  // `-b` refuses an existing name, so after a lock failure that left the ref
+  // behind the retry fails differently and recovery below takes over.
+  const args = ["checkout", "--no-track", "-b", branchName, ...(startRef ? [startRef] : [])];
+  const result = await executeGitCommandWithConfigLockRetry(args, gitOpts);
+  if (result.success || existedBefore || !startCommit) {
+    return result;
+  }
+
+  const recovered = await recoverHalfCreatedBranch(branchName, startCommit, gitOpts);
+  return recovered ?? result;
+}
+
+/**
+ * Check out a branch a failed `checkout -b` created but did not switch to.
+ * Only a branch still pointing at the intended start commit qualifies, so a
+ * branch carrying any other commits is never adopted. Returns undefined when
+ * there is nothing safe to recover.
+ */
+async function recoverHalfCreatedBranch(
+  branchName: string,
+  startCommit: string,
+  gitOpts: GitOptions,
+): Promise<GitCommandResult | undefined> {
+  const branchCommit = await resolveCommit(`refs/heads/${branchName}`, gitOpts);
+  if (branchCommit !== startCommit) {
+    return undefined;
+  }
+  if ((await Utils.getCurrentBranch(gitOpts?.cwd)) === branchName) {
+    return { success: true, output: "" };
+  }
+  console.log(`⚠️  Branch '${branchName}' was created but not checked out, recovering...`);
+  const checkout = await executeGitCommandWithConfigLockRetry(["checkout", branchName], gitOpts);
+  return checkout.success ? checkout : undefined;
+}
+
+/** Resolve `ref` to a full commit id, or undefined when it does not resolve. */
+async function resolveCommit(ref: string, gitOpts: GitOptions): Promise<string | undefined> {
+  const result = await Utils.executeGitCommand(
+    ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`],
+    gitOpts,
+  );
+  const commit = result.output.trim();
+  return result.success && commit ? commit : undefined;
 }
 
 /**

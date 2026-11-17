@@ -11,6 +11,7 @@
 import { existsSync, readFileSync } from "fs";
 import { isAbsolute, join } from "path";
 
+import { gitHubSlugFromRemote } from "./config";
 import type { ErrorMonitorConfig, RepoConfig, TeamConfig } from "./config";
 import { resolveWorkspaceDir, workspaceDbPath, workspaceEnvPath } from "./paths";
 import { applyAgentSelectionEnv } from "../agent/selection";
@@ -108,17 +109,9 @@ export function buildRepoCredentialEnv(
   };
 }
 
-/**
- * Extract the `owner/repo` slug from a GitHub remote URL.
- *
- * @param remote - e.g. `git@github.com:acme/backend.git` or
- *                 `https://github.com/acme/backend`
- * @returns The slug, or null for non-GitHub remotes.
- */
-export function gitHubSlugFromRemote(remote: string): string | null {
-  const match = remote.match(/github\.com[:/]([^/]+\/[^/]+?)(?:\.git)?\/?$/);
-  return match?.[1] ?? null;
-}
+// Defined next to the config parser (which validates `sync_team_prs`
+// against it); re-exported here for existing callers.
+export { gitHubSlugFromRemote };
 
 /**
  * Compose the environment for a task subprocess routed to one repo.

@@ -237,7 +237,7 @@ export function createFleetResolveConflicts(
       return invoke();
     } catch (error) {
       if (error instanceof JobNotStartedError) {
-        return { outcome: "deferred", message: error.message };
+        return { outcome: "deferred", message: error.message, capacity: true };
       }
       throw error;
     }

@@ -1,6 +1,7 @@
 import { spawn } from "child_process";
 import { chmodSync, copyFileSync, existsSync, readdirSync, statSync } from "fs";
 import { isAbsolute, join, resolve } from "path";
+import { executeGitCommandWithConfigLockRetry } from "./git-exec";
 import { Utils } from "./registry";
 
 /**
@@ -162,29 +163,12 @@ export async function enableWorktreeConfig(
   );
 }
 
-const CONFIG_LOCK_ERROR = /could not lock config file/i;
-
-/** Delays between retries of a config write that lost the lock race. */
-const CONFIG_LOCK_RETRY_DELAYS_MS = [50, 100, 200, 400, 800, 1600];
-
-/**
- * Run a `git config` write, retrying while another process holds the config
- * lock. Git never waits for that lock itself; the holder is usually a
- * concurrent task's own config write that finishes within milliseconds.
- */
-async function writeGitConfig(
+/** Run a `git config` write, retrying while another process holds the lock. */
+function writeGitConfig(
   args: string[],
   cwd: string,
 ): Promise<{ success: boolean; output: string; error?: string }> {
-  let result = await Utils.executeGitCommand(args, { cwd });
-  for (const delayMs of CONFIG_LOCK_RETRY_DELAYS_MS) {
-    if (result.success || !CONFIG_LOCK_ERROR.test(result.error ?? "")) {
-      return result;
-    }
-    await Bun.sleep(delayMs);
-    result = await Utils.executeGitCommand(args, { cwd });
-  }
-  return result;
+  return executeGitCommandWithConfigLockRetry(args, { cwd });
 }
 
 /**

@@ -2,7 +2,8 @@ import { assertCurrentGitLabOrigin } from "../code-host/change-origin";
 import { createConflictChangeAdapter } from "./conflict-change-adapter";
 import type { ChangeRequestInfo } from "./conflict-change-adapter";
 /**
- * Merge-conflict resolution for the agent's own PRs.
+ * Merge-conflict resolution for the agent's own PRs, plus teammates' PRs in
+ * repos opted into team-PR base sync (`sync_team_prs = true`).
  *
  * When a watched PR falls behind its base and GitHub reports it conflicting
  * (`mergeable_state: "dirty"`), the worker merges the base branch into the PR
@@ -16,8 +17,11 @@ import type { ChangeRequestInfo } from "./conflict-change-adapter";
  * refresh-and-retry of the merge+push, and every failure path posts a comment
  * on the PR so a silent dead-end is impossible.
  *
- * Guardrails: only the agent's own PRs are handled (the review poller's
- * watch list), fork PRs are skipped, and pushes are never forced — retries
+ * Guardrails: automatic runs only reach PRs the review poller selects — the
+ * agent's own PRs (its watch list) and, per opted-in repo, open non-draft
+ * same-repo PRs by team members (`author_association` OWNER/MEMBER/
+ * COLLABORATOR/MAINTAIN, run only under an explicit agent sandbox); fork
+ * PRs are skipped, and pushes are never forced — retries
  * always build on top of whatever is actually published, so a human push
  * that lands mid-resolution is incorporated rather than fought.
  *

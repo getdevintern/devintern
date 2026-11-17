@@ -370,8 +370,10 @@ test.skipIf(!existsSync(cliPath))(
       expect(processedTaskIds(worker.dbPath), diagnostics()).toContain(
         `task:${third.key}:${thirdStamp}`,
       );
+      // A successful run with no PR (bare remote) records an actioned marker, so
+      // the actioned gate skips the item before the processed-update dedupe.
       expect(worker.logs, diagnostics()).toContain(
-        `skipping ${third.key} (already processed at this update)`,
+        `skipping ${third.key} (already actioned; no change since the PR)`,
       );
 
       // The decoy was never touched, and the fake routed every request.

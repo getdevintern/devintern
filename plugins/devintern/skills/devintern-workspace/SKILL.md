@@ -15,6 +15,17 @@ Read the existing TOML and identify the intended repository remotes, tracker sou
 
 Use the [workspace guide](https://devintern.com/docs/code/workspaces) for the fields involved in the change. In the DevIntern source repository, read `docs/code/workspaces.md` and, for exact schema behavior, `packages/code/src/lib/workspace/config.ts`. Installed skills must not assume that the source checkout is available.
 
+## Read worker state
+
+To see what the worker has done, read its state with the read-only `devintern worker` commands. Do not curl the dashboard or query `state/queue.db` with `sqlite3`. The commands need no dashboard port, running worker, or network, so they work inside a sandbox where `localhost:4400` is unreachable. With `--json`, each command prints exactly the body of the matching dashboard `GET /api/...` route.
+
+- `devintern worker runs [--automation <id>] [--origin <o>] [--status <s>] [--task-key <k>] [--limit N] --json` lists runs. `runs show <id>` adds stages, retry eligibility, harness logs, and artifacts. `runs logs <id> [<name>]` and `runs artifacts <id> [<artifact-id>]` read transcripts and outputs.
+- `devintern worker stats --window 7d|30d|90d|all`, `automations` (`nextDueAt`, `lastRun`), `prs`, `queue`, `status`, `overview`, and `logs --lines N --level warn` cover the other views.
+- Pass `--workspace` for a nondefault workspace. A non-zero exit means the database is missing or unreadable, or the request was invalid. Report that error. Do not treat it as "no runs".
+- If `devintern worker --help` does not list these commands, the installed CLI predates them. Say so and suggest upgrading `@getdevintern/code`. Do not fall back to writing to `state/queue.db`.
+
+When an automation prompt needs run history (a retro, an outcome watcher, a log triage), point it at these commands rather than at `http://localhost:4400`. Sandboxed agent runs usually cannot reach the host's localhost.
+
 ## Register additional repositories
 
 Run this inside the checkout to register it with the existing workspace:
@@ -61,6 +72,6 @@ For a running worker, distinguish:
 - **Live changes:** repositories, routing, defaults/team queries, team `repo`, task args, pipeline references, automations, estimations, polling, retention, execution limits, conflict policy, and auto-update policy apply to subsequent work. Existing runs keep their original configuration.
 - **Restart required:** shared tracker credentials, `[defaults].tracker`, team identity/tracker/credentials, error-monitor configuration, `[worker.schedule]`, dashboard settings and port. A reload containing startup-only changes is rejected in full.
 
-A broken reload leaves the last valid configuration serving. A saved file alone is not proof of activation: inspect the worker's existing logs for successful reload or explain the required restart. Restart a service only when covered by the request; do not launch a second daemon alongside one already running. User-level systemd or launchd service setup is described in the [worker guide](https://devintern.com/docs/code/worker#running-as-a-service).
+A broken reload leaves the last valid configuration serving. A saved file alone is not proof of activation: inspect the worker's existing logs (`devintern worker logs`) for successful reload or explain the required restart. Restart a service only when covered by the request; do not launch a second daemon alongside one already running. User-level systemd or launchd service setup is described in the [worker guide](https://devintern.com/docs/code/worker#running-as-a-service).
 
 Summarize the config path, changed behavior, validation performed, and whether the running worker accepted the change or needs a restart. Name unresolved credentials or source configuration without exposing values.

@@ -4,7 +4,7 @@ sidebarLabel: "Worker"
 description: "Use when running DevIntern as a long-running worker that picks up tracker tasks, handles PR reviews and CI failures, and runs as a service."
 section: "Automation"
 order: 2
-dateModified: 2026-11-12
+dateModified: 2026-11-17
 ---
 
 # Worker Daemon
@@ -129,7 +129,7 @@ Migrating an existing workspace: PRs used to be the default. Any automation that
 
 Some recurring jobs are supposed to do nothing when there is nothing to do — "keep main green", "release only when warranted", "find flaky tests". Their prompts say to make no changes and report, but a PR-opening run with no commit used to fail with `Implementation was not committed`.
 
-Set `allow_no_changes = true` (boolean, default `false`) on those entries. When the agent finishes without changing the repository, the occurrence is recorded as a successful no-op: the run succeeds, no branch or PR is created, and no review or publish step runs. Without the flag the existing behavior is unchanged — a missing commit still fails the run.
+Set `allow_no_changes = true` (boolean, default `false`) on those entries. When the agent finishes without changing the repository, the occurrence is recorded as a successful no-op: the run succeeds, no branch or PR is created, and no review or publish step runs. Without the flag the existing behavior is unchanged — a missing commit still fails the run. A run whose agent reports that it could not meet its goal is escalated instead of succeeding; see [Reporting a blocked run](#reporting-a-blocked-run).
 
 ```toml
 [[automations]]
@@ -144,6 +144,29 @@ make no changes and report that main is already green."""
 ```
 
 The equivalent CLI flag is `--allow-no-changes` for a one-off run. Scheduled occurrences receive it automatically from the automation setting.
+
+### Reporting a blocked run
+
+A clean agent exit only means the agent stopped. A release job whose test gate failed, or a report job whose data source was unreachable, used to finish with no changes and be recorded as a successful no-op. Every implementation run (automations and tracker tasks) is now asked to state the outcome explicitly, with one line right after its final `<!-- devintern:summary:end -->` marker:
+
+```text
+<!-- devintern:outcome status=blocked reason="the unit test gate (bun run test) failed" -->
+```
+
+| `status`         | Meaning                                                                                                                                      | Recorded run                                                                                    |
+| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `blocked`        | The goal was not met: a required gate failed, a required step (push, merge, permission) was refused, or a needed dependency was unavailable. | `escalated`, with `outcome_reason` = `blocked: <reason>`                                        |
+| `partial`        | Part of the goal was met; the reason says what is missing.                                                                                   | `succeeded`, with `outcome_reason` = `partial: <reason>`, so the delivered work stays a success |
+| `noop` or `done` | Nothing to do, or the goal was met.                                                                                                          | `succeeded`                                                                                     |
+| no marker        | Same as before.                                                                                                                              | `succeeded`                                                                                     |
+
+"Nothing to do" is not blocked. A `main-red-fixer` that finds main already green should omit the marker or use `status=noop`. Your prompts can rely on the built-in instruction, or say explicitly which failures count as blocked (for example "if the test gate fails, report the run as blocked").
+
+An escalated run shows up wherever escalations already do: the dashboard run list and the automation's last run, the stats escalation rate, and `devintern report --last`. The worker logs `🛑 [automation:<id>] escalated: blocked: <reason>` instead of `✅ … completed`. The child process still exits 0, so agent failover and the transient-failure retry paths are unaffected. The next attempt is the next scheduled occurrence, or a manual **Run now** or dashboard retry.
+
+For tracker tasks, a blocked outcome changes only the run record and the markdown status. Delivery has already happened by the time the outcome is read, so a PR the run opened stays open and a remote ticket still moves to its PR status. A markdown task (`TASK_TRACKER=markdown`) is not set to `Status: Done`. It is still recorded as actioned, so polling does not dispatch it again until you edit the file. A blocked run is never resumed by session pickup: the next attempt, whether a retry, a reopened ticket, or the next occurrence, starts from a fresh branch.
+
+The marker is agent output, so it is parsed defensively. Only a whole line matching the format above counts. It is read only from the final report (the last complete summary block and what follows it, or the last 40 lines when there is no summary), never from inside a code fence, and the last valid marker wins. Unknown statuses and malformed markers are ignored. The reason is collapsed to one line and truncated to 300 characters. A run already escalated as an incomplete implementation is not affected by the marker.
 
 Automation occurrences always skip the clarity (feasibility) check, as if run with `--skip-clarity-check`. The prompt is operator-authored rather than a tracker ticket, so the extra assessment would only cost an agent call per run.
 
@@ -235,6 +258,7 @@ On shutdown the scheduler stops its timer, terminates active automation subproce
 | Task files pile up under `~/.devintern/automations/` | They are small and safe to delete — they are only run inputs; the durable record is the run history in `queue.db`.                                                                        |
 | A run failed and you need to know why                | Open the dashboard's Logs tab to read recent worker output without a shell on the machine ([details](./dashboard.md)).                                                                    |
 | The dashboard Logs tab is empty                      | The daemon tees its output to `worker.stdout.log` / `worker.stderr.log` in the workspace home. Check those files or `journalctl --user -u devintern-worker`.                              |
+| You need run data in a script or a sandboxed agent | Use the read-only `devintern worker runs`, `stats`, `automations`, `queue`, `status`, and `logs` commands. With `--json` they print the dashboard API body without needing the dashboard port ([details](./dashboard.md#read-dashboard-data-from-the-command-line)). |
 
 ## Scheduled story-point estimation
 
@@ -345,6 +369,12 @@ Retry bookkeeping lives in `~/.devintern/state/queue.db` next to the worker's cu
 ### Tickets already actioned after a PR
 
 Once a ticket's pull request is created the worker records it as **actioned** in `~/.devintern/state/queue.db` and keeps it out of the sweep until the ticket genuinely changes — even when it still matches `[defaults].task_query`. This is what stops a label-based tracker (GitHub, GitLab) from re-implementing the same open issue in a loop, and it works for every polled tracker.
+
+A worker run that completes successfully without creating a PR is recorded the same way when no PR could ever be created: the remote is not GitHub, GitLab, or Bitbucket, or `[defaults].worker_task_args` omits `--create-pr`. Without the marker, the worker's own completion comment and status change would look like a ticket update and re-run the task on every poll.
+
+A PR that fails on a supported host for a reason a re-run can fix (a GitHub 5xx, a rate limit, an expired app token) is **not** recorded. The branch stays pushed, the worker posts a `Pull request could not be created` comment on the ticket (unless `--skip-comments` is set), and the next poll re-runs the **whole ticket**: a new agent session, a new implementation comment, and a new push of the same branch. The worker does not retry only the PR step. These re-runs are capped at 3 consecutive failed attempts per ticket. The run that hits the cap records the ticket as actioned, so it stays out of the sweep until someone edits it. A successful run resets the count.
+
+A PR failure that needs a human fix is recorded as actioned on the first attempt. That covers a missing `GITHUB_TOKEN` or GitHub App, a missing `BITBUCKET_TOKEN` or workspace, GitLab code-host support not enabled, and GitHub 400/404/422 validation errors. The tracker comment still explains the failure; fix the configuration, then edit the ticket to re-run it.
 
 If the project configures `prStatus` in `.devintern-code/settings.json`, the worker also moves the ticket to that status/label first. The local marker is recorded even when no `prStatus` is set (the worker logs a warning suggesting one), and even when the transition fails — a missing label, missing permission, or transient API error never makes the worker lose track of the ticket or fail the run that just created the PR.
 
@@ -471,7 +501,7 @@ Success is verified, not assumed: after a push the resolver re-fetches the PR (a
 
 Transient push problems recover on their own: a rejection caused by concurrent forward movement (someone pushed to the branch while the agent was resolving) triggers a bounded refresh-and-retry that rebuilds the merge on top of the new commits, keeping the eventual push a fast-forward. Rollbacks or history rewrites are left alone and deferred instead.
 
-This applies only to the agent's own PRs (the same watch list as review polling). Each base/head SHA pair is a durable event in `~/.devintern/state/queue.db`; new commits on the PR branch open a fresh event, so an exhausted attempt is retried after the next push. Failures retry up to `WEBHOOK_MAX_RETRIES` (default 3), including across worker restarts, waiting out an exponential backoff between attempts (30s after the first failure, doubling up to 10 minutes) so persistent failures do not hammer the API on every poll tick. Before acting, the worker requires the PR head SHA to remain unchanged for `WORKER_BASE_SYNC_QUIET_SECONDS` (default 30) and then re-fetches both SHAs. Recent or concurrent pushes defer the run without consuming an attempt; if a run defers several times in a row, the event is given up until the head or base moves again. GitHub's PR API can report an outdated `base.sha` for a while, so the resolver always merges the actual fetched tip of the base branch rather than trusting that field. Each resolve run is bounded by `WORKER_RESOLVE_TIMEOUT_SECONDS` (default 1800; `0` disables) — a hung resolver subprocess is killed and counted as a failed attempt, and runs left `in_progress` by a crashed or killed worker are marked failed at the next startup. The same merge logic is available manually for any PR via `devintern resolve-conflicts <pr-url>`; manual runs exit non-zero with a clear message when the fix could not be published.
+By default this applies only to the agent's own PRs (the same watch list as review polling); see [Syncing teammates' open PRs](#syncing-teammates-open-prs) to opt repos in for the rest of the team's PRs. Each base/head SHA pair is a durable event in `~/.devintern/state/queue.db`; new commits on the PR branch open a fresh event, so an exhausted attempt is retried after the next push. Failures retry up to `WEBHOOK_MAX_RETRIES` (default 3), including across worker restarts, waiting out an exponential backoff between attempts (30s after the first failure, doubling up to 10 minutes) so persistent failures do not hammer the API on every poll tick. Before acting, the worker requires the PR head SHA to remain unchanged for `WORKER_BASE_SYNC_QUIET_SECONDS` (default 30) and then re-fetches both SHAs. Recent or concurrent pushes defer the run without consuming an attempt; if a run defers several times in a row, the event is given up until the head or base moves again. GitHub's PR API can report an outdated `base.sha` for a while, so the resolver always merges the actual fetched tip of the base branch rather than trusting that field. Each resolve run is bounded by `WORKER_RESOLVE_TIMEOUT_SECONDS` (default 1800; `0` disables) — a hung resolver subprocess is killed and counted as a failed attempt, and runs left `in_progress` by a crashed or killed worker are marked failed at the next startup. The same merge logic is available manually for any PR via `devintern resolve-conflicts <pr-url>`; manual runs exit non-zero with a clear message when the fix could not be published.
 
 #### Scheduled conflict resolution
 
@@ -488,6 +518,23 @@ In scheduled mode the poller still detects every conflict on the first tick it a
 The setting applies to the whole workspace and live-reloads with `workspace.toml`. Between windows a conflicted PR cannot be merged, so teams that rely on instant rebases should keep `auto`. See [Workspaces → Automatic conflict resolution](./workspaces.md#automatic-conflict-resolution-auto-vs-scheduled-vs-disabled) for the config reference and tradeoffs.
 
 To turn automatic conflict resolution off entirely — no detection, no queuing, no agent runs — set `conflict_resolution = "disabled"`: conflicted PRs stay conflicted until resolved by hand or via `devintern resolve-conflicts <pr-url>`.
+
+### Syncing teammates' open PRs
+
+Base sync can also cover the rest of the team's open PRs, not just the agent's own. Opt in per repository in `workspace.toml`:
+
+```toml
+[[repos]]
+name = "backend"
+remote = "git@github.com:acme/backend.git"
+sync_team_prs = true
+```
+
+For each opted-in repo the worker lists open PRs on every poll (one ETag-conditional `GET /repos/{owner}/{repo}/pulls?state=open&per_page=100`; `304` responses reuse the previous list) and catches eligible ones up with their base exactly like the agent's own PRs: same `mergeable_state` check, quiet period, retry backoff, defer cap, `conflict_resolution` mode (`disabled` turns this off too and skips the listing), and scheduled windows. Runs are recorded as `conflict_resolution` in run history. Teammates' PRs only get base sync — review feedback on them is never addressed.
+
+A PR is eligible only when it is open, not a draft, its branch lives in the same repository (forks are skipped), and GitHub's `author_association` for its author is `OWNER`, `MEMBER`, `COLLABORATOR`, or `MAINTAIN`. The author check runs on the list entry, again on the PR itself, and once more right before the resolver starts. The agent's own PRs are excluded from the sweep because they already go through the full pipeline. The worker logs `👀 watching owner/repo#N (open PR) for base sync` when it starts watching a PR, `🚧 skipping … (non-team author: …)` once per skipped PR, `👋 … left the open-PR list` when a PR closes or merges, and marks the sync line with `(external PR)`. Only the first 100 open PRs are discovered; the worker warns once while a repo's list sits at that cap.
+
+Because conflict resolution hands teammates' code to the coding agent, `sync_team_prs` requires an explicit sandbox provider in each opted-in repo's effective environment (workspace `.env`, then the repo's `env_file`, then `[repos.env]`): `AGENT_SANDBOX=native`, `nono`, or `docker` (see `devintern sandbox`). Unset, `none`, and `auto` are refused — `auto` falls back to running unsandboxed when no provider fits the harness, which the worker cannot rule out ahead of time. The worker refuses to start, and rejects a live reload, listing each offending repo. `sync_team_prs` is GitHub-only: setting it on a GitLab (or any non-github.com) repo is a config error. The flag live-reloads; turning it off drops that repo's discovery state on the next poll.
 
 ## Auto-merge of the agent's PRs
 

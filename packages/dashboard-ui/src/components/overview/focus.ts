@@ -35,3 +35,20 @@ export function consumeHarnessFocus(): void {
   pendingHarnessFocus = false;
   revealElement(HARNESS_SECTION_ID);
 }
+
+/** DOM id of the Automations view's Source health section. */
+export const SOURCE_HEALTH_SECTION_ID = "source-health";
+
+let pendingSourceHealthFocus = false;
+
+/** Reveal the Source health section now, or as soon as Automations mounts it. */
+export function requestSourceHealthFocus(): void {
+  if (!revealElement(SOURCE_HEALTH_SECTION_ID)) pendingSourceHealthFocus = true;
+}
+
+/** Called by the Source health section on mount; reveals it when a request is pending. */
+export function consumeSourceHealthFocus(): void {
+  if (!pendingSourceHealthFocus) return;
+  pendingSourceHealthFocus = false;
+  revealElement(SOURCE_HEALTH_SECTION_ID);
+}

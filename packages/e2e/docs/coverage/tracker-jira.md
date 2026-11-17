@@ -38,13 +38,21 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 - Missing: Real Jira create/close and estimation.
 - Last reviewed: 2026-11-17
 
+### Jira tracker polling: `updated >=` detector + `task_query`, `(key, updated)` dedupe, no-PR actioned marker, re-arm on edit, retry gate, cursor resume
+
+- Surface: `devintern worker` surface
+- Status: `default`
+- Evidence: `tests/local/worker-jira-polling.test.ts` (`bun run --filter @devintern/e2e test`)
+- Missing: PR-created actioned marker and post-PR transition on a real code host (bare remote exposes no platform); live Jira `updated` semantics.
+- Last reviewed: 2026-11-17
+
 ## Tracker plan status
 
 ### Jira
 
 - Default `test`: yes (offline fake)
 - Opt-in suite: `test:trackers` (read-only live smoke)
-- Notes: Fake lifecycle: key/`--query`, transition, comment, `--skip-comments`. One-shot and scheduled worker estimation are offline. Real project lifecycle and live estimation remain Layer 2.
+- Notes: Fake lifecycle: key/`--query`, transition, comment, `--skip-comments`. One-shot and scheduled worker estimation and worker polling are offline. Real project lifecycle and live estimation remain Layer 2.
 - Last reviewed: 2026-11-17
 
 ## Backlog
@@ -120,6 +128,18 @@ pull request, or commit is created. A second driven occurrence runs the sweep
 again and does not estimate the unchanged issue. No live tracker or credential
 is required. The only skip is the built-CLI guard.
 
+`tests/local/worker-jira-polling.test.ts` drives the worker's polling loop
+(`[defaults].task_query`, `poll_interval = 1`) against the same fake. The fake
+evaluates a documented JQL subset: clauses split on top-level `AND`, outer
+parentheses stripped, `updated >= "-Nm"` against each issue's `updated` stamp
+relative to the wall clock, and quoted text terms as before. The test covers
+single pickup of the matching issue (branch, run record, comment, transition),
+a decoy that is never run, no re-run while the issue is unchanged (the no-PR
+actioned marker), exactly one re-run after a description edit, the retry gate
+after an incomplete run (unlocked by exactly one human comment), and cursor
+resume after a graceful restart. The PR-created actioned marker on a real code
+host remains live-only.
+
 Endpoints covered:
 
 - `GET /rest/api/3/myself`
@@ -174,3 +194,38 @@ bare remote. No extra prerequisites or credentials are needed.
 ### Jira story-point estimation
 
 `tests/local/tracker-jira-estimation.test.ts` covers one-shot estimation, unchanged-task skips, re-estimation, and `--skip-comments` against the offline Jira fixture. `tests/local/worker-scheduled-estimation.test.ts` covers the same fake from a worker `[[estimations]]` schedule: one coalesced sweep, `estimate` run attribution, read-only git, and a later sweep that leaves the unchanged issue alone.
+
+### Worker Jira polling
+
+`tests/local/worker-jira-polling.test.ts` starts one real `devintern worker`
+with `[defaults].tracker = "jira"`, `[defaults].task_query = 'text ~ "<run
+marker>"'`, and `poll_interval = 1` against the in-process Jira fake
+(`providers/fake-jira.ts`, created with `wallClock: true` so tracker stamps
+follow the real clock that the detector window and retry gate compare with).
+It needs no Jira project, token, or network access. Build the CLI first. The
+test skips only when `packages/code/dist` is absent, and a skip is not a pass.
+
+In one workflow it proves:
+
+1. Pickup. The eligible issue is implemented once: its branch is pushed to the
+   bare remote, a `succeeded` run record exists, the issue gets one
+   implementation comment, and it moves to In Progress. A decoy outside the
+   query is never touched. `tracker.searches` contains the user query and the
+   detector's `updated >= "-Nm"` window (N >= 6).
+2. No re-run while unchanged. Over several further ticks the issue is not run
+   again. A bare remote has no code-host platform, so the run succeeds without
+   a PR, and the worker records the actioned marker for it.
+3. Re-arm on change. Editing the description on the fake runs it exactly once
+   more.
+4. Retry gate. A second issue whose agent reports incomplete
+   (`E2E_INCOMPLETE_PROMPT_MARKER`) gets the "Implementation Incomplete"
+   comment and moves back to To Do. Its bot comment and transition do not
+   trigger a retry. One human comment unlocks exactly one retry.
+5. Cursor persistence. After a graceful stop and restart on the same
+   workspace, the first search is the detector window from the persisted
+   cursor, and nothing already processed runs again.
+
+```bash
+bun run --filter @getdevintern/code build
+bun run --filter @devintern/e2e test
+```

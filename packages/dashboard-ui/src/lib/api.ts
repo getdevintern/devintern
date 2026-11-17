@@ -544,6 +544,33 @@ export interface WorkerResponse {
   queueDbPath: string;
   /** Whether the durable queue database file is absent. */
   queueDbMissing: boolean;
+  /**
+   * Health of each automation source in the current config. Absent from
+   * older servers; empty (with {@link sourcesError}) when it could not be read.
+   */
+  sources?: SourceHealth[];
+  sourcesError?: string;
+}
+
+/** Outcome of the most recent read of an automation source. */
+export type SourceHealthStatus = "ok" | "unreadable" | "rate-limited" | "auth-failed";
+
+/** One automation source (an error monitor today) as served by `GET /api/sources`. */
+export interface SourceHealth {
+  provider: string;
+  sourceId: string;
+  status: SourceHealthStatus;
+  /** Epoch ms of the most recent read attempt. */
+  checkedAt: number;
+  lastSuccessAt?: number | null;
+  consecutiveFailures: number;
+  message?: string | null;
+  /** When rate-limited, epoch ms after which the worker reads again. */
+  retryAfterAt?: number | null;
+}
+
+export interface SourcesResponse {
+  sources: SourceHealth[];
 }
 
 /** Where a queued item came from. */

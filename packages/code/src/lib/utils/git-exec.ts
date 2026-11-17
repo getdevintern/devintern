@@ -194,6 +194,53 @@ export async function remoteBranchExists(
   return result.success && result.output.trim().length > 0;
 }
 
+/** Git's message when another process holds a config file's `.lock`. */
+export const CONFIG_LOCK_ERROR = /could not lock config file/i;
+
+/** Delays between retries of a git command that lost the config lock race. */
+const CONFIG_LOCK_RETRY_DELAYS_MS = [50, 100, 200, 400, 800, 1600];
+
+/** Whether a git result reports a failed config lock (on stderr or stdout). */
+export function hasConfigLockError(result: { output?: string; error?: string }): boolean {
+  return CONFIG_LOCK_ERROR.test(result.error ?? "") || CONFIG_LOCK_ERROR.test(result.output ?? "");
+}
+
+/**
+ * Run a git command that may write the shared config, retrying with backoff
+ * while another process holds `config.lock`. Git never waits for that lock
+ * itself; the holder is usually a concurrent task's own config write (a
+ * `checkout -b` with tracking, a `push --set-upstream`) that finishes within
+ * milliseconds. Fleet worktrees share one bare clone's config, so these races
+ * are routine there.
+ *
+ * Only failed results are retried: a command that exits 0 while warning about
+ * the lock (e.g. `push -u` that pushed but could not record the upstream) is
+ * returned as-is so the caller decides whether the missing config matters.
+ * The command must be safe to re-run after a lock failure.
+ *
+ * @param args - Git CLI arguments (without `git` prefix)
+ * @param options - Options forwarded to `executeGitCommand`
+ */
+export async function executeGitCommandWithConfigLockRetry(
+  args: string[],
+  options?: {
+    verbose?: boolean;
+    cwd?: string;
+    timeoutMs?: number;
+    env?: NodeJS.ProcessEnv;
+  },
+): Promise<{ success: boolean; output: string; error?: string }> {
+  let result = await Utils.executeGitCommand(args, options);
+  for (const delayMs of CONFIG_LOCK_RETRY_DELAYS_MS) {
+    if (result.success || !hasConfigLockError(result)) {
+      return result;
+    }
+    await Bun.sleep(delayMs);
+    result = await Utils.executeGitCommand(args, options);
+  }
+  return result;
+}
+
 /**
  * Check out a branch, creating a tracking branch from origin when needed.
  *
@@ -211,7 +258,9 @@ export async function checkoutBranch(
 
   const remoteRef = `origin/${branch}`;
   if (await Utils.gitRefExists(`refs/remotes/${remoteRef}`, options)) {
-    const trackCheckout = await Utils.executeGitCommand(
+    // `--track` writes `branch.<name>.*` into the (possibly shared) config;
+    // `-B` makes the retry safe after a lock failure left the ref behind.
+    const trackCheckout = await executeGitCommandWithConfigLockRetry(
       ["checkout", "-B", branch, "--track", remoteRef],
       options,
     );

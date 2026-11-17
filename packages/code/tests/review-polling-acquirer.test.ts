@@ -4,14 +4,19 @@ import { join } from "path";
 import { tmpdir } from "os";
 
 import {
+  OPEN_PR_LIST_PAGE_SIZE,
   ReviewPollingAcquirer,
   runResolveConflictsViaCli,
+  teamPrStateCursorSource,
 } from "../src/lib/acquirers/review-polling";
 import type {
+  AutomaticResolveResult,
   ConditionalResult,
   PolledComment,
   PolledPr,
+  PolledPrListItem,
   PolledReview,
+  ReviewPollingGitHub,
 } from "../src/lib/acquirers/review-polling";
 import type { CronOrIntervalSchedule } from "../src/lib/automation/config";
 import { WebhookQueue } from "../src/lib/state/webhook-queue";
@@ -58,10 +63,7 @@ describe("ReviewPollingAcquirer", () => {
   function makeAcquirer(
     gh: FakeGitHubState,
     options: {
-      resolveResults?: Array<{
-        outcome: "clean" | "resolved" | "skipped" | "failed" | "deferred";
-        message: string;
-      }>;
+      resolveResults?: AutomaticResolveResult[];
       runStore?: RunStore;
       quietPeriodSeconds?: number;
       now?: () => number;
@@ -762,6 +764,60 @@ describe("ReviewPollingAcquirer", () => {
       "acme/widgets#42",
       "acme/widgets#42",
     ]);
+  });
+
+  test("capacity defers wait for a harness instead of exhausting the event", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    let clock = 1_000_000;
+    const capacity: AutomaticResolveResult = {
+      outcome: "deferred",
+      message: "agent usage limit; waiting for a harness to become available",
+      capacity: true,
+    };
+    const made = makeAcquirer(
+      {
+        prState: "open",
+        mergeableState: "dirty",
+        headSha: "head1",
+        baseSha: "base1",
+        baseIncluded: false,
+        reviews: [],
+        comments: [],
+      },
+      {
+        now: () => clock,
+        resolveResults: [
+          { ...capacity, retryAt: clock + 60_000 },
+          capacity,
+          capacity,
+          capacity,
+          { outcome: "resolved", message: "merged base" },
+        ],
+      },
+    );
+    const externalId = "base-sync:acme/widgets#42:base1:head1";
+
+    await made.acquirer.tick();
+    expect(made.resolved).toHaveLength(1);
+    // Before the reported reset, the resolver is not relaunched.
+    clock += 30_000;
+    await made.acquirer.tick();
+    expect(made.resolved).toHaveLength(1);
+
+    // Past the cap of consecutive defers, the event stays pending and unprocessed.
+    for (let i = 0; i < 3; i++) {
+      clock += 6 * 60_000;
+      await made.acquirer.tick();
+    }
+    expect(made.resolved).toHaveLength(4);
+    expect(queue.getBaseSyncEvent(externalId)).toMatchObject({ status: "pending", attempts: 0 });
+    expect(queue.hasProcessed("github:base-sync", externalId)).toBe(false);
+
+    // Once a harness is back, the conflict is resolved.
+    clock += 6 * 60_000;
+    await made.acquirer.tick();
+    expect(made.resolved).toHaveLength(5);
+    expect(queue.getBaseSyncEvent(externalId)?.status).toBe("completed");
   });
 
   test("a head race during pre-run revalidation stays pending without an attempt", async () => {
@@ -1680,5 +1736,437 @@ process.exitCode = behavior === "deferred" || behavior === "deferred-fallback" ?
     } finally {
       rmSync(testDir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("ReviewPollingAcquirer team-PR base sync (sync_team_prs)", () => {
+  const REPO = "acme/widgets";
+  let dbPath: string;
+  let workerState: WorkerState;
+  let queue: WebhookQueue;
+  let logs: string[];
+  let warns: string[];
+  let logSpy: ReturnType<typeof spyOn>;
+  let warnSpy: ReturnType<typeof spyOn>;
+
+  beforeEach(() => {
+    resetUnusableStateWarnings();
+    dbPath = join(tmpdir(), `rp-team-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
+    workerState = new WorkerState(dbPath);
+    queue = new WebhookQueue({ dbPath });
+    logs = [];
+    warns = [];
+    logSpy = spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+      logs.push(args.join(" "));
+    });
+    warnSpy = spyOn(console, "warn").mockImplementation((...args: unknown[]) => {
+      warns.push(args.join(" "));
+    });
+  });
+
+  afterEach(() => {
+    logSpy.mockRestore();
+    warnSpy.mockRestore();
+    workerState.close();
+    queue.close();
+    for (const suffix of ["", "-wal", "-shm"]) {
+      rmSync(`${dbPath}${suffix}`, { force: true });
+    }
+  });
+
+  interface FakePr {
+    number: number;
+    state?: string;
+    draft?: boolean;
+    association?: string;
+    /** Head repo full name; defaults to the base repo (same-repo PR). */
+    headRepo?: string;
+    mergeable?: string;
+    headSha?: string;
+    baseSha?: string;
+  }
+
+  /** Multi-PR fake GitHub; ETags change whenever `version` is bumped. */
+  class TeamGitHub {
+    prs = new Map<number, FakePr>();
+    version = 1;
+    listCalls: Array<string | undefined> = [];
+    prCalls: Array<{ n: number; etag?: string }> = [];
+    reviewCalls: number[] = [];
+    listError?: Error;
+    listGone = false;
+    /** Overrides the list payload (page-cap tests). */
+    listOverride?: PolledPrListItem[];
+    /** Called after each PR fetch (lets tests mutate state between fetches). */
+    afterFetch?: (n: number, calls: number) => void;
+
+    add(pr: FakePr): void {
+      this.prs.set(pr.number, pr);
+      this.version += 1;
+    }
+
+    private listEtag(): string {
+      return `W/"list-${this.version}"`;
+    }
+
+    private payload(pr: FakePr): PolledPr {
+      return {
+        state: pr.state ?? "open",
+        draft: pr.draft,
+        author_association: pr.association,
+        mergeable_state: pr.mergeable ?? "dirty",
+        head: {
+          sha: pr.headSha ?? `head${pr.number}`,
+          ref: `feature/${pr.number}`,
+          repo: { full_name: pr.headRepo ?? REPO },
+        },
+        base: { sha: pr.baseSha ?? "base1", ref: "main" },
+      };
+    }
+
+    client(): ReviewPollingGitHub {
+      return {
+        fetchPr: async (_repo, n, etag) => {
+          this.prCalls.push({ n, etag });
+          const calls = this.prCalls.filter((call) => call.n === n).length;
+          const pr = this.prs.get(n);
+          try {
+            if (!pr) return { data: null, notModified: false, gone: true };
+            const current = `W/"pr-${n}-${this.version}"`;
+            if (etag && etag === current) return { data: null, etag, notModified: true };
+            return { data: this.payload(pr), etag: current, notModified: false };
+          } finally {
+            this.afterFetch?.(n, calls);
+          }
+        },
+        fetchReviews: async (_repo, n) => {
+          this.reviewCalls.push(n);
+          return {
+            data: [{ id: n, state: "CHANGES_REQUESTED", user: { login: "rev", type: "User" } }],
+            notModified: false,
+          };
+        },
+        fetchReviewCommentsSince: async () => [],
+        listOpenPullRequests: async (_repo, etag) => {
+          this.listCalls.push(etag);
+          if (this.listError) throw this.listError;
+          if (this.listGone) return { data: null, notModified: false, gone: true };
+          const current = this.listEtag();
+          if (etag && etag === current) return { data: null, etag, notModified: true };
+          const data =
+            this.listOverride ??
+            [...this.prs.values()]
+              .filter((pr) => (pr.state ?? "open") === "open")
+              .map((pr) => ({
+                number: pr.number,
+                draft: pr.draft,
+                author_association: pr.association,
+                head: { repo: { full_name: pr.headRepo ?? REPO } },
+              }));
+          return { data, etag: current, notModified: false };
+        },
+      };
+    }
+  }
+
+  function make(
+    gh: TeamGitHub,
+    options: {
+      syncTeamPrsRepos?: string[] | (() => string[]);
+      conflictResolution?: ConflictResolutionMode;
+      conflictSchedule?: CronOrIntervalSchedule;
+      now?: () => number;
+      runStore?: RunStore;
+    } = {},
+  ) {
+    const addressed: string[] = [];
+    const resolved: string[] = [];
+    const acquirer = new ReviewPollingAcquirer({
+      intervalSeconds: 60,
+      workerState,
+      queue,
+      github: gh.client(),
+      addressPr: async (repo, n) => {
+        addressed.push(`${repo}#${n}`);
+        return true;
+      },
+      resolveConflicts: async (repo, n) => {
+        resolved.push(`${repo}#${n}`);
+        return { outcome: "resolved", message: "merged base" };
+      },
+      quietPeriodSeconds: 0,
+      allowedRepos: [REPO],
+      syncTeamPrsRepos: "syncTeamPrsRepos" in options ? options.syncTeamPrsRepos : [REPO],
+      conflictResolution: options.conflictResolution,
+      conflictSchedule: options.conflictSchedule,
+      conflictWindowGraceMs: 60 * 60_000,
+      now: options.now,
+      runStore: options.runStore,
+    });
+    return { acquirer, addressed, resolved };
+  }
+
+  test("default off: no repo opted in sends no discovery requests", async () => {
+    workerState.recordAgentPr({ repo: REPO, prNumber: 42 });
+    for (const syncTeamPrsRepos of [undefined, [] as string[]]) {
+      const gh = new TeamGitHub();
+      gh.add({ number: 42, association: "MEMBER", mergeable: "clean" });
+      gh.add({ number: 7, association: "MEMBER" });
+      const made = make(gh, { syncTeamPrsRepos });
+      await made.acquirer.tick();
+      expect(gh.listCalls).toEqual([]);
+      expect(gh.prCalls.map((call) => call.n)).toEqual([42]);
+      expect(made.resolved).toEqual([]);
+      expect(logs.some((line) => line.includes("team-PR base sync"))).toBe(false);
+    }
+  });
+
+  test("a conflicting teammate PR is base-synced without feedback addressing", async () => {
+    const runStore = new RunStore(dbPath);
+    const gh = new TeamGitHub();
+    gh.add({ number: 7, association: "MEMBER" });
+    const made = make(gh, { runStore });
+
+    await made.acquirer.tick();
+
+    expect(made.resolved).toEqual([`${REPO}#7`]);
+    expect(made.addressed).toEqual([]);
+    expect(gh.reviewCalls).toEqual([]);
+    expect(logs).toContain(`👀 [poll:reviews] watching ${REPO}#7 (open PR) for base sync`);
+    expect(logs.some((line) => line.includes(`syncing ${REPO}#7 (external PR)`))).toBe(true);
+    expect(queue.getBaseSyncEvent(`base-sync:${REPO}#7:base1:head7`)?.status).toBe("completed");
+    const runs = runStore.listRuns({ limit: 10 });
+    expect(runs.map((run) => [run.origin, run.prNumber])).toEqual([["conflict_resolution", 7]]);
+    runStore.close();
+
+    // Deduped by base/head like the agent's own PRs.
+    await made.acquirer.tick();
+    expect(made.resolved).toEqual([`${REPO}#7`]);
+  });
+
+  test("non-team authors are skipped at discovery and logged once", async () => {
+    const gh = new TeamGitHub();
+    gh.add({ number: 8, association: "CONTRIBUTOR" });
+    gh.add({ number: 9 });
+    const made = make(gh);
+
+    await made.acquirer.tick();
+    await made.acquirer.tick();
+
+    expect(made.resolved).toEqual([]);
+    expect(gh.prCalls).toEqual([]);
+    const skips = logs.filter((line) => line.includes("🚧"));
+    expect(skips).toEqual([
+      `🚧 [poll:reviews] skipping ${REPO}#8 for base sync (non-team author: CONTRIBUTOR)`,
+      `🚧 [poll:reviews] skipping ${REPO}#9 for base sync (non-team author: unknown)`,
+    ]);
+  });
+
+  test("the fresh per-PR payload re-checks the team gate", async () => {
+    const gh = new TeamGitHub();
+    gh.add({ number: 7, association: "MEMBER" });
+    // The list entry is stale: the PR itself reports an outside author.
+    gh.listOverride = [{ number: 7, author_association: "MEMBER" }];
+    gh.prs.get(7)!.association = "NONE";
+    const made = make(gh);
+
+    await made.acquirer.tick();
+
+    expect(gh.prCalls.map((call) => call.n)).toEqual([7]);
+    expect(made.resolved).toEqual([]);
+    expect(logs.some((line) => line.includes(`skipping ${REPO}#7`))).toBe(true);
+  });
+
+  test("eligibility is re-checked on the pre-execution refetch", async () => {
+    const gh = new TeamGitHub();
+    gh.add({ number: 7, association: "MEMBER" });
+    gh.afterFetch = (n, calls) => {
+      // Flip the PR to draft after the sweep's fetch, before the refetch.
+      if (n === 7 && calls === 1) gh.prs.get(7)!.draft = true;
+    };
+    const made = make(gh);
+
+    await made.acquirer.tick();
+
+    expect(gh.prCalls.map((call) => call.n)).toEqual([7, 7]);
+    expect(made.resolved).toEqual([]);
+  });
+
+  test("drafts and forks are skipped without per-PR requests", async () => {
+    const gh = new TeamGitHub();
+    gh.add({ number: 10, association: "MEMBER", draft: true });
+    gh.add({ number: 11, association: "COLLABORATOR", headRepo: "someone/widgets" });
+    const made = make(gh);
+
+    await made.acquirer.tick();
+
+    expect(gh.listCalls).toHaveLength(1);
+    expect(gh.prCalls).toEqual([]);
+    expect(made.resolved).toEqual([]);
+    expect(logs.some((line) => line.includes("👀"))).toBe(false);
+  });
+
+  test("a PR that leaves the open list leaves the watch set", async () => {
+    const gh = new TeamGitHub();
+    gh.add({ number: 7, association: "MEMBER", mergeable: "clean" });
+    const made = make(gh);
+
+    await made.acquirer.tick();
+    expect(logs.some((line) => line.includes(`watching ${REPO}#7`))).toBe(true);
+
+    gh.prs.get(7)!.state = "closed";
+    gh.version += 1;
+    await made.acquirer.tick();
+    expect(logs).toContain(`👋 [poll:reviews] ${REPO}#7 left the open-PR list; no longer watching`);
+    const fetchesAfterClose = gh.prCalls.length;
+
+    await made.acquirer.tick();
+    expect(gh.prCalls).toHaveLength(fetchesAfterClose);
+  });
+
+  test("a 304 list reuses the cached PRs; a restart never sends a stored ETag first", async () => {
+    const gh = new TeamGitHub();
+    gh.add({ number: 7, association: "MEMBER", mergeable: "clean" });
+    const made = make(gh);
+
+    await made.acquirer.tick();
+    expect(gh.listCalls).toEqual([undefined]);
+    await made.acquirer.tick();
+    expect(gh.listCalls).toEqual([undefined, 'W/"list-2"']);
+    // The cached list still drives the per-PR poll, which revalidates too.
+    expect(gh.prCalls).toEqual([
+      { n: 7, etag: undefined },
+      { n: 7, etag: 'W/"pr-7-2"' },
+    ]);
+
+    // Fresh process with the durable ETags in place: hydrate unconditionally.
+    const restarted = make(gh);
+    await restarted.acquirer.tick();
+    expect(gh.listCalls.at(-1)).toBeUndefined();
+    expect(gh.prCalls.at(-1)).toEqual({ n: 7, etag: undefined });
+  });
+
+  test("the agent's own PRs are not swept again", async () => {
+    workerState.recordAgentPr({ repo: REPO, prNumber: 42 });
+    const gh = new TeamGitHub();
+    gh.add({ number: 42, association: "OWNER" });
+    const made = make(gh);
+
+    await made.acquirer.tick();
+
+    expect(made.resolved).toEqual([`${REPO}#42`]);
+    expect(made.addressed).toEqual([`${REPO}#42`]);
+    expect(logs.some((line) => line.includes("👀"))).toBe(false);
+    expect(logs.some((line) => line.includes("(external PR)"))).toBe(false);
+    expect(workerState.getCursor(teamPrStateCursorSource(REPO, 42))).toBeNull();
+  });
+
+  test("disabled conflict resolution skips discovery and never syncs teammate PRs", async () => {
+    const gh = new TeamGitHub();
+    gh.add({ number: 7, association: "MEMBER" });
+    const made = make(gh, { conflictResolution: "disabled" });
+
+    await made.acquirer.tick();
+
+    expect(gh.listCalls).toEqual([]);
+    expect(made.resolved).toEqual([]);
+  });
+
+  test("scheduled mode queues teammate conflicts until the window opens", async () => {
+    const DAY_MS = 86_400_000;
+    let now = 1_750_000_000_000;
+    const gh = new TeamGitHub();
+    gh.add({ number: 7, association: "MEMBER" });
+    const made = make(gh, {
+      conflictResolution: "scheduled",
+      conflictSchedule: { interval: "1d", intervalMs: DAY_MS },
+      now: () => now,
+    });
+
+    await made.acquirer.tick();
+    expect(made.resolved).toEqual([]);
+    expect(queue.getBaseSyncEvent(`base-sync:${REPO}#7:base1:head7`)?.status).toBe("pending");
+
+    now += DAY_MS + 1;
+    await made.acquirer.tick();
+    expect(made.resolved).toEqual([`${REPO}#7`]);
+  });
+
+  test("a full open-PR page warns once until the list drops below the cap", async () => {
+    const gh = new TeamGitHub();
+    const page = (count: number): PolledPrListItem[] =>
+      Array.from({ length: count }, (_, index) => ({ number: index + 1, draft: true }));
+    gh.listOverride = page(OPEN_PR_LIST_PAGE_SIZE);
+    const made = make(gh);
+    const capWarnings = () => warns.filter((line) => line.includes("page cap")).length;
+
+    await made.acquirer.tick();
+    gh.version += 1;
+    await made.acquirer.tick();
+    expect(capWarnings()).toBe(1);
+
+    gh.listOverride = page(OPEN_PR_LIST_PAGE_SIZE - 1);
+    gh.version += 1;
+    await made.acquirer.tick();
+    gh.listOverride = page(OPEN_PR_LIST_PAGE_SIZE);
+    gh.version += 1;
+    await made.acquirer.tick();
+    expect(capWarnings()).toBe(2);
+  });
+
+  test("credential failures listing open PRs are throttled per repo", async () => {
+    let now = 1_750_000_000_000;
+    const gh = new TeamGitHub();
+    gh.listError = new Error("GitHub API error (401): Bad credentials. Renew GITHUB_TOKEN.");
+    const made = make(gh, { now: () => now });
+
+    await made.acquirer.tick();
+    now += 60_000;
+    await made.acquirer.tick();
+    const credentialWarnings = () =>
+      warns.filter((line) => line.includes("rejected the credential while listing open PRs"));
+    expect(credentialWarnings()).toHaveLength(1);
+
+    gh.listError = undefined;
+    await made.acquirer.tick();
+    expect(logs.some((line) => line.includes("listing open PRs recovered"))).toBe(true);
+  });
+
+  test("a 404 PR or list warns and does not sync", async () => {
+    const gh = new TeamGitHub();
+    gh.listOverride = [{ number: 99, author_association: "MEMBER" }];
+    const made = make(gh);
+
+    await made.acquirer.tick();
+    expect(made.resolved).toEqual([]);
+    expect(warns.some((line) => line.includes(`404 for ${REPO}#99`))).toBe(true);
+
+    const listGone = new TeamGitHub();
+    listGone.listGone = true;
+    const other = make(listGone, { now: () => Date.now() + 2 * 60 * 60_000 });
+    await other.acquirer.tick();
+    expect(warns.some((line) => line.includes("404 listing open PRs"))).toBe(true);
+  });
+
+  test("live reload opting a repo out prunes state; opting back in re-hydrates", async () => {
+    let opted = [REPO];
+    const gh = new TeamGitHub();
+    gh.add({ number: 7, association: "MEMBER", mergeable: "clean" });
+    const made = make(gh, { syncTeamPrsRepos: () => opted });
+
+    await made.acquirer.tick();
+    expect(logs).toContain(`🌐 [poll:reviews] team-PR base sync enabled on: ${REPO}`);
+
+    opted = [];
+    await made.acquirer.tick();
+    expect(logs).toContain("🌐 [poll:reviews] team-PR base sync disabled");
+    expect(gh.listCalls).toHaveLength(1);
+
+    opted = [REPO];
+    await made.acquirer.tick();
+    // Pruned caches mean no stored ETag is sent (no 304 against an empty cache).
+    expect(gh.listCalls).toEqual([undefined, undefined]);
+    expect(gh.prCalls.at(-1)).toEqual({ n: 7, etag: undefined });
+    expect(logs.filter((line) => line.includes(`watching ${REPO}#7`))).toHaveLength(2);
   });
 });

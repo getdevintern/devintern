@@ -3,6 +3,7 @@ import { rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
+import { outcomeRunDisposition } from "../src/lib/agent/implementation-outcome";
 import { RunStore } from "../src/lib/state/run-recorder";
 import type { SessionPickupRunStore } from "../src/lib/state/session-pickup";
 import {
@@ -173,6 +174,56 @@ describe("resolveSessionPickup", () => {
       kind: "fresh",
       reason: "branch 'feature/proj-5c' has no commits to resume",
     });
+  });
+
+  test("starts the next automation occurrence fresh after a blocked PR-opening run", async () => {
+    // A blocked run delivered (commits landed, PR opened) before its outcome
+    // escalated it. The blocker is outside the code, so neither the next
+    // occurrence nor a retry may resume its branch.
+    const scope = {
+      origin: "scheduled" as const,
+      automationId: "release",
+      tracker: "markdown",
+      repo: "app",
+    };
+    const disposition = outcomeRunDisposition({ status: "blocked", reason: "test gate failed" });
+    expect(disposition.status).toBe("escalated");
+    const blocked = store.createRun({ ...scope, taskKey: "release", branch: "feature/release" });
+    store.addStage(
+      blocked,
+      "implementation",
+      "succeeded",
+      "implemented",
+      JSON.stringify({ report: "could not release" }),
+    );
+    store.finishRun(blocked, disposition.status, disposition.reason);
+    const next = store.createRun({ ...scope, taskKey: "release" });
+
+    const probes = { branchExists: () => true, hasLandedCommits: () => true };
+    for (const selection of [{ excludeRunId: next }, { runId: blocked }]) {
+      expect(
+        await resolveSessionPickup({
+          runStore: store,
+          taskKey: "release",
+          scope,
+          ...selection,
+          ...probes,
+        }),
+      ).toEqual({ kind: "fresh", reason: "prior run reported its goal as blocked" });
+    }
+
+    // An incomplete handoff is also escalated, but it is unfinished work and
+    // stays resumable.
+    const incomplete = store.createRun({ ...scope, taskKey: "release", branch: "feature/release" });
+    store.finishRun(incomplete, "escalated", "implementation incomplete; handed back to a human");
+    const resumed = await resolveSessionPickup({
+      runStore: store,
+      taskKey: "release",
+      scope,
+      runId: incomplete,
+      ...probes,
+    });
+    expect(resumed.kind).toBe("resume");
   });
 
   test("requires commits when a report came from a failed implementation stage", async () => {

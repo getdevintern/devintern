@@ -233,6 +233,17 @@ export class FakeLinearTracker implements TrackerFixture {
     return id;
   }
 
+  /**
+   * Edit an issue the way a human would in the Linear UI: change its title
+   * and/or description and bump `updatedAt`.
+   */
+  async editTicket(ticketKey: string, input: { title?: string; body?: string }): Promise<void> {
+    const issue = this.requireIssue(ticketKey);
+    if (input.title !== undefined) issue.title = input.title;
+    if (input.body !== undefined) issue.description = input.body;
+    issue.updatedAt = this.timestamp();
+  }
+
   /** Resolve a scenario-owned issue by moving it to its terminal state. */
   async closeTicket(ticketKey: string): Promise<void> {
     const issue = this.requireIssue(ticketKey);

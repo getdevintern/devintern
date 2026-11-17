@@ -131,8 +131,9 @@ It records every `SearchIssues` request the fake receives and asserts:
   once, and after a graceful stop/start on the same queue DB the first request
   is the delta built from the saved cursor;
 - with `--skip-comments` (no tracker writes) an unchanged ready issue keeps
-  matching the query yet is skipped by the `(key, updatedAt)` dedupe across
-  polls and the restart, and a new comment (new `updatedAt`) runs it once more.
+  matching the query yet is skipped by the no-PR actioned marker across polls
+  and the restart, and a human description edit (new `updatedAt`) runs it once
+  more.
 
 The fake runs with `clock: "wall"` so its `updatedAt` stamps fall inside the
 detector's real-time window. No prerequisites beyond the built CLI; the test

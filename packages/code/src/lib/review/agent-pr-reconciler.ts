@@ -33,6 +33,13 @@ export interface PolledPr {
   state?: unknown;
   /** GitHub's computed merge state; `"dirty"` means merge conflicts. */
   mergeable_state?: string;
+  /** Work-in-progress PR (team-PR base sync skips drafts). */
+  draft?: boolean;
+  /**
+   * GitHub's author/repo relationship (`OWNER`, `MEMBER`, `COLLABORATOR`,
+   * `CONTRIBUTOR`, `NONE`, …); gates team-PR base sync.
+   */
+  author_association?: string;
   head?: { sha: string; ref?: string; repo?: { full_name: string } | null };
   base?: { sha: string; ref?: string };
 }

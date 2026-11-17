@@ -81,6 +81,7 @@ poll_interval = 60
 # name = "backend"
 # remote = "git@github.com:acme/backend.git"
 # default_branch = "main"    # optional; otherwise follows origin/HEAD
+# sync_team_prs = true       # also base-sync teammates' open PRs (GitHub; needs AGENT_SANDBOX=native|nono|docker)
 # ----
 # [[routing.rules]]
 # repo = "backend"
