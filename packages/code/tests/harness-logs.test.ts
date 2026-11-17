@@ -15,8 +15,11 @@ import { join } from "path";
 
 import type { AgentHarness } from "@devintern/agent-harness";
 import {
+  HARNESS_LOG_RUN_ID_ENV,
   createHarnessLogSink,
   harnessLogFileName,
+  harnessLogRunEnv,
+  inheritedLogRunId,
   harnessLogsDir,
   HARNESS_LOG_PRUNE_INTERVAL_MS,
   isHarnessLoggingEnabled,
@@ -112,6 +115,37 @@ describe("harness run logs", () => {
     expect(content).toContain("=== end of harness run ===");
     expect(content).toContain("exitCode: 0");
     expect(content).toContain("maxTurnsReached: false");
+  });
+
+  test("files a child's transcript under the parent's run from the env", () => {
+    process.env[HARNESS_LOG_RUN_ID_ENV] = "463";
+    try {
+      expect(getActiveRunContext()).toBeNull();
+      const sink = createHarnessLogSink({
+        harness: HARNESS,
+        label: "merge-safety-review",
+        origin: "auto_merge",
+      });
+      sink!.close({ exitCode: 0, signal: null });
+    } finally {
+      delete process.env[HARNESS_LOG_RUN_ID_ENV];
+    }
+    const files = readdirSync(harnessLogsDir());
+    expect(files).toHaveLength(1);
+    expect(parseHarnessLogName(files[0]!)).toMatchObject({
+      runId: 463,
+      origin: "auto_merge",
+      label: "merge-safety-review",
+    });
+  });
+
+  test("ignores a malformed inherited run id", () => {
+    expect(inheritedLogRunId({ [HARNESS_LOG_RUN_ID_ENV]: "463" })).toBe(463);
+    expect(inheritedLogRunId({ [HARNESS_LOG_RUN_ID_ENV]: "abc" })).toBeUndefined();
+    expect(inheritedLogRunId({ [HARNESS_LOG_RUN_ID_ENV]: "0" })).toBeUndefined();
+    expect(inheritedLogRunId({ [HARNESS_LOG_RUN_ID_ENV]: "-4" })).toBeUndefined();
+    expect(inheritedLogRunId({})).toBeUndefined();
+    expect(harnessLogRunEnv(12)).toEqual({ [HARNESS_LOG_RUN_ID_ENV]: "12" });
   });
 
   test("writes chunks contiguously without per-line decoration", () => {

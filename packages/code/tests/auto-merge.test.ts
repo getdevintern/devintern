@@ -1,4 +1,6 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
+
+import { Utils } from "../src/lib/utils";
 
 import {
   autoMergePr,
@@ -132,6 +134,26 @@ describe("autoMergePr", () => {
     expect(opts.agentCalls).toHaveLength(1);
     expect(opts.agentCalls[0]).toContain("- src/x.ts");
     expect(opts.agentCalls[0]).not.toContain("- README.md");
+  });
+
+  test("the default review checkout skips the dependency install", async () => {
+    const github = fakeGitHub([file("src/x.ts")]);
+    const seen: unknown[] = [];
+    const prepare = spyOn(Utils, "prepareReviewWorktree").mockImplementation(
+      async (_branch, prepareOptions) => {
+        seen.push(prepareOptions);
+        return { success: false, error: "stubbed" };
+      },
+    );
+    try {
+      const opts = options(github);
+      delete (opts as Partial<AutoMergeOptions>).worktree;
+      await autoMergePr(URL, opts);
+    } finally {
+      prepare.mockRestore();
+    }
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({ installDependencies: false });
   });
 
   test("an unsafe verdict is a rejection with an explanatory comment", async () => {
