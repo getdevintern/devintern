@@ -273,6 +273,10 @@ describe("GitHubTaskTrackerClient estimation", () => {
     });
 
     const found = await adapter.findEstimationComment("123");
-    expect(found).toEqual({ commentId: "42", created: "2026-01-03T00:00:00Z" });
+    expect(found).toEqual({
+      commentId: "42",
+      created: "2026-01-03T00:00:00Z",
+      updated: "2026-01-03T00:00:00Z",
+    });
   });
 });

@@ -295,10 +295,15 @@ export async function spawnAgent(options: SpawnAgentOptions): Promise<SpawnedAge
     const workingDir =
       options.policy?.workingDir ?? (spawnOptions.cwd as string | undefined) ?? process.cwd();
     const defaults = buildDefaultSandboxPolicy(workingDir);
+    // The child env is exactly what gets spawned below (before the provider's
+    // overlay), so providers can decide overrides against it instead of the
+    // CLI's own process.env.
+    const childEnv = spawnOptions.env ?? process.env;
     const policy: SandboxPolicy = {
       ...defaults,
       harnessName: sandbox.harnessName,
       ...options.policy,
+      env: childEnv,
       writablePaths: [...defaults.writablePaths, ...(options.policy?.writablePaths ?? [])],
     };
 

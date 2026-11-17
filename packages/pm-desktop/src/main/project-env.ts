@@ -13,6 +13,7 @@ import {
   isHarnessInstalled,
   listHarnesses,
   parseAgentEffort,
+  parseHarnessList,
   resolveExecutablePathStrict,
   resolveHarness,
 } from "@devintern/agent-harness";
@@ -133,12 +134,33 @@ export async function persistActiveProject(
 }
 
 /**
+ * Move `harnessName` to the front of a multi-entry `AGENT_HARNESS` chain,
+ * keeping the other entries (in order) as usage-limit fallbacks. A single or
+ * unset value is replaced by `harnessName` alone. Aliases are
+ * canonicalized and duplicates of the picked harness dropped.
+ *
+ * @param current - Existing `AGENT_HARNESS` value (may be unset or single).
+ * @param harnessName - Canonical name of the picked harness.
+ * @returns The new `AGENT_HARNESS` value.
+ */
+export function promoteHarness(current: string | undefined, harnessName: string): string {
+  // Only an existing multi-entry chain is kept: a single or unset value must
+  // not gain an implicit fallback (parseHarnessList also substitutes the
+  // default harness for an empty value). It canonicalizes and de-duplicates.
+  const parsed = parseHarnessList(current);
+  if (parsed.length < 2) return harnessName;
+  return [harnessName, ...parsed.filter((entry) => entry !== harnessName)].join(",");
+}
+
+/**
  * Persist `AGENT_HARNESS` for an installed, resolvable harness.
  *
  * Validates registry membership, CLI install, and path resolution before
  * writing so a failed switch leaves the previous harness active. Clears a
  * sticky `AGENT_CLI_PATH` so a prior agent path cannot attach to the newly
  * selected harness (same rule as CLI explicit `harnessName` selection).
+ * A multi-entry chain is kept: the picked harness moves to the front and the
+ * remaining entries stay as fallbacks (see {@link promoteHarness}).
  *
  * @throws When the harness is unknown, not installed, or its CLI path cannot
  *   be resolved.
@@ -172,7 +194,9 @@ export async function persistActiveHarness(
   resolveExecutablePathStrict(resolved.path, resolved.harness.displayName);
 
   const { env } = await readProjectEnv(projectDir);
-  const vars: Record<string, string> = { AGENT_HARNESS: harness.name };
+  const vars: Record<string, string> = {
+    AGENT_HARNESS: promoteHarness(env.AGENT_HARNESS, harness.name),
+  };
   // Empty value is falsy in resolveHarness; removes sticky global override.
   if (env.AGENT_CLI_PATH) {
     vars.AGENT_CLI_PATH = "";

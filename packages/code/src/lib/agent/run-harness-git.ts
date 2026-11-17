@@ -1,7 +1,8 @@
-import { captureError } from "@devintern/utils";
+import { captureError, redactText } from "@devintern/utils";
 import type { AgentHarness } from "@devintern/agent-harness";
-import { runContext } from "../cli/context";
+import { isWorkerTaskProcess, runContext } from "../cli/context";
 import { PRManager } from "../code-host";
+import { isFinalPrDeliveryAttempt, MAX_PR_DELIVERY_ATTEMPTS } from "../task/actioned-without-pr";
 import { loadProjectSettings } from "../config/project-settings";
 import { applyActionedTransition } from "../task/actioned-transition";
 import { recordRunPr } from "../state/run-recorder";
@@ -192,6 +193,46 @@ export function createGitHelpers(ctx: FinalizeContext) {
     };
   };
 
+  // A PR failure on a supported code host tells the tracker so a person can
+  // see the branch is pushed without a PR. A retryable failure also flags the
+  // run so the worker leaves the ticket unmarked and re-runs it (bounded by
+  // MAX_PR_DELIVERY_ATTEMPTS); a permanent one (missing config, 4xx
+  // validation) is left unflagged so the ticket is marked actioned. The
+  // comment only promises worker re-runs inside a worker process; an
+  // interactive CLI run gets neutral re-run guidance instead.
+  const notePrCreationFailure = async (
+    message: string,
+    options: { branch?: string; permanent?: boolean } = {},
+  ) => {
+    if (runContext.activeTaskContext && !options.permanent) {
+      runContext.activeTaskContext.prCreationFailure = message;
+    }
+    if (!(taskKey && tracker) || skipComments) return;
+    const { branch } = options;
+    try {
+      await tracker.postComment(taskKey, {
+        format: "markdown",
+        body: [
+          "⚠️ **Pull request could not be created**",
+          "",
+          `${branch ? `The branch \`${branch}\` was pushed, but the` : "The"} pull request failed: ${redactText(message)}`,
+          "",
+          !isWorkerTaskProcess()
+            ? options.permanent
+              ? "This needs a configuration or repository fix. Re-run with `--create-pr` after fixing the cause."
+              : "Re-run with `--create-pr` after fixing the cause."
+            : options.permanent
+              ? "This needs a configuration or repository fix, so the worker will not run this ticket again until it changes."
+              : isFinalPrDeliveryAttempt(taskKey)
+                ? `This was the last of ${MAX_PR_DELIVERY_ATTEMPTS} attempts, so the worker will not re-run this ticket. Edit the ticket to retry.`
+                : `The worker will re-run the whole ticket on its next poll (a new agent session), up to ${MAX_PR_DELIVERY_ATTEMPTS} attempts in total, then stop until the ticket changes.`,
+        ].join("\n"),
+      });
+    } catch (error) {
+      console.warn(`⚠️  Failed to post PR failure comment: ${(error as Error).message}`);
+    }
+  };
+
   const createPrAndTransition = async (
     implementationOutput: string,
     autoReviewRan = false,
@@ -295,10 +336,17 @@ export function createGitHelpers(ctx: FinalizeContext) {
           taskKey,
           stage: "create-pr",
         });
+        if (!prResult.unsupportedPlatform) {
+          await notePrCreationFailure(prResult.message || "PR creation failed", {
+            branch: branchForPr,
+            permanent: prResult.permanent === true,
+          });
+        }
       }
     } catch (prError) {
       console.log(`⚠️  PR creation failed: ${(prError as Error).message}`);
       captureError(prError, { taskKey, stage: "create-pr" });
+      await notePrCreationFailure((prError as Error).message || "PR creation failed");
     }
     return undefined;
   };

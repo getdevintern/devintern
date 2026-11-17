@@ -179,7 +179,7 @@ export async function runClarityCheck(
         }
         const usage = usageLimit ?? detectUsageLimit(stdoutOutput, stderrOutput);
         if (usage.limited) {
-          reject(new UsageLimitError(usage.resetsAt));
+          reject(new UsageLimitError(usage.resetsAt, usage.period));
           return;
         }
         if (code !== 0) {

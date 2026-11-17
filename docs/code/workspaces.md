@@ -1,10 +1,10 @@
 ---
 title: "Workspaces (Multi-Repo Fleet)"
 sidebarLabel: "Multiple Repositories"
-description: "Drive repositories and tracker teams with one devintern worker: workspace.toml routing and isolated per-task worktrees"
+description: "Use when one worker should serve several repositories or tracker teams: workspace.toml, routing rules, and isolated per-task worktrees."
 section: "Automation"
 order: 3
-dateModified: 2026-10-16
+dateModified: 2026-11-14
 ---
 
 # Workspaces (Multi-Repo Fleet)
@@ -36,12 +36,24 @@ dashboard = true
 # conflict_resolution_cron = "0 3 * * *"      # worker host timezone
 # conflict_resolution_interval = "1d"         # exactly one of cron / interval
 # Or turn it off entirely: conflict_resolution = "disabled"
+# conflict_resolution_model = "sonnet"        # cheaper model for conflict resolution (primary harness)
+# Merge the agent's own PRs once they are green and safe (off by default):
+# auto_merge = true
+# auto_merge_safe_paths = ["**/*.md", "docs/**"]   # merge with no agent run
+# auto_merge_deny_paths = ["**/migrations/**"]     # never auto-merge
+# auto_merge_review = true                          # agent decides the rest
 
 # Optional bounded host concurrency (see warning below):
 # [workspace.execution]
 # isolation = "best_effort_host"
 # max_concurrency = 4
 # max_concurrency_per_repo = 1
+
+# Optional non-loopback dashboard origins (reverse proxy); `tailscale serve`
+# is detected automatically. See dashboard.md#allowed-origins.
+# [dashboard]
+# allowed_origins = ["https://dash.example.internal"]
+# tailscale_autodetect = true
 
 [defaults]
 tracker = "jira"
@@ -107,7 +119,8 @@ prompt = "Review the frontend and clean up one source of recurring noise."
 - `[worker.schedule]` gates only new-task pickup: multiple windows union, windows may cross midnight, `blocked` wins on overlap, and a missed whole window triggers one catch-up drain at startup. Timezone/DST semantics and `devintern worker run-now` are covered in [Running the Worker Unattended: Working windows](./automated-task-processing.md#working-windows-quiet-hours).
 - `[worker].auto_update` keeps a globally installed CLI current while the worker is idle (checked at most daily, installed without interrupting work, restart on success). See [Running the Worker Unattended: Keeping the worker up to date](./worker.md#keeping-the-worker-up-to-date).
 - `[[automations]]` uses the same schema as single-repo `.devintern-code/automations.toml`. An entry must name `repo` when the workspace has more than one repository. `open_pr` (boolean, default `false`) decides whether occurrences open a pull request: opt-in per automation, and workspace-level `worker_task_args` never overrides it. `allow_no_changes` (boolean, default `false`) records an occurrence that changes nothing as a successful no-op instead of a failed run — use it for jobs whose prompt says to make no changes when nothing needs doing. See [Worker Daemon → Recurring automations](./worker.md#recurring-automations) for prompt-writing guidance and schedule semantics.
-- `[[estimations]]` schedules unattended story-point sweeps (tracker query + cron/interval, no `prompt`, no `repo`). The workspace tracker must support estimation. See [Worker Daemon → Scheduled story-point estimation](./worker.md#scheduled-story-point-estimation).
+- `[[estimations]]` schedules unattended story-point sweeps (tracker query + cron/interval, no `prompt`, no `repo`). An entry runs against `[defaults].tracker`, or against one team's tracker and credentials when it sets `team = "<team name>"`. That tracker must support estimation. See [Worker Daemon → Scheduled story-point estimation](./worker.md#scheduled-story-point-estimation).
+- `[[automations]]` and `[[estimations]]` entries may each set `harness` (one agent name), `model`, and `effort` (`"low"`, `"medium"`, or `"high"`) to run that schedule on a different agent than the workspace default. Precedence for an entry's runs is **entry field > team/repo env > workspace env > harness default**; omitted fields keep the existing workspace/repo/team values. A `model` without `harness` applies to the workspace's primary harness only (as its `<HARNESS>_MODEL`), so `model = "sonnet"` alone keeps failover and a fallback harness runs on its own default model. A pinned `harness` opts the entry out of failover; when it names a different agent than the workspace primary, an inherited `model`/`effort` and the primary's `AGENT_CLI_PATH` (plus the `CLAUDE_CLI_PATH` fallback for a non-`claude-code` pin) are dropped so the pinned agent uses its own binary and defaults. An unknown `harness` or an `effort` outside the three levels fails validation naming the entry id and field. A pinned `harness` whose CLI is not installed is warned about at worker startup and on reload, naming the entry. `effort` on a harness that does not support reasoning effort is ignored with a warning instead of failing the run. These overrides apply on live reload to subsequent occurrences; in-flight runs finish under the selection they started with. See [Worker Daemon → Choosing the agent per schedule](./worker.md#choosing-the-agent-per-schedule).
 - `[[error_monitors]]` maps each Sentry project to one repo and an optional team, with per-source credential layers for multi-project setups. See [Sentry Auto-fixes](./sentry-integration.md).
 
 ### Bounded host concurrency
@@ -122,6 +135,8 @@ max_concurrency_per_repo = 1
 ```
 
 `max_concurrency` bounds all agent work across polling, relay events, retries, error monitors, reviews, mentions, CI fixes, conflict resolution, automations, estimations, and ad-hoc `worker add` tasks. `max_concurrency_per_repo` bounds task jobs that receive disposable worktrees in one repository. Shared-base jobs such as reviews and CI fixes remain serialized per repository even when the per-repository task limit is larger.
+
+When jobs wait for the same slot, short pull-request work starts first: auto-merge checks, review and mention replies, and CI fixes, then conflict resolution, then automations, tasks, and estimations. Jobs of the same kind keep their order, and a job that has waited 15 minutes moves to the front, so a stream of merge checks cannot hold back a conflict resolution or automation indefinitely. An auto-merge check that is waiting shows **Waiting for a slot** as its step in the dashboard until it starts.
 
 The limits are a live cap, not a one-time batch gate: polling keeps running while jobs are in flight, so each poll fills every free slot with newly available tasks, and a task is admitted as soon as an in-flight job frees its slot. The worker never admits more than the configured limits at once.
 
@@ -196,7 +211,7 @@ Credentials layer as workspace `.env` < team `env_file` < inline `[teams.env]` f
 
 The shared `.env` can also namespace credentials as `<TRACKER>_<TEAM>_<SETTING>`. For example, `JIRA_PLATFORM_URL`, `JIRA_PLATFORM_EMAIL`, and `JIRA_PLATFORM_API_TOKEN` are projected onto Jira's normal variables only for team `platform`. Team names are uppercased and punctuation becomes `_`; team `env_file` and inline values still win.
 
-`[defaults].tracker` and `[defaults].task_query` are optional fallbacks for team entries. Once any `[[teams]]` exist, there is no separate defaults poller. Scheduled estimations still use `[defaults].tracker`; configure it explicitly when using `[[estimations]]`.
+`[defaults].tracker` and `[defaults].task_query` are optional fallbacks for team entries. Once any `[[teams]]` exist, there is no separate defaults poller. Scheduled estimations without `team` still use `[defaults].tracker`; configure it explicitly for them, or set `team` on each `[[estimations]]` entry to estimate against that team's tracker ([per-team estimations](./worker.md#per-team-estimations)).
 
 Team `task_query` and `repo` changes live-reload along with routing rules. Team names, tracker types, `env_file`, and inline credentials are startup-only because changing them requires rebuilding tracker clients and detectors; restart the worker after changing those fields.
 
@@ -274,13 +289,65 @@ conflict_resolution = "scheduled"
 conflict_resolution_cron = "0 3 * * *"   # or conflict_resolution_interval = "1d"
 ```
 
-The schedule uses the same format as `[[automations]]`: a five-field cron expression (worker host timezone) or a positive `15m`/`6h`/`1d` interval — exactly one of the two. Exactly one window pass runs per occurrence; if the worker is down when the window arrives (a missed nightly run), the queued conflicts resolve on the first tick after restart. Inside a window the usual safety rules still apply: failed attempts wait out their retry backoff, PRs whose head is still moving wait out the quiet period, and anything not finished before the window closes (60 minutes by default, `WORKER_RESOLVE_WINDOW_GRACE_MINUTES`) waits for the next one. PRs merged upstream before the window opens are skipped — the worker re-checks GitHub's mergeability before invoking the agent.
+The schedule uses the same format as `[[automations]]`: a five-field cron expression (worker host timezone) or a positive `15m`/`6h`/`1d` interval — exactly one of the two. Exactly one window pass runs per occurrence; if the worker is down when the window arrives (a missed nightly run), the queued conflicts resolve on the first tick after restart. Inside a window the usual safety rules still apply: failed attempts wait out their retry backoff, PRs whose head is still moving wait out the quiet period, and anything not finished before the window closes (60 minutes by default, `WORKER_RESOLVE_WINDOW_GRACE_MINUTES`) waits for the next one. The window does not cut off a chain of sibling PRs mid-way, though: each conflict observed and each resolution attempt made while it is open keeps it open for at least 15 more minutes (enough for the auto-merge quiet period and CI on the PR just resolved, so the conflict its merge creates in the next sibling is still caught), but never longer than one extra grace period past its nominal end. A conflict first seen after an idle window has closed, or one that exhausted its retries, does not extend or reopen it. PRs merged upstream before the window opens are skipped — the worker re-checks GitHub's mergeability before invoking the agent.
 
 Two things are never delayed by scheduled mode: review feedback on the agent's PRs is addressed immediately as usual, and you can always run `devintern resolve-conflicts <pr-url>` by hand to fix one PR without waiting for the window — once GitHub reports the PR conflict-free, the queued event never triggers an agent run.
 
 The setting is workspace-wide (per-repo overrides are not supported in v1) and live-reloads with the rest of the runtime configuration. The tradeoff to keep in mind: between windows a conflicted PR cannot be merged, so on fast-moving branches where an instant rebase unblocks a waiting reviewer, `auto` stays the better choice. See [Worker Daemon → Merge conflicts on the agent's PRs](./worker.md#merge-conflicts-on-the-agents-prs) for how resolution itself works.
 
+**Choosing the agent.** Conflict resolution is usually mechanical, so it can run on a cheaper model than feature work. Set any of `conflict_resolution_harness`, `conflict_resolution_model`, and `conflict_resolution_effort` under `[workspace]`; they behave exactly like an automation's `harness` / `model` / `effort` (see [Worker Daemon → Choosing the agent per schedule](./worker.md#choosing-the-agent-per-schedule)) and apply to automatic resolution on GitHub (`auto` and `scheduled`) and GitLab (`auto`):
+
+```toml
+[workspace]
+conflict_resolution_model = "sonnet"     # a model id for your primary harness (here claude-code); failover still applies
+# conflict_resolution_harness = "codex"  # pin one agent (opts out of failover)
+# conflict_resolution_effort = "low"
+```
+
+A model-only setting applies to the workspace's primary harness and keeps failover. A pinned harness that hits a usage limit does not fail over: the resolution is deferred and retried on later polls, and after three consecutive deferrals the PR waits until its head or base moves again (or until you run `devintern resolve-conflicts <pr-url>`). Changes live-reload; a manual `devintern resolve-conflicts <pr-url>` uses the normal environment.
+
 Set `conflict_resolution = "disabled"` to turn automatic conflict resolution off entirely: the worker stops watching for conflicts on the agent's PRs altogether — no detection, no queuing, no agent runs. A PR that conflicts with its base simply stays conflicted until someone resolves it (by hand, or on demand via `devintern resolve-conflicts <pr-url>`). Review feedback and @mention handling are unaffected. This is a valid choice when the team prefers to rebase manually, or when the agent is not trusted to resolve conflicts in a sensitive repository.
+
+### Auto-merging safe PRs
+
+Set `auto_merge = true` to have the worker merge its own pull requests once they are green and safe, so docs fixes or new e2e tests do not wait in a review queue. It is off by default, applies only to the PRs the worker opened (the same watch list as review polling), and is GitHub-only for now.
+
+```toml
+[workspace]
+auto_merge = true
+auto_merge_safe_paths = ["**/*.md", "docs/**", "packages/*/tests/e2e/**"]
+auto_merge_deny_paths = ["**/migrations/**", "**/package.json", "bun.lock"]
+auto_merge_review = true          # ask the agent about PRs that leave the safe paths
+auto_merge_method = "squash"      # merge | squash | rebase
+auto_merge_review_label = "needs-human-review"  # label PRs left open; "" disables
+# auto_merge_model = "sonnet"     # also auto_merge_harness / auto_merge_effort
+
+[[repos]]
+name = "api"
+remote = "git@github.com:acme/api.git"
+auto_merge_safe_paths = ["e2e/**"]  # replaces the workspace list for this repo
+```
+
+Each candidate PR goes through these gates in order, and any "no" leaves it open for a human:
+
+1. **Ready.** The PR is open, not a draft, not from a fork, and GitHub reports it mergeable with passing checks (`mergeable_state` is `clean`), so failing, pending, or conflicting PRs wait. Branch protection still applies: a PR that needs an approval is `blocked` and waits. No reviewer's latest review requests changes, and the head commit has not moved for 5 minutes (`WORKER_AUTO_MERGE_QUIET_SECONDS`).
+2. **Deny paths.** If any changed file matches `auto_merge_deny_paths`, or a built-in deny path (`.github/**`, `**/CODEOWNERS`, `.devintern-code/**`), the PR is never auto-merged.
+3. **Safe paths.** If every changed file matches `auto_merge_safe_paths`, the PR merges right away. No agent runs, so no tokens are spent.
+4. **Agent review.** Otherwise, with `auto_merge_review = true` (the default), the agent reads the diff in a checkout of the PR and returns a verdict. The PR merges only on an explicit "safe". A missing or malformed verdict never merges. The verdict must be the last line of the agent's final answer on stdout; JSON anywhere else, including the agent's transcript or stderr, is ignored. With `auto_merge_review = false`, PRs outside the safe paths are left open.
+
+Globs are repo-relative ([`Bun.Glob`](https://bun.sh/docs/api/glob) syntax). `docs/` is shorthand for `docs/**`. A rename counts both its old and new path, so moving a source file into `docs/` is not docs-only. A per-repo list replaces the workspace list rather than extending it.
+
+The merge is pinned to the head SHA that passed the gates, and the PR is re-checked right before merging, so a commit pushed during the review is never merged unreviewed. Each decision is made once per head SHA and policy: a PR that was left open is evaluated again after new commits, or after you change its safe paths, deny paths, or `auto_merge_review`. The agent review runs at most once per head and policy. Changes to these settings live-reload.
+
+Every decision is also stated on the PR itself, in a single **status comment** that devintern creates on the first decision and edits in place afterwards, so pushes do not add new comments. A merged PR's comment names the merge method and commit, and the reason (safe paths, or the merge-safety review's verdict). A PR left open gets the reason and the next steps: for paths outside the safe list, the comment lists the files (up to 10) and suggests widening `auto_merge_safe_paths` or enabling `auto_merge_review`; for a deny-path hit, it names the file and the deny path; for a negative review, it quotes the agent's reason. "Not ready yet" checks post nothing. Only comments written by the worker's own GitHub credential are edited, and editing needs the same `Pull requests: Read and write` permission as posting.
+
+PRs left open for a human (including a check that kept failing) also get a **review label**, `needs-human-review` by default, so they stand out in the pull request list. GitHub creates the label on first use. When auto-merge later merges the PR, it removes the label. Set `auto_merge_review_label` to another name to use your own label, or to `""` to turn labeling off. Renaming the label does not re-evaluate PRs that were already decided. A failure to add or remove the label only logs a warning; it never blocks the merge.
+
+**Agent usage limits.** A review that hits the agent's usage limit never drops the PR. With failover, the next harness in the chain takes over. When every harness is limited, or `auto_merge_harness` pins one that is, the check is **Deferred** until the quota resets, using the reset time from the agent's limit message, or the same fallback cooldown as other worker jobs. The PR is not checked again before then, so no check is relaunched into the limit, and it is reviewed on the first pass after the quota returns. A deferral never counts against the PR's attempts. Ordinary failures (for example, an agent that returns no verdict) retry after 5 and then 10 minutes. After the third failure for the same commit, the status comment says the check kept failing, and the PR waits for new commits or a policy change.
+
+In the dashboard, each check shows in the run list with the **Auto-merge** origin while it runs. Merges stay as **Succeeded**, PRs left open as **Escalated** with the reason, and errors as **Failed**. Checks that end in "not ready yet" (for example, changes requested) are removed once they finish. The **Automations** page lists an **Auto-merge** entry while it is enabled, with the current policy. Its **Run now** checks every open PR immediately, skipping the quiet period and retry backoff. GitHub must still report each PR green and conflict-free.
+
+To check a PR by hand without merging it, run `devintern auto-merge <pr-url> --safe-path '**/*.md' --dry-run`. Flags: `--safe-path` and `--deny-path` (repeatable), `--no-review`, `--method`, `--review-label <name>` and `--no-review-label` (a manual run labels PRs it leaves open with `needs-human-review` by default). The dry run goes through every gate, including the agent review.
 
 ### How workspace automations differ from single-repo ones
 
@@ -310,7 +377,7 @@ devintern worker connect sentry # add a Sentry auto-fix project
 - Re-running `add-repo` for the same repo is a no-op. Hand-written comments in `workspace.toml` are preserved; new entries are appended.
 - `.devintern-code/settings.json` needs no migration: it travels with the repo and applies inside each task worktree.
 
-Once repos are registered you can dispatch one-off work without a tracker ticket. `devintern worker add --repo <name> --title "..."` enqueues a durable task pinned to that repo; see [Ad-hoc tasks](./worker.md#ad-hoc-tasks-worker-add).
+Once repos are registered you can dispatch one-off work without a tracker ticket. `devintern worker add --repo <name> --title "..."` enqueues a durable task pinned to that repo; see [Delegate Tasks to the Worker](./delegation.md).
 
 ## Environment
 
@@ -376,7 +443,7 @@ WantedBy=multi-user.target
 With GitHub credentials in the workspace `.env`, the fleet worker also reacts to PR activity across every GitHub repo in the workspace:
 
 - **The agent's own PRs**: one poller watches every PR the fleet created (the registry is shared across repos) and addresses actionable review feedback automatically. With `[workspace].ci_failure_fix = true`, it also repairs failing CI. Entries for repos no longer in `workspace.toml` are unwatched at startup.
-- **@mentions on any PR**: each GitHub repo gets a mention sweep. Mention-triggered runs are permission gated: the mentioning user needs write, maintain, or admin access, and the gate fails closed on API errors. Fork PRs are skipped unless maintainer edits are allowed. Standard workspaces recognize the central `devintern-ai` identity through the relay and use `GITHUB_TOKEN` for local API calls. No-relay installations need an advanced customer-owned App.
+- **@mentions on any PR**: each GitHub repo gets a mention sweep. Mention-triggered runs are permission gated: the mentioning user needs write, maintain, or admin access, and a GitHub API error during the check is retried rather than treated as a denial. Fork PRs are skipped unless maintainer edits are allowed. Standard workspaces recognize the central `devintern-ai` identity through the relay and use `GITHUB_TOKEN` for local API calls. No-relay installations need an advanced customer-owned App.
 - **Relay (instant events)**: accept relay setup in `devintern worker init`; its durable pairing is stored owner-only under the workspace home and starts automatically with the worker. GitHub uses the central App. GitLab.com and Self-Managed projects receive automatically tested project hooks when local credentials have Maintainer or Owner access; only reference metadata reaches the relay, and every action re-fetches authoritative state locally. Tracker events re-run the applicable defaults/team query and then use the same fixed mapping or routing rules as polling. A tracker type used by several teams stays polling-only because current relay envelopes do not identify the team registration; the worker fails closed instead of guessing. Events for repositories not in the workspace are ignored.
 
 To reconnect after adding repositories, run `devintern worker connect`. The command walks every GitHub and GitLab repository in `workspace.toml`, skips verified GitHub App pairings, and creates or rotates GitLab hooks without manual URLs or secrets. `devintern worker connect status` reports GitHub and GitLab readiness independently. Use `devintern worker connect gitlab` for a focused repair, or add `--disconnect` to remove only remembered GitLab hooks/routes while preserving polling. Tracker targets such as `devintern worker connect linear --team growth` compose the selected team's credentials on top of the shared workspace `.env`.

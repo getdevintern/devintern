@@ -5,7 +5,8 @@ import type {
   CiFailure as PendingFailure,
 } from "../ci-provider";
 export interface PolledCiPr {
-  state: string;
+  /** Optional/untrusted: a payload can omit state or report an unknown value. */
+  state?: unknown;
   head?: {
     sha: string;
     /** Head repository; differs from the base repo for fork PRs. */

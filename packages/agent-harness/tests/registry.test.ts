@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { getHarness, listHarnesses, registerHarness } from "../src/registry.js";
+import { parseHarnessList } from "../src/harness-chain.js";
 import { ClaudeCodeHarness } from "../src/harnesses/claude-code.js";
 
 describe("registry", () => {
@@ -44,6 +45,15 @@ describe("registry", () => {
   test("getHarness resolves the Muse Code product-name alias", () => {
     expect(getHarness("muse-code")?.name).toBe("muse");
     expect(getHarness("muse-code")?.defaultPath).toBe("muse");
+  });
+
+  test("getHarness resolves the claude binary-name alias", () => {
+    expect(getHarness("claude")).toBe(getHarness("claude-code"));
+  });
+
+  test("parseHarnessList canonicalizes claude in a failover chain", () => {
+    expect(parseHarnessList("claude,codex,grok")).toEqual(["claude-code", "codex", "grok"]);
+    expect(parseHarnessList("claude,claude-code")).toEqual(["claude-code"]);
   });
 
   test("getHarness returns undefined for unknown name", () => {

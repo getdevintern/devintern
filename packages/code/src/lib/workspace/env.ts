@@ -13,6 +13,8 @@ import { isAbsolute, join } from "path";
 
 import type { ErrorMonitorConfig, RepoConfig, TeamConfig } from "./config";
 import { resolveWorkspaceDir, workspaceDbPath, workspaceEnvPath } from "./paths";
+import { applyAgentSelectionEnv } from "../agent/selection";
+import type { AgentSelection } from "../agent/selection";
 import { ANALYTICS_CONFIG_DIR_ENV } from "../observability/analytics";
 import { WORKER_SUBPROCESS_ENV } from "../config/config-dir";
 import {
@@ -260,12 +262,18 @@ function applyGitLabProjectPin(
  *                                 {@link ACTIONED_SOURCE_ENV}).
  * @param options.pipelineDefaultFile - Absolute path of the workspace default
  *                                      pipeline file, if one is configured.
+ * @param options.agentSelection - Per-entry harness/model/effort overrides
+ *                                 applied last (above every env layer).
  * @returns Environment record to pass to `runTaskViaCli` / `runAddressReviewViaCli`.
  */
 export function buildRepoEnv(
   repo: RepoConfig,
   workspaceDir: string = resolveWorkspaceDir(),
-  options: { actionedSource?: string; pipelineDefaultFile?: string } = {},
+  options: {
+    actionedSource?: string;
+    pipelineDefaultFile?: string;
+    agentSelection?: AgentSelection;
+  } = {},
 ): Record<string, string | undefined> {
   return composeRepoEnv(repo, workspaceDir, options).env;
 }
@@ -274,7 +282,11 @@ export function buildRepoEnv(
 function composeRepoEnv(
   repo: RepoConfig,
   workspaceDir: string,
-  options: { actionedSource?: string; pipelineDefaultFile?: string },
+  options: {
+    actionedSource?: string;
+    pipelineDefaultFile?: string;
+    agentSelection?: AgentSelection;
+  },
 ): ComposedRepoEnv {
   const workspaceEnv = parseEnvFile(workspaceEnvPath(workspaceDir));
   const repoFileEnv = repo.envFile
@@ -316,6 +328,8 @@ function composeRepoEnv(
   if (repo.prLabels && repo.prLabels.length > 0) {
     env.PR_LABELS = repo.prLabels.join(",");
   }
+
+  applyAgentSelectionEnv(env, options.agentSelection);
 
   return { env, derivedGitLabProject, explicitGitLabProject };
 }
@@ -456,7 +470,11 @@ export function buildTeamTaskEnv(
   repo: RepoConfig,
   team: TeamConfig,
   workspaceDir: string = resolveWorkspaceDir(),
-  options: { actionedSource?: string; pipelineDefaultFile?: string } = {},
+  options: {
+    actionedSource?: string;
+    pipelineDefaultFile?: string;
+    agentSelection?: AgentSelection;
+  } = {},
 ): Record<string, string | undefined> {
   const { env, derivedGitLabProject, explicitGitLabProject } = composeRepoEnv(
     repo,
@@ -481,6 +499,8 @@ export function buildTeamTaskEnv(
     explicitProject: explicitGitLabProject ?? teamEnv.GITLAB_PROJECT,
     previouslyPinned: derivedGitLabProject,
   });
+  // Re-apply the entry selection so a team layer cannot re-route the agent.
+  applyAgentSelectionEnv(env, options.agentSelection);
   env.TASK_TRACKER = team.tracker;
   env[WORKSPACE_TEAM_ENV] = team.name;
   return env;
@@ -514,12 +534,52 @@ export function buildErrorMonitorEnv(
  * paths pinned, so the child resolves auth and license state in the workspace.
  *
  * @param workspaceDir - Workspace home (defaults to `~/.devintern`).
+ * @param options.agentSelection - Per-entry harness/model/effort overrides
+ *                                 applied last (above the process env).
  */
 export function buildWorkspaceContextEnv(
   workspaceDir: string = resolveWorkspaceDir(),
+  options: { agentSelection?: AgentSelection } = {},
 ): Record<string, string | undefined> {
   const env: Record<string, string | undefined> = { ...process.env };
   pinWorkerRuntimeEnv(env, workspaceDir);
+  applyAgentSelectionEnv(env, options.agentSelection);
+  return env;
+}
+
+/**
+ * Compose the environment for a repo-less workspace-context run owned by one
+ * team (a team-scoped `[[estimations]]` sweep).
+ *
+ * The team-credential half of {@link buildTeamTaskEnv} without a repository:
+ *
+ * process env < {@link buildTeamEnv} (workspace `.env` < tracker/team
+ * namespaced values < team `env_file` < team inline) < worker runtime paths <
+ * `TASK_TRACKER` and team pins.
+ *
+ * These are the same layers the worker validated and built the team's
+ * tracker client from at startup, so the child talks to the same board.
+ * Repo context is cleared because the run has no destination repository.
+ *
+ * @param team - Team whose tracker and credentials the run uses.
+ * @param workspaceDir - Workspace home (defaults to `~/.devintern`).
+ * @param options.agentSelection - Per-entry harness/model/effort overrides
+ *                                 applied above the team layers.
+ */
+export function buildTeamWorkspaceContextEnv(
+  team: TeamConfig,
+  workspaceDir: string = resolveWorkspaceDir(),
+  options: { agentSelection?: AgentSelection } = {},
+): Record<string, string | undefined> {
+  const env: Record<string, string | undefined> = {
+    ...process.env,
+    ...buildTeamEnv(team, workspaceDir),
+  };
+  pinWorkerRuntimeEnv(env, workspaceDir);
+  delete env[WORKSPACE_REPO_ENV];
+  applyAgentSelectionEnv(env, options.agentSelection);
+  env.TASK_TRACKER = team.tracker;
+  env[WORKSPACE_TEAM_ENV] = team.name;
   return env;
 }
 

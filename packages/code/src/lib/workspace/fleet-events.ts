@@ -5,17 +5,21 @@
  * The workspace worker has no ambient checkout, so every event run is a CLI
  * subprocess in the repo's persistent base worktree with that repo's composed
  * environment. The permission gate for mention-driven runs
- * (write/maintain/admin, fails closed) therefore lives HERE, before the
+ * (write/maintain/admin; a confirmed denial skips, an API error propagates so
+the caller retries) therefore lives HERE, before the
  * subprocess: `devintern address-review` is a manual command and performs no
  * gating of its own.
  */
 
 import { runAddressReviewViaCli, runResolveConflictsViaCli } from "../acquirers/review-polling";
 import { runCiFixViaCli } from "../acquirers/ci-failure-watcher";
+import { runAutoMergeViaCli } from "../acquirers/auto-merge-cli";
+import type { AutoMergeResult } from "../review/auto-merge";
 import { randomUUID } from "crypto";
 import type { CiFixResult } from "../acquirers/ci-failure-watcher";
 import type { AutomaticResolveResult } from "../acquirers/review-polling";
 import type { TaskExecutionResult } from "../acquirers/task-polling";
+import { autoMergePathsFor } from "./config";
 import type { RepoConfig, WorkspaceConfig } from "./config";
 import { buildRepoEnv, gitHubSlugFromRemote } from "./env";
 import { toRoutableTask } from "./router";
@@ -27,7 +31,11 @@ export interface FleetEventDeps {
   config: WorkspaceConfig;
   workspaceDir: string;
   repoManager: RepoManagerLike;
-  /** Permission gate backend (GitHub collaborator check; injected for tests). */
+  /**
+   * Permission gate backend (GitHub collaborator check; injected for tests).
+   * Must reject on API errors rather than resolve `false`, so a transient
+   * failure is retried instead of being treated as a denial.
+   */
   userHasPushAccess: (owner: string, repo: string, username: string) => Promise<boolean>;
   /** Review runner (injected for tests; defaults to the CLI subprocess). */
   runReview?: (
@@ -53,6 +61,8 @@ export interface FleetEventDeps {
   ) => Promise<boolean>;
   /** Base-sync runner (injected for tests; defaults to the CLI subprocess). */
   runResolve?: typeof runResolveConflictsViaCli;
+  /** Auto-merge runner (injected for tests; defaults to the CLI subprocess). */
+  runAutoMerge?: typeof runAutoMergeViaCli;
   verbose?: boolean;
   /** Shared workspace admission supervisor. */
   supervisor?: TaskSupervisor;
@@ -201,9 +211,12 @@ export function createFleetResolveConflicts(
       await repoManager.ensureBareClone(repo);
       await repoManager.fetch(repo.name);
       const base = await repoManager.ensureBaseWorktree(repo);
+      // Read at run time so a live reload of the conflict agent applies.
+      const agentSelection = config.workspace.conflictAgent;
       return runResolve(slug, prNumber, {
         cwd: base,
-        env: buildRepoEnv(repo, workspaceDir),
+        env: buildRepoEnv(repo, workspaceDir, { agentSelection }),
+        harnessPin: agentSelection?.harness,
         expectedHeadSha: expected.headSha,
         expectedBaseSha: expected.baseSha,
         signal,
@@ -224,7 +237,93 @@ export function createFleetResolveConflicts(
       return invoke();
     } catch (error) {
       if (error instanceof JobNotStartedError) {
-        return { outcome: "deferred", message: error.message };
+        return { outcome: "deferred", message: error.message, capacity: true };
+      }
+      throw error;
+    }
+  };
+}
+
+/**
+ * Fingerprint of the auto-merge policy that decides a repo's PRs (paths and
+ * review switch; not the merge method or review label, which don't change
+ * the decision, so renaming the label doesn't re-evaluate every PR).
+ * Changing it re-evaluates PRs that were decided under the previous policy.
+ */
+export function fleetAutoMergePolicyFingerprint(config: WorkspaceConfig, slug: string): string {
+  const settings = config.workspace.autoMerge;
+  const repo = repoBySlug(config, slug);
+  const paths = repo
+    ? autoMergePathsFor(settings, repo)
+    : { safePaths: settings.safePaths, denyPaths: settings.denyPaths };
+  const material = JSON.stringify({ ...paths, review: settings.review });
+  return Bun.hash(material).toString(16);
+}
+
+/**
+ * Build the fleet auto-merge runner: the repo's live policy (repo path lists
+ * replace the workspace's), its checkout and env, and the shared supervisor.
+ */
+export function createFleetAutoMerge(
+  deps: FleetEventDeps,
+): (
+  slug: string,
+  prNumber: number,
+  expectedHeadSha: string,
+  options?: { lastAttempt: boolean; onStart?: () => void; runId?: number },
+) => Promise<AutoMergeResult> {
+  const { config, workspaceDir, repoManager } = deps;
+  const runAutoMerge = deps.runAutoMerge ?? runAutoMergeViaCli;
+  return async (slug, prNumber, expectedHeadSha, options) => {
+    const repo = repoBySlug(config, slug);
+    if (!repo) {
+      return {
+        outcome: "skipped",
+        message: "repository is not configured in this workspace",
+        reviewed: false,
+      };
+    }
+    const invoke = async (signal?: AbortSignal) => {
+      // Admitted: the repo's slot is ours, so the check is no longer waiting.
+      options?.onStart?.();
+      await repoManager.ensureBareClone(repo);
+      await repoManager.fetch(repo.name);
+      const base = await repoManager.ensureBaseWorktree(repo);
+      // Read at run time so live reloads of the policy and agent apply.
+      const settings = config.workspace.autoMerge;
+      const agentSelection = settings.agent;
+      return runAutoMerge(slug, prNumber, {
+        policy: {
+          ...autoMergePathsFor(settings, repo),
+          review: settings.review,
+          method: settings.method,
+          reviewLabel: settings.reviewLabel,
+        },
+        expectedHeadSha,
+        lastAttempt: options?.lastAttempt ?? false,
+        ...(options?.runId !== undefined ? { runId: options.runId } : {}),
+        cwd: base,
+        env: buildRepoEnv(repo, workspaceDir, { agentSelection }),
+        harnessPin: agentSelection?.harness,
+        signal,
+      });
+    };
+    try {
+      if (deps.supervisor) {
+        return await deps.supervisor.schedule({
+          id: randomUUID(),
+          source: "github:auto-merge",
+          repo: repo.name,
+          kind: "auto_merge",
+          label: `${slug}#${prNumber}`,
+          checkoutClass: "shared_base",
+          run: invoke,
+        });
+      }
+      return await invoke();
+    } catch (error) {
+      if (error instanceof JobNotStartedError) {
+        return { outcome: "deferred", message: error.message, reviewed: false };
       }
       throw error;
     }
@@ -282,34 +381,39 @@ export function createFleetCiFix(
  * Build the fleet mention handler: permission-gate the mentioning user, then
  * run the review pipeline for that PR.
  *
- * The gate fails closed: API errors count as "no access".
+ * A confirmed denial returns `"skipped"` (an intentional no-op). A permission
+ * API error propagates: the relay classifies it as transient and retries it
+ * within its bounded budget, and the polling sweep retries it through its
+ * attempt ledger. A 5xx or rate limit must not permanently drop a valid
+ * @mention.
+ *
+ * @returns The review run outcome, or `"skipped"` when the actor lacks access.
  */
 export function createFleetMentionHandler(
   deps: FleetEventDeps,
   sharedAddressPr?: AddressPr,
-): (slug: string, comment: { user: { login: string } }, prNumber: number) => Promise<void> {
+): (
+  slug: string,
+  comment: { user: { login: string } },
+  prNumber: number,
+) => Promise<TaskExecutionResult> {
   const addressPr = sharedAddressPr ?? coalescePrFeedbackRuns(createFleetAddressPr(deps));
 
   return async (slug, comment, prNumber) => {
     const [owner, name] = slug.split("/") as [string, string];
     const actor = comment.user.login;
 
-    let hasAccess = false;
-    try {
-      hasAccess = await deps.userHasPushAccess(owner, name, actor);
-    } catch {
-      hasAccess = false;
-    }
+    const hasAccess = await deps.userHasPushAccess(owner, name, actor);
     if (!hasAccess) {
       console.log(
         `⛔ [fleet] Skipping mention on ${slug}#${prNumber}: @${actor} does not have push access ` +
           "(mention-triggered automation requires write, maintain, or admin permission)",
       );
-      return;
+      return "skipped";
     }
 
     console.log(`📌 [fleet] @mention on ${slug}#${prNumber} by @${actor}`);
-    await addressPr(slug, prNumber);
+    return addressPr(slug, prNumber);
   };
 }
 

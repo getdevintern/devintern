@@ -127,6 +127,43 @@ describe("verifyImplementation", () => {
     expect(run.pendingFeedback).toBeUndefined();
   });
 
+  test("resolves a contradictory approval with onFail instead of retrying", async () => {
+    // The verdict is schema-valid but says approved while listing a blocking
+    // finding. Retrying cannot fix a deterministic contradiction; the step
+    // downgrades it to a rejection and lets onFail decide.
+    const contradictory: ReviewFeedback = {
+      summary: "Approved despite a known bug",
+      approved: true,
+      items: [{ priority: "high", category: "bug", issue: "Still broken", suggestion: "Fix it" }],
+    };
+    const parse = (): VerifyDependencies => ({
+      ...deps(contradictory),
+      runAgent: async () => JSON.stringify(contradictory),
+      parseFeedback: (output, options) => {
+        expect(options).toEqual({ enforceApproval: false });
+        return parseReviewFeedback(output, options);
+      },
+    });
+    const reason = describeVerificationFailure(contradictory, contradictory.items);
+
+    expect(await verifyImplementation(state({ onFail: "warn" }), parse())).toEqual({
+      kind: "warn",
+      reason,
+    });
+    expect(await verifyImplementation(state({ onFail: "halt" }), parse())).toEqual({
+      kind: "halt",
+      reason,
+    });
+    const loopback = state({ maxIterations: 2 });
+    expect(await verifyImplementation(loopback, parse())).toEqual({
+      kind: "repeat",
+      from: "repair",
+      maxRepeats: 2,
+      reason,
+    });
+    expect(loopback.pendingFeedback?.approved).toBe(false);
+  });
+
   test("loops back with feedback and a bounded repair prompt", async () => {
     const run = state({ maxIterations: 2 });
 
@@ -227,16 +264,24 @@ describe("verifyImplementation", () => {
     expect(attempts).toBe(2);
   });
 
-  test("halts after repeated verdicts that approve unresolved blocking findings", async () => {
+  test("does not retry a verdict that approves unresolved blocking findings", async () => {
+    // Schema-valid but contradictory: the parser accepts it, the step downgrades
+    // it to a rejection, and `loopback` repairs instead of re-running the agent.
     const injected = deps({ ...feedback, approved: true });
     let attempts = 0;
     injected.runAgent = async () => {
       attempts++;
       return "verdict";
     };
-    const result = await verifyImplementation(state({}), injected);
-    expect(result?.kind).toBe("halt");
-    expect(attempts).toBe(2);
+    const run = state({});
+    expect(await verifyImplementation(run, injected)).toEqual({
+      kind: "repeat",
+      from: "repair",
+      maxRepeats: 3,
+      reason: describeVerificationFailure(feedback, feedback.items),
+    });
+    expect(attempts).toBe(1);
+    expect(run.pendingFeedback?.approved).toBe(false);
   });
 
   test("propagates usage limits without retrying", async () => {

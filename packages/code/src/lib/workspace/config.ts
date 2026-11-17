@@ -14,6 +14,12 @@ import type { WorkerScheduleConfig } from "../worker/schedule";
 import { parseEstimationEntries } from "../automation/estimation-config";
 import type { EstimationConfig } from "../automation/estimation-config";
 import { parseToml } from "./toml";
+import { parseAgentSelection } from "../agent/selection";
+import type { AgentSelection, HarnessPinnedEntry } from "../agent/selection";
+import { parseDashboardAllowedOriginList } from "../observability/dashboard-origins";
+import { AUTO_MERGE_METHODS, DEFAULT_AUTO_MERGE_REVIEW_LABEL } from "../review/merge-gate";
+import type { AutoMergeMethod } from "../review/merge-gate";
+import type { DashboardAllowedOrigin } from "../observability/dashboard-origins";
 
 /** When automatic conflict resolution on the agent's PRs runs. */
 export type ConflictResolutionMode = "auto" | "scheduled" | "disabled";
@@ -57,6 +63,42 @@ export interface WorkspaceSettings {
    * `"scheduled"`.
    */
   conflictSchedule?: CronOrIntervalSchedule;
+  /**
+   * Agent for automatic conflict resolution, from the optional
+   * `conflict_resolution_harness` / `_model` / `_effort` keys. Same semantics
+   * as an automation's `harness` / `model` / `effort` (see
+   * `agent/selection.ts`). Omitted when none of the keys is set.
+   */
+  conflictAgent?: AgentSelection;
+  /** Auto-merge of the agent's own PRs (off by default). */
+  autoMerge: AutoMergeSettings;
+}
+
+/**
+ * Auto-merge of the agent's own PRs, from the `[workspace].auto_merge*` keys.
+ * Off by default. See `review/auto-merge.ts` for the gate order.
+ */
+export interface AutoMergeSettings {
+  enabled: boolean;
+  /** GitHub merge strategy (`auto_merge_method`, default `squash`). */
+  method: AutoMergeMethod;
+  /**
+   * Ask the agent about PRs that touch paths outside `safePaths`
+   * (`auto_merge_review`, default true). When false, only PRs entirely
+   * inside the safe paths merge.
+   */
+  review: boolean;
+  /** Globs safe to merge without review (`auto_merge_safe_paths`). */
+  safePaths: string[];
+  /** Globs that block auto-merge entirely (`auto_merge_deny_paths`). */
+  denyPaths: string[];
+  /**
+   * Label for PRs left open for a human, removed on merge
+   * (`auto_merge_review_label`, default `needs-human-review`; `""` disables).
+   */
+  reviewLabel: string;
+  /** Agent for the merge-safety review (`auto_merge_harness` / `_model` / `_effort`). */
+  agent?: AgentSelection;
 }
 
 /** Fleet-wide defaults from the `[defaults]` table. */
@@ -116,6 +158,10 @@ export interface RepoConfig {
    * over `[defaults].pipeline_file`.
    */
   pipelineFile?: string;
+  /** Per-repo `auto_merge_safe_paths`; replaces the workspace list when set. */
+  autoMergeSafePaths?: string[];
+  /** Per-repo `auto_merge_deny_paths`; replaces the workspace list when set. */
+  autoMergeDenyPaths?: string[];
   /** Optional env file path, relative to the workspace directory. */
   envFile?: string;
   /** Inline env overrides (highest precedence). */
@@ -179,9 +225,18 @@ export interface WorkerSettings {
   autoUpdate: boolean;
 }
 
+/** Dashboard access settings from the `[dashboard]` table. */
+export interface DashboardSettings {
+  /** Explicitly trusted non-loopback origins (`allowed_origins`). */
+  allowedOrigins: DashboardAllowedOrigin[];
+  /** Trust names `tailscale serve` proxies to the dashboard (`tailscale_autodetect`, default true). */
+  tailscaleAutodetect: boolean;
+}
+
 /** Parsed and validated `workspace.toml`. */
 export interface WorkspaceConfig {
   workspace: WorkspaceSettings;
+  dashboard: DashboardSettings;
   worker: WorkerSettings;
   defaults: WorkspaceDefaults;
   /** Team tracker sources; empty means the single `[defaults]` fleet query. */
@@ -194,11 +249,27 @@ export interface WorkspaceConfig {
   estimations: EstimationConfig[];
 }
 
+/**
+ * Thrown by {@link parseWorkspaceConfig} when the TOML is invalid or violates
+ * the schema. `message` keeps the historical aggregated text; `problems`
+ * carries each problem separately for reporters such as `worker doctor`.
+ */
+export class WorkspaceConfigError extends Error {
+  readonly problems: string[];
+
+  constructor(message: string, problems: string[]) {
+    super(message);
+    this.name = "WorkspaceConfigError";
+    this.problems = [...problems];
+  }
+}
+
 export const DEFAULT_WORKTREES_TTL_DAYS = 7;
 export const DEFAULT_POLL_INTERVAL_SECONDS = 60;
 export const DEFAULT_DASHBOARD = true;
 export const DEFAULT_CI_FAILURE_FIX = false;
 export const DEFAULT_CONFLICT_RESOLUTION: ConflictResolutionMode = "auto";
+export const DEFAULT_AUTO_MERGE_METHOD: AutoMergeMethod = "squash";
 export const DEFAULT_MAX_CONCURRENCY = 1;
 export const DEFAULT_MAX_CONCURRENCY_PER_REPO = 1;
 
@@ -343,9 +414,8 @@ export function parseWorkspaceConfig(
   try {
     document = parseToml(text);
   } catch (error) {
-    throw new Error(
-      `Failed to parse ${sourceLabel}: ${error instanceof Error ? error.message : String(error)}`,
-    );
+    const detail = `Failed to parse ${sourceLabel}: ${error instanceof Error ? error.message : String(error)}`;
+    throw new WorkspaceConfigError(detail, [detail]);
   }
 
   const errors: string[] = [];
@@ -409,14 +479,17 @@ export function parseWorkspaceConfig(
   errors.push(...schedule.errors);
   const autoUpdate = readOptionalBoolean(workerTable, "auto_update", "[worker]", errors) ?? true;
 
-  const estimations = parseEstimationsSection(document, tracker, errors);
+  const estimations = parseEstimationsSection(document, tracker, teams, errors);
+
+  const dashboard = parseDashboardSection(document, errors);
 
   if (errors.length > 0) {
-    throw new Error(`Invalid ${sourceLabel}:\n- ${errors.join("\n- ")}`);
+    throw new WorkspaceConfigError(`Invalid ${sourceLabel}:\n- ${errors.join("\n- ")}`, errors);
   }
 
   return {
     workspace,
+    dashboard,
     worker: { schedule: schedule.config, autoUpdate },
     defaults,
     teams,
@@ -425,6 +498,31 @@ export function parseWorkspaceConfig(
     routing,
     automations: automationResult.automations,
     estimations,
+  };
+}
+
+const DASHBOARD_KEYS = new Set(["allowed_origins", "tailscale_autodetect"]);
+
+/** Parse `[dashboard]` access settings. */
+function parseDashboardSection(
+  document: Record<string, unknown>,
+  errors: string[],
+): DashboardSettings {
+  const table = asTable(document.dashboard, "[dashboard]", errors);
+  for (const key of Object.keys(table)) {
+    if (!DASHBOARD_KEYS.has(key)) {
+      errors.push(
+        `[dashboard].${key} is not supported; known keys: ${[...DASHBOARD_KEYS].join(", ")}.`,
+      );
+    }
+  }
+  const entries = readStringList(table, "allowed_origins", "[dashboard]", errors);
+  const parsed = parseDashboardAllowedOriginList(entries, "[dashboard].allowed_origins");
+  errors.push(...parsed.errors);
+  return {
+    allowedOrigins: parsed.origins,
+    tailscaleAutodetect:
+      readOptionalBoolean(table, "tailscale_autodetect", "[dashboard]", errors) ?? true,
   };
 }
 
@@ -492,6 +590,12 @@ function parseWorkspaceSettings(
     readOptionalBoolean(workspaceTable, "ci_failure_fix", "[workspace]", errors) ??
     DEFAULT_CI_FAILURE_FIX;
   const { conflictResolution, conflictSchedule } = parseConflictPolicy(workspaceTable, errors);
+  const conflictAgent = parseAgentSelection(
+    workspaceTable,
+    { label: "[workspace]", keyPrefix: "conflict_resolution_" },
+    errors,
+  );
+  const autoMerge = parseAutoMergePolicy(workspaceTable, errors);
 
   return {
     execution: { isolation, maxConcurrency, maxConcurrencyPerRepo },
@@ -501,6 +605,67 @@ function parseWorkspaceSettings(
     ciFailureFix,
     conflictResolution,
     conflictSchedule,
+    ...(Object.keys(conflictAgent).length > 0 ? { conflictAgent } : {}),
+    autoMerge,
+  };
+}
+
+/** Read an auto-merge glob list, rejecting absolute and parent-relative globs. */
+function readGlobList(
+  table: Record<string, unknown>,
+  key: string,
+  label: string,
+  errors: string[],
+): string[] {
+  const globs = readStringList(table, key, label, errors);
+  for (const glob of globs) {
+    if (glob.startsWith("/") || glob.split("/").includes("..")) {
+      errors.push(`${label}.${key} entry "${glob}" must be a repo-relative glob.`);
+    }
+  }
+  return globs;
+}
+
+/** `auto_merge_review_label`: default label when unset, `""` disables. */
+function readReviewLabel(
+  workspaceTable: Record<string, unknown>,
+  label: string,
+  errors: string[],
+): string {
+  const value = workspaceTable.auto_merge_review_label;
+  if (value === undefined || value === null) return DEFAULT_AUTO_MERGE_REVIEW_LABEL;
+  if (typeof value !== "string") {
+    errors.push(`${label}.auto_merge_review_label must be a string ("" disables labeling).`);
+    return DEFAULT_AUTO_MERGE_REVIEW_LABEL;
+  }
+  return value.trim();
+}
+
+/** Parse the `[workspace].auto_merge*` keys. */
+function parseAutoMergePolicy(
+  workspaceTable: Record<string, unknown>,
+  errors: string[],
+): AutoMergeSettings {
+  const label = "[workspace]";
+  const enabled = readOptionalBoolean(workspaceTable, "auto_merge", label, errors) ?? false;
+  const rawMethod = readString(workspaceTable, "auto_merge_method", label, errors);
+  let method = DEFAULT_AUTO_MERGE_METHOD;
+  if (rawMethod) {
+    if ((AUTO_MERGE_METHODS as readonly string[]).includes(rawMethod)) {
+      method = rawMethod as AutoMergeMethod;
+    } else {
+      errors.push(`${label}.auto_merge_method must be one of: ${AUTO_MERGE_METHODS.join(", ")}.`);
+    }
+  }
+  const agent = parseAgentSelection(workspaceTable, { label, keyPrefix: "auto_merge_" }, errors);
+  return {
+    enabled,
+    method,
+    review: readOptionalBoolean(workspaceTable, "auto_merge_review", label, errors) ?? true,
+    safePaths: readGlobList(workspaceTable, "auto_merge_safe_paths", label, errors),
+    denyPaths: readGlobList(workspaceTable, "auto_merge_deny_paths", label, errors),
+    reviewLabel: readReviewLabel(workspaceTable, label, errors),
+    ...(Object.keys(agent).length > 0 ? { agent } : {}),
   };
 }
 
@@ -664,6 +829,12 @@ function parseReposSection(
           ? defaultPrLabels
           : readStringList(table, "pr_labels", label, errors),
       pipelineFile: readString(table, "pipeline_file", label, errors),
+      ...(table.auto_merge_safe_paths === undefined
+        ? {}
+        : { autoMergeSafePaths: readGlobList(table, "auto_merge_safe_paths", label, errors) }),
+      ...(table.auto_merge_deny_paths === undefined
+        ? {}
+        : { autoMergeDenyPaths: readGlobList(table, "auto_merge_deny_paths", label, errors) }),
       envFile: readString(table, "env_file", label, errors),
       env: readEnvTable(table, label, errors),
     });
@@ -833,27 +1004,56 @@ function validateTeamRouting(
   }
 }
 
-/** Parse `[[estimations]]` and check the fleet tracker supports `--estimate`. */
+/**
+ * Parse `[[estimations]]` and check each sweep's tracker supports `--estimate`.
+ *
+ * An entry with `team` runs against that team's tracker (resolved after
+ * {@link applyTeamDefaults}); an entry without one uses `[defaults].tracker`.
+ */
 function parseEstimationsSection(
   document: Record<string, unknown>,
   tracker: string | undefined,
+  teams: TeamConfig[],
   errors: string[],
 ): EstimationConfig[] {
   const estimationResult = parseEstimationEntries(document.estimations);
   errors.push(...estimationResult.errors);
   // Estimation sweeps run the one-shot `--estimate` engine, so only trackers
   // with estimate support can serve them; fail the job at startup otherwise.
-  if (estimationResult.estimations.length > 0 && !tracker) {
+  const unsupported = (estimationId: string, source: string): string =>
+    `Estimation "${estimationId}" requires a tracker that supports --estimate ` +
+    `(supported: ${trackersSupportingEstimate().join(", ")}); ${source} does not.`;
+
+  const defaultsEstimations = estimationResult.estimations.filter((item) => !item.team);
+  if (defaultsEstimations.length > 0 && !tracker) {
     errors.push(
-      "[[estimations]] uses [defaults].tracker; configure it explicitly in a multi-team workspace.",
+      "[[estimations]] uses [defaults].tracker; configure it explicitly in a multi-team workspace " +
+        "or set team on the estimation.",
     );
-  } else if (tracker && !supportsEstimate(tracker) && estimationResult.estimations.length > 0) {
-    for (const estimation of estimationResult.estimations) {
+  } else if (tracker && !supportsEstimate(tracker)) {
+    for (const estimation of defaultsEstimations) {
+      errors.push(unsupported(estimation.id, `[defaults].tracker "${tracker}"`));
+    }
+  }
+
+  for (const estimation of estimationResult.estimations) {
+    if (!estimation.team) continue;
+    const requested = estimation.team.toLowerCase();
+    const team = teams.find((item) => item.name.toLowerCase() === requested);
+    if (!team) {
       errors.push(
-        `Estimation "${estimation.id}" requires a tracker that supports --estimate ` +
-          `(supported: ${trackersSupportingEstimate().join(", ")}); ` +
-          `[defaults].tracker "${tracker}" does not.`,
+        teams.length > 0
+          ? `Estimation "${estimation.id}".team "${estimation.team}" does not match any [[teams]] name.`
+          : `Estimation "${estimation.id}".team "${estimation.team}" is set but no [[teams]] are configured.`,
       );
+      continue;
+    }
+    // Canonicalize so runtime lookups (`findTeam`) and run attribution use
+    // the declared spelling.
+    estimation.team = team.name;
+    // An empty tracker already produced a "needs a tracker" team error.
+    if (team.tracker && !supportsEstimate(team.tracker)) {
+      errors.push(unsupported(estimation.id, `team "${team.name}" tracker "${team.tracker}"`));
     }
   }
   return estimationResult.estimations;
@@ -908,4 +1108,28 @@ export function findRepo(config: WorkspaceConfig, name: string): RepoConfig | un
  */
 export function findTeam(config: WorkspaceConfig, name: string): TeamConfig | undefined {
   return config.teams.find((team) => team.name === name);
+}
+
+/**
+ * Every workspace job that may pin its own harness: automations,
+ * estimations, and automatic conflict resolution.
+ */
+export function harnessPinnedJobs(config: WorkspaceConfig): HarnessPinnedEntry[] {
+  return [
+    ...config.automations,
+    ...config.estimations,
+    { id: "conflict resolution", harness: config.workspace.conflictAgent?.harness },
+    { id: "auto-merge review", harness: config.workspace.autoMerge.agent?.harness },
+  ];
+}
+
+/** Effective auto-merge path policy for one repository (repo lists replace workspace lists). */
+export function autoMergePathsFor(
+  settings: AutoMergeSettings,
+  repo: Pick<RepoConfig, "autoMergeSafePaths" | "autoMergeDenyPaths">,
+): { safePaths: string[]; denyPaths: string[] } {
+  return {
+    safePaths: repo.autoMergeSafePaths ?? settings.safePaths,
+    denyPaths: repo.autoMergeDenyPaths ?? settings.denyPaths,
+  };
 }

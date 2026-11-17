@@ -1,13 +1,13 @@
 ---
-title: "@devintern/code Configuration"
+title: "DevIntern Code Configuration"
 sidebarLabel: "Configuration"
-description: "Environment variables, settings.json, tracker credentials, and agent harness options for @devintern/code."
+description: "Use when setting tracker credentials, GitHub auth, agent harness, sandboxing, or other environment variables and settings for DevIntern Code."
 section: "Automation Reference"
 order: 0
-dateModified: 2026-10-16
+dateModified: 2026-11-12
 ---
 
-# @devintern/code Configuration
+# DevIntern Code Configuration
 
 @devintern/code uses per-project configuration stored in `.devintern-code/.env` in your project directory. This allows you to work with multiple projects without configuration conflicts.
 
@@ -21,6 +21,8 @@ The tool searches for `.env` files in the following order:
 2. **Project discovery**: traverses up from the current working directory, checking `.devintern-code/.env` then `.env` at each level, stopping at the first `.git` root found or your home directory
 3. **User home directory** (`~/.env`)
 4. **Tool installation directory**
+
+When `--env-file` is given, only that file is loaded; the project, home, and installation `.env` files are not read, so keys it omits are never filled from a project-controlled file. Variables already set in your shell are overridden by the selected file.
 
 You can run `devintern` from any subdirectory of your project and it will find the correct config automatically.
 
@@ -98,7 +100,7 @@ Unattended runs also need a `LICENSE_KEY`. See [Pricing](https://devintern.com/p
 | Air-gapped mentions or `devintern webhook serve`              | Customer-owned GitHub App (advanced)                           |
 | Custom `slug[bot]` attribution                                | Customer-owned GitHub App (advanced)                           |
 
-See [GitHub Issues Integration](./github-issues-integration.md) and the advanced [GitHub Integration](./github-integration.md) guide.
+See [GitHub Issues Integration](./github-issues-integration.md) and the advanced [GitHub Webhooks and PR Automation](./github-integration.md) guide.
 
 **Precedence when both are set:**
 
@@ -178,7 +180,7 @@ Both the ID and a private key are required.
 3. Generate and save a private key
 4. Install the App on your repositories
 
-> These permissions cover task implementation, PR creation, and the 🎉 reaction left on addressed feedback. The reaction is cosmetic only — whether feedback needs action is decided from the local state database — so a missing reaction permission never causes re-processing. If reactions fail with a permissions error after a settings change, re-approve the installation; already-issued credentials keep working for up to an hour. If you also run the webhook server or mention sweep to auto-address PR feedback, that App needs additional **Pull request review comments** and **Issue comments** permissions plus event subscriptions; see [GitHub Integration](./github-integration.md#update-app-permissions).
+> These permissions cover task implementation, PR creation, and the 🎉 reaction left on addressed feedback. The reaction is cosmetic only — whether feedback needs action is decided from the local state database — so a missing reaction permission never causes re-processing. If reactions fail with a permissions error after a settings change, re-approve the installation; already-issued credentials keep working for up to an hour. If you also run the webhook server or mention sweep to auto-address PR feedback, that App needs additional **Pull request review comments** and **Issue comments** permissions plus event subscriptions; see [GitHub Webhooks and PR Automation](./github-integration.md#update-app-permissions).
 
 For CI/CD environments, you can use a base64-encoded key:
 
@@ -403,12 +405,22 @@ devintern doctor
 It checks, in order:
 
 - **Bun runtime** and **Git** availability
-- **AI agent CLI**: whether your configured harness (`AGENT_HARNESS`, default `claude-code`) is installed and on `PATH`; suggests an installed alternative or install steps when not
+- **AI agent CLI**: every entry of your harness chain (`AGENT_HARNESS`, default `claude-code`), evaluated exactly as the worker does at startup. Each entry lists the resolved executable path, the effective sandbox for that harness (with `AGENT_SANDBOX=auto` the provider is picked per harness, so `opencode` can run under `nono` while `codex` runs under `native`), the effective harness-scoped model (`<HARNESS>_MODEL`, or `AGENT_MODEL` for the primary only; otherwise `default`), and whether it is ready, ready with a warning, or excluded with the reason. It flags a CLI that resolves to a mise shim under a sandbox, with the `<HARNESS>_CLI_PATH` fix, and notes when `nono` falls back to its generic profile because no pack exists for the harness. With `AGENT_SANDBOX=auto`, an entry that no installed provider supports is reported as a warning (it would run unsandboxed), never as plain ready. The check is ok when every entry is ready, and a warning (degraded) when the primary is usable but a fallback is excluded, unknown, or flagged. It fails when no entry can run (an installed alternative is suggested), and also when the primary cannot start or is not a registered harness name: the worker would fall back, but interactive and PR-review runs use only the primary, so `devintern sandbox` treats this case as a failure too. The probes only run `<cli> --version`; nothing is installed and no credentials or configuration change
 - **Task tracker credentials**: required environment variables for your `TASK_TRACKER` in `.devintern-code/.env`
 - **DevIntern sign-in**: local session validity (`devintern login` when missing)
 - **License**: entitlement status when signed in (only needed for unattended automation)
 
-Each failing row gets a fix hint. The command exits non-zero when any check fails, so scripts and CI can gate on it. The interactive `devintern init` wizard runs a subset of these checks automatically at the end of setup.
+Each failing row gets a fix hint. Exit codes:
+
+| Exit code | Meaning |
+| --------- | ------- |
+| `0` | Ready. Warnings (for example a degraded harness chain or a missing license) are shown but do not fail |
+| `1` | Not ready: at least one check failed, including a harness chain with no usable entry |
+| `2` | Degraded: warnings but no failures. Only with `devintern doctor --strict`, for CI gates that require a fully ready setup |
+
+The interactive `devintern init` wizard runs a subset of these checks automatically at the end of setup.
+
+`devintern doctor` is project-scoped. When a worker workspace exists it adds one line pointing to `devintern worker doctor`, which checks the unattended worker instead (see [Worker readiness](./worker.md#checking-worker-readiness-worker-doctor)).
 
 If a check fails in a way that looks like a DevIntern defect rather than a configuration problem, run `devintern report` to file it with the readiness context attached.
 
@@ -536,7 +548,7 @@ AGENT_HARNESS=claude-code
 
 You usually only need `AGENT_HARNESS`. By default devintern uses the harness's standard command (for example `claude` for `claude-code`) and finds it on your `PATH` automatically, so `AGENT_CLI_PATH` can be left unset.
 
-Common `AGENT_HARNESS` values include `claude-code`, `opencode`, `codex`, `cursor`, `grok`, `deepseek`, `antigravity`, `cline`, `goose`, `kilo-code`, `kimi`, `muse`, and `qwen`. If you do need to set a path explicitly, run `which` for the harness binary (`claude`, `opencode`, `codex`, `cursor-agent`, `grok`, `reasonix`, `agy`, `cline`, `goose`, `kilo`, `kimi`, `muse`, or `qwen`).
+Common `AGENT_HARNESS` values include `claude-code` (alias `claude`), `opencode`, `codex`, `cursor`, `grok`, `deepseek`, `antigravity`, `cline`, `goose`, `kilo-code`, `kimi`, `muse`, and `qwen`. If you do need to set a path explicitly, run `which` for the harness binary (`claude`, `opencode`, `codex`, `cursor-agent`, `grok`, `reasonix`, `agy`, `cline`, `goose`, `kilo`, `kimi`, `muse`, or `qwen`).
 
 **Cursor note:** The Cursor harness uses Cursor's headless `cursor-agent` CLI (not a command named `cursor`). Cursor also installs an `agent` alias, but devintern looks for `cursor-agent` because other tools use the `agent` name too. Install Cursor and enable the CLI from Cursor's settings, then set `AGENT_HARNESS=cursor`. The `--max-turns` option has no effect with this harness; Cursor runs until the task is complete.
 
@@ -567,8 +579,8 @@ The first entry is your preferred harness; later entries are fallbacks in priori
 
 Applies to every unattended worker surface — fleet task polling, PR review addressing, `@mention` runs, conflict resolution, scheduled automations, estimations, dashboard retries, relay-driven tasks, and `devintern webhook serve` — not only the webhook queue.
 
-- At startup every entry is checked against the harness registry and your machine: unknown or not-installed entries produce a clear warning and are skipped, and the effective chain is logged (e.g. `Agent harness: claude-code → codex (failover enabled)`). Multi-harness chains also log each entry's effective model (`Models: opencode: ... | grok: default`) so a fallback without a model is visible immediately.
-- When the active harness reports a usage/rate limit, the worker records its reset window (parsed from the limit output; a 1-hour cooldown applies when no timer is parseable, e.g. monthly spend limits) and immediately retries the same work on the highest-priority harness that still has capacity.
+- At startup every entry is checked against the harness registry and your machine: unknown or not-installed entries produce a clear warning and are skipped. With a sandbox configured, each entry is also started (`<cli> --version`) through the sandbox the real run will use for that harness (the same per-harness selection as the spawn); an entry that cannot start is skipped with an actionable warning, and the primary is kept only when no other entry can start; and the effective chain is logged (e.g. `Agent harness: claude-code → codex (failover enabled)`). Multi-harness chains also log each entry's effective model (`Models: opencode: ... | grok: default`) so a fallback without a model is visible immediately.
+- When the active harness reports a usage/rate limit, the worker records its reset window (parsed from the limit output, e.g. `resets in 6d 23h`). When the output has no parseable reset time, the cooldown starts at 1 hour and doubles for each further limit on the same harness without one (up to 24 hours), resetting after a successful run or a limit that does say when it resets; a limit that names its quota period waits at least 24 hours for a monthly or weekly quota and 4 hours for a daily one. The worker then immediately retries the same work on the highest-priority harness that still has capacity.
 - When the primary harness's window elapses, the worker automatically fails back to it and logs the switch. Fallback agents hitting their own limits mid-run advance the chain again.
 - If every harness in the chain is limited at once, new agent work is deferred until the earliest window ends (the webhook queue pauses; polling/review/automation runs return to their next tick).
 - Failover state (active harness + per-harness windows) persists in the queue database, so restarting the worker resumes on the right harness instead of retrying a still-limited agent.
@@ -618,6 +630,21 @@ AGENT_EFFORT=medium
 
 Valid values are `low`, `medium`, and `high` (anything else fails with a clear error). Lower effort runs faster and cheaper; higher effort reasons more deeply — useful for hard analysis tasks, while routine work can stay at the default (unset). The setting applies to every agent spawn, mirroring `AGENT_MODEL`, and degrades cleanly in failover chains: harnesses that expose reasoning effort emit it (Claude Code, Grok, Antigravity, and Reasonix via `--effort`, and Muse Code via `--reasoning-effort`; Cline via `--thinking`; Opencode v1 and Kilo Code via `--variant`; Codex via its `model_reasoning_effort` config override; pi composes it into the model string), harnesses that do not ignore it with a one-line warning. Because pi encodes effort in the model string, it only applies when a model is configured (`AGENT_MODEL` or `--model`); with no model set, pi ignores the effort and prints a one-line warning. OpenCode v2 removed `--variant` and instead folds the effort into the model reference (`provider/model#variant`), so on v2 it likewise only applies when a model is configured; with no model set it is ignored. When `AGENT_EFFORT` is unset no extra flags are emitted and behavior is unchanged.
 
+### Per-task overrides from the task description
+
+A task can override the harness, model, and effort for that task alone by adding an explicit preference block to its description:
+
+```markdown
+## Execution preferences
+Harness: codex
+Model: gpt-5.2
+Effort: high
+```
+
+The block ends at the next heading. A `devintern` HTML comment works too (`<!-- devintern: Harness: codex -->`), so the lines stay hidden in rendered descriptions. Trackers that flatten headings to plain text (Jira ADF, Azure DevOps HTML) also accept a line containing only `Execution preferences`, ending at the next heading or at a blank line followed by ordinary prose (blank lines between the heading and its fields, or between fields, are ignored); fenced code samples and `<pre>` / `<code>` sections are ignored. If the heading is lost entirely, use the comment form. Bare `Harness:`/`Model:`/`Effort:` lines outside such a block are treated as ordinary prose, not configuration.
+
+Each line is optional and independent; omitted values fall back to the environment defaults above. `Model:` is passed unchanged to the selected harness as an exact identifier or a native CLI alias (including OpenCode v2 `provider/model#variant` references). DevIntern does not define model aliases or select model versions; the harness validates model compatibility and availability. `Effort:` is applied only when the selected harness supports reasoning effort; otherwise it is ignored with a warning. Unknown harnesses, conflicting repeated values, and invalid efforts fail the task with an actionable message. When only `Harness:` is set, `AGENT_MODEL` is not carried over because it is harness-specific — the task uses that harness's `<HARNESS>_MODEL` when configured, otherwise its default model. A task-selected harness resolves its CLI from `<HARNESS>_CLI_PATH` (or `PATH`); `AGENT_CLI_PATH` still applies only to the environment-selected primary harness. The effective selection is printed before the run and recorded in run history. See [usage.md](usage.md#per-task-execution-preferences) for the full syntax.
+
 Set `AGENT_CLI_PATH` only when the CLI is not on your `PATH` or uses a non-standard name. You can give it a bare command name or a full path. Avoid committing an **absolute** path to a shared `.env`: it is machine-specific, so copying an `.env` from macOS (`/Users/...`) to a Linux host (`/home/...`) would point at a non-existent binary. If the configured command cannot be found, devintern fails fast at startup with a message telling you the CLI is not on your `PATH`.
 
 **Advanced spawn tuning** (rarely needed):
@@ -665,14 +692,16 @@ Or per interactive run:
 devintern PROJ-123 --sandbox nono
 ```
 
-Run `devintern sandbox` at any time for a full diagnosis: which providers are installed, the one-time setup steps each still needs, which one `auto` would pick, and exactly what your next run will do with the current configuration, including why it would fail. The command exits non-zero when the configured provider guarantees a failed run, so scripts and CI can gate on it.
+Run `devintern sandbox` at any time for a full diagnosis: which providers are installed, the one-time setup steps each still needs, which one `auto` would pick for each harness in `AGENT_HARNESS`, and exactly what your next run will do with the current configuration, including why it would fail. The "Next run" line uses the same per-harness picker as real runs and worker startup, so with a chain such as `opencode,codex,grok` it lists the provider for each entry (for example `nono` for `opencode` and `grok`, `native` for `codex`). An explicit provider that cannot wrap a fallback entry only skips it on worker surfaces (`devintern worker`), which run the chain with the remaining entries; the doctor reports this as a warning. Interactive `devintern <TASK>` and PR-review runs use only the primary (first) `AGENT_HARNESS` entry, so the primary must be wrappable and start under its sandbox. The command exits non-zero when the configuration guarantees a failed run (an unusable provider, or a primary entry that is not a registered harness, cannot be wrapped, or fails its sandbox preflight), so scripts and CI can gate on it.
+
+A running process reuses each harness's sandbox decision for later spawns. If a cached provider fails to wrap a spawn (for example, it was uninstalled after the worker started), that spawn fails, and the next spawn of that harness detects providers again and picks anew. Other changes to provider availability or `AGENT_SANDBOX` take effect on restart.
 
 ### Providers
 
 | Value    | What it is                                                                                                                                                                                  | Works with                                             |
 | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
 | `none`   | No sandboxing (default)                                                                                                                                                                     | all harnesses                                          |
-| `auto`   | Best available option (native, then nono); runs unsandboxed with a warning if none is available. Docker, which needs per-user setup, is never picked automatically | depends on pick                                        |
+| `auto`   | Best available option per harness (native, then nono, skipping a provider that cannot wrap the harness, so `opencode` and `grok` get nono even when native is available); runs unsandboxed with a warning if none is available. Docker, which needs per-user setup, is never picked automatically | depends on pick                                        |
 | `native` | The harness's own built-in OS sandbox, enabled and configured by DevIntern. Zero install, nothing to set up                                                                                 | `claude-code`, `codex`                                 |
 | `nono`   | Kernel-enforced isolation (Landlock on Linux, Seatbelt on macOS), zero setup ([nono.sh](https://nono.sh))                                                                                   | all harnesses                                          |
 | `docker` | [Docker Sandboxes](https://www.docker.com/products/docker-sandboxes) microVM via the `sbx` CLI; the supported microVM option; never picked by `auto` (requires per-user setup, see below)   | `claude-code`, `codex`, `cursor`, `gemini`, `opencode` |

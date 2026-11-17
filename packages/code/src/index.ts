@@ -31,6 +31,7 @@ import {
   VERSION,
   checkForCliUpdate,
   enforceLicenseOrExit,
+  findEnvFileArg,
   getLoadedEnvPath,
   loadEnvironment,
   loadSupabaseConfig,
@@ -51,7 +52,11 @@ import { runInitCommand } from "./lib/init/cli";
 import { runWorkerCli } from "./lib/worker/cli";
 import { runDashboardCommand, runDoctorCommand } from "./lib/observability/cli";
 import { runWebhookCommand } from "./lib/code-host/cli";
-import { runAddressReviewCommand, runResolveConflictsCommand } from "./lib/review/cli";
+import {
+  runAddressReviewCommand,
+  runAutoMergeCommand,
+  runResolveConflictsCommand,
+} from "./lib/review/cli";
 import { runLoginCommand, runLogoutCommand, runWhoamiCommand } from "./lib/account/cli";
 import { runSandboxCommand } from "./lib/agent/cli";
 import { runReportCommand } from "./lib/report/cli";
@@ -119,6 +124,8 @@ if (process.argv[2] === "init") {
   await runAddressReviewCommand(process.argv.slice(3));
 } else if (process.argv[2] === "resolve-conflicts") {
   await runResolveConflictsCommand(process.argv.slice(3));
+} else if (process.argv[2] === "auto-merge") {
+  await runAutoMergeCommand(process.argv.slice(3));
 } else if (process.argv[2] === "login") {
   await runLoginCommand(process.argv);
 } else if (process.argv[2] === "logout") {
@@ -132,8 +139,12 @@ if (process.argv[2] === "init") {
 } else if (process.argv[2] === "whoami") {
   await runWhoamiCommand();
 } else {
-  // Load environment variables early (before CLI parsing)
-  loadEnvironment();
+  // Load environment variables early (before CLI parsing). Peek `--env-file`
+  // from argv so an explicit file is the only `.env` source: loading the
+  // implicit project `.env` first would leave its values in place for every
+  // key the explicit file omits (for example, a project-controlled
+  // JIRA_BASE_URL paired with the user's real token).
+  loadEnvironment(findEnvFileArg(process.argv));
 }
 
 /**

@@ -6,9 +6,10 @@ Bitbucket Cloud, GitLab.com and GitLab Self-Managed using a local Markdown task
 and a deterministic agent. Git operations and provider API calls are real; no AI
 account or task tracker is needed.
 
-The maintained coverage inventory and gap backlog live in
+The maintained coverage inventory and gap backlog live in per-area files under
+[docs/coverage/](docs/coverage/), indexed by
 [docs/coverage-matrix.md](docs/coverage-matrix.md). The recurring `e2e-expander`
-workspace automation scouts that list and delegates each accepted gap to the
+workspace automation scouts those files and delegates each accepted gap to the
 worker as a separate task and pull request.
 
 ## Run locally
@@ -60,6 +61,22 @@ hooks and agent configuration are excluded. Tokens are passed through the
 environment and Git askpass, never embedded in remote URLs or command arguments.
 Telemetry, updates and license checks are disabled for the test subprocesses.
 
+### Proxy environments
+
+The suite can run where an HTTP proxy is configured, such as a DevIntern worker,
+a CI sandbox, or a corporate network. A preload (`bunfig.toml` →
+`tests/setup/loopback-no-proxy.ts`) appends `localhost`, `127.0.0.1`, `::1` and
+the bracketed `[::1]` to both `NO_PROXY` and `no_proxy`. The dashboard and
+webhook fixtures apply the same step when they start, which covers runs from the
+repo root that skip this package's bunfig. With these entries, health polls and
+API fetches against `http://[::1]:<port>` go straight to the fixture. Some Bun
+versions (seen on 1.4.2) do not match a bare `::1` entry against a bracketed URL
+host. In that case the request goes through the proxy and times out, which looks
+like a dashboard bug. Proxy variables are not unset, so suites that reach remote
+endpoints still use the proxy. When a test needs to change these variables,
+assign new values instead of using `delete`. On Bun 1.4.2, fetch falls back to
+the process's startup value of a deleted variable.
+
 Cleanup closes PRs and deletes the exact branches owned by each scenario,
 including when an assertion fails. Closed PRs remain as GitHub history. Cleanup
 failures fail the test and identify the branches. A forcibly killed runner can
@@ -86,60 +103,14 @@ and secret `E2E_GITHUB_TOKEN` before running it. Do not expose these
 credentials to untrusted pull-request code. Build the CLI in that job before
 running the suite so the artifact matches the checkout.
 
-## Worker `worker add` option matrix
+## Test descriptions
 
-The default local suite (`tests/local/worker-add-options.test.ts`) drives the built
-CLI's `devintern worker add` through every documented option against a throwaway
-workspace and a local bare Git remote seeded from `fixtures/simple-project`; no
-tracker or hosted code host is involved. Enqueue-only cases cover `--title`,
-`--body`, `--body-file <path>`, `--body-file -` stdin, `--idempotency-key`,
-`--workspace`, `--json`, and the validation errors. Daemon cases cover `--wait`,
-`--wait-timeout` (`0` and a bounded timeout through `E2E_AGENT_DELAY_MS`), and
-`--resume`, asserting the pushed branch/commit directly on the bare remote rather
-than a pull request.
-
-## Agent harness invocation checks
-
-The ordinary local suite also probes every registered agent harness whose CLI is
-installed on the machine. Harnesses that are not installed are reported as
-skipped, so the suite behaves the same on a laptop with six agent CLIs and in CI
-with none.
-
-Each installed harness is launched with the exact non-interactive invocation
-DevIntern generates (subcommand, flags, and prompt) inside a temporary home and
-workspace. The check asserts only that the CLI accepts that invocation: a
-removed flag, renamed subcommand, or changed prompt mode fails with a
-parser/usage error. Sign-in prompts, missing provider keys, model errors, and
-runs that exceed the probe timeout are expected and do not fail the suite, so no
-AI account, credentials, or model calls are required. The probe environment
-excludes ambient provider keys and harness configuration.
-
-Set `E2E_HARNESS_PROBE_TIMEOUT_MS` to tune the per-harness timeout (default
-`10000`). These checks do not run full agent tasks; the deterministic fake agent
-continues to cover the implementation, git, and pull-request lifecycle.
-
-## Sandbox checks (nono)
-
-The ordinary local suite also exercises the real `nono` boundary when the
-binary is installed; otherwise those tests skip, like the harness probes. A
-deterministic shell agent reports what it could write and read, so the suite
-needs no AI account:
-
-- `devintern sandbox` reports nono as available, shows the preflight for the
-  configured harness, and `AGENT_SANDBOX=auto` picks nono for a harness without
-  a built-in sandbox (the preflight must use the same provider the run will).
-- A nono-wrapped run edits the fixture and pushes its branch while writes to
-  the working directory, output directory and temp dir succeed; writes to
-  `$HOME` are denied, and reads stay open (the v1 policy).
-- An explicitly requested nono provider fails closed when nono is not on
-  `PATH`: the task exits non-zero instead of running the agent unsandboxed.
-- An enclosing `NONO_CAP_FILE` marker is inherited rather than nested, so the
-  agent runs in the existing confinement.
-
-The sandbox suite keeps its isolated `HOME` outside the OS temp directory:
-nono's Linux profile grants a broad read on `/tmp`, and a home nested under
-that grant makes nono refuse its own per-user deny rules. Real user homes are
-normally outside `/tmp`, so the fixture mirrors that.
+What each test covers, its scenarios, and any extra run command live in the
+`## Test notes` section of its area file under [docs/coverage/](docs/coverage/),
+next to the coverage rows. See the
+[coverage index](docs/coverage-matrix.md#areas) for the list of areas. A new
+test documents itself in its area file, not in this README; most offline tests
+run with the commands in [Run locally](#run-locally).
 
 ## Local GitLab Self-Managed
 
@@ -245,34 +216,9 @@ on the DevIntern GitHub repository. Each job receives only its provider's token,
 and no credentials are exposed to untrusted PR workflows. Missing configuration
 fails the explicit live command before it mutates a remote repository.
 
-## Offline fake tracker servers
-
-The default local suite includes an in-process fake Jira Cloud v3 server, so the
-built CLI can exercise the Jira tracker lifecycle with no credentials and no
-network access. `bun test tests/local` runs
-`tests/local/tracker-jira-fake.test.ts`; it skips only when the built CLI is
-absent, like the other local Git tests.
-
-The fake binds `127.0.0.1:0`, accepts any Basic-auth credentials (and never logs
-them), and implements only the endpoints the product calls: `/myself`, enhanced
-JQL `search/jql`, issue read/update, comments (ADF and text), and workflow
-transitions. Any unmatched request returns a diagnostic 404 and fails the test,
-so a client change that starts calling a new route is visible instead of
-silently returning `{}`.
-
-Two scenarios run the production Jira client through explicit-key and `--query`
-selection against a seeded issue and a decoy outside the selector. Read-back
-goes through the fake fixture, not CLI stdout: the pushed `feature/<key>` branch
-and exact `src/greeting.ts` diff, the run record, the configured workflow
-status, surviving unrelated labels, the implementation summary comment, and
-delivery of the seeded description/comment markers to the deterministic agent.
-A second run with `--skip-comments` proves no additional comment or transition
-is posted. The local bare Git remote is the code host; no GitHub token or PR is
-required.
-
 ## Remote tracker fixtures
 
-The Markdown suites above need no task tracker. Separate opt-in suites exercise
+The Markdown suites need no task tracker. Separate opt-in suites exercise
 the same built CLI against a real remote tracker ticket through the reusable
 `TrackerScenario` fixture. There are three providers, all published to GitHub:
 
@@ -394,53 +340,6 @@ are never printed. The active `TASK_TRACKER` must be configured;
 inspected when it is absent.
 
 This smoke is opt-in and is not part of `test`, Turbo, or CI. See
-[docs/tracker-e2e-plan.md](docs/tracker-e2e-plan.md) for the staged expansion to
-full Jira/Trello lifecycles and offline fake-server coverage.
-
-## Delivery lifecycle coverage
-
-GitHub and local GitLab also cover an agent exiting unsuccessfully after editing,
-an agent producing no changes, and an existing remote feature branch. Failure
-scenarios verify the recorded run is failed, no PR/MR or remote implementation
-branch appears, and the target branch is unchanged. Collision scenarios verify
-the existing commit survives and the new PR/MR uses `-attempt-2`.
-
-Local GitLab additionally covers an actual rejected push using a read-only project
-token, plus a review round trip. A Developer project bot opens an MR, a separate
-human identity posts feedback, and `address-review` edits and pushes to that same
-MR and replies to the discussion. A second CLI invocation must add no commit,
-reply, or agent invocation. GitLab updates MR metadata asynchronously; the suite
-waits for the pushed SHA before asserting the new head. Both project tokens expire
-the next day and are removed with their disposable project.
-
-All four areas run through the existing GitHub/GitLab commands above; no task
-tracker, model credentials, or additional local environment variables are needed.
-These lifecycle scenarios currently run against GitHub and local GitLab; the
-hosted GitLab.com and Bitbucket suites retain their publication smoke tests.
-
-Local GitLab also runs the worker daemon itself (`tests/code/gitlab-worker.test.ts`),
-not the one-shot CLI. Each scenario provisions a separate private project and a
-Developer project token, then starts the built `devintern worker` against a real
-workspace. Coverage includes an injected task producing a labelled MR, GitLab
-Issues polling with status transition and actioned deduplication, registered-MR
-review polling, CI repair through an external failed commit status, retry-budget
-escalation, and automatic conflict resolution after the base branch advances.
-Relay delivery, `worker connect gitlab` hook installation, and real project-hook
-callbacks remain out of scope for the ordinary worker suite: they need relay
-infrastructure or a GitLab container-to-worker callback path.
-
-The separate opt-in `test:e2e:gitlab-relay` suite uses the **deployed** relay.
-It installs a real managed project hook, proves review feedback arrives with
-normal polling effectively disabled, verifies MR-close unwatching, and checks
-that `--disconnect` removes the managed hook and stops deliveries. It needs a
-signed-in Supabase session (`E2E_RELAY_AUTH_SESSION`, or the local
-`~/.devintern/state/code/.auth-session.json`), an entitled account, and the
-local GitLab container. It writes a temporary hook and relay route, then removes
-both in cleanup. Run it with:
-
-```sh
-bun run --filter @devintern/e2e test:e2e:gitlab-relay
-```
-
-CI must provide `E2E_RELAY_AUTH_SESSION` explicitly; the suite is not part of
-PR CI.
+[docs/coverage/trackers.md](docs/coverage/trackers.md) for the staged expansion to
+full Jira/Trello lifecycles and the implemented Jira/Linear fake-server coverage
+(Trello fake planned).

@@ -9,6 +9,9 @@ import { WebhookQueue } from "../src/lib/state/webhook-queue";
 import {
   cliResultToTaskResult,
   getWorkerFailover,
+  harnessBlockedReason,
+  harnessChainBlockedUntil,
+  WorkerFailover,
   resetWorkerFailover,
   runWithFailover,
   startWorkerFailover,
@@ -325,10 +328,15 @@ describe("usage-limit hint file", () => {
     const previous = process.env[USAGE_LIMIT_FILE_ENV];
     process.env[USAGE_LIMIT_FILE_ENV] = path;
     try {
-      writeUsageLimitHint(new UsageLimitError("4:27 PM"));
+      writeUsageLimitHint(new UsageLimitError("2h", "monthly"));
       const hint = readUsageLimitHint(path);
-      expect(hint.resetsAt).toBe("4:27 PM");
+      expect(hint.resetsAt).toBe("2h");
+      expect(hint.period).toBe("monthly");
       expect(hint.untilMs).toBeGreaterThan(Date.now());
+
+      // No reset time: the child leaves the window to the parent's fallback.
+      writeUsageLimitHint(new UsageLimitError(undefined, "monthly"));
+      expect(readUsageLimitHint(path)).toEqual({ period: "monthly" });
     } finally {
       if (previous === undefined) {
         delete process.env[USAGE_LIMIT_FILE_ENV];
@@ -336,5 +344,144 @@ describe("usage-limit hint file", () => {
         process.env[USAGE_LIMIT_FILE_ENV] = previous;
       }
     }
+  });
+});
+
+describe("usage limit without a reset time", () => {
+  const HOUR = 3_600_000;
+
+  function singleHarness(now: () => number) {
+    return new WorkerFailover({ checkInstalled: false, raw: "opencode", log: () => {}, now });
+  }
+
+  function windowMs(outcome: ReturnType<WorkerFailover["reportFromHint"]>, now: number): number {
+    if (outcome.kind !== "exhausted") throw new Error(`expected exhausted, got ${outcome.kind}`);
+    return outcome.untilMs - now;
+  }
+
+  test("doubles the fallback per consecutive limit and caps it at a day", () => {
+    const now = Date.now();
+    const failover = singleHarness(() => now);
+    try {
+      const windows = [1, 2, 3, 4, 5, 6, 7].map(() => windowMs(failover.reportFromHint({}), now));
+      expect(windows).toEqual([1, 2, 4, 8, 16, 24, 24].map((hours) => hours * HOUR));
+    } finally {
+      failover.stop();
+    }
+  });
+
+  test("a named quota period sets a floor on the first limit", () => {
+    const now = Date.now();
+    for (const [period, hours] of [
+      ["monthly", 24],
+      ["weekly", 24],
+      ["daily", 4],
+    ] as const) {
+      const failover = singleHarness(() => now);
+      try {
+        expect(windowMs(failover.reportFromHint({ period }), now)).toBe(hours * HOUR);
+      } finally {
+        failover.stop();
+      }
+    }
+  });
+
+  test("a known reset time or a successful run restarts the backoff", () => {
+    const now = Date.now();
+    const logs: string[] = [];
+    const failover = new WorkerFailover({
+      checkInstalled: false,
+      raw: "opencode",
+      log: (message) => logs.push(message),
+      now: () => now,
+    });
+    const lastCooldown = () => logs.filter((line) => line.includes("re-checking in")).at(-1);
+    try {
+      failover.reportFromHint({});
+      failover.reportFromHint({});
+      expect(lastCooldown()).toContain("(2 in a row); re-checking in 2h");
+      failover.reportFromHint({ resetsAt: "30m" });
+      failover.reportFromHint({});
+      expect(lastCooldown()).toContain("(1 in a row); re-checking in 1h");
+
+      failover.reportFromHint({});
+      failover.recordSuccess();
+      failover.reportFromHint({});
+      expect(lastCooldown()).toContain("(1 in a row); re-checking in 1h");
+    } finally {
+      failover.stop();
+    }
+  });
+});
+
+describe("startWorkerFailover restore", () => {
+  let dir: string | null = null;
+  afterEach(() => {
+    if (dir) rmSync(dir, { recursive: true, force: true });
+    dir = null;
+  });
+
+  test("restoring windows that cover the whole chain calls onPause once", async () => {
+    dir = mkdtempSync(join(tmpdir(), "failover-restore-"));
+    const queue = new WebhookQueue({ dbPath: join(dir, "queue.db") });
+    const untilMs = Date.now() + 6 * 24 * 60 * 60 * 1000;
+    try {
+      queue.setRateLimit("opencode", untilMs);
+      const pauses: Array<{ untilMs: number; harness: string }> = [];
+      await startWorkerFailover({
+        checkInstalled: false,
+        sandboxName: "none",
+        raw: "opencode",
+        queue,
+        log: () => {},
+        onPause: (info) => pauses.push(info),
+      });
+      expect(pauses).toEqual([{ untilMs, harness: "opencode" }]);
+      expect(getWorkerFailover()?.allLimited()).toBe(true);
+    } finally {
+      resetWorkerFailover();
+      queue.close();
+    }
+  });
+
+  test("restoring a partially limited chain does not pause", async () => {
+    dir = mkdtempSync(join(tmpdir(), "failover-restore-"));
+    const queue = new WebhookQueue({ dbPath: join(dir, "queue.db") });
+    try {
+      queue.setRateLimit("opencode", Date.now() + 60_000);
+      let pauses = 0;
+      await startWorkerFailover({
+        checkInstalled: false,
+        sandboxName: "none",
+        raw: "opencode,codex",
+        queue,
+        log: () => {},
+        onPause: () => pauses++,
+      });
+      expect(pauses).toBe(0);
+    } finally {
+      resetWorkerFailover();
+      queue.close();
+    }
+  });
+});
+
+describe("harnessChainBlockedUntil", () => {
+  function fake(allLimited: boolean, windows: Record<string, number>): WorkerFailover {
+    return { allLimited: () => allLimited, windows: () => windows } as unknown as WorkerFailover;
+  }
+
+  test("returns the earliest future window only while every harness is limited", () => {
+    const now = 1_000;
+    expect(harnessChainBlockedUntil(null, now)).toBeUndefined();
+    expect(harnessChainBlockedUntil(fake(false, { a: 5_000 }), now)).toBeUndefined();
+    expect(harnessChainBlockedUntil(fake(true, { a: 9_000, b: 5_000, c: 500 }), now)).toBe(5_000);
+    expect(harnessChainBlockedUntil(fake(true, { a: 500 }), now)).toBeUndefined();
+  });
+
+  test("words the reason with the ISO resume time", () => {
+    expect(harnessBlockedReason(Date.parse("2026-11-20T04:00:12.689Z"))).toBe(
+      "no agent harness is available until 2026-11-20T04:00:12.689Z (usage limit)",
+    );
   });
 });

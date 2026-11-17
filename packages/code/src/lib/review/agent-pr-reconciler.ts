@@ -16,13 +16,105 @@
 
 import type { AgentPr, WorkerState } from "../state/worker-state";
 
-/** The subset of a GitHub PR payload the poller and reconciler rely on. */
+/**
+ * The subset of a GitHub PR payload the poller and reconciler rely on.
+ *
+ * `state` is optional and `unknown` because it arrives from a remote API: a
+ * payload can omit it, report `null`, or report a value this worker does not
+ * know. `unknown` prevents callers assuming a string shape, but it cannot stop
+ * them comparing the field directly — so **only `classifyAgentPrState` may
+ * drive a closure decision**. Never write `pr.state !== "open"` to decide
+ * whether to unwatch: that treats a missing/unusable value as "not open" and
+ * would permanently stop polling a PR that is still alive. (The poller's
+ * base-sync check may compare the raw field: there an unusable value only
+ * means "do not sync this tick".)
+ */
 export interface PolledPr {
-  state: string;
+  state?: unknown;
   /** GitHub's computed merge state; `"dirty"` means merge conflicts. */
   mergeable_state?: string;
   head?: { sha: string; ref?: string; repo?: { full_name: string } | null };
   base?: { sha: string; ref?: string };
+}
+
+/** GitHub PR states that prove a PR is no longer open. */
+export type TerminalAgentPrState = "closed" | "merged";
+
+/** Classification of a remote PR `state` value; `null` means unusable. */
+export type AgentPrLifecycleState = "open" | TerminalAgentPrState | null;
+
+const TERMINAL_AGENT_PR_STATES: ReadonlySet<string> = new Set<TerminalAgentPrState>([
+  "closed",
+  "merged",
+]);
+
+/**
+ * Classify a remote PR `state`.
+ *
+ * Only an explicitly recognised value is actionable: `"closed"`/`"merged"`
+ * are terminal, `"open"` is alive, and everything else — missing, `null`,
+ * empty, non-string, or unknown — is unusable (`null`). Unusable state must
+ * never close a registry row: that would permanently stop polling a PR that is
+ * still open.
+ *
+ * This is the **only** classifier allowed to drive registry closure; comparing
+ * {@link PolledPr.state} directly cannot distinguish "not open" from "missing".
+ */
+export function classifyAgentPrState(state: unknown): AgentPrLifecycleState {
+  if (typeof state !== "string") return null;
+  const normalized = state.trim().toLowerCase();
+  if (normalized === "open") return "open";
+  return TERMINAL_AGENT_PR_STATES.has(normalized) ? (normalized as TerminalAgentPrState) : null;
+}
+
+/** PRs already reported as having an unusable state (one warning per process). */
+const warnedUnusableState = new Set<string>();
+
+/**
+ * Forget which PRs already warned about an unusable state.
+ *
+ * Exported for tests so this process-wide cache cannot make the suite depend
+ * on execution order. Production callers never need it: entries are dropped
+ * as soon as the PR is observed open or confirmed terminal.
+ */
+export function resetUnusableStateWarnings(): void {
+  warnedUnusableState.clear();
+}
+
+/** Describe an unusable state value without echoing the surrounding payload. */
+function describeUnusableState(state: unknown): string {
+  if (state === undefined) return "missing";
+  if (state === null) return "null";
+  if (typeof state === "string") {
+    return state === "" ? "empty string" : `unrecognised ${JSON.stringify(state.slice(0, 40))}`;
+  }
+  return `unexpected ${typeof state}`;
+}
+
+/** Warn at most once per PR per process about a state the worker cannot act on. */
+function warnUnusableStateOnce(repo: string, prNumber: number, state: unknown): void {
+  const key = agentPrKey(repo, prNumber);
+  if (warnedUnusableState.has(key)) return;
+  warnedUnusableState.add(key);
+  console.warn(
+    `⚠️  [agent-pr-reconciler] ${repo}#${prNumber} returned an unusable PR state ` +
+      `(${describeUnusableState(state)}); keeping it watched and retrying next poll`,
+  );
+}
+
+/**
+ * Drop warning bookkeeping for PRs no longer in the open registry.
+ *
+ * Rows can also be closed by the CI watcher, which does not call
+ * `applyAgentPrFetch`, so this keeps the cache bounded by currently watched
+ * PRs and lets a later re-registration warn again.
+ */
+function pruneUnusableStateWarnings(openPrs: AgentPr[]): void {
+  if (warnedUnusableState.size === 0) return;
+  const openKeys = new Set(openPrs.map((pr) => agentPrKey(pr.repo, pr.prNumber)));
+  for (const key of warnedUnusableState) {
+    if (!openKeys.has(key)) warnedUnusableState.delete(key);
+  }
 }
 
 /** Result of a conditional (ETag-cached) GitHub GET. */
@@ -46,8 +138,8 @@ export interface AgentPrReconcileGitHub {
 export interface AgentPrClosure {
   repo: string;
   prNumber: number;
-  /** The PR's confirmed GitHub state. */
-  reason: string;
+  /** The PR's confirmed terminal GitHub state. */
+  reason: TerminalAgentPrState;
 }
 
 export interface AgentPrReconcileSummary {
@@ -70,7 +162,13 @@ export function agentPrKey(repo: string, prNumber: number): string {
 
 /**
  * Apply one fetched PR state to the registry: persist the ETag cursor and
- * close the row only when GitHub confirms that it is no longer open.
+ * close the row only when GitHub explicitly reports a terminal state.
+ *
+ * Unusable state (missing, `null`, empty, or unrecognised) leaves the row open
+ * so the next reconciliation tick retries; it must never be treated as
+ * "not open". Its ETag is not persisted and any stored one is dropped: caching
+ * it would make the next request conditional, and GitHub would answer 304
+ * with no state to re-examine, leaving the PR watched but never processed.
  *
  * @returns The closure record, or `null` when the PR stays watched.
  */
@@ -79,15 +177,29 @@ export function applyAgentPrFetch(
   pr: { repo: string; prNumber: number },
   result: ConditionalResult<PolledPr>,
 ): AgentPrClosure | null {
+  const data = result.data;
+  if (!data) return null;
+
+  const state = classifyAgentPrState(data.state);
+  if (state === null) {
+    warnUnusableStateOnce(pr.repo, pr.prNumber, data.state);
+    // Re-fetch unconditionally next tick instead of replaying a 304 that
+    // carries no state to confirm.
+    workerState.clearCursor(agentPrStateCursorSource(pr.repo, pr.prNumber));
+    return null;
+  }
+
   if (!result.notModified && result.etag) {
     workerState.setCursor(agentPrStateCursorSource(pr.repo, pr.prNumber), "state", result.etag);
   }
-  if (result.data && result.data.state !== "open") {
-    const reason = result.data.state;
-    workerState.markAgentPrClosed(pr.repo, pr.prNumber);
-    return { repo: pr.repo, prNumber: pr.prNumber, reason };
-  }
-  return null;
+  // The row is no longer in a state that can produce an unusable report, so
+  // release the warning slot. This keeps the cache bounded by currently
+  // anomalous PRs and lets a later re-registration warn again.
+  warnedUnusableState.delete(agentPrKey(pr.repo, pr.prNumber));
+  if (state === "open") return null;
+
+  workerState.markAgentPrClosed(pr.repo, pr.prNumber);
+  return { repo: pr.repo, prNumber: pr.prNumber, reason: state };
 }
 
 /**
@@ -145,5 +257,6 @@ export async function reconcileOpenAgentPrs(options: {
       fresh.set(agentPrKey(pr.repo, pr.prNumber), result);
     }
   }
+  pruneUnusableStateWarnings(workerState.listOpenAgentPrs());
   return summary;
 }

@@ -15,6 +15,7 @@ import {
   hasRunStage,
   latestRunStage,
   markRunCleanStop,
+  recordRunHarness,
   recordRunStage,
   replaceRunStage,
 } from "../src/lib/state/run-recorder";
@@ -226,13 +227,23 @@ describe("RunStore", () => {
   });
 
   test("setRunPr attaches PR info without clobbering existing fields", () => {
-    const id = store.createRun({ origin: "task", taskKey: "PROJ-4", repo: "acme/widgets" });
-    store.setRunPr(id, { prNumber: 7, url: "https://github.com/acme/widgets/pull/7" });
+    const id = store.createRun({ origin: "task", taskKey: "PROJ-4", repo: "widgets" });
+    store.setRunPr(id, {
+      repo: "acme/widgets",
+      prNumber: 7,
+      url: "https://github.com/acme/widgets/pull/7",
+    });
 
     const run = store.getRun(id);
-    expect(run?.repo).toBe("acme/widgets");
+    expect(run?.repo).toBe("widgets");
     expect(run?.prNumber).toBe(7);
     expect(run?.prUrl).toBe("https://github.com/acme/widgets/pull/7");
+  });
+
+  test("setRunPr records the PR repo when the run has no repo", () => {
+    const id = store.createRun({ origin: "task", taskKey: "PROJ-5" });
+    store.setRunPr(id, { repo: "acme/widgets", prNumber: 8 });
+    expect(store.getRun(id)?.repo).toBe("acme/widgets");
   });
 
   test("createRun persists the PR URL of PR-affected origins", () => {
@@ -565,6 +576,21 @@ describe("RunStore", () => {
       expect(hasRunStage("verify")).toBe(false);
     } finally {
       endRun("failed", "test cleanup");
+    }
+  });
+
+  test("recordRunHarness updates the stored run and active context", () => {
+    beginRun({ origin: "task", taskKey: "PROJ-HARNESS", harness: "claude-code" });
+    const runId = getActiveRunContext()!.id;
+    const reader = new RunStore();
+    try {
+      expect(reader.getRun(runId)?.harness).toBe("claude-code");
+      recordRunHarness("opencode");
+      expect(reader.getRun(runId)?.harness).toBe("opencode");
+      expect(getActiveRunContext()?.harness).toBe("opencode");
+    } finally {
+      reader.close();
+      endRun("succeeded", "done");
     }
   });
 

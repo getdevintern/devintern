@@ -4,7 +4,14 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function isRetryableNetworkError(error: Error): boolean {
+/**
+ * Whether a transport-level error (DNS, connection reset, timeout, ...) is
+ * worth retrying. Exposed so callers that already exhausted `fetchWithRetry`
+ * can classify the escaped error the same way this helper did.
+ *
+ * @param error - Error thrown by `fetch`
+ */
+export function isRetryableNetworkError(error: Error): boolean {
   const message = error.message.toLowerCase();
   return (
     message.includes("econnreset") ||

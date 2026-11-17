@@ -168,7 +168,7 @@ export async function processGitLabWithPersistence(
     settle?.("handled");
   } catch (error) {
     if (error instanceof UsageLimitError) {
-      handleUsageLimit(error.resetHint);
+      handleUsageLimit(error.resetHint, error.period);
       if (eventId && runtime.queue) runtime.queue.requeuePending(eventId);
       reviewQueue
         .add(() => processGitLabWithPersistence(eventId, queued, settle))

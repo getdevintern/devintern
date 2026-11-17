@@ -10,6 +10,12 @@ export interface ActiveTaskContext {
   tracker: TaskTrackerClient;
   projectKey: string;
   movedToInProgress: boolean;
+  /**
+   * Set when this run attempted a PR on a supported code host and it failed
+   * (5xx, rate limit, expired token). The worker then leaves the ticket
+   * unmarked so the next poll retries delivery.
+   */
+  prCreationFailure?: string;
 }
 
 /**

@@ -12,32 +12,36 @@
  * single machine-readable object on stdout (human diagnostics go to stderr).
  */
 
-import { randomBytes } from "crypto";
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "fs";
-import { dirname, join, resolve } from "path";
+import { existsSync, readFileSync } from "fs";
+import { dirname, resolve } from "path";
 
+import { listHarnesses } from "@devintern/agent-harness";
 import { checkLicense } from "@devintern/license-check";
 
 import { LockManager } from "../lock-manager";
+import { readWorkerHarnessPause } from "../observability/harness-pause";
+import type { WorkerHarnessPause } from "../observability/harness-pause";
 import { loadSupabaseConfig } from "../cli/bootstrap";
 import type { RepoConfig, WorkspaceConfig } from "./config";
 import { loadWorkspaceConfig } from "./config";
 import { InjectedTaskStore } from "../state/injected-tasks";
-import type { EnqueueInjectedTaskResult, InjectedTask } from "../state/injected-tasks";
-import { RunStore } from "../state/run-recorder";
-import type { RunRecord } from "../state/run-recorder";
+import type { InjectedTask } from "../state/injected-tasks";
 import { applyWorkspaceProcessEnv } from "./env";
+import { enqueueInjectedTask, MAX_INJECTED_BODY_CHARS } from "./injected-enqueue";
+import {
+  injectedChildStillRunningMessage,
+  interruptedChildStillRunning,
+} from "./injected-recovery";
 import {
   injectedTasksDir,
   resolveWorkspaceDir,
   workspaceCodeStateDir,
   workspaceConfigPath,
   workspaceDbPath,
+  workspaceEnvPath,
   workspaceStateDir,
+  readWorkerStartMarker,
 } from "./paths";
-
-/** Maximum body size accepted (matches the run recorder's description cap). */
-export const MAX_INJECTED_BODY_CHARS = 20_000;
 
 /** How often `--wait` re-reads the task row. */
 const WAIT_POLL_INTERVAL_MS = 1_000;
@@ -53,6 +57,17 @@ const WAIT_POLL_INTERVAL_MS = 1_000;
  */
 export const DEFAULT_WAIT_TIMEOUT_SECONDS = 6 * 60 * 60;
 
+/**
+ * How long `--wait` tolerates a missing worker for an already-claimed task.
+ *
+ * A claimed (`running`) row is mid-run, so the worker may have just been
+ * restarted and startup recovery can auto-resume it. A worker that never
+ * returns (crash without a restart, or a permanently stopped daemon) must
+ * still fail in bounded time instead of waiting out the six-hour overall
+ * deadline.
+ */
+export const WORKER_RESTART_GRACE_MS = 5 * 60 * 1_000;
+
 export interface WorkerAddOptions {
   /** Human-readable status sink (defaults to stdout). */
   log?: (message: string) => void;
@@ -60,6 +75,10 @@ export interface WorkerAddOptions {
   error?: (message: string) => void;
   /** Reads stdin for `--body-file -`; injectable for tests. */
   readStdin?: () => string;
+  /** Override {@link WORKER_RESTART_GRACE_MS}; injectable for tests. */
+  restartGraceMs?: number;
+  /** Override how often `--wait` re-reads the task row; injectable for tests. */
+  waitPollIntervalMs?: number;
 }
 
 export interface AddOptions {
@@ -226,55 +245,6 @@ export function parseWorkerAddArgs(args: string[]): ParsedAddArgs {
     return { kind: "error", message: "--idempotency-key cannot be empty." };
   }
   return { kind: "ok", options };
-}
-
-/** Filesystem-safe slug derived from a task title. */
-export function slugifyTitle(title: string): string {
-  return title
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 40)
-    .replace(/-+$/g, "");
-}
-
-/**
- * Derive a unique `local-<slug>` task key.
- *
- * The `local-` prefix keeps generated keys (and therefore `feature/local-…`
- * branches) from colliding with tracker keys, which always carry a
- * `PROJ-123`-style shape.
- */
-export function deriveInjectedTaskKey(title: string, isTaken: (key: string) => boolean): string {
-  const base = `local-${slugifyTitle(title) || "task"}`;
-  if (!isTaken(base)) return base;
-  for (let suffix = 2; ; suffix++) {
-    const candidate = `${base}-${suffix}`;
-    if (!isTaken(candidate)) return candidate;
-  }
-}
-
-/** Render the local markdown task file the pipeline consumes. */
-export function buildInjectedTaskMarkdown(input: {
-  taskKey: string;
-  title: string;
-  body: string;
-  now?: Date;
-}): string {
-  const title = input.title.replace(/\s+/g, " ").trim();
-  const created = (input.now ?? new Date()).toISOString();
-  const body = input.body.trimEnd();
-  return [
-    "---",
-    `key: ${input.taskKey}`,
-    `created_at: ${created}`,
-    "---",
-    "",
-    `# ${title}`,
-    "",
-    body,
-    "",
-  ].join("\n");
 }
 
 function displayPath(path: string): string {
@@ -451,6 +421,8 @@ export async function runWorkerAdd(
       wait: add.wait,
       json: add.json,
       waitTimeoutSeconds: add.waitTimeoutSeconds,
+      restartGraceMs: options.restartGraceMs,
+      waitPollIntervalMs: options.waitPollIntervalMs,
     };
     if (add.resume) {
       return await resumeTask(add.resume, context);
@@ -459,16 +431,8 @@ export async function runWorkerAdd(
       error("❌ Could not resolve the task's repo and body.");
       return 1;
     }
-    if (add.idempotencyKey) {
-      // Only an active (pending/running) task dedupes; a settled one under the
-      // same key is history and a new occurrence is enqueued below.
-      const existing = store.findActiveByIdempotencyKey(add.idempotencyKey);
-      if (existing) {
-        // `await` is load-bearing: without it the surrounding `finally` would
-        // `store.close()` while `reportTask`/`waitForTask` is still polling.
-        return await reportTask(existing, context);
-      }
-    }
+    // `await` is load-bearing: without it the surrounding `finally` would
+    // `store.close()` while `reportTask`/`waitForTask` is still polling.
     return await enqueueNewTask(add, target.body, target.repo, context);
   } catch (enqueueError) {
     // Filesystem/DB failures (including a sandbox denying writes to the
@@ -518,22 +482,18 @@ interface TaskContext {
   json: boolean;
   /** `--wait` deadline in seconds; `0` = no limit, undefined = the default. */
   waitTimeoutSeconds?: number;
+  /** How long `--wait` tolerates a missing worker; defaults to the constant. */
+  restartGraceMs?: number;
+  /** How often `--wait` re-reads the task row; defaults to the constant. */
+  waitPollIntervalMs?: number;
   store: InjectedTaskStore;
   selectedDir: string;
+  /**
+   * ISO-8601 end of the earliest usage-limit window when every harness in the
+   * worker's chain is limited (set once the task row is known to be pending).
+   */
+  harnessPausedUntil?: string;
 }
-
-/** A per-invocation filename so concurrent callers never share a prompt path. */
-function injectedTaskFileName(taskKey: string): string {
-  return `${taskKey}-${randomBytes(4).toString("hex")}.md`;
-}
-
-/** Whether an insert failed on the `task_key` unique index (lost a key race). */
-function isTaskKeyConflict(error: unknown): boolean {
-  return /UNIQUE constraint failed: injected_tasks\.task_key/i.test(String(error));
-}
-
-/** Bound the re-derive/retry loop if many callers race the same title. */
-const MAX_TASK_KEY_ATTEMPTS = 50;
 
 /** Create the markdown file + durable row, then optionally wait. */
 async function enqueueNewTask(
@@ -543,74 +503,43 @@ async function enqueueNewTask(
   ctx: TaskContext & { workerRunning: boolean },
 ): Promise<number> {
   const { store, selectedDir, workerRunning, log, status } = ctx;
-  const dir = injectedTasksDir(selectedDir);
-  // Prompts hold arbitrary operator context, so keep them owner-only like the
-  // workspace .env. `mode` only applies to newly created paths.
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
-
-  for (let attempt = 0; ; attempt++) {
-    const taskKey = deriveInjectedTaskKey(add.title, (key) => store.hasTaskKey(key));
-    // Unique per call: if a concurrent caller wins the same key or idempotency
-    // row, unlinking our own file can never delete the winner's prompt.
-    const taskFile = join(dir, injectedTaskFileName(taskKey));
-    writeFileSync(taskFile, buildInjectedTaskMarkdown({ taskKey, title: add.title, body }), {
-      encoding: "utf8",
-      mode: 0o600,
-    });
-
-    let enqueued: EnqueueInjectedTaskResult;
-    try {
-      enqueued = store.enqueue({
-        taskKey,
-        repo: repo.name,
-        title: add.title.trim(),
-        body,
-        taskFile,
-        idempotencyKey: add.idempotencyKey,
-        actor: "local:add",
-      });
-    } catch (enqueueError) {
-      try {
-        unlinkSync(taskFile);
-      } catch {
-        // Best-effort cleanup.
-      }
-      // A concurrent caller claimed this task_key first; re-derive (now seeing
-      // their committed row) and retry with a suffixed key.
-      if (isTaskKeyConflict(enqueueError) && attempt < MAX_TASK_KEY_ATTEMPTS) continue;
-      throw enqueueError;
-    }
-
-    const { task, deduplicated } = enqueued;
-    if (deduplicated) {
-      // Lost an idempotency race: drop our own file and report their row.
-      try {
-        unlinkSync(taskFile);
-      } catch {
-        // Best-effort cleanup.
-      }
-      return reportTask(task, ctx);
-    }
-
-    if (!add.json) {
-      status(`✅ Enqueued ${task.taskKey} for repo "${task.repo}" (task #${task.id}).`);
-      status(
-        workerRunning
-          ? "   The worker picks it up on its next poll."
-          : "⚠️  No worker is running; the task stays queued until one starts.",
-      );
-      status(`   Prompt: ${displayPath(task.taskFile)}`);
-    }
-
-    if (!add.wait) {
-      if (add.json) log(JSON.stringify({ ...serialize(task), deduplicated: false }));
-      return 0;
-    }
-    return await waitForTask(task.id, { ...ctx, deduplicated: false, taskKey: task.taskKey });
+  // Only an active (pending/running) task dedupes; a settled one under the
+  // same key is history and a new occurrence is enqueued.
+  const { task, deduplicated } = enqueueInjectedTask(store, selectedDir, {
+    repo: repo.name,
+    title: add.title,
+    body,
+    idempotencyKey: add.idempotencyKey,
+    actor: "local:add",
+  });
+  if (deduplicated) {
+    return await reportTask(task, ctx);
   }
+
+  const pause = readHarnessPause(selectedDir);
+  if (!add.json) {
+    status(`✅ Enqueued ${task.taskKey} for repo "${task.repo}" (task #${task.id}).`);
+    if (!workerRunning) {
+      status("⚠️  No worker is running; the task stays queued until one starts.");
+    } else if (!pause) {
+      status("   The worker picks it up on its next poll.");
+    }
+  }
+  const paused = warnHarnessPause(pause, ctx);
+  if (!add.json) status(`   Prompt: ${displayPath(task.taskFile)}`);
+
+  if (!add.wait) {
+    if (add.json) log(JSON.stringify({ ...serialize(task), deduplicated: false, ...paused }));
+    return 0;
+  }
+  return await waitForTask(
+    task.id,
+    { ...ctx, ...paused, deduplicated: false, taskKey: task.taskKey },
+    task,
+  );
 }
 
-function serialize(task: InjectedTask): {
+function serialize(task: Pick<InjectedTask, "id" | "taskKey" | "repo" | "status">): {
   id: number;
   taskKey: string;
   repo: string;
@@ -619,13 +548,81 @@ function serialize(task: InjectedTask): {
   return { id: task.id, taskKey: task.taskKey, repo: task.repo, status: task.status };
 }
 
+/** Best-effort read of the worker's harness-chain pause; never throws. */
+function readHarnessPause(selectedDir: string): WorkerHarnessPause | null {
+  try {
+    return readWorkerHarnessPause(selectedDir, workspaceDbPath(selectedDir));
+  } catch {
+    return null;
+  }
+}
+
+/** Fallback harness suggested when the whole chain is usage-limited. */
+const FALLBACK_HARNESS_SUGGESTIONS = ["codex", "claude-code", "opencode"];
+
+/** A registered harness not already in the chain, for the fallback hint. */
+function suggestFallbackHarness(chain: readonly string[]): string {
+  const candidates = [
+    ...FALLBACK_HARNESS_SUGGESTIONS,
+    ...listHarnesses().map((harness) => harness.name),
+  ];
+  return candidates.find((name) => !chain.includes(name)) ?? "codex";
+}
+
+/**
+ * Warn (on the status sink, so stderr under `--json`) that the pending task
+ * cannot start until the earliest usage-limit window of the worker's chain
+ * elapses, plus a `--wait` timeout warning when its deadline ends earlier.
+ *
+ * @returns The `harnessPausedUntil` JSON field, or `{}` when not exhausted.
+ */
+function warnHarnessPause(
+  pause: WorkerHarnessPause | null,
+  ctx: TaskContext,
+): { harnessPausedUntil?: string } {
+  if (!pause) return {};
+  const until = new Date(pause.untilMs).toISOString();
+  const chain = pause.chain.join(",");
+  ctx.status(
+    `⏳ Every agent harness in AGENT_HARNESS (${chain}) is usage-limited until ${until}; ` +
+      "the worker starts this task after that.",
+  );
+  const example = [...pause.chain, suggestFallbackHarness(pause.chain)].join(",");
+  ctx.status(
+    `   Add a fallback harness (e.g. AGENT_HARNESS=${example} in ` +
+      `${displayPath(workspaceEnvPath(ctx.selectedDir))}) to keep working through limits.`,
+  );
+  if (ctx.wait) {
+    const timeoutSeconds = ctx.waitTimeoutSeconds ?? DEFAULT_WAIT_TIMEOUT_SECONDS;
+    if (timeoutSeconds > 0 && Date.now() + timeoutSeconds * 1000 < pause.untilMs) {
+      ctx.status(
+        `⚠️  --wait-timeout (${timeoutSeconds}s) ends before that reset; ` +
+          "the wait will likely time out before the task can start.",
+      );
+    }
+  }
+  return { harnessPausedUntil: until };
+}
+
 /**
  * Emit the single result for a settled task: the JSON object under `--json`,
  * otherwise a human success/failure line. Returns the process exit code.
  */
-function emitSettled(task: InjectedTask, deduplicated: boolean, ctx: TaskContext): number {
+function emitSettled(
+  task: Pick<InjectedTask, "id" | "taskKey" | "repo" | "status" | "message">,
+  deduplicated: boolean,
+  ctx: TaskContext,
+): number {
   if (ctx.json) {
-    ctx.log(JSON.stringify({ ...serialize(task), deduplicated }));
+    ctx.log(
+      JSON.stringify({
+        ...serialize(task),
+        deduplicated,
+        ...(task.status === "failed"
+          ? { error: task.message ?? "task pipeline did not complete cleanly" }
+          : {}),
+      }),
+    );
   } else if (task.status === "failed") {
     ctx.error(`❌ ${task.taskKey} failed${task.message ? `: ${task.message}` : ""}`);
   } else {
@@ -641,14 +638,21 @@ async function reportTask(task: InjectedTask, ctx: TaskContext): Promise<number>
       `ℹ️  Idempotency key already used by ${task.taskKey} (task #${task.id}, status: ${task.status}).`,
     );
   }
+  // Only a still-pending row is waiting on a harness; a running one started.
+  const paused =
+    task.status === "pending" ? warnHarnessPause(readHarnessPause(ctx.selectedDir), ctx) : {};
   if (!ctx.wait) {
-    if (ctx.json) ctx.log(JSON.stringify({ ...serialize(task), deduplicated: true }));
+    if (ctx.json) ctx.log(JSON.stringify({ ...serialize(task), deduplicated: true, ...paused }));
     return 0;
   }
   if (task.status === "done" || task.status === "failed") {
     return emitSettled(task, true, ctx);
   }
-  return await waitForTask(task.id, { ...ctx, deduplicated: true, taskKey: task.taskKey });
+  return await waitForTask(
+    task.id,
+    { ...ctx, ...paused, deduplicated: true, taskKey: task.taskKey },
+    task,
+  );
 }
 
 /**
@@ -672,11 +676,21 @@ async function resumeTask(
   }
   if (task.status === "pending" || task.status === "running") {
     ctx.status(`ℹ️  ${taskKey} is already ${task.status} (task #${task.id}); not re-queued.`);
+    const paused =
+      task.status === "pending" ? warnHarnessPause(readHarnessPause(ctx.selectedDir), ctx) : {};
     if (!ctx.wait) {
-      if (ctx.json) ctx.log(JSON.stringify({ ...serialize(task), deduplicated: true }));
+      if (ctx.json) ctx.log(JSON.stringify({ ...serialize(task), deduplicated: true, ...paused }));
       return 0;
     }
-    return await waitForTask(task.id, { ...ctx, deduplicated: true, taskKey });
+    return await waitForTask(task.id, { ...ctx, ...paused, deduplicated: true, taskKey }, task);
+  }
+
+  // A hard-killed worker's detached child may still be running this attempt in
+  // the same worktree. Re-queueing would force-remove that worktree underneath
+  // it, so refuse until the operator confirms the process is gone.
+  if (interruptedChildStillRunning(task)) {
+    ctx.error(`❌ ${injectedChildStillRunningMessage(taskKey, task.childPid!)}`);
+    return 1;
   }
 
   const revived = store.requeueSettled(taskKey);
@@ -684,19 +698,28 @@ async function resumeTask(
     ctx.error(`❌ ${taskKey} could not be re-queued; it moved on. Reload and try again.`);
     return 1;
   }
+  const pause = readHarnessPause(ctx.selectedDir);
   if (!ctx.json) {
     ctx.status(`♻️  Re-queued ${revived.taskKey} (task #${revived.id}, repo "${revived.repo}").`);
-    ctx.status(
-      workerRunning
-        ? "   The worker resumes it on its next poll (same branch when the prior attempt left one)."
-        : "⚠️  No worker is running; the task stays queued until one starts.",
-    );
+    if (!workerRunning) {
+      ctx.status("⚠️  No worker is running; the task stays queued until one starts.");
+    } else if (!pause) {
+      ctx.status(
+        "   The worker resumes it on its next poll (same branch when the prior attempt left one).",
+      );
+    }
   }
+  const paused = warnHarnessPause(pause, ctx);
   if (!ctx.wait) {
-    if (ctx.json) ctx.log(JSON.stringify({ ...serialize(revived), deduplicated: false }));
+    if (ctx.json)
+      ctx.log(JSON.stringify({ ...serialize(revived), deduplicated: false, ...paused }));
     return 0;
   }
-  return await waitForTask(revived.id, { ...ctx, deduplicated: false, taskKey });
+  return await waitForTask(
+    revived.id,
+    { ...ctx, ...paused, deduplicated: false, taskKey },
+    revived,
+  );
 }
 
 /**
@@ -723,10 +746,21 @@ function failWait(
         status: "failed",
         deduplicated: ctx.deduplicated,
         error: result.error,
+        ...(ctx.harnessPausedUntil ? { harnessPausedUntil: ctx.harnessPausedUntil } : {}),
       }),
     );
   }
   return 1;
+}
+
+/** Whether a process still exists (EPERM means it exists but is not signalable). */
+function isPidRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
 }
 
 /**
@@ -740,14 +774,18 @@ function failWait(
 async function waitForTask(
   id: number,
   ctx: TaskContext & { deduplicated: boolean; taskKey: string },
+  initialTask: InjectedTask,
 ): Promise<number> {
   ctx.status(`⏳ Waiting for task #${id} to finish (Ctrl-C to detach)...`);
   const timeoutSeconds = ctx.waitTimeoutSeconds ?? DEFAULT_WAIT_TIMEOUT_SECONDS;
   const deadline = timeoutSeconds > 0 ? Date.now() + timeoutSeconds * 1_000 : Infinity;
+  const restartGraceMs = ctx.restartGraceMs ?? WORKER_RESTART_GRACE_MS;
+  const pollIntervalMs = ctx.waitPollIntervalMs ?? WAIT_POLL_INTERVAL_MS;
+  let workerGapSince: number | null = null;
   for (;;) {
     const task = ctx.store.getById(id);
     if (!task) {
-      return reportPrunedTask(id, ctx);
+      return reportPrunedTask(id, ctx, initialTask.repo);
     }
     if (task.status === "done" || task.status === "failed") {
       return emitSettled(task, ctx.deduplicated, ctx);
@@ -769,17 +807,61 @@ async function waitForTask(
     const workerRunning =
       LockManager.readLockStatus(ctx.selectedDir, ".worker.lock", { plainDir: true })?.running ??
       false;
-    if (!workerRunning) {
-      return failWait(
-        ctx,
-        { id, repo: task.repo, error: "The worker stopped before the task finished." },
-        [
-          "❌ The worker stopped before the task finished; it remains queued/failed.",
-          "   Start the worker again and inspect the dashboard run history.",
-        ],
-      );
+    if (workerRunning) {
+      // A replacement worker came back within the grace: a later restart gets
+      // its own grace window rather than inheriting an old one.
+      workerGapSince = null;
+    } else {
+      const now = Date.now();
+      // The replacement worker writes this marker before its slow pre-lock
+      // startup (orphan recovery, worktree sweep, push probes), so a live
+      // replacement is evidence the worker is coming back even while the lock
+      // is still absent. Only a marker written after this task was claimed can
+      // belong to the replacement; an older marker is from the dead worker and
+      // a recycled pid must not be mistaken for a new process.
+      const startingMarker = readWorkerStartMarker(ctx.selectedDir);
+      const replacementStarting =
+        startingMarker !== null &&
+        isPidRunning(startingMarker.pid) &&
+        (task.startedAt === undefined || startingMarker.startedAt >= task.startedAt);
+      if (replacementStarting) {
+        // Restart grace measures from evidence of a new worker, not from the
+        // lock disappearing while that process is still in startup.
+        workerGapSince = now;
+      } else if (workerGapSince === null) {
+        workerGapSince = now;
+        if (task.status === "running") {
+          ctx.status(
+            `ℹ️  No worker is running; task #${id} is still running and may auto-resume when ` +
+              "the worker restarts. Still waiting within the restart grace period.",
+          );
+        }
+      }
+      if (!replacementStarting && now - workerGapSince >= restartGraceMs) {
+        const graceSeconds = Math.max(1, Math.round(restartGraceMs / 1_000));
+        const error =
+          `The worker stopped and did not restart within ${graceSeconds}s while task #${id} ` +
+          "was running.";
+        return failWait(ctx, { id, repo: task.repo, error }, [
+          `❌ ${error}`,
+          "   Start the worker again to auto-resume the task, or inspect the dashboard run history.",
+        ]);
+      }
+      if (task.status !== "running" && !replacementStarting) {
+        // A `pending` row has nobody to claim it, so fail fast as before. While
+        // a replacement is starting it will be claimed, so it waits through the
+        // same bounded grace instead of reporting a transient restart failure.
+        return failWait(
+          ctx,
+          { id, repo: task.repo, error: "The worker stopped before the task finished." },
+          [
+            "❌ The worker stopped before the task finished; it remains queued/failed.",
+            "   Start the worker again and inspect the dashboard run history.",
+          ],
+        );
+      }
     }
-    await new Promise((resolveWait) => setTimeout(resolveWait, WAIT_POLL_INTERVAL_MS));
+    await new Promise((resolveWait) => setTimeout(resolveWait, pollIntervalMs));
   }
 }
 
@@ -787,52 +869,31 @@ async function waitForTask(
  * Report a task whose injected row was pruned by the worker's retention sweep
  * before `--wait` observed its terminal status.
  *
- * `pruneSettled` only removes settled (`done`/`failed`) rows, so a row that
- * vanished after the CLI enqueued it settled; its outcome is durably mirrored
- * in the run record (same DB, keyed by the task key) written before the row is
- * finished. Read that instead of reporting a spurious "disappeared" failure
- * for a successful run. A missing or non-terminal run (e.g. the DB was edited
- * out from under us) is genuinely inconclusive and still fails.
+ * `pruneSettled` retains each row's outcome under its immutable queue ID.
+ * This also keeps a later task with the same key from changing this result.
  */
 function reportPrunedTask(
   id: number,
   ctx: TaskContext & { deduplicated: boolean; taskKey: string },
+  repo: string,
 ): number {
-  const run = readLatestRun(ctx.selectedDir, ctx.taskKey);
-  if (!run || run.status === "in_progress" || run.status === "deferred") {
+  const outcome = ctx.store.getPrunedOutcome(id);
+  if (!outcome || outcome.repo !== repo) {
     return failWait(ctx, { id, error: `Injected task #${id} disappeared while waiting.` }, [
       `❌ Injected task #${id} disappeared while waiting.`,
     ]);
   }
-  const settled: InjectedTask = {
+  const settled = {
     id,
     taskKey: ctx.taskKey,
-    repo: run.repo ?? "",
-    title: "",
-    body: "",
-    taskFile: "",
-    actor: "",
-    status: run.status === "succeeded" ? "done" : "failed",
-    message: run.outcomeReason,
-    createdAt: run.startedAt,
+    repo: outcome.repo,
+    status: outcome.status,
+    message: outcome.message,
   };
   if (!ctx.json) {
-    ctx.status(`ℹ️  Injected task #${id} was pruned after it settled; reporting its run outcome.`);
+    ctx.status(`ℹ️  Injected task #${id} was pruned after it settled; reporting its outcome.`);
   }
   return emitSettled(settled, ctx.deduplicated, ctx);
-}
-
-/** Latest run record for a task key (read-only; null when absent/unreadable). */
-function readLatestRun(selectedDir: string, taskKey: string): RunRecord | null {
-  let store: RunStore | null = null;
-  try {
-    store = new RunStore(workspaceDbPath(selectedDir), { readonly: true });
-    return store.latestRunByTaskKey([taskKey]).get(taskKey) ?? null;
-  } catch {
-    return null;
-  } finally {
-    store?.close();
-  }
 }
 
 /** Read all of stdin (used by `--body-file -`). */

@@ -32,7 +32,7 @@ import { TASK_POLL_LAST_DRAIN_KEY } from "../state/worker-state";
 import type { WebhookQueue } from "../state/webhook-queue";
 import type { WorkerState } from "../state/worker-state";
 import type { Acquirer } from "../../worker";
-import { cliResultToTaskResult, runWithFailover } from "../worker/failover";
+import { cliResultToTaskResult, harnessBlockedReason, runWithFailover } from "../worker/failover";
 
 export interface ReadyTask {
   key: string;
@@ -43,9 +43,11 @@ export interface ReadyTask {
  * Outcome of one task execution. `true` means the run completed; `"deferred"`
  * means it never started (repo busy or every harness usage-limited) and must be
  * evaluated again next tick; `"skipped"` means the retry gate skipped an
- * unchanged incomplete ticket, which is deliberately not a run.
+ * unchanged incomplete ticket, which is deliberately not a run; `"interrupted"`
+ * means a shutdown drain killed the run before it settled, so its outcome is
+ * unknown rather than failed.
  */
-export type TaskExecutionResult = boolean | "deferred" | "skipped";
+export type TaskExecutionResult = boolean | "deferred" | "skipped" | "interrupted";
 
 /** Dedupe key for a ready task: one execution per `(key, update stamp)`. */
 export function processedTaskId(task: ReadyTask): string {
@@ -109,6 +111,14 @@ export interface TaskPollingAcquirerOptions {
    * worker is observable as "N in flight, M slots free".
    */
   capacity?: () => { available: number; inFlight: number };
+  /**
+   * Harness-chain gate: the epoch-ms time the chain becomes usable again while
+   * every harness is usage-limited, else `undefined`. While it returns a future
+   * time the tick claims nothing and runs no detection or search, so the
+   * cursor and pending re-admissions are kept for the first tick after the
+   * limit clears. Wired to the worker failover state; omitted in focused tests.
+   */
+  harnessBlockedUntil?: () => number | undefined;
   verbose?: boolean;
 }
 
@@ -129,7 +139,8 @@ export function workerTaskArgs(): string[] {
  *               with per-repo env; direct callers inherit both
  * @returns true when the CLI exited 0, `"deferred"` when every harness in
  *   the failover chain is usage-limited, `"skipped"` when the retry gate
- *   skipped the task, false on any other failure
+ *   skipped the task, `"interrupted"` when a shutdown drain killed the child
+ *   (its exit code is meaningless then), false on any other failure
  */
 export async function runTaskViaCli(
   taskKey: string,
@@ -138,8 +149,15 @@ export async function runTaskViaCli(
     cwd?: string;
     env?: Record<string, string | undefined>;
     signal?: AbortSignal;
+    /** Called once with the spawned child pid, for durable interrupt recovery. */
+    onChildSpawn?: (pid: number) => void;
   } = {},
 ): Promise<TaskExecutionResult> {
+  // Distinguishes "the drain killed this run" from "the run failed and the
+  // drain happened to start around the same time". Only the abort handler (or
+  // an already-aborted signal) sets it, so the SIGTERM exit code of a drained
+  // child is never mistaken for a genuine pipeline failure.
+  let interrupted = false;
   const result = await runWithFailover(
     (env) =>
       new Promise<number>((resolve) => {
@@ -155,6 +173,7 @@ export async function runTaskViaCli(
           resolve(code);
         };
         if (opts.signal?.aborted) {
+          interrupted = true;
           finish(1);
           return;
         }
@@ -165,8 +184,18 @@ export async function runTaskViaCli(
           env,
           detached,
         });
+        if (child.pid !== undefined) {
+          try {
+            opts.onChildSpawn?.(child.pid);
+          } catch (error) {
+            console.warn(
+              `⚠️  Could not record the task child pid for ${taskKey}: ${(error as Error).message}`,
+            );
+          }
+        }
         abort = () => {
           if (child.pid === undefined) return;
+          interrupted = true;
           try {
             if (detached) process.kill(-child.pid, "SIGTERM");
             else child.kill("SIGTERM");
@@ -194,6 +223,7 @@ export async function runTaskViaCli(
       }),
     opts.env ?? process.env,
   );
+  if (interrupted) return "interrupted";
   return cliResultToTaskResult(result);
 }
 
@@ -217,6 +247,8 @@ export class TaskPollingAcquirer implements Acquirer {
    */
   private readonly pendingRescans = new Map<string, string>();
   private readonly gateErrors = new Set<string>();
+  /** Resume time of the harness-chain pause last logged, so it is logged once. */
+  private pausedUntil: number | undefined;
 
   constructor(options: TaskPollingAcquirerOptions) {
     this.options = options;
@@ -278,7 +310,8 @@ export class TaskPollingAcquirer implements Acquirer {
 
   /**
    * One detect → evaluate → dedupe → execute cycle. The detect/evaluate/claim
-   * phase is skipped while busy and while the working-window gate is closed
+   * phase is skipped while busy, while every harness is usage-limited, and
+   * while the working-window gate is closed
    * (unless overridden for a manual run or startup catch-up). The scheduled
    * executions are awaited only after the busy gate is released, so the next
    * interval tick keeps polling and fills free concurrency slots while the
@@ -291,18 +324,7 @@ export class TaskPollingAcquirer implements Acquirer {
     const query = this.resolveQuery();
     if (!query) return;
 
-    const gate = this.options.gate;
-    if (!bypass.ignoreGate && gate) {
-      const manual = this.scheduleGuard(() => gate.consumeManualPickup(), false);
-      if (manual) {
-        console.log(`▶️  [${this.name}] manual run requested; draining now`);
-      } else if (!this.scheduleGuard(() => gate.pickupAllowed(), true)) {
-        // Outside the working window: no detection, no evaluation, no new
-        // tasks. Whatever is already running finishes before this check even
-        // happens, and no cursor moves while gated out.
-        return;
-      }
-    }
+    if (!this.pickupAllowed(bypass)) return;
 
     this.busy = true;
 
@@ -522,6 +544,52 @@ export class TaskPollingAcquirer implements Acquirer {
       if (key !== null) actioned.add(key);
     }
     return actioned;
+  }
+
+  /**
+   * Pre-tick gates: the harness-chain pause, then the working window (quiet
+   * hours) unless bypassed. The harness check runs first so a queued manual
+   * pickup is not consumed by a tick that could not start anything anyway.
+   * Gated out means no detection, no evaluation, no new tasks, and no cursor
+   * movement; whatever is already running finishes naturally.
+   */
+  private pickupAllowed(bypass: { ignoreGate?: boolean }): boolean {
+    if (this.harnessPaused()) return false;
+    const gate = this.options.gate;
+    if (bypass.ignoreGate || !gate) return true;
+    if (this.scheduleGuard(() => gate.consumeManualPickup(), false)) {
+      console.log(`▶️  [${this.name}] manual run requested; draining now`);
+      return true;
+    }
+    return this.scheduleGuard(() => gate.pickupAllowed(), true);
+  }
+
+  /**
+   * Harness-chain pause: while every harness is usage-limited, picking tasks up
+   * would only claim, defer, and unclaim each one on every tick. Logs the pause
+   * once (again only when the resume time moves) and once more on resume.
+   */
+  private harnessPaused(): boolean {
+    const resolve = this.options.harnessBlockedUntil;
+    if (!resolve) return false;
+    const until = this.scheduleGuard(resolve, undefined);
+    if (until !== undefined && until > Date.now()) {
+      if (this.pausedUntil !== until) {
+        this.pausedUntil = until;
+        this.loadPendingRescans(this.options.detector.source);
+        const waiting = this.pendingRescans.size;
+        const waitingNote = waiting > 0 ? `; ${waiting} task(s) waiting` : "";
+        console.log(
+          `⏳ [${this.name}] pickup paused: ${harnessBlockedReason(until)}${waitingNote}`,
+        );
+      }
+      return true;
+    }
+    if (this.pausedUntil !== undefined) {
+      this.pausedUntil = undefined;
+      console.log(`▶️  [${this.name}] pickup resumed: an agent harness is available again`);
+    }
+    return false;
   }
 
   private resolveQuery(): string | undefined {

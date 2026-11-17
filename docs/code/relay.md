@@ -1,10 +1,10 @@
 ---
 title: "Relay (Instant Events)"
 sidebarLabel: "Relay & Connections"
-description: "Connect the worker to the DevIntern relay for instant PR and task events without webhook setup"
+description: "Use when the worker should receive PR and tracker events in seconds through the DevIntern relay instead of polling or self-hosted webhooks."
 section: "Automation"
 order: 5
-dateModified: 2026-10-16
+dateModified: 2026-11-12
 ---
 
 # Relay (Instant Events)

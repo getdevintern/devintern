@@ -46,6 +46,25 @@ describe("report redaction", () => {
     expect(redacted).toContain("<email>");
   });
 
+  test("redacts emails at any position, including adjacent to punctuation", () => {
+    const redacted = redactReportText(
+      "(first.last+tag@mail.example.com), x<y@example.org>; z:a_b%c@sub.example.io.",
+      { cwd: workdir },
+    );
+    expect(redacted).toBe("(<email>), x<<email>>; z:<email>.");
+  });
+
+  test("redacts a long line with no email in linear time", () => {
+    // A quadratic email scan took minutes on input this size; the test
+    // timeout is the regression signal, not a wall-clock assertion.
+    const blob = "A".repeat(1_000_000);
+    const redacted = redactReportText(`${blob} contact someone@example.com`, {
+      cwd: workdir,
+      maxChars: 2_000_000,
+    });
+    expect(redacted.endsWith("contact <email>")).toBe(true);
+  });
+
   test("keeps identifier-shaped false positives", () => {
     expect(redactReportText("UTF-8 and ISO-8601", { cwd: workdir })).toContain("UTF-8");
     expect(redactReportText("UTF-8 and ISO-8601", { cwd: workdir })).toContain("ISO-8601");

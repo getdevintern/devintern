@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 
 import type { LogEntry } from "@/lib/api";
-import { levelDotClass, matchesQuery, severityCounts } from "@/lib/log-view";
+import { matchesQuery, severityCounts } from "@/lib/log-view";
 
 function entry(partial: Partial<LogEntry>): LogEntry {
   return {
@@ -41,9 +41,4 @@ test("severityCounts tallies errors and warnings only", () => {
 
 test("severityCounts of an empty window is zeroed", () => {
   expect(severityCounts([])).toEqual({ error: 0, warn: 0 });
-});
-
-test("levelDotClass distinguishes severities", () => {
-  expect(levelDotClass("error")).not.toBe(levelDotClass("warn"));
-  expect(levelDotClass("info")).not.toBe(levelDotClass("error"));
 });

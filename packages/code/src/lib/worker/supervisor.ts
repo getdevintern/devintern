@@ -6,7 +6,14 @@
  * replacing the callback with executor dispatch.
  */
 
-export type JobKind = "task" | "review" | "ci_fix" | "conflict" | "automation" | "estimation";
+export type JobKind =
+  | "task"
+  | "review"
+  | "ci_fix"
+  | "conflict"
+  | "auto_merge"
+  | "automation"
+  | "estimation";
 
 export type HostCheckoutClass = "task_worktree" | "shared_base" | "workspace";
 
@@ -60,6 +67,12 @@ export interface TaskSupervisor {
    * re-admit work the drain is waiting on.
    */
   resume(): void;
+  /**
+   * Whether a shutdown {@link drain} has begun. A draining supervisor rejects
+   * new admissions and aborts running jobs, so acquirers use this to avoid
+   * settling their durable rows as failures while the process is exiting.
+   */
+  isDraining(): boolean;
   /** How many admitted jobs are currently running. */
   inFlightCount(): number;
   /**
@@ -85,6 +98,34 @@ interface QueuedJob {
   request: ScheduleRequest<unknown>;
   resolve: (value: unknown) => void;
   reject: (error: unknown) => void;
+  enqueuedAt: number;
+}
+
+/**
+ * Admission priority by job kind; lower starts first among jobs that can
+ * start. Short, PR-facing work (merge checks, review replies, CI fixes) jumps
+ * ahead of long agent runs that would otherwise hold a repository's shared
+ * base checkout for many minutes. Within a level the queue stays FIFO.
+ */
+export const JOB_PRIORITY: Record<JobKind, number> = {
+  auto_merge: 0,
+  review: 0,
+  ci_fix: 0,
+  conflict: 1,
+  task: 2,
+  automation: 2,
+  estimation: 2,
+};
+
+/**
+ * A job that has waited this long is promoted to the top level, so a steady
+ * stream of short jobs cannot starve conflict resolution or automations.
+ */
+export const PRIORITY_AGING_MS = 15 * 60 * 1000;
+
+export interface SupervisorOptions {
+  /** Clock for priority aging; injectable for tests. */
+  now?: () => number;
 }
 
 interface RunningJob {
@@ -114,8 +155,12 @@ function validateRequest(request: ScheduleRequest<unknown>): void {
 }
 
 /** Create the minimal in-memory supervisor used by the host executor. */
-export function createTaskSupervisor(initialLimits: SupervisorLimits): TaskSupervisor {
+export function createTaskSupervisor(
+  initialLimits: SupervisorLimits,
+  options: SupervisorOptions = {},
+): TaskSupervisor {
   validateLimits(initialLimits);
+  const now = options.now ?? Date.now;
 
   let limits = { ...initialLimits };
   // Two independent closed states: `draining` is the shutdown drain (terminal
@@ -160,15 +205,37 @@ export function createTaskSupervisor(initialLimits: SupervisorLimits): TaskSuper
     }
   };
 
+  /** Effective priority: the kind's level, or the top level once aged. */
+  const priorityOf = (job: QueuedJob, at: number): number =>
+    at - job.enqueuedAt >= PRIORITY_AGING_MS ? 0 : JOB_PRIORITY[job.request.kind];
+
+  /** Index of the highest-priority job that can start (FIFO within a level), or -1. */
+  const nextAdmissible = (): number => {
+    const at = now();
+    let best = -1;
+    let bestPriority = Infinity;
+    for (let index = 0; index < queued.length; index++) {
+      const job = queued[index]!;
+      if (!canStart(job.request)) continue;
+      const priority = priorityOf(job, at);
+      if (priority < bestPriority) {
+        best = index;
+        bestPriority = priority;
+        if (priority === 0) break;
+      }
+    }
+    return best;
+  };
+
   let pumping = false;
   const pump = (): void => {
     if (pumping || admissionsBlocked()) return;
     pumping = true;
     try {
-      // Scan for the first admissible job each time. A saturated repository
+      // Scan for the best admissible job each time. A saturated repository
       // must not block unrelated work queued behind it.
       for (;;) {
-        const index = queued.findIndex((job) => canStart(job.request));
+        const index = nextAdmissible();
         if (index < 0) return;
         const [job] = queued.splice(index, 1);
         if (!job) return;
@@ -248,6 +315,7 @@ export function createTaskSupervisor(initialLimits: SupervisorLimits): TaskSuper
           request: request as ScheduleRequest<unknown>,
           resolve: resolve as (value: unknown) => void,
           reject,
+          enqueuedAt: now(),
         });
       });
       pump();
@@ -305,6 +373,10 @@ export function createTaskSupervisor(initialLimits: SupervisorLimits): TaskSuper
       if (!holding) return;
       holding = false;
       pump();
+    },
+
+    isDraining(): boolean {
+      return draining;
     },
 
     inFlightCount(): number {

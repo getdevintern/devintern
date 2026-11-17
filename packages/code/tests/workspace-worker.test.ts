@@ -10,10 +10,12 @@ import { applyWorkspaceConfig } from "../src/lib/workspace/config-reload";
 import {
   buildFleetEventAcquirers,
   buildInjectedTaskAcquirer,
+  buildRetryQueueAcquirer,
   createFleetTaskExecutor,
   createWorkspaceTaskAcquirer,
   errorMonitorTaskArgs,
   fleetTaskArgs,
+  isHarnessChainPaused,
   resolveActionedSource,
   resolveWorkspaceAutomationContext,
   startWorktreeSweeper,
@@ -21,13 +23,22 @@ import {
 } from "../src/lib/workspace/workspace-worker";
 import type { FleetTask, RepoManagerLike } from "../src/lib/workspace/workspace-worker";
 import { InjectedTaskStore } from "../src/lib/state/injected-tasks";
+import { ScheduledRetryStore, isRunRetriable } from "../src/lib/state/run-retry";
+import { RunStore } from "../src/lib/state/run-recorder";
+import { workspaceDbPath } from "../src/lib/workspace/paths";
+import { resetWorkerFailover, startWorkerFailover } from "../src/lib/worker/failover";
 import { RUN_ORIGIN_ENV } from "../src/lib/observability/analytics";
+import { resolveRunIdentity } from "../src/lib/task/run-identity";
 import {
   actionedSourceKey,
   createTaskActionedGate,
   recordTaskActioned,
 } from "../src/lib/task/actioned-state";
-import { ACTIONED_SOURCE_ENV } from "../src/lib/workspace/env";
+import {
+  ACTIONED_SOURCE_ENV,
+  WORKSPACE_REPO_ENV,
+  WORKSPACE_TEAM_ENV,
+} from "../src/lib/workspace/env";
 import { PICKUP_RUN_ID_ENV } from "../src/lib/state/session-pickup";
 import type { TaskTrackerClient } from "../src/lib/trackers/client";
 import type { Task } from "../src/types/task-tracker";
@@ -39,6 +50,16 @@ import { toRoutableTask } from "../src/lib/workspace/router";
 import { CiFailureWatcherAcquirer } from "../src/lib/acquirers/ci-failure-watcher";
 import { GitLabReviewsClient } from "../src/lib/code-host/gitlab/reviews";
 import { saveRelayState } from "../src/lib/relay/connect";
+
+// The acquirers' default pause/drain checks read the process-wide failover
+// singleton, so a controller started by one test (or leaked by another file in
+// the same process) must never change the outcome of the next test.
+beforeEach(() => {
+  resetWorkerFailover();
+});
+afterEach(() => {
+  resetWorkerFailover();
+});
 
 /** Deterministic synchronization gate for tests (preferred over sleeps). */
 function deferred(): { promise: Promise<void>; resolve: () => void } {
@@ -451,6 +472,48 @@ describe("createFleetTaskExecutor serialization", () => {
     rmSync(workspaceDir, { recursive: true, force: true });
   });
 
+  test("a tracker task whose worktree setup fails gets a retriable failed run", async () => {
+    repoManager.createTaskWorktree = async () => {
+      throw new Error("Failed to add worktree at /x (origin/main): disk full");
+    };
+    const savedTracker = process.env.TASK_TRACKER;
+    process.env.TASK_TRACKER = "jira";
+    try {
+      const executor = createFleetTaskExecutor({
+        config: CONFIG,
+        workspaceDir,
+        skips: state.skips,
+        repoManager,
+        runTask: async () => true,
+      });
+
+      const result = await executor(
+        "BACK-77",
+        toRoutableTask({ key: "BACK-77", labels: ["backend"], components: [] }),
+      );
+
+      expect(result).toBe(false);
+      const runs = new RunStore(workspaceDbPath(workspaceDir), { readonly: true });
+      try {
+        const [run] = runs.listRuns({ taskKey: "BACK-77" });
+        expect(run).toMatchObject({
+          origin: "task",
+          tracker: "jira",
+          repo: "backend",
+          status: "failed",
+          outcomeReason:
+            "Worktree setup failed: Failed to add worktree at /x (origin/main): disk full",
+        });
+        expect(isRunRetriable(run!)).toEqual({ eligible: true, kind: "task" });
+      } finally {
+        runs.close();
+      }
+    } finally {
+      if (savedTracker === undefined) delete process.env.TASK_TRACKER;
+      else process.env.TASK_TRACKER = savedTracker;
+    }
+  });
+
   test("task runs wait for held supervisor slots", async () => {
     const supervisor = createTaskSupervisor({ maxConcurrency: 1, maxConcurrencyPerRepo: 1 });
     let agentStarted = false;
@@ -620,6 +683,7 @@ describe("createFleetTaskExecutor serialization", () => {
 
     expect(observed?.env.DEVINTERN_RUN_ORIGIN).toBe("error_monitor");
     expect(observed?.args).toContain("--skip-clarity-check");
+    expect(observed?.args).toContain("--allow-no-changes");
   });
 
   test("pins the resolved actioned source into the subprocess env", async () => {
@@ -790,6 +854,289 @@ describe("buildInjectedTaskAcquirer", () => {
       store.close();
     }
   });
+
+  test("records the spawned task child pid on the claimed row", async () => {
+    const repoManager = new FakeRepoManager(workspaceDir);
+    const store = new InjectedTaskStore(join(workspaceDir, "injected-tasks.db"));
+    try {
+      const { task } = store.enqueue({
+        taskKey: "local-child-pid",
+        repo: "backend",
+        title: "Child pid",
+        body: "",
+        taskFile: join(workspaceDir, "injected", "local-child-pid.md"),
+      });
+
+      let persistedDuringRun: number | undefined;
+      const acquirer = buildInjectedTaskAcquirer(
+        {
+          config: CONFIG,
+          workspaceDir,
+          skips: state.skips,
+          repoManager,
+          runTask: async (_taskRef, _args, options) => {
+            options.onChildSpawn?.(process.pid);
+            persistedDuringRun = store.getById(task.id)?.childPid;
+            return true;
+          },
+        },
+        store,
+      );
+
+      await acquirer.tick();
+
+      expect(persistedDuringRun).toBe(process.pid);
+      // A clean settle clears it so a later startup never probes a stale pid.
+      expect(store.getById(task.id)?.childPid).toBeUndefined();
+    } finally {
+      store.close();
+    }
+  });
+
+  test("a worktree setup failure records a retriable failed run with the real reason", async () => {
+    const repoManager = new FakeRepoManager(workspaceDir);
+    const lockError =
+      'Failed to configure worktrees for repo "backend": error: could not lock config file /x/config: File exists';
+    repoManager.ensureBareClone = async () => {
+      throw new Error(lockError);
+    };
+    const store = new InjectedTaskStore(join(workspaceDir, "injected-tasks.db"));
+    const taskFile = join(workspaceDir, "injected", "local-setup-fails.md");
+    mkdirSync(join(workspaceDir, "injected"), { recursive: true });
+    writeFileSync(taskFile, "# Setup fails\n\nBody.\n");
+    let spawned = false;
+    try {
+      const { task } = store.enqueue({
+        taskKey: "local-setup-fails",
+        repo: "backend",
+        title: "Setup fails",
+        body: "",
+        taskFile,
+      });
+      const acquirer = buildInjectedTaskAcquirer(
+        {
+          config: CONFIG,
+          workspaceDir,
+          skips: state.skips,
+          repoManager,
+          runTask: async () => {
+            spawned = true;
+            return true;
+          },
+        },
+        store,
+      );
+
+      await acquirer.tick();
+
+      expect(spawned).toBe(false);
+      // The queue row keeps the concrete cause instead of the generic fallback.
+      const row = store.getById(task.id);
+      expect(row?.status).toBe("failed");
+      expect(row?.message).toBe(`Worktree setup failed: ${lockError}`);
+
+      // A run exists, so the dashboard lists the failure and offers Retry.
+      const runs = new RunStore(workspaceDbPath(workspaceDir), { readonly: true });
+      try {
+        const [run] = runs.listRuns({ taskKey: "local-setup-fails" });
+        expect(run).toMatchObject({
+          origin: "local",
+          tracker: "local",
+          repo: "backend",
+          status: "failed",
+          outcomeReason: `Worktree setup failed: ${lockError}`,
+          taskDescription: "# Setup fails\n\nBody.\n",
+        });
+        expect(isRunRetriable(run!)).toEqual({ eligible: true, kind: "injected" });
+      } finally {
+        runs.close();
+      }
+    } finally {
+      store.close();
+    }
+  });
+
+  test("composes the run scope injected orphan recovery matches on restart", async () => {
+    const repoManager = new FakeRepoManager(workspaceDir);
+    const store = new InjectedTaskStore(join(workspaceDir, "injected-tasks.db"));
+    const taskFile = join(workspaceDir, "injected", "local-scope.md");
+    const savedOrigin = process.env[RUN_ORIGIN_ENV];
+    const savedAutomation = process.env.DEVINTERN_AUTOMATION_ID;
+    const savedTracker = process.env.TASK_TRACKER;
+    // Simulate markers leaked from the worker's parent env: neither may turn an
+    // injected task into a scheduled/manual run, or the recorded scope stops
+    // matching `origin: "local"` / `tracker: "local"` in orphan recovery.
+    process.env[RUN_ORIGIN_ENV] = "manual";
+    process.env.DEVINTERN_AUTOMATION_ID = "leaked-automation";
+    process.env.TASK_TRACKER = "jira";
+    try {
+      store.enqueue({
+        taskKey: "local-scope",
+        repo: "backend",
+        title: "Scope",
+        body: "",
+        taskFile,
+      });
+
+      let observedEnv: Record<string, string | undefined> | undefined;
+      const acquirer = buildInjectedTaskAcquirer(
+        {
+          config: CONFIG,
+          workspaceDir,
+          skips: state.skips,
+          repoManager,
+          runTask: async (_taskRef, _args, options) => {
+            observedEnv = options.env;
+            return true;
+          },
+        },
+        store,
+      );
+
+      await acquirer.tick();
+
+      expect(observedEnv).toBeDefined();
+      expect(observedEnv![WORKSPACE_REPO_ENV]).toBe("backend");
+      expect(observedEnv![WORKSPACE_TEAM_ENV]).toBeUndefined();
+      expect(resolveRunIdentity(observedEnv!)).toEqual({
+        origin: "local",
+        tracker: "local",
+        repo: "backend",
+        team: undefined,
+      });
+    } finally {
+      if (savedOrigin === undefined) delete process.env[RUN_ORIGIN_ENV];
+      else process.env[RUN_ORIGIN_ENV] = savedOrigin;
+      if (savedAutomation === undefined) delete process.env.DEVINTERN_AUTOMATION_ID;
+      else process.env.DEVINTERN_AUTOMATION_ID = savedAutomation;
+      if (savedTracker === undefined) delete process.env.TASK_TRACKER;
+      else process.env.TASK_TRACKER = savedTracker;
+      store.close();
+    }
+  });
+});
+
+describe("harness-chain pause wiring", () => {
+  let workspaceDir: string;
+  let state: WorkspaceState;
+
+  beforeEach(() => {
+    workspaceDir = join(tmpdir(), `ws-pause-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    mkdirSync(workspaceDir, { recursive: true });
+    state = openWorkspaceState(workspaceDir);
+  });
+
+  afterEach(() => {
+    state.close();
+    rmSync(workspaceDir, { recursive: true, force: true });
+  });
+
+  /** Start the process-wide failover with one entry and exhaust it. */
+  async function startAndExhaustChain() {
+    const failover = await startWorkerFailover({
+      checkInstalled: false,
+      sandboxName: "none",
+      raw: "codex",
+      log: () => {},
+    });
+    failover.manager.reportUsageLimit(Date.now() + 60_000);
+    return failover;
+  }
+
+  test("isHarnessChainPaused reflects the live failover state", async () => {
+    expect(isHarnessChainPaused()).toBe(false);
+
+    const failover = await startAndExhaustChain();
+    expect(isHarnessChainPaused()).toBe(true);
+
+    // Reading live state, not a snapshot: the engine unlocking an entry must
+    // unpause the drains without rebuilding them.
+    failover.manager.windowElapsed("codex");
+    expect(isHarnessChainPaused()).toBe(false);
+  });
+
+  test("buildInjectedTaskAcquirer stays idle while exhausted, then drains after the window", async () => {
+    const repoManager = new FakeRepoManager(workspaceDir);
+    const store = new InjectedTaskStore(join(workspaceDir, "injected-tasks.db"));
+    const failover = await startAndExhaustChain();
+    try {
+      const { task } = store.enqueue({
+        taskKey: "local-paused",
+        repo: "backend",
+        title: "Paused",
+        body: "",
+        taskFile: join(workspaceDir, "injected", "local-paused.md"),
+      });
+      let runs = 0;
+      const acquirer = buildInjectedTaskAcquirer(
+        {
+          config: CONFIG,
+          workspaceDir,
+          skips: state.skips,
+          repoManager,
+          // Keep the executor's own pre-git guard permissive so only the
+          // acquirer-level pause can keep the row from running.
+          isHarnessExhausted: () => false,
+          runTask: async () => {
+            runs++;
+            return true;
+          },
+        },
+        store,
+      );
+
+      await acquirer.tick();
+      expect(runs).toBe(0);
+      expect(store.getById(task.id)?.status).toBe("pending");
+
+      failover.manager.windowElapsed("codex");
+      await acquirer.tick();
+      expect(runs).toBe(1);
+      expect(store.getById(task.id)?.status).toBe("done");
+    } finally {
+      store.close();
+    }
+  });
+
+  test("buildRetryQueueAcquirer stays idle while exhausted, then drains after the window", async () => {
+    const repoManager = new FakeRepoManager(workspaceDir);
+    const store = new ScheduledRetryStore(join(workspaceDir, "scheduled-retries.db"));
+    const failover = await startAndExhaustChain();
+    try {
+      // Pin the repo so the executor does not depend on label routing.
+      store.schedule({ taskKey: "PROJ-1", repo: "backend", actor: "a@x.com" });
+      let runs = 0;
+      const acquirer = buildRetryQueueAcquirer(
+        {
+          config: CONFIG,
+          workspaceDir,
+          skips: state.skips,
+          repoManager,
+          // Keep the executor's own pre-git guard permissive so only the
+          // acquirer-level pause can keep the row from running.
+          isHarnessExhausted: () => false,
+          runTask: async () => {
+            runs++;
+            return true;
+          },
+        },
+        store,
+      );
+
+      await acquirer.tick();
+      expect(runs).toBe(0);
+      expect(store.hasActive("PROJ-1")).toBe(true);
+      expect(store.hasPending()).toBe(true);
+
+      failover.manager.windowElapsed("codex");
+      await acquirer.tick();
+      expect(runs).toBe(1);
+      expect(store.hasActive("PROJ-1")).toBe(false);
+      expect(store.hasPending()).toBe(false);
+    } finally {
+      store.close();
+    }
+  });
 });
 
 describe("fleetTaskArgs", () => {
@@ -813,6 +1160,7 @@ remote = "git@github.com:acme/backend.git"
       "--create-pr",
       "--auto-review",
       "--skip-clarity-check",
+      "--allow-no-changes",
     ]);
     const alreadySkipped = {
       ...CONFIG,
@@ -821,7 +1169,30 @@ remote = "git@github.com:acme/backend.git"
         workerTaskArgs: "--create-pr --skip-clarity-check",
       },
     };
-    expect(errorMonitorTaskArgs(alreadySkipped)).toEqual(["--create-pr", "--skip-clarity-check"]);
+    expect(errorMonitorTaskArgs(alreadySkipped)).toEqual([
+      "--create-pr",
+      "--skip-clarity-check",
+      "--allow-no-changes",
+    ]);
+  });
+
+  test("error monitor runs may conclude that no code change is needed", () => {
+    // A remediation that finds the issue already fixed must not fail with
+    // "Implementation was not committed": that failure is reported back to
+    // the same Sentry issue and feeds the next remediation attempt.
+    expect(errorMonitorTaskArgs(CONFIG)).toContain("--allow-no-changes");
+    const alreadyAllowed = {
+      ...CONFIG,
+      defaults: {
+        ...CONFIG.defaults,
+        workerTaskArgs: "--create-pr --allow-no-changes",
+      },
+    };
+    expect(errorMonitorTaskArgs(alreadyAllowed)).toEqual([
+      "--create-pr",
+      "--allow-no-changes",
+      "--skip-clarity-check",
+    ]);
   });
 });
 
@@ -896,6 +1267,7 @@ GITLAB_CODE_HOST_PROXY = ""
             async drain() {},
             holdAdmissions() {},
             resume() {},
+            isDraining: () => false,
             inFlightCount: () => 0,
             queuedCount: () => 0,
           },
@@ -1017,6 +1389,7 @@ GITLAB_CODE_HOST_PROXY = ""
             async drain() {},
             holdAdmissions() {},
             resume() {},
+            isDraining: () => false,
             inFlightCount: () => 0,
             queuedCount: () => 0,
           },
@@ -1175,6 +1548,7 @@ remote = "https://forgejo.example/acme/forgejo.git"
       expect(acquirers.map((acquirer) => acquirer.name)).toEqual([
         "poll:reviews",
         "poll:ci-failures",
+        "poll:auto-merge",
       ]);
       expect(hooksOut.hooks?.mentionSweepRepos()).toEqual([]);
 
@@ -1305,6 +1679,35 @@ remote = "git@gitlab.com:group/backend.git"
       }
       rmSync(workspaceDir, { recursive: true, force: true });
     }
+  });
+
+  test("applies the entry's harness/model/effort to the occurrence env only", async () => {
+    const workspaceDir = join(
+      tmpdir(),
+      `ws-automation-selection-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    );
+    const repoManager = new FakeRepoManager(workspaceDir);
+    const context = await resolveWorkspaceAutomationContext(
+      {
+        id: "scheduled",
+        enabled: true,
+        prompt: "work",
+        interval: "1h",
+        intervalMs: 3_600_000,
+        repo: "backend",
+        harness: "codex",
+        model: "gpt-5-codex",
+        effort: "high",
+      },
+      CONFIG,
+      workspaceDir,
+      repoManager,
+    );
+
+    expect(context?.env.AGENT_HARNESS).toBe("codex");
+    expect(context?.env.AGENT_MODEL).toBe("gpt-5-codex");
+    expect(context?.env.AGENT_EFFORT).toBe("high");
+    rmSync(workspaceDir, { recursive: true, force: true });
   });
 });
 

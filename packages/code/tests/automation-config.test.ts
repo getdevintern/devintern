@@ -212,20 +212,27 @@ describe("automationTaskArgs", () => {
     expect(automationTaskArgs(open, ["--create-pr", "--auto-review"])).toEqual([
       "--create-pr",
       "--auto-review",
+      "--skip-clarity-check",
     ]);
     expect(automationTaskArgs(open, ["--create-pr=true", "--auto-review"])).toEqual([
       "--create-pr=true",
       "--auto-review",
+      "--skip-clarity-check",
     ]);
   });
 
   test("opted-in automations always create a PR even when the defaults omit --create-pr", () => {
-    expect(automationTaskArgs(open, ["--auto-review"])).toEqual(["--auto-review", "--create-pr"]);
-    expect(automationTaskArgs(open, [])).toEqual(["--create-pr"]);
+    expect(automationTaskArgs(open, ["--auto-review"])).toEqual([
+      "--auto-review",
+      "--create-pr",
+      "--skip-clarity-check",
+    ]);
+    expect(automationTaskArgs(open, [])).toEqual(["--create-pr", "--skip-clarity-check"]);
     expect(automationTaskArgs(open, ["--create-pr=false", "--auto-review"])).toEqual([
       "--create-pr=false",
       "--auto-review",
       "--create-pr",
+      "--skip-clarity-check",
     ]);
   });
 
@@ -244,17 +251,17 @@ describe("automationTaskArgs", () => {
         "--sandbox",
         "none",
       ]),
-    ).toEqual(["--sandbox", "none", "--no-git"]);
+    ).toEqual(["--sandbox", "none", "--no-git", "--skip-clarity-check"]);
   });
 
   test("an explicit --no-git is never duplicated", () => {
-    expect(automationTaskArgs(off, ["--no-git"])).toEqual(["--no-git"]);
+    expect(automationTaskArgs(off, ["--no-git"])).toEqual(["--no-git", "--skip-clarity-check"]);
   });
 
   test("off strips inline = value forms (--create-pr=true, --auto-review=1)", () => {
     expect(
       automationTaskArgs(off, ["--create-pr=true", "--auto-review=1", "--sandbox", "none"]),
-    ).toEqual(["--sandbox", "none", "--no-git"]);
+    ).toEqual(["--sandbox", "none", "--no-git", "--skip-clarity-check"]);
   });
 
   test("off strips --auto-review-iterations=N inline without leaving a dangling value", () => {
@@ -264,24 +271,36 @@ describe("automationTaskArgs", () => {
   });
 
   test("off also strips --create-pr=false (PR creation never leaks in)", () => {
-    expect(automationTaskArgs(off, ["--create-pr=false"])).toEqual(["--no-git"]);
+    expect(automationTaskArgs(off, ["--create-pr=false"])).toEqual([
+      "--no-git",
+      "--skip-clarity-check",
+    ]);
   });
 
   test("allow_no_changes appends the no-op success flag", () => {
     expect(automationTaskArgs({ openPr: true, allowNoChanges: true }, [])).toEqual([
       "--create-pr",
       "--allow-no-changes",
+      "--skip-clarity-check",
     ]);
     expect(automationTaskArgs({ openPr: false, allowNoChanges: true }, [])).toEqual([
       "--no-git",
       "--allow-no-changes",
+      "--skip-clarity-check",
     ]);
+  });
+
+  test("every occurrence skips the clarity check, without duplicating an explicit flag", () => {
+    expect(automationTaskArgs(open, [])).toContain("--skip-clarity-check");
+    expect(automationTaskArgs(off, [])).toContain("--skip-clarity-check");
+    const args = automationTaskArgs(open, ["--skip-clarity-check"]);
+    expect(args.filter((arg) => arg === "--skip-clarity-check")).toHaveLength(1);
   });
 
   test("an explicit --allow-no-changes is never duplicated", () => {
     expect(
       automationTaskArgs({ openPr: true, allowNoChanges: true }, ["--allow-no-changes"]),
-    ).toEqual(["--allow-no-changes", "--create-pr"]);
+    ).toEqual(["--allow-no-changes", "--create-pr", "--skip-clarity-check"]);
   });
 });
 

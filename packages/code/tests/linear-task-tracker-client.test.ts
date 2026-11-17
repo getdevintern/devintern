@@ -171,7 +171,11 @@ describe("LinearTaskTrackerClient estimation", () => {
     });
 
     const found = await adapter.findEstimationComment("ENG-42");
-    expect(found).toEqual({ commentId: "c9", created: "2026-01-03T00:00:00.000Z" });
+    expect(found).toEqual({
+      commentId: "c9",
+      created: "2026-01-03T00:00:00.000Z",
+      updated: "2026-01-03T00:00:00.000Z",
+    });
   });
 });
 
