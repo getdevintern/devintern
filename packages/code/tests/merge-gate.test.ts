@@ -96,7 +96,7 @@ describe("classifyChangedPaths", () => {
 });
 
 describe("parseMergeSafetyVerdict", () => {
-  test("reads the last JSON verdict in the output", () => {
+  test("reads the verdict from the final stdout line", () => {
     const output = [
       'Example format: {"safe": true, "reason": "example"}',
       "Analysis…",
@@ -108,10 +108,37 @@ describe("parseMergeSafetyVerdict", () => {
     });
   });
 
+  test("prose as the final line is no verdict, even after an earlier approving JSON", () => {
+    const output = [
+      '{"safe": true, "reason": "tests only"}',
+      "This PR changes auth middleware; I would not merge it unattended.",
+    ].join("\n");
+    expect(parseMergeSafetyVerdict(output)).toBeNull();
+  });
+
+  test("ignores trailing whitespace and ANSI reset codes after the verdict", () => {
+    const output =
+      'Looks fine.\n\x1b[32m{"safe": true, "reason": "docs only"}\x1b[0m\n\x1b[0m  \n\n';
+    expect(parseMergeSafetyVerdict(output)).toEqual({ safe: true, reason: "docs only" });
+    expect(parseMergeSafetyVerdict('{"safe": true, "reason": "x"}\r\n')).toEqual({
+      safe: true,
+      reason: "x",
+    });
+  });
+
   test("rejects verdicts without a boolean safe flag", () => {
     expect(parseMergeSafetyVerdict('{"safe": "yes", "reason": "x"}')).toBeNull();
+    expect(parseMergeSafetyVerdict('{"safe": "true", "reason": "x"}')).toBeNull();
     expect(parseMergeSafetyVerdict("looks safe to me")).toBeNull();
     expect(parseMergeSafetyVerdict("")).toBeNull();
+    expect(parseMergeSafetyVerdict("[true]")).toBeNull();
+  });
+
+  test("rejects malformed JSON or a verdict embedded in prose on the last line", () => {
+    expect(parseMergeSafetyVerdict('{"safe": true, "reason": "x"')).toBeNull();
+    expect(parseMergeSafetyVerdict('{"safe": true, reason: "x"}')).toBeNull();
+    expect(parseMergeSafetyVerdict('Verdict: {"safe": true, "reason": "x"}')).toBeNull();
+    expect(parseMergeSafetyVerdict('{"safe": true, "reason": "x"} — done')).toBeNull();
   });
 
   test("fills a missing reason", () => {

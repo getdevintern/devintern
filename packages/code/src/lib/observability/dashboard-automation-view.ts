@@ -4,6 +4,7 @@
  */
 
 import type {
+  AutomationActivity,
   AutomationScheduleStatus,
   ScheduledJobKind,
   ScheduledJobRunFilter,
@@ -37,6 +38,8 @@ export interface DashboardAutomationView extends AgentSelection {
   runFilter: ScheduledJobRunFilter;
   /** Most recent run of this automation (any origin), description stripped. */
   lastRun?: RunRecord;
+  /** Occurrence in flight on this worker, including one still waiting for a slot. */
+  activity?: AutomationActivity;
 }
 
 /** Runs attributed to a scheduled job; prompt automations match by id. */
@@ -69,5 +72,6 @@ export function toAutomationView(
     team: status.team,
     runFilter: scheduledJobRunFilter(status),
     lastRun: lastRun ? { ...lastRun, taskDescription: undefined } : undefined,
+    ...(status.activity ? { activity: status.activity } : {}),
   };
 }

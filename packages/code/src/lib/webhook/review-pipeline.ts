@@ -417,9 +417,11 @@ async function processReviewAsync(
     // Permission gate: only users who can push to the repo may direct the
     // agent. Anyone can comment on a public repo; without this check a
     // drive-by @mention from a read-only user would trigger an agent run.
-    // Fails closed on API errors.
+    // An API error (5xx, rate limit) is not a denial: it propagates to the
+    // persistence wrapper, which classifies it and retries transient failures
+    // through the webhook queue. The agent never runs without a confirmed grant.
     const actor = event.review.user.login;
-    const actorHasPushAccess = await githubClient.userHasPushAccess(owner, repo, actor);
+    const actorHasPushAccess = await githubClient.userHasPushAccessOrThrow(owner, repo, actor);
     if (!actorHasPushAccess) {
       console.log(
         `⛔ Skipping review: @${actor} does not have push access to ${owner}/${repo} ` +

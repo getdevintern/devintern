@@ -123,6 +123,73 @@ async function runWorkerRunNowSubcommand(args: string[]): Promise<never> {
   process.exit(runWorkerRunNow(args));
 }
 
+/**
+ * `devintern worker doctor` — side-effect-free preflight answering whether
+ * this workspace can acquire and run work right now. Never starts the daemon.
+ */
+async function runWorkerDoctorSubcommand(args: string[]): Promise<never> {
+  if (hasHelpArg(args)) {
+    console.log("Usage: devintern worker doctor [--workspace <path>] [--offline]");
+    console.log("");
+    console.log("Check whether this worker workspace can acquire and run work right now:");
+    console.log("workspace.toml, per-team tracker credentials, ready-tasks query dry-runs,");
+    console.log("repository access, automation entitlement, harness and sandbox, and the");
+    console.log("dashboard port. Changes nothing and does not start the worker.");
+    console.log("Exits non-zero when any check fails.");
+    console.log("");
+    console.log("Options:");
+    console.log("  --workspace <path>  Use this workspace.toml (default: ~/.devintern/");
+    console.log("                      workspace.toml, or DEVINTERN_WORKSPACE_DIR)");
+    console.log("  --offline           Skip query, repository, and license checks (no network)");
+    console.log("  -h, --help          Display this help message");
+    process.exit(0);
+  }
+  let workspacePath: string | undefined;
+  let offline = false;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === "--workspace") {
+      const value = args[i + 1];
+      if (!value || value.startsWith("-")) {
+        console.error("❌ --workspace requires a path to workspace.toml.");
+        process.exit(1);
+      }
+      workspacePath = value;
+      i++;
+    } else if (arg === "--offline") {
+      offline = true;
+    } else {
+      console.error(`❌ Unknown option for worker doctor: ${arg}`);
+      console.error("   Run `devintern worker doctor --help` for usage.");
+      process.exit(1);
+    }
+  }
+
+  const { collectWorkerDoctorChecks } = await import("../observability/worker-readiness");
+  const { renderReadinessReport } = await import("../observability/readiness");
+  const workspaceDir = workspacePath ? dirname(resolve(workspacePath)) : resolveWorkspaceDir();
+  // Mirror the daemon: shared workspace values (AGENT_HARNESS, AGENT_CLI_PATH,
+  // LICENSE_KEY, ...) apply to this process. Only process.env changes.
+  const processEnv = { ...process.env };
+  try {
+    applyWorkspaceProcessEnv(workspaceDir);
+  } catch {
+    // Unreadable workspace .env: the config check reports the workspace state.
+  }
+  const checks = await collectWorkerDoctorChecks({ workspacePath, offline }, { processEnv });
+  const report = renderReadinessReport(checks);
+  console.log(`🩺 devintern worker readiness${offline ? " (offline)" : ""}:\n`);
+  console.log(report.lines.join("\n"));
+  if (report.hasFailures) {
+    console.log("\n❌ Not ready — the worker would sit idle or fail. Fix the checks above.");
+  } else if (report.hasWarnings) {
+    console.log("\n✅ Ready to run (with the warnings above) — start it with `devintern worker`.");
+  } else {
+    console.log("\n✅ Everything looks good — start the worker with `devintern worker`.");
+  }
+  process.exit(report.hasFailures ? 1 : 0);
+}
+
 /** Interactively configure unattended automation and a native user service. */
 async function runWorkerInitSubcommand(args: string[]): Promise<never> {
   if (hasHelpArg(args)) {
@@ -205,7 +272,9 @@ async function runWorkerDaemon(args: string[]): Promise<void> {
     } else if (arg === "-v" || arg === "--verbose") {
       verbose = true;
     } else if (arg === "--help" || arg === "-h") {
-      console.log("Usage: devintern worker [init|login|scaffold|add-repo|add|run-now] [options]");
+      console.log(
+        "Usage: devintern worker [init|login|scaffold|add-repo|add|run-now|doctor] [options]",
+      );
       console.log("       devintern worker connect [target] [--workspace <path>]");
       console.log("");
       console.log("Run the devintern worker daemon. The worker acquires events (reviews on");
@@ -230,6 +299,7 @@ async function runWorkerDaemon(args: string[]): Promise<void> {
       console.log("  add                 Enqueue a one-off task for a workspace repo");
       console.log("  connect             Configure relay integrations or Sentry auto-fixes");
       console.log("  run-now             One immediate drain, ignoring working windows");
+      console.log("  doctor              Check workspace readiness without starting the worker");
       console.log("");
       console.log("Options:");
       console.log("  --workspace <path>  Use this workspace.toml (default: ~/.devintern/");
@@ -322,5 +392,6 @@ export async function runWorkerCli(args: string[]): Promise<void> {
   if (subcommand === "run-now") return runWorkerRunNowSubcommand(rest);
   if (subcommand === "init") return runWorkerInitSubcommand(rest);
   if (subcommand === "login") return runWorkerLoginSubcommand(rest);
+  if (subcommand === "doctor") return runWorkerDoctorSubcommand(rest);
   return runWorkerDaemon(args);
 }

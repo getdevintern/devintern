@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { ArrowLeft, Check, Copy, GitPullRequest, Play, RefreshCcw } from "lucide-react";
 
+import { AutomationActivityStatus, visibleActivity } from "@/components/AutomationActivity";
 import { RunResult } from "@/components/RunResult";
 import { EmptyState, StatusBadge, StatusPill } from "@/components/shared";
 import { Button } from "@/components/ui/button";
@@ -140,6 +141,7 @@ function RecentRuns({
 function JobFacts({ automation }: { automation: AutomationSchedule }) {
   const human = automation.schedule ? humanizeSchedule(automation.schedule) : undefined;
   const lastRun = automation.lastRun;
+  const activity = visibleActivity(automation);
   const kind = jobKind(automation);
   const title = jobTitle(automation);
   return (
@@ -198,6 +200,16 @@ function JobFacts({ automation }: { automation: AutomationSchedule }) {
           ) : (
             <span className="text-muted-foreground">No</span>
           )}
+        </Fact>
+      ) : null}
+      {activity ? (
+        <Fact label="Now">
+          <AutomationActivityStatus activity={activity} />
+          {activity.state === "waiting" && activity.reason ? (
+            <span className="block text-xs text-subtle-foreground">
+              {activity.reason.charAt(0).toUpperCase() + activity.reason.slice(1)}
+            </span>
+          ) : null}
         </Fact>
       ) : null}
       <Fact label="Last run">
@@ -332,10 +344,14 @@ export function AutomationDetailView({ automationId }: { automationId: string })
         {automation.enabled ? (
           <Button
             size="sm"
-            disabled={busy}
+            disabled={busy || automation.activity !== undefined}
             aria-busy={busy || undefined}
             onClick={() => void runNow(automation)}
-            title={runNowHint(kind)}
+            title={
+              automation.activity !== undefined
+                ? "An occurrence is already in flight"
+                : runNowHint(kind)
+            }
           >
             {started ? <Check /> : <Play />} {busy ? "Starting…" : started ? "Started" : "Run now"}
           </Button>

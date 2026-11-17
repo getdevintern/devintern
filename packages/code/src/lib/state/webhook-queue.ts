@@ -571,6 +571,31 @@ export class WebhookQueue {
     this.db.run(`DELETE FROM relay_delivery_attempts WHERE external_id = ?`, [externalId]);
   }
 
+  /**
+   * Consume one failed attempt for polling feedback (for example a swept
+   * @mention whose handler threw).
+   *
+   * Polling feedback claims its ids in `processed_events` before running, so a
+   * failed handler releases that claim and records an attempt here instead of
+   * marking the feedback handled. The durable count bounds the retry so a
+   * deterministic failure eventually becomes terminal. Rows share the
+   * `relay_delivery_attempts` table (and its stale-row cleanup) under a
+   * `feedback:` prefix that cannot collide with relay envelope ids.
+   *
+   * @param externalId - Feedback id (for example `github:mentions:comment:<id>`)
+   * @param error - Failure message to retain for diagnostics
+   * @param now - Timestamp of this failure (injected for tests)
+   * @returns The number of failed attempts recorded so far
+   */
+  beginFeedbackAttempt(externalId: string, error: string, now: number = Date.now()): number {
+    return this.beginRelayDeliveryAttempt(`feedback:${externalId}`, error, now);
+  }
+
+  /** Forget a feedback id's retry history once it settles or is exhausted. */
+  clearFeedbackAttempts(externalId: string): void {
+    this.clearRelayDeliveryAttempts(`feedback:${externalId}`);
+  }
+
   /** Configured retry ceiling, shared by webhook, base-sync, and relay work. */
   getMaxRetries(): number {
     return this.maxRetries;
