@@ -270,7 +270,7 @@ export function createFleetAutoMerge(
   slug: string,
   prNumber: number,
   expectedHeadSha: string,
-  options?: { lastAttempt: boolean; onStart?: () => void },
+  options?: { lastAttempt: boolean; onStart?: () => void; runId?: number },
 ) => Promise<AutoMergeResult> {
   const { config, workspaceDir, repoManager } = deps;
   const runAutoMerge = deps.runAutoMerge ?? runAutoMergeViaCli;
@@ -301,6 +301,7 @@ export function createFleetAutoMerge(
         },
         expectedHeadSha,
         lastAttempt: options?.lastAttempt ?? false,
+        ...(options?.runId !== undefined ? { runId: options.runId } : {}),
         cwd: base,
         env: buildRepoEnv(repo, workspaceDir, { agentSelection }),
         harnessPin: agentSelection?.harness,

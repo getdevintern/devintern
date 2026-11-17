@@ -27,6 +27,7 @@ import { agentSandboxPolicy, getSandbox } from "../agent/sandbox";
 import { createHarnessLogSink } from "../observability/harness-logs";
 import { redactSecrets, stripAnsi } from "../observability/worker-logs";
 import { beginRun, endRun, recordRunStage } from "../state/run-recorder";
+import type { RunOrigin } from "../state/run-recorder";
 import { formatCiFixPrompt, formatReviewPrompt } from "./formatter";
 import type { CiFailureFeedback } from "./formatter";
 import { GIT_CLEAN_ARGS, Utils } from "../utils";
@@ -101,12 +102,14 @@ export function classifyAgentFailure(outcome: {
  * @param prompt - Full review prompt sent to the agent via argv (`-p` / positional)
  * @param workDir - Git working directory for the agent process
  * @param verbose - When true, log command and timeout details
+ * @param log - Transcript label and origin; defaults to an `address-review` task spawn
  * @returns Whether the agent succeeded, its combined output, and failure details
  */
 export async function runAgent(
   prompt: string,
   workDir: string,
   verbose: boolean,
+  log: { label?: string; origin?: RunOrigin } = {},
 ): Promise<AgentRunResult> {
   const { harness, path: executablePath } = resolveHarness();
   // Wait out any in-progress CLI auto-update swap before spawning, so a
@@ -158,7 +161,8 @@ export async function runAgent(
         policy: agentSandboxPolicy(),
         sink: createHarnessLogSink({
           harness,
-          label: "address-review",
+          label: log.label ?? "address-review",
+          ...(log.origin ? { origin: log.origin } : {}),
           cwd: workDir,
           command: [resolvedPath, ...agentArgs],
         }),
