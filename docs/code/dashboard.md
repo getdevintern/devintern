@@ -4,7 +4,7 @@ sidebarLabel: "Dashboard"
 description: "Use when checking what the worker is doing, reading agent transcripts, diagnosing failed runs, retrying work, or delegating an ad-hoc task from the local dashboard."
 section: "Automation"
 order: 4
-dateModified: 2026-11-14
+dateModified: 2026-11-17
 ---
 
 # Worker Dashboard
@@ -142,6 +142,36 @@ devintern dashboard --workspace /path/to/workspace.toml
 ```
 
 With `--workspace`, the dashboard also applies that workspace's [`[dashboard]` access settings](#allowed-origins), and **Automations** lists that workspace's `[[automations]]` with their next scheduled run. **Run now** needs the worker, because workspace automations run through its routing and repository pipeline; start `devintern worker` and use its dashboard to trigger them.
+
+## Read dashboard data from the command line
+
+Every read-only dashboard view is also a `devintern worker` subcommand. The commands call the same code as the dashboard API, but read the workspace database directly: they need no running dashboard, no running worker, no free port, and no network access. Use them from scripts, from a shell without a browser, or from sandboxed automation agents. A sandboxed agent usually cannot reach `localhost:4400`, because the sandbox gives each command its own network namespace.
+
+| Command | Same data as | Shows |
+| --- | --- | --- |
+| `devintern worker runs [--automation <id>] [--origin <origin>] [--status <status>] [--task-key <key>] [--limit N] [--offset N]` | `GET /api/runs` | Recorded runs, newest first |
+| `devintern worker runs show <id>` | `GET /api/runs/:id` | One run with its stages (and their detail), retry eligibility and audit, harness logs, and artifacts |
+| `devintern worker runs logs <id> [<name>]` | `GET /api/runs/:id/harness-logs[/:name]` | A run's agent transcripts, or the redacted tail of one |
+| `devintern worker runs artifacts <id> [<artifact-id>]` | `GET /api/runs/:id/artifacts[/:artifactId]` | A run's registered artifacts, or one artifact's content |
+| `devintern worker stats [--window 7d\|30d\|90d\|all]` | `GET /api/stats` | Success and escalation rates, durations, per-harness and per-origin counts (default `30d`) |
+| `devintern worker automations` | `GET /api/automations` | Configured automations with `nextDueAt` and `lastRun` |
+| `devintern worker prs` | `GET /api/agent-prs` | Open pull and merge requests opened by the agent |
+| `devintern worker queue` | `GET /api/queue` | Queued work that has not started |
+| `devintern worker status` | `GET /api/worker` | Worker liveness, durable queue counts, agent PR counts, poll cursors |
+| `devintern worker overview` | `GET /api/overview` | Capacity, harness chain health, tracker freshness |
+| `devintern worker logs [--lines N] [--level all\|info\|warn\|error]` | `GET /api/logs` | Recent worker log entries (default 500) |
+
+Without `--json`, each command prints a compact table or summary. With `--json`, stdout contains exactly the response body of the matching API route, so a script or prompt that used `curl http://localhost:4400/api/...` can switch to the command unchanged:
+
+```bash
+devintern worker runs --automation execution-retro --limit 5 --json
+devintern worker stats --window 7d --json | jq '.stats.successRate'
+devintern worker runs show 455 --json | jq '.stages[] | {stage, status, summary}'
+```
+
+The commands read the workspace selected by `--workspace <path>` (a `workspace.toml` or its directory), then `DEVINTERN_WORKSPACE_DIR`, then `~/.devintern`, and use its `state/queue.db`: the database the worker records into. If the database is missing or unreadable, a command prints the reason on stderr and exits with code `1`. Invalid filters and unknown run ids also exit with code `1`. Every command has `--help`.
+
+The commands are strictly read-only. They open the database read-only and never create, migrate, or lock it. They also work when the state directory is mounted read-only, as the native agent sandbox mounts it, and they still see rows the running worker has not yet checkpointed out of its write-ahead log. SQLite can read a WAL database on a read-only mount only while the worker has it open (its `queue.db-wal` and `queue.db-shm` files exist). If the worker is stopped and the directory is read-only, the commands exit with an error that says so, and do not report empty results. Two pieces of state exist only inside the worker process: the working-window snapshot (`schedule` in `status`) and in-flight automation activity. The commands report these as empty.
 
 ## Local by design
 
