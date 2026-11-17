@@ -411,14 +411,18 @@ async function headBlobIds(workDir: string, paths: string[]): Promise<Map<string
  * Paths in `keep` (still-conflicted files the agent has yet to resolve) are
  * never touched.
  *
- * Unlike the initial preparation, a failure here is fatal for the sync: the
- * whole point is that no hook or agent runs against tooling older than the
- * merged lockfile.
+ * When `fatal` is set (the initial preparation install succeeded), a failure
+ * here aborts the sync: no hook or agent may run against tooling older than
+ * the merged lockfile. When the initial install had already failed (e.g. the
+ * package manager is not on the worker's PATH), the sync never had installed
+ * tooling to drift from, so a failure only warns, matching the non-fatal
+ * contract of `prepareWorktreeForAgent`.
  */
 async function reinstallMergedDependencies(params: {
   workDir: string;
   verbose: boolean;
   changed: string[] | null;
+  fatal: boolean;
   keep?: string[];
 }): Promise<{ success: true } | { success: false; error: string }> {
   const summary =
@@ -430,7 +434,11 @@ async function reinstallMergedDependencies(params: {
     verbose: params.verbose,
   });
   if (!install.success) {
-    return { success: false, error: install.error ?? "unknown install error" };
+    const error = install.error ?? "unknown install error";
+    if (params.fatal) return { success: false, error };
+    console.warn(
+      `⚠️  Reinstall after the base merge failed, but the initial dependency install had already failed; continuing: ${error}`,
+    );
   }
   const dirty = await Utils.executeGitCommand(["diff", "--name-only"], { cwd: params.workDir });
   const keep = new Set(params.keep ?? []);
@@ -462,9 +470,14 @@ async function reinstallMergedDependencies(params: {
  *   agent and its commit hooks use the merged toolchain.
  * - A conflicted dependency file: there is no installable lockfile until the
  *   agent resolves it, so the prompt tells the agent to install before
- *   committing, and the worker reinstalls after the commit, before push.
+ *   committing. If the agent leaves the merge uncommitted, the worker
+ *   installs the resolved files before its own `git commit`; otherwise it
+ *   reinstalls after the agent's commit, before push.
  * After the agent, the worker also reinstalls whenever the committed
  * dependency files differ from what it last installed.
+ *
+ * `installFatal` is whether the worktree preparation install succeeded; only
+ * then is a failed reinstall a regression worth aborting the sync for.
  */
 async function attemptMerge(params: {
   workDir: string;
@@ -472,6 +485,7 @@ async function attemptMerge(params: {
   branch: string;
   verbose: boolean;
   agentRunner: AgentRunner;
+  installFatal: boolean;
 }): Promise<MergeAttempt> {
   // Worktree preparation installs dependencies, and installers can rewrite
   // tracked files (e.g. `bun install` normalizing `bun.lock`), leaving the
@@ -518,6 +532,7 @@ async function attemptMerge(params: {
         workDir: params.workDir,
         verbose: params.verbose,
         changed,
+        fatal: params.installFatal,
       });
       if (!install.success) {
         return {
@@ -558,6 +573,7 @@ async function attemptMerge(params: {
         workDir: params.workDir,
         verbose: params.verbose,
         changed,
+        fatal: params.installFatal,
       });
       if (!install.success) {
         await Utils.executeGitCommand(["merge", "--abort"], { cwd: params.workDir });
@@ -591,6 +607,7 @@ async function attemptMerge(params: {
         workDir: params.workDir,
         verbose: params.verbose,
         changed,
+        fatal: params.installFatal,
         keep: conflictedFiles,
       });
       if (!install.success) {
@@ -641,9 +658,46 @@ async function attemptMerge(params: {
     };
   }
 
+  // Whether the installed dependencies differ from `changes` as recorded in
+  // `blobIds` (the index before the worker's commit, HEAD after it).
+  // Compare against what was installed, not only against the pre-merge HEAD:
+  // an agent that reverts a merged lockfile to the branch's version drops it
+  // from the diff while the merged toolchain is still installed.
+  const installIsStale = async (
+    changes: string[] | null,
+    blobIds: (workDir: string, paths: string[]) => Promise<Map<string, string>>,
+  ): Promise<boolean> => {
+    if (!installedFor || !changes) return needsInstall(changes);
+    const installed = installedFor;
+    const paths = [...new Set([...installed.keys(), ...changes])];
+    const current = await blobIds(params.workDir, paths);
+    return paths.some((path) => current.get(path) !== installed.get(path));
+  };
+
   if (mergeHead.success) {
-    // Agent resolved but did not commit; finish the merge.
+    // Agent resolved but did not commit; finish the merge. The commit below
+    // runs pre-commit hooks, so install the resolved dependencies first (the
+    // agent may have skipped the install the prompt asked for).
     await Utils.executeGitCommand(["add", "-A"], { cwd: params.workDir });
+    const resolvedChanges = await dependencyChanges();
+    if (await installIsStale(resolvedChanges, stagedBlobIds)) {
+      const install = await reinstallMergedDependencies({
+        workDir: params.workDir,
+        verbose: params.verbose,
+        changed: resolvedChanges,
+        fatal: params.installFatal,
+      });
+      if (!install.success) {
+        await Utils.executeGitCommand(["merge", "--abort"], { cwd: params.workDir });
+        return {
+          kind: "aborted",
+          message: `dependency install after resolving the merge with origin/${params.baseRef} failed: ${install.error}`,
+        };
+      }
+      if (resolvedChanges) {
+        installedFor = await stagedBlobIds(params.workDir, resolvedChanges);
+      }
+    }
     const commit = await Utils.executeGitCommand(["commit", "--no-edit"], {
       cwd: params.workDir,
     });
@@ -657,18 +711,14 @@ async function attemptMerge(params: {
   // make sure the installed dependencies match the committed ones: either
   // nothing was installed yet (a dependency file was conflicted) or the
   // agent's resolution changed a dependency file after the pre-agent install.
+  // Pre-commit hooks that rewrote a lockfile also show up here.
   const committedChanges = await dependencyChanges();
-  let stale = needsInstall(committedChanges);
-  if (stale && installedFor && committedChanges) {
-    const committed = await headBlobIds(params.workDir, committedChanges);
-    const installed = installedFor;
-    stale = committedChanges.some((path) => committed.get(path) !== installed.get(path));
-  }
-  if (stale) {
+  if (await installIsStale(committedChanges, headBlobIds)) {
     const install = await reinstallMergedDependencies({
       workDir: params.workDir,
       verbose: params.verbose,
       changed: committedChanges,
+      fatal: params.installFatal,
     });
     if (!install.success) {
       return {
@@ -966,11 +1016,19 @@ export async function resolveConflictsOnPr(
         console.log(`🔁 Retry ${attempt - 1}/${MAX_SYNC_ATTEMPTS - 1}: rebuilding the merge`);
       }
 
-      const worktree = await Utils.prepareReviewWorktree(branch, { verbose, cwd });
+      const worktree = await Utils.prepareReviewWorktree(branch, {
+        verbose,
+        cwd,
+        installDependencies: false,
+      });
       if (!worktree.success || !worktree.path) {
         return await failWith("setup", `worktree preparation failed: ${worktree.error}`);
       }
       workDir = worktree.path;
+      // Installed here rather than inside `prepareReviewWorktree` so the
+      // result is known: a post-merge reinstall failure is only fatal when
+      // this baseline install worked.
+      const baselineInstall = await Utils.prepareWorktreeForAgent(workDir, { verbose });
 
       if (leaseSha) {
         const preparedHead = await Utils.executeGitCommand(["rev-parse", "HEAD"], {
@@ -1015,7 +1073,14 @@ export async function resolveConflictsOnPr(
         }
       }
 
-      const mergeAttempt = await attemptMerge({ workDir, baseRef, branch, verbose, agentRunner });
+      const mergeAttempt = await attemptMerge({
+        workDir,
+        baseRef,
+        branch,
+        verbose,
+        agentRunner,
+        installFatal: baselineInstall.success,
+      });
       if (mergeAttempt.kind === "skipped") {
         return { outcome: "skipped", message: mergeAttempt.message };
       }
