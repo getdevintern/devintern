@@ -120,6 +120,63 @@ remote = "git@github.com:acme/frontend.git"
     expect(findRepo(config, "frontend")?.pipelineFile).toBeUndefined();
   });
 
+  test("sync_team_prs is off by default and parses as a per-repo boolean", () => {
+    const config = parseWorkspaceConfig(`
+[defaults]
+tracker = "jira"
+
+[[repos]]
+name = "backend"
+remote = "git@github.com:acme/backend.git"
+sync_team_prs = true
+
+[[repos]]
+name = "frontend"
+remote = "git@github.com:acme/frontend.git"
+`);
+    expect(findRepo(config, "backend")?.syncTeamPrs).toBe(true);
+    expect(findRepo(config, "frontend")?.syncTeamPrs).toBeUndefined();
+  });
+
+  test("rejects a non-boolean sync_team_prs", () => {
+    expect(() =>
+      parseWorkspaceConfig(`
+[defaults]
+tracker = "jira"
+
+[[repos]]
+name = "backend"
+remote = "git@github.com:acme/backend.git"
+sync_team_prs = "yes"
+`),
+    ).toThrow(/\[\[repos\]\]\[0\]\.sync_team_prs must be a boolean/);
+  });
+
+  test("rejects sync_team_prs on a non-GitHub (e.g. GitLab) repo", () => {
+    expect(() =>
+      parseWorkspaceConfig(`
+[defaults]
+tracker = "jira"
+
+[[repos]]
+name = "widgets"
+remote = "https://gitlab.com/acme/widgets.git"
+sync_team_prs = true
+`),
+    ).toThrow(/sync_team_prs is GitHub-only; "widgets"/);
+    // sync_team_prs = false (or absent) stays valid on GitLab repos.
+    const config = parseWorkspaceConfig(`
+[defaults]
+tracker = "jira"
+
+[[repos]]
+name = "widgets"
+remote = "https://gitlab.com/acme/widgets.git"
+sync_team_prs = false
+`);
+    expect(findRepo(config, "widgets")?.syncTeamPrs).toBe(false);
+  });
+
   test("rejects an empty pipeline_file value", () => {
     expect(() =>
       parseWorkspaceConfig(`
