@@ -1,0 +1,239 @@
+# `devintern` command e2e coverage
+
+Scope: the one-shot `devintern` task-run command and its flags, plus the standalone `address-review`, `resolve-conflicts`, `init`, `workspace`, `doctor`, and `report` commands. Dashboard, webhook, sandbox, and auth commands live in their own area files.
+
+Status values are defined in the [coverage index](../coverage-matrix.md#status-legend).
+
+## Coverage
+
+### Single task key or local Markdown file
+
+- Surface: `devintern` command surface
+- Status: `default`
+- Evidence: `tests/local/cli.test.ts`
+- Missing: —
+- Last reviewed: 2026-11-17
+
+### Multiple task keys and mixed Markdown/tracker batches
+
+- Surface: `devintern` command surface
+- Status: `default`
+- Evidence: `tests/local/cli-batch.test.ts`
+- Missing: Additional tracker combinations.
+- Last reviewed: 2026-11-17
+
+### `--query` across trackers
+
+- Surface: `devintern` command surface
+- Status: `default` / `live`
+- Evidence: `tests/local/tracker-jira-fake.test.ts`, `tests/local/tracker-linear-fake.test.ts`, live tracker suites
+- Missing: Additional tracker combinations.
+- Last reviewed: 2026-11-17
+
+### `--create-pr`, `--pr-target-branch` explicit
+
+- Surface: `devintern` command surface
+- Status: `default` / `live`
+- Evidence: local + provider suites
+- Missing: Implicit target is live-only on GitLab; add GitHub coverage.
+- Last reviewed: 2026-11-17
+
+### `--skip-clarity-check`, `--skip-comments`, `--no-update`, `--agent-path`
+
+- Surface: `devintern` command surface
+- Status: `default`
+- Evidence: local suites
+- Missing: —
+- Last reviewed: 2026-11-17
+
+### `--allow-no-changes`
+
+- Surface: `devintern` command surface
+- Status: `default`
+- Evidence: `tests/local/cli-allow-no-changes.test.ts` (`bun run --filter @devintern/e2e test`): no-op exits non-zero without the flag, 0 with it; `--no-git` no-op succeeds either way (flag irrelevant); no PR or push; offline Jira comment/status.
+- Missing: Live code-host parity. Observed (unconfirmed intent): a no-op leaves the tracker ticket in progress with no comment.
+- Last reviewed: 2026-11-17
+
+### `--force`
+
+- Surface: `devintern` command surface
+- Status: `default`
+- Evidence: `tests/local/tracker-force-retry-gate.test.ts`
+- Missing: Additional trackers.
+- Last reviewed: 2026-11-17
+
+### `--no-git`, `--no-auto-commit`
+
+- Surface: `devintern` command surface
+- Status: `default`
+- Evidence: `tests/local/cli-git-delivery.test.ts` (`bun run --filter @devintern/e2e test`)
+- Missing: —
+- Last reviewed: 2026-11-17
+
+### `--estimate`
+
+- Surface: `devintern` command surface
+- Status: `gap`
+- Evidence: —
+- Missing: Per-tracker story-point write/comment.
+- Last reviewed: 2026-11-17
+
+### `--auto-review`, `--auto-review-iterations`
+
+- Surface: `devintern` command surface
+- Status: `default`
+- Evidence: `tests/local/cli-auto-review.test.ts` (`bun run --filter @devintern/e2e test`)
+- Missing: Provider parity: live PR review feedback remains opt-in.
+- Last reviewed: 2026-11-17
+
+### `--env-file`
+
+- Surface: `devintern` command surface
+- Status: `default`
+- Evidence: `tests/local/cli-env-file.test.ts` (`bun run --filter @devintern/e2e test`)
+- Missing: —
+- Last reviewed: 2026-11-17
+
+### `--hook-retries` (task-run commit repair loop and cap)
+
+- Surface: `devintern` command surface
+- Status: `default`
+- Evidence: `tests/local/cli-hook-retries.test.ts` (`bun run --filter @devintern/e2e test`): real failing pre-commit hook; repaired retry, `Commit already completed during hook fix`, cap of 1, and 0 retries
+- Missing: Push-side (pre-push) hook repair; `address-review` and webhook review loops.
+- Last reviewed: 2026-11-17
+
+### `--max-turns`
+
+- Surface: `devintern` command surface
+- Status: `partial`
+- Evidence: helper passes the default; no local test asserts the forwarded value
+- Missing: Assertion that a non-default `--max-turns` reaches the harness argv (including the hook-fix invocation).
+- Last reviewed: 2026-11-17
+
+### `--verbose`, deprecated `--jql`, `--claude-path`, `--skip-jira-comments`
+
+- Surface: `devintern` command surface
+- Status: `gap`
+- Evidence: —
+- Missing: Compatibility and warning paths.
+- Last reviewed: 2026-11-17
+
+### `init`
+
+- Surface: `devintern` command surface
+- Status: `gap`
+- Evidence: —
+- Missing: Non-interactive failure and scaffold alternatives.
+- Last reviewed: 2026-11-17
+
+### `workspace`
+
+- Surface: `devintern` command surface
+- Status: `gap`
+- Evidence: —
+- Missing: Help/error redirect only; low value.
+- Last reviewed: 2026-11-17
+
+### `address-review`
+
+- Surface: `devintern` command surface
+- Status: `partial`
+- Evidence: GitLab live lifecycle
+- Missing: GitHub; `--no-push`, `--no-reply`, `--ci-feedback`, `--expected-head`.
+- Last reviewed: 2026-11-17
+
+### `resolve-conflicts`
+
+- Surface: `devintern` command surface
+- Status: `partial`
+- Evidence: `tests/local/worker-conflict-failover.test.ts` asserts the standalone first-harness-only contract and a nonzero exhausted-primary result (`bun run build`, then `bun run --filter @devintern/e2e test`). GitLab worker auto mode remains live.
+- Missing: Scheduled/disabled modes and live provider options this story does not claim. One-shot multi-harness failover is not implemented.
+- Last reviewed: 2026-11-17
+
+### `doctor`
+
+- Surface: `devintern` command surface
+- Status: `default`
+- Evidence: `tests/local/cli-doctor.test.ts` (`bun run --filter @devintern/e2e test`)
+- Missing: Live session/license opt-in; nonexistent Markdown dir passes.
+- Last reviewed: 2026-11-17
+
+### `report`
+
+- Surface: `devintern` command surface
+- Status: `default`
+- Evidence: `tests/local/cli-report.test.ts`
+- Missing: Additional platform permission scenarios.
+- Last reviewed: 2026-11-17
+
+## Backlog
+
+Priority numbers are the global ranking from the
+[index](../coverage-matrix.md#priority-backlog); lower runs first.
+
+- Priority 6: ~~`--auto-review` loop and iteration cap on GitHub and GitLab~~ (the local loop/cap is implemented by `tests/local/cli-auto-review.test.ts`; provider parity with real PR review feedback remains live/opt-in).
+- Priority 9: Standalone `address-review` options, plus `resolve-conflicts` scheduled/disabled modes and live provider options. The offline first-harness-only contract is covered by `tests/local/worker-conflict-failover.test.ts`.
+
+## Test notes
+
+### Local auto-review loop
+
+`tests/local/cli-auto-review.test.ts` runs the built CLI's `--auto-review` loop
+against a local bare Git remote and the deterministic fixture agent, with no
+hosted PR, account, or network access. The fixture agent gains two prompt-driven
+modes: `auto-review-feedback` (the bundled `review.md` prompt) prints only a
+JSON verdict, and `auto-review-fix` (the bundled `fix.md` prompt) edits
+`src/greeting.ts` without committing or pushing. The reviewer reports one
+`medium` finding on iteration 1 and approves from iteration 2, so the loop
+converges; `E2E_AUTO_REVIEW_STUCK=1` keeps every iteration unapproved to prove
+`--auto-review-iterations` caps the review/fix cycles. Both modes are recorded
+in `E2E_AGENT_INVOCATIONS` so the test asserts the exact
+implement → review → fix → review sequence.
+
+The scenarios assert the pushed `feature/<task-key>` branch, the exact
+`src/greeting.ts` diff, the two commits ahead of base (the implementation plus
+`fix: address PR review feedback`), and the
+`DEVINTERN_OUTPUT_DIR/<task-key>/auto-review-summary.json` artifact
+(`iterations`, `success`, and `history`). Per-iteration verdicts are saved under
+`iteration-<n>/feedback.json`. A non-approved loop still exits 0 and delivers
+the branch; the local remote has no supported PR host, so `--create-pr` pushes
+and exits without a PR URL.
+
+```sh
+bun run --filter @getdevintern/code build
+bun run --filter @devintern/e2e test
+```
+
+### Local git-hook repair loop
+
+`tests/local/cli-hook-retries.test.ts` installs a real executable pre-commit
+hook (by repointing the fixture's pinned `core.hooksPath` at a per-test hooks
+directory) that rejects the commit while staged `src/greeting.ts` carries a
+per-test marker. With `E2E_HOOK_MARKER` set, the fixture agent's implementation
+edit plants that marker, so the production commit fails through real
+`git commit`. The bundled hook-fix prompt selects the prompt-driven `hook-fix`
+mode, whose outcome `E2E_HOOK_FIX` controls: `fix` removes the marker and leaves
+the commit to the production retry, `fix-commit` also commits itself, and `noop`
+leaves the marker in place. Each repair turn is recorded in
+`E2E_AGENT_INVOCATIONS` as `hook-fix`.
+
+The scenarios prove a repaired retry pushes one marker-free implementation
+commit to a local bare remote and writes
+`DEVINTERN_OUTPUT_DIR/<task-key>/git-hook-errors.log` for attempt 1;
+`--hook-retries 1` with an unrepairable hook runs exactly one repair turn,
+prints `Max retries (1) exceeded`, exits non-zero, and pushes nothing;
+`--hook-retries 0` fails without any repair turn; and an agent that commits
+during the fix is delivered without a duplicate commit.
+
+```sh
+bun run --filter @getdevintern/code build
+bun run --filter @devintern/e2e test
+```
+
+### Incomplete task retry gate
+
+`tests/local/tracker-force-retry-gate.test.ts` verifies that an unchanged incomplete Jira task is skipped until `--force` requests a retry.
+
+### No-op runs (`--allow-no-changes`)
+
+`tests/local/cli-allow-no-changes.test.ts` runs the built CLI with the fixture agent's `no-change` mode against a local bare remote. Without the flag, `--create-pr` exits non-zero with `Implementation was not committed` and records a `failed` run. With `--allow-no-changes`, it exits 0, records a `succeeded` run with no `pr_url`, and pushes no branch or commit. With `--no-git` the commit step is skipped, so the flag has no effect there: a no-op succeeds with or without it, and the suite runs both forms as a regression guard. Against the offline Jira fake, the failure path posts a failure comment and moves the ticket back to its todo status. The no-op path currently posts no comment and leaves the ticket in its in-progress status. The test asserts this as observed behaviour, not as a confirmed product contract.
