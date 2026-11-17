@@ -90,14 +90,17 @@ export async function pullReviewWorktreeBranch(
  * worktrees from other branches are pruned to bound disk usage.
  *
  * @param branch - PR head branch to check out
- * @param options - Verbose logging
+ * @param options - Verbose logging; `installDependencies: false` skips the
+ *   package install for read-only agents (the merge-safety review reads the
+ *   diff and code; CI has already built and tested the PR)
  */
 export async function prepareReviewWorktree(
   branch: string,
-  options?: { verbose?: boolean; cwd?: string },
+  options?: { verbose?: boolean; cwd?: string; installDependencies?: boolean },
 ): Promise<{ success: boolean; path?: string; error?: string }> {
   const verbose = options?.verbose ?? false;
   const cwd = options?.cwd;
+  const installDependencies = options?.installDependencies ?? true;
   // Options for git commands that must run against the *source* repository
   // (worktree add/remove, fetch, branch -D). Distinct from `cwd: worktreePath`
   // calls below, which operate inside the created worktree.
@@ -132,7 +135,7 @@ export async function prepareReviewWorktree(
     logVerbose(verbose, `   Worktree directory exists: ${worktreeExists}`);
 
     if (worktreeExists) {
-      if (await tryReuseReviewWorktree(worktreePath, branch, verbose)) {
+      if (await tryReuseReviewWorktree(worktreePath, branch, verbose, installDependencies)) {
         return { success: true, path: worktreePath };
       }
 
@@ -147,6 +150,7 @@ export async function prepareReviewWorktree(
       verbose,
       repoOpts,
       repoOptsQuiet,
+      installDependencies,
     );
     if (!created.success) {
       return { success: false, error: created.error };
@@ -263,6 +267,7 @@ async function tryReuseReviewWorktree(
   worktreePath: string,
   branch: string,
   verbose: boolean,
+  installDependencies: boolean,
 ): Promise<boolean> {
   // Check if it's a valid git worktree by testing if .git exists and is valid
   if (!existsSync(join(worktreePath, ".git"))) {
@@ -313,7 +318,7 @@ async function tryReuseReviewWorktree(
   await Utils.executeGitCommand(GIT_CLEAN_ARGS, { verbose: false, cwd: worktreePath });
   logVerbose(verbose, `✅ Switched to branch ${branch}`);
 
-  await Utils.prepareWorktreeForAgent(worktreePath, { verbose });
+  if (installDependencies) await Utils.prepareWorktreeForAgent(worktreePath, { verbose });
   return true;
 }
 
@@ -402,6 +407,7 @@ async function createReviewWorktree(
   verbose: boolean,
   repoOpts: GitOptions,
   repoOptsQuiet: GitOptions,
+  installDependencies: boolean,
 ): Promise<{ success: boolean; error?: string }> {
   logVerbose(verbose, `   Creating worktree at ${worktreePath}...`);
 
@@ -486,8 +492,8 @@ async function createReviewWorktree(
 
   logVerbose(verbose, `✅ Worktree ready at ${worktreePath}`);
 
-  // Install dependencies to ensure Agent has everything needed
-  await Utils.prepareWorktreeForAgent(worktreePath, { verbose });
+  // Install dependencies so agents that build or test have what they need.
+  if (installDependencies) await Utils.prepareWorktreeForAgent(worktreePath, { verbose });
   logVerbose(verbose, `✅ Worktree preparation complete!`);
   return { success: true };
 }

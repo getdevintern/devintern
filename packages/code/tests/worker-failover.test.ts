@@ -9,6 +9,8 @@ import { WebhookQueue } from "../src/lib/state/webhook-queue";
 import {
   cliResultToTaskResult,
   getWorkerFailover,
+  harnessBlockedReason,
+  harnessChainBlockedUntil,
   WorkerFailover,
   resetWorkerFailover,
   runWithFailover,
@@ -461,5 +463,25 @@ describe("startWorkerFailover restore", () => {
       resetWorkerFailover();
       queue.close();
     }
+  });
+});
+
+describe("harnessChainBlockedUntil", () => {
+  function fake(allLimited: boolean, windows: Record<string, number>): WorkerFailover {
+    return { allLimited: () => allLimited, windows: () => windows } as unknown as WorkerFailover;
+  }
+
+  test("returns the earliest future window only while every harness is limited", () => {
+    const now = 1_000;
+    expect(harnessChainBlockedUntil(null, now)).toBeUndefined();
+    expect(harnessChainBlockedUntil(fake(false, { a: 5_000 }), now)).toBeUndefined();
+    expect(harnessChainBlockedUntil(fake(true, { a: 9_000, b: 5_000, c: 500 }), now)).toBe(5_000);
+    expect(harnessChainBlockedUntil(fake(true, { a: 500 }), now)).toBeUndefined();
+  });
+
+  test("words the reason with the ISO resume time", () => {
+    expect(harnessBlockedReason(Date.parse("2026-11-20T04:00:12.689Z"))).toBe(
+      "no agent harness is available until 2026-11-20T04:00:12.689Z (usage limit)",
+    );
   });
 });

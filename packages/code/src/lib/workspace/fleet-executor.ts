@@ -8,7 +8,7 @@ import type { PickupGate } from "../worker/schedule";
 import type { WebhookQueue } from "../state/webhook-queue";
 import type { WorkerState } from "../state/worker-state";
 import type { RoutingSkipStore } from "./state";
-import { getWorkerFailover } from "../worker/failover";
+import { getWorkerFailover, harnessChainBlockedUntil } from "../worker/failover";
 import { createTaskSupervisor, JobNotStartedError } from "../worker/supervisor";
 import type { TaskSupervisor } from "../worker/supervisor";
 import { findRepo, findTeam, resolveWorkspacePipelinePath } from "./config";
@@ -141,6 +141,11 @@ export interface WorkspaceTaskAcquirerDeps {
    * defaults to the worker's failover controller.
    */
   isHarnessExhausted?: () => boolean;
+  /**
+   * Polling pause gate: resume time while every harness is usage-limited.
+   * Injected for tests; defaults to the worker's failover controller.
+   */
+  harnessBlockedUntil?: () => number | undefined;
 }
 
 /** Per-task CLI args from `[defaults].worker_task_args`, else `--create-pr`. */
@@ -252,6 +257,7 @@ export function createWorkspaceTaskAcquirer(deps: WorkspaceTaskAcquirerDeps): Ta
     executeTask,
     capacity,
     verbose,
+    harnessBlockedUntil: deps.harnessBlockedUntil ?? (() => harnessChainBlockedUntil()),
     isTaskActionedUnchanged: deps.isTaskActionedUnchanged
       ? (task) => deps.isTaskActionedUnchanged!(task.key, task.updated)
       : undefined,

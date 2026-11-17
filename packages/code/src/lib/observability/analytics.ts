@@ -173,8 +173,9 @@ function resolveHost(): string {
 }
 
 /**
- * Truthy env values disable telemetry; the variable only needs to exist for
- * common CI conventions like `DEVINTERN_TELEMETRY_DISABLED=` to work too.
+ * Any non-empty value other than `0` disables telemetry (`1`, `true`, `yes`,
+ * ...). An empty value (`DEVINTERN_TELEMETRY_DISABLED=`) and `0` count as
+ * unset and keep analytics enabled; see tests/analytics.test.ts.
  */
 export function isTelemetryDisabledByEnv(
   env: Record<string, string | undefined> = process.env,

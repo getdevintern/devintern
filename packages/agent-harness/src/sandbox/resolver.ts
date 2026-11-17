@@ -17,11 +17,11 @@
  */
 
 import { existsSync } from "fs";
-import { detectSandboxProviders } from "./detect.js";
 import type { DetectedSandboxProvider } from "./detect.js";
-import { sandboxInheritsEnclosingSandbox } from "./nesting.js";
-import { getSandboxProvider, listSandboxProviders } from "./registry.js";
+import { resolveHarnessSandboxDecision } from "./selection.js";
 import type { ResolvedSandbox } from "./types.js";
+
+export { removedSandboxProviderMessage } from "./selection.js";
 
 export interface SandboxResolutionOptions {
   /** Explicit provider name (e.g. "nono"), or "none"/"auto". */
@@ -89,45 +89,6 @@ const ACTIVE_SANDBOX_ENV: Record<string, ActiveSandboxMarker> = {
 };
 
 /**
- * Removed providers and the migration message users see when they still have
- * `--sandbox <name>` or `AGENT_SANDBOX=<name>` configured. This is the single
- * source of truth: the resolver, `devintern sandbox`, and their tests all read
- * it, so a future removal is a one-line change with a consistent, actionable
- * error instead of the generic unknown-provider list.
- *
- * A `Map` (not an object literal) is deliberate: the lookup key is untrusted
- * input (`--sandbox <x>` / `AGENT_SANDBOX`), and an object lookup would resolve
- * inherited prototype members such as `constructor` or `toString` to a truthy
- * non-string value instead of falling through to the unknown-provider error.
- */
-const REMOVED_SANDBOX_PROVIDERS = new Map<string, string>([
-  [
-    "srt",
-    'Sandbox provider "srt" has been removed. Use "nono" for whole-process confinement ' +
-      '(or "docker" for a microVM boundary). ' +
-      "See https://devintern.com/docs/code/configuration#providers",
-  ],
-  [
-    "smolvm",
-    'Sandbox provider "smolvm" has been removed. Use "docker" for a microVM boundary ' +
-      '(or "nono" for local confinement). ' +
-      "See https://devintern.com/docs/code/configuration#providers",
-  ],
-]);
-
-/**
- * Migration message for a retired sandbox provider.
- *
- * @param name - Provider name from `--sandbox` or `AGENT_SANDBOX`; untrusted
- *   input, so only own entries of the removed-provider map can match.
- * @returns The migration message, or `undefined` when the name is not a
- *   removed provider (callers then report it as unknown).
- */
-export function removedSandboxProviderMessage(name: string): string | undefined {
-  return REMOVED_SANDBOX_PROVIDERS.get(name);
-}
-
-/**
  * Name of the sandbox provider already wrapping this process, if any.
  *
  * Re-wrapping with any kernel sandbox — the same provider or a different one —
@@ -162,108 +123,39 @@ export async function resolveSandbox(
   const name = options?.sandboxName || process.env.AGENT_SANDBOX || "none";
   const harnessName = options?.harnessName;
   const warn = options?.onWarning ?? ((message: string) => console.warn(message));
-  const active = activeSandboxName(options?.trustedEnv);
 
-  if (name === "none") {
-    return null;
-  }
+  // One picker for runtime, worker preflight, and the doctors (see
+  // `selection.ts`), so preflight never probes through a provider this run
+  // would not use.
+  const decision = await resolveHarnessSandboxDecision({
+    sandboxName: name,
+    harnessName,
+    detections: options?.detections,
+    activeSandbox: name === "none" ? undefined : activeSandboxName(options?.trustedEnv),
+  });
 
-  // Already inside a kernel sandbox. Nesting a namespace-based wrapper — the
-  // same provider or a different one — is unsupported on Linux/macOS: the inner
-  // instance cannot set up its namespaces/state under the outer confinement and
-  // exits non-zero before the agent starts. The existing confinement is the
-  // boundary, so `auto` and explicitly requested non-nestable providers inherit
-  // rather than stack a second sandbox. MicroVM providers may nest (see below).
-  const skipNesting = (activeName: string, requestedName?: string): null => {
-    warn(
-      requestedName && requestedName !== activeName
-        ? `ℹ️  Already running inside the ${activeName} sandbox — not adding a nested ` +
-            `${requestedName} sandbox; the agent inherits the existing confinement.`
-        : `ℹ️  Already running inside the ${activeName} sandbox — not nesting another sandbox; ` +
-            "the agent inherits the existing confinement.",
-    );
-    return null;
-  };
-
-  // Only `auto` can be decided before provider detection: it inherits the
-  // enclosing sandbox regardless of which provider it would otherwise pick.
-  // An explicit request is validated first (below) and classified after its
-  // provider is resolved, so an unusable request still errors instead of
-  // silently inheriting.
-  if (active && sandboxInheritsEnclosingSandbox({ configured: name, activeSandbox: active })) {
-    return skipNesting(active);
-  }
-
-  if (name === "auto") {
-    const detections = options?.detections ?? (await detectSandboxProviders());
-    const candidates = detections
-      .filter(({ provider, detection }) => {
-        if (!detection.available || provider.priority <= 0) return false;
-        if (harnessName && provider.supportsHarness && !provider.supportsHarness(harnessName)) {
-          return false;
-        }
-        return true;
-      })
-      .sort((a, b) => b.provider.priority - a.provider.priority);
-
-    const best = candidates[0] ? { ...candidates[0], harnessName } : undefined;
-    if (!best) {
+  switch (decision.kind) {
+    case "none":
+      return null;
+    case "unsandboxed":
+      warn(decision.warning);
+      return null;
+    case "error":
+      throw new Error(decision.message);
+    case "inherited": {
+      // Already inside a kernel sandbox: nesting a namespace-based wrapper is
+      // unsupported, so the existing confinement is the boundary.
+      const requestedName = decision.provider?.name;
       warn(
-        "⚠️  AGENT_SANDBOX=auto: no sandbox provider available on this machine — " +
-          "running the agent unsandboxed. Install nono (https://nono.sh) to enable isolation.",
+        requestedName && requestedName !== decision.activeSandbox
+          ? `ℹ️  Already running inside the ${decision.activeSandbox} sandbox — not adding a nested ` +
+              `${requestedName} sandbox; the agent inherits the existing confinement.`
+          : `ℹ️  Already running inside the ${decision.activeSandbox} sandbox — not nesting another sandbox; ` +
+              "the agent inherits the existing confinement.",
       );
       return null;
     }
-    return best;
+    case "provider":
+      return { provider: decision.provider, detection: decision.detection, harnessName };
   }
-
-  // Explicit migration path for retired providers: a user who still has
-  // `--sandbox <name>` or `AGENT_SANDBOX=<name>` configured must get an
-  // actionable message instead of the generic unknown-provider list.
-  const removedMessage = removedSandboxProviderMessage(name);
-  if (removedMessage) {
-    throw new Error(removedMessage);
-  }
-
-  const provider = getSandboxProvider(name);
-  if (!provider) {
-    const available = listSandboxProviders()
-      .map((p) => `"${p.name}"`)
-      .join(", ");
-    throw new Error(
-      `Unknown sandbox provider: "${name}". ` +
-        `Valid values: "none", "auto", ${available}. Set AGENT_SANDBOX or pass --sandbox.`,
-    );
-  }
-
-  // Validate the explicit request before deciding whether to nest: an
-  // unavailable or harness-incompatible provider must surface its conflict
-  // instead of silently inheriting the enclosing sandbox.
-  const detections = options?.detections ?? (await detectSandboxProviders());
-  const detected = detections.find((d) => d.provider.name === name);
-  const detection = detected?.detection ?? (await provider.detect());
-  if (!detection.available) {
-    throw new Error(
-      `Sandbox provider "${name}" is not usable on this machine: ${detection.reason ?? "unavailable"}`,
-    );
-  }
-
-  if (harnessName && provider.supportsHarness && !provider.supportsHarness(harnessName)) {
-    throw new Error(
-      `Sandbox provider "${name}" does not support the "${harnessName}" harness. ` +
-        'Use "nono" (it wraps any harness), or switch AGENT_HARNESS.',
-    );
-  }
-
-  // Already inside a sandbox. Only providers that cannot nest (kernel wrappers
-  // and the native harness sandbox) are skipped; microVM providers run in their
-  // own guest and may run inside the enclosing confinement.
-  if (
-    active &&
-    sandboxInheritsEnclosingSandbox({ configured: name, activeSandbox: active, provider })
-  ) {
-    return skipNesting(active, name);
-  }
-
-  return { provider, detection, harnessName };
 }

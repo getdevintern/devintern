@@ -114,12 +114,15 @@ export interface AutoMergeOptions {
   /** Source repository directory for the review worktree. */
   cwd?: string;
   github?: AutoMergeGitHub;
-  /** Agent runner (tests); defaults to the shared review agent. */
+  /**
+   * Agent runner (tests); defaults to the shared review agent. The verdict
+   * is parsed from `stdout`, which falls back to `output` when absent.
+   */
   agentRunner?: (
     prompt: string,
     workDir: string,
     verbose: boolean,
-  ) => Promise<{ success: boolean; output: string }>;
+  ) => Promise<{ success: boolean; output: string; stdout?: string }>;
   /** Review checkout (tests); defaults to the branch-scoped review worktree. */
   worktree?: {
     prepare(branch: string): Promise<{ success: boolean; path?: string; error?: string }>;
@@ -129,6 +132,9 @@ export interface AutoMergeOptions {
 
 /** Diffs above this size are not sent to the agent (rejected instead). */
 export const MAX_REVIEW_DIFF_CHARS = 150_000;
+
+/** Transcript label for the merge-safety agent (distinct from review replies). */
+export const MERGE_SAFETY_REVIEW_LOG_LABEL = "merge-safety-review";
 
 /** `mergeable_state` values meaning "mergeable and checks passing". */
 const MERGEABLE_STATES = new Set(["clean", "has_hooks"]);
@@ -459,7 +465,9 @@ async function reviewWithAgent(params: {
   const { options, branch, headSha, prompt } = params;
   const verbose = options.verbose ?? false;
   const worktree = options.worktree ?? {
-    prepare: (name: string) => Utils.prepareReviewWorktree(name, { verbose, cwd: options.cwd }),
+    // Read-only review of a CI-green PR: no package install needed.
+    prepare: (name: string) =>
+      Utils.prepareReviewWorktree(name, { verbose, cwd: options.cwd, installDependencies: false }),
     remove: async (path: string) => {
       const removed = await Utils.removeReviewWorktree(path, { verbose, cwd: options.cwd });
       if (!removed.success) {
@@ -483,12 +491,21 @@ async function reviewWithAgent(params: {
         return { kind: "waiting", ran: false, message: "PR head moved while preparing the review" };
       }
     }
-    const runner = options.agentRunner ?? runAgent;
-    const run = await runner(prompt, workDir, verbose);
+    const injected = options.agentRunner;
+    const run = injected
+      ? await injected(prompt, workDir, verbose).then((result) => ({
+          ...result,
+          stdout: result.stdout ?? result.output,
+        }))
+      : await runAgent(prompt, workDir, verbose, {
+          label: MERGE_SAFETY_REVIEW_LOG_LABEL,
+          origin: "auto_merge",
+        });
     if (!run.success) {
       return { kind: "failed", ran: true, message: "merge-safety agent run failed" };
     }
-    const verdict = parseMergeSafetyVerdict(run.output);
+    // Only stdout counts: stderr may echo the prompt (and so the PR diff).
+    const verdict = parseMergeSafetyVerdict(run.stdout ?? "");
     if (!verdict) {
       return { kind: "failed", ran: true, message: "merge-safety agent returned no verdict" };
     }

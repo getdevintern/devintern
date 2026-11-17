@@ -12,6 +12,7 @@ import { join } from "path";
 import { resetHintToMs } from "@devintern/agent-harness";
 
 import { pinnedHarnessChildEnv } from "../agent/selection";
+import { harnessLogRunEnv } from "../observability/harness-logs";
 import { AUTO_MERGE_OUTCOMES } from "../review/auto-merge";
 import type { AutoMergeOutcome, AutoMergePolicy, AutoMergeResult } from "../review/auto-merge";
 import { getWorkerFailover, runWithFailover } from "../worker/failover";
@@ -43,6 +44,8 @@ export interface AutoMergeCliOptions {
   entrypoint?: string;
   /** This head's final allowed attempt: a failure is stated on the PR. */
   lastAttempt?: boolean;
+  /** Worker run for this check; the child's agent transcript is filed under it. */
+  runId?: number;
 }
 
 /** CLI flags carrying the policy to the subprocess. */
@@ -130,7 +133,11 @@ function spawnOnce(
         detached: true,
         stdio: ["inherit", "inherit", "inherit", "pipe"],
         cwd: opts.cwd,
-        env: { ...opts.env, DEVINTERN_RESULT_FD: "3" },
+        env: {
+          ...opts.env,
+          DEVINTERN_RESULT_FD: "3",
+          ...(opts.runId !== undefined ? harnessLogRunEnv(opts.runId) : {}),
+        },
       },
     );
     const abort = () => killTree(child.pid);

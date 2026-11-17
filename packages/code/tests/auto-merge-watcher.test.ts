@@ -117,6 +117,58 @@ describe("AutoMergeWatcherAcquirer", () => {
     expect(statusDuringMerge).toEqual(["in_progress"]);
   });
 
+  test("hands the open run's id to the merge check so its transcript is filed under it", async () => {
+    const runIds: Array<number | undefined> = [];
+    const w = new AutoMergeWatcherAcquirer({
+      intervalSeconds: 60,
+      workerState,
+      queue,
+      enabled: () => true,
+      now: () => now,
+      quietSeconds: 0,
+      fetchPr: async () => ({ data: pr, notModified: false }),
+      mergePr: async (_repo, _prNumber, _sha, { runId }) => {
+        runIds.push(runId);
+        return { outcome: "merged", message: "ok", reviewed: false };
+      },
+      runStore: { createRun: () => 41, finishRun: () => {}, discardRun: () => {} },
+    });
+    await w.tick();
+    expect(runIds).toEqual([41]);
+  });
+
+  test("marks the run as waiting for a slot until the check is admitted", async () => {
+    const steps: string[] = [];
+    const seen: Array<{ before: string | undefined; after: string | undefined }> = [];
+    const w = new AutoMergeWatcherAcquirer({
+      intervalSeconds: 60,
+      workerState,
+      queue,
+      enabled: () => true,
+      now: () => now,
+      quietSeconds: 0,
+      fetchPr: async () => ({ data: pr, notModified: false }),
+      mergePr: async (_repo, _prNumber, _sha, { onStart }) => {
+        const before = steps.at(-1);
+        // The fleet runner calls onStart once the supervisor admits the job.
+        onStart?.();
+        seen.push({ before, after: steps.at(-1) });
+        return { outcome: "merged", message: "ok", reviewed: false };
+      },
+      runStore: {
+        createRun: () => 1,
+        finishRun: () => {},
+        discardRun: () => {},
+        startStep: (_id, step) => {
+          steps.push(step);
+          return now;
+        },
+      },
+    });
+    await w.tick();
+    expect(seen).toEqual([{ before: "waiting-for-slot", after: "auto-merge" }]);
+  });
+
   test.each([
     [{ mergeable_state: "unstable" }],
     [{ mergeable_state: "blocked" }],

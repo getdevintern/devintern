@@ -8,6 +8,7 @@ import {
   persistActiveEffort,
   persistActiveHarness,
   persistActiveModel,
+  promoteHarness,
   persistActiveProject,
   persistActiveTracker,
   persistTrackerCredentials,
@@ -175,6 +176,24 @@ describe("project-env", () => {
       const raw = await readFile(join(dir, ".devintern-pm", ".env"), "utf8");
       expect(raw).toContain("AGENT_HARNESS=opencode");
       expect(raw.split("\n")).toContain("AGENT_CLI_PATH=");
+    });
+
+    test("keeps a multi-entry chain, moving the picked harness to the front", async () => {
+      process.env.OPENCODE_CLI_PATH = writeExecutable("opencode");
+      const dir = await writeEnv(
+        "TASK_TRACKER=markdown\nMARKDOWN_TASKS_DIR=./tasks\nAGENT_HARNESS=claude,opencode,grok\n",
+      );
+
+      await persistActiveHarness(dir, "opencode");
+      const { env } = await readProjectEnv(dir);
+      expect(env.AGENT_HARNESS).toBe("opencode,claude-code,grok");
+    });
+
+    test("promoteHarness never invents a chain from a single or unset value", () => {
+      expect(promoteHarness(undefined, "opencode")).toBe("opencode");
+      expect(promoteHarness(" , ", "opencode")).toBe("opencode");
+      expect(promoteHarness("claude-code", "opencode")).toBe("opencode");
+      expect(promoteHarness("opencode,grok", "grok")).toBe("grok,opencode");
     });
 
     test("rejects an empty or whitespace harness name without writing", async () => {
