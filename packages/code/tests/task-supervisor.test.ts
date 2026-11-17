@@ -1,7 +1,153 @@
 import { describe, expect, test } from "bun:test";
 
-import { createTaskSupervisor, JobNotStartedError } from "../src/lib/worker/supervisor";
-import type { HostCheckoutClass } from "../src/lib/worker/supervisor";
+import {
+  createTaskSupervisor,
+  JobNotStartedError,
+  PRIORITY_AGING_MS,
+} from "../src/lib/worker/supervisor";
+import type { HostCheckoutClass, JobKind } from "../src/lib/worker/supervisor";
+
+describe("TaskSupervisor priority", () => {
+  /** Hold the repo's shared base, queue `kinds` behind it, return start order. */
+  async function startOrder(kinds: JobKind[]): Promise<string[]> {
+    const supervisor = createTaskSupervisor({ maxConcurrency: 4, maxConcurrencyPerRepo: 1 });
+    const started: string[] = [];
+    const holder = deferred<void>();
+    const holding = supervisor.schedule(
+      request({
+        id: "holder",
+        repo: "web",
+        kind: "conflict",
+        checkoutClass: "shared_base",
+        run: () => holder.promise,
+      }),
+    );
+    // Each queued job finishes as soon as it starts, freeing the slot.
+    const jobs = kinds.map((kind, index) =>
+      supervisor.schedule(
+        request({
+          id: `${kind}-${index}`,
+          repo: "web",
+          kind,
+          checkoutClass: "shared_base",
+          run: async () => {
+            started.push(`${kind}-${index}`);
+          },
+        }),
+      ),
+    );
+    holder.resolve();
+    await holding;
+    await Promise.all(jobs);
+    return started;
+  }
+
+  test("short PR work starts before long jobs waiting for the same slot", async () => {
+    expect(await startOrder(["automation", "conflict", "auto_merge", "review", "ci_fix"])).toEqual([
+      "auto_merge-2",
+      "review-3",
+      "ci_fix-4",
+      "conflict-1",
+      "automation-0",
+    ]);
+  });
+
+  test("jobs of the same priority keep submission order", async () => {
+    expect(await startOrder(["automation", "estimation", "automation"])).toEqual([
+      "automation-0",
+      "estimation-1",
+      "automation-2",
+    ]);
+  });
+
+  test("a job waiting longer than the aging window is promoted", async () => {
+    let now = 0;
+    // The automation is queued at t=0; the merge check only after the window.
+    const supervisor = createTaskSupervisor(
+      { maxConcurrency: 4, maxConcurrencyPerRepo: 1 },
+      { now: () => now },
+    );
+    const started: string[] = [];
+    const holder = deferred<void>();
+    const holding = supervisor.schedule(
+      request({
+        id: "holder",
+        repo: "web",
+        kind: "conflict",
+        checkoutClass: "shared_base",
+        run: () => holder.promise,
+      }),
+    );
+    const automation = supervisor.schedule(
+      request({
+        id: "automation",
+        repo: "web",
+        kind: "automation",
+        checkoutClass: "shared_base",
+        run: async () => {
+          started.push("automation");
+        },
+      }),
+    );
+    now = PRIORITY_AGING_MS;
+    const merge = supervisor.schedule(
+      request({
+        id: "merge",
+        repo: "web",
+        kind: "auto_merge",
+        checkoutClass: "shared_base",
+        run: async () => {
+          started.push("merge");
+        },
+      }),
+    );
+    holder.resolve();
+    await Promise.all([holding, automation, merge]);
+    expect(started).toEqual(["automation", "merge"]);
+  });
+
+  test("priority never admits a job its slot cannot take", async () => {
+    // A merge check on a busy repo must not block an automation on a free one.
+    const supervisor = createTaskSupervisor({ maxConcurrency: 4, maxConcurrencyPerRepo: 1 });
+    const holder = deferred<void>();
+    const started: string[] = [];
+    const holding = supervisor.schedule(
+      request({
+        id: "holder",
+        repo: "web",
+        checkoutClass: "shared_base",
+        run: () => holder.promise,
+      }),
+    );
+    const merge = supervisor.schedule(
+      request({
+        id: "merge",
+        repo: "web",
+        kind: "auto_merge",
+        checkoutClass: "shared_base",
+        run: async () => {
+          started.push("merge");
+        },
+      }),
+    );
+    const automation = supervisor.schedule(
+      request({
+        id: "automation",
+        repo: "api",
+        kind: "automation",
+        checkoutClass: "shared_base",
+        run: async () => {
+          started.push("automation");
+        },
+      }),
+    );
+    await automation;
+    expect(started).toEqual(["automation"]);
+    holder.resolve();
+    await Promise.all([holding, merge]);
+    expect(started).toEqual(["automation", "merge"]);
+  });
+});
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -16,6 +162,7 @@ function deferred<T>() {
 function request<T>(options: {
   id: string;
   repo?: string;
+  kind?: JobKind;
   checkoutClass?: HostCheckoutClass;
   run: (signal: AbortSignal) => Promise<T>;
 }) {
@@ -23,7 +170,7 @@ function request<T>(options: {
     id: options.id,
     source: "test",
     repo: options.repo,
-    kind: "task" as const,
+    kind: options.kind ?? ("task" as const),
     checkoutClass: options.checkoutClass ?? ("task_worktree" as const),
     run: options.run,
   };

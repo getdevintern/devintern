@@ -6,6 +6,10 @@
 
 - **Opt-in base sync for teammates' open PRs (`sync_team_prs`, DEV-86)**: set `sync_team_prs = true` on a GitHub `[[repos]]` entry to have the worker also catch teammates' open, non-draft, same-repo PRs up with their base (authors with `author_association` `OWNER`, `MEMBER`, `COLLABORATOR`, or `MAINTAIN`). These PRs use the same base-sync path as the agent's own PRs, so `conflict_resolution` modes, scheduled windows, quiet period, retry backoff, and defer caps all apply; review feedback on them is never addressed. Discovery is one ETag-conditional open-PR list request per opted-in repo per poll, so repos that are not opted in make no extra requests. The flag requires an explicit agent sandbox (`AGENT_SANDBOX=native`, `nono`, or `docker`; `auto` and `none` are refused) in each opted-in repo's effective env: the worker refuses to start, and rejects live reloads, otherwise. It is rejected on non-GitHub repos. See `docs/code/worker.md#syncing-teammates-open-prs`
 
+### Fixed
+
+- **Auto-merge reads the merge-safety verdict only from the agent's final stdout line.** Previously the parser scanned stdout and stderr together and took the last `{"safe": ...}` object, so a `{"safe": true}` literal echoed in a harness transcript on stderr (for example from the PR diff in the prompt) could approve a PR the agent had rejected or never judged. Now only the last non-empty stdout line counts, after stripping ANSI codes; anything else is "no verdict" and never merges
+
 ## [2.23.0] - 2026-11-13
 
 Task control and observability release: a task description can now choose its own harness, model, and effort, and the local dashboard gains an Overview landing page, a read-only Workspace view, a redesigned task-activity list, and per-automation pages. Worker reliability fixes stop exhausted harness chains, credential failures, and relay review failures from looping or flooding logs and Sentry; usage-limit detection and cooldowns are more accurate; and agent failures now carry their real reason. See **Upgrade notes** for the dashboard route change and the stricter `--env-file` precedence.

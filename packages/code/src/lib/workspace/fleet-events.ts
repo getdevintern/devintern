@@ -5,7 +5,8 @@
  * The workspace worker has no ambient checkout, so every event run is a CLI
  * subprocess in the repo's persistent base worktree with that repo's composed
  * environment. The permission gate for mention-driven runs
- * (write/maintain/admin, fails closed) therefore lives HERE, before the
+ * (write/maintain/admin; a confirmed denial skips, an API error propagates so
+the caller retries) therefore lives HERE, before the
  * subprocess: `devintern address-review` is a manual command and performs no
  * gating of its own.
  */
@@ -30,7 +31,11 @@ export interface FleetEventDeps {
   config: WorkspaceConfig;
   workspaceDir: string;
   repoManager: RepoManagerLike;
-  /** Permission gate backend (GitHub collaborator check; injected for tests). */
+  /**
+   * Permission gate backend (GitHub collaborator check; injected for tests).
+   * Must reject on API errors rather than resolve `false`, so a transient
+   * failure is retried instead of being treated as a denial.
+   */
   userHasPushAccess: (owner: string, repo: string, username: string) => Promise<boolean>;
   /** Review runner (injected for tests; defaults to the CLI subprocess). */
   runReview?: (
@@ -265,7 +270,7 @@ export function createFleetAutoMerge(
   slug: string,
   prNumber: number,
   expectedHeadSha: string,
-  options?: { lastAttempt: boolean },
+  options?: { lastAttempt: boolean; onStart?: () => void },
 ) => Promise<AutoMergeResult> {
   const { config, workspaceDir, repoManager } = deps;
   const runAutoMerge = deps.runAutoMerge ?? runAutoMergeViaCli;
@@ -279,6 +284,8 @@ export function createFleetAutoMerge(
       };
     }
     const invoke = async (signal?: AbortSignal) => {
+      // Admitted: the repo's slot is ours, so the check is no longer waiting.
+      options?.onStart?.();
       await repoManager.ensureBareClone(repo);
       await repoManager.fetch(repo.name);
       const base = await repoManager.ensureBaseWorktree(repo);
@@ -373,34 +380,39 @@ export function createFleetCiFix(
  * Build the fleet mention handler: permission-gate the mentioning user, then
  * run the review pipeline for that PR.
  *
- * The gate fails closed: API errors count as "no access".
+ * A confirmed denial returns `"skipped"` (an intentional no-op). A permission
+ * API error propagates: the relay classifies it as transient and retries it
+ * within its bounded budget, and the polling sweep retries it through its
+ * attempt ledger. A 5xx or rate limit must not permanently drop a valid
+ * @mention.
+ *
+ * @returns The review run outcome, or `"skipped"` when the actor lacks access.
  */
 export function createFleetMentionHandler(
   deps: FleetEventDeps,
   sharedAddressPr?: AddressPr,
-): (slug: string, comment: { user: { login: string } }, prNumber: number) => Promise<void> {
+): (
+  slug: string,
+  comment: { user: { login: string } },
+  prNumber: number,
+) => Promise<TaskExecutionResult> {
   const addressPr = sharedAddressPr ?? coalescePrFeedbackRuns(createFleetAddressPr(deps));
 
   return async (slug, comment, prNumber) => {
     const [owner, name] = slug.split("/") as [string, string];
     const actor = comment.user.login;
 
-    let hasAccess = false;
-    try {
-      hasAccess = await deps.userHasPushAccess(owner, name, actor);
-    } catch {
-      hasAccess = false;
-    }
+    const hasAccess = await deps.userHasPushAccess(owner, name, actor);
     if (!hasAccess) {
       console.log(
         `⛔ [fleet] Skipping mention on ${slug}#${prNumber}: @${actor} does not have push access ` +
           "(mention-triggered automation requires write, maintain, or admin permission)",
       );
-      return;
+      return "skipped";
     }
 
     console.log(`📌 [fleet] @mention on ${slug}#${prNumber} by @${actor}`);
-    await addressPr(slug, prNumber);
+    return addressPr(slug, prNumber);
   };
 }
 
