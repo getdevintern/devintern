@@ -1,13 +1,13 @@
 ---
-title: "GitHub Integration"
+title: "GitHub Webhooks and PR Automation"
 description: "Advanced: deploy a repo-local GitHub webhook listener (`devintern webhook serve`)"
-section: "Server Automation"
+section: "Automation"
 order: 4
 sidebarHidden: true
-dateModified: 2026-09-01
+dateModified: 2026-11-12
 ---
 
-# GitHub Integration Guide
+# GitHub Webhooks and PR Automation
 
 Prefer the [worker](./worker.md) plus the [relay](./relay.md) for PR review feedback: polling is always on, the central DevIntern AI App delivers events in seconds, and only `GITHUB_TOKEN` is needed locally. This page is the advanced path—`devintern webhook serve` with a customer-owned GitHub App—for air-gapped or self-hosted installs that operate their own public GitHub webhook.
 
@@ -425,7 +425,6 @@ export GITHUB_TOKEN="ghp_..."
 # Optional
 export WEBHOOK_PORT="3000"        # Default: 3000
 export WEBHOOK_HOST="0.0.0.0"     # Default: 0.0.0.0
-export WEBHOOK_AUTO_REPLY="true"  # Reply to addressed comments
 export WEBHOOK_AUTO_REVIEW="true" # Run self-review loop after addressing feedback
 export AUTO_REVIEW_ITERATIONS="2" # Max review-fix cycles for the self-review loop (default: 2; shared with the CLI)
 export WEBHOOK_MAX_RETRIES="3"    # Retries per failed webhook job
@@ -451,6 +450,8 @@ devintern webhook serve --port 3000
 pm2 start "devintern webhook serve" --name devintern-webhooks
 ```
 
+`--port <port>` and `--host <host>` override the `WEBHOOK_PORT` / `WEBHOOK_HOST` environment variables.
+
 ### Systemd Service (Linux)
 
 Create `/etc/systemd/system/devintern-webhooks.service`:
@@ -470,7 +471,6 @@ Environment=PATH=/home/your-user/.local/bin:/home/your-user/.local/share/mise/in
 Environment=LICENSE_KEY=your-automation-license-key
 Environment=WEBHOOK_SECRET=your-secret
 Environment=GITHUB_TOKEN=ghp_...
-Environment=WEBHOOK_AUTO_REPLY=true
 Environment=WEBHOOK_AUTO_REVIEW=true
 ExecStart=/usr/local/bin/devintern webhook serve --port 3000
 Restart=always

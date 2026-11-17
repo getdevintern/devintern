@@ -1,13 +1,13 @@
 ---
-title: "@devintern/pm Configuration"
+title: "DevIntern PM Configuration"
 sidebarLabel: "Configuration"
 description: "Environment variables, tracker credentials, and defaults for @devintern/pm."
 section: "Create Tasks"
 order: 2
-dateModified: 2026-08-08
+dateModified: 2026-11-12
 ---
 
-# @devintern/pm Configuration
+# DevIntern PM Configuration
 
 @devintern/pm uses per-project configuration stored in `.devintern-pm/.env` in your project directory. Run `devpm init` in a terminal for a guided setup: it asks which tracker you use, links to each provider's token creation page, validates the connection, and writes the file for you. Prefer editing by hand (or setting up in CI)? Run `devpm init --yes` to write the configuration template instead, then fill in values for your selected backend as described below.
 
@@ -148,7 +148,7 @@ You can also override the harness for a single run with `--harness <name>` (CLI 
 2. Harness-specific env var (e.g. `OPENCODE_CLI_PATH` when `AGENT_HARNESS=opencode`)
 3. Harness default command, located on your `PATH` (e.g. `claude`)
 
-Common `AGENT_HARNESS` values include `claude-code`, `opencode`, `codex`, `cursor`, `grok`, `deepseek`, `reasonix`, `antigravity`, `cline`, `goose`, `kilo-code`, `kimi`, and `qwen`. If you do need to set a path explicitly, run `which` for the harness binary (`claude`, `opencode`, `codex`, `cursor-agent`, `grok`, `dsh`, `reasonix`, `agy`, `cline`, `goose`, `kilo`, `kimi`, or `qwen`).
+Common `AGENT_HARNESS` values include `claude-code` (alias `claude`), `opencode`, `codex`, `cursor`, `grok`, `deepseek`, `reasonix`, `antigravity`, `cline`, `goose`, `kilo-code`, `kimi`, `muse`, and `qwen`. If you do need to set a path explicitly, run `which` for the harness binary (`claude`, `opencode`, `codex`, `cursor-agent`, `grok`, `dsh`, `reasonix`, `agy`, `cline`, `goose`, `kilo`, `kimi`, `muse`, or `qwen`).
 
 **Cursor note:** The Cursor harness uses Cursor's headless `cursor-agent` CLI (not a command named `cursor`). Cursor also installs an `agent` alias, but devpm looks for `cursor-agent` because other tools use the `agent` name too. Install Cursor and enable the CLI from Cursor's settings, then set `AGENT_HARNESS=cursor`.
 
@@ -156,15 +156,37 @@ Common `AGENT_HARNESS` values include `claude-code`, `opencode`, `codex`, `curso
 
 **DeepSeek Harness note (experimental):** Harness id `deepseek` (alias `dsh`); the CLI binary is `dsh`, DeepSeek's official [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness). It is in developer preview and upstream expects compatibility-breaking changes. Install Node.js and the CLI (`npm i -g @deepseek-ai/dsh`) so `dsh` is on your `PATH`, or point `AGENT_CLI_PATH` / `DEEPSEEK_CLI_PATH` at a wrapper, then set `AGENT_HARNESS=deepseek`. devpm invokes the documented `dsh headless` task mode (plus `--json` when structured output is requested); this adapter was verified against `@deepseek-ai/dsh` 0.2.1-rc.2. A different installed version prints a one-line warning naming the verified version instead of failing later with a raw parser error. A `dsh` that does not report a parseable version — for example Debian/Ubuntu's unrelated `dsh` distributed shell, which shares the binary name — is refused with install or `DEEPSEEK_CLI_PATH` guidance instead of being spawned.
 
-Headless mode ignores the credentials saved by the dsh GUI. Authenticate with `DEEPSEEK_API_KEY` in the launch environment (`.devintern-pm/.env` works) or in `$DSH_HOME/.env`; to reuse a saved GUI sign-in, restore the credential rows in `$DSH_HOME/profiles/headless/cordis.patch.yml` as described in the [headless bundle docs](https://github.com/deepseek-ai/deepseek-harness/tree/master/packages/bundle/headless#credentials). The shipped headless profile defaults to provider `deepseek-official` and model `deepseek-flash`, so `DEEPSEEK_API_KEY` is enough to start. The model and reasoning level are profile settings (`agent-default-model` in `$DSH_HOME/profiles/headless/cordis.patch.yml`); `AGENT_MODEL` and `AGENT_EFFORT` are ignored (with guidance) rather than passed as unsupported flags. `--max-turns` and plan/read-only flags have no headless equivalent; devpm's internal 100-turn cap is ignored silently, while a non-default turn cap prints a one-line warning. devpm runs every story prompt with `skipPermissions`, which DevIntern maps to `DSH_PERMISSION_MODE=danger-full-access` unless you set that variable yourself: the shipped `workspace-write` default pairs with approval policy `ask`, and headless composes no interactive answerer, so any operation that needs approval fails closed. Set `DSH_PERMISSION_MODE=workspace-write` to keep dsh's own sandbox instead (approval stays `ask`). When DevIntern's nono/srt sandbox is enabled, it remains the enforcement boundary regardless of this setting. devpm does not expose upstream `--session-id` resumption. Missing installs and headless credential errors are surfaced in the run output. When `DSH_HOME` is set, DevIntern expands `~`, resolves relative values against the workspace (matching dsh), and grants that directory instead of `~/.dsh` in nono/srt sandbox policies — but only a `.dsh*` directory directly under `$HOME` (for example `~/.dsh-custom` or `~/.dsh/profiles`) or one inside the workspace; a trusted directory that does not exist yet is created before the grant. Other locations (including `DSH_HOME=/`, `$HOME` itself, or unrelated `$HOME` subtrees such as `~/.ssh`) are not granted unless `DEVINTERN_SANDBOX_ALLOW_CUSTOM_DSH_HOME=1` explicitly trusts them. `DSH_HOME` is read from the environment dsh inherits, so setting it in `.devintern-pm/.env` is honored by both dsh and the sandbox grant; the `DEVINTERN_SANDBOX_ALLOW_CUSTOM_DSH_HOME` opt-in is read only from the launch environment (not the project `.env`), so a repository file cannot widen the grant.
+Headless mode ignores the credentials saved by the dsh GUI. Authenticate with `DEEPSEEK_API_KEY` in the launch environment (`.devintern-pm/.env` works) or in `$DSH_HOME/.env`; to reuse a saved GUI sign-in, restore the credential rows in `$DSH_HOME/profiles/headless/cordis.patch.yml` as described in the [headless bundle docs](https://github.com/deepseek-ai/deepseek-harness/tree/master/packages/bundle/headless#credentials). The shipped headless profile defaults to provider `deepseek-official` and model `deepseek-flash`, so `DEEPSEEK_API_KEY` is enough to start. The model and reasoning level are profile settings (`agent-default-model` in `$DSH_HOME/profiles/headless/cordis.patch.yml`); `AGENT_MODEL` and `AGENT_EFFORT` are ignored (with guidance) rather than passed as unsupported flags. `--max-turns` and plan/read-only flags have no headless equivalent; devpm's internal 100-turn cap is ignored silently, while a non-default turn cap prints a one-line warning. devpm runs every story prompt with `skipPermissions`, which DevIntern maps to `DSH_PERMISSION_MODE=danger-full-access` unless you set that variable yourself: the shipped `workspace-write` default pairs with approval policy `ask`, and headless composes no interactive answerer, so any operation that needs approval fails closed. Set `DSH_PERMISSION_MODE=workspace-write` to keep dsh's own sandbox instead (approval stays `ask`). When DevIntern's nono sandbox is enabled, it remains the enforcement boundary regardless of this setting. devpm does not expose upstream `--session-id` resumption. Missing installs and headless credential errors are surfaced in the run output. When `DSH_HOME` is set, DevIntern expands `~`, resolves relative values against the workspace (matching dsh), and grants that directory instead of `~/.dsh` in nono sandbox policies — but only a `.dsh*` directory directly under `$HOME` (for example `~/.dsh-custom` or `~/.dsh/profiles`) or one inside the workspace; a trusted directory that does not exist yet is created before the grant. Other locations (including `DSH_HOME=/`, `$HOME` itself, or unrelated `$HOME` subtrees such as `~/.ssh`) are not granted unless `DEVINTERN_SANDBOX_ALLOW_CUSTOM_DSH_HOME=1` explicitly trusts them. `DSH_HOME` is read from the environment dsh inherits, so setting it in `.devintern-pm/.env` is honored by both dsh and the sandbox grant; the `DEVINTERN_SANDBOX_ALLOW_CUSTOM_DSH_HOME` opt-in is read only from the launch environment (not the project `.env`), so a repository file cannot widen the grant.
 
 **Reasonix note:** Harness id `reasonix`; the CLI binary is `reasonix` (the community DeepSeek-Reasonix CLI). Install with `npm i -g reasonix`, set `DEEPSEEK_API_KEY` (or run `reasonix setup`), then set `AGENT_HARNESS=reasonix`. This is the harness formerly selected by `AGENT_HARNESS=deepseek`; after the split, `deepseek` selects the official experimental harness, so existing Reasonix configurations must switch to `AGENT_HARNESS=reasonix`. A `deepseek` miss whose `dsh` is not installed, or a stale `DEEPSEEK_CLI_PATH` / `AGENT_CLI_PATH` / `REASONIX_CLI_PATH` that still points at `reasonix`, reports that hint, including from a failover chain.
 
 **Antigravity note:** Harness id is `antigravity` (alias `agy`); the CLI binary is `agy`. Google retired consumer Gemini CLI on 2026-06-18 in favor of Antigravity CLI. Install from [antigravity.google/docs/cli/install](https://antigravity.google/docs/cli/install), authenticate (browser/keyring, or `ANTIGRAVITY_TOKEN` for CI), then set `AGENT_HARNESS=antigravity`. Legacy `AGENT_HARNESS=gemini` still routes to Antigravity with a deprecation warning. Prefer `AGENT_CLI_PATH` / `ANTIGRAVITY_CLI_PATH` / `AGY_CLI_PATH` over `GEMINI_CLI_PATH`.
 
+**Muse Code note:** Harness id is `muse` (alias `muse-code`); the CLI binary is `muse`. Install with Meta's one-line installer (`curl -fsSL https://dev.meta.ai/install.sh | sh`), confirm `muse --version`, then set `AGENT_HARNESS=muse` (or point `MUSE_CLI_PATH` / `AGENT_CLI_PATH` at the binary). DevIntern requires **Muse Code 1.4.9 or newer** (older builds lack `--disable-request-user-input` and fail with an upgrade message). Authenticate interactively on first run (`muse`, then browser sign-in or "Paste an API key"), or set `META_API_KEY` for unattended runs (`muse auth set` stores a key; `muse logout` clears stored credentials). The default model is `muse-spark-1.2`; override it with `AGENT_MODEL` or `--model`. `--effort`/`AGENT_EFFORT` maps to Muse's `--reasoning-effort`, and devpm's drafting run caps Muse with `--max-model-steps`; exhausting that budget fails the draft with Muse's step-limit diagnostic instead of being parsed as a completed story. DevIntern runs `muse exec`, passes `--disable-request-user-input` so drafting never blocks on a question, and uses `--disable-approval` when permissions are skipped — Muse's OS sandbox stays on, while egress is opened with `--sandbox-network enabled` because a headless draft cannot answer Muse's per-destination network review (the outer sandbox still enforces any configured domain allowlist). DevIntern never auto-emits `--yolo` and never auto-trusts the workspace, so project `AGENTS.md`/skills/hooks load only after you trust that checkout yourself. Muse has no headless plan mode; `readonly` uses Muse's `:read-only` permission profile, and a requested `plan` mode fails closed. Oversized prompts use `--prompt-file`; `--json` is used only when structured output is requested. On Linux the Muse sandbox needs a working bubblewrap and a non-musl build. On macOS under `nono`, DevIntern disables Muse's inner Seatbelt to avoid nested sandboxing (the outer wrapper remains the boundary) and therefore requires `META_API_KEY`: the stored `~/.config/muse/auth.json` credential is hidden from the run, so agent shell commands cannot read it. See [Muse Code authentication](https://dev.meta.ai/docs/muse-code/auth), [launch flags](https://dev.meta.ai/docs/muse-code/configuration#launch-flags), and [permissions](https://dev.meta.ai/docs/muse-code/permissions). A Muse exit code of `0` means the turn completed, not that generated tasks or tests are correct.
+
 **Kilo Code note:** Harness id is `kilo-code`; the CLI binary is `kilo`.
 
 **Qwen note:** Qwen Code accepts a model via `--model` (e.g. `qwen3-coder-plus`); you can also keep the model in `~/.qwen/settings.json`.
+
+### Failover on usage limits
+
+`AGENT_HARNESS` may list several harnesses, comma-separated, in priority order. The first entry is your preferred harness; later entries are fallbacks devpm switches to when the active harness reports a usage limit:
+
+```bash
+# .devintern-pm/.env
+AGENT_HARNESS=opencode,grok
+# Optional: model for the fallback (otherwise grok's CLI default applies)
+# GROK_MODEL=grok-4.7
+```
+
+- Unknown or not-installed entries are skipped with a warning; the first usable entry runs first. If the first entry is the one skipped, the entry that runs in its place is treated as a fallback: the first-entry settings below do not apply to it.
+- When a harness hits its usage limit, devpm prints one line on stderr (limited harness, reset time when known, next harness) and re-runs the same request on the next entry. Other failures, such as a non-zero exit or the turn limit, do not fail over.
+- Once a fallback succeeds, devpm keeps using it for the rest of that process, including the strict-JSON retry. Nothing is persisted; the next `devpm` run starts with the first entry again.
+- If every entry is usage-limited, the run fails with a message listing each limited harness.
+- `AGENT_MODEL`/`--model` and `AGENT_EFFORT`/`--effort` apply to the first entry only, because model ids are harness-specific. A fallback uses its own `<HARNESS>_MODEL` (for example `GROK_MODEL`, `CLAUDE_CODE_MODEL`) or its CLI default, and runs with its default effort. Likewise, `AGENT_CLI_PATH` applies to the first entry only; a fallback uses `<HARNESS>_CLI_PATH` or `PATH`.
+- `--harness <name>`, or picking a harness in the interactive picker, disables failover: only that harness runs.
+
+The DevIntern PM desktop app uses the same engine, so it fails over the same way when the project's `AGENT_HARNESS` lists several harnesses. Picking a harness in the desktop app moves it to the front of the list in `.devintern-pm/.env` and keeps the other entries as fallbacks. For example, picking `grok` with `AGENT_HARNESS=opencode,grok` saves `AGENT_HARNESS=grok,opencode`.
 
 ### Model selection
 
@@ -188,7 +210,7 @@ Alongside the model you can tune how deeply the agent reasons with `AGENT_EFFORT
 AGENT_EFFORT=medium
 ```
 
-Valid values are `low`, `medium`, and `high` (anything else fails with a clear error). Lower effort runs faster and cheaper; higher effort reasons more deeply. For a single run, override it with `--effort <level>`; the flag wins over the environment. Harnesses that expose reasoning effort emit it (Claude Code, Grok, Antigravity, and Reasonix (`reasonix`) via `--effort`; Cline via `--thinking`; Opencode v1 and Kilo Code via `--variant`; Codex via its `model_reasoning_effort` config override; pi composes it into the model string); harnesses that do not ignore it with a one-line warning (the official `deepseek` harness is config-only and names the profile file in its warning). Because pi encodes effort in the model string, it only applies when a model is configured (`AGENT_MODEL` or `--model`); with no model set, pi ignores the effort and prints a one-line warning. OpenCode v2 removed `--variant` and folds the effort into the model reference (`provider/model#variant`), so on v2 it likewise only applies when a model is configured. When unset, no extra flags are emitted and behavior is unchanged.
+Valid values are `low`, `medium`, and `high` (anything else fails with a clear error). Lower effort runs faster and cheaper; higher effort reasons more deeply. For a single run, override it with `--effort <level>`; the flag wins over the environment. Harnesses that expose reasoning effort emit it (Claude Code, Grok, Antigravity, and Reasonix (`reasonix`) via `--effort`, and Muse Code via `--reasoning-effort`; Cline via `--thinking`; Opencode v1 and Kilo Code via `--variant`; Codex via its `model_reasoning_effort` config override; pi composes it into the model string); harnesses that do not ignore it with a one-line warning (the official `deepseek` harness is config-only and names the profile file in its warning). Because pi encodes effort in the model string, it only applies when a model is configured (`AGENT_MODEL` or `--model`); with no model set, pi ignores the effort and prints a one-line warning. OpenCode v2 removed `--variant` and folds the effort into the model reference (`provider/model#variant`), so on v2 it likewise only applies when a model is configured. When unset, no extra flags are emitted and behavior is unchanged.
 
 In the DevIntern PM desktop app, set the same override per project from **Settings → Agent effort**; it persists to `.devintern-pm/.env` and applies to new agent runs immediately.
 
@@ -215,6 +237,22 @@ DEVINTERN_VERBOSE=1
 ```
 
 When set to `1` or `true`, every API request, response status, and retry attempt is printed to the console. This is useful for diagnosing authentication or connectivity issues. The same effect can be achieved at runtime by passing `--verbose` (or `-v`) to `devpm`.
+
+## Behind an HTTP Proxy
+
+devpm sends tracker, update, and other requests through a proxy when one of these variables is set in your shell environment:
+
+- `HTTPS_PROXY` / `https_proxy`
+- `HTTP_PROXY` / `http_proxy`
+- `NO_PROXY` / `no_proxy` (comma-separated hosts that bypass the proxy)
+
+On Node.js v24.14+ or v25.4+, devpm turns on Node's built-in proxy support at startup automatically. On older Node versions, run devpm with `NODE_USE_ENV_PROXY=1` (supported for `fetch` from Node v22.21 and v24.0), or upgrade Node:
+
+```bash
+NODE_USE_ENV_PROXY=1 devpm --prompt "..."
+```
+
+Set proxy variables in your shell, not in `.devintern-pm/.env`: that file loads after startup, too late to configure the proxy. When a request fails at the network level, devpm prints the underlying cause (for example `ECONNREFUSED` or `ENOTFOUND`), plus a hint if a proxy variable is set but Node is not using it. devpm never prints the proxy URL, since it can contain credentials.
 
 ## No License Required
 

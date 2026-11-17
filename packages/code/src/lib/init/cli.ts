@@ -1,9 +1,22 @@
 import { existsSync } from "fs";
 import { join, resolve } from "path";
 import { detectSandboxProviders } from "@devintern/agent-harness";
+import { hasHelpArg } from "../cli/help";
 import { flushAnalytics, trackSetupCompleted, trackSetupStarted } from "../observability/analytics";
 import { scaffoldProject } from "./scaffold";
 import { isInteractive, runInitUpgrade, runInitWizard } from "./wizard";
+
+const INIT_USAGE = [
+  "Usage: devintern init [options]",
+  "",
+  "Initialize .devintern-code configuration in the current directory.",
+  "In a terminal this opens the interactive setup wizard; --yes, --no-interactive,",
+  "or piped stdin writes the configuration templates without prompts.",
+  "",
+  "Options:",
+  "  --yes, --no-interactive  Skip prompts and write the config templates",
+  "  -h, --help               Display this help message",
+].join("\n");
 
 /**
  * Scaffold `.devintern-code/` with env template, settings, and gitignore
@@ -60,6 +73,10 @@ async function initializeProject(): Promise<void> {
  * when a project `.env` already exists), otherwise the non-interactive scaffold.
  */
 export async function runInitCommand(): Promise<never> {
+  if (hasHelpArg(process.argv.slice(2))) {
+    console.log(INIT_USAGE);
+    process.exit(0);
+  }
   if (isInteractive(process.argv, process.stdin)) {
     if (existsSync(resolve(process.cwd(), ".devintern-code", ".env"))) {
       await runInitUpgrade();

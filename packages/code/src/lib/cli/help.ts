@@ -60,6 +60,7 @@ Subcommands:
   webhook serve        Start the advanced repo-local direct-webhook server
   address-review       Address review feedback on an existing pull request
   resolve-conflicts    Merge a PR's base branch into it, resolving conflicts
+  auto-merge           Merge a PR if it is green and safe (safe paths or agent review)
   login [method]       Sign in (github | google | x | email; prompts if omitted)
   logout               Clear local auth session
   whoami               Show current authenticated user
@@ -77,3 +78,17 @@ Licensing:
   'devintern worker'. The pilot runs 14 days with no task limit.
 
 Run 'devintern <subcommand> --help' for subcommand-specific options.`;
+
+/**
+ * Whether an argv list requests help.
+ *
+ * Subcommand dispatchers must check this before doing any work: `devintern
+ * init --help` and `devintern logout --help` used to execute the command
+ * instead of printing its usage.
+ *
+ * @param args - Arguments following the subcommand name.
+ * @returns True when `--help` or `-h` is present.
+ */
+export function hasHelpArg(args: readonly string[]): boolean {
+  return args.some((arg) => arg === "--help" || arg === "-h");
+}

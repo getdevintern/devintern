@@ -42,6 +42,9 @@ export function isSourceOrDiffLine(line: string): boolean {
     /^(?:diff --git|index\b|---\s|\+\+\+\s|@@\s)/i.test(trimmed) ||
     /^[+-](?![+-])/.test(trimmed) ||
     /^(?:\/\/|\/\*|\*|#|>|```|~~~)/.test(trimmed) ||
+    // `nl -ba` and `cat -n` prefix source with a line number and a tab.
+    // Codex echoes these listings in stderr, including quoted error fixtures.
+    /^\d+\t/.test(trimmed) ||
     // `rg -n`, grep, and compiler-style locations: path:line[:column]:content.
     /^(?:(?:\.?\.?\/|\/)?(?:[^:\s]+\/)+[^:\s]+|[^:\s]+\.[a-z\d]+):\d+(?::\d+)?:/i.test(trimmed) ||
     /^(?:const|let|var|function|class|import|export|return)\b/.test(trimmed) ||

@@ -21,8 +21,9 @@ import { tmpdir } from "os";
 import { join } from "path";
 
 import { buildDefaultSandboxPolicy } from "../spawn-agent.js";
-import { detectSandboxProviders } from "./detect.js";
-import { getSandboxProvider } from "./registry.js";
+import { activeSandboxName } from "./resolver.js";
+import { resolveHarnessSandboxDecision } from "./selection.js";
+import type { HarnessSandboxDecision } from "./selection.js";
 import type { SandboxProvider } from "./types.js";
 
 /** Result of probing a harness CLI through a sandbox provider. */
@@ -129,32 +130,136 @@ export function firstActionableProbeLine(stderr: string, stdout = ""): string | 
   return actionable ?? lines[0];
 }
 
+/** Options for {@link resolveProbeProvider}. */
+export interface ProbeProviderOptions {
+  /**
+   * Environment to inspect for enclosing-sandbox markers. Defaults to the
+   * trusted startup snapshot read by {@link activeSandboxName}, so tests can
+   * inject markers without touching the real process environment.
+   */
+  trustedEnv?: NodeJS.ProcessEnv;
+  /**
+   * Primary harness the run is configured to launch. `resolveSandbox` rejects
+   * an explicit provider that cannot wrap it before any nesting decision, so
+   * the probe must exercise that provider (and report its failure) instead of
+   * claiming the run inherits the enclosing sandbox.
+   */
+  harnessName?: string;
+}
+
+/**
+ * Wrapper-free provider stand-in for a run that inherits an enclosing sandbox.
+ *
+ * Mirrors `resolveSandbox`: an explicitly requested provider that cannot nest
+ * is skipped, and the harness executes inside the confinement already wrapping
+ * this process. The probe therefore must not add a wrapper — it just runs
+ * `<path> --version` so a CLI that cannot start under that confinement (the
+ * mise-shim / permission-denied failure this module exists for) is still
+ * detected instead of silently skipped.
+ *
+ * The name is deliberately distinct from the real provider's so wrapped and
+ * inherited probe results never share a cache entry.
+ *
+ * Exported for callers that know a run inherits the enclosing sandbox but do
+ * not go through {@link resolveProbeProvider} (e.g. the `devintern sandbox`
+ * preflight, which resolves the provider from its own detections).
+ *
+ * @param activeSandbox - Provider name of the sandbox wrapping this process.
+ * @param compatibility - Configured provider whose harness support still
+ *   decides whether the run starts (inheriting does not make an unsupported
+ *   harness runnable). Forwarded so callers can flag those entries as failures.
+ */
+export function inheritedSandboxProbeProvider(
+  activeSandbox: string,
+  compatibility?: Pick<SandboxProvider, "supportsHarness">,
+): SandboxProvider {
+  return {
+    name: `${activeSandbox} (inherited)`,
+    displayName: `inherited ${activeSandbox}`,
+    priority: 0,
+    detect: async () => ({ available: true }),
+    ...(compatibility?.supportsHarness
+      ? { supportsHarness: (harnessName: string) => compatibility.supportsHarness!(harnessName) }
+      : {}),
+    wrapCommand: (path, args) => ({ path, args: [...args] }),
+  };
+}
+
 /**
  * Resolve the provider a configured `AGENT_SANDBOX` value would use.
  *
  * Returns `undefined` for `none`, unknown/unavailable providers, and `auto`
- * when no provider is available. Callers treat that as "cannot preflight" and
- * fail open rather than blocking startup on a probe infrastructure problem.
+ * when no provider is available. When this process already runs inside an
+ * enclosing sandbox the run inherits it (`auto` never adds a layer, and an
+ * explicitly requested provider is skipped unless it can nest), so the probe
+ * executes the harness directly through the wrapper-free stand-in instead of
+ * being skipped: that exercises the confinement the real run will use.
  *
  * @param sandboxName - Configured sandbox name (`none`, `auto`, `nono`, …).
+ * @param options - Optional environment override for enclosing-sandbox markers
+ *   and the primary harness name to validate compatibility against.
  */
 export async function resolveProbeProvider(
   sandboxName: string,
+  options: ProbeProviderOptions = {},
 ): Promise<SandboxProvider | undefined> {
   const name = sandboxName.trim();
   if (!name || name === "none") return undefined;
+  const decision = await resolveHarnessSandboxDecision({
+    sandboxName: name,
+    harnessName: options.harnessName?.trim() || undefined,
+    activeSandbox: activeSandboxName(options.trustedEnv),
+  });
+  return sandboxDecisionProbeProvider(decision);
+}
 
-  if (name === "auto") {
-    const detections = await detectSandboxProviders();
-    return detections
-      .filter(({ provider, detection }) => detection.available && provider.priority > 0)
-      .sort((a, b) => b.provider.priority - a.provider.priority)[0]?.provider;
+/**
+ * Provider the readiness probe executes a harness through for a decision.
+ *
+ * Mirrors what the real run spawns: the selected provider, the wrapper-free
+ * inherited stand-in inside an enclosing sandbox, or nothing when the run is
+ * unsandboxed. A harness-incompatible explicit provider is returned as-is so
+ * callers can report the incompatibility (the run fails on it).
+ *
+ * @param decision - Shared harness sandbox decision.
+ */
+export function sandboxDecisionProbeProvider(
+  decision: HarnessSandboxDecision,
+): SandboxProvider | undefined {
+  switch (decision.kind) {
+    case "provider":
+      return decision.provider;
+    case "inherited":
+      return inheritedSandboxProbeProvider(decision.activeSandbox, decision.provider);
+    case "error":
+      return decision.reason === "incompatible" ? decision.provider : undefined;
+    default:
+      return undefined;
   }
+}
 
-  const provider = getSandboxProvider(name);
-  if (!provider) return undefined;
-  const detection = await provider.detect();
-  return detection.available ? provider : undefined;
+/**
+ * Probe one harness exactly as the shared sandbox decision says the real run
+ * will spawn it.
+ *
+ * - `error` → not ready with the decision's actionable message (no probe).
+ * - `none`/`unsandboxed` → ready without probing (nothing confines the CLI;
+ *   installability is checked separately).
+ * - `provider`/`inherited` → `<path> --version` through that wrapper.
+ *
+ * Throws only when the probe infrastructure itself fails; callers fail open.
+ *
+ * @param entry - Harness name and resolved CLI path.
+ * @param decision - Shared harness sandbox decision for this harness.
+ */
+export async function probeHarnessForDecision(
+  entry: { name: string; path: string },
+  decision: HarnessSandboxDecision,
+): Promise<HarnessSandboxProbeResult> {
+  if (decision.kind === "error") return { ok: false, reason: decision.message };
+  const provider = sandboxDecisionProbeProvider(decision);
+  if (!provider) return { ok: true };
+  return probeHarnessUnderSandbox({ path: entry.path, provider, harnessName: entry.name });
 }
 
 /**
@@ -200,6 +305,9 @@ async function runProbe(
     const policy = {
       ...buildDefaultSandboxPolicy(workingDir),
       harnessName: options.harnessName,
+      // The probe spawns with `env` below; providers must evaluate overrides
+      // against that env rather than the CLI's own process.env.
+      env,
     };
     const wrapped = await options.provider.wrapCommand(options.path, ["--version"], policy);
     const spawnEnv: NodeJS.ProcessEnv = { ...env };

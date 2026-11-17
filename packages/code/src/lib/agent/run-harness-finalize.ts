@@ -31,7 +31,7 @@ import { resolveAgentEffort, resolveAgentModel } from "./model";
 import { createPlanImplementationPrompt, detectPlanOnlyBehavior, logHookErrorToFile } from "./plan";
 import { createGitHelpers, headAdvancedDuringRun } from "./run-harness-git";
 import type { FinalizeContext } from "./run-harness-git";
-import { getSandbox } from "./sandbox";
+import { agentSandboxPolicy, getSandbox } from "./sandbox";
 import { harnessSpawnEnv } from "./spawn";
 import { createHarnessLogSink } from "../observability/harness-logs";
 import { runTaskSteps } from "../task/step-runner";
@@ -132,6 +132,7 @@ async function implementPlan(
     args: spawnArgs,
     spawnOptions: { stdio: ["ignore", "pipe", "pipe"], env: harnessSpawnEnv(agentEnv) },
     sandbox: await getSandbox(ctx.harness.name),
+    policy: agentSandboxPolicy(),
     sink: createHarnessLogSink({
       harness: ctx.harness,
       label: "plan-retry",
@@ -613,7 +614,7 @@ function verifyDependencies(state: DeliveryState): VerifyDependencies {
   return {
     getDiff: () => state.getDiff(),
     runAgent: (prompt) => state.runAgentPrompt(prompt),
-    parseFeedback: (output, minPriority) => state.parseReviewFeedback(output, minPriority),
+    parseFeedback: (output) => state.parseReviewFeedback(output, { enforceApproval: false }),
     filterItems: (items, minPriority) => state.filterByPriority(items, minPriority),
   };
 }

@@ -53,3 +53,40 @@ describe("GitHubReviewsClient.userHasPushAccess", () => {
     expect(await client.userHasPushAccess("acme", "widgets", "anyone")).toBe(false);
   });
 });
+
+describe("GitHubReviewsClient.userHasPushAccessOrThrow", () => {
+  function clientWithPermission(result: { permission: string; roleName?: string } | Error) {
+    const client = new GitHubReviewsClient({ token: "test-token" });
+    (client as any).getCollaboratorPermission = async () => {
+      if (result instanceof Error) {
+        throw result;
+      }
+      return result;
+    };
+    return client;
+  }
+
+  test("grants write and maintain", async () => {
+    expect(
+      await clientWithPermission({ permission: "write" }).userHasPushAccessOrThrow("a", "b", "u"),
+    ).toBe(true);
+    expect(
+      await clientWithPermission({
+        permission: "read",
+        roleName: "maintain",
+      }).userHasPushAccessOrThrow("a", "b", "u"),
+    ).toBe(true);
+  });
+
+  test("returns false for a confirmed denial", async () => {
+    expect(
+      await clientWithPermission({ permission: "read" }).userHasPushAccessOrThrow("a", "b", "u"),
+    ).toBe(false);
+  });
+
+  test("propagates API errors", async () => {
+    await expect(
+      clientWithPermission(new Error("HTTP 503")).userHasPushAccessOrThrow("a", "b", "u"),
+    ).rejects.toThrow("HTTP 503");
+  });
+});

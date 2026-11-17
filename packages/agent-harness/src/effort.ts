@@ -85,7 +85,7 @@ export function warnEffortUnsupported(harness: AgentHarness, options: AgentRunOp
     console.warn(
       `⚠️  ${harness.displayName} (${harness.name}) does not support reasoning effort; ` +
         `ignoring effort "${options.effort}". ` +
-        `Supported harnesses: antigravity, cline, claude-code, codex, grok, kilo-code, opencode, pi, reasonix.` +
+        `Supported harnesses: antigravity, cline, claude-code, codex, grok, kilo-code, muse, opencode, pi, reasonix.` +
         hint,
     );
   }

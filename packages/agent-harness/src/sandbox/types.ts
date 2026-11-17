@@ -5,10 +5,10 @@
  * (`path` + `args`) into a wrapped command that runs the agent under
  * OS-level isolation. Two provider tiers exist:
  *
- * - Exec wrappers (nono, srt): the wrapper `exec`s the agent in place, so
+ * - Exec wrappers (nono): the wrapper `exec`s the agent in place, so
  *   the process-group reaper in `process-reaper.ts` works unchanged and any
  *   registered harness can be wrapped.
- * - MicroVMs (Docker Sandboxes, SmolVM): the agent runs inside a VM whose
+ * - MicroVMs (Docker Sandboxes): the agent runs inside a VM whose
  *   lifetime is decoupled from the CLI process, so these providers restrict
  *   `supportsHarness` to agents available inside the guest and implement
  *   `cleanup()` to stop the VM.
@@ -25,9 +25,21 @@ export interface SandboxPolicy {
   /** Extra readable roots beyond the provider's defaults. */
   readablePaths?: string[];
   /**
+   * Absolute paths the agent must not be able to read, even when a broader
+   * grant (a writable state directory, a top-level `$HOME` entry) contains
+   * them. Used for credentials that belong to the harness rather than the
+   * agent, e.g. `~/.config/muse/auth.json` when Muse's own sandbox is
+   * disabled to avoid nested Seatbelt on macOS.
+   *
+   * nono cannot express deny-over-allow, so it splits the containing grants
+   * instead of passing a deny list through.
+   */
+  denyReadPaths?: string[];
+  /**
    * Network policy. "open" keeps egress unrestricted — the agent needs LLM
    * APIs, git push, and package registries, so this is the default. Domain
-   * allowlists are enforced only by providers that support them (srt).
+   * allowlists are enforced by providers that support them (nono's proxy
+   * filter and Docker's per-sandbox rules).
    */
   network: "open" | { allowedDomains: string[] };
   /** Absolute path to the directory the agent operates in. */
@@ -37,6 +49,15 @@ export interface SandboxPolicy {
    * need it to address the agent by name inside the guest.
    */
   harnessName?: string;
+  /**
+   * Environment the child will actually be spawned with, before any
+   * {@link WrappedCommand.env} overlay. Providers that adapt the child env
+   * (e.g. nono redirects `BUN_INSTALL`) must decide against this, not against
+   * the CLI process's own `process.env`: a caller (or a project env file) can
+   * supply a different value in `spawnOptions.env`. Callers that omit it are
+   * assumed to spawn with `process.env`.
+   */
+  env?: NodeJS.ProcessEnv;
 }
 
 /** The rewritten invocation returned by {@link SandboxProvider.wrapCommand}. */
@@ -62,7 +83,7 @@ export interface SandboxDetection {
 }
 
 export interface SandboxProvider {
-  /** Machine-readable identifier, e.g. "nono" or "srt". */
+  /** Machine-readable identifier, e.g. "nono" or "docker". */
   readonly name: string;
   /** Human-readable name, e.g. "Anthropic Sandbox Runtime". */
   readonly displayName: string;
@@ -86,10 +107,10 @@ export interface SandboxProvider {
   supportsHarness?(harnessName: string): boolean;
   /**
    * Whether this provider can run inside an enclosing sandbox. Kernel-namespace
-   * wrappers (`nono`, `srt`) and the in-process `native` sandbox cannot nest:
+   * wrappers (`nono`) and the in-process `native` sandbox cannot nest:
    * the inner instance cannot set up its namespaces/session state under the
    * outer confinement and exits before the agent starts. MicroVM providers
-   * (`docker`, `smolvm`) run the agent inside a guest, independent of the host
+   * (`docker`) run the agent inside a guest, independent of the host
    * namespaces, so they may nest. Undefined means "cannot nest".
    */
   readonly canNestInSandbox?: boolean;

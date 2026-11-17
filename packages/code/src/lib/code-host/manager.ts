@@ -100,6 +100,7 @@ export class PRManager {
     if (repoInfo.platform === "unknown") {
       return {
         success: false,
+        unsupportedPlatform: true,
         message: "Could not detect repository platform (GitHub, GitLab, or Bitbucket)",
       };
     }
@@ -254,6 +255,7 @@ export class PRManager {
 
       return {
         success: false,
+        permanent: true,
         message:
           "GitHub client not configured. Please set GITHUB_TOKEN or configure GitHub App (GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY_PATH).",
       };
@@ -266,6 +268,7 @@ export class PRManager {
       if (!bitbucketToken) {
         return {
           success: false,
+          permanent: true,
           message:
             "Bitbucket client not configured. Please set BITBUCKET_TOKEN environment variable.",
         };
@@ -274,6 +277,7 @@ export class PRManager {
       if (!repoInfo.workspace) {
         return {
           success: false,
+          permanent: true,
           message: "Could not detect Bitbucket workspace from git remote URL.",
         };
       }
@@ -285,7 +289,7 @@ export class PRManager {
     if (repoInfo.platform === "gitlab") {
       try {
         const config = resolveGitLabCodeHostConfig(repoInfo.instanceUrl ?? "");
-        if (!config.ok) return { success: false, message: config.message };
+        if (!config.ok) return { success: false, permanent: true, message: config.message };
 
         console.warn(`⚠️  Experimental GitLab code-host support enabled for ${config.instanceUrl}`);
         const client = new GitLabMRClient(config.token, config.instanceUrl, {
@@ -296,6 +300,7 @@ export class PRManager {
       } catch (error) {
         return {
           success: false,
+          permanent: true,
           message: `GitLab code-host configuration failed: ${(error as Error).message}`,
         };
       }
@@ -304,6 +309,7 @@ export class PRManager {
     // This shouldn't be reached since we handle unknown platform at the start
     return {
       success: false,
+      unsupportedPlatform: true,
       message: "Unsupported repository platform.",
     };
   }

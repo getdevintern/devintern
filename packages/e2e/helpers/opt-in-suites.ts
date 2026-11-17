@@ -34,6 +34,12 @@ export const OPT_IN_SUITES: readonly OptInSuite[] = [
     status: "skip",
   },
   {
+    name: "GitLab hosted relay E2E",
+    script: "test:e2e:gitlab-relay",
+    reason: "requires a signed-in account and writes a temporary hook to the deployed relay",
+    status: "skip",
+  },
+  {
     name: "Bitbucket Cloud source-control E2E",
     script: "test:e2e:bitbucket",
     reason: "requires a dedicated Bitbucket fixture repository and token",
@@ -72,25 +78,19 @@ export const OPT_IN_SUITES: readonly OptInSuite[] = [
   {
     name: "Jira tracker lifecycle E2E",
     script: "test:e2e:tracker:jira",
-    reason: "planned in Layer 2 of docs/tracker-e2e-plan.md",
+    reason: "planned in Layer 2 of docs/coverage/trackers.md",
     status: "todo",
   },
   {
     name: "Trello tracker lifecycle E2E",
     script: "test:e2e:tracker:trello",
-    reason: "planned in Layer 2 of docs/tracker-e2e-plan.md",
+    reason: "planned in Layer 2 of docs/coverage/trackers.md",
     status: "todo",
   },
   {
     name: "Linear, Asana, and Azure DevOps tracker smoke",
     script: "test:trackers",
     reason: "read-only checks are planned; the registry only detects them today",
-    status: "todo",
-  },
-  {
-    name: "Offline fake tracker servers",
-    script: "test",
-    reason: "planned in Layer 3 of docs/tracker-e2e-plan.md",
     status: "todo",
   },
 ];

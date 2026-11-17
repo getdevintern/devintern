@@ -89,11 +89,8 @@ function applyEvidenceLadder(items: unknown[]): void {
   }
 }
 
-/** Reject malformed agent verdicts before priority filtering can discard findings. */
-export function validateReviewFeedback(
-  value: unknown,
-  minPriority: ReviewPriority = "medium",
-): asserts value is ReviewFeedback {
+/** Reject verdicts that do not match the review schema, coercing confidence. */
+export function validateReviewFeedbackStructure(value: unknown): asserts value is ReviewFeedback {
   if (!value || typeof value !== "object") throw new Error("Invalid feedback structure");
   const feedback = value as Partial<ReviewFeedback>;
   if (
@@ -108,15 +105,20 @@ export function validateReviewFeedback(
   if (!feedback.items.every(isFinding)) {
     throw new Error("Invalid feedback structure");
   }
+}
+
+/** Reject malformed agent verdicts before priority filtering can discard findings. */
+export function validateReviewFeedback(
+  value: unknown,
+  minPriority: ReviewPriority = "medium",
+): asserts value is ReviewFeedback {
+  validateReviewFeedbackStructure(value);
   // "Approved" means nothing above the caller's blocking threshold is left
   // unresolved — not that the review found no notes at all. Verification
   // defaults to `high`, so its medium findings are advisory and must not
   // invalidate an approval; the auto-review loop keeps the `medium` default.
   const threshold = PRIORITY_WEIGHTS[minPriority];
-  if (
-    feedback.approved &&
-    feedback.items.some((item) => PRIORITY_WEIGHTS[item.priority] >= threshold)
-  ) {
+  if (value.approved && value.items.some((item) => PRIORITY_WEIGHTS[item.priority] >= threshold)) {
     throw new Error(`Review cannot approve unresolved ${minPriority}-or-higher findings`);
   }
 }

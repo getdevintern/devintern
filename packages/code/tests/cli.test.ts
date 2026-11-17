@@ -148,6 +148,7 @@ describe.concurrent("CLI Argument Handling", () => {
     const result = await runCLI(["webhook", "serve", "--help"]);
     expect(result.stdout).toContain("Usage: devintern webhook serve [options]");
     expect(result.stdout).toContain("--port <port>");
+    expect(result.stdout).not.toContain("WEBHOOK_AUTO_REPLY");
     expect(result.stderr).not.toContain("deprecated");
     expect(result.exitCode).toBe(0);
   });
@@ -208,11 +209,14 @@ describe.concurrent("CLI Argument Handling", () => {
   });
 
   test("should reject removed worker flags", async () => {
-    for (const flag of ["--listen", "--no-workspace", "--port", "--host", "--query", "--no-ui"]) {
-      const result = await runCLI(["worker", flag]);
-      expect(result.stderr).toContain(`${flag} has been removed from devintern worker`);
-      expect(result.exitCode).toBe(1);
-    }
+    const flags = ["--listen", "--no-workspace", "--port", "--host", "--query", "--no-ui"];
+    // Each invocation runs in its own isolated temp dir, so the subprocesses
+    // are independent and can overlap instead of paying startup cost serially.
+    const results = await Promise.all(flags.map((flag) => runCLI(["worker", flag])));
+    flags.forEach((flag, i) => {
+      expect(results[i].stderr).toContain(`${flag} has been removed from devintern worker`);
+      expect(results[i].exitCode).toBe(1);
+    });
   });
 
   test("should show version with --version", async () => {
@@ -519,6 +523,15 @@ describe.concurrent("CLI Argument Handling", () => {
     const result = await runCLI(["worker", "--workspace"]);
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain("--workspace requires a path");
+  });
+
+  test("dashboard --workspace rejects a file that is not workspace.toml", async () => {
+    const result = await runCLI(["dashboard", "--workspace", "not-workspace.toml"], {
+      prepareDir: (testDir) => writeFileSync(join(testDir, "not-workspace.toml"), ""),
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("No workspace.toml at");
+    expect(result.stderr).toContain("directory that contains it");
   });
 
   test("worker requires a workspace", async () => {

@@ -1,10 +1,10 @@
 ---
 title: "Story Points Estimation"
 description: "Schedule unattended AI story-point estimation via [[estimations]] in workspace.toml, or run one-shot --estimate"
-section: "Server Automation"
+section: "Automation"
 order: 6
 sidebarHidden: true
-dateModified: 2026-08-27
+dateModified: 2026-11-12
 ---
 
 # Story Points Estimation
@@ -127,8 +127,9 @@ You can add, remove, enable, disable, reschedule, or change the query of an esti
 
 Notes:
 
-- Works with Jira, Linear, Azure DevOps, Asana, and GitHub (comment-only). Trello/markdown workspaces fail at startup.
-- Runs use the full skip/re-estimate behavior above (24h gate, update-in-place).
+- Works with Jira, Linear, Azure DevOps, Asana, GitHub, and GitLab (GitHub and GitLab are comment-only). Trello/markdown workspaces fail at startup.
+- In a multi-team workspace, set `team = "<team name>"` on an entry to estimate that team's board with its own tracker and credentials, for example a GitHub Issues team next to Jira defaults. Entries without `team` use `[defaults].tracker`. See [Worker Daemon → Per-team estimations](./worker.md#per-team-estimations).
+- Runs use the full skip/re-estimate behavior above (24h gate, update-in-place). A partial tracker update (field or comment fails) is reported as failed and retried on the next sweep, even if the successful half changed the task or comment timestamp.
 - Usage-limit aborts end the sweep cleanly; the next occurrence retries. Tickets already written stay done.
 - Each sweep is visible in the [dashboard](./dashboard.md) under its own `estimate` origin.
 

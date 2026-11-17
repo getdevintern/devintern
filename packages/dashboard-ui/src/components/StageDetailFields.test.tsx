@@ -21,9 +21,9 @@ test("bool fields render yes/no badges", () => {
     },
   ]);
   expect(html).toContain("Outcome");
-  expect(html).toContain("✓ approved");
+  expect(html).toContain("approved");
   expect(html).toContain("Failed");
-  expect(html).toContain("✕ bad");
+  expect(html).toContain("bad");
 });
 
 test("issues render severity badges and descriptions", () => {

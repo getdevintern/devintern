@@ -1,10 +1,10 @@
 ---
 title: "Telegram Integration"
 description: "Try the alpha @devintern/pm integration for creating tracker tasks from Telegram"
-section: "PM"
+section: "Create Tasks"
 order: 11
 sidebarHidden: true
-dateModified: 2026-08-12
+dateModified: 2026-11-12
 tags: ["telegram", "devintern/pm", "integration", "chat", "bot"]
 ---
 

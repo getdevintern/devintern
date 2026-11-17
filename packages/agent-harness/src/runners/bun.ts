@@ -113,7 +113,7 @@ export async function runAgentBun(
   });
 
   if (usageLimit?.limited) {
-    throw new UsageLimitError(usageLimit.resetsAt);
+    throw new UsageLimitError(usageLimit.resetsAt, usageLimit.period);
   }
 
   const result: AgentRunResult = {

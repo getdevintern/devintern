@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { execSync } from "child_process";
 import { existsSync, mkdirSync, rmSync, utimesSync, writeFileSync } from "fs";
 import { join } from "path";
@@ -159,6 +159,51 @@ describe("RepoManager", () => {
     expect(git(worktree, "rev-parse --is-inside-work-tree")).toBe("true");
   });
 
+  test("ensureBareClone and task worktrees skip shared-config writes once configured", async () => {
+    const clonePath = await manager.ensureBareClone(repo);
+    // Another writer (a concurrent task's `git push -u`, or a sandbox's
+    // deny-write placeholder) holds the shared config lock. Git fails any
+    // write immediately, so a steady-state task start must not write.
+    const lockPath = join(clonePath, "config.lock");
+    writeFileSync(lockPath, "");
+    try {
+      await manager.ensureBareClone(repo);
+      const worktree = await manager.createTaskWorktree(repo, "BACK-60");
+      expect(git(worktree, "config --show-origin --get core.hooksPath")).toContain(
+        "config.worktree",
+      );
+    } finally {
+      rmSync(lockPath, { force: true });
+    }
+  });
+
+  test("a needed shared-config write retries until a transient lock clears", async () => {
+    const clonePath = await manager.ensureBareClone(repo);
+    git(clonePath, "config --unset extensions.worktreeConfig");
+    const lockPath = join(clonePath, "config.lock");
+    writeFileSync(lockPath, "");
+    // Release the lock only after a write has actually lost the race, so the
+    // test needs a retry rather than depending on git's timing.
+    const original = Utils.executeGitCommand;
+    let lockFailures = 0;
+    const spy = spyOn(Utils, "executeGitCommand").mockImplementation(async (args, options) => {
+      const result = await original(args, options);
+      if (!result.success && /could not lock config file/.test(result.error ?? "")) {
+        lockFailures++;
+        rmSync(lockPath, { force: true });
+      }
+      return result;
+    });
+    try {
+      await manager.ensureBareClone(repo);
+    } finally {
+      spy.mockRestore();
+      rmSync(lockPath, { force: true });
+    }
+    expect(lockFailures).toBe(1);
+    expect(git(clonePath, "config --get extensions.worktreeConfig")).toBe("true");
+  });
+
   test("resolveDefaultBranch falls back to origin/HEAD when unset in config", async () => {
     await manager.ensureBareClone(repo);
     const noBranchConfigured: RepoConfig = { ...repo, defaultBranch: undefined };
@@ -171,6 +216,41 @@ describe("RepoManager", () => {
     expect(base).toBe(join(workspaceDir, "worktrees", "backend", "base"));
     expect(existsSync(join(base, "README.md"))).toBe(true);
     expect(await manager.ensureBaseWorktree(repo)).toBe(base);
+  });
+
+  test("ensureBaseWorktree resets a reused checkout to the fetched default branch", async () => {
+    await manager.ensureBareClone(repo);
+    const base = await manager.ensureBaseWorktree(repo);
+
+    // Simulate an automation that left the shared checkout on its own branch.
+    // The bare clone has no identity of its own (CI has no global one), so the
+    // fixture commit passes it explicitly.
+    git(base, "checkout -b feature/stale");
+    writeFileSync(join(base, "stale.txt"), "stale work\n");
+    git(base, "add .");
+    git(
+      base,
+      '-c user.name="Fixture User" -c user.email="fixture@example.com" commit -m "stale feature work"',
+    );
+    const staleHead = git(base, "rev-parse HEAD");
+
+    // Upstream moves on while the checkout is stale.
+    writeFileSync(join(originDir, "next.txt"), "next\n");
+    git(originDir, "add .");
+    git(originDir, 'commit -m "Next upstream commit"');
+    await manager.fetch(repo.name);
+
+    expect(await manager.ensureBaseWorktree(repo)).toBe(base);
+    // Detached at the fetched default branch, not on the previous feature
+    // branch and not on the pre-fetch commit.
+    expect(git(base, "rev-parse --abbrev-ref HEAD")).toBe("HEAD");
+    expect(git(base, "rev-parse HEAD")).toBe(git(originDir, "rev-parse main"));
+    expect(existsSync(join(base, "README.md"))).toBe(true);
+    expect(existsSync(join(base, "next.txt"))).toBe(true);
+    // Tracked files from the stale feature branch are gone.
+    expect(existsSync(join(base, "stale.txt"))).toBe(false);
+    // The branch the previous run created is left intact for its own PR.
+    expect(git(base, "rev-parse feature/stale")).toBe(staleHead);
   });
 
   test("sweepStaleWorktrees removes old task worktrees but never the base", async () => {

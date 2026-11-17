@@ -1,10 +1,12 @@
 import { checkLicense } from "@devintern/license-check";
+import { dirname, resolve } from "path";
 import {
   enforceLicenseOrExit,
   getLoadedEnvPath,
   loadEnvironment,
   loadSupabaseConfig,
 } from "../cli/bootstrap";
+import { hasHelpArg } from "../cli/help";
 import { flushAnalytics, trackDoctorRun } from "./analytics";
 
 /**
@@ -16,13 +18,32 @@ export async function runDashboardCommand(args: string[]): Promise<void> {
 
   let port: number | undefined;
   let host: string | undefined;
+  let workspacePath: string | undefined;
+  const allowOriginArgs: string[] = [];
+  let tailscaleAutodetect = true;
 
   for (let i = 0; i < args.length; i++) {
-    if (args[i] === "--port" && args[i + 1]) {
+    if (args[i] === "--allow-origin") {
+      if (!args[i + 1] || args[i + 1].startsWith("-")) {
+        console.error("❌ --allow-origin requires an origin, e.g. https://box.tailnet.ts.net.");
+        process.exit(1);
+      }
+      allowOriginArgs.push(args[i + 1]);
+      i++;
+    } else if (args[i] === "--no-tailscale-autodetect") {
+      tailscaleAutodetect = false;
+    } else if (args[i] === "--port" && args[i + 1]) {
       port = parseInt(args[i + 1], 10);
       i++;
     } else if (args[i] === "--host" && args[i + 1]) {
       host = args[i + 1];
+      i++;
+    } else if (args[i] === "--workspace") {
+      if (!args[i + 1] || args[i + 1].startsWith("-")) {
+        console.error("❌ --workspace requires a path to workspace.toml.");
+        process.exit(1);
+      }
+      workspacePath = args[i + 1];
       i++;
     } else if (args[i] === "--help" || args[i] === "-h") {
       console.log("Usage: devintern dashboard [options]");
@@ -35,8 +56,51 @@ export async function runDashboardCommand(args: string[]): Promise<void> {
       console.log("  --port <port>  Port to listen on (default: 4400 or DASHBOARD_PORT)");
       console.log("  --host <host>  Loopback host to bind to (default: 127.0.0.1;");
       console.log("                 accepted: 127.0.0.1, localhost, ::1)");
+      console.log("  --workspace <path>  Read queue counts, worker liveness, and run");
+      console.log("                      transcripts from this workspace.toml (or its");
+      console.log("                      workspace directory).");
+      console.log("                      (default: ~/.devintern/, or DEVINTERN_WORKSPACE_DIR)");
+      console.log("  --allow-origin <origin>  Also trust this non-loopback origin, e.g. a");
+      console.log("                      reverse proxy (https://dash.example.internal).");
+      console.log("                      Repeatable; also DASHBOARD_ALLOWED_ORIGINS.");
+      console.log("  --no-tailscale-autodetect  Do not trust names `tailscale serve`");
+      console.log("                      proxies to this dashboard (also");
+      console.log("                      DASHBOARD_TAILSCALE_AUTODETECT=0).");
       console.log("  -h, --help     Display this help message");
       process.exit(0);
+    }
+  }
+
+  const { parseDashboardAllowedOriginList, mergeDashboardAllowedOrigins } =
+    await import("./dashboard-origins");
+  const flagOrigins = parseDashboardAllowedOriginList(allowOriginArgs, "--allow-origin");
+  if (flagOrigins.errors.length > 0) {
+    for (const error of flagOrigins.errors) console.error(`❌ ${error}`);
+    process.exit(1);
+  }
+  let allowedOrigins = flagOrigins.origins;
+
+  let workspaceDir: string | undefined;
+  if (workspacePath) {
+    const { resolveWorkspaceArgPath } = await import("./dashboard-db");
+    const configPath = resolveWorkspaceArgPath(workspacePath);
+    if (!configPath) {
+      console.error(`❌ No workspace.toml at ${resolve(workspacePath)}.`);
+      console.error("   Pass an existing workspace.toml or the directory that contains it.");
+      process.exit(1);
+    }
+    workspaceDir = dirname(configPath);
+    // The workspace's [dashboard] access settings apply to the standalone
+    // dashboard too, so it is reachable the same way as the worker's.
+    try {
+      const { loadWorkspaceConfig } = await import("../workspace/config");
+      const { dashboard } = loadWorkspaceConfig(configPath);
+      allowedOrigins = mergeDashboardAllowedOrigins(allowedOrigins, dashboard.allowedOrigins);
+      tailscaleAutodetect &&= dashboard.tailscaleAutodetect;
+    } catch (error) {
+      console.warn(
+        `⚠️  Ignoring [dashboard] settings: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
   }
 
@@ -54,8 +118,35 @@ export async function runDashboardCommand(args: string[]): Promise<void> {
   }
   await enforceLicenseOrExit(licenseResult);
 
+  const { resolveDashboardQueueDbPath } = await import("./dashboard-db");
   const { startDashboardServer } = await import("../../dashboard-server");
-  const server = startDashboardServer({ port, host });
+  // A custom workspace redirects the durable queue counts, worker liveness,
+  // and harness transcripts; run history keeps reading the project-scoped DB
+  // unless WEBHOOK_QUEUE_DB pins one.
+  const queueDbPath = workspaceDir ? resolveDashboardQueueDbPath(workspaceDir) : undefined;
+  // With an explicit workspace, list its [[automations]] (read-only) instead of
+  // the project-scoped automations.toml of whatever directory this started in.
+  const automationActions = workspaceDir
+    ? (await import("../automation/workspace-dashboard")).loadWorkspaceAutomationActions(
+        workspaceDir,
+      )
+    : undefined;
+  let server: ReturnType<typeof startDashboardServer>;
+  try {
+    server = startDashboardServer({
+      port,
+      host,
+      queueDbPath,
+      workspaceDir,
+      automationActions,
+      allowedOrigins,
+      tailscaleAutodetect,
+    });
+  } catch (error) {
+    // Non-loopback --host, malformed DASHBOARD_ALLOWED_ORIGINS, busy port.
+    console.error(`❌ ${error instanceof Error ? error.message : String(error)}`);
+    process.exit(1);
+  }
 
   const shutdown = (): void => {
     console.log("\n👋 Dashboard stopped");
@@ -67,10 +158,37 @@ export async function runDashboardCommand(args: string[]): Promise<void> {
 }
 
 /**
- * `devintern doctor` — readiness check for a first successful run. Exits 1 when
- * any check fails so scripts and CI can gate on it.
+ * `devintern doctor` — readiness check for a first successful run.
+ *
+ * Exit codes: 0 ready (warnings, e.g. a degraded harness chain, are printed
+ * but do not fail); 1 not ready (any check failed, including a harness chain
+ * with no usable entry); 2 degraded, only with `--strict` (warnings present,
+ * no failures) so CI can gate on a fully ready setup.
  */
 export async function runDoctorCommand(): Promise<never> {
+  const args = process.argv.slice(2);
+  if (hasHelpArg(args)) {
+    console.log(
+      [
+        "Usage: devintern doctor [--strict]",
+        "",
+        "Check runtime, git, every agent harness chain entry (executable, effective",
+        "sandbox, model, readiness), tracker credentials, sign-in, and license",
+        "readiness for a first run.",
+        "",
+        "Exit codes:",
+        "  0  ready (warnings such as a degraded harness chain are shown, not fatal)",
+        "  1  not ready: at least one check failed",
+        "  2  degraded: warnings but no failures (only with --strict)",
+        "",
+        "Options:",
+        "  --strict    Exit 2 when any check warns",
+        "  -h, --help  Display this help message",
+      ].join("\n"),
+    );
+    process.exit(0);
+  }
+  const strict = args.includes("--strict");
   const { collectReadinessChecks, renderReadinessReport } = await import("./readiness");
   loadEnvironment();
   let supabaseConfig;
@@ -83,10 +201,16 @@ export async function runDoctorCommand(): Promise<never> {
   console.log("🩺 devintern readiness:\n");
   const report = renderReadinessReport(checks);
   console.log(report.lines.join("\n"));
+  const { hasWorkspace, workspaceConfigPath } = await import("../workspace/paths");
+  if (hasWorkspace()) {
+    console.log(
+      `ℹ️  Worker workspace found (${workspaceConfigPath()}) — run \`devintern worker doctor\` to check unattended readiness.`,
+    );
+  }
   if (report.hasFailures) {
     console.log("\n❌ Not ready — fix the failed checks above.");
   } else if (report.hasWarnings) {
-    console.log("\n✅ Ready to run (with the warnings above).");
+    console.log("\n⚠️  Ready but degraded — review the warnings above.");
   } else {
     console.log("\n✅ Everything looks good — run 'devintern <TASK-KEY>' to start.");
   }
@@ -96,5 +220,21 @@ export async function runDoctorCommand(): Promise<never> {
     hasWarnings: report.hasWarnings,
   });
   await flushAnalytics();
-  process.exit(report.hasFailures ? 1 : 0);
+  process.exit(doctorExitCode(report, strict));
+}
+
+/**
+ * Exit code for `devintern doctor` (see {@link runDoctorCommand}).
+ *
+ * @param report - Aggregate flags from `renderReadinessReport`.
+ * @param strict - Whether `--strict` was passed.
+ * @returns 1 on failures, 2 on warnings under `--strict`, otherwise 0.
+ */
+export function doctorExitCode(
+  report: { hasFailures: boolean; hasWarnings: boolean },
+  strict = false,
+): number {
+  if (report.hasFailures) return 1;
+  if (strict && report.hasWarnings) return 2;
+  return 0;
 }

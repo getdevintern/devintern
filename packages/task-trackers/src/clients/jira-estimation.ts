@@ -31,14 +31,18 @@ const storyPointsCandidatesCache = new WeakMap<
 /**
  * Find an existing automated story-points estimation comment on an issue.
  *
+ * `updated` is the comment's edit time, not its creation time: the
+ * re-estimation gate must not treat the estimation's own writes as a task
+ * change, and Jira bumps an issue's `updated` when story points are written.
+ *
  * @param ctx - Jira client context
  * @param issueKey - Issue key
- * @returns Comment id and created timestamp, or `null`
+ * @returns Comment id plus created/updated timestamps, or `null`
  */
 export async function findEstimationComment(
   ctx: JiraEstimationContext,
   issueKey: string,
-): Promise<{ commentId: string; created: string } | null> {
+): Promise<{ commentId: string; created: string; updated: string } | null> {
   try {
     const response = await ctx.jiraApiCall(
       "GET",
@@ -60,7 +64,11 @@ export async function findEstimationComment(
         commentText = JSON.stringify(comment.body);
       }
       if (commentText.includes("Automated Story Points Estimation")) {
-        return { commentId: comment.id, created: comment.created };
+        return {
+          commentId: comment.id,
+          created: comment.created,
+          updated: comment.updated || comment.created,
+        };
       }
     }
     return null;

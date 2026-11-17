@@ -40,12 +40,12 @@ const sanitizeSchema = {
 };
 
 const headingSizes: Record<number, string> = {
-  1: "mt-3 mb-1 text-lg font-semibold",
-  2: "mt-3 mb-1 text-base font-semibold",
-  3: "mt-2 mb-1 text-sm font-semibold",
-  4: "mt-2 mb-0.5 text-sm font-medium",
-  5: "mt-2 mb-0.5 text-xs font-medium uppercase tracking-wide text-muted-foreground",
-  6: "mt-2 mb-0.5 text-xs font-medium text-muted-foreground",
+  1: "mt-6 mb-2 text-base font-semibold tracking-tight text-foreground",
+  2: "mt-5 mb-1.5 text-[0.9375rem] font-semibold tracking-tight text-foreground",
+  3: "mt-4 mb-1 text-sm font-semibold text-foreground",
+  4: "mt-3 mb-1 text-sm font-medium text-foreground",
+  5: "mt-3 mb-0.5 text-[0.8125rem] font-medium text-muted-foreground",
+  6: "mt-3 mb-0.5 text-xs font-medium text-muted-foreground",
 };
 
 const components: Components = {
@@ -55,29 +55,37 @@ const components: Components = {
   h4: ({ children }) => <h4 className={headingSizes[4]}>{children}</h4>,
   h5: ({ children }) => <h5 className={headingSizes[5]}>{children}</h5>,
   h6: ({ children }) => <h6 className={headingSizes[6]}>{children}</h6>,
-  p: ({ children }) => <p className="my-1.5 whitespace-pre-wrap">{children}</p>,
+  p: ({ children }) => <p className="my-2 whitespace-pre-wrap break-words">{children}</p>,
   pre: ({ children }) => (
-    <pre className="my-2 overflow-x-auto rounded-md bg-muted p-3 font-mono text-xs">{children}</pre>
+    <pre className="my-3 overflow-x-auto rounded-md border border-border bg-muted p-3 font-mono text-xs leading-relaxed">
+      {children}
+    </pre>
   ),
   code: ({ className, children }) => {
     // Fenced blocks get `language-*` from remark; inline code does not.
     if (className) {
       return <code className={className}>{children}</code>;
     }
-    return <code className="rounded bg-muted px-1 py-0.5 font-mono text-[0.85em]">{children}</code>;
+    return (
+      <code className="rounded border border-border bg-raised px-1 py-px font-mono text-[0.85em] break-words text-foreground">
+        {children}
+      </code>
+    );
   },
   ul: ({ children, className }) => (
     <ul
       className={
         className?.includes("contains-task-list")
-          ? "my-1.5 list-none space-y-0.5 pl-0"
-          : "my-1.5 list-disc space-y-0.5 pl-5"
+          ? "my-2 list-none space-y-1 pl-0"
+          : "my-2 list-disc space-y-1 pl-5 marker:text-subtle-foreground"
       }
     >
       {children}
     </ul>
   ),
-  ol: ({ children }) => <ol className="my-1.5 list-decimal space-y-0.5 pl-5">{children}</ol>,
+  ol: ({ children }) => (
+    <ol className="my-2 list-decimal space-y-1 pl-5 marker:text-subtle-foreground">{children}</ol>
+  ),
   li: ({ children, className }) => {
     if (className?.includes("task-list-item")) {
       return <li className="list-none">{children}</li>;
@@ -105,7 +113,7 @@ const components: Components = {
       {children}
     </blockquote>
   ),
-  hr: () => <hr className="my-3 border-border" />,
+  hr: () => <hr className="my-4 border-border" />,
   strong: ({ children }) => <strong className="font-semibold">{children}</strong>,
   em: ({ children }) => <em className="italic">{children}</em>,
   a: ({ href, children }) => {
@@ -132,7 +140,9 @@ const components: Components = {
     </div>
   ),
   th: ({ children }) => (
-    <th className="border border-border bg-muted px-2 py-1 font-medium">{children}</th>
+    <th className="border border-border bg-muted px-2 py-1 font-medium text-foreground">
+      {children}
+    </th>
   ),
   td: ({ children }) => <td className="border border-border px-2 py-1">{children}</td>,
   del: ({ children }) => <del className="text-muted-foreground line-through">{children}</del>,
@@ -140,7 +150,7 @@ const components: Components = {
 
 export function Markdown({ children }: { children: string }) {
   return (
-    <div className="text-sm leading-relaxed">
+    <div className="max-w-[72ch] text-[0.875rem] leading-[1.6] text-foreground/90 [&>:first-child]:mt-0 [&>:last-child]:mb-0">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         rehypePlugins={[[rehypeSanitize, sanitizeSchema]]}

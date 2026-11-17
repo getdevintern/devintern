@@ -11,6 +11,9 @@
  * state instead of failing, so the dashboard always renders.
  */
 
+import { existsSync } from "fs";
+import { resolve } from "path";
+
 import { LockManager } from "../lock-manager";
 import type { LockStatus } from "../lock-manager";
 import type {
@@ -46,14 +49,27 @@ import type {
 } from "../state/run-retry";
 import { readWorkerLogs } from "./worker-logs";
 import type { LogEntry, WorkerLogLevel, WorkerLogsResult } from "./worker-logs";
-import { listHarnessLogs, readHarnessLogContent } from "./harness-logs";
+import { harnessLogsDir, listHarnessLogs, readHarnessLogContent } from "./harness-logs";
 import type { HarnessLogContent, HarnessLogFile } from "./harness-logs";
 import { listRunArtifacts, readRunArtifact } from "./task-artifacts";
 import type { TaskArtifactContent, TaskArtifactFile } from "./task-artifacts";
-import { resolveQueueDbPath, WebhookQueue } from "../state/webhook-queue";
+import { WebhookQueue } from "../state/webhook-queue";
+import {
+  injectedChildStillRunningMessage,
+  interruptedChildStillRunning,
+} from "../workspace/injected-recovery";
 import { resolveWorkspaceDir } from "../workspace/paths";
+import {
+  readDashboardQueueStatuses,
+  readDashboardRelayStats,
+  resolveDashboardHistoryDbPath,
+  resolveDashboardQueueDbPath,
+} from "./dashboard-db";
 import { WorkerState } from "../state/worker-state";
 import type { Cursor } from "../state/worker-state";
+import { deriveTaskTitle } from "./task-title";
+import { scheduledJobRunFilter, toAutomationView } from "./dashboard-automation-view";
+import type { DashboardAutomationView } from "./dashboard-automation-view";
 
 const RUN_STATUSES: RunStatus[] = [
   "in_progress",
@@ -69,6 +85,7 @@ const RUN_ORIGINS: RunOrigin[] = [
   "pr_mention",
   "ci_fix",
   "conflict_resolution",
+  "auto_merge",
   "scheduled",
   "estimate",
   "manual",
@@ -99,8 +116,16 @@ export interface ApiResponse {
 
 export interface DashboardDataOptions {
   dbPath?: string;
+  queueDbPath?: string;
   /** Project root used to locate the worker lock file. */
   workingDir?: string;
+  /**
+   * Workspace home holding the worker lock, worker capture files, and harness
+   * transcripts. Defaults to `resolveWorkspaceDir()`; a standalone dashboard
+   * passes its `--workspace` value here so liveness and transcripts follow the
+   * same workspace as the queue counts.
+   */
+  workspaceDir?: string;
   /**
    * Live working-window snapshot from the worker process (embedded
    * dashboard only; standalone servers return null).
@@ -172,6 +197,24 @@ export interface RunHarnessLogFile extends HarnessLogFile {
   attempt?: number;
 }
 
+/** Pending/running counts for one durable work queue. */
+export interface QueueStatusCounts {
+  pending: number;
+  running: number;
+}
+
+/** Every durable queue the worker may be waiting on, as served by `GET /api/worker`. */
+export interface WorkerQueueStats {
+  /** Relay/webhook deliveries awaiting or inside the normal poll loop. */
+  pending: number;
+  processing: number;
+  failed: number;
+  /** Ad-hoc tasks enqueued by `devintern worker add`. */
+  injected: QueueStatusCounts;
+  /** Retries scheduled by the dashboard's Retry action. */
+  retries: QueueStatusCounts;
+}
+
 /** Worker liveness as reported by `GET /api/worker`. */
 export type WorkerLiveness = "running" | "stopped" | "unknown";
 
@@ -199,22 +242,7 @@ export interface OpenAgentPrView {
   updatedAt: number;
 }
 
-/** One configured scheduled automation as served by `GET /api/automations`. */
-export interface DashboardAutomationView {
-  id: string;
-  enabled: boolean;
-  /** Cron expression or interval as configured (`0 9 * * 1`, `6h`). */
-  schedule?: string;
-  repo?: string;
-  /** The prompt executed per occurrence. */
-  prompt: string;
-  /** Whether occurrences open a pull request (opt-in; default off). */
-  openPr: boolean;
-  /** Next scheduled occurrence (epoch ms), when the scheduler registered it. */
-  nextDueAt?: number;
-  /** Most recent run of this automation (any origin), description stripped. */
-  lastRun?: RunRecord;
-}
+export type { DashboardAutomationView } from "./dashboard-automation-view";
 
 /**
  * Lazily opened read-only view over the worker's SQLite database.
@@ -225,7 +253,9 @@ export interface DashboardAutomationView {
  */
 export class DashboardData {
   readonly dbPath: string;
+  readonly queueDbPath: string;
   readonly workingDir: string;
+  readonly workspaceDir: string;
   readonly retryMode: "spawn" | "schedule";
   private readonly logDirs: string[];
   private readonly maxLogBytesPerFile: number | undefined;
@@ -237,6 +267,8 @@ export class DashboardData {
   private scheduledRetryStore: ScheduledRetryStore | null = null;
   /** Lazy read-write connection for ad-hoc (`worker add`) rows. */
   private injectedTaskStore: InjectedTaskStore | null = null;
+  /** Lazy read-only connection for eligibility checks (GETs must not create). */
+  private injectedTaskReadStore: InjectedTaskStore | null = null;
   /**
    * Task keys with a dashboard-triggered retry in flight (task key → claimed
    * at). The spawned CLI needs a moment to create its run row, so claims are
@@ -255,8 +287,13 @@ export class DashboardData {
   private automationActionsOverride?: DashboardAutomationActions;
 
   constructor(options: DashboardDataOptions = {}) {
-    this.dbPath = options.dbPath ?? resolveQueueDbPath();
     this.workingDir = options.workingDir ?? process.cwd();
+    this.workspaceDir = options.workspaceDir ?? resolveWorkspaceDir();
+    this.dbPath = options.dbPath ?? resolveDashboardHistoryDbPath(this.workingDir);
+    this.queueDbPath =
+      options.queueDbPath ??
+      options.dbPath ??
+      resolveDashboardQueueDbPath(undefined, this.workingDir);
     this.scheduleSnapshot = options.scheduleSnapshot ?? (() => null);
     this.retryMode = options.retryMode ?? "spawn";
     this.inflightRetryTtlMs = options.inflightRetryTtlMs ?? INFLIGHT_RETRY_TTL_MS;
@@ -267,7 +304,7 @@ export class DashboardData {
       this.logDirs = options.logDirs;
     } else {
       const dirs = [this.workingDir];
-      const workspaceDir = resolveWorkspaceDir();
+      const workspaceDir = this.workspaceDir;
       if (!dirs.includes(workspaceDir)) {
         // Standalone `devintern dashboard` often runs outside the workspace
         // home where the daemon's service definition drops its capture files.
@@ -315,6 +352,18 @@ export class DashboardData {
   }
 
   /**
+   * Whether the durable queue database is absent. The history DB and queue DB
+   * can differ, so the UI must not claim "no database yet" while a workspace
+   * DB is actively recording ad-hoc/retry work.
+   */
+  get queueDbMissing(): boolean {
+    if (resolve(this.queueDbPath) === resolve(this.dbPath)) {
+      return this.dbMissing;
+    }
+    return !existsSync(this.queueDbPath);
+  }
+
+  /**
    * List runs for `/api/runs`.
    *
    * Task descriptions are stripped here: they are polled every few seconds
@@ -343,13 +392,7 @@ export class DashboardData {
       return {
         runs: runs.map((run) => ({
           ...run,
-          taskTitle: run.taskDescription
-            ?.split("\n")
-            .map((line) => line.trim())
-            .find(Boolean)
-            ?.replace(/^#{1,6}\s+/, "")
-            .replace(/[*_`]/g, "")
-            .slice(0, 160),
+          taskTitle: deriveTaskTitle(run.taskDescription),
           taskDescription: undefined,
         })),
         recentLimit: 100,
@@ -384,7 +427,8 @@ export class DashboardData {
     }
     // Resolve each producing run once; logs can outlive their run row.
     const attempts = new Map<number, number | undefined>();
-    return listHarnessLogs({ runId, taskKey: run.taskKey }).map((file) => {
+    const dir = harnessLogsDir(this.workspaceDir);
+    return listHarnessLogs({ runId, taskKey: run.taskKey }, dir).map((file) => {
       const id = file.runId;
       if (id === undefined) {
         return file;
@@ -410,7 +454,7 @@ export class DashboardData {
     if (!match) {
       return null;
     }
-    return readHarnessLogContent(name);
+    return readHarnessLogContent(name, { dir: harnessLogsDir(this.workspaceDir) });
   }
 
   /** Registered immutable outputs belonging to this exact attempt. */
@@ -454,21 +498,31 @@ export class DashboardData {
   /** Store backing the schedule mode of the retry action. */
   getScheduledRetryStore(): ScheduledRetryStore {
     if (!this.scheduledRetryStore) {
-      this.scheduledRetryStore = new ScheduledRetryStore(this.dbPath);
+      this.scheduledRetryStore = new ScheduledRetryStore(this.queueDbPath);
     }
     return this.scheduledRetryStore;
   }
 
-  /**
-   * Store backing the ad-hoc retry action. Rows live in the same workspace DB,
-   * so the embedded worker's injected-task acquirer drains a re-queued row on
-   * its next poll.
-   */
+  /** Store backing the ad-hoc retry action; rows live in the durable queue DB. */
   getInjectedTaskStore(): InjectedTaskStore {
     if (!this.injectedTaskStore) {
-      this.injectedTaskStore = new InjectedTaskStore(this.dbPath);
+      this.injectedTaskStore = new InjectedTaskStore(this.queueDbPath);
     }
     return this.injectedTaskStore;
+  }
+
+  /**
+   * Read-only view of the ad-hoc queue, used by GET eligibility checks.
+   *
+   * Opening the read-write store here would create `<workspace>/state/queue.db`
+   * (and its schema) merely by viewing a run, violating the dashboard's
+   * read-only GET contract.
+   */
+  getInjectedTaskReadStore(): InjectedTaskStore {
+    if (!this.injectedTaskReadStore) {
+      this.injectedTaskReadStore = new InjectedTaskStore(this.queueDbPath, { readonly: true });
+    }
+    return this.injectedTaskReadStore;
   }
 
   /** Claim the retry slot for a task; false when one is already held. */
@@ -522,20 +576,9 @@ export class DashboardData {
       return [];
     }
     return statuses.map((status) => {
-      const lastRun = this.read(
-        undefined,
-        (stores) => stores.runs.listRuns({ automationId: status.id, limit: 1, offset: 0 })[0],
-      );
-      return {
-        id: status.id,
-        enabled: status.enabled,
-        schedule: status.cron ?? status.interval,
-        repo: status.repo,
-        prompt: status.prompt,
-        openPr: status.openPr === true,
-        nextDueAt: status.nextDueAt,
-        lastRun: lastRun ? { ...lastRun, taskDescription: undefined } : undefined,
-      };
+      const filter = { ...scheduledJobRunFilter(status), limit: 1, offset: 0 };
+      const lastRun = this.read(undefined, (stores) => stores.runs.listRuns(filter)[0]);
+      return toAutomationView(status, lastRun);
     });
   }
 
@@ -564,8 +607,12 @@ export class DashboardData {
     return this.read(null, (stores) => stores.runs.getStats(windowMs));
   }
 
-  getQueueStats(): { pending: number; processing: number; failed: number } {
-    return this.read({ pending: 0, processing: 0, failed: 0 }, (stores) => stores.queue.getStats());
+  getQueueStats(): WorkerQueueStats {
+    return {
+      ...readDashboardRelayStats(this.dbPath, this.queueDbPath),
+      injected: readDashboardQueueStatuses(this.queueDbPath, "injected_tasks"),
+      retries: readDashboardQueueStatuses(this.queueDbPath, "scheduled_retries"),
+    };
   }
 
   getAgentPrCounts(): { open: number; closed: number } {
@@ -672,6 +719,8 @@ export class DashboardData {
     this.scheduledRetryStore = null;
     this.injectedTaskStore?.close();
     this.injectedTaskStore = null;
+    this.injectedTaskReadStore?.close();
+    this.injectedTaskReadStore = null;
   }
 }
 
@@ -708,7 +757,7 @@ const INFLIGHT_RETRY_TTL_MS = 60_000;
 /** Resolve an ad-hoc row, treating an unreadable/missing store as "no row". */
 function findInjectedTask(data: DashboardData, taskKey: string): InjectedTask | null {
   try {
-    return data.getInjectedTaskStore().getByTaskKey(taskKey);
+    return data.getInjectedTaskReadStore().getByTaskKey(taskKey);
   } catch {
     return null;
   }
@@ -946,6 +995,10 @@ function retryInjectedRun(
   if (task.status === "pending" || task.status === "running") {
     return conflict(`ad-hoc task ${taskKey} is already ${task.status} (task #${task.id})`);
   }
+  // Re-queueing force-removes the worktree the surviving child is working in.
+  if (interruptedChildStillRunning(task)) {
+    return conflict(injectedChildStillRunningMessage(taskKey, task.childPid!));
+  }
   const revived = store.requeueSettled(taskKey);
   if (!revived) {
     return conflict(`ad-hoc task ${taskKey} moved on; reload the run and try again`);
@@ -1104,8 +1157,8 @@ export async function handleRunAutomation(
     return conflict(`automation "${automationId}" is disabled; enable it in the config first`);
   }
 
-  const activeRun = data.listRuns({ automationId, status: "in_progress", limit: 1, offset: 0 })
-    .runs[0];
+  const active = { ...automation.runFilter, status: "in_progress" as const, limit: 1, offset: 0 };
+  const activeRun = data.listRuns(active).runs[0];
   if (activeRun) {
     return conflict(
       `automation "${automationId}" already has a run in progress (run ${activeRun.id}); wait for it to finish`,
@@ -1146,7 +1199,7 @@ export async function handleRunAutomation(
  * `GET /api/runs` — paginated run list with optional filters.
  *
  * @param data - Dashboard data source
- * @param params - Query params: `limit`, `offset`, `status`, `origin`, `taskKey`
+ * @param params - Query params: `limit`, `offset`, `status`, `origin`, `taskKey`, `automationId`
  */
 export function handleRuns(data: DashboardData, params: URLSearchParams): ApiResponse {
   const rawLimit = params.get("limit");
@@ -1159,7 +1212,6 @@ export function handleRuns(data: DashboardData, params: URLSearchParams): ApiRes
   if (!Number.isFinite(offset) || offset < 0) {
     return badRequest("offset must be a non-negative integer");
   }
-
   const status = params.get("status") ?? undefined;
   if (status !== undefined && !RUN_STATUSES.includes(status as RunStatus)) {
     return badRequest(`status must be one of: ${RUN_STATUSES.join(", ")}`);
@@ -1173,6 +1225,7 @@ export function handleRuns(data: DashboardData, params: URLSearchParams): ApiRes
     taskKey: params.get("taskKey") ?? undefined,
     status: status as RunStatus | undefined,
     origin: origin as RunOrigin | undefined,
+    automationId: params.get("automationId") ?? undefined,
     limit,
     offset,
   });
@@ -1333,11 +1386,15 @@ export function handleStats(data: DashboardData, params: URLSearchParams): ApiRe
  * running elsewhere, and claiming "stopped" would be wrong.
  *
  * @param workingDir - Project root the dashboard was started from
+ * @param workspaceDir - Workspace home whose lock is also consulted
  */
-function resolveWorkerStatus(workingDir: string): WorkerStatusView {
+export function resolveWorkerStatus(
+  workingDir: string,
+  workspaceDir: string = resolveWorkspaceDir(),
+): WorkerStatusView {
   const locks = [
     LockManager.readLockStatus(workingDir, WORKER_LOCK_FILE),
-    LockManager.readLockStatus(resolveWorkspaceDir(), WORKER_LOCK_FILE, { plainDir: true }),
+    LockManager.readLockStatus(workspaceDir, WORKER_LOCK_FILE, { plainDir: true }),
   ].filter((lock): lock is LockStatus => lock !== null);
   if (locks.length === 0) {
     return { status: "unknown" };
@@ -1361,7 +1418,7 @@ export function handleWorkerStatus(data: DashboardData): ApiResponse {
   return {
     status: 200,
     body: {
-      worker: resolveWorkerStatus(data.workingDir),
+      worker: resolveWorkerStatus(data.workingDir, data.workspaceDir),
       queue: data.getQueueStats(),
       agentPrs: data.getAgentPrCounts(),
       schedule: data.getScheduleSnapshot(),
@@ -1372,6 +1429,8 @@ export function handleWorkerStatus(data: DashboardData): ApiResponse {
       })),
       dbPath: data.dbPath,
       dbMissing: data.dbMissing,
+      queueDbPath: data.queueDbPath,
+      queueDbMissing: data.queueDbMissing,
     },
   };
 }

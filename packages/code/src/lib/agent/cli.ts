@@ -8,7 +8,19 @@ import {
   resolveHarness,
 } from "@devintern/agent-harness";
 import { getLoadedEnvPath, loadEnvironment } from "../cli/bootstrap";
+import { hasHelpArg } from "../cli/help";
 import { buildSandboxDoctorReport, collectHarnessPreflight } from "./sandbox";
+
+const SANDBOX_USAGE = [
+  "Usage: devintern sandbox",
+  "",
+  "Report detected sandbox providers, the one-time setup each still needs, and",
+  "what the next agent run will do with the current AGENT_SANDBOX configuration.",
+  "Exits non-zero when the configured provider guarantees a failed run.",
+  "",
+  "Options:",
+  "  -h, --help  Display this help message",
+].join("\n");
 
 /**
  * `devintern sandbox` — report detected providers, remaining setup steps, and
@@ -16,6 +28,10 @@ import { buildSandboxDoctorReport, collectHarnessPreflight } from "./sandbox";
  * the configured provider guarantees a failed run, so scripts/CI can gate.
  */
 export async function runSandboxCommand(): Promise<never> {
+  if (hasHelpArg(process.argv.slice(2))) {
+    console.log(SANDBOX_USAGE);
+    process.exit(0);
+  }
   loadEnvironment();
   const detections = await detectSandboxProviders();
   const configured = process.env.AGENT_SANDBOX || "none";
@@ -37,20 +53,29 @@ export async function runSandboxCommand(): Promise<never> {
       ? (loadedEnvPath as string)
       : "environment"
     : "default";
-  const harnessName = resolveHarness().harness.name;
-  const preflight = await collectHarnessPreflight(configured, detections);
+  const requested = parseHarnessList(process.env.AGENT_HARNESS);
   // Pack-profile status per chain entry: shows which harness runs are backed
   // by a nono pack and which fall back to the generic profile.
-  const packStatuses = parseHarnessList(process.env.AGENT_HARNESS)
-    .filter((name) => getHarness(name) !== undefined)
-    .map((name) => describeNonoPack(name));
+  const harnessChain = requested
+    .map((name) => getHarness(name)?.name)
+    .filter((name): name is string => name !== undefined);
+  // `resolveHarness()` (interactive and PR-review runs) takes the first
+  // AGENT_HARNESS entry and throws when it is unknown; report that as a failed
+  // next run instead of crashing before the report prints.
+  const unknownPrimary = getHarness(requested[0] ?? "") ? undefined : requested[0];
+  const harnessName = unknownPrimary
+    ? (harnessChain[0] ?? requested[0]!)
+    : resolveHarness().harness.name;
+  const activeSandbox = activeSandboxName();
+  const preflight = await collectHarnessPreflight(configured, detections, undefined, activeSandbox);
+  const packStatuses = harnessChain.map((name) => describeNonoPack(name));
   const report = buildSandboxDoctorReport(
     detections,
     configured,
     configuredSource,
     harnessName,
     process.platform,
-    { activeSandbox: activeSandboxName(), packStatuses, preflight },
+    { activeSandbox, harnessChain, packStatuses, preflight, unknownPrimary },
   );
   console.log(report.lines.join("\n"));
   process.exit(report.nextRunFails ? 1 : 0);

@@ -1,8 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { SrtSandboxProvider } from "../src/sandbox/providers/srt.js";
 import {
   DSH_HOME_CUSTOM_ROOT_ENV,
   ensureHarnessStateDir,
@@ -10,7 +9,6 @@ import {
   harnessStatePaths,
   resolveHomeDir,
 } from "../src/sandbox/harness-state.js";
-import type { SandboxPolicy } from "../src/sandbox/types.js";
 
 const originalDshHome = process.env.DSH_HOME;
 const originalHome = process.env.HOME;
@@ -43,16 +41,6 @@ afterEach(() => {
 function uniqueHomeChild(name: string): string {
   // Do not create it: a lexical path under $HOME is enough to test resolution.
   return join(resolveHomeDir(), `${name}-${process.pid}-${Date.now()}`);
-}
-
-function policy(overrides: Partial<SandboxPolicy> = {}): SandboxPolicy {
-  return {
-    writablePaths: ["/work/repo"],
-    network: "open",
-    workingDir: "/work/repo",
-    harnessName: "deepseek",
-    ...overrides,
-  };
 }
 
 describe("harness state paths", () => {
@@ -159,41 +147,6 @@ describe("harness state paths", () => {
     expect(harnessStatePaths("deepseek", process.env)).toEqual([custom]);
   });
 
-  test("srt grants a custom DSH_HOME", () => {
-    const dshHome = mkdtempSync(join(process.cwd(), "dsh-home-"));
-    process.env.DSH_HOME = dshHome;
-    try {
-      mkdirSync(join(dshHome, "profiles"), { recursive: true });
-      const wrapped = new SrtSandboxProvider(process.env).wrapCommand(
-        "/usr/bin/dsh",
-        ["headless"],
-        policy(),
-      );
-      const settings = JSON.parse(readFileSync(wrapped.args[1] as string, "utf8"));
-      expect(settings.filesystem.allowWrite).toContain(dshHome);
-    } finally {
-      rmSync(dshHome, { recursive: true, force: true });
-    }
-  });
-
-  test("srt creates and grants a trusted custom DSH_HOME that does not exist yet", () => {
-    const dshHome = join(process.cwd(), `.dsh-fresh-${process.pid}-${Date.now()}`);
-    expect(existsSync(dshHome)).toBe(false);
-    process.env.DSH_HOME = dshHome;
-    try {
-      const wrapped = new SrtSandboxProvider(process.env).wrapCommand(
-        "/usr/bin/dsh",
-        ["headless"],
-        policy(),
-      );
-      const settings = JSON.parse(readFileSync(wrapped.args[1] as string, "utf8"));
-      expect(existsSync(dshHome)).toBe(true);
-      expect(settings.filesystem.allowWrite).toContain(dshHome);
-    } finally {
-      rmSync(dshHome, { recursive: true, force: true });
-    }
-  });
-
   test("canonicalizes a symlinked $HOME before and after creating DSH_HOME", () => {
     const root = mkdtempSync(join(tmpdir(), "dsh-symhome-"));
     const realHome = join(root, "real");
@@ -264,47 +217,6 @@ describe("harness state paths", () => {
       expect(harnessStateAbsolutePaths("deepseek", home, process.env)).toEqual([
         join(home, ".dsh"),
       ]);
-    } finally {
-      rmSync(home, { recursive: true, force: true });
-    }
-  });
-
-  test("srt grants the default ~/.dsh on a fresh install", () => {
-    const home = mkdtempSync(join(tmpdir(), "dsh-fresh-srt-"));
-    process.env.HOME = home;
-    delete process.env.DSH_HOME;
-    try {
-      const wrapped = new SrtSandboxProvider(process.env).wrapCommand(
-        "/usr/bin/dsh",
-        ["headless"],
-        policy(),
-      );
-      const settings = JSON.parse(readFileSync(wrapped.args[1] as string, "utf8"));
-      expect(existsSync(join(home, ".dsh"))).toBe(true);
-      expect(settings.filesystem.allowWrite).toContain(join(home, ".dsh"));
-    } finally {
-      rmSync(home, { recursive: true, force: true });
-    }
-  });
-
-  test("grants a DSH_HOME merged after module load (repo .env) from a production provider", () => {
-    const home = mkdtempSync(join(tmpdir(), "dsh-live-env-"));
-    const custom = join(home, ".dsh-custom");
-    process.env.HOME = home;
-    process.env.DSH_HOME = custom;
-    try {
-      // The registry constructs providers with no snapshot, exactly like the
-      // Code/PM hosts. DSH_HOME is merged into process.env after import (the
-      // repository .env), and the dsh child inherits that value, so the grant
-      // must follow it instead of the startup default ~/.dsh.
-      const wrapped = new SrtSandboxProvider().wrapCommand(
-        "/usr/bin/dsh",
-        ["headless"],
-        policy(),
-      );
-      const settings = JSON.parse(readFileSync(wrapped.args[1] as string, "utf8"));
-      expect(settings.filesystem.allowWrite).toContain(custom);
-      expect(settings.filesystem.allowWrite).not.toContain(join(home, ".dsh"));
     } finally {
       rmSync(home, { recursive: true, force: true });
     }

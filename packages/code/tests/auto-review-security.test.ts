@@ -90,6 +90,24 @@ describe("review feedback validation", () => {
       "cannot approve",
     );
   });
+  test("returns a contradictory approval when the caller owns the policy", () => {
+    const json = JSON.stringify({ ...verdict, approved: true });
+    // Steps like `verify` resolve the contradiction themselves, so they need
+    // the verdict rather than a parse error that would burn a retry.
+    expect(parseReviewFeedback(json, { enforceApproval: false })).toEqual({
+      ...verdict,
+      approved: true,
+    });
+    // Skipping the approval check must not skip schema validation.
+    expect(() =>
+      parseReviewFeedback(
+        JSON.stringify({ ...verdict, items: [{ ...finding, priority: "urgent" }] }),
+        {
+          enforceApproval: false,
+        },
+      ),
+    ).toThrow("Invalid feedback structure");
+  });
   test("accepts valid findings and a clean approval", () => {
     expect(parseReviewFeedback(JSON.stringify(verdict))).toEqual(verdict);
     expect(

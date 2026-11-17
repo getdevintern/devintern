@@ -13,7 +13,7 @@
 
 import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { EventEmitter } from "node:events";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -24,8 +24,11 @@ import type { PipelineConfig } from "../src/types/settings";
 import { registerStep } from "../src/lib/task/pipeline-registry";
 import { runContext } from "../src/lib/cli/context";
 import { HarnessUnavailableError } from "../src/lib/agent/harness-startup";
+import { RUN_ORIGIN_ENV } from "../src/lib/observability/analytics";
 
 // --- snapshot real modules before any mock.module override ---
+// A run spawned by a worker inherits its origin; each test opts into worker mode explicitly.
+const ambientRunOrigin = process.env[RUN_ORIGIN_ENV];
 const realHarness = { ...(await import("@devintern/agent-harness")) };
 const realUtils = { ...(await import("../src/lib/utils")) };
 const realCodeHost = { ...(await import("../src/lib/code-host")) };
@@ -63,6 +66,7 @@ let tracker: {
   transitionStatus: ReturnType<typeof mock>;
   postComment: ReturnType<typeof mock>;
   extractDescriptionText: () => string;
+  getTask: ReturnType<typeof mock>;
 };
 let commitResult: { success: boolean; message: string; hookError?: string };
 let commitResults: Array<typeof commitResult>;
@@ -82,9 +86,18 @@ let deliveryEvents: string[];
 let agentPrompts: string[];
 let autoReviewOptions: Array<{ maxIterations?: number; minPriority?: string }>;
 let pipelineConfig: PipelineConfig | undefined;
-let prResult: { success: boolean; url?: string; message?: string; warnings?: string[] };
+let prResult: {
+  success: boolean;
+  url?: string;
+  message?: string;
+  warnings?: string[];
+  unsupportedPlatform?: boolean;
+  permanent?: boolean;
+};
 let prCreateOptions: { artifactComment?: string } | undefined;
 let postImplementationCommentMock: ReturnType<typeof mock>;
+let recordedStages: Array<{ stage: string; data: unknown }>;
+let autoReviewError: Error | undefined;
 
 const HEAD_BEFORE = "1111111111111111111111111111111111111111";
 const HEAD_AFTER = "2222222222222222222222222222222222222222";
@@ -190,6 +203,7 @@ mock.module("../src/lib/review/auto-review-loop", () => ({
   runAutoReviewLoop: async (options: { maxIterations?: number; minPriority?: string }) => {
     autoReviewCalls++;
     autoReviewOptions.push(options);
+    if (autoReviewError) throw autoReviewError;
     return { success: true, iterations: 1, finalFeedback: [] };
   },
   getPRDiff: () => "diff --git a/file b/file",
@@ -205,7 +219,29 @@ mock.module("../src/lib/review/auto-review-loop", () => ({
 mock.module("../src/lib/state/retry-state", () => ({ recordIncompleteAttempt: () => {} }));
 mock.module("../src/lib/state/run-recorder", () => ({
   recordRunPr: () => {},
-  recordRunStage: () => {},
+  recordRunStage: (stage: string, data: unknown) => {
+    recordedStages.push({ stage, data });
+  },
+  replaceRunStage: (stage: string, data: unknown) => {
+    for (let i = recordedStages.length - 1; i >= 0; i -= 1) {
+      if (recordedStages[i]?.stage === stage) recordedStages.splice(i, 1);
+    }
+    recordedStages.push({ stage, data });
+  },
+  hasRunStage: (stage: string) => recordedStages.some((entry) => entry.stage === stage),
+  latestRunStage: (stage: string) => {
+    for (let i = recordedStages.length - 1; i >= 0; i -= 1) {
+      const entry = recordedStages[i];
+      if (entry?.stage !== stage) continue;
+      const data = entry.data as { status?: string; detail?: unknown };
+      return {
+        stage,
+        status: data.status,
+        detail: data.detail === undefined ? undefined : JSON.stringify(data.detail),
+      };
+    }
+    return undefined;
+  },
 }));
 mock.module("../src/lib/state/worker-state", () => ({
   ...realWorkerState,
@@ -228,7 +264,7 @@ mock.module("../src/lib/agent/plan", () => ({
   createPlanImplementationPrompt: () => "prompt",
   logHookErrorToFile: () => {},
 }));
-mock.module("../src/lib/agent/sandbox", () => ({ getSandbox: async () => null }));
+mock.module("../src/lib/agent/sandbox", () => ({ ...realSandbox, getSandbox: async () => null }));
 mock.module("@devintern/utils", () => ({ ...realUtilsPkg, captureError: () => {} }));
 
 const { runAgentHarness } = await import("../src/lib/agent/run-harness");
@@ -273,6 +309,8 @@ beforeEach(() => {
   deliveryEvents = [];
   agentPrompts = [];
   autoReviewOptions = [];
+  recordedStages = [];
+  autoReviewError = undefined;
   pipelineConfig = undefined;
   prResult = { success: true, url: "https://github.com/o/r/pull/1", warnings: [] };
   prCreateOptions = undefined;
@@ -286,9 +324,12 @@ beforeEach(() => {
     transitionStatus: mock(async () => {}),
     postComment: mock(async () => {}),
     extractDescriptionText: () => "description",
+    getTask: mock(async () => task),
   };
   runContext.options = { verbose: false } as never;
+  runContext.activeTaskContext = null;
   delete process.env.AGENT_HARNESS_TIMEOUT_MINUTES;
+  delete process.env[RUN_ORIGIN_ENV];
 });
 
 afterEach(() => {
@@ -299,6 +340,8 @@ afterEach(() => {
 });
 
 afterAll(() => {
+  if (ambientRunOrigin === undefined) delete process.env[RUN_ORIGIN_ENV];
+  else process.env[RUN_ORIGIN_ENV] = ambientRunOrigin;
   mock.module("@devintern/agent-harness", () => ({ ...realHarness }));
   mock.module("../src/lib/utils", () => ({ ...realUtils }));
   mock.module("../src/lib/code-host", () => ({ ...realCodeHost }));
@@ -337,6 +380,15 @@ describe("runAgentHarness early failures", () => {
     scenario.closeCode = 1;
     scenario.stdout = "The agent tried and failed.\n";
     await expect(runAgentHarness(baseInput())).rejects.toThrow("Agent exited with code 1");
+  });
+
+  test("includes the agent's last failure line in a non-zero exit error", async () => {
+    scenario.closeCode = 1;
+    scenario.stdout = "working...\n";
+    scenario.stderr = "warning: transient retry\nfatal: remote repository not found\n";
+    await expect(runAgentHarness(baseInput())).rejects.toThrow(
+      "Agent exited with code 1: fatal: remote repository not found",
+    );
   });
 
   test("classifies a sandbox/mise startup failure separately", async () => {
@@ -392,9 +444,50 @@ describe("runAgentHarness non-commit outcomes", () => {
     expect(tracker.postComment).not.toHaveBeenCalled();
     expect(tracker.postIncompleteImplementationComment).not.toHaveBeenCalled();
   });
+
+  test("ignores a stale incomplete summary from a prior attempt when recording the stage", async () => {
+    const taskDir = join(outDir, "task-1");
+    mkdirSync(taskDir, { recursive: true });
+    const stalePath = join(taskDir, "implementation-summary-incomplete.md");
+    writeFileSync(stalePath, "stale halt from a prior attempt", "utf8");
+    const staleSeconds = (Date.now() - 60_000) / 1000;
+    utimesSync(stalePath, staleSeconds, staleSeconds);
+    scenario.stdout = "Implemented the parser and its tests.";
+
+    await runAgentHarness({ ...baseInput(), enableGit: false });
+
+    const implementation = recordedStages.find((entry) => entry.stage === "implementation");
+    const data = implementation?.data as {
+      status?: string;
+      detail?: { report?: string };
+    };
+    expect(data.status).toBe("succeeded");
+    expect(data.detail?.report).toContain("Implemented the parser");
+  });
 });
 
 describe("runAgentHarness git delivery", () => {
+  test("records the implementation stage before auto-review can interrupt delivery", async () => {
+    // The worker restart shape: the agent finished and wrote its report, then
+    // auto-review hit a usage limit before the pipeline could record the stage.
+    // The durable stage must already exist so session pickup can reuse it.
+    scenario.stdout = "Implemented the parser and its tests.";
+    autoReviewError = new realHarness.UsageLimitError();
+
+    await expect(
+      runAgentHarness({ ...baseInput(), createPr: true, autoReview: true }),
+    ).rejects.toThrow(realHarness.UsageLimitError);
+
+    const implementation = recordedStages.find((entry) => entry.stage === "implementation");
+    expect(implementation).toBeDefined();
+    const data = implementation?.data as {
+      status?: string;
+      detail?: { report?: string };
+    };
+    expect(data.status).toBe("succeeded");
+    expect(data.detail?.report).toContain("Implemented the parser");
+  });
+
   test("verifies and publishes inherited commits when pickup needs no new edits", async () => {
     scenario.stdout = "The inherited implementation is complete and validated.";
     commitResult = { success: false, message: "No changes to commit" };
@@ -431,6 +524,26 @@ describe("runAgentHarness git delivery", () => {
     );
     expect(deliveryEvents).not.toContain("push");
     expect(tracker.transitionStatus).not.toHaveBeenCalledWith("TASK-1", "In Review");
+  });
+
+  test("marks the early implementation stage failed when delivery halts", async () => {
+    scenario.stdout = "Implemented the parser and its tests.";
+    commitResult = { success: false, message: "No changes to commit" };
+
+    await expect(runAgentHarness({ ...baseInput(), createPr: true })).rejects.toThrow(
+      "Implementation was not committed",
+    );
+
+    const implementation = [...recordedStages]
+      .reverse()
+      .find((entry) => entry.stage === "implementation");
+    const data = implementation?.data as {
+      status?: string;
+      detail?: { report?: string; deliveryError?: string };
+    };
+    expect(data.status).toBe("failed");
+    expect(data.detail?.report).toContain("Implemented the parser");
+    expect(data.detail?.deliveryError).toContain("Implementation was not committed");
   });
 
   test("does not publish agent commits on the PR target branch", async () => {
@@ -551,6 +664,176 @@ describe("runAgentHarness git delivery", () => {
 
     expect(postImplementationCommentMock).toHaveBeenCalledTimes(1);
     expect(tracker.transitionStatus).toHaveBeenCalledWith("TASK-1", "In Review");
+  });
+
+  test("flags a retryable PR failure and tells the tracker the ticket is stuck", async () => {
+    scenario.stdout = "done";
+    prResult = { success: false, message: "GitHub API 502 Bad Gateway" };
+    runContext.activeTaskContext = {
+      taskKey: "TASK-1",
+      tracker: tracker as never,
+      projectKey: "TASK",
+      movedToInProgress: true,
+    };
+
+    const dbDir = mkdtempSync(join(tmpdir(), "run-harness-pr-retry-"));
+    const originalOrigin = process.env[RUN_ORIGIN_ENV];
+    const originalDb = process.env.WEBHOOK_QUEUE_DB;
+    process.env[RUN_ORIGIN_ENV] = "worker";
+    process.env.WEBHOOK_QUEUE_DB = join(dbDir, "queue.db");
+    try {
+      await runAgentHarness({ ...baseInput(), createPr: true });
+    } finally {
+      if (originalOrigin === undefined) delete process.env[RUN_ORIGIN_ENV];
+      else process.env[RUN_ORIGIN_ENV] = originalOrigin;
+      if (originalDb === undefined) delete process.env.WEBHOOK_QUEUE_DB;
+      else process.env.WEBHOOK_QUEUE_DB = originalDb;
+      rmSync(dbDir, { recursive: true, force: true });
+    }
+
+    expect(runContext.activeTaskContext?.prCreationFailure).toBe("GitHub API 502 Bad Gateway");
+    expect(tracker.postComment).toHaveBeenCalledTimes(1);
+    const [key, content] = (tracker.postComment as ReturnType<typeof mock>).mock.calls[0] as [
+      string,
+      { body: string },
+    ];
+    expect(key).toBe("TASK-1");
+    expect(content.body).toContain("Pull request could not be created");
+    expect(content.body).toContain("feature/task-1");
+    expect(content.body).toContain("GitHub API 502 Bad Gateway");
+    expect(content.body).toContain("re-run the whole ticket on its next poll");
+    expect(tracker.transitionStatus).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    { permanent: false, message: "GitHub API 502 Bad Gateway" },
+    { permanent: true, message: "GitHub API 401 Bad credentials" },
+  ])(
+    "an interactive CLI PR failure comment makes no worker promises (permanent=$permanent)",
+    async ({ permanent, message }) => {
+      // RUN_ORIGIN_ENV is cleared in beforeEach: an interactive CLI run.
+      expect(process.env[RUN_ORIGIN_ENV]).toBeUndefined();
+      scenario.stdout = "done";
+      prResult = { success: false, message, ...(permanent ? { permanent: true } : {}) };
+      runContext.activeTaskContext = {
+        taskKey: "TASK-1",
+        tracker: tracker as never,
+        projectKey: "TASK",
+        movedToInProgress: true,
+      };
+      await runAgentHarness({ ...baseInput(), createPr: true });
+
+      expect(tracker.postComment).toHaveBeenCalledTimes(1);
+      const [, content] = (tracker.postComment as ReturnType<typeof mock>).mock.calls[0] as [
+        string,
+        { body: string },
+      ];
+      expect(content.body).toContain("Pull request could not be created");
+      expect(content.body).toContain(message);
+      expect(content.body).toContain("Re-run with `--create-pr` after fixing the cause.");
+      expect(content.body.toLowerCase()).not.toContain("worker");
+      expect(content.body).not.toContain("attempts");
+    },
+  );
+
+  test("tells the tracker no re-run is coming on the attempt that hits the cap", async () => {
+    scenario.stdout = "done";
+    prResult = { success: false, message: "GitHub API 502 Bad Gateway" };
+    runContext.activeTaskContext = {
+      taskKey: "TASK-1",
+      tracker: tracker as never,
+      projectKey: "TASK",
+      movedToInProgress: true,
+    };
+    const { actionedSourceKeyFromEnv } = await import("../src/lib/task/actioned-state");
+    const { MAX_PR_DELIVERY_ATTEMPTS, prDeliveryFailuresKey } =
+      await import("../src/lib/task/actioned-without-pr");
+    const dbDir = mkdtempSync(join(tmpdir(), "run-harness-pr-cap-"));
+    const originalOrigin = process.env[RUN_ORIGIN_ENV];
+    const originalDb = process.env.WEBHOOK_QUEUE_DB;
+    process.env[RUN_ORIGIN_ENV] = "worker";
+    process.env.WEBHOOK_QUEUE_DB = join(dbDir, "queue.db");
+    try {
+      const state = new realWorkerState.WorkerState();
+      state.setMeta(
+        prDeliveryFailuresKey(actionedSourceKeyFromEnv(), "TASK-1"),
+        String(MAX_PR_DELIVERY_ATTEMPTS - 1),
+      );
+      state.close();
+
+      await runAgentHarness({ ...baseInput(), createPr: true });
+    } finally {
+      if (originalOrigin === undefined) delete process.env[RUN_ORIGIN_ENV];
+      else process.env[RUN_ORIGIN_ENV] = originalOrigin;
+      if (originalDb === undefined) delete process.env.WEBHOOK_QUEUE_DB;
+      else process.env.WEBHOOK_QUEUE_DB = originalDb;
+      rmSync(dbDir, { recursive: true, force: true });
+    }
+
+    const [, content] = (tracker.postComment as ReturnType<typeof mock>).mock.calls[0] as [
+      string,
+      { body: string },
+    ];
+    expect(content.body).toContain(`This was the last of ${MAX_PR_DELIVERY_ATTEMPTS} attempts`);
+    expect(content.body).not.toContain("re-run the whole ticket on its next poll");
+  });
+
+  test("does not flag or comment when the code host is unsupported", async () => {
+    scenario.stdout = "done";
+    prResult = { success: false, message: "Could not detect", unsupportedPlatform: true };
+    runContext.activeTaskContext = {
+      taskKey: "TASK-1",
+      tracker: tracker as never,
+      projectKey: "TASK",
+      movedToInProgress: true,
+    };
+
+    await runAgentHarness({ ...baseInput(), createPr: true });
+
+    expect(runContext.activeTaskContext?.prCreationFailure).toBeUndefined();
+    expect(tracker.postComment).not.toHaveBeenCalled();
+  });
+
+  test("comments but does not flag a permanent PR failure such as a missing token", async () => {
+    scenario.stdout = "done";
+    prResult = {
+      success: false,
+      permanent: true,
+      message: "GitHub client not configured. Please set GITHUB_TOKEN",
+    };
+    runContext.activeTaskContext = {
+      taskKey: "TASK-1",
+      tracker: tracker as never,
+      projectKey: "TASK",
+      movedToInProgress: true,
+    };
+    process.env[RUN_ORIGIN_ENV] = "worker";
+
+    await runAgentHarness({ ...baseInput(), createPr: true });
+
+    expect(runContext.activeTaskContext?.prCreationFailure).toBeUndefined();
+    expect(tracker.postComment).toHaveBeenCalledTimes(1);
+    const [, content] = (tracker.postComment as ReturnType<typeof mock>).mock.calls[0] as [
+      string,
+      { body: string },
+    ];
+    expect(content.body).toContain("will not run this ticket again until it changes");
+  });
+
+  test("flags a retryable PR failure without commenting under --skip-comments", async () => {
+    scenario.stdout = "done";
+    prResult = { success: false, message: "rate limited" };
+    runContext.activeTaskContext = {
+      taskKey: "TASK-1",
+      tracker: tracker as never,
+      projectKey: "TASK",
+      movedToInProgress: true,
+    };
+
+    await runAgentHarness({ ...baseInput(), createPr: true, skipComments: true });
+
+    expect(runContext.activeTaskContext?.prCreationFailure).toBe("rate limited");
+    expect(tracker.postComment).not.toHaveBeenCalled();
   });
 
   test("publishes explicitly selected artifacts independently of the plugin name", async () => {

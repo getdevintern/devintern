@@ -1,4 +1,4 @@
-node_modules/
+node_modules
 dist/
 .turbo/
 .DS_Store
@@ -21,3 +21,7 @@ dist/
 
 packages/pm-desktop/out/
 packages/pm-desktop/release/
+
+# Claude Code local state
+.claude/worktrees/
+.claude/settings.local.json

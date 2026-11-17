@@ -135,6 +135,142 @@ describe("resolveSessionPickup", () => {
     });
   });
 
+  test("resumes a failed run whose branch has commits even without a report", async () => {
+    // Legacy/interrupted shape: the implementation stage was never written
+    // before auto-review, but the branch holds the completed work.
+    const runId = failedRunWithState("PROJ-5b", "feature/proj-5b");
+
+    const decision = await resolveSessionPickup({
+      runStore: store,
+      taskKey: "PROJ-5b",
+      branchExists: () => true,
+      hasLandedCommits: () => true,
+      describeLanded: ({ branch }) => `Commits:\n123 add parser on ${branch}`,
+    });
+
+    expect(decision.kind).toBe("resume");
+    if (decision.kind !== "resume") return;
+    expect(decision.session).toMatchObject({
+      runId,
+      branch: "feature/proj-5b",
+      landed: "Commits:\n123 add parser on feature/proj-5b",
+      outcomeReason: "agent exited non-zero",
+    });
+    expect(decision.session.report).toBeUndefined();
+  });
+
+  test("falls back when the branch has no commits and no report", async () => {
+    failedRunWithState("PROJ-5c", "feature/proj-5c");
+
+    const decision = await resolveSessionPickup({
+      runStore: store,
+      taskKey: "PROJ-5c",
+      branchExists: () => true,
+      hasLandedCommits: () => false,
+    });
+
+    expect(decision).toEqual({
+      kind: "fresh",
+      reason: "branch 'feature/proj-5c' has no commits to resume",
+    });
+  });
+
+  test("requires commits when a report came from a failed implementation stage", async () => {
+    // Delivery halts after the early stage write are corrected to "failed".
+    // The report alone must not make an empty branch resumable.
+    const runId = store.createRun({
+      origin: "task",
+      taskKey: "PROJ-5e",
+      branch: "feature/proj-5e",
+    });
+    store.addStage(
+      runId,
+      "implementation",
+      "failed",
+      "implementation not delivered",
+      JSON.stringify({ report: "claims the work was implemented" }),
+    );
+    store.finishRun(runId, "failed", "Implementation was not committed");
+
+    const empty = await resolveSessionPickup({
+      runStore: store,
+      taskKey: "PROJ-5e",
+      branchExists: () => true,
+      hasLandedCommits: () => false,
+    });
+    expect(empty).toEqual({
+      kind: "fresh",
+      reason: "branch 'feature/proj-5e' has no commits to resume",
+    });
+
+    const landed = await resolveSessionPickup({
+      runStore: store,
+      taskKey: "PROJ-5e",
+      branchExists: () => true,
+      hasLandedCommits: () => true,
+    });
+    expect(landed.kind).toBe("resume");
+    if (landed.kind === "resume") {
+      expect(landed.session.report).toBe("claims the work was implemented");
+    }
+  });
+
+  test("requires commits when a succeeded report predates delivery", async () => {
+    // recordCompletedImplementation writes a succeeded stage as soon as the
+    // agent session ends, before commit/verify/auto-review. A crash or SIGTERM
+    // during delivery leaves that stage plus a report on an empty branch, so a
+    // supplied commit probe must veto resuming it.
+    const runId = store.createRun({
+      origin: "task",
+      taskKey: "PROJ-5f",
+      branch: "feature/proj-5f",
+    });
+    store.addStage(
+      runId,
+      "implementation",
+      "succeeded",
+      "implemented with claude",
+      JSON.stringify({ report: "claims the work was implemented" }),
+    );
+    store.finishRun(runId, "failed", "worker restarted during commit");
+
+    const empty = await resolveSessionPickup({
+      runStore: store,
+      taskKey: "PROJ-5f",
+      branchExists: () => true,
+      hasLandedCommits: () => false,
+    });
+    expect(empty).toEqual({
+      kind: "fresh",
+      reason: "branch 'feature/proj-5f' has no commits to resume",
+    });
+
+    const landed = await resolveSessionPickup({
+      runStore: store,
+      taskKey: "PROJ-5f",
+      branchExists: () => true,
+      hasLandedCommits: () => true,
+    });
+    expect(landed.kind).toBe("resume");
+    if (landed.kind === "resume") {
+      expect(landed.session.report).toBe("claims the work was implemented");
+    }
+  });
+
+  test("falls back when the commit probe throws", async () => {
+    failedRunWithState("PROJ-5d", "feature/proj-5d");
+
+    const decision = await resolveSessionPickup({
+      runStore: store,
+      taskKey: "PROJ-5d",
+      hasLandedCommits: () => {
+        throw new Error("git unavailable");
+      },
+    });
+
+    expect(decision.kind).toBe("fresh");
+  });
+
   test("falls back when the recorded branch no longer exists", async () => {
     failedRunWithState("PROJ-6", "feature/proj-6", "some report");
     const decision = await resolveSessionPickup({

@@ -19,6 +19,7 @@ export type {
   AgentRunResult,
   HarnessInvocation,
   HarnessProbe,
+  HarnessProbeOptions,
   ResolvedHarness,
   StructuredOutputResult,
 } from "./types.js";
@@ -67,6 +68,7 @@ export {
   type HarnessChainOptions,
   type ResolvedHarnessChain,
 } from "./harness-chain.js";
+export type { HarnessChainEvaluation, HarnessEntryReadiness } from "./harness-chain.js";
 
 // Prompt argument construction
 export { buildPromptArgs } from "./prompt-args.js";
@@ -75,8 +77,11 @@ export { buildPromptArgs } from "./prompt-args.js";
 export {
   buildHarnessInvocation,
   parseMajorVersion,
+  parseVersion,
+  probeCliVersion,
   probeHarness,
   readCliVersion,
+  type CliVersionProbeResult,
   resetHarnessProbeCache,
 } from "./probe.js";
 
@@ -124,6 +129,7 @@ export { GooseHarness } from "./harnesses/goose.js";
 export { GrokHarness } from "./harnesses/grok.js";
 export { KiloCodeHarness } from "./harnesses/kilo-code.js";
 export { KimiHarness } from "./harnesses/kimi.js";
+export { MUSE_MIN_VERSION, MUSE_READONLY_PROFILE, MuseHarness } from "./harnesses/muse.js";
 export { OpencodeHarness } from "./harnesses/opencode.js";
 export { PiHarness } from "./harnesses/pi.js";
 export { QwenCodeHarness } from "./harnesses/qwen.js";
@@ -152,14 +158,30 @@ export {
 export {
   resolveSandbox,
   activeSandboxName,
+  removedSandboxProviderMessage,
   type SandboxResolutionOptions,
 } from "./sandbox/resolver.js";
 export { detectSandboxProviders, type DetectedSandboxProvider } from "./sandbox/detect.js";
+export { sandboxInheritsEnclosingSandbox, type SandboxNestingDecision } from "./sandbox/nesting.js";
 export { probeCommand, unsupportedPlatform } from "./sandbox/probe.js";
+export {
+  decideHarnessSandbox,
+  describeSandboxDecision,
+  incompatibleSandboxMessage,
+  pickAutoSandboxProvider,
+  resolveHarnessSandboxDecision,
+  type HarnessSandboxDecision,
+  type HarnessSandboxDecisionInput,
+  type ResolveHarnessSandboxDecisionOptions,
+  type SandboxDecisionErrorReason,
+} from "./sandbox/selection.js";
 export {
   probeHarnessUnderSandbox,
   resetHarnessSandboxProbeCache,
   resolveProbeProvider,
+  inheritedSandboxProbeProvider,
+  probeHarnessForDecision,
+  sandboxDecisionProbeProvider,
   firstActionableProbeLine,
   type HarnessSandboxProbeOptions,
   type HarnessSandboxProbeResult,
@@ -178,16 +200,17 @@ export {
   type NonoPackStatus,
 } from "./sandbox/providers/nono.js";
 export {
+  defaultMuseCredentialPath,
   harnessStateAbsolutePaths,
   harnessStatePaths,
+  museCredentialPath,
   resolveHomeDir,
 } from "./sandbox/harness-state.js";
-export { SrtSandboxProvider } from "./sandbox/providers/srt.js";
 export { DockerSandboxProvider } from "./sandbox/providers/docker.js";
-export { SmolvmSandboxProvider } from "./sandbox/providers/smolvm.js";
 export {
   spawnAgent,
   applyNestingGuard,
+  museCredentialGuard,
   buildDefaultSandboxPolicy,
   type SpawnAgentOptions,
   type SpawnedAgent,
@@ -203,6 +226,7 @@ export {
   UsageLimitError,
   detectUsageLimit,
   resetHintToMs,
+  type UsageLimitPeriod,
   type UsageLimitResult,
 } from "./detect-usage-limit.js";
 

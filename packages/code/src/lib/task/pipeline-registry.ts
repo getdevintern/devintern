@@ -1,3 +1,4 @@
+import type { ParseReviewFeedbackOptions } from "../review/auto-review-loop";
 import type { ReviewFeedback, ReviewFeedbackItem, ReviewPriority } from "../../types/auto-review";
 import type { ProjectSettings } from "../../types/settings";
 import type { TaskTrackerClient } from "../trackers/client";
@@ -36,7 +37,7 @@ export interface PipelineContext {
   /** Read the current diff against the configured PR target branch. */
   getDiff(): string;
   /** Parse an agent review verdict and filter findings by priority. */
-  parseReviewFeedback(output: string, minPriority?: ReviewPriority): ReviewFeedback;
+  parseReviewFeedback(output: string, options?: ParseReviewFeedbackOptions): ReviewFeedback;
   filterByPriority(items: ReviewFeedbackItem[], minPriority: ReviewPriority): ReviewFeedbackItem[];
 }
 

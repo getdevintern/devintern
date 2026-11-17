@@ -181,7 +181,9 @@ export class GitHubAppAuth {
       }
       const error = (await response.json().catch(() => ({ message: "Unknown error" }))) as any;
       throw new Error(
-        `Failed to get installation for ${owner}/${repo}: ${error.message || response.statusText}`,
+        `GitHub API error (${response.status}): Failed to get installation for ${owner}/${repo}: ${
+          error.message || response.statusText
+        }`,
       );
     }
 
@@ -217,7 +219,9 @@ export class GitHubAppAuth {
     if (!response.ok) {
       const error = (await response.json().catch(() => ({ message: "Unknown error" }))) as any;
       throw new Error(
-        `Failed to create installation access token: ${error.message || response.statusText}`,
+        `GitHub API error (${response.status}): Failed to create installation access token: ${
+          error.message || response.statusText
+        }`,
       );
     }
 
@@ -255,7 +259,11 @@ export class GitHubAppAuth {
 
     if (!response.ok) {
       const error = (await response.json().catch(() => ({ message: "Unknown error" }))) as any;
-      throw new Error(`Failed to get GitHub App info: ${error.message || response.statusText}`);
+      throw new Error(
+        `GitHub API error (${response.status}): Failed to get GitHub App info: ${
+          error.message || response.statusText
+        }`,
+      );
     }
 
     const data = (await response.json()) as any;

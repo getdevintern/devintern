@@ -172,12 +172,14 @@ export async function recordTaskActioned(input: {
   fallbackTask?: Task;
   transitioned?: boolean;
   transitionStatus?: string;
+  /** Pause between re-read attempts; defaults to 250ms, injectable for tests. */
+  rereadDelayMs?: number;
 }): Promise<boolean> {
   const { workerState, source, tracker, taskKey } = input;
   let task: Task | undefined;
   let verified = false;
   try {
-    task = await rereadTask(tracker, taskKey);
+    task = await rereadTask(tracker, taskKey, REREAD_ATTEMPTS, input.rereadDelayMs);
     verified = true;
   } catch (error) {
     task = input.fallbackTask;

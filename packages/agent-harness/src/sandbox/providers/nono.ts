@@ -20,10 +20,28 @@
  *   `.local/bin` beneath it.
  * - `--allow` on the harness's own config dir (e.g. `~/.claude` +
  *   `~/.claude.json`): agents write session state there and hard-fail
- *   without it.
+ *   without it. When the policy denies a file inside such a grant (Muse's
+ *   stored credential), the grant is split into per-child grants that omit
+ *   the denied path instead of relying on deny-over-allow, which Landlock
+ *   cannot express.
  * - `--allow-file /dev/ptmx` so tools that allocate a PTY (lefthook,
  *   script(1), interactive CLIs) can open the master; without it git
  *   hooks fail with path_not_granted on /dev/ptmx.
+ * - `BUN_INSTALL`/`BUN_TMPDIR` in the child env point at a persistent,
+ *   per-workspace cache under `~/.cache` (explicitly granted here; stale roots
+ *   are evicted after 30 days of disuse). The base stays outside the default
+ *   writable set so one repository's agent cannot poison another's cache. Bun
+ *   otherwise defaults to the read-only `~/.bun`, so `bun install` / `bun add`
+ *   fails with "EACCES accessing temporary directory" before it resolves
+ *   anything. A configured
+ *   value is kept only when the final grant set gives the child write access to
+ *   it — host-level writability is irrelevant, because a top-level `$HOME`
+ *   entry is granted `--read` only. When the install root is redirected,
+ *   `<cache>/bin` is appended to `PATH` (installed launchers stay resolvable
+ *   without shadowing system tools) and the CLI self-updaters are disabled
+ *   (their skip cache is read-only here, so they would re-exec the unchanged
+ *   binary forever). When the cache cannot be created safely the overlay is
+ *   omitted and the reason is logged once, rather than aborting the run.
  * - `--allow-unix-socket $SSH_AUTH_SOCK` so `git push` over ssh works.
  * - Domain allowlists map to repeated `--allow-domain` (nono's proxy filter);
  *   network is otherwise open by default.
@@ -53,6 +71,8 @@ import type { Dirent } from "fs";
 import { tmpdir } from "os";
 import { join, relative } from "path";
 import { findInPath } from "../../resolver.js";
+import { bunSandboxOverlay, trySandboxBunEnv } from "../bun-env.js";
+import type { BunSandboxEnv } from "../bun-env.js";
 import {
   ensureHarnessStateDir,
   harnessStateAbsolutePaths,
@@ -281,6 +301,13 @@ export function refineGrantsAgainstDenies(
 ): NonoGrant[] {
   const out: NonoGrant[] = [];
   for (const grant of grants) {
+    // A file grant naming a denied path is itself the conflict; drop it.
+    if (
+      (grant.flag === "--allow-file" || grant.flag === "--read-file") &&
+      denies.includes(grant.path)
+    ) {
+      continue;
+    }
     if (
       (grant.flag === "--allow" || grant.flag === "--read") &&
       denies.some((d) => isInside(d, grant.path))
@@ -295,6 +322,28 @@ export function refineGrantsAgainstDenies(
 
 function flattenGrants(grants: readonly NonoGrant[]): string[] {
   return grants.flatMap((g) => [g.flag, g.path]);
+}
+
+/**
+ * Compute the Bun env overlay against the grants the child will actually run
+ * with, and against the env it will actually be spawned with.
+ *
+ * Only directory `--allow` grants confer write access; a top-level `$HOME`
+ * entry is `--read`, which is the case that used to slip through a
+ * host-writability check.
+ */
+function bunEnvForGrants(
+  bun: BunSandboxEnv | undefined,
+  grants: readonly NonoGrant[],
+  childEnv: NodeJS.ProcessEnv,
+): Record<string, string> | undefined {
+  if (!bun) return undefined;
+  const overlay = bunSandboxOverlay(
+    bun,
+    grants.filter((grant) => grant.flag === "--allow").map((grant) => grant.path),
+    childEnv,
+  );
+  return Object.keys(overlay.env).length > 0 ? overlay.env : undefined;
 }
 
 /**
@@ -430,8 +479,18 @@ export class NonoSandboxProvider implements SandboxProvider {
     const home = resolveHomeDir();
     const grants: NonoGrant[] = [];
 
+    // Bun defaults BUN_INSTALL to ~/.bun, which stays read-only under the
+    // sandbox. Point the child at a per-workspace cache that is created here
+    // and explicitly granted below so `bun install`/`bun add` works on the
+    // first try instead of failing with "EACCES accessing temporary directory".
+    // A cache that cannot be created safely only loses the overlay (with a
+    // one-time warning from the shared helper); it must not prevent the agent
+    // from starting.
+    const bun = trySandboxBunEnv(undefined, policy.workingDir);
+
     // Read+write: the policy's writable set.
     const writable = new Set([policy.workingDir, ...policy.writablePaths]);
+    if (bun) writable.add(bun.writablePath);
     for (const p of writable) {
       if (existsSync(p)) grants.push({ flag: "--allow", path: p });
     }
@@ -466,7 +525,7 @@ export class NonoSandboxProvider implements SandboxProvider {
       if (existsSync(p)) grants.push({ flag: "--read", path: p });
     }
 
-    // Extra readable roots from the policy (parity with srt's allowRead).
+    // Extra readable roots from the policy.
     for (const p of policy.readablePaths ?? []) {
       if (existsSync(p)) grants.push({ flag: "--read", path: p });
     }
@@ -487,17 +546,25 @@ export class NonoSandboxProvider implements SandboxProvider {
 
     // Network: open by default in nono; a policy allowlist maps to the proxy
     // filter. (Programs that ignore proxy env vars lose connectivity when an
-    // allowlist is set — same caveat as srt.)
+    // allowlist is set.)
     if (policy.network !== "open") {
       for (const domain of policy.network.allowedDomains) {
         suffix.push("--allow-domain", domain);
       }
     }
 
-    const refined = preflightLandlockGrants(nonoArgs, grants, suffix);
+    const refined = preflightLandlockGrants(
+      nonoArgs,
+      (policy.denyReadPaths ?? []).length > 0
+        ? refineGrantsAgainstDenies(grants, policy.denyReadPaths ?? [])
+        : grants,
+      suffix,
+    );
+    const bunEnv = bunEnvForGrants(bun, refined, policy.env ?? process.env);
     return {
       path: "nono",
       args: [...nonoArgs, ...flattenGrants(refined), ...suffix, "--", path, ...args],
+      env: bunEnv,
     };
   }
 }

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
+import { extractTextFromADF } from "@devintern/task-trackers";
 
 import {
   actionedSourceKey,
@@ -11,6 +12,7 @@ import {
   recordTaskActioned,
   trackerActionedSignal,
 } from "../src/lib/task/actioned-state";
+import { JiraTaskTrackerClient } from "../src/lib/trackers/jira/jira-task-tracker-client";
 import type { TaskTrackerClient } from "../src/lib/trackers/client";
 import { WorkerState } from "../src/lib/state/worker-state";
 import { ACTIONED_SOURCE_ENV, buildRepoEnv, buildTeamTaskEnv } from "../src/lib/workspace/env";
@@ -142,6 +144,7 @@ describe("actionedSourceKey", () => {
         const tracker = fakeTracker(() => task, jiraDescribe);
         // The subprocess records under the env-derived key...
         await recordTaskActioned({
+          rereadDelayMs: 0,
           workerState: state,
           source: actionedSourceKeyFromEnv(teamEnv),
           tracker,
@@ -208,12 +211,67 @@ describe("recordTaskActioned + createTaskActionedGate", () => {
     expect(workerState.getTaskActioned(source, "42")).toBeNull();
   });
 
+  test("a Jira ticket actioned before the markdown view change stays suppressed", async () => {
+    const adf = {
+      type: "doc",
+      version: 1,
+      content: [
+        {
+          type: "heading",
+          attrs: { level: 2 },
+          content: [{ type: "text", text: "Execution preferences" }],
+        },
+        { type: "paragraph", content: [{ type: "text", text: "Harness: codex" }] },
+      ],
+    };
+    const issue = {
+      key: "DEV-1",
+      fields: {
+        summary: "Add export",
+        description: adf,
+        status: { name: "In Review" },
+        labels: ["intern", "in review"],
+        updated: "2026-01-01T00:00:00Z",
+      },
+    };
+    const client = new JiraTaskTrackerClient(
+      "https://test.atlassian.net",
+      "test@example.com",
+      "test-token",
+    );
+    client.jiraApiCall = async () => issue;
+    const task = await client.getTask("DEV-1");
+
+    // A marker written by the previous release digested ADF plain text.
+    const source = actionedSourceKey("jira");
+    workerState.markTaskActioned(
+      source,
+      "DEV-1",
+      computeActionedSignal({
+        summary: task.summary,
+        description: extractTextFromADF(adf as Parameters<typeof extractTextFromADF>[0]),
+        status: task.status,
+        labels: task.labels,
+      }),
+      true,
+      task.updated,
+    );
+
+    // A human comment bumps the tracker stamp but not the description. The
+    // gate must not mistake the richer markdown view for a description edit.
+    issue.fields.updated = "2026-01-02T00:00:00Z";
+    const gate = createTaskActionedGate({ getTracker: () => client, workerState, source });
+    expect(await gate("DEV-1", issue.fields.updated)).toBe(true);
+    expect(workerState.getTaskActioned(source, "DEV-1")?.verified).toBe(true);
+  });
+
   test("a Jira ticket stays actioned until its status changes (reopen)", async () => {
     let task = jiraTask({ status: "In Review", labels: ["intern", "in review"] });
     const tracker = fakeTracker(() => task, jiraDescribe);
     const source = actionedSourceKey("jira");
 
     await recordTaskActioned({
+      rereadDelayMs: 0,
       workerState,
       source,
       tracker,
@@ -253,6 +311,7 @@ describe("recordTaskActioned + createTaskActionedGate", () => {
     const tracker = fakeTracker(githubTask, githubDescribe);
     const source = "github";
     await recordTaskActioned({
+      rereadDelayMs: 0,
       workerState,
       source,
       tracker,
@@ -278,6 +337,7 @@ describe("recordTaskActioned + createTaskActionedGate", () => {
     } as unknown as TaskTrackerClient;
     const source = "github";
     const ok = await recordTaskActioned({
+      rereadDelayMs: 0,
       workerState,
       source,
       tracker: broken,
@@ -320,6 +380,7 @@ describe("recordTaskActioned + createTaskActionedGate", () => {
     } as unknown as TaskTrackerClient;
     const source = "github";
     await recordTaskActioned({
+      rereadDelayMs: 0,
       workerState,
       source,
       tracker: broken,
@@ -345,6 +406,7 @@ describe("recordTaskActioned + createTaskActionedGate", () => {
     } as unknown as TaskTrackerClient;
     const source = "jira";
     await recordTaskActioned({
+      rereadDelayMs: 0,
       workerState,
       source,
       tracker: broken,
@@ -375,6 +437,7 @@ describe("recordTaskActioned + createTaskActionedGate", () => {
     } as unknown as TaskTrackerClient;
     const source = "jira";
     await recordTaskActioned({
+      rereadDelayMs: 0,
       workerState,
       source,
       tracker: broken,
@@ -401,6 +464,7 @@ describe("recordTaskActioned + createTaskActionedGate", () => {
     } as unknown as TaskTrackerClient;
     const source = "github";
     await recordTaskActioned({
+      rereadDelayMs: 0,
       workerState,
       source,
       tracker: broken,
@@ -431,6 +495,7 @@ describe("recordTaskActioned + createTaskActionedGate", () => {
     } as unknown as TaskTrackerClient;
     const source = "github";
     await recordTaskActioned({
+      rereadDelayMs: 0,
       workerState,
       source,
       tracker: broken,
@@ -458,6 +523,7 @@ describe("recordTaskActioned + createTaskActionedGate", () => {
     } as unknown as TaskTrackerClient;
     const source = "github";
     await recordTaskActioned({
+      rereadDelayMs: 0,
       workerState,
       source,
       tracker: broken,

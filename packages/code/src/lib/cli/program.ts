@@ -37,6 +37,7 @@ const SUBCOMMANDS = [
   "webhook",
   "address-review",
   "resolve-conflicts",
+  "auto-merge",
   "login",
   "logout",
   "whoami",
@@ -108,7 +109,7 @@ export function createProgram(): Command {
     )
     .option(
       "--sandbox <provider>",
-      "Run the agent inside a sandbox: none | auto | native | nono | srt | docker | smolvm (overrides AGENT_SANDBOX; run 'devintern sandbox' to see what is available)",
+      "Run the agent inside a sandbox: none | auto | native | nono | docker (overrides AGENT_SANDBOX; run 'devintern sandbox' to see what is available)",
     )
     .addOption(new Option("--no-update", "Skip the npm update check for this run"));
 

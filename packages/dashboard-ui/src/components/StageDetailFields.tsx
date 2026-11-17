@@ -1,49 +1,119 @@
 /**
  * Friendly rendering of parsed stage-detail fields (see `lib/stage-detail.ts`).
  *
- * Renders structured fields as label/value pairs, with specialized layouts for
- * durations, scores, booleans, lists, nested fields, and feasibility "issues"
- * (with severity badges). Kept separate from the view so it can be reused and
- * tested in isolation if needed.
+ * Scalar fields (booleans, scores, counts, durations, short text) collapse
+ * into one inline facts row; richer fields (lists, findings, issues, nested
+ * fields, prose) render as labelled blocks below it. `FieldChips` and
+ * `FieldBlocks` are exported so a caller can place prose between the two.
  */
+import { Check, X } from "lucide-react";
 import type { ReactNode } from "react";
 
 import { Badge } from "@/components/ui/badge";
+import type { StatusTone } from "@/components/shared";
 import { Markdown } from "@/lib/markdown";
-import { formatDuration } from "@/lib/utils";
+import { cn, formatDuration } from "@/lib/utils";
 import type { DetailField, FieldValue, Issue, ReviewItem } from "@/lib/stage-detail";
 
-const SEVERITY_STYLES: Record<string, string> = {
-  critical: "bg-destructive/15 text-destructive border-destructive/30",
-  major: "bg-chart-5/15 text-chart-5 border-chart-5/30",
-  minor: "bg-muted text-muted-foreground border-border",
+const SEVERITY_TONES: Record<string, StatusTone> = {
+  critical: "danger",
+  major: "warning",
+  minor: "neutral",
 };
 
-const PRIORITY_STYLES: Record<string, string> = {
-  critical: "bg-destructive/15 text-destructive border-destructive/30",
-  high: "bg-chart-3/15 text-chart-3 border-chart-3/30",
-  medium: "bg-chart-5/15 text-chart-5 border-chart-5/30",
-  low: "bg-muted text-muted-foreground border-border",
-  info: "bg-muted text-muted-foreground border-border",
+const PRIORITY_TONES: Record<string, StatusTone> = {
+  critical: "danger",
+  high: "warning",
+  medium: "attention",
+  low: "neutral",
+  info: "info",
 };
+
+/** True for values that read well as a compact "label value" pair. */
+function isCompact(value: FieldValue): boolean {
+  switch (value.kind) {
+    case "bool":
+    case "score":
+    case "count":
+    case "duration":
+      return true;
+    case "text":
+      return value.text.length <= 60 && !value.text.includes("\n");
+    default:
+      return false;
+  }
+}
+
+export function splitFields(fields: DetailField[]): {
+  compact: DetailField[];
+  blocks: DetailField[];
+} {
+  return {
+    compact: fields.filter((field) => isCompact(field.value)),
+    blocks: fields.filter((field) => !isCompact(field.value)),
+  };
+}
 
 export function StageDetailFields({ fields }: { fields: DetailField[] }) {
+  const { compact, blocks } = splitFields(fields);
   return (
-    <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1.5 text-sm">
+    <div className="space-y-4">
+      <FieldChips fields={compact} />
+      <FieldBlocks fields={blocks} />
+    </div>
+  );
+}
+
+/** Inline facts row for scalar fields. */
+export function FieldChips({ fields }: { fields: DetailField[] }) {
+  if (fields.length === 0) {
+    return null;
+  }
+  return (
+    <dl className="flex flex-wrap items-center gap-x-6 gap-y-2 text-[0.8125rem]">
       {fields.map((field) => (
-        <FieldRow key={field.label} field={field} />
+        <div key={field.label} className="flex items-center gap-2">
+          <dt className="text-muted-foreground">{field.label}</dt>
+          <dd className={cn("font-medium", chipTone(field))}>{renderValue(field.value)}</dd>
+        </div>
       ))}
     </dl>
   );
 }
 
-function FieldRow({ field }: { field: DetailField }) {
+/** Dim zero counts, flag non-zero blocking findings. */
+function chipTone(field: DetailField): string | undefined {
+  if (field.value.kind === "count" && /blocking/i.test(field.label)) {
+    return field.value.n > 0 ? "text-danger" : "text-muted-foreground";
+  }
+  return undefined;
+}
+
+/** Labelled blocks for rich fields. */
+export function FieldBlocks({ fields }: { fields: DetailField[] }) {
+  if (fields.length === 0) {
+    return null;
+  }
   return (
-    <>
-      <dt className="text-xs text-muted-foreground pt-0.5">{field.label}</dt>
-      <dd className="min-w-0">{renderValue(field.value)}</dd>
-    </>
+    <div className="space-y-4">
+      {fields.map((field) => (
+        <section key={field.label}>
+          <h4 className="mb-1.5 text-xs font-medium text-muted-foreground">
+            {field.label}
+            {countOf(field.value)}
+          </h4>
+          {renderValue(field.value)}
+        </section>
+      ))}
+    </div>
   );
+}
+
+function countOf(value: FieldValue): ReactNode {
+  if (value.kind === "issues" || value.kind === "reviewItems" || value.kind === "list") {
+    return <span className="tabular ml-1.5 text-subtle-foreground">{value.items.length}</span>;
+  }
+  return null;
 }
 
 function renderValue(value: FieldValue): ReactNode {
@@ -55,17 +125,17 @@ function renderValue(value: FieldValue): ReactNode {
     case "bool":
       return <BoolValue value={value} />;
     case "duration":
-      return <span className="tabular-nums">{formatDuration(value.ms)}</span>;
+      return <span className="tabular">{formatDuration(value.ms)}</span>;
     case "score":
       return (
-        <span className="tabular-nums">
+        <span className="tabular">
           {value.value}
           {value.max ? `/${value.max}` : ""}
         </span>
       );
     case "count":
       return (
-        <span className="tabular-nums">
+        <span className="tabular">
           {value.n} {value.noun ? pluralize(value.noun, value.n) : ""}
         </span>
       );
@@ -85,15 +155,9 @@ function BoolValue({ value }: { value: Extract<FieldValue, { kind: "bool" }> }) 
   const no = value.no ?? "no";
   const truthy = value.value;
   return (
-    <Badge
-      variant="outline"
-      className={
-        truthy
-          ? "bg-chart-4/15 text-chart-4 border-chart-4/30"
-          : "bg-destructive/15 text-destructive border-destructive/30"
-      }
-    >
-      {truthy ? `✓ ${yes}` : `✕ ${no}`}
+    <Badge variant={truthy ? "success" : "danger"}>
+      {truthy ? <Check aria-hidden="true" /> : <X aria-hidden="true" />}
+      {truthy ? yes : no}
     </Badge>
   );
 }
@@ -132,7 +196,7 @@ function reviewItemKey(item: ReviewItem): string {
 
 function FieldValueList({ items }: { items: FieldValue[] }) {
   return (
-    <ul className="list-disc space-y-0.5 pl-5">
+    <ul className="max-w-[72ch] list-disc space-y-1.5 pl-5 text-[0.875rem] leading-[1.55] marker:text-subtle-foreground">
       {items.map((item) => (
         <li key={fieldValueKey(item)}>{renderValue(item)}</li>
       ))}
@@ -140,63 +204,77 @@ function FieldValueList({ items }: { items: FieldValue[] }) {
   );
 }
 
+/** One bordered list with hairline dividers: never a card per finding. */
+function FindingList({ children }: { children: ReactNode }) {
+  return (
+    <ul className="divide-y divide-border overflow-hidden rounded-md border border-border bg-muted/50">
+      {children}
+    </ul>
+  );
+}
+
+function FindingRow({ badge, children }: { badge: ReactNode; children: ReactNode }) {
+  return (
+    <li className="flex flex-col gap-1.5 px-3 py-2.5 sm:flex-row sm:gap-3">
+      <div className="shrink-0 sm:w-[4.5rem]">{badge}</div>
+      <div className="min-w-0 flex-1 space-y-1">{children}</div>
+    </li>
+  );
+}
+
 function IssueList({ items }: { items: Issue[] }) {
   return (
-    <ul className="space-y-1">
+    <FindingList>
       {items.map((issue) => (
-        <li key={issueKey(issue)} className="rounded-md border border-border bg-muted/40 p-2">
-          <div className="flex flex-wrap items-center gap-2">
-            <Badge
-              variant="outline"
-              className={SEVERITY_STYLES[issue.severity] ?? SEVERITY_STYLES.minor}
-            >
-              {issue.severity}
-            </Badge>
-            <span className="text-xs font-medium">{issue.category}</span>
-          </div>
+        <FindingRow
+          key={issueKey(issue)}
+          badge={
+            <Badge variant={SEVERITY_TONES[issue.severity] ?? "neutral"}>{issue.severity}</Badge>
+          }
+        >
+          <div className="font-mono text-xs text-foreground">{issue.category}</div>
           {issue.description ? (
-            <p className="mt-1 text-xs text-muted-foreground whitespace-pre-wrap break-words">
+            <p className="max-w-[72ch] whitespace-pre-wrap break-words text-[0.8125rem] leading-[1.55] text-muted-foreground">
               {issue.description}
             </p>
           ) : null}
-        </li>
+        </FindingRow>
       ))}
-    </ul>
+    </FindingList>
   );
 }
 
 function ReviewItemList({ items }: { items: ReviewItem[] }) {
   return (
-    <ul className="space-y-1.5">
+    <FindingList>
       {items.map((item) => (
-        <li key={reviewItemKey(item)} className="rounded-md border border-border bg-muted/40 p-2">
-          <div className="flex flex-wrap items-center gap-2">
-            <Badge
-              variant="outline"
-              className={PRIORITY_STYLES[item.priority] ?? PRIORITY_STYLES.info}
-            >
-              {item.priority}
-            </Badge>
-            <span className="text-xs font-medium">{item.category}</span>
+        <FindingRow
+          key={reviewItemKey(item)}
+          badge={<Badge variant={PRIORITY_TONES[item.priority] ?? "info"}>{item.priority}</Badge>}
+        >
+          <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
             {item.file ? (
-              <code className="text-xs text-muted-foreground">
+              <code className="break-all font-mono text-xs text-foreground">
                 {item.file}
                 {item.line ? `:${item.line}` : ""}
               </code>
             ) : null}
+            <span className="text-xs text-subtle-foreground">{item.category}</span>
           </div>
           {item.issue ? (
-            <p className="mt-1 text-xs whitespace-pre-wrap break-words">{item.issue}</p>
+            <p className="max-w-[72ch] whitespace-pre-wrap break-words text-[0.8125rem] leading-[1.55]">
+              {item.issue}
+            </p>
           ) : null}
           {item.suggestion ? (
-            <p className="mt-1 text-xs text-muted-foreground whitespace-pre-wrap break-words">
+            <p className="max-w-[72ch] whitespace-pre-wrap break-words text-[0.8125rem] leading-[1.55] text-muted-foreground">
               <span className="font-medium text-foreground">Suggestion: </span>
               {item.suggestion}
             </p>
           ) : null}
-        </li>
+        </FindingRow>
       ))}
-    </ul>
+    </FindingList>
   );
 }
 

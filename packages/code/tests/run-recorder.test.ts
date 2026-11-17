@@ -12,7 +12,12 @@ import {
   beginRun,
   endRun,
   getActiveRunContext,
+  hasRunStage,
+  latestRunStage,
   markRunCleanStop,
+  recordRunHarness,
+  recordRunStage,
+  replaceRunStage,
 } from "../src/lib/state/run-recorder";
 
 describe("RunStore", () => {
@@ -222,13 +227,23 @@ describe("RunStore", () => {
   });
 
   test("setRunPr attaches PR info without clobbering existing fields", () => {
-    const id = store.createRun({ origin: "task", taskKey: "PROJ-4", repo: "acme/widgets" });
-    store.setRunPr(id, { prNumber: 7, url: "https://github.com/acme/widgets/pull/7" });
+    const id = store.createRun({ origin: "task", taskKey: "PROJ-4", repo: "widgets" });
+    store.setRunPr(id, {
+      repo: "acme/widgets",
+      prNumber: 7,
+      url: "https://github.com/acme/widgets/pull/7",
+    });
 
     const run = store.getRun(id);
-    expect(run?.repo).toBe("acme/widgets");
+    expect(run?.repo).toBe("widgets");
     expect(run?.prNumber).toBe(7);
     expect(run?.prUrl).toBe("https://github.com/acme/widgets/pull/7");
+  });
+
+  test("setRunPr records the PR repo when the run has no repo", () => {
+    const id = store.createRun({ origin: "task", taskKey: "PROJ-5" });
+    store.setRunPr(id, { repo: "acme/widgets", prNumber: 8 });
+    expect(store.getRun(id)?.repo).toBe("acme/widgets");
   });
 
   test("createRun persists the PR URL of PR-affected origins", () => {
@@ -550,6 +565,74 @@ describe("RunStore", () => {
     expect(store.getRun(inProgress)?.cleanStop).toBe(true);
     // markCleanStop must not relabel a run that finished during shutdown.
     expect(store.getRun(finished)?.cleanStop).toBeUndefined();
+  });
+
+  test("hasRunStage reports stages recorded for the active run", () => {
+    beginRun({ origin: "task", taskKey: "PROJ-HS" });
+    try {
+      expect(hasRunStage("implementation")).toBe(false);
+      recordRunStage("implementation", { status: "succeeded", summary: "done" });
+      expect(hasRunStage("implementation")).toBe(true);
+      expect(hasRunStage("verify")).toBe(false);
+    } finally {
+      endRun("failed", "test cleanup");
+    }
+  });
+
+  test("recordRunHarness updates the stored run and active context", () => {
+    beginRun({ origin: "task", taskKey: "PROJ-HARNESS", harness: "claude-code" });
+    const runId = getActiveRunContext()!.id;
+    const reader = new RunStore();
+    try {
+      expect(reader.getRun(runId)?.harness).toBe("claude-code");
+      recordRunHarness("opencode");
+      expect(reader.getRun(runId)?.harness).toBe("opencode");
+      expect(getActiveRunContext()?.harness).toBe("opencode");
+    } finally {
+      reader.close();
+      endRun("succeeded", "done");
+    }
+  });
+
+  test("replaceStage replaces a stage row instead of appending a duplicate", () => {
+    const id = store.createRun({ origin: "task", taskKey: "PROJ-RS" });
+    store.addStage(id, "implementation", "succeeded", "early", JSON.stringify({ report: "agent" }));
+    store.replaceStage(id, "implementation", "failed", "halt", JSON.stringify({ report: "halt" }));
+
+    const stages = store.listStages(id).filter((stage) => stage.stage === "implementation");
+    expect(stages).toHaveLength(1);
+    expect(stages[0]).toMatchObject({ status: "failed", summary: "halt" });
+  });
+
+  test("replaceRunStage corrects the active run's recorded stage", () => {
+    beginRun({ origin: "task", taskKey: "PROJ-RS2" });
+    const runId = getActiveRunContext()!.id;
+    try {
+      recordRunStage("implementation", {
+        status: "succeeded",
+        summary: "early",
+        detail: { report: "agent" },
+      });
+      expect(latestRunStage("implementation")?.status).toBe("succeeded");
+
+      replaceRunStage("implementation", {
+        status: "failed",
+        summary: "halt",
+        detail: { report: "halt" },
+      });
+
+      const reader = new RunStore();
+      try {
+        const stages = reader.listStages(runId).filter((stage) => stage.stage === "implementation");
+        expect(stages).toHaveLength(1);
+        expect(stages[0]?.status).toBe("failed");
+        expect(latestRunStage("implementation")?.summary).toBe("halt");
+      } finally {
+        reader.close();
+      }
+    } finally {
+      endRun("failed", "test cleanup");
+    }
   });
 
   test("markRunCleanStop labels only the captured run, never a later one", () => {

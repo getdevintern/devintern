@@ -47,7 +47,7 @@ if (unsupported.length > 0) {
 if (supported.length === 0) {
   console.error(
     "No configured tracker has a read-only check. Configure Jira, Trello, or Markdown, " +
-      "or extend helpers/tracker-smoke.ts (see docs/tracker-e2e-plan.md).",
+      "or extend helpers/tracker-smoke.ts (see docs/coverage/trackers.md).",
   );
   process.exit(1);
 }

@@ -93,6 +93,14 @@ export async function isolateWorktreeHooks(
  *
  * This also repairs repositories where the extension was already enabled in
  * the unsafe layout.
+ *
+ * Every write is skipped when the value is already in place. Each fleet task
+ * start calls this against the shared bare clone, and `git config` takes
+ * `<file>.lock` for every write and fails at once ("could not lock config
+ * file") while any other writer holds it — a concurrent task's
+ * `git push --set-upstream`, or a placeholder an agent sandbox mounts to deny
+ * config writes. A steady-state repository therefore needs no shared-config
+ * write at all, and the writes that remain retry briefly on lock contention.
  */
 export async function enableWorktreeConfig(
   cwd: string,
@@ -115,17 +123,17 @@ export async function enableWorktreeConfig(
   );
 
   if (sharedBare.success && sharedBare.output.trim().toLowerCase() === "true") {
-    const preserveBare = await Utils.executeGitCommand(
+    const preserveBare = await writeGitConfig(
       ["config", "--file", mainWorktreeConfig, "core.bare", "true"],
-      { cwd },
+      cwd,
     );
     if (!preserveBare.success) {
       return preserveBare;
     }
 
-    const removeSharedBare = await Utils.executeGitCommand(
+    const removeSharedBare = await writeGitConfig(
       ["config", "--file", sharedConfig, "--unset-all", "core.bare"],
-      { cwd },
+      cwd,
     );
     if (!removeSharedBare.success) {
       // Another worker may have completed the same idempotent migration
@@ -140,10 +148,43 @@ export async function enableWorktreeConfig(
     }
   }
 
-  return Utils.executeGitCommand(
-    ["config", "--file", sharedConfig, "extensions.worktreeConfig", "true"],
+  const extension = await Utils.executeGitCommand(
+    ["config", "--file", sharedConfig, "--get", "extensions.worktreeConfig"],
     { cwd },
   );
+  if (extension.success && extension.output.trim().toLowerCase() === "true") {
+    return extension;
+  }
+
+  return writeGitConfig(
+    ["config", "--file", sharedConfig, "extensions.worktreeConfig", "true"],
+    cwd,
+  );
+}
+
+const CONFIG_LOCK_ERROR = /could not lock config file/i;
+
+/** Delays between retries of a config write that lost the lock race. */
+const CONFIG_LOCK_RETRY_DELAYS_MS = [50, 100, 200, 400, 800, 1600];
+
+/**
+ * Run a `git config` write, retrying while another process holds the config
+ * lock. Git never waits for that lock itself; the holder is usually a
+ * concurrent task's own config write that finishes within milliseconds.
+ */
+async function writeGitConfig(
+  args: string[],
+  cwd: string,
+): Promise<{ success: boolean; output: string; error?: string }> {
+  let result = await Utils.executeGitCommand(args, { cwd });
+  for (const delayMs of CONFIG_LOCK_RETRY_DELAYS_MS) {
+    if (result.success || !CONFIG_LOCK_ERROR.test(result.error ?? "")) {
+      return result;
+    }
+    await Bun.sleep(delayMs);
+    result = await Utils.executeGitCommand(args, { cwd });
+  }
+  return result;
 }
 
 /**

@@ -1,10 +1,16 @@
 # End-to-end tests
 
 Private Bun workspace for workflows against real services. The suites run the built
-Code CLI against GitHub.com, Bitbucket Cloud, GitLab.com and GitLab Self-Managed
-using a local Markdown task
-and a deterministic agent. Git operations and GitHub API calls are real; no AI account
-or task tracker is needed.
+Code CLI, both one-shot and as the workspace worker daemon, against GitHub.com,
+Bitbucket Cloud, GitLab.com and GitLab Self-Managed using a local Markdown task
+and a deterministic agent. Git operations and provider API calls are real; no AI
+account or task tracker is needed.
+
+The maintained coverage inventory and gap backlog live in per-area files under
+[docs/coverage/](docs/coverage/), indexed by
+[docs/coverage-matrix.md](docs/coverage-matrix.md). The recurring `e2e-expander`
+workspace automation scouts those files and delegates each accepted gap to the
+worker as a separate task and pull request.
 
 ## Run locally
 
@@ -55,6 +61,22 @@ hooks and agent configuration are excluded. Tokens are passed through the
 environment and Git askpass, never embedded in remote URLs or command arguments.
 Telemetry, updates and license checks are disabled for the test subprocesses.
 
+### Proxy environments
+
+The suite can run where an HTTP proxy is configured, such as a DevIntern worker,
+a CI sandbox, or a corporate network. A preload (`bunfig.toml` →
+`tests/setup/loopback-no-proxy.ts`) appends `localhost`, `127.0.0.1`, `::1` and
+the bracketed `[::1]` to both `NO_PROXY` and `no_proxy`. The dashboard and
+webhook fixtures apply the same step when they start, which covers runs from the
+repo root that skip this package's bunfig. With these entries, health polls and
+API fetches against `http://[::1]:<port>` go straight to the fixture. Some Bun
+versions (seen on 1.4.2) do not match a bare `::1` entry against a bracketed URL
+host. In that case the request goes through the proxy and times out, which looks
+like a dashboard bug. Proxy variables are not unset, so suites that reach remote
+endpoints still use the proxy. When a test needs to change these variables,
+assign new values instead of using `delete`. On Bun 1.4.2, fetch falls back to
+the process's startup value of a deleted variable.
+
 Cleanup closes PRs and deletes the exact branches owned by each scenario,
 including when an assertion fails. Closed PRs remain as GitHub history. Cleanup
 failures fail the test and identify the branches. A forcibly killed runner can
@@ -81,25 +103,14 @@ and secret `E2E_GITHUB_TOKEN` before running it. Do not expose these
 credentials to untrusted pull-request code. Build the CLI in that job before
 running the suite so the artifact matches the checkout.
 
-## Agent harness invocation checks
+## Test descriptions
 
-The ordinary local suite also probes every registered agent harness whose CLI is
-installed on the machine. Harnesses that are not installed are reported as
-skipped, so the suite behaves the same on a laptop with six agent CLIs and in CI
-with none.
-
-Each installed harness is launched with the exact non-interactive invocation
-DevIntern generates (subcommand, flags, and prompt) inside a temporary home and
-workspace. The check asserts only that the CLI accepts that invocation: a
-removed flag, renamed subcommand, or changed prompt mode fails with a
-parser/usage error. Sign-in prompts, missing provider keys, model errors, and
-runs that exceed the probe timeout are expected and do not fail the suite, so no
-AI account, credentials, or model calls are required. The probe environment
-excludes ambient provider keys and harness configuration.
-
-Set `E2E_HARNESS_PROBE_TIMEOUT_MS` to tune the per-harness timeout (default
-`10000`). These checks do not run full agent tasks; the deterministic fake agent
-continues to cover the implementation, git, and pull-request lifecycle.
+What each test covers, its scenarios, and any extra run command live in the
+`## Test notes` section of its area file under [docs/coverage/](docs/coverage/),
+next to the coverage rows. See the
+[coverage index](docs/coverage-matrix.md#areas) for the list of areas. A new
+test documents itself in its area file, not in this README; most offline tests
+run with the commands in [Run locally](#run-locally).
 
 ## Local GitLab Self-Managed
 
@@ -207,7 +218,7 @@ fails the explicit live command before it mutates a remote repository.
 
 ## Remote tracker fixtures
 
-The Markdown suites above need no task tracker. Separate opt-in suites exercise
+The Markdown suites need no task tracker. Separate opt-in suites exercise
 the same built CLI against a real remote tracker ticket through the reusable
 `TrackerScenario` fixture. There are three providers, all published to GitHub:
 
@@ -329,26 +340,6 @@ are never printed. The active `TASK_TRACKER` must be configured;
 inspected when it is absent.
 
 This smoke is opt-in and is not part of `test`, Turbo, or CI. See
-[docs/tracker-e2e-plan.md](docs/tracker-e2e-plan.md) for the staged expansion to
-full Jira/Trello lifecycles and offline fake-server coverage.
-
-## Delivery lifecycle coverage
-
-GitHub and local GitLab also cover an agent exiting unsuccessfully after editing,
-an agent producing no changes, and an existing remote feature branch. Failure
-scenarios verify the recorded run is failed, no PR/MR or remote implementation
-branch appears, and the target branch is unchanged. Collision scenarios verify
-the existing commit survives and the new PR/MR uses `-attempt-2`.
-
-Local GitLab additionally covers an actual rejected push using a read-only project
-token, plus a review round trip. A Developer project bot opens an MR, a separate
-human identity posts feedback, and `address-review` edits and pushes to that same
-MR and replies to the discussion. A second CLI invocation must add no commit,
-reply, or agent invocation. GitLab updates MR metadata asynchronously; the suite
-waits for the pushed SHA before asserting the new head. Both project tokens expire
-the next day and are removed with their disposable project.
-
-All four areas run through the existing GitHub/GitLab commands above; no task
-tracker, model credentials, or additional local environment variables are needed.
-These lifecycle scenarios currently run against GitHub and local GitLab; the
-hosted GitLab.com and Bitbucket suites retain their publication smoke tests.
+[docs/coverage/trackers.md](docs/coverage/trackers.md) for the staged expansion to
+full Jira/Trello lifecycles and the implemented Jira/Linear fake-server coverage
+(Trello fake planned).

@@ -21,6 +21,13 @@ describe("detectMaxTurnsReached", () => {
     expect(detectMaxTurnsReached("", "maximum turns reached")).toBe(true);
   });
 
+  test("detects Muse Code's model-step limit diagnostic", () => {
+    expect(detectMaxTurnsReached("This turn reached its step limit.\n", "")).toBe(true);
+    expect(findMaxTurnsReachedLine("", "This turn reached its step limit.")).toBe(
+      "This turn reached its step limit.",
+    );
+  });
+
   test("does not match CLI flag alone", () => {
     expect(detectMaxTurnsReached("claude -p --max-turns 10\n", "")).toBe(false);
   });

@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <strong>Keep your coding agent working through your backlog.</strong>
+  <strong>Leave tickets. Come back to pull requests.</strong>
 </p>
 
 <p align="center">
@@ -17,14 +17,13 @@
   <a href="https://github.com/getdevintern/devintern"><img src="https://img.shields.io/github/stars/getdevintern/devintern?style=social" alt="Stars"></a>
 </p>
 
-<p align="center">
-  <video src="https://github.com/user-attachments/assets/f62b17c0-4e5b-4a2f-ac3a-761c44af3680" width="100%" controls muted autoplay loop playsinline></video>
-</p>
-<p align="center"><em>Ready ticket → pull request → review feedback → follow-up commits.</em></p>
-
 DevIntern is a self-hosted worker that picks up ready tickets from Jira, Linear, GitHub Issues, or your other trackers, runs Claude Code, Codex, Cursor, or OpenCode, and opens pull requests. When reviewers request changes, it follows up on the same branch. Your team controls what gets picked up and what gets merged.
 
-Running it locally from the terminal is free, self-hosted, and needs no signup. Unattended automation is separate: a 14-day Worker Pilot, then a paid license.
+![The local DevIntern dashboard showing one run: ticket PROJ-1842 passed the feasibility check, implementation, verification, and self-review, then opened pull request #4419.](assets/readme/dashboard-run-detail.png)
+
+<p align="center"><em>One ticket, start to finish, in the worker's local dashboard. Example data.</em></p>
+
+Interactive runs are free with no signup. Unattended automation starts with a 14-day Worker Pilot (sign-in required, no credit card or task-count limit), then requires a paid license. Your coding-agent usage costs are separate.
 
 <p align="center">
   <a href="#set-up-your-worker"><strong>Set up your worker</strong></a>
@@ -35,8 +34,6 @@ Running it locally from the terminal is free, self-hosted, and needs no signup. 
   &nbsp;·&nbsp;
   <a href="https://devintern.com">Website</a>
 </p>
-
-Try unattended automation free for 14 days with the Worker Pilot. Sign-in required; no credit card or task-count limit. Continued automation requires a license. Bring your existing coding agent; its usage costs are separate.
 
 - **Your tracker:** Jira · Linear · GitHub Issues · Trello · Asana · Azure DevOps · plain markdown files
 - **Your agent:** Claude Code · Codex · Cursor · OpenCode (one config line to switch)
@@ -94,6 +91,34 @@ Start with a narrow queue of well-specified tasks. Watch the runs in the local d
 
 Prefer guided setup through your coding agent? Use the [DevIntern setup skill](docs/code/agent-skills.md). Want to inspect one run first? [Run one ticket first](#run-one-ticket-first).
 
+## See it working
+
+![A tour of the local dashboard: the runs list, one run's timeline from feasibility check to opened pull request, the pull requests awaiting review, scheduled automations, and work routing across repositories.](assets/readme/dashboard-tour.gif)
+
+<p align="center"><em>The worker's local dashboard: runs, one run step by step, pull requests awaiting review, automations, and work routing. Example data.</em></p>
+
+Browse the [DevIntern-authored pull requests](https://github.com/getdevintern/devintern/pulls?q=is%3Apr+label%3Adevintern-authored) to inspect changes produced by DevIntern on this repository. Start with these merged examples:
+
+- [Worker daemon smoke coverage and PR label checks (#306)](https://github.com/getdevintern/devintern/pull/306)
+- [Sandbox-aware coding-agent readiness (#300)](https://github.com/getdevintern/devintern/pull/300)
+- [Per-agent state directories in the sandbox (#296)](https://github.com/getdevintern/devintern/pull/296)
+
+Open each PR to inspect its diff, checks, and discussion. The [full pull request list](https://github.com/getdevintern/devintern/pulls?q=is%3Apr+label%3Adevintern-authored) includes work still in review.
+
+If DevIntern is useful to you, [star the repo](https://github.com/getdevintern/devintern) or share a workflow you have automated.
+
+## Drive development across projects
+
+One workspace brings your teams’ trackers, repositories, scheduled maintenance, and Sentry fixes together under a single worker. Start with one repository, then add projects as you grow.
+
+![The dashboard's Workspace view: Jira, Linear, and GitHub Issues sources, scheduled automations, and a Sentry monitor routed to four repositories from one workspace.toml.](assets/readme/dashboard-workspace.png)
+
+<p align="center"><em>Work routing for an example workspace: three teams' trackers, scheduled automations, and a Sentry monitor feeding four repositories.</em></p>
+
+Choose each team’s ready queue and route work to the right repositories. Each repository keeps its agent and pipeline settings. Scheduled prompts handle recurring chores, and Sentry monitoring feeds qualifying errors into the same ticket-to-PR pipeline. Your team reviews the changes and decides what merges.
+
+[Configure your workspace](docs/code/workspaces.md) · [Set up automations](docs/code/worker.md)
+
 ## Why teams use it
 
 | Capability        | What it does                                                                                                                                                   |
@@ -104,6 +129,8 @@ Prefer guided setup through your coding agent? Use the [DevIntern setup skill](d
 | **Self-hosted**   | Runs on a laptop or VM you control. Your code and credentials stay there; the source is available under the FSL.                                               |
 
 ## What the worker does
+
+![Ready tracker tickets flow through the local worker, coding agent, and quality gates into pull requests. Review feedback returns as commits; DevIntern PM provides optional ticket intake.](assets/readme/ticket-pipeline.png)
 
 `devintern worker` is a long-running daemon that polls your tracker, implements ready tickets, opens pull requests, and keeps its own PRs healthy while your team writes specs, reviews code, or sleeps. Agent execution runs on your machine. Your code and credentials never pass through DevIntern servers; your configured agent, tracker, and source-control providers handle their own requests.
 
@@ -140,17 +167,15 @@ For teams this changes what "keeping the repo healthy" costs: maintenance ticket
 
 Sign in to evaluate unattended automation with a no-card Worker Pilot: 14 days with no task-count limit. Continued use requires the paid automation tier (one-time Supporter license or Team/Business subscription); interactive use stays free forever. [Pricing](https://devintern.com/pricing/) · [Worker docs](docs/code/worker.md)
 
-## See it working
+## Watch it from the dashboard
 
-Browse the [DevIntern-authored pull requests](https://github.com/getdevintern/devintern/pulls?q=is%3Apr+label%3Adevintern-authored) to inspect changes produced by DevIntern on this repository. Start with these merged examples:
+The worker serves a local dashboard at `http://localhost:4400`. It runs on the worker machine and binds to loopback by default, so run history, transcripts, and logs stay next to your code.
 
-- [Worker daemon smoke coverage and PR label checks (#306)](https://github.com/getdevintern/devintern/pull/306)
-- [Sandbox-aware coding-agent readiness (#300)](https://github.com/getdevintern/devintern/pull/300)
-- [Per-agent state directories in the sandbox (#296)](https://github.com/getdevintern/devintern/pull/296)
+| Runs                                                                                                                                                 | Pull requests awaiting review                                                                                                                      |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| ![The Runs view listing tracker tasks and scheduled automations with status, pull request, harness, and duration.](assets/readme/dashboard-runs.png) | ![The Pull requests view listing open agent pull requests with their ticket, branch, and waiting time.](assets/readme/dashboard-pull-requests.png) |
 
-Open each PR to inspect its diff, checks, and discussion. The [full pull request list](https://github.com/getdevintern/devintern/pulls?q=is%3Apr+label%3Adevintern-authored) includes work still in review.
-
-If DevIntern is useful to you, [star the repo](https://github.com/getdevintern/devintern) or share a workflow you have automated.
+Every run is recorded stage by stage, including tickets handed back to the tracker with questions. Screenshots show example data. [Dashboard guide](docs/code/dashboard.md)
 
 ## Run one ticket first
 
@@ -178,7 +203,14 @@ bunx skills add getdevintern/devintern \
   --skill devintern-setup devintern-workspace devintern-delegate devintern-report --agent codex
 ```
 
-`--agent claude-code` for Claude Code, `--global` for user-wide availability. Four skills cover the whole worker lifecycle: [setup](skills/devintern-setup/SKILL.md), [workspace configuration](skills/devintern-workspace/SKILL.md), [delegating a task](skills/devintern-delegate/SKILL.md), and filing a [redacted bug report](skills/devintern-report/SKILL.md).
+In Claude Code, install them as a plugin instead:
+
+```text
+/plugin marketplace add getdevintern/devintern
+/plugin install devintern@devintern
+```
+
+For the Skills CLI, `--agent claude-code` targets Claude Code and `--global` makes the skills available user-wide. Four skills cover the whole worker lifecycle: [setup](plugins/devintern/skills/devintern-setup/SKILL.md), [workspace configuration](plugins/devintern/skills/devintern-workspace/SKILL.md), [delegating a task](plugins/devintern/skills/devintern-delegate/SKILL.md), and filing a [redacted bug report](plugins/devintern/skills/devintern-report/SKILL.md).
 
 The skills are instructions for your agent. They do not install the CLI, connect accounts, or start a worker by themselves. See the [agent skills guide](docs/code/agent-skills.md) for prerequisites and example prompts.
 
@@ -192,7 +224,7 @@ Source is under the [Functional Source License, Version 1.1, ALv2 Future License
 
 - **Interactive use** → free forever
 - **Worker Pilot** → 14 days with no task-count limit, no card required; `devintern login` required
-- **Worker (unattended)** → Supporter ($99 once for one person's own repos) or a Team/Business subscription
+- **Worker (unattended)** → Supporter ($99 once for one person's own and client repos) or a Team/Business subscription
 
 Details: [devintern.com/pricing](https://devintern.com/pricing/)
 

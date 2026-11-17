@@ -1,13 +1,292 @@
 #!/usr/bin/env bun
-import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 
-const mode = process.env.E2E_AGENT_MODE ?? "implement";
-if (process.env.E2E_AGENT_INVOCATIONS) {
-  appendFileSync(process.env.E2E_AGENT_INVOCATIONS, JSON.stringify({ mode }) + "\n");
+// A one-shot fixture run can pin its mode explicitly. A long-lived worker
+// cannot: the same daemon runs implementation, review, CI-repair and conflict
+// jobs, so those tests identify the prompt by a seeded marker instead.
+const agentInput = process.argv.join(" ");
+// Batch tests seed a unique alphanumeric token into each task body as
+// `E2EPROMPTMARKER<TOKEN>`. Recording every marker this invocation saw proves
+// each task's own prompt reached the agent, in order, even when every task
+// produces the same file edit. Tokens must stay alphanumeric: tracker
+// descriptions pass through HTML-to-Markdown conversion, which escapes `_` and
+// other Markdown-special characters before the prompt reaches this process.
+const promptMarkers = [...agentInput.matchAll(/E2EPROMPTMARKER[A-Z0-9]+/g)].map(
+  (match) => match[0],
+);
+// The local auto-review loop sends the bundled review and fix prompts from the
+// same one-shot CLI run that implemented the task. Detect those turns before
+// the explicit E2E_AGENT_MODE so a single run can exercise
+// implement → review → fix → review without the fixture pinning one mode.
+// The git-hook repair turn (`runAgentHarnessToFixGitHook`) is likewise sent from
+// the same run that implemented the task, so it is keyed on its bundled prompt.
+const promptMode = agentInput.includes("You are reviewing a pull request")
+  ? "auto-review-feedback"
+  : agentInput.includes("## Feedback to Address")
+    ? "auto-review-fix"
+    : agentInput.includes("# Git Hook Error - Fix Required")
+      ? "hook-fix"
+      : undefined;
+// Per-prompt `incomplete` mode for a long-lived worker that must succeed on one
+// ticket and report another incomplete. Like E2E_FAIL_PROMPT_MARKER below, the
+// marker must be alphanumeric so Markdown escaping cannot hide it.
+const incompletePromptMarker = process.env.E2E_INCOMPLETE_PROMPT_MARKER;
+if (incompletePromptMarker && !/^[A-Za-z0-9]+$/.test(incompletePromptMarker)) {
+  throw new Error("E2E_INCOMPLETE_PROMPT_MARKER must be alphanumeric");
+}
+const markerMode =
+  incompletePromptMarker && agentInput.includes(incompletePromptMarker) ? "incomplete" : undefined;
+const mode =
+  promptMode ??
+  markerMode ??
+  process.env.E2E_AGENT_MODE ??
+  (agentInput.includes("# Resolve Merge Conflicts")
+    ? "conflict"
+    : agentInput.includes("E2E_CI_FIX_MARKER")
+      ? "ci"
+      : agentInput.includes("E2E_REVIEW_GREETING")
+        ? "review"
+        : agentInput.includes("# Story Points Estimation") ||
+            agentInput.includes("## Task to Estimate")
+          ? "estimate"
+          : agentInput.includes("E2E_NO_CHANGE")
+            ? "no-change"
+            : "implement");
+// Opt-in start/end timeline for concurrency coverage. An `exit` handler records
+// the end exactly once, so early exits, failures and thrown errors still close
+// their interval. The existing E2E_AGENT_INVOCATIONS record stays unchanged.
+const timelinePath = process.env.E2E_AGENT_TIMELINE;
+let timelineEnded = false;
+function recordTimeline(event: "start" | "end"): void {
+  if (!timelinePath) return;
+  appendFileSync(timelinePath, JSON.stringify({ mode, event, at: Date.now() }) + "\n");
+}
+if (timelinePath) {
+  recordTimeline("start");
+  process.on("exit", () => {
+    if (timelineEnded) return;
+    timelineEnded = true;
+    recordTimeline("end");
+  });
+}
+
+/**
+ * Land an empty commit on the current task branch.
+ *
+ * Session pickup only reuses a branch that has commits ahead of its base, so
+ * resume and crash coverage need one before the run ends (or is killed).
+ */
+function commitInterruptedAttempt(): void {
+  const commit = Bun.spawnSync(
+    [
+      "git",
+      "-c",
+      "user.name=DevIntern E2E",
+      "-c",
+      "user.email=e2e@example.com",
+      "commit",
+      "--allow-empty",
+      "-m",
+      "wip: interrupted attempt",
+    ],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  if (commit.exitCode !== 0) {
+    throw new Error(commit.stdout.toString() + commit.stderr.toString());
+  }
+}
+
+/** Publish this invocation so tests can observe that the agent started. */
+function recordInvocation(): void {
+  if (process.env.E2E_AGENT_INVOCATIONS) {
+    // Automation subprocesses carry the owning schedule id, so a worker test can
+    // attribute each agent invocation to the automation that spawned it instead
+    // of relying on global mode counts.
+    const automation = process.env.DEVINTERN_AUTOMATION_ID;
+    appendFileSync(
+      process.env.E2E_AGENT_INVOCATIONS,
+      JSON.stringify({
+        mode,
+        ...(promptMarkers.length > 0 ? { promptMarkers } : {}),
+        ...(automation ? { automation } : {}),
+      }) + "\n",
+    );
+  }
+}
+
+// Opt-in delay for bounded-timeout coverage. Defaults to 0, so every existing
+// scenario stays as fast and deterministic as before.
+const delayMs = Number(process.env.E2E_AGENT_DELAY_MS ?? "0");
+// A crash test needs the agent to have already committed when the daemon is
+// killed, otherwise the interrupted branch has nothing to resume and startup
+// recovery must settle the row `failed` for lack of work. This mode lands the
+// empty commit first and records the invocation only afterwards, so a test that
+// polls that record before killing the daemon is provably interrupting a
+// resumable attempt (a branch ahead of its base) instead of an unstarted one.
+if (mode === "interrupted") {
+  commitInterruptedAttempt();
+  recordInvocation();
+  if (Number.isFinite(delayMs) && delayMs > 0) {
+    await Bun.sleep(delayMs);
+  }
+  process.exit(0);
+}
+recordInvocation();
+if (Number.isFinite(delayMs) && delayMs > 0) {
+  await Bun.sleep(delayMs);
+}
+
+/** Outcome of one write the sandbox-grant probe attempted. */
+interface SandboxWriteAttempt {
+  ok: boolean;
+  code?: string;
+}
+
+/**
+ * Try one write and report whether the sandbox allowed it, never throwing.
+ *
+ * `append` touches an existing file (workspace.toml, .env) with a harmless
+ * comment line, so even an unconfined run cannot break the workspace; the
+ * other probes create a new file exclusively.
+ */
+function attemptWrite(path: string, kind: "append" | "create"): SandboxWriteAttempt {
+  try {
+    if (kind === "append") appendFileSync(path, "\n# e2e sandbox escape probe\n");
+    else writeFileSync(path, "e2e sandbox escape probe\n", { flag: "wx" });
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, code: (error as NodeJS.ErrnoException).code ?? String(error) };
+  }
+}
+
+function requiredEnv(name: string): string {
+  const value = process.env[name];
+  if (!value) throw new Error(`sandbox probe requires ${name}`);
+  return value;
+}
+
+// Sandbox workspace-grant probes, keyed on alphanumeric prompt markers (Markdown
+// escaping would mangle `_`). They run as side effects before the normal mode,
+// so the delegating task still implements and the automation still no-ops.
+//
+// E2ESANDBOXDELEGATE: from inside the (sandboxed) agent, delegate a follow-up
+// through the built CLI's `worker add` — the devintern-delegate skill's path,
+// which writes `<workspace>/injected/` and `<workspace>/state/queue.db` — then
+// attempt the writes the policy must deny. The delegated body omits the marker
+// so the follow-up implements instead of delegating again.
+if (agentInput.includes("E2ESANDBOXDELEGATE")) {
+  const workspace = requiredEnv("DEVINTERN_WORKSPACE_DIR");
+  const add = Bun.spawnSync(
+    [
+      process.execPath,
+      requiredEnv("E2E_DEVINTERN_CLI"),
+      "worker",
+      "add",
+      "--repo",
+      requiredEnv("E2E_SANDBOX_DELEGATE_REPO"),
+      "--title",
+      "Delegated sandbox follow-up",
+      "--body",
+      "Change the greeting to Hello, world! and run bun test. E2EPROMPTMARKERDELEGATED",
+      "--idempotency-key",
+      requiredEnv("E2E_SANDBOX_DELEGATE_KEY"),
+      "--json",
+    ],
+    { stdout: "pipe", stderr: "pipe", env: process.env },
+  );
+  const stdout = add.stdout.toString();
+  let json: unknown = null;
+  try {
+    json = JSON.parse(stdout.trim());
+  } catch {
+    json = null;
+  }
+  const outside = process.env.E2E_SANDBOX_OUTSIDE;
+  const capFile = process.env.NONO_CAP_FILE;
+  const report = {
+    nono: Boolean(capFile && existsSync(capFile)),
+    workerAdd: { exitCode: add.exitCode, json, stdout, stderr: add.stderr.toString().slice(-2000) },
+    writes: {
+      workspaceToml: attemptWrite(`${workspace}/workspace.toml`, "append"),
+      workspaceEnv: attemptWrite(`${workspace}/.env`, "append"),
+      // Directly under repos/: the repo's own bare clone is the worktree's git
+      // common dir, which the default policy grants so `git commit` works.
+      repos: attemptWrite(`${workspace}/repos/e2e-sandbox-escape`, "create"),
+      ...(outside ? { outside: attemptWrite(`${outside}/sandbox-escape`, "create") } : {}),
+    },
+  };
+  writeFileSync(
+    `${requiredEnv("DEVINTERN_OUTPUT_DIR")}/e2e-sandbox-delegate.json`,
+    JSON.stringify(report, null, 2),
+  );
+}
+// E2ESANDBOXAUTOMATIONWRITE: an automation run writes under its own
+// `<workspace>/automations/<id>/` directory, the grant automations rely on for
+// reports and cursors.
+if (agentInput.includes("E2ESANDBOXAUTOMATIONWRITE")) {
+  const target = `${requiredEnv("DEVINTERN_WORKSPACE_DIR")}/automations/${requiredEnv("DEVINTERN_AUTOMATION_ID")}/e2e-sandbox-write.txt`;
+  const write = attemptWrite(target, "create");
+  writeFileSync(
+    `${requiredEnv("DEVINTERN_OUTPUT_DIR")}/e2e-sandbox-automation.json`,
+    JSON.stringify({ target, ...write }),
+  );
+}
+// Narrow, explicit per-task failure for batch-isolation coverage. Unlike the
+// process-wide E2E_AGENT_MODE, this only affects a prompt carrying the marker,
+// so one task in a batch can fail while the others still implement.
+//
+// The marker must be alphanumeric. Tracker descriptions are Markdown-escaped
+// before they reach the agent (`E2E_FAIL_ABC` arrives as `E2E\_FAIL\_ABC`), so a
+// marker containing Markdown-special characters would silently never match.
+// Fail loudly instead of letting a future scenario pass without failing.
+const failPromptMarker = process.env.E2E_FAIL_PROMPT_MARKER;
+if (failPromptMarker) {
+  if (!/^[A-Za-z0-9]+$/.test(failPromptMarker)) {
+    throw new Error(
+      "E2E_FAIL_PROMPT_MARKER must be alphanumeric: Markdown escaping prevents a marker with special characters from matching",
+    );
+  }
+  if (agentInput.includes(failPromptMarker)) {
+    console.error("E2E deliberate prompt-marker failure");
+    process.exit(18);
+  }
+}
+// Estimation runs are read-only: print only the JSON object the CLI parses,
+// never touch the fixture project. A re-estimation scenario can ask for a
+// different deterministic value to prove the field was rewritten.
+if (mode === "estimate") {
+  const configuredPoints = Number(process.env.E2E_ESTIMATE_POINTS ?? "3");
+  const storyPoints = [1, 2, 3, 5, 8, 13, 21].includes(configuredPoints) ? configuredPoints : 3;
+  console.log(
+    JSON.stringify({
+      storyPoints,
+      confidence: "high",
+      implementationConfidence: 8,
+      reasoning:
+        "The fixture task has a clear, small scope and the deterministic agent can implement it.",
+      risks: [],
+      unclearAreas: [],
+      summary: "Deterministic E2E estimation fixture.",
+    }),
+  );
+  process.exit(0);
+}
+// A settled-but-failed attempt with an implementation report, for resume
+// coverage: exit 0 with failure language so the pipeline records an escalated
+// run (branch + report) without editing the fixture. `incomplete` leaves one
+// landed (empty) commit because session pickup only reuses a branch that has
+// commits ahead of its base, even when the run recorded a report.
+// `incomplete-empty` skips the commit to cover the documented fallback to a
+// fresh attempt branch when the prior branch has nothing to resume.
+if (mode === "incomplete" || mode === "incomplete-empty") {
+  if (mode === "incomplete") commitInterruptedAttempt();
+  console.log(
+    "Implementation was unsuccessful. I could not complete the requested change because the deterministic E2E fixture intentionally stopped before editing any tracked file. The branch and run record must remain available for a resume attempt.",
+  );
+  process.exit(0);
 }
 // Tracker scenarios seed unique markers into the ticket description and a
 // comment; both must reach the agent's actual input before it edits anything.
-const agentInput = process.argv.join(" ");
 const missingMarkers: string[] = [];
 if (
   process.env.E2E_EXPECT_DESCRIPTION_MARKER &&
@@ -24,6 +303,106 @@ if (
 if (missingMarkers.length > 0) {
   throw new Error(`Seeded ${missingMarkers.join(" and ")} marker(s) did not reach the agent input`);
 }
+// One-shot pre-edit failure. A long-lived worker cannot change AGENT mode
+// between attempts, so a dashboard retry test plants this sentinel for the
+// first invocation only. Unlinking it before exit leaves the fixture tree
+// untouched and lets the same daemon's next invocation implement normally.
+const failOnceFile = process.env.E2E_FAIL_ONCE_FILE;
+if (failOnceFile && existsSync(failOnceFile)) {
+  unlinkSync(failOnceFile);
+  // Stdout marks this as agent work. A fast non-zero exit with empty stdout
+  // is classified as a harness that could not start, and the worker defers
+  // that instead of recording a retriable failed run.
+  console.log("E2E deliberate one-shot failure");
+  console.error("E2E deliberate one-shot failure");
+  process.exit(18);
+}
+// Auto-review reviewer turn: print only the JSON verdict the loop parses. The
+// first iteration reports one blocking medium finding; a later iteration
+// approves so the loop converges. E2E_AUTO_REVIEW_STUCK keeps every iteration
+// unapproved to prove the iteration cap.
+if (mode === "auto-review-feedback") {
+  const iteration = Number(agentInput.match(/\*\*Review Iteration\*\*:\s*(\d+)/)?.[1] ?? "1");
+  const stuck = process.env.E2E_AUTO_REVIEW_STUCK === "1";
+  if (!stuck && iteration > 1) {
+    console.log(
+      JSON.stringify({
+        summary: "The review finding was addressed and no blocking issues remain.",
+        approved: true,
+        items: [],
+      }),
+    );
+  } else {
+    console.log(
+      JSON.stringify({
+        summary: "The greeting change works, but the exported value is not asserted.",
+        approved: false,
+        items: [
+          {
+            priority: "medium",
+            confidence: "high",
+            category: "code-quality",
+            file: "src/greeting.ts",
+            line: "1",
+            issue:
+              "The fixture test only checks a Hello prefix, so it cannot catch a wrong greeting value.",
+            evidence:
+              "tests/greeting.test.ts:5 asserts only a Hello prefix, not the exact exported value",
+            suggestion: "Assert the exact exported greeting value in tests/greeting.test.ts.",
+          },
+        ],
+      }),
+    );
+  }
+  process.exit(0);
+}
+// Auto-review fixer turn: apply the suggested edit and leave the commit to the
+// production loop. Accept an already-fixed file so a later fix turn is a no-op.
+if (mode === "auto-review-fix") {
+  const fixedPath = "src/greeting.ts";
+  const fixed = 'export const greeting = "Hello, reviewer!";\n';
+  const current = readFileSync(fixedPath, "utf8");
+  if (current !== fixed) {
+    if (current !== 'export const greeting = "Hello, world!";\n') {
+      throw new Error("Unexpected fixture contents; refusing to edit this workspace");
+    }
+    writeFileSync(fixedPath, fixed);
+  }
+  console.log("Applied the review suggestion: src/greeting.ts now exports Hello, reviewer!");
+  process.exit(0);
+}
+// Git-hook repair turn. The implementation edit carried E2E_HOOK_MARKER, which
+// the fixture's pre-commit hook rejects. `E2E_HOOK_FIX` picks the outcome:
+// `fix` removes the marker and leaves the commit to the production retry,
+// `fix-commit` also commits itself (through the hook), and `noop` (default)
+// leaves the marker in place so every retry fails the hook again.
+if (mode === "hook-fix") {
+  const marker = process.env.E2E_HOOK_MARKER;
+  const behavior = process.env.E2E_HOOK_FIX ?? "noop";
+  if (!marker) throw new Error("hook-fix mode requires E2E_HOOK_MARKER");
+  if (behavior === "fix" || behavior === "fix-commit") {
+    const fixedPath = "src/greeting.ts";
+    if (!readFileSync(fixedPath, "utf8").includes(marker)) {
+      throw new Error("Hook marker is missing; refusing to edit this workspace");
+    }
+    writeFileSync(fixedPath, 'export const greeting = "Hello, world!";\n');
+    if (behavior === "fix-commit") {
+      for (const args of [
+        ["git", "add", "-A"],
+        ["git", "commit", "-m", "fix: resolve pre-commit hook failures"],
+      ]) {
+        const step = Bun.spawnSync(args, { stdout: "pipe", stderr: "pipe" });
+        if (step.exitCode !== 0) {
+          throw new Error(step.stdout.toString() + step.stderr.toString());
+        }
+      }
+    }
+    console.log("Removed the hook marker from src/greeting.ts.");
+  } else {
+    console.log("Inspected the hook failure and left src/greeting.ts unchanged.");
+  }
+  process.exit(0);
+}
 const path = "src/greeting.ts";
 if (mode === "no-change") {
   console.log(
@@ -32,20 +411,38 @@ if (mode === "no-change") {
   process.exit(0);
 }
 const expected =
-  mode === "review"
-    ? 'export const greeting = "Hello, world!";\n'
-    : 'export const greeting = "Hello";\n';
-if (readFileSync(path, "utf8") !== expected)
+  mode === "implement"
+    ? 'export const greeting = "Hello";\n'
+    : 'export const greeting = "Hello, world!";\n';
+if (mode !== "conflict" && readFileSync(path, "utf8") !== expected)
   throw new Error("Unexpected fixture contents; refusing to edit this workspace");
-if (mode === "review" && !process.argv.join(" ").includes("E2E_REVIEW_GREETING")) {
+if (mode === "review" && !agentInput.includes("E2E_REVIEW_GREETING")) {
   throw new Error("Review feedback marker was not delivered to the agent");
 }
-writeFileSync(
-  path,
+if (mode === "ci" && process.env.E2E_FAIL_CI === "1") {
+  console.error("E2E deliberate CI repair failure");
+  process.exit(19);
+}
+const replacement =
   mode === "review"
     ? 'export const greeting = "Hello, reviewer!";\n'
-    : 'export const greeting = "Hello, world!";\n',
-);
+    : mode === "ci"
+      ? 'export const greeting = "Hello, CI!";\n'
+      : mode === "conflict"
+        ? 'export const greeting = "Hello, merged!";\n'
+        : 'export const greeting = "Hello, world!";\n';
+// Hook-repair coverage plants a token the fixture's pre-commit hook rejects,
+// so the first production commit fails and the repair loop must engage.
+const hookMarker = mode === "implement" ? process.env.E2E_HOOK_MARKER : undefined;
+writeFileSync(path, hookMarker ? `${replacement}// ${hookMarker}\n` : replacement);
+if (mode === "conflict") {
+  // The merge resolver trusts the index, not the agent's output: stage the
+  // resolved file so `git diff --diff-filter=U` no longer reports it.
+  const add = Bun.spawnSync(["git", "add", "-A"], { stdout: "pipe", stderr: "pipe" });
+  if (add.exitCode !== 0) {
+    throw new Error(add.stdout.toString() + add.stderr.toString());
+  }
+}
 if (mode === "fail") {
   console.error("E2E deliberate implementation failure after editing the fixture");
   process.exit(17);
@@ -54,11 +451,12 @@ const check = Bun.spawnSync([process.execPath, "test"], { stdout: "pipe", stderr
 if (check.exitCode !== 0) {
   throw new Error(check.stdout.toString() + check.stderr.toString());
 }
+const greeting = replacement.match(/"([^"]+)"/)?.[1] ?? "Hello, world!";
 console.log(`<!-- devintern:summary:start -->
 ## Why
 The fixture needs a more descriptive greeting.
 ## What changed
-Updated src/greeting.ts to export ${mode === "review" ? "Hello, reviewer!" : "Hello, world!"}.
+Updated src/greeting.ts to export ${greeting}.
 ## Scope
 The greeting export is the only changed file.
 ## Tradeoffs

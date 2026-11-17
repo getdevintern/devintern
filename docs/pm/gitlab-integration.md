@@ -1,13 +1,14 @@
 ---
-title: "Create GitLab Issues with @devintern/pm"
+title: "Create GitLab Issues with DevIntern PM"
 sidebarLabel: "GitLab Integration"
 description: "File well-specified GitLab issues from AI drafts on gitlab.com or a self-hosted instance."
-section: "PM"
+section: "Create Tasks"
 order: 7
+dateModified: 2026-11-12
 sidebarHidden: true
 ---
 
-# Create GitLab Issues with @devintern/pm
+# Create GitLab Issues with DevIntern PM
 
 @devintern/pm creates GitLab issues directly from AI-generated stories and tasks. Setup takes a few minutes: you need a Personal Access Token and a target project. Both **GitLab Cloud (gitlab.com)** and **self-hosted instances** are supported.
 

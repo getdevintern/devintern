@@ -171,7 +171,7 @@ export const GITHUB_PR_TOKEN_STEP: EnvPromptStep = {
  */
 export const ENV_HARNESS_DOCS = `# Agent Harness Configuration
 # Which AI agent to use: claude-code | opencode | codex | cursor | grok | deepseek | reasonix
-# (also: antigravity | kimi | qwen | goose | kilo-code | cline | pi)
+# (also: antigravity | kimi | muse | qwen | goose | kilo-code | cline | pi)
 # deepseek selects DeepSeek's official harness (experimental; CLI 'dsh');
 # reasonix selects the community Reasonix CLI (CLI 'reasonix')
 # Legacy: gemini still resolves to antigravity with a deprecation warning
