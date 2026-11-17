@@ -75,6 +75,31 @@ export interface FakeLinearOptions {
   teamKey?: string;
   /** Override one or more workflow state names. */
   statuses?: Partial<FakeLinearStatuses>;
+  /**
+   * Additional workflow states (Linear type `backlog`), for issues that start
+   * outside a status-based task query and are moved into it later.
+   */
+  extraStates?: string[];
+  /**
+   * Timestamp source for `createdAt`/`updatedAt`.
+   *
+   * `fixed` (default) starts at 2026-01-01 and advances one second per write,
+   * which keeps one-shot CLI scenarios deterministic. `wall` follows the real
+   * clock (still strictly increasing), which the worker's change detector
+   * needs: it filters on `updatedAt > Date.now() - lookback`, so fixed-epoch
+   * stamps would never be detected as changed.
+   */
+  clock?: "fixed" | "wall";
+}
+
+/** One `SearchIssues` request the fake received, recorded for assertions. */
+export interface FakeLinearSearchRequest {
+  /** The `filter` variable exactly as received (parsed JSON). */
+  filter: unknown;
+  /** Wall-clock receipt time (epoch ms). */
+  receivedAt: number;
+  /** Identifiers returned, in response order; empty for a rejected filter. */
+  matched: string[];
 }
 
 const FAKE_TEAM_ID = "fake-team-eng";
@@ -82,6 +107,12 @@ const FAKE_USER_NAME = "E2E Linear User";
 
 /** A predicate over fake issues, built from a Linear IssueFilter. */
 type IssueMatcher = (issue: FakeLinearIssue) => boolean;
+
+/** Fake state the filter compiler needs to resolve state and team conditions. */
+interface FilterContext {
+  stateName: (stateId: string) => string;
+  teamKey: string;
+}
 
 /** Linear GraphQL fake backed entirely by in-memory state. */
 export class FakeLinearTracker implements TrackerFixture {
@@ -94,6 +125,9 @@ export class FakeLinearTracker implements TrackerFixture {
 
   /** Operations the fake could not route, for an explicit end-of-test assertion. */
   readonly unexpectedOperations: string[] = [];
+
+  /** Every `SearchIssues` request, oldest first (detector deltas and evaluate queries). */
+  readonly searchRequests: FakeLinearSearchRequest[] = [];
 
   /**
    * GraphQL operation names answered so far, in order (names only; never
@@ -109,11 +143,15 @@ export class FakeLinearTracker implements TrackerFixture {
   private nextIssueNumber = 1;
   private nextCommentId = 10_000;
   private now = Date.parse("2026-01-01T00:00:00.000Z");
+  private readonly clock: "fixed" | "wall";
+  private readonly extraStates: string[];
 
   constructor(options: FakeLinearOptions = {}) {
     this.teamKeyValue = options.teamKey ?? "ENG";
     this.statuses = { ...FAKE_LINEAR_STATUSES, ...options.statuses };
     this.openState = this.statuses.todo;
+    this.clock = options.clock ?? "fixed";
+    this.extraStates = options.extraStates ?? [];
     this.states = this.buildStates();
 
     this.server = Bun.serve({
@@ -150,7 +188,12 @@ export class FakeLinearTracker implements TrackerFixture {
     title: string;
     body: string;
     labels?: string[];
+    /** Initial workflow state name; defaults to the `todo` status. */
+    state?: string;
   }): Promise<TrackerTicket> {
+    if (input.state !== undefined && !this.hasState(input.state)) {
+      throw new Error(`Fake Linear workflow state not found: ${input.state}`);
+    }
     const identifier = `${this.teamKeyValue}-${this.nextIssueNumber++}`;
     const timestamp = this.timestamp();
     const issue: FakeLinearIssue = {
@@ -159,7 +202,7 @@ export class FakeLinearTracker implements TrackerFixture {
       url: `${this.baseUrl}/issue/${identifier}`,
       title: input.title,
       description: input.body,
-      stateId: this.stateId(this.statuses.todo),
+      stateId: this.stateId(input.state ?? this.statuses.todo),
       priority: 3,
       priorityLabel: "Medium",
       estimate: null,
@@ -195,6 +238,21 @@ export class FakeLinearTracker implements TrackerFixture {
     const issue = this.requireIssue(ticketKey);
     issue.stateId = this.stateId(this.statuses.done);
     issue.updatedAt = this.timestamp();
+  }
+
+  /** Move an issue to a workflow state, as a human would in the Linear UI. */
+  moveTicket(ticketKey: string, stateName: string): void {
+    if (!this.hasState(stateName)) {
+      throw new Error(`Fake Linear workflow state not found: ${stateName}`);
+    }
+    const issue = this.requireIssue(ticketKey);
+    issue.stateId = this.stateId(stateName);
+    issue.updatedAt = this.timestamp();
+  }
+
+  /** Current `updatedAt` stamp, which the worker dedupes on. */
+  updatedAt(ticketKey: string): string {
+    return this.requireIssue(ticketKey).updatedAt;
   }
 
   async deleteComment(commentId: string): Promise<void> {
@@ -250,7 +308,7 @@ export class FakeLinearTracker implements TrackerFixture {
       }
     }
 
-    const matcher = compileIssueFilter(filter);
+    const matcher = compileIssueFilter(filter, this.filterContext());
     if (!matcher) {
       throw new Error(`Unsupported fake Linear filter: ${query}`);
     }
@@ -458,13 +516,20 @@ export class FakeLinearTracker implements TrackerFixture {
   }
 
   private searchIssues(variables: Record<string, unknown>): Response {
-    const matcher = compileIssueFilter(variables.filter);
+    const request: FakeLinearSearchRequest = {
+      filter: variables.filter,
+      receivedAt: Date.now(),
+      matched: [],
+    };
+    this.searchRequests.push(request);
+    const matcher = compileIssueFilter(variables.filter, this.filterContext());
     if (!matcher) {
       return this.unexpected(
         `SearchIssues: unsupported filter ${JSON.stringify(variables.filter)}`,
       );
     }
     const matches = [...this.issues.values()].filter(matcher);
+    request.matched = matches.map((issue) => issue.identifier);
     return json({
       data: {
         issues: {
@@ -500,8 +565,17 @@ export class FakeLinearTracker implements TrackerFixture {
     };
   }
 
+  private filterContext(): FilterContext {
+    return { stateName: (stateId) => this.stateName(stateId), teamKey: this.teamKeyValue };
+  }
+
+  private hasState(name: string): boolean {
+    return this.states.some((state) => state.name === name);
+  }
+
   private buildStates(): FakeLinearState[] {
-    return [...new Set(Object.values(this.statuses))].map((name, index) => ({
+    const names = [...Object.values(this.statuses), ...this.extraStates];
+    return [...new Set(names)].map((name, index) => ({
       id: `state-${index + 1}`,
       name,
       type: this.stateType(name),
@@ -509,6 +583,9 @@ export class FakeLinearTracker implements TrackerFixture {
   }
 
   private stateType(name: string): string {
+    if (this.extraStates.includes(name) && !Object.values(this.statuses).includes(name)) {
+      return "backlog";
+    }
     if (name === this.statuses.todo) return "unstarted";
     if (name === this.statuses.done) return "completed";
     return "started";
@@ -542,7 +619,7 @@ export class FakeLinearTracker implements TrackerFixture {
   }
 
   private timestamp(): string {
-    this.now += 1000;
+    this.now = this.clock === "wall" ? Math.max(this.now + 1, Date.now()) : this.now + 1000;
     return new Date(this.now).toISOString();
   }
 
@@ -557,8 +634,15 @@ function operationName(query: string): string | undefined {
   return query.match(/\b(?:query|mutation|subscription)\s+([A-Za-z_][A-Za-z0-9_]*)/)?.[1];
 }
 
-/** Compile the Linear IssueFilter subset the fake supports into a predicate. */
-function compileIssueFilter(value: unknown): IssueMatcher | undefined {
+/**
+ * Compile the Linear IssueFilter subset the fake supports into a predicate.
+ *
+ * Supported: `and`/`or`, string comparators on `title`/`description`,
+ * `state.name` / `team.key` (`eq`/`neq`), and `updatedAt` date comparators
+ * (`gt`/`gte`/`lt`/`lte` with an ISO-8601 value). Anything else returns
+ * undefined so the caller rejects the filter instead of matching loosely.
+ */
+function compileIssueFilter(value: unknown, context: FilterContext): IssueMatcher | undefined {
   if (typeof value === "string") {
     const needle = value.toLowerCase();
     return (issue) => issue.title.toLowerCase().includes(needle);
@@ -571,7 +655,7 @@ function compileIssueFilter(value: unknown): IssueMatcher | undefined {
   for (const [key, condition] of Object.entries(filter)) {
     if (key === "and" || key === "or") {
       if (!Array.isArray(condition)) return undefined;
-      const children = condition.map(compileIssueFilter);
+      const children = condition.map((child) => compileIssueFilter(child, context));
       if (children.some((child) => child === undefined)) return undefined;
       const compiled = children.filter((child): child is IssueMatcher => Boolean(child));
       matchers.push(
@@ -589,6 +673,21 @@ function compileIssueFilter(value: unknown): IssueMatcher | undefined {
     }
     if (key === "updatedAt") {
       const matcher = compileDateCondition(condition);
+      if (!matcher) return undefined;
+      matchers.push(matcher);
+      continue;
+    }
+    if (key === "state" || key === "team") {
+      // Linear nests the comparator under the related entity's field:
+      // `{"state":{"name":{"eq":"Todo"}}}`, `{"team":{"key":{"eq":"ENG"}}}`.
+      const field = key === "state" ? "name" : "key";
+      const nested = asRecord(condition);
+      if (!nested || Object.keys(nested).length !== 1 || !(field in nested)) return undefined;
+      const read =
+        key === "state"
+          ? (issue: FakeLinearIssue) => context.stateName(issue.stateId)
+          : () => context.teamKey;
+      const matcher = compileEqualityCondition(nested[field], read);
       if (!matcher) return undefined;
       matchers.push(matcher);
       continue;
@@ -633,38 +732,52 @@ function compileStringCondition(
   return (issue) => matchers.every((matcher) => matcher(issue));
 }
 
-/**
- * Compile a `{gt|gte|lt|lte}` ISO-8601 condition on `updatedAt`, the shape the
- * worker's Linear change detector sends on every tick after the first.
- */
+/** Compile a `{gt|gte|lt|lte: ISO}` DateComparator on `updatedAt`. */
 function compileDateCondition(condition: unknown): IssueMatcher | undefined {
   const operations = asRecord(condition);
-  if (!operations) return undefined;
+  if (!operations || Object.keys(operations).length === 0) return undefined;
 
   const matchers: IssueMatcher[] = [];
   for (const [operation, rawValue] of Object.entries(operations)) {
     if (typeof rawValue !== "string") return undefined;
     const bound = Date.parse(rawValue);
     if (!Number.isFinite(bound)) return undefined;
-    const at = (issue: FakeLinearIssue) => Date.parse(issue.updatedAt);
+    const stamp = (issue: FakeLinearIssue) => Date.parse(issue.updatedAt);
     switch (operation) {
       case "gt":
-        matchers.push((issue) => at(issue) > bound);
+        matchers.push((issue) => stamp(issue) > bound);
         break;
       case "gte":
-        matchers.push((issue) => at(issue) >= bound);
+        matchers.push((issue) => stamp(issue) >= bound);
         break;
       case "lt":
-        matchers.push((issue) => at(issue) < bound);
+        matchers.push((issue) => stamp(issue) < bound);
         break;
       case "lte":
-        matchers.push((issue) => at(issue) <= bound);
+        matchers.push((issue) => stamp(issue) <= bound);
         break;
       default:
         return undefined;
     }
   }
+  return (issue) => matchers.every((matcher) => matcher(issue));
+}
 
+/** Compile an `{eq|neq}` comparator over a derived string value. */
+function compileEqualityCondition(
+  condition: unknown,
+  read: (issue: FakeLinearIssue) => string,
+): IssueMatcher | undefined {
+  const operations = asRecord(condition);
+  if (!operations || Object.keys(operations).length === 0) return undefined;
+
+  const matchers: IssueMatcher[] = [];
+  for (const [operation, rawValue] of Object.entries(operations)) {
+    if (typeof rawValue !== "string") return undefined;
+    if (operation === "eq") matchers.push((issue) => read(issue) === rawValue);
+    else if (operation === "neq") matchers.push((issue) => read(issue) !== rawValue);
+    else return undefined;
+  }
   return (issue) => matchers.every((matcher) => matcher(issue));
 }
 
