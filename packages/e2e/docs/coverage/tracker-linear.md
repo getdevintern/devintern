@@ -11,16 +11,16 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 - Surface: External dependency: task trackers
 - Status: `default`
 - Evidence: `tests/local/tracker-linear-fake.test.ts`, `bun run --filter @devintern/e2e test`
-- Missing: Live team/project lifecycle, estimation, attachment uploads.
-- Last reviewed: 2026-11-17
+- Missing: Live team/project lifecycle, live estimation, attachment uploads.
+- Last reviewed: 2026-11-18
 
 ### Offline fake Linear server (default lifecycle)
 
 - Surface: External dependency: task trackers
 - Status: `default`
 - Evidence: `tests/local/tracker-linear-fake.test.ts`, `bun run --filter @devintern/e2e test`
-- Missing: Live team/project lifecycle, estimation, attachment uploads.
-- Last reviewed: 2026-11-17
+- Missing: Live team/project lifecycle, live estimation, attachment uploads.
+- Last reviewed: 2026-11-18
 
 ### Linear worker polling: `updatedAt.gt` delta, pickup, `(key, updated)` dedupe, re-arm, cursor restart
 
@@ -30,14 +30,22 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 - Missing: Live Linear filter semantics; actioned-PR gate (no PR on a bare remote).
 - Last reviewed: 2026-11-17
 
+### Linear: `--estimate` native estimate field, estimation comment, re-estimation
+
+- Surface: External dependency: task trackers
+- Status: `default`
+- Evidence: `tests/local/tracker-linear-estimation.test.ts`, `bun run --filter @devintern/e2e test`
+- Missing: Live Linear estimation (team estimate scales, real `IssueUpdateInput`/`CommentUpdateInput` validation); worker `[[estimations]]` schedule against the fake Linear server (gap `e2e-tracker-linear-scheduled-estimation`, not started).
+- Last reviewed: 2026-11-18
+
 ## Tracker plan status
 
 ### Linear
 
 - Default `test`: yes (offline fake)
 - Opt-in suite: none
-- Notes: Fake lifecycle: key/`--query`, workflow state, comment, decoy isolation. Worker polling and relay `task.changed` delivery are offline too. Live Layer 2 team/project lifecycle, estimation, and attachments remain future work.
-- Last reviewed: 2026-11-17
+- Notes: Fake lifecycle: key/`--query`, workflow state, comment, decoy isolation. Worker polling, relay `task.changed` delivery, and CLI `--estimate` are offline too. Live Layer 2 team/project lifecycle, live estimation, scheduled `[[estimations]]` for Linear, and attachments remain future work.
+- Last reviewed: 2026-11-18
 
 ## Layer 3 fake (implemented)
 
@@ -57,6 +65,8 @@ Operations covered:
 - `IssueComments` (markdown bodies, fixed advancing timestamps)
 - `TeamStates` (workflow state ids and names)
 - `CommentCreate` (markdown comment bodies)
+- `CommentUpdate` (`input.body` only; rewrites the comment in place, keeps
+  its id and `createdAt`, and advances its and the issue's `updatedAt`)
 - `IssueUpdate` (`stateId`, plus `estimate`/`labelIds`/title/description fields)
 - `SearchIssues` (JSON IssueFilter with `title`/`description` string
   conditions, `state.name`/`team.key` equality, `updatedAt`
@@ -78,7 +88,7 @@ whose `task_query` is a JSON IssueFilter through the loopback relay fake
 
 Any other operation or malformed payload returns a diagnostic GraphQL error and
 is recorded in `unexpectedOperations`, which both scenarios assert is empty.
-Live Layer 2 coverage — real team/project lifecycle, estimation, and attachment
+Live Layer 2 coverage — real team/project lifecycle, live estimation, and attachment
 uploads — remains future work; there is intentionally no live Linear suite.
 
 ## Test notes
@@ -95,7 +105,7 @@ The fake binds `127.0.0.1:0` on a single `POST /graphql` endpoint, accepts any
 `Authorization` header without logging it, and serves one in-memory team with
 Todo/In Progress/In Review workflow states, issues, labels, and markdown
 comments. It implements only the operations the product calls: `IssueById`,
-`IssueComments`, `TeamStates`, `CommentCreate`, `IssueUpdate`, and
+`IssueComments`, `TeamStates`, `CommentCreate`, `CommentUpdate`, `IssueUpdate`, and
 `SearchIssues` (filters on `title`/`description`, `state.name`, `team.key`,
 and `updatedAt` comparators; anything else is rejected). Any other operation
 or malformed payload returns a diagnostic GraphQL error and fails the test through `unexpectedOperations`.
@@ -139,3 +149,35 @@ The fake runs with `clock: "wall"` so its `updatedAt` stamps fall inside the
 detector's real-time window. No prerequisites beyond the built CLI; the test
 skips when `packages/code/dist/index.js` is absent. Run it alone with
 `bun test tests/local/worker-linear-polling.test.ts` from `packages/e2e`.
+
+### Linear `--estimate`
+
+`tests/local/tracker-linear-estimation.test.ts` runs the built
+`devintern <key> --estimate` (and `--query <IssueFilter> --estimate`) against
+the same in-process Linear fake with the deterministic agent in `estimate`
+mode and a local bare remote. Linear estimation writes the native `estimate`
+field (`IssueUpdate` with `input.estimate`), so no story-points settings are
+needed. Read-back goes through the fake (`getEstimate`, `listComments`,
+answered `operations`), not CLI stdout. It asserts:
+
+- the issue's `estimate` equals the agent's points, exactly one comment
+  carries the `Automated Story Points Estimation` marker,
+  `estimation-result.json` is written, the run record has origin `estimate`,
+  and a decoy issue is untouched;
+- an unchanged issue is skipped without an agent attempt; after a human
+  description edit (new `updatedAt`) the next run re-estimates and rewrites
+  the same comment through exactly one `CommentUpdate` (same id, new body, new
+  estimate), and a further no-change run is skipped (the estimation's own
+  writes are not treated as a user change);
+- an issue created less than 24 hours ago (fake `clock: "wall"`) is skipped:
+  no agent call, no `IssueUpdate`, no comment, no run record;
+- `--skip-comments` with `--query` selection writes the field without
+  `CommentCreate`, and a repeat run is a no-op through the persisted
+  estimation state;
+- every scenario leaves the workspace on the base branch with a clean tree,
+  pushes no `feature/<key>` branch to the bare remote, and records no
+  unexpected GraphQL operation.
+
+No prerequisites beyond the built CLI; the test skips only when
+`packages/code/dist/index.js` is absent. Run it alone with
+`bun test tests/local/tracker-linear-estimation.test.ts` from `packages/e2e`.
