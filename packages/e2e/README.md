@@ -1126,6 +1126,17 @@ skips when `packages/code/dist/index.js` is absent. Run it alone with
 
 `tests/local/tracker-asana-fake.test.ts` exercises the built CLI against a loopback Asana API fixture, covering key and query selection, project sections, comments, and decoy isolation.
 
+### Worker Asana polling (Events API)
+
+`tests/local/worker-asana-polling.test.ts` starts the built `devintern worker` with `tracker = "asana"`, a `section:"To Do" <marker>` `task_query`, and `poll_interval = 1` against the same fake. The fake implements `GET /api/1.0/events?resource=<project>&sync=<token>` with Asana's sync semantics: a missing, unknown, or expired token returns 412 with a fresh `sync` and an `errors` array; a live token returns the events since it was issued plus a rotated `sync`. Task create/update/section moves and story add/edit/delete append events, `expireSyncTokens()` invalidates every outstanding token, and `syncRequests` records the received and issued tokens (sync cursors, not credentials) and whether the Bearer token matched.
+
+The suite proves the first tick's 412 handshake runs the eligible task once and leaves the decoy alone. Later ticks present the rotated token, and empty pages cause no evaluate query and no run. A human edit generates an event and exactly one more run. The worker's own section move and implementation comment do produce events and a re-evaluation, but the query no longer matches once the task leaves To Do, so there is no self-loop. An expired token gets a 412 mid-run, triggers a full re-evaluation, and the worker recovers on the new token without crashing. With `--skip-comments` the processed task still matches unchanged, and the `(key, updated)` dedupe skips it on that full resync. Without `ASANA_DEFAULT_PROJECT_GID` the worker refuses to start and never calls the Events API. Build the CLI first; the only skip is the built-CLI guard.
+
+```sh
+bun run --filter @getdevintern/code build
+bun run --filter @devintern/e2e test
+```
+
 ### Azure DevOps fake
 
 `tests/local/tracker-azure-devops-fake.test.ts` exercises key and WIQL selection, state transitions, comments, and decoy isolation against a loopback fake API. The test subprocess opts in with `DEVINTERN_E2E_FAKE_AZURE_DEVOPS=1`; project configuration cannot enable the endpoint override. `tests/local/worker-azure-devops-polling.test.ts` drives the worker daemon's Azure DevOps change detector against the same fake: delta WIQL shape, exactly-once pickup, over-reported same-day ticks, re-arm, cursor persistence across a restart, and the `(key, updated)` dedupe.
