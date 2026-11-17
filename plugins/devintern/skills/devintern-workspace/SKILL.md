@@ -22,6 +22,9 @@ To see what the worker has done, read its state with the read-only `devintern wo
 - `devintern worker runs [--automation <id>] [--origin <o>] [--status <s>] [--task-key <k>] [--limit N] --json` lists runs. `runs show <id>` adds stages, retry eligibility, harness logs, and artifacts. `runs logs <id> [<name>]` and `runs artifacts <id> [<artifact-id>]` read transcripts and outputs.
 - `devintern worker stats --window 7d|30d|90d|all`, `automations` (`nextDueAt`, `lastRun`), `prs`, `queue`, `status`, `overview`, and `logs --lines N --level warn` cover the other views.
 - Pass `--workspace` for a nondefault workspace. A non-zero exit means the database is missing or unreadable, or the request was invalid. Report that error. Do not treat it as "no runs".
+- If `devintern worker --help` does not list these commands, the installed CLI predates them. Say so and suggest upgrading `@getdevintern/code`. Do not fall back to writing to `state/queue.db`.
+
+When an automation prompt needs run history (a retro, an outcome watcher, a log triage), point it at these commands rather than at `http://localhost:4400`. Sandboxed agent runs usually cannot reach the host's localhost.
 
 ## Register additional repositories
 

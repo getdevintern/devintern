@@ -18,6 +18,7 @@ Existing Sentry error tracking captures exceptions automatically. Use a manual r
 ## Diagnose before filing
 
 - Run `devintern --version` and `devintern doctor`.
+- For a worker run, find the failing run in the run history instead of describing it from memory. `devintern worker runs --status failed --limit 20 --json` lists recent failures (filter with `--automation <id>`, `--origin <o>`, or `--task-key <k>`; an automation run that recorded `succeeded` can still have a report saying it was blocked). `devintern worker runs show <id> --json` returns its stages, `outcomeReason`, and the agent's report. `devintern worker runs logs <id>` lists its harness transcripts, and `devintern worker logs --level warn` shows recent worker warnings and errors. These commands are read-only and need no dashboard, running worker, or network. If `devintern worker --help` does not list them, the installed CLI predates them: use the dashboard instead and suggest upgrading `@getdevintern/code`.
 - Read the failing output and the relevant docs page. For tracker, agent, relay, or workspace problems, check [configuration](https://devintern.com/docs/code/configuration), [worker](https://devintern.com/docs/code/worker), and [relay](https://devintern.com/docs/code/relay).
 - Try a minimal, read-only reproduction when possible. Do not re-run a destructive or non-idempotent command just to reproduce.
 - If the failure is clearly configuration, help fix it and stop. File a report only when the behavior contradicts the docs or looks like a product crash.
@@ -38,7 +39,7 @@ devintern report --last --log /tmp/devintern-report-UNIQUE.log
 
 Never place `.env` contents, session files, tokens, task descriptions, prompts, diffs, or customer data in the title, description, or a log file you attach. The command redacts common secrets, but it cannot recognize every proprietary value.
 
-Prefer `--last`, `--task <KEY>`, or `--run <id>` over describing a run from memory. Add `--share-identifiers` only when the user agrees to include the task key and repository slug; the default is redacted.
+Prefer `--last`, `--task <KEY>`, or `--run <id>` (the id from `devintern worker runs`) over describing a run from memory. Add `--share-identifiers` only when the user agrees to include the task key and repository slug; the default is redacted.
 
 ## Draft the report
 
