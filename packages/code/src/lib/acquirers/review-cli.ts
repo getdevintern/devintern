@@ -1,20 +1,30 @@
 /**
- * CLI subprocess runners for automatic PR pipelines (`devintern
- * address-review` / `devintern resolve-conflicts`), shared by the GitHub and
- * GitLab review pollers and the fleet event handlers. Split out of
- * `review-polling.ts`, which re-exports everything here for existing imports.
+ * Subprocess runners for the automatic review loops: address-review and
+ * resolve-conflicts run as `devintern` CLI children (with harness failover)
+ * so each agent run gets its own process, timeout, and result channel.
  */
-
 import { spawn } from "child_process";
 import { captureError } from "@devintern/utils";
 
 import { parseEnvInteger } from "../config/env-integer";
-import { cliResultToTaskResult, runWithFailover } from "../worker/failover";
 import type { TaskExecutionResult } from "./task-polling";
+import {
+  cliResultToTaskResult,
+  harnessChainBlockedUntil,
+  runWithFailover,
+} from "../worker/failover";
 
 export interface AutomaticResolveResult {
   outcome: "clean" | "resolved" | "skipped" | "failed" | "deferred";
   message: string;
+  /**
+   * Set on a `deferred` outcome when the resolver never ran because the worker
+   * had no capacity (every harness usage-limited, or the worker draining).
+   * Capacity defers are transient and never count toward the defer cap.
+   */
+  capacity?: true;
+  /** Earliest time a capacity defer should be retried, when known. */
+  retryAt?: number;
 }
 
 const prRunTails = new Map<string, Promise<void>>();
@@ -222,9 +232,12 @@ async function runResolveWithFailover(
     { harnessPin: opts.harnessPin },
   );
   if (status === "deferred") {
+    const retryAt = harnessChainBlockedUntil();
     return {
       outcome: "deferred",
       message: "agent usage limit; waiting for a harness to become available",
+      capacity: true,
+      ...(retryAt !== undefined ? { retryAt } : {}),
     };
   }
   return (

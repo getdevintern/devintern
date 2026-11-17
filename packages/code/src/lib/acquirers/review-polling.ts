@@ -58,7 +58,7 @@ import type { WebhookQueue } from "../state/webhook-queue";
 import type { WorkerState } from "../state/worker-state";
 import type { ConflictResolutionMode } from "../workspace/config";
 import type { Acquirer } from "../../worker";
-import type { AutomaticResolveResult } from "./review-cli-runners";
+import type { AutomaticResolveResult } from "./review-cli";
 import { isTeamAuthor, TeamPrSweeper } from "./team-pr-sweep";
 import type { PolledPrListItem, TeamPrSweepHost } from "./team-pr-sweep";
 import {
@@ -86,6 +86,8 @@ export {
   teamPrStateCursorSource,
 } from "./team-pr-sweep";
 export type { PolledPrListItem } from "./team-pr-sweep";
+// Resolver/feedback subprocess helpers live in ./review-cli; re-exported so
+// existing importers keep their paths.
 export {
   DEFAULT_RESOLVE_TIMEOUT_MS,
   runAddressReviewUrlViaCli,
@@ -93,8 +95,8 @@ export {
   runResolveConflictsUrlViaCli,
   runResolveConflictsViaCli,
   serializePrRun,
-} from "./review-cli-runners";
-export type { AutomaticResolveResult } from "./review-cli-runners";
+} from "./review-cli";
+export type { AutomaticResolveResult } from "./review-cli";
 export type { ConflictWindowStatus, ConflictWindowTriggerOutcome };
 
 export interface PolledReview {
@@ -264,6 +266,12 @@ const BASE_SYNC_SOURCE = "github:base-sync";
  */
 const MAX_CONSECUTIVE_DEFERS = 3;
 
+/**
+ * Wait before retrying a base sync deferred for lack of harness capacity when
+ * the failover chain exposes no reset time.
+ */
+const CAPACITY_RETRY_FALLBACK_MS = 5 * 60_000;
+
 /** Backoff before the first retry of a failed base-sync event. */
 const RETRY_BACKOFF_BASE_MS = 30_000;
 
@@ -292,6 +300,8 @@ export class ReviewPollingAcquirer implements Acquirer {
   private prCache = new Map<string, PolledPr>();
   /** Consecutive `deferred` resolver outcomes per base-sync event. */
   private deferCounts = new Map<string, number>();
+  /** Base-sync events waiting for harness capacity, keyed to their retry time. */
+  private capacityRetryAt = new Map<string, number>();
   /** Cached scheduled-window state; `undefined` = not loaded from the cursor yet. */
   private conflictWindowState: ConflictWindowState | null | undefined;
   private lastFeedbackPollAt: number;
@@ -885,6 +895,7 @@ export class ReviewPollingAcquirer implements Acquirer {
     }
     if (fresh.mergeable_state !== "dirty" && fresh.mergeable_state !== "behind") {
       this.deferCounts.delete(externalId);
+      this.capacityRetryAt.delete(externalId);
       queue.completeBaseSyncEvent(BASE_SYNC_SOURCE, externalId);
       return { kind: "stop" };
     }
@@ -966,9 +977,25 @@ export class ReviewPollingAcquirer implements Acquirer {
     const { queue } = this.options;
     if (result.outcome !== "failed" && result.outcome !== "deferred") {
       this.deferCounts.delete(externalId);
+      this.capacityRetryAt.delete(externalId);
       queue.completeBaseSyncEvent(BASE_SYNC_SOURCE, externalId);
       return false;
     }
+    if (result.outcome === "deferred" && result.capacity) {
+      // No harness could run the resolver: nothing about the PR failed, so
+      // keep the event pending without spending an attempt or a defer, and
+      // wait for capacity instead of exhausting the conflict.
+      const retryAt =
+        result.retryAt && result.retryAt > now ? result.retryAt : now + CAPACITY_RETRY_FALLBACK_MS;
+      this.capacityRetryAt.set(externalId, retryAt);
+      console.log(
+        `⏳ [${this.name}] ${repo}#${prNumber} base sync waiting for agent capacity until ` +
+          `${new Date(retryAt).toISOString()}: ${result.message}`,
+      );
+      queue.deferBaseSyncAttempt(externalId);
+      return false;
+    }
+    this.capacityRetryAt.delete(externalId);
     if (result.outcome === "deferred") {
       const defers = (this.deferCounts.get(externalId) ?? 0) + 1;
       this.deferCounts.set(externalId, defers);
@@ -1062,6 +1089,9 @@ export class ReviewPollingAcquirer implements Acquirer {
 
     const quietMs = (this.options.quietPeriodSeconds ?? 30) * 1000;
     if (now - event.headObservedAt < quietMs) return;
+
+    const capacityRetryAt = this.capacityRetryAt.get(externalId);
+    if (capacityRetryAt !== undefined && now < capacityRetryAt) return;
 
     // Re-fetch immediately before execution. Any movement leaves the current
     // event pending and consumes no retry; a new base supersedes it immediately.

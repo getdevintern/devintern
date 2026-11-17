@@ -330,4 +330,28 @@ describe("Dependency Installation", () => {
     const packageJsonExists = existsSync(join(worktreePath, "package.json"));
     expect(packageJsonExists).toBe(true);
   });
+
+  test("skips the install when a read-only review asks for no dependencies", async () => {
+    execSync("git checkout -b feature/read-only", { cwd: repoDir });
+    writeFileSync(join(repoDir, "package.json"), JSON.stringify({ name: "ro" }), "utf8");
+    execSync("git add . && git commit -m 'Add package.json'", { cwd: repoDir });
+    execSync("git checkout main || git checkout master", { cwd: repoDir });
+
+    const prepareSpy = spyOn(Utils, "prepareWorktreeForAgent");
+    try {
+      // Create, then reuse: neither path may install.
+      for (let pass = 0; pass < 2; pass++) {
+        const result = await Utils.prepareReviewWorktree("feature/read-only", {
+          verbose: false,
+          cwd: repoDir,
+          installDependencies: false,
+        });
+        expect(result.success).toBe(true);
+        expect(existsSync(join(result.path!, "package.json"))).toBe(true);
+      }
+      expect(prepareSpy).not.toHaveBeenCalled();
+    } finally {
+      prepareSpy.mockRestore();
+    }
+  });
 });

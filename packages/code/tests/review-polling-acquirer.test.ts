@@ -10,6 +10,7 @@ import {
   teamPrStateCursorSource,
 } from "../src/lib/acquirers/review-polling";
 import type {
+  AutomaticResolveResult,
   ConditionalResult,
   PolledComment,
   PolledPr,
@@ -62,10 +63,7 @@ describe("ReviewPollingAcquirer", () => {
   function makeAcquirer(
     gh: FakeGitHubState,
     options: {
-      resolveResults?: Array<{
-        outcome: "clean" | "resolved" | "skipped" | "failed" | "deferred";
-        message: string;
-      }>;
+      resolveResults?: AutomaticResolveResult[];
       runStore?: RunStore;
       quietPeriodSeconds?: number;
       now?: () => number;
@@ -766,6 +764,60 @@ describe("ReviewPollingAcquirer", () => {
       "acme/widgets#42",
       "acme/widgets#42",
     ]);
+  });
+
+  test("capacity defers wait for a harness instead of exhausting the event", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    let clock = 1_000_000;
+    const capacity: AutomaticResolveResult = {
+      outcome: "deferred",
+      message: "agent usage limit; waiting for a harness to become available",
+      capacity: true,
+    };
+    const made = makeAcquirer(
+      {
+        prState: "open",
+        mergeableState: "dirty",
+        headSha: "head1",
+        baseSha: "base1",
+        baseIncluded: false,
+        reviews: [],
+        comments: [],
+      },
+      {
+        now: () => clock,
+        resolveResults: [
+          { ...capacity, retryAt: clock + 60_000 },
+          capacity,
+          capacity,
+          capacity,
+          { outcome: "resolved", message: "merged base" },
+        ],
+      },
+    );
+    const externalId = "base-sync:acme/widgets#42:base1:head1";
+
+    await made.acquirer.tick();
+    expect(made.resolved).toHaveLength(1);
+    // Before the reported reset, the resolver is not relaunched.
+    clock += 30_000;
+    await made.acquirer.tick();
+    expect(made.resolved).toHaveLength(1);
+
+    // Past the cap of consecutive defers, the event stays pending and unprocessed.
+    for (let i = 0; i < 3; i++) {
+      clock += 6 * 60_000;
+      await made.acquirer.tick();
+    }
+    expect(made.resolved).toHaveLength(4);
+    expect(queue.getBaseSyncEvent(externalId)).toMatchObject({ status: "pending", attempts: 0 });
+    expect(queue.hasProcessed("github:base-sync", externalId)).toBe(false);
+
+    // Once a harness is back, the conflict is resolved.
+    clock += 6 * 60_000;
+    await made.acquirer.tick();
+    expect(made.resolved).toHaveLength(5);
+    expect(queue.getBaseSyncEvent(externalId)?.status).toBe("completed");
   });
 
   test("a head race during pre-run revalidation stays pending without an attempt", async () => {

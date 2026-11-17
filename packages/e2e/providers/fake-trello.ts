@@ -11,8 +11,14 @@
  * whose body names the method and path, and the request is recorded so a test
  * can fail loudly even if the product ignores the error response.
  *
+ * Every card create, update, list move, archive, comment, checklist, and
+ * attachment appends a board action, and `GET /1/boards/:id/actions` serves
+ * them newest first with Trello's `since`, `filter`, and `limit` semantics so
+ * the worker's board-actions change detector runs against a real feed.
+ *
  * The server binds `127.0.0.1:0`, accepts any query `key`/`token` credentials,
- * never logs them, and never makes outbound requests.
+ * never logs them (requests record only whether the fake credentials matched),
+ * and never makes outbound requests.
  */
 
 import type { TrackerComment, TrackerFixture, TrackerTicket, TrackerTicketState } from "./tracker";
@@ -60,8 +66,34 @@ interface FakeTrelloAction {
   type: string;
   date: string;
   memberCreator: FakeTrelloMember;
-  data: { text?: string };
+  data: Record<string, unknown> & { text?: string };
 }
+
+/** One recorded request; never holds credentials, only whether they matched. */
+export interface FakeTrelloRequest {
+  method: string;
+  path: string;
+  credentialsMatched: boolean;
+}
+
+/** Query parameters one `GET /1/boards/:id/actions` request carried. */
+export interface FakeTrelloBoardActionsRequest {
+  since: string | null;
+  filter: string | null;
+  limit: string | null;
+}
+
+/** Board action summary for test assertions. */
+export interface FakeTrelloBoardAction {
+  id: string;
+  type: string;
+  cardShortLink: string;
+}
+
+/** Trello action ids are 24-hex ObjectIds; a padded counter keeps them ordered. */
+const ACTION_ID_PATTERN = /^[0-9a-f]{24}$/i;
+const DEFAULT_ACTIONS_LIMIT = 50;
+const MAX_ACTIONS_LIMIT = 1000;
 
 interface FakeTrelloCheckItem {
   id: string;
@@ -157,6 +189,10 @@ export class FakeTrelloTracker implements TrackerFixture {
 
   /** Requests the fake could not route, for an explicit end-of-test assertion. */
   readonly unexpectedRequests: string[] = [];
+  /** Every request in arrival order, without query strings or credentials. */
+  readonly requests: FakeTrelloRequest[] = [];
+  /** `since`/`filter`/`limit` received by each board actions request, in order. */
+  readonly boardActionRequests: FakeTrelloBoardActionsRequest[] = [];
 
   private readonly server: ReturnType<typeof Bun.serve>;
   private readonly baseUrl: string;
@@ -168,7 +204,7 @@ export class FakeTrelloTracker implements TrackerFixture {
   private readonly checklists = new Map<string, FakeTrelloChecklist>();
   private readonly attachments: FakeTrelloAttachment[] = [];
   private nextCardNumber = 1;
-  private nextCommentId = 10_000;
+  private nextActionNumber = 1;
   private nextLabelNumber = 1;
   private nextChecklistNumber = 1;
   private nextCheckItemNumber = 1;
@@ -254,11 +290,13 @@ export class FakeTrelloTracker implements TrackerFixture {
   async closeTicket(ticketKey: string): Promise<void> {
     const card = this.requireCard(ticketKey);
     card.archived = true;
-    card.dateLastActivity = this.timestamp();
+    this.recordCardAction(card, "updateCard", { old: { closed: false } });
   }
 
   async deleteComment(commentId: string): Promise<void> {
-    const index = this.actions.findIndex((action) => action.id === commentId);
+    const index = this.actions.findIndex(
+      (action) => action.id === commentId && action.type === "commentCard",
+    );
     if (index < 0) throw new Error(`Fake Trello comment not found: ${commentId}`);
     this.actions.splice(index, 1);
   }
@@ -294,6 +332,56 @@ export class FakeTrelloTracker implements TrackerFixture {
     }));
   }
 
+  /**
+   * Apply a human edit to a card, appending one `updateCard` board action.
+   *
+   * Mirrors `PUT /1/cards/:id`: description and list may change together.
+   */
+  async updateTicket(
+    ticketKey: string,
+    update: { body?: string; listName?: string },
+  ): Promise<void> {
+    const card = this.requireCard(ticketKey);
+    const before = this.listName(card.listId);
+    const listBefore = this.lists.find((list) => list.id === card.listId);
+    const old: Record<string, unknown> = {};
+    if (update.body !== undefined) {
+      old.desc = card.desc;
+      card.desc = update.body;
+    }
+    if (update.listName !== undefined) {
+      old.idList = card.listId;
+      card.listId = this.requireList(update.listName).id;
+    }
+    const listAfter = this.lists.find((list) => list.id === card.listId);
+    this.recordCardAction(card, "updateCard", {
+      old,
+      ...(update.listName !== undefined && before !== this.listName(card.listId)
+        ? { listBefore: listRef(listBefore), listAfter: listRef(listAfter) }
+        : { list: listRef(listAfter) }),
+    });
+  }
+
+  /** Board actions newest first, as `GET /1/boards/:id/actions` would return them. */
+  boardActions(): FakeTrelloBoardAction[] {
+    return [...this.actions].reverse().map((action) => ({
+      id: action.id,
+      type: action.type,
+      cardShortLink: this.cards.get(action.cardId)?.shortLink ?? action.cardId,
+    }));
+  }
+
+  /** Newest board action id, the cursor a fully caught-up detector holds. */
+  newestActionId(): string | undefined {
+    return this.actions.at(-1)?.id;
+  }
+
+  /** Number of `GET /1/search` requests (the worker's evaluate step). */
+  get searchCount(): number {
+    return this.requests.filter((request) => request.method === "GET" && request.path === "/search")
+      .length;
+  }
+
   /** Stop the HTTP server and release the ephemeral port. */
   async cleanup(): Promise<void> {
     this.server.stop(true);
@@ -309,6 +397,13 @@ export class FakeTrelloTracker implements TrackerFixture {
     // The product's default base URL ends in `/1`; the fixture base does not.
     const path = decodeURIComponent(url.pathname).replace(/^\/1(?=\/|$)/, "");
     const method = request.method.toUpperCase();
+    this.requests.push({
+      method,
+      path,
+      credentialsMatched:
+        url.searchParams.get("key") === FAKE_API_KEY &&
+        url.searchParams.get("token") === FAKE_API_TOKEN,
+    });
 
     const response = await this.route(method, path, url, request);
     if (response) return response;
@@ -347,6 +442,9 @@ export class FakeTrelloTracker implements TrackerFixture {
 
     const labelsMatch = path.match(/^\/boards\/([^/]+)\/labels$/);
     if (labelsMatch?.[1]) return this.getBoardLabels(labelsMatch[1]);
+
+    const boardActionsMatch = path.match(/^\/boards\/([^/]+)\/actions$/);
+    if (boardActionsMatch?.[1]) return this.getBoardActions(boardActionsMatch[1], url);
 
     const actionsMatch = path.match(/^\/cards\/([^/]+)\/actions$/);
     if (actionsMatch?.[1]) return this.getActions(actionsMatch[1], url);
@@ -430,6 +528,58 @@ export class FakeTrelloTracker implements TrackerFixture {
     );
   }
 
+  /**
+   * `GET /1/boards/:id/actions`: newest first, only actions strictly newer
+   * than `since` (an action id or an ISO date), optional comma-separated
+   * `filter` of action types (`all` or absent means every type), and `limit`
+   * (default 50, max 1000).
+   */
+  private getBoardActions(boardId: string, url: URL): Response {
+    const board = this.findBoard(boardId);
+    if (!board) return boardNotFound(boardId);
+    const since = url.searchParams.get("since");
+    const filter = url.searchParams.get("filter");
+    const limitParam = url.searchParams.get("limit");
+    this.boardActionRequests.push({ since, filter, limit: limitParam });
+
+    let newerThan: (action: FakeTrelloAction) => boolean = () => true;
+    if (since !== null) {
+      if (ACTION_ID_PATTERN.test(since)) {
+        const cursor = since.toLowerCase();
+        newerThan = (action) => action.id > cursor;
+      } else {
+        const sinceMs = Date.parse(since);
+        if (!Number.isFinite(sinceMs)) {
+          return json({ error: `invalid value for since: ${since}` }, 400);
+        }
+        newerThan = (action) => Date.parse(action.date) > sinceMs;
+      }
+    }
+
+    const types =
+      filter && filter !== "all"
+        ? new Set(
+            filter
+              .split(",")
+              .map((type) => type.trim())
+              .filter(Boolean),
+          )
+        : undefined;
+
+    const limit = limitParam === null ? DEFAULT_ACTIONS_LIMIT : Number(limitParam);
+    if (!Number.isInteger(limit) || limit < 0 || limit > MAX_ACTIONS_LIMIT) {
+      return json({ error: `invalid value for limit: ${limitParam}` }, 400);
+    }
+
+    const actions = this.actions
+      .filter((action) => this.cards.get(action.cardId)?.boardId === board.id)
+      .filter(newerThan)
+      .filter((action) => !types || types.has(action.type))
+      .reverse()
+      .slice(0, limit);
+    return json(actions.map((action) => this.actionPayload(action)));
+  }
+
   private async postCard(request: Request): Promise<Response> {
     const form = await readForm(request);
     const listId = form.idList;
@@ -455,18 +605,37 @@ export class FakeTrelloTracker implements TrackerFixture {
     const card = this.findCard(cardId);
     if (!card) return cardNotFound(cardId);
     const form = await readForm(request);
+    const listBefore = this.lists.find((candidate) => candidate.id === card.listId);
+    const old: Record<string, unknown> = {};
     if (form.idList) {
       const list = this.lists.find((candidate) => candidate.id === form.idList);
       if (!list) return json({ error: `List not found: ${form.idList}` }, 404);
+      if (list.id !== card.listId) old.idList = card.listId;
       card.listId = list.id;
     }
     if (form.idLabels !== undefined) {
+      old.idLabels = card.labelIds;
       card.labelIds = this.parseLabelIds(form.idLabels);
     }
-    if (form.name !== undefined) card.name = form.name;
-    if (form.desc !== undefined) card.desc = form.desc;
-    if (form.closed !== undefined) card.archived = form.closed === "true";
-    card.dateLastActivity = this.timestamp();
+    if (form.name !== undefined) {
+      old.name = card.name;
+      card.name = form.name;
+    }
+    if (form.desc !== undefined) {
+      old.desc = card.desc;
+      card.desc = form.desc;
+    }
+    if (form.closed !== undefined) {
+      old.closed = card.archived;
+      card.archived = form.closed === "true";
+    }
+    const listAfter = this.lists.find((candidate) => candidate.id === card.listId);
+    this.recordCardAction(card, "updateCard", {
+      old,
+      ...("idList" in old
+        ? { listBefore: listRef(listBefore), listAfter: listRef(listAfter) }
+        : { list: listRef(listAfter) }),
+    });
     return json(this.cardDetail(card));
   }
 
@@ -525,6 +694,9 @@ export class FakeTrelloTracker implements TrackerFixture {
       date: this.timestamp(),
     };
     this.attachments.push(attachment);
+    this.recordCardAction(card, "addAttachmentToCard", {
+      attachment: { id: attachment.id, name: attachment.name, url: attachment.url },
+    });
     return json(attachment, 201);
   }
 
@@ -539,6 +711,9 @@ export class FakeTrelloTracker implements TrackerFixture {
       items: [],
     };
     this.checklists.set(checklist.id, checklist);
+    this.recordCardAction(card, "addChecklistToCard", {
+      checklist: { id: checklist.id, name: checklist.name },
+    });
     return json({ id: checklist.id, name: checklist.name, idCard: checklist.cardId }, 201);
   }
 
@@ -573,17 +748,36 @@ export class FakeTrelloTracker implements TrackerFixture {
       dateLastActivity: this.timestamp(),
     };
     this.cards.set(card.id, card);
+    this.recordCardAction(card, "createCard", {
+      list: listRef(this.lists.find((list) => list.id === card.listId)),
+    });
     return card;
   }
 
   private addCommentAction(card: FakeTrelloCard, text: string): FakeTrelloAction {
+    return this.recordCardAction(card, "commentCard", { text });
+  }
+
+  /**
+   * Append one board action for a card mutation and bump the card's
+   * `dateLastActivity`, as Trello does for every card action.
+   */
+  private recordCardAction(
+    card: FakeTrelloCard,
+    type: string,
+    data: Record<string, unknown>,
+  ): FakeTrelloAction {
     const action: FakeTrelloAction = {
-      id: String(this.nextCommentId++),
+      id: (this.nextActionNumber++).toString(16).padStart(24, "0"),
       cardId: card.id,
-      type: "commentCard",
+      type,
       date: this.timestamp(),
       memberCreator: FAKE_MEMBER,
-      data: { text },
+      data: {
+        ...data,
+        card: { id: card.id, shortLink: card.shortLink, name: card.name },
+        board: { id: this.board.id, shortLink: this.board.shortLink, name: this.board.name },
+      },
     };
     this.actions.push(action);
     card.dateLastActivity = action.date;
@@ -699,6 +893,10 @@ function json(value: unknown, status = 200): Response {
     status,
     headers: { "content-type": "application/json; charset=utf-8" },
   });
+}
+
+function listRef(list: FakeTrelloList | undefined): Record<string, string> | undefined {
+  return list ? { id: list.id, name: list.name } : undefined;
 }
 
 function cardNotFound(cardId: string): Response {

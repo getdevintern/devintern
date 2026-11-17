@@ -19,7 +19,7 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 - Surface: `devintern worker` surface
 - Status: `live`
 - Evidence: GitLab worker suite
-- Missing: GitHub/Jira/Trello/Linear worker paths (Azure DevOps and Asana: next rows).
+- Missing: GitHub worker path (Jira, Trello, Azure DevOps, Linear, and Asana: see the tracker files).
 - Last reviewed: 2026-11-17
 
 ### Scheduled `[[automations]]`: schedule, no-op, branch/push policy, hot reload

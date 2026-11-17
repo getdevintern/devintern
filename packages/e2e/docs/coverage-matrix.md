@@ -64,8 +64,8 @@ Trackers:
 - [coverage/tracker-github-issues.md](coverage/tracker-github-issues.md): GitHub Issues as the tracker.
 - [coverage/tracker-gitlab-issues.md](coverage/tracker-gitlab-issues.md): local GitLab and GitLab.com Issues.
 - [coverage/tracker-jira.md](coverage/tracker-jira.md): Jira fake lifecycle, estimation, smoke, and Layer 2 plan.
-- [coverage/tracker-trello.md](coverage/tracker-trello.md): Trello fake lifecycle, smoke, and Layer 2 plan.
-- [coverage/tracker-linear.md](coverage/tracker-linear.md): Linear GraphQL fake lifecycle.
+- [coverage/tracker-trello.md](coverage/tracker-trello.md): Trello fake lifecycle, board-actions worker polling, smoke, and Layer 2 plan.
+- [coverage/tracker-linear.md](coverage/tracker-linear.md): Linear GraphQL fake lifecycle and worker polling.
 - [coverage/tracker-asana.md](coverage/tracker-asana.md): Asana fake lifecycle and Events API worker polling.
 - [coverage/tracker-azure-devops.md](coverage/tracker-azure-devops.md): Azure DevOps fake lifecycle and WIQL worker polling.
 

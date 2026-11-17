@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { GitHubPRClient, isTransientPrFailure, parsePrLabels } from "../src/lib/code-host";
+import {
+  GitHubPRClient,
+  PRManager,
+  isTransientPrFailure,
+  parsePrLabels,
+} from "../src/lib/code-host";
 import type { PRInfo } from "../src/lib/code-host";
 
 const originalFetch = globalThis.fetch;
@@ -197,6 +202,7 @@ describe("GitHubPRClient.createPullRequest", () => {
     const result = await client.createPullRequest(basePrInfo());
 
     expect(result.success).toBe(false);
+    expect(result.permanent).toBe(true);
     expect(result.message).toContain("Validation Failed");
   });
 
@@ -212,7 +218,57 @@ describe("GitHubPRClient.createPullRequest", () => {
 
     expect(attempts).toBe(1); // no retry and no lookup for non-transient errors
     expect(result.success).toBe(false);
+    expect(result.permanent).toBe(true);
     expect(result.message).toContain("Not Found");
+  });
+
+  test("keeps an expired-token 401 retryable", async () => {
+    globalThis.fetch = mockFetch(async () => jsonResponse(401, { message: "Bad credentials" }));
+
+    const result = await new GitHubPRClient("expired").createPullRequest(basePrInfo());
+
+    expect(result.success).toBe(false);
+    expect(result.permanent).toBeUndefined();
+  });
+});
+
+describe("PRManager permanent failures", () => {
+  const saved: Record<string, string | undefined> = {};
+  const keys = [
+    "GITHUB_TOKEN",
+    "GITHUB_APP_ID",
+    "GITHUB_APP_PRIVATE_KEY_PATH",
+    "GITHUB_APP_PRIVATE_KEY_BASE64",
+    "GITHUB_APP_INSTALLATION_ID",
+  ];
+  afterEach(() => {
+    for (const key of keys) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    }
+  });
+
+  test("tags a missing GITHUB_TOKEN as permanent", async () => {
+    for (const key of keys) {
+      saved[key] = process.env[key];
+      delete process.env[key];
+    }
+    const manager = new PRManager();
+    manager.detectRepository = async () =>
+      ({
+        platform: "github",
+        provider: "github",
+        repository: "owner/repo",
+      }) as Awaited<ReturnType<PRManager["detectRepository"]>>;
+
+    const result = await manager.createPullRequest(
+      { key: "DEV-1", summary: "Test" } as never,
+      "feature/dev-1",
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.permanent).toBe(true);
+    expect(result.message).toContain("GitHub client not configured");
   });
 });
 

@@ -152,7 +152,7 @@ export interface UtilsSurface {
   pullReviewWorktreeBranch(worktreePath: string, branch: string, verbose: boolean): Promise<void>;
   prepareReviewWorktree(
     branch: string,
-    options?: { verbose?: boolean; cwd?: string },
+    options?: { verbose?: boolean; cwd?: string; installDependencies?: boolean },
   ): Promise<{ success: boolean; path?: string; error?: string }>;
   getReviewWorktreePath(branch?: string): string;
   cleanupStaleReviewWorktrees(

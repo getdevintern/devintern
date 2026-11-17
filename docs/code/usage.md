@@ -245,6 +245,7 @@ Effort: high
 - Check token/App permissions
 - For GitHub App: Ensure the App is installed on the repository
 - Use `--verbose` flag to see detailed error messages
+- The branch stays pushed, and a `Pull request could not be created` comment is posted on the ticket (unless `--skip-comments` is set). Fix the cause and re-run with `--create-pr`
 
 **"Issue not found" / card fetch errors**
 
