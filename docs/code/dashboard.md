@@ -27,6 +27,7 @@ It starts automatically with `devintern worker`. Open [http://localhost:4400](ht
 - Run a recurring automation immediately instead of waiting for its next scheduled time
 - Hand the worker a one-off task with **New task**, without creating a tracker ticket
 - Review recent worker logs when something needs attention
+- See when work happens on **Stats** → **When runs happen**: a weekday × hour heatmap of run pickups and agent time, filterable by run origin, with the peak pickup hour, the quietest 4-hour block, and idle hours. Hours default to the worker host's timezone (the one cron automations fire in); switch to your own timezone when it differs. Use it to move recurring automations into quiet hours
 
 The overview also summarizes activity and success rates, which is useful for spotting repeated failures without checking every run individually.
 
@@ -154,7 +155,7 @@ Every read-only dashboard view is also a `devintern worker` subcommand. The comm
 | `devintern worker runs show <id>` | `GET /api/runs/:id` | One run with its stages (and their detail), retry eligibility and audit, harness logs, and artifacts |
 | `devintern worker runs logs <id> [<name>]` | `GET /api/runs/:id/harness-logs[/:name]` | A run's agent transcripts, or the redacted tail of one |
 | `devintern worker runs artifacts <id> [<artifact-id>]` | `GET /api/runs/:id/artifacts[/:artifactId]` | A run's registered artifacts, or one artifact's content |
-| `devintern worker stats [--window 7d\|30d\|90d\|all]` | `GET /api/stats` | Success and escalation rates, durations, per-harness and per-origin counts (default `30d`) |
+| `devintern worker stats [--window 7d\|30d\|90d\|all] [--tz <zone>]` | `GET /api/stats` | Success and escalation rates, durations, per-harness and per-origin counts, and hour-of-day activity (`stats.activity`) in the worker host's timezone or `--tz` (default `30d`) |
 | `devintern worker automations` | `GET /api/automations` | Configured automations with `nextDueAt` and `lastRun` |
 | `devintern worker prs` | `GET /api/agent-prs` | Open pull and merge requests opened by the agent |
 | `devintern worker queue` | `GET /api/queue` | Queued work that has not started |

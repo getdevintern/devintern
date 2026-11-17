@@ -24,6 +24,7 @@ import type {
 import { loadStandaloneAutomationActions } from "../automation/manual";
 import type { CodeHostProvider } from "../code-host/index";
 import { RunStore } from "../state/run-recorder";
+import { hostTimeZone, isValidTimeZone } from "../state/run-activity";
 import type {
   RunOrigin,
   RunRecord,
@@ -621,8 +622,8 @@ export class DashboardData {
     this.inflightAutomationRuns.delete(automationId);
   }
 
-  getStats(windowMs: number | null): RunStats | null {
-    return this.read(null, (stores) => stores.runs.getStats(windowMs));
+  getStats(windowMs: number | null, timeZone?: string): RunStats | null {
+    return this.read(null, (stores) => stores.runs.getStats(windowMs, timeZone));
   }
 
   getQueueStats(): WorkerQueueStats {
@@ -1380,15 +1381,19 @@ export function handleRunArtifact(
  * `GET /api/stats` — aggregate run statistics over a time window.
  *
  * @param data - Dashboard data source
- * @param params - Query params: `window` (7d | 30d | 90d | all, default 30d)
+ * @param params - `window` (7d | 30d | 90d | all, default 30d); `tz` (IANA zone, default host)
  */
 export function handleStats(data: DashboardData, params: URLSearchParams): ApiResponse {
   const window = params.get("window") ?? "30d";
   if (!(window in STATS_WINDOWS)) {
     return badRequest(`window must be one of: ${Object.keys(STATS_WINDOWS).join(", ")}`);
   }
-  const stats = data.getStats(STATS_WINDOWS[window] ?? null);
-  return { status: 200, body: { window, stats } };
+  const timeZone = params.get("tz") || hostTimeZone();
+  if (!isValidTimeZone(timeZone)) {
+    return badRequest(`tz must be an IANA timezone (got ${JSON.stringify(timeZone)})`);
+  }
+  const stats = data.getStats(STATS_WINDOWS[window] ?? null, timeZone);
+  return { status: 200, body: { window, hostTimeZone: hostTimeZone(), stats } };
 }
 
 /**

@@ -297,6 +297,23 @@ describe("dashboard API", () => {
     expect(handleStats(data, new URLSearchParams("window=1y")).status).toBe(400);
   });
 
+  test("handleStats buckets activity in the requested timezone", () => {
+    const store = new RunStore(dbPath);
+    seedRun(store, { status: "succeeded" });
+    store.close();
+
+    const utc = handleStats(data, new URLSearchParams("window=7d&tz=UTC"));
+    const body = utc.body as { hostTimeZone: string; stats: RunStats };
+    expect(typeof body.hostTimeZone).toBe("string");
+    expect(body.stats.activity.timezone).toBe("UTC");
+    const starts = body.stats.activity.cells.reduce((sum, cell) => sum + cell.starts, 0);
+    expect(starts).toBe(1);
+    const startCell = body.stats.activity.cells.find((cell) => cell.starts > 0);
+    expect(startCell?.hour).toBe(new Date().getUTCHours());
+
+    expect(handleStats(data, new URLSearchParams("tz=Mars/Olympus")).status).toBe(400);
+  });
+
   test("handleWorkerStatus reports lock, queue, agent PRs, and cursors", () => {
     const state = new WorkerState(dbPath);
     state.recordAgentPr({ repo: "acme/webapp", prNumber: 7 });
