@@ -1786,6 +1786,101 @@ describe("runWorkerAdd", () => {
     expect(code).toBe(1);
     expect(cap.err.join("\n")).toContain("--wait needs a running worker");
   });
+
+  /** A lock taken in another PID namespace whose pid is invisible here. */
+  function writeForeignNamespaceLock(): void {
+    writeFileSync(
+      join(dir, ".worker.lock"),
+      JSON.stringify({
+        pid: 999_999_999,
+        timestamp: new Date().toISOString(),
+        // Never equal to a real reader's namespace; off Linux the reader has
+        // none, which is unverifiable too, so the result is host-independent.
+        pidNamespace: "pid:[foreign-test-namespace]",
+      }),
+    );
+  }
+
+  test("an unverifiable worker prints the neutral line instead of 'No worker is running'", async () => {
+    writeForeignNamespaceLock();
+    const cap = capture();
+    const code = await runWorkerAdd(
+      ["--workspace", configPath, "--repo", "backend", "--title", "Sandboxed enqueue"],
+      cap.options,
+    );
+    expect(code).toBe(0);
+    const output = [...cap.out, ...cap.err].join("\n");
+    expect(output).toContain(
+      "Could not verify the worker from this sandbox; the task is queued durably.",
+    );
+    expect(output).not.toContain("No worker is running");
+  });
+
+  test("--resume with an unverifiable worker prints the neutral line", async () => {
+    const seeded = new InjectedTaskStore(workspaceDbPath(dir));
+    seeded.enqueue({
+      taskKey: "local-sandboxed-resume",
+      repo: "backend",
+      title: "Sandboxed resume",
+      body: "context",
+      taskFile: join(dir, "injected", "local-sandboxed-resume.md"),
+    });
+    seeded.finish(seeded.claimNext()!.id, "failed", "worker restarted while this task was running");
+    seeded.close();
+    writeForeignNamespaceLock();
+
+    const cap = capture();
+    const code = await runWorkerAdd(
+      ["--workspace", configPath, "--resume", "local-sandboxed-resume"],
+      cap.options,
+    );
+    expect(code).toBe(0);
+    const output = [...cap.out, ...cap.err].join("\n");
+    expect(output).toContain("Could not verify the worker from this sandbox");
+    expect(output).not.toContain("No worker is running");
+  });
+
+  test("--wait is allowed and survives the restart grace with an unverifiable worker", async () => {
+    writeForeignNamespaceLock();
+    const dbPath = workspaceDbPath(dir);
+    // Claim the row, then settle it only after the restart grace has elapsed:
+    // a waiter that treated the unverifiable lock as dead would give up first.
+    const companion = (async () => {
+      const store = new InjectedTaskStore(dbPath);
+      try {
+        let claimed: { id: number } | null = null;
+        for (let attempt = 0; attempt < 300 && !claimed; attempt++) {
+          if (store.hasPending()) claimed = store.claimNext();
+          else await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        if (!claimed) throw new Error("timed out waiting for the enqueued row");
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        store.finish(claimed.id, "done");
+      } finally {
+        store.close();
+      }
+    })();
+
+    const cap = capture();
+    const code = await runWorkerAdd(
+      [
+        "--workspace",
+        configPath,
+        "--repo",
+        "backend",
+        "--title",
+        "Sandboxed wait",
+        "--wait",
+        "--json",
+      ],
+      { ...cap.options, restartGraceMs: 100 },
+    );
+    await companion;
+
+    expect(cap.err.join("\n")).not.toContain("--wait needs a running worker");
+    expect(code).toBe(0);
+    expect(JSON.parse(cap.out.at(-1)!)).toMatchObject({ status: "done" });
+  });
 });
 
 describe("worker add harness usage-limit warning", () => {

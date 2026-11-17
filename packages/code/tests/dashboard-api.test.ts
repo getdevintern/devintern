@@ -1,6 +1,6 @@
 import { ArtifactStore } from "../src/lib/artifacts/store";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
@@ -12,6 +12,7 @@ import {
   handleRunDetail,
   handleStats,
   handleWorkerStatus,
+  resolveWorkerStatus,
 } from "../src/lib/observability/dashboard-api";
 import {
   resolveDashboardHistoryDbPath,
@@ -1325,5 +1326,57 @@ describe("dashboard server", () => {
     } finally {
       server.stop(true);
     }
+  });
+});
+
+describe("resolveWorkerStatus PID-namespace liveness", () => {
+  let workingDir: string;
+  let workspaceDir: string;
+
+  beforeEach(() => {
+    workingDir = mkdtempSync(join(tmpdir(), "worker-status-cwd-"));
+    workspaceDir = mkdtempSync(join(tmpdir(), "worker-status-ws-"));
+  });
+
+  afterEach(() => {
+    rmSync(workingDir, { recursive: true, force: true });
+    rmSync(workspaceDir, { recursive: true, force: true });
+  });
+
+  function writeWorkspaceLock(fields: Record<string, unknown>): string {
+    const lockPath = join(workspaceDir, ".worker.lock");
+    writeFileSync(
+      lockPath,
+      JSON.stringify({ pid: 999_999_999, timestamp: "2026-11-17T10:11:59.687Z", ...fields }),
+    );
+    return lockPath;
+  }
+
+  test("a dead pid from another PID namespace is unknown, not stopped", () => {
+    // Never equal to the reader's namespace (and off Linux the reader has
+    // none, which is just as unverifiable), so this holds on any host.
+    const lockFile = writeWorkspaceLock({ pidNamespace: "pid:[foreign-test-namespace]" });
+    expect(resolveWorkerStatus(workingDir, workspaceDir)).toEqual({
+      status: "unknown",
+      pid: 999_999_999,
+      startedAt: "2026-11-17T10:11:59.687Z",
+      lockFile,
+      reason: "pid-namespace",
+    });
+  });
+
+  test("a legacy lock without a namespace still reports stopped", () => {
+    writeWorkspaceLock({});
+    expect(resolveWorkerStatus(workingDir, workspaceDir).status).toBe("stopped");
+  });
+
+  test("an unverifiable lock beats a provably stale one", () => {
+    writeWorkspaceLock({ pidNamespace: "pid:[foreign-test-namespace]" });
+    mkdirSync(join(workingDir, ".devintern-code"));
+    writeFileSync(
+      join(workingDir, ".devintern-code", ".worker.lock"),
+      JSON.stringify({ pid: 999_999_999, timestamp: "2026-11-17T09:00:00.000Z" }),
+    );
+    expect(resolveWorkerStatus(workingDir, workspaceDir).status).toBe("unknown");
   });
 });

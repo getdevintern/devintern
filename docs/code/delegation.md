@@ -182,6 +182,12 @@ without the task settling. A live worker that keeps deferring the task (a
 usage-limit pause, a permanently saturated repo) can no longer make `--wait`
 hang forever. Pass `--wait-timeout 0` to wait without a limit.
 
+From inside a PID-isolated sandbox (for example an agent running under
+bubblewrap `--unshare-pid`), the worker's pid is invisible, so `worker add`
+cannot verify the worker. It prints "Could not verify the worker from this
+sandbox; the task is queued durably." instead of claiming no worker is running,
+allows `--wait`, and treats the worker as alive while waiting.
+
 A timeout, worker stop, or inconclusive wait reports `status: "failed"` with an
 `error` even though the task itself may still be queued or running. Inspect the
 error and the existing run in the dashboard or worker logs before enqueuing

@@ -1252,18 +1252,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
     ? [...new Set(config.teams.map((team) => team.tracker))].sort().join(",")
     : config.defaults.tracker;
   console.log(`🗂️  Workspace: ${configPath} (${config.repos.length} repo(s)${teamsLabel})`);
-  console.log(
-    `⚙️  Agent concurrency: ${config.workspace.execution.maxConcurrency} global, ` +
-      `${config.workspace.execution.maxConcurrencyPerRepo} per repository`,
-  );
-  if (
-    config.workspace.execution.maxConcurrency > 1 ||
-    config.workspace.execution.maxConcurrencyPerRepo > 1
-  ) {
-    console.warn(
-      "⚠️  Concurrent jobs share host ports, processes, Docker, caches, and linked Git metadata.",
-    );
-  }
+  logAgentConcurrency(config);
   console.log(
     "🔄 Live config reload armed: edits to workspace.toml apply automatically (SIGHUP forces one)",
   );
@@ -1332,6 +1321,19 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
     },
     acquirers,
   );
+}
+
+/** Log the configured agent concurrency and warn when jobs can run in parallel. */
+function logAgentConcurrency(config: WorkspaceConfig): void {
+  const { maxConcurrency, maxConcurrencyPerRepo } = config.workspace.execution;
+  console.log(
+    `⚙️  Agent concurrency: ${maxConcurrency} global, ${maxConcurrencyPerRepo} per repository`,
+  );
+  if (maxConcurrency > 1 || maxConcurrencyPerRepo > 1) {
+    console.warn(
+      "⚠️  Concurrent jobs share host ports, processes, Docker, caches, and linked Git metadata.",
+    );
+  }
 }
 
 /** Export shared workspace values into `process.env` and return derived defaults. */

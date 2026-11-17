@@ -257,6 +257,7 @@ On shutdown the scheduler stops its timer, terminates active automation subproce
 | A run failed and you need to know why                | Open the dashboard's Logs tab to read recent worker output without a shell on the machine ([details](./dashboard.md)).                                                                    |
 | The dashboard Logs tab is empty                      | The daemon tees its output to `worker.stdout.log` / `worker.stderr.log` in the workspace home. Check those files or `journalctl --user -u devintern-worker`.                              |
 | You need run data in a script or a sandboxed agent | Use the read-only `devintern worker runs`, `stats`, `automations`, `queue`, `status`, and `logs` commands. With `--json` they print the dashboard API body without needing the dashboard port ([details](./dashboard.md#read-dashboard-data-from-the-command-line)). |
+| `worker status` says `unknown` inside a sandbox | Expected. The worker records its Linux PID namespace in `.worker.lock`, and a command running inside a PID-isolated sandbox (for example bubblewrap `--unshare-pid`) cannot see the worker's pid, so it reports `unknown` instead of `stopped`. In that case `worker add` still enqueues durably and allows `--wait`, and a worker started from inside the sandbox refuses to take over the lock. Run `devintern worker status` outside the sandbox to confirm. |
 
 ## Scheduled story-point estimation
 
