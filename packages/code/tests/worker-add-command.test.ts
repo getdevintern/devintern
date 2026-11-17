@@ -600,12 +600,12 @@ describe("runWorkerAdd", () => {
       events.push("getById");
       return originalGet.call(this, id);
     });
-    const closeSpy = spyOn(InjectedTaskStore.prototype, "close").mockImplementation(
-      function (this: InjectedTaskStore) {
-        events.push("close");
-        return originalClose.call(this);
-      },
-    );
+    const closeSpy = spyOn(InjectedTaskStore.prototype, "close").mockImplementation(function (
+      this: InjectedTaskStore,
+    ) {
+      events.push("close");
+      return originalClose.call(this);
+    });
 
     let settleStore: InjectedTaskStore | null = null;
     const settle = (async () => {
@@ -719,23 +719,24 @@ describe("runWorkerAdd", () => {
     );
     const dbPath = workspaceDbPath(dir);
     const enqueue = InjectedTaskStore.prototype.enqueue;
-    const enqueueSpy = spyOn(InjectedTaskStore.prototype, "enqueue").mockImplementation(
-      function (this: InjectedTaskStore, input) {
-        const result = enqueue.call(this, input);
-        const claimed = this.claimNext()!;
-        const runs = new RunStore(dbPath);
-        const runId = runs.createRun({
-          origin: "local",
-          taskKey: claimed.taskKey,
-          repo: claimed.repo,
-        });
-        runs.finishRun(runId, "succeeded");
-        runs.close();
-        this.finish(claimed.id, "done");
-        this.pruneSettled(0, Date.now() + 1_000);
-        return result;
-      },
-    );
+    const enqueueSpy = spyOn(InjectedTaskStore.prototype, "enqueue").mockImplementation(function (
+      this: InjectedTaskStore,
+      input,
+    ) {
+      const result = enqueue.call(this, input);
+      const claimed = this.claimNext()!;
+      const runs = new RunStore(dbPath);
+      const runId = runs.createRun({
+        origin: "local",
+        taskKey: claimed.taskKey,
+        repo: claimed.repo,
+      });
+      runs.finishRun(runId, "succeeded");
+      runs.close();
+      this.finish(claimed.id, "done");
+      this.pruneSettled(0, Date.now() + 1_000);
+      return result;
+    });
     try {
       const cap = capture();
       const code = await runWorkerAdd(
@@ -873,33 +874,34 @@ describe("runWorkerAdd", () => {
     );
     const dbPath = workspaceDbPath(dir);
     const enqueue = InjectedTaskStore.prototype.enqueue;
-    const enqueueSpy = spyOn(InjectedTaskStore.prototype, "enqueue").mockImplementation(
-      function (this: InjectedTaskStore, input) {
-        const result = enqueue.call(this, input);
-        const first = this.claimNext()!;
-        const runs = new RunStore(dbPath);
-        const firstRun = runs.createRun({
-          origin: "local",
-          taskKey: first.taskKey,
-          repo: first.repo,
-        });
-        runs.finishRun(firstRun, "failed", "first task failed");
-        this.finish(first.id, "failed", "first task failed");
-        this.pruneSettled(0, Date.now() + 1_000);
-        const second = enqueue.call(this, input).task;
-        const claimed = this.claimNext()!;
-        expect(claimed.id).toBe(second.id);
-        const secondRun = runs.createRun({
-          origin: "local",
-          taskKey: claimed.taskKey,
-          repo: claimed.repo,
-        });
-        runs.finishRun(secondRun, "succeeded");
-        runs.close();
-        this.finish(second.id, "done");
-        return result;
-      },
-    );
+    const enqueueSpy = spyOn(InjectedTaskStore.prototype, "enqueue").mockImplementation(function (
+      this: InjectedTaskStore,
+      input,
+    ) {
+      const result = enqueue.call(this, input);
+      const first = this.claimNext()!;
+      const runs = new RunStore(dbPath);
+      const firstRun = runs.createRun({
+        origin: "local",
+        taskKey: first.taskKey,
+        repo: first.repo,
+      });
+      runs.finishRun(firstRun, "failed", "first task failed");
+      this.finish(first.id, "failed", "first task failed");
+      this.pruneSettled(0, Date.now() + 1_000);
+      const second = enqueue.call(this, input).task;
+      const claimed = this.claimNext()!;
+      expect(claimed.id).toBe(second.id);
+      const secondRun = runs.createRun({
+        origin: "local",
+        taskKey: claimed.taskKey,
+        repo: claimed.repo,
+      });
+      runs.finishRun(secondRun, "succeeded");
+      runs.close();
+      this.finish(second.id, "done");
+      return result;
+    });
     try {
       const cap = capture();
       const code = await runWorkerAdd(
