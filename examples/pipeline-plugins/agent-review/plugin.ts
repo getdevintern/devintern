@@ -89,7 +89,7 @@ const definition: StepDefinition = {
         for (let attempt = 0; attempt < 2; attempt++) {
           const output = await context.runAgentPrompt(prompt);
           try {
-            feedback = context.parseReviewFeedback(output);
+            feedback = context.parseReviewFeedback(output, { enforceApproval: false });
             break;
           } catch (error) {
             if (attempt === 1) {
@@ -104,6 +104,12 @@ const definition: StepDefinition = {
         if (!feedback) return { kind: "halt", reason: "Review agent returned no verdict" };
 
         const blocking = context.filterByPriority(feedback.items, minPriority);
+        // An approval that lists blocking findings is contradictory; resolve it
+        // as a rejection so `onBlocked` decides instead of treating it as a
+        // malformed verdict and retrying the agent.
+        if (feedback.approved && blocking.length > 0) {
+          feedback = { ...feedback, approved: false };
+        }
         console.log(`🔎 agent-review: ${feedback.summary} (${blocking.length} blocking)`);
         if (blocking.length === 0) {
           return {

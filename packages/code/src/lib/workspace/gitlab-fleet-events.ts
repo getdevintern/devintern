@@ -141,13 +141,15 @@ export async function buildGitLabFleetAcquirers(options: {
         const repo = resolveGitLabRepo(mr);
         if (!repo) return { outcome: "skipped", message: "repository is not configured" };
         const invoke = async (base: string, signal?: AbortSignal) => {
+          const agentSelection = config.workspace.conflictAgent;
           return runResolveConflictsUrlViaCli(
             mr.webUrl,
             `${mr.instanceUrl}:${mr.projectPath}!${mr.changeNumber}`,
             {
               cwd: base,
               signal,
-              env: buildRepoEnv(repo, workspaceDir),
+              env: buildRepoEnv(repo, workspaceDir, { agentSelection }),
+              harnessPin: agentSelection?.harness,
               expectedHeadSha: expected.headSha,
               expectedBaseSha: expected.baseSha,
             },

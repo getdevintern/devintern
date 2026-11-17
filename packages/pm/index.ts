@@ -8,6 +8,7 @@
 import { askConfirm } from "./lib/runtime/stdin.js";
 import { getArgs } from "./lib/runtime/args.js";
 import { configureTerminalEncoding } from "./lib/runtime/terminal.js";
+import { enableEnvProxy, formatCliError } from "./lib/runtime/proxy.js";
 import { getModuleDir } from "./lib/runtime/path.js";
 import { loadConfig, loadSupabaseConfig, migrateLegacyConfigDir } from "./lib/config";
 import { createEngine, DEFAULT_ISSUE_TYPES, EngineError } from "./lib/engine";
@@ -124,6 +125,10 @@ function isInteractiveCancelled(error: unknown): boolean {
  */
 async function main() {
   configureTerminalEncoding();
+
+  // Node's fetch ignores HTTP(S)_PROXY unless told otherwise; enable it before
+  // any tracker, license, or update request. No-op without a proxy or on Bun.
+  enableEnvProxy();
 
   // Enable verbose API logging globally when --verbose or -v is passed
   const args = getArgs();
@@ -246,7 +251,7 @@ async function main() {
       process.exit(0);
     }
     captureError(error);
-    console.error("\n❌ Error:", error instanceof Error ? error.message : error);
+    console.error("\n❌ Error:", formatCliError(error));
     await flushErrorTracking();
     process.exit(1);
   }
@@ -442,6 +447,9 @@ async function runInteractiveSession(engine: PmEngine, config: LoadedConfig): Pr
       const resolved = resolveHarness({ harnessName: interactiveConfig.harnessName });
       resolved.path = resolveExecutablePathStrict(resolved.path, resolved.harness.displayName);
       config.agent = resolved;
+      // An explicit harness pick disables AGENT_HARNESS failover, like --harness.
+      config.agentFallbacks = [];
+      config.agentIsFallback = false;
     }
 
     const shouldContinue = await runCreateFlow({
@@ -994,12 +1002,12 @@ async function runCreateFlow(params: CreateFlowParams): Promise<boolean> {
     if (isInteractiveCancelled(error)) {
       throw error;
     }
-    console.error("\n❌ Error:", error instanceof Error ? error.message : error);
+    console.error("\n❌ Error:", formatCliError(error));
     // In interactive mode, show error and wait for user to restart in-place
     if (interactiveHandle) {
       await showInteractiveMessageAndRestart(
         interactiveHandle,
-        `Error: ${error instanceof Error ? error.message : "Unknown error"}`,
+        `Error: ${error instanceof Error ? formatCliError(error) : "Unknown error"}`,
       );
       return true; // continue create-another loop
     }

@@ -30,27 +30,149 @@ import {
   handleStats,
   handleWorkerStatus,
 } from "./lib/observability/dashboard-api";
-import type { AutomationRunDeps, RetryHandlerDeps } from "./lib/observability/dashboard-api";
+import { handleOverview } from "./lib/observability/dashboard-overview";
+import { handleQueuedWork } from "./lib/observability/queued-work";
+import { handleCreateTask } from "./lib/observability/dashboard-tasks";
+import { DashboardReports } from "./lib/observability/dashboard-report";
+import type { DashboardReportDeps } from "./lib/observability/dashboard-report";
+import { handleWorkspace } from "./lib/observability/dashboard-workspace";
+import type {
+  ApiResponse,
+  AutomationRunDeps,
+  RetryHandlerDeps,
+} from "./lib/observability/dashboard-api";
 import type { DashboardAutomationActions } from "./lib/automation/acquirer";
+import {
+  dashboardOriginMatchesHost,
+  isDashboardTailscaleAutodetectDisabledByEnv,
+  isLoopbackDashboardHost,
+  mergeDashboardAllowedOrigins,
+  parseDashboardAllowedOriginsEnv,
+} from "./lib/observability/dashboard-origins";
+import type { DashboardAllowedOrigin } from "./lib/observability/dashboard-origins";
+import { TailscaleOriginDetector } from "./lib/observability/dashboard-tailscale";
+import type { TailscaleStatusProbe } from "./lib/observability/dashboard-tailscale";
 
 export const DEFAULT_DASHBOARD_PORT = 4400;
-const LOOPBACK_DASHBOARD_HOSTS = new Set(["127.0.0.1", "localhost", "::1"]);
+export { isLoopbackDashboardHost };
 
-/** Whether a dashboard bind target is an explicitly supported loopback host. */
-export function isLoopbackDashboardHost(host: string): boolean {
-  const normalized = host
-    .trim()
-    .toLowerCase()
-    .replace(/^\[|\]$/g, "");
-  return LOOPBACK_DASHBOARD_HOSTS.has(normalized);
+/** Why {@link checkDashboardRequest} refused a request. */
+export interface DashboardRequestRejection {
+  status: 403 | 415;
+  /** `host`: the Host is neither loopback nor allowlisted (worth a re-detection). */
+  reason: "host" | "origin" | "content-type";
+  error: string;
+}
+
+export interface DashboardRequestGuardOptions {
+  /** Trusted non-loopback origins (explicit and auto-detected). */
+  allowedOrigins?: readonly DashboardAllowedOrigin[];
+}
+
+/** Parse a `Host` header into its lowercased authority, or null when malformed. */
+function parseHostHeader(header: string | null): { host: string; hostname: string } | null {
+  if (!header || /[/@?#\s]/.test(header)) return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(`http://${header}`);
+  } catch {
+    return null;
+  }
+  return { host: parsed.host, hostname: parsed.hostname };
+}
+
+/**
+ * Central CSRF / DNS-rebinding guard for every `/api` request.
+ *
+ * Host (every method, GET included, because rebinding can read):
+ * - a loopback name (`127.0.0.1`, `localhost`, `[::1]`) on ANY port is
+ *   accepted. A DNS-rebinding page cannot make a browser send a loopback Host
+ *   (the Host is the attacker's own name), and a remapped port (an SSH tunnel
+ *   on `localhost:8440`) is still the user's own machine;
+ * - otherwise the Host must belong to an allowed origin (explicit
+ *   `allowed_origins` or a detected Tailscale Serve name), else 403.
+ *
+ * Writes (non-GET/HEAD):
+ * - `Origin` must be the origin of the request's own Host: `http://<Host>`
+ *   for a loopback Host, or the allowed origin whose Host matched. A page on
+ *   another localhost port can neither read the API (same-origin policy, no
+ *   CORS headers) nor write it (its Origin is not this Host). An allowed
+ *   origin is also accepted on a loopback Host, for proxies that rewrite Host
+ *   to the upstream address. A missing `Origin` passes only with
+ *   `Sec-Fetch-Site: same-origin`. Otherwise 403;
+ * - `Content-Type` must start with `application/json`, which a cross-origin
+ *   page cannot send without a CORS preflight the server never approves,
+ *   else 415.
+ *
+ * `X-Forwarded-*` headers are never consulted.
+ *
+ * @param request - Incoming request
+ * @param options - Allowed non-loopback origins
+ * @returns null when the request may proceed, else the rejection to send
+ */
+export function checkDashboardRequest(
+  request: Request,
+  options: DashboardRequestGuardOptions = {},
+): DashboardRequestRejection | null {
+  const allowedOrigins = options.allowedOrigins ?? [];
+  const host = parseHostHeader(request.headers.get("host"));
+  const loopback = host !== null && isLoopbackDashboardHost(host.hostname);
+  const hostMatches = host
+    ? allowedOrigins.filter((entry) => dashboardOriginMatchesHost(entry, host.host))
+    : [];
+  if (!host || (!loopback && hostMatches.length === 0)) {
+    return {
+      status: 403,
+      reason: "host",
+      error:
+        "forbidden host; open the dashboard via http://localhost:<port> or http://127.0.0.1:<port>, " +
+        "or add its origin to [dashboard].allowed_origins",
+    };
+  }
+  if (request.method === "GET" || request.method === "HEAD") {
+    return null;
+  }
+  const origin = request.headers.get("origin");
+  if (origin === null) {
+    if (request.headers.get("sec-fetch-site") !== "same-origin") {
+      return { status: 403, reason: "origin", error: "forbidden: missing Origin header" };
+    }
+  } else {
+    const trusted = loopback
+      ? origin === `http://${host.host}` || allowedOrigins.some((entry) => entry.origin === origin)
+      : hostMatches.some((entry) => entry.origin === origin);
+    if (!trusted) {
+      return { status: 403, reason: "origin", error: "forbidden: cross-origin request" };
+    }
+  }
+  const contentType = request.headers.get("content-type") ?? "";
+  if (!contentType.toLowerCase().startsWith("application/json")) {
+    return {
+      status: 415,
+      reason: "content-type",
+      error: "unsupported media type: expected application/json",
+    };
+  }
+  return null;
 }
 
 export interface DashboardServerOptions {
   port?: number;
   host?: string;
+  /** Database owning run history (defaults to the project-scoped worker DB). */
   dbPath?: string;
+  /**
+   * Database owning durable queue counts (ad-hoc tasks, scheduled retries).
+   * Defaults to `dbPath` when supplied, else the configured workspace DB.
+   */
+  queueDbPath?: string;
   /** Project root used to locate the worker lock file. */
   workingDir?: string;
+  /**
+   * Workspace home holding the worker lock, capture files, and harness
+   * transcripts (defaults to `resolveWorkspaceDir()`, or `DEVINTERN_WORKSPACE_DIR`).
+   */
+  workspaceDir?: string;
   /** Live working-window snapshot provider (embedded dashboard). */
   scheduleSnapshot?: () => import("./lib/worker/schedule").ScheduleSnapshot | null;
   /**
@@ -71,6 +193,37 @@ export interface DashboardServerOptions {
   automationDeps?: AutomationRunDeps;
   /** Directories to search for worker capture files (primary first). */
   logDirs?: string[];
+  /**
+   * Explicitly trusted non-loopback origins (`--allow-origin`,
+   * `[dashboard].allowed_origins`); merged with `DASHBOARD_ALLOWED_ORIGINS`.
+   */
+  allowedOrigins?: readonly DashboardAllowedOrigin[];
+  /**
+   * Trust names `tailscale serve` proxies to this dashboard (default true).
+   * `DASHBOARD_TAILSCALE_AUTODETECT=0` also disables it.
+   */
+  tailscaleAutodetect?: boolean;
+  /** Replacement for `tailscale serve status --json` (tests). */
+  tailscaleProbe?: TailscaleStatusProbe;
+  /** Collaborator overrides for bug-report preview/submission (tests). */
+  reportDeps?: DashboardReportDeps;
+}
+
+/** Log trusted origins and the access warning they carry. */
+function logAllowedOrigins(origins: readonly DashboardAllowedOrigin[], label: string): void {
+  if (origins.length === 0) return;
+  console.log(`   ${label}: ${origins.map((entry) => entry.origin).join(", ")}`);
+  console.warn(
+    "   ⚠️  Anyone who can reach these addresses gets full dashboard access, including retries and automation runs.",
+  );
+  const funnel = origins.filter((entry) => entry.source === "tailscale-funnel");
+  if (funnel.length > 0) {
+    console.warn(
+      `   🚨 Tailscale Funnel publishes ${funnel.map((entry) => entry.origin).join(", ")} on the PUBLIC INTERNET ` +
+        "with no login: anyone on the internet can read run transcripts and trigger work. " +
+        "Run `tailscale funnel reset` or set DASHBOARD_TAILSCALE_AUTODETECT=0.",
+    );
+  }
 }
 
 /** Resolve the built dashboard UI directory, or null when not shipped/built. */
@@ -96,6 +249,29 @@ function json(payload: { status: number; body: unknown }): Response {
   });
 }
 
+/**
+ * `POST /api/tasks`: decode the JSON body and enqueue the ad-hoc task. The
+ * Origin/Content-Type checks already ran in {@link checkDashboardRequest}.
+ */
+async function createTaskFromRequest(data: DashboardData, request: Request): Promise<ApiResponse> {
+  let payload: unknown;
+  try {
+    payload = await request.json();
+  } catch {
+    return { status: 400, body: { error: "request body must be valid JSON" } };
+  }
+  return handleCreateTask(data, payload);
+}
+
+/** Parse a JSON request body; undefined when it is missing or malformed. */
+async function readJsonBody(request: Request): Promise<unknown> {
+  try {
+    return await request.json();
+  } catch {
+    return undefined;
+  }
+}
+
 /** Serve a file from the UI dir, confined to it; null on miss/traversal. */
 function serveStatic(uiDir: string, pathname: string): Response | null {
   const relative = pathname === "/" ? "index.html" : pathname.slice(1);
@@ -111,7 +287,7 @@ function serveStatic(uiDir: string, pathname: string): Response | null {
 
 const MISSING_UI_PAGE =
   "devintern dashboard: UI assets not found.\n\n" +
-  "The JSON API is available under /api (try /api/runs, /api/stats, /api/worker).\n" +
+  "The JSON API is available under /api (try /api/overview, /api/runs, /api/stats, /api/worker).\n" +
   "If you are running from source, build the UI first:\n" +
   "  bun run --filter @devintern/dashboard-ui build\n";
 
@@ -137,12 +313,15 @@ export function startDashboardServer(
   }
   const data = new DashboardData({
     dbPath: options.dbPath,
+    queueDbPath: options.queueDbPath,
     workingDir: options.workingDir,
+    workspaceDir: options.workspaceDir,
     scheduleSnapshot: options.scheduleSnapshot,
     retryMode: options.retryMode,
     automationActions: options.automationActions,
     logDirs: options.logDirs,
   });
+  const reports = new DashboardReports(data, options.reportDeps);
   const uiDir = resolveUiDir();
 
   const runDetailPattern = /^\/api\/runs\/([^/]+)$/;
@@ -152,27 +331,76 @@ export function startDashboardServer(
   const runArtifactFilePattern = /^\/api\/runs\/([1-9][0-9]*)\/artifacts\/([a-f0-9-]{36})\/file$/;
   const runArtifactPattern = /^\/api\/runs\/([^/]+)\/artifacts\/([^/]+)$/;
   const runRetryPattern = /^\/api\/runs\/([^/]+)\/retry$/;
+  const runReportPreviewPattern = /^\/api\/runs\/([^/]+)\/report\/preview$/;
   const automationRunPattern = /^\/api\/automations\/([^/]+)\/run$/;
+
+  const envOrigins = parseDashboardAllowedOriginsEnv(process.env.DASHBOARD_ALLOWED_ORIGINS);
+  if (envOrigins.errors.length > 0) {
+    throw new Error(envOrigins.errors.join("\n"));
+  }
+  const explicitOrigins = mergeDashboardAllowedOrigins(
+    options.allowedOrigins ?? [],
+    envOrigins.origins,
+  );
+  const tailscaleAutodetect =
+    (options.tailscaleAutodetect ?? true) &&
+    !isDashboardTailscaleAutodetectDisabledByEnv(process.env.DASHBOARD_TAILSCALE_AUTODETECT);
+  // Assigned once the bound port is known (port 0 binds an ephemeral one).
+  let tailscale: TailscaleOriginDetector | null = null;
+  const guard = (request: Request) =>
+    checkDashboardRequest(request, {
+      allowedOrigins: tailscale
+        ? mergeDashboardAllowedOrigins(explicitOrigins, tailscale.current)
+        : explicitOrigins,
+    });
+
+  /** Non-GET `/api` routes (already past the guard); anything else is 405. */
+  const routeWrite = async (request: Request, pathname: string): Promise<ApiResponse> => {
+    if (request.method !== "POST") {
+      return { status: 405, body: { error: "method not allowed" } };
+    }
+    const retry = pathname.match(runRetryPattern);
+    if (retry) {
+      return handleRetryRun(data, retry[1], options.retryDeps);
+    }
+    const automationRun = pathname.match(automationRunPattern);
+    if (automationRun) {
+      return handleRunAutomation(data, automationRun[1], options.automationDeps);
+    }
+    if (pathname === "/api/tasks") {
+      return createTaskFromRequest(data, request);
+    }
+    const reportPreview = pathname.match(runReportPreviewPattern);
+    if (reportPreview) {
+      return reports.preview(reportPreview[1], await readJsonBody(request));
+    }
+    if (pathname === "/api/reports") {
+      return reports.submit(await readJsonBody(request));
+    }
+    return { status: 405, body: { error: "method not allowed" } };
+  };
 
   const server = Bun.serve({
     port,
     hostname: host,
-    async fetch(request: Request): Promise<Response> {
+    async fetch(request): Promise<Response> {
       const url = new URL(request.url);
       const { pathname } = url;
 
       if (pathname.startsWith("/api")) {
-        const retry = request.method === "POST" ? pathname.match(runRetryPattern) : null;
-        if (retry) {
-          return json(await handleRetryRun(data, retry[1], options.retryDeps));
+        // Central CSRF / DNS-rebinding guard; must stay ahead of every route.
+        let rejection = guard(request);
+        if (rejection?.reason === "host" && tailscale) {
+          // An unknown Host may be a `tailscale serve` added after startup:
+          // re-detect (rate limited) before refusing.
+          await tailscale.refreshIfStale();
+          rejection = guard(request);
         }
-        const automationRun =
-          request.method === "POST" ? pathname.match(automationRunPattern) : null;
-        if (automationRun) {
-          return json(await handleRunAutomation(data, automationRun[1], options.automationDeps));
+        if (rejection) {
+          return json({ status: rejection.status, body: { error: rejection.error } });
         }
         if (request.method !== "GET") {
-          return json({ status: 405, body: { error: "method not allowed" } });
+          return json(await routeWrite(request, pathname));
         }
         if (pathname === "/api/health") {
           return json({ status: 200, body: { status: "ok" } });
@@ -220,6 +448,15 @@ export function startDashboardServer(
         if (pathname === "/api/worker") {
           return json(handleWorkerStatus(data));
         }
+        if (pathname === "/api/queue") {
+          return json(handleQueuedWork(data));
+        }
+        if (pathname === "/api/overview") {
+          return json(handleOverview(data));
+        }
+        if (pathname === "/api/workspace") {
+          return json(handleWorkspace(data));
+        }
         if (pathname === "/api/agent-prs") {
           return json(handleAgentPrs(data));
         }
@@ -246,8 +483,27 @@ export function startDashboardServer(
 
   console.log(`📊 Dashboard running at http://${host}:${port}`);
   console.log(`   Database: ${data.dbPath}${data.dbMissing ? " (not created yet)" : ""}`);
+  if (data.queueDbPath !== data.dbPath) {
+    console.log(
+      `   Queue database: ${data.queueDbPath}${existsSync(data.queueDbPath) ? "" : " (not created yet)"}`,
+    );
+  }
   if (!uiDir) {
     console.log("   UI assets not found — JSON API only (see /api/runs, /api/stats).");
+  }
+  logAllowedOrigins(explicitOrigins, "Allowed origins");
+  if (tailscaleAutodetect) {
+    tailscale = new TailscaleOriginDetector({
+      boundPort: server.port ?? port,
+      probe: options.tailscaleProbe,
+      onChange: (origins) => {
+        if (origins.length > 0)
+          logAllowedOrigins(origins, "Tailscale Serve origins (auto-detected)");
+        else console.log("   Tailscale Serve no longer proxies to this dashboard.");
+      },
+    });
+    // Fire-and-forget: detection never delays or fails startup.
+    void tailscale.refresh();
   }
 
   return server;

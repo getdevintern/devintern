@@ -78,26 +78,19 @@ export const OPT_IN_SUITES: readonly OptInSuite[] = [
   {
     name: "Jira tracker lifecycle E2E",
     script: "test:e2e:tracker:jira",
-    reason: "planned in Layer 2 of docs/tracker-e2e-plan.md",
+    reason: "planned in Layer 2 of docs/coverage/trackers.md",
     status: "todo",
   },
   {
     name: "Trello tracker lifecycle E2E",
     script: "test:e2e:tracker:trello",
-    reason: "planned in Layer 2 of docs/tracker-e2e-plan.md",
+    reason: "planned in Layer 2 of docs/coverage/trackers.md",
     status: "todo",
   },
   {
     name: "Linear, Asana, and Azure DevOps tracker smoke",
     script: "test:trackers",
     reason: "read-only checks are planned; the registry only detects them today",
-    status: "todo",
-  },
-  {
-    name: "Offline fake Trello server",
-    script: "test",
-    reason:
-      "planned in Layer 3 of docs/tracker-e2e-plan.md; the offline Jira fake runs in the default suite",
     status: "todo",
   },
 ];

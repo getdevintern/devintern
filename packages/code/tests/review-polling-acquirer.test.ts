@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, setSystemTime, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, setSystemTime, spyOn, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -8,6 +8,7 @@ import {
   runResolveConflictsViaCli,
 } from "../src/lib/acquirers/review-polling";
 import type {
+  AutomaticResolveResult,
   ConditionalResult,
   PolledComment,
   PolledPr,
@@ -18,6 +19,7 @@ import { WebhookQueue } from "../src/lib/state/webhook-queue";
 import { RunStore } from "../src/lib/state/run-recorder";
 import { WorkerState } from "../src/lib/state/worker-state";
 import type { ConflictResolutionMode } from "../src/lib/workspace/config";
+import { resetUnusableStateWarnings } from "../src/lib/review/agent-pr-reconciler";
 
 describe("ReviewPollingAcquirer", () => {
   let dbPath: string;
@@ -25,6 +27,7 @@ describe("ReviewPollingAcquirer", () => {
   let queue: WebhookQueue;
 
   beforeEach(() => {
+    resetUnusableStateWarnings();
     dbPath = join(tmpdir(), `rp-test-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
     workerState = new WorkerState(dbPath);
     queue = new WebhookQueue({ dbPath });
@@ -56,10 +59,7 @@ describe("ReviewPollingAcquirer", () => {
   function makeAcquirer(
     gh: FakeGitHubState,
     options: {
-      resolveResults?: Array<{
-        outcome: "clean" | "resolved" | "skipped" | "failed" | "deferred";
-        message: string;
-      }>;
+      resolveResults?: AutomaticResolveResult[];
       runStore?: RunStore;
       quietPeriodSeconds?: number;
       now?: () => number;
@@ -246,6 +246,66 @@ describe("ReviewPollingAcquirer", () => {
     await acquirer.tick();
     expect(addressed).toEqual([]);
     expect(workerState.listOpenAgentPrs()).toHaveLength(0);
+  });
+
+  test("an unusable PR state keeps the row watched across ticks and warns once", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 77 });
+    const warnings: string[] = [];
+    const warn = spyOn(console, "warn").mockImplementation((message: unknown) => {
+      warnings.push(String(message));
+    });
+    const addressed: string[] = [];
+    try {
+      const acquirer = new ReviewPollingAcquirer({
+        intervalSeconds: 60,
+        workerState,
+        queue,
+        github: {
+          async fetchPr() {
+            return { data: {}, etag: 'W/"empty"', notModified: false };
+          },
+          async fetchReviews() {
+            return { data: [], etag: 'W/"reviews"', notModified: false };
+          },
+          async fetchReviewCommentsSince() {
+            return [];
+          },
+        },
+        addressPr: async (repo, n) => {
+          addressed.push(`${repo}#${n}`);
+          return true;
+        },
+      });
+
+      await acquirer.tick();
+      await acquirer.tick();
+    } finally {
+      warn.mockRestore();
+    }
+
+    expect(workerState.listOpenAgentPrs().map((pr) => pr.prNumber)).toEqual([77]);
+    expect(workerState.countAgentPrs()).toEqual({ open: 1, closed: 0 });
+    expect(addressed).toEqual([]);
+    expect(warnings.filter((message) => message.includes("unusable PR state"))).toHaveLength(1);
+  });
+
+  test("an unusable PR state defers feedback instead of marking it processed", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const gh: FakeGitHubState = {
+      prState: "draft",
+      reviews: [{ id: 1, state: "changes_requested", user: human }],
+      comments: [],
+    };
+    const { acquirer, addressed } = makeAcquirer(gh);
+
+    await acquirer.tick();
+    expect(addressed).toEqual([]);
+    // The review must stay unprocessed so it is retried once state is usable.
+    expect(queue.hasProcessed("github:reviews", "review:acme/widgets#42:1")).toBe(false);
+
+    gh.prState = "open";
+    await acquirer.tick();
+    expect(addressed).toEqual(["acme/widgets#42"]);
   });
 
   test("stored ETags are sent on subsequent ticks and 304 skips review parsing", async () => {
@@ -702,6 +762,60 @@ describe("ReviewPollingAcquirer", () => {
     ]);
   });
 
+  test("capacity defers wait for a harness instead of exhausting the event", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    let clock = 1_000_000;
+    const capacity: AutomaticResolveResult = {
+      outcome: "deferred",
+      message: "agent usage limit; waiting for a harness to become available",
+      capacity: true,
+    };
+    const made = makeAcquirer(
+      {
+        prState: "open",
+        mergeableState: "dirty",
+        headSha: "head1",
+        baseSha: "base1",
+        baseIncluded: false,
+        reviews: [],
+        comments: [],
+      },
+      {
+        now: () => clock,
+        resolveResults: [
+          { ...capacity, retryAt: clock + 60_000 },
+          capacity,
+          capacity,
+          capacity,
+          { outcome: "resolved", message: "merged base" },
+        ],
+      },
+    );
+    const externalId = "base-sync:acme/widgets#42:base1:head1";
+
+    await made.acquirer.tick();
+    expect(made.resolved).toHaveLength(1);
+    // Before the reported reset, the resolver is not relaunched.
+    clock += 30_000;
+    await made.acquirer.tick();
+    expect(made.resolved).toHaveLength(1);
+
+    // Past the cap of consecutive defers, the event stays pending and unprocessed.
+    for (let i = 0; i < 3; i++) {
+      clock += 6 * 60_000;
+      await made.acquirer.tick();
+    }
+    expect(made.resolved).toHaveLength(4);
+    expect(queue.getBaseSyncEvent(externalId)).toMatchObject({ status: "pending", attempts: 0 });
+    expect(queue.hasProcessed("github:base-sync", externalId)).toBe(false);
+
+    // Once a harness is back, the conflict is resolved.
+    clock += 6 * 60_000;
+    await made.acquirer.tick();
+    expect(made.resolved).toHaveLength(5);
+    expect(queue.getBaseSyncEvent(externalId)?.status).toBe("completed");
+  });
+
   test("a head race during pre-run revalidation stays pending without an attempt", async () => {
     workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
     let fetches = 0;
@@ -794,7 +908,7 @@ describe("ReviewPollingAcquirer", () => {
     };
   }
 
-  function windowState(): { nextWindowAt: number; windowOpenUntil: number } {
+  function windowState(): { nextWindowAt: number; windowOpenUntil: number; windowCapAt: number } {
     const raw = workerState.getCursor("worker:conflict-window")?.cursorValue;
     expect(raw).toBeTruthy();
     return JSON.parse(raw!);
@@ -854,6 +968,56 @@ describe("ReviewPollingAcquirer", () => {
     expect(queue.getBaseSyncEvent("base-sync:acme/widgets#42:base3:head1")?.status).toBe("pending");
   });
 
+  test("opening the window on demand resolves queued conflicts now and keeps the next occurrence", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const start = 1_750_000_000_000;
+    let now = start;
+    const made = makeAcquirer(conflictGh(), {
+      conflictSchedule: dailySchedule,
+      conflictWindowGraceMs: 60 * 60_000,
+      now: () => now,
+    });
+
+    await made.acquirer.tick();
+    expect(made.resolved).toEqual([]);
+    expect(made.acquirer.conflictWindowStatus()).toEqual({
+      schedule: dailySchedule,
+      nextWindowAt: start + DAY_MS,
+      openUntil: undefined,
+    });
+
+    now += 5_000;
+    expect(made.acquirer.openConflictWindowNow()).toEqual({ ok: true });
+    expect(windowState()).toEqual({
+      nextWindowAt: start + DAY_MS,
+      windowOpenUntil: now + 60 * 60_000,
+      windowCapAt: now + 120 * 60_000,
+    });
+    expect(made.acquirer.conflictWindowStatus()?.openUntil).toBe(now + 60 * 60_000);
+
+    await made.acquirer.tick();
+    expect(made.resolved).toEqual(["acme/widgets#42"]);
+    expect(queue.getBaseSyncEvent("base-sync:acme/widgets#42:base1:head1")?.status).toBe(
+      "completed",
+    );
+  });
+
+  test("on-demand window is refused outside scheduled mode", () => {
+    const auto = makeAcquirer(conflictGh());
+    expect(auto.acquirer.conflictWindowStatus()).toBeNull();
+    expect(auto.acquirer.openConflictWindowNow().ok).toBe(false);
+
+    const disabled = makeAcquirer(conflictGh(), {
+      conflictSchedule: dailySchedule,
+      conflictResolution: "disabled",
+    });
+    expect(disabled.acquirer.conflictWindowStatus()).toBeNull();
+    expect(disabled.acquirer.openConflictWindowNow()).toEqual({
+      ok: false,
+      reason: "conflict resolution is disabled in workspace.toml",
+    });
+  });
+
   test("a window missed while the worker was down catches up on the first tick after restart", async () => {
     workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
     let now = 1_750_000_000_000;
@@ -897,6 +1061,121 @@ describe("ReviewPollingAcquirer", () => {
     now += DAY_MS + 1;
     await made.acquirer.tick();
     expect(made.resolved).toEqual([]);
+  });
+
+  const MIN = 60_000;
+
+  /** Scheduled acquirer whose first window opens (idle) at the returned `windowAt`. */
+  async function openIdleWindow(gh: FakeGitHubState, clock: { now: number }, quiet = 0) {
+    const made = makeAcquirer(gh, {
+      conflictSchedule: dailySchedule,
+      conflictWindowGraceMs: 60 * MIN,
+      quietPeriodSeconds: quiet,
+      now: () => clock.now,
+    });
+    await made.acquirer.tick();
+    clock.now += DAY_MS;
+    const windowAt = clock.now;
+    await made.acquirer.tick();
+    expect(windowState().windowOpenUntil).toBe(windowAt + 60 * MIN);
+    return { ...made, windowAt };
+  }
+
+  test("a conflict observed late in the window keeps it open until it resolves", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const clock = { now: 1_750_000_000_000 };
+    const gh = { ...conflictGh(), mergeableState: "clean" };
+    const made = await openIdleWindow(gh, clock, 120);
+    const { windowAt } = made;
+
+    // A sibling merge conflicts the PR one minute before the nominal close.
+    clock.now = windowAt + 59 * MIN;
+    gh.mergeableState = "dirty";
+    gh.baseSha = "base2";
+    await made.acquirer.tick();
+    expect(made.resolved).toEqual([]);
+    expect(made.acquirer.conflictWindowStatus()?.openUntil).toBe(windowAt + 74 * MIN);
+
+    // Past the nominal close, the drain extension still lets it resolve.
+    clock.now = windowAt + 62 * MIN;
+    await made.acquirer.tick();
+    expect(made.resolved).toEqual(["acme/widgets#42"]);
+    expect(windowState().windowOpenUntil).toBe(windowAt + 77 * MIN);
+
+    // The next conflict in the chain (after quiet period + CI + merge) is caught too.
+    clock.now = windowAt + 72 * MIN;
+    gh.baseSha = "base3";
+    await made.acquirer.tick();
+    clock.now = windowAt + 75 * MIN;
+    await made.acquirer.tick();
+    expect(made.resolved).toEqual(["acme/widgets#42", "acme/widgets#42"]);
+  });
+
+  test("a conflict after an idle window closes waits for the next window", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const clock = { now: 1_750_000_000_000 };
+    const gh = { ...conflictGh(), mergeableState: "clean" };
+    const made = await openIdleWindow(gh, clock);
+
+    clock.now = made.windowAt + 61 * MIN;
+    gh.mergeableState = "dirty";
+    gh.baseSha = "base2";
+    await made.acquirer.tick();
+    expect(made.resolved).toEqual([]);
+    expect(queue.getBaseSyncEvent("base-sync:acme/widgets#42:base2:head1")?.status).toBe("pending");
+    expect(made.acquirer.conflictWindowStatus()?.openUntil).toBeUndefined();
+    expect(windowState().windowOpenUntil).toBe(made.windowAt + 60 * MIN);
+  });
+
+  test("drain extensions never keep the window open past twice its grace", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const clock = { now: 1_750_000_000_000 };
+    const gh = { ...conflictGh(), mergeableState: "clean" };
+    const made = await openIdleWindow(gh, clock);
+    const { windowAt } = made;
+    gh.mergeableState = "dirty";
+
+    // A conflict that keeps reappearing every 10 minutes.
+    for (let minute = 55; minute <= 115; minute += 10) {
+      clock.now = windowAt + minute * MIN;
+      gh.baseSha = `base-${minute}`;
+      await made.acquirer.tick();
+      expect(windowState().windowOpenUntil).toBe(windowAt + Math.min(minute + 15, 120) * MIN);
+    }
+    expect(made.resolved).toHaveLength(7);
+    expect(windowState().windowCapAt).toBe(windowAt + 120 * MIN);
+
+    clock.now = windowAt + 121 * MIN;
+    gh.baseSha = "base-late";
+    await made.acquirer.tick();
+    expect(made.resolved).toHaveLength(7);
+    expect(made.acquirer.conflictWindowStatus()?.openUntil).toBeUndefined();
+  });
+
+  test("a drain extension survives a worker restart", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const clock = { now: 1_750_000_000_000 };
+    const gh = { ...conflictGh(), mergeableState: "clean" };
+    const made = await openIdleWindow(gh, clock, 120);
+    const { windowAt } = made;
+
+    clock.now = windowAt + 59 * MIN;
+    gh.mergeableState = "dirty";
+    gh.baseSha = "base2";
+    await made.acquirer.tick();
+    expect(made.resolved).toEqual([]);
+
+    // Restart past the nominal close: the persisted extension still applies.
+    clock.now = windowAt + 62 * MIN;
+    const restarted = makeAcquirer(gh, {
+      conflictSchedule: dailySchedule,
+      conflictWindowGraceMs: 60 * MIN,
+      quietPeriodSeconds: 120,
+      now: () => clock.now,
+    });
+    await restarted.acquirer.tick();
+    expect(restarted.resolved).toEqual(["acme/widgets#42"]);
+    expect(windowState().windowCapAt).toBe(windowAt + 120 * MIN);
   });
 
   test("disabled mode never detects or resolves conflicts", async () => {
@@ -1120,6 +1399,239 @@ describe("ReviewPollingAcquirer", () => {
       now += 60 * 60_000;
       await acquirer.tick();
       expect(warns).toBe(2);
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
+
+  test("403 permission denials are throttled like rejected credentials", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 1 });
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 2 });
+
+    const forbidden = new Error(
+      "GitHub API error (403): Resource not accessible by personal access token",
+    );
+    const warns: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warns.push(args.join(" "));
+    };
+    try {
+      const acquirer = new ReviewPollingAcquirer({
+        intervalSeconds: 60,
+        workerState,
+        queue,
+        github: {
+          async fetchPr() {
+            throw forbidden;
+          },
+          async fetchReviews() {
+            throw new Error("must not be reached");
+          },
+          async fetchReviewCommentsSince() {
+            throw new Error("must not be reached");
+          },
+        },
+        addressPr: async () => true,
+      });
+
+      // Both PRs hit the same permanent permission failure, but only the
+      // first triggers a warning this hour.
+      await acquirer.tick();
+      expect(warns).toHaveLength(1);
+      // A 403 means the token may be valid but under-scoped, so the guidance
+      // must not tell the operator to renew it.
+      expect(warns[0]).toContain("lacks a permission");
+      expect(warns[0]).not.toContain("invalid, expired, or revoked");
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
+
+  test("fleet-mode credential failures are throttled per repository", async () => {
+    workerState.recordAgentPr({ repo: "acme/a", prNumber: 1 });
+    workerState.recordAgentPr({ repo: "acme/b", prNumber: 2 });
+    let now = 1_000;
+    const failures = new Map<string, Error>([
+      [
+        "acme/a",
+        new Error("GitHub API error (403): Resource not accessible by personal access token"),
+      ],
+      ["acme/b", new Error("GitHub API error (401): Bad credentials")],
+    ]);
+    const warns: string[] = [];
+    const logs: string[] = [];
+    const originalWarn = console.warn;
+    const originalLog = console.log;
+    console.warn = (...args: unknown[]) => {
+      warns.push(args.join(" "));
+    };
+    console.log = (...args: unknown[]) => {
+      logs.push(args.join(" "));
+    };
+    const recoveryLines = (repo: string) =>
+      logs.filter(
+        (line) => line.includes("GitHub credential accepted again") && line.includes(repo),
+      ).length;
+    try {
+      const acquirer = new ReviewPollingAcquirer({
+        intervalSeconds: 60,
+        now: () => now,
+        workerState,
+        queue,
+        github: {
+          async fetchPr(repo) {
+            const failure = failures.get(repo);
+            if (failure) throw failure;
+            return { data: { state: "open" }, etag: 'W/"pr"', notModified: false };
+          },
+          async fetchReviews() {
+            return { data: [], etag: 'W/"rev"', notModified: false };
+          },
+          async fetchReviewCommentsSince() {
+            return [];
+          },
+        },
+        addressPr: async () => true,
+      });
+
+      await acquirer.tick();
+      // A 403 in repo A must not hide repo B's 401.
+      expect(warns).toHaveLength(2);
+      expect(warns.find((line) => line.includes("acme/a#1"))).toContain("lacks a permission");
+      expect(warns.find((line) => line.includes("acme/b#2"))).toContain(
+        "invalid, expired, or revoked",
+      );
+
+      now += 60_000;
+      await acquirer.tick();
+      expect(warns).toHaveLength(2);
+      expect(recoveryLines("acme/a")).toBe(0);
+
+      // Repo B recovers while repo A still fails: B rearms and reports
+      // recovery, A stays throttled.
+      failures.delete("acme/b");
+      now += 60_000;
+      await acquirer.tick();
+      expect(warns).toHaveLength(2);
+      expect(recoveryLines("acme/b")).toBe(1);
+      expect(recoveryLines("acme/a")).toBe(0);
+    } finally {
+      console.warn = originalWarn;
+      console.log = originalLog;
+    }
+  });
+
+  test("metadata-only success does not clear a reviews/comments throttle", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    let now = 1_000;
+    let failReviews = true;
+    let pollFeedback = true;
+    const warns: string[] = [];
+    const logs: string[] = [];
+    const originalWarn = console.warn;
+    const originalLog = console.log;
+    console.warn = (...args: unknown[]) => {
+      warns.push(args.join(" "));
+    };
+    console.log = (...args: unknown[]) => {
+      logs.push(args.join(" "));
+    };
+    const recoveryLines = () =>
+      logs.filter((line) => line.includes("GitHub credential accepted again")).length;
+    try {
+      const acquirer = new ReviewPollingAcquirer({
+        intervalSeconds: 60,
+        now: () => now,
+        workerState,
+        queue,
+        shouldPollFeedback: () => pollFeedback,
+        github: {
+          async fetchPr() {
+            return {
+              data: { state: "open", mergeable_state: "clean" },
+              etag: 'W/"pr"',
+              notModified: false,
+            };
+          },
+          async fetchReviews() {
+            if (failReviews) {
+              throw new Error(
+                "GitHub API error (403): Resource not accessible by personal access token",
+              );
+            }
+            return { data: [], etag: 'W/"rev"', notModified: false };
+          },
+          async fetchReviewCommentsSince() {
+            return [];
+          },
+        },
+        addressPr: async () => true,
+      });
+
+      // The PR-state read works; only the reviews endpoint is rejected.
+      await acquirer.tick();
+      expect(warns).toHaveLength(1);
+      expect(warns[0]).toContain("reading reviews");
+
+      // Relay healthy again and feedback polling skipped: the PR-state fetch
+      // succeeds, but the reviews endpoint was never re-tested, so no recovery
+      // may be announced and the throttle must stay armed.
+      pollFeedback = false;
+      now += 60_000;
+      await acquirer.tick();
+      expect(recoveryLines()).toBe(0);
+      expect(warns).toHaveLength(1);
+
+      // Feedback polling resumed but reviews still fail: the old throttle
+      // holds, so no duplicate warning inside the hour.
+      pollFeedback = true;
+      now += 60_000;
+      await acquirer.tick();
+      expect(warns).toHaveLength(1);
+
+      // The reviews endpoint finally succeeds → recovery claimed exactly once.
+      failReviews = false;
+      now += 60_000;
+      await acquirer.tick();
+      expect(recoveryLines()).toBe(1);
+    } finally {
+      console.warn = originalWarn;
+      console.log = originalLog;
+    }
+  });
+
+  test("non-credential 403s keep the normal per-PR capture path", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 1 });
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 2 });
+
+    const warns: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warns.push(args.join(" "));
+    };
+    try {
+      const acquirer = new ReviewPollingAcquirer({
+        intervalSeconds: 60,
+        workerState,
+        queue,
+        github: {
+          async fetchPr() {
+            throw new Error("GitHub API error (403): Repository was archived so is read-only.");
+          },
+          async fetchReviews() {
+            throw new Error("must not be reached");
+          },
+          async fetchReviewCommentsSince() {
+            throw new Error("must not be reached");
+          },
+        },
+        addressPr: async () => true,
+      });
+
+      await acquirer.tick();
+      expect(warns).toHaveLength(2);
+      expect(warns.every((line) => !line.includes("lacks a permission"))).toBe(true);
     } finally {
       console.warn = originalWarn;
     }

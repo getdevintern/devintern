@@ -1,15 +1,15 @@
 ---
-title: "Implement Linear Issues with @devintern/code"
+title: "Implement Linear Issues with DevIntern Code"
 sidebarLabel: "Linear Integration"
 description: "Fetch Linear issues, move workflow states, implement with your coding agent, and open PRs with summaries posted back."
-section: "Code"
+section: "Automation"
 order: 5
 sidebarHidden: true
-dateModified: 2026-08-17
+dateModified: 2026-11-12
 tags: ["linear", "devintern/code", "integration"]
 ---
 
-# Implement Linear Issues with @devintern/code
+# Implement Linear Issues with DevIntern Code
 
 @devintern/code can implement work directly from Linear issues: fetch issue details and comments, run a feasibility check, move the issue through your workflow states, execute your AI agent, commit changes, open a pull request, and post results back to the issue.
 

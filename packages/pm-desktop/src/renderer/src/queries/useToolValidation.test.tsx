@@ -1,5 +1,10 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import {
+  QueryClient,
+  QueryClientProvider,
+  defaultScheduler,
+  notifyManager,
+} from "@tanstack/react-query";
 import { Window } from "happy-dom";
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
@@ -34,6 +39,11 @@ describe("useToolValidation", () => {
   let validateRequiredTools: ReturnType<typeof mock>;
 
   beforeEach(() => {
+    // Deliver notifications synchronously. TanStack Query's default scheduler
+    // defers them with setTimeout, so a notification queued during teardown can
+    // run after the happy-dom globals are deleted and crash React on `window`.
+    notifyManager.setScheduler((callback) => callback());
+
     domWindow = new Window();
     globalThis.document = domWindow.document as unknown as Document;
     globalThis.window = domWindow as unknown as Window & typeof globalThis.window;
@@ -64,14 +74,19 @@ describe("useToolValidation", () => {
     await act(async () => {
       root.unmount();
       client.clear();
+      client.unmount();
       await flushMicrotasks();
     });
+    // Drain notifyManager timers queued during clear() while the DOM globals are
+    // still installed; otherwise they fire after teardown and touch `window`.
+    await flushMicrotasks();
     container.remove();
     // @ts-expect-error test teardown
     delete globalThis.document;
     // @ts-expect-error test teardown
     delete globalThis.window;
     domWindow.close();
+    notifyManager.setScheduler(defaultScheduler);
   });
 
   test("probes IPC again when the app regains focus", async () => {

@@ -49,6 +49,10 @@ export interface CollectDiagnosticsOptions {
   last?: boolean;
   shareIdentifiers?: boolean;
   command?: string;
+  /** Run database to read; defaults to `WEBHOOK_QUEUE_DB` or the nearest `queue.db`. */
+  runDbPath?: string;
+  /** Directories holding worker capture files; defaults to the workspace home. */
+  workerLogDirs?: string[];
 }
 
 export interface CollectedDiagnostics {
@@ -139,6 +143,7 @@ function collectFileLogs(
 
 /** Read the worker capture files when a workspace exists on this host. */
 function collectWorkerLogs(options: {
+  dirs: string[];
   cwd: string;
   repoSlug: string | null;
   taskKey: string | null;
@@ -146,7 +151,7 @@ function collectWorkerLogs(options: {
 }): ReportLogAttachment[] {
   try {
     const result = readWorkerLogs({
-      dirs: [resolveWorkspaceDir()],
+      dirs: options.dirs,
       limit: 200,
       maxBytesPerFile: DEFAULT_LOG_BYTES,
     });
@@ -200,15 +205,16 @@ interface StageRow {
 }
 
 /** Resolve the local queue database without importing the CLI's path helpers. */
-function resolveRunDbPath(cwd: string): string {
+function resolveRunDbPath(cwd: string, explicit?: string): string {
+  if (explicit?.trim()) return resolve(explicit.trim());
   const override = process.env.WEBHOOK_QUEUE_DB?.trim();
   if (override) return override;
   return join(resolveReportConfigDir(undefined, cwd), "queue.db");
 }
 
 /** Open the run database read-only, or return null when it does not exist. */
-function openRunDb(cwd: string): Database | null {
-  const path = resolveRunDbPath(cwd);
+function openRunDb(cwd: string, explicit?: string): Database | null {
+  const path = resolveRunDbPath(cwd, explicit);
   if (!existsSync(path)) return null;
   try {
     return new Database(path, { readonly: true });
@@ -400,7 +406,7 @@ export async function collectDiagnostics(
     return { environment, repoSlug, taskKey: options.taskKey ?? null };
   }
 
-  const db = openRunDb(cwd);
+  const db = openRunDb(cwd, options.runDbPath);
   const run = db ? selectRun(db, options) : null;
   // Redact the run's task key even when it is omitted from the payload. A
   // `--last` report has no explicit --task value, but the failure reason and
@@ -431,7 +437,10 @@ export async function collectDiagnostics(
   if (options.logs !== false) {
     const logs = [
       ...collectFileLogs(options.logPaths ?? [], redaction),
-      ...collectWorkerLogs(redaction),
+      ...collectWorkerLogs({
+        ...redaction,
+        dirs: options.workerLogDirs ?? [resolveWorkspaceDir()],
+      }),
     ];
     if (logs.length > 0) context.logs = logs;
   }

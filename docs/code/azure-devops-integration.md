@@ -1,15 +1,15 @@
 ---
-title: "Implement Azure DevOps Work Items with @devintern/code"
+title: "Implement Azure DevOps Work Items with DevIntern Code"
 sidebarLabel: "Azure DevOps Integration"
 description: "Fetch Azure DevOps work items, run WIQL batches, implement with your coding agent, and post PRs and state transitions back."
-section: "Code"
+section: "Automation"
 order: 5
 sidebarHidden: true
-dateModified: 2026-07-23
+dateModified: 2026-11-12
 tags: ["azure-devops", "devintern/code", "integration"]
 ---
 
-# Implement Azure DevOps Work Items with @devintern/code
+# Implement Azure DevOps Work Items with DevIntern Code
 
 @devintern/code can implement work directly from Azure DevOps work items: fetch work item details and comments, run a feasibility check, move the item through workflow states, execute your AI agent, commit changes, open a pull request, and post results back to the work item.
 
@@ -132,3 +132,7 @@ State names differ per process template and work item type. Check the states ava
 **401 or 403 errors**
 
 Verify the PAT has not expired and includes the Work Items (Read and write) scope for the target organization.
+
+### Offline fake API for local tests
+
+The E2E suite can redirect Azure DevOps requests to a loopback fake server by exporting `DEVINTERN_E2E_FAKE_AZURE_DEVOPS=1` **before starting** the CLI and setting `AZURE_DEVOPS_BASE_URL` to an absolute `http(s)` URL on `127.0.0.1` or `[::1]`. Project `.env` files cannot enable this override. Normal runs use `https://dev.azure.com/<organization>` so a project cannot redirect a PAT.

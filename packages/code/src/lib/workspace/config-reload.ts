@@ -19,11 +19,13 @@
  * never crashes on a bad edit.
  */
 
-import { watch } from "fs";
+import { createHash } from "crypto";
+import { readFileSync, renameSync, statSync, watch, writeFileSync } from "fs";
 import { basename, dirname } from "path";
 
 import type { WorkspaceConfig } from "./config";
 import { loadWorkspaceConfig } from "./config";
+import { workspaceAppliedConfigPath } from "./paths";
 
 /** Coalescing window for rapid successive edits before reloads run. */
 export const DEFAULT_RELOAD_DEBOUNCE_MS = 300;
@@ -61,6 +63,8 @@ export interface ReloadOutcome {
   applied: boolean;
   /** True when disk content parsed but matched the already-active config. */
   unchanged?: boolean;
+  /** Why the on-disk file was rejected (parse, validation, or startup-only change). */
+  error?: string;
 }
 
 export interface WorkspaceConfigReloaderOptions {
@@ -81,6 +85,8 @@ export interface WorkspaceConfigReloaderOptions {
   validate?: (next: WorkspaceConfig, current: WorkspaceConfig) => void;
   /** Error sink (injected for tests). Defaults to console.error. */
   onError?: (message: string) => void;
+  /** Called after every reload attempt (applied, unchanged, or rejected). */
+  onOutcome?: (outcome: ReloadOutcome) => void;
 }
 
 /**
@@ -152,16 +158,22 @@ export class WorkspaceConfigReloader {
    * @returns Whether a new config was applied, and whether it was a no-op.
    */
   reload(reason: string): ReloadOutcome {
+    const outcome = this.reloadOnce(reason);
+    this.options.onOutcome?.(outcome);
+    return outcome;
+  }
+
+  private reloadOnce(reason: string): ReloadOutcome {
     let next: WorkspaceConfig;
     try {
       next = (this.options.load ?? loadWorkspaceConfig)(this.options.configPath);
     } catch (error) {
+      const message = (error as Error).message;
       this.reportError(
-        `Failed to reload workspace config (${reason}): ` +
-          `${(error as Error).message}\n` +
+        `Failed to reload workspace config (${reason}): ${message}\n` +
           "   Continuing with the previously loaded configuration.",
       );
-      return { applied: false };
+      return { applied: false, error: message };
     }
 
     if (serializeWorkspaceConfig(next) === serializeWorkspaceConfig(this.options.current)) {
@@ -171,11 +183,12 @@ export class WorkspaceConfigReloader {
     try {
       this.options.validate?.(next, this.options.current);
     } catch (error) {
+      const message = (error as Error).message;
       this.reportError(
-        `Failed to reload workspace config (${reason}): ${(error as Error).message}\n` +
+        `Failed to reload workspace config (${reason}): ${message}\n` +
           "   Continuing with the previously loaded configuration.",
       );
-      return { applied: false };
+      return { applied: false, error: message };
     }
 
     applyWorkspaceConfig(this.options.current, next);
@@ -229,4 +242,131 @@ export class WorkspaceConfigReloader {
     const onError = this.options.onError ?? ((text: string) => console.error(text));
     onError(message);
   }
+}
+
+/** Identity of one on-disk version of `workspace.toml`. */
+export interface ConfigFileFingerprint {
+  /** File mtime (epoch ms, rounded). */
+  fileModifiedAt: number;
+  /** sha256 of the file bytes. */
+  contentHash: string;
+}
+
+/**
+ * Which `workspace.toml` version the running worker last applied, and the
+ * last version it rejected. Written by the worker at startup and after every
+ * reload attempt; the dashboard compares it with the file on disk to tell
+ * whether a saved edit is live.
+ */
+export interface AppliedConfigRecord extends ConfigFileFingerprint {
+  /** Worker process that wrote the record (a record from another pid is stale). */
+  pid: number;
+  /** When this version was applied (epoch ms). */
+  appliedAt: number;
+  /** Last rejected version; cleared when a later version applies. */
+  rejection?: ConfigFileFingerprint & { at: number; reason: string };
+}
+
+/** Fingerprint the config file, or null when it cannot be read. */
+export function fingerprintConfigFile(configPath: string): ConfigFileFingerprint | null {
+  try {
+    const bytes = readFileSync(configPath);
+    return {
+      fileModifiedAt: Math.round(statSync(configPath).mtimeMs),
+      contentHash: createHash("sha256").update(bytes).digest("hex"),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Read the applied-config record, or null when absent or malformed. */
+export function readAppliedConfigRecord(workspaceDir: string): AppliedConfigRecord | null {
+  try {
+    const raw = JSON.parse(
+      readFileSync(workspaceAppliedConfigPath(workspaceDir), "utf8"),
+    ) as Partial<AppliedConfigRecord>;
+    if (
+      typeof raw.pid !== "number" ||
+      typeof raw.appliedAt !== "number" ||
+      typeof raw.fileModifiedAt !== "number" ||
+      typeof raw.contentHash !== "string"
+    ) {
+      return null;
+    }
+    const rejection = raw.rejection;
+    const validRejection =
+      rejection &&
+      typeof rejection.at === "number" &&
+      typeof rejection.reason === "string" &&
+      typeof rejection.fileModifiedAt === "number" &&
+      typeof rejection.contentHash === "string";
+    return {
+      pid: raw.pid,
+      appliedAt: raw.appliedAt,
+      fileModifiedAt: raw.fileModifiedAt,
+      contentHash: raw.contentHash,
+      rejection: validRejection ? rejection : undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeAppliedConfigRecord(workspaceDir: string, record: AppliedConfigRecord): void {
+  const path = workspaceAppliedConfigPath(workspaceDir);
+  const temp = `${path}.${process.pid}.tmp`;
+  try {
+    writeFileSync(temp, JSON.stringify(record), { encoding: "utf8", mode: 0o600 });
+    renameSync(temp, path);
+  } catch (error) {
+    // Observability only: never fail a reload over the dashboard record.
+    console.warn(`⚠️  Could not record the applied workspace config: ${(error as Error).message}`);
+  }
+}
+
+/**
+ * Record that the file currently on disk is the version the worker runs
+ * (startup load, applied reload, or a semantically identical save).
+ */
+export function recordConfigApplied(
+  workspaceDir: string,
+  configPath: string,
+  now: number = Date.now(),
+  pid: number = process.pid,
+): void {
+  const fingerprint = fingerprintConfigFile(configPath);
+  if (!fingerprint) return;
+  writeAppliedConfigRecord(workspaceDir, { pid, appliedAt: now, ...fingerprint });
+}
+
+/** Record that the file currently on disk was rejected, keeping the applied version. */
+export function recordConfigRejected(
+  workspaceDir: string,
+  configPath: string,
+  reason: string,
+  now: number = Date.now(),
+  pid: number = process.pid,
+): void {
+  const previous = readAppliedConfigRecord(workspaceDir);
+  const fingerprint = fingerprintConfigFile(configPath);
+  if (!previous || previous.pid !== pid || !fingerprint) return;
+  writeAppliedConfigRecord(workspaceDir, {
+    ...previous,
+    rejection: { ...fingerprint, at: now, reason },
+  });
+}
+
+/** Reloader `onOutcome` hook that keeps the applied-config record current. */
+export function appliedConfigRecorder(
+  workspaceDir: string,
+  configPath: string,
+): (outcome: ReloadOutcome) => void {
+  return (outcome) => {
+    if (outcome.error !== undefined) {
+      recordConfigRejected(workspaceDir, configPath, outcome.error);
+    } else {
+      recordConfigApplied(workspaceDir, configPath);
+    }
+  };
 }

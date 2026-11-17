@@ -140,6 +140,48 @@ describe("EstimationAcquirer", () => {
     await acquirer.stop();
   });
 
+  test("Run now runs the estimation sweep, not the automation prompt pipeline", async () => {
+    const dbPath = newDb();
+    const calls: string[] = [];
+    let finish!: (ok: boolean) => void;
+    const acquirer = new EstimationAcquirer({
+      estimations: [intervalEntry("groom", { team: "Platform" })],
+      dbPath,
+      now: () => 0,
+      ...noopTimers(),
+      resolveContext: async () => ({ cwd: "/workspace-home", env: {}, release() {} }),
+      spawnRun: (estimation) => {
+        calls.push(`${estimation.id}:${estimation.query}`);
+        return {
+          completion: new Promise<boolean>((resolve) => (finish = resolve)),
+          terminate() {},
+        };
+      },
+    });
+    await acquirer.start();
+
+    expect(await acquirer.triggerManual("groom")).toEqual({ ok: true });
+    expect(calls).toEqual(["groom:labels IN (NeedsEstimate)"]);
+    expect(await acquirer.triggerManual("groom")).toEqual({
+      ok: false,
+      reason: 'automation "groom" is already running',
+    });
+
+    const [status] = acquirer.listSchedules();
+    expect(status).toMatchObject({
+      id: "groom",
+      kind: "estimation",
+      query: "labels IN (NeedsEstimate)",
+      team: "Platform",
+      runFilter: { automationId: "groom", origin: "estimate" },
+      nextDueAt: 900_000,
+    });
+
+    finish(true);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await acquirer.stop();
+  });
+
   test("disabled entries are never scheduled", async () => {
     const dbPath = newDb();
     const acquirer = new EstimationAcquirer({

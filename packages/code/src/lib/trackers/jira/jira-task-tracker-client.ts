@@ -7,6 +7,7 @@
 
 import {
   JiraClient as BaseJiraClient,
+  convertADFToMarkdown,
   extractLinkedResources,
   extractTextFromADF,
   formatIssueDetails,
@@ -96,9 +97,20 @@ export class JiraTaskTrackerClient implements TaskTrackerClient {
 
   extractDescriptionText(task: Task): string {
     const issue = task.raw as JiraIssue;
+    // This value is persisted as the ticket's identity in actioned/retry state
+    // (actioned-state.ts, retry-gate.ts), so keep the historical plain-text
+    // form. Changing it would re-trigger already-actioned tickets on upgrade.
     return extractTextFromADF(
       issue.fields?.description as Parameters<typeof extractTextFromADF>[0],
     );
+  }
+
+  extractDescriptionMarkdown(task: Task): string {
+    const issue = task.raw as JiraIssue;
+    // Keep headings (`## Execution preferences`) and code fences so the
+    // preference parser can tell a real section from a pasted code sample.
+    // ADF's flattened text output loses both.
+    return convertADFToMarkdown(issue.fields?.description);
   }
 
   // ------------------------------------------------------------------
@@ -212,7 +224,7 @@ export class JiraTaskTrackerClient implements TaskTrackerClient {
 
   async findEstimationComment(
     taskKey: string,
-  ): Promise<{ commentId: string; created: string } | null> {
+  ): Promise<{ commentId: string; created: string; updated: string } | null> {
     return this.jiraClient.findEstimationComment(taskKey);
   }
 

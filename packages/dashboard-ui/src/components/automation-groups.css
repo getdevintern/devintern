@@ -1,0 +1,32 @@
+/* Repository groups: one <tbody> per group, headed by a full-width row. */
+.auto-group-row {
+  background: var(--muted);
+}
+.auto-group + .auto-group .auto-group-row {
+  border-top: 1px solid var(--border);
+}
+.auto-group-row:not(:last-child) {
+  border-bottom: 1px solid color-mix(in oklch, var(--border), transparent 30%);
+}
+.auto-group-cell {
+  padding: 0.5rem 1rem;
+  text-align: left;
+  font-weight: inherit;
+}
+.auto-group-heading {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+  color: var(--muted-foreground);
+  font-size: 0.75rem;
+  font-weight: 500;
+  line-height: 1.25rem;
+}
+.auto-group-heading svg {
+  color: var(--subtle-foreground);
+}
+.auto-group-count {
+  color: var(--subtle-foreground);
+  font-variant-numeric: tabular-nums;
+}

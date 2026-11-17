@@ -207,6 +207,9 @@ describe("spawnAgent Muse credential guard", () => {
 
     expect(seenPolicy?.harnessName).toBe("muse");
     expect(seenPolicy?.denyReadPaths).toContain("/home/u/.config/muse/auth.json");
+    // The provider decides env overrides (BUN_INSTALL) against this, so it
+    // must be the env the child is spawned with, not process.env.
+    expect(seenPolicy?.env?.HOME).toBe("/home/u");
   });
 
   test("fails actionably before spawning when META_API_KEY is missing", async () => {

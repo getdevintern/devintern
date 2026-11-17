@@ -324,6 +324,30 @@ export function maybePruneHarnessLogs(
 }
 
 /**
+ * Run a subprocess's transcripts belong to when the run row lives in its
+ * parent: the worker opens an auto-merge run, then evaluates the PR in a
+ * `devintern auto-merge` child that has no run context of its own. Only the
+ * log filename uses it; the child never writes to the run.
+ */
+export const HARNESS_LOG_RUN_ID_ENV = "DEVINTERN_HARNESS_LOG_RUN_ID";
+
+/** Env overlay attributing a child's transcripts to a parent's run. */
+export function harnessLogRunEnv(runId: number): Record<string, string> {
+  return { [HARNESS_LOG_RUN_ID_ENV]: String(runId) };
+}
+
+/**
+ * The parent's run id from {@link HARNESS_LOG_RUN_ID_ENV}, ignoring malformed
+ * values. Callers name the origin through {@link HarnessLogContext.origin}.
+ */
+export function inheritedLogRunId(env: NodeJS.ProcessEnv = process.env): number | undefined {
+  const raw = env[HARNESS_LOG_RUN_ID_ENV]?.trim();
+  if (!raw || !/^\d+$/.test(raw)) return undefined;
+  const id = Number.parseInt(raw, 10);
+  return Number.isSafeInteger(id) && id > 0 ? id : undefined;
+}
+
+/**
  * Build the per-execution sink for one spawn. Returns undefined when logging
  * is disabled or the log cannot be opened; callers treat a missing sink as a
  * no-op and never fail the run over logging.
@@ -343,7 +367,7 @@ export function createHarnessLogSink(ctx: HarnessLogContext): AgentOutputSink | 
   const active = getActiveRunContext();
   const origin = ctx.origin ?? active?.origin ?? "task";
   const taskKey = ctx.taskKey ?? active?.taskKey;
-  const runId = active?.id;
+  const runId = active?.id ?? inheritedLogRunId();
   const startedAt = new Date();
   const name = harnessLogFileName({
     startedAt,

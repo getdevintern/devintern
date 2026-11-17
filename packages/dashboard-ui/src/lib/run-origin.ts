@@ -6,6 +6,7 @@ export const RUN_ORIGIN_LABELS = {
   pr_mention: "PR mention",
   ci_fix: "CI fix",
   conflict_resolution: "Conflict resolution",
+  auto_merge: "Auto-merge",
   scheduled: "Scheduled automation",
   estimate: "Estimate run",
   manual: "Manual run",

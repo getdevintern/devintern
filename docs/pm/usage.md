@@ -1,13 +1,13 @@
 ---
-title: "@devintern/pm Usage Guide"
+title: "DevIntern PM Usage Guide"
 sidebarLabel: "Using DevIntern PM"
 description: "Interactive drafting, source inputs, and posting flows for @devintern/pm."
 section: "Create Tasks"
 order: 1
-dateModified: 2026-10-16
+dateModified: 2026-11-12
 ---
 
-# @devintern/pm Usage Guide
+# DevIntern PM Usage Guide
 
 [DevIntern PM](https://devintern.com/pm-desktop/) is the primary way to create and review tickets. This guide covers the CLI for terminal workflows and automation.
 

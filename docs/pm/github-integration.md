@@ -1,13 +1,14 @@
 ---
-title: "Create GitHub Issues with @devintern/pm"
+title: "Create GitHub Issues with DevIntern PM"
 sidebarLabel: "GitHub Issues Integration"
 description: "File well-specified GitHub issues from AI drafts in your repository."
-section: "PM"
+section: "Create Tasks"
 order: 6
+dateModified: 2026-11-12
 sidebarHidden: true
 ---
 
-# Create GitHub Issues with @devintern/pm
+# Create GitHub Issues with DevIntern PM
 
 @devintern/pm creates GitHub Issues directly from AI-generated stories and tasks. Setup takes a few minutes: you need a Personal Access Token and a target repository.
 

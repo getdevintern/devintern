@@ -59,6 +59,27 @@ describe("worker log parsing", () => {
     expect(redactSecrets("WORKER_POLL_INTERVAL=30")).toBe("WORKER_POLL_INTERVAL=30");
   });
 
+  test("does not mistake ordinary words containing 'pat' for secret keys", () => {
+    expect(redactSecrets("nono: path_not_granted: /home/user/.local/share/mise")).toBe(
+      "nono: path_not_granted: /home/user/.local/share/mise",
+    );
+    expect(redactSecrets("path: /home/user/.local/share/mise")).toBe(
+      "path: /home/user/.local/share/mise",
+    );
+    expect(redactSecrets("patch: failed to apply")).toBe("patch: failed to apply");
+    expect(redactSecrets("compatible: yes")).toBe("compatible: yes");
+  });
+
+  test("redacts token-shaped 'pat' keys", () => {
+    expect(redactSecrets("pat: abc123")).toBe("pat: [redacted]");
+    expect(redactSecrets("GITHUB_PAT=abc123")).toBe("GITHUB_PAT=[redacted]");
+    expect(redactSecrets("github_pat_abc123: abc123")).toBe("github_pat_abc123: [redacted]");
+    // `pat` embedded in a camelCase or all-caps key is still a credential.
+    expect(redactSecrets("clientPat=abc123")).toBe("clientPat=[redacted]");
+    expect(redactSecrets("userPat: abc123")).toBe("userPat: [redacted]");
+    expect(redactSecrets("MYPAT=abc123")).toBe("MYPAT=[redacted]");
+  });
+
   test("redacts YAML/JSON assignments and quoted or spaced values", () => {
     expect(redactSecrets('"api_key": "sk-abcdefghijklmnopqrstuvwxyz123456"')).toBe(
       '"api_key": [redacted]',

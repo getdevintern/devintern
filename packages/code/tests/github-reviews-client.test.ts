@@ -1,11 +1,21 @@
 import { afterEach, describe, expect, test } from "bun:test";
 
-import { GitHubReviewsClient, isGitHubAuthError } from "../src/lib/code-host/github/reviews";
+import {
+  GitHubReviewsClient,
+  isGitHubAuthError,
+  isGitHubTransientError,
+} from "../src/lib/code-host/github/reviews";
 
 const originalFetch = globalThis.fetch;
+const originalRetryEnv = process.env.DEVINTERN_FETCH_MAX_RETRIES;
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
+  if (originalRetryEnv === undefined) {
+    delete process.env.DEVINTERN_FETCH_MAX_RETRIES;
+  } else {
+    process.env.DEVINTERN_FETCH_MAX_RETRIES = originalRetryEnv;
+  }
 });
 
 const jsonResponse = (status: number, body: unknown) =>
@@ -185,9 +195,114 @@ describe("GitHubReviewsClient auth failure path", () => {
       true,
     );
     expect(isGitHubAuthError(new Error("No GitHub authentication configured."))).toBe(true);
+    expect(
+      isGitHubAuthError(
+        new Error("GitHub API error (403): Resource not accessible by personal access token"),
+      ),
+    ).toBe(true);
+    expect(
+      isGitHubAuthError(
+        new Error("GitHub API error (403): Resource not accessible by integration"),
+      ),
+    ).toBe(true);
+    // Rate limits are transient, not credential failures.
+    expect(isGitHubAuthError(new Error("GitHub API error (403): API rate limit exceeded"))).toBe(
+      false,
+    );
+    expect(
+      isGitHubAuthError(new Error("GitHub API error (403): You have triggered abuse detection")),
+    ).toBe(false);
+    // GitHub reuses 403 for non-credential conditions; these must keep the
+    // normal capture/retry path instead of being hidden behind auth throttles.
+    for (const detail of [
+      "Repository was archived so is read-only.",
+      "This issue is locked.",
+      "Repository access blocked",
+      "Forbidden",
+    ]) {
+      expect(isGitHubAuthError(new Error(`GitHub API error (403): ${detail}`))).toBe(false);
+    }
     expect(isGitHubAuthError(new Error("GitHub API error (404): Not Found"))).toBe(false);
     expect(isGitHubAuthError(new Error("GitHub API error (500): Server Error"))).toBe(false);
     expect(isGitHubAuthError(null)).toBe(false);
+  });
+
+  test("isGitHubTransientError recognizes retryable upstream statuses only", () => {
+    for (const status of [408, 429, 500, 502, 503, 504]) {
+      expect(isGitHubTransientError(new Error(`GitHub API error (${status}): Unknown error`))).toBe(
+        true,
+      );
+    }
+    expect(isGitHubTransientError(new Error("GitHub API error (401): Bad credentials"))).toBe(
+      false,
+    );
+    expect(isGitHubTransientError(new Error("GitHub API error (404): Not Found"))).toBe(false);
+    expect(isGitHubTransientError(new Error("GitHub API error (422): Validation Failed"))).toBe(
+      false,
+    );
+    expect(isGitHubTransientError(new Error("GitHub API error (422): network policy"))).toBe(false);
+    expect(isGitHubTransientError(null)).toBe(false);
+  });
+
+  test("a 403 rate limit is transient but a plain 403 is not", () => {
+    expect(
+      isGitHubTransientError(new Error("GitHub API error (403): API rate limit exceeded")),
+    ).toBe(true);
+    expect(
+      isGitHubTransientError(
+        new Error("GitHub API error (403): You have exceeded a secondary rate limit."),
+      ),
+    ).toBe(true);
+    expect(
+      isGitHubTransientError(new Error("GitHub API error (403): abuse detection mechanism")),
+    ).toBe(true);
+    expect(isGitHubTransientError(new Error("GitHub API error (403): Forbidden"))).toBe(false);
+    expect(
+      isGitHubTransientError(new Error("GitHub API error (403): Resource not accessible")),
+    ).toBe(false);
+  });
+
+  test("transport failures are transient like fetchWithRetry treats them", () => {
+    for (const message of [
+      "fetch failed",
+      "connect ECONNREFUSED 140.82.112.5:443",
+      "getaddrinfo ENOTFOUND api.github.com",
+      "socket hang up",
+    ]) {
+      expect(isGitHubTransientError(new Error(message))).toBe(true);
+    }
+    expect(isGitHubTransientError(new Error("Invalid private key"))).toBe(false);
+  });
+
+  test("App-auth HTTP failures carry the status used for classification", async () => {
+    // Without this the default 3 retries (1s/2s/4s backoff) make this test
+    // exceed Bun's 5s timeout and add ~7s to every suite run.
+    process.env.DEVINTERN_FETCH_MAX_RETRIES = "0";
+    let fetchCalls = 0;
+    globalThis.fetch = mockFetch(async () => {
+      fetchCalls += 1;
+      return jsonResponse(503, { message: "Service Unavailable" });
+    });
+
+    const { generateKeyPairSync } = await import("node:crypto");
+    const { GitHubAppAuth } = await import("../src/lib/code-host/github/app-auth");
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const appAuth = new GitHubAppAuth({
+      appId: "1",
+      privateKey: privateKey.export({ type: "pkcs1", format: "pem" }).toString(),
+    });
+    try {
+      await appAuth.getInstallationToken(42);
+      throw new Error("expected getInstallationToken to reject");
+    } catch (error) {
+      expect((error as Error).message).toBe(
+        "GitHub API error (503): Failed to create installation access token: Service Unavailable",
+      );
+      expect(isGitHubTransientError(error)).toBe(true);
+      // A single attempt proves the retry backoff was disabled, not just that
+      // the environment variable happened to be set somewhere.
+      expect(fetchCalls).toBe(1);
+    }
   });
 
   test("non-401 API errors keep the bare status message", async () => {
@@ -200,5 +315,87 @@ describe("GitHubReviewsClient auth failure path", () => {
     } catch (error) {
       expect((error as Error).message).toBe("GitHub API error (404): Not Found");
     }
+  });
+});
+
+describe("GitHubReviewsClient.upsertMarkedIssueComment", () => {
+  const MARKER = "<!-- marker -->";
+
+  function recorder(comments: Array<{ id: number; body: string; user: { login: string } }>) {
+    const calls: Array<{ method: string; url: string; body?: string }> = [];
+    globalThis.fetch = mockFetch(async (url, init) => {
+      const method = init?.method ?? "GET";
+      const target = String(url);
+      calls.push({ method, url: target, body: init?.body as string | undefined });
+      if (target.endsWith("/user")) return jsonResponse(200, { login: "devintern-bot" });
+      if (method === "GET") return jsonResponse(200, comments);
+      return jsonResponse(200, { id: 99 });
+    });
+    return calls;
+  }
+
+  test("edits this credential's marked comment in place", async () => {
+    const calls = recorder([
+      { id: 1, body: `${MARKER}\nhuman copy`, user: { login: "alice" } },
+      { id: 2, body: `${MARKER}\nold status`, user: { login: "Devintern-Bot" } },
+    ]);
+    const client = new GitHubReviewsClient({ token: "t", authMode: "token-only" });
+    await client.upsertMarkedIssueComment("acme", "widgets", 7, MARKER, `${MARKER}\nnew`);
+    const write = calls.at(-1)!;
+    expect(write.method).toBe("PATCH");
+    expect(write.url).toEndWith("/repos/acme/widgets/issues/comments/2");
+    expect(JSON.parse(write.body!)).toEqual({ body: `${MARKER}\nnew` });
+  });
+
+  test("creates a comment when only other authors carry the marker", async () => {
+    const calls = recorder([{ id: 1, body: `${MARKER}\nhuman copy`, user: { login: "alice" } }]);
+    const client = new GitHubReviewsClient({ token: "t", authMode: "token-only" });
+    await client.upsertMarkedIssueComment("acme", "widgets", 7, MARKER, `${MARKER}\nnew`);
+    const write = calls.at(-1)!;
+    expect(write.method).toBe("POST");
+    expect(write.url).toEndWith("/repos/acme/widgets/issues/7/comments");
+  });
+});
+
+describe("GitHubReviewsClient issue labels", () => {
+  function recorder(status: number) {
+    const calls: Array<{ method: string; url: string; body?: string }> = [];
+    globalThis.fetch = mockFetch(async (url, init) => {
+      calls.push({
+        method: init?.method ?? "GET",
+        url: String(url),
+        body: init?.body as string | undefined,
+      });
+      return jsonResponse(status, status === 404 ? { message: "Label does not exist" } : []);
+    });
+    return calls;
+  }
+
+  test("adds labels with one POST", async () => {
+    const calls = recorder(200);
+    const client = new GitHubReviewsClient({ token: "t", authMode: "token-only" });
+    await client.addIssueLabels("acme", "widgets", 7, ["needs-human-review"]);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.method).toBe("POST");
+    expect(calls[0]!.url).toEndWith("/repos/acme/widgets/issues/7/labels");
+    expect(JSON.parse(calls[0]!.body!)).toEqual({ labels: ["needs-human-review"] });
+  });
+
+  test("removes a label by its URL-encoded name", async () => {
+    const calls = recorder(200);
+    const client = new GitHubReviewsClient({ token: "t", authMode: "token-only" });
+    await client.removeIssueLabel("acme", "widgets", 7, "needs review/human");
+    expect(calls[0]!.method).toBe("DELETE");
+    expect(calls[0]!.url).toEndWith("/repos/acme/widgets/issues/7/labels/needs%20review%2Fhuman");
+  });
+
+  test("removing an absent label (404) succeeds; other errors throw", async () => {
+    recorder(404);
+    const client = new GitHubReviewsClient({ token: "t", authMode: "token-only" });
+    await client.removeIssueLabel("acme", "widgets", 7, "needs-human-review");
+    recorder(403);
+    await expect(client.removeIssueLabel("acme", "widgets", 7, "x")).rejects.toThrow(
+      "GitHub API error (403)",
+    );
   });
 });

@@ -1,4 +1,5 @@
 import { randomUUID } from "crypto";
+import { existsSync, readFileSync } from "fs";
 
 import { TaskPollingAcquirer, runTaskViaCli, workerTaskArgs } from "../acquirers/task-polling";
 import type { TaskExecutionResult } from "../acquirers/task-polling";
@@ -7,7 +8,7 @@ import type { PickupGate } from "../worker/schedule";
 import type { WebhookQueue } from "../state/webhook-queue";
 import type { WorkerState } from "../state/worker-state";
 import type { RoutingSkipStore } from "./state";
-import { getWorkerFailover } from "../worker/failover";
+import { getWorkerFailover, harnessChainBlockedUntil } from "../worker/failover";
 import { createTaskSupervisor, JobNotStartedError } from "../worker/supervisor";
 import type { TaskSupervisor } from "../worker/supervisor";
 import { findRepo, findTeam, resolveWorkspacePipelinePath } from "./config";
@@ -16,8 +17,66 @@ import { buildRepoEnv, buildTeamTaskEnv } from "./env";
 import { effectiveRoutingRules, routeTask, routeTaskWithRules, toRoutableTask } from "./router";
 import type { RoutableTask } from "./router";
 import { RUN_ORIGIN_ENV } from "../observability/analytics";
+import { AUTOMATION_ID_ENV } from "../automation/acquirer";
 import { PICKUP_RUN_ID_ENV } from "../state/session-pickup";
 import { actionedSourceKey } from "../task/actioned-state";
+import { QUEUE_CLAIM_ENV } from "./queue-failure-reason";
+import { workspaceDbPath } from "./paths";
+import { RunStore } from "../state/run-recorder";
+import { resolveRunIdentity } from "../task/run-identity";
+
+/** Cap the description snapshot read from an ad-hoc task file. */
+const MAX_SETUP_FAILURE_DESCRIPTION = 20_000;
+
+/**
+ * Record a failed run for a task whose worktree setup failed before the task
+ * subprocess (which normally owns the run record) could start.
+ *
+ * Best-effort: recording must never mask the setup failure itself.
+ */
+function recordSetupFailedRun(input: {
+  dbPath: string;
+  env: NodeJS.ProcessEnv;
+  taskKey: string;
+  repo: string;
+  queueClaim?: string;
+  /** Ad-hoc task markdown; its text becomes the run's title/description. */
+  descriptionFile?: string;
+  reason: string;
+}): void {
+  let store: RunStore | undefined;
+  try {
+    store = new RunStore(input.dbPath);
+    const identity = resolveRunIdentity(input.env);
+    const runId = store.createRun({
+      origin: identity.origin,
+      tracker: identity.tracker,
+      team: identity.team,
+      repo: input.repo,
+      taskKey: input.taskKey,
+      ...(input.queueClaim ? { queueClaim: input.queueClaim } : {}),
+      ...(identity.automationId ? { automationId: identity.automationId } : {}),
+    });
+    if (input.descriptionFile && existsSync(input.descriptionFile)) {
+      const description = readFileSync(input.descriptionFile, "utf8").slice(
+        0,
+        MAX_SETUP_FAILURE_DESCRIPTION,
+      );
+      store.setRunTicket(runId, { description });
+    }
+    store.finishRun(runId, "failed", input.reason);
+  } catch (error) {
+    console.warn(
+      `⚠️  could not record setup failure for ${input.taskKey}: ${(error as Error).message}`,
+    );
+  } finally {
+    try {
+      store?.close();
+    } catch {
+      // Closing a best-effort recorder must not mask the setup failure.
+    }
+  }
+}
 
 /** Task shape the fleet acquirer needs (structural subset of `Task`). */
 export interface FleetTask {
@@ -67,7 +126,12 @@ export interface WorkspaceTaskAcquirerDeps {
   runTask?: (
     taskKey: string,
     extraArgs: string[],
-    opts: { cwd: string; env: Record<string, string | undefined>; signal?: AbortSignal },
+    opts: {
+      cwd: string;
+      env: Record<string, string | undefined>;
+      signal?: AbortSignal;
+      onChildSpawn?: (pid: number) => void;
+    },
   ) => Promise<TaskExecutionResult>;
   /** Shared admission supervisor. A local instance is created only for focused tests. */
   supervisor?: TaskSupervisor;
@@ -77,6 +141,11 @@ export interface WorkspaceTaskAcquirerDeps {
    * defaults to the worker's failover controller.
    */
   isHarnessExhausted?: () => boolean;
+  /**
+   * Polling pause gate: resume time while every harness is usage-limited.
+   * Injected for tests; defaults to the worker's failover controller.
+   */
+  harnessBlockedUntil?: () => number | undefined;
 }
 
 /** Per-task CLI args from `[defaults].worker_task_args`, else `--create-pr`. */
@@ -88,10 +157,25 @@ export function fleetTaskArgs(config: WorkspaceConfig): string[] {
   return workerTaskArgs();
 }
 
-/** Error groups are pre-qualified by the monitor, so skip the generic feasibility agent pass. */
+/**
+ * Build the CLI args for an error-monitor remediation run.
+ *
+ * The monitor already qualified the error group, so the generic feasibility
+ * pass is skipped. A remediation that concludes no code change is needed (the
+ * issue was already fixed, is not reproducible, or belongs to the
+ * environment) is a legitimate outcome: without `--allow-no-changes` delivery
+ * fails the run with "Implementation was not committed", and that failure is
+ * reported back to the same Sentry issue, inflating it and feeding the next
+ * remediation attempt.
+ */
 export function errorMonitorTaskArgs(config: WorkspaceConfig): string[] {
   const args = fleetTaskArgs(config);
-  return args.includes("--skip-clarity-check") ? args : [...args, "--skip-clarity-check"];
+  const withClarity = args.includes("--skip-clarity-check")
+    ? args
+    : [...args, "--skip-clarity-check"];
+  return withClarity.includes("--allow-no-changes")
+    ? withClarity
+    : [...withClarity, "--allow-no-changes"];
 }
 
 /**
@@ -173,6 +257,7 @@ export function createWorkspaceTaskAcquirer(deps: WorkspaceTaskAcquirerDeps): Ta
     executeTask,
     capacity,
     verbose,
+    harnessBlockedUntil: deps.harnessBlockedUntil ?? (() => harnessChainBlockedUntil()),
     isTaskActionedUnchanged: deps.isTaskActionedUnchanged
       ? (task) => deps.isTaskActionedUnchanged!(task.key, task.updated)
       : undefined,
@@ -226,6 +311,13 @@ export function createFleetTaskExecutor(
      * resolves from that specific run.
      */
     pickupRunId?: number;
+    /** Unique queue execution whose run record should receive this outcome. */
+    queueClaim?: string;
+    /**
+     * Called with the task child pid after it spawns. Used by the injected-task
+     * queue to persist the pid for interrupt recovery.
+     */
+    onChildSpawn?: (pid: number) => void;
   } = {},
 ): (taskKey: string, routable: RoutableTask) => Promise<TaskExecutionResult> {
   const { config, workspaceDir, skips, repoManager } = deps;
@@ -300,11 +392,6 @@ export function createFleetTaskExecutor(
         label: taskKey,
         checkoutClass: "task_worktree",
         run: async (signal) => {
-          await repoManager.ensureBareClone(repo);
-          await repoManager.fetch(repo.name);
-          const worktree = await repoManager.createTaskWorktree(repo, taskKey);
-          console.log(`🏗️  ${scope} ${taskKey} → ${repo.name} (${worktree})`);
-
           // Read per run so a live-reloaded `[defaults].pipeline_file` applies
           // to subsequent tasks.
           const pipelineDefaultFile = config.defaults.pipelineFile
@@ -320,16 +407,50 @@ export function createFleetTaskExecutor(
                 actionedSource: deps.actionedSource,
                 pipelineDefaultFile,
               });
+          if (options.runOrigin === "local") {
+            // An injected task is never an automation run. A marker leaked from
+            // the worker's parent env would make the pipeline record a
+            // `scheduled` origin/automationId, which no longer matches the
+            // local scope startup recovery looks runs up by.
+            delete env[AUTOMATION_ID_ENV];
+          }
+          const childEnv = {
+            ...env,
+            [RUN_ORIGIN_ENV]: options.runOrigin ?? "worker",
+            [QUEUE_CLAIM_ENV]: options.queueClaim,
+            ...(options.pickupRunId !== undefined
+              ? { [PICKUP_RUN_ID_ENV]: String(options.pickupRunId) }
+              : {}),
+          };
+
+          let worktree: string;
+          try {
+            await repoManager.ensureBareClone(repo);
+            await repoManager.fetch(repo.name);
+            worktree = await repoManager.createTaskWorktree(repo, taskKey);
+          } catch (error) {
+            // The task subprocess records the run, so a failure before it
+            // spawns would otherwise leave no run: the task would be invisible
+            // in the dashboard and its queue row would keep only a generic
+            // reason. Record the attempt here instead.
+            recordSetupFailedRun({
+              dbPath: workspaceDbPath(workspaceDir),
+              env: childEnv,
+              taskKey,
+              repo: repo.name,
+              queueClaim: options.queueClaim,
+              descriptionFile: options.runOrigin === "local" ? options.taskRef : undefined,
+              reason: `Worktree setup failed: ${(error as Error).message}`,
+            });
+            throw error;
+          }
+          console.log(`🏗️  ${scope} ${taskKey} → ${repo.name} (${worktree})`);
+
           const ok = await runTask(options.taskRef ?? taskKey, extraArgs, {
             cwd: worktree,
-            env: {
-              ...env,
-              [RUN_ORIGIN_ENV]: options.runOrigin ?? "worker",
-              ...(options.pickupRunId !== undefined
-                ? { [PICKUP_RUN_ID_ENV]: String(options.pickupRunId) }
-                : {}),
-            },
+            env: childEnv,
             signal,
+            ...(options.onChildSpawn ? { onChildSpawn: options.onChildSpawn } : {}),
           });
 
           // A retry-gate skip is a clean outcome: no run was started, so the

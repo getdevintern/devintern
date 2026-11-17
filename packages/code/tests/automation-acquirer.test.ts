@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, rmSync } from "fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
@@ -16,8 +16,15 @@ import {
   writeAutomationTaskFile,
 } from "../src/lib/automation/acquirer";
 import { automationTaskArgs } from "../src/lib/automation/config";
+import { spawnEstimationSweep } from "../src/lib/automation/estimation-acquirer";
 import { AutomationStateStore } from "../src/lib/automation/state";
 import type { AutomationConfig } from "../src/lib/automation/config";
+import { resetWorkerFailover, startWorkerFailover } from "../src/lib/worker/failover";
+import {
+  HARNESS_UNAVAILABLE_EXIT_CODE,
+  USAGE_LIMIT_FILE_ENV,
+  WORKER_CHILD_ENV,
+} from "../src/lib/worker/usage-limit-protocol";
 
 describe("AutomationAcquirer", () => {
   describe("resolveAutomationRunArgs", () => {
@@ -37,15 +44,24 @@ describe("AutomationAcquirer", () => {
         extraArgs: ["--create-pr"],
         automationArgs: (a: AutomationConfig) => automationTaskArgs(a, ["--create-pr"]),
       };
-      expect(resolveAutomationRunArgs(automationOn, options)).toEqual(["--create-pr"]);
-      expect(resolveAutomationRunArgs(automationOff, options)).toEqual(["--no-git"]);
+      expect(resolveAutomationRunArgs(automationOn, options)).toEqual([
+        "--create-pr",
+        "--skip-clarity-check",
+      ]);
+      expect(resolveAutomationRunArgs(automationOff, options)).toEqual([
+        "--no-git",
+        "--skip-clarity-check",
+      ]);
     });
 
     test("falls back to the shared flags with the open_pr policy applied", () => {
       expect(
         resolveAutomationRunArgs(automation(true), { extraArgs: () => ["--auto-review"] }),
-      ).toEqual(["--auto-review", "--create-pr"]);
-      expect(resolveAutomationRunArgs(automation(false), {})).toEqual(["--no-git"]);
+      ).toEqual(["--auto-review", "--create-pr", "--skip-clarity-check"]);
+      expect(resolveAutomationRunArgs(automation(false), {})).toEqual([
+        "--no-git",
+        "--skip-clarity-check",
+      ]);
     });
 
     test("the fallback strips PR flags from custom extraArgs when open_pr is off", () => {
@@ -53,12 +69,13 @@ describe("AutomationAcquirer", () => {
         resolveAutomationRunArgs(automation(false), {
           extraArgs: () => ["--create-pr", "--auto-review"],
         }),
-      ).toEqual(["--no-git"]);
+      ).toEqual(["--no-git", "--skip-clarity-check"]);
     });
   });
 
   const dbPaths: string[] = [];
   afterEach(() => {
+    resetWorkerFailover();
     for (const path of dbPaths.splice(0)) {
       for (const suffix of ["", "-wal", "-shm"]) rmSync(`${path}${suffix}`, { force: true });
     }
@@ -81,6 +98,92 @@ describe("AutomationAcquirer", () => {
     };
     expect(nextAutomationDue(interval, after)).toBe(after + 900_000);
     expect(nextAutomationDue(cron, after)).toBeGreaterThan(after);
+  });
+
+  describe("harness usage-limit gate", () => {
+    const hourly = (extra: Partial<AutomationConfig> = {}): AutomationConfig => ({
+      id: "hourly",
+      enabled: true,
+      prompt: "p",
+      interval: "1h",
+      intervalMs: 3_600_000,
+      ...extra,
+    });
+
+    function build(blockedUntil: number | null, now: { value: number }) {
+      const dbPath = join(tmpdir(), `acquirer-gate-${Date.now()}-${Math.random()}.db`);
+      dbPaths.push(dbPath);
+      let spawned = 0;
+      let resolved = 0;
+      const acquirer = new AutomationAcquirer({
+        automations: [hourly()],
+        dbPath,
+        now: () => now.value,
+        setTimer: () => 1 as unknown as ReturnType<typeof setTimeout>,
+        clearTimer: () => {},
+        harnessBlockedUntil: () => blockedUntil,
+        resolveContext: async () => {
+          resolved++;
+          return { cwd: tmpdir(), env: {}, release: () => {} };
+        },
+        spawnRun: () => {
+          spawned++;
+          return { completion: Promise.resolve(true), terminate: () => {} };
+        },
+        spawnManualRun: () => {
+          spawned++;
+          return { completion: Promise.resolve(true), terminate: () => {} };
+        },
+      });
+      return { acquirer, dbPath, counts: () => ({ spawned, resolved }) };
+    }
+
+    test("skips due occurrences and advances the cursor while the chain is exhausted", async () => {
+      const now = { value: 0 };
+      const { acquirer, dbPath, counts } = build(10 * 3_600_000, now);
+      await acquirer.start();
+      now.value = 3_600_000;
+      await acquirer.tick();
+      expect(counts()).toEqual({ spawned: 0, resolved: 0 });
+      const store = new AutomationStateStore(dbPath);
+      expect(store.get("hourly")?.nextDueAt).toBe(2 * 3_600_000);
+      expect(store.get("hourly")?.leaseOwner).toBeUndefined();
+      store.close();
+      await acquirer.stop();
+    });
+
+    test("rejects manual runs while the chain is exhausted", async () => {
+      const now = { value: 0 };
+      const { acquirer, counts } = build(10 * 3_600_000, now);
+      await acquirer.start();
+      const outcome = await acquirer.triggerManual("hourly");
+      expect(outcome.ok).toBe(false);
+      expect(!outcome.ok && outcome.reason).toContain("no agent harness is available");
+      expect(counts().spawned).toBe(0);
+      await acquirer.stop();
+    });
+
+    test("runs normally when a harness is available", async () => {
+      const now = { value: 0 };
+      const { acquirer, counts } = build(null, now);
+      await acquirer.start();
+      now.value = 3_600_000;
+      await acquirer.tick();
+      expect(counts()).toEqual({ spawned: 1, resolved: 1 });
+      await acquirer.stop();
+    });
+
+    test("default gate reads the worker failover chain and pinned-harness windows", async () => {
+      const { defaultHarnessBlockedUntil } = await import("../src/lib/automation/acquirer");
+      await startWorkerFailover({ raw: "codex", checkInstalled: false, log: () => {} });
+      expect(defaultHarnessBlockedUntil(hourly())).toBeNull();
+      const { getWorkerFailover } = await import("../src/lib/worker/failover");
+      const until = Date.now() + 3_600_000;
+      getWorkerFailover()?.reportFromHint({ untilMs: until });
+      expect(defaultHarnessBlockedUntil(hourly())).toBe(until);
+      expect(defaultHarnessBlockedUntil(hourly({ harness: "codex" }))).toBe(until);
+      expect(defaultHarnessBlockedUntil(hourly({ harness: "grok" }))).toBeNull();
+    });
   });
 
   test.each([
@@ -230,6 +333,24 @@ describe("AutomationAcquirer", () => {
       cwd: process.cwd(),
       env: process.env,
     });
+
+    expect(await run.completion).toBe(true);
+  });
+
+  test("tries Codex when the scheduled harness cannot start", async () => {
+    await startWorkerFailover({
+      raw: "opencode,codex",
+      checkInstalled: false,
+      sandboxName: "none",
+    });
+    const run = spawnAutomationProcess(
+      process.execPath,
+      [
+        "-e",
+        `process.exit(process.env.AGENT_HARNESS === "opencode" ? ${HARNESS_UNAVAILABLE_EXIT_CODE} : 0)`,
+      ],
+      { cwd: process.cwd(), env: process.env },
+    );
 
     expect(await run.completion).toBe(true);
   });
@@ -411,6 +532,13 @@ describe("AutomationAcquirer", () => {
     now += 10;
     const claiming = first.tick();
     expect(heartbeatTimers).toHaveLength(1);
+    // The claimed occurrence has no run row yet; the dashboard sees it as waiting.
+    expect(first.listSchedules()[0]?.activity).toEqual({
+      state: "waiting",
+      since: 10,
+      trigger: "scheduled",
+      reason: "waiting for a free worker slot",
+    });
 
     // Advance past the original lease expiry (t=40), firing every scheduled
     // heartbeat. Each beat renews the lease to now + 40ms, so it never lapses.
@@ -945,6 +1073,67 @@ describe("AutomationAcquirer triggerManual (dashboard Run now)", () => {
     await acquirer.stop();
   });
 
+  test("lists a manual run as waiting while it waits for a slot, then running, then idle", async () => {
+    const dbPath = join(tmpdir(), `acq-manual-${Date.now()}-${Math.random()}.db`);
+    dbPaths.push(dbPath);
+    let now = 1_000;
+    let admit!: () => void;
+    const admitted = new Promise<void>((resolve) => (admit = resolve));
+    let resolveRun!: (ok: boolean) => void;
+    const acquirer = new AutomationAcquirer({
+      automations: [{ ...makeAutomation(), repo: "web" }],
+      dbPath,
+      now: () => now,
+      resolveContext: async () => {
+        await admitted;
+        return { cwd: "/base-worktree", env: {}, release() {} };
+      },
+      spawnManualRun: () => ({
+        completion: new Promise<boolean>((resolve) => (resolveRun = resolve)),
+        terminate() {},
+      }),
+    });
+    await acquirer.start();
+    expect(acquirer.listSchedules()[0]?.activity).toBeUndefined();
+
+    const outcome = acquirer.triggerManual("dependency-health");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(acquirer.listSchedules()[0]?.activity).toEqual({
+      state: "waiting",
+      since: 1_000,
+      trigger: "manual",
+      reason: "waiting for the web checkout, which another run is using",
+    });
+
+    now = 5_000;
+    admit();
+    expect(await outcome).toEqual({ ok: true });
+    expect(acquirer.listSchedules()[0]?.activity).toEqual({
+      state: "running",
+      since: 5_000,
+      trigger: "manual",
+    });
+
+    resolveRun(true);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(acquirer.listSchedules()[0]?.activity).toBeUndefined();
+    await acquirer.stop();
+  });
+
+  test("clears the waiting state when a busy repository declines the manual run", async () => {
+    const dbPath = join(tmpdir(), `acq-manual-${Date.now()}-${Math.random()}.db`);
+    dbPaths.push(dbPath);
+    const acquirer = new AutomationAcquirer({
+      automations: [makeAutomation()],
+      dbPath,
+      resolveContext: async () => null,
+    });
+    await acquirer.start();
+    expect((await acquirer.triggerManual("dependency-health")).ok).toBe(false);
+    expect(acquirer.listSchedules()[0]?.activity).toBeUndefined();
+    await acquirer.stop();
+  });
+
   test("a scheduled occurrence coming due mid-manual-run is skipped, not run concurrently", async () => {
     const dbPath = join(tmpdir(), `acq-manual-${Date.now()}-${Math.random()}.db`);
     dbPaths.push(dbPath);
@@ -986,5 +1175,279 @@ describe("AutomationAcquirer triggerManual (dashboard Run now)", () => {
     resolveManual(true);
     await new Promise((resolve) => setTimeout(resolve, 0));
     await acquirer.stop();
+  });
+});
+
+describe("spawnAutomationProcess harness pin", () => {
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+    resetWorkerFailover();
+  });
+
+  // A stub CLI that records the env it was spawned with, then exits 75
+  // (EX_TEMPFAIL) so the parent's usage-limit handling is exercised.
+  const PROBE_SOURCE = `const fs = require("node:fs");
+fs.appendFileSync(
+  process.env.PROBE_LOG,
+  JSON.stringify({
+    harness: process.env.AGENT_HARNESS ?? null,
+    workerChild: process.env[${JSON.stringify(WORKER_CHILD_ENV)}] ?? null,
+    usageLimitFile: process.env[${JSON.stringify(USAGE_LIMIT_FILE_ENV)}] ?? null,
+    cliPath: process.env.AGENT_CLI_PATH ?? null,
+    claudeCliPath: process.env.CLAUDE_CLI_PATH ?? null,
+    model: process.env.AGENT_MODEL ?? null,
+    codexModel: process.env.CODEX_MODEL ?? null,
+    grokModel: process.env.GROK_MODEL ?? null,
+    effort: process.env.AGENT_EFFORT ?? null,
+    argv: process.argv.slice(2),
+  }) + "\\n",
+);
+process.exit(75);
+`;
+
+  function fixture(): { probePath: string; probeLog: string } {
+    const dir = mkdtempSync(join(tmpdir(), "acquirer-pin-"));
+    dirs.push(dir);
+    const probePath = join(dir, "probe.cjs");
+    writeFileSync(probePath, PROBE_SOURCE);
+    return { probePath, probeLog: join(dir, "spawns.jsonl") };
+  }
+
+  function readSpawns(path: string): Array<Record<string, unknown>> {
+    const raw = readFileSync(path, "utf8").trim();
+    return raw ? raw.split("\n").map((line) => JSON.parse(line)) : [];
+  }
+
+  // Strip ambient worker-child markers so the assertions reflect what
+  // `pinAutomationEnv` adds, not whatever the test shell was spawned with.
+  function cleanBase(extra: Record<string, string | undefined>) {
+    const env: Record<string, string | undefined> = { ...process.env, ...extra };
+    delete env[WORKER_CHILD_ENV];
+    delete env[USAGE_LIMIT_FILE_ENV];
+    return env;
+  }
+
+  test("pins the entry harness, keeps the worker-child marker, and never fails over", async () => {
+    const { probePath, probeLog } = fixture();
+    await startWorkerFailover({ raw: "codex,grok", checkInstalled: false, log: () => {} });
+    const inheritedHint = join(tmpdir(), `acquirer-inherited-${Date.now()}.json`);
+
+    const run = spawnAutomationProcess(process.execPath, [probePath], {
+      cwd: process.cwd(),
+      // An ancestor worker's hint path must not leak into a pinned child.
+      env: { ...cleanBase({ PROBE_LOG: probeLog }), [USAGE_LIMIT_FILE_ENV]: inheritedHint },
+      harnessPin: "codex",
+    });
+    expect(await run.completion).toBe(false);
+
+    const records = readSpawns(probeLog);
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({
+      harness: "codex",
+      workerChild: "1",
+      usageLimitFile: null,
+    });
+  });
+
+  test("fails over to the next harness when the entry did not pin one", async () => {
+    const { probePath, probeLog } = fixture();
+    await startWorkerFailover({ raw: "codex,grok", checkInstalled: false, log: () => {} });
+
+    const run = spawnAutomationProcess(process.execPath, [probePath], {
+      cwd: process.cwd(),
+      env: cleanBase({ PROBE_LOG: probeLog }),
+    });
+    expect(await run.completion).toBe(false);
+
+    const records = readSpawns(probeLog);
+    expect(records.length).toBeGreaterThanOrEqual(2);
+    expect(records[0]).toMatchObject({ harness: "codex", workerChild: "1" });
+    expect(records[0]?.usageLimitFile).not.toBeNull();
+    expect(records[1]).toMatchObject({ harness: "grok", workerChild: "1" });
+  });
+
+  test("an estimation sweep pins the entry harness and never fails over", async () => {
+    const { probePath, probeLog } = fixture();
+    await startWorkerFailover({ raw: "codex,grok", checkInstalled: false, log: () => {} });
+
+    const previousEntry = process.argv[1];
+    process.argv[1] = probePath;
+    try {
+      const run = spawnEstimationSweep(
+        {
+          id: "groom",
+          enabled: true,
+          query: "q",
+          interval: "6h",
+          intervalMs: 21_600_000,
+          harness: "claude-code",
+        },
+        { cwd: process.cwd(), env: cleanBase({ PROBE_LOG: probeLog }), release() {} },
+      );
+      expect(await run.completion).toBe(false);
+    } finally {
+      process.argv[1] = previousEntry;
+    }
+
+    const records = readSpawns(probeLog);
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({
+      harness: "claude-code",
+      workerChild: "1",
+      usageLimitFile: null,
+    });
+    expect(records[0]?.argv).toContain("--estimate");
+  });
+
+  test("a pin to a non-primary harness drops the inherited AGENT_CLI_PATH", async () => {
+    const { probePath, probeLog } = fixture();
+    await startWorkerFailover({ raw: "claude-code,codex", checkInstalled: false, log: () => {} });
+
+    const run = spawnAutomationProcess(process.execPath, [probePath], {
+      cwd: process.cwd(),
+      env: cleanBase({
+        PROBE_LOG: probeLog,
+        AGENT_HARNESS: "claude-code",
+        AGENT_CLI_PATH: "/opt/custom/claude",
+      }),
+      harnessPin: "codex",
+    });
+    expect(await run.completion).toBe(false);
+
+    const records = readSpawns(probeLog);
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({ harness: "codex", cliPath: null });
+  });
+
+  test("a pin to the primary harness keeps AGENT_CLI_PATH", async () => {
+    const { probePath, probeLog } = fixture();
+    await startWorkerFailover({ raw: "claude-code,codex", checkInstalled: false, log: () => {} });
+
+    const run = spawnAutomationProcess(process.execPath, [probePath], {
+      cwd: process.cwd(),
+      env: cleanBase({
+        PROBE_LOG: probeLog,
+        AGENT_HARNESS: "claude-code",
+        AGENT_CLI_PATH: "/opt/custom/claude",
+      }),
+      harnessPin: "claude-code",
+    });
+    expect(await run.completion).toBe(false);
+
+    const records = readSpawns(probeLog);
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({
+      harness: "claude-code",
+      cliPath: "/opt/custom/claude",
+    });
+  });
+
+  test("a pin to a non-claude harness drops the inherited CLAUDE_CLI_PATH fallback", async () => {
+    const { probePath, probeLog } = fixture();
+    await startWorkerFailover({ raw: "claude-code,codex", checkInstalled: false, log: () => {} });
+
+    const run = spawnAutomationProcess(process.execPath, [probePath], {
+      cwd: process.cwd(),
+      env: cleanBase({
+        PROBE_LOG: probeLog,
+        AGENT_HARNESS: "claude-code",
+        CLAUDE_CLI_PATH: "/opt/custom/claude",
+      }),
+      harnessPin: "codex",
+    });
+    expect(await run.completion).toBe(false);
+
+    const records = readSpawns(probeLog);
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({ harness: "codex", claudeCliPath: null });
+  });
+
+  test("a pin to claude-code keeps the inherited CLAUDE_CLI_PATH", async () => {
+    const { probePath, probeLog } = fixture();
+    await startWorkerFailover({ raw: "codex,claude-code", checkInstalled: false, log: () => {} });
+
+    const run = spawnAutomationProcess(process.execPath, [probePath], {
+      cwd: process.cwd(),
+      env: cleanBase({
+        PROBE_LOG: probeLog,
+        AGENT_HARNESS: "codex",
+        CLAUDE_CLI_PATH: "/opt/custom/claude",
+      }),
+      harnessPin: "claude-code",
+    });
+    expect(await run.completion).toBe(false);
+
+    const records = readSpawns(probeLog);
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({
+      harness: "claude-code",
+      claudeCliPath: "/opt/custom/claude",
+    });
+  });
+
+  test("a pin that changes the harness drops the inherited model", async () => {
+    const { probePath, probeLog } = fixture();
+    await startWorkerFailover({ raw: "claude-code,codex", checkInstalled: false, log: () => {} });
+
+    const env = automationRunEnv(
+      {
+        id: "triage",
+        enabled: true,
+        prompt: "p",
+        interval: "1h",
+        intervalMs: 3_600_000,
+        harness: "codex",
+      },
+      cleanBase({
+        PROBE_LOG: probeLog,
+        AGENT_HARNESS: "claude-code",
+        AGENT_MODEL: "claude-sonnet",
+      }),
+    );
+
+    const run = spawnAutomationProcess(process.execPath, [probePath], {
+      cwd: process.cwd(),
+      env,
+      harnessPin: "codex",
+    });
+    expect(await run.completion).toBe(false);
+
+    const records = readSpawns(probeLog);
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({ harness: "codex", model: null });
+  });
+
+  test("a model-only entry scopes its model to the primary and keeps failover", async () => {
+    const { probePath, probeLog } = fixture();
+    await startWorkerFailover({ raw: "codex,grok", checkInstalled: false, log: () => {} });
+
+    const base = cleanBase({ PROBE_LOG: probeLog, AGENT_HARNESS: "codex,grok" });
+    delete base.AGENT_MODEL;
+    delete base.AGENT_EFFORT;
+    const env = automationRunEnv(
+      {
+        id: "triage",
+        enabled: true,
+        prompt: "p",
+        interval: "1h",
+        intervalMs: 3_600_000,
+        model: "gpt-5-codex",
+      },
+      base,
+    );
+
+    const run = spawnAutomationProcess(process.execPath, [probePath], {
+      cwd: process.cwd(),
+      env,
+    });
+    expect(await run.completion).toBe(false);
+
+    const records = readSpawns(probeLog);
+    expect(records.length).toBeGreaterThanOrEqual(2);
+    // The model rides on the primary's own CODEX_MODEL, which the grok
+    // fallback never reads, so failover still runs with grok's default model.
+    expect(records[0]).toMatchObject({ harness: "codex", model: null, codexModel: "gpt-5-codex" });
+    expect(records[1]).toMatchObject({ harness: "grok", model: null, grokModel: null });
   });
 });

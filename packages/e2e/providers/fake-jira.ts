@@ -41,6 +41,8 @@ interface FakeJiraIssue {
   status: string;
   labels: string[];
   comments: FakeJiraComment[];
+  /** Custom fields written through `PUT /rest/api/3/issue/{key}`. */
+  fields: Record<string, unknown>;
   created: string;
   updated: string;
 }
@@ -66,6 +68,14 @@ export interface FakeJiraOptions {
   projectKey?: string;
   /** Override one or more workflow status names. */
   statuses?: Partial<FakeJiraStatuses>;
+  /**
+   * Stamp writes with the real wall clock (strictly increasing) instead of the
+   * deterministic +1s clock. Worker polling compares tracker stamps with local
+   * time (the detector's relative `updated` window and the retry gate's
+   * "comment created after the failure report" check), so a fake clock that
+   * drifts ahead of real time would make an old comment look new.
+   */
+  wallClock?: boolean;
 }
 
 const FAKE_ACCOUNT = {
@@ -151,16 +161,28 @@ export class FakeJiraTracker implements TrackerFixture {
   /** Requests the fake could not route, for an explicit end-of-test assertion. */
   readonly unexpectedRequests: string[] = [];
 
+  /**
+   * JQL strings received by `GET /rest/api/3/search/jql`, in arrival order.
+   *
+   * The value is the decoded `jql` parameter, so a test can prove the worker
+   * sent its configured query without parsing access logs.
+   */
+  readonly searches: string[] = [];
+
   private readonly server: ReturnType<typeof Bun.serve>;
   private readonly baseUrl: string;
   private readonly issues = new Map<string, FakeJiraIssue>();
+  private handledRequests = 0;
   private nextIssueNumber = 1;
   private nextCommentId = 10_000;
   private now = Date.parse("2026-01-01T00:00:00.000Z");
+  private readonly wallClock: boolean;
 
   constructor(options: FakeJiraOptions = {}) {
     this.projectKeyValue = options.projectKey ?? "E2E";
     this.statuses = { ...FAKE_JIRA_STATUSES, ...options.statuses };
+    this.wallClock = options.wallClock ?? false;
+    if (this.wallClock) this.now = Date.now();
     this.openState = this.statuses.todo;
 
     this.server = Bun.serve({
@@ -210,6 +232,7 @@ export class FakeJiraTracker implements TrackerFixture {
       status: this.statuses.todo,
       labels: [...(input.labels ?? [])],
       comments: [],
+      fields: {},
       created: timestamp,
       updated: timestamp,
     };
@@ -266,6 +289,32 @@ export class FakeJiraTracker implements TrackerFixture {
     return this.requireIssue(ticketKey).status;
   }
 
+  /**
+   * Move the deterministic fake clock so a ticket can be created "now" for the
+   * estimation <24h skip. Later timestamped writes continue from this instant.
+   *
+   * @param epochMs - Epoch milliseconds to use as the server's current time
+   */
+  setNow(epochMs: number): void {
+    if (!Number.isFinite(epochMs)) throw new Error(`Invalid fake Jira clock: ${epochMs}`);
+    this.now = epochMs;
+  }
+
+  /** Read one persisted custom field, or `undefined` when it was never written. */
+  getField(ticketKey: string, fieldId: string): unknown {
+    return this.requireIssue(ticketKey).fields[fieldId];
+  }
+
+  /**
+   * Story points written to the convention field used by the estimation test.
+   *
+   * @param ticketKey - Issue key
+   * @param fieldId - Jira custom field id (default `customfield_10016`)
+   */
+  getStoryPoints(ticketKey: string, fieldId = "customfield_10016"): unknown {
+    return this.getField(ticketKey, fieldId);
+  }
+
   async listComments(ticketKey: string): Promise<TrackerComment[]> {
     const issue = this.requireIssue(ticketKey);
     return issue.comments.map((comment) => ({ id: comment.id, body: adfToText(comment.body) }));
@@ -283,6 +332,11 @@ export class FakeJiraTracker implements TrackerFixture {
     }));
   }
 
+  /** Total HTTP requests the fake has handled, including unmatched ones. */
+  get requestCount(): number {
+    return this.handledRequests;
+  }
+
   /** Stop the HTTP server and release the ephemeral port. */
   async cleanup(): Promise<void> {
     this.server.stop(true);
@@ -294,6 +348,7 @@ export class FakeJiraTracker implements TrackerFixture {
   }
 
   private async handle(request: Request): Promise<Response> {
+    this.handledRequests++;
     const url = new URL(request.url);
     const path = decodeURIComponent(url.pathname);
     const method = request.method.toUpperCase();
@@ -322,6 +377,11 @@ export class FakeJiraTracker implements TrackerFixture {
       return this.postComment(commentMatch[1], request);
     }
 
+    const commentUpdateMatch = path.match(/^\/rest\/api\/3\/issue\/([^/]+)\/comment\/([^/]+)$/);
+    if (commentUpdateMatch?.[1] && commentUpdateMatch[2] && method === "PUT") {
+      return this.updateComment(commentUpdateMatch[1], commentUpdateMatch[2], request);
+    }
+
     const transitionMatch = path.match(/^\/rest\/api\/3\/issue\/([^/]+)\/transitions$/);
     if (transitionMatch?.[1] && method === "GET") {
       return this.getTransitions(transitionMatch[1]);
@@ -337,6 +397,7 @@ export class FakeJiraTracker implements TrackerFixture {
 
   private search(url: URL): Response {
     const jql = url.searchParams.get("jql") ?? "";
+    this.searches.push(jql);
     const startAt = Number(url.searchParams.get("startAt") ?? 0);
     const maxResults = Number(url.searchParams.get("maxResults") ?? 50);
     const matches = this.matchingIssues(jql);
@@ -348,16 +409,58 @@ export class FakeJiraTracker implements TrackerFixture {
     });
   }
 
+  /**
+   * Evaluate the documented JQL subset.
+   *
+   * The query is split on top-level `AND` (outside quotes and parentheses),
+   * and redundant outer parentheses are stripped from each clause. A clause of
+   * the form `updated >= "-Nm"` (the worker's Jira change detector, see
+   * `createJiraChangeDetector`) keeps issues whose `updated` stamp is no older
+   * than N minutes before the real wall clock, as Jira evaluates relative
+   * dates against server time. Every other clause keeps the original
+   * behavior: each quoted term (for example `text ~ "<marker>"`) must appear
+   * in the summary or description, and an unquoted remainder is one term.
+   * `OR`, `NOT`, `ORDER BY`, and other fields are not supported.
+   */
   private matchingIssues(query: string): FakeJiraIssue[] {
-    const quoted = [...query.matchAll(/["']([^"']+)["']/g)]
+    let updatedWindowMs: number | undefined;
+    const textClauses: string[] = [];
+    for (const clause of splitTopLevelAnd(query)) {
+      const window = clause.match(/^updated\s*>=\s*(["'])-(\d+)m\1$/i);
+      if (window?.[2]) {
+        const ms = Number(window[2]) * 60_000;
+        updatedWindowMs = updatedWindowMs === undefined ? ms : Math.min(updatedWindowMs, ms);
+      } else {
+        textClauses.push(clause);
+      }
+    }
+    const textQuery = textClauses.join(" ");
+    const quoted = [...textQuery.matchAll(/["']([^"']+)["']/g)]
       .map((match) => match[1]?.trim())
       .filter((term): term is string => Boolean(term));
-    const terms = quoted.length > 0 ? quoted : [query.trim()].filter(Boolean);
-    if (terms.length === 0) return [...this.issues.values()];
+    const terms = quoted.length > 0 ? quoted : [textQuery.trim()].filter(Boolean);
+    const since = updatedWindowMs === undefined ? undefined : Date.now() - updatedWindowMs;
     return [...this.issues.values()].filter((issue) => {
+      if (since !== undefined && Date.parse(issue.updated) < since) return false;
       const searchable = `${issue.summary}\n${adfToText(issue.description)}`.toLowerCase();
       return terms.every((term) => searchable.includes(term.toLowerCase()));
     });
+  }
+
+  /**
+   * Edit an issue the way a human would in the Jira UI: change its summary
+   * and/or description and bump `updated`.
+   */
+  async editTicket(ticketKey: string, input: { title?: string; body?: string }): Promise<void> {
+    const issue = this.requireIssue(ticketKey);
+    if (input.title !== undefined) issue.summary = input.title;
+    if (input.body !== undefined) issue.description = textToAdf(input.body);
+    issue.updated = this.timestamp();
+  }
+
+  /** Current `updated` stamp, for asserting that an edit re-armed polling. */
+  getUpdated(ticketKey: string): string {
+    return this.requireIssue(ticketKey).updated;
   }
 
   private getIssue(key: string): Response {
@@ -380,6 +483,12 @@ export class FakeJiraTracker implements TrackerFixture {
     }
     if (fields?.description && typeof fields.description === "object") {
       issue.description = fields.description as AdfNode;
+    }
+    // Persist every other field verbatim (notably story-point custom fields) so
+    // a test can read back the value the CLI actually wrote.
+    for (const [fieldId, value] of Object.entries(fields ?? {})) {
+      if (fieldId === "labels" || fieldId === "summary" || fieldId === "description") continue;
+      issue.fields[fieldId] = value;
     }
     issue.updated = this.timestamp();
     return new Response(null, { status: 204 });
@@ -421,6 +530,29 @@ export class FakeJiraTracker implements TrackerFixture {
     return json(this.commentPayload(comment), 201);
   }
 
+  private async updateComment(key: string, commentId: string, request: Request): Promise<Response> {
+    const issue = this.issues.get(key.toUpperCase());
+    if (!issue) return notFound(key);
+    const comment = issue.comments.find((candidate) => candidate.id === commentId);
+    if (!comment) {
+      return json({ errorMessages: [`Fake Jira comment not found: ${commentId}`] }, 404);
+    }
+    const body = await readJson(request);
+    if (!body.ok) return body.response;
+    const container = asRecord(body.value);
+    const rawBody = container?.body;
+    const adf =
+      rawBody && typeof rawBody === "object"
+        ? (rawBody as AdfNode)
+        : textToAdf(typeof rawBody === "string" ? rawBody : "");
+    const timestamp = this.timestamp();
+    comment.body = adf;
+    comment.renderedBody = adfToHtml(adf);
+    comment.updated = timestamp;
+    issue.updated = timestamp;
+    return json(this.commentPayload(comment));
+  }
+
   private getTransitions(key: string): Response {
     const issue = this.issues.get(key.toUpperCase());
     if (!issue) return notFound(key);
@@ -459,6 +591,7 @@ export class FakeJiraTracker implements TrackerFixture {
       key: issue.key,
       self: `${this.baseUrl}/rest/api/3/issue/${issue.key}`,
       fields: {
+        ...issue.fields,
         summary: issue.summary,
         description: issue.description,
         issuetype: { id: "10001", name: "Task", subtask: false },
@@ -513,9 +646,68 @@ export class FakeJiraTracker implements TrackerFixture {
   }
 
   private timestamp(): string {
-    this.now += 1000;
+    this.now = this.wallClock ? Math.max(this.now + 1, Date.now()) : this.now + 1000;
     return new Date(this.now).toISOString();
   }
+}
+
+/**
+ * Split JQL on top-level `AND`, ignoring separators inside quotes or
+ * parentheses, and strip parentheses that wrap a whole clause.
+ */
+function splitTopLevelAnd(query: string): string[] {
+  const clauses: string[] = [];
+  let depth = 0;
+  let quote: string | undefined;
+  let start = 0;
+  for (let index = 0; index < query.length; index++) {
+    const char = query[index]!;
+    if (quote) {
+      if (char === quote) quote = undefined;
+      continue;
+    }
+    if (char === '"' || char === "'") quote = char;
+    else if (char === "(") depth++;
+    else if (char === ")") depth = Math.max(0, depth - 1);
+    else if (depth === 0) {
+      const separator = query.slice(index).match(/^\s+AND\s+/i);
+      if (separator && index > start) {
+        clauses.push(query.slice(start, index));
+        index += separator[0].length - 1;
+        start = index + 1;
+      }
+    }
+  }
+  clauses.push(query.slice(start));
+  return clauses.map(stripOuterParens).filter(Boolean);
+}
+
+function stripOuterParens(clause: string): string {
+  let current = clause.trim();
+  while (current.startsWith("(") && current.endsWith(")") && wrapsWhole(current)) {
+    current = current.slice(1, -1).trim();
+  }
+  return current;
+}
+
+/** True when the opening parenthesis at index 0 closes at the final index. */
+function wrapsWhole(clause: string): boolean {
+  let depth = 0;
+  let quote: string | undefined;
+  for (let index = 0; index < clause.length; index++) {
+    const char = clause[index]!;
+    if (quote) {
+      if (char === quote) quote = undefined;
+      continue;
+    }
+    if (char === '"' || char === "'") quote = char;
+    else if (char === "(") depth++;
+    else if (char === ")") {
+      depth--;
+      if (depth === 0 && index < clause.length - 1) return false;
+    }
+  }
+  return depth === 0;
 }
 
 function json(value: unknown, status = 200): Response {

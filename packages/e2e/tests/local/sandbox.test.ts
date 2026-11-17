@@ -1,38 +1,172 @@
 /**
- * End-to-end coverage for the nono sandbox provider.
+ * End-to-end coverage for sandbox provider selection and fail-closed behavior.
  *
- * These tests exercise the real boundary: the built CLI runs a deterministic
- * shell agent wrapped by nono, and the agent reports which paths it could
- * write and read. They complement the agent-harness unit tests, which only
- * inspect the generated argv.
+ * These tests exercise the built CLI. Real boundary checks run when the
+ * relevant provider can actually start on this host; fail-closed and doctor
+ * checks are deterministic and run without any external provider by removing
+ * its executable from PATH (or shadowing it with an unreachable daemon stub).
  *
- * The suite skips when nono is not installed, so `bun run test` behaves the
- * same on a laptop with nono and in CI without it.
+ * The suite complements the agent-harness unit tests, which only inspect the
+ * generated argv. No AI account or model call is involved.
  */
 
 import { expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { delimiter, join, relative } from "node:path";
 import { cliPath } from "../../helpers/fixture-workspace";
+import type { CommandResult } from "../../helpers/process";
 import { command } from "../../helpers/process";
 import {
+  createProviderHome,
   createSandboxHome,
+  createSandboxOutside,
   nonoPath,
-  pathWithoutNono,
+  pathWithoutProvider,
+  providerBinary,
+  providerPrerequisite,
   runtimeBinDir,
   SandboxWorkspace,
   sandboxEnvironment,
+  stubExecutable,
+  stubHarness,
 } from "../../helpers/sandbox";
 
 const nono = nonoPath();
 const skip = !existsSync(cliPath) || nono === undefined;
 
-/** Write a stub harness CLI that accepts `--version` and any probe flags. */
-function stubHarness(dir: string, name: string): void {
-  const path = join(dir, name);
-  writeFileSync(path, '#!/bin/sh\necho "stub"\n');
-  chmodSync(path, 0o700);
+/**
+ * PATH with the provider's executable removed, keeping runtime and system tools.
+ *
+ * The runtime directory is filtered together with the ambient PATH:
+ * `bun add -g` installs into the same directory as the bun executable (for
+ * example `~/.bun/bin`), so prepending the runtime directory after filtering
+ * would put the provider straight back on PATH.
+ */
+function providerOfflinePath(provider: string, base: string = process.env.PATH ?? ""): string {
+  const path = pathWithoutProvider(provider, [runtimeBinDir(), base].join(delimiter));
+  const binary = providerBinary(provider);
+  const leaked = binary
+    ? path.split(delimiter).find((entry) => entry !== "" && existsSync(join(entry, binary)))
+    : undefined;
+  if (binary && leaked) {
+    // Fail loudly instead of silently running the real provider: the
+    // fail-closed test would otherwise pass or fail for the wrong reason.
+    throw new Error(`test PATH still resolves ${binary} through ${leaked}`);
+  }
+  return path;
+}
+
+/** PATH with the provider's executable removed, keeping runtime and system tools. */
+function providerOfflineEnv(provider: string): Record<string, string> {
+  return { PATH: providerOfflinePath(provider) };
+}
+
+/** PATH with a stub executable shadowing the real one, for unreachable services. */
+function shadowBinEnv(run: SandboxWorkspace, name: string, source: string): Record<string, string> {
+  const bin = join(run.root, "shadow-bin");
+  mkdirSync(bin, { recursive: true });
+  stubExecutable(bin, name, source);
+  return { PATH: [bin, runtimeBinDir(), process.env.PATH ?? ""].join(delimiter) };
+}
+
+/**
+ * Assert the probe could not write to the host path outside every grant.
+ *
+ * The fixture only provides that path when the host has a directory outside the
+ * OS temp dir (see {@link createSandboxOutside}). When it does not — for
+ * example a checkout under `/tmp` where `/var/tmp` is also denied — skip the
+ * escape assertion instead of reporting a fixture limitation as a boundary
+ * regression. The remaining checks (workspace, temp, output, HOME) still prove
+ * confinement.
+ *
+ * @param run - Workspace whose probe report to inspect.
+ * @param checks - Parsed probe checks for that run.
+ */
+function expectOutsideWriteDenied(
+  run: SandboxWorkspace,
+  checks: ReturnType<SandboxWorkspace["checks"]>,
+): void {
+  if (!run.outside) {
+    console.warn(
+      "outside-write boundary not asserted: this host has no directory outside the OS temp dir",
+    );
+    expect(checks["outside-write"]).toBeUndefined();
+    return;
+  }
+  // The escape target must really be outside the temp dir providers grant, or
+  // "denied" would be a lie. `relative` avoids prefix-matching `/tmpfoo`.
+  expect(relative(realpathSync(tmpdir()), realpathSync(run.outside)).startsWith("..")).toBe(true);
+  expect(checks["outside-write"]?.ok).toBe(false);
+  expect(existsSync(join(run.outside, "sandbox-escape"))).toBe(false);
+}
+
+/**
+ * The fixture's outside-the-boundary directory must never live under the OS
+ * temp dir: nono's Linux profile grants write on `/tmp` itself, so a directory
+ * there would make the agent's escape succeed and fail the boundary tests for
+ * the wrong reason.
+ */
+test("outside-the-boundary fixture rejects temp bases and falls back to a non-temp one", () => {
+  const temp = realpathSync(tmpdir());
+  const insideTemp = mkdtempSync(join(tmpdir(), "devintern-e2e-outside-guard-"));
+  const packageLocal = join(import.meta.dir, "..", ".local");
+  let created: string | undefined;
+  try {
+    // A base under the temp dir must be rejected outright, creating nothing.
+    expect(createSandboxOutside([insideTemp])).toBeUndefined();
+
+    mkdirSync(packageLocal, { recursive: true });
+    if (!relative(temp, realpathSync(packageLocal)).startsWith("..")) {
+      // This checkout itself lives under the temp dir, so the package-local
+      // base cannot be outside it; the guard above is all this host can assert.
+      return;
+    }
+
+    const outside = createSandboxOutside([insideTemp, packageLocal]);
+    expect(outside).toBeDefined();
+    if (outside) {
+      created = outside;
+      expect(relative(temp, realpathSync(outside)).startsWith("..")).toBe(true);
+    }
+  } finally {
+    rmSync(insideTemp, { recursive: true, force: true });
+    if (created) rmSync(created, { recursive: true, force: true });
+  }
+});
+
+/** PATH with stub harness CLIs so provider preflight does not need real agents. */
+function stubHarnessEnv(run: SandboxWorkspace, names: readonly string[]): Record<string, string> {
+  const bin = join(run.root, "harness-bin");
+  mkdirSync(bin, { recursive: true });
+  for (const name of names) stubHarness(bin, name);
+  return { PATH: [bin, runtimeBinDir(), process.env.PATH ?? ""].join(delimiter) };
+}
+
+/** A stub `sbx` whose `ls` fails, matching an unreachable/unauthenticated daemon. */
+const DOCKER_DAEMON_DOWN_STUB = `#!/bin/sh
+case "$1" in
+  ls) echo "Not authenticated to Docker" >&2; exit 1 ;;
+  *) echo "stub"; exit 0 ;;
+esac
+`;
+
+/** Assert an explicitly requested provider aborted the run before the agent. */
+async function expectFailClosed(
+  run: SandboxWorkspace,
+  result: CommandResult,
+  provider: string,
+  wording: string,
+): Promise<void> {
+  const text = `${result.stdout}\n${result.stderr}`;
+  expect(result.exitCode).not.toBe(0);
+  expect(text).toContain(`Sandbox provider "${provider}"`);
+  expect(text).toContain(wording);
+  expect(text).not.toContain("🔒 Agent sandbox:");
+  // Nothing ran: no probe report, no commit, no pushed branch.
+  expect(Object.keys(run.checks())).toHaveLength(0);
+  expect(await run.git("rev-list", "--count", `${run.base}..HEAD`)).toBe("0");
+  expect(await run.remoteSha(run.head)).toBeUndefined();
 }
 
 test.skipIf(skip)(
@@ -47,7 +181,7 @@ test.skipIf(skip)(
     const baseEnv = sandboxEnvironment(root, home);
     const env = {
       ...baseEnv,
-      PATH: [bin, baseEnv.PATH].join(delimiter),
+      PATH: [bin, runtimeBinDir(), baseEnv.PATH].join(delimiter),
     };
     try {
       const explicit = await command([process.execPath, cliPath, "sandbox"], root, env);
@@ -93,10 +227,12 @@ test.skipIf(skip)(
       expect(checks["nono-marker"]?.ok).toBe(true);
       expect(checks["working-dir-write"]?.ok).toBe(true);
       expect(checks["temp-write"]?.ok).toBe(true);
+      expect(checks["output-write"]?.ok).toBe(true);
       expect(checks["repo-edit"]?.ok).toBe(true);
       // The v1 policy keeps reads open but confines writes.
       expect(checks["home-read"]?.ok).toBe(true);
       expect(checks["home-write"]?.ok).toBe(false);
+      expectOutsideWriteDenied(run, checks);
       expect(existsSync(join(run.home, "sandbox-escape"))).toBe(false);
 
       expect(await run.git("branch", "--show-current")).toBe(run.head);
@@ -119,14 +255,9 @@ test.skipIf(!existsSync(cliPath))(
     const run = await new SandboxWorkspace().prepare();
     try {
       const result = await run.run({
-        PATH: [runtimeBinDir(), pathWithoutNono()].join(delimiter),
+        PATH: providerOfflinePath("nono"),
       });
-      const text = `${result.stdout}\n${result.stderr}`;
-      expect(result.exitCode).not.toBe(0);
-      expect(text).toContain('Sandbox provider "nono" is not usable on this machine');
-      // Nothing ran: no probe report, no commit.
-      expect(Object.keys(run.checks())).toHaveLength(0);
-      expect(await run.git("rev-list", "--count", `${run.base}..HEAD`)).toBe("0");
+      await expectFailClosed(run, result, "nono", "not usable on this machine");
     } finally {
       run.dispose();
     }
@@ -157,4 +288,269 @@ test.skipIf(skip)(
     }
   },
   90_000,
+);
+
+// Explicit providers that cannot be enforced must abort before the agent runs.
+for (const provider of ["docker"] as const) {
+  test.skipIf(!existsSync(cliPath))(
+    `an explicitly requested ${provider} provider fails closed when it is unusable`,
+    async () => {
+      const run = await new SandboxWorkspace().prepare();
+      try {
+        // docker runs as `sbx`; shadowing it with a failing daemon keeps the
+        // system PATH (including git and sh) intact.
+        const overrides =
+          provider === "docker"
+            ? shadowBinEnv(run, providerBinary("docker") ?? "sbx", DOCKER_DAEMON_DOWN_STUB)
+            : providerOfflineEnv(provider);
+        const result = await run.run(overrides, ["--sandbox", provider]);
+        await expectFailClosed(run, result, provider, "not usable on this machine");
+      } finally {
+        run.dispose();
+      }
+    },
+    90_000,
+  );
+}
+
+test.skipIf(!existsSync(cliPath))(
+  "an explicitly requested native provider fails closed for a harness it cannot wrap",
+  async () => {
+    const run = await new SandboxWorkspace().prepare();
+    try {
+      const result = await run.run({ ...stubHarnessEnv(run, ["goose"]), AGENT_HARNESS: "goose" }, [
+        "--sandbox",
+        "native",
+      ]);
+      const text = `${result.stdout}\n${result.stderr}`;
+      expect(result.exitCode).not.toBe(0);
+      expect(text).toContain('Sandbox provider "native" does not support the "goose" harness');
+      expect(text).not.toContain("🔒 Agent sandbox:");
+      expect(Object.keys(run.checks())).toHaveLength(0);
+      expect(await run.git("rev-list", "--count", `${run.base}..HEAD`)).toBe("0");
+      expect(await run.remoteSha(run.head)).toBeUndefined();
+    } finally {
+      run.dispose();
+    }
+  },
+  90_000,
+);
+
+test.skipIf(!existsSync(cliPath))(
+  "an unknown --sandbox provider fails closed without running the agent",
+  async () => {
+    const run = await new SandboxWorkspace().prepare();
+    try {
+      // AGENT_SANDBOX is nono for this workspace; the flag must override it.
+      const result = await run.run({}, ["--sandbox", "bogus"]);
+      const text = `${result.stdout}\n${result.stderr}`;
+      expect(result.exitCode).not.toBe(0);
+      expect(text).toContain('Unknown sandbox provider: "bogus"');
+      expect(text).toContain("Valid values:");
+      expect(text).toContain('"none"');
+      expect(text).toContain('"auto"');
+      expect(text).not.toContain("🔒 Agent sandbox:");
+      expect(Object.keys(run.checks())).toHaveLength(0);
+      expect(await run.git("rev-list", "--count", `${run.base}..HEAD`)).toBe("0");
+      expect(await run.remoteSha(run.head)).toBeUndefined();
+    } finally {
+      run.dispose();
+    }
+  },
+  90_000,
+);
+
+test.skipIf(!existsSync(cliPath))(
+  "sandbox doctor fails closed for an unknown AGENT_SANDBOX value",
+  async () => {
+    const root = mkdtempSync(join(tmpdir(), "devintern-e2e-sandbox-doctor-bogus-"));
+    const home = createProviderHome(root);
+    try {
+      const result = await command(
+        [process.execPath, cliPath, "sandbox"],
+        root,
+        sandboxEnvironment(root, home, "bogus"),
+      );
+      const text = `${result.stdout}\n${result.stderr}`;
+      expect(result.exitCode).toBe(1);
+      expect(text).toContain("Configured: AGENT_SANDBOX=bogus");
+      expect(text).toContain('unknown provider "bogus"');
+      expect(text).toContain("❌ fails");
+      expect(text).toContain("Valid: none, auto");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+  60_000,
+);
+
+test.skipIf(!existsSync(cliPath))(
+  "sandbox doctor reports the native provider as the next run for a supported harness",
+  async () => {
+    const root = mkdtempSync(join(tmpdir(), "devintern-e2e-sandbox-doctor-native-"));
+    const home = createProviderHome(root);
+    const bin = join(home, "bin");
+    mkdirSync(bin, { recursive: true });
+    stubHarness(bin, "claude");
+    stubHarness(bin, "codex");
+    const baseEnv = sandboxEnvironment(root, home, "native");
+    const env = {
+      ...baseEnv,
+      PATH: [bin, runtimeBinDir(), baseEnv.PATH].join(delimiter),
+      AGENT_HARNESS: "claude-code",
+    };
+    try {
+      const result = await command([process.execPath, cliPath, "sandbox"], root, env);
+      const text = `${result.stdout}\n${result.stderr}`;
+      expect(result.exitCode).toBe(0);
+      expect(text).toContain("Configured: AGENT_SANDBOX=native");
+      expect(text).toContain("Next run:   agent wrapped with Harness native sandbox");
+      expect(text).toContain("✅ available");
+      expect(text).toContain("Harness CLI preflight (native)");
+      expect(text).toContain("AGENT_SANDBOX=auto would pick: native");
+      expect(text).not.toContain("❌ fails");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+  60_000,
+);
+
+for (const provider of ["srt", "smolvm"] as const) {
+  test.skipIf(!existsSync(cliPath))(
+    `sandbox doctor reports the removed ${provider} provider as a migration error`,
+    async () => {
+      const root = mkdtempSync(join(tmpdir(), `devintern-e2e-sandbox-doctor-${provider}-`));
+      const home = createProviderHome(root);
+      const bin = join(home, "bin");
+      mkdirSync(bin, { recursive: true });
+      stubHarness(bin, "claude");
+      const baseEnv = sandboxEnvironment(root, home, provider);
+      const env = {
+        ...baseEnv,
+        PATH: [bin, runtimeBinDir(), baseEnv.PATH].join(delimiter),
+        AGENT_HARNESS: "claude-code",
+      };
+      try {
+        const result = await command([process.execPath, cliPath, "sandbox"], root, env);
+        const text = `${result.stdout}\n${result.stderr}`;
+        expect(result.exitCode).toBe(1);
+        expect(text).toContain(`Configured: AGENT_SANDBOX=${provider}`);
+        expect(text).toContain(`Sandbox provider "${provider}" has been removed`);
+        expect(text).not.toContain("Uncaught exception");
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+    60_000,
+  );
+}
+
+test.skipIf(!existsSync(cliPath))(
+  "sandbox doctor does not claim docker sandboxes a run when the daemon is unreachable",
+  async () => {
+    const root = mkdtempSync(join(tmpdir(), "devintern-e2e-sandbox-doctor-docker-"));
+    const home = createProviderHome(root);
+    const bin = join(home, "bin");
+    mkdirSync(bin, { recursive: true });
+    stubHarness(bin, "claude");
+    const sbx = providerBinary("docker") ?? "sbx";
+    const shadow = join(home, "shadow");
+    mkdirSync(shadow, { recursive: true });
+    stubExecutable(shadow, sbx, DOCKER_DAEMON_DOWN_STUB);
+    const baseEnv = sandboxEnvironment(root, home, "docker");
+    const env = {
+      ...baseEnv,
+      PATH: [shadow, bin, runtimeBinDir(), baseEnv.PATH].join(delimiter),
+      AGENT_HARNESS: "claude-code",
+    };
+    try {
+      const result = await command([process.execPath, cliPath, "sandbox"], root, env);
+      const text = `${result.stdout}\n${result.stderr}`;
+      expect(result.exitCode).toBe(1);
+      expect(text).toContain("Configured: AGENT_SANDBOX=docker");
+      expect(text).toMatch(/docker\s+Docker Sandboxes \(microVM\)/);
+      expect(text).toContain("docker is not usable on this machine");
+      expect(text).toContain("sbx found, but not usable");
+      expect(text).not.toContain("agent wrapped with Docker Sandboxes");
+      expect(text).not.toContain("Uncaught exception");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+  60_000,
+);
+
+test.skipIf(!existsSync(cliPath))(
+  "sandbox doctor picks native for auto when the harness supports it",
+  async () => {
+    const root = mkdtempSync(join(tmpdir(), "devintern-e2e-sandbox-doctor-auto-native-"));
+    const home = createProviderHome(root);
+    const bin = join(home, "bin");
+    mkdirSync(bin, { recursive: true });
+    stubHarness(bin, "claude");
+    stubHarness(bin, "codex");
+    const baseEnv = sandboxEnvironment(root, home, "auto");
+    const env = {
+      ...baseEnv,
+      PATH: [bin, runtimeBinDir(), baseEnv.PATH].join(delimiter),
+      AGENT_HARNESS: "claude-code",
+    };
+    try {
+      const result = await command([process.execPath, cliPath, "sandbox"], root, env);
+      const text = `${result.stdout}\n${result.stderr}`;
+      expect(result.exitCode).toBe(0);
+      expect(text).toContain("Configured: AGENT_SANDBOX=auto");
+      expect(text).toContain("auto picks native");
+      expect(text).toContain("agent wrapped with Harness native sandbox");
+      expect(text).toContain("AGENT_SANDBOX=auto would pick: native");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+  60_000,
+);
+
+test.skipIf(!existsSync(cliPath))(
+  "sandbox doctor reports a missing harness CLI and fails the next run",
+  async () => {
+    const root = mkdtempSync(join(tmpdir(), "devintern-e2e-sandbox-doctor-missing-"));
+    const home = createProviderHome(root);
+    const baseEnv = sandboxEnvironment(root, home, "native");
+    const env = {
+      ...baseEnv,
+      // An explicit but nonexistent path exercises the missing-harness preflight
+      // without deleting a whole system PATH directory that may hold other tools.
+      CLAUDE_CLI_PATH: join(root, "missing-harness", "claude"),
+      AGENT_HARNESS: "claude-code",
+    };
+    try {
+      const result = await command([process.execPath, cliPath, "sandbox"], root, env);
+      const text = `${result.stdout}\n${result.stderr}`;
+      expect(result.exitCode).toBe(1);
+      expect(text).toContain("Harness CLI preflight (native)");
+      expect(text).toContain("FAIL —");
+      expect(text).toContain("CLAUDE_CLI_PATH");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+  60_000,
+);
+
+// The prerequisite gate must check registration before the "no external binary
+// to probe" fast path: otherwise an unknown name looks usable and a future
+// boundary test would run for a provider the CLI refuses.
+test.skipIf(process.platform === "win32")(
+  "the prerequisite gate rejects an unregistered provider name",
+  async () => {
+    const unknown = await providerPrerequisite("bogus");
+    expect(unknown.usable).toBe(false);
+    expect(unknown.reason).toBe('no registered sandbox provider named "bogus"');
+
+    // A registered provider with no binary still passes the gate.
+    const native = await providerPrerequisite("native");
+    expect(native.usable).toBe(true);
+    expect(native.reason).toBe("native has no external binary to probe");
+  },
 );

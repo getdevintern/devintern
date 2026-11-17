@@ -24,7 +24,6 @@
  * PR in `cursors`.
  */
 
-import { spawn } from "child_process";
 import { captureError } from "@devintern/utils";
 
 import { parseHarnessList } from "@devintern/agent-harness";
@@ -33,24 +32,53 @@ import {
   agentPrKey,
   agentPrStateCursorSource,
   applyAgentPrFetch,
+  classifyAgentPrState,
   reconcileOpenAgentPrs,
 } from "../review/agent-pr-reconciler";
 import type { ConditionalResult, PolledPr } from "../review/agent-pr-reconciler";
-import { isGitHubAuthError } from "../code-host/github/reviews";
+import {
+  describeGitHubAuthFailure,
+  isGitHubAuthError,
+  isGitHubTransientError,
+} from "../code-host/github/reviews";
 import { nextScheduleOccurrence } from "../automation/config";
 import type { CronOrIntervalSchedule } from "../automation/config";
-import { parseEnvInteger } from "../config/env-integer";
 import type { RunStore } from "../state/run-recorder";
 import type { TaskExecutionResult } from "./task-polling";
 import type { WebhookQueue } from "../state/webhook-queue";
-import { cliResultToTaskResult, runWithFailover } from "../worker/failover";
 import type { WorkerState } from "../state/worker-state";
 import type { ConflictResolutionMode } from "../workspace/config";
 import type { Acquirer } from "../../worker";
+import type { AutomaticResolveResult } from "./review-cli";
+import {
+  CONFLICT_WINDOW_SOURCE,
+  extendConflictWindow,
+  isConflictWindowOpen,
+  openConflictWindow,
+  parseConflictWindowState,
+  resolveConflictWindowGraceMs,
+} from "./conflict-window";
+import type {
+  ConflictWindowState,
+  ConflictWindowStatus,
+  ConflictWindowTriggerOutcome,
+} from "./conflict-window";
 
 // The PR-state protocol types live with the reconciler, which shares them;
 // re-exported so poller consumers keep their existing import paths.
 export type { ConditionalResult, PolledPr };
+// Resolver/feedback subprocess helpers live in ./review-cli; re-exported so
+// existing importers keep their paths.
+export {
+  DEFAULT_RESOLVE_TIMEOUT_MS,
+  runAddressReviewUrlViaCli,
+  runAddressReviewViaCli,
+  runResolveConflictsUrlViaCli,
+  runResolveConflictsViaCli,
+  serializePrRun,
+} from "./review-cli";
+export type { AutomaticResolveResult } from "./review-cli";
+export type { ConflictWindowStatus, ConflictWindowTriggerOutcome };
 
 export interface PolledReview {
   id: number;
@@ -62,11 +90,6 @@ export interface PolledComment {
   id: number;
   user: { login: string; type: string };
   created_at: string;
-}
-
-export interface AutomaticResolveResult {
-  outcome: "clean" | "resolved" | "skipped" | "failed" | "deferred";
-  message: string;
 }
 
 /** GitHub access used by the poller (injected for tests). */
@@ -82,6 +105,36 @@ export interface ReviewPollingGitHub {
     prNumber: number,
     sinceIso: string,
   ): Promise<PolledComment[]>;
+}
+
+/**
+ * Endpoint group a polling pass can fail on. Recovery is tracked per stage so
+ * a successful metadata-only PR fetch cannot clear a reviews/comments throttle
+ * that was never re-tested.
+ */
+type PollStage = "pr-state" | "reviews" | "comments" | "write";
+
+/** Human label for a stage, used in credential warnings. */
+const POLL_STAGE_LABELS: Record<PollStage, string> = {
+  "pr-state": "reading PR state",
+  reviews: "reading reviews",
+  comments: "reading review comments",
+  write: "posting a review comment",
+};
+
+interface AuthFailureEntry {
+  repo: string;
+  stage: PollStage;
+  lastWarnAt: number | null;
+  active: boolean;
+}
+
+/** Stage progress for one PR pass; mutated by {@link ReviewPollingAcquirer.pollPr}. */
+interface PollProgress {
+  /** Stages whose requests completed during this pass. */
+  completed: Set<PollStage>;
+  /** Stage whose request is currently in flight. */
+  current?: PollStage;
 }
 
 export interface ReviewPollingAcquirerOptions {
@@ -147,20 +200,6 @@ export interface ReviewPollingAcquirerOptions {
 /** Dedupe source for review/comment ids. */
 const SOURCE = "github:reviews";
 const BASE_SYNC_SOURCE = "github:base-sync";
-/** Durable cursor source for the scheduled conflict-resolution window. */
-const CONFLICT_WINDOW_SOURCE = "worker:conflict-window";
-const prRunTails = new Map<string, Promise<void>>();
-
-/** Default minutes a scheduled conflict-resolution window stays open. */
-export const DEFAULT_CONFLICT_WINDOW_GRACE_MINUTES = 60;
-
-/** Durable state for scheduled conflict resolution (persisted per worker). */
-interface ConflictWindowState {
-  /** Next scheduled occurrence (ms epoch). */
-  nextWindowAt: number;
-  /** Resolution attempts are allowed until this instant (0 = none opened yet). */
-  windowOpenUntil: number;
-}
 
 /**
  * Consecutive `deferred` resolver outcomes tolerated for one base-sync event
@@ -169,6 +208,12 @@ interface ConflictWindowState {
  * silently on every poll tick forever.
  */
 const MAX_CONSECUTIVE_DEFERS = 3;
+
+/**
+ * Wait before retrying a base sync deferred for lack of harness capacity when
+ * the failover chain exposes no reset time.
+ */
+const CAPACITY_RETRY_FALLBACK_MS = 5 * 60_000;
 
 /** Backoff before the first retry of a failed base-sync event. */
 const RETRY_BACKOFF_BASE_MS = 30_000;
@@ -187,389 +232,6 @@ export function baseSyncRetryBackoffMs(attempts: number): number {
   return Math.min(RETRY_BACKOFF_BASE_MS * 2 ** (attempts - 1), RETRY_BACKOFF_MAX_MS);
 }
 
-/** Default wall-clock budget for one resolve-conflicts subprocess. */
-export const DEFAULT_RESOLVE_TIMEOUT_MS = 30 * 60 * 1000;
-
-/** Resolver subprocess budget; `WORKER_RESOLVE_TIMEOUT_SECONDS` overrides (0 disables). */
-function resolveTimeoutMs(overrideMs?: number): number {
-  if (overrideMs !== undefined) return overrideMs;
-  return (
-    parseEnvInteger("WORKER_RESOLVE_TIMEOUT_SECONDS", DEFAULT_RESOLVE_TIMEOUT_MS / 1000, {
-      min: 0,
-    }) * 1000
-  );
-}
-
-/** Kill a spawned process and (best-effort) its whole process group. */
-function killProcessTree(child: ReturnType<typeof spawn>): void {
-  if (child.pid === undefined) return;
-  // The child is spawned detached, so it leads its own process group;
-  // the negative pid signals every descendant (e.g. agent harnesses).
-  try {
-    process.kill(-child.pid, "SIGTERM");
-  } catch {
-    child.kill("SIGTERM");
-  }
-  // If the SIGTERM already finished the child, cancel the deferred SIGKILL:
-  // by then the pid/pgid may have been recycled for an unrelated process, and
-  // signalling that would kill a bystander (e.g. under heavy test-suite churn).
-  const sigkillTimer = setTimeout(() => {
-    try {
-      process.kill(-child.pid!, "SIGKILL");
-    } catch {
-      try {
-        child.kill("SIGKILL");
-      } catch {
-        // Already gone.
-      }
-    }
-  }, 5_000).unref();
-  child.once("close", () => clearTimeout(sigkillTimer));
-}
-
-/** Serialize automatic pipelines that target the same PR worktree. */
-export async function serializePrRun<T>(
-  repo: string,
-  prNumber: number,
-  run: () => Promise<T>,
-): Promise<T> {
-  const key = `${repo.toLowerCase()}#${prNumber}`;
-  const previous = prRunTails.get(key) ?? Promise.resolve();
-  let release!: () => void;
-  const tail = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  const chained = previous.then(() => tail);
-  prRunTails.set(key, chained);
-  await previous;
-  try {
-    return await run();
-  } finally {
-    release();
-    if (prRunTails.get(key) === chained) prRunTails.delete(key);
-  }
-}
-
-/**
- * Run `devintern address-review` for a PR as a CLI subprocess, reusing the
- * whole manual flow (worktree, agent, push, replies, reactions).
- *
- * @param repo - `owner/repo` slug
- * @param prNumber - Pull request number
- * @param opts - Working directory and environment for the subprocess;
- *               the workspace worker runs from the repo's base worktree with
- *               per-repo env; direct callers inherit both.
- */
-export function runAddressReviewViaCli(
-  repo: string,
-  prNumber: number,
-  opts: {
-    cwd?: string;
-    env?: Record<string, string | undefined>;
-    signal?: AbortSignal;
-  } = {},
-): Promise<TaskExecutionResult> {
-  return serializePrRun(repo, prNumber, () =>
-    runSubcommandViaCli("address-review", repo, prNumber, opts),
-  );
-}
-
-/** Run manual feedback addressing for an already canonical change-request URL. */
-export function runAddressReviewUrlViaCli(
-  webUrl: string,
-  serializationKey: string,
-  opts: {
-    cwd?: string;
-    env?: Record<string, string | undefined>;
-    signal?: AbortSignal;
-    entrypoint?: string;
-    outputStdio?: "inherit" | "ignore";
-  } = {},
-): Promise<TaskExecutionResult> {
-  return serializePrRun(serializationKey, 0, () =>
-    runSubcommandViaCli("address-review", serializationKey, 0, { ...opts, webUrl }),
-  );
-}
-
-/**
- * Run `devintern resolve-conflicts` for a PR as a CLI subprocess.
- *
- * @param repo - `owner/repo` slug
- * @param prNumber - Pull request number
- * @param opts - Optional per-repo working directory and environment
- */
-export function runResolveConflictsViaCli(
-  repo: string,
-  prNumber: number,
-  opts: {
-    cwd?: string;
-    env?: Record<string, string | undefined>;
-    expectedHeadSha?: string;
-    expectedBaseSha?: string;
-    /** Hard wall-clock budget; defaults to `WORKER_RESOLVE_TIMEOUT_SECONDS` (30min). */
-    timeoutMs?: number;
-    /** Override the CLI entrypoint and output handling (subprocess tests). */
-    entrypoint?: string;
-    outputStdio?: "inherit" | "ignore";
-    webUrl?: string;
-    signal?: AbortSignal;
-  } = {},
-): Promise<AutomaticResolveResult> {
-  const args = [
-    ...(opts.expectedHeadSha ? ["--expected-head", opts.expectedHeadSha] : []),
-    ...(opts.expectedBaseSha ? ["--expected-base", opts.expectedBaseSha] : []),
-  ];
-  return serializePrRun(repo, prNumber, () => runResolveSubcommand(repo, prNumber, args, opts));
-}
-
-/** Run conflict resolution for a canonical provider change-request URL. */
-export function runResolveConflictsUrlViaCli(
-  webUrl: string,
-  serializationKey: string,
-  opts: {
-    cwd?: string;
-    env?: Record<string, string | undefined>;
-    expectedHeadSha?: string;
-    expectedBaseSha?: string;
-    timeoutMs?: number;
-    signal?: AbortSignal;
-    entrypoint?: string;
-    outputStdio?: "inherit" | "ignore";
-  } = {},
-): Promise<AutomaticResolveResult> {
-  return runResolveConflictsViaCli(serializationKey, 0, { ...opts, webUrl });
-}
-
-function runResolveSubcommand(
-  repo: string,
-  prNumber: number,
-  extraArgs: string[],
-  opts: {
-    cwd?: string;
-    env?: Record<string, string | undefined>;
-    timeoutMs?: number;
-    entrypoint?: string;
-    outputStdio?: "inherit" | "ignore";
-    webUrl?: string;
-    signal?: AbortSignal;
-  },
-): Promise<AutomaticResolveResult> {
-  return runResolveWithFailover(repo, prNumber, extraArgs, opts);
-}
-
-async function runResolveWithFailover(
-  repo: string,
-  prNumber: number,
-  extraArgs: string[],
-  opts: {
-    cwd?: string;
-    env?: Record<string, string | undefined>;
-    timeoutMs?: number;
-    entrypoint?: string;
-    outputStdio?: "inherit" | "ignore";
-    webUrl?: string;
-    signal?: AbortSignal;
-  },
-): Promise<AutomaticResolveResult> {
-  let last: AutomaticResolveResult | null = null;
-  const status = await runWithFailover(async (env) => {
-    const spawned = await spawnResolveOnce(repo, prNumber, extraArgs, { ...opts, env });
-    last = spawned.result;
-    return spawned.code;
-  }, opts.env ?? process.env);
-  if (status === "deferred") {
-    return {
-      outcome: "deferred",
-      message: "agent usage limit; waiting for a harness to become available",
-    };
-  }
-  return (
-    last ?? {
-      outcome: status === "ok" ? "skipped" : "failed",
-      message: status === "ok" ? "resolver completed" : "resolver exited with a non-zero code",
-    }
-  );
-}
-
-function spawnResolveOnce(
-  repo: string,
-  prNumber: number,
-  extraArgs: string[],
-  opts: {
-    cwd?: string;
-    env?: Record<string, string | undefined>;
-    timeoutMs?: number;
-    entrypoint?: string;
-    outputStdio?: "inherit" | "ignore";
-    webUrl?: string;
-    signal?: AbortSignal;
-  },
-): Promise<{ code: number; result: AutomaticResolveResult }> {
-  const prUrl = opts.webUrl ?? `https://github.com/${repo}/pull/${prNumber}`;
-  return new Promise((resolve) => {
-    let settled = false;
-    let abort: (() => void) | undefined;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const finish = (value: { code: number; result: AutomaticResolveResult }): void => {
-      if (settled) return;
-      settled = true;
-      if (abort) opts.signal?.removeEventListener("abort", abort);
-      if (timer) clearTimeout(timer);
-      // oxlint-disable-next-line promise/no-multiple-resolved -- settled guards a single resolution.
-      resolve(value);
-    };
-    if (opts.signal?.aborted) {
-      finish({ code: 1, result: { outcome: "failed", message: "resolver cancelled" } });
-      return;
-    }
-    let result: AutomaticResolveResult | null = null;
-    let resultOutput = "";
-    let resultOverflow = false;
-    let timedOut = false;
-    const maxResultBytes = 64 * 1024;
-    // Detached so the whole process group (agent harnesses included) can be
-    // signalled on timeout.
-    const child = spawn(
-      process.execPath,
-      [opts.entrypoint ?? process.argv[1], "resolve-conflicts", prUrl, ...extraArgs],
-      {
-        detached: true,
-        stdio: ["inherit", opts.outputStdio ?? "inherit", opts.outputStdio ?? "inherit", "pipe"],
-        cwd: opts.cwd,
-        env: { ...(opts.env ?? process.env), DEVINTERN_RESULT_FD: "3" },
-      },
-    );
-    let aborted = false;
-    abort = () => {
-      aborted = true;
-      killProcessTree(child);
-    };
-    opts.signal?.addEventListener("abort", abort, { once: true });
-    const timeoutMs = resolveTimeoutMs(opts.timeoutMs);
-    timer =
-      timeoutMs > 0
-        ? setTimeout(() => {
-            timedOut = true;
-            console.warn(
-              `⏱️  resolve-conflicts for ${prUrl} exceeded ${Math.round(timeoutMs / 1000)}s; killing`,
-            );
-            killProcessTree(child);
-          }, timeoutMs)
-        : null;
-    child.stdio[3]?.on("data", (chunk: Buffer) => {
-      if (resultOverflow) return;
-      if (Buffer.byteLength(resultOutput) + chunk.byteLength > maxResultBytes) {
-        resultOutput = "";
-        resultOverflow = true;
-        return;
-      }
-      resultOutput += chunk.toString();
-    });
-    child.on("close", (code) => {
-      if (aborted) {
-        finish({ code: 1, result: { outcome: "failed", message: "resolver cancelled" } });
-        return;
-      }
-      if (timedOut) {
-        finish({
-          code: 1,
-          result: { outcome: "failed", message: `resolver timed out after ${timeoutMs}ms` },
-        });
-        return;
-      }
-      if (!resultOverflow) {
-        for (const line of resultOutput.trimEnd().split("\n")) {
-          try {
-            const candidate = JSON.parse(line) as Partial<AutomaticResolveResult>;
-            if (
-              typeof candidate.message === "string" &&
-              ["clean", "resolved", "skipped", "failed", "deferred"].includes(
-                candidate.outcome ?? "",
-              )
-            ) {
-              result = candidate as AutomaticResolveResult;
-            }
-          } catch {
-            // Ignore malformed records and use the exit-status fallback.
-          }
-        }
-      }
-      finish({
-        code: code ?? 1,
-        result: result ?? {
-          outcome: code === 0 ? "skipped" : code === 2 ? "deferred" : "failed",
-          message:
-            code === 0
-              ? "resolver completed"
-              : code === 2
-                ? "resolver deferred"
-                : `resolver exited with code ${code}`,
-        },
-      });
-    });
-    child.on("error", (error) => {
-      finish({
-        code: 1,
-        result: { outcome: "failed", message: `failed to spawn resolver: ${error.message}` },
-      });
-    });
-  });
-}
-
-async function runSubcommandViaCli(
-  subcommand: string,
-  repo: string,
-  prNumber: number,
-  opts: {
-    cwd?: string;
-    env?: Record<string, string | undefined>;
-    signal?: AbortSignal;
-    webUrl?: string;
-    entrypoint?: string;
-    outputStdio?: "inherit" | "ignore";
-  } = {},
-): Promise<TaskExecutionResult> {
-  const prUrl = opts.webUrl ?? `https://github.com/${repo}/pull/${prNumber}`;
-  const status = await runWithFailover(
-    (env) =>
-      new Promise<number>((resolve) => {
-        if (opts.signal?.aborted) {
-          resolve(1);
-          return;
-        }
-        const child = spawn(
-          process.execPath,
-          [opts.entrypoint ?? process.argv[1], subcommand, prUrl],
-          {
-            stdio: opts.outputStdio ?? "inherit",
-            cwd: opts.cwd,
-            env,
-            detached: process.platform !== "win32",
-          },
-        );
-        const abort = () => killProcessTree(child);
-        let settled = false;
-        const finish = (code: number) => {
-          if (settled) return;
-          settled = true;
-          opts.signal?.removeEventListener("abort", abort);
-          resolve(code);
-        };
-        opts.signal?.addEventListener("abort", abort, { once: true });
-        child.on("close", (code) => {
-          finish(code ?? 1);
-        });
-        child.on("error", (error) => {
-          captureError(error, { command: subcommand, repo, prNumber, stage: "spawn" });
-          console.error(`❌ Failed to spawn ${subcommand} for ${prUrl}: ${error.message}`);
-          finish(1);
-        });
-      }),
-    opts.env ?? process.env,
-  );
-  return cliResultToTaskResult(status);
-}
-
 /**
  * Polls the agent's own PRs for review feedback.
  */
@@ -581,11 +243,20 @@ export class ReviewPollingAcquirer implements Acquirer {
   private prCache = new Map<string, PolledPr>();
   /** Consecutive `deferred` resolver outcomes per base-sync event. */
   private deferCounts = new Map<string, number>();
+  /** Base-sync events waiting for harness capacity, keyed to their retry time. */
+  private capacityRetryAt = new Map<string, number>();
   /** Cached scheduled-window state; `undefined` = not loaded from the cursor yet. */
   private conflictWindowState: ConflictWindowState | null | undefined;
   private lastFeedbackPollAt: number;
-  /** Last time a rejected-credential warning was printed (rate-limited). */
-  private lastAuthWarnAt = 0;
+  /**
+   * Per-repo/per-stage throttle state for permanent credential failures. Fleet
+   * mode resolves a distinct token per repo, so a 403 in one repo must not
+   * hide an unrelated 401 in another, and a write failure must not be silenced
+   * by a read warning (or cleared by a successful read).
+   */
+  private authFailures = new Map<string, AuthFailureEntry>();
+  /** Per-repo throttle for "404 may mean access lost" warnings. */
+  private inaccessibleWarnAt = new Map<string, number>();
 
   constructor(options: ReviewPollingAcquirerOptions) {
     this.options = options;
@@ -702,12 +373,36 @@ export class ReviewPollingAcquirer implements Acquirer {
       for (const key of this.prCache.keys()) {
         if (!watchedKeys.has(key)) this.clearPrCache(key);
       }
+      const watchedRepos = new Set(watchedPrs.map((pr) => pr.repo));
+      for (const [key, entry] of this.authFailures) {
+        if (!watchedRepos.has(entry.repo)) this.authFailures.delete(key);
+      }
+      for (const repo of this.inaccessibleWarnAt.keys()) {
+        if (!watchedRepos.has(repo)) this.inaccessibleWarnAt.delete(repo);
+      }
+      /** Stages that completed in this tick, per repo (union over its PRs). */
+      const succeededStages = new Map<string, Set<PollStage>>();
+      /** Stages that failed with a credential error in this tick, per repo. */
+      const failedStages = new Map<string, Set<PollStage>>();
+      const recordStages = (
+        target: Map<string, Set<PollStage>>,
+        repo: string,
+        stages: Iterable<PollStage>,
+      ): void => {
+        let entry = target.get(repo);
+        if (!entry) {
+          entry = new Set();
+          target.set(repo, entry);
+        }
+        for (const stage of stages) entry.add(stage);
+      };
       for (const pr of watchedPrs) {
         // Defensive: rows registered mid-run for a foreign repo (or when
         // startup pruning could not run) are skipped, never acted on.
         if (allowedRepos && allowedRepos.length > 0 && !allowedRepos.includes(pr.repo)) {
           continue;
         }
+        const progress: PollProgress = { completed: new Set() };
         try {
           await this.pollPr(
             pr.repo,
@@ -715,24 +410,48 @@ export class ReviewPollingAcquirer implements Acquirer {
             pr.createdAt,
             pollFeedback,
             fresh.get(agentPrKey(pr.repo, pr.prNumber)),
+            progress,
           );
         } catch (error) {
+          recordStages(succeededStages, pr.repo, progress.completed);
           if (isGitHubAuthError(error)) {
-            // A rejected credential fails identically on every request, so
-            // re-reporting it per PR per tick floods error tracking with
-            // duplicates. Warn the operator throttled and keep polling.
-            this.warnAuthFailure(error as Error);
+            // Credential failures (401/rejected, 403/under-scoped) are
+            // configuration problems that fail identically on every PR every
+            // tick. Warn the operator at most once per repo per stage per hour
+            // and intentionally skip captureError so a permanently rejected
+            // credential does not flood error tracking with duplicates.
+            const stage = progress.current ?? "write";
+            recordStages(failedStages, pr.repo, [stage]);
+            this.warnAuthFailure(pr.repo, pr.prNumber, error as Error, stage);
             continue;
           }
-          captureError(error, {
-            acquirer: this.name,
-            repo: pr.repo,
-            prNumber: pr.prNumber,
-            stage: "poll-pr",
-          });
+          // A 408/429/5xx survived the client's retries: GitHub is momentarily
+          // unavailable and the next tick retries it. Keep the warning visible,
+          // but do not report expected upstream noise as a fresh issue.
+          if (!isGitHubTransientError(error)) {
+            captureError(error, {
+              acquirer: this.name,
+              repo: pr.repo,
+              prNumber: pr.prNumber,
+              stage: "poll-pr",
+            });
+          }
           console.warn(
             `⚠️  [${this.name}] polling ${pr.repo}#${pr.prNumber} failed: ${(error as Error).message}`,
           );
+          continue;
+        }
+        recordStages(succeededStages, pr.repo, progress.completed);
+      }
+      // Only a tick where the same stage succeeded proves that stage's
+      // credential works again. A metadata-only PR fetch must not clear a
+      // reviews/comments throttle it never exercised, and one PR's failure
+      // must not mask another's success in the same repo.
+      for (const [repo, stages] of succeededStages) {
+        const failed = failedStages.get(repo);
+        for (const stage of stages) {
+          if (failed?.has(stage)) continue;
+          this.noteAuthRecovery(repo, stage);
         }
       }
     } finally {
@@ -740,25 +459,61 @@ export class ReviewPollingAcquirer implements Acquirer {
     }
   }
 
-  /** One auth-related warning per hour, not one per PR per tick. */
+  /** One credential warning per repo per stage per rolling hour. */
   private static AUTH_WARN_INTERVAL_MS = 60 * 60 * 1000;
 
-  private warnAuthFailure(error: Error): void {
+  private static authKey(repo: string, stage: PollStage): string {
+    return `${repo.toLowerCase()}\u0000${stage}`;
+  }
+
+  private warnAuthFailure(repo: string, prNumber: number, error: Error, stage: PollStage): void {
+    const key = ReviewPollingAcquirer.authKey(repo, stage);
+    const entry = this.authFailures.get(key) ?? {
+      repo,
+      stage,
+      lastWarnAt: null,
+      active: false,
+    };
+    entry.active = true;
     const now = this.now();
-    if (now - this.lastAuthWarnAt < ReviewPollingAcquirer.AUTH_WARN_INTERVAL_MS) {
+    if (
+      entry.lastWarnAt !== null &&
+      now - entry.lastWarnAt < ReviewPollingAcquirer.AUTH_WARN_INTERVAL_MS
+    ) {
+      this.authFailures.set(key, entry);
       return;
     }
-    this.lastAuthWarnAt = now;
+    entry.lastWarnAt = now;
+    this.authFailures.set(key, entry);
     console.warn(
-      `⚠️  [${this.name}] ${error.message} Renew GITHUB_TOKEN ` +
-        "(or reconnect the workspace's GitHub credentials); polling continues.",
+      `⚠️  [${this.name}] GitHub rejected the credential while ${POLL_STAGE_LABELS[stage]} ` +
+        `on ${repo}#${prNumber}: ` +
+        `${error.message} ${describeGitHubAuthFailure(error, stage === "write" ? "comment" : "reviews")}`,
+    );
+  }
+
+  /** Announce one stage's recovery and rearm that stage's throttle. */
+  private noteAuthRecovery(repo: string, stage: PollStage): void {
+    const key = ReviewPollingAcquirer.authKey(repo, stage);
+    const entry = this.authFailures.get(key);
+    if (!entry?.active) return;
+    this.authFailures.delete(key);
+    console.log(
+      `✅ [${this.name}] GitHub credential accepted again for ${repo}; ` +
+        `${POLL_STAGE_LABELS[stage]} recovered`,
     );
   }
 
   private warnPrInaccessible(repo: string, prNumber: number): void {
     const now = this.now();
-    if (now - this.lastAuthWarnAt < ReviewPollingAcquirer.AUTH_WARN_INTERVAL_MS) return;
-    this.lastAuthWarnAt = now;
+    const lastWarnAt = this.inaccessibleWarnAt.get(repo);
+    if (
+      lastWarnAt !== undefined &&
+      now - lastWarnAt < ReviewPollingAcquirer.AUTH_WARN_INTERVAL_MS
+    ) {
+      return;
+    }
+    this.inaccessibleWarnAt.set(repo, now);
     console.warn(
       `⚠️  [${this.name}] GitHub returned 404 for ${repo}#${prNumber}. ` +
         "The PR may still be open but inaccessible to this worker's GitHub credential; " +
@@ -772,13 +527,15 @@ export class ReviewPollingAcquirer implements Acquirer {
     prNumber: number,
     watchedSinceMs: number,
     pollFeedback: boolean,
-    prefetched?: ConditionalResult<PolledPr>,
-  ): Promise<void> {
+    prefetched: ConditionalResult<PolledPr> | undefined,
+    progress: PollProgress,
+  ): Promise<"ok" | "inaccessible"> {
     const { workerState, github, addressPr, resolveConflicts } = this.options;
 
     // 1. PR state (ETag-cached): unwatch confirmed closed/merged PRs. When the
     //    reconciliation pass already fetched this PR, its result is reused
     //    (and already applied), so no second request is spent here.
+    progress.current = "pr-state";
     const prSource = agentPrStateCursorSource(repo, prNumber);
     const prKey = agentPrKey(repo, prNumber);
     const prResult =
@@ -790,14 +547,16 @@ export class ReviewPollingAcquirer implements Acquirer {
       ));
     if (prResult.gone) {
       this.warnPrInaccessible(repo, prNumber);
-      return;
+      // A 404 can mean lost access, so it cannot prove the credential works.
+      return "inaccessible";
     }
     if (!prefetched) {
       const closure = applyAgentPrFetch(workerState, { repo, prNumber }, prResult);
       if (closure) {
         console.log(`👁️  [${this.name}] ${repo}#${prNumber} is ${closure.reason}; unwatching`);
         this.clearPrCache(prKey);
-        return;
+        progress.completed.add("pr-state");
+        return "ok";
       }
     }
 
@@ -812,25 +571,70 @@ export class ReviewPollingAcquirer implements Acquirer {
       if (cachedPr) await this.maybeSyncBase(repo, prNumber, cachedPr);
     }
 
-    if (!pollFeedback) return;
+    // Reconciliation and base sync may spend additional PR-state requests; only
+    // reaching this point proves the whole pr-state stage succeeded.
+    progress.completed.add("pr-state");
+    progress.current = undefined;
+    if (!pollFeedback) return "ok";
+
+    // GitHub can return an unusable PR state (missing/null/unknown) even though
+    // the row stays watched (applyAgentPrFetch refuses to close on it). Do not
+    // collect feedback in that case: collection marks reviews/comments as
+    // processed *before* the address run re-fetches the PR, and that run rejects
+    // an unconfirmed PR — so events would be deduped forever without ever being
+    // addressed. Skipping leaves both cursors and processed markers untouched,
+    // so the feedback is picked up once the state is usable again.
+    const observedPr = prResult.notModified ? this.prCache.get(prKey) : prResult.data;
+    const lifecycle = observedPr ? classifyAgentPrState(observedPr.state) : "open";
+    if (lifecycle !== "open") return "ok";
 
     // 2. Reviews (ETag-cached): new human changes_requested reviews.
     // 3. Inline review comments since the last seen timestamp.
     // Both passes must run (each advances its own cursor), so no short-circuit.
+    progress.current = "reviews";
     const reviewed = await this.collectActionableReviews(repo, prNumber);
+    progress.completed.add("reviews");
+    progress.current = "comments";
     const commented = await this.collectActionableComments(repo, prNumber, watchedSinceMs);
+    progress.completed.add("comments");
+    progress.current = undefined;
     if (!reviewed && !commented) {
-      return;
+      return "ok";
     }
 
     console.log(`\n📌 [${this.name}] new review feedback on ${repo}#${prNumber}`);
-    const ok = await addressPr(repo, prNumber);
+    progress.current = "write";
+    let ok: TaskExecutionResult;
+    try {
+      ok = await addressPr(repo, prNumber);
+      progress.completed.add("write");
+    } catch (error) {
+      // addressPr runs the feedback agent and its git/repo operations, not a
+      // GitHub API fetch. Even when the message mentions the network (e.g.
+      // "ssh: connect ... Network is unreachable"), a failed feedback run is
+      // actionable, so always report it instead of letting the tick's
+      // GitHub-transient filter hide it.
+      captureError(error, {
+        acquirer: this.name,
+        repo,
+        prNumber,
+        stage: "address-pr",
+      });
+      console.warn(
+        `⚠️  [${this.name}] addressing ${repo}#${prNumber} failed: ${(error as Error).message}`,
+      );
+      return "ok";
+    } finally {
+      progress.current = undefined;
+    }
     if (ok === "deferred") {
       console.log(
         `⏳ [${this.name}] ${repo}#${prNumber} deferred; will retry when a harness is available`,
       );
     } else if (ok === "skipped") {
       console.log(`⏭️  [${this.name}] ${repo}#${prNumber} skipped; nothing to address`);
+    } else if (ok === "interrupted") {
+      console.log(`⏸️  [${this.name}] ${repo}#${prNumber} interrupted by worker shutdown`);
     } else {
       console.log(
         ok
@@ -838,6 +642,7 @@ export class ReviewPollingAcquirer implements Acquirer {
           : `⚠️  [${this.name}] ${repo}#${prNumber} feedback run did not complete cleanly`,
       );
     }
+    return "ok";
   }
 
   /** Mark unprocessed human `changes_requested` reviews as actionable. */
@@ -942,6 +747,7 @@ export class ReviewPollingAcquirer implements Acquirer {
     }
     if (fresh.mergeable_state !== "dirty" && fresh.mergeable_state !== "behind") {
       this.deferCounts.delete(externalId);
+      this.capacityRetryAt.delete(externalId);
       queue.completeBaseSyncEvent(BASE_SYNC_SOURCE, externalId);
       return { kind: "stop" };
     }
@@ -963,6 +769,7 @@ export class ReviewPollingAcquirer implements Acquirer {
     const { repo, prNumber, externalId, now, headSha, baseSha, branch } = params;
 
     const attempt = queue.beginBaseSyncAttempt(externalId, now);
+    this.extendConflictWindowForDrain(now);
     let runId: number | null = null;
     try {
       runId =
@@ -986,32 +793,9 @@ export class ReviewPollingAcquirer implements Acquirer {
     } catch (error) {
       result = { outcome: "failed", message: (error as Error).message };
     }
-    const terminal = result.outcome !== "failed" && result.outcome !== "deferred";
-    if (terminal) {
-      this.deferCounts.delete(externalId);
-      queue.completeBaseSyncEvent(BASE_SYNC_SOURCE, externalId);
-    } else if (result.outcome === "deferred") {
-      const defers = (this.deferCounts.get(externalId) ?? 0) + 1;
-      this.deferCounts.set(externalId, defers);
-      console.warn(
-        `⚠️  [${this.name}] ${repo}#${prNumber} base sync deferred: ${result.message} ` +
-          `(${defers}/${MAX_CONSECUTIVE_DEFERS})`,
-      );
-      if (defers >= MAX_CONSECUTIVE_DEFERS) {
-        console.warn(
-          `⛔ [${this.name}] ${repo}#${prNumber} base sync keeps deferring; giving up until ` +
-            `the head or base moves again`,
-        );
-        this.deferCounts.delete(externalId);
-        queue.exhaustBaseSyncEvent(BASE_SYNC_SOURCE, externalId, result.message);
-      } else {
-        queue.deferBaseSyncAttempt(externalId);
-      }
-    } else {
-      console.warn(`⚠️  [${this.name}] ${repo}#${prNumber} base sync failed: ${result.message}`);
-      const exhausted = queue.failBaseSyncEvent(externalId, result.message, now);
-      if (exhausted) queue.exhaustBaseSyncEvent(BASE_SYNC_SOURCE, externalId, result.message);
-    }
+    const exhausted = this.settleBaseSync(repo, prNumber, externalId, result, now);
+    // Live (or just-landed) conflict work keeps a scheduled window draining.
+    if (!exhausted) this.extendConflictWindowForDrain(this.now());
     if (runId !== null) {
       try {
         runStore?.finishRun(
@@ -1027,6 +811,61 @@ export class ReviewPollingAcquirer implements Acquirer {
         console.warn(`⚠️  Run recording (base sync end) failed: ${(error as Error).message}`);
       }
     }
+  }
+
+  /** Persist a resolver outcome on its base-sync event; returns true when exhausted. */
+  private settleBaseSync(
+    repo: string,
+    prNumber: number,
+    externalId: string,
+    result: AutomaticResolveResult,
+    now: number,
+  ): boolean {
+    const { queue } = this.options;
+    if (result.outcome !== "failed" && result.outcome !== "deferred") {
+      this.deferCounts.delete(externalId);
+      this.capacityRetryAt.delete(externalId);
+      queue.completeBaseSyncEvent(BASE_SYNC_SOURCE, externalId);
+      return false;
+    }
+    if (result.outcome === "deferred" && result.capacity) {
+      // No harness could run the resolver: nothing about the PR failed, so
+      // keep the event pending without spending an attempt or a defer, and
+      // wait for capacity instead of exhausting the conflict.
+      const retryAt =
+        result.retryAt && result.retryAt > now ? result.retryAt : now + CAPACITY_RETRY_FALLBACK_MS;
+      this.capacityRetryAt.set(externalId, retryAt);
+      console.log(
+        `⏳ [${this.name}] ${repo}#${prNumber} base sync waiting for agent capacity until ` +
+          `${new Date(retryAt).toISOString()}: ${result.message}`,
+      );
+      queue.deferBaseSyncAttempt(externalId);
+      return false;
+    }
+    this.capacityRetryAt.delete(externalId);
+    if (result.outcome === "deferred") {
+      const defers = (this.deferCounts.get(externalId) ?? 0) + 1;
+      this.deferCounts.set(externalId, defers);
+      console.warn(
+        `⚠️  [${this.name}] ${repo}#${prNumber} base sync deferred: ${result.message} ` +
+          `(${defers}/${MAX_CONSECUTIVE_DEFERS})`,
+      );
+      if (defers >= MAX_CONSECUTIVE_DEFERS) {
+        console.warn(
+          `⛔ [${this.name}] ${repo}#${prNumber} base sync keeps deferring; giving up until ` +
+            `the head or base moves again`,
+        );
+        this.deferCounts.delete(externalId);
+        queue.exhaustBaseSyncEvent(BASE_SYNC_SOURCE, externalId, result.message);
+        return true;
+      }
+      queue.deferBaseSyncAttempt(externalId);
+      return false;
+    }
+    console.warn(`⚠️  [${this.name}] ${repo}#${prNumber} base sync failed: ${result.message}`);
+    const exhausted = queue.failBaseSyncEvent(externalId, result.message, now);
+    if (exhausted) queue.exhaustBaseSyncEvent(BASE_SYNC_SOURCE, externalId, result.message);
+    return exhausted;
   }
 
   private async maybeSyncBase(repo: string, prNumber: number, pr: PolledPr): Promise<void> {
@@ -1071,6 +910,10 @@ export class ReviewPollingAcquirer implements Acquirer {
       now,
     });
     if (event.status !== "pending") return;
+    // A conflict first seen (or whose head moved) while a scheduled window
+    // is open keeps that window draining long enough to resolve it.
+    const windowOpen = isConflictWindowOpen(this.conflictWindowState, now);
+    if (event.updatedAt === now && windowOpen) this.extendConflictWindowForDrain(now);
 
     // Retry backoff: a previously failed event waits (doubled per further
     // failure) before another attempt. The anchor is the event's own
@@ -1084,10 +927,13 @@ export class ReviewPollingAcquirer implements Acquirer {
     // `devintern resolve-conflicts <pr-url>` still runs on demand; once the
     // PR is no longer conflicting, the mergeability check above keeps the
     // queued event out of execution without spending tokens.
-    if (this.options.conflictSchedule && !this.conflictWindowOpen(now)) return;
+    if (this.options.conflictSchedule && !windowOpen) return;
 
     const quietMs = (this.options.quietPeriodSeconds ?? 30) * 1000;
     if (now - event.headObservedAt < quietMs) return;
+
+    const capacityRetryAt = this.capacityRetryAt.get(externalId);
+    if (capacityRetryAt !== undefined && now < capacityRetryAt) return;
 
     // Re-fetch immediately before execution. Any movement leaves the current
     // event pending and consumes no retry; a new base supersedes it immediately.
@@ -1124,29 +970,19 @@ export class ReviewPollingAcquirer implements Acquirer {
     if (!schedule) return;
     const now = this.now();
     if (this.conflictWindowState === undefined) {
-      this.conflictWindowState = null;
-      const raw = this.options.workerState.getCursor(CONFLICT_WINDOW_SOURCE)?.cursorValue;
-      if (raw) {
-        try {
-          const parsed = JSON.parse(raw) as Partial<ConflictWindowState>;
-          if (
-            typeof parsed.nextWindowAt === "number" &&
-            typeof parsed.windowOpenUntil === "number"
-          ) {
-            this.conflictWindowState = {
-              nextWindowAt: parsed.nextWindowAt,
-              windowOpenUntil: parsed.windowOpenUntil,
-            };
-          }
-        } catch {
-          // Corrupt state re-initializes below.
-        }
-      }
+      // Corrupt or missing state re-initializes below.
+      this.conflictWindowState = parseConflictWindowState(
+        this.options.workerState.getCursor(CONFLICT_WINDOW_SOURCE)?.cursorValue,
+      );
     }
 
     let state = this.conflictWindowState;
     if (!state) {
-      state = { nextWindowAt: nextScheduleOccurrence(schedule, now), windowOpenUntil: 0 };
+      state = {
+        nextWindowAt: nextScheduleOccurrence(schedule, now),
+        windowOpenUntil: 0,
+        windowCapAt: 0,
+      };
       this.saveConflictWindowState(state);
       return;
     }
@@ -1155,10 +991,11 @@ export class ReviewPollingAcquirer implements Acquirer {
       // still pending (including from a missed window while the worker was
       // down) resolves now.
       this.deferCounts.clear();
-      state = {
-        nextWindowAt: nextScheduleOccurrence(schedule, now),
-        windowOpenUntil: now + this.conflictWindowGraceMs(),
-      };
+      state = openConflictWindow(
+        nextScheduleOccurrence(schedule, now),
+        now,
+        this.conflictWindowGraceMs(),
+      );
       this.saveConflictWindowState(state);
       console.log(
         `⏰ [${this.name}] conflict-resolution window open until ${new Date(
@@ -1168,10 +1005,76 @@ export class ReviewPollingAcquirer implements Acquirer {
     }
   }
 
-  /** Scheduled mode only: are resolution attempts currently allowed? */
-  private conflictWindowOpen(now: number): boolean {
+  /**
+   * Scheduled mode only: the configured window and its durable state, or
+   * `null` when conflicts resolve immediately (`auto`) or never (`disabled`).
+   */
+  conflictWindowStatus(): ConflictWindowStatus | null {
+    const schedule = this.options.conflictSchedule;
+    if (this.options.conflictResolution === "disabled" || !schedule) return null;
+    if (!this.options.resolveConflicts) return null;
+    const state = this.conflictWindowState ?? undefined;
+    const now = this.now();
+    return {
+      schedule,
+      nextWindowAt: state?.nextWindowAt,
+      openUntil: state && now <= state.windowOpenUntil ? state.windowOpenUntil : undefined,
+    };
+  }
+
+  /**
+   * Dashboard "Run now" for scheduled conflict resolution: open the window
+   * immediately (for the usual grace period) instead of waiting for the next
+   * occurrence, then start a tick so queued conflicts resolve right away. The
+   * next scheduled occurrence is unchanged. Per-PR safeguards still apply
+   * (mergeability re-check, quiet period, retry backoff, repo locks).
+   */
+  openConflictWindowNow(): ConflictWindowTriggerOutcome {
+    if (this.options.conflictResolution === "disabled") {
+      return { ok: false, reason: "conflict resolution is disabled in workspace.toml" };
+    }
+    if (!this.options.conflictSchedule) {
+      return {
+        ok: false,
+        reason: "conflict resolution runs automatically as soon as a conflict is detected",
+      };
+    }
+    if (!this.options.resolveConflicts) {
+      return { ok: false, reason: "conflict resolution is not available on this worker" };
+    }
+    // Load (or initialize) the durable cursor so the next occurrence is kept.
+    this.syncConflictWindow();
+    const now = this.now();
+    const nextWindowAt =
+      this.conflictWindowState?.nextWindowAt ??
+      nextScheduleOccurrence(this.options.conflictSchedule, now);
+    this.deferCounts.clear();
+    this.saveConflictWindowState(
+      openConflictWindow(nextWindowAt, now, this.conflictWindowGraceMs()),
+    );
+    console.log(
+      `⏰ [${this.name}] conflict-resolution window opened on demand (dashboard) until ${new Date(
+        now + this.conflictWindowGraceMs(),
+      ).toISOString()}`,
+    );
+    // An in-flight tick finishes its pass; the open window covers the next one.
+    if (this.timer) void this.tick();
+    return { ok: true };
+  }
+
+  /**
+   * Scheduled mode: keep the window open for the drain grace past `now`, up
+   * to its hard cap. Only called for work begun inside an open window, so a
+   * late event after an idle close never reopens it.
+   */
+  private extendConflictWindowForDrain(now: number): void {
+    if (!this.options.conflictSchedule) return;
     const state = this.conflictWindowState;
-    return state != null && now <= state.windowOpenUntil;
+    const extended = state ? extendConflictWindow(state, now) : null;
+    if (!extended) return;
+    this.saveConflictWindowState(extended);
+    const until = new Date(extended.windowOpenUntil).toISOString();
+    console.log(`⏰ [${this.name}] conflict window kept open until ${until} while work drains`);
   }
 
   private saveConflictWindowState(state: ConflictWindowState): void {
@@ -1180,14 +1083,7 @@ export class ReviewPollingAcquirer implements Acquirer {
   }
 
   private conflictWindowGraceMs(): number {
-    return (
-      this.options.conflictWindowGraceMs ??
-      parseEnvInteger(
-        "WORKER_RESOLVE_WINDOW_GRACE_MINUTES",
-        DEFAULT_CONFLICT_WINDOW_GRACE_MINUTES,
-        { min: 0 },
-      ) * 60_000
-    );
+    return resolveConflictWindowGraceMs(this.options.conflictWindowGraceMs);
   }
 
   private scheduleLabel(): string {

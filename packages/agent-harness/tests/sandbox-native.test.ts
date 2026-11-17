@@ -1,9 +1,10 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
-import { tmpdir } from "os";
-import { join } from "path";
+import { homedir, tmpdir } from "os";
+import { delimiter, join } from "path";
 import { MuseHarness } from "../src/harnesses/muse.js";
 import { buildPromptArgs, MAX_PROMPT_ARG_BYTES } from "../src/prompt-args.js";
+import { resetBunEnvWarning } from "../src/sandbox/bun-env.js";
 import { NativeSandboxProvider } from "../src/sandbox/providers/native.js";
 import { refineGrantsAgainstDenies } from "../src/sandbox/providers/nono.js";
 import { museCredentialPath } from "../src/sandbox/harness-state.js";
@@ -21,6 +22,21 @@ function policy(overrides: Partial<SandboxPolicy> = {}): SandboxPolicy {
 }
 
 describe("NativeSandboxProvider", () => {
+  const originalHome = process.env.HOME;
+  let tempHome: string;
+
+  beforeEach(() => {
+    // Keep the default Bun cache (~/.cache) writable even when the test
+    // process runs inside a sandbox that makes the real home read-only.
+    tempHome = mkdtempSync(join(tmpdir(), "native-home-"));
+    process.env.HOME = tempHome;
+  });
+
+  afterEach(() => {
+    process.env.HOME = originalHome;
+    rmSync(tempHome, { recursive: true, force: true });
+  });
+
   test("supportsHarness covers only harnesses with a built-in sandbox", () => {
     const provider = new NativeSandboxProvider();
     expect(provider.supportsHarness("claude-code")).toBe(true);
@@ -56,11 +72,86 @@ describe("NativeSandboxProvider", () => {
     expect(settings.sandbox.allowUnsandboxedCommands).toBe(false);
     expect(settings.sandbox.failIfUnavailable).toBe(true);
     expect(settings.sandbox.excludedCommands).toEqual(["docker *", "gh *"]);
-    expect(settings.sandbox.filesystem.allowWrite).toEqual(["/work/repo", "/tmp/devintern-tasks"]);
+    // Bun's install root is appended so `bun install` cannot hit a read-only
+    // ~/.bun; the policy paths keep their order.
+    expect(settings.sandbox.filesystem.allowWrite.slice(0, 2)).toEqual([
+      "/work/repo",
+      "/tmp/devintern-tasks",
+    ]);
     // "open" must be explicit: the sandbox default is deny-with-prompt, which
     // hard-fails in -p print mode with the escape hatch closed.
     expect(settings.sandbox.network.allowedDomains).toEqual(["*"]);
     expect(settings.sandbox.network.allowLocalBinding).toBe(true);
+  });
+
+  test("claude-code: gives Bun a writable install root and resolves it on PATH", () => {
+    // Auto mode selects native for claude-code, so this provider must apply
+    // the same Bun fix as nono instead of leaving BUN_INSTALL at ~/.bun.
+    const wrapped = new NativeSandboxProvider().wrapCommand("/usr/bin/claude", [], policy());
+    const install = wrapped.env?.BUN_INSTALL;
+    const temp = wrapped.env?.BUN_TMPDIR;
+    expect(typeof install).toBe("string");
+    expect(typeof temp).toBe("string");
+    expect(install!.startsWith(join(homedir(), ".bun"))).toBe(false);
+
+    const settings = JSON.parse(readFileSync(wrapped.args[1] as string, "utf8"));
+    const allowWrite: string[] = settings.sandbox.filesystem.allowWrite;
+    expect(allowWrite.some((root) => install === root || install!.startsWith(`${root}/`))).toBe(
+      true,
+    );
+
+    // `bun install -g` writes launchers to <BUN_INSTALL>/bin, so it must be
+    // reachable by name even though the install root is ephemeral — but
+    // appended, so it cannot shadow system tools.
+    expect(wrapped.env?.PATH?.endsWith(`${delimiter}${join(install!, "bin")}`)).toBe(true);
+    expect(wrapped.env?.DEVINTERN_NO_UPDATE).toBe("1");
+    expect(wrapped.env?.DEVPM_NO_UPDATE).toBe("1");
+  });
+
+  test("claude-code: keeps a configured Bun root the policy grants write access to", () => {
+    const root = mkdtempSync(join(tmpdir(), "native-bun-configured-"));
+    const install = join(root, "bun");
+    const temp = join(root, "bun-tmp");
+    try {
+      const wrapped = new NativeSandboxProvider().wrapCommand("/usr/bin/claude", [], {
+        ...policy({ writablePaths: [root] }),
+        env: { BUN_INSTALL: install, BUN_TMPDIR: temp, PATH: process.env.PATH },
+      });
+      expect(wrapped.env?.BUN_INSTALL).toBeUndefined();
+      expect(wrapped.env?.BUN_TMPDIR).toBeUndefined();
+      expect(wrapped.env?.PATH).toBeUndefined();
+      // The provider must not grant a cache it does not use.
+      const settings = JSON.parse(readFileSync(wrapped.args[1] as string, "utf8"));
+      expect(settings.sandbox.filesystem.allowWrite).toEqual([root]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("claude-code: warns once when the Bun cache cannot be created", () => {
+    const fakeUid = 999_999_999;
+    const realGetuid = process.getuid;
+    const home = mkdtempSync(join(tmpdir(), "native-bun-fail-home-"));
+    const originalHome = process.env.HOME;
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    process.env.HOME = home;
+    resetBunEnvWarning();
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args.map(String).join(" "));
+    };
+    process.getuid = () => fakeUid;
+    try {
+      new NativeSandboxProvider().wrapCommand("/usr/bin/claude", [], policy());
+      new NativeSandboxProvider().wrapCommand("/usr/bin/claude", [], policy());
+    } finally {
+      process.getuid = realGetuid;
+      process.env.HOME = originalHome;
+      console.warn = originalWarn;
+      resetBunEnvWarning();
+      rmSync(home, { recursive: true, force: true });
+    }
+    expect(warnings.filter((w) => w.includes("Bun cache unavailable"))).toHaveLength(1);
   });
 
   test("claude-code: ssh-agent socket is allowed through when present", () => {
@@ -106,9 +197,16 @@ describe("NativeSandboxProvider", () => {
     expect(wrapped.args).toContain('features.network_proxy.domains={ "*" = "allow" }');
     const cIndex = wrapped.args.lastIndexOf("-c");
     expect(cIndex).toBeGreaterThan(-1);
-    // Extra roots exclude the working dir (codex already allows the workspace).
-    expect(wrapped.args[cIndex + 1]).toBe(
-      `sandbox_workspace_write.writable_roots=${JSON.stringify(["/tmp/devintern-tasks"])}`,
+    // Extra roots exclude the working dir (codex already allows the workspace)
+    // and include the disposable Bun cache (auto mode picks native for codex).
+    const rootsArg = wrapped.args[cIndex + 1] as string;
+    expect(rootsArg.startsWith("sandbox_workspace_write.writable_roots=")).toBe(true);
+    const roots = JSON.parse(rootsArg.split("=")[1] as string) as string[];
+    expect(roots).toContain("/tmp/devintern-tasks");
+    expect(roots).not.toContain("/work/repo");
+    expect(typeof wrapped.env?.BUN_INSTALL).toBe("string");
+    expect(roots.some((root) => (wrapped.env!.BUN_INSTALL as string).startsWith(`${root}/`))).toBe(
+      true,
     );
   });
 

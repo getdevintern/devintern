@@ -7,8 +7,13 @@ import { rename } from "node:fs/promises";
 import { pathExists } from "./runtime/fs.js";
 import { createDefaultSupabaseAuthConfig } from "@devintern/auth";
 import type { SupabaseAuthConfig } from "@devintern/auth";
-import { resolveHarness, resolveExecutablePathStrict } from "@devintern/agent-harness";
-import type { ResolvedHarness } from "@devintern/agent-harness";
+import {
+  parseHarnessList,
+  resolveHarness,
+  resolveHarnessChainSync,
+  resolveExecutablePathStrict,
+} from "@devintern/agent-harness";
+import type { HarnessChainEntry, ResolvedHarness } from "@devintern/agent-harness";
 import { resolveConfigDir } from "@devintern/utils";
 import { loadTrackerConfig } from "@devintern/task-trackers";
 import type { TrackerConfig, TrackerType } from "@devintern/task-trackers";
@@ -16,7 +21,21 @@ import type { TrackerConfig, TrackerType } from "@devintern/task-trackers";
 export type { TrackerType };
 
 export interface Config extends TrackerConfig {
+  /** Primary (first usable) agent harness. */
   agent: ResolvedHarness;
+  /**
+   * Usage-limit fallbacks after {@link Config.agent}, in priority order, from a
+   * comma-separated `AGENT_HARNESS` chain. Empty/absent when `--harness` was
+   * given or the chain has a single entry, which disables failover.
+   */
+  agentFallbacks?: HarnessChainEntry[];
+  /**
+   * `true` when the configured first `AGENT_HARNESS` entry was dropped
+   * (unknown / not installed) and {@link Config.agent} is a later entry taking
+   * its place. The engine then treats it like a fallback: its own
+   * `<HARNESS>_MODEL`, default effort, and no caller CLI path override.
+   */
+  agentIsFallback?: boolean;
 }
 
 export interface LoadConfigOptions {
@@ -85,10 +104,7 @@ export async function loadConfig(optionsOrBaseDir?: LoadConfigOptions | string):
   const trackerConfig = await loadTrackerConfig(".devintern-pm", options?.baseDir, {
     workspaceEnvFallback: options?.workspaceEnvFallback,
   });
-  const agent = resolveHarness({
-    harnessName: options?.harnessName,
-    cliPath: options?.cliPath,
-  });
+  const { agent, agentFallbacks, agentIsFallback } = resolveAgentChain(options);
   // Locate the CLI on PATH and fail fast with an actionable error if missing,
   // instead of surfacing a cryptic spawn error mid-run.
   agent.path = resolveExecutablePathStrict(agent.path, agent.harness.displayName);
@@ -96,5 +112,56 @@ export async function loadConfig(optionsOrBaseDir?: LoadConfigOptions | string):
   return {
     ...trackerConfig,
     agent,
+    agentFallbacks,
+    ...(agentIsFallback ? { agentIsFallback } : {}),
+  };
+}
+
+/**
+ * Resolve the primary harness plus usage-limit fallbacks.
+ *
+ * An explicit harness name disables failover. A single-entry (or unset)
+ * `AGENT_HARNESS` resolves exactly like {@link resolveHarness}. A multi-entry
+ * chain is resolved by `resolveHarnessChainSync`, whose dropped entries
+ * (unknown / not installed) are reported as warnings and never tried; the first
+ * usable entry becomes the primary, later ones the fallbacks. When that
+ * primary is not the configured first entry it is flagged `agentIsFallback`.
+ *
+ * @param options - Harness overrides from the caller.
+ * @returns The primary harness and its ordered fallbacks.
+ */
+function resolveAgentChain(options: LoadConfigOptions | undefined): {
+  agent: ResolvedHarness;
+  agentFallbacks: HarnessChainEntry[];
+  agentIsFallback?: boolean;
+} {
+  const single = (): { agent: ResolvedHarness; agentFallbacks: HarnessChainEntry[] } => ({
+    agent: resolveHarness({ harnessName: options?.harnessName, cliPath: options?.cliPath }),
+    agentFallbacks: [],
+  });
+  if (options?.harnessName || parseHarnessList(process.env.AGENT_HARNESS).length < 2) {
+    return single();
+  }
+
+  // resolveHarness below already emits alias deprecation warnings for the primary.
+  const chain = resolveHarnessChainSync({ warnDeprecated: false });
+  for (const issue of chain.issues) {
+    console.warn(`⚠️  ${issue.message}`);
+  }
+  const [first, ...rest] = chain.entries;
+  if (!first) return single();
+
+  if (first.name === chain.parsed[0]) {
+    // Primary is the configured first entry: keep today's resolution
+    // (deprecation warnings, AGENT_CLI_PATH / explicit cliPath).
+    return { agent: single().agent, agentFallbacks: rest };
+  }
+  // The configured primary was dropped; the first usable entry takes over.
+  // AGENT_CLI_PATH / cliPath target the configured primary, so it keeps its
+  // own resolved path (`<HARNESS>_CLI_PATH` or PATH).
+  return {
+    agent: { harness: first.harness, path: first.path },
+    agentFallbacks: rest,
+    agentIsFallback: true,
   };
 }

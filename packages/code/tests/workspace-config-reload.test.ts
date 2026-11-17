@@ -5,9 +5,13 @@ import { join } from "path";
 
 import {
   WorkspaceConfigReloader,
+  appliedConfigRecorder,
   applyWorkspaceConfig,
+  fingerprintConfigFile,
+  readAppliedConfigRecord,
   serializeWorkspaceConfig,
 } from "../src/lib/workspace/config-reload";
+import type { ReloadOutcome } from "../src/lib/workspace/config-reload";
 import { parseWorkspaceConfig } from "../src/lib/workspace/config";
 import type { RepoConfig, WorkspaceConfig } from "../src/lib/workspace/config";
 import type { RepoManagerLike } from "../src/lib/workspace/workspace-worker";
@@ -542,5 +546,94 @@ labels = ["backend"]
     expect(runs.at(-1)?.args).toEqual(["--create-pr", "--auto-review"]);
     // Per-repo env follows the reloaded repo definitions too.
     expect(Object.keys(runs.at(-1)?.env ?? {})).toContain("GITHUB_REPO");
+  });
+});
+
+describe("applied-config record", () => {
+  function reloaderFor(dir: string, path: string, outcomes: ReloadOutcome[] = []) {
+    const current: WorkspaceConfig = parseWorkspaceConfig(readFileSync(path, "utf8"));
+    const record = appliedConfigRecorder(dir, path);
+    return new WorkspaceConfigReloader({
+      configPath: path,
+      current,
+      validate: (next, active) => {
+        if (next.defaults.tracker !== active.defaults.tracker) {
+          throw new Error("[defaults].tracker is startup-only; restart the worker to change it.");
+        }
+      },
+      onError: () => undefined,
+      onOutcome: (outcome) => {
+        outcomes.push(outcome);
+        record(outcome);
+      },
+    });
+  }
+
+  test("records the applied file version, including no-op and applied reloads", () => {
+    const dir = freshDir();
+    const path = join(dir, "workspace.toml");
+    writeToml(path, V1);
+    const outcomes: ReloadOutcome[] = [];
+    const reloader = reloaderFor(dir, path, outcomes);
+
+    reloader.reload("worker started");
+    expect(outcomes[0]).toEqual({ applied: false, unchanged: true });
+    const first = readAppliedConfigRecord(dir);
+    expect(first?.pid).toBe(process.pid);
+    expect(first?.contentHash).toBe(fingerprintConfigFile(path)?.contentHash);
+
+    writeToml(path, V2);
+    reloader.reload("file change");
+    expect(outcomes[1]).toEqual({ applied: true });
+    const second = readAppliedConfigRecord(dir);
+    expect(second?.contentHash).toBe(fingerprintConfigFile(path)?.contentHash);
+    expect(second?.contentHash).not.toBe(first?.contentHash);
+    expect(second?.rejection).toBeUndefined();
+  });
+
+  test("a rejected reload keeps the applied version and records the reason", () => {
+    const dir = freshDir();
+    const path = join(dir, "workspace.toml");
+    writeToml(path, V1);
+    const outcomes: ReloadOutcome[] = [];
+    const reloader = reloaderFor(dir, path, outcomes);
+    reloader.reload("worker started");
+    const applied = readAppliedConfigRecord(dir);
+
+    // A routing edit saved together with a startup-only change is rejected whole.
+    writeToml(path, V2.replace('tracker = "markdown"', 'tracker = "jira"'));
+    reloader.reload("file change");
+    expect(outcomes[1]?.applied).toBe(false);
+    expect(outcomes[1]?.error).toContain("[defaults].tracker is startup-only");
+    const record = readAppliedConfigRecord(dir);
+    expect(record?.contentHash).toBe(applied?.contentHash);
+    expect(record?.rejection?.reason).toContain("[defaults].tracker is startup-only");
+    expect(record?.rejection?.contentHash).toBe(fingerprintConfigFile(path)?.contentHash);
+
+    // Reverting the startup-only key applies the edit and clears the rejection.
+    writeToml(path, V2);
+    reloader.reload("file change");
+    expect(readAppliedConfigRecord(dir)?.rejection).toBeUndefined();
+  });
+
+  test("a parse failure is recorded as a rejection", () => {
+    const dir = freshDir();
+    const path = join(dir, "workspace.toml");
+    writeToml(path, V1);
+    const reloader = reloaderFor(dir, path);
+    reloader.reload("worker started");
+    writeToml(path, `${V1}\n[[repos]\n`);
+    const outcome = reloader.reload("file change");
+    expect(outcome.applied).toBe(false);
+    expect(outcome.error).toBeString();
+    expect(readAppliedConfigRecord(dir)?.rejection?.reason).toBe(outcome.error);
+  });
+
+  test("a malformed record reads as absent", () => {
+    const dir = freshDir();
+    writeFileSync(join(dir, ".worker.config-state.json"), "{not json");
+    expect(readAppliedConfigRecord(dir)).toBeNull();
+    writeFileSync(join(dir, ".worker.config-state.json"), JSON.stringify({ pid: "x" }));
+    expect(readAppliedConfigRecord(dir)).toBeNull();
   });
 });

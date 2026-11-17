@@ -383,7 +383,6 @@ export GITHUB_APP_PRIVATE_KEY_BASE64="..."
 # Optional
 export WEBHOOK_PORT="3000"        # Default: 3000
 export WEBHOOK_HOST="0.0.0.0"     # Default: 0.0.0.0
-export WEBHOOK_AUTO_REPLY="true"  # Reply to addressed comments
 export WEBHOOK_AUTO_REVIEW="true" # Run self-review loop after addressing feedback
 export AUTO_REVIEW_ITERATIONS="2" # Max review-fix cycles for the self-review loop (default: 2; shared with the CLI)
 ```
@@ -417,7 +416,6 @@ WorkingDirectory=/path/to/your/projects
 Environment=WEBHOOK_SECRET=your-secret
 Environment=GITHUB_APP_ID=123456
 Environment=GITHUB_APP_PRIVATE_KEY_PATH=/path/to/key.pem
-Environment=WEBHOOK_AUTO_REPLY=true
 Environment=WEBHOOK_AUTO_REVIEW=true
 ExecStart=/usr/local/bin/devintern webhook serve --port 3000
 Restart=always
@@ -479,7 +477,7 @@ Handler failures are classified:
 - **Permanent** (HTTP `400`/`401`/`404`/`410`/`422`, or an explicit `PermanentWebhookError`) — the delivery is recorded as handled and future duplicates are skipped.
 - **Transient** (HTTP `403`/`429`/`5xx`, timeouts, connection errors) — the delivery is left unhandled and eligible for retry. A bare `403` stays retryable because GitHub also uses it for rate limits; a handler can explicitly mark a confirmed terminal permission failure permanent.
 
-The DevIntern relay retries transient failures by keeping the worker cursor unchanged and backing off before polling again. Deferred or unsuccessful review runs also keep the cursor unchanged. An in-flight delivery holds the cursor until its owning run settles; a handled duplicate can advance it safely.
+The DevIntern relay retries transient failures by keeping the worker cursor unchanged and backing off before polling again, up to the queue's bounded retry budget. Once that budget is spent the delivery is acknowledged with its captured error, so one permanently failing envelope (for example a git auth or checkout error raised before the run starts) cannot pin the cursor for every later envelope forever. Deferred review runs (every harness usage-limited) keep the cursor unchanged and retry after the backoff without spending an attempt. A review run that was interrupted by a shutdown drain is treated the same way: it stays retryable without spending an attempt, because its outcome is unknown rather than failed. A review run that actually started and failed is different: its own subprocess already reports the concrete error, so the relay logs the outcome and acknowledges the delivery instead of redelivering it — otherwise one failing review would re-run the whole review on every backoff cycle. An in-flight delivery holds the cursor until its owning run settles; a handled duplicate can advance it safely.
 
 GitHub does **not** automatically redeliver failed webhooks. Use manual redelivery or a scheduled recovery job that requests redelivery through GitHub's API. Returning `409` alone does not schedule a retry. Direct webhook handlers acknowledge durable queue admission before asynchronous processing finishes, so later processing failures require queue recovery or explicit redelivery. See [Handling failed webhook deliveries](https://docs.github.com/en/webhooks/using-webhooks/handling-failed-webhook-deliveries).
 

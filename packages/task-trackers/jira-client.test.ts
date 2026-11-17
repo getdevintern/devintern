@@ -309,6 +309,40 @@ describe("JiraClient REST helpers", () => {
     }
   });
 
+  test("searchIssues keeps the JQL once when Jira echoes it back in the error", async () => {
+    const client = new JiraClient("https://acme.atlassian.net", "user@example.com", "token");
+
+    const jql = 'status = "To Do"';
+    const apiError = new Error(`Invalid JQL: ${jql}`);
+    client.jiraApiCall = async () => {
+      throw apiError;
+    };
+
+    const error = await client.searchIssues(jql).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(Error);
+    const message = (error as Error).message;
+    expect(message).toContain(`Invalid JQL: ${jql}`);
+    expect(message.split(jql)).toHaveLength(2);
+    expect((error as Error).cause).toBe(apiError);
+  });
+
+  test("searchIssues falls back to the JQL when the caused error has no message", async () => {
+    const client = new JiraClient("https://acme.atlassian.net", "user@example.com", "token");
+
+    const jql = 'status = "To Do"';
+    const emptyError = new Error("");
+    client.jiraApiCall = async () => {
+      throw emptyError;
+    };
+
+    const error = await client.searchIssues(jql).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe(`Failed to search issues with JQL: ${jql}`);
+    expect((error as Error).cause).toBe(emptyError);
+  });
+
   test("updateStoryPoints sets field via PUT", async () => {
     const client = new JiraClient("https://acme.atlassian.net", "user@example.com", "token");
 

@@ -1,13 +1,13 @@
 ---
-title: "@devintern/pm Configuration"
+title: "DevIntern PM Configuration"
 sidebarLabel: "Configuration"
 description: "Environment variables, tracker credentials, and defaults for @devintern/pm."
 section: "Create Tasks"
 order: 2
-dateModified: 2026-11-03
+dateModified: 2026-11-12
 ---
 
-# @devintern/pm Configuration
+# DevIntern PM Configuration
 
 @devintern/pm uses per-project configuration stored in `.devintern-pm/.env` in your project directory. Run `devpm init` in a terminal for a guided setup: it asks which tracker you use, links to each provider's token creation page, validates the connection, and writes the file for you. Prefer editing by hand (or setting up in CI)? Run `devpm init --yes` to write the configuration template instead, then fill in values for your selected backend as described below.
 
@@ -148,7 +148,7 @@ You can also override the harness for a single run with `--harness <name>` (CLI 
 2. Harness-specific env var (e.g. `OPENCODE_CLI_PATH` when `AGENT_HARNESS=opencode`)
 3. Harness default command, located on your `PATH` (e.g. `claude`)
 
-Common `AGENT_HARNESS` values include `claude-code`, `opencode`, `codex`, `cursor`, `grok`, `deepseek`, `antigravity`, `cline`, `goose`, `kilo-code`, `kimi`, `muse`, and `qwen`. If you do need to set a path explicitly, run `which` for the harness binary (`claude`, `opencode`, `codex`, `cursor-agent`, `grok`, `reasonix`, `agy`, `cline`, `goose`, `kilo`, `kimi`, `muse`, or `qwen`).
+Common `AGENT_HARNESS` values include `claude-code` (alias `claude`), `opencode`, `codex`, `cursor`, `grok`, `deepseek`, `antigravity`, `cline`, `goose`, `kilo-code`, `kimi`, `muse`, and `qwen`. If you do need to set a path explicitly, run `which` for the harness binary (`claude`, `opencode`, `codex`, `cursor-agent`, `grok`, `reasonix`, `agy`, `cline`, `goose`, `kilo`, `kimi`, `muse`, or `qwen`).
 
 **Cursor note:** The Cursor harness uses Cursor's headless `cursor-agent` CLI (not a command named `cursor`). Cursor also installs an `agent` alias, but devpm looks for `cursor-agent` because other tools use the `agent` name too. Install Cursor and enable the CLI from Cursor's settings, then set `AGENT_HARNESS=cursor`.
 
@@ -163,6 +163,26 @@ Common `AGENT_HARNESS` values include `claude-code`, `opencode`, `codex`, `curso
 **Kilo Code note:** Harness id is `kilo-code`; the CLI binary is `kilo`.
 
 **Qwen note:** Qwen Code accepts a model via `--model` (e.g. `qwen3-coder-plus`); you can also keep the model in `~/.qwen/settings.json`.
+
+### Failover on usage limits
+
+`AGENT_HARNESS` may list several harnesses, comma-separated, in priority order. The first entry is your preferred harness; later entries are fallbacks devpm switches to when the active harness reports a usage limit:
+
+```bash
+# .devintern-pm/.env
+AGENT_HARNESS=opencode,grok
+# Optional: model for the fallback (otherwise grok's CLI default applies)
+# GROK_MODEL=grok-4.7
+```
+
+- Unknown or not-installed entries are skipped with a warning; the first usable entry runs first. If the first entry is the one skipped, the entry that runs in its place is treated as a fallback: the first-entry settings below do not apply to it.
+- When a harness hits its usage limit, devpm prints one line on stderr (limited harness, reset time when known, next harness) and re-runs the same request on the next entry. Other failures, such as a non-zero exit or the turn limit, do not fail over.
+- Once a fallback succeeds, devpm keeps using it for the rest of that process, including the strict-JSON retry. Nothing is persisted; the next `devpm` run starts with the first entry again.
+- If every entry is usage-limited, the run fails with a message listing each limited harness.
+- `AGENT_MODEL`/`--model` and `AGENT_EFFORT`/`--effort` apply to the first entry only, because model ids are harness-specific. A fallback uses its own `<HARNESS>_MODEL` (for example `GROK_MODEL`, `CLAUDE_CODE_MODEL`) or its CLI default, and runs with its default effort. Likewise, `AGENT_CLI_PATH` applies to the first entry only; a fallback uses `<HARNESS>_CLI_PATH` or `PATH`.
+- `--harness <name>`, or picking a harness in the interactive picker, disables failover: only that harness runs.
+
+The DevIntern PM desktop app uses the same engine, so it fails over the same way when the project's `AGENT_HARNESS` lists several harnesses. Picking a harness in the desktop app moves it to the front of the list in `.devintern-pm/.env` and keeps the other entries as fallbacks. For example, picking `grok` with `AGENT_HARNESS=opencode,grok` saves `AGENT_HARNESS=grok,opencode`.
 
 ### Model selection
 
@@ -213,6 +233,22 @@ DEVINTERN_VERBOSE=1
 ```
 
 When set to `1` or `true`, every API request, response status, and retry attempt is printed to the console. This is useful for diagnosing authentication or connectivity issues. The same effect can be achieved at runtime by passing `--verbose` (or `-v`) to `devpm`.
+
+## Behind an HTTP Proxy
+
+devpm sends tracker, update, and other requests through a proxy when one of these variables is set in your shell environment:
+
+- `HTTPS_PROXY` / `https_proxy`
+- `HTTP_PROXY` / `http_proxy`
+- `NO_PROXY` / `no_proxy` (comma-separated hosts that bypass the proxy)
+
+On Node.js v24.14+ or v25.4+, devpm turns on Node's built-in proxy support at startup automatically. On older Node versions, run devpm with `NODE_USE_ENV_PROXY=1` (supported for `fetch` from Node v22.21 and v24.0), or upgrade Node:
+
+```bash
+NODE_USE_ENV_PROXY=1 devpm --prompt "..."
+```
+
+Set proxy variables in your shell, not in `.devintern-pm/.env`: that file loads after startup, too late to configure the proxy. When a request fails at the network level, devpm prints the underlying cause (for example `ECONNREFUSED` or `ENOTFOUND`), plus a hint if a proxy variable is set but Node is not using it. devpm never prints the proxy URL, since it can contain credentials.
 
 ## No License Required
 

@@ -15,3 +15,9 @@
 import { stripWorkerInjectedEnv } from "./worker-env";
 
 stripWorkerInjectedEnv(process.env);
+
+// Dashboard servers started by tests must not shell out to the developer's
+// real `tailscale` (Serve auto-detection) or inherit a shell's allowlist.
+// Tests that exercise detection inject a probe and re-enable it explicitly.
+process.env.DASHBOARD_TAILSCALE_AUTODETECT = "0";
+delete process.env.DASHBOARD_ALLOWED_ORIGINS;

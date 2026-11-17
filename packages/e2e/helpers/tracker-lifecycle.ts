@@ -6,6 +6,9 @@ import type { TrackerScenario, TrackerStatusSettings } from "./tracker-scenario"
 /** Identifying header of the automated implementation-success comment. */
 export const IMPLEMENTATION_COMMENT_MARKER = "Implementation Completed by @devintern/code";
 
+/** Identifying text of the automated processing-failure comment. */
+export const PROCESSING_FAILURE_COMMENT_MARKER = "Automated implementation did not complete";
+
 /**
  * Keep only the pull requests created by a scenario's own run.
  *
@@ -173,4 +176,13 @@ export function assertImplementationComment(comments: TrackerComment[]): void {
   expect(implementation).toBeDefined();
   expect(implementation?.body).toContain("## What changed");
   expect(implementation?.body).toContain("Updated src/greeting.ts");
+}
+
+/** Assert the tracker received the automated processing-failure comment. */
+export function assertProcessingFailureComment(comments: TrackerComment[]): void {
+  const failure = comments.find((comment) =>
+    comment.body.includes(PROCESSING_FAILURE_COMMENT_MARKER),
+  );
+  expect(failure).toBeDefined();
+  expect(failure?.body).toContain("no pull request was created for this attempt");
 }

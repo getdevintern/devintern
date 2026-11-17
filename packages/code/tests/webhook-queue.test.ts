@@ -225,6 +225,30 @@ describe("WebhookQueue", () => {
     });
   });
 
+  describe("relay delivery attempts", () => {
+    test("counts retryable failures and clears on settlement", () => {
+      expect(queue.beginRelayDeliveryAttempt("d1", "boom")).toBe(1);
+      expect(queue.beginRelayDeliveryAttempt("d1", "boom again")).toBe(2);
+      queue.clearRelayDeliveryAttempts("d1");
+      expect(queue.beginRelayDeliveryAttempt("d1", "fresh budget")).toBe(1);
+    });
+
+    test("attempts survive a restart", () => {
+      expect(queue.beginRelayDeliveryAttempt("d1", "boom")).toBe(1);
+      const reopened = new WebhookQueue({ dbPath });
+      expect(reopened.beginRelayDeliveryAttempt("d1", "boom again")).toBe(2);
+      reopened.close();
+    });
+
+    test("cleanup reaps stale attempt rows", () => {
+      queue.beginRelayDeliveryAttempt("d1", "boom", Date.now() - 1_000);
+      queue.cleanupProcessedEvents(-1);
+      // A zero-age window treats the row as expired, so the next attempt is
+      // the first one in the fresh budget.
+      expect(queue.beginRelayDeliveryAttempt("d1", "fresh")).toBe(1);
+    });
+  });
+
   describe("malformed rows", () => {
     test("getEvent rejects an unknown status", () => {
       insertRawRow(
