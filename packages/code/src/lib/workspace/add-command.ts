@@ -19,7 +19,7 @@ import { listHarnesses } from "@devintern/agent-harness";
 import { checkLicense } from "@devintern/license-check";
 
 import { LockManager } from "../lock-manager";
-import type { PidLiveness } from "../lock-manager";
+import type { LockProbes, PidLiveness } from "../lock-manager";
 import { readWorkerHarnessPause } from "../observability/harness-pause";
 import type { WorkerHarnessPause } from "../observability/harness-pause";
 import { loadSupabaseConfig } from "../cli/bootstrap";
@@ -43,6 +43,7 @@ import {
   workspaceStateDir,
   readWorkerStartMarker,
 } from "./paths";
+import type { WorkerStartMarker } from "./paths";
 
 /** How often `--wait` re-reads the task row. */
 const WAIT_POLL_INTERVAL_MS = 1_000;
@@ -764,14 +765,26 @@ function failWait(
   return 1;
 }
 
-/** Whether a process still exists (EPERM means it exists but is not signalable). */
-function isPidRunning(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM";
-  }
+/**
+ * Whether the `.worker.starting` marker proves a replacement worker is
+ * starting. Only a marker written after the task was claimed can belong to the
+ * replacement (an older one is the dead worker's, and its pid may be recycled).
+ * The pid is probed namespace-aware via {@link LockManager.probeLiveness}: a
+ * marker from another PID namespace cannot be probed (its pid may collide with
+ * an unrelated local process), so it counts only while `startedAt` is within
+ * `LOCK_HEARTBEAT_STALE_MS`. The marker is never refreshed, so after that
+ * window the normal restart grace takes over and still bounds `--wait`.
+ */
+export function isReplacementWorkerStarting(
+  marker: WorkerStartMarker | null,
+  taskStartedAt: number | undefined,
+  probes: LockProbes = {},
+): boolean {
+  if (marker === null) return false;
+  if (taskStartedAt !== undefined && marker.startedAt < taskStartedAt) return false;
+  return (
+    LockManager.probeLiveness(marker.pid, marker.pidNamespace, marker.startedAt, probes) !== false
+  );
 }
 
 /**
@@ -817,6 +830,9 @@ async function waitForTask(
     }
     // An unverifiable lock (another PID namespace, i.e. this waiter runs in a
     // sandbox) counts as alive: giving up would abandon a live worker's task.
+    // It stays "unknown" only while the worker refreshes its lock heartbeat; a
+    // dead worker's lock turns `false` after LOCK_HEARTBEAT_STALE_MS, so the
+    // restart-grace failure below still fires.
     const workerRunning =
       LockManager.readLockStatus(ctx.selectedDir, ".worker.lock", { plainDir: true })?.running ??
       false;
@@ -833,10 +849,7 @@ async function waitForTask(
       // belong to the replacement; an older marker is from the dead worker and
       // a recycled pid must not be mistaken for a new process.
       const startingMarker = readWorkerStartMarker(ctx.selectedDir);
-      const replacementStarting =
-        startingMarker !== null &&
-        isPidRunning(startingMarker.pid) &&
-        (task.startedAt === undefined || startingMarker.startedAt >= task.startedAt);
+      const replacementStarting = isReplacementWorkerStarting(startingMarker, task.startedAt);
       if (replacementStarting) {
         // Restart grace measures from evidence of a new worker, not from the
         // lock disappearing while that process is still in startup.

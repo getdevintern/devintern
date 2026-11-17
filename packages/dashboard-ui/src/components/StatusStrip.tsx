@@ -153,7 +153,8 @@ function WorkerChip({
 /**
  * Worker liveness indicator. When liveness cannot be determined (no readable
  * worker lock in any known location — the worker may run from a different
- * directory), it says so explicitly instead of claiming "stopped".
+ * directory — or a lock whose owner is in another PID namespace), it says so
+ * explicitly instead of claiming "stopped".
  */
 export function WorkerStatusIndicator({ worker }: { worker: WorkerStatus }) {
   if (worker.status === "running") {
@@ -168,6 +169,18 @@ export function WorkerStatusIndicator({ worker }: { worker: WorkerStatus }) {
   }
   if (worker.status === "stopped") {
     return <WorkerChip state="stopped" label="worker stopped" />;
+  }
+  if (worker.reason === "pid-namespace") {
+    return (
+      <WorkerChip
+        state="unknown"
+        label="worker status unknown"
+        detail={worker.pid !== undefined ? ` (pid ${worker.pid})` : undefined}
+        title={`A worker lock exists${worker.lockFile ? ` at ${worker.lockFile}` : ""}${
+          worker.pid !== undefined ? ` for pid ${worker.pid}` : ""
+        }, but it was taken in another PID namespace, so the pid cannot be verified from here (for example, the dashboard runs inside a sandbox). Check \`devintern worker status\` outside the sandbox.`}
+      />
+    );
   }
   return (
     <WorkerChip

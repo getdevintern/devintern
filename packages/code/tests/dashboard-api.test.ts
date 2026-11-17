@@ -1347,7 +1347,13 @@ describe("resolveWorkerStatus PID-namespace liveness", () => {
     const lockPath = join(workspaceDir, ".worker.lock");
     writeFileSync(
       lockPath,
-      JSON.stringify({ pid: 999_999_999, timestamp: "2026-11-17T10:11:59.687Z", ...fields }),
+      JSON.stringify({
+        pid: 999_999_999,
+        timestamp: "2026-11-17T10:11:59.687Z",
+        // A fresh heartbeat: an old one would make the foreign lock provably stale.
+        heartbeatAt: new Date().toISOString(),
+        ...fields,
+      }),
     );
     return lockPath;
   }

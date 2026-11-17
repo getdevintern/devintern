@@ -325,6 +325,7 @@ describe("devintern worker read-only dashboard commands", () => {
       JSON.stringify({
         pid: 999_999_999,
         timestamp: "2026-11-17T10:11:59.687Z",
+        heartbeatAt: new Date().toISOString(),
         pidNamespace: "pid:[foreign-test-namespace]",
       }),
     );

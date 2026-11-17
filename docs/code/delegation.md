@@ -186,7 +186,18 @@ From inside a PID-isolated sandbox (for example an agent running under
 bubblewrap `--unshare-pid`), the worker's pid is invisible, so `worker add`
 cannot verify the worker. It prints "Could not verify the worker from this
 sandbox; the task is queued durably." instead of claiming no worker is running,
-allows `--wait`, and treats the worker as alive while waiting.
+allows `--wait`, and treats the worker as alive while waiting. The worker
+refreshes a heartbeat in its lock every 20 seconds; once that heartbeat is more
+than 2 minutes old, the worker counts as stopped, so `--wait` on a crashed
+worker still fails after the restart grace instead of blocking until
+`--wait-timeout`. Likewise, a replacement's startup marker written from another
+PID namespace counts as a starting worker only for its first 2 minutes; after
+that the restart grace applies.
+
+Restart the worker after upgrading so its lock records its PID namespace.
+A worker started on an older version writes a lock without a namespace or
+heartbeat. From inside the sandbox its pid is then probed directly and is not
+found, so `worker add` reports that no worker is running and refuses `--wait`.
 
 A timeout, worker stop, or inconclusive wait reports `status: "failed"` with an
 `error` even though the task itself may still be queued or running. Inspect the
