@@ -18,6 +18,11 @@ export function runHash(id: number): string {
   return `#/runs/${id}`;
 }
 
+/** Hash route of one automation's detail page. */
+export function automationHash(id: string): string {
+  return `#/automations/${encodeURIComponent(id)}`;
+}
+
 /** Retired hashes and where they now live, so old bookmarks keep working. */
 const LEGACY_HASHES: Record<string, string> = {
   // Task activity was folded into the overview's "Active work" section.

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Check, GitPullRequest, Play } from "lucide-react";
 
+import { AutomationActivityStatus, visibleActivity } from "@/components/AutomationActivity";
 import { AutomationGroupHeaderRow } from "@/components/AutomationGroupHeader";
 import { RunResult } from "@/components/RunResult";
 import { EmptyState, StatusBadge, StatusPill } from "@/components/shared";
@@ -23,16 +24,12 @@ import {
   runNowHint,
   runStartedMessage,
 } from "@/lib/scheduled-jobs";
+import { automationHash } from "@/lib/routes";
 import { formatRunOrigin } from "@/lib/run-origin";
 import { cn, formatAge, formatTime } from "@/lib/utils";
 import { formatNextRun, humanizeSchedule } from "@/views/automation-schedule";
 // oxlint-disable-next-line import/no-unassigned-import -- view styles
 import "./automations.css";
-
-/** Hash route of one automation's detail page. */
-export function automationHash(id: string): string {
-  return `#/automations/${encodeURIComponent(id)}`;
-}
 
 function openAutomationHash(id: string): void {
   window.location.hash = automationHash(id);
@@ -76,6 +73,9 @@ function AutomationRow({
   const busy = busyId === automation.id;
   const started = startedId === automation.id;
   const lastRun = automation.lastRun;
+  const activity = visibleActivity(automation);
+  // The worker rejects a second trigger while an occurrence holds the lease.
+  const inFlight = automation.activity !== undefined;
   const human = automation.schedule ? humanizeSchedule(automation.schedule) : undefined;
   const kind = jobKind(automation);
   const kindLabel = jobKindLabel(kind);
@@ -145,7 +145,9 @@ function AutomationRow({
         )}
       </TableCell>
       <TableCell className="auto-cell-last min-w-0 px-4 py-2.5 align-middle">
-        {lastRun ? (
+        {activity ? (
+          <AutomationActivityStatus activity={activity} />
+        ) : lastRun ? (
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
             <button
               type="button"
@@ -180,11 +182,11 @@ function AutomationRow({
           <Button
             variant="outline"
             size="sm"
-            disabled={busy}
+            disabled={busy || inFlight}
             aria-busy={busy || undefined}
             onClick={() => onRunNow(automation)}
             aria-label={`Run ${title} now`}
-            title={runNowHint(kind)}
+            title={inFlight ? "An occurrence is already in flight" : runNowHint(kind)}
           >
             {started ? <Check className="text-success" /> : <Play />}{" "}
             {busy ? "Starting…" : started ? "Started" : "Run now"}
