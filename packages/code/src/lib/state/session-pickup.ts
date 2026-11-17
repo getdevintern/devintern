@@ -22,6 +22,7 @@
  * safe default.
  */
 
+import { isBlockedOutcomeReason } from "../agent/implementation-outcome";
 import type { RunRecord, RunStatus, RunStore, StageStatus } from "./run-recorder";
 
 /** Terminal statuses whose runs are candidates for pickup. */
@@ -298,6 +299,13 @@ export async function resolveSessionPickup(
   const run = candidate.run;
   if (!isPickupStatus(run.status)) {
     return { kind: "fresh", reason: `prior run is ${run.status}` };
+  }
+  // An agent-reported `blocked` outcome escalates a run that otherwise
+  // finished cleanly and delivered (PR opened, ticket actioned). Its branch is
+  // not interrupted work to continue: the blocker is outside the code, so the
+  // next attempt starts fresh, exactly as it did when such runs succeeded.
+  if (run.status === "escalated" && isBlockedOutcomeReason(run.outcomeReason)) {
+    return { kind: "fresh", reason: "prior run reported its goal as blocked" };
   }
 
   const branch = run.branch?.trim();

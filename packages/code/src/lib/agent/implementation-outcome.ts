@@ -136,6 +136,17 @@ export function parseImplementationOutcome(output: string): ImplementationOutcom
   return outcome;
 }
 
+/** Prefix of the `outcome_reason` recorded for a run escalated by a `blocked` marker. */
+export const BLOCKED_OUTCOME_REASON_PREFIX = "blocked: ";
+
+/**
+ * Whether a recorded outcome reason comes from an agent-reported `blocked`
+ * marker (as opposed to an incomplete handoff or another escalation).
+ */
+export function isBlockedOutcomeReason(reason: string | undefined): boolean {
+  return reason?.startsWith(BLOCKED_OUTCOME_REASON_PREFIX) ?? false;
+}
+
 /** Run status and recorded reason implied by a reported outcome. */
 export interface OutcomeRunDisposition {
   status: "succeeded" | "escalated";
@@ -156,7 +167,7 @@ export function outcomeRunDisposition(
   if (outcome?.status === "blocked") {
     return {
       status: "escalated",
-      reason: `blocked: ${outcome.reason ?? "the agent reported that it could not meet the goal"}`,
+      reason: `${BLOCKED_OUTCOME_REASON_PREFIX}${outcome.reason ?? "the agent reported that it could not meet the goal"}`,
     };
   }
   if (outcome?.status === "partial") {

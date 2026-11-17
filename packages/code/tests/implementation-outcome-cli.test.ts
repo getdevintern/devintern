@@ -6,7 +6,7 @@
  * `--allow-no-changes` in a git checkout (a no-op delivery).
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
@@ -67,11 +67,18 @@ interface CliRun {
   hint: ReturnType<typeof readRunOutcomeHint>;
 }
 
-async function runCli(agentStdout: string, flags: string[], cwd = dir): Promise<CliRun> {
+const PLAIN_TASK = "# Release\n\nPublish the next release.\n";
+
+async function runCli(
+  agentStdout: string,
+  flags: string[],
+  cwd = dir,
+  taskContent = PLAIN_TASK,
+): Promise<CliRun> {
   const dbPath = join(dir, "queue.db");
   const hintPath = join(dir, "outcome.json");
   const taskFile = join(cwd, "release.md");
-  writeFileSync(taskFile, "# Release\n\nPublish the next release.\n");
+  writeFileSync(taskFile, taskContent);
   const proc = Bun.spawn({
     cmd: ["bun", CLI_PATH, taskFile, "--skip-clarity-check", ...flags],
     cwd,
@@ -183,4 +190,32 @@ describe("agent outcome marker → run status", () => {
     expect(result.run.status).toBe("succeeded");
     expect(result.run.outcomeReason).toBe("partial: one of two tickets created");
   }, 40_000);
+
+  describe("markdown task status", () => {
+    const TASK_WITH_STATUS = "---\nstatus: Todo\n---\n# Release\n\nPublish the next release.\n";
+    const taskStatus = () =>
+      /^status:\s*(.+)$/m.exec(readFileSync(join(dir, "release.md"), "utf8"))?.[1]?.trim();
+
+    test("status=blocked leaves the task file out of Done", async () => {
+      const result = await runCli(
+        BLOCKED,
+        ["--no-git", "--agent-path", writeStubAgent(BLOCKED)],
+        dir,
+        TASK_WITH_STATUS,
+      );
+      expect(result.run.status).toBe("escalated");
+      expect(taskStatus()).not.toBe("Done");
+    }, 40_000);
+
+    test("a clean run still marks the task file Done", async () => {
+      const result = await runCli(
+        SUMMARY,
+        ["--no-git", "--agent-path", writeStubAgent(SUMMARY)],
+        dir,
+        TASK_WITH_STATUS,
+      );
+      expect(result.run.status).toBe("succeeded");
+      expect(taskStatus()).toBe("Done");
+    }, 40_000);
+  });
 });
