@@ -75,8 +75,20 @@ export interface RelayHandlers {
     repo: string,
     prNumber: number,
   ): Promise<boolean | "deferred" | "skipped" | "interrupted">;
-  /** New PR conversation comment → mention/permission gates decide inside. */
-  handlePrComment(repo: string, prNumber: number, commentId: number): Promise<void>;
+  /**
+   * New PR conversation comment → mention/permission gates decide inside.
+   * @returns The run outcome, with the same semantics as {@link addressPr}:
+   *          `"skipped"` for intentional no-ops (no credentials, comment gone,
+   *          bot not mentioned, permission denied); `"deferred"` and
+   *          `"interrupted"` keep the delivery retryable. A thrown error (for
+   *          example a transient permission-API failure) is classified and
+   *          retried within the bounded relay budget.
+   */
+  handlePrComment(
+    repo: string,
+    prNumber: number,
+    commentId: number,
+  ): Promise<boolean | "deferred" | "skipped" | "interrupted">;
   /** Tracker task changed → re-evaluate the matching team/default source. */
   evaluateTask(taskKey: string, trackerSource: string, team?: string): Promise<void>;
   /** Provider-neutral change hint; implementation must re-fetch authoritative state. */
@@ -358,7 +370,23 @@ export class RelayAcquirer implements Acquirer {
         if (!repo || pr === undefined || commentId === undefined) {
           return;
         }
-        await handlers.handlePrComment(repo, pr, commentId);
+        const outcome = await handlers.handlePrComment(repo, pr, commentId);
+        if (outcome === "deferred") {
+          throw new RelayDeferredError(
+            `Relay mention ${repo}#${pr} deferred until a harness is available`,
+          );
+        }
+        if (outcome === "interrupted") {
+          throw new RelayInterruptedError(`Relay mention ${repo}#${pr} was interrupted`);
+        }
+        if (outcome === false) {
+          // Same as reviews: the run reports its own failure, so acknowledge
+          // instead of re-running the whole pipeline on every backoff cycle.
+          console.warn(
+            `⚠️  [relay] mention run on ${repo}#${pr} did not complete cleanly; ` +
+              "acknowledging the delivery instead of retrying it",
+          );
+        }
         return;
       }
       case "task.changed": {

@@ -56,6 +56,11 @@ describe("resolveHarness with comma-separated AGENT_HARNESS", () => {
   beforeEach(() => {
     delete process.env.AGENT_HARNESS;
     delete process.env.AGENT_CLI_PATH;
+    // Per-harness overrides (e.g. an ambient CODEX_CLI_PATH) would change the
+    // resolved path; the afterEach restores the original environment.
+    for (const key of Object.keys(process.env)) {
+      if (key.endsWith("_CLI_PATH")) delete process.env[key];
+    }
     warnings = [];
     console.warn = (msg?: unknown) => {
       warnings.push(String(msg));
@@ -350,7 +355,8 @@ describe("resolveHarnessChain", () => {
     expect(chain.issues[0]!.requested).toBe("grok");
     expect(chain.issues[0]!.reason).toBe("sandbox-incompatible");
     expect(chain.issues[0]!.message).toContain("does not support");
-    expect(chain.issues[0]!.message).toContain("GROK_CLI_PATH");
+    expect(chain.issues[0]!.message).not.toContain("GROK_CLI_PATH");
+    expect(chain.issues[0]!.message).toContain("AGENT_SANDBOX=auto");
   });
 
   test("auto probes directly inside an enclosing sandbox", async () => {
@@ -461,6 +467,25 @@ describe("resolveHarnessChain", () => {
     ]);
     expect(chain.issues[0]!.message).toContain("Keeping it as the primary entry");
     expect(chain.issues[1]!.message).not.toContain("Keeping it as the primary entry");
+  });
+
+  test("an uninstalled fallback does not count as a passing entry (doctor view)", async () => {
+    // Doctors resolve with checkInstalled: false, so uninstalled entries stay
+    // in the evaluation. The worker's chain would contain only the installed
+    // primary and keep it, so the doctor must keep it too.
+    const chain = await resolveHarnessChain({
+      raw: "grok,opencode",
+      checkInstalled: false,
+      isInstalled: (entry) => entry.name === "grok",
+      sandboxName: "nono",
+      probeSandbox: () => ({ ok: false, reason: "mise: Permission denied" }),
+    });
+
+    const grok = chain.evaluations!.find((e) => e.name === "grok")!;
+    expect(grok.retained).toBe(true);
+    expect(chain.issues.find((i) => i.requested === "grok")!.message).toContain(
+      "Keeping it as the primary entry",
+    );
   });
 
   test("probes entries in parallel", async () => {

@@ -78,13 +78,13 @@ export const OPT_IN_SUITES: readonly OptInSuite[] = [
   {
     name: "Jira tracker lifecycle E2E",
     script: "test:e2e:tracker:jira",
-    reason: "planned in Layer 2 of docs/tracker-e2e-plan.md",
+    reason: "planned in Layer 2 of docs/coverage/trackers.md",
     status: "todo",
   },
   {
     name: "Trello tracker lifecycle E2E",
     script: "test:e2e:tracker:trello",
-    reason: "planned in Layer 2 of docs/tracker-e2e-plan.md",
+    reason: "planned in Layer 2 of docs/coverage/trackers.md",
     status: "todo",
   },
   {

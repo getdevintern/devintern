@@ -1,7 +1,8 @@
 /**
  * Queued (not yet started) work for the dashboard's Overview: ad-hoc tasks
- * from `devintern worker add`, dashboard-scheduled retries, and webhook
- * deliveries the worker has persisted but not picked up.
+ * from `devintern worker add`, dashboard-scheduled retries, webhook
+ * deliveries the worker has persisted but not picked up, and automation
+ * occurrences waiting for a free slot (they have no run row until admitted).
  *
  * Rows that are already running are deliberately left out: they own a run
  * row and show up under "Active work" instead. Every reader here follows the
@@ -19,10 +20,11 @@ import { configureSqliteConnection } from "../state/sqlite";
 import { WebhookQueue } from "../state/webhook-queue";
 import type { WebhookEvent } from "../state/webhook-queue";
 import type { ApiResponse, DashboardData } from "./dashboard-api";
+import type { DashboardAutomationView } from "./dashboard-automation-view";
 import { deriveTaskTitle } from "./task-title";
 
 /** Where a queued item came from. */
-export type QueuedWorkKind = "ad-hoc" | "retry" | "webhook";
+export type QueuedWorkKind = "ad-hoc" | "retry" | "webhook" | "automation";
 
 /** One queued item as served by `GET /api/queue`. */
 export interface QueuedWorkItem {
@@ -56,6 +58,8 @@ export interface QueuedWorkItem {
   /** Webhook: processing attempts so far. */
   attempts?: number;
   lastError?: string;
+  /** Automation: the scheduled job waiting for a slot (its dashboard id). */
+  automationId?: string;
 }
 
 export interface QueuedWorkResponse {
@@ -282,6 +286,29 @@ export interface QueuedWorkSources {
   lookupRun: (id: number) => Pick<RunRecord, "taskDescription" | "repo"> | null;
   /** Pending count across every queue, beyond the listed rows. */
   pendingTotal: number;
+  /** Scheduled jobs on this worker, for occurrences still waiting for a slot. */
+  listAutomations?: () => DashboardAutomationView[];
+}
+
+/**
+ * Map an automation occurrence that holds its lease but has not been admitted
+ * yet (no run row exists) to a queued item; `null` for anything else.
+ */
+export function waitingAutomationToQueuedItem(
+  automation: DashboardAutomationView,
+): QueuedWorkItem | null {
+  const activity = automation.activity;
+  if (activity?.state !== "waiting") return null;
+  return {
+    id: `automation:${automation.id}`,
+    kind: "automation",
+    title: automation.title ?? automation.id,
+    repo: automation.repo,
+    actor: activity.trigger === "manual" ? "Run now" : "schedule",
+    createdAt: activity.since,
+    message: activity.reason,
+    automationId: automation.id,
+  };
 }
 
 function retryToQueuedItem(
@@ -327,10 +354,22 @@ export function collectQueuedWork(sources: QueuedWorkSources): QueuedWorkRespons
     .flatMap((path) => readPendingWebhookEvents(path))
     .slice(0, QUEUED_SOURCE_LIMIT)
     .map(webhookEventToQueuedItem);
-  const items = [...adHoc, ...retries, ...webhooks].sort(
+  let automations: QueuedWorkItem[] = [];
+  try {
+    automations = (sources.listAutomations?.() ?? [])
+      .map(waitingAutomationToQueuedItem)
+      .filter((item): item is QueuedWorkItem => item !== null);
+  } catch {
+    // The scheduler catalog is best-effort here: the queue still lists the rest.
+  }
+  const items = [...adHoc, ...retries, ...webhooks, ...automations].sort(
     (a, b) => queuedEligibleAt(a) - queuedEligibleAt(b),
   );
-  return { items, total: Math.max(items.length, sources.pendingTotal) };
+  // Waiting automations are not counted by the durable queues behind pendingTotal.
+  return {
+    items,
+    total: Math.max(items.length, sources.pendingTotal + automations.length),
+  };
 }
 
 /**
@@ -346,6 +385,7 @@ export function handleQueuedWork(data: DashboardData): ApiResponse {
     listInjected: (limit) => data.getInjectedTaskReadStore().listPending(limit),
     lookupRun: (id) => data.getRunDetail(id)?.run ?? null,
     pendingTotal: stats.pending + stats.injected.pending + stats.retries.pending,
+    listAutomations: () => data.getAutomations(),
   });
   return { status: 200, body };
 }

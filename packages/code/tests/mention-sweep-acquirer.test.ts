@@ -11,6 +11,7 @@ import {
   mentionsBot,
 } from "../src/lib/acquirers/mention-sweep";
 import type { SweptComment, SweptPrInfo } from "../src/lib/acquirers/mention-sweep";
+import type { TaskExecutionResult } from "../src/lib/acquirers/task-polling";
 import { WebhookQueue } from "../src/lib/state/webhook-queue";
 import { WorkerState } from "../src/lib/state/worker-state";
 
@@ -97,6 +98,7 @@ describe("bot mention aliases", () => {
       },
       handleMention: async (c, prNumber) => {
         handled.push({ id: c.id, prNumber });
+        return true;
       },
     });
 
@@ -183,6 +185,9 @@ describe("MentionSweepAcquirer", () => {
     pr?: Partial<SweptPrInfo>;
     shouldPollFeedback?: () => boolean;
     feedbackFallbackIntervalSeconds?: number;
+    /** Per-call handler behavior; defaults to a settled successful run. */
+    outcome?: (call: number, c: SweptComment) => TaskExecutionResult | Error;
+    feedbackMaxAttempts?: number;
   }) {
     const handled: Array<{ id: number; prNumber: number }> = [];
     const posted: string[] = [];
@@ -210,7 +215,11 @@ describe("MentionSweepAcquirer", () => {
       },
       handleMention: async (c, prNumber) => {
         handled.push({ id: c.id, prNumber });
+        const result = options.outcome?.(handled.length, c) ?? true;
+        if (result instanceof Error) throw result;
+        return result;
       },
+      feedbackMaxAttempts: options.feedbackMaxAttempts,
     });
     return { acquirer, handled, posted };
   }
@@ -323,5 +332,200 @@ describe("MentionSweepAcquirer", () => {
     expect(workerState.getCursor("github:mention:issuecomments:acme/widgets")?.cursorValue).toBe(
       createdAt,
     );
+  });
+
+  const ISSUE_CURSOR = "github:mention:issuecomments:acme/widgets";
+
+  for (const outcome of ["interrupted", "deferred"] as const) {
+    test(`an ${outcome} mention is retried on the next sweep without passing the cursor`, async () => {
+      const first = comment({ id: 1, created_at: new Date(Date.now() + 60_000).toISOString() });
+      const second = comment({ id: 2, created_at: new Date(Date.now() + 120_000).toISOString() });
+      const { acquirer, handled } = makeAcquirer({
+        issueComments: [first, second],
+        outcome: (call) => (call === 1 ? outcome : true),
+      });
+
+      await acquirer.tick();
+      // The sweep stops at the unsettled mention; the later one waits.
+      expect(handled).toEqual([{ id: 1, prNumber: 5 }]);
+      const cursor = workerState.getCursor(ISSUE_CURSOR)?.cursorValue;
+      expect(cursor).toBeDefined();
+      expect(cursor! < first.created_at).toBe(true);
+      expect(queue.hasProcessed("github:mentions", "comment:1")).toBe(false);
+
+      await acquirer.tick();
+      expect(handled).toEqual([
+        { id: 1, prNumber: 5 },
+        { id: 1, prNumber: 5 },
+        { id: 2, prNumber: 5 },
+      ]);
+      expect(workerState.getCursor(ISSUE_CURSOR)?.cursorValue).toBe(second.created_at);
+      expect(queue.hasProcessed("github:mentions", "comment:1")).toBe(true);
+    });
+  }
+
+  test("interrupted and deferred runs do not consume attempts", async () => {
+    const { acquirer, handled } = makeAcquirer({
+      issueComments: [comment({})],
+      feedbackMaxAttempts: 1,
+      outcome: (call) => (call <= 3 ? (call % 2 ? "deferred" : "interrupted") : true),
+    });
+
+    for (let i = 0; i < 4; i++) await acquirer.tick();
+    expect(handled).toHaveLength(4);
+    expect(queue.hasProcessed("github:mentions", "comment:1")).toBe(true);
+  });
+
+  test("a throwing handler is retried until the limit, then marked handled", async () => {
+    const c = comment({});
+    const { acquirer, handled } = makeAcquirer({
+      issueComments: [c],
+      feedbackMaxAttempts: 3,
+      outcome: () => new Error("GitHub API 502"),
+    });
+
+    await acquirer.tick();
+    await acquirer.tick();
+    expect(handled).toHaveLength(2);
+    expect(queue.hasProcessed("github:mentions", "comment:1")).toBe(false);
+    expect((workerState.getCursor(ISSUE_CURSOR)?.cursorValue ?? "") < c.created_at).toBe(true);
+
+    await acquirer.tick();
+    expect(handled).toHaveLength(3);
+    expect(queue.hasProcessed("github:mentions", "comment:1")).toBe(true);
+    expect(workerState.getCursor(ISSUE_CURSOR)?.cursorValue).toBe(c.created_at);
+    // Ledger cleared at the limit: a fresh failure starts from one again.
+    expect(queue.beginFeedbackAttempt("github:mentions:comment:1", "probe")).toBe(1);
+
+    await acquirer.tick();
+    expect(handled).toHaveLength(3);
+  });
+
+  test("a throwing mention holds the cursor but does not block later mentions", async () => {
+    const first = comment({ id: 1, created_at: new Date(Date.now() + 60_000).toISOString() });
+    const second = comment({ id: 2, created_at: new Date(Date.now() + 120_000).toISOString() });
+    const { acquirer, handled } = makeAcquirer({
+      issueComments: [first, second],
+      feedbackMaxAttempts: 3,
+      outcome: (_call, c) => (c.id === 1 ? new Error("GitHub API 502") : true),
+    });
+
+    await acquirer.tick();
+    // The later mention runs in the same sweep despite the earlier throw.
+    expect(handled).toEqual([
+      { id: 1, prNumber: 5 },
+      { id: 2, prNumber: 5 },
+    ]);
+    expect(queue.hasProcessed("github:mentions", "comment:1")).toBe(false);
+    expect(queue.hasProcessed("github:mentions", "comment:2")).toBe(true);
+    // The cursor stays before the failing mention, not at the later one.
+    expect((workerState.getCursor(ISSUE_CURSOR)?.cursorValue ?? "") < first.created_at).toBe(true);
+
+    // Next sweep re-reads both: only the failing one is retried, the
+    // already-handled one is deduped.
+    await acquirer.tick();
+    expect(handled.map((h) => h.id)).toEqual([1, 2, 1]);
+  });
+
+  test("a settled run clears the attempt history left by earlier throws", async () => {
+    const { acquirer, handled } = makeAcquirer({
+      issueComments: [comment({})],
+      feedbackMaxAttempts: 3,
+      outcome: (call) => (call === 1 ? new Error("rate limited") : true),
+    });
+
+    await acquirer.tick();
+    expect(queue.hasProcessed("github:mentions", "comment:1")).toBe(false);
+    await acquirer.tick();
+    expect(handled).toHaveLength(2);
+    expect(queue.hasProcessed("github:mentions", "comment:1")).toBe(true);
+    expect(queue.beginFeedbackAttempt("github:mentions:comment:1", "probe")).toBe(1);
+  });
+
+  test("a permanent PR lookup failure (plain issue 404) is handled after one call", async () => {
+    let lookups = 0;
+    const handled: number[] = [];
+    const c = comment({});
+    const acquirer = new MentionSweepAcquirer({
+      repo: "acme/widgets",
+      intervalSeconds: 60,
+      workerState,
+      queue,
+      feedbackMaxAttempts: 3,
+      github: {
+        fetchIssueCommentsSince: async () => [c],
+        fetchReviewCommentsSince: async () => [],
+        getBotUsername: async () => "devintern[bot]",
+        getPr: async () => {
+          lookups++;
+          throw new Error("GitHub API error (404): Not Found");
+        },
+        postComment: async () => {},
+      },
+      handleMention: async (m) => {
+        handled.push(m.id);
+        return true;
+      },
+    });
+
+    await acquirer.tick();
+    expect(lookups).toBe(1);
+    expect(queue.hasProcessed("github:mentions", "comment:1")).toBe(true);
+    expect(workerState.getCursor(ISSUE_CURSOR)?.cursorValue).toBe(c.created_at);
+    // No attempt was recorded: a fresh failure would start from one.
+    expect(queue.beginFeedbackAttempt("github:mentions:comment:1", "probe")).toBe(1);
+
+    await acquirer.tick();
+    expect(lookups).toBe(1);
+    expect(handled).toEqual([]);
+  });
+
+  test("a permanent handler failure (permission 404) is not retried", async () => {
+    const c = comment({});
+    const err = Object.assign(new Error("Not Found"), { status: 404 });
+    const { acquirer, handled } = makeAcquirer({
+      issueComments: [c],
+      feedbackMaxAttempts: 3,
+      outcome: () => err,
+    });
+
+    await acquirer.tick();
+    expect(handled).toHaveLength(1);
+    expect(queue.hasProcessed("github:mentions", "comment:1")).toBe(true);
+    expect(workerState.getCursor(ISSUE_CURSOR)?.cursorValue).toBe(c.created_at);
+
+    await acquirer.tick();
+    expect(handled).toHaveLength(1);
+  });
+
+  test("a transient PR lookup failure is retried rather than dropped", async () => {
+    let lookups = 0;
+    const handled: number[] = [];
+    const acquirer = new MentionSweepAcquirer({
+      repo: "acme/widgets",
+      intervalSeconds: 60,
+      workerState,
+      queue,
+      github: {
+        fetchIssueCommentsSince: async () => [comment({})],
+        fetchReviewCommentsSince: async () => [],
+        getBotUsername: async () => "devintern[bot]",
+        getPr: async (prNumber) => {
+          lookups++;
+          if (lookups === 1) throw new Error("GitHub API 503");
+          return { number: prNumber, state: "open", headRepoFullName: "acme/widgets" };
+        },
+        postComment: async () => {},
+      },
+      handleMention: async (c) => {
+        handled.push(c.id);
+        return true;
+      },
+    });
+
+    await acquirer.tick();
+    expect(handled).toEqual([]);
+    await acquirer.tick();
+    expect(handled).toEqual([1]);
   });
 });

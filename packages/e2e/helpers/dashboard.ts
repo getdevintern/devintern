@@ -10,6 +10,7 @@
  */
 
 import { cliPath } from "./fixture-workspace";
+import { ensureLoopbackBypassesProxy } from "./loopback-proxy";
 import { freePort } from "./webhook-server";
 import type { WorkerFixture } from "./worker";
 
@@ -153,6 +154,9 @@ export class DashboardFixture {
     worker: WorkerFixture,
     options: DashboardFixtureOptions = {},
   ): Promise<DashboardFixture> {
+    // The health poll and callers' fetches run in this process; keep them off
+    // any ambient proxy even when the bunfig preload did not run (root runs).
+    ensureLoopbackBypassesProxy();
     const host = options.host ?? "127.0.0.1";
     const port = options.port ?? (await freePort(host));
     const child = Bun.spawn(

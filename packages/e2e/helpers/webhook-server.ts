@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { isolatedEnvironment } from "./environment";
 import { cliPath } from "./fixture-workspace";
+import { ensureLoopbackBypassesProxy } from "./loopback-proxy";
 
 const HEALTH_TIMEOUT_MS = 30_000;
 const HEALTH_POLL_INTERVAL_MS = 50;
@@ -195,6 +196,8 @@ export class WebhookServerFixture {
 
   /** Spawn the built CLI and resolve only after `GET /health` returns 200. */
   static async start(options: WebhookServerFixtureOptions = {}): Promise<WebhookServerFixture> {
+    // Keep the in-process health poll off any ambient proxy (see loopback-proxy).
+    ensureLoopbackBypassesProxy();
     const root = mkdtempSync(join(tmpdir(), "devintern-e2e-webhook-"));
     const env = isolatedEnvironment(root);
     // The CLI resolves its agent harness at startup even for `webhook serve`,

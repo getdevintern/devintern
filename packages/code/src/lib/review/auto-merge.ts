@@ -114,12 +114,15 @@ export interface AutoMergeOptions {
   /** Source repository directory for the review worktree. */
   cwd?: string;
   github?: AutoMergeGitHub;
-  /** Agent runner (tests); defaults to the shared review agent. */
+  /**
+   * Agent runner (tests); defaults to the shared review agent. The verdict
+   * is parsed from `stdout`, which falls back to `output` when absent.
+   */
   agentRunner?: (
     prompt: string,
     workDir: string,
     verbose: boolean,
-  ) => Promise<{ success: boolean; output: string }>;
+  ) => Promise<{ success: boolean; output: string; stdout?: string }>;
   /** Review checkout (tests); defaults to the branch-scoped review worktree. */
   worktree?: {
     prepare(branch: string): Promise<{ success: boolean; path?: string; error?: string }>;
@@ -483,12 +486,18 @@ async function reviewWithAgent(params: {
         return { kind: "waiting", ran: false, message: "PR head moved while preparing the review" };
       }
     }
-    const runner = options.agentRunner ?? runAgent;
-    const run = await runner(prompt, workDir, verbose);
+    const injected = options.agentRunner;
+    const run = injected
+      ? await injected(prompt, workDir, verbose).then((result) => ({
+          ...result,
+          stdout: result.stdout ?? result.output,
+        }))
+      : await runAgent(prompt, workDir, verbose);
     if (!run.success) {
       return { kind: "failed", ran: true, message: "merge-safety agent run failed" };
     }
-    const verdict = parseMergeSafetyVerdict(run.output);
+    // Only stdout counts: stderr may echo the prompt (and so the PR diff).
+    const verdict = parseMergeSafetyVerdict(run.stdout ?? "");
     if (!verdict) {
       return { kind: "failed", ran: true, message: "merge-safety agent returned no verdict" };
     }

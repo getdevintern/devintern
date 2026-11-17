@@ -153,7 +153,7 @@ const TELEMETRY_ON = { DEVINTERN_TELEMETRY_DISABLED: undefined, DEVINTERN_NO_UPD
 function expectHealthyDoctor(result: CommandResult): void {
   const text = `${result.stdout}\n${result.stderr}`;
   expect(result.exitCode).toBe(0);
-  expect(text).toContain("Ready to run");
+  expect(text).toContain("⚠️  Ready but degraded — review the warnings above.");
 }
 
 /** Recorded target hosts only; never request contents. */

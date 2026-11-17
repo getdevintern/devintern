@@ -33,6 +33,7 @@ import { HarnessFailover } from "../agent/harness-failover";
 import type { FailoverOutcome } from "../agent/harness-failover";
 import { HARNESS_CHAIN_ENV, resolveAgentModel } from "../agent/model";
 import { pinnedHarnessChildEnv } from "../agent/selection";
+import { resetSandboxResolutionCache } from "../agent/sandbox";
 import type { WebhookQueue } from "../state/webhook-queue";
 import {
   AUTOMATION_ACCESS_EXIT_CODE,
@@ -358,8 +359,10 @@ export async function startWorkerFailover(
 ): Promise<WorkerFailover> {
   instance?.stop();
   // A fresh start is a configuration reload: drop cached sandbox readiness so
-  // a fixed <HARNESS>_CLI_PATH is probed again.
+  // a fixed <HARNESS>_CLI_PATH is probed again, and spawn-time sandbox
+  // selection runs again for each harness instead of reusing stale picks.
   resetHarnessSandboxProbeCache();
+  resetSandboxResolutionCache();
   const chain =
     options.chain ??
     (await resolveHarnessChain({
@@ -377,6 +380,29 @@ export async function startWorkerFailover(
 /** The process-wide controller, or null when failover has not been started. */
 export function getWorkerFailover(): WorkerFailover | null {
   return instance;
+}
+
+/**
+ * When every harness in the chain is usage-limited, the earliest time one of
+ * them becomes usable again; `undefined` while any entry can start a run (or
+ * when the chain is only cooling down after startup failures, which has no
+ * exposed resume time and is short-lived).
+ *
+ * Pickup loops use this to pause once with a reason instead of claiming and
+ * deferring every ready task on each tick.
+ */
+export function harnessChainBlockedUntil(
+  failover: WorkerFailover | null = getWorkerFailover(),
+  now: number = Date.now(),
+): number | undefined {
+  if (!failover?.allLimited()) return undefined;
+  const until = Math.min(...Object.values(failover.windows()).filter((value) => value > now));
+  return Number.isFinite(until) ? until : undefined;
+}
+
+/** Human-readable reason for a harness-chain pause, shared by pickup loops. */
+export function harnessBlockedReason(untilMs: number): string {
+  return `no agent harness is available until ${new Date(untilMs).toISOString()} (usage limit)`;
 }
 
 /**

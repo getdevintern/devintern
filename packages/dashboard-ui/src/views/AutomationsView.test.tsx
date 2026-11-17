@@ -172,6 +172,33 @@ test("last run is one tidy line: status, relative time, origin and time on hover
   expect(html).toContain('href="https://acme.atlassian.net/browse/DEV-42"');
 });
 
+test("an occurrence waiting for a slot shows as waiting and blocks Run now", () => {
+  const html = render([
+    automation({
+      lastRun: lastRun(),
+      activity: {
+        state: "waiting",
+        since: Date.now() - 4 * 60_000,
+        trigger: "manual",
+        reason: "waiting for the acme/widgets checkout, which another run is using",
+      },
+    }),
+  ]);
+
+  expect(html).toContain("Waiting for a slot");
+  expect(html).toContain("waiting for the acme/widgets checkout");
+  // The waiting state replaces the stale last run in its cell.
+  expect(html).not.toContain(">succeeded<");
+  expect(html).toMatch(/<button[^>]*disabled=""[^>]*aria-label="Run nightly-triage now"/);
+});
+
+test("a started occurrence shows Starting until its run row is in progress", () => {
+  const activity = { state: "running" as const, since: Date.now(), trigger: "scheduled" as const };
+  expect(render([automation({ activity })])).toContain("Starting");
+  const recorded = render([automation({ activity, lastRun: lastRun({ status: "in_progress" }) })]);
+  expect(recorded).not.toContain("Starting");
+});
+
 test("last run without a result renders no empty result placeholder", () => {
   const html = render([automation({ lastRun: lastRun({ ticketKey: undefined }) })]);
   expect(html).not.toContain("ref-link");

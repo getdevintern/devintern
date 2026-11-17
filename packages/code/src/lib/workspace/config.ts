@@ -249,6 +249,21 @@ export interface WorkspaceConfig {
   estimations: EstimationConfig[];
 }
 
+/**
+ * Thrown by {@link parseWorkspaceConfig} when the TOML is invalid or violates
+ * the schema. `message` keeps the historical aggregated text; `problems`
+ * carries each problem separately for reporters such as `worker doctor`.
+ */
+export class WorkspaceConfigError extends Error {
+  readonly problems: string[];
+
+  constructor(message: string, problems: string[]) {
+    super(message);
+    this.name = "WorkspaceConfigError";
+    this.problems = [...problems];
+  }
+}
+
 export const DEFAULT_WORKTREES_TTL_DAYS = 7;
 export const DEFAULT_POLL_INTERVAL_SECONDS = 60;
 export const DEFAULT_DASHBOARD = true;
@@ -399,9 +414,8 @@ export function parseWorkspaceConfig(
   try {
     document = parseToml(text);
   } catch (error) {
-    throw new Error(
-      `Failed to parse ${sourceLabel}: ${error instanceof Error ? error.message : String(error)}`,
-    );
+    const detail = `Failed to parse ${sourceLabel}: ${error instanceof Error ? error.message : String(error)}`;
+    throw new WorkspaceConfigError(detail, [detail]);
   }
 
   const errors: string[] = [];
@@ -470,7 +484,7 @@ export function parseWorkspaceConfig(
   const dashboard = parseDashboardSection(document, errors);
 
   if (errors.length > 0) {
-    throw new Error(`Invalid ${sourceLabel}:\n- ${errors.join("\n- ")}`);
+    throw new WorkspaceConfigError(`Invalid ${sourceLabel}:\n- ${errors.join("\n- ")}`, errors);
   }
 
   return {

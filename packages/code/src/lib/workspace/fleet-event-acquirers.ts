@@ -360,7 +360,11 @@ export async function buildFleetEventAcquirers(options: {
   let githubFor: ((slug: string) => FleetGitHubClient) | undefined;
   let addressPr: ((repo: string, prNumber: number) => Promise<TaskExecutionResult>) | undefined;
   let handleMention:
-    | ((repo: string, comment: { user: { login: string } }, prNumber: number) => Promise<void>)
+    | ((
+        repo: string,
+        comment: { user: { login: string } },
+        prNumber: number,
+      ) => Promise<TaskExecutionResult>)
     | undefined;
 
   // Built whenever credentials exist — even with zero GitHub repos today —
@@ -381,7 +385,9 @@ export async function buildFleetEventAcquirers(options: {
       workspaceDir,
       repoManager,
       userHasPushAccess: (owner: string, repo: string, user: string) =>
-        gh(`${owner}/${repo}`).userHasPushAccess(owner, repo, user),
+        // Throwing variant: a transient permission-API error must be retried by
+        // the relay / mention sweep, not treated as a denial.
+        gh(`${owner}/${repo}`).userHasPushAccessOrThrow(owner, repo, user),
       verbose,
       supervisor: options.supervisor,
     };
@@ -684,7 +690,7 @@ export async function buildFleetEventAcquirers(options: {
                       "(GITHUB_TOKEN is not set in this relay-backed workspace).",
                   );
                 }
-                return;
+                return "skipped";
               }
               const [repoOwner, repoName] = repo.split("/") as [string, string];
               const { data: comment } = await githubFor(repo).conditionalGet<{
@@ -694,11 +700,13 @@ export async function buildFleetEventAcquirers(options: {
                 created_at: string;
                 html_url: string;
               }>(`/repos/${repo}/issues/comments/${commentId}`, repoOwner, repoName);
-              if (!comment) return;
+              if (!comment) return "skipped";
               const botName = await githubFor(repo).getBotUsername(repoOwner, repoName);
               const botNames = botMentionCandidates(botName);
-              if (botNames.length === 0 || !mentionsAnyBot(comment.body, botNames)) return;
-              await handleMention(repo, comment, prNumber);
+              if (botNames.length === 0 || !mentionsAnyBot(comment.body, botNames)) {
+                return "skipped";
+              }
+              return handleMention(repo, comment, prNumber);
             },
             evaluateTask,
             reconcileCodeHost: async (envelope) => {
