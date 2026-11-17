@@ -37,6 +37,29 @@ devintern worker
 devintern webhook serve
 ```
 
+## Checking worker readiness (`worker doctor`)
+
+An idle healthy worker and an idle misconfigured worker look the same on the dashboard. Before starting the daemon (and after a config edit, tracker change, token rotation, project rename, upgrade, or machine move), run:
+
+```bash
+devintern worker doctor [--workspace <path>] [--offline]
+```
+
+It answers "can this workspace acquire and run work right now?" and checks, in order:
+
+- **Workspace config**: `workspace.toml` parses, with a `N repos, M teams, K automations` summary. Every parse problem is listed as its own failing row. A missing or unreadable `--workspace` path fails with the path.
+- **Work sources**: warns when there are no repos or nothing to acquire (no tracker query, automation, or error monitor).
+- **Tracker credentials** per team (or `[defaults]`), resolved the same way the worker does: workspace `.env` < team `env_file` < inline `[teams.env]`. A missing variable fails, naming the team and the variable.
+- **Task query**: dry-runs each team's `task_query` once and prints the match count, e.g. `jira (team "platform"): 3 tasks match`. A renamed status or other API error fails, naming the team.
+- **Repository access** per `[[repos]]` entry: GitHub remotes are read through the API with `GITHUB_TOKEN`; other remotes use `git ls-remote`.
+- **Automation entitlement**: license, Worker Pilot, or grace state, using the same check the daemon runs at startup.
+- **Agent harness** and **agent sandbox**: the `AGENT_HARNESS` chain resolves to an installed CLI, and `AGENT_SANDBOX` names a usable provider that can start it. Removed providers (`srt`, `smolvm`) fail with their migration message.
+- **Dashboard port**: a warning only when `[workspace].dashboard_port` (default 4400) is already in use.
+
+Every failing or warning row includes a 💡 fix hint. The command exits 1 when any check fails and 0 otherwise. Warnings do not change the exit code. Each probe has a timeout, and a failing probe never stops the rest from running. `--offline` skips the query, repository, and license checks (they show as warnings) and makes no network calls.
+
+The doctor does not start the worker or edit anything. It never writes `workspace.toml`, `.env` files, the queue/state database, or task assignments. The license check can refresh the stored sign-in session and the cached entitlement, just as the daemon's own startup check does.
+
 ## Agent failover
 
 Set `AGENT_HARNESS=codex,grok` (comma-separated, priority first) in the workspace `.env` so the worker keeps going when one agent hits a usage limit. Failover applies to every worker job: tracker tasks, PR review addressing, `@mention` runs, conflict resolution, scheduled automations, estimations, dashboard retries, and relay-driven work — except automations, estimations, or conflict resolution that pin their own `harness` (see [Choosing the agent per schedule](#choosing-the-agent-per-schedule)). Details: [Failover across multiple harnesses](./configuration.md#failover-across-multiple-harnesses).

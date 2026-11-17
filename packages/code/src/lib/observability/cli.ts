@@ -188,6 +188,12 @@ export async function runDoctorCommand(): Promise<never> {
   console.log("🩺 devintern readiness:\n");
   const report = renderReadinessReport(checks);
   console.log(report.lines.join("\n"));
+  const { hasWorkspace, workspaceConfigPath } = await import("../workspace/paths");
+  if (hasWorkspace()) {
+    console.log(
+      `ℹ️  Worker workspace found (${workspaceConfigPath()}) — run \`devintern worker doctor\` to check unattended readiness.`,
+    );
+  }
   if (report.hasFailures) {
     console.log("\n❌ Not ready — fix the failed checks above.");
   } else if (report.hasWarnings) {

@@ -412,6 +412,8 @@ It checks, in order:
 
 Each failing row gets a fix hint. The command exits non-zero when any check fails, so scripts and CI can gate on it. The interactive `devintern init` wizard runs a subset of these checks automatically at the end of setup.
 
+`devintern doctor` is project-scoped. When a worker workspace exists it adds one line pointing to `devintern worker doctor`, which checks the unattended worker instead (see [Worker readiness](./worker.md#checking-worker-readiness-worker-doctor)).
+
 If a check fails in a way that looks like a DevIntern defect rather than a configuration problem, run `devintern report` to file it with the readiness context attached.
 
 ## Output Directory
