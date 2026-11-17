@@ -759,12 +759,17 @@ export async function buildFleetEventAcquirers(options: {
 
 /**
  * Build the injected-task acquirer's merge-state lookup: ask GitHub whether a
- * closed dependency PR merged and record the answer in `agent_prs`, so the
+ * dependency PR the gate waits on (closed with an unknown reason, or still
+ * `open` in the registry, or merged without a host merge time the gate needs
+ * to order stacked merges) merged or closed, and record the answer (with
+ * GitHub's `merged_at` and base ref for a merge) in `agent_prs`, so the
  * dependency gate (and later readers) never ask again.
+ * The open case covers workspaces where no review poller watches the PR
+ * (e.g. no fleet GitHub credentials). An open PR returns `null`.
  *
- * Only GitHub repos are looked up; other hosts already record the outcome when
- * they observe the close, and anything unresolvable stays unknown (the
- * dependent keeps waiting). Auth follows the mode the event wiring chose
+ * Only GitHub repos are looked up; GitLab pollers record the outcome when they
+ * observe the close, and anything unresolvable (e.g. Bitbucket) stays unknown
+ * (the dependent keeps waiting). Auth follows the mode the event wiring chose
  * (`token-only` for relay-hosted workspaces, else `app-first`).
  */
 export function createDependencyMergeStateResolver(options: {
@@ -782,7 +787,7 @@ export function createDependencyMergeStateResolver(options: {
     if (!slug) return null;
     const { GITHUB_AUTH_MODE_ENV, GitHubReviewsClient } =
       await import("../code-host/github/reviews");
-    const { closeReasonFromPr } = await import("../review/agent-pr-reconciler");
+    const { closeReasonFromPr, mergeDetailsFromPr } = await import("../review/agent-pr-reconciler");
     resolver ??= createFleetGitHubClientResolver(
       config,
       workspaceDir,
@@ -796,7 +801,12 @@ export function createDependencyMergeStateResolver(options: {
     if (!result.data) return null;
     const reason = closeReasonFromPr("closed", result.data);
     if (!reason || result.data.state === "open") return null;
-    workerState.markAgentPrClosed(slug, pr.number, reason);
+    workerState.markAgentPrClosed(
+      slug,
+      pr.number,
+      reason,
+      reason === "merged" ? mergeDetailsFromPr(result.data) : undefined,
+    );
     return reason;
   };
 }

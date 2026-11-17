@@ -14,7 +14,12 @@
  * shares its fetch results with the caller's per-PR poll loop via `fresh`.
  */
 
-import type { AgentPr, AgentPrCloseReason, WorkerState } from "../state/worker-state";
+import type {
+  AgentPr,
+  AgentPrCloseReason,
+  AgentPrMergeDetails,
+  WorkerState,
+} from "../state/worker-state";
 
 /**
  * The subset of a GitHub PR payload the poller and reconciler rely on.
@@ -91,6 +96,19 @@ export function closeReasonFromPr(
   if (typeof pr.merged_at === "string" && pr.merged_at !== "") return "merged";
   if (pr.merged === false) return "closed";
   return undefined;
+}
+
+/**
+ * The host-reported merge facts in a single-PR payload: GitHub's `merged_at`
+ * and the base ref the PR targeted. Absent fields stay `undefined`.
+ */
+export function mergeDetailsFromPr(pr: Pick<PolledPr, "merged_at" | "base">): AgentPrMergeDetails {
+  const mergedAt = typeof pr.merged_at === "string" ? Date.parse(pr.merged_at) : Number.NaN;
+  const mergedInto = pr.base?.ref;
+  return {
+    mergedAt: Number.isFinite(mergedAt) ? mergedAt : undefined,
+    mergedInto: typeof mergedInto === "string" && mergedInto !== "" ? mergedInto : undefined,
+  };
 }
 
 /** PRs already reported as having an unusable state (one warning per process). */
@@ -224,7 +242,13 @@ export function applyAgentPrFetch(
   warnedUnusableState.delete(agentPrKey(pr.repo, pr.prNumber));
   if (state === "open") return null;
 
-  workerState.markAgentPrClosed(pr.repo, pr.prNumber, closeReasonFromPr(state, data));
+  const reason = closeReasonFromPr(state, data);
+  workerState.markAgentPrClosed(
+    pr.repo,
+    pr.prNumber,
+    reason,
+    reason === "merged" ? mergeDetailsFromPr(data) : undefined,
+  );
   return { repo: pr.repo, prNumber: pr.prNumber, reason: state };
 }
 

@@ -64,6 +64,13 @@ export interface DependencyPr {
    * merged. The caller may ask the code host and record the answer.
    */
   state: "open" | "merged" | "closed" | "closed-unknown";
+  /**
+   * When the code host merged it (epoch ms), from the host's PR payload. Not
+   * the worker's first-observed time: only the host's time orders merges.
+   */
+  mergedAt?: number;
+  /** The branch it merged into, from the host's PR payload. */
+  mergedInto?: string;
 }
 
 /** Everything the gate knows about one dependency. */
@@ -76,16 +83,25 @@ export interface DependencyFacts {
     prNumber?: number;
     prUrl?: string;
     branch?: string;
+    /** Set when the run pushed its branch but could not open the PR. */
+    prFailure?: string;
   };
   /** The PR that run opened, from the PR registry. */
   pr?: DependencyPr;
+  /**
+   * The dependency's own stack base: set when its latest claim was stacked on
+   * another (then unmerged) task, so its PR targeted that task's branch. A
+   * merge of such a PR lands in the base's branch, not the default branch, so
+   * the dependency is only as merged as its base is.
+   */
+  stackBase?: DependencyFacts;
 }
 
 /** One dependency, classified. */
 export type DependencyStatus =
   | { key: string; state: "satisfied"; via: "merged" | "no-pr"; pr?: DependencyPr }
   | { key: string; state: "unmerged"; pr: DependencyPr }
-  | { key: string; state: "merge-unknown"; pr: DependencyPr }
+  | { key: string; state: "merge-unknown"; pr: DependencyPr; reason?: string }
   | { key: string; state: "pending"; reason: string }
   | { key: string; state: "blocked"; reason: string };
 
@@ -103,13 +119,70 @@ export type DependencyGateDecision =
       kind: "waiting";
       reason: string;
       statuses: DependencyStatus[];
-      /** PRs whose merge state is unknown; resolving them may change the decision. */
-      unknownMergeState: Array<{ key: string; pr: DependencyPr }>;
+      /**
+       * Dependency PRs worth asking the code host about, since the answer may
+       * change the decision: closed PRs whose merge state is unknown, merged
+       * stacked PRs whose merge order against their base is unknown, plus
+       * unmerged (`open`) PRs the gate is waiting on. The registry only learns
+       * a PR closed when a poller observes it (not for every host or
+       * credential setup), so an `open` row can be stale.
+       */
+      mergeStateLookups: Array<{ key: string; pr: DependencyPr }>;
     }
   | { kind: "blocked"; reason: string; statuses: DependencyStatus[] };
 
 function prLabel(pr: Pick<DependencyPr, "number">): string {
   return `PR #${pr.number}`;
+}
+
+/**
+ * Classify a dependency whose PR merged while stacked on another task's
+ * branch.
+ *
+ * Retargeted elsewhere first (e.g. to the default branch once the base
+ * merged), its work landed there directly. Otherwise its work is wherever the
+ * base's work is: an unmerged base becomes the dependency to wait on (merged
+ * mode) or stack on (stacked mode; the base's branch now carries the
+ * dependency's commits too). A merged base carried the dependency's work only
+ * if the dependency merged into the base's branch first; merged after, its
+ * commits sit on a branch nothing merges any more. The host's merge times
+ * decide the order; until both are known the dependency is `merge-unknown`,
+ * so the caller asks the code host.
+ */
+function classifyMergedIntoStackBase(
+  key: string,
+  pr: DependencyPr,
+  base: DependencyFacts,
+): DependencyStatus {
+  const baseBranch = base.pr?.branch ?? base.latestRun?.branch;
+  if (pr.mergedInto !== undefined && baseBranch !== undefined && pr.mergedInto !== baseBranch) {
+    return { key, state: "satisfied", via: "merged", pr };
+  }
+  const status = classifyDependency(base);
+  if (status.state === "pending" || status.state === "blocked") {
+    return { ...status, key, reason: `${key} merged into ${base.key}'s branch; ${status.reason}` };
+  }
+  if (status.state !== "satisfied") return status;
+  const basePr = base.pr;
+  if (basePr?.state !== "merged") return { ...status, key };
+  const order = `whether ${key} ${prLabel(pr)} merged before ${base.key} ${prLabel(basePr)}`;
+  if (pr.mergedAt === undefined) {
+    return { key, state: "merge-unknown", pr, reason: `checking ${order}` };
+  }
+  if (basePr.mergedAt === undefined) {
+    return { key, state: "merge-unknown", pr: basePr, reason: `checking ${order}` };
+  }
+  if (pr.mergedAt > basePr.mergedAt) {
+    return {
+      key,
+      state: "blocked",
+      reason:
+        `${key} ${prLabel(pr)} merged into ${pr.mergedInto ?? baseBranch ?? `${base.key}'s branch`} ` +
+        `after ${base.key} ${prLabel(basePr)} merged, so its work is not on the default branch; ` +
+        `land it there, then re-queue this task`,
+    };
+  }
+  return { ...status, key };
 }
 
 /** Classify one dependency from its facts. */
@@ -148,11 +221,20 @@ export function classifyDependency(facts: DependencyFacts): DependencyStatus {
           state: "open",
         }
       : undefined);
-  if (!pr) return { key, state: "satisfied", via: "no-pr" };
+  if (!pr) {
+    // Pushed but no PR: the work exists only on the branch, so the default
+    // branch (merged mode) and a stack base (stacked mode) both lack it.
+    if (latestRun.prFailure !== undefined) {
+      return { key, state: "blocked", reason: `${key} pushed but PR creation failed` };
+    }
+    return { key, state: "satisfied", via: "no-pr" };
+  }
   const withBranch = { ...pr, branch: pr.branch ?? latestRun.branch };
   switch (pr.state) {
     case "merged":
-      return { key, state: "satisfied", via: "merged", pr: withBranch };
+      return facts.stackBase
+        ? classifyMergedIntoStackBase(key, withBranch, facts.stackBase)
+        : { key, state: "satisfied", via: "merged", pr: withBranch };
     case "closed":
       return {
         key,
@@ -184,10 +266,19 @@ export function evaluateDependencyGate(
 
   const pending = statuses.filter((status) => status.state === "pending");
   const unknown = statuses.filter((status) => status.state === "merge-unknown");
-  const unmerged = statuses.filter((status) => status.state === "unmerged");
-  const unknownMergeState = unknown.map((status) => ({ key: status.key, pr: status.pr }));
+  // Two dependencies can resolve to the same unmerged PR (a dependency and the
+  // stack base its merged PR landed in); count that PR once.
+  const unmerged = statuses
+    .filter((status) => status.state === "unmerged")
+    .filter(
+      (status, index, list) =>
+        list.findIndex((other) => other.pr.number === status.pr.number) === index,
+    );
+  const unknownLookups = unknown.map((status) => ({ key: status.key, pr: status.pr }));
+  const unmergedLookups = unmerged.map((status) => ({ key: status.key, pr: status.pr }));
   const unknownReasons = unknown.map(
-    (status) => `${status.key} ${prLabel(status.pr)} closed; checking whether it merged`,
+    (status) =>
+      status.reason ?? `${status.key} ${prLabel(status.pr)} closed; checking whether it merged`,
   );
 
   if (mode === "merged") {
@@ -199,13 +290,23 @@ export function evaluateDependencyGate(
       ...unmerged.map((status) => `${status.key} ${prLabel(status.pr)} not merged`),
       ...unknownReasons,
     ];
-    return { kind: "waiting", reason: reasons.join("; "), statuses, unknownMergeState };
+    return {
+      kind: "waiting",
+      reason: reasons.join("; "),
+      statuses,
+      mergeStateLookups: [...unknownLookups, ...unmergedLookups],
+    };
   }
 
   // Stacked: every dependency must have finished successfully first.
   if (pending.length > 0 || unknown.length > 0) {
     const reasons = [...pending.map((status) => status.reason), ...unknownReasons];
-    return { kind: "waiting", reason: reasons.join("; "), statuses, unknownMergeState };
+    return {
+      kind: "waiting",
+      reason: reasons.join("; "),
+      statuses,
+      mergeStateLookups: unknownLookups,
+    };
   }
   if (unmerged.length === 0) return { kind: "ready", statuses };
   const [only] = unmerged;
@@ -218,7 +319,7 @@ export function evaluateDependencyGate(
         kind: "waiting",
         reason: `${only.key} ${prLabel(only.pr)} not merged (its branch is unknown, so it cannot be stacked on)`,
         statuses,
-        unknownMergeState: [],
+        mergeStateLookups: unmergedLookups,
       };
     }
     return {
@@ -234,7 +335,7 @@ export function evaluateDependencyGate(
       `${unmerged.length} dependencies unmerged (${list}); ` +
       "stacked mode waits until at most one remains unmerged",
     statuses,
-    unknownMergeState: [],
+    mergeStateLookups: unmergedLookups,
   };
 }
 

@@ -69,23 +69,46 @@ function prState(row: Record<string, unknown>): DependencyPr["state"] {
  * @param keys - Dependency task keys
  */
 export function readLocalDependencyFacts(db: Database, keys: readonly string[]): DependencyFacts[] {
+  return readFacts(db, keys, new Set());
+}
+
+/**
+ * Bound on how far a chain of stack bases is followed. Each hop is a task
+ * whose PR merged into another task's branch; real chains are short.
+ */
+const MAX_STACK_BASE_DEPTH = 16;
+
+function readFacts(
+  db: Database,
+  keys: readonly string[],
+  visiting: ReadonlySet<string>,
+): DependencyFacts[] {
   const unique = [...new Set(keys)];
   if (unique.length === 0) return [];
   const placeholders = unique.map(() => "?").join(", ");
 
   const work = new Map<string, DependencyWorkState>();
+  const stackedOn = new Map<string, string>();
   if (hasTable(db, "injected_tasks")) {
+    const stackedOnColumn = hasColumn(db, "injected_tasks", "stacked_on") ? ", stacked_on" : "";
     const rows = db
-      .query(`SELECT task_key, status FROM injected_tasks WHERE task_key IN (${placeholders})`)
-      .all(...unique) as Array<{ task_key: string; status: string }>;
-    for (const row of rows) work.set(row.task_key, workState(row.status));
+      .query(
+        `SELECT task_key, status${stackedOnColumn} FROM injected_tasks WHERE task_key IN (${placeholders})`,
+      )
+      .all(...unique) as Array<{ task_key: string; status: string; stacked_on?: unknown }>;
+    for (const row of rows) {
+      work.set(row.task_key, workState(row.status));
+      const base = text(row.stacked_on);
+      if (base) stackedOn.set(row.task_key, base);
+    }
   }
 
   const runs = new Map<string, NonNullable<DependencyFacts["latestRun"]>>();
   if (hasTable(db, "runs")) {
+    const prFailureColumn = hasColumn(db, "runs", "pr_failure") ? ", pr_failure" : "";
     const rows = db
       .query(
-        `SELECT task_key, status, pr_number, pr_url, branch FROM (
+        `SELECT task_key, status, pr_number, pr_url, branch${prFailureColumn} FROM (
            SELECT *, ROW_NUMBER() OVER (
              PARTITION BY task_key ORDER BY started_at DESC, id DESC
            ) AS rn
@@ -102,6 +125,7 @@ export function readLocalDependencyFacts(db: Database, keys: readonly string[]):
         prNumber: integer(row.pr_number),
         prUrl: text(row.pr_url),
         branch: text(row.branch),
+        prFailure: text(row.pr_failure),
       });
     }
   }
@@ -110,9 +134,12 @@ export function readLocalDependencyFacts(db: Database, keys: readonly string[]):
   if (hasTable(db, "agent_prs")) {
     const closeColumns = hasColumn(db, "agent_prs", "close_reason") ? ", close_reason" : "";
     const urlColumn = hasColumn(db, "agent_prs", "web_url") ? ", web_url" : "";
+    const mergeColumns = hasColumn(db, "agent_prs", "host_merged_at")
+      ? ", host_merged_at, merged_into"
+      : "";
     const rows = db
       .query(
-        `SELECT task_key, pr_number, branch, state${closeColumns}${urlColumn} FROM agent_prs
+        `SELECT task_key, pr_number, branch, state${closeColumns}${urlColumn}${mergeColumns} FROM agent_prs
          WHERE task_key IN (${placeholders}) ORDER BY created_at DESC`,
       )
       .all(...unique) as Array<Record<string, unknown>>;
@@ -142,8 +169,23 @@ export function readLocalDependencyFacts(db: Database, keys: readonly string[]):
             url: text(row.web_url) ?? latestRun?.prUrl,
             branch: text(row.branch) ?? latestRun?.branch,
             state: prState(row),
+            mergedAt: integer(row.host_merged_at),
+            mergedInto: text(row.merged_into),
           }
         : undefined;
-    return { key, work: work.get(key) ?? "missing", latestRun, pr };
+    const facts: DependencyFacts = { key, work: work.get(key) ?? "missing", latestRun, pr };
+    // Only a merged PR consults its stack base; read it lazily for that case.
+    const base = stackedOn.get(key);
+    if (pr?.state === "merged" && base) {
+      const chain = new Set(visiting).add(key);
+      if (chain.has(base) || chain.size > MAX_STACK_BASE_DEPTH) {
+        // A looping or runaway chain cannot be resolved; an unknown base
+        // classifies as blocked rather than silently satisfied.
+        facts.stackBase = { key: base, work: "missing" };
+      } else {
+        facts.stackBase = readFacts(db, [base], chain)[0];
+      }
+    }
+    return facts;
   });
 }

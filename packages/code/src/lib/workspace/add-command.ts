@@ -28,7 +28,6 @@ import { InjectedTaskStore } from "../state/injected-tasks";
 import type { InjectedTask } from "../state/injected-tasks";
 import { applyWorkspaceProcessEnv } from "./env";
 import {
-  collectInjectedDependencies,
   enqueueInjectedTask,
   InjectedTaskDependencyError,
   MAX_INJECTED_BODY_CHARS,
@@ -550,13 +549,6 @@ async function enqueueNewTask(
   const { store, selectedDir, workerRunning, log, status } = ctx;
   // Only an active (pending/running) task dedupes; a settled one under the
   // same key is history and a new occurrence is enqueued.
-  const dependsOn = collectInjectedDependencies(add.after, body);
-  if (dependsOn.length === 0 && add.dependencyMode !== undefined) {
-    status(
-      `⚠️  ${add.dependencyMode === "stacked" ? "--stack" : "--wait-merge"} has no effect ` +
-        "without --after or a 'Depends on:' line.",
-    );
-  }
   let enqueued: ReturnType<typeof enqueueInjectedTask>;
   try {
     enqueued = enqueueInjectedTask(store, selectedDir, {
@@ -577,9 +569,21 @@ async function enqueueNewTask(
     ctx.error("   No task was enqueued.");
     return 1;
   }
-  const { task, deduplicated } = enqueued;
+  const { task, deduplicated, ignoredDependencies } = enqueued;
   if (deduplicated) {
     return await reportTask(task, ctx);
+  }
+  if (ignoredDependencies.length > 0) {
+    status(
+      `⚠️  Ignoring 'Depends on:' ${ignoredDependencies.join(", ")}: no ad-hoc task with that key ` +
+        "in this workspace (use --after to require one).",
+    );
+  }
+  if (task.dependsOn.length === 0 && add.dependencyMode !== undefined) {
+    status(
+      `⚠️  ${add.dependencyMode === "stacked" ? "--stack" : "--wait-merge"} has no effect ` +
+        "without --after or a 'Depends on:' line.",
+    );
   }
 
   const pause = readHarnessPause(selectedDir);

@@ -178,16 +178,20 @@ cells):
 ```
 
 `--after` keys and `Depends on:` keys are merged and de-duplicated, then stored
-on the task. Every key must name an existing ad-hoc task (any status) **in the
-same repo**, and the new dependencies must not form a cycle; otherwise the
-command fails with an error and enqueues nothing. Cross-repo dependencies are
-not supported.
+on the task. Only words shaped like task keys (`local-…` or `PROJ-12`) count on
+a `Depends on:` line, so prose such as `Depends on: the orders API being
+deployed` declares nothing. Every `--after` key must name an existing ad-hoc
+task (any status); a `Depends on:` key that names no ad-hoc task (for example a
+tracker ticket mentioned for context) is ignored, and `worker add` prints a
+warning. Dependencies must be **in the same repo** and must not form a cycle;
+otherwise the command fails with an error and enqueues nothing. Cross-repo
+dependencies are not supported.
 
 ### Modes: merged and stacked
 
 | Mode               | Starts when                                                                 | Base and PR target                       |
 | ------------------ | --------------------------------------------------------------------------- | ---------------------------------------- |
-| `merged` (default) | every dependency's PR has merged (a dependency that succeeded without a PR counts as satisfied) | the default branch, as usual |
+| `merged` (default) | every dependency's PR has merged (a dependency that succeeded with nothing to deliver counts as satisfied) | the default branch, as usual |
 | `stacked`          | every dependency's latest run succeeded (its PR may still be open)          | the one unmerged dependency's branch      |
 
 Pick the workspace default with `[defaults].dependency_mode` in
@@ -206,6 +210,19 @@ the task.
   With all of them merged, it behaves like merged mode.
 - An explicit `Target branch:` line in the body wins over the stacked base; the
   worker logs a warning.
+- A stacked PR that merges into its base's branch does not put its work on the
+  default branch. Tasks that depend on it count it as merged only once its base
+  has merged too. Until then, merged mode waits on the base's PR, and stacked
+  mode stacks on the base's branch, which now carries both tasks' work. Once
+  both have merged, the worker compares GitHub's merge times: a stacked PR
+  merged into its base's branch **after** the base merged never reached the
+  default branch, so dependents are blocked ("merged into feature/… after …
+  merged") until that work lands and they are re-queued. A stacked PR that was
+  retargeted (for example to the default branch) before merging counts as
+  merged directly. The worker learns merge times and the merged-into branch
+  from GitHub; while it has not yet, dependents wait and it asks GitHub. On
+  other code hosts it cannot tell the order, so dependents of a stacked PR
+  merged into its base's branch keep waiting.
 
 **Stacked limitation:** the worker does not yet retarget or restack a stacked PR
 after its base PR merges, changes, or closes. Until it does, a human (or the
@@ -216,13 +233,18 @@ stack without checking the stacked PR afterwards.
 ### Waiting and blocked
 
 A dependent task stays `pending` while it waits; the worker re-checks it on
-every injected-task tick from the local run and PR records (it asks the code
-host only when a dependency PR closed and the worker does not know whether it
-merged). Waiting tasks do not take a concurrency slot, are not counted as
+every injected-task tick from the local run and PR records. For a GitHub repo
+it also asks GitHub about a dependency PR it is waiting on (closed with an
+unknown reason, or still open locally) at most once every 5 minutes per PR, so
+a merge is noticed even when no review poller watches that PR.
+**Bitbucket:** the worker cannot see Bitbucket PRs merge yet, so merged mode
+waits indefinitely there; use `--stack` (or `dependency_mode = "stacked"`) for
+Bitbucket repos. Waiting tasks do not take a concurrency slot, are not counted as
 deferrals, and cannot hit the deferral cap.
 
 A task is **blocked** when a dependency's task failed, its latest run is
-`failed`, `escalated`, or `abandoned`, or its PR was closed without merging.
+`failed`, `escalated`, or `abandoned`, its PR was closed without merging, or
+it pushed its branch but PR creation failed (`pushed but PR creation failed`).
 Blocked tasks stay pending too: re-queue the dependency
 (`devintern worker add --resume <dependencyKey>`), and once it satisfies the
 mode the dependent task starts.

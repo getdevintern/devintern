@@ -128,31 +128,49 @@ export class InjectedTaskDependencyError extends Error {
   }
 }
 
-/** `--after` keys plus the body's `Depends on:` keys, de-duplicated in order. */
-export function collectInjectedDependencies(after: readonly string[] | undefined, body: string) {
-  return [
-    ...new Set([...(after ?? []).map((key) => key.trim()), ...extractDependsOn(body)]),
-  ].filter(Boolean);
+/** Dependencies of a new ad-hoc task, after checking them against the queue. */
+export interface ResolvedInjectedDependencies {
+  /** Keys the task will wait on, de-duplicated in declaration order. */
+  dependsOn: string[];
+  /**
+   * `Depends on:` keys from the body that name no ad-hoc task in this
+   * workspace (e.g. a tracker ticket mentioned for context). They are not
+   * dependencies; callers may surface them as a warning.
+   */
+  ignored: string[];
 }
 
 /**
- * Reject dependencies that do not name an existing ad-hoc task of the same
- * repo. Cycles are checked once the new task's key is known.
+ * Collect `--after` keys plus the body's `Depends on:` keys and check them.
+ *
+ * `--after` is an explicit request, so an unknown key there is an error. A
+ * body is free-form markdown written by people and agents, so a `Depends on:`
+ * key that matches no ad-hoc task is dropped (reported in `ignored`) rather
+ * than rejecting the whole enqueue. Any key that does name a task must be in
+ * the same repo.
+ *
+ * @throws {InjectedTaskDependencyError} unknown `--after` key or cross-repo dependency
  */
-function validateDependencyTargets(
+export function resolveInjectedDependencies(
   store: InjectedTaskStore,
   repo: string,
-  dependsOn: readonly string[],
-): void {
-  if (dependsOn.length === 0) return;
-  const repos = store.reposByTaskKey(dependsOn);
-  const unknown = dependsOn.filter((key) => !repos.has(key));
+  after: readonly string[] | undefined,
+  body: string,
+): ResolvedInjectedDependencies {
+  const explicit = [...new Set((after ?? []).map((key) => key.trim()).filter(Boolean))];
+  const fromBody = extractDependsOn(body).filter((key) => !explicit.includes(key));
+  const all = [...explicit, ...fromBody];
+  if (all.length === 0) return { dependsOn: [], ignored: [] };
+  const repos = store.reposByTaskKey(all);
+  const unknown = explicit.filter((key) => !repos.has(key));
   if (unknown.length > 0) {
     throw new InjectedTaskDependencyError(
       `unknown dependency ${unknown.join(", ")}: no ad-hoc task with that key in this workspace ` +
         "(check `devintern worker queue` / `devintern worker runs`)",
     );
   }
+  const ignored = fromBody.filter((key) => !repos.has(key));
+  const dependsOn = all.filter((key) => repos.has(key));
   const foreign = dependsOn.filter((key) => repos.get(key) !== repo);
   if (foreign.length > 0) {
     const detail = foreign.map((key) => `${key} (repo "${repos.get(key)}")`).join(", ");
@@ -160,6 +178,7 @@ function validateDependencyTargets(
       `cross-repo dependencies are not supported: ${detail} is not in repo "${repo}"`,
     );
   }
+  return { dependsOn, ignored };
 }
 
 /** Reject a dependency set that would make `taskKey` (transitively) depend on itself. */
@@ -196,6 +215,12 @@ export function rewriteInjectedTaskFile(
   );
 }
 
+/** {@link enqueueInjectedTask} result. */
+export interface EnqueueInjectedTaskOutcome extends EnqueueInjectedTaskResult {
+  /** Body `Depends on:` keys skipped because no ad-hoc task has them. */
+  ignoredDependencies: string[];
+}
+
 /**
  * Enqueue an ad-hoc task: write its markdown prompt and insert the durable row.
  *
@@ -211,14 +236,18 @@ export function enqueueInjectedTask(
   store: InjectedTaskStore,
   workspaceDir: string,
   request: InjectedTaskRequest,
-): EnqueueInjectedTaskResult {
+): EnqueueInjectedTaskOutcome {
   if (request.idempotencyKey) {
     const existing = store.findActiveByIdempotencyKey(request.idempotencyKey);
-    if (existing) return { task: existing, deduplicated: true };
+    if (existing) return { task: existing, deduplicated: true, ignoredDependencies: [] };
   }
 
-  const dependsOn = collectInjectedDependencies(request.after, request.body);
-  validateDependencyTargets(store, request.repo, dependsOn);
+  const { dependsOn, ignored } = resolveInjectedDependencies(
+    store,
+    request.repo,
+    request.after,
+    request.body,
+  );
   const dependencyMode = request.dependencyMode ?? "merged";
 
   const dir = injectedTasksDir(workspaceDir);
@@ -271,6 +300,6 @@ export function enqueueInjectedTask(
 
     // Lost an idempotency race: drop our own file and report their row.
     if (enqueued.deduplicated) unlinkQuietly(taskFile);
-    return enqueued;
+    return { ...enqueued, ignoredDependencies: enqueued.deduplicated ? [] : ignored };
   }
 }

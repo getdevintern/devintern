@@ -166,8 +166,11 @@ export function parseTaskKey(taskKey: string): {
   };
 }
 
-/** Characters a dependency task key may contain (tracker keys and `local-…` keys). */
-const DEPENDENCY_KEY = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+/**
+ * Shape of a dependency task key: an ad-hoc `local-…` key or a tracker key
+ * (`PROJ-12`). Anything else on a `Depends on:` line is prose, not a key.
+ */
+const DEPENDENCY_KEY = /^(?:local-[a-z0-9][a-z0-9-]*|[a-z][a-z0-9_]*-\d+)$/i;
 
 /**
  * Extract the task keys named on `Depends on:` lines of a task description.
@@ -177,7 +180,9 @@ const DEPENDENCY_KEY = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
  * (`**Depends on**: x`, `**Depends on: x**`, `Depends on: _x_`), list items,
  * and table cells (`| Depends on: | x, y |`). Values are separated by commas,
  * whitespace, or the word `and`; inline code backticks are stripped, and
- * trailing prose after a dash or parenthesis is ignored. Every
+ * trailing prose after a dash or parenthesis is ignored. Only tokens shaped
+ * like task keys (`local-…`, `PROJ-12`) are kept, so a line such as
+ * `Depends on: the orders API being deployed` yields nothing. Every
  * matching line contributes, and the result is de-duplicated in order.
  *
  * Shared by ad-hoc task enqueue and tracker-native blocker sources.

@@ -347,6 +347,7 @@ export class InjectedTaskStore {
         dependency_mode TEXT,
         dependency_state TEXT,
         dependency_reason TEXT,
+        stacked_on TEXT,
         created_at INTEGER NOT NULL,
         started_at INTEGER,
         finished_at INTEGER
@@ -381,7 +382,13 @@ export class InjectedTaskStore {
     if (!columns.some((column) => column.name === "not_before")) {
       addColumnIfMissing(this.db, "not_before INTEGER");
     }
-    for (const name of ["depends_on", "dependency_mode", "dependency_state", "dependency_reason"]) {
+    for (const name of [
+      "depends_on",
+      "dependency_mode",
+      "dependency_state",
+      "dependency_reason",
+      "stacked_on",
+    ]) {
       if (!columns.some((column) => column.name === name)) {
         addColumnIfMissing(this.db, `${name} TEXT`);
       }
@@ -743,6 +750,18 @@ export class InjectedTaskStore {
       [state, reason, id, state, reason],
     );
     return Number(result.changes ?? 0) > 0;
+  }
+
+  /**
+   * Record which task a claim stacked this row on (`null`: not stacked, i.e.
+   * the PR targets the default branch or an explicit `Target branch:`). Read
+   * by dependents: a merged PR of a stacked row landed in its base's branch.
+   */
+  setStackedOn(id: number, stackedOnTaskKey: string | null): void {
+    this.ensureDb().run("UPDATE injected_tasks SET stacked_on = ? WHERE id = ?", [
+      stackedOnTaskKey,
+      id,
+    ]);
   }
 
   /** Every row currently claimed as `running` (startup auto-resume scan). */

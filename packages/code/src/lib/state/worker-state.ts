@@ -97,6 +97,18 @@ export interface AgentPr {
   updatedAt: number;
 }
 
+/**
+ * Merge facts a code host reports in a PR payload. Unlike
+ * {@link AgentPr.mergedAt} (when the worker first noticed), these come from
+ * the host, so they order merges correctly.
+ */
+export interface AgentPrMergeDetails {
+  /** When the host merged the PR (epoch ms). */
+  mergedAt?: number;
+  /** The branch the PR merged into (its base ref at merge time). */
+  mergedInto?: string;
+}
+
 /** Consecutive CI-fix bookkeeping for one agent-created PR. */
 export interface CiFixState {
   consecutiveFailures: number;
@@ -362,6 +374,8 @@ export class WorkerState {
     for (const [name, definition] of [
       ["close_reason", "TEXT"],
       ["merged_at", "INTEGER"],
+      ["host_merged_at", "INTEGER"],
+      ["merged_into", "TEXT"],
     ]) {
       if (columns.includes(name)) continue;
       try {
@@ -390,6 +404,8 @@ export class WorkerState {
         state TEXT NOT NULL DEFAULT 'open',
         close_reason TEXT,
         merged_at INTEGER,
+        host_merged_at INTEGER,
+        merged_into TEXT,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
         PRIMARY KEY (provider, instance_url, project_path, change_number)
@@ -537,6 +553,8 @@ export class WorkerState {
          state = 'open',
          close_reason = NULL,
          merged_at = NULL,
+         host_merged_at = NULL,
+         merged_into = NULL,
          updated_at = excluded.updated_at`,
       [
         change.provider,
@@ -667,15 +685,33 @@ export class WorkerState {
    * @param prNumber - PR number
    * @param reason - Whether it merged; omit when the caller cannot tell (an
    *   earlier recorded reason is kept)
+   * @param merge - What the code host reported about the merge, when the
+   *   caller saw the PR payload (earlier recorded values are kept otherwise)
    */
-  markAgentPrClosed(repo: string, prNumber: number, reason?: AgentPrCloseReason): void {
+  markAgentPrClosed(
+    repo: string,
+    prNumber: number,
+    reason?: AgentPrCloseReason,
+    merge: AgentPrMergeDetails = {},
+  ): void {
     const now = Date.now();
     this.db.run(
       `UPDATE agent_prs SET state = 'closed', updated_at = ?,
          close_reason = COALESCE(?, close_reason),
-         merged_at = CASE WHEN ? = 'merged' THEN COALESCE(merged_at, ?) ELSE merged_at END
+         merged_at = CASE WHEN ? = 'merged' THEN COALESCE(merged_at, ?) ELSE merged_at END,
+         host_merged_at = COALESCE(?, host_merged_at),
+         merged_into = COALESCE(?, merged_into)
        WHERE provider = 'github' AND repo = ? AND pr_number = ?`,
-      [now, reason ?? null, reason ?? null, now, repo, prNumber],
+      [
+        now,
+        reason ?? null,
+        reason ?? null,
+        now,
+        merge.mergedAt ?? null,
+        merge.mergedInto ?? null,
+        repo,
+        prNumber,
+      ],
     );
   }
 
