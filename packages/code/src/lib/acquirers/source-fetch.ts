@@ -40,6 +40,12 @@ export interface SourceFetchOutcome<TIssue> {
   error?: string;
   /** Provider-suggested wait before retrying; absent unless rate-limited. */
   retryAfterMs?: number;
+  /**
+   * True when no read was attempted because the source is inside a
+   * provider-requested retry window. A skip is not a read failure: nothing
+   * is persisted and failure counters are untouched.
+   */
+  skipped?: boolean;
 }
 
 /** Per-source health update handed to durable storage. */
@@ -75,4 +81,9 @@ export interface SourceStatusRecord {
 /** Narrow sink so acquirers can report source health without owning storage. */
 export interface SourceStatusSink {
   recordSourceStatus(status: SourceStatusInput): void;
+  /**
+   * Optional read-back of the persisted status, used to honor a retry window
+   * recorded before a restart.
+   */
+  getSourceStatus?(provider: string, sourceId: string): SourceStatusRecord | null;
 }

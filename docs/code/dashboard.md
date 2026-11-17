@@ -38,6 +38,7 @@ The overview also summarizes activity and success rates, which is useful for spo
 - **Active work.** Runs in progress against `max_concurrency`, with a per-repository breakdown against `max_concurrency_per_repo`. The count includes every in-progress run, including PR review, CI fix, and conflict runs. See [Follow active work](#follow-active-work) for the rows underneath.
 - **Agent harnesses.** Your `AGENT_HARNESS` failover chain in priority order, which harness is active, and any usage-limit window with the time it ends. When every harness is limited, a banner shows when agent work resumes. After a limit window ends, the harness reads **quota unconfirmed** until a run on it succeeds, because the worker only learns the quota is back when an agent run goes through. The header shows the same warning on every page.
 - **Tracker sources.** Each team's tracker and when it was last polled. A source that has not polled for more than three poll intervals is flagged.
+- **Automation source health.** When an error monitor (for example Sentry) cannot be read because its token was rejected, the project was renamed, the provider is down, or it is rate-limiting, the header shows **N sources need attention** on every page. It links to **Source health** in **Automations**, which shows each source's exact status, last success, consecutive failures, last error, and next retry. See [Sentry integration](./sentry-integration.md#source-health-in-the-dashboard).
 
 Startup-failure cooldowns are kept in worker memory only, so the dashboard does not show them.
 

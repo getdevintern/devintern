@@ -54,6 +54,7 @@ import { AutomationAcquirer } from "../automation/acquirer";
 import type { AutomationConfig } from "../automation/config";
 import { automationTaskArgs } from "../automation/config";
 import { AutomationStateStore } from "../automation/state";
+import { configuredSourcesOf } from "../observability/dashboard-sources";
 import { EstimationAcquirer } from "../automation/estimation-acquirer";
 import { composeScheduledJobActions } from "../automation/scheduled-jobs";
 import { warnUninstalledHarnessPins } from "../agent/selection";
@@ -1224,6 +1225,8 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
         retryMode: "schedule",
         automationActions,
         scheduleSnapshot: () => (pickupGate.enabled ? pickupGate.snapshot() : null),
+        // `[[error_monitors]]` is startup-only, so the polled set is fixed.
+        configuredSources: () => configuredSourcesOf(config),
       });
     } catch (error) {
       console.warn(
