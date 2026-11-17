@@ -34,7 +34,7 @@ import { join } from "path";
 import { spawn } from "child_process";
 
 import type { WebhookQueue } from "../state/webhook-queue";
-import type { CiFixState, WorkerState } from "../state/worker-state";
+import type { AgentPrCloseReason, CiFixState, WorkerState } from "../state/worker-state";
 import { RowParseError } from "../state/row-parse";
 import type { Acquirer } from "../../worker";
 import type { CiFailureFeedback } from "../review/formatter";
@@ -76,7 +76,7 @@ export interface CiFailureWatcherAcquirerOptions {
   /** Optional provider-specific watch list; defaults to registered GitHub PRs. */
   watchedChanges?: () => Array<{ repo: string; prNumber: number }>;
   /** Optional provider-specific close operation. */
-  markClosed?: (repo: string, prNumber: number) => void;
+  markClosed?: (repo: string, prNumber: number, reason?: AgentPrCloseReason) => void;
   /** Durable key namespace; defaults to `github`. */
   namespace?: string;
   /** Human-readable provider label used for missing-log diagnostics. */
@@ -678,7 +678,7 @@ export class CiFailureWatcherAcquirer implements Acquirer {
           console.log(
             `👁️  [${this.name}] ${this.describe(repo, prNumber)} is ${lifecycle}; unwatching`,
           );
-          this.markClosed(repo, prNumber);
+          this.markClosed(repo, prNumber, ciCloseReason(lifecycle, prResult.data.merged));
           return "removed";
         }
       }
@@ -857,14 +857,23 @@ export class CiFailureWatcherAcquirer implements Acquirer {
     return this.namespace === "github" ? SOURCE : `${this.namespace}:ci`;
   }
 
-  private markClosed(repo: string, prNumber: number): void {
-    if (this.options.markClosed) this.options.markClosed(repo, prNumber);
-    else this.options.workerState.markAgentPrClosed(repo, prNumber);
+  private markClosed(repo: string, prNumber: number, reason?: AgentPrCloseReason): void {
+    if (this.options.markClosed) this.options.markClosed(repo, prNumber, reason);
+    else this.options.workerState.markAgentPrClosed(repo, prNumber, reason);
   }
 
   private describe(repo: string, prNumber: number): string {
     return this.options.describeChange?.(repo, prNumber) ?? `${repo}#${prNumber}`;
   }
+}
+
+/** Merge outcome of a terminal change from its CI-provider payload. */
+function ciCloseReason(
+  lifecycle: "closed" | "merged",
+  merged: unknown,
+): AgentPrCloseReason | undefined {
+  if (lifecycle === "merged" || merged === true) return "merged";
+  return merged === false ? "closed" : undefined;
 }
 
 /** Read `CI_FIX_MAX_ATTEMPTS` (default {@link DEFAULT_CI_FIX_MAX_ATTEMPTS}). */

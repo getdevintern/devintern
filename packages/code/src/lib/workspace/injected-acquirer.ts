@@ -17,8 +17,26 @@ import type { Acquirer } from "../../worker";
 import type { InjectedTask, InjectedTaskStore } from "../state/injected-tasks";
 import type { TaskExecutionResult } from "../acquirers/task-polling";
 import { randomUUID } from "crypto";
+import type { DependencyGateDecision, DependencyPr } from "../dependencies/gate";
+import { evaluateDependencyGate } from "../dependencies/gate";
+import { applyStackBase } from "../dependencies/stacked-base";
 import { getWorkerFailover } from "../worker/failover";
+import { rewriteInjectedTaskFile } from "./injected-enqueue";
 import { queueFailureReason } from "./queue-failure-reason";
+
+/**
+ * Minimum time between code-host lookups for one closed dependency PR whose
+ * merge state the registry does not know.
+ */
+export const MERGE_STATE_LOOKUP_COOLDOWN_MS = 5 * 60_000;
+
+/** A dependency PR whose merge state must be asked of the code host. */
+export interface UnknownMergeStateLookup {
+  /** Repo of the dependent (and dependency) task. */
+  repo: string;
+  taskKey: string;
+  pr: DependencyPr;
+}
 
 /** Source label surfaced in worker logs, run records, and the dashboard. */
 export const INJECTED_TASK_SOURCE = "local:add";
@@ -82,6 +100,14 @@ export interface InjectedTaskAcquirerOptions {
   maxDeferrals?: number;
   /** Backoff after a deferral (defaults to {@link injectedDeferBackoffMs}). */
   deferBackoffMs?: (deferCount: number) => number;
+  /**
+   * Ask the code host whether a closed dependency PR merged, and record the
+   * answer in the PR registry (`agent_prs`). Called only when the registry
+   * says the PR closed without knowing why, at most once per
+   * {@link MERGE_STATE_LOOKUP_COOLDOWN_MS} per PR. Return `null` when the
+   * host cannot tell; the dependent keeps waiting.
+   */
+  resolveMergeState?: (lookup: UnknownMergeStateLookup) => Promise<"merged" | "closed" | null>;
   /** Clock for claims and backoff (tests). */
   now?: () => number;
   verbose?: boolean;
@@ -163,6 +189,10 @@ export class InjectedTaskAcquirer implements Acquirer {
     const executions: Promise<void>[] = [];
     const excluded: number[] = [];
     try {
+      // Dependency gate: rows still waiting on (or blocked by) a dependency
+      // stay pending and are never claimed, so they take no concurrency slot
+      // and never touch the deferral budget.
+      const ready = await this.gatePendingDependencies(excluded);
       while (this.hasCapacity()) {
         // `stop()` closes the store immediately after returning, but in-flight
         // `execute` calls may resolve later; writing then would reopen the
@@ -177,11 +207,22 @@ export class InjectedTaskAcquirer implements Acquirer {
         }
         // Avoid re-claiming a row we requeue in this same drain.
         excluded.push(task.id);
+        let decision = ready.get(task.id);
+        if (task.dependsOn.length > 0 && !decision) {
+          // Enqueued after the gate pass above: gate it now.
+          decision = this.evaluateGate(task);
+          if (decision.kind !== "ready") {
+            this.options.store.requeue(task.id);
+            this.recordGate(task, decision);
+            continue;
+          }
+        }
         if (!this.hasRepoCapacity(task.repo)) {
           this.options.store.requeue(task.id);
           continue;
         }
         this.reserveSlot(task.repo);
+        if (decision) this.prepareDependencyBase(task, decision);
         executions.push(this.runOne(task).finally(() => this.releaseSlot(task.repo)));
       }
     } finally {
@@ -192,6 +233,118 @@ export class InjectedTaskAcquirer implements Acquirer {
 
   private now(): number {
     return this.options.now?.() ?? Date.now();
+  }
+
+  /** Last code-host merge-state lookup per dependency PR (cooldown). */
+  private readonly mergeLookups = new Map<string, number>();
+
+  /** Evaluate one row's dependency gate from local facts. */
+  private evaluateGate(task: InjectedTask): DependencyGateDecision {
+    return evaluateDependencyGate(
+      task.dependencyMode ?? "merged",
+      this.options.store.dependencyFacts(task.dependsOn),
+    );
+  }
+
+  /**
+   * Gate every pending row that has dependencies: unsatisfied rows are added to
+   * `excluded` (and their reason recorded for the queue view); satisfied rows
+   * are returned with their decision so the claim can apply a stacked base.
+   */
+  private async gatePendingDependencies(
+    excluded: number[],
+  ): Promise<Map<number, DependencyGateDecision>> {
+    const ready = new Map<number, DependencyGateDecision>();
+    const { store } = this.options;
+    for (const task of store.listPendingWithDependencies()) {
+      let decision = this.evaluateGate(task);
+      if (decision.kind === "waiting" && decision.unknownMergeState.length > 0) {
+        if (await this.resolveUnknownMergeStates(task, decision)) {
+          if (store.isClosed()) break;
+          decision = this.evaluateGate(task);
+        }
+      }
+      if (decision.kind === "ready") {
+        ready.set(task.id, decision);
+      } else {
+        excluded.push(task.id);
+      }
+      this.recordGate(task, decision);
+    }
+    return ready;
+  }
+
+  /**
+   * Ask the code host about closed dependency PRs of unknown merge state.
+   *
+   * @returns Whether any lookup ran (the caller re-evaluates the gate)
+   */
+  private async resolveUnknownMergeStates(
+    task: InjectedTask,
+    decision: Extract<DependencyGateDecision, { kind: "waiting" }>,
+  ): Promise<boolean> {
+    const resolve = this.options.resolveMergeState;
+    if (!resolve) return false;
+    let looked = false;
+    for (const { key, pr } of decision.unknownMergeState) {
+      const lookupKey = `${task.repo}#${pr.number}`;
+      const last = this.mergeLookups.get(lookupKey);
+      if (last !== undefined && this.now() - last < MERGE_STATE_LOOKUP_COOLDOWN_MS) continue;
+      this.mergeLookups.set(lookupKey, this.now());
+      looked = true;
+      try {
+        await resolve({ repo: task.repo, taskKey: key, pr });
+      } catch (error) {
+        console.warn(
+          `⚠️  [${this.name}] could not check whether ${key} PR #${pr.number} merged: ` +
+            `${(error as Error).message}`,
+        );
+      }
+    }
+    return looked;
+  }
+
+  /** Persist the gate verdict on the row; log only when it changes. */
+  private recordGate(task: InjectedTask, decision: DependencyGateDecision): void {
+    const { store } = this.options;
+    if (store.isClosed()) return;
+    const state = decision.kind === "ready" ? null : decision.kind;
+    const reason = decision.kind === "ready" ? null : decision.reason;
+    if (!store.setDependencyState(task.id, state, reason)) return;
+    if (decision.kind === "blocked") {
+      console.warn(`⛔ [${this.name}] ${task.taskKey} blocked: ${decision.reason}`);
+    } else if (decision.kind === "waiting") {
+      console.log(`⏳ [${this.name}] ${task.taskKey} waiting: ${decision.reason}`);
+    } else if (this.options.verbose) {
+      console.log(`   [${this.name}] ${task.taskKey} dependencies satisfied`);
+    }
+  }
+
+  /**
+   * Materialize the description the run should see: a stacked task gains the
+   * generated `Target branch:` section for its one unmerged dependency; any
+   * other dependent task is rewritten from its original body so a stale base
+   * from an earlier claim cannot linger.
+   */
+  private prepareDependencyBase(task: InjectedTask, decision: DependencyGateDecision): void {
+    if (task.dependsOn.length === 0 || decision.kind !== "ready") return;
+    const applied = applyStackBase(task.body, decision.stackedOn, (message) =>
+      console.warn(`⚠️  [${this.name}] ${task.taskKey}: ${message}`),
+    );
+    try {
+      rewriteInjectedTaskFile(task, applied.body);
+    } catch (error) {
+      console.warn(
+        `⚠️  [${this.name}] could not rewrite ${task.taskKey}'s prompt: ${(error as Error).message}`,
+      );
+      return;
+    }
+    if (applied.stackedOn) {
+      console.log(
+        `🧱 [${this.name}] ${task.taskKey} stacked on ${applied.stackedOn.taskKey} ` +
+          `PR #${applied.stackedOn.prNumber} (${applied.stackedOn.branch})`,
+      );
+    }
   }
 
   /** Whether the harness chain is exhausted and the drain must stay idle. */

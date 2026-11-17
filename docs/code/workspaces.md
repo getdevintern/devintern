@@ -62,6 +62,7 @@ worker_task_args = "--create-pr"
 poll_interval = 60
 # pr_labels = ["devintern", "auto-pr"]
 # pipeline_file = "pipelines/default.json"   # optional fleet-wide pipeline
+# dependency_mode = "merged"   # or "stacked": how `worker add --after` tasks wait
 
 [[repos]]
 name = "backend"
@@ -114,6 +115,7 @@ prompt = "Review the frontend and clean up one source of recurring noise."
 - `[defaults].tracker` picks the tracker for the single-source fleet query; any tracker with polling support works (Jira, Linear, GitHub Issues, GitLab Issues, Azure DevOps, Asana, Trello, Markdown).
 - `pr_labels` applies labels to every PR the fleet creates (GitHub only). A repo's `pr_labels` overrides `[defaults].pr_labels`. Outside a workspace, single-repo users get the same behavior by setting `PR_LABELS` (comma-separated) in `.devintern-code/.env`.
 - `pipeline_file` points at a standalone JSON pipeline definition. `[defaults].pipeline_file` is the fleet-wide fallback; a repo's `pipeline_file` overrides both it and the repo's checked-in `.devintern-code/settings.json` pipeline. See [Pipelines for the fleet and per repository](#pipelines-for-the-fleet-and-per-repository).
+- `dependency_mode` (`"merged"` or `"stacked"`, default `"merged"`) is the default for ad-hoc tasks that depend on other tasks (`devintern worker add --after`, or a `Depends on:` line). `merged` waits until every dependency's PR merged; `stacked` starts once the dependencies succeeded, branching from and targeting the one still-unmerged dependency. `--stack` / `--wait-merge` override it per task. See [Delegation → Dependent tasks](./delegation.md#dependent-tasks---after).
 - `sync_team_prs = true` (GitHub repos only, off by default) extends automatic base sync to teammates' open PRs and requires an explicit `AGENT_SANDBOX` provider. See [Syncing teammates' open PRs](./worker.md#syncing-teammates-open-prs).
 - Each repository follows its advertised `origin/HEAD` unless its `[[repos]]` entry sets an explicit `default_branch` override.
 - Repo names must be unique and filesystem-safe; they become directory names under `repos/` and `worktrees/`.

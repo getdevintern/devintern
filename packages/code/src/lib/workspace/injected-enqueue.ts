@@ -16,7 +16,14 @@ import { randomBytes } from "crypto";
 import { mkdirSync, unlinkSync, writeFileSync } from "fs";
 import { join } from "path";
 
-import type { EnqueueInjectedTaskResult, InjectedTaskStore } from "../state/injected-tasks";
+import type { DependencyMode } from "../dependencies/gate";
+import { evaluateDependencyGate, findDependencyCycle } from "../dependencies/gate";
+import type {
+  EnqueueInjectedTaskResult,
+  InjectedTask,
+  InjectedTaskStore,
+} from "../state/injected-tasks";
+import { extractDependsOn } from "../utils/general";
 import { injectedTasksDir } from "./paths";
 
 /** Maximum body size accepted (matches the run recorder's description cap). */
@@ -104,6 +111,89 @@ export interface InjectedTaskRequest {
   idempotencyKey?: string;
   /** Audit identity stored on the row (default `local:add`). */
   actor?: string;
+  /**
+   * Dependencies from `--after`; merged (de-duplicated) with any
+   * `Depends on:` lines in {@link body}.
+   */
+  after?: string[];
+  /** Resolved dependency mode (default `merged`); stored only with dependencies. */
+  dependencyMode?: DependencyMode;
+}
+
+/** A rejected dependency declaration (unknown, cross-repo, or cyclic). */
+export class InjectedTaskDependencyError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InjectedTaskDependencyError";
+  }
+}
+
+/** `--after` keys plus the body's `Depends on:` keys, de-duplicated in order. */
+export function collectInjectedDependencies(after: readonly string[] | undefined, body: string) {
+  return [
+    ...new Set([...(after ?? []).map((key) => key.trim()), ...extractDependsOn(body)]),
+  ].filter(Boolean);
+}
+
+/**
+ * Reject dependencies that do not name an existing ad-hoc task of the same
+ * repo. Cycles are checked once the new task's key is known.
+ */
+function validateDependencyTargets(
+  store: InjectedTaskStore,
+  repo: string,
+  dependsOn: readonly string[],
+): void {
+  if (dependsOn.length === 0) return;
+  const repos = store.reposByTaskKey(dependsOn);
+  const unknown = dependsOn.filter((key) => !repos.has(key));
+  if (unknown.length > 0) {
+    throw new InjectedTaskDependencyError(
+      `unknown dependency ${unknown.join(", ")}: no ad-hoc task with that key in this workspace ` +
+        "(check `devintern worker queue` / `devintern worker runs`)",
+    );
+  }
+  const foreign = dependsOn.filter((key) => repos.get(key) !== repo);
+  if (foreign.length > 0) {
+    const detail = foreign.map((key) => `${key} (repo "${repos.get(key)}")`).join(", ");
+    throw new InjectedTaskDependencyError(
+      `cross-repo dependencies are not supported: ${detail} is not in repo "${repo}"`,
+    );
+  }
+}
+
+/** Reject a dependency set that would make `taskKey` (transitively) depend on itself. */
+function assertNoDependencyCycle(
+  store: InjectedTaskStore,
+  taskKey: string,
+  dependsOn: readonly string[],
+): void {
+  const cycle = findDependencyCycle(taskKey, dependsOn, (key) => store.dependenciesOf(key));
+  if (cycle) {
+    throw new InjectedTaskDependencyError(`dependency cycle: ${cycle.join(" → ")}`);
+  }
+}
+
+/**
+ * Rewrite a task's markdown prompt from its stored row and a (possibly
+ * augmented) body, e.g. with a stacked base section added at claim time.
+ * Always derived from the row's original body, so a later claim never keeps a
+ * stale base from an earlier one.
+ */
+export function rewriteInjectedTaskFile(
+  task: Pick<InjectedTask, "taskKey" | "title" | "taskFile" | "createdAt">,
+  body: string,
+): void {
+  writeFileSync(
+    task.taskFile,
+    buildInjectedTaskMarkdown({
+      taskKey: task.taskKey,
+      title: task.title,
+      body,
+      now: new Date(task.createdAt),
+    }),
+    { encoding: "utf8", mode: 0o600 },
+  );
 }
 
 /**
@@ -127,6 +217,10 @@ export function enqueueInjectedTask(
     if (existing) return { task: existing, deduplicated: true };
   }
 
+  const dependsOn = collectInjectedDependencies(request.after, request.body);
+  validateDependencyTargets(store, request.repo, dependsOn);
+  const dependencyMode = request.dependencyMode ?? "merged";
+
   const dir = injectedTasksDir(workspaceDir);
   // Prompts hold arbitrary operator context, so keep them owner-only like the
   // workspace .env. `mode` only applies to newly created paths.
@@ -134,6 +228,15 @@ export function enqueueInjectedTask(
 
   for (let attempt = 0; ; attempt++) {
     const taskKey = deriveInjectedTaskKey(request.title, (key) => store.hasTaskKey(key));
+    // A new key cannot be referenced by existing rows unless a pruned task's
+    // key is reused; check anyway so a stored graph can never loop.
+    assertNoDependencyCycle(store, taskKey, dependsOn);
+    // Record the initial verdict so the queue view explains the wait before
+    // the worker's next gate pass.
+    const initial =
+      dependsOn.length > 0
+        ? evaluateDependencyGate(dependencyMode, store.dependencyFacts(dependsOn))
+        : undefined;
     // Unique per call: if a concurrent caller wins the same key or idempotency
     // row, unlinking our own file can never delete the winner's prompt.
     const taskFile = join(dir, injectedTaskFileName(taskKey));
@@ -153,6 +256,10 @@ export function enqueueInjectedTask(
         taskFile,
         idempotencyKey: request.idempotencyKey,
         actor: request.actor ?? "local:add",
+        dependsOn,
+        dependencyMode,
+        dependencyState: initial && initial.kind !== "ready" ? initial.kind : undefined,
+        dependencyReason: initial && initial.kind !== "ready" ? initial.reason : undefined,
       });
     } catch (enqueueError) {
       unlinkQuietly(taskFile);

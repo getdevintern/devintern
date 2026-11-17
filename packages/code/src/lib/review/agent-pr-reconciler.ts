@@ -14,7 +14,7 @@
  * shares its fetch results with the caller's per-PR poll loop via `fresh`.
  */
 
-import type { AgentPr, WorkerState } from "../state/worker-state";
+import type { AgentPr, AgentPrCloseReason, WorkerState } from "../state/worker-state";
 
 /**
  * The subset of a GitHub PR payload the poller and reconciler rely on.
@@ -31,6 +31,9 @@ import type { AgentPr, WorkerState } from "../state/worker-state";
  */
 export interface PolledPr {
   state?: unknown;
+  /** GitHub reports `state: "closed"` for merged PRs; these tell them apart. */
+  merged?: unknown;
+  merged_at?: unknown;
   /** GitHub's computed merge state; `"dirty"` means merge conflicts. */
   mergeable_state?: string;
   /** Work-in-progress PR (team-PR base sync skips drafts). */
@@ -72,6 +75,22 @@ export function classifyAgentPrState(state: unknown): AgentPrLifecycleState {
   const normalized = state.trim().toLowerCase();
   if (normalized === "open") return "open";
   return TERMINAL_AGENT_PR_STATES.has(normalized) ? (normalized as TerminalAgentPrState) : null;
+}
+
+/**
+ * Why a terminal PR closed, from its payload: `merged`, `closed` without
+ * merging, or `undefined` when the payload cannot tell (GitHub's list payloads
+ * omit `merged`, so only an explicit `merged: false` proves "not merged").
+ */
+export function closeReasonFromPr(
+  lifecycle: TerminalAgentPrState,
+  pr: Pick<PolledPr, "merged" | "merged_at">,
+): AgentPrCloseReason | undefined {
+  if (lifecycle === "merged") return "merged";
+  if (pr.merged === true) return "merged";
+  if (typeof pr.merged_at === "string" && pr.merged_at !== "") return "merged";
+  if (pr.merged === false) return "closed";
+  return undefined;
 }
 
 /** PRs already reported as having an unusable state (one warning per process). */
@@ -205,7 +224,7 @@ export function applyAgentPrFetch(
   warnedUnusableState.delete(agentPrKey(pr.repo, pr.prNumber));
   if (state === "open") return null;
 
-  workerState.markAgentPrClosed(pr.repo, pr.prNumber);
+  workerState.markAgentPrClosed(pr.repo, pr.prNumber, closeReasonFromPr(state, data));
   return { repo: pr.repo, prNumber: pr.prNumber, reason: state };
 }
 

@@ -75,6 +75,7 @@ describe("worker add argument parsing", () => {
         idempotencyKey: "run-1",
         wait: true,
         json: true,
+        after: [],
       },
     });
   });

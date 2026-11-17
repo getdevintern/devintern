@@ -12,6 +12,8 @@ export interface CiChange {
    * that as "unknown", never as "not open".
    */
   state?: unknown;
+  /** Whether a closed change merged (`true`/`false`); unknown otherwise. */
+  merged?: unknown;
   headSha?: string;
   headRepository?: string;
 }

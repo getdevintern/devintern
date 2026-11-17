@@ -756,3 +756,47 @@ export async function buildFleetEventAcquirers(options: {
 
   return acquirers;
 }
+
+/**
+ * Build the injected-task acquirer's merge-state lookup: ask GitHub whether a
+ * closed dependency PR merged and record the answer in `agent_prs`, so the
+ * dependency gate (and later readers) never ask again.
+ *
+ * Only GitHub repos are looked up; other hosts already record the outcome when
+ * they observe the close, and anything unresolvable stays unknown (the
+ * dependent keeps waiting). Auth follows the mode the event wiring chose
+ * (`token-only` for relay-hosted workspaces, else `app-first`).
+ */
+export function createDependencyMergeStateResolver(options: {
+  config: WorkspaceConfig;
+  workspaceDir: string;
+  workerState: Pick<WorkerState, "markAgentPrClosed">;
+}): (lookup: { repo: string; pr: { number: number } }) => Promise<"merged" | "closed" | null> {
+  const { config, workspaceDir, workerState } = options;
+  let resolver: ((slug: string) => FleetGitHubClient) | undefined;
+  return async ({ repo, pr }) => {
+    const repoConfig = config.repos.find((candidate) => candidate.name === repo);
+    const slug = repoConfig
+      ? (repoConfig.env.GITHUB_REPO ?? gitHubSlugFromRemote(repoConfig.remote))
+      : undefined;
+    if (!slug) return null;
+    const { GITHUB_AUTH_MODE_ENV, GitHubReviewsClient } =
+      await import("../code-host/github/reviews");
+    const { closeReasonFromPr } = await import("../review/agent-pr-reconciler");
+    resolver ??= createFleetGitHubClientResolver(
+      config,
+      workspaceDir,
+      process.env[GITHUB_AUTH_MODE_ENV] === "token-only",
+      GitHubReviewsClient,
+    );
+    const [owner = "", name = ""] = slug.split("/");
+    const result = await resolver(slug).conditionalGet<
+      import("../review/agent-pr-reconciler").PolledPr
+    >(`/repos/${slug}/pulls/${pr.number}`, owner, name);
+    if (!result.data) return null;
+    const reason = closeReasonFromPr("closed", result.data);
+    if (!reason || result.data.state === "open") return null;
+    workerState.markAgentPrClosed(slug, pr.number, reason);
+    return reason;
+  };
+}

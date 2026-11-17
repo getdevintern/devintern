@@ -602,6 +602,14 @@ export interface QueuedWorkItem {
   lastError?: string;
   /** Automation: the scheduled job waiting for a slot. */
   automationId?: string;
+  /** Ad-hoc: task keys this task depends on. */
+  dependsOn?: string[];
+  /** Ad-hoc: `merged` (wait for merges) or `stacked` (branch from one unmerged dependency). */
+  dependencyMode?: "merged" | "stacked";
+  /** Ad-hoc: `waiting` or `blocked` on a dependency; unset once claimable. */
+  dependencyState?: "waiting" | "blocked";
+  /** Ad-hoc: why, naming the dependency. */
+  dependencyReason?: string;
 }
 
 export interface QueuedWorkResponse {

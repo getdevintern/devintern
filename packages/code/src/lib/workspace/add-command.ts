@@ -27,7 +27,14 @@ import { loadWorkspaceConfig } from "./config";
 import { InjectedTaskStore } from "../state/injected-tasks";
 import type { InjectedTask } from "../state/injected-tasks";
 import { applyWorkspaceProcessEnv } from "./env";
-import { enqueueInjectedTask, MAX_INJECTED_BODY_CHARS } from "./injected-enqueue";
+import {
+  collectInjectedDependencies,
+  enqueueInjectedTask,
+  InjectedTaskDependencyError,
+  MAX_INJECTED_BODY_CHARS,
+} from "./injected-enqueue";
+import { resolveDependencyMode } from "../dependencies/gate";
+import type { DependencyMode } from "../dependencies/gate";
 import {
   injectedChildStillRunningMessage,
   interruptedChildStillRunning,
@@ -94,6 +101,10 @@ export interface AddOptions {
   json: boolean;
   /** `--wait` deadline in seconds; `0` waits without a limit (default 6h). */
   waitTimeoutSeconds?: number;
+  /** `--after` task keys (repeatable), merged with the body's `Depends on:` lines. */
+  after: string[];
+  /** `--stack` / `--wait-merge` override of `[defaults].dependency_mode`. */
+  dependencyMode?: DependencyMode;
 }
 
 export type ParsedAddArgs =
@@ -115,6 +126,11 @@ function usage(): string {
     "  --body <text>             Task description",
     "  --body-file <path>        Read the description from a file ('-' for stdin)",
     "  --idempotency-key <key>   Dedupe key; a retry reuses the existing task",
+    "  --after <taskKey>         Start only after this ad-hoc task (same repo); repeatable.",
+    "                            A 'Depends on: <key>, ...' line in the body works too",
+    "  --stack                   Stack on an unmerged dependency's branch once it succeeded",
+    "  --wait-merge              Wait until every dependency's PR merged",
+    "                            (default: [defaults].dependency_mode, else merged)",
     "  --resume <taskKey>        Re-queue a settled ad-hoc task (resumes its branch)",
     "  --wait                    Block until the run finishes; exit with its status",
     "  --wait-timeout <seconds>  Give up waiting after this long (0 = no limit; default 21600)",
@@ -134,6 +150,7 @@ const VALUE_FLAGS = new Set([
   "--idempotency-key",
   "--resume",
   "--wait-timeout",
+  "--after",
 ]);
 
 /**
@@ -155,9 +172,56 @@ function validateResumeArgs(options: AddOptions): string | null {
     options.bodyFile !== undefined ? "--body-file" : undefined,
     options.repo !== undefined ? "--repo" : undefined,
     options.idempotencyKey !== undefined ? "--idempotency-key" : undefined,
+    options.after.length > 0 ? "--after" : undefined,
+    options.dependencyMode === "stacked" ? "--stack" : undefined,
+    options.dependencyMode === "merged" ? "--wait-merge" : undefined,
   ].filter((flag): flag is string => flag !== undefined);
   if (conflicting.length > 0) {
     return `--resume re-queues the existing task; drop ${conflicting.join(", ")}.`;
+  }
+  return null;
+}
+
+/**
+ * Store one value flag on the parsed options.
+ *
+ * @returns An error message for an invalid value, else null
+ */
+function applyValueFlag(options: AddOptions, flag: string, value: string): string | null {
+  switch (flag) {
+    case "--workspace":
+      options.workspacePath = value;
+      break;
+    case "--repo":
+      options.repo = value;
+      break;
+    case "--title":
+      options.title = value;
+      break;
+    case "--body":
+      options.body = value;
+      break;
+    case "--body-file":
+      options.bodyFile = value;
+      break;
+    case "--idempotency-key":
+      options.idempotencyKey = value;
+      break;
+    case "--resume":
+      options.resume = value;
+      break;
+    case "--after":
+      if (!value.trim()) return "--after requires a task key.";
+      options.after.push(value.trim());
+      break;
+    case "--wait-timeout": {
+      const seconds = Number(value);
+      if (!Number.isInteger(seconds) || seconds < 0) {
+        return "--wait-timeout requires a non-negative integer number of seconds.";
+      }
+      options.waitTimeoutSeconds = seconds;
+      break;
+    }
   }
   return null;
 }
@@ -167,11 +231,21 @@ function validateResumeArgs(options: AddOptions): string | null {
  * errors are testable without touching a workspace.
  */
 export function parseWorkerAddArgs(args: string[]): ParsedAddArgs {
-  const options: AddOptions = { title: "", wait: false, json: false };
+  const options: AddOptions = { title: "", wait: false, json: false, after: [] };
+  let modeFlag: string | undefined;
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg === undefined) continue;
     if (arg === "--help" || arg === "-h") return { kind: "help" };
+    if (arg === "--stack" || arg === "--wait-merge") {
+      const mode: DependencyMode = arg === "--stack" ? "stacked" : "merged";
+      if (modeFlag !== undefined && options.dependencyMode !== mode) {
+        return { kind: "error", message: "--stack and --wait-merge are mutually exclusive." };
+      }
+      modeFlag = arg;
+      options.dependencyMode = mode;
+      continue;
+    }
     if (arg === "--wait") {
       options.wait = true;
       continue;
@@ -189,40 +263,8 @@ export function parseWorkerAddArgs(args: string[]): ParsedAddArgs {
         return { kind: "error", message: `${arg} requires a value.` };
       }
       i++;
-      switch (arg) {
-        case "--workspace":
-          options.workspacePath = value;
-          break;
-        case "--repo":
-          options.repo = value;
-          break;
-        case "--title":
-          options.title = value;
-          break;
-        case "--body":
-          options.body = value;
-          break;
-        case "--body-file":
-          options.bodyFile = value;
-          break;
-        case "--idempotency-key":
-          options.idempotencyKey = value;
-          break;
-        case "--resume":
-          options.resume = value;
-          break;
-        case "--wait-timeout": {
-          const seconds = Number(value);
-          if (!Number.isInteger(seconds) || seconds < 0) {
-            return {
-              kind: "error",
-              message: "--wait-timeout requires a non-negative integer number of seconds.",
-            };
-          }
-          options.waitTimeoutSeconds = seconds;
-          break;
-        }
-      }
+      const valueError = applyValueFlag(options, arg, value);
+      if (valueError) return { kind: "error", message: valueError };
       continue;
     }
     return { kind: "error", message: `Unknown option: ${arg}` };
@@ -423,6 +465,7 @@ export async function runWorkerAdd(
       waitTimeoutSeconds: add.waitTimeoutSeconds,
       restartGraceMs: options.restartGraceMs,
       waitPollIntervalMs: options.waitPollIntervalMs,
+      dependencyModeDefault: config.defaults.dependencyMode,
     };
     if (add.resume) {
       return await resumeTask(add.resume, context);
@@ -488,6 +531,8 @@ interface TaskContext {
   waitPollIntervalMs?: number;
   store: InjectedTaskStore;
   selectedDir: string;
+  /** `[defaults].dependency_mode` of the selected workspace. */
+  dependencyModeDefault?: DependencyMode;
   /**
    * ISO-8601 end of the earliest usage-limit window when every harness in the
    * worker's chain is limited (set once the task row is known to be pending).
@@ -505,13 +550,34 @@ async function enqueueNewTask(
   const { store, selectedDir, workerRunning, log, status } = ctx;
   // Only an active (pending/running) task dedupes; a settled one under the
   // same key is history and a new occurrence is enqueued.
-  const { task, deduplicated } = enqueueInjectedTask(store, selectedDir, {
-    repo: repo.name,
-    title: add.title,
-    body,
-    idempotencyKey: add.idempotencyKey,
-    actor: "local:add",
-  });
+  const dependsOn = collectInjectedDependencies(add.after, body);
+  if (dependsOn.length === 0 && add.dependencyMode !== undefined) {
+    status(
+      `⚠️  ${add.dependencyMode === "stacked" ? "--stack" : "--wait-merge"} has no effect ` +
+        "without --after or a 'Depends on:' line.",
+    );
+  }
+  let enqueued: ReturnType<typeof enqueueInjectedTask>;
+  try {
+    enqueued = enqueueInjectedTask(store, selectedDir, {
+      repo: repo.name,
+      title: add.title,
+      body,
+      idempotencyKey: add.idempotencyKey,
+      actor: "local:add",
+      after: add.after,
+      dependencyMode: resolveDependencyMode({
+        override: add.dependencyMode,
+        configured: ctx.dependencyModeDefault,
+      }),
+    });
+  } catch (dependencyError) {
+    if (!(dependencyError instanceof InjectedTaskDependencyError)) throw dependencyError;
+    ctx.error(`❌ ${dependencyError.message}`);
+    ctx.error("   No task was enqueued.");
+    return 1;
+  }
+  const { task, deduplicated } = enqueued;
   if (deduplicated) {
     return await reportTask(task, ctx);
   }
@@ -519,6 +585,12 @@ async function enqueueNewTask(
   const pause = readHarnessPause(selectedDir);
   if (!add.json) {
     status(`✅ Enqueued ${task.taskKey} for repo "${task.repo}" (task #${task.id}).`);
+    if (task.dependsOn.length > 0) {
+      status(
+        `   Depends on ${task.dependsOn.join(", ")} (${task.dependencyMode ?? "merged"} mode)` +
+          (task.dependencyState ? `; ${task.dependencyState}: ${task.dependencyReason}` : ""),
+      );
+    }
     if (!workerRunning) {
       status("⚠️  No worker is running; the task stays queued until one starts.");
     } else if (!pause) {
@@ -539,13 +611,37 @@ async function enqueueNewTask(
   );
 }
 
-function serialize(task: Pick<InjectedTask, "id" | "taskKey" | "repo" | "status">): {
+function serialize(
+  task: Pick<InjectedTask, "id" | "taskKey" | "repo" | "status"> &
+    Partial<
+      Pick<InjectedTask, "dependsOn" | "dependencyMode" | "dependencyState" | "dependencyReason">
+    >,
+): {
   id: number;
   taskKey: string;
   repo: string;
   status: string;
+  dependsOn?: string[];
+  dependencyMode?: DependencyMode;
+  dependencyState?: string;
+  dependencyReason?: string;
 } {
-  return { id: task.id, taskKey: task.taskKey, repo: task.repo, status: task.status };
+  const dependent = task.dependsOn !== undefined && task.dependsOn.length > 0;
+  return {
+    id: task.id,
+    taskKey: task.taskKey,
+    repo: task.repo,
+    status: task.status,
+    ...(dependent
+      ? {
+          dependsOn: task.dependsOn,
+          dependencyMode: task.dependencyMode ?? "merged",
+          ...(task.status === "pending" && task.dependencyState
+            ? { dependencyState: task.dependencyState, dependencyReason: task.dependencyReason }
+            : {}),
+        }
+      : {}),
+  };
 }
 
 /** Best-effort read of the worker's harness-chain pause; never throws. */

@@ -26,6 +26,7 @@ import { readImplementationReport } from "../state/session-pickup";
 import { RetryStateStore } from "../state/retry-state";
 import { ScheduledRetryStore } from "../state/run-retry";
 import { InjectedTaskStore } from "../state/injected-tasks";
+import type { WorkerState } from "../state/worker-state";
 import { createTaskActionedGate } from "../task/actioned-state";
 import type { TaskTrackerClient } from "../trackers/client";
 import { findRepo, findTeam, harnessPinnedJobs, loadWorkspaceConfig } from "./config";
@@ -76,7 +77,10 @@ import {
   resolveActionedSource,
 } from "./fleet-executor";
 import type { FleetExecutorDeps, RepoManagerLike } from "./fleet-executor";
-import { buildFleetEventAcquirers } from "./fleet-event-acquirers";
+import {
+  buildFleetEventAcquirers,
+  createDependencyMergeStateResolver,
+} from "./fleet-event-acquirers";
 import { assertTeamPrSyncSandbox } from "./team-pr-sync";
 import type { FleetEventReloadHooks, FleetSourceRuntime } from "./fleet-event-acquirers";
 
@@ -493,15 +497,28 @@ export function isHarnessChainPaused(): boolean {
 
 /**
  * Build the `worker add` drain acquirer: claims durable injected rows and runs
- * each through the fleet executor, pinned to the repo the row names.
+ * each through the fleet executor, pinned to the repo the row names. Ad-hoc
+ * tasks drain on the same short interval as retries and run through the normal
+ * pipeline (which inherits `[defaults].worker_task_args`, e.g. `--create-pr`).
+ *
+ * @param workerState - PR registry; when given, the dependency gate can ask
+ *   GitHub whether a closed dependency PR merged and record the answer there
  */
 export function buildInjectedTaskAcquirer(
   deps: FleetExecutorDeps,
   store: InjectedTaskStore,
   verbose?: boolean,
+  workerState?: Pick<WorkerState, "markAgentPrClosed">,
 ): InjectedTaskAcquirer {
   return new InjectedTaskAcquirer({
     store,
+    resolveMergeState: workerState
+      ? createDependencyMergeStateResolver({
+          config: deps.config,
+          workspaceDir: deps.workspaceDir,
+          workerState,
+        })
+      : undefined,
     runDbPath: workspaceDbPath(deps.workspaceDir),
     execute: (task, queueClaim) =>
       createFleetTaskExecutor(deps, {
@@ -924,14 +941,12 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
     ),
   );
 
-  // Ad-hoc `worker add` tasks: drained on the same short interval as retries,
-  // pinned to their explicit repo, and run through the normal pipeline (which
-  // inherits `[defaults].worker_task_args`, e.g. `--create-pr`).
   acquirers.push(
     buildInjectedTaskAcquirer(
       { config, workspaceDir, skips: state.skips, repoManager, supervisor },
       injectedTasks,
       options.verbose,
+      state.workerState,
     ),
   );
 

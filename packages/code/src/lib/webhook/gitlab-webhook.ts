@@ -195,14 +195,17 @@ async function processGitLabEvent({ event, target }: QueuedGitLabWebhook): Promi
   if (event.kind === "lifecycle") {
     const state = new WorkerState();
     try {
-      state.markAgentChangeRequestClosed({
-        provider: target.provider,
-        instanceUrl: target.instanceUrl,
-        projectId: target.projectId,
-        projectPath: target.projectPath,
-        number: target.changeNumber,
-        webUrl: target.webUrl,
-      });
+      state.markAgentChangeRequestClosed(
+        {
+          provider: target.provider,
+          instanceUrl: target.instanceUrl,
+          projectId: target.projectId,
+          projectPath: target.projectPath,
+          number: target.changeNumber,
+          webUrl: target.webUrl,
+        },
+        event.state === "closed" ? "closed" : "merged",
+      );
     } finally {
       state.close();
     }
