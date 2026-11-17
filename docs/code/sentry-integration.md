@@ -173,6 +173,11 @@ The first skipped tick of a window logs one line; later skips log only with
 cadence. The window is persisted, so a worker restarted mid-window still waits
 it out. A 429 without `Retry-After` keeps polling on `poll_interval`.
 
+The honored window is capped at ten poll intervals or one hour, whichever is
+longer. A larger `Retry-After` (for example from a misconfigured proxy) is
+clamped with a warning, and a persisted window beyond the cap is shortened on
+restart, so a bad hint can never stop a source indefinitely.
+
 Handled issue IDs are stored in the workspace database under a source key that
 includes the provider and configured source `id`. That prevents collisions
 between Sentry projects. A failed fix is not automatically repeated; a run

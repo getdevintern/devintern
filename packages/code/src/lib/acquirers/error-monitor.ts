@@ -54,6 +54,16 @@ export interface IssueValidity {
 const FAILURE_LOG_EVERY = 10;
 /** Re-emit an unchanged failure at least this often, in case reads are rare. */
 const FAILURE_LOG_HEARTBEAT_MS = 15 * 60 * 1000;
+/**
+ * Upper bound on an honored provider retry window, in poll intervals. A
+ * `Retry-After` hint is untrusted (a buggy proxy or CDN can send years), and a
+ * skipped tick never reads, so an unbounded window could stall a source
+ * forever, even across restarts. Longer hints are clamped to
+ * `max(poll_interval * RETRY_WINDOW_MAX_POLLS, RETRY_WINDOW_MIN_CAP_MS)`.
+ */
+const RETRY_WINDOW_MAX_POLLS = 10;
+/** Floor for the retry-window cap so short poll intervals still honor normal hints. */
+const RETRY_WINDOW_MIN_CAP_MS = 60 * 60 * 1000;
 
 /** Adapter contract implemented once per error-monitoring vendor. */
 export interface ErrorMonitorProvider<TIssue extends ErrorMonitorIssue> {
@@ -320,7 +330,19 @@ export class ErrorMonitorAcquirer<TIssue extends ErrorMonitorIssue> implements A
         this.options.sourceId,
       );
       if (record?.status === "rate-limited" && record.retryAfterAt !== undefined) {
-        this.retryAfterAt = record.retryAfterAt;
+        // A row persisted by an older build (or a clock jump) may hold a window
+        // beyond the cap; never wait longer than the cap from now.
+        const now = this.now();
+        const cap = this.maxRetryWindowMs();
+        if (record.retryAfterAt - now > cap) {
+          this.retryAfterAt = now + cap;
+          console.warn(
+            `⚠️  [${this.name}] persisted retry window until ${new Date(record.retryAfterAt).toISOString()} ` +
+              `exceeds the ${Math.ceil(cap / 1000)}s cap; reads resume by ${new Date(now + cap).toISOString()}.`,
+          );
+        } else {
+          this.retryAfterAt = record.retryAfterAt;
+        }
       }
     } catch (error) {
       console.warn(
@@ -339,7 +361,7 @@ export class ErrorMonitorAcquirer<TIssue extends ErrorMonitorIssue> implements A
     const failure = error instanceof SourceFetchError ? error : undefined;
     const status: SourceFetchFailureStatus = failure?.status ?? "unreadable";
     const message = failure?.message ?? (error as Error).message;
-    const retryAfterMs = failure?.retryAfterMs;
+    const retryAfterMs = this.clampRetryAfterMs(failure?.retryAfterMs);
     const checkedAt = this.now();
     // Same derivation as the persisted `retry_after_at`.
     this.retryAfterAt =
@@ -361,6 +383,26 @@ export class ErrorMonitorAcquirer<TIssue extends ErrorMonitorIssue> implements A
     this.lastOutcome = outcome;
     this.logReadFailure(status, message, retryAfterMs);
     return outcome;
+  }
+
+  /** Longest provider retry window this source will honor. */
+  private maxRetryWindowMs(): number {
+    return Math.max(
+      this.options.intervalSeconds * 1000 * RETRY_WINDOW_MAX_POLLS,
+      RETRY_WINDOW_MIN_CAP_MS,
+    );
+  }
+
+  /** Clamp an untrusted `Retry-After` hint to {@link maxRetryWindowMs}, logging when it applies. */
+  private clampRetryAfterMs(retryAfterMs: number | undefined): number | undefined {
+    if (retryAfterMs === undefined) return undefined;
+    const cap = this.maxRetryWindowMs();
+    if (retryAfterMs <= cap) return retryAfterMs;
+    console.warn(
+      `⚠️  [${this.name}] provider asked to wait ${Math.ceil(retryAfterMs / 1000)}s; ` +
+        `clamping the retry window to ${Math.ceil(cap / 1000)}s.`,
+    );
+    return cap;
   }
 
   /** Record a successful read so health counters reset and the cursor may advance. */

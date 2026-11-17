@@ -1527,6 +1527,89 @@ describe("ErrorMonitorAcquirer with Sentry issues", () => {
       }
     });
 
+    test("clamps an oversized Retry-After so the source cannot stall indefinitely", async () => {
+      const store = new AutomationStateStore(join(dir, "status.db"));
+      const DAY = 24 * 60 * 60 * 1000;
+      let clock = 10_000;
+      let limited = true;
+      const { provider, calls } = scriptedProvider(() =>
+        limited
+          ? new SourceFetchError("rate-limited", "HTTP 429", { retryAfterMs: 365 * DAY })
+          : [],
+      );
+      const acquirer = new ErrorMonitorAcquirer<SentryIssue>({
+        sourceId: "primary",
+        intervalSeconds: 60,
+        queue,
+        provider,
+        statusStore: store,
+        now: () => clock,
+        executeTask: async () => true,
+      });
+      const capture = captureConsole();
+      try {
+        // poll_interval 60s * 10 = 10 min, below the 1h floor, so the cap is 1h.
+        const limitedOutcome = await acquirer.tick();
+        expect(limitedOutcome.retryAfterMs).toBe(60 * 60 * 1000);
+        expect(store.getSourceStatus("sentry", "primary")?.retryAfterAt).toBe(
+          10_000 + 60 * 60 * 1000,
+        );
+        expect(capture.warnings.some((line) => line.includes("clamping the retry window"))).toBe(
+          true,
+        );
+
+        clock = 10_000 + 60 * 60 * 1000 - 1;
+        expect((await acquirer.tick()).skipped).toBe(true);
+        expect(calls.count).toBe(1);
+
+        limited = false;
+        clock = 10_000 + 60 * 60 * 1000;
+        expect((await acquirer.tick()).status).toBe("ok");
+        expect(calls.count).toBe(2);
+      } finally {
+        capture.restore();
+        store.close();
+      }
+    });
+
+    test("clamps an oversized retry window persisted before a restart", async () => {
+      const store = new AutomationStateStore(join(dir, "status.db"));
+      store.recordSourceStatus({
+        provider: "sentry",
+        sourceId: "primary",
+        status: "rate-limited",
+        checkedAt: 1_000,
+        message: "HTTP 429",
+        retryAfterMs: 365 * 24 * 60 * 60 * 1000,
+      });
+      let clock = 30_000;
+      const { provider, calls } = scriptedProvider(() => []);
+      const acquirer = new ErrorMonitorAcquirer<SentryIssue>({
+        sourceId: "primary",
+        intervalSeconds: 600,
+        queue,
+        provider,
+        statusStore: store,
+        now: () => clock,
+        executeTask: async () => true,
+      });
+      const capture = captureConsole();
+      try {
+        // poll_interval 600s * 10 = 100 min cap, measured from the restart.
+        const cap = 600 * 1000 * 10;
+        expect((await acquirer.tick()).skipped).toBe(true);
+        expect(capture.warnings.some((line) => line.includes("exceeds the"))).toBe(true);
+        clock = 30_000 + cap - 1;
+        expect((await acquirer.tick()).skipped).toBe(true);
+        clock = 30_000 + cap;
+        expect((await acquirer.tick()).status).toBe("ok");
+        expect(calls.count).toBe(1);
+      } finally {
+        capture.restore();
+        store.close();
+      }
+    });
+
     test("a rate-limited source does not stop another source from polling", async () => {
       const store = new AutomationStateStore(join(dir, "status.db"));
       const limited = scriptedProvider(

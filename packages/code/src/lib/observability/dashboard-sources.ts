@@ -11,6 +11,7 @@ import { Database } from "bun:sqlite";
 import { existsSync, statSync } from "fs";
 
 import type { SourceFetchStatus } from "../acquirers/source-fetch";
+import { configureSqliteConnection } from "../state/sqlite";
 import { loadWorkspaceConfig } from "../workspace/config";
 import type { WorkspaceConfig } from "../workspace/config";
 import { workspaceConfigPath } from "../workspace/paths";
@@ -82,6 +83,8 @@ export function readSourceStatuses(dbPath: string): DashboardSourceView[] {
   if (!existsSync(dbPath)) return [];
   const db = new Database(dbPath, { readonly: true });
   try {
+    // Wait out the worker's concurrent writes/checkpoints instead of failing fast with SQLITE_BUSY.
+    configureSqliteConnection(db, { readonly: true });
     const table = db
       .query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'source_status'")
       .get();

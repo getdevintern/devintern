@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, rmSync, utimesSync, writeFileSync } from "fs";
 import { join } from "path";
@@ -9,6 +10,7 @@ import {
   filterConfiguredSources,
   handleSources,
   parseSourceStatusRow,
+  readSourceStatuses,
 } from "../src/lib/observability/dashboard-sources";
 import type { DashboardSourceView } from "../src/lib/observability/dashboard-sources";
 import { AutomationStateStore } from "../src/lib/automation/state";
@@ -322,6 +324,55 @@ describe("dashboard source health", () => {
       expect(worker.sources).toHaveLength(1);
     } finally {
       server.stop(true);
+    }
+  });
+});
+
+describe("source status reads under contention", () => {
+  test("waits out a concurrent writer lock instead of failing with SQLITE_BUSY", async () => {
+    const dir = join(
+      tmpdir(),
+      `dash-sources-busy-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    );
+    mkdirSync(dir, { recursive: true });
+    const dbPath = join(dir, "queue.db");
+    try {
+      // Rollback-journal mode so an exclusive writer lock blocks readers, as a
+      // WAL checkpoint/recovery would.
+      const setup = new Database(dbPath);
+      setup.run("PRAGMA journal_mode = DELETE");
+      setup.run(
+        "CREATE TABLE source_status (provider TEXT NOT NULL, source_id TEXT NOT NULL, status TEXT NOT NULL, checked_at INTEGER NOT NULL, last_success_at INTEGER, consecutive_failures INTEGER NOT NULL DEFAULT 0, message TEXT, retry_after_at INTEGER, PRIMARY KEY (provider, source_id))",
+      );
+      setup.run(
+        "INSERT INTO source_status (provider, source_id, status, checked_at) VALUES ('sentry', 'api-production', 'ok', 1)",
+      );
+      setup.close();
+
+      const holder = Bun.spawn(
+        [
+          process.execPath,
+          "-e",
+          `const { Database } = require("bun:sqlite");
+           const db = new Database(process.argv[1]);
+           db.run("BEGIN EXCLUSIVE");
+           console.log("locked");
+           setTimeout(() => { db.run("COMMIT"); db.close(); }, 400);`,
+          dbPath,
+        ],
+        { stdout: "pipe", stderr: "inherit" },
+      );
+      const reader = holder.stdout.getReader();
+      const { value } = await reader.read();
+      expect(new TextDecoder().decode(value)).toContain("locked");
+
+      const started = Date.now();
+      const rows = readSourceStatuses(dbPath);
+      expect(Date.now() - started).toBeGreaterThanOrEqual(200);
+      expect(rows.map((row) => row.sourceId)).toEqual(["api-production"]);
+      await holder.exited;
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });
