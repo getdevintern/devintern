@@ -19,6 +19,8 @@ import {
 import { resolveProjectConfigDir } from "../config/config-dir";
 import { RUN_ORIGIN_ENV } from "../observability/analytics";
 import type { RunOrigin } from "../state/run-recorder";
+import { readRunOutcomeHint, RUN_OUTCOME_FILE_ENV } from "../worker/run-outcome-protocol";
+import type { RunOutcomeHint } from "../worker/run-outcome-protocol";
 import {
   getWorkerFailover,
   harnessBlockedReason,
@@ -57,6 +59,34 @@ export interface AutomationRunContext {
 export interface SpawnedAutomationRun {
   completion: Promise<boolean>;
   terminate(): void;
+  /**
+   * Terminal status the child recorded, read after a clean exit. A clean exit
+   * can still be an escalated run (the agent reported its goal as blocked).
+   */
+  outcome?(): RunOutcomeHint | undefined;
+}
+
+/**
+ * Worker log line for a settled automation run. A clean exit whose recorded
+ * run escalated uses the worker's escalation wording (🛑, as auto-merge
+ * rejections do) instead of claiming completion.
+ *
+ * @param label - Log prefix such as `automation:release`
+ * @param ok - Whether the child exited cleanly
+ * @param outcome - Terminal status the child recorded, when known
+ * @param subject - Noun for the run (`""` or `"manual run "`)
+ */
+export function automationCompletionMessage(
+  label: string,
+  ok: boolean,
+  outcome: RunOutcomeHint | undefined,
+  subject = "",
+): string {
+  if (!ok) return `⚠️  [${label}] ${subject}did not complete cleanly`;
+  if (outcome?.status === "escalated") {
+    return `🛑 [${label}] ${subject}escalated: ${outcome.reason ?? "handed back to a human"}`;
+  }
+  return `✅ [${label}] ${subject}completed`;
 }
 
 /** Result of a dashboard "Run now" trigger for one automation. */
@@ -470,9 +500,11 @@ export class AutomationAcquirer implements Acquirer {
     active.lifecycle = run.completion
       .then((ok) =>
         console.log(
-          ok
-            ? `✅ [${kind}:${automation.id}] completed`
-            : `⚠️  [${kind}:${automation.id}] did not complete cleanly`,
+          automationCompletionMessage(
+            `${kind}:${automation.id}`,
+            ok,
+            ok ? run.outcome?.() : undefined,
+          ),
         ),
       )
       .catch((error) => console.error(`❌ [${kind}:${automation.id}] ${(error as Error).message}`))
@@ -823,9 +855,16 @@ export function spawnAutomationProcess(
   let exitResult: boolean | undefined;
   let terminationTimer: ReturnType<typeof setTimeout> | undefined;
   let hintDir: string | undefined;
+  let outcomeHint: RunOutcomeHint | undefined;
+  const outcomeDir = mkdtempSync(join(tmpdir(), "devintern-run-outcome-"));
+  const outcomePath = join(outcomeDir, "outcome.json");
   let settle!: (ok: boolean) => void;
   const completion = new Promise<boolean>((resolve) => {
-    settle = resolve;
+    settle = (ok) => {
+      if (ok) outcomeHint = readRunOutcomeHint(outcomePath);
+      rmSync(outcomeDir, { recursive: true, force: true });
+      resolve(ok);
+    };
   });
   const cleanupHint = () => {
     if (!hintDir) return;
@@ -868,9 +907,11 @@ export function spawnAutomationProcess(
   };
 
   const start = (env: Record<string, string | undefined>): void => {
+    // A failover re-spawn must not inherit the previous attempt's status.
+    rmSync(outcomePath, { force: true });
     const spawned = spawn(executable, args, {
       cwd: options.cwd,
-      env,
+      env: { ...env, [RUN_OUTCOME_FILE_ENV]: outcomePath },
       stdio: "inherit",
       detached,
     });
@@ -928,6 +969,7 @@ export function spawnAutomationProcess(
   return {
     completion,
     terminate: beginTermination,
+    outcome: () => outcomeHint,
   };
 }
 
