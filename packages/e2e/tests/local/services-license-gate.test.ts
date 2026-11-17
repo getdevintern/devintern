@@ -15,7 +15,7 @@
  */
 
 import { expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isolatedEnvironment } from "../../helpers/environment";
@@ -87,26 +87,27 @@ function expectOnlyHosts(proxy: RecordingProxy, allowed: string[]): string[] {
   return hosts;
 }
 
+/** Preload that pins the CLI's `/proc/self/cgroup` view (helpers/fake-cgroup-preload.cjs). */
+const FAKE_CGROUP_PRELOAD = join(import.meta.dir, "../../helpers/fake-cgroup-preload.cjs");
+
 /**
- * Whether this test process (and so its children) runs inside a systemd
- * `.service` cgroup, which `isAutomatedEnvironment`
- * (packages/code/src/lib/config/env-detector.ts) treats as automated even
- * without `CI`. A developer terminal is a `.scope`; a worker service is not.
+ * Runs the task with `CI` unset and the CLI seeing `cgroup` as its
+ * `/proc/self/cgroup`, so `isAutomatedEnvironment`
+ * (packages/code/src/lib/config/env-detector.ts) decides from that unit, not
+ * from whatever unit hosts this test run (a terminal `.scope` or a worker
+ * `.service`). Both branches therefore run on every Linux host.
  */
-function hostIsSystemdService(): boolean {
-  if (process.platform !== "linux") return false;
-  let contents: string;
-  try {
-    contents = readFileSync("/proc/self/cgroup", "utf8");
-  } catch {
-    return false;
-  }
-  return contents.split("\n").some((line) => {
-    const path = line.includes(":/") ? line.slice(line.indexOf(":/") + 1) : "";
-    const leaf = path.split("/").filter(Boolean).pop() ?? "";
-    return leaf.endsWith(".service") && !/^user@\d+\.service$/.test(leaf);
-  });
+function runWithoutCi(run: FixtureWorkspace, cgroup: string): Promise<CommandResult> {
+  delete run.env.CI;
+  delete run.env.SYSTEMD_EXEC_PID;
+  run.env.E2E_FAKE_CGROUP = cgroup;
+  return run.runTask({ bunArgs: ["--preload", FAKE_CGROUP_PRELOAD] });
 }
+
+const TERMINAL_CGROUP =
+  "0::/user.slice/user-1000.slice/user@1000.service/app.slice/e2e-terminal.scope\n";
+const SERVICE_CGROUP =
+  "0::/user.slice/user-1000.slice/user@1000.service/app.slice/e2e-worker.service\n";
 
 /** Markdown task run against a local bare remote, with the gate enabled. */
 async function withGatedTaskRun(
@@ -219,28 +220,35 @@ test.skipIf(skip)(
 );
 
 test.skipIf(skip)(
-  "a task run without CI follows the host's automation detection at the license boundary",
+  "an interactive task run (terminal scope, no CI) skips the license check and completes",
   async () => {
     await withGatedTaskRun(async (run, proxy) => {
-      delete run.env.CI;
-      const result = await run.runTask();
-      if (hostIsSystemdService()) {
-        // Running under a systemd service (e.g. a DevIntern worker) still
-        // counts as unattended, so the gate applies without CI.
-        expect(result.exitCode).toBe(AUTOMATION_ACCESS_EXIT_CODE);
-        expect(result.stderr).toContain(AUTOMATION_DENIAL);
-        await expectNoWork(run);
-      } else {
-        // Interactive use is free under FSL: no license is checked at all.
-        if (result.exitCode !== 0) {
-          throw new Error(`CLI exited ${result.exitCode}:\n${result.stdout}\n${result.stderr}`);
-        }
-        expect(`${result.stdout}\n${result.stderr}`).not.toContain("License check failed");
-        expect(run.agentInvocations().map((invocation) => invocation.mode)).toEqual(["implement"]);
-        expect(await run.remoteSha(run.head)).toBeDefined();
+      const result = await runWithoutCi(run, TERMINAL_CGROUP);
+      // Interactive use is free under FSL: no license is checked at all.
+      if (result.exitCode !== 0) {
+        throw new Error(`CLI exited ${result.exitCode}:\n${result.stdout}\n${result.stderr}`);
       }
+      expect(`${result.stdout}\n${result.stderr}`).not.toContain("License check failed");
+      expect(run.agentInvocations().map((invocation) => invocation.mode)).toEqual(["implement"]);
+      expect(await run.remoteSha(run.head)).toBeDefined();
       expect(proxy.requestsTo(POLAR_HOST)).toEqual([]);
       expect(proxy.requestsTo(SUPABASE_HOST)).toEqual([]);
+    });
+  },
+  60_000,
+);
+
+test.skipIf(skip)(
+  "a task run inside a systemd service without CI still fails closed with exit 77",
+  async () => {
+    await withGatedTaskRun(async (run, proxy) => {
+      const result = await runWithoutCi(run, SERVICE_CGROUP);
+      // A systemd service (e.g. a DevIntern worker) counts as unattended, so
+      // the gate applies without CI.
+      expect(result.exitCode).toBe(AUTOMATION_ACCESS_EXIT_CODE);
+      expect(result.stderr).toContain(AUTOMATION_DENIAL);
+      expect(proxy.requests()).toEqual([]);
+      await expectNoWork(run);
     });
   },
   60_000,
