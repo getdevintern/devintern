@@ -270,7 +270,7 @@ export function createFleetAutoMerge(
   slug: string,
   prNumber: number,
   expectedHeadSha: string,
-  options?: { lastAttempt: boolean },
+  options?: { lastAttempt: boolean; onStart?: () => void },
 ) => Promise<AutoMergeResult> {
   const { config, workspaceDir, repoManager } = deps;
   const runAutoMerge = deps.runAutoMerge ?? runAutoMergeViaCli;
@@ -284,6 +284,8 @@ export function createFleetAutoMerge(
       };
     }
     const invoke = async (signal?: AbortSignal) => {
+      // Admitted: the repo's slot is ours, so the check is no longer waiting.
+      options?.onStart?.();
       await repoManager.ensureBareClone(repo);
       await repoManager.fetch(repo.name);
       const base = await repoManager.ensureBaseWorktree(repo);

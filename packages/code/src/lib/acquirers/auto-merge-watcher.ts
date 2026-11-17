@@ -59,9 +59,14 @@ export interface AutoMergeWatcherOptions {
     repo: string,
     prNumber: number,
     expectedHeadSha: string,
-    options: { lastAttempt: boolean },
+    options: {
+      lastAttempt: boolean;
+      /** Called once the check is admitted and starts (after any wait for a slot). */
+      onStart?: () => void;
+    },
   ): Promise<AutoMergeResult>;
-  runStore?: Pick<RunStore, "createRun" | "finishRun" | "discardRun">;
+  runStore?: Pick<RunStore, "createRun" | "finishRun" | "discardRun"> &
+    Partial<Pick<RunStore, "startStep">>;
   /** Harness recorded on runs; undefined when no agent review can run. */
   harness?: () => string | undefined;
   /**
@@ -82,6 +87,11 @@ export const AUTO_MERGE_SOURCE = "github:auto-merge";
 
 export const DEFAULT_AUTO_MERGE_QUIET_SECONDS = 300;
 export const DEFAULT_AUTO_MERGE_MAX_ATTEMPTS = 3;
+
+/** Run step while the check waits for the repository's slot. */
+export const AUTO_MERGE_WAITING_STEP = "waiting-for-slot";
+/** Run step once the check is admitted and evaluating the PR. */
+export const AUTO_MERGE_CHECK_STEP = "auto-merge";
 
 /** Re-check delay after a `waiting` outcome (changes requested, head moved). */
 const WAITING_BACKOFF_MS = 10 * 60_000;
@@ -310,11 +320,15 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
     decisionKey: string,
   ): Promise<void> {
     const runId = this.beginRun(repo, prNumber);
+    // The run row exists before the check is admitted: until the supervisor
+    // grants the repo's slot it is waiting, not evaluating.
+    this.recordStep(runId, AUTO_MERGE_WAITING_STEP);
     const maxAttempts = this.options.maxAttempts ?? DEFAULT_AUTO_MERGE_MAX_ATTEMPTS;
     let result: AutoMergeResult;
     try {
       result = await this.options.mergePr(repo, prNumber, state.headSha, {
         lastAttempt: state.failures + 1 >= maxAttempts,
+        onStart: () => this.recordStep(runId, AUTO_MERGE_CHECK_STEP),
       });
     } catch (error) {
       result = { outcome: "failed", message: (error as Error).message, reviewed: false };
@@ -384,6 +398,17 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
     } catch (error) {
       console.warn(`⚠️  Run recording (auto-merge begin) failed: ${(error as Error).message}`);
       return null;
+    }
+  }
+
+  /** Best-effort step marker on the open run. */
+  private recordStep(runId: number | null, step: string): void {
+    const { runStore } = this.options;
+    if (!runStore?.startStep || runId === null) return;
+    try {
+      runStore.startStep(runId, step);
+    } catch (error) {
+      console.warn(`⚠️  Run recording (auto-merge step) failed: ${(error as Error).message}`);
     }
   }
 
