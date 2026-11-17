@@ -1,5 +1,7 @@
 import { existsSync, readFileSync, statSync } from "fs";
 import { join } from "path";
+import { parseImplementationOutcome } from "./implementation-outcome";
+import type { ImplementationOutcome } from "./implementation-outcome";
 
 /** Cap the persisted agent report so a huge transcript cannot bloat the DB. */
 export const IMPLEMENTATION_REPORT_EXCERPT_LENGTH = 10_000;
@@ -23,6 +25,11 @@ export interface ImplementationReport {
   incomplete: boolean;
   /** Agent-written report excerpt, when a fresh file exists. */
   report?: string;
+  /**
+   * Goal outcome marker from the agent's final report, parsed from the full
+   * summary file (not the excerpt). Only read for a complete implementation.
+   */
+  outcome?: ImplementationOutcome;
 }
 
 /** Mtime of a summary file, or undefined when it is absent or unreadable. */
@@ -74,9 +81,12 @@ export function readImplementationReport(taskDir: string, sinceMs: number): Impl
   if (reportPath === undefined) return { incomplete: false };
 
   try {
+    const content = readFileSync(reportPath, "utf8");
+    const outcome = incomplete ? undefined : parseImplementationOutcome(content);
     return {
       incomplete,
-      report: readFileSync(reportPath, "utf8").slice(0, IMPLEMENTATION_REPORT_EXCERPT_LENGTH),
+      report: content.slice(0, IMPLEMENTATION_REPORT_EXCERPT_LENGTH),
+      ...(outcome === undefined ? {} : { outcome }),
     };
   } catch {
     /* best-effort: recording must never fail a run */

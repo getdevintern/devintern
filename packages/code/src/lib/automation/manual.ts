@@ -17,7 +17,12 @@
 
 import { loadSingleRepoAutomations, automationTaskArgs } from "./config";
 import type { AutomationConfig } from "./config";
-import { AUTOMATION_ID_ENV, MANUAL_ORIGIN_ENV_VALUE, spawnManualAutomationRun } from "./acquirer";
+import {
+  AUTOMATION_ID_ENV,
+  MANUAL_ORIGIN_ENV_VALUE,
+  automationCompletionMessage,
+  spawnManualAutomationRun,
+} from "./acquirer";
 import type {
   AutomationRunContext,
   AutomationScheduleStatus,
@@ -105,9 +110,12 @@ export function loadStandaloneAutomationActions(
         );
     void run.completion.then((ok) => {
       console.log(
-        ok
-          ? `✅ [automation:${automation.id}] manual run completed`
-          : `⚠️  [automation:${automation.id}] manual run did not complete cleanly`,
+        automationCompletionMessage(
+          `automation:${automation.id}`,
+          ok,
+          ok ? run.outcome?.() : undefined,
+          "manual run ",
+        ),
       );
     });
     return { ok: true };

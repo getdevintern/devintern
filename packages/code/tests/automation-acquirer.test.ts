@@ -9,6 +9,7 @@ import {
   AutomationAcquirer,
   MANUAL_ORIGIN_ENV_VALUE,
   MAX_TIMER_DELAY_MS,
+  automationCompletionMessage,
   automationRunEnv,
   nextAutomationDue,
   resolveAutomationRunArgs,
@@ -20,6 +21,7 @@ import { spawnEstimationSweep } from "../src/lib/automation/estimation-acquirer"
 import { AutomationStateStore } from "../src/lib/automation/state";
 import type { AutomationConfig } from "../src/lib/automation/config";
 import { resetWorkerFailover, startWorkerFailover } from "../src/lib/worker/failover";
+import { RUN_OUTCOME_FILE_ENV } from "../src/lib/worker/run-outcome-protocol";
 import {
   HARNESS_UNAVAILABLE_EXIT_CODE,
   USAGE_LIMIT_FILE_ENV,
@@ -335,6 +337,74 @@ describe("AutomationAcquirer", () => {
     });
 
     expect(await run.completion).toBe(true);
+    expect(run.outcome?.()).toBeUndefined();
+  });
+
+  test("reads the run status the child recorded after a clean exit", async () => {
+    const hint = JSON.stringify({ status: "escalated", reason: "blocked: test gate failed" });
+    const run = spawnAutomationProcess(
+      process.execPath,
+      [
+        "-e",
+        `require("fs").writeFileSync(process.env.${RUN_OUTCOME_FILE_ENV}, ${JSON.stringify(hint)})`,
+      ],
+      { cwd: process.cwd(), env: process.env },
+    );
+
+    expect(await run.completion).toBe(true);
+    expect(run.outcome?.()).toEqual({ status: "escalated", reason: "blocked: test gate failed" });
+  });
+
+  test("a failover re-spawn does not inherit the previous attempt's status", async () => {
+    await startWorkerFailover({
+      raw: "opencode,codex",
+      checkInstalled: false,
+      sandboxName: "none",
+    });
+    const hint = JSON.stringify({ status: "deferred", reason: "harness unavailable" });
+    const run = spawnAutomationProcess(
+      process.execPath,
+      [
+        "-e",
+        `if (process.env.AGENT_HARNESS === "opencode") {
+          require("fs").writeFileSync(process.env.${RUN_OUTCOME_FILE_ENV}, ${JSON.stringify(hint)});
+          process.exit(${HARNESS_UNAVAILABLE_EXIT_CODE});
+        }`,
+      ],
+      { cwd: process.cwd(), env: process.env },
+    );
+
+    expect(await run.completion).toBe(true);
+    expect(run.outcome?.()).toBeUndefined();
+  });
+
+  test("logs an escalated clean exit with the escalation wording, not as completed", () => {
+    expect(
+      automationCompletionMessage("automation:release", true, {
+        status: "escalated",
+        reason: "blocked: push to main was refused",
+      }),
+    ).toBe("🛑 [automation:release] escalated: blocked: push to main was refused");
+    expect(
+      automationCompletionMessage(
+        "automation:release",
+        true,
+        { status: "escalated" },
+        "manual run ",
+      ),
+    ).toBe("🛑 [automation:release] manual run escalated: handed back to a human");
+    expect(
+      automationCompletionMessage("automation:release", true, {
+        status: "succeeded",
+        reason: "partial: one of two tickets created",
+      }),
+    ).toBe("✅ [automation:release] completed");
+    expect(automationCompletionMessage("automation:release", true, undefined)).toBe(
+      "✅ [automation:release] completed",
+    );
+    expect(automationCompletionMessage("automation:release", false, undefined)).toBe(
+      "⚠️  [automation:release] did not complete cleanly",
+    );
   });
 
   test("tries Codex when the scheduled harness cannot start", async () => {

@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- **Automation runs whose agent was blocked are recorded as escalated, not succeeded.** A clean exit with no changes (a `--no-git` or `allow_no_changes` automation) was always recorded `succeeded`, even when the agent's report said a gate failed, a push was refused, or a data source was unreachable. The implementation prompt now asks the agent to end with `<!-- devintern:outcome status=blocked reason="…" -->` when it could not meet the goal. A blocked run is recorded `escalated` with the reason in `outcome_reason`, and the worker logs `🛑 [automation:<id>] escalated: …` instead of `✅ … completed`. `status=partial` stays `succeeded` with the reason recorded; no marker, `done`, or `noop` behave as before. The marker is parsed only from the final report, strictly, with a bounded reason. See [Reporting a blocked run](../../docs/code/worker.md#reporting-a-blocked-run)
 - **Auto-merge reads the merge-safety verdict only from the agent's final stdout line.** Previously the parser scanned stdout and stderr together and took the last `{"safe": ...}` object, so a `{"safe": true}` literal echoed in a harness transcript on stderr (for example from the PR diff in the prompt) could approve a PR the agent had rejected or never judged. Now only the last non-empty stdout line counts, after stripping ANSI codes; anything else is "no verdict" and never merges
 
 ## [2.23.0] - 2026-11-13

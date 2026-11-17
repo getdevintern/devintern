@@ -49,6 +49,7 @@ import {
 import { pickupSelection, resolveSessionPickup } from "../state/session-pickup";
 import type { SessionPickupDecision } from "../state/session-pickup";
 import { finishTaskRun } from "../state/task-run";
+import { outcomeRunDisposition } from "../agent/implementation-outcome";
 import { TaskFormatter } from "../task/formatter";
 import type { RetryPromptContext } from "../task/formatter";
 import { buildTicketUrl } from "../task/ticket-url";
@@ -221,7 +222,8 @@ export function recordImplementationStage(
   harnessName: string,
   execution: { model?: string; effort?: string } = {},
 ): ReturnType<typeof readImplementationReport> {
-  const { incomplete, report } = readImplementationReport(taskDir, implementationStartedAt);
+  const implementationReport = readImplementationReport(taskDir, implementationStartedAt);
+  const { incomplete, report } = implementationReport;
 
   const stage = {
     status: incomplete ? ("failed" as const) : ("succeeded" as const),
@@ -256,7 +258,7 @@ export function recordImplementationStage(
     }
   }
 
-  return { incomplete, report };
+  return implementationReport;
 }
 
 /**
@@ -333,7 +335,7 @@ async function runImplementation(input: ImplementationInput): Promise<void> {
   // early success when finalize wrote the incomplete summary afterwards.
   const effectiveModel = resolveAgentModel(resolvedAgent.harness.name);
   const effectiveEffort = resolveAgentEffort();
-  const { incomplete: implementationIncomplete } = recordImplementationStage(
+  const { incomplete: implementationIncomplete, outcome } = recordImplementationStage(
     taskDir,
     implementationStartedAt,
     resolvedAgent.harness.displayName,
@@ -373,7 +375,17 @@ async function runImplementation(input: ImplementationInput): Promise<void> {
         prCreationFailure: runContext.activeTaskContext?.prCreationFailure,
       });
     }
-    await finishTaskRun("succeeded");
+    // The agent's own outcome marker decides between success and escalation
+    // for a clean run. A blocked run keeps every success side effect above
+    // (actioned record, retry-state reset) so polling does not re-dispatch it;
+    // only the recorded status changes so a human sees it.
+    const disposition = outcomeRunDisposition(outcome);
+    if (disposition.status === "escalated") {
+      console.log(`\n🛑 Agent reported the goal as not met (${disposition.reason})`);
+    } else if (disposition.reason) {
+      console.log(`\nℹ️  Agent reported the goal as ${disposition.reason}`);
+    }
+    await finishTaskRun(disposition.status, disposition.reason);
     // A later reopen of the ticket starts with a clean retry slate.
     clearRetryState(workflowKey);
   }

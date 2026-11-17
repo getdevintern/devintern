@@ -127,7 +127,7 @@ Migrating an existing workspace: PRs used to be the default. Any automation that
 
 Some recurring jobs are supposed to do nothing when there is nothing to do — "keep main green", "release only when warranted", "find flaky tests". Their prompts say to make no changes and report, but a PR-opening run with no commit used to fail with `Implementation was not committed`.
 
-Set `allow_no_changes = true` (boolean, default `false`) on those entries. When the agent finishes without changing the repository, the occurrence is recorded as a successful no-op: the run succeeds, no branch or PR is created, and no review or publish step runs. Without the flag the existing behavior is unchanged — a missing commit still fails the run.
+Set `allow_no_changes = true` (boolean, default `false`) on those entries. When the agent finishes without changing the repository, the occurrence is recorded as a successful no-op: the run succeeds, no branch or PR is created, and no review or publish step runs. Without the flag the existing behavior is unchanged — a missing commit still fails the run. A run whose agent reports that it could not meet its goal is escalated instead of succeeding; see [Reporting a blocked run](#reporting-a-blocked-run).
 
 ```toml
 [[automations]]
@@ -142,6 +142,27 @@ make no changes and report that main is already green."""
 ```
 
 The equivalent CLI flag is `--allow-no-changes` for a one-off run. Scheduled occurrences receive it automatically from the automation setting.
+
+### Reporting a blocked run
+
+A clean agent exit only means the agent stopped. A release job whose test gate failed, or a report job whose data source was unreachable, used to finish with no changes and be recorded as a successful no-op. Every implementation run (automations and tracker tasks) is now asked to state the outcome explicitly, with one line right after its final `<!-- devintern:summary:end -->` marker:
+
+```text
+<!-- devintern:outcome status=blocked reason="the unit test gate (bun run test) failed" -->
+```
+
+| `status`         | Meaning                                                                                                                                      | Recorded run                                                                                    |
+| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `blocked`        | The goal was not met: a required gate failed, a required step (push, merge, permission) was refused, or a needed dependency was unavailable. | `escalated`, with `outcome_reason` = `blocked: <reason>`                                        |
+| `partial`        | Part of the goal was met; the reason says what is missing.                                                                                   | `succeeded`, with `outcome_reason` = `partial: <reason>`, so the delivered work stays a success |
+| `noop` or `done` | Nothing to do, or the goal was met.                                                                                                          | `succeeded`                                                                                     |
+| no marker        | Same as before.                                                                                                                              | `succeeded`                                                                                     |
+
+"Nothing to do" is not blocked. A `main-red-fixer` that finds main already green should omit the marker or use `status=noop`. Your prompts can rely on the built-in instruction, or say explicitly which failures count as blocked (for example "if the test gate fails, report the run as blocked").
+
+An escalated run shows up wherever escalations already do: the dashboard run list and the automation's last run, the stats escalation rate, and `devintern report --last`. The worker logs `🛑 [automation:<id>] escalated: blocked: <reason>` instead of `✅ … completed`. The child process still exits 0, so agent failover and the transient-failure retry paths are unaffected. The next attempt is the next scheduled occurrence, or a manual **Run now** or dashboard retry.
+
+The marker is agent output, so it is parsed defensively. Only a whole line matching the format above counts. It is read only from the final report (the last complete summary block and what follows it, or the last 40 lines when there is no summary), never from inside a code fence, and the last valid marker wins. Unknown statuses and malformed markers are ignored. The reason is collapsed to one line and truncated to 300 characters. A run already escalated as an incomplete implementation is not affected by the marker.
 
 Automation occurrences always skip the clarity (feasibility) check, as if run with `--skip-clarity-check`. The prompt is operator-authored rather than a tracker ticket, so the extra assessment would only cost an agent call per run.
 
