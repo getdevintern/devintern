@@ -1,3 +1,4 @@
+import { executeGitCommandWithConfigLockRetry, hasConfigLockError } from "./git-exec";
 import { Utils } from "./registry";
 
 /**
@@ -296,6 +297,16 @@ export async function pushCurrentBranch(options?: {
         cwd,
       });
       if (pushResult.success) {
+        // `push -u` exits 0 even when recording the upstream lost the shared
+        // config lock to a concurrent task. Nothing here depends on the
+        // upstream (pushes name origin/<branch> explicitly), so restore it
+        // best-effort for interactive use without failing delivery.
+        if (hasConfigLockError(pushResult)) {
+          await executeGitCommandWithConfigLockRetry(
+            ["branch", `--set-upstream-to=origin/${currentBranch}`, currentBranch],
+            { verbose, cwd },
+          );
+        }
         return {
           success: true,
           message: `Successfully pushed '${currentBranch}' to remote and set upstream`,
