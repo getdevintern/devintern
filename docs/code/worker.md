@@ -356,6 +356,7 @@ The worker log is the diagnostic. Look for `[poll:<tracker>]` (for Jira, `[poll:
 
 - `📌 picking up KEY` — it was claimed on this tick.
 - `⏳ KEY deferred; will retry next poll` — the target repository was busy, so the task was not attempted and its claim remains pending automatically.
+- `⏳ pickup paused: no agent harness is available until <ISO time> (usage limit); N task(s) waiting` — every harness in the `AGENT_HARNESS` chain is usage-limited. Polling stops claiming and searching (logged once, and again only if the resume time changes) and keeps its cursor and pending tasks; `▶️ pickup resumed` follows on the first tick after a window resets, and waiting tickets are picked up then.
 - `⏭️ KEY skipped (previous attempt reported incomplete; ticket unchanged)` — the retry gate declined the unchanged ticket, so no run started and no PR was attempted. Edit the description or comment to unlock a retry (see [Re-running a task](#re-running-a-task)); the ticket stays deduped until it changes.
 - `⏭️ skipping KEY (already processed at this update)` — this ticket was already claimed at this version. Edit or comment on it so its update stamp changes, then wait for the next change detection.
 - `⏭️ skipping KEY (already actioned; no change since the PR)` — a PR was already created for this ticket. Edit its summary/description, re-open it, or change its labels to re-arm it; see [Tickets already actioned after a PR](#tickets-already-actioned-after-a-pr).

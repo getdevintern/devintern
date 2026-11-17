@@ -19,7 +19,11 @@ import {
 import { resolveProjectConfigDir } from "../config/config-dir";
 import { RUN_ORIGIN_ENV } from "../observability/analytics";
 import type { RunOrigin } from "../state/run-recorder";
-import { getWorkerFailover, HARNESS_UNAVAILABLE_COOLDOWN_MS } from "../worker/failover";
+import {
+  getWorkerFailover,
+  harnessBlockedReason,
+  HARNESS_UNAVAILABLE_COOLDOWN_MS,
+} from "../worker/failover";
 import {
   HARNESS_UNAVAILABLE_EXIT_CODE,
   readUsageLimitHint,
@@ -691,10 +695,6 @@ export class AutomationAcquirer implements Acquirer {
       Math.min(MAX_TIMER_DELAY_MS, Math.max(0, wakeAt - now)),
     );
   }
-}
-
-function harnessBlockedReason(untilMs: number): string {
-  return `no agent harness is available until ${new Date(untilMs).toISOString()} (usage limit)`;
 }
 
 /**
