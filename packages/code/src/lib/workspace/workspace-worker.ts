@@ -831,6 +831,24 @@ export function validateReloadedWorkspaceConfig(
  *
  * The caller has already passed the license gate.
  */
+/** Start harness failover, logging when a usage limit pauses and resumes agent work. */
+async function startLoggedWorkerFailover(
+  queue: NonNullable<Parameters<typeof startWorkerFailover>[0]>["queue"],
+): Promise<void> {
+  await startWorkerFailover({
+    queue,
+    onPause: ({ untilMs, harness, resetHint }) => {
+      console.warn(
+        `⏳ ${harness} hit a usage limit${resetHint ? ` (resets ${resetHint})` : ""} and no fallback harness is available. ` +
+          `Deferring new agent work until ${new Date(untilMs).toISOString()}.`,
+      );
+    },
+    onResume: () => {
+      console.log("▶️  Usage-limit windows elapsed — resuming agent work on the available harness");
+    },
+  });
+}
+
 export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Promise<void> {
   const configPath = options.workspacePath
     ? resolve(options.workspacePath)
@@ -868,18 +886,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   assertWorkspaceHasWork(config, retryQueue, injectedTasks, multiTeam, initialQuery);
 
   const state = openWorkspaceState(workspaceDir);
-  await startWorkerFailover({
-    queue: state.queue,
-    onPause: ({ untilMs, harness, resetHint }) => {
-      console.warn(
-        `⏳ ${harness} hit a usage limit${resetHint ? ` (resets ${resetHint})` : ""} and no fallback harness is available. ` +
-          `Deferring new agent work until ${new Date(untilMs).toISOString()}.`,
-      );
-    },
-    onResume: () => {
-      console.log("▶️  Usage-limit windows elapsed — resuming agent work on the available harness");
-    },
-  });
+  await startLoggedWorkerFailover(state.queue);
   const repoManager = new RepoManager(workspaceDir);
   const supervisor = createTaskSupervisor({
     maxConcurrency: config.workspace.execution.maxConcurrency,
