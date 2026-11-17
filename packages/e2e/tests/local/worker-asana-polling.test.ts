@@ -410,7 +410,8 @@ test.skipIf(!existsSync(cliPath))(
     const tracker = new FakeAsanaTracker();
     // Fixture default worker args include `--skip-comments`: the run makes no
     // tracker writes, so the processed task still matches the query with the
-    // same `modified_at`, and only the `(key, updated)` dedupe can stop a re-run.
+    // same `modified_at`, and only the `(key, updated)` gates (the no-PR actioned
+    // marker, then the processed-update dedupe) can stop a re-run.
     const worker = new WorkerFixture({
       tracker: "asana",
       env: tracker.environment(),
@@ -441,7 +442,9 @@ test.skipIf(!existsSync(cliPath))(
       expect(await tracker.getStatus(eligible.key), detail).toBe(tracker.statuses.todo);
       await assertIdleTicks(worker, tracker, "after the first run");
 
-      const skipLine = `skipping ${eligible.key} (already processed at this update)`;
+      // A successful run with no PR (bare remote) records an actioned marker, so
+      // the actioned gate skips the task before the processed-update dedupe.
+      const skipLine = `skipping ${eligible.key} (already actioned; no change since the PR)`;
       const skipsBefore = worker.logs.split(skipLine).length - 1;
       await assertExpiredTokenRecovery(worker, tracker);
       // The full resync re-evaluated the still-matching task and skipped it.

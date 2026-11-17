@@ -807,6 +807,11 @@ export class WorkerState {
     );
   }
 
+  /** Delete one metadata value; a missing key is a no-op. */
+  deleteMeta(key: string): void {
+    this.db.run(`DELETE FROM worker_meta WHERE key = ?`, [key]);
+  }
+
   /**
    * Whether a PR feedback comment was already addressed by this worker.
    * This is the dedupe gate for review runs — GitHub reactions carry no

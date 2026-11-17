@@ -344,6 +344,12 @@ Retry bookkeeping lives in `~/.devintern/state/queue.db` next to the worker's cu
 
 Once a ticket's pull request is created the worker records it as **actioned** in `~/.devintern/state/queue.db` and keeps it out of the sweep until the ticket genuinely changes — even when it still matches `[defaults].task_query`. This is what stops a label-based tracker (GitHub, GitLab) from re-implementing the same open issue in a loop, and it works for every polled tracker.
 
+A worker run that completes successfully without creating a PR is recorded the same way when no PR could ever be created: the remote is not GitHub, GitLab, or Bitbucket, or `[defaults].worker_task_args` omits `--create-pr`. Without the marker, the worker's own completion comment and status change would look like a ticket update and re-run the task on every poll.
+
+A PR that fails on a supported host for a reason a re-run can fix (a GitHub 5xx, a rate limit, an expired app token) is **not** recorded. The branch stays pushed, the worker posts a `Pull request could not be created` comment on the ticket (unless `--skip-comments` is set), and the next poll re-runs the **whole ticket**: a new agent session, a new implementation comment, and a new push of the same branch. The worker does not retry only the PR step. These re-runs are capped at 3 consecutive failed attempts per ticket. The run that hits the cap records the ticket as actioned, so it stays out of the sweep until someone edits it. A successful run resets the count.
+
+A PR failure that needs a human fix is recorded as actioned on the first attempt. That covers a missing `GITHUB_TOKEN` or GitHub App, a missing `BITBUCKET_TOKEN` or workspace, GitLab code-host support not enabled, and GitHub 400/404/422 validation errors. The tracker comment still explains the failure; fix the configuration, then edit the ticket to re-run it.
+
 If the project configures `prStatus` in `.devintern-code/settings.json`, the worker also moves the ticket to that status/label first. The local marker is recorded even when no `prStatus` is set (the worker logs a warning suggesting one), and even when the transition fails — a missing label, missing permission, or transient API error never makes the worker lose track of the ticket or fail the run that just created the PR.
 
 A ticket re-arms when any field the marker records changes:

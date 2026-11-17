@@ -435,7 +435,8 @@ test.skipIf(!existsSync(cliPath))(
     const tracker = new FakeLinearTracker({ clock: "wall" });
     // Fixture default args include `--skip-comments`: the run makes no tracker
     // writes, so the processed issue keeps matching the query with the same
-    // `updatedAt`, and only the `(key, updated)` dedupe can stop a re-run.
+    // `updatedAt`, and only the `(key, updated)` gates (the no-PR actioned
+    // marker, then the processed-update dedupe) can stop a re-run.
     const worker = fixtureFor(tracker);
     let failure: unknown;
     try {
@@ -456,10 +457,12 @@ test.skipIf(!existsSync(cliPath))(
       expect(tracker.updatedAt(eligible.key), detail).toBe(stamp);
       expect(await tracker.getStatus(eligible.key), detail).toBe(tracker.statuses.todo);
 
-      const skipLine = `skipping ${eligible.key} (already processed at this update)`;
+      // A successful run with no PR (bare remote) records an actioned marker, so
+      // the actioned gate skips the issue before the processed-update dedupe.
+      const skipLine = `skipping ${eligible.key} (already actioned; no change since the PR)`;
       await assertIdleTicks(worker, tracker, "after the first run");
       detail = diagnostics(worker, tracker, "idle");
-      // The evaluate step still returned the issue; dedupe skipped it.
+      // The evaluate step still returned the issue; the actioned gate skipped it.
       expect(worker.logs, detail).toContain(skipLine);
       const evaluations = tracker.searchRequests.filter(
         (request) => deltaBound(request) === undefined,
@@ -469,13 +472,15 @@ test.skipIf(!existsSync(cliPath))(
       await restartAndAssertCursor(worker, tracker);
       await assertIdleTicks(worker, tracker, "after restart");
       detail = diagnostics(worker, tracker, "after restart");
-      // `processed_events` survived the restart: same stamp, same skip.
+      // The actioned marker survived the restart: same stamp, same skip.
       expect(worker.logs, detail).toContain(skipLine);
       expect(worker.runRecords(eligible.key), detail).toHaveLength(1);
 
-      // A new `updatedAt` (a human comment) is a new dedupe key: one more run.
+      // A human edit bumps `updatedAt` past the actioned marker: one more run.
       const followUpMarker = uniqueMarker();
-      await tracker.addComment(eligible.key, `Also keep it short.\n\n${followUpMarker}\n`);
+      await tracker.editTicket(eligible.key, {
+        body: `# Expand the greeting\n\nChange the greeting to Hello, world! Also keep it short.\n\n${followUpMarker}\n`,
+      });
       await worker.waitFor(
         "the edited issue to run again",
         () =>

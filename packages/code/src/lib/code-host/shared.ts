@@ -40,6 +40,13 @@ export interface PRResult {
   changeRequest?: ChangeRequestIdentity;
   warnings?: string[];
   artifactPublication?: import("../artifacts/types").ArtifactPublication;
+  /** The remote is not a supported code host, so retrying cannot succeed. */
+  unsupportedPlatform?: boolean;
+  /**
+   * Retrying cannot succeed without a human change (missing token or code-host
+   * config, a 4xx validation error), so the worker should not re-run the ticket.
+   */
+  permanent?: boolean;
 }
 
 export const VALIDATED_GITLAB_VERSION = "19.3";

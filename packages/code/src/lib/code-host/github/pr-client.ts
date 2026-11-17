@@ -75,8 +75,13 @@ export class GitHubPRClient extends PRClient {
           }
         }
 
+        // 400/404/422 are validation errors (no commits between branches, bad
+        // base, unknown repo) that a re-run cannot fix. 401/403/429/5xx stay
+        // retryable: they cover expired tokens and rate limits.
+        const permanent = [400, 404, 422].includes(response.status);
         return {
           success: false,
+          ...(permanent ? { permanent: true } : {}),
           message: `GitHub PR creation failed: ${errorData.message || response.statusText}`,
         };
       }

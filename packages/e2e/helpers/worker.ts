@@ -699,6 +699,27 @@ export class WorkerFixture {
         ]);
   }
 
+  /** Persisted polling cursor for one tracker source (`cursors` table), if any. */
+  pollCursor(source: string): string | undefined {
+    return (
+      this.query<{ cursor_value: string | null }>(
+        "SELECT cursor_value FROM cursors WHERE source = ?",
+        [source],
+      )[0]?.cursor_value ?? undefined
+    );
+  }
+
+  /** Local actioned marker for one ticket (`actioned_tasks` table), if any. */
+  actionedTask(
+    source: string,
+    taskKey: string,
+  ): { verified: number; pending: number; updated_stamp: string | null } | undefined {
+    return this.query<{ verified: number; pending: number; updated_stamp: string | null }>(
+      "SELECT verified, pending, updated_stamp FROM actioned_tasks WHERE source = ? AND task_key = ?",
+      [source, taskKey],
+    )[0];
+  }
+
   /** Run records attributed to one scheduled automation, oldest first. */
   automationRuns(automationId: string): WorkerRunRecord[] {
     return this.query<WorkerRunRecord>(
