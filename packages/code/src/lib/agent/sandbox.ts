@@ -411,6 +411,12 @@ export interface SandboxDoctorExtras {
    */
   harnessChain?: string[];
   /**
+   * First `AGENT_HARNESS` entry when it is not a registered harness.
+   * `resolveHarness()` throws on it, so interactive and PR-review runs fail
+   * even though the worker would skip it; the report then exits non-zero.
+   */
+  unknownPrimary?: string;
+  /**
    * nono pack-profile status per harness chain entry, so the report can show
    * which runs are pack-backed and which fall back to the generic profile.
    * Probing is done by the caller (this stays pure).
@@ -523,9 +529,24 @@ function describeNextRun(
     lines.push(...r.more.map((line) => `${indent}${" ".repeat(width + 2)}${line}`));
   });
   if (decisions.some((d) => d.kind === "error") && !decisions.every((d) => d.kind === "error")) {
-    lines.push(`${indent}→ entries that fail are skipped; the chain runs with the rest`);
+    lines.push(
+      decisions[0]!.kind === "error"
+        ? `${indent}→ the worker skips failing entries, but interactive and PR-review runs ` +
+            `use the primary (${decisions[0]!.harnessName}) and fail`
+        : `${indent}⚠ the worker skips failing fallback entries; interactive and PR-review ` +
+            `runs use the primary`,
+    );
   }
   return lines;
+}
+
+/** Report line for a first AGENT_HARNESS entry that is not a registered harness. */
+function describeUnknownPrimary(name: string | undefined): string[] {
+  if (name === undefined) return [];
+  return [
+    `Primary:    AGENT_HARNESS entry "${name}" is not a registered harness; ` +
+      `interactive and PR-review runs fail (the worker skips it)`,
+  ];
 }
 
 /**
@@ -562,7 +583,9 @@ export function buildSandboxDoctorReport(
   // same one runtime spawns and the worker chain preflight use, so this line
   // cannot drift from what actually wraps each harness.
   lines.push(`Configured: AGENT_SANDBOX=${configured} (${configuredSource})`);
-  let nextRunFails = false;
+  const unknownPrimaryLines = describeUnknownPrimary(extras.unknownPrimary);
+  lines.push(...unknownPrimaryLines);
+  let nextRunFails = unknownPrimaryLines.length > 0;
   if (configured === "none") {
     lines.push("Next run:   agents run unsandboxed (sandboxing is off)");
     const suggestion = pickAutoSandboxProvider(detections, chain[0]);
@@ -581,12 +604,14 @@ export function buildSandboxDoctorReport(
         activeSandbox,
       }),
     );
-    // A provider-level error (removed/unknown/unavailable) fails every spawn;
-    // an incompatible entry is dropped from the chain, so the run only fails
-    // when no entry can be wrapped.
+    // A provider-level error (removed/unknown/unavailable) fails every spawn.
+    // Interactive and PR-review runs spawn only the primary entry
+    // (`resolveHarness()` uses the first AGENT_HARNESS entry), so a primary
+    // the provider cannot wrap fails the next run even though the worker
+    // would skip it and run a fallback.
     nextRunFails =
       decisions.some((d) => d.kind === "error" && d.reason !== "incompatible") ||
-      decisions.every((d) => d.kind === "error");
+      decisions[0]?.kind === "error";
     lines.push(...describeNextRun(decisions, detections));
   }
   lines.push("");
@@ -617,10 +642,14 @@ export function buildSandboxDoctorReport(
         lines.push(`  ${" ".repeat(9)} ⚠ ${warning}`);
       }
     }
-    // Failing entries are dropped at runtime while another can start; the
-    // next task only fails when no entry in the chain can start.
-    if (!preflight.entries.some((entry) => entry.ok)) {
+    // The worker drops failing fallbacks while another entry can start, but
+    // interactive and PR-review runs spawn only the primary, so a failing
+    // primary means the next task hits the same startup error. Failing
+    // fallbacks stay warnings (the rows above).
+    if (!preflight.entries[0]!.ok) {
       nextRunFails = true;
+    } else if (preflight.entries.some((entry) => !entry.ok)) {
+      lines.push("  ⚠ failing fallback entries are skipped by the worker; the primary can start");
     }
     lines.push("");
   }

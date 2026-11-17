@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { SupabaseAuthConfig } from "@devintern/auth";
+import { activeSandboxName, resolveHarness } from "@devintern/agent-harness";
 import {
   agentChainCheck,
   defaultAgentChainProbe,
@@ -238,22 +239,44 @@ describe("agentChainCheck", () => {
     expect(text.split("\n").filter((line) => line.includes("OPENCODE_MODEL"))).toHaveLength(1);
   });
 
-  test("only later entries ready is degraded (warn), not failed and not ok", () => {
+  test("a non-ready primary fails even when a fallback is usable (matches devintern sandbox)", () => {
     const check = agentChainCheck(
       chainProbe([
         entry("opencode", { status: "not-ready", retained: false, reason: "cannot start" }),
         entry("grok"),
       ]),
     );
+    expect(check.status).toBe("fail");
+    expect(check.detail).toContain("primary opencode cannot start");
+    expect(check.detail).toContain("interactive and PR-review runs use the primary and fail");
+    expect((check.items ?? []).join("\n")).toContain("excluded: cannot start");
+  });
+
+  test("only a non-ready fallback is degraded (warn), not failed and not ok", () => {
+    const check = agentChainCheck(
+      chainProbe([
+        entry("opencode"),
+        entry("grok", { status: "not-ready", retained: false, reason: "cannot start" }),
+      ]),
+    );
     expect(check.status).toBe("warn");
     expect(check.detail).toContain("1 of 2");
-    expect((check.items ?? []).join("\n")).toContain("excluded: cannot start");
   });
 
   test("unknown entries degrade the chain and are listed", () => {
     const check = agentChainCheck(chainProbe([entry("codex")], { unknown: ["nope"] }));
     expect(check.status).toBe("warn");
     expect((check.items ?? []).join("\n")).toContain("nope — unknown harness; excluded");
+  });
+
+  test("an unknown primary fails in AGENT_HARNESS order even when a fallback is ready", () => {
+    const check = agentChainCheck(
+      chainProbe([entry("codex")], { unknown: ["foo"], requested: ["foo", "codex"] }),
+    );
+    expect(check.status).toBe("fail");
+    expect(check.detail).toContain("primary foo is not a registered harness");
+    expect(check.items?.[0]).toBe("1. ❌ foo — unknown harness; excluded");
+    expect(check.items?.[1]).toStartWith("2. ✅ codex");
   });
 
   test("a fully ready chain is ok", () => {
@@ -308,6 +331,127 @@ describe("defaultAgentChainProbe", () => {
         else process.env[key] = value;
       }
     }
+  });
+});
+
+describe("defaultAgentChainProbe with an unknown primary", () => {
+  test("foo,codex fails the agent check, matching resolveHarness()", async () => {
+    const probe = await defaultAgentChainProbe({
+      AGENT_HARNESS: "foo,codex",
+      AGENT_SANDBOX: "none",
+      CODEX_CLI_PATH: process.execPath,
+    });
+    expect(probe.requested).toEqual(["foo", "codex"]);
+    const check = agentChainCheck(probe);
+    expect(check.status).toBe("fail");
+    expect(check.items?.[0]).toBe("1. ❌ foo — unknown harness; excluded");
+    const previous = process.env.AGENT_HARNESS;
+    try {
+      process.env.AGENT_HARNESS = "foo,codex";
+      expect(() => resolveHarness()).toThrow('Unknown agent harness: "foo"');
+    } finally {
+      if (previous === undefined) delete process.env.AGENT_HARNESS;
+      else process.env.AGENT_HARNESS = previous;
+    }
+  });
+});
+
+describe("defaultAgentChainProbe with a provider-level AGENT_SANDBOX error", () => {
+  for (const sandbox of ["srt", "bogus-provider"]) {
+    test(`AGENT_SANDBOX=${sandbox} names the sandbox, not another harness`, async () => {
+      const probe = await defaultAgentChainProbe({
+        AGENT_HARNESS: "claude-code",
+        AGENT_SANDBOX: sandbox,
+      });
+      expect(probe.entries.every((e) => e.status === "not-ready")).toBe(true);
+      expect(probe.sandboxError).toBeDefined();
+      expect(probe.alternatives).toEqual([]);
+      const check = agentChainCheck(probe);
+      expect(check.status).toBe("fail");
+      expect(check.detail).toContain(`AGENT_SANDBOX=${sandbox}`);
+      expect(check.detail).toContain(probe.sandboxError!);
+      expect(check.hint).toContain("Fix AGENT_SANDBOX");
+      expect(check.hint).not.toContain("set AGENT_HARNESS=");
+    });
+  }
+
+  test("an installed alternative is not offered when the sandbox is the problem", () => {
+    const check = agentChainCheck(
+      chainProbe([entry("claude-code", { status: "not-ready", retained: false })], {
+        sandbox: "srt",
+        sandboxError: 'AGENT_SANDBOX="srt" has been removed',
+        alternatives: [{ name: "codex", displayName: "Codex" }],
+      }),
+    );
+    expect(check.status).toBe("fail");
+    expect(check.hint).not.toContain("Codex");
+    expect(check.hint).toContain("AGENT_SANDBOX=auto");
+  });
+
+  test("an incompatible-only error still offers alternatives", () => {
+    const check = agentChainCheck(
+      chainProbe([entry("claude-code", { status: "not-ready", retained: false })], {
+        alternatives: [{ name: "codex", displayName: "Codex" }],
+      }),
+    );
+    expect(check.hint).toContain("set AGENT_HARNESS=codex");
+  });
+});
+
+describe("defaultAgentChainProbe env snapshot", () => {
+  const keys = [
+    "AGENT_HARNESS",
+    "AGENT_SANDBOX",
+    "AGENT_MODEL",
+    "AGENT_CLI_PATH",
+    "OPENCODE_MODEL",
+    "OPENCODE_CLI_PATH",
+    "DEVINTERN_HARNESS_CHAIN",
+  ];
+
+  test("reads CLI path and model overrides from the passed env only, then restores process.env", async () => {
+    const previous = new Map(keys.map((key) => [key, process.env[key]]));
+    try {
+      for (const key of keys) delete process.env[key];
+      const probe = await defaultAgentChainProbe({
+        ...process.env,
+        AGENT_HARNESS: "opencode",
+        AGENT_SANDBOX: "none",
+        OPENCODE_CLI_PATH: process.execPath,
+        OPENCODE_MODEL: "x/y",
+      });
+      expect(probe.entries.map((e) => [e.name, e.path, e.model, e.status])).toEqual([
+        ["opencode", process.execPath, "x/y (OPENCODE_MODEL)", "ready"],
+      ]);
+      for (const key of keys) expect(process.env[key]).toBeUndefined();
+    } finally {
+      for (const [key, value] of previous) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+});
+
+describe("defaultAgentChainProbe enclosing-sandbox detection", () => {
+  test("a sandbox marker in the probed env (e.g. from a repo .env) does not fake an inherited sandbox", async () => {
+    const base = {
+      ...process.env,
+      AGENT_HARNESS: "claude-code",
+      AGENT_SANDBOX: "auto",
+      CLAUDE_CLI_PATH: process.execPath,
+    };
+    const clean = await defaultAgentChainProbe(base);
+    const injected = await defaultAgentChainProbe({
+      ...base,
+      NONO_CAP_FILE: "/etc/hostname",
+      SANDBOX_RUNTIME: "1",
+    });
+    expect(injected.entries.map((e) => e.sandbox)).toEqual(clean.entries.map((e) => e.sandbox));
+    const trustedActive = activeSandboxName();
+    expect(injected.entries.some((e) => e.sandbox?.includes("(inherited)"))).toBe(
+      trustedActive !== undefined,
+    );
   });
 });
 

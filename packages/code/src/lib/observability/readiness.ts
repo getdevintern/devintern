@@ -103,10 +103,23 @@ export interface AgentChainProbeResult {
   entries: AgentChainEntryReport[];
   /** Requested names that are not registered harnesses. */
   unknown: string[];
+  /**
+   * Every requested name (canonical for known harnesses) in `AGENT_HARNESS`
+   * order, unknown names included. `requested[0]` is the primary that
+   * interactive and PR-review runs spawn. Defaults to entries then unknown.
+   */
+  requested?: string[];
   /** Set when the chain cannot be resolved at all (only unknown names). */
   error?: string;
   /** Installed harnesses outside the chain, offered when nothing is usable. */
   alternatives: Array<{ name: string; displayName: string }>;
+  /**
+   * Set when AGENT_SANDBOX itself is the problem (removed, unknown, or an
+   * unavailable explicit provider): every entry fails the same way, so
+   * switching AGENT_HARNESS cannot help. Mirrors `globalError` in
+   * `resolveHarnessChain`.
+   */
+  sandboxError?: string;
 }
 
 /**
@@ -124,15 +137,54 @@ function describeEntryModel(name: string, parsed: readonly string[]): string {
 }
 
 /**
+ * Run `fn` with `env` applied over `process.env`, restoring it afterwards.
+ *
+ * Chain resolution reads its configuration from `process.env` at every level
+ * (`<HARNESS>_CLI_PATH` / `AGENT_CLI_PATH` in path resolution and install
+ * checks, `<HARNESS>_MODEL` / `AGENT_MODEL` in model resolution, sandbox
+ * detection). The init wizard probes a `.env` it has just written but not
+ * loaded, so the whole probe must see that snapshot, not a mix of the two.
+ * A no-op when `env` is `process.env` itself.
+ */
+async function withEnvOverlay<T>(
+  env: Record<string, string | undefined>,
+  fn: () => Promise<T>,
+): Promise<T> {
+  if (env === process.env) return fn();
+  const previous = new Map<string, string | undefined>();
+  for (const [key, value] of Object.entries(env)) {
+    if (process.env[key] === value) continue;
+    previous.set(key, process.env[key]);
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  try {
+    return await fn();
+  } finally {
+    for (const [key, value] of previous) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+/**
  * Default chain probe: the worker's own startup resolution
  * (`resolveHarnessChain`), run over every requested entry. Read-only: it
  * executes `<cli> --version` through the sandbox the run would use and never
  * installs, logs in, or changes configuration.
  *
- * @param env - Environment holding AGENT_HARNESS / AGENT_SANDBOX.
+ * @param env - Environment snapshot the whole probe evaluates (AGENT_HARNESS,
+ *   AGENT_SANDBOX, CLI path and model overrides). Defaults to `process.env`.
  */
-export async function defaultAgentChainProbe(
+export function defaultAgentChainProbe(
   env: Record<string, string | undefined> = process.env,
+): Promise<AgentChainProbeResult> {
+  return withEnvOverlay(env, () => probeAgentChainFromProcessEnv(env));
+}
+
+async function probeAgentChainFromProcessEnv(
+  env: Record<string, string | undefined>,
 ): Promise<AgentChainProbeResult> {
   const sandbox = env.AGENT_SANDBOX?.trim() || "none";
   const parsed = parseHarnessList(env.AGENT_HARNESS);
@@ -145,6 +197,10 @@ export async function defaultAgentChainProbe(
       warnDeprecated: false,
       warnMiseShims: false,
       sandboxName: sandbox,
+      // No `trustedEnv`: the enclosing sandbox must come from the trusted
+      // startup snapshot (activeSandboxName's default), exactly as the worker
+      // resolves it. `env` may include a repository's `.env`, which must not
+      // be able to fake an inherited sandbox.
     });
   } catch (error) {
     return {
@@ -167,16 +223,25 @@ export async function defaultAgentChainProbe(
     ...(evaluation.packNote ? { notes: [evaluation.packNote] } : {}),
   }));
   const usable = entries.some((entry) => entry.status !== "not-ready");
+  // Provider-level errors are not about a specific harness (the same rule as
+  // `globalError` in resolveHarnessChain): no other harness would fix them.
+  const providerError = (chain.evaluations ?? [])
+    .map((evaluation) => evaluation.sandbox)
+    .find((decision) => decision?.kind === "error" && decision.reason !== "incompatible");
+  const sandboxError = providerError?.kind === "error" ? providerError.message : undefined;
   return {
     sandbox,
     entries,
     unknown,
-    alternatives: usable
-      ? []
-      : listHarnesses()
-          .filter((h) => !chain.parsed.includes(h.name))
-          .filter((h) => isHarnessInstalled(h, { includeGlobalCliPath: false }))
-          .map((h) => ({ name: h.name, displayName: h.displayName })),
+    requested: parsed,
+    ...(sandboxError ? { sandboxError } : {}),
+    alternatives:
+      usable || sandboxError
+        ? []
+        : listHarnesses()
+            .filter((h) => !chain.parsed.includes(h.name))
+            .filter((h) => isHarnessInstalled(h, { includeGlobalCliPath: false }))
+            .map((h) => ({ name: h.name, displayName: h.displayName })),
   };
 }
 
@@ -190,9 +255,13 @@ const ENTRY_ICON: Record<HarnessEntryReadiness, string> = {
  * Build the agent readiness check from a chain probe.
  *
  * - `ok`: every requested entry is ready.
- * - `warn` (degraded): at least one entry is usable, but another is excluded,
+ * - `warn` (degraded): the primary is usable, but a fallback is excluded,
  *   unknown, or carries a warning (e.g. a mise shim under a sandbox).
- * - `fail`: no requested entry can run.
+ * - `fail`: no requested entry can run, or the primary cannot (including a
+ *   primary that is not a registered harness). The worker
+ *   would fail over to a usable fallback, but interactive and PR-review runs
+ *   spawn only the primary (`resolveHarness()`), so the next such run fails.
+ *   This is the same rule `devintern sandbox` exits 1 on.
  */
 export function agentChainCheck(probe: AgentChainProbeResult): ReadinessCheck {
   if (probe.error) {
@@ -205,7 +274,19 @@ export function agentChainCheck(probe: AgentChainProbeResult): ReadinessCheck {
     };
   }
   const items: string[] = [];
-  probe.entries.forEach((entry, index) => {
+  // Render in AGENT_HARNESS order so positions match the configured chain;
+  // unknown names keep their slot instead of trailing the known entries.
+  const requested = probe.requested ?? [
+    ...probe.entries.map((entry) => entry.name),
+    ...probe.unknown,
+  ];
+  const byName = new Map(probe.entries.map((entry) => [entry.name, entry]));
+  requested.forEach((name, index) => {
+    const entry = byName.get(name);
+    if (!entry) {
+      items.push(`${index + 1}. ❌ ${name} — unknown harness; excluded`);
+      return;
+    }
     const state =
       entry.status === "ready"
         ? "ready"
@@ -218,14 +299,21 @@ export function agentChainCheck(probe: AgentChainProbeResult): ReadinessCheck {
     if (entry.hint && entry.status !== "ready") items.push(`   💡 ${entry.hint}`);
     for (const note of entry.notes ?? []) items.push(`   ℹ️  ${note}`);
   });
-  for (const name of probe.unknown) {
-    items.push(`❌ ${name} — unknown harness; excluded`);
-  }
 
   const usable = probe.entries.filter((entry) => entry.status !== "not-ready");
   const total = probe.entries.length + probe.unknown.length;
   const chainText = probe.entries.map((entry) => entry.name).join(" → ");
   const sandboxText = `AGENT_SANDBOX=${probe.sandbox}`;
+  if (probe.sandboxError) {
+    return {
+      id: "agent",
+      label: "AI agent CLI",
+      status: "fail",
+      detail: `${sandboxText} fails every harness in ${chainText || "AGENT_HARNESS"}: ${probe.sandboxError}`,
+      hint: "Fix AGENT_SANDBOX in .devintern-code/.env (e.g. AGENT_SANDBOX=auto, nono, or none); switching AGENT_HARNESS will not help",
+      items,
+    };
+  }
   if (usable.length === 0) {
     const other = probe.alternatives[0];
     return {
@@ -236,6 +324,37 @@ export function agentChainCheck(probe: AgentChainProbeResult): ReadinessCheck {
       hint: other
         ? `${other.displayName} is installed: set AGENT_HARNESS=${other.name} in .devintern-code/.env to use it`
         : "Install an agent CLI (e.g. Claude Code) or set <HARNESS>_CLI_PATH to its executable",
+      items,
+    };
+  }
+  // The primary is the first requested name, not the first resolved entry:
+  // `resolveHarness()` takes the raw first AGENT_HARNESS entry and throws
+  // when it is not a registered harness.
+  const primaryName = requested[0];
+  if (primaryName !== undefined && !byName.has(primaryName)) {
+    return {
+      id: "agent",
+      label: "AI agent CLI",
+      status: "fail",
+      detail:
+        `primary ${primaryName} is not a registered harness; the worker falls back to ` +
+        `${usable.map((entry) => entry.name).join(" → ")}, but interactive and PR-review ` +
+        `runs use the primary and fail`,
+      hint: `Fix the first AGENT_HARNESS entry or move a working harness first`,
+      items,
+    };
+  }
+  const primary = byName.get(primaryName ?? "");
+  if (primary && primary.status === "not-ready") {
+    return {
+      id: "agent",
+      label: "AI agent CLI",
+      status: "fail",
+      detail:
+        `primary ${primary.name} cannot start (${sandboxText}); the worker falls back to ` +
+        `${usable.map((entry) => entry.name).join(" → ")}, but interactive and PR-review ` +
+        `runs use the primary and fail`,
+      hint: primary.hint ?? `Fix ${primary.name} or move a working harness first in AGENT_HARNESS`,
       items,
     };
   }

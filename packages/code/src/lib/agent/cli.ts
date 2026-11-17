@@ -53,14 +53,21 @@ export async function runSandboxCommand(): Promise<never> {
       ? (loadedEnvPath as string)
       : "environment"
     : "default";
-  const harnessName = resolveHarness().harness.name;
-  const activeSandbox = activeSandboxName();
-  const preflight = await collectHarnessPreflight(configured, detections, undefined, activeSandbox);
+  const requested = parseHarnessList(process.env.AGENT_HARNESS);
   // Pack-profile status per chain entry: shows which harness runs are backed
   // by a nono pack and which fall back to the generic profile.
-  const harnessChain = parseHarnessList(process.env.AGENT_HARNESS)
+  const harnessChain = requested
     .map((name) => getHarness(name)?.name)
     .filter((name): name is string => name !== undefined);
+  // `resolveHarness()` (interactive and PR-review runs) takes the first
+  // AGENT_HARNESS entry and throws when it is unknown; report that as a failed
+  // next run instead of crashing before the report prints.
+  const unknownPrimary = getHarness(requested[0] ?? "") ? undefined : requested[0];
+  const harnessName = unknownPrimary
+    ? (harnessChain[0] ?? requested[0]!)
+    : resolveHarness().harness.name;
+  const activeSandbox = activeSandboxName();
+  const preflight = await collectHarnessPreflight(configured, detections, undefined, activeSandbox);
   const packStatuses = harnessChain.map((name) => describeNonoPack(name));
   const report = buildSandboxDoctorReport(
     detections,
@@ -68,7 +75,7 @@ export async function runSandboxCommand(): Promise<never> {
     configuredSource,
     harnessName,
     process.platform,
-    { activeSandbox, harnessChain, packStatuses, preflight },
+    { activeSandbox, harnessChain, packStatuses, preflight, unknownPrimary },
   );
   console.log(report.lines.join("\n"));
   process.exit(report.nextRunFails ? 1 : 0);

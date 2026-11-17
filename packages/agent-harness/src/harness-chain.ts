@@ -526,7 +526,14 @@ export async function resolveHarnessChain(
   const globalError = outcomes.some(
     ({ decision }) => decision?.kind === "error" && decision.reason !== "incompatible",
   );
-  const firstPassing = outcomes.findIndex(({ result }) => result.ok);
+  // Only installed entries can actually start. Uninstalled entries report a
+  // passing probe (nothing to probe) and only appear here when the caller
+  // skipped the install filter (doctors); the worker's chain never contains
+  // them alongside installed ones, so they must not decide whether a failing
+  // primary is kept.
+  const firstPassing = outcomes.findIndex(
+    ({ result }, index) => base.entries[index]!.installed && result.ok,
+  );
   const keepIndex = (index: number): boolean =>
     globalError || outcomes[index]!.result.ok || (firstPassing === -1 && index === 0);
 

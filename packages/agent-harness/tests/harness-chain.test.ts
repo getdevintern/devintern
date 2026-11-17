@@ -469,6 +469,25 @@ describe("resolveHarnessChain", () => {
     expect(chain.issues[1]!.message).not.toContain("Keeping it as the primary entry");
   });
 
+  test("an uninstalled fallback does not count as a passing entry (doctor view)", async () => {
+    // Doctors resolve with checkInstalled: false, so uninstalled entries stay
+    // in the evaluation. The worker's chain would contain only the installed
+    // primary and keep it, so the doctor must keep it too.
+    const chain = await resolveHarnessChain({
+      raw: "grok,opencode",
+      checkInstalled: false,
+      isInstalled: (entry) => entry.name === "grok",
+      sandboxName: "nono",
+      probeSandbox: () => ({ ok: false, reason: "mise: Permission denied" }),
+    });
+
+    const grok = chain.evaluations!.find((e) => e.name === "grok")!;
+    expect(grok.retained).toBe(true);
+    expect(chain.issues.find((i) => i.requested === "grok")!.message).toContain(
+      "Keeping it as the primary entry",
+    );
+  });
+
   test("probes entries in parallel", async () => {
     let inFlight = 0;
     let maxInFlight = 0;
