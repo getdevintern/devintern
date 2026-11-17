@@ -21,6 +21,18 @@ import { parseRunNowArgs, runWorkerRunNow } from "./run-now";
 
 export { parseRunNowArgs, runWorkerRunNow };
 
+/** Read-only dashboard subcommands (kept in sync with `WORKER_READ_COMMANDS`; loaded lazily). */
+const WORKER_READ_SUBCOMMANDS = new Set([
+  "runs",
+  "stats",
+  "automations",
+  "prs",
+  "queue",
+  "status",
+  "overview",
+  "logs",
+]);
+
 /** Sign in to the selected worker workspace without changing project login. */
 async function runWorkerLoginSubcommand(args: string[]): Promise<never> {
   if (hasHelpArg(args)) {
@@ -276,6 +288,9 @@ async function runWorkerDaemon(args: string[]): Promise<void> {
         "Usage: devintern worker [init|login|scaffold|add-repo|add|run-now|doctor] [options]",
       );
       console.log("       devintern worker connect [target] [--workspace <path>]");
+      console.log(
+        "       devintern worker <runs|stats|automations|prs|queue|status|overview|logs> [--json]",
+      );
       console.log("");
       console.log("Run the devintern worker daemon. The worker acquires events (reviews on");
       console.log("the agent's PRs, ready tasks from your tracker) and executes them locally.");
@@ -300,6 +315,11 @@ async function runWorkerDaemon(args: string[]): Promise<void> {
       console.log("  connect             Configure relay integrations or Sentry auto-fixes");
       console.log("  run-now             One immediate drain, ignoring working windows");
       console.log("  doctor              Check workspace readiness without starting the worker");
+      console.log("");
+      console.log("Read-only dashboard data (no dashboard, worker, or network needed; --json");
+      console.log("prints the matching /api response body):");
+      const { WORKER_READ_HELP_LINES } = await import("./dashboard-read-cli");
+      for (const line of WORKER_READ_HELP_LINES) console.log(line);
       console.log("");
       console.log("Options:");
       console.log("  --workspace <path>  Use this workspace.toml (default: ~/.devintern/");
@@ -393,5 +413,9 @@ export async function runWorkerCli(args: string[]): Promise<void> {
   if (subcommand === "init") return runWorkerInitSubcommand(rest);
   if (subcommand === "login") return runWorkerLoginSubcommand(rest);
   if (subcommand === "doctor") return runWorkerDoctorSubcommand(rest);
+  if (subcommand && WORKER_READ_SUBCOMMANDS.has(subcommand)) {
+    const { isWorkerReadCommand, runWorkerReadCommand } = await import("./dashboard-read-cli");
+    if (isWorkerReadCommand(subcommand)) process.exit(runWorkerReadCommand(subcommand, rest));
+  }
   return runWorkerDaemon(args);
 }

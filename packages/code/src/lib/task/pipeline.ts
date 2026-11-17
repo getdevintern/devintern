@@ -49,6 +49,7 @@ import {
 import { pickupSelection, resolveSessionPickup } from "../state/session-pickup";
 import type { SessionPickupDecision } from "../state/session-pickup";
 import { finishTaskRun } from "../state/task-run";
+import { outcomeRunDisposition } from "../agent/implementation-outcome";
 import { TaskFormatter } from "../task/formatter";
 import type { RetryPromptContext } from "../task/formatter";
 import { buildTicketUrl } from "../task/ticket-url";
@@ -221,7 +222,8 @@ export function recordImplementationStage(
   harnessName: string,
   execution: { model?: string; effort?: string } = {},
 ): ReturnType<typeof readImplementationReport> {
-  const { incomplete, report } = readImplementationReport(taskDir, implementationStartedAt);
+  const implementationReport = readImplementationReport(taskDir, implementationStartedAt);
+  const { incomplete, report } = implementationReport;
 
   const stage = {
     status: incomplete ? ("failed" as const) : ("succeeded" as const),
@@ -256,7 +258,7 @@ export function recordImplementationStage(
     }
   }
 
-  return { incomplete, report };
+  return implementationReport;
 }
 
 /**
@@ -333,7 +335,7 @@ async function runImplementation(input: ImplementationInput): Promise<void> {
   // early success when finalize wrote the incomplete summary afterwards.
   const effectiveModel = resolveAgentModel(resolvedAgent.harness.name);
   const effectiveEffort = resolveAgentEffort();
-  const { incomplete: implementationIncomplete } = recordImplementationStage(
+  const { incomplete: implementationIncomplete, outcome } = recordImplementationStage(
     taskDir,
     implementationStartedAt,
     resolvedAgent.harness.displayName,
@@ -343,15 +345,19 @@ async function runImplementation(input: ImplementationInput): Promise<void> {
     },
   );
 
-  if (isMarkdownTaskTracker(tracker)) {
+  // The agent's own outcome marker decides between success and escalation
+  // for a clean run. Resolve it before any tracker transition so a blocked
+  // markdown task is not written as Done while its run is escalated.
+  const disposition = outcomeRunDisposition(outcome);
+  if (isMarkdownTaskTracker(tracker) && disposition.status !== "escalated") {
     await tracker.markDoneIfSuccessful(workflowKey, taskDir);
   }
   if (implementationIncomplete) {
     await finishTaskRun("escalated", "implementation incomplete; handed back to a human");
   } else {
     // Markdown tasks have no remote PR, so `applyActionedTransition` is a
-    // no-op for them; record the (now Done) file as actioned here so a
-    // status-less sweep does not re-implement it until the file changes.
+    // no-op for them; record the file (Done, or left open when blocked) as
+    // actioned here so a sweep does not re-implement it until the file changes.
     if (isMarkdownTaskTracker(tracker)) {
       const workerState = new WorkerState();
       try {
@@ -373,7 +379,15 @@ async function runImplementation(input: ImplementationInput): Promise<void> {
         prCreationFailure: runContext.activeTaskContext?.prCreationFailure,
       });
     }
-    await finishTaskRun("succeeded");
+    // A blocked run keeps the remaining success side effects above (actioned
+    // record, PR status, retry-state reset) so polling does not re-dispatch
+    // it; a markdown task stays out of Done so the file still shows it open.
+    if (disposition.status === "escalated") {
+      console.log(`\n🛑 Agent reported the goal as not met (${disposition.reason})`);
+    } else if (disposition.reason) {
+      console.log(`\nℹ️  Agent reported the goal as ${disposition.reason}`);
+    }
+    await finishTaskRun(disposition.status, disposition.reason);
     // A later reopen of the ticket starts with a clean retry slate.
     clearRetryState(workflowKey);
   }

@@ -143,10 +143,40 @@ heartbeat every tenth consecutive failure or after about 15 minutes, so a long
 outage stays visible instead of looking like a dead worker; a recovery line is
 logged when the source reads successfully again. The per-source status (including
 consecutive failures and the last successful read) is persisted in the workspace
-database beside the schedule state for operator inspection; authentication
-failures are additionally logged as errors and are visible immediately. The
-recorded status and retry window are not yet consumed to delay polling — ticks
-keep firing on `poll_interval` — and the dashboard does not yet surface them.
+database beside the schedule state; authentication failures are additionally
+logged as errors and are visible immediately.
+
+### Source health in the dashboard
+
+When any configured error monitor's last read was not `ok`, the
+[dashboard](./dashboard.md) header shows a warning such as **1 source needs
+attention**. Select it to jump to **Source health** at the top of
+**Automations**, which lists each configured source with its provider, id,
+exact status (`auth-failed`, `unreadable`, or `rate-limited`), last successful
+read, consecutive failures, last error message, and the next retry time while
+a rate-limit window is open. Both clear on the next header poll after the
+source reads successfully again. While every source is healthy, the header
+shows nothing and Automations shows a single quiet line instead of the table.
+Only sources in the current `workspace.toml` (enabled `[[error_monitors]]`)
+are listed; rows for removed sources stay in the database for history but are
+hidden. `GET /api/sources` returns the same list as JSON, and `GET /api/worker`
+includes it as `sources`.
+
+### Rate-limit retry window
+
+When Sentry rate-limits a read and sends `Retry-After`, the worker records the
+earliest retry time and honors it: ticks inside that window skip the read
+entirely, so no request is sent, no run is recorded, and the consecutive-failure
+count does not grow. Other error monitors keep polling on their own schedules.
+The first skipped tick of a window logs one line; later skips log only with
+`--verbose`. Once the window passes, reads resume on the normal `poll_interval`
+cadence. The window is persisted, so a worker restarted mid-window still waits
+it out. A 429 without `Retry-After` keeps polling on `poll_interval`.
+
+The honored window is capped at ten poll intervals or one hour, whichever is
+longer. A larger `Retry-After` (for example from a misconfigured proxy) is
+clamped with a warning, and a persisted window beyond the cap is shortened on
+restart, so a bad hint can never stop a source indefinitely.
 
 Handled issue IDs are stored in the workspace database under a source key that
 includes the provider and configured source `id`. That prevents collisions

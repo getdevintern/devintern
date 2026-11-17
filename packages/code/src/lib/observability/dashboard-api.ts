@@ -68,6 +68,11 @@ import {
 import { WorkerState } from "../state/worker-state";
 import type { Cursor } from "../state/worker-state";
 import { deriveTaskTitle } from "./task-title";
+import {
+  createCachedWorkspaceSourcesLoader,
+  readConfiguredSourceHealth,
+} from "./dashboard-sources";
+import type { ConfiguredSource, DashboardSourcesResult } from "./dashboard-sources";
 import { scheduledJobRunFilter, toAutomationView } from "./dashboard-automation-view";
 import type { DashboardAutomationView } from "./dashboard-automation-view";
 
@@ -161,6 +166,8 @@ export interface DashboardDataOptions {
   logDirs?: string[];
   /** Tail window per capture file; tests shrink this for truncation cases. */
   maxLogBytesPerFile?: number;
+  /** Sources the running config polls; defaults to the workspace.toml list. */
+  configuredSources?: () => ConfiguredSource[];
 }
 
 interface Stores {
@@ -224,6 +231,7 @@ export interface WorkerStatusView {
   startedAt?: string;
   /** Lock file the status was read from; absent when undeterminable. */
   lockFile?: string;
+  reason?: "pid-namespace"; // `unknown` because the lock owner is in another PID namespace
 }
 
 /** One open agent PR as served by `GET /api/agent-prs`. */
@@ -285,6 +293,7 @@ export class DashboardData {
   /** Automation listing/triggering; lazily defaults to the standalone spawn path. */
   private automationActions: DashboardAutomationActions | null = null;
   private automationActionsOverride?: DashboardAutomationActions;
+  private readonly configuredSources: () => ConfiguredSource[];
 
   constructor(options: DashboardDataOptions = {}) {
     this.workingDir = options.workingDir ?? process.cwd();
@@ -299,6 +308,8 @@ export class DashboardData {
     this.inflightRetryTtlMs = options.inflightRetryTtlMs ?? INFLIGHT_RETRY_TTL_MS;
     this.inflightAutomationTtlMs = options.inflightAutomationTtlMs ?? INFLIGHT_RETRY_TTL_MS;
     this.automationActionsOverride = options.automationActions;
+    this.configuredSources =
+      options.configuredSources ?? createCachedWorkspaceSourcesLoader(this.workspaceDir);
     if (options.logDirs !== undefined) {
       // Explicit dirs keep tests hermetic; the workspace home is not probed.
       this.logDirs = options.logDirs;
@@ -580,6 +591,14 @@ export class DashboardData {
       const lastRun = this.read(undefined, (stores) => stores.runs.listRuns(filter)[0]);
       return toAutomationView(status, lastRun);
     });
+  }
+
+  /** Health of each configured automation source; never throws. */
+  getSources(): DashboardSourcesResult {
+    // The worker records source health in the workspace (or fleet) database,
+    // the same one worker liveness and the durable queue are read from; the
+    // run-history database differs for a standalone `devintern dashboard`.
+    return readConfiguredSourceHealth(this.queueDbPath, this.configuredSources);
   }
 
   /** True while a dashboard-triggered manual run for the automation is starting. */
@@ -1383,7 +1402,8 @@ export function handleStats(data: DashboardData, params: URLSearchParams): ApiRe
  * other location: the live lock wins, and `stopped` is only reported when
  * every readable lock belongs to a dead process. When no readable lock file
  * exists in either location, liveness is `unknown`: the worker may be
- * running elsewhere, and claiming "stopped" would be wrong.
+ * running elsewhere, and claiming "stopped" would be wrong. A lock from another
+ * PID namespace (read inside a sandbox) is `unknown` too and beats a stale one.
  *
  * @param workingDir - Project root the dashboard was started from
  * @param workspaceDir - Workspace home whose lock is also consulted
@@ -1399,22 +1419,27 @@ export function resolveWorkerStatus(
   if (locks.length === 0) {
     return { status: "unknown" };
   }
-  // A live lock beats a stale one regardless of which location it sits in.
-  const lock = locks.find((candidate) => candidate.running) ?? locks[0];
+  // Live beats unverifiable beats stale, whichever location each sits in.
+  const rank = (l: LockStatus) => (l.running === true ? 0 : l.running === "unknown" ? 1 : 2);
+  const lock = locks.sort((a, b) => rank(a) - rank(b))[0]; // `locks` is a fresh array
+  const unknown = lock.running === "unknown";
   return {
-    status: lock.running ? "running" : "stopped",
+    status: unknown ? "unknown" : lock.running ? "running" : "stopped",
     pid: lock.pid,
     startedAt: lock.startedAt,
     lockFile: lock.path,
+    ...(unknown ? { reason: "pid-namespace" as const } : {}),
   };
 }
 
 /**
- * `GET /api/worker` — worker liveness, queue counts, agent PRs, poll cursors.
+ * `GET /api/worker` — worker liveness, queue counts, agent PRs, poll cursors,
+ * and automation source health.
  *
  * @param data - Dashboard data source
  */
 export function handleWorkerStatus(data: DashboardData): ApiResponse {
+  const sources = data.getSources();
   return {
     status: 200,
     body: {
@@ -1431,6 +1456,9 @@ export function handleWorkerStatus(data: DashboardData): ApiResponse {
       dbMissing: data.dbMissing,
       queueDbPath: data.queueDbPath,
       queueDbMissing: data.queueDbMissing,
+      // Additive: configured automation source health (empty on read errors).
+      sources: sources.sources,
+      ...(sources.error !== undefined ? { sourcesError: sources.error } : {}),
     },
   };
 }

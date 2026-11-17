@@ -9,7 +9,7 @@ import {
   TriangleAlert,
 } from "lucide-react";
 
-import { requestHarnessFocus } from "@/components/overview/focus";
+import { requestHarnessFocus, requestSourceHealthFocus } from "@/components/overview/focus";
 import {
   formatClock,
   formatIn,
@@ -20,8 +20,14 @@ import type { HarnessAlert } from "@/components/overview/overview-model";
 import { useNow } from "@/components/overview/use-now";
 import { useOverviewPoll } from "@/components/overview/overview-store";
 import { usePoll } from "@/lib/api";
-import type { ScheduleSnapshot, WorkerResponse, WorkerStatus } from "@/lib/api";
+import type { ScheduleSnapshot, SourceHealth, WorkerResponse, WorkerStatus } from "@/lib/api";
 import { parseHash } from "@/lib/routes";
+import {
+  SOURCE_HEALTH_HASH,
+  attentionLabel,
+  attentionTitle,
+  sourcesNeedingAttention,
+} from "@/lib/source-health";
 import { cn } from "@/lib/utils";
 
 /**
@@ -147,7 +153,8 @@ function WorkerChip({
 /**
  * Worker liveness indicator. When liveness cannot be determined (no readable
  * worker lock in any known location — the worker may run from a different
- * directory), it says so explicitly instead of claiming "stopped".
+ * directory — or a lock whose owner is in another PID namespace), it says so
+ * explicitly instead of claiming "stopped".
  */
 export function WorkerStatusIndicator({ worker }: { worker: WorkerStatus }) {
   if (worker.status === "running") {
@@ -162,6 +169,18 @@ export function WorkerStatusIndicator({ worker }: { worker: WorkerStatus }) {
   }
   if (worker.status === "stopped") {
     return <WorkerChip state="stopped" label="worker stopped" />;
+  }
+  if (worker.reason === "pid-namespace") {
+    return (
+      <WorkerChip
+        state="unknown"
+        label="worker status unknown"
+        detail={worker.pid !== undefined ? ` (pid ${worker.pid})` : undefined}
+        title={`A worker lock exists${worker.lockFile ? ` at ${worker.lockFile}` : ""}${
+          worker.pid !== undefined ? ` for pid ${worker.pid}` : ""
+        }, but it was taken in another PID namespace, so the pid cannot be verified from here (for example, the dashboard runs inside a sandbox). Check \`devintern worker status\` outside the sandbox.`}
+      />
+    );
   }
   return (
     <WorkerChip
@@ -215,6 +234,33 @@ export function HarnessAlertPill({ alert, now }: { alert: HarnessAlert; now: num
         <TriangleAlert className="size-3.5" aria-hidden="true" />
       )}
       <span className="strip-label">{label}</span>
+    </a>
+  );
+}
+
+/**
+ * Warning item for automation sources whose last read failed, linking to the
+ * Source health section in Automations. Renders nothing while every source is
+ * healthy (or none is configured), so a quiet strip means a healthy source.
+ */
+export function SourceHealthPill({ sources }: { sources: readonly SourceHealth[] | undefined }) {
+  const unhealthy = sourcesNeedingAttention(sources);
+  if (unhealthy.length === 0) return null;
+  return (
+    <a
+      href={SOURCE_HEALTH_HASH}
+      className="harness-pill"
+      data-state="sources"
+      title={attentionTitle(unhealthy)}
+      onClick={(event) => {
+        // Already on Automations: the hash would not change, so scroll to the
+        // section directly. Elsewhere it focuses once it mounts.
+        if (parseHash(window.location.hash).view === "automations") event.preventDefault();
+        requestSourceHealthFocus();
+      }}
+    >
+      <TriangleAlert className="size-3.5" aria-hidden="true" />
+      <span className="strip-label">{attentionLabel(unhealthy.length)}</span>
     </a>
   );
 }
@@ -310,6 +356,7 @@ export function StatusStrip() {
     <div className="dashboard-status-strip" ref={stripRef}>
       <WorkerStatusIndicator worker={data.worker} />
       <HarnessStatus />
+      <SourceHealthPill sources={data.sources} />
       {data.schedule?.enabled ? (
         <Item
           icon={

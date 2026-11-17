@@ -3,6 +3,7 @@ import {
   IMPLEMENTATION_SUMMARY_END as SUMMARY_END,
   IMPLEMENTATION_SUMMARY_START as SUMMARY_START,
 } from "@devintern/agent-harness";
+import { IMPLEMENTATION_OUTCOME_INSTRUCTIONS } from "./implementation-outcome";
 
 /** Request a complete final summary in implementation and repair sessions. */
 export function withImplementationSummary(prompt: string): string {
@@ -30,7 +31,9 @@ List commands actually run and their results, including failures and unverified 
 ${SUMMARY_END}
 
 Do not leave sections empty or use N/A for information you did not investigate.
-Do not repeat the instructional placeholder text above in your summary.`;
+Do not repeat the instructional placeholder text above in your summary.
+
+${IMPLEMENTATION_OUTCOME_INSTRUCTIONS}`;
 }
 
 /**

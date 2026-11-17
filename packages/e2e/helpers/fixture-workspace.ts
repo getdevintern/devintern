@@ -175,6 +175,8 @@ export class FixtureWorkspace {
       prLabels?: string[];
       /** Additional CLI arguments appended after the fixture's defaults. */
       extraArgs?: string[];
+      /** Bun runtime flags placed before the CLI path (e.g. `--preload`). */
+      bunArgs?: string[];
     } = {},
   ) {
     // Estimation runs are detected from the bundled prompt, so leave the agent
@@ -185,6 +187,7 @@ export class FixtureWorkspace {
     return command(
       [
         process.execPath,
+        ...(options.bunArgs ?? []),
         cliPath,
         ...(options.query === undefined
           ? [options.taskRef ?? join(this.root, `${this.id}.md`)]

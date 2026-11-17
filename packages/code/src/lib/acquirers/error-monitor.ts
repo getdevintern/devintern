@@ -54,6 +54,16 @@ export interface IssueValidity {
 const FAILURE_LOG_EVERY = 10;
 /** Re-emit an unchanged failure at least this often, in case reads are rare. */
 const FAILURE_LOG_HEARTBEAT_MS = 15 * 60 * 1000;
+/**
+ * Upper bound on an honored provider retry window, in poll intervals. A
+ * `Retry-After` hint is untrusted (a buggy proxy or CDN can send years), and a
+ * skipped tick never reads, so an unbounded window could stall a source
+ * forever, even across restarts. Longer hints are clamped to
+ * `max(poll_interval * RETRY_WINDOW_MAX_POLLS, RETRY_WINDOW_MIN_CAP_MS)`.
+ */
+const RETRY_WINDOW_MAX_POLLS = 10;
+/** Floor for the retry-window cap so short poll intervals still honor normal hints. */
+const RETRY_WINDOW_MIN_CAP_MS = 60 * 60 * 1000;
 
 /** Adapter contract implemented once per error-monitoring vendor. */
 export interface ErrorMonitorProvider<TIssue extends ErrorMonitorIssue> {
@@ -136,6 +146,15 @@ export class ErrorMonitorAcquirer<TIssue extends ErrorMonitorIssue> implements A
   private consecutiveReadFailures = 0;
   /** Wall-clock time of the last failure warning, for the heartbeat interval. */
   private lastFailureLogAt: number | null = null;
+  /**
+   * Epoch ms before which the provider asked us not to read (rate-limited
+   * `Retry-After`). Mirrors the persisted `retry_after_at`; null when unset.
+   */
+  private retryAfterAt: number | null = null;
+  /** Whether {@link retryAfterAt} was seeded from the durable store yet. */
+  private retryWindowSeeded = false;
+  /** Retry window whose start was already logged at normal level. */
+  private loggedRetryWindow: number | null = null;
 
   constructor(options: ErrorMonitorAcquirerOptions<TIssue>) {
     this.options = {
@@ -182,6 +201,8 @@ export class ErrorMonitorAcquirer<TIssue extends ErrorMonitorIssue> implements A
     const { queue, provider, minOccurrences, maxIssuesPerTick, verbose } = this.options;
     const dedupeSource = this.name;
     try {
+      const skip = this.retryWindowSkip();
+      if (skip) return skip;
       let issues: TIssue[];
       try {
         issues = await provider.fetchIssues();
@@ -259,6 +280,78 @@ export class ErrorMonitorAcquirer<TIssue extends ErrorMonitorIssue> implements A
   }
 
   /**
+   * Honor a provider-requested retry window. While the window is open no read
+   * is attempted, nothing is persisted, and failure counters stay put; other
+   * sources poll on their own timers. The first skip of a window is logged at
+   * normal level, later skips in the same window only when verbose.
+   */
+  private retryWindowSkip(): SourceFetchOutcome<TIssue> | null {
+    this.seedRetryWindow();
+    const retryAfterAt = this.retryAfterAt;
+    if (retryAfterAt === null) return null;
+    const now = this.now();
+    if (retryAfterAt <= now) {
+      // Window passed: read on this tick and keep the normal cadence.
+      this.retryAfterAt = null;
+      this.loggedRetryWindow = null;
+      return null;
+    }
+    const waitSeconds = Math.ceil((retryAfterAt - now) / 1000);
+    const line =
+      `⏳ [${this.name}] rate-limited; skipping reads until ` +
+      `${new Date(retryAfterAt).toISOString()} (${waitSeconds}s) as the provider requested.`;
+    if (this.loggedRetryWindow !== retryAfterAt) {
+      this.loggedRetryWindow = retryAfterAt;
+      console.log(line);
+    } else if (this.options.verbose) {
+      console.log(`   ${line}`);
+    }
+    return {
+      status: "rate-limited",
+      issues: [],
+      error: this.lastOutcome.error,
+      retryAfterMs: retryAfterAt - now,
+      skipped: true,
+    };
+  }
+
+  /**
+   * Load a retry window persisted before this process started, once. Only a
+   * rate-limited row carries one; storage errors fall back to polling.
+   */
+  private seedRetryWindow(): void {
+    if (this.retryWindowSeeded) return;
+    this.retryWindowSeeded = true;
+    const store = this.options.statusStore;
+    if (!store?.getSourceStatus) return;
+    try {
+      const record = store.getSourceStatus(
+        this.options.provider.providerName,
+        this.options.sourceId,
+      );
+      if (record?.status === "rate-limited" && record.retryAfterAt !== undefined) {
+        // A row persisted by an older build (or a clock jump) may hold a window
+        // beyond the cap; never wait longer than the cap from now.
+        const now = this.now();
+        const cap = this.maxRetryWindowMs();
+        if (record.retryAfterAt - now > cap) {
+          this.retryAfterAt = now + cap;
+          console.warn(
+            `⚠️  [${this.name}] persisted retry window until ${new Date(record.retryAfterAt).toISOString()} ` +
+              `exceeds the ${Math.ceil(cap / 1000)}s cap; reads resume by ${new Date(now + cap).toISOString()}.`,
+          );
+        } else {
+          this.retryAfterAt = record.retryAfterAt;
+        }
+      }
+    } catch (error) {
+      console.warn(
+        `⚠️  [${this.name}] could not read persisted source status: ${(error as Error).message}`,
+      );
+    }
+  }
+
+  /**
    * Classify a failed read, persist the per-source status, and return the
    * outcome. Callers must not mark any issue processed on this path: a source
    * that could not be read was not read, so its cursor stays put and the next
@@ -268,12 +361,16 @@ export class ErrorMonitorAcquirer<TIssue extends ErrorMonitorIssue> implements A
     const failure = error instanceof SourceFetchError ? error : undefined;
     const status: SourceFetchFailureStatus = failure?.status ?? "unreadable";
     const message = failure?.message ?? (error as Error).message;
-    const retryAfterMs = failure?.retryAfterMs;
+    const retryAfterMs = this.clampRetryAfterMs(failure?.retryAfterMs);
+    const checkedAt = this.now();
+    // Same derivation as the persisted `retry_after_at`.
+    this.retryAfterAt =
+      status === "rate-limited" && retryAfterMs !== undefined ? checkedAt + retryAfterMs : null;
     this.persistSourceStatus({
       sourceId: this.options.sourceId,
       provider: this.options.provider.providerName,
       status,
-      checkedAt: this.now(),
+      checkedAt,
       message,
       retryAfterMs,
     });
@@ -288,12 +385,33 @@ export class ErrorMonitorAcquirer<TIssue extends ErrorMonitorIssue> implements A
     return outcome;
   }
 
+  /** Longest provider retry window this source will honor. */
+  private maxRetryWindowMs(): number {
+    return Math.max(
+      this.options.intervalSeconds * 1000 * RETRY_WINDOW_MAX_POLLS,
+      RETRY_WINDOW_MIN_CAP_MS,
+    );
+  }
+
+  /** Clamp an untrusted `Retry-After` hint to {@link maxRetryWindowMs}, logging when it applies. */
+  private clampRetryAfterMs(retryAfterMs: number | undefined): number | undefined {
+    if (retryAfterMs === undefined) return undefined;
+    const cap = this.maxRetryWindowMs();
+    if (retryAfterMs <= cap) return retryAfterMs;
+    console.warn(
+      `⚠️  [${this.name}] provider asked to wait ${Math.ceil(retryAfterMs / 1000)}s; ` +
+        `clamping the retry window to ${Math.ceil(cap / 1000)}s.`,
+    );
+    return cap;
+  }
+
   /** Record a successful read so health counters reset and the cursor may advance. */
   private recordReadSuccess(): void {
     const recoveredFrom = this.lastLoggedFailure;
     this.lastLoggedFailure = null;
     this.consecutiveReadFailures = 0;
     this.lastFailureLogAt = null;
+    this.retryAfterAt = null;
     if (recoveredFrom) {
       console.log(
         `✅ [${this.name}] source is readable again (was ${recoveredFrom.status}); polling resumed.`,
@@ -371,7 +489,9 @@ export class ErrorMonitorAcquirer<TIssue extends ErrorMonitorIssue> implements A
       case "rate-limited":
         console.warn(
           `⏳ [${this.name}] source is unreadable${streak}: rate-limited${retry} — ${message}. ` +
-            "No issues were read; the cursor was left unchanged and the next tick will retry.",
+            (retryAfterMs !== undefined
+              ? "No issues were read; the cursor was left unchanged and reads pause until the provider's retry window passes."
+              : "No issues were read; the cursor was left unchanged and the next tick will retry."),
         );
         break;
       default:

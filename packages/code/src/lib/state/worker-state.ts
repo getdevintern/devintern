@@ -180,6 +180,44 @@ function parseAgentPrRow(row: unknown): AgentPr {
 }
 
 /**
+ * Poll-cursor kinds that are pure per-change ETag/state snapshots and are safe
+ * to drop once the change closes. Losing one only causes an unconditional
+ * refetch: CI-failure dedupe lives in the webhook queue's processed-events
+ * table and the retry budget in `ci_fix_state`, never in these cursors.
+ *
+ * Deliberately excluded: `github:prcomments:<repo>#<n>` is a comment
+ * high-water mark whose loss could replay already-handled comments.
+ */
+const PER_CHANGE_CURSOR_KINDS: Record<string, readonly string[]> = {
+  // PR-state (reconciler/poller), reviews ETag, and the GitHub CI watcher.
+  github: ["pr", "reviews", "cipr", "ciactions", "cistatus"],
+  // GitLab CI watcher (namespace `gitlab`); GitLab review polling keeps no
+  // per-MR cursors.
+  gitlab: ["cipr", "ciactions", "cistatus"],
+};
+
+/**
+ * Cursor sources the worker keeps per registered change request.
+ *
+ * GitHub keys use `<repo>#<n>`; the GitLab CI watcher keys use
+ * `<instanceUrl>:<projectPath>#<iid>` (see `ciKey` in `gitlab-fleet-events.ts`).
+ * Providers without per-change cursors return an empty list.
+ */
+export function perChangeCursorSources(change: {
+  provider: string;
+  instanceUrl: string;
+  projectPath: string;
+  number: number;
+}): string[] {
+  const kinds = PER_CHANGE_CURSOR_KINDS[change.provider] ?? [];
+  const subject =
+    change.provider === "gitlab"
+      ? `${change.instanceUrl}:${change.projectPath}#${change.number}`
+      : `${change.projectPath}#${change.number}`;
+  return kinds.map((kind) => `${change.provider}:${kind}:${subject}`);
+}
+
+/**
  * SQLite-backed store for worker cursors and the agent PR registry.
  */
 export class WorkerState {
@@ -404,6 +442,85 @@ export class WorkerState {
   }
 
   /**
+   * Drop the per-change ETag/state poll cursors of one change request
+   * (see {@link perChangeCursorSources}). High-water-mark cursors such as
+   * `github:prcomments:*` are left alone.
+   *
+   * @returns Number of cursor rows deleted
+   */
+  clearChangeRequestCursors(change: {
+    provider: string;
+    instanceUrl: string;
+    projectPath: string;
+    number: number;
+  }): number {
+    return this.deleteCursorSources(perChangeCursorSources(change));
+  }
+
+  /**
+   * Drop a GitHub PR's per-PR poll cursors (`github:pr|reviews|cipr|ciactions|cistatus`).
+   *
+   * @returns Number of cursor rows deleted
+   */
+  clearPrCursors(repo: string, prNumber: number): number {
+    return this.clearChangeRequestCursors({
+      provider: "github",
+      instanceUrl: "https://github.com",
+      projectPath: repo,
+      number: prNumber,
+    });
+  }
+
+  /**
+   * Startup sweep: delete per-change poll cursors left behind by change
+   * requests whose `agent_prs` row is already `closed` (databases written
+   * before cursors were pruned on close). Idempotent. Cursors of open rows
+   * and of changes with no registry row are never touched.
+   *
+   * @returns Number of cursor rows deleted
+   */
+  pruneClosedChangeRequestCursors(): number {
+    const rows = this.db
+      .query(`SELECT provider, instance_url, project_path, change_number, state FROM agent_prs`)
+      .all();
+    const closed = new Set<string>();
+    const open = new Set<string>();
+    for (const row of rows) {
+      let sources: string[];
+      let state: unknown;
+      try {
+        const record = parseRowObject(row, "agent_prs cursor sweep row");
+        state = record.state;
+        sources = perChangeCursorSources({
+          provider: requireString(record, "provider", "agent_prs cursor sweep row"),
+          instanceUrl: requireString(record, "instance_url", "agent_prs cursor sweep row"),
+          projectPath: requireString(record, "project_path", "agent_prs cursor sweep row"),
+          number: requireNumber(record, "change_number", "agent_prs cursor sweep row"),
+        });
+      } catch {
+        continue;
+      }
+      for (const source of sources) (state === "closed" ? closed : open).add(source);
+    }
+    // Never drop a key an open row still uses, whatever the other rows say.
+    return this.deleteCursorSources([...closed].filter((source) => !open.has(source)));
+  }
+
+  private deleteCursorSources(sources: string[]): number {
+    let deleted = 0;
+    // Chunk to stay well under SQLite's bound-parameter limit.
+    for (let i = 0; i < sources.length; i += 500) {
+      const chunk = sources.slice(i, i + 500);
+      const placeholders = chunk.map(() => "?").join(", ");
+      deleted += this.db.run(
+        `DELETE FROM cursors WHERE source IN (${placeholders})`,
+        chunk,
+      ).changes;
+    }
+    return deleted;
+  }
+
+  /**
    * List all persisted polling cursors (dashboard freshness view).
    *
    * Fail-fast: a malformed row throws {@link RowParseError} so a corruption is
@@ -612,22 +729,36 @@ export class WorkerState {
   }
 
   /**
-   * Mark an agent PR as closed/merged so review polling stops watching it.
+   * Mark an agent PR as closed/merged so review polling stops watching it,
+   * and drop its per-PR ETag/state poll cursors ({@link clearPrCursors}).
    *
    * @param repo - Repo slug
    * @param prNumber - PR number
    */
   markAgentPrClosed(repo: string, prNumber: number): void {
-    this.db.run(
-      `UPDATE agent_prs SET state = 'closed', updated_at = ?
-       WHERE provider = 'github' AND repo = ? AND pr_number = ?`,
-      [Date.now(), repo, prNumber],
-    );
+    this.db.transaction(() => {
+      const { changes } = this.db.run(
+        `UPDATE agent_prs SET state = 'closed', updated_at = ?
+         WHERE provider = 'github' AND repo = ? AND pr_number = ?`,
+        [Date.now(), repo, prNumber],
+      );
+      // No registry row: the cursors may belong to another subsystem.
+      if (changes > 0) this.clearPrCursors(repo, prNumber);
+    })();
   }
 
-  /** Mark one provider-neutral registered change request closed. */
+  /**
+   * Mark one provider-neutral registered change request closed and drop its
+   * per-change poll cursors ({@link clearChangeRequestCursors}).
+   */
   markAgentChangeRequestClosed(identity: ChangeRequestIdentity): void {
-    this.db.run(
+    this.db.transaction(() => {
+      if (this.closeChangeRequestRow(identity) > 0) this.clearChangeRequestCursors(identity);
+    })();
+  }
+
+  private closeChangeRequestRow(identity: ChangeRequestIdentity): number {
+    return this.db.run(
       `UPDATE agent_prs SET state = 'closed', updated_at = ?
        WHERE provider = ? AND instance_url = ?
          AND COALESCE(project_id, '') = COALESCE(?, '')
@@ -640,7 +771,7 @@ export class WorkerState {
         identity.projectPath,
         identity.number,
       ],
-    );
+    ).changes;
   }
 
   /**
