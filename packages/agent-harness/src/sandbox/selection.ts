@@ -324,6 +324,8 @@ export function describeSandboxDecision(decision: HarnessSandboxDecision): strin
     case "inherited":
       return `${decision.activeSandbox} (inherited)`;
     case "error":
-      return `${decision.requested} (unusable)`;
+      return decision.reason === "incompatible" && decision.harnessName
+        ? `${decision.requested} (does not support ${decision.harnessName})`
+        : `${decision.requested} (${decision.reason})`;
   }
 }

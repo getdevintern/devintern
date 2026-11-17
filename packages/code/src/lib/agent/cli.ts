@@ -58,16 +58,17 @@ export async function runSandboxCommand(): Promise<never> {
   const preflight = await collectHarnessPreflight(configured, detections, undefined, activeSandbox);
   // Pack-profile status per chain entry: shows which harness runs are backed
   // by a nono pack and which fall back to the generic profile.
-  const packStatuses = parseHarnessList(process.env.AGENT_HARNESS)
-    .filter((name) => getHarness(name) !== undefined)
-    .map((name) => describeNonoPack(name));
+  const harnessChain = parseHarnessList(process.env.AGENT_HARNESS)
+    .map((name) => getHarness(name)?.name)
+    .filter((name): name is string => name !== undefined);
+  const packStatuses = harnessChain.map((name) => describeNonoPack(name));
   const report = buildSandboxDoctorReport(
     detections,
     configured,
     configuredSource,
     harnessName,
     process.platform,
-    { activeSandbox, packStatuses, preflight },
+    { activeSandbox, harnessChain, packStatuses, preflight },
   );
   console.log(report.lines.join("\n"));
   process.exit(report.nextRunFails ? 1 : 0);

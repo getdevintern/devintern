@@ -11,9 +11,15 @@ const realHarness = { ...(await import("@devintern/agent-harness")) };
 
 const resolveCalls: Array<SandboxResolutionOptions | undefined> = [];
 let failFlaky = false;
+let failWrap = false;
+const detectCalls: Array<{ fresh?: boolean } | undefined> = [];
 
 mock.module("@devintern/agent-harness", () => ({
   ...realHarness,
+  detectSandboxProviders: async (options?: { fresh?: boolean }) => {
+    detectCalls.push(options);
+    return [];
+  },
   resolveSandbox: async (options?: SandboxResolutionOptions): Promise<ResolvedSandbox | null> => {
     resolveCalls.push(options);
     if (!options?.harnessName) return null;
@@ -29,7 +35,10 @@ mock.module("@devintern/agent-harness", () => ({
         displayName: `${name} sandbox`,
         priority: 1,
         detect: async () => ({ available: true }),
-        wrapCommand: () => ({ path: "fake", args: [] }),
+        wrapCommand: () => {
+          if (failWrap) throw new Error("nono: command not found");
+          return { path: "fake", args: [] };
+        },
       },
       detection: { available: true },
       harnessName: options.harnessName,
@@ -41,6 +50,8 @@ const { getSandbox, setSandboxOverride } = await import("../src/lib/agent/sandbo
 
 beforeEach(() => {
   resolveCalls.length = 0;
+  detectCalls.length = 0;
+  failWrap = false;
   setSandboxOverride("auto");
 });
 
@@ -83,5 +94,22 @@ describe("getSandbox", () => {
 
     expect(retried?.provider.name).toBe("nono");
     expect(resolveCalls.filter((options) => options?.harnessName === "flaky")).toHaveLength(2);
+  });
+
+  test("a provider that fails to wrap is evicted and re-resolved with fresh detection", async () => {
+    const first = await getSandbox("opencode");
+    failWrap = true;
+    await expect(
+      Promise.resolve().then(() =>
+        first!.provider.wrapCommand("opencode", [], { writablePaths: [] } as never),
+      ),
+    ).rejects.toThrow("command not found");
+    failWrap = false;
+
+    const next = await getSandbox("opencode");
+    expect(next).not.toBe(first);
+    expect(resolveCalls.filter((o) => o?.harnessName === "opencode")).toHaveLength(2);
+    expect(detectCalls).toEqual([{ fresh: true }]);
+    expect(resolveCalls.at(-1)?.detections).toEqual([]);
   });
 });

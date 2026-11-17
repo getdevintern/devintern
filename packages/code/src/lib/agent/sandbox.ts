@@ -13,17 +13,20 @@
 import { existsSync } from "fs";
 
 import {
-  removedSandboxProviderMessage,
+  decideHarnessSandbox,
+  detectSandboxProviders,
+  pickAutoSandboxProvider,
   resolveHarnessChain,
   resolveSandbox,
-  sandboxInheritsEnclosingSandbox,
 } from "@devintern/agent-harness";
 import type {
   DetectedSandboxProvider,
   HarnessChainEvaluation,
+  HarnessSandboxDecision,
   NonoPackStatus,
   ResolvedSandbox,
   SandboxPolicy,
+  SandboxProvider,
 } from "@devintern/agent-harness";
 import {
   automationsDir,
@@ -43,6 +46,12 @@ let cliOverride: string | undefined;
 const cachedSandboxes = new Map<string, Promise<ResolvedSandbox | null>>();
 /** Providers already announced, so a failover onto a new provider is logged once. */
 const announcedProviders = new Set<string>();
+/**
+ * Set when a cached provider failed to wrap a spawn: provider detection is
+ * cached per process too, so the next resolution must detect afresh or it
+ * would pick the same (now unusable) provider again.
+ */
+let detectionStale = false;
 
 /**
  * Record the `--sandbox` CLI flag value. Must be called during CLI parsing,
@@ -62,6 +71,33 @@ export function setSandboxOverride(name: string | undefined): void {
 export function resetSandboxResolutionCache(): void {
   cachedSandboxes.clear();
   announcedProviders.clear();
+  detectionStale = false;
+}
+
+/**
+ * Wrap a resolved sandbox so a failing `wrapCommand` (provider uninstalled,
+ * broken, or its policy no longer satisfiable since it was resolved) evicts
+ * the memoized resolution. The failing spawn still throws; the next spawn of
+ * that harness re-runs provider detection and selection instead of reusing
+ * stale state.
+ *
+ * @param resolved - The resolution being memoized.
+ * @param key - Its cache key.
+ */
+function evictOnWrapFailure(resolved: ResolvedSandbox, key: string): ResolvedSandbox {
+  const provider = resolved.provider;
+  // Prototype-delegate instead of spreading: providers may be class instances.
+  const guarded: SandboxProvider = Object.create(provider);
+  guarded.wrapCommand = async (...args: Parameters<SandboxProvider["wrapCommand"]>) => {
+    try {
+      return await provider.wrapCommand(...args);
+    } catch (error) {
+      cachedSandboxes.delete(key);
+      detectionStale = true;
+      throw error;
+    }
+  };
+  return { ...resolved, provider: guarded };
 }
 
 /**
@@ -70,7 +106,10 @@ export function resetSandboxResolutionCache(): void {
  *
  * A failed resolution (explicit provider unusable for the harness) is not
  * memoized: the error is thrown for this spawn and the next spawn resolves
- * again, so a provider installed or fixed meanwhile is picked up.
+ * again, so a provider installed or fixed meanwhile is picked up. Likewise a
+ * memoized provider whose `wrapCommand` fails is evicted and the next spawn
+ * re-detects providers. Otherwise availability is snapshotted until the cache
+ * is reset (worker failover restart, `--sandbox` override, process restart).
  *
  * @param harnessName - The harness being wrapped, for compatibility filtering.
  * @returns The resolved sandbox, or `null` to spawn the agent directly.
@@ -79,13 +118,20 @@ export function getSandbox(harnessName: string): Promise<ResolvedSandbox | null>
   const key = `${cliOverride ?? ""}\0${harnessName}`;
   let cached = cachedSandboxes.get(key);
   if (!cached) {
-    cached = resolveSandbox({ sandboxName: cliOverride, harnessName }).then(
+    const fresh = detectionStale;
+    detectionStale = false;
+    const resolution = fresh
+      ? detectSandboxProviders({ fresh: true }).then((detections) =>
+          resolveSandbox({ sandboxName: cliOverride, harnessName, detections }),
+        )
+      : resolveSandbox({ sandboxName: cliOverride, harnessName });
+    cached = resolution.then(
       (resolved) => {
         if (resolved && !announcedProviders.has(resolved.provider.name)) {
           announcedProviders.add(resolved.provider.name);
           console.log(`🔒 Agent sandbox: ${resolved.provider.displayName}`);
         }
-        return resolved;
+        return resolved ? evictOnWrapFailure(resolved, key) : resolved;
       },
       (error: unknown) => {
         if (cachedSandboxes.get(key) === cached) cachedSandboxes.delete(key);
@@ -359,6 +405,12 @@ export interface SandboxDoctorExtras {
    */
   activeSandbox?: string;
   /**
+   * Known harness names of the configured chain (`AGENT_HARNESS`), in
+   * priority order. `auto` picks a provider per harness, so the "Next run"
+   * line names the decision for each entry. Defaults to `[harnessName]`.
+   */
+  harnessChain?: string[];
+  /**
    * nono pack-profile status per harness chain entry, so the report can show
    * which runs are pack-backed and which fall back to the generic profile.
    * Probing is done by the caller (this stays pure).
@@ -369,6 +421,111 @@ export interface SandboxDoctorExtras {
    * without executing anything in this function.
    */
   preflight?: HarnessPreflightReport;
+}
+
+/**
+ * Operator-facing "Next run" text for one shared-picker decision.
+ *
+ * Rendering only: the decision itself comes from `decideHarnessSandbox`.
+ *
+ * @param decision - Decision for one harness.
+ * @param detections - Provider detections (for unavailable reasons and the
+ *   list of valid provider names).
+ * @returns The text after `Next run:` plus optional continuation lines.
+ */
+function describeNextRunDecision(
+  decision: HarnessSandboxDecision,
+  detections: readonly DetectedSandboxProvider[],
+): { text: string; more: string[] } {
+  switch (decision.kind) {
+    case "none":
+      return { text: "agents run unsandboxed (sandboxing is off)", more: [] };
+    case "unsandboxed":
+      return {
+        text: "auto finds no usable provider — the run proceeds unsandboxed with a warning",
+        more: [],
+      };
+    case "inherited":
+      return {
+        text:
+          `already inside the ${decision.activeSandbox} sandbox — no additional sandbox will be added` +
+          (decision.provider ? "; the agent inherits the existing confinement" : ""),
+        more: [],
+      };
+    case "provider":
+      return {
+        text:
+          decision.requested === "auto"
+            ? `auto picks ${decision.provider.name} — agent wrapped with ${decision.provider.displayName}`
+            : `agent wrapped with ${decision.provider.displayName}`,
+        more: [],
+      };
+    case "error":
+      switch (decision.reason) {
+        case "removed":
+          return { text: `❌ fails — ${decision.message}`, more: [] };
+        case "unknown":
+          return {
+            text:
+              `❌ fails — unknown provider "${decision.requested}". Valid: none, auto, ` +
+              detections.map((d) => d.provider.name).join(", "),
+            more: [],
+          };
+        case "unavailable": {
+          const detection = detections.find((d) => d.provider.name === decision.requested);
+          return {
+            text:
+              `❌ fails — ${decision.requested} is not usable on this machine ` +
+              "(an explicit provider is never silently skipped):",
+            more: [detection?.detection.reason ?? "unavailable"],
+          };
+        }
+        case "incompatible":
+          return {
+            text:
+              `❌ fails — ${decision.requested} does not support the configured ` +
+              `"${decision.harnessName}" harness. Use AGENT_SANDBOX=auto (picks a compatible ` +
+              `provider per harness) or nono (any harness), or switch AGENT_HARNESS.`,
+            more: [],
+          };
+      }
+  }
+}
+
+/**
+ * Render the "Next run" block for every chain entry's decision.
+ *
+ * Collapses to one line when every entry gets the same outcome (always the
+ * case for a single harness or a provider-level error), otherwise lists the
+ * decision per harness, so `auto` never names only the primary's provider.
+ */
+function describeNextRun(
+  decisions: HarnessSandboxDecision[],
+  detections: readonly DetectedSandboxProvider[],
+): string[] {
+  const rendered = decisions.map((decision) => describeNextRunDecision(decision, detections));
+  const indent = " ".repeat(12);
+  const providerError = decisions.findIndex(
+    (d) => d.kind === "error" && d.reason !== "incompatible",
+  );
+  const uniform = rendered.every(
+    (r) => r.text === rendered[0]!.text && r.more.join() === rendered[0]!.more.join(),
+  );
+  if (uniform || providerError !== -1) {
+    const r = rendered[providerError === -1 ? 0 : providerError]!;
+    return [`Next run:   ${r.text}`, ...r.more.map((line) => `${indent}${line}`)];
+  }
+  const width = Math.max(...decisions.map((d) => (d.harnessName ?? "").length));
+  const lines = ["Next run:   per harness (each entry gets its own sandbox decision):"];
+  decisions.forEach((decision, index) => {
+    const r = rendered[index]!;
+    lines.push(`${indent}${(decision.harnessName ?? "").padEnd(width)}  ${r.text}`);
+    lines.push(...r.more.map((line) => `${indent}${" ".repeat(width + 2)}${line}`));
+  });
+  if (decisions.some((d) => d.kind === "error") && !decisions.every((d) => d.kind === "error")) {
+    lines.push(`${indent}→ entries that fail are skipped; the chain runs with the rest`);
+  }
+  return lines;
 }
 
 /**
@@ -386,7 +543,7 @@ export interface SandboxDoctorExtras {
  *   pack-profile status per harness chain entry, and collected harness
  *   readiness results.
  */
-// oxlint-disable-next-line max-params, complexity -- positional signature kept for existing callers; one branch per configured provider/next-run combination keeps the report readable.
+// oxlint-disable-next-line max-params -- positional signature kept for existing callers.
 export function buildSandboxDoctorReport(
   detections: DetectedSandboxProvider[],
   configured: string,
@@ -398,70 +555,39 @@ export function buildSandboxDoctorReport(
   const { activeSandbox, packStatuses = [], preflight } = extras;
   const lines: string[] = [];
   const linux = platform === "linux";
-  const usable = (d: DetectedSandboxProvider) =>
-    d.detection.available &&
-    (!d.provider.supportsHarness || d.provider.supportsHarness(harnessName));
-  const autoPick = detections
-    .filter((d) => usable(d) && d.provider.priority > 0)
-    .sort((a, b) => b.provider.priority - a.provider.priority)[0];
+  const chain = extras.harnessChain?.length ? [...new Set(extras.harnessChain)] : [harnessName];
 
   // What the next agent run will actually do with the current configuration.
-  let nextRunFails = false;
-  // Shared with the resolver so the doctor, the runtime error and the tests
-  // cannot drift; consulted before the generic unknown-provider branch.
-  const removedMessage = removedSandboxProviderMessage(configured);
+  // Every entry is decided by the shared picker (`decideHarnessSandbox`), the
+  // same one runtime spawns and the worker chain preflight use, so this line
+  // cannot drift from what actually wraps each harness.
   lines.push(`Configured: AGENT_SANDBOX=${configured} (${configuredSource})`);
+  let nextRunFails = false;
   if (configured === "none") {
     lines.push("Next run:   agents run unsandboxed (sandboxing is off)");
-    if (autoPick) {
+    const suggestion = pickAutoSandboxProvider(detections, chain[0]);
+    if (suggestion) {
       lines.push(
-        `            → ${autoPick.provider.name} is installed and ready; enable it with ` +
-          `AGENT_SANDBOX=${autoPick.provider.name} (or AGENT_SANDBOX=auto)`,
+        `            → ${suggestion.provider.name} is installed and ready; enable it with ` +
+          `AGENT_SANDBOX=${suggestion.provider.name} (or AGENT_SANDBOX=auto)`,
       );
     }
-  } else if (configured === "auto") {
-    lines.push(
-      activeSandbox
-        ? `Next run:   already inside the ${activeSandbox} sandbox — no additional sandbox will be added`
-        : autoPick
-          ? `Next run:   auto picks ${autoPick.provider.name} — agent wrapped with ${autoPick.provider.displayName}`
-          : "Next run:   auto finds no usable provider — the run proceeds unsandboxed with a warning",
-    );
-  } else if (removedMessage) {
-    nextRunFails = true;
-    lines.push(`Next run:   ❌ fails — ${removedMessage}`);
   } else {
-    const chosen = detections.find((d) => d.provider.name === configured);
-    if (!chosen) {
-      nextRunFails = true;
-      lines.push(
-        `Next run:   ❌ fails — unknown provider "${configured}". Valid: none, auto, ` +
-          detections.map((d) => d.provider.name).join(", "),
-      );
-    } else if (!chosen.detection.available) {
-      nextRunFails = true;
-      lines.push(
-        `Next run:   ❌ fails — ${configured} is not usable on this machine ` +
-          "(an explicit provider is never silently skipped):",
-      );
-      lines.push(`            ${chosen.detection.reason ?? "unavailable"}`);
-    } else if (chosen.provider.supportsHarness && !chosen.provider.supportsHarness(harnessName)) {
-      nextRunFails = true;
-      lines.push(
-        `Next run:   ❌ fails — ${configured} does not support the configured ` +
-          `"${harnessName}" harness. Use nono (any harness), or switch AGENT_HARNESS.`,
-      );
-    } else if (
-      activeSandbox &&
-      sandboxInheritsEnclosingSandbox({ configured, activeSandbox, provider: chosen.provider })
-    ) {
-      lines.push(
-        `Next run:   already inside the ${activeSandbox} sandbox — no additional sandbox ` +
-          "will be added; the agent inherits the existing confinement",
-      );
-    } else {
-      lines.push(`Next run:   agent wrapped with ${chosen.provider.displayName}`);
-    }
+    const decisions = chain.map((name) =>
+      decideHarnessSandbox({
+        sandboxName: configured,
+        harnessName: name,
+        detections,
+        activeSandbox,
+      }),
+    );
+    // A provider-level error (removed/unknown/unavailable) fails every spawn;
+    // an incompatible entry is dropped from the chain, so the run only fails
+    // when no entry can be wrapped.
+    nextRunFails =
+      decisions.some((d) => d.kind === "error" && d.reason !== "incompatible") ||
+      decisions.every((d) => d.kind === "error");
+    lines.push(...describeNextRun(decisions, detections));
   }
   lines.push("");
 
@@ -499,11 +625,14 @@ export function buildSandboxDoctorReport(
     lines.push("");
   }
 
-  lines.push(
-    autoPick
-      ? `AGENT_SANDBOX=auto would pick: ${autoPick.provider.name} (for AGENT_HARNESS=${harnessName})`
-      : `AGENT_SANDBOX=auto would run unsandboxed (no provider available for AGENT_HARNESS=${harnessName}).`,
-  );
+  for (const name of chain) {
+    const pick = pickAutoSandboxProvider(detections, name);
+    lines.push(
+      pick
+        ? `AGENT_SANDBOX=auto would pick: ${pick.provider.name} (for ${name})`
+        : `AGENT_SANDBOX=auto would run ${name} unsandboxed (no available provider supports it).`,
+    );
+  }
 
   // The pack block only makes sense when nono is installed.
   const nonoAvailable = detections.some((d) => d.provider.name === "nono" && d.detection.available);

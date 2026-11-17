@@ -360,18 +360,34 @@ export interface HarnessChainEvaluation {
   readonly miseShim?: MiseShimInfo;
 }
 
-/** Build the actionable issue for a harness that failed its sandbox probe. */
+/**
+ * Build the actionable issue for a harness that failed its sandbox probe.
+ *
+ * When the shared picker itself refused the harness (an explicit provider
+ * that cannot wrap it), the decision message already names the sandbox, the
+ * harness and the fixes; pinning the CLI path cannot fix that mismatch, so
+ * the CLI_PATH hint is only offered when the harness failed to start under a
+ * provider that does support it.
+ */
 function sandboxIncompatibleIssue(
   entry: HarnessChainEntry,
   providerName: string,
   reason: string,
   kept: "kept" | "dropped",
+  decision?: HarnessSandboxDecision,
 ): HarnessChainIssue {
-  const fix = `${harnessCliPathEnvKey(entry.name)}=/path/to/${entry.name}`;
   const tail =
     kept === "kept"
       ? " Keeping it as the primary entry because no other harness in the chain can start."
       : " Skipping it.";
+  if (decision?.kind === "error") {
+    return {
+      requested: entry.name,
+      reason: "sandbox-incompatible",
+      message: `Harness "${entry.name}" cannot run under AGENT_SANDBOX=${decision.requested}: ${decision.message}${tail}`,
+    };
+  }
+  const fix = `${harnessCliPathEnvKey(entry.name)}=/path/to/${entry.name}`;
   return {
     requested: entry.name,
     reason: "sandbox-incompatible",
@@ -524,7 +540,13 @@ export async function resolveHarnessChain(
     const label = decision ? describeSandboxDecision(decision) : sandboxName;
     if (!result.ok && !globalError) {
       issues.push(
-        sandboxIncompatibleIssue(entry, label, result.reason, retained ? "kept" : "dropped"),
+        sandboxIncompatibleIssue(
+          entry,
+          label,
+          result.reason,
+          retained ? "kept" : "dropped",
+          decision,
+        ),
       );
     }
     const resolvedPath = resolveExecutablePath(entry.path);
@@ -557,6 +579,14 @@ export async function resolveHarnessChain(
       status = "warning";
       reason = `resolves to a mise shim (${shim.path}); a sandbox denies its install step`;
       hint = `${miseShimFixHint(entry.name)} (the real executable, not the mise shim)`;
+    } else if (decision?.kind === "unsandboxed") {
+      // Never present an unsandboxed fallback as plain "ready": `auto` asked
+      // for isolation and this harness will run without it.
+      status = "warning";
+      reason = decision.warning.replace(/^⚠️\s*/u, "");
+      hint =
+        "Install a provider that supports this harness (nono wraps any harness), " +
+        "set AGENT_SANDBOX=none to opt out explicitly, or remove it from AGENT_HARNESS";
     } else if (failOpen) {
       status = "warning";
       reason = `sandbox readiness probe could not run (${failOpen}); kept`;

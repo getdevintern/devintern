@@ -64,6 +64,63 @@ describe("buildSandboxDoctorReport", () => {
     expect(text).toContain("AGENT_SANDBOX=nono");
   });
 
+  test("auto + chain: the Next run line lists the shared picker's provider per harness", () => {
+    const detections = [
+      detected("native", { priority: 40, harnesses: ["claude-code", "codex"] }),
+      detected("nono", { priority: 30 }),
+    ];
+    const report = buildSandboxDoctorReport(
+      detections,
+      "auto",
+      "environment",
+      "opencode",
+      "linux",
+      {
+        harnessChain: ["opencode", "codex", "grok"],
+      },
+    );
+    const text = report.lines.join("\n");
+    expect(report.nextRunFails).toBe(false);
+    expect(text).toContain("Next run:   per harness");
+    expect(text).toMatch(/opencode\s+auto picks nono/);
+    expect(text).toMatch(/codex\s+auto picks native/);
+    expect(text).toMatch(/grok\s+auto picks nono/);
+    expect(text).not.toContain("Next run:   auto picks native");
+    expect(text).toContain("AGENT_SANDBOX=auto would pick: nono (for opencode)");
+    expect(text).toContain("AGENT_SANDBOX=auto would pick: native (for codex)");
+  });
+
+  test("explicit provider incompatible with only some entries: the run keeps the rest", () => {
+    const detections = [detected("native", { priority: 40, harnesses: ["claude-code", "codex"] })];
+    const partial = buildSandboxDoctorReport(
+      detections,
+      "native",
+      "environment",
+      "opencode",
+      "linux",
+      {
+        harnessChain: ["opencode", "codex"],
+      },
+    );
+    const text = partial.lines.join("\n");
+    expect(partial.nextRunFails).toBe(false);
+    expect(text).toMatch(/opencode\s+❌ fails — native does not support the configured "opencode"/);
+    expect(text).toMatch(/codex\s+agent wrapped with native \(test\)/);
+    expect(text).toContain("entries that fail are skipped");
+
+    const none = buildSandboxDoctorReport(
+      detections,
+      "native",
+      "environment",
+      "opencode",
+      "linux",
+      {
+        harnessChain: ["opencode", "grok"],
+      },
+    );
+    expect(none.nextRunFails).toBe(true);
+  });
+
   test("auto with nothing usable: warns about unsandboxed fallback", () => {
     const report = buildSandboxDoctorReport(
       [detected("nono", { available: false, reason: "nono not found on PATH" })],

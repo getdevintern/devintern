@@ -247,6 +247,30 @@ describe("resolveHarnessChain with the shared picker", () => {
     expect(chain.entries.map((e) => e.name)).toEqual(["codex"]);
     expect(chain.issues.map((i) => i.requested)).toEqual(["opencode", "grok"]);
     expect(chain.issues[0]!.message).toContain('does not support the "opencode" harness');
+    // A provider/harness mismatch is not fixed by pinning the CLI path.
+    expect(chain.issues[0]!.message).toContain("AGENT_SANDBOX=auto");
+    expect(chain.issues[0]!.message).not.toContain("_CLI_PATH");
+    expect(chain.issues[0]!.message).not.toContain("(unusable)");
+    const opencode = chain.evaluations?.find((e) => e.name === "opencode");
+    expect(opencode?.sandboxLabel).toBe("explicit-d (does not support opencode)");
+    expect(opencode?.hint).toBeUndefined();
+  });
+
+  test("auto with no compatible provider marks entries as a warning, not plain ready", async () => {
+    const chain = await resolveHarnessChain({
+      raw: "opencode,codex",
+      isInstalled: installed,
+      sandboxName: "auto",
+      detections: [fake("codex-only-g", 40, ["codex"])],
+      activeSandbox: undefined,
+    });
+    expect(chain.entries.map((e) => e.name)).toEqual(["opencode", "codex"]);
+    const [opencode, codex] = chain.evaluations ?? [];
+    expect(opencode?.sandbox?.kind).toBe("unsandboxed");
+    expect(opencode?.status).toBe("warning");
+    expect(opencode?.reason).toContain("unsandboxed");
+    expect(opencode?.hint).toContain("nono");
+    expect(codex?.status).toBe("ready");
   });
 
   test("an unavailable explicit provider leaves the chain intact and reports every entry", async () => {
