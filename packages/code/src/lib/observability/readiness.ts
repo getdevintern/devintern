@@ -224,19 +224,17 @@ async function probeAgentChainFromProcessEnv(
       alternatives: [],
     };
   }
-  const entries = (chain.evaluations ?? []).map(
-    (evaluation): AgentChainEntryReport => ({
-      name: evaluation.name,
-      path: evaluation.resolvedPath,
-      sandbox: evaluation.sandboxLabel,
-      model: describeEntryModel(evaluation.name, chain.parsed),
-      status: evaluation.status,
-      retained: evaluation.retained && evaluation.status !== "not-ready",
-      ...(evaluation.reason ? { reason: evaluation.reason } : {}),
-      ...(evaluation.hint ? { hint: evaluation.hint } : {}),
-      ...(evaluation.packNote ? { notes: [evaluation.packNote] } : {}),
-    }),
-  );
+  const entries = (chain.evaluations ?? []).map((evaluation): AgentChainEntryReport => ({
+    name: evaluation.name,
+    path: evaluation.resolvedPath,
+    sandbox: evaluation.sandboxLabel,
+    model: describeEntryModel(evaluation.name, chain.parsed),
+    status: evaluation.status,
+    retained: evaluation.retained && evaluation.status !== "not-ready",
+    ...(evaluation.reason ? { reason: evaluation.reason } : {}),
+    ...(evaluation.hint ? { hint: evaluation.hint } : {}),
+    ...(evaluation.packNote ? { notes: [evaluation.packNote] } : {}),
+  }));
   const usable = entries.some((entry) => entry.status !== "not-ready");
   // Provider-level errors are not about a specific harness (the same rule as
   // `globalError` in resolveHarnessChain): no other harness would fix them.
