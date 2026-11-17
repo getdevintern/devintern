@@ -63,6 +63,8 @@ export interface AutoMergeWatcherOptions {
       lastAttempt: boolean;
       /** Called once the check is admitted and starts (after any wait for a slot). */
       onStart?: () => void;
+      /** The run row opened for this check; its review transcript is attributed to it. */
+      runId?: number;
     },
   ): Promise<AutoMergeResult>;
   runStore?: Pick<RunStore, "createRun" | "finishRun" | "discardRun"> &
@@ -329,6 +331,7 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
       result = await this.options.mergePr(repo, prNumber, state.headSha, {
         lastAttempt: state.failures + 1 >= maxAttempts,
         onStart: () => this.recordStep(runId, AUTO_MERGE_CHECK_STEP),
+        ...(runId !== null ? { runId } : {}),
       });
     } catch (error) {
       result = { outcome: "failed", message: (error as Error).message, reviewed: false };

@@ -316,7 +316,7 @@ How a poll cycle works:
 
 Cursors persist in `~/.devintern/state/queue.db`; after a restart the worker resumes where it left off instead of starting from "now".
 
-Polling is available for all eight trackers: Jira, Linear, GitHub Issues, GitLab Issues, Azure DevOps, Asana, Trello, and markdown. Trello polling uses the board actions feed and requires `TRELLO_DEFAULT_BOARD_ID`; Asana polling uses the Events API and requires `ASANA_DEFAULT_PROJECT_GID`; GitLab Issues polling requires `GITLAB_TOKEN` and `GITLAB_PROJECT`. A folder of markdown tasks is the fastest way to try the worker: no tracker account needed. Point `[defaults].tracker` at `markdown`, set `MARKDOWN_TASKS_DIR` in the workspace `.env`, and put the ready-tasks filter in `[defaults].task_query`.
+Polling is available for all eight trackers: Jira, Linear, GitHub Issues, GitLab Issues, Azure DevOps, Asana, Trello, and markdown. Trello polling uses the board actions feed and requires `TRELLO_DEFAULT_BOARD_ID` (without it, a worker with a `task_query` refuses to start with `Could not initialize the trello change detector`); Asana polling uses the Events API and requires `ASANA_DEFAULT_PROJECT_GID`; GitLab Issues polling requires `GITLAB_TOKEN` and `GITLAB_PROJECT`. A folder of markdown tasks is the fastest way to try the worker: no tracker account needed. Point `[defaults].tracker` at `markdown`, set `MARKDOWN_TASKS_DIR` in the workspace `.env`, and put the ready-tasks filter in `[defaults].task_query`.
 
 ### Delivery failures
 

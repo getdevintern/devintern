@@ -133,6 +133,9 @@ export interface AutoMergeOptions {
 /** Diffs above this size are not sent to the agent (rejected instead). */
 export const MAX_REVIEW_DIFF_CHARS = 150_000;
 
+/** Transcript label for the merge-safety agent (distinct from review replies). */
+export const MERGE_SAFETY_REVIEW_LOG_LABEL = "merge-safety-review";
+
 /** `mergeable_state` values meaning "mergeable and checks passing". */
 const MERGEABLE_STATES = new Set(["clean", "has_hooks"]);
 
@@ -462,7 +465,9 @@ async function reviewWithAgent(params: {
   const { options, branch, headSha, prompt } = params;
   const verbose = options.verbose ?? false;
   const worktree = options.worktree ?? {
-    prepare: (name: string) => Utils.prepareReviewWorktree(name, { verbose, cwd: options.cwd }),
+    // Read-only review of a CI-green PR: no package install needed.
+    prepare: (name: string) =>
+      Utils.prepareReviewWorktree(name, { verbose, cwd: options.cwd, installDependencies: false }),
     remove: async (path: string) => {
       const removed = await Utils.removeReviewWorktree(path, { verbose, cwd: options.cwd });
       if (!removed.success) {
@@ -492,7 +497,10 @@ async function reviewWithAgent(params: {
           ...result,
           stdout: result.stdout ?? result.output,
         }))
-      : await runAgent(prompt, workDir, verbose);
+      : await runAgent(prompt, workDir, verbose, {
+          label: MERGE_SAFETY_REVIEW_LOG_LABEL,
+          origin: "auto_merge",
+        });
     if (!run.success) {
       return { kind: "failed", ran: true, message: "merge-safety agent run failed" };
     }
