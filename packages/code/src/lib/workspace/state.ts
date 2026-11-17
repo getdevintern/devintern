@@ -85,7 +85,7 @@ export function createWorkspaceLock(workspaceDir: string = resolveWorkspaceDir()
   if (!existsSync(workspaceDir)) {
     mkdirSync(workspaceDir, { recursive: true });
   }
-  return new LockManager(workspaceDir, ".worker.lock", { plainDir: true });
+  return new LockManager(workspaceDir, ".worker.lock", { plainDir: true, reclaimForeign: true });
 }
 
 /**

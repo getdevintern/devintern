@@ -466,4 +466,42 @@ describe("agent PR reconciler", () => {
     // The fetch is still shared with the per-PR poll loop (no second request).
     expect(fresh.get(agentPrKey("acme/widgets", 40))?.data).toEqual({});
   });
+
+  test("closing a PR drops exactly its per-PR poll cursors", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 7 });
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 8 });
+    const kinds = ["pr", "reviews", "cipr", "ciactions", "cistatus"];
+    for (const n of [7, 8]) {
+      for (const kind of kinds) workerState.setCursor(`github:${kind}:acme/widgets#${n}`, "v", "e");
+      workerState.setCursor(`github:prcomments:acme/widgets#${n}`, "2026-11-01T00:00:00Z");
+    }
+    for (const source of ["jira", "github:mention:prcomments:acme/widgets", "worker:relay"]) {
+      workerState.setCursor(source, "v");
+    }
+
+    const summary = await reconcileOpenAgentPrs({
+      workerState,
+      github: {
+        async fetchPr(_repo, prNumber) {
+          return {
+            data: { state: prNumber === 7 ? "closed" : "open" },
+            etag: 'W/"2"',
+            notModified: false,
+          };
+        },
+      },
+      watched: workerState.listOpenAgentPrs(),
+    });
+
+    expect(summary.closed.map((pr) => pr.prNumber)).toEqual([7]);
+    const sources = workerState.listCursors().map((cursor) => cursor.source);
+    expect(sources.filter((source) => source.endsWith("#7"))).toEqual([
+      "github:prcomments:acme/widgets#7",
+    ]);
+    for (const kind of kinds) expect(sources).toContain(`github:${kind}:acme/widgets#8`);
+    expect(sources).toContain("github:prcomments:acme/widgets#8");
+    expect(sources).toContain("jira");
+    expect(sources).toContain("github:mention:prcomments:acme/widgets");
+    expect(sources).toContain("worker:relay");
+  });
 });

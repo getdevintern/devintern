@@ -730,6 +730,67 @@ describe("CiFailureWatcherAcquirer", () => {
     expect(workerState.listMergedAgentChangeRequests(10)).toEqual([]);
   });
 
+  test("closing a PR drops exactly its per-PR poll cursors", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 43 });
+    const kinds = ["pr", "reviews", "cipr", "ciactions", "cistatus"];
+    for (const n of [42, 43]) {
+      for (const kind of kinds) workerState.setCursor(`github:${kind}:acme/widgets#${n}`, "v", "e");
+      workerState.setCursor(`github:prcomments:acme/widgets#${n}`, "2026-11-01T00:00:00Z");
+    }
+    for (const source of ["jira", "github:mention:prcomments:acme/widgets", "worker:relay"]) {
+      workerState.setCursor(source, "v");
+    }
+    const base = makeGithub({ prState: "open", headSha: sha1, workflowRuns: [] });
+    const acquirer = new CiFailureWatcherAcquirer({
+      intervalSeconds: 60,
+      workerState,
+      queue,
+      provider: createGitHubCiProvider({
+        ...base,
+        fetchPr: async (_repo, n) => ({
+          data: { state: n === 42 ? "merged" : "open", head: { sha: sha1 } },
+          etag: 'W/"pr-2"',
+          notModified: false,
+        }),
+      }),
+      fixPr: async () => true,
+    });
+
+    await acquirer.tick();
+
+    expect(workerState.listOpenAgentPrs().map((pr) => pr.prNumber)).toEqual([43]);
+    const sources = workerState.listCursors().map((cursor) => cursor.source);
+    expect(sources.filter((source) => source.endsWith("#42"))).toEqual([
+      "github:prcomments:acme/widgets#42",
+    ]);
+    for (const kind of kinds) expect(sources).toContain(`github:${kind}:acme/widgets#43`);
+    expect(sources).toContain("jira");
+    expect(sources).toContain("github:mention:prcomments:acme/widgets");
+    expect(sources).toContain("worker:relay");
+  });
+
+  test("a re-registered PR whose CI cursors were pruned does not re-fix a handled failure", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const gh: FakeGitHubState = { prState: "open", headSha: sha1, workflowRuns: [failingRun(901)] };
+    const { acquirer, fixed } = makeAcquirer(gh);
+
+    await acquirer.tick();
+    expect(fixed).toEqual(["acme/widgets#42"]);
+
+    gh.prState = "closed";
+    await acquirer.tick();
+    expect(workerState.getCursor("github:ciactions:acme/widgets#42")).toBeNull();
+    expect(workerState.getCursor("github:cipr:acme/widgets#42")).toBeNull();
+
+    // Reopened: same head and the same failing run are observed from scratch.
+    gh.prState = "open";
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    await acquirer.tick();
+    expect(gh.seenActionsEtag).toBeUndefined();
+    expect(fixed).toEqual(["acme/widgets#42"]);
+  });
+
   test("an unusable PR state keeps the CI watch instead of unwatching", async () => {
     workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
     const base = makeGithub({ prState: "open", workflowRuns: [] });
