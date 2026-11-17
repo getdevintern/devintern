@@ -231,6 +231,7 @@ export interface WorkerStatusView {
   startedAt?: string;
   /** Lock file the status was read from; absent when undeterminable. */
   lockFile?: string;
+  reason?: "pid-namespace"; // `unknown` because the lock owner is in another PID namespace
 }
 
 /** One open agent PR as served by `GET /api/agent-prs`. */
@@ -1401,7 +1402,8 @@ export function handleStats(data: DashboardData, params: URLSearchParams): ApiRe
  * other location: the live lock wins, and `stopped` is only reported when
  * every readable lock belongs to a dead process. When no readable lock file
  * exists in either location, liveness is `unknown`: the worker may be
- * running elsewhere, and claiming "stopped" would be wrong.
+ * running elsewhere, and claiming "stopped" would be wrong. A lock from another
+ * PID namespace (read inside a sandbox) is `unknown` too and beats a stale one.
  *
  * @param workingDir - Project root the dashboard was started from
  * @param workspaceDir - Workspace home whose lock is also consulted
@@ -1417,13 +1419,16 @@ export function resolveWorkerStatus(
   if (locks.length === 0) {
     return { status: "unknown" };
   }
-  // A live lock beats a stale one regardless of which location it sits in.
-  const lock = locks.find((candidate) => candidate.running) ?? locks[0];
+  // Live beats unverifiable beats stale, whichever location each sits in.
+  const rank = (l: LockStatus) => (l.running === true ? 0 : l.running === "unknown" ? 1 : 2);
+  const lock = locks.sort((a, b) => rank(a) - rank(b))[0]; // `locks` is a fresh array
+  const unknown = lock.running === "unknown";
   return {
-    status: lock.running ? "running" : "stopped",
+    status: unknown ? "unknown" : lock.running ? "running" : "stopped",
     pid: lock.pid,
     startedAt: lock.startedAt,
     lockFile: lock.path,
+    ...(unknown ? { reason: "pid-namespace" as const } : {}),
   };
 }
 

@@ -319,6 +319,26 @@ describe("devintern worker read-only dashboard commands", () => {
     expect(run("logs", []).stdout).toContain("Processing PROJ-1");
   });
 
+  test("status says unknown when the worker lock is from another PID namespace", () => {
+    writeFileSync(
+      join(workspaceDir, ".worker.lock"),
+      JSON.stringify({
+        pid: 999_999_999,
+        timestamp: "2026-11-17T10:11:59.687Z",
+        heartbeatAt: new Date().toISOString(),
+        pidNamespace: "pid:[foreign-test-namespace]",
+      }),
+    );
+    const text = run("status", []).stdout;
+    expect(text).toContain(
+      "Worker:     unknown (cannot verify from this sandbox; pid 999999999) since 2026-11-17T10:11:59.687Z",
+    );
+    expect(JSON.parse(run("status", ["--json"]).stdout).worker).toMatchObject({
+      status: "unknown",
+      reason: "pid-namespace",
+    });
+  });
+
   test("--workspace accepts the workspace dir or its workspace.toml", () => {
     process.env.DEVINTERN_WORKSPACE_DIR = mkdtempSync(join(tmpdir(), "worker-read-other-"));
     try {
