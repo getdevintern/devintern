@@ -52,7 +52,7 @@ When the worker is stopped or every agent harness is usage-limited, in-progress 
 Three lists sit below the running rows:
 
 - **Waiting to retry** appears only when a task's latest attempt was deferred in the last 48 hours (for example after an agent usage limit), with the reason and the step it stopped at.
-- **Queued** appears only when the worker has accepted work it has not started yet: ad-hoc tasks from `devintern worker add` or **New task**, retries scheduled from the dashboard, and pull request events waiting for pickup. It is collapsed by default, and its header names the next item. Rows are ordered by when they become eligible and show the source, repository, and how long the item has waited, or when a deferred task's backoff ends. Select a row to expand its details: who queued it, deferrals and attempts, the last error, the full ad-hoc prompt, or a link to the run being retried. Up to 50 items per source are listed; `GET /api/queue` returns the same list as JSON.
+- **Queued** appears only when the worker has accepted work it has not started yet: ad-hoc tasks from `devintern worker add` or **New task**, retries scheduled from the dashboard, pull request events waiting for pickup, and automations waiting for their repository's checkout to be free. It is collapsed by default, and its header names the next item. Rows are ordered by when they become eligible and show the source, repository, and how long the item has waited, or when a deferred task's backoff ends. Select a row to expand its details: who queued it, deferrals and attempts, the last error, the full ad-hoc prompt, or a link to the run being retried. Up to 50 items per source are listed; `GET /api/queue` returns the same list as JSON.
 - **Recently finished** is collapsed by default and holds the last five finished tasks with their outcome and pull request. **View all runs** opens the full history in **Runs**.
 
 Repeat attempts at the same task are folded into one row. The former **Task activity** page now lives here; old `#/activity` links open **Overview**.
@@ -87,6 +87,8 @@ Missing credentials, usage limits, and failed verification checks are configurat
 Open **Automations**, find the automation, and choose **Run now**. When automations target more than one repository, the list groups them: automations without a `repo` come first under **General**, then one group per repository in name order, with enabled automations ahead of disabled ones and the soonest next run first. The worker runs it through the same pipeline as a scheduled occurrence, including its normal repository, environment, and overlap protection.
 
 Open an automation from the list to read its full prompt, see its schedule and next run, and review its recent runs.
+
+An automation runs in its repository's base checkout, which one job uses at a time. When a review reply, conflict resolution, or another automation is using it, a started occurrence (scheduled or **Run now**) waits for the checkout and has no run yet. The list and the automation's page then show **Waiting for a slot** with how long it has waited, the Overview lists it under **Queued**, and **Run now** stays disabled. It starts by itself once the checkout is free; **Starting** shows until its run appears.
 
 This is useful for testing a new automation prompt or running routine work early.
 

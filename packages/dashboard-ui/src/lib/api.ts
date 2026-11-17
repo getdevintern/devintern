@@ -368,6 +368,22 @@ export interface AutomationSchedule {
   runFilter?: ScheduledJobRunFilter;
   /** Most recent run of this automation (any origin). */
   lastRun?: RunRecord;
+  /** Occurrence in flight on this worker, including one still waiting for a slot. */
+  activity?: AutomationActivity;
+}
+
+/**
+ * What an occurrence is doing before (or while) its run record exists. A run
+ * waiting for a free slot has no run row yet, so this is its only trace.
+ */
+export interface AutomationActivity {
+  /** `waiting`: not admitted yet. `running`: the run's process has started. */
+  state: "waiting" | "running";
+  /** When the occurrence entered this state (epoch ms). */
+  since: number;
+  trigger: "scheduled" | "manual";
+  /** Why a waiting occurrence has not started yet. */
+  reason?: string;
 }
 
 export interface AutomationsResponse {
@@ -531,7 +547,7 @@ export interface WorkerResponse {
 }
 
 /** Where a queued item came from. */
-export type QueuedWorkKind = "ad-hoc" | "retry" | "webhook";
+export type QueuedWorkKind = "ad-hoc" | "retry" | "webhook" | "automation";
 
 /** One pending item from `GET /api/queue`; running rows are active work instead. */
 export interface QueuedWorkItem {
@@ -557,6 +573,8 @@ export interface QueuedWorkItem {
   prUrl?: string;
   attempts?: number;
   lastError?: string;
+  /** Automation: the scheduled job waiting for a slot. */
+  automationId?: string;
 }
 
 export interface QueuedWorkResponse {

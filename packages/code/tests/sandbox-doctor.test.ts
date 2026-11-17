@@ -49,6 +49,21 @@ function setCliPaths(paths: Record<string, string>): () => void {
 }
 
 describe("buildSandboxDoctorReport", () => {
+  test("an unknown primary fails the next run even with a usable fallback", () => {
+    const report = buildSandboxDoctorReport(
+      [detected("nono", { priority: 30 })],
+      "none",
+      "default",
+      "codex",
+      "linux",
+      { harnessChain: ["codex"], unknownPrimary: "foo" },
+    );
+    expect(report.nextRunFails).toBe(true);
+    expect(report.lines.join("\n")).toContain(
+      'AGENT_HARNESS entry "foo" is not a registered harness',
+    );
+  });
+
   test("sandboxing off: says so and suggests the best installed provider", () => {
     const report = buildSandboxDoctorReport(
       [detected("nono", { priority: 30 })],
@@ -62,6 +77,79 @@ describe("buildSandboxDoctorReport", () => {
     expect(text).toContain("agents run unsandboxed (sandboxing is off)");
     expect(text).toContain("nono is installed and ready");
     expect(text).toContain("AGENT_SANDBOX=nono");
+  });
+
+  test("auto + chain: the Next run line lists the shared picker's provider per harness", () => {
+    const detections = [
+      detected("native", { priority: 40, harnesses: ["claude-code", "codex"] }),
+      detected("nono", { priority: 30 }),
+    ];
+    const report = buildSandboxDoctorReport(
+      detections,
+      "auto",
+      "environment",
+      "opencode",
+      "linux",
+      {
+        harnessChain: ["opencode", "codex", "grok"],
+      },
+    );
+    const text = report.lines.join("\n");
+    expect(report.nextRunFails).toBe(false);
+    expect(text).toContain("Next run:   per harness");
+    expect(text).toMatch(/opencode\s+auto picks nono/);
+    expect(text).toMatch(/codex\s+auto picks native/);
+    expect(text).toMatch(/grok\s+auto picks nono/);
+    expect(text).not.toContain("Next run:   auto picks native");
+    expect(text).toContain("AGENT_SANDBOX=auto would pick: nono (for opencode)");
+    expect(text).toContain("AGENT_SANDBOX=auto would pick: native (for codex)");
+  });
+
+  test("explicit provider incompatible with the primary only: interactive runs fail", () => {
+    const detections = [detected("native", { priority: 40, harnesses: ["claude-code", "codex"] })];
+    // Interactive and PR-review runs spawn only the primary (resolveHarness
+    // uses AGENT_HARNESS[0]), so a compatible fallback must not pass the doctor.
+    const partial = buildSandboxDoctorReport(
+      detections,
+      "native",
+      "environment",
+      "opencode",
+      "linux",
+      {
+        harnessChain: ["opencode", "codex"],
+      },
+    );
+    const text = partial.lines.join("\n");
+    expect(partial.nextRunFails).toBe(true);
+    expect(text).toMatch(/opencode\s+❌ fails — native does not support the configured "opencode"/);
+    expect(text).toMatch(/codex\s+agent wrapped with native \(test\)/);
+    expect(text).toContain("interactive and PR-review runs use the primary (opencode) and fail");
+
+    // Fallback-only incompatibility: the primary can run, so only a warning.
+    const fallback = buildSandboxDoctorReport(
+      detections,
+      "native",
+      "environment",
+      "codex",
+      "linux",
+      {
+        harnessChain: ["codex", "opencode"],
+      },
+    );
+    expect(fallback.nextRunFails).toBe(false);
+    expect(fallback.lines.join("\n")).toContain("⚠ the worker skips failing fallback entries");
+
+    const none = buildSandboxDoctorReport(
+      detections,
+      "native",
+      "environment",
+      "opencode",
+      "linux",
+      {
+        harnessChain: ["opencode", "grok"],
+      },
+    );
+    expect(none.nextRunFails).toBe(true);
   });
 
   test("auto with nothing usable: warns about unsandboxed fallback", () => {
@@ -352,7 +440,8 @@ describe("buildSandboxDoctorReport", () => {
     // native has the higher priority but cannot wrap goose, so the doctor must
     // preflight through nono (matching the resolver) instead of failing a run
     // that will actually use nono.
-    expect(report?.provider).toBe("auto (per harness)");
+    expect(report?.provider).toBe("nono");
+    expect(report?.entries.map((entry) => entry.sandbox)).toEqual(["nono"]);
   });
 
   test("collectHarnessPreflight probes directly when the run inherits an enclosing sandbox", async () => {
@@ -437,7 +526,7 @@ describe("buildSandboxDoctorReport", () => {
       expect(report?.provider).toBe("native");
       expect(report?.entries.map((entry) => entry.ok)).toEqual([false]);
       expect(report?.entries[0]?.reason).toContain(
-        'the native sandbox does not support the "grok" harness',
+        'Sandbox provider "native" does not support the "grok" harness',
       );
     } finally {
       restore();
@@ -465,7 +554,7 @@ describe("buildSandboxDoctorReport", () => {
       expect(report?.entries[0]?.ok).toBe(true);
       expect(report?.entries[1]?.ok).toBe(false);
       expect(report?.entries[1]?.reason).toContain(
-        'the native sandbox does not support the "grok" harness',
+        'Sandbox provider "native" does not support the "grok" harness',
       );
     } finally {
       restore();
@@ -577,9 +666,97 @@ test("auto selects a compatible provider for each fallback", async () => {
   for (const item of [primary, fallback]) {
     item.provider.wrapCommand = () => ({ path: process.execPath, args: ["--version"] });
   }
-  const report = await collectHarnessPreflight("auto", [primary, fallback], "claude-code,grok");
-  expect(report?.entries.map((entry) => [entry.name, entry.ok])).toEqual([
-    ["claude-code", true],
-    ["grok", true],
-  ]);
+  const restore = setCliPaths({
+    CLAUDE_CLI_PATH: process.execPath,
+    GROK_CLI_PATH: process.execPath,
+  });
+  try {
+    const report = await collectHarnessPreflight("auto", [primary, fallback], "claude-code,grok");
+    expect(report?.provider).toBe("auto (per harness)");
+    expect(report?.entries.map((entry) => [entry.name, entry.sandbox, entry.ok])).toEqual([
+      ["claude-code", "primary-only", true],
+      ["grok", "fallback-only", true],
+    ]);
+  } finally {
+    restore();
+  }
+});
+
+test("auto + opencode,codex,grok: doctor rows use the runtime provider per harness", async () => {
+  const native = detected("native", { priority: 40, harnesses: ["claude-code", "codex"] });
+  const nono = detected("nono", { priority: 30 });
+  for (const item of [native, nono]) {
+    item.provider.wrapCommand = () => ({ path: process.execPath, args: ["--version"] });
+  }
+  const restore = setCliPaths({
+    OPENCODE_CLI_PATH: process.execPath,
+    CODEX_CLI_PATH: process.execPath,
+    GROK_CLI_PATH: process.execPath,
+  });
+  try {
+    const report = await collectHarnessPreflight("auto", [native, nono], "opencode,codex,grok");
+    expect(report?.entries.map((entry) => [entry.name, entry.sandbox, entry.ok])).toEqual([
+      ["opencode", "nono", true],
+      ["codex", "native", true],
+      ["grok", "nono", true],
+    ]);
+    // Every runnable row is rendered, and grok's generic nono profile is not
+    // presented as pack-backed.
+    const rendered = buildSandboxDoctorReport(
+      [native, nono],
+      "auto",
+      "environment",
+      "opencode",
+      "linux",
+      {
+        preflight: report,
+      },
+    ).lines.join("\n");
+    expect(rendered).toContain("[native]");
+    expect(rendered).toContain('no pack profile for "grok"');
+  } finally {
+    restore();
+  }
+});
+
+test("only a later entry ready: the primary-only interactive run fails, every row is shown", () => {
+  const report = buildSandboxDoctorReport(
+    [detected("nono", { priority: 30 })],
+    "nono",
+    "environment",
+    "opencode",
+    "linux",
+    {
+      preflight: {
+        provider: "nono",
+        entries: [
+          { name: "opencode", path: "/x/opencode", ok: false, reason: "Permission denied" },
+          { name: "grok", path: "/x/grok", ok: true },
+        ],
+      },
+    },
+  );
+  expect(report.nextRunFails).toBe(true);
+  expect(report.lines.join("\n")).toContain("FAIL — Permission denied");
+});
+
+test("only a fallback entry fails its preflight: warning, the next run does not fail", () => {
+  const report = buildSandboxDoctorReport(
+    [detected("nono", { priority: 30 })],
+    "nono",
+    "environment",
+    "opencode",
+    "linux",
+    {
+      preflight: {
+        provider: "nono",
+        entries: [
+          { name: "opencode", path: "/x/opencode", ok: true },
+          { name: "grok", path: "/x/grok", ok: false, reason: "Permission denied" },
+        ],
+      },
+    },
+  );
+  expect(report.nextRunFails).toBe(false);
+  expect(report.lines.join("\n")).toContain("⚠ failing fallback entries are skipped by the worker");
 });

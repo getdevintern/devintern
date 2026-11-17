@@ -158,24 +158,37 @@ export async function runDashboardCommand(args: string[]): Promise<void> {
 }
 
 /**
- * `devintern doctor` — readiness check for a first successful run. Exits 1 when
- * any check fails so scripts and CI can gate on it.
+ * `devintern doctor` — readiness check for a first successful run.
+ *
+ * Exit codes: 0 ready (warnings, e.g. a degraded harness chain, are printed
+ * but do not fail); 1 not ready (any check failed, including a harness chain
+ * with no usable entry); 2 degraded, only with `--strict` (warnings present,
+ * no failures) so CI can gate on a fully ready setup.
  */
 export async function runDoctorCommand(): Promise<never> {
-  if (hasHelpArg(process.argv.slice(2))) {
+  const args = process.argv.slice(2);
+  if (hasHelpArg(args)) {
     console.log(
       [
-        "Usage: devintern doctor",
+        "Usage: devintern doctor [--strict]",
         "",
-        "Check runtime, git, agent CLI, tracker credentials, sign-in, and license",
-        "readiness for a first run. Exits non-zero when any check fails.",
+        "Check runtime, git, every agent harness chain entry (executable, effective",
+        "sandbox, model, readiness), tracker credentials, sign-in, and license",
+        "readiness for a first run.",
+        "",
+        "Exit codes:",
+        "  0  ready (warnings such as a degraded harness chain are shown, not fatal)",
+        "  1  not ready: at least one check failed",
+        "  2  degraded: warnings but no failures (only with --strict)",
         "",
         "Options:",
+        "  --strict    Exit 2 when any check warns",
         "  -h, --help  Display this help message",
       ].join("\n"),
     );
     process.exit(0);
   }
+  const strict = args.includes("--strict");
   const { collectReadinessChecks, renderReadinessReport } = await import("./readiness");
   loadEnvironment();
   let supabaseConfig;
@@ -191,7 +204,7 @@ export async function runDoctorCommand(): Promise<never> {
   if (report.hasFailures) {
     console.log("\n❌ Not ready — fix the failed checks above.");
   } else if (report.hasWarnings) {
-    console.log("\n✅ Ready to run (with the warnings above).");
+    console.log("\n⚠️  Ready but degraded — review the warnings above.");
   } else {
     console.log("\n✅ Everything looks good — run 'devintern <TASK-KEY>' to start.");
   }
@@ -201,5 +214,21 @@ export async function runDoctorCommand(): Promise<never> {
     hasWarnings: report.hasWarnings,
   });
   await flushAnalytics();
-  process.exit(report.hasFailures ? 1 : 0);
+  process.exit(doctorExitCode(report, strict));
+}
+
+/**
+ * Exit code for `devintern doctor` (see {@link runDoctorCommand}).
+ *
+ * @param report - Aggregate flags from `renderReadinessReport`.
+ * @param strict - Whether `--strict` was passed.
+ * @returns 1 on failures, 2 on warnings under `--strict`, otherwise 0.
+ */
+export function doctorExitCode(
+  report: { hasFailures: boolean; hasWarnings: boolean },
+  strict = false,
+): number {
+  if (report.hasFailures) return 1;
+  if (strict && report.hasWarnings) return 2;
+  return 0;
 }

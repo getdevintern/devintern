@@ -1,6 +1,7 @@
 /**
  * Overview's "Queued" disclosure: work the worker has accepted but not
- * started (ad-hoc tasks, dashboard retries, webhook deliveries). Closed by
+ * started (ad-hoc tasks, dashboard retries, webhook deliveries, and
+ * automations waiting for a free slot). Closed by
  * default so active work keeps the panel; each row opens in place to show
  * what will run, for which repo, and why it may be held back.
  */
@@ -12,13 +13,14 @@ import { formatIn } from "@/components/overview/overview-model";
 import { TaskDescription } from "@/components/TaskDescription";
 import { TicketKey } from "@/components/TicketKey";
 import type { QueuedWorkItem, QueuedWorkKind } from "@/lib/api";
-import { runHash } from "@/lib/routes";
+import { automationHash, runHash } from "@/lib/routes";
 import { formatPastTime, formatTime } from "@/lib/utils";
 
 const KIND_LABELS: Record<QueuedWorkKind, string> = {
   "ad-hoc": "Ad-hoc task",
   retry: "Retry",
   webhook: "PR event",
+  automation: "Automation",
 };
 
 /** Whether the item is backing off and cannot be picked up yet. */
@@ -35,6 +37,7 @@ function statusDetail(item: QueuedWorkItem, now: number): string | undefined {
   }
   if (item.attempts)
     return `${item.attempts} failed ${item.attempts === 1 ? "attempt" : "attempts"}`;
+  if (item.kind === "automation") return "Waiting for a slot";
   if (item.actor) return `Queued by ${item.actor}`;
   return undefined;
 }
@@ -62,7 +65,9 @@ function QueuedDetails({ item, now }: { item: QueuedWorkItem; now: number }) {
             <TicketKey label={`#${item.prNumber}`} href={item.prUrl} />
           </Fact>
         ) : null}
-        {item.actor ? <Fact label="Queued by">{item.actor}</Fact> : null}
+        {item.actor ? (
+          <Fact label={item.kind === "automation" ? "Started by" : "Queued by"}>{item.actor}</Fact>
+        ) : null}
         <Fact label="Queued">{formatTime(item.createdAt)}</Fact>
         {held !== undefined ? (
           <Fact label="Eligible">
@@ -71,7 +76,9 @@ function QueuedDetails({ item, now }: { item: QueuedWorkItem; now: number }) {
         ) : null}
         {item.deferCount ? <Fact label="Deferrals">{item.deferCount}</Fact> : null}
         {item.attempts ? <Fact label="Attempts">{item.attempts}</Fact> : null}
-        {item.message ? <Fact label="Last note">{item.message}</Fact> : null}
+        {item.message ? (
+          <Fact label={item.kind === "automation" ? "Waiting" : "Last note"}>{item.message}</Fact>
+        ) : null}
         {item.lastError ? (
           <Fact label="Last error">
             <span className="text-danger">{item.lastError}</span>
@@ -81,6 +88,12 @@ function QueuedDetails({ item, now }: { item: QueuedWorkItem; now: number }) {
       {item.runId !== undefined ? (
         <a className="aq-link" href={runHash(item.runId)}>
           Open the run being retried
+          <ArrowRight className="size-3.5" aria-hidden="true" />
+        </a>
+      ) : null}
+      {item.automationId !== undefined ? (
+        <a className="aq-link" href={automationHash(item.automationId)}>
+          Open the automation
           <ArrowRight className="size-3.5" aria-hidden="true" />
         </a>
       ) : null}

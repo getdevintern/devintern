@@ -128,7 +128,8 @@ test.skipIf(skip)(
 
       expect(result.exitCode).toBe(0);
       expect(text).toContain("Usage: devintern doctor");
-      expect(text).toContain("Exits non-zero when any check fails.");
+      expect(text).toContain("1  not ready: at least one check failed");
+      expect(text).toContain("--strict");
       expect(text).toContain("-h, --help");
       // Help must not run the readiness probes.
       expect(text).not.toContain("devintern readiness:");
@@ -147,14 +148,15 @@ test.skipIf(skip)(
       expect(result.exitCode).toBe(0);
       expect(text).toContain("✅ Bun runtime — v");
       expect(text).toContain("✅ Git — ");
-      expect(text).toContain(`✅ AI agent CLI — Claude Code (${workspace.agent})`);
+      expect(text).toContain("✅ AI agent CLI — claude-code ready");
+      expect(text).toContain(`✅ claude-code — ${workspace.agent}`);
       expect(text).toContain("✅ Task tracker — markdown");
       expect(text).not.toContain("❌");
 
       // No session in the isolated HOME: sign-in is a warning, not a failure.
       expect(text).toContain("⚠️  DevIntern sign-in");
       expect(text).toContain("Run 'devintern login'");
-      expect(text).toContain("✅ Ready to run (with the warnings above).");
+      expect(text).toContain("⚠️  Ready but degraded — review the warnings above.");
       expect(text).not.toContain("❌ Not ready");
 
       // The sign-in probe read no session, so no refresh or license check ran.
@@ -212,7 +214,7 @@ test.skipIf(skip)(
 
       expect(result.exitCode).toBe(1);
       expect(text).toContain("❌ AI agent CLI");
-      expect(text).toContain('Unknown agent harness: "not-a-harness"');
+      expect(text).toContain('Unknown agent harness "not-a-harness" in AGENT_HARNESS');
       expect(text).toContain("Set AGENT_HARNESS to a supported harness name");
       expect(text).toContain("❌ Not ready");
       expectAgentNotInvoked(workspace);
@@ -235,9 +237,9 @@ test.skipIf(skip)(
       expect(result.exitCode).toBe(1);
       expect(text).toContain("✅ Git — ");
       expect(text).toContain("❌ AI agent CLI");
-      expect(text).toContain("not found on PATH");
+      expect(text).toContain("excluded: CLI not found");
       expect(text).toContain("Install an agent CLI");
-      expect(text).toContain("AGENT_CLI_PATH");
+      expect(text).toContain("_CLI_PATH to its executable");
       expect(text).toContain("❌ Not ready");
       expectAgentNotInvoked(workspace);
     });
