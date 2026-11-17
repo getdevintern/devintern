@@ -856,7 +856,7 @@ describe("ReviewPollingAcquirer", () => {
     };
   }
 
-  function windowState(): { nextWindowAt: number; windowOpenUntil: number } {
+  function windowState(): { nextWindowAt: number; windowOpenUntil: number; windowCapAt: number } {
     const raw = workerState.getCursor("worker:conflict-window")?.cursorValue;
     expect(raw).toBeTruthy();
     return JSON.parse(raw!);
@@ -939,6 +939,7 @@ describe("ReviewPollingAcquirer", () => {
     expect(windowState()).toEqual({
       nextWindowAt: start + DAY_MS,
       windowOpenUntil: now + 60 * 60_000,
+      windowCapAt: now + 120 * 60_000,
     });
     expect(made.acquirer.conflictWindowStatus()?.openUntil).toBe(now + 60 * 60_000);
 
@@ -1008,6 +1009,121 @@ describe("ReviewPollingAcquirer", () => {
     now += DAY_MS + 1;
     await made.acquirer.tick();
     expect(made.resolved).toEqual([]);
+  });
+
+  const MIN = 60_000;
+
+  /** Scheduled acquirer whose first window opens (idle) at the returned `windowAt`. */
+  async function openIdleWindow(gh: FakeGitHubState, clock: { now: number }, quiet = 0) {
+    const made = makeAcquirer(gh, {
+      conflictSchedule: dailySchedule,
+      conflictWindowGraceMs: 60 * MIN,
+      quietPeriodSeconds: quiet,
+      now: () => clock.now,
+    });
+    await made.acquirer.tick();
+    clock.now += DAY_MS;
+    const windowAt = clock.now;
+    await made.acquirer.tick();
+    expect(windowState().windowOpenUntil).toBe(windowAt + 60 * MIN);
+    return { ...made, windowAt };
+  }
+
+  test("a conflict observed late in the window keeps it open until it resolves", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const clock = { now: 1_750_000_000_000 };
+    const gh = { ...conflictGh(), mergeableState: "clean" };
+    const made = await openIdleWindow(gh, clock, 120);
+    const { windowAt } = made;
+
+    // A sibling merge conflicts the PR one minute before the nominal close.
+    clock.now = windowAt + 59 * MIN;
+    gh.mergeableState = "dirty";
+    gh.baseSha = "base2";
+    await made.acquirer.tick();
+    expect(made.resolved).toEqual([]);
+    expect(made.acquirer.conflictWindowStatus()?.openUntil).toBe(windowAt + 74 * MIN);
+
+    // Past the nominal close, the drain extension still lets it resolve.
+    clock.now = windowAt + 62 * MIN;
+    await made.acquirer.tick();
+    expect(made.resolved).toEqual(["acme/widgets#42"]);
+    expect(windowState().windowOpenUntil).toBe(windowAt + 77 * MIN);
+
+    // The next conflict in the chain (after quiet period + CI + merge) is caught too.
+    clock.now = windowAt + 72 * MIN;
+    gh.baseSha = "base3";
+    await made.acquirer.tick();
+    clock.now = windowAt + 75 * MIN;
+    await made.acquirer.tick();
+    expect(made.resolved).toEqual(["acme/widgets#42", "acme/widgets#42"]);
+  });
+
+  test("a conflict after an idle window closes waits for the next window", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const clock = { now: 1_750_000_000_000 };
+    const gh = { ...conflictGh(), mergeableState: "clean" };
+    const made = await openIdleWindow(gh, clock);
+
+    clock.now = made.windowAt + 61 * MIN;
+    gh.mergeableState = "dirty";
+    gh.baseSha = "base2";
+    await made.acquirer.tick();
+    expect(made.resolved).toEqual([]);
+    expect(queue.getBaseSyncEvent("base-sync:acme/widgets#42:base2:head1")?.status).toBe("pending");
+    expect(made.acquirer.conflictWindowStatus()?.openUntil).toBeUndefined();
+    expect(windowState().windowOpenUntil).toBe(made.windowAt + 60 * MIN);
+  });
+
+  test("drain extensions never keep the window open past twice its grace", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const clock = { now: 1_750_000_000_000 };
+    const gh = { ...conflictGh(), mergeableState: "clean" };
+    const made = await openIdleWindow(gh, clock);
+    const { windowAt } = made;
+    gh.mergeableState = "dirty";
+
+    // A conflict that keeps reappearing every 10 minutes.
+    for (let minute = 55; minute <= 115; minute += 10) {
+      clock.now = windowAt + minute * MIN;
+      gh.baseSha = `base-${minute}`;
+      await made.acquirer.tick();
+      expect(windowState().windowOpenUntil).toBe(windowAt + Math.min(minute + 15, 120) * MIN);
+    }
+    expect(made.resolved).toHaveLength(7);
+    expect(windowState().windowCapAt).toBe(windowAt + 120 * MIN);
+
+    clock.now = windowAt + 121 * MIN;
+    gh.baseSha = "base-late";
+    await made.acquirer.tick();
+    expect(made.resolved).toHaveLength(7);
+    expect(made.acquirer.conflictWindowStatus()?.openUntil).toBeUndefined();
+  });
+
+  test("a drain extension survives a worker restart", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const clock = { now: 1_750_000_000_000 };
+    const gh = { ...conflictGh(), mergeableState: "clean" };
+    const made = await openIdleWindow(gh, clock, 120);
+    const { windowAt } = made;
+
+    clock.now = windowAt + 59 * MIN;
+    gh.mergeableState = "dirty";
+    gh.baseSha = "base2";
+    await made.acquirer.tick();
+    expect(made.resolved).toEqual([]);
+
+    // Restart past the nominal close: the persisted extension still applies.
+    clock.now = windowAt + 62 * MIN;
+    const restarted = makeAcquirer(gh, {
+      conflictSchedule: dailySchedule,
+      conflictWindowGraceMs: 60 * MIN,
+      quietPeriodSeconds: 120,
+      now: () => clock.now,
+    });
+    await restarted.acquirer.tick();
+    expect(restarted.resolved).toEqual(["acme/widgets#42"]);
+    expect(windowState().windowCapAt).toBe(windowAt + 120 * MIN);
   });
 
   test("disabled mode never detects or resolves conflicts", async () => {
