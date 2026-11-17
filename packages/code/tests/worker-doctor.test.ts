@@ -19,6 +19,8 @@ import { renderReadinessReport } from "../src/lib/observability/readiness";
 import {
   collectWorkerDoctorChecks,
   defaultCheckSandbox,
+  gitLsRemote,
+  gitProbeEnv,
 } from "../src/lib/observability/worker-readiness";
 import type { WorkerDoctorDeps } from "../src/lib/observability/worker-readiness";
 
@@ -463,6 +465,42 @@ function snapshotTree(dir: string): Record<string, string> {
   walk(dir);
   return out;
 }
+
+describe("gitLsRemote SSH probe", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "worker-doctor-ssh-"));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("runs ssh in BatchMode so a passphrase or host-key prompt cannot block", async () => {
+    const argsFile = join(dir, "ssh-args");
+    const fakeSsh = join(dir, "ssh");
+    writeFileSync(fakeSsh, `#!/bin/sh\nprintf '%s\\n' "$@" > "${argsFile}"\nexit 255\n`);
+    chmodSync(fakeSsh, 0o755);
+    const env: Record<string, string | undefined> = {
+      ...process.env,
+      PATH: `${dir}:${process.env.PATH ?? ""}`,
+    };
+    delete env.GIT_SSH_COMMAND;
+    delete env.GIT_SSH;
+
+    const result = await gitLsRemote("git@github.com:acme/backend.git", env, 10_000);
+
+    expect(result.ok).toBe(false);
+    const args = readFileSync(argsFile, "utf8").split("\n");
+    expect(args).toContain("BatchMode=yes");
+    expect(args).toContain("ConnectTimeout=10");
+  });
+
+  test("keeps a user-supplied GIT_SSH_COMMAND or GIT_SSH", () => {
+    expect(gitProbeEnv({ GIT_SSH_COMMAND: "ssh -i key" }).GIT_SSH_COMMAND).toBe("ssh -i key");
+    expect(gitProbeEnv({ GIT_SSH: "/usr/bin/plink" }).GIT_SSH_COMMAND).toBeUndefined();
+    expect(gitProbeEnv({}).GIT_TERMINAL_PROMPT).toBe("0");
+  });
+});
 
 describe("devintern worker doctor CLI", () => {
   const cliEnv = (extra: Record<string, string> = {}): Record<string, string> => {

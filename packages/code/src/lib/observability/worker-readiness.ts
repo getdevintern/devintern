@@ -114,14 +114,32 @@ async function defaultDryRunQuery(tracker: string, env: Env, query: string): Pro
   return result.tasks.length;
 }
 
-/** Run `git ls-remote` without prompting for credentials. */
-function gitLsRemote(remote: string, env: Env, timeoutMs: number): Promise<RepoAccessResult> {
+/**
+ * Environment for a non-interactive git probe. HTTPS prompts are disabled via
+ * GIT_TERMINAL_PROMPT/GIT_ASKPASS; SSH remotes get `BatchMode=yes` so ssh fails
+ * fast instead of reading a key passphrase or host-key confirmation from
+ * /dev/tty. A user-supplied GIT_SSH_COMMAND or GIT_SSH is left untouched.
+ */
+export function gitProbeEnv(env: Env): Env {
+  const probeEnv: Env = { ...env, GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "", SSH_ASKPASS: "" };
+  if (!env.GIT_SSH_COMMAND && !env.GIT_SSH) {
+    probeEnv.GIT_SSH_COMMAND = "ssh -o BatchMode=yes -o ConnectTimeout=10";
+  }
+  return probeEnv;
+}
+
+/** Run `git ls-remote` without prompting for credentials. Exported for tests. */
+export function gitLsRemote(
+  remote: string,
+  env: Env,
+  timeoutMs: number,
+): Promise<RepoAccessResult> {
   return new Promise((resolvePromise) => {
     execFile(
       "git",
       ["ls-remote", "--exit-code", remote, "HEAD"],
       {
-        env: { ...env, GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "", SSH_ASKPASS: "" },
+        env: gitProbeEnv(env),
         timeout: timeoutMs,
         killSignal: "SIGKILL",
       },
