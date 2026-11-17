@@ -68,7 +68,10 @@ import {
 import { WorkerState } from "../state/worker-state";
 import type { Cursor } from "../state/worker-state";
 import { deriveTaskTitle } from "./task-title";
-import { loadConfiguredWorkspaceSources, readConfiguredSourceHealth } from "./dashboard-sources";
+import {
+  createCachedWorkspaceSourcesLoader,
+  readConfiguredSourceHealth,
+} from "./dashboard-sources";
 import type { ConfiguredSource, DashboardSourcesResult } from "./dashboard-sources";
 import { scheduledJobRunFilter, toAutomationView } from "./dashboard-automation-view";
 import type { DashboardAutomationView } from "./dashboard-automation-view";
@@ -305,7 +308,7 @@ export class DashboardData {
     this.inflightAutomationTtlMs = options.inflightAutomationTtlMs ?? INFLIGHT_RETRY_TTL_MS;
     this.automationActionsOverride = options.automationActions;
     this.configuredSources =
-      options.configuredSources ?? (() => loadConfiguredWorkspaceSources(this.workspaceDir));
+      options.configuredSources ?? createCachedWorkspaceSourcesLoader(this.workspaceDir);
     if (options.logDirs !== undefined) {
       // Explicit dirs keep tests hermetic; the workspace home is not probed.
       this.logDirs = options.logDirs;
@@ -591,7 +594,10 @@ export class DashboardData {
 
   /** Health of each configured automation source; never throws. */
   getSources(): DashboardSourcesResult {
-    return readConfiguredSourceHealth(this.dbPath, this.configuredSources);
+    // The worker records source health in the workspace (or fleet) database,
+    // the same one worker liveness and the durable queue are read from; the
+    // run-history database differs for a standalone `devintern dashboard`.
+    return readConfiguredSourceHealth(this.queueDbPath, this.configuredSources);
   }
 
   /** True while a dashboard-triggered manual run for the automation is starting. */

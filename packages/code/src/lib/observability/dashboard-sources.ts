@@ -8,7 +8,7 @@
  */
 
 import { Database } from "bun:sqlite";
-import { existsSync } from "fs";
+import { existsSync, statSync } from "fs";
 
 import type { SourceFetchStatus } from "../acquirers/source-fetch";
 import { loadWorkspaceConfig } from "../workspace/config";
@@ -114,6 +114,31 @@ export function loadConfiguredWorkspaceSources(workspaceDir: string): Configured
   const configPath = workspaceConfigPath(workspaceDir);
   if (!existsSync(configPath)) return [];
   return configuredSourcesOf(loadWorkspaceConfig(configPath));
+}
+
+/**
+ * A `loadConfiguredWorkspaceSources` that re-parses `workspace.toml` only when
+ * its mtime or size changes, so the header and Automations polls do not parse
+ * the file on every request. Errors are not cached: a broken config keeps
+ * reporting its error until it is fixed.
+ *
+ * @param workspaceDir - Workspace home holding `workspace.toml`
+ */
+export function createCachedWorkspaceSourcesLoader(workspaceDir: string): () => ConfiguredSource[] {
+  let cached: { key: string; sources: ConfiguredSource[] } | null = null;
+  return () => {
+    const configPath = workspaceConfigPath(workspaceDir);
+    if (!existsSync(configPath)) {
+      cached = null;
+      return [];
+    }
+    const stat = statSync(configPath);
+    const key = `${stat.mtimeMs}:${stat.size}`;
+    if (cached?.key === key) return cached.sources;
+    const sources = loadConfiguredWorkspaceSources(workspaceDir);
+    cached = { key, sources };
+    return sources;
+  };
 }
 
 /**

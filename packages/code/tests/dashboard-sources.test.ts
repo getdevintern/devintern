@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, rmSync, writeFileSync } from "fs";
+import { mkdirSync, rmSync, utimesSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
 import { DashboardData, handleWorkerStatus } from "../src/lib/observability/dashboard-api";
 import {
+  createCachedWorkspaceSourcesLoader,
   filterConfiguredSources,
   handleSources,
   parseSourceStatusRow,
@@ -185,6 +186,56 @@ describe("dashboard source health", () => {
       .getSources()
       .sources.map((source) => source.sourceId);
     expect(ids).toEqual(["api-production"]);
+  });
+
+  test("reads source health from the workspace queue database, not run history", () => {
+    // Mirrors standalone `devintern dashboard` (observability/cli.ts): only
+    // workspaceDir and queueDbPath are passed, so dbPath falls back to the
+    // project's run-history database, which the worker never writes to.
+    const workspaceQueueDb = join(workspaceDir, "state", "queue.db");
+    mkdirSync(join(workspaceDir, "state"), { recursive: true });
+    const store = new AutomationStateStore(workspaceQueueDb);
+    store.recordSourceStatus({
+      provider: "sentry",
+      sourceId: "api-production",
+      status: "auth-failed",
+      checkedAt: 7_000,
+      message: "HTTP 403",
+    });
+    store.close();
+    writeFileSync(workspaceConfigPath(workspaceDir), WORKSPACE_TOML);
+
+    const data = new DashboardData({
+      workingDir: dir,
+      workspaceDir,
+      queueDbPath: workspaceQueueDb,
+      logDirs: [],
+    });
+    opened.push(data);
+    expect(data.dbPath).not.toBe(data.queueDbPath);
+
+    const sources = data.getSources().sources;
+    expect(sources.map((source) => [source.sourceId, source.status])).toEqual([
+      ["api-production", "auth-failed"],
+    ]);
+    const worker = handleWorkerStatus(data).body as { sources: DashboardSourceView[] };
+    expect(worker.sources).toHaveLength(1);
+  });
+
+  test("workspace.toml is re-parsed only when it changes", () => {
+    const configPath = workspaceConfigPath(workspaceDir);
+    writeFileSync(configPath, WORKSPACE_TOML);
+    const load = createCachedWorkspaceSourcesLoader(workspaceDir);
+    const first = load();
+    expect(first.map((source) => source.sourceId)).toEqual(["api-production"]);
+    expect(load()).toBe(first);
+
+    writeFileSync(configPath, WORKSPACE_TOML.replace("enabled = false", "enabled = true"));
+    utimesSync(configPath, new Date(), new Date(Date.now() + 5_000));
+    expect(load().map((source) => source.sourceId)).toEqual(["api-production", "api-staging"]);
+
+    rmSync(configPath);
+    expect(load()).toEqual([]);
   });
 
   test("a missing database or table yields no sources", () => {
