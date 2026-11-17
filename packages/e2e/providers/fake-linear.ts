@@ -95,6 +95,13 @@ export class FakeLinearTracker implements TrackerFixture {
   /** Operations the fake could not route, for an explicit end-of-test assertion. */
   readonly unexpectedOperations: string[] = [];
 
+  /**
+   * GraphQL operation names answered so far, in order (names only; never
+   * variables or headers). Recorded after the response is computed, so a test
+   * that sees an operation here knows the fake already read its state.
+   */
+  readonly operations: string[] = [];
+
   private readonly server: ReturnType<typeof Bun.serve>;
   private readonly baseUrl: string;
   private readonly states: FakeLinearState[];
@@ -284,7 +291,12 @@ export class FakeLinearTracker implements TrackerFixture {
     }
     const variables = asRecord(body?.variables) ?? {};
     const operation = operationName(query);
+    const response = this.route(operation, variables);
+    this.operations.push(operation ?? "<anonymous>");
+    return response;
+  }
 
+  private route(operation: string | undefined, variables: Record<string, unknown>): Response {
     switch (operation) {
       case "IssueById":
         return this.issueById(variables);
@@ -575,6 +587,12 @@ function compileIssueFilter(value: unknown): IssueMatcher | undefined {
       matchers.push(matcher);
       continue;
     }
+    if (key === "updatedAt") {
+      const matcher = compileDateCondition(condition);
+      if (!matcher) return undefined;
+      matchers.push(matcher);
+      continue;
+    }
     return undefined;
   }
 
@@ -607,6 +625,41 @@ function compileStringCondition(
         matchers.push((issue) => issue[field].toLowerCase().includes(needle));
         break;
       }
+      default:
+        return undefined;
+    }
+  }
+
+  return (issue) => matchers.every((matcher) => matcher(issue));
+}
+
+/**
+ * Compile a `{gt|gte|lt|lte}` ISO-8601 condition on `updatedAt`, the shape the
+ * worker's Linear change detector sends on every tick after the first.
+ */
+function compileDateCondition(condition: unknown): IssueMatcher | undefined {
+  const operations = asRecord(condition);
+  if (!operations) return undefined;
+
+  const matchers: IssueMatcher[] = [];
+  for (const [operation, rawValue] of Object.entries(operations)) {
+    if (typeof rawValue !== "string") return undefined;
+    const bound = Date.parse(rawValue);
+    if (!Number.isFinite(bound)) return undefined;
+    const at = (issue: FakeLinearIssue) => Date.parse(issue.updatedAt);
+    switch (operation) {
+      case "gt":
+        matchers.push((issue) => at(issue) > bound);
+        break;
+      case "gte":
+        matchers.push((issue) => at(issue) >= bound);
+        break;
+      case "lt":
+        matchers.push((issue) => at(issue) < bound);
+        break;
+      case "lte":
+        matchers.push((issue) => at(issue) <= bound);
+        break;
       default:
         return undefined;
     }

@@ -93,7 +93,51 @@ interface FakeAsanaTask {
   stories: FakeAsanaStory[];
 }
 
+/**
+ * One Events API record, in Asana's documented compact shape.
+ *
+ * `resource` is the object that changed (a task or a story), `parent` is the
+ * task a story belongs to, and `change` names the field for `changed` events.
+ */
+export interface FakeAsanaEvent {
+  type: "task" | "story";
+  action: "added" | "changed" | "removed";
+  resource: { gid: string; resource_type: "task" | "story" };
+  parent: { gid: string; resource_type: "task" | "section" } | null;
+  user: { gid: string; resource_type: "user" };
+  created_at: string;
+  change?: { field: string; action: "changed" | "added" | "removed" };
+}
+
+/**
+ * One `GET /events` call the fake served.
+ *
+ * Sync tokens are opaque Asana cursors, not credentials, so the received and
+ * issued values are recorded verbatim for the test's chain assertions. The
+ * Bearer token is only checked, never stored.
+ */
+export interface FakeAsanaSyncRequest {
+  /** `resource` query parameter. */
+  resource: string | null;
+  /** `sync` query parameter, or null when the client sent none. */
+  received: string | null;
+  /** 412 for a missing/unknown/expired token, 200 for a valid one. */
+  status: 200 | 412;
+  /** Events returned on a 200 page (always 0 for a 412). */
+  eventCount: number;
+  /** Fresh `sync` token the response carried. */
+  issued: string;
+  /** Whether the request's Bearer token matched the fake's issued token. */
+  authorized: boolean;
+}
+
+/** Asana's 412 explanation, so a client that parses `errors` sees real text. */
+const SYNC_TOKEN_INVALID_MESSAGE =
+  "Sync token invalid or too old. If you are attempting to keep resources in sync, " +
+  "you must fetch the full dataset for this query now and use the new sync token for the next sync.";
+
 const FAKE_ACCOUNT = { name: "E2E Asana User" } as const;
+const FAKE_USER_GID = "1100000000000001";
 
 const API_PREFIX = "/api/1.0";
 
@@ -204,7 +248,17 @@ export class FakeAsanaTracker implements TrackerFixture {
   private readonly apiToken = crypto.randomUUID();
   private readonly server: ReturnType<typeof Bun.serve>;
   private readonly baseUrl: string;
+  /** Every `GET /events` call, oldest first. */
+  readonly syncRequests: FakeAsanaSyncRequest[] = [];
+
+  /** Every project task listing (the worker's evaluate step and `--query` runs). */
+  readonly projectTaskListings: string[] = [];
+
   private readonly tasks = new Map<string, FakeAsanaTask>();
+  /** Append-only Events API log for the watched project. */
+  private readonly events: FakeAsanaEvent[] = [];
+  /** Live sync tokens mapped to the event-log position they were issued at. */
+  private readonly syncTokens = new Map<string, number>();
   private nextTaskGid = 1_200_000_000_000_100;
   private nextStoryGid = 1_400_000_000_000_000;
   private nextTagGid = 1_500_000_000_000_000;
@@ -280,6 +334,7 @@ export class FakeAsanaTracker implements TrackerFixture {
       stories: [],
     };
     this.tasks.set(gid, task);
+    this.recordEvent({ type: "task", action: "added", gid, parent: null });
     return { key: gid, url: task.permalink_url };
   }
 
@@ -294,6 +349,44 @@ export class FakeAsanaTracker implements TrackerFixture {
     const task = this.requireTask(ticketKey);
     task.completed = true;
     task.modified_at = this.timestamp();
+    this.recordEvent({ type: "task", action: "changed", gid: task.gid, field: "completed" });
+  }
+
+  /**
+   * Edit a task as a human would in the Asana UI (rename and/or new notes).
+   *
+   * Bumps `modified_at` and appends a `changed` event, like a real edit.
+   */
+  editTicket(ticketKey: string, edit: { title?: string; body?: string }): void {
+    const task = this.requireTask(ticketKey);
+    if (edit.title !== undefined) {
+      task.name = edit.title;
+      this.recordEvent({ type: "task", action: "changed", gid: task.gid, field: "name" });
+    }
+    if (edit.body !== undefined) {
+      task.notes = edit.body;
+      task.html_notes = textToHtml(edit.body);
+      this.recordEvent({ type: "task", action: "changed", gid: task.gid, field: "notes" });
+    }
+    task.modified_at = this.timestamp();
+  }
+
+  /** Raw `modified_at` stamp, which the product uses as the task's `updated`. */
+  modifiedAt(ticketKey: string): string {
+    return this.requireTask(ticketKey).modified_at;
+  }
+
+  /** Snapshot of the Events API log, oldest first. */
+  eventLog(): FakeAsanaEvent[] {
+    return this.events.map((event) => ({ ...event }));
+  }
+
+  /**
+   * Invalidate every outstanding sync token, as Asana does once a token ages
+   * out. The next `GET /events` with any previously issued token gets a 412.
+   */
+  expireSyncTokens(): void {
+    this.syncTokens.clear();
   }
 
   async deleteComment(commentId: string): Promise<void> {
@@ -302,6 +395,7 @@ export class FakeAsanaTracker implements TrackerFixture {
       if (index >= 0) {
         task.stories.splice(index, 1);
         task.modified_at = this.timestamp();
+        this.recordEvent({ type: "story", action: "removed", gid: commentId, parent: task.gid });
         return;
       }
     }
@@ -374,13 +468,8 @@ export class FakeAsanaTracker implements TrackerFixture {
     const method = request.method.toUpperCase();
     this.requests.push(`${method} ${path}${url.search}`);
 
-    if (method === "GET" && path === `${API_PREFIX}/attachments`) {
-      const parent = url.searchParams.get("parent");
-      if (parent && !this.tasks.has(parent)) {
-        return this.diagnostic(`Unknown fake Asana task: ${parent}`);
-      }
-      return json({ data: [] });
-    }
+    const collection = method === "GET" ? this.handleCollection(path, url, request) : undefined;
+    if (collection) return collection;
 
     const projectTasksMatch = path.match(/^\/api\/1\.0\/projects\/([^/]+)\/tasks$/);
     if (projectTasksMatch?.[1] && method === "GET") {
@@ -428,10 +517,26 @@ export class FakeAsanaTracker implements TrackerFixture {
     return this.diagnostic(`Unmatched fake Asana request: ${method} ${path}`);
   }
 
+  /** Top-level GET collections: the Events API feed and task attachments. */
+  private handleCollection(path: string, url: URL, request: Request): Response | undefined {
+    if (path === `${API_PREFIX}/events`) {
+      return this.getEvents(url.searchParams, request.headers.get("authorization"));
+    }
+    if (path === `${API_PREFIX}/attachments`) {
+      const parent = url.searchParams.get("parent");
+      if (parent && !this.tasks.has(parent)) {
+        return this.diagnostic(`Unknown fake Asana task: ${parent}`);
+      }
+      return json({ data: [] });
+    }
+    return undefined;
+  }
+
   private listProjectTasks(projectGid: string, optFields: string[] | undefined): Response {
     if (projectGid !== this.projectGidValue) {
       return this.diagnostic(`Unknown fake Asana project: ${projectGid}`);
     }
+    this.projectTaskListings.push(projectGid);
     // Real `GET /projects/{gid}/tasks` only supports pagination/field params.
     // The product lists the full project and filters client-side.
     return json({
@@ -461,8 +566,13 @@ export class FakeAsanaTracker implements TrackerFixture {
     if (!task) {
       return this.diagnostic(`Unknown fake Asana task: ${taskGid}`);
     }
+    const moved = task.section_gid !== sectionGid;
     task.section_gid = sectionGid;
     task.modified_at = this.timestamp();
+    if (moved) {
+      // Asana reports a section move as the task being added to the new section.
+      this.recordEvent({ type: "task", action: "added", gid: task.gid, parent: sectionGid });
+    }
     return json({ data: {} });
   }
 
@@ -543,6 +653,9 @@ export class FakeAsanaTracker implements TrackerFixture {
       }
     }
     task.modified_at = this.timestamp();
+    for (const field of Object.keys(data)) {
+      this.recordEvent({ type: "task", action: "changed", gid: task.gid, field });
+    }
     return json({ data: this.taskPayload(task, optFields) });
   }
 
@@ -561,6 +674,13 @@ export class FakeAsanaTracker implements TrackerFixture {
     }
     story.html_text = htmlText ?? textToHtml(plainText ?? "");
     story.text = plainText ?? htmlToPlainText(htmlText ?? "");
+    this.recordEvent({
+      type: "story",
+      action: "changed",
+      gid: story.gid,
+      parent: this.storyParent(story.gid),
+      field: "text",
+    });
     return json({ data: this.storyPayload(story) });
   }
 
@@ -573,7 +693,82 @@ export class FakeAsanaTracker implements TrackerFixture {
     };
     task.stories.push(story);
     task.modified_at = story.created_at;
+    this.recordEvent({ type: "story", action: "added", gid: story.gid, parent: task.gid });
     return story;
+  }
+
+  private storyParent(storyGid: string): string | null {
+    for (const task of this.tasks.values()) {
+      if (task.stories.some((story) => story.gid === storyGid)) return task.gid;
+    }
+    return null;
+  }
+
+  /**
+   * `GET /events?resource=<project>&sync=<token>`, with Asana's sync semantics.
+   *
+   * A missing, unknown, or expired token returns 412 with a fresh `sync` and
+   * Asana's `errors` array; a live token returns every event recorded since it
+   * was issued plus a rotated `sync`. Old tokens stay valid until
+   * {@link expireSyncTokens}, as real Asana tokens do until they age out.
+   */
+  private getEvents(params: URLSearchParams, authorization: string | null): Response {
+    const resource = params.get("resource");
+    const received = params.get("sync");
+    const authorized = authorization === `Bearer ${this.apiToken}`;
+    if (resource !== this.projectGidValue) {
+      return this.diagnostic(`Unknown fake Asana events resource: ${resource ?? "(missing)"}`, 400);
+    }
+
+    const issued = this.issueSyncToken();
+    const position = received === null ? undefined : this.syncTokens.get(received);
+    if (position === undefined) {
+      this.syncRequests.push({
+        resource,
+        received,
+        status: 412,
+        eventCount: 0,
+        issued,
+        authorized,
+      });
+      return json({ sync: issued, errors: [{ message: SYNC_TOKEN_INVALID_MESSAGE }] }, 412);
+    }
+
+    const page = this.events.slice(position);
+    this.syncRequests.push({
+      resource,
+      received,
+      status: 200,
+      eventCount: page.length,
+      issued,
+      authorized,
+    });
+    return json({ data: page, sync: issued, has_more: false });
+  }
+
+  private issueSyncToken(): string {
+    const token = crypto.randomUUID().replace(/-/g, "");
+    this.syncTokens.set(token, this.events.length);
+    return token;
+  }
+
+  private recordEvent(input: {
+    type: FakeAsanaEvent["type"];
+    action: FakeAsanaEvent["action"];
+    gid: string;
+    parent?: string | null;
+    field?: string;
+  }): void {
+    const parentType = input.type === "story" ? "task" : "section";
+    this.events.push({
+      type: input.type,
+      action: input.action,
+      resource: { gid: input.gid, resource_type: input.type },
+      parent: input.parent ? { gid: input.parent, resource_type: parentType } : null,
+      user: { gid: FAKE_USER_GID, resource_type: "user" },
+      created_at: new Date(this.now).toISOString(),
+      ...(input.field ? { change: { field: input.field, action: "changed" as const } } : {}),
+    });
   }
 
   private findStory(storyGid: string): FakeAsanaStory | undefined {

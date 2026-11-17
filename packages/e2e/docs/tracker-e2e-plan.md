@@ -24,17 +24,17 @@ test data into the trackers a worker actually uses.
 
 ## Current coverage
 
-| Tracker             | Default `test`     | Opt-in suite                           | Notes                                                                                                                                                                                   |
-| ------------------- | ------------------ | -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Markdown            | no                 | `test:trackers` (read-only path)       | Plain files, no credentials.                                                                                                                                                            |
-| Jira                | yes (offline fake) | `test:trackers` (read-only live smoke) | Fake lifecycle: key/`--query`, transition, comment, `--skip-comments`. One-shot and scheduled worker estimation are offline. Real project lifecycle and live estimation remain Layer 2. |
-| Trello              | no                 | `test:trackers` (read-only smoke)      | Full lifecycle planned in Layer 2.                                                                                                                                                      |
-| GitHub Issues       | no                 | `test:e2e:tracker`                     | Existing live suite; dedicated tracker repository doubles as code host.                                                                                                                 |
-| Local GitLab Issues | no                 | `test:e2e:tracker:gitlab`              | Existing live suite; creates and deletes a dedicated project.                                                                                                                           |
-| GitLab.com Issues   | no                 | `test:e2e:tracker:gitlab-com`          | Existing live suite; pre-created project, issues only, project retained.                                                                                                                |
-| Linear              | yes (offline fake) | none                                   | Fake lifecycle: key/`--query`, workflow state, comment, decoy isolation. Live Layer 2 team/project lifecycle, estimation, and attachments remain future work.                           |
-| Asana               | yes (offline fake) | none                                   | Fake lifecycle: key/`--query`, section transition, comment, decoy isolation.                                                                                                            |
-| Azure DevOps        | yes (offline fake) | none                                   | Fake lifecycle: key/`--query`, state transition, comment, decoy isolation. Worker polling (WIQL `ChangedDate` delta, dedupe, re-arm, cursor restart) is offline.                        |
+| Tracker             | Default `test`     | Opt-in suite                           | Notes                                                                                                                                                                                                              |
+| ------------------- | ------------------ | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Markdown            | no                 | `test:trackers` (read-only path)       | Plain files, no credentials.                                                                                                                                                                                       |
+| Jira                | yes (offline fake) | `test:trackers` (read-only live smoke) | Fake lifecycle: key/`--query`, transition, comment, `--skip-comments`. One-shot and scheduled worker estimation are offline. Real project lifecycle and live estimation remain Layer 2.                            |
+| Trello              | no                 | `test:trackers` (read-only smoke)      | Full lifecycle planned in Layer 2.                                                                                                                                                                                 |
+| GitHub Issues       | no                 | `test:e2e:tracker`                     | Existing live suite; dedicated tracker repository doubles as code host.                                                                                                                                            |
+| Local GitLab Issues | no                 | `test:e2e:tracker:gitlab`              | Existing live suite; creates and deletes a dedicated project.                                                                                                                                                      |
+| GitLab.com Issues   | no                 | `test:e2e:tracker:gitlab-com`          | Existing live suite; pre-created project, issues only, project retained.                                                                                                                                           |
+| Linear              | yes (offline fake) | none                                   | Fake lifecycle: key/`--query`, workflow state, comment, decoy isolation. Worker relay `task.changed` delivery is offline too. Live Layer 2 team/project lifecycle, estimation, and attachments remain future work. |
+| Asana               | yes (offline fake) | none                                   | Fake lifecycle: key/`--query`, section transition, comment, decoy isolation. Worker polling through the Events API (412 handshake, sync-token rotation, expiry resync) is offline.                                 |
+| Azure DevOps        | yes (offline fake) | none                                   | Fake lifecycle: key/`--query`, state transition, comment, decoy isolation. Worker polling (WIQL `ChangedDate` delta, dedupe, re-arm, cursor restart) is offline.                                                   |
 
 The default local run reports these opt-in suites as skipped and planned
 coverage as todo (`helpers/opt-in-suites.ts`), so the test output names what it
@@ -251,6 +251,16 @@ after an incomplete run (unlocked by exactly one human comment), and cursor
 resume after a graceful restart. The PR-created actioned marker on a real code
 host remains live-only.
 
+`tests/local/worker-asana-polling.test.ts` drives worker polling against the
+Asana fake's Events API (`GET /api/1.0/events?resource=&sync=`). A missing or
+expired token returns 412 with a fresh `sync`, and a live token returns the
+events since it was issued plus a rotated `sync`. Fake writes append events, and
+a test hook expires every token. The test covers the 412 first-tick drain, the
+rotated-token chain on empty pages (no evaluate, no run), an edit-triggered
+single run, expired-token full resync without re-runs, the `(key, updated)`
+dedupe for an unchanged still-matching task, and the startup refusal without
+`ASANA_DEFAULT_PROJECT_GID`.
+
 Endpoints covered:
 
 - `GET /rest/api/3/myself`
@@ -305,7 +315,15 @@ Operations covered:
 - `CommentCreate` (markdown comment bodies)
 - `IssueUpdate` (`stateId`, plus `estimate`/`labelIds`/title/description fields)
 - `SearchIssues` (JSON IssueFilter with `title`/`description` string
-  conditions and `and`/`or`, plus plain-text title contains)
+  conditions, `updatedAt` `gt`/`gte`/`lt`/`lte` date conditions (the worker
+  change detector's delta query), and `and`/`or`, plus plain-text title
+  contains)
+
+The fake also records answered operation names in `operations` (names only),
+so a worker test can tell when a poll tick has already read its state.
+`tests/local/worker-relay-task-events.test.ts` uses that to drive a worker
+whose `task_query` is a JSON IssueFilter through the loopback relay fake
+(`helpers/fake-relay.ts`); see the README's relay section.
 
 Any other operation or malformed payload returns a diagnostic GraphQL error and
 is recorded in `unexpectedOperations`, which both scenarios assert is empty.
