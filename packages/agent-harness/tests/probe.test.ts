@@ -62,6 +62,23 @@ describe("readCliVersion", () => {
     const cli = makeCli("exit 3");
     expect(readCliVersion(cli)).toBeUndefined();
   });
+
+  test("retries with writable XDG dirs when the CLI cannot write its own state", () => {
+    if (process.platform === "win32") return;
+    // Mimics opencode in a sandbox: it crashes unless its data dir is writable.
+    const cli = makeCli(
+      'case "$XDG_DATA_HOME" in *devintern-version-probe-*) echo "opencode v2.1.2";; *) echo "PlatformError: PermissionDenied" >&2; exit 1;; esac',
+    );
+    const previous = process.env.XDG_DATA_HOME;
+    process.env.XDG_DATA_HOME = "/nonexistent/readonly";
+    try {
+      expect(readCliVersion(cli)).toBe("opencode v2.1.2");
+      expect(new OpencodeHarness().probe(cli)).toEqual({ version: "opencode v2.1.2", major: 2 });
+    } finally {
+      if (previous === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = previous;
+    }
+  });
 });
 
 describe("probeHarness", () => {

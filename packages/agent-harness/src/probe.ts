@@ -13,6 +13,9 @@
  */
 
 import { spawnSync } from "child_process";
+import { mkdtempSync, rmSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
 import type { AgentHarness, AgentRunOptions, HarnessInvocation, HarnessProbe } from "./types.js";
 
 /** Probe cache keyed by `harness name` + executable path, so each CLI runs once. */
@@ -68,16 +71,46 @@ export function parseVersion(
  * Best-effort: returns `undefined` on a spawn failure, non-zero exit, timeout,
  * or empty output rather than throwing.
  *
+ * Some CLIs (Opencode) open their log/state files before handling `--version`
+ * and crash when those directories are read-only, which is common inside a
+ * worker sandbox. When the first attempt fails, the probe retries once with the
+ * XDG data/state/cache directories pointed at a throwaway temp directory, so a
+ * restricted home does not hide the installed version and select the wrong
+ * flag set.
+ *
  * @param executablePath - Resolved path/command of the CLI.
  * @returns Combined stdout/stderr trimmed, or `undefined`.
  */
 export function readCliVersion(executablePath: string): string | undefined {
+  const version = spawnVersion(executablePath, process.env);
+  if (version !== undefined) {
+    return version;
+  }
+  let scratch: string | undefined;
+  try {
+    scratch = mkdtempSync(join(tmpdir(), "devintern-version-probe-"));
+    return spawnVersion(executablePath, {
+      ...process.env,
+      XDG_DATA_HOME: join(scratch, "data"),
+      XDG_STATE_HOME: join(scratch, "state"),
+      XDG_CACHE_HOME: join(scratch, "cache"),
+    });
+  } catch {
+    return undefined;
+  } finally {
+    if (scratch) {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  }
+}
+
+function spawnVersion(executablePath: string, env: NodeJS.ProcessEnv): string | undefined {
   try {
     const result = spawnSync(executablePath, ["--version"], {
       encoding: "utf8",
       timeout: 5000,
       stdio: ["ignore", "pipe", "pipe"],
-      env: process.env,
+      env,
     });
     if (result.error || result.status !== 0) {
       return undefined;
