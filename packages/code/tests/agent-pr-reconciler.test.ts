@@ -55,20 +55,63 @@ describe("agent PR reconciler", () => {
     expect(workerState.listMergedAgentChangeRequests(10)).toEqual([]);
   });
 
-  test("a PR merged on GitHub is recorded as merged", async () => {
+  test("a PR merged on GitHub (state closed + merged) is recorded with GitHub's merge time", async () => {
     workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 9 });
+    const mergedAt = "2026-11-16T08:30:00Z";
     const summary = await reconcileOpenAgentPrs({
       workerState,
       github: {
         async fetchPr() {
-          return { data: { state: "merged" }, etag: 'W/"2"', notModified: false };
+          // GitHub's REST pulls payload: merged PRs are `closed` + `merged`.
+          return {
+            data: { state: "closed", merged: true, merged_at: mergedAt },
+            etag: 'W/"2"',
+            notModified: false,
+          };
         },
       },
       watched: workerState.listOpenAgentPrs(),
     });
 
     expect(summary.closed).toEqual([{ repo: "acme/widgets", prNumber: 9, reason: "merged" }]);
-    expect(workerState.listMergedAgentChangeRequests(10).map((pr) => pr.prNumber)).toEqual([9]);
+    const merged = workerState.listMergedAgentChangeRequests(10);
+    expect(merged.map((pr) => pr.prNumber)).toEqual([9]);
+    expect(merged[0]?.mergedAt).toBe(Date.parse(mergedAt));
+  });
+
+  test("a GitHub PR closed without merging (merged: false) is not recorded as merged", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 10 });
+    const summary = await reconcileOpenAgentPrs({
+      workerState,
+      github: {
+        async fetchPr() {
+          return {
+            data: { state: "closed", merged: false, merged_at: null },
+            etag: 'W/"2"',
+            notModified: false,
+          };
+        },
+      },
+      watched: workerState.listOpenAgentPrs(),
+    });
+
+    expect(summary.closed).toEqual([{ repo: "acme/widgets", prNumber: 10, reason: "closed" }]);
+    expect(workerState.listOpenAgentPrs()).toHaveLength(0);
+    expect(workerState.listMergedAgentChangeRequests(10)).toEqual([]);
+  });
+
+  test("a provider reporting state merged directly is recorded as merged", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 11 });
+    const before = Date.now();
+    const closure = applyAgentPrFetch(
+      workerState,
+      { repo: "acme/widgets", prNumber: 11 },
+      { data: { state: "merged" }, notModified: false },
+    );
+    expect(closure?.reason).toBe("merged");
+    const merged = workerState.listMergedAgentChangeRequests(10);
+    expect(merged.map((pr) => pr.prNumber)).toEqual([11]);
+    expect(merged[0]?.mergedAt ?? 0).toBeGreaterThanOrEqual(before);
   });
 
   test("a 404 leaves an inaccessible PR watched for a later retry", async () => {

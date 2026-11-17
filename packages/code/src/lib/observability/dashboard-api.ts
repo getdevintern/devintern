@@ -67,7 +67,7 @@ import {
 import { WorkerState } from "../state/worker-state";
 import type { Cursor } from "../state/worker-state";
 import { DEFAULT_MERGED_PR_LIMIT, parseAgentPrsQuery, toAgentPrView } from "./dashboard-agent-prs";
-import type { OpenAgentPrView } from "./dashboard-agent-prs";
+import type { AgentPrView } from "./dashboard-agent-prs";
 import { deriveTaskTitle } from "./task-title";
 import {
   createCachedWorkspaceSourcesLoader,
@@ -234,7 +234,7 @@ export interface WorkerStatusView {
   lockFile?: string;
 }
 
-export type { OpenAgentPrView } from "./dashboard-agent-prs";
+export type { AgentPrView, OpenAgentPrView } from "./dashboard-agent-prs";
 export type { DashboardAutomationView } from "./dashboard-automation-view";
 
 /**
@@ -630,7 +630,7 @@ export class DashboardData {
    * switches and stay correct even when this dashboard process runs
    * without tracker configuration.
    */
-  getOpenAgentPrs(): OpenAgentPrView[] {
+  getOpenAgentPrs(): AgentPrView[] {
     return this.read([], (stores) =>
       stores.state.listOpenAgentChangeRequests().map((pr) => toAgentPrView(pr)),
     );
@@ -643,7 +643,7 @@ export class DashboardData {
    *
    * @param limit - Maximum PRs returned
    */
-  getMergedAgentPrs(limit: number = DEFAULT_MERGED_PR_LIMIT): OpenAgentPrView[] {
+  getMergedAgentPrs(limit: number = DEFAULT_MERGED_PR_LIMIT): AgentPrView[] {
     return this.read([], (stores) =>
       stores.state.listMergedAgentChangeRequests(limit).map((pr) => toAgentPrView(pr)),
     );

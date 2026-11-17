@@ -40,7 +40,7 @@ import type {
   ApiResponse,
   DashboardAutomationView,
   EnrichedLogEntry,
-  OpenAgentPrView,
+  AgentPrView,
   RunHarnessLogFile,
   RunRetryInfo,
   WorkerQueueStats,
@@ -738,7 +738,7 @@ function renderAutomations(body: { automations: DashboardAutomationView[] }): st
   );
 }
 
-function renderPrs(body: { prs: OpenAgentPrView[] }): string {
+function renderPrs(body: { prs: AgentPrView[] }): string {
   if (body.prs.length === 0) return "No open agent PRs.";
   return table(
     ["REPO", "PR", "TASK", "UPDATED", "URL"],
@@ -752,7 +752,7 @@ function renderPrs(body: { prs: OpenAgentPrView[] }): string {
   );
 }
 
-function renderMergedPrs(body: { prs: OpenAgentPrView[] }): string {
+function renderMergedPrs(body: { prs: AgentPrView[] }): string {
   if (body.prs.length === 0) return "No merged agent PRs recorded.";
   return table(
     ["REPO", "PR", "TASK", "MERGED", "URL"],

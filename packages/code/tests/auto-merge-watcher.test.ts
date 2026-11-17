@@ -117,6 +117,21 @@ describe("AutoMergeWatcherAcquirer", () => {
     expect(statusDuringMerge).toEqual(["in_progress"]);
   });
 
+  test("a successful merge is recorded in the registry immediately", async () => {
+    await watcher().tick();
+    expect(workerState.listOpenAgentPrs()).toHaveLength(0);
+    const merged = workerState.listMergedAgentChangeRequests(10);
+    expect(merged.map((row) => row.prNumber)).toEqual([7]);
+    expect(merged[0]?.mergedAt).toBe(now);
+  });
+
+  test("a rejected merge leaves the PR open and unmerged", async () => {
+    results = [{ outcome: "rejected", message: "no", reviewed: false }];
+    await watcher().tick();
+    expect(workerState.listOpenAgentPrs()).toHaveLength(1);
+    expect(workerState.listMergedAgentChangeRequests(10)).toEqual([]);
+  });
+
   test("hands the open run's id to the merge check so its transcript is filed under it", async () => {
     const runIds: Array<number | undefined> = [];
     const w = new AutoMergeWatcherAcquirer({

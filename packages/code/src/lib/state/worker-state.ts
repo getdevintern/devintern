@@ -47,6 +47,11 @@ export type AgentPrState = "open" | "closed";
 export interface AgentPrCloseOptions {
   /** The code host confirmed the PR was merged (not just closed). */
   merged?: boolean;
+  /**
+   * Host-reported merge time (epoch ms); defaults to now when `merged` is set
+   * without one. Ignored unless `merged` is true.
+   */
+  mergedAt?: number;
 }
 
 const AGENT_PR_STATES = ["open", "closed"] as const satisfies readonly AgentPrState[];
@@ -665,7 +670,7 @@ export class WorkerState {
     this.db.run(
       `UPDATE agent_prs SET state = 'closed', merged_at = COALESCE(merged_at, ?), updated_at = ?
        WHERE provider = 'github' AND repo = ? AND pr_number = ?`,
-      [options.merged ? now : null, now, repo, prNumber],
+      [options.merged ? (options.mergedAt ?? now) : null, now, repo, prNumber],
     );
   }
 
@@ -681,7 +686,7 @@ export class WorkerState {
          AND COALESCE(project_id, '') = COALESCE(?, '')
          AND project_path = ? AND change_number = ?`,
       [
-        options.merged ? now : null,
+        options.merged ? (options.mergedAt ?? now) : null,
         now,
         identity.provider,
         identity.instanceUrl,

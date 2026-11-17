@@ -38,7 +38,7 @@ import type { AgentPrCloseOptions, CiFixState, WorkerState } from "../state/work
 import { RowParseError } from "../state/row-parse";
 import type { Acquirer } from "../../worker";
 import type { CiFailureFeedback } from "../review/formatter";
-import { classifyAgentPrState } from "../review/agent-pr-reconciler";
+import { classifyAgentPrState, resolveAgentPrMerge } from "../review/agent-pr-reconciler";
 import { serializePrRun } from "./review-polling";
 import { describeGitHubAuthFailure, isGitHubAuthError } from "../code-host/github/reviews";
 
@@ -675,10 +675,12 @@ export class CiFailureWatcherAcquirer implements Acquirer {
         // Only a confirmed terminal state may remove a PR from the registry:
         // an unusable payload (missing/null/unknown state) must keep polling.
         if (lifecycle === "closed" || lifecycle === "merged") {
+          const close = resolveAgentPrMerge(lifecycle, prResult.data);
           console.log(
-            `👁️  [${this.name}] ${this.describe(repo, prNumber)} is ${lifecycle}; unwatching`,
+            `👁️  [${this.name}] ${this.describe(repo, prNumber)} is ` +
+              `${close.merged ? "merged" : lifecycle}; unwatching`,
           );
-          this.markClosed(repo, prNumber, { merged: lifecycle === "merged" });
+          this.markClosed(repo, prNumber, close);
           return "removed";
         }
       }

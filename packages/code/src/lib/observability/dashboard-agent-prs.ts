@@ -7,7 +7,7 @@ import type { CodeHostProvider } from "../code-host/index";
 import type { AgentPr } from "../state/worker-state";
 
 /** One agent PR as served by `GET /api/agent-prs` (open or merged list). */
-export interface OpenAgentPrView {
+export interface AgentPrView {
   provider: CodeHostProvider;
   instanceUrl: string;
   projectId?: string;
@@ -23,6 +23,9 @@ export interface OpenAgentPrView {
   createdAt: number;
   updatedAt: number;
 }
+
+/** @deprecated Use {@link AgentPrView}; it also describes merged PRs. */
+export type OpenAgentPrView = AgentPrView;
 
 /** Most merged PRs `GET /api/agent-prs?state=merged` returns by default. */
 export const DEFAULT_MERGED_PR_LIMIT = 50;
@@ -48,7 +51,7 @@ export function parseAgentPrsQuery(params: URLSearchParams): AgentPrsQuery | { e
 }
 
 /** Map a registry row to its dashboard wire shape. */
-export function toAgentPrView(pr: AgentPr): OpenAgentPrView {
+export function toAgentPrView(pr: AgentPr): AgentPrView {
   return {
     provider: pr.provider,
     instanceUrl: pr.instanceUrl,
