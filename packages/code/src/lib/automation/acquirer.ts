@@ -70,9 +70,28 @@ export interface ScheduledJobRunFilter {
   origin?: RunOrigin;
 }
 
+/**
+ * What an occurrence is doing before its run record exists. The task
+ * subprocess creates the run row, so without this a run that is waiting for a
+ * free slot (the repo's base checkout or a worker slot) or still starting up
+ * is invisible on the dashboard.
+ */
+export interface AutomationActivity {
+  /** `waiting`: holding the lease, not yet admitted. `running`: subprocess spawned. */
+  state: "waiting" | "running";
+  /** When the occurrence entered this state (epoch ms). */
+  since: number;
+  /** What started the occurrence. */
+  trigger: "scheduled" | "manual";
+  /** Why a waiting occurrence has not started yet. */
+  reason?: string;
+}
+
 /** One configured schedule as exposed to the dashboard, with its agent override. */
 export interface AutomationScheduleStatus extends AgentSelection {
   id: string;
+  /** In-flight occurrence held by this worker; absent when idle. */
+  activity?: AutomationActivity;
   /** Job type; absent means a prompt automation. */
   kind?: ScheduledJobKind;
   /** Display name when it differs from `id` (namespaced estimation / conflict ids). */
@@ -151,6 +170,8 @@ export interface AutomationAcquirerOptions {
 interface ActiveAutomationRun {
   run: SpawnedAutomationRun;
   lifecycle: Promise<void>;
+  startedAt: number;
+  trigger: AutomationActivity["trigger"];
 }
 
 /**
@@ -204,6 +225,8 @@ export class AutomationAcquirer implements Acquirer {
   private owner = `${process.pid}:${randomUUID()}`;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private active = new Map<string, ActiveAutomationRun>();
+  /** Occurrences holding the lease while `resolveContext` waits for a slot. */
+  private waiting = new Map<string, { since: number; trigger: AutomationActivity["trigger"] }>();
   private tickPromise: Promise<void> | null = null;
   private stopped = true;
   private paused = false;
@@ -372,10 +395,12 @@ export class AutomationAcquirer implements Acquirer {
           Math.max(1, heartbeatMs),
         );
         (preparationHeartbeat as { unref?: () => void }).unref?.();
+        this.waiting.set(automation.id, { since: this.now(), trigger: "scheduled" });
         try {
           context = await this.options.resolveContext(automation);
         } finally {
           clearHeartbeatInterval(preparationHeartbeat);
+          this.waiting.delete(automation.id);
         }
         if (!context) {
           console.warn(
@@ -405,7 +430,7 @@ export class AutomationAcquirer implements Acquirer {
               "scheduled",
               this.options.terminationGraceMs,
             );
-        this.trackActiveRun(automation, stateId, context, run);
+        this.trackActiveRun(automation, stateId, context, run, "scheduled");
       } catch (error) {
         this.store.release(stateId, this.owner);
         await context?.release();
@@ -429,11 +454,14 @@ export class AutomationAcquirer implements Acquirer {
     stateId: string,
     context: AutomationRunContext,
     run: SpawnedAutomationRun,
+    trigger: AutomationActivity["trigger"],
   ): void {
     const kind = this.jobKind();
     const active: ActiveAutomationRun = {
       run,
       lifecycle: Promise.resolve(),
+      startedAt: this.now(),
+      trigger,
     };
     active.lifecycle = run.completion
       .then((ok) =>
@@ -523,12 +551,14 @@ export class AutomationAcquirer implements Acquirer {
       Math.max(1, heartbeatMs),
     );
     (preparationHeartbeat as { unref?: () => void }).unref?.();
+    this.waiting.set(automation.id, { since: this.now(), trigger: "manual" });
     try {
       context = await this.options.resolveContext(automation);
     } catch (error) {
       return { ok: false, reason: (error as Error).message };
     } finally {
       clearHeartbeatInterval(preparationHeartbeat);
+      this.waiting.delete(automation.id);
       if (context === null) {
         // Declined (busy repo) or rejected — give the lease back so the
         // scheduler can proceed with the next occurrence.
@@ -581,7 +611,7 @@ export class AutomationAcquirer implements Acquirer {
       }
       throw error;
     }
-    this.trackActiveRun(automation, stateId, context, run);
+    this.trackActiveRun(automation, stateId, context, run, "manual");
     return { ok: true };
   }
 
@@ -589,8 +619,10 @@ export class AutomationAcquirer implements Acquirer {
   listSchedules(): AutomationScheduleStatus[] {
     return this.options.automations.map((automation) => {
       const state = this.store.get(this.stateId(automation));
+      const activity = this.activityOf(automation);
       return {
         id: automation.id,
+        ...(activity ? { activity } : {}),
         enabled: automation.enabled,
         cron: automation.cron,
         interval: automation.interval,
@@ -614,6 +646,23 @@ export class AutomationAcquirer implements Acquirer {
 
   private jobKind(): string {
     return this.options.jobKind ?? "automation";
+  }
+
+  /** In-flight occurrence of one automation, for the dashboard. */
+  private activityOf(automation: AutomationConfig): AutomationActivity | undefined {
+    const active = this.active.get(automation.id);
+    if (active) return { state: "running", since: active.startedAt, trigger: active.trigger };
+    const waiting = this.waiting.get(automation.id);
+    if (!waiting) return undefined;
+    return { state: "waiting", ...waiting, reason: this.waitingReason(automation) };
+  }
+
+  /** Why an admitted-but-not-started occurrence is still waiting. */
+  private waitingReason(automation: AutomationConfig): string {
+    if (this.options.jobKind !== undefined || !automation.repo) {
+      return "waiting for a free worker slot";
+    }
+    return `waiting for the ${automation.repo} checkout, which another run is using`;
   }
 
   /** Reason logged when `resolveContext` declines a due occurrence. */

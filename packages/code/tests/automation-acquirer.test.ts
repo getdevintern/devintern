@@ -532,6 +532,13 @@ describe("AutomationAcquirer", () => {
     now += 10;
     const claiming = first.tick();
     expect(heartbeatTimers).toHaveLength(1);
+    // The claimed occurrence has no run row yet; the dashboard sees it as waiting.
+    expect(first.listSchedules()[0]?.activity).toEqual({
+      state: "waiting",
+      since: 10,
+      trigger: "scheduled",
+      reason: "waiting for a free worker slot",
+    });
 
     // Advance past the original lease expiry (t=40), firing every scheduled
     // heartbeat. Each beat renews the lease to now + 40ms, so it never lapses.
@@ -1063,6 +1070,67 @@ describe("AutomationAcquirer triggerManual (dashboard Run now)", () => {
     const store = new AutomationStateStore(dbPath);
     expect(store.get("dependency-health")?.leaseOwner).toBeUndefined();
     store.close();
+    await acquirer.stop();
+  });
+
+  test("lists a manual run as waiting while it waits for a slot, then running, then idle", async () => {
+    const dbPath = join(tmpdir(), `acq-manual-${Date.now()}-${Math.random()}.db`);
+    dbPaths.push(dbPath);
+    let now = 1_000;
+    let admit!: () => void;
+    const admitted = new Promise<void>((resolve) => (admit = resolve));
+    let resolveRun!: (ok: boolean) => void;
+    const acquirer = new AutomationAcquirer({
+      automations: [{ ...makeAutomation(), repo: "web" }],
+      dbPath,
+      now: () => now,
+      resolveContext: async () => {
+        await admitted;
+        return { cwd: "/base-worktree", env: {}, release() {} };
+      },
+      spawnManualRun: () => ({
+        completion: new Promise<boolean>((resolve) => (resolveRun = resolve)),
+        terminate() {},
+      }),
+    });
+    await acquirer.start();
+    expect(acquirer.listSchedules()[0]?.activity).toBeUndefined();
+
+    const outcome = acquirer.triggerManual("dependency-health");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(acquirer.listSchedules()[0]?.activity).toEqual({
+      state: "waiting",
+      since: 1_000,
+      trigger: "manual",
+      reason: "waiting for the web checkout, which another run is using",
+    });
+
+    now = 5_000;
+    admit();
+    expect(await outcome).toEqual({ ok: true });
+    expect(acquirer.listSchedules()[0]?.activity).toEqual({
+      state: "running",
+      since: 5_000,
+      trigger: "manual",
+    });
+
+    resolveRun(true);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(acquirer.listSchedules()[0]?.activity).toBeUndefined();
+    await acquirer.stop();
+  });
+
+  test("clears the waiting state when a busy repository declines the manual run", async () => {
+    const dbPath = join(tmpdir(), `acq-manual-${Date.now()}-${Math.random()}.db`);
+    dbPaths.push(dbPath);
+    const acquirer = new AutomationAcquirer({
+      automations: [makeAutomation()],
+      dbPath,
+      resolveContext: async () => null,
+    });
+    await acquirer.start();
+    expect((await acquirer.triggerManual("dependency-health")).ok).toBe(false);
+    expect(acquirer.listSchedules()[0]?.activity).toBeUndefined();
     await acquirer.stop();
   });
 
