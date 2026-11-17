@@ -4,7 +4,7 @@ sidebarLabel: "Worker"
 description: "Use when running DevIntern as a long-running worker that picks up tracker tasks, handles PR reviews and CI failures, and runs as a service."
 section: "Automation"
 order: 2
-dateModified: 2026-11-12
+dateModified: 2026-11-17
 ---
 
 # Worker Daemon
@@ -233,6 +233,7 @@ On shutdown the scheduler stops its timer, terminates active automation subproce
 | Task files pile up under `~/.devintern/automations/` | They are small and safe to delete — they are only run inputs; the durable record is the run history in `queue.db`.                                                                        |
 | A run failed and you need to know why                | Open the dashboard's Logs tab to read recent worker output without a shell on the machine ([details](./dashboard.md)).                                                                    |
 | The dashboard Logs tab is empty                      | The daemon tees its output to `worker.stdout.log` / `worker.stderr.log` in the workspace home. Check those files or `journalctl --user -u devintern-worker`.                              |
+| You need run data in a script or a sandboxed agent | Use the read-only `devintern worker runs`, `stats`, `automations`, `queue`, `status`, and `logs` commands. With `--json` they print the dashboard API body without needing the dashboard port ([details](./dashboard.md#read-dashboard-data-from-the-command-line)). |
 
 ## Scheduled story-point estimation
 
