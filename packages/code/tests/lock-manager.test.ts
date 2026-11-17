@@ -3,10 +3,14 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { existsSync, writeFileSync, readFileSync, mkdirSync, rmSync } from "fs";
+import { existsSync, writeFileSync, readFileSync, mkdirSync, mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { LockManager } from "../src/lib/lock-manager";
+import {
+  LOCK_HEARTBEAT_RECLAIM_MS,
+  LOCK_HEARTBEAT_STALE_MS,
+  LockManager,
+} from "../src/lib/lock-manager";
 
 describe("LockManager", () => {
   let testDir: string;
@@ -221,5 +225,319 @@ describe("LockManager.readLockStatus", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("LockManager PID-namespace liveness", () => {
+  let testDir: string;
+  const OWN_NS = "pid:[4026531836]";
+  const FOREIGN_NS = "pid:[4026533128]";
+  const DEAD_PID = 424242;
+
+  const errno = (code: string) => () => {
+    throw Object.assign(new Error(code), { code });
+  };
+
+  function writeLock(fields: Record<string, unknown>): string {
+    const lockPath = join(testDir, ".worker.lock");
+    writeFileSync(
+      lockPath,
+      JSON.stringify({ pid: DEAD_PID, timestamp: new Date().toISOString(), ...fields }),
+    );
+    return lockPath;
+  }
+
+  function status(probes: { signalPid: (pid: number) => void; ns?: string }) {
+    return LockManager.readLockStatus(testDir, ".worker.lock", {
+      plainDir: true,
+      probes: { signalPid: probes.signalPid, readPidNamespace: () => probes.ns },
+    });
+  }
+
+  beforeEach(() => {
+    testDir = mkdtempSync(join(tmpdir(), "lock-manager-ns-"));
+  });
+
+  afterEach(() => {
+    rmSync(testDir, { recursive: true, force: true });
+  });
+
+  test("same namespace + ESRCH reports stopped", () => {
+    writeLock({ pidNamespace: OWN_NS });
+    const lock = status({ signalPid: errno("ESRCH"), ns: OWN_NS });
+    expect(lock?.running).toBe(false);
+    expect(lock?.pidNamespace).toBe(OWN_NS);
+  });
+
+  test("different namespace + ESRCH reports unknown", () => {
+    writeLock({ pidNamespace: FOREIGN_NS });
+    expect(status({ signalPid: errno("ESRCH"), ns: OWN_NS })?.running).toBe("unknown");
+  });
+
+  test("a recorded namespace the reader cannot compare reports unknown", () => {
+    writeLock({ pidNamespace: FOREIGN_NS });
+    expect(status({ signalPid: errno("ESRCH"), ns: undefined })?.running).toBe("unknown");
+  });
+
+  test("legacy lock without a namespace + ESRCH reports stopped", () => {
+    writeLock({});
+    expect(status({ signalPid: errno("ESRCH"), ns: OWN_NS })?.running).toBe(false);
+  });
+
+  test("EPERM reports running in the reader's own namespace", () => {
+    writeLock({ pidNamespace: OWN_NS });
+    expect(status({ signalPid: errno("EPERM"), ns: OWN_NS })?.running).toBe(true);
+  });
+
+  test("a successful probe reports running in the reader's own namespace", () => {
+    writeLock({ pidNamespace: OWN_NS });
+    expect(status({ signalPid: () => {}, ns: OWN_NS })?.running).toBe(true);
+  });
+
+  test("a foreign-namespace pid is never probed: a colliding live pid stays unknown while fresh", () => {
+    writeLock({ pidNamespace: FOREIGN_NS });
+    let probed = 0;
+    const collide = () => {
+      probed += 1;
+    };
+    expect(status({ signalPid: collide, ns: OWN_NS })?.running).toBe("unknown");
+    expect(status({ signalPid: errno("EPERM"), ns: OWN_NS })?.running).toBe("unknown");
+    expect(probed).toBe(0);
+  });
+
+  for (const [label, signalPid] of [
+    ["succeeds", () => {}],
+    ["throws EPERM", errno("EPERM")],
+  ] as const) {
+    test(`a dead sandboxed owner whose pid collides (probe ${label}) is stopped and reclaimable`, () => {
+      const old = new Date(Date.now() - 60 * 60_000).toISOString();
+      const lockPath = writeLock({
+        pid: 2,
+        pidNamespace: FOREIGN_NS,
+        timestamp: old,
+        heartbeatAt: old,
+      });
+      expect(status({ signalPid, ns: OWN_NS })?.running).toBe(false);
+      const lock = new LockManager(testDir, ".worker.lock", {
+        plainDir: true,
+        reclaimForeign: true,
+        probes: { signalPid, readPidNamespace: () => OWN_NS },
+      });
+      expect(lock.acquire().success).toBe(true);
+      expect(JSON.parse(readFileSync(lockPath, "utf8")).pid).toBe(process.pid);
+      lock.release();
+    });
+  }
+
+  test("a crashed lock carrying our own pid from an old namespace is reclaimed", () => {
+    const old = new Date(Date.now() - 60 * 60_000).toISOString();
+    writeLock({ pid: process.pid, pidNamespace: FOREIGN_NS, timestamp: old, heartbeatAt: old });
+    const lock = new LockManager(testDir, ".worker.lock", {
+      plainDir: true,
+      reclaimForeign: true,
+      probes: { readPidNamespace: () => OWN_NS },
+    });
+    expect(lock.acquire().success).toBe(true);
+    lock.release();
+  });
+
+  test("a same-namespace lock with our pid that this process does not hold is reclaimed", () => {
+    writeLock({ pid: process.pid, pidNamespace: OWN_NS });
+    const lock = new LockManager(testDir, ".worker.lock", {
+      plainDir: true,
+      probes: { readPidNamespace: () => OWN_NS },
+    });
+    expect(lock.acquire().success).toBe(true);
+    // ...but a second in-process acquire of a held lock is still refused.
+    const again = new LockManager(testDir, ".worker.lock", {
+      plainDir: true,
+      probes: { readPidNamespace: () => OWN_NS },
+    });
+    expect(again.acquire().success).toBe(false);
+    lock.release();
+  });
+
+  test("acquire waits for the longer reclaim window, though status already reports stopped", () => {
+    const between = new Date(
+      Date.now() - (LOCK_HEARTBEAT_STALE_MS + LOCK_HEARTBEAT_RECLAIM_MS) / 2,
+    ).toISOString();
+    const lockPath = writeLock({
+      pidNamespace: FOREIGN_NS,
+      timestamp: between,
+      heartbeatAt: between,
+    });
+    expect(status({ signalPid: errno("ESRCH"), ns: OWN_NS })?.running).toBe(false);
+    const lock = new LockManager(testDir, ".worker.lock", {
+      plainDir: true,
+      reclaimForeign: true,
+      probes: { signalPid: errno("ESRCH"), readPidNamespace: () => OWN_NS },
+    });
+    const result = lock.acquire();
+    expect(result.success).toBe(false);
+    expect(result.message).toContain(`${LOCK_HEARTBEAT_RECLAIM_MS / 60_000} minutes`);
+    expect(JSON.parse(readFileSync(lockPath, "utf8")).pid).toBe(DEAD_PID);
+  });
+
+  test("acquire records the owner's namespace, and omits it when unreadable", () => {
+    const withNs = new LockManager(testDir, ".a.lock", {
+      plainDir: true,
+      probes: { readPidNamespace: () => OWN_NS },
+    });
+    expect(withNs.acquire().success).toBe(true);
+    expect(JSON.parse(readFileSync(withNs.getLockFilePath(), "utf8")).pidNamespace).toBe(OWN_NS);
+    withNs.release();
+
+    const withoutNs = new LockManager(testDir, ".b.lock", {
+      plainDir: true,
+      probes: { readPidNamespace: () => undefined },
+    });
+    expect(withoutNs.acquire().success).toBe(true);
+    expect(JSON.parse(readFileSync(withoutNs.getLockFilePath(), "utf8"))).not.toHaveProperty(
+      "pidNamespace",
+    );
+    withoutNs.release();
+  });
+
+  test("acquire refuses to steal a lock it cannot verify", () => {
+    const lockPath = writeLock({ pidNamespace: FOREIGN_NS });
+    const lock = new LockManager(testDir, ".worker.lock", {
+      plainDir: true,
+      probes: { signalPid: errno("ESRCH"), readPidNamespace: () => OWN_NS },
+    });
+    const result = lock.acquire();
+    expect(result.success).toBe(false);
+    expect(result.pid).toBe(DEAD_PID);
+    expect(result.message).toContain(`PID: ${DEAD_PID}`);
+    expect(result.message).toContain(FOREIGN_NS);
+    expect(result.message).toContain(OWN_NS);
+    expect(JSON.parse(readFileSync(lockPath, "utf8")).pid).toBe(DEAD_PID);
+  });
+
+  test("a foreign-namespace lock with a stale heartbeat reports stopped", () => {
+    const old = new Date(Date.now() - LOCK_HEARTBEAT_STALE_MS - 1_000).toISOString();
+    writeLock({ pidNamespace: FOREIGN_NS, timestamp: old, heartbeatAt: old });
+    expect(status({ signalPid: errno("ESRCH"), ns: OWN_NS })?.running).toBe(false);
+  });
+
+  test("a fresh heartbeat keeps an old acquire timestamp unknown", () => {
+    const old = new Date(Date.now() - 60 * 60_000).toISOString();
+    writeLock({
+      pidNamespace: FOREIGN_NS,
+      timestamp: old,
+      heartbeatAt: new Date().toISOString(),
+    });
+    expect(status({ signalPid: errno("ESRCH"), ns: OWN_NS })?.running).toBe("unknown");
+  });
+
+  test("a restarted owner in a new namespace reclaims its crashed lock once the heartbeat is stale", () => {
+    // Crashed worker from the previous container's namespace; last beat long ago.
+    const old = new Date(Date.now() - LOCK_HEARTBEAT_RECLAIM_MS - 1_000).toISOString();
+    const lockPath = writeLock({ pidNamespace: FOREIGN_NS, timestamp: old, heartbeatAt: old });
+    const lock = new LockManager(testDir, ".worker.lock", {
+      plainDir: true,
+      reclaimForeign: true,
+      probes: { signalPid: errno("ESRCH"), readPidNamespace: () => OWN_NS },
+    });
+    expect(lock.acquire().success).toBe(true);
+    const written = JSON.parse(readFileSync(lockPath, "utf8"));
+    expect(written.pid).toBe(process.pid);
+    expect(written.pidNamespace).toBe(OWN_NS);
+    expect(typeof written.heartbeatAt).toBe("string");
+    lock.release();
+  });
+
+  test("a task lock (no reclaimForeign) never reclaims a foreign-namespace lock, however old", () => {
+    const ancient = new Date(Date.now() - 24 * 60 * 60_000).toISOString();
+    const lockPath = writeLock({
+      pidNamespace: FOREIGN_NS,
+      timestamp: ancient,
+      heartbeatAt: ancient,
+    });
+    const lock = new LockManager(testDir, ".worker.lock", {
+      plainDir: true,
+      probes: { signalPid: errno("ESRCH"), readPidNamespace: () => OWN_NS },
+    });
+    const result = lock.acquire();
+    expect(result.success).toBe(false);
+    expect(result.message).not.toContain("reclaimed automatically");
+    expect(JSON.parse(readFileSync(lockPath, "utf8")).pid).toBe(DEAD_PID);
+    // Without any heartbeat or timestamp it still refuses.
+    writeLock({ pidNamespace: FOREIGN_NS, timestamp: undefined });
+    expect(lock.acquire().success).toBe(false);
+  });
+
+  test("the default CLI task lock does not opt into reclaim; worker locks do", async () => {
+    const { createWorkspaceLock, createRepoRunLock } = await import("../src/lib/workspace/state");
+    const ancient = new Date(Date.now() - 24 * 60 * 60_000).toISOString();
+    const foreign = JSON.stringify({
+      pid: DEAD_PID,
+      pidNamespace: FOREIGN_NS,
+      timestamp: ancient,
+      heartbeatAt: ancient,
+    });
+    const taskLock = new LockManager(testDir);
+    writeFileSync(taskLock.getLockFilePath(), foreign);
+    const runLock = createRepoRunLock("repo", testDir);
+    writeFileSync(runLock.getLockFilePath(), foreign);
+    const workspaceLock = createWorkspaceLock(testDir);
+    writeFileSync(workspaceLock.getLockFilePath(), foreign);
+    const ns = (await import("../src/lib/lock-manager")).readOwnPidNamespace();
+    if (ns === undefined || ns === FOREIGN_NS) return; // needs a readable, different namespace
+    expect(taskLock.acquire().success).toBe(false);
+    expect(runLock.acquire().success).toBe(false);
+    expect(workspaceLock.acquire().success).toBe(true);
+    workspaceLock.release();
+  });
+
+  test("refreshHeartbeat advances heartbeatAt and keeps a foreign reader at unknown", () => {
+    let clock = Date.parse("2026-01-01T00:00:00.000Z");
+    const owner = new LockManager(testDir, ".worker.lock", {
+      plainDir: true,
+      probes: { readPidNamespace: () => FOREIGN_NS, now: () => clock },
+    });
+    expect(owner.acquire().success).toBe(true);
+    const reader = (now: number) =>
+      LockManager.readLockStatus(testDir, ".worker.lock", {
+        plainDir: true,
+        probes: { signalPid: errno("ESRCH"), readPidNamespace: () => OWN_NS, now: () => now },
+      })?.running;
+
+    clock += LOCK_HEARTBEAT_STALE_MS + 1_000;
+    // Without a refresh, the reader would consider the owner dead...
+    expect(reader(clock)).toBe(false);
+    owner.refreshHeartbeat();
+    // ...but a refreshed heartbeat keeps it unverifiable-but-alive.
+    expect(reader(clock)).toBe("unknown");
+    expect(JSON.parse(readFileSync(owner.getLockFilePath(), "utf8")).heartbeatAt).toBe(
+      new Date(clock).toISOString(),
+    );
+    owner.release();
+    expect(existsSync(owner.getLockFilePath())).toBe(false);
+  });
+
+  test("refreshHeartbeat never rewrites a lock now owned by another pid", () => {
+    const owner = new LockManager(testDir, ".worker.lock", { plainDir: true });
+    expect(owner.acquire().success).toBe(true);
+    const lockPath = owner.getLockFilePath();
+    writeFileSync(lockPath, JSON.stringify({ pid: DEAD_PID, timestamp: "x", heartbeatAt: "x" }));
+    owner.refreshHeartbeat();
+    expect(JSON.parse(readFileSync(lockPath, "utf8"))).toEqual({
+      pid: DEAD_PID,
+      timestamp: "x",
+      heartbeatAt: "x",
+    });
+  });
+
+  test("acquire still steals a truly stale same-namespace lock", () => {
+    const lockPath = writeLock({ pidNamespace: OWN_NS });
+    const lock = new LockManager(testDir, ".worker.lock", {
+      plainDir: true,
+      probes: { signalPid: errno("ESRCH"), readPidNamespace: () => OWN_NS },
+    });
+    expect(lock.acquire().success).toBe(true);
+    const written = JSON.parse(readFileSync(lockPath, "utf8"));
+    expect(written.pid).toBe(process.pid);
+    expect(written.pidNamespace).toBe(OWN_NS);
+    lock.release();
   });
 });

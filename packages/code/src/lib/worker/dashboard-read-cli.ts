@@ -768,6 +768,9 @@ function renderQueue(body: QueuedWorkResponse): string {
 function workerLine(worker: WorkerStatusView): string {
   const pid = worker.pid === undefined ? "" : ` (pid ${worker.pid})`;
   const since = worker.startedAt ? ` since ${worker.startedAt}` : "";
+  if (worker.reason === "pid-namespace") {
+    return `${worker.status} (cannot verify from this sandbox${worker.pid === undefined ? "" : `; pid ${worker.pid}`})${since}`;
+  }
   return `${worker.status}${pid}${since}`;
 }
 

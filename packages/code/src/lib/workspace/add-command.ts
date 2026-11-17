@@ -19,6 +19,7 @@ import { listHarnesses } from "@devintern/agent-harness";
 import { checkLicense } from "@devintern/license-check";
 
 import { LockManager } from "../lock-manager";
+import type { LockProbes, PidLiveness } from "../lock-manager";
 import { readWorkerHarnessPause } from "../observability/harness-pause";
 import type { WorkerHarnessPause } from "../observability/harness-pause";
 import { loadSupabaseConfig } from "../cli/bootstrap";
@@ -48,6 +49,7 @@ import {
   workspaceStateDir,
   readWorkerStartMarker,
 } from "./paths";
+import type { WorkerStartMarker } from "./paths";
 
 /** How often `--wait` re-reads the task row. */
 const WAIT_POLL_INTERVAL_MS = 1_000;
@@ -73,6 +75,10 @@ export const DEFAULT_WAIT_TIMEOUT_SECONDS = 6 * 60 * 60;
  * deadline.
  */
 export const WORKER_RESTART_GRACE_MS = 5 * 60 * 1_000;
+
+/** Printed instead of "No worker is running" when the worker lock cannot be verified. */
+const UNVERIFIED_WORKER_NOTICE =
+  "Could not verify the worker from this sandbox; the task is queued durably.";
 
 export interface WorkerAddOptions {
   /** Human-readable status sink (defaults to stdout). */
@@ -442,9 +448,11 @@ export async function runWorkerAdd(
 
   if (!(await checkAutomationAccess(selectedDir, status, error))) return 1;
 
-  const workerRunning =
+  // `"unknown"`: the lock was taken in another PID namespace (this command runs
+  // inside a PID-isolated sandbox), so a live worker cannot be ruled out.
+  const workerRunning: PidLiveness =
     LockManager.readLockStatus(selectedDir, ".worker.lock", { plainDir: true })?.running ?? false;
-  if (!workerRunning && add.wait) {
+  if (workerRunning === false && add.wait) {
     error("❌ --wait needs a running worker, but none is active for this workspace.");
     error("   Start it with `devintern worker`, or drop --wait to enqueue durably.");
     return 1;
@@ -452,7 +460,7 @@ export async function runWorkerAdd(
 
   const store = new InjectedTaskStore(workspaceDbPath(selectedDir));
   try {
-    const context: TaskContext & { workerRunning: boolean } = {
+    const context: TaskContext & { workerRunning: PidLiveness } = {
       store,
       selectedDir,
       workerRunning,
@@ -544,7 +552,7 @@ async function enqueueNewTask(
   add: AddOptions,
   body: string,
   repo: RepoConfig,
-  ctx: TaskContext & { workerRunning: boolean },
+  ctx: TaskContext & { workerRunning: PidLiveness },
 ): Promise<number> {
   const { store, selectedDir, workerRunning, log, status } = ctx;
   // Only an active (pending/running) task dedupes; a settled one under the
@@ -595,7 +603,9 @@ async function enqueueNewTask(
           (task.dependencyState ? `; ${task.dependencyState}: ${task.dependencyReason}` : ""),
       );
     }
-    if (!workerRunning) {
+    if (workerRunning === "unknown") {
+      status(`ℹ️  ${UNVERIFIED_WORKER_NOTICE}`);
+    } else if (!workerRunning) {
       status("⚠️  No worker is running; the task stays queued until one starts.");
     } else if (!pause) {
       status("   The worker picks it up on its next poll.");
@@ -765,7 +775,7 @@ async function reportTask(task: InjectedTask, ctx: TaskContext): Promise<number>
  */
 async function resumeTask(
   taskKey: string,
-  ctx: TaskContext & { workerRunning: boolean },
+  ctx: TaskContext & { workerRunning: PidLiveness },
 ): Promise<number> {
   const { store, workerRunning } = ctx;
   const task = store.getByTaskKey(taskKey);
@@ -801,7 +811,9 @@ async function resumeTask(
   const pause = readHarnessPause(ctx.selectedDir);
   if (!ctx.json) {
     ctx.status(`♻️  Re-queued ${revived.taskKey} (task #${revived.id}, repo "${revived.repo}").`);
-    if (!workerRunning) {
+    if (workerRunning === "unknown") {
+      ctx.status(`ℹ️  ${UNVERIFIED_WORKER_NOTICE}`);
+    } else if (!workerRunning) {
       ctx.status("⚠️  No worker is running; the task stays queued until one starts.");
     } else if (!pause) {
       ctx.status(
@@ -853,14 +865,26 @@ function failWait(
   return 1;
 }
 
-/** Whether a process still exists (EPERM means it exists but is not signalable). */
-function isPidRunning(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM";
-  }
+/**
+ * Whether the `.worker.starting` marker proves a replacement worker is
+ * starting. Only a marker written after the task was claimed can belong to the
+ * replacement (an older one is the dead worker's, and its pid may be recycled).
+ * The pid is probed namespace-aware via {@link LockManager.probeLiveness}: a
+ * marker from another PID namespace cannot be probed (its pid may collide with
+ * an unrelated local process), so it counts only while `startedAt` is within
+ * `LOCK_HEARTBEAT_STALE_MS`. The marker is never refreshed, so after that
+ * window the normal restart grace takes over and still bounds `--wait`.
+ */
+export function isReplacementWorkerStarting(
+  marker: WorkerStartMarker | null,
+  taskStartedAt: number | undefined,
+  probes: LockProbes = {},
+): boolean {
+  if (marker === null) return false;
+  if (taskStartedAt !== undefined && marker.startedAt < taskStartedAt) return false;
+  return (
+    LockManager.probeLiveness(marker.pid, marker.pidNamespace, marker.startedAt, probes) !== false
+  );
 }
 
 /**
@@ -904,10 +928,15 @@ async function waitForTask(
         ],
       );
     }
+    // An unverifiable lock (another PID namespace, i.e. this waiter runs in a
+    // sandbox) counts as alive: giving up would abandon a live worker's task.
+    // It stays "unknown" only while the worker refreshes its lock heartbeat; a
+    // dead worker's lock turns `false` after LOCK_HEARTBEAT_STALE_MS, so the
+    // restart-grace failure below still fires.
     const workerRunning =
       LockManager.readLockStatus(ctx.selectedDir, ".worker.lock", { plainDir: true })?.running ??
       false;
-    if (workerRunning) {
+    if (workerRunning !== false) {
       // A replacement worker came back within the grace: a later restart gets
       // its own grace window rather than inheriting an old one.
       workerGapSince = null;
@@ -920,10 +949,7 @@ async function waitForTask(
       // belong to the replacement; an older marker is from the dead worker and
       // a recycled pid must not be mistaken for a new process.
       const startingMarker = readWorkerStartMarker(ctx.selectedDir);
-      const replacementStarting =
-        startingMarker !== null &&
-        isPidRunning(startingMarker.pid) &&
-        (task.startedAt === undefined || startingMarker.startedAt >= task.startedAt);
+      const replacementStarting = isReplacementWorkerStarting(startingMarker, task.startedAt);
       if (replacementStarting) {
         // Restart grace measures from evidence of a new worker, not from the
         // lock disappearing while that process is still in startup.

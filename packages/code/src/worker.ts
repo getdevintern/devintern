@@ -312,7 +312,8 @@ export async function startWorker(
   // Single-instance guard, separate from the CLI task lock so an idle daemon
   // does not block manual `devintern TASK-123` runs. The executor still takes
   // the task lock per run (one in-flight task per repo).
-  const lock = options.lock ?? new LockManager(process.cwd(), ".worker.lock");
+  const lock =
+    options.lock ?? new LockManager(process.cwd(), ".worker.lock", { reclaimForeign: true });
   const lockResult = lock.acquire();
   if (!lockResult.success) {
     console.error(`❌ ${lockResult.message.replace("devintern", "devintern worker")}`);

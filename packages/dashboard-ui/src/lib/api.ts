@@ -522,6 +522,12 @@ export interface WorkerStatus {
   startedAt?: string;
   /** Lock file the status was read from; absent when it could not be determined. */
   lockFile?: string;
+  /**
+   * Why the status is `unknown` despite a lock file: the lock owner runs in
+   * another PID namespace (e.g. the dashboard runs inside a sandbox), so its
+   * pid cannot be verified from here.
+   */
+  reason?: "pid-namespace";
 }
 
 export interface WorkerResponse {

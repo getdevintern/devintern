@@ -110,6 +110,40 @@ function pruneInjectedTasks(
   }
 }
 
+/**
+ * Drop per-PR poll cursors of change requests already closed in the registry
+ * (databases from before cursors were pruned on close). Housekeeping only: a
+ * failure is logged and never blocks worker startup.
+ */
+function pruneClosedChangeRequestCursors(
+  workerState: Pick<WorkerState, "pruneClosedChangeRequestCursors">,
+): void {
+  try {
+    const pruned = workerState.pruneClosedChangeRequestCursors();
+    if (pruned > 0) {
+      console.log(`🧹 [fleet] pruned ${pruned} poll cursor(s) of closed agent PR(s)`);
+    }
+  } catch (error) {
+    console.warn(`⚠️  [fleet] could not prune closed PR cursors: ${(error as Error).message}`);
+  }
+}
+
+/**
+ * Working windows (quiet hours): gate only the ready-task drain; reviews,
+ * mentions, automations, and relay events stay on their normal paths.
+ */
+function startWorkspacePickupGate(
+  config: { worker: { schedule: Parameters<typeof createPickupGate>[0] } },
+  workspaceDir: string,
+): ReturnType<typeof createPickupGate> {
+  const pickupGate = createPickupGate(config.worker.schedule, {
+    runNowPath: workspaceRunNowPath(workspaceDir),
+  });
+  describePickupSchedule(pickupGate);
+  attachPickupScheduleLogger(pickupGate);
+  return pickupGate;
+}
+
 /** Interval between periodic injected-task prunes (1 hour). */
 export const INJECTED_TASK_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 
@@ -903,19 +937,14 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
     maxConcurrencyPerRepo: config.workspace.execution.maxConcurrencyPerRepo,
   });
   await recoverOrphanedWorkspaceRuns({ config, workspaceDir, dbPath: state.dbPath });
+  pruneClosedChangeRequestCursors(state.workerState);
   const injectedStartup = createInjectedStartupRecovery(
     injectedTasks,
     workspaceDir,
     options.beforeAcquirersStart,
   );
 
-  // Working windows (quiet hours): gate only the ready-task drain; reviews,
-  // mentions, automations, and relay events stay on their normal paths.
-  const pickupGate = createPickupGate(config.worker.schedule, {
-    runNowPath: workspaceRunNowPath(workspaceDir),
-  });
-  describePickupSchedule(pickupGate);
-  attachPickupScheduleLogger(pickupGate);
+  const pickupGate = startWorkspacePickupGate(config, workspaceDir);
 
   await sweepAllWorktrees(config.repos, repoManager, config.workspace.worktreesTtlDays);
   // Keep sweeping while the worker runs, not only at startup: a long-lived
@@ -1267,18 +1296,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
     ? [...new Set(config.teams.map((team) => team.tracker))].sort().join(",")
     : config.defaults.tracker;
   console.log(`🗂️  Workspace: ${configPath} (${config.repos.length} repo(s)${teamsLabel})`);
-  console.log(
-    `⚙️  Agent concurrency: ${config.workspace.execution.maxConcurrency} global, ` +
-      `${config.workspace.execution.maxConcurrencyPerRepo} per repository`,
-  );
-  if (
-    config.workspace.execution.maxConcurrency > 1 ||
-    config.workspace.execution.maxConcurrencyPerRepo > 1
-  ) {
-    console.warn(
-      "⚠️  Concurrent jobs share host ports, processes, Docker, caches, and linked Git metadata.",
-    );
-  }
+  logAgentConcurrency(config);
   console.log(
     "🔄 Live config reload armed: edits to workspace.toml apply automatically (SIGHUP forces one)",
   );
@@ -1347,6 +1365,19 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
     },
     acquirers,
   );
+}
+
+/** Log the configured agent concurrency and warn when jobs can run in parallel. */
+function logAgentConcurrency(config: WorkspaceConfig): void {
+  const { maxConcurrency, maxConcurrencyPerRepo } = config.workspace.execution;
+  console.log(
+    `⚙️  Agent concurrency: ${maxConcurrency} global, ${maxConcurrencyPerRepo} per repository`,
+  );
+  if (maxConcurrency > 1 || maxConcurrencyPerRepo > 1) {
+    console.warn(
+      "⚠️  Concurrent jobs share host ports, processes, Docker, caches, and linked Git metadata.",
+    );
+  }
 }
 
 /** Export shared workspace values into `process.env` and return derived defaults. */

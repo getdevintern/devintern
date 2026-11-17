@@ -4,6 +4,7 @@ import {
   chmodSync,
   existsSync,
   mkdirSync,
+  mkdtempSync,
   readFileSync,
   rmSync,
   statSync,
@@ -12,7 +13,11 @@ import {
 import { join } from "path";
 import { tmpdir } from "os";
 
-import { parseWorkerAddArgs, runWorkerAdd } from "../src/lib/workspace/add-command";
+import {
+  isReplacementWorkerStarting,
+  parseWorkerAddArgs,
+  runWorkerAdd,
+} from "../src/lib/workspace/add-command";
 import {
   buildInjectedTaskMarkdown,
   deriveInjectedTaskKey,
@@ -21,11 +26,13 @@ import {
 import { InjectedTaskStore } from "../src/lib/state/injected-tasks";
 import { RunStore } from "../src/lib/state/run-recorder";
 import { WebhookQueue } from "../src/lib/state/webhook-queue";
-import { LockManager } from "../src/lib/lock-manager";
+import { LOCK_HEARTBEAT_STALE_MS, LockManager, readOwnPidNamespace } from "../src/lib/lock-manager";
 import {
   workspaceDbPath,
   workspaceStateDir,
+  readWorkerStartMarker,
   workspaceWorkerStartPath,
+  writeWorkerStartMarker,
 } from "../src/lib/workspace/paths";
 import { loadWorkspaceConfig } from "../src/lib/workspace/config";
 import { recoverOrphanedWorkspaceRuns } from "../src/lib/workspace/workspace-worker";
@@ -1786,6 +1793,213 @@ describe("runWorkerAdd", () => {
     );
     expect(code).toBe(1);
     expect(cap.err.join("\n")).toContain("--wait needs a running worker");
+  });
+
+  /** A lock taken in another PID namespace whose pid is invisible here. */
+  function writeForeignNamespaceLock(): void {
+    writeFileSync(
+      join(dir, ".worker.lock"),
+      JSON.stringify({
+        pid: 999_999_999,
+        timestamp: new Date().toISOString(),
+        // Never equal to a real reader's namespace; off Linux the reader has
+        // none, which is unverifiable too, so the result is host-independent.
+        pidNamespace: "pid:[foreign-test-namespace]",
+      }),
+    );
+  }
+
+  test("an unverifiable worker prints the neutral line instead of 'No worker is running'", async () => {
+    writeForeignNamespaceLock();
+    const cap = capture();
+    const code = await runWorkerAdd(
+      ["--workspace", configPath, "--repo", "backend", "--title", "Sandboxed enqueue"],
+      cap.options,
+    );
+    expect(code).toBe(0);
+    const output = [...cap.out, ...cap.err].join("\n");
+    expect(output).toContain(
+      "Could not verify the worker from this sandbox; the task is queued durably.",
+    );
+    expect(output).not.toContain("No worker is running");
+  });
+
+  test("--resume with an unverifiable worker prints the neutral line", async () => {
+    const seeded = new InjectedTaskStore(workspaceDbPath(dir));
+    seeded.enqueue({
+      taskKey: "local-sandboxed-resume",
+      repo: "backend",
+      title: "Sandboxed resume",
+      body: "context",
+      taskFile: join(dir, "injected", "local-sandboxed-resume.md"),
+    });
+    seeded.finish(seeded.claimNext()!.id, "failed", "worker restarted while this task was running");
+    seeded.close();
+    writeForeignNamespaceLock();
+
+    const cap = capture();
+    const code = await runWorkerAdd(
+      ["--workspace", configPath, "--resume", "local-sandboxed-resume"],
+      cap.options,
+    );
+    expect(code).toBe(0);
+    const output = [...cap.out, ...cap.err].join("\n");
+    expect(output).toContain("Could not verify the worker from this sandbox");
+    expect(output).not.toContain("No worker is running");
+  });
+
+  test("--wait is allowed and survives the restart grace with an unverifiable worker", async () => {
+    writeForeignNamespaceLock();
+    const dbPath = workspaceDbPath(dir);
+    // Claim the row, then settle it only after the restart grace has elapsed:
+    // a waiter that treated the unverifiable lock as dead would give up first.
+    const companion = (async () => {
+      const store = new InjectedTaskStore(dbPath);
+      try {
+        let claimed: { id: number } | null = null;
+        for (let attempt = 0; attempt < 300 && !claimed; attempt++) {
+          if (store.hasPending()) claimed = store.claimNext();
+          else await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        if (!claimed) throw new Error("timed out waiting for the enqueued row");
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        store.finish(claimed.id, "done");
+      } finally {
+        store.close();
+      }
+    })();
+
+    const cap = capture();
+    const code = await runWorkerAdd(
+      [
+        "--workspace",
+        configPath,
+        "--repo",
+        "backend",
+        "--title",
+        "Sandboxed wait",
+        "--wait",
+        "--json",
+      ],
+      { ...cap.options, restartGraceMs: 100 },
+    );
+    await companion;
+
+    expect(cap.err.join("\n")).not.toContain("--wait needs a running worker");
+    expect(code).toBe(0);
+    expect(JSON.parse(cap.out.at(-1)!)).toMatchObject({ status: "done" });
+  });
+
+  test("--wait still fails after the restart grace once an unverifiable worker's heartbeat goes stale", async () => {
+    writeForeignNamespaceLock();
+    const dbPath = workspaceDbPath(dir);
+    const companion = (async () => {
+      const store = new InjectedTaskStore(dbPath);
+      try {
+        let claimed: { id: number } | null = null;
+        for (let attempt = 0; attempt < 300 && !claimed; attempt++) {
+          if (store.hasPending()) claimed = store.claimNext();
+          else await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        if (!claimed) throw new Error("timed out waiting for the enqueued row");
+        // The sandboxed worker crashes: its lock stays behind but the
+        // heartbeat stops, so it ages past LOCK_HEARTBEAT_STALE_MS.
+        const old = new Date(Date.now() - LOCK_HEARTBEAT_STALE_MS - 1_000).toISOString();
+        writeFileSync(
+          join(dir, ".worker.lock"),
+          JSON.stringify({
+            pid: 999_999_999,
+            timestamp: old,
+            heartbeatAt: old,
+            pidNamespace: "pid:[foreign-test-namespace]",
+          }),
+        );
+      } finally {
+        store.close();
+      }
+    })();
+
+    const cap = capture();
+    const code = await runWorkerAdd(
+      [
+        "--workspace",
+        configPath,
+        "--repo",
+        "backend",
+        "--title",
+        "Sandboxed dead worker",
+        "--wait",
+        // A hang would surface as this timeout rather than the grace failure.
+        "--wait-timeout",
+        "20",
+        "--json",
+      ],
+      { ...cap.options, restartGraceMs: 200 },
+    );
+    await companion;
+
+    expect(code).toBe(1);
+    expect(JSON.parse(cap.out.at(-1)!).error).toContain("did not restart within");
+  });
+});
+
+describe("isReplacementWorkerStarting", () => {
+  const OWN_NS = "pid:[4026531836]";
+  const FOREIGN_NS = "pid:[4026532999]";
+  const NOW = 1_000_000_000;
+  // The colliding pid "exists" locally: a plain signal-0 probe would say alive.
+  const alivePid = () => {};
+  const probes = { signalPid: alivePid, readPidNamespace: () => OWN_NS, now: () => NOW };
+
+  test("does not trust a colliding pid from another namespace once the marker is old", () => {
+    const marker = {
+      pid: 4,
+      startedAt: NOW - LOCK_HEARTBEAT_STALE_MS - 1,
+      pidNamespace: FOREIGN_NS,
+    };
+    expect(isReplacementWorkerStarting(marker, NOW - LOCK_HEARTBEAT_STALE_MS - 10, probes)).toBe(
+      false,
+    );
+  });
+
+  test("treats a recent foreign-namespace marker as a replacement without probing its pid", () => {
+    const marker = { pid: 4, startedAt: NOW - 1_000, pidNamespace: FOREIGN_NS };
+    const signalPid = () => {
+      throw Object.assign(new Error("ESRCH"), { code: "ESRCH" });
+    };
+    expect(isReplacementWorkerStarting(marker, NOW - 5_000, { ...probes, signalPid })).toBe(true);
+  });
+
+  test("probes the pid for a same-namespace or legacy marker regardless of age", () => {
+    const old = NOW - 10 * LOCK_HEARTBEAT_STALE_MS;
+    const dead = () => {
+      throw Object.assign(new Error("ESRCH"), { code: "ESRCH" });
+    };
+    for (const marker of [
+      { pid: 4, startedAt: old, pidNamespace: OWN_NS },
+      { pid: 4, startedAt: old },
+    ]) {
+      expect(isReplacementWorkerStarting(marker, old, probes)).toBe(true);
+      expect(isReplacementWorkerStarting(marker, old, { ...probes, signalPid: dead })).toBe(false);
+    }
+  });
+
+  test("the worker's marker records its own PID namespace", () => {
+    const markerDir = mkdtempSync(join(tmpdir(), "start-marker-"));
+    try {
+      writeWorkerStartMarker(markerDir, 1234);
+      const marker = readWorkerStartMarker(markerDir);
+      expect(marker?.pid).toBe(1234);
+      expect(marker?.pidNamespace).toBe(readOwnPidNamespace());
+    } finally {
+      rmSync(markerDir, { recursive: true, force: true });
+    }
+  });
+
+  test("ignores a marker written before the task was claimed", () => {
+    const marker = { pid: 4, startedAt: NOW - 1_000, pidNamespace: OWN_NS };
+    expect(isReplacementWorkerStarting(marker, NOW, probes)).toBe(false);
+    expect(isReplacementWorkerStarting(null, NOW, probes)).toBe(false);
   });
 });
 

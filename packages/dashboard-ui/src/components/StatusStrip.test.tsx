@@ -50,6 +50,26 @@ test("an undeterminable worker says unknown instead of claiming stopped", () => 
   expect(html).toContain("title=");
 });
 
+test("an unverifiable pid-namespace lock says the lock exists, not that none was found", () => {
+  const html = render({
+    status: "unknown",
+    reason: "pid-namespace",
+    pid: 4242,
+    lockFile: "/home/u/.devintern/.worker.lock",
+  });
+
+  expect(html).toContain('data-state="unknown"');
+  expect(html).toContain("worker status unknown");
+  expect(html).toContain("(pid 4242)");
+  expect(html).toContain("another PID namespace");
+  expect(html).toContain("/home/u/.devintern/.worker.lock");
+  expect(html).not.toContain("No worker lock file was found");
+});
+
+test("an unknown status without a reason keeps the no-lock-found explanation", () => {
+  expect(render({ status: "unknown" })).toContain("No worker lock file was found");
+});
+
 test("the queued count includes relay deliveries, ad-hoc tasks, and scheduled retries", () => {
   expect(queueLabel(mixedQueue)).toBe("5 queued");
 
