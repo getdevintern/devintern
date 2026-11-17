@@ -26,7 +26,7 @@ export interface TrackerSmokeCheck {
   requiredEnv: readonly string[];
   /**
    * Read-only check. Undefined when the tracker is detected but has no
-   * read-only check yet (see `docs/tracker-e2e-plan.md`).
+   * read-only check yet (see `docs/coverage/trackers.md`).
    */
   run?: (env: Record<string, string>) => Promise<TrackerSmokeResult>;
 }

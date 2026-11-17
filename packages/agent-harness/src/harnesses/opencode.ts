@@ -35,8 +35,8 @@
  */
 
 import { effectiveSkipPermissions, isConstrainedMode, assertModeSupported } from "../modes.js";
-import { parseMajorVersion, readCliVersion } from "../probe.js";
-import type { AgentHarness, AgentRunOptions, HarnessProbe } from "../types.js";
+import { parseMajorVersion, probeCliVersion } from "../probe.js";
+import type { AgentHarness, AgentRunOptions, HarnessProbe, HarnessProbeOptions } from "../types.js";
 
 export class OpencodeHarness implements AgentHarness {
   readonly name = "opencode";
@@ -61,15 +61,25 @@ export class OpencodeHarness implements AgentHarness {
   /**
    * Detect the installed OpenCode major version from `opencode --version`.
    *
+   * When the version cannot be determined, prints one warning naming the
+   * executable and the probe's failure reason before falling back to v1
+   * flags; otherwise the only symptom would be a v2 usage dump.
+   *
    * @param executablePath - Resolved opencode executable path/command.
+   * @param options - Optional environment for the `--version` process.
    * @returns The version snapshot, or `{}` when it cannot be read.
    */
-  probe(executablePath: string): HarnessProbe {
-    const version = readCliVersion(executablePath);
-    if (version === undefined) {
-      return {};
+  probe(executablePath: string, options: HarnessProbeOptions = {}): HarnessProbe {
+    const { output, failure } = probeCliVersion(executablePath, options, "opencode");
+    const major = output === undefined ? undefined : parseMajorVersion(output);
+    if (output === undefined || major === undefined) {
+      const reason = failure ?? `unrecognized version output: ${output}`;
+      console.warn(
+        `⚠️  Could not determine opencode version from ${executablePath} (${reason}); assuming v1 flags`,
+      );
+      return output === undefined ? {} : { version: output };
     }
-    return { version, major: parseMajorVersion(version) };
+    return { version: output, major };
   }
 
   /**

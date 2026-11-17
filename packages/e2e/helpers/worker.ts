@@ -254,6 +254,14 @@ export interface WorkerFixtureOptions {
   repos?: string[];
   /** Prefix for the isolated temporary directory. */
   rootPrefix?: string;
+  /**
+   * Existing, empty directory to use as the fixture root instead of a fresh
+   * one under the OS temp dir. The fixture still removes it on
+   * {@link WorkerFixture.dispose}, so pass only a directory the test created.
+   * Sandbox coverage needs this: nono's Linux profile grants write on `/tmp`,
+   * so a workspace under the temp dir could never prove a denied write.
+   */
+  root?: string;
 }
 
 /** Log captured from the worker subprocess, for readiness and failure reports. */
@@ -295,7 +303,8 @@ export class WorkerFixture {
   private descendantTimer: ReturnType<typeof setInterval> | undefined;
 
   constructor(private readonly options: WorkerFixtureOptions = {}) {
-    this.root = mkdtempSync(join(tmpdir(), options.rootPrefix ?? "devintern-e2e-worker-"));
+    this.root =
+      options.root ?? mkdtempSync(join(tmpdir(), options.rootPrefix ?? "devintern-e2e-worker-"));
     this.workspaceDir = join(this.root, "workspace");
     this.env = isolatedEnvironment(this.root);
     this.repoNames = options.repos?.length ? [...options.repos] : ["fixture"];
@@ -341,11 +350,6 @@ export class WorkerFixture {
       // A lock this process is writing right now is not valid JSON yet.
       return undefined;
     }
-  }
-
-  /** Daemon exit code once it has exited, or undefined while running/unstarted. */
-  get exitStatus(): number | undefined {
-    return this.exitCode ?? this.child?.exitCode ?? undefined;
   }
 
   /** Complete stdout/stderr captured from the worker so far. */
@@ -401,6 +405,11 @@ export class WorkerFixture {
    */
   get running(): boolean {
     return this.child !== null && this.child.exitCode === null && this.exitCode === undefined;
+  }
+
+  /** Daemon exit code once it has exited on its own, otherwise undefined. */
+  get exitStatus(): number | undefined {
+    return this.exitCode ?? this.child?.exitCode ?? undefined;
   }
 
   /**
