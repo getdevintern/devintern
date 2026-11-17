@@ -52,8 +52,22 @@ function writeStubAgent(stdout: string): string {
   return agentPath;
 }
 
+/** Git identity for fixture commits and the CLI: CI runners have no global one. */
+const GIT_IDENTITY_ENV = {
+  GIT_AUTHOR_NAME: "Test",
+  GIT_AUTHOR_EMAIL: "test@example.com",
+  GIT_COMMITTER_NAME: "Test",
+  GIT_COMMITTER_EMAIL: "test@example.com",
+};
+
 async function git(cwd: string, ...args: string[]): Promise<void> {
-  const proc = Bun.spawn({ cmd: ["git", ...args], cwd, stdout: "ignore", stderr: "pipe" });
+  const proc = Bun.spawn({
+    cmd: ["git", ...args],
+    cwd,
+    env: { ...process.env, ...GIT_IDENTITY_ENV },
+    stdout: "ignore",
+    stderr: "pipe",
+  });
   const code = await proc.exited;
   if (code !== 0)
     throw new Error(`git ${args.join(" ")} failed: ${await new Response(proc.stderr).text()}`);
@@ -89,10 +103,7 @@ async function runCli(
       DEVINTERN_OUTPUT_DIR: join(dir, "output"),
       WEBHOOK_QUEUE_DB: dbPath,
       [RUN_OUTCOME_FILE_ENV]: hintPath,
-      GIT_AUTHOR_NAME: "Test",
-      GIT_AUTHOR_EMAIL: "test@example.com",
-      GIT_COMMITTER_NAME: "Test",
-      GIT_COMMITTER_EMAIL: "test@example.com",
+      ...GIT_IDENTITY_ENV,
     },
     stdout: "pipe",
     stderr: "pipe",
