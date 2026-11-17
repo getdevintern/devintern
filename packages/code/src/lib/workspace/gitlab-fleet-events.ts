@@ -210,17 +210,20 @@ export async function buildGitLabFleetAcquirers(options: {
             return { repo: key, prNumber: mr.changeNumber };
           });
       },
-      markClosed: (key, n) => {
+      markClosed: (key, n, options) => {
         const mr = ciRow(key, n);
         if (mr) {
-          state.workerState.markAgentChangeRequestClosed({
-            provider: mr.provider,
-            instanceUrl: mr.instanceUrl,
-            projectId: mr.projectId,
-            projectPath: mr.projectPath,
-            number: mr.changeNumber,
-            webUrl: mr.webUrl,
-          });
+          state.workerState.markAgentChangeRequestClosed(
+            {
+              provider: mr.provider,
+              instanceUrl: mr.instanceUrl,
+              projectId: mr.projectId,
+              projectPath: mr.projectPath,
+              number: mr.changeNumber,
+              webUrl: mr.webUrl,
+            },
+            options,
+          );
         }
       },
       provider: createGitLabCiProvider(resolveCi),

@@ -1251,22 +1251,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   const analyticsTracker = multiTeam
     ? [...new Set(config.teams.map((team) => team.tracker))].sort().join(",")
     : config.defaults.tracker;
-  console.log(`🗂️  Workspace: ${configPath} (${config.repos.length} repo(s)${teamsLabel})`);
-  console.log(
-    `⚙️  Agent concurrency: ${config.workspace.execution.maxConcurrency} global, ` +
-      `${config.workspace.execution.maxConcurrencyPerRepo} per repository`,
-  );
-  if (
-    config.workspace.execution.maxConcurrency > 1 ||
-    config.workspace.execution.maxConcurrencyPerRepo > 1
-  ) {
-    console.warn(
-      "⚠️  Concurrent jobs share host ports, processes, Docker, caches, and linked Git metadata.",
-    );
-  }
-  console.log(
-    "🔄 Live config reload armed: edits to workspace.toml apply automatically (SIGHUP forces one)",
-  );
+  logWorkspaceStartup(config, configPath, teamsLabel);
   // Idle self-update: while the daemon runs for weeks, keep a global
   // npm/bun install current — checked at most daily, applied only when the
   // supervisor is idle, never touching source/local installs. Opt out with
@@ -1331,6 +1316,30 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       },
     },
     acquirers,
+  );
+}
+
+/** Print the workspace summary, concurrency settings, and reload notice at startup. */
+function logWorkspaceStartup(
+  config: WorkspaceConfig,
+  configPath: string,
+  teamsLabel: string,
+): void {
+  console.log(`🗂️  Workspace: ${configPath} (${config.repos.length} repo(s)${teamsLabel})`);
+  console.log(
+    `⚙️  Agent concurrency: ${config.workspace.execution.maxConcurrency} global, ` +
+      `${config.workspace.execution.maxConcurrencyPerRepo} per repository`,
+  );
+  if (
+    config.workspace.execution.maxConcurrency > 1 ||
+    config.workspace.execution.maxConcurrencyPerRepo > 1
+  ) {
+    console.warn(
+      "⚠️  Concurrent jobs share host ports, processes, Docker, caches, and linked Git metadata.",
+    );
+  }
+  console.log(
+    "🔄 Live config reload armed: edits to workspace.toml apply automatically (SIGHUP forces one)",
   );
 }
 

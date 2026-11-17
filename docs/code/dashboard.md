@@ -22,6 +22,7 @@ It starts automatically with `devintern worker`. Open [http://localhost:4400](ht
 - Follow each run from task pickup through implementation and pull request creation
 - Read the raw agent transcript for any harness execution under the run (clarity, implementation, review, and more)
 - Open the task or pull request behind a run
+- Switch **Pull requests** between **Open** (the agent's PRs awaiting review, oldest first) and **Merged** (up to the 50 most recently merged, newest first), each linking to the PR and its ticket. A merge is recorded when the worker sees it, so PRs that closed before this was added stay out of the merged list, and so do PRs closed without merging
 - Understand why a run failed and retry it after fixing the cause
 - Report a DevIntern bug for a run, with a preview of exactly what is sent
 - Run a recurring automation immediately instead of waiting for its next scheduled time
@@ -156,7 +157,7 @@ Every read-only dashboard view is also a `devintern worker` subcommand. The comm
 | `devintern worker runs artifacts <id> [<artifact-id>]` | `GET /api/runs/:id/artifacts[/:artifactId]` | A run's registered artifacts, or one artifact's content |
 | `devintern worker stats [--window 7d\|30d\|90d\|all]` | `GET /api/stats` | Success and escalation rates, durations, per-harness and per-origin counts (default `30d`) |
 | `devintern worker automations` | `GET /api/automations` | Configured automations with `nextDueAt` and `lastRun` |
-| `devintern worker prs` | `GET /api/agent-prs` | Open pull and merge requests opened by the agent |
+| `devintern worker prs [--state open\|merged] [--limit N]` | `GET /api/agent-prs?state=open\|merged&limit=N` | Pull and merge requests opened by the agent: open (default), or recently merged (`limit` 1..500, default 50) |
 | `devintern worker queue` | `GET /api/queue` | Queued work that has not started |
 | `devintern worker status` | `GET /api/worker` | Worker liveness, durable queue counts, agent PR counts, poll cursors |
 | `devintern worker overview` | `GET /api/overview` | Capacity, harness chain health, tracker freshness |

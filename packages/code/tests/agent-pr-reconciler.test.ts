@@ -51,6 +51,24 @@ describe("agent PR reconciler", () => {
     expect(summary.closed).toEqual([{ repo: "acme/widgets", prNumber: 7, reason: "closed" }]);
     expect(workerState.listOpenAgentPrs()).toHaveLength(0);
     expect(workerState.countAgentPrs()).toEqual({ open: 0, closed: 1 });
+    // A plain close is not a merge.
+    expect(workerState.listMergedAgentChangeRequests(10)).toEqual([]);
+  });
+
+  test("a PR merged on GitHub is recorded as merged", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 9 });
+    const summary = await reconcileOpenAgentPrs({
+      workerState,
+      github: {
+        async fetchPr() {
+          return { data: { state: "merged" }, etag: 'W/"2"', notModified: false };
+        },
+      },
+      watched: workerState.listOpenAgentPrs(),
+    });
+
+    expect(summary.closed).toEqual([{ repo: "acme/widgets", prNumber: 9, reason: "merged" }]);
+    expect(workerState.listMergedAgentChangeRequests(10).map((pr) => pr.prNumber)).toEqual([9]);
   });
 
   test("a 404 leaves an inaccessible PR watched for a later retry", async () => {

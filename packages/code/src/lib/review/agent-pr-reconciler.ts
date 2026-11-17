@@ -205,7 +205,7 @@ export function applyAgentPrFetch(
   warnedUnusableState.delete(agentPrKey(pr.repo, pr.prNumber));
   if (state === "open") return null;
 
-  workerState.markAgentPrClosed(pr.repo, pr.prNumber);
+  workerState.markAgentPrClosed(pr.repo, pr.prNumber, { merged: state === "merged" });
   return { repo: pr.repo, prNumber: pr.prNumber, reason: state };
 }
 

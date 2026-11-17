@@ -43,6 +43,12 @@ export interface Cursor {
 
 export type AgentPrState = "open" | "closed";
 
+/** How a registered PR left the open state. */
+export interface AgentPrCloseOptions {
+  /** The code host confirmed the PR was merged (not just closed). */
+  merged?: boolean;
+}
+
 const AGENT_PR_STATES = ["open", "closed"] as const satisfies readonly AgentPrState[];
 const CODE_HOST_PROVIDERS = [
   "github",
@@ -76,6 +82,11 @@ export interface AgentPr {
    */
   ticketUrl?: string;
   state: AgentPrState;
+  /**
+   * When the worker confirmed the PR merged (epoch ms). Absent for open PRs,
+   * PRs closed without merging, and rows closed before this was recorded.
+   */
+  mergedAt?: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -174,6 +185,7 @@ function parseAgentPrRow(row: unknown): AgentPr {
     taskKey: optionalString(record, "task_key", "agent_prs row"),
     ticketUrl: optionalString(record, "ticket_url", "agent_prs row"),
     state: requireEnum(AGENT_PR_STATES, record.state, "state", "agent_prs row"),
+    mergedAt: optionalNumber(record, "merged_at", "agent_prs row"),
     createdAt: requireNumber(record, "created_at", "agent_prs row"),
     updatedAt: requireNumber(record, "updated_at", "agent_prs row"),
   };
@@ -305,7 +317,14 @@ export class WorkerState {
     }
 
     const columns = readColumnNames(this.db, "agent_prs");
-    if (columns.includes("provider")) return;
+    if (columns.includes("provider")) {
+      // Registries created before merges were recorded: existing closed rows
+      // keep `merged_at` NULL (merge vs. close is unknown for them).
+      if (!columns.includes("merged_at")) {
+        this.db.run("ALTER TABLE agent_prs ADD COLUMN merged_at INTEGER");
+      }
+      return;
+    }
 
     const hasTicketUrl = columns.includes("ticket_url");
     this.db.transaction(() => {
@@ -343,6 +362,7 @@ export class WorkerState {
         task_key TEXT,
         ticket_url TEXT,
         state TEXT NOT NULL DEFAULT 'open',
+        merged_at INTEGER,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
         PRIMARY KEY (provider, instance_url, project_path, change_number)
@@ -488,6 +508,7 @@ export class WorkerState {
          task_key = excluded.task_key,
          ticket_url = excluded.ticket_url,
          state = 'open',
+         merged_at = NULL,
          updated_at = excluded.updated_at`,
       [
         change.provider,
@@ -548,6 +569,25 @@ export class WorkerState {
     const rows = this.db
       .query(`SELECT * FROM agent_prs WHERE state = 'open' ORDER BY created_at ASC`)
       .all();
+    return this.mapAgentPrRows(rows);
+  }
+
+  /**
+   * List agent-created change requests the worker saw merged, most recently
+   * merged first (dashboard history view). A readonly database that predates
+   * the `merged_at` column has no recorded merges and returns an empty list.
+   *
+   * @param limit - Maximum rows returned
+   */
+  listMergedAgentChangeRequests(limit: number): AgentPr[] {
+    if (!readColumnNames(this.db, "agent_prs").includes("merged_at")) return [];
+    const rows = this.db
+      .query(
+        `SELECT * FROM agent_prs
+         WHERE state = 'closed' AND merged_at IS NOT NULL
+         ORDER BY merged_at DESC LIMIT ?`,
+      )
+      .all(limit);
     return this.mapAgentPrRows(rows);
   }
 
@@ -616,24 +656,33 @@ export class WorkerState {
    *
    * @param repo - Repo slug
    * @param prNumber - PR number
+   * @param options - `merged: true` when the host confirmed a merge; the
+   *                  merge time is recorded for the dashboard's merged list.
+   *                  An earlier recorded merge is never cleared.
    */
-  markAgentPrClosed(repo: string, prNumber: number): void {
+  markAgentPrClosed(repo: string, prNumber: number, options: AgentPrCloseOptions = {}): void {
+    const now = Date.now();
     this.db.run(
-      `UPDATE agent_prs SET state = 'closed', updated_at = ?
+      `UPDATE agent_prs SET state = 'closed', merged_at = COALESCE(merged_at, ?), updated_at = ?
        WHERE provider = 'github' AND repo = ? AND pr_number = ?`,
-      [Date.now(), repo, prNumber],
+      [options.merged ? now : null, now, repo, prNumber],
     );
   }
 
-  /** Mark one provider-neutral registered change request closed. */
-  markAgentChangeRequestClosed(identity: ChangeRequestIdentity): void {
+  /** Mark one provider-neutral registered change request closed (or merged). */
+  markAgentChangeRequestClosed(
+    identity: ChangeRequestIdentity,
+    options: AgentPrCloseOptions = {},
+  ): void {
+    const now = Date.now();
     this.db.run(
-      `UPDATE agent_prs SET state = 'closed', updated_at = ?
+      `UPDATE agent_prs SET state = 'closed', merged_at = COALESCE(merged_at, ?), updated_at = ?
        WHERE provider = ? AND instance_url = ?
          AND COALESCE(project_id, '') = COALESCE(?, '')
          AND project_path = ? AND change_number = ?`,
       [
-        Date.now(),
+        options.merged ? now : null,
+        now,
         identity.provider,
         identity.instanceUrl,
         identity.projectId ?? null,

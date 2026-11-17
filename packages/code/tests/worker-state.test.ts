@@ -141,6 +141,48 @@ describe("WorkerState", () => {
       expect(state.listOpenAgentChangeRequests()[0]?.provider).toBe("github");
     });
 
+    test("merged PRs are listed most recently merged first; plain closes are not", () => {
+      state.recordAgentPr({ repo: "acme/widgets", prNumber: 1 });
+      state.recordAgentPr({ repo: "acme/widgets", prNumber: 2 });
+      state.recordAgentPr({ repo: "acme/widgets", prNumber: 3 });
+      state.markAgentPrClosed("acme/widgets", 1, { merged: true });
+      state.markAgentPrClosed("acme/widgets", 2);
+      insertRawRow(dbPath, "UPDATE agent_prs SET merged_at = merged_at - 1000 WHERE pr_number = 1");
+      state.markAgentPrClosed("acme/widgets", 3, { merged: true });
+
+      const merged = state.listMergedAgentChangeRequests(10);
+      expect(merged.map((pr) => pr.prNumber)).toEqual([3, 1]);
+      expect(merged[0]?.mergedAt).toBeNumber();
+      expect(state.listMergedAgentChangeRequests(1).map((pr) => pr.prNumber)).toEqual([3]);
+    });
+
+    test("a later plain close keeps a recorded merge; reopening clears it", () => {
+      state.recordAgentPr({ repo: "acme/widgets", prNumber: 4 });
+      state.markAgentPrClosed("acme/widgets", 4, { merged: true });
+      state.markAgentPrClosed("acme/widgets", 4);
+      expect(state.listMergedAgentChangeRequests(10)).toHaveLength(1);
+
+      state.recordAgentPr({ repo: "acme/widgets", prNumber: 4 });
+      expect(state.listMergedAgentChangeRequests(10)).toHaveLength(0);
+      expect(state.listOpenAgentPrs()[0]?.mergedAt).toBeUndefined();
+    });
+
+    test("markAgentChangeRequestClosed records GitLab merges", () => {
+      const identity = {
+        provider: "gitlab" as const,
+        instanceUrl: "https://git.example.test",
+        projectId: "17",
+        projectPath: "acme/widgets",
+        number: 42,
+        webUrl: "https://git.example.test/acme/widgets/-/merge_requests/42",
+      };
+      state.recordAgentChangeRequest(identity);
+      state.markAgentChangeRequestClosed(identity, { merged: true });
+      expect(state.listMergedAgentChangeRequests(10)).toMatchObject([
+        { provider: "gitlab", changeNumber: 42 },
+      ]);
+    });
+
     test("re-recording a closed PR reopens it", () => {
       state.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
       state.markAgentPrClosed("acme/widgets", 42);
@@ -232,6 +274,56 @@ describe("WorkerState", () => {
       expect(migrated.listOpenAgentPrs().find((pr) => pr.prNumber === 2)?.ticketUrl).toBe(
         "https://acme.atlassian.net/browse/OLD-2",
       );
+      migrated.close();
+      for (const suffix of ["", "-wal", "-shm"]) {
+        rmSync(`${legacyPath}${suffix}`, { force: true });
+      }
+    });
+
+    test("opening a provider-aware registry without merged_at adds the column", () => {
+      const legacyPath = join(
+        tmpdir(),
+        `ws-premerge-${Date.now()}-${Math.random().toString(36).slice(2)}.db`,
+      );
+      const { Database } = require("bun:sqlite");
+      const legacy = new Database(legacyPath);
+      legacy.run(`
+        CREATE TABLE agent_prs (
+          provider TEXT NOT NULL,
+          instance_url TEXT NOT NULL,
+          project_id TEXT,
+          project_path TEXT NOT NULL,
+          change_number INTEGER NOT NULL,
+          web_url TEXT NOT NULL,
+          repo TEXT NOT NULL,
+          pr_number INTEGER NOT NULL,
+          branch TEXT,
+          task_key TEXT,
+          ticket_url TEXT,
+          state TEXT NOT NULL DEFAULT 'open',
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          PRIMARY KEY (provider, instance_url, project_path, change_number)
+        )
+      `);
+      legacy.run(
+        `INSERT INTO agent_prs (provider, instance_url, project_path, change_number, web_url,
+           repo, pr_number, state, created_at, updated_at)
+         VALUES ('github', 'https://github.com', 'acme/old', 1,
+           'https://github.com/acme/old/pull/1', 'acme/old', 1, 'closed', 1, 1)`,
+      );
+      legacy.close();
+
+      // A readonly reader (the dashboard) sees no merges on the old schema.
+      const readonly = new WorkerState(legacyPath, { readonly: true });
+      expect(readonly.listMergedAgentChangeRequests(10)).toEqual([]);
+      readonly.close();
+
+      const migrated = new WorkerState(legacyPath);
+      expect(migrated.listMergedAgentChangeRequests(10)).toEqual([]);
+      migrated.recordAgentPr({ repo: "acme/old", prNumber: 2 });
+      migrated.markAgentPrClosed("acme/old", 2, { merged: true });
+      expect(migrated.listMergedAgentChangeRequests(10).map((pr) => pr.prNumber)).toEqual([2]);
       migrated.close();
       for (const suffix of ["", "-wal", "-shm"]) {
         rmSync(`${legacyPath}${suffix}`, { force: true });

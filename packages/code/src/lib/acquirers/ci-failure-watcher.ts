@@ -34,7 +34,7 @@ import { join } from "path";
 import { spawn } from "child_process";
 
 import type { WebhookQueue } from "../state/webhook-queue";
-import type { CiFixState, WorkerState } from "../state/worker-state";
+import type { AgentPrCloseOptions, CiFixState, WorkerState } from "../state/worker-state";
 import { RowParseError } from "../state/row-parse";
 import type { Acquirer } from "../../worker";
 import type { CiFailureFeedback } from "../review/formatter";
@@ -76,7 +76,7 @@ export interface CiFailureWatcherAcquirerOptions {
   /** Optional provider-specific watch list; defaults to registered GitHub PRs. */
   watchedChanges?: () => Array<{ repo: string; prNumber: number }>;
   /** Optional provider-specific close operation. */
-  markClosed?: (repo: string, prNumber: number) => void;
+  markClosed?: (repo: string, prNumber: number, options?: AgentPrCloseOptions) => void;
   /** Durable key namespace; defaults to `github`. */
   namespace?: string;
   /** Human-readable provider label used for missing-log diagnostics. */
@@ -678,7 +678,7 @@ export class CiFailureWatcherAcquirer implements Acquirer {
           console.log(
             `👁️  [${this.name}] ${this.describe(repo, prNumber)} is ${lifecycle}; unwatching`,
           );
-          this.markClosed(repo, prNumber);
+          this.markClosed(repo, prNumber, { merged: lifecycle === "merged" });
           return "removed";
         }
       }
@@ -857,9 +857,9 @@ export class CiFailureWatcherAcquirer implements Acquirer {
     return this.namespace === "github" ? SOURCE : `${this.namespace}:ci`;
   }
 
-  private markClosed(repo: string, prNumber: number): void {
-    if (this.options.markClosed) this.options.markClosed(repo, prNumber);
-    else this.options.workerState.markAgentPrClosed(repo, prNumber);
+  private markClosed(repo: string, prNumber: number, options: AgentPrCloseOptions): void {
+    if (this.options.markClosed) this.options.markClosed(repo, prNumber, options);
+    else this.options.workerState.markAgentPrClosed(repo, prNumber, options);
   }
 
   private describe(repo: string, prNumber: number): string {

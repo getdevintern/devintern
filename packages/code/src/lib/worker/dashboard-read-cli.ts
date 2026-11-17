@@ -245,13 +245,19 @@ const SPECS: Record<string, CommandSpec> = {
     run: (data) => ({ response: handleAutomations(data), render: renderAutomations }),
   },
   prs: {
-    usage: "prs",
+    usage: "prs [--state open|merged] [--limit N]",
     route: "GET /api/agent-prs",
-    description: "Open pull/merge requests created by the agent.",
-    options: {},
-    optionHelp: [],
+    description: "Pull/merge requests created by the agent: open ones, or recently merged.",
+    options: { state: { type: "string" }, limit: { type: "string" } },
+    optionHelp: [
+      "  --state <state>     open | merged (default open)",
+      "  --limit N           Merged PRs to return, 1..500 (default 50)",
+    ],
     positionals: { min: 0, max: 0 },
-    run: (data) => ({ response: handleAgentPrs(data), render: renderPrs }),
+    run: (data, values) => ({
+      response: handleAgentPrs(data, queryParams(values, { state: "state", limit: "limit" })),
+      render: values.state === "merged" ? renderMergedPrs : renderPrs,
+    }),
   },
   queue: {
     usage: "queue",
@@ -741,6 +747,20 @@ function renderPrs(body: { prs: OpenAgentPrView[] }): string {
       `#${pr.prNumber}`,
       pr.taskKey ?? "-",
       formatTime(pr.updatedAt),
+      pr.prUrl,
+    ]),
+  );
+}
+
+function renderMergedPrs(body: { prs: OpenAgentPrView[] }): string {
+  if (body.prs.length === 0) return "No merged agent PRs recorded.";
+  return table(
+    ["REPO", "PR", "TASK", "MERGED", "URL"],
+    body.prs.map((pr) => [
+      pr.repo,
+      `#${pr.prNumber}`,
+      pr.taskKey ?? "-",
+      pr.mergedAt !== undefined ? formatTime(pr.mergedAt) : "-",
       pr.prUrl,
     ]),
   );
