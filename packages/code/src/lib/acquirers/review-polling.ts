@@ -24,7 +24,6 @@
  * PR in `cursors`.
  */
 
-import { spawn } from "child_process";
 import { captureError } from "@devintern/utils";
 
 import { parseHarnessList } from "@devintern/agent-harness";
@@ -44,14 +43,13 @@ import {
 } from "../code-host/github/reviews";
 import { nextScheduleOccurrence } from "../automation/config";
 import type { CronOrIntervalSchedule } from "../automation/config";
-import { parseEnvInteger } from "../config/env-integer";
 import type { RunStore } from "../state/run-recorder";
 import type { TaskExecutionResult } from "./task-polling";
 import type { WebhookQueue } from "../state/webhook-queue";
-import { cliResultToTaskResult, runWithFailover } from "../worker/failover";
 import type { WorkerState } from "../state/worker-state";
 import type { ConflictResolutionMode } from "../workspace/config";
 import type { Acquirer } from "../../worker";
+import type { AutomaticResolveResult } from "./review-cli";
 import {
   CONFLICT_WINDOW_SOURCE,
   extendConflictWindow,
@@ -69,6 +67,17 @@ import type {
 // The PR-state protocol types live with the reconciler, which shares them;
 // re-exported so poller consumers keep their existing import paths.
 export type { ConditionalResult, PolledPr };
+// Resolver/feedback subprocess helpers live in ./review-cli; re-exported so
+// existing importers keep their paths.
+export {
+  DEFAULT_RESOLVE_TIMEOUT_MS,
+  runAddressReviewUrlViaCli,
+  runAddressReviewViaCli,
+  runResolveConflictsUrlViaCli,
+  runResolveConflictsViaCli,
+  serializePrRun,
+} from "./review-cli";
+export type { AutomaticResolveResult } from "./review-cli";
 export type { ConflictWindowStatus, ConflictWindowTriggerOutcome };
 
 export interface PolledReview {
@@ -81,11 +90,6 @@ export interface PolledComment {
   id: number;
   user: { login: string; type: string };
   created_at: string;
-}
-
-export interface AutomaticResolveResult {
-  outcome: "clean" | "resolved" | "skipped" | "failed" | "deferred";
-  message: string;
 }
 
 /** GitHub access used by the poller (injected for tests). */
@@ -196,7 +200,6 @@ export interface ReviewPollingAcquirerOptions {
 /** Dedupe source for review/comment ids. */
 const SOURCE = "github:reviews";
 const BASE_SYNC_SOURCE = "github:base-sync";
-const prRunTails = new Map<string, Promise<void>>();
 
 /**
  * Consecutive `deferred` resolver outcomes tolerated for one base-sync event
@@ -205,6 +208,12 @@ const prRunTails = new Map<string, Promise<void>>();
  * silently on every poll tick forever.
  */
 const MAX_CONSECUTIVE_DEFERS = 3;
+
+/**
+ * Wait before retrying a base sync deferred for lack of harness capacity when
+ * the failover chain exposes no reset time.
+ */
+const CAPACITY_RETRY_FALLBACK_MS = 5 * 60_000;
 
 /** Backoff before the first retry of a failed base-sync event. */
 const RETRY_BACKOFF_BASE_MS = 30_000;
@@ -223,411 +232,6 @@ export function baseSyncRetryBackoffMs(attempts: number): number {
   return Math.min(RETRY_BACKOFF_BASE_MS * 2 ** (attempts - 1), RETRY_BACKOFF_MAX_MS);
 }
 
-/** Default wall-clock budget for one resolve-conflicts subprocess. */
-export const DEFAULT_RESOLVE_TIMEOUT_MS = 30 * 60 * 1000;
-
-/** Resolver subprocess budget; `WORKER_RESOLVE_TIMEOUT_SECONDS` overrides (0 disables). */
-function resolveTimeoutMs(overrideMs?: number): number {
-  if (overrideMs !== undefined) return overrideMs;
-  return (
-    parseEnvInteger("WORKER_RESOLVE_TIMEOUT_SECONDS", DEFAULT_RESOLVE_TIMEOUT_MS / 1000, {
-      min: 0,
-    }) * 1000
-  );
-}
-
-/** Kill a spawned process and (best-effort) its whole process group. */
-function killProcessTree(child: ReturnType<typeof spawn>): void {
-  if (child.pid === undefined) return;
-  // The child is spawned detached, so it leads its own process group;
-  // the negative pid signals every descendant (e.g. agent harnesses).
-  try {
-    process.kill(-child.pid, "SIGTERM");
-  } catch {
-    child.kill("SIGTERM");
-  }
-  // If the SIGTERM already finished the child, cancel the deferred SIGKILL:
-  // by then the pid/pgid may have been recycled for an unrelated process, and
-  // signalling that would kill a bystander (e.g. under heavy test-suite churn).
-  const sigkillTimer = setTimeout(() => {
-    try {
-      process.kill(-child.pid!, "SIGKILL");
-    } catch {
-      try {
-        child.kill("SIGKILL");
-      } catch {
-        // Already gone.
-      }
-    }
-  }, 5_000).unref();
-  child.once("close", () => clearTimeout(sigkillTimer));
-}
-
-/** Serialize automatic pipelines that target the same PR worktree. */
-export async function serializePrRun<T>(
-  repo: string,
-  prNumber: number,
-  run: () => Promise<T>,
-): Promise<T> {
-  const key = `${repo.toLowerCase()}#${prNumber}`;
-  const previous = prRunTails.get(key) ?? Promise.resolve();
-  let release!: () => void;
-  const tail = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  const chained = previous.then(() => tail);
-  prRunTails.set(key, chained);
-  await previous;
-  try {
-    return await run();
-  } finally {
-    release();
-    if (prRunTails.get(key) === chained) prRunTails.delete(key);
-  }
-}
-
-/**
- * Run `devintern address-review` for a PR as a CLI subprocess, reusing the
- * whole manual flow (worktree, agent, push, replies, reactions).
- *
- * @param repo - `owner/repo` slug
- * @param prNumber - Pull request number
- * @param opts - Working directory and environment for the subprocess;
- *               the workspace worker runs from the repo's base worktree with
- *               per-repo env; direct callers inherit both.
- */
-export function runAddressReviewViaCli(
-  repo: string,
-  prNumber: number,
-  opts: {
-    cwd?: string;
-    env?: Record<string, string | undefined>;
-    signal?: AbortSignal;
-  } = {},
-): Promise<TaskExecutionResult> {
-  return serializePrRun(repo, prNumber, () =>
-    runSubcommandViaCli("address-review", repo, prNumber, opts),
-  );
-}
-
-/** Run manual feedback addressing for an already canonical change-request URL. */
-export function runAddressReviewUrlViaCli(
-  webUrl: string,
-  serializationKey: string,
-  opts: {
-    cwd?: string;
-    env?: Record<string, string | undefined>;
-    signal?: AbortSignal;
-    entrypoint?: string;
-    outputStdio?: "inherit" | "ignore";
-  } = {},
-): Promise<TaskExecutionResult> {
-  return serializePrRun(serializationKey, 0, () =>
-    runSubcommandViaCli("address-review", serializationKey, 0, { ...opts, webUrl }),
-  );
-}
-
-/**
- * Run `devintern resolve-conflicts` for a PR as a CLI subprocess.
- *
- * @param repo - `owner/repo` slug
- * @param prNumber - Pull request number
- * @param opts - Optional per-repo working directory and environment
- */
-export function runResolveConflictsViaCli(
-  repo: string,
-  prNumber: number,
-  opts: {
-    cwd?: string;
-    env?: Record<string, string | undefined>;
-    expectedHeadSha?: string;
-    expectedBaseSha?: string;
-    /** Hard wall-clock budget; defaults to `WORKER_RESOLVE_TIMEOUT_SECONDS` (30min). */
-    timeoutMs?: number;
-    /** Override the CLI entrypoint and output handling (subprocess tests). */
-    entrypoint?: string;
-    outputStdio?: "inherit" | "ignore";
-    webUrl?: string;
-    signal?: AbortSignal;
-    /** Harness pinned by `[workspace].conflict_resolution_harness` (skips failover). */
-    harnessPin?: string;
-  } = {},
-): Promise<AutomaticResolveResult> {
-  const args = [
-    ...(opts.expectedHeadSha ? ["--expected-head", opts.expectedHeadSha] : []),
-    ...(opts.expectedBaseSha ? ["--expected-base", opts.expectedBaseSha] : []),
-  ];
-  return serializePrRun(repo, prNumber, () => runResolveSubcommand(repo, prNumber, args, opts));
-}
-
-/** Run conflict resolution for a canonical provider change-request URL. */
-export function runResolveConflictsUrlViaCli(
-  webUrl: string,
-  serializationKey: string,
-  opts: {
-    cwd?: string;
-    env?: Record<string, string | undefined>;
-    expectedHeadSha?: string;
-    expectedBaseSha?: string;
-    timeoutMs?: number;
-    signal?: AbortSignal;
-    /** Harness pinned by `[workspace].conflict_resolution_harness` (skips failover). */
-    harnessPin?: string;
-    entrypoint?: string;
-    outputStdio?: "inherit" | "ignore";
-  } = {},
-): Promise<AutomaticResolveResult> {
-  return runResolveConflictsViaCli(serializationKey, 0, { ...opts, webUrl });
-}
-
-function runResolveSubcommand(
-  repo: string,
-  prNumber: number,
-  extraArgs: string[],
-  opts: {
-    cwd?: string;
-    env?: Record<string, string | undefined>;
-    timeoutMs?: number;
-    entrypoint?: string;
-    outputStdio?: "inherit" | "ignore";
-    webUrl?: string;
-    signal?: AbortSignal;
-    /** Harness pinned by `[workspace].conflict_resolution_harness` (skips failover). */
-    harnessPin?: string;
-  },
-): Promise<AutomaticResolveResult> {
-  return runResolveWithFailover(repo, prNumber, extraArgs, opts);
-}
-
-async function runResolveWithFailover(
-  repo: string,
-  prNumber: number,
-  extraArgs: string[],
-  opts: {
-    cwd?: string;
-    env?: Record<string, string | undefined>;
-    timeoutMs?: number;
-    entrypoint?: string;
-    outputStdio?: "inherit" | "ignore";
-    webUrl?: string;
-    signal?: AbortSignal;
-    /** Harness pinned by `[workspace].conflict_resolution_harness` (skips failover). */
-    harnessPin?: string;
-  },
-): Promise<AutomaticResolveResult> {
-  let last: AutomaticResolveResult | null = null;
-  const status = await runWithFailover(
-    async (env) => {
-      const spawned = await spawnResolveOnce(repo, prNumber, extraArgs, { ...opts, env });
-      last = spawned.result;
-      return spawned.code;
-    },
-    opts.env ?? process.env,
-    { harnessPin: opts.harnessPin },
-  );
-  if (status === "deferred") {
-    return {
-      outcome: "deferred",
-      message: "agent usage limit; waiting for a harness to become available",
-    };
-  }
-  return (
-    last ?? {
-      outcome: status === "ok" ? "skipped" : "failed",
-      message: status === "ok" ? "resolver completed" : "resolver exited with a non-zero code",
-    }
-  );
-}
-
-function spawnResolveOnce(
-  repo: string,
-  prNumber: number,
-  extraArgs: string[],
-  opts: {
-    cwd?: string;
-    env?: Record<string, string | undefined>;
-    timeoutMs?: number;
-    entrypoint?: string;
-    outputStdio?: "inherit" | "ignore";
-    webUrl?: string;
-    signal?: AbortSignal;
-  },
-): Promise<{ code: number; result: AutomaticResolveResult }> {
-  const prUrl = opts.webUrl ?? `https://github.com/${repo}/pull/${prNumber}`;
-  return new Promise((resolve) => {
-    let settled = false;
-    let abort: (() => void) | undefined;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const finish = (value: { code: number; result: AutomaticResolveResult }): void => {
-      if (settled) return;
-      settled = true;
-      if (abort) opts.signal?.removeEventListener("abort", abort);
-      if (timer) clearTimeout(timer);
-      // oxlint-disable-next-line promise/no-multiple-resolved -- settled guards a single resolution.
-      resolve(value);
-    };
-    if (opts.signal?.aborted) {
-      finish({ code: 1, result: { outcome: "failed", message: "resolver cancelled" } });
-      return;
-    }
-    let result: AutomaticResolveResult | null = null;
-    let resultOutput = "";
-    let resultOverflow = false;
-    let timedOut = false;
-    const maxResultBytes = 64 * 1024;
-    // Detached so the whole process group (agent harnesses included) can be
-    // signalled on timeout.
-    const child = spawn(
-      process.execPath,
-      [opts.entrypoint ?? process.argv[1], "resolve-conflicts", prUrl, ...extraArgs],
-      {
-        detached: true,
-        stdio: ["inherit", opts.outputStdio ?? "inherit", opts.outputStdio ?? "inherit", "pipe"],
-        cwd: opts.cwd,
-        env: { ...(opts.env ?? process.env), DEVINTERN_RESULT_FD: "3" },
-      },
-    );
-    let aborted = false;
-    abort = () => {
-      aborted = true;
-      killProcessTree(child);
-    };
-    opts.signal?.addEventListener("abort", abort, { once: true });
-    const timeoutMs = resolveTimeoutMs(opts.timeoutMs);
-    timer =
-      timeoutMs > 0
-        ? setTimeout(() => {
-            timedOut = true;
-            console.warn(
-              `⏱️  resolve-conflicts for ${prUrl} exceeded ${Math.round(timeoutMs / 1000)}s; killing`,
-            );
-            killProcessTree(child);
-          }, timeoutMs)
-        : null;
-    child.stdio[3]?.on("data", (chunk: Buffer) => {
-      if (resultOverflow) return;
-      if (Buffer.byteLength(resultOutput) + chunk.byteLength > maxResultBytes) {
-        resultOutput = "";
-        resultOverflow = true;
-        return;
-      }
-      resultOutput += chunk.toString();
-    });
-    child.on("close", (code) => {
-      if (aborted) {
-        finish({ code: 1, result: { outcome: "failed", message: "resolver cancelled" } });
-        return;
-      }
-      if (timedOut) {
-        finish({
-          code: 1,
-          result: { outcome: "failed", message: `resolver timed out after ${timeoutMs}ms` },
-        });
-        return;
-      }
-      if (!resultOverflow) {
-        for (const line of resultOutput.trimEnd().split("\n")) {
-          try {
-            const candidate = JSON.parse(line) as Partial<AutomaticResolveResult>;
-            if (
-              typeof candidate.message === "string" &&
-              ["clean", "resolved", "skipped", "failed", "deferred"].includes(
-                candidate.outcome ?? "",
-              )
-            ) {
-              result = candidate as AutomaticResolveResult;
-            }
-          } catch {
-            // Ignore malformed records and use the exit-status fallback.
-          }
-        }
-      }
-      finish({
-        code: code ?? 1,
-        result: result ?? {
-          outcome: code === 0 ? "skipped" : code === 2 ? "deferred" : "failed",
-          message:
-            code === 0
-              ? "resolver completed"
-              : code === 2
-                ? "resolver deferred"
-                : `resolver exited with code ${code}`,
-        },
-      });
-    });
-    child.on("error", (error) => {
-      finish({
-        code: 1,
-        result: { outcome: "failed", message: `failed to spawn resolver: ${error.message}` },
-      });
-    });
-  });
-}
-
-async function runSubcommandViaCli(
-  subcommand: string,
-  repo: string,
-  prNumber: number,
-  opts: {
-    cwd?: string;
-    env?: Record<string, string | undefined>;
-    signal?: AbortSignal;
-    webUrl?: string;
-    entrypoint?: string;
-    outputStdio?: "inherit" | "ignore";
-  } = {},
-): Promise<TaskExecutionResult> {
-  const prUrl = opts.webUrl ?? `https://github.com/${repo}/pull/${prNumber}`;
-  // Distinguishes "the drain killed this run" from "the run failed and the
-  // drain happened to start around the same time". Only the abort handler (or
-  // an already-aborted signal) sets it, so the SIGTERM exit code of a drained
-  // child is never mistaken for a genuine pipeline failure.
-  let interrupted = false;
-  const status = await runWithFailover(
-    (env) =>
-      new Promise<number>((resolve) => {
-        if (opts.signal?.aborted) {
-          interrupted = true;
-          resolve(1);
-          return;
-        }
-        const child = spawn(
-          process.execPath,
-          [opts.entrypoint ?? process.argv[1], subcommand, prUrl],
-          {
-            stdio: opts.outputStdio ?? "inherit",
-            cwd: opts.cwd,
-            env,
-            detached: process.platform !== "win32",
-          },
-        );
-        const abort = () => {
-          interrupted = true;
-          killProcessTree(child);
-        };
-        let settled = false;
-        const finish = (code: number) => {
-          if (settled) return;
-          settled = true;
-          opts.signal?.removeEventListener("abort", abort);
-          resolve(code);
-        };
-        opts.signal?.addEventListener("abort", abort, { once: true });
-        child.on("close", (code) => {
-          finish(code ?? 1);
-        });
-        child.on("error", (error) => {
-          captureError(error, { command: subcommand, repo, prNumber, stage: "spawn" });
-          console.error(`❌ Failed to spawn ${subcommand} for ${prUrl}: ${error.message}`);
-          finish(1);
-        });
-      }),
-    opts.env ?? process.env,
-  );
-  if (interrupted) return "interrupted";
-  return cliResultToTaskResult(status);
-}
-
 /**
  * Polls the agent's own PRs for review feedback.
  */
@@ -639,6 +243,8 @@ export class ReviewPollingAcquirer implements Acquirer {
   private prCache = new Map<string, PolledPr>();
   /** Consecutive `deferred` resolver outcomes per base-sync event. */
   private deferCounts = new Map<string, number>();
+  /** Base-sync events waiting for harness capacity, keyed to their retry time. */
+  private capacityRetryAt = new Map<string, number>();
   /** Cached scheduled-window state; `undefined` = not loaded from the cursor yet. */
   private conflictWindowState: ConflictWindowState | null | undefined;
   private lastFeedbackPollAt: number;
@@ -1141,6 +747,7 @@ export class ReviewPollingAcquirer implements Acquirer {
     }
     if (fresh.mergeable_state !== "dirty" && fresh.mergeable_state !== "behind") {
       this.deferCounts.delete(externalId);
+      this.capacityRetryAt.delete(externalId);
       queue.completeBaseSyncEvent(BASE_SYNC_SOURCE, externalId);
       return { kind: "stop" };
     }
@@ -1217,9 +824,25 @@ export class ReviewPollingAcquirer implements Acquirer {
     const { queue } = this.options;
     if (result.outcome !== "failed" && result.outcome !== "deferred") {
       this.deferCounts.delete(externalId);
+      this.capacityRetryAt.delete(externalId);
       queue.completeBaseSyncEvent(BASE_SYNC_SOURCE, externalId);
       return false;
     }
+    if (result.outcome === "deferred" && result.capacity) {
+      // No harness could run the resolver: nothing about the PR failed, so
+      // keep the event pending without spending an attempt or a defer, and
+      // wait for capacity instead of exhausting the conflict.
+      const retryAt =
+        result.retryAt && result.retryAt > now ? result.retryAt : now + CAPACITY_RETRY_FALLBACK_MS;
+      this.capacityRetryAt.set(externalId, retryAt);
+      console.log(
+        `⏳ [${this.name}] ${repo}#${prNumber} base sync waiting for agent capacity until ` +
+          `${new Date(retryAt).toISOString()}: ${result.message}`,
+      );
+      queue.deferBaseSyncAttempt(externalId);
+      return false;
+    }
+    this.capacityRetryAt.delete(externalId);
     if (result.outcome === "deferred") {
       const defers = (this.deferCounts.get(externalId) ?? 0) + 1;
       this.deferCounts.set(externalId, defers);
@@ -1308,6 +931,9 @@ export class ReviewPollingAcquirer implements Acquirer {
 
     const quietMs = (this.options.quietPeriodSeconds ?? 30) * 1000;
     if (now - event.headObservedAt < quietMs) return;
+
+    const capacityRetryAt = this.capacityRetryAt.get(externalId);
+    if (capacityRetryAt !== undefined && now < capacityRetryAt) return;
 
     // Re-fetch immediately before execution. Any movement leaves the current
     // event pending and consumes no retry; a new base supersedes it immediately.
