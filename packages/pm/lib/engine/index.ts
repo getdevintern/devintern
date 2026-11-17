@@ -251,13 +251,11 @@ function agentCandidates(
     : { harness: config.agent.harness, path: config.agent.path, model, effort };
   const fallbacks = (config.agentFallbacks ?? [])
     .filter((entry) => entry.name !== config.agent.harness.name)
-    .map(
-      (entry): AgentCandidate => ({
-        harness: entry.harness,
-        path: entry.path,
-        model: ownModel(entry.name),
-      }),
-    );
+    .map((entry): AgentCandidate => ({
+      harness: entry.harness,
+      path: entry.path,
+      model: ownModel(entry.name),
+    }));
   return [primary, ...fallbacks];
 }
 
