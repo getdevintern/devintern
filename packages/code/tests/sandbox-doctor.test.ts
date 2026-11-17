@@ -352,7 +352,8 @@ describe("buildSandboxDoctorReport", () => {
     // native has the higher priority but cannot wrap goose, so the doctor must
     // preflight through nono (matching the resolver) instead of failing a run
     // that will actually use nono.
-    expect(report?.provider).toBe("auto (per harness)");
+    expect(report?.provider).toBe("nono");
+    expect(report?.entries.map((entry) => entry.sandbox)).toEqual(["nono"]);
   });
 
   test("collectHarnessPreflight probes directly when the run inherits an enclosing sandbox", async () => {
@@ -437,7 +438,7 @@ describe("buildSandboxDoctorReport", () => {
       expect(report?.provider).toBe("native");
       expect(report?.entries.map((entry) => entry.ok)).toEqual([false]);
       expect(report?.entries[0]?.reason).toContain(
-        'the native sandbox does not support the "grok" harness',
+        'Sandbox provider "native" does not support the "grok" harness',
       );
     } finally {
       restore();
@@ -465,7 +466,7 @@ describe("buildSandboxDoctorReport", () => {
       expect(report?.entries[0]?.ok).toBe(true);
       expect(report?.entries[1]?.ok).toBe(false);
       expect(report?.entries[1]?.reason).toContain(
-        'the native sandbox does not support the "grok" harness',
+        'Sandbox provider "native" does not support the "grok" harness',
       );
     } finally {
       restore();
@@ -577,9 +578,76 @@ test("auto selects a compatible provider for each fallback", async () => {
   for (const item of [primary, fallback]) {
     item.provider.wrapCommand = () => ({ path: process.execPath, args: ["--version"] });
   }
-  const report = await collectHarnessPreflight("auto", [primary, fallback], "claude-code,grok");
-  expect(report?.entries.map((entry) => [entry.name, entry.ok])).toEqual([
-    ["claude-code", true],
-    ["grok", true],
-  ]);
+  const restore = setCliPaths({
+    CLAUDE_CLI_PATH: process.execPath,
+    GROK_CLI_PATH: process.execPath,
+  });
+  try {
+    const report = await collectHarnessPreflight("auto", [primary, fallback], "claude-code,grok");
+    expect(report?.provider).toBe("auto (per harness)");
+    expect(report?.entries.map((entry) => [entry.name, entry.sandbox, entry.ok])).toEqual([
+      ["claude-code", "primary-only", true],
+      ["grok", "fallback-only", true],
+    ]);
+  } finally {
+    restore();
+  }
+});
+
+test("auto + opencode,codex,grok: doctor rows use the runtime provider per harness", async () => {
+  const native = detected("native", { priority: 40, harnesses: ["claude-code", "codex"] });
+  const nono = detected("nono", { priority: 30 });
+  for (const item of [native, nono]) {
+    item.provider.wrapCommand = () => ({ path: process.execPath, args: ["--version"] });
+  }
+  const restore = setCliPaths({
+    OPENCODE_CLI_PATH: process.execPath,
+    CODEX_CLI_PATH: process.execPath,
+    GROK_CLI_PATH: process.execPath,
+  });
+  try {
+    const report = await collectHarnessPreflight("auto", [native, nono], "opencode,codex,grok");
+    expect(report?.entries.map((entry) => [entry.name, entry.sandbox, entry.ok])).toEqual([
+      ["opencode", "nono", true],
+      ["codex", "native", true],
+      ["grok", "nono", true],
+    ]);
+    // Every runnable row is rendered, and grok's generic nono profile is not
+    // presented as pack-backed.
+    const rendered = buildSandboxDoctorReport(
+      [native, nono],
+      "auto",
+      "environment",
+      "opencode",
+      "linux",
+      {
+        preflight: report,
+      },
+    ).lines.join("\n");
+    expect(rendered).toContain("[native]");
+    expect(rendered).toContain('no pack profile for "grok"');
+  } finally {
+    restore();
+  }
+});
+
+test("only a later entry ready: the next run does not fail, every row is shown", () => {
+  const report = buildSandboxDoctorReport(
+    [detected("nono", { priority: 30 })],
+    "nono",
+    "environment",
+    "opencode",
+    "linux",
+    {
+      preflight: {
+        provider: "nono",
+        entries: [
+          { name: "opencode", path: "/x/opencode", ok: false, reason: "Permission denied" },
+          { name: "grok", path: "/x/grok", ok: true },
+        ],
+      },
+    },
+  );
+  expect(report.nextRunFails).toBe(false);
+  expect(report.lines.join("\n")).toContain("FAIL — Permission denied");
 });

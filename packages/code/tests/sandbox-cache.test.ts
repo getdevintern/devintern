@@ -10,16 +10,23 @@ import type { ResolvedSandbox, SandboxResolutionOptions } from "@devintern/agent
 const realHarness = { ...(await import("@devintern/agent-harness")) };
 
 const resolveCalls: Array<SandboxResolutionOptions | undefined> = [];
+let failFlaky = false;
 
 mock.module("@devintern/agent-harness", () => ({
   ...realHarness,
   resolveSandbox: async (options?: SandboxResolutionOptions): Promise<ResolvedSandbox | null> => {
     resolveCalls.push(options);
     if (!options?.harnessName) return null;
+    if (options.harnessName === "flaky" && failFlaky) {
+      failFlaky = false;
+      throw new Error('Sandbox provider "fake" is not usable on this machine');
+    }
+    // Mirrors auto: native wraps codex, everything else needs nono.
+    const name = options.harnessName === "codex" ? "native" : "nono";
     return {
       provider: {
-        name: "fake",
-        displayName: "Fake sandbox",
+        name,
+        displayName: `${name} sandbox`,
         priority: 1,
         detect: async () => ({ available: true }),
         wrapCommand: () => ({ path: "fake", args: [] }),
@@ -58,5 +65,23 @@ describe("getSandbox", () => {
 
     expect(second).toBe(first);
     expect(resolveCalls).toHaveLength(1);
+  });
+
+  test("failover onto a harness that needs another provider re-resolves it", async () => {
+    const first = await getSandbox("codex");
+    const next = await getSandbox("opencode");
+
+    expect(first?.provider.name).toBe("native");
+    expect(next?.provider.name).toBe("nono");
+    expect(next?.harnessName).toBe("opencode");
+  });
+
+  test("a failed resolution is not memoized", async () => {
+    failFlaky = true;
+    await expect(getSandbox("flaky")).rejects.toThrow("not usable");
+    const retried = await getSandbox("flaky");
+
+    expect(retried?.provider.name).toBe("nono");
+    expect(resolveCalls.filter((options) => options?.harnessName === "flaky")).toHaveLength(2);
   });
 });

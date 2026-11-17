@@ -33,6 +33,7 @@ import { HarnessFailover } from "../agent/harness-failover";
 import type { FailoverOutcome } from "../agent/harness-failover";
 import { HARNESS_CHAIN_ENV, resolveAgentModel } from "../agent/model";
 import { pinnedHarnessChildEnv } from "../agent/selection";
+import { resetSandboxResolutionCache } from "../agent/sandbox";
 import type { WebhookQueue } from "../state/webhook-queue";
 import {
   AUTOMATION_ACCESS_EXIT_CODE,
@@ -358,8 +359,10 @@ export async function startWorkerFailover(
 ): Promise<WorkerFailover> {
   instance?.stop();
   // A fresh start is a configuration reload: drop cached sandbox readiness so
-  // a fixed <HARNESS>_CLI_PATH is probed again.
+  // a fixed <HARNESS>_CLI_PATH is probed again, and spawn-time sandbox
+  // selection runs again for each harness instead of reusing stale picks.
   resetHarnessSandboxProbeCache();
+  resetSandboxResolutionCache();
   const chain =
     options.chain ??
     (await resolveHarnessChain({

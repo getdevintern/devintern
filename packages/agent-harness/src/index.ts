@@ -64,6 +64,7 @@ export {
   type HarnessChainOptions,
   type ResolvedHarnessChain,
 } from "./harness-chain.js";
+export type { HarnessChainEvaluation, HarnessEntryReadiness } from "./harness-chain.js";
 
 // Prompt argument construction
 export { buildPromptArgs } from "./prompt-args.js";
@@ -153,10 +154,23 @@ export { detectSandboxProviders, type DetectedSandboxProvider } from "./sandbox/
 export { sandboxInheritsEnclosingSandbox, type SandboxNestingDecision } from "./sandbox/nesting.js";
 export { probeCommand, unsupportedPlatform } from "./sandbox/probe.js";
 export {
+  decideHarnessSandbox,
+  describeSandboxDecision,
+  incompatibleSandboxMessage,
+  pickAutoSandboxProvider,
+  resolveHarnessSandboxDecision,
+  type HarnessSandboxDecision,
+  type HarnessSandboxDecisionInput,
+  type ResolveHarnessSandboxDecisionOptions,
+  type SandboxDecisionErrorReason,
+} from "./sandbox/selection.js";
+export {
   probeHarnessUnderSandbox,
   resetHarnessSandboxProbeCache,
   resolveProbeProvider,
   inheritedSandboxProbeProvider,
+  probeHarnessForDecision,
+  sandboxDecisionProbeProvider,
   firstActionableProbeLine,
   type HarnessSandboxProbeOptions,
   type HarnessSandboxProbeResult,

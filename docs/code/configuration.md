@@ -405,12 +405,20 @@ devintern doctor
 It checks, in order:
 
 - **Bun runtime** and **Git** availability
-- **AI agent CLI**: whether your configured harness (`AGENT_HARNESS`, default `claude-code`) is installed and on `PATH`; suggests an installed alternative or install steps when not
+- **AI agent CLI**: every entry of your harness chain (`AGENT_HARNESS`, default `claude-code`), evaluated exactly as the worker does at startup. Each entry lists the resolved executable path, the effective sandbox for that harness (with `AGENT_SANDBOX=auto` the provider is picked per harness, so `opencode` can run under `nono` while `codex` runs under `native`), the effective harness-scoped model (`<HARNESS>_MODEL`, or `AGENT_MODEL` for the primary only; otherwise `default`), and whether it is ready, ready with a warning, or excluded with the reason. It flags a CLI that resolves to a mise shim under a sandbox, with the `<HARNESS>_CLI_PATH` fix, and notes when `nono` falls back to its generic profile because no pack exists for the harness. The check is ok when every entry is ready, a warning (degraded) when at least one entry is usable but another is excluded, unknown, or flagged, and a failure when no entry can run (an installed alternative is suggested). The probes only run `<cli> --version`; nothing is installed and no credentials or configuration change
 - **Task tracker credentials**: required environment variables for your `TASK_TRACKER` in `.devintern-code/.env`
 - **DevIntern sign-in**: local session validity (`devintern login` when missing)
 - **License**: entitlement status when signed in (only needed for unattended automation)
 
-Each failing row gets a fix hint. The command exits non-zero when any check fails, so scripts and CI can gate on it. The interactive `devintern init` wizard runs a subset of these checks automatically at the end of setup.
+Each failing row gets a fix hint. Exit codes:
+
+| Exit code | Meaning |
+| --------- | ------- |
+| `0` | Ready. Warnings (for example a degraded harness chain or a missing license) are shown but do not fail |
+| `1` | Not ready: at least one check failed, including a harness chain with no usable entry |
+| `2` | Degraded: warnings but no failures. Only with `devintern doctor --strict`, for CI gates that require a fully ready setup |
+
+The interactive `devintern init` wizard runs a subset of these checks automatically at the end of setup.
 
 If a check fails in a way that looks like a DevIntern defect rather than a configuration problem, run `devintern report` to file it with the readiness context attached.
 
@@ -569,7 +577,7 @@ The first entry is your preferred harness; later entries are fallbacks in priori
 
 Applies to every unattended worker surface — fleet task polling, PR review addressing, `@mention` runs, conflict resolution, scheduled automations, estimations, dashboard retries, relay-driven tasks, and `devintern webhook serve` — not only the webhook queue.
 
-- At startup every entry is checked against the harness registry and your machine: unknown or not-installed entries produce a clear warning and are skipped, and the effective chain is logged (e.g. `Agent harness: claude-code → codex (failover enabled)`). Multi-harness chains also log each entry's effective model (`Models: opencode: ... | grok: default`) so a fallback without a model is visible immediately.
+- At startup every entry is checked against the harness registry and your machine: unknown or not-installed entries produce a clear warning and are skipped. With a sandbox configured, each entry is also started (`<cli> --version`) through the sandbox the real run will use for that harness (the same per-harness selection as the spawn); an entry that cannot start is skipped with an actionable warning, and the primary is kept only when no other entry can start; and the effective chain is logged (e.g. `Agent harness: claude-code → codex (failover enabled)`). Multi-harness chains also log each entry's effective model (`Models: opencode: ... | grok: default`) so a fallback without a model is visible immediately.
 - When the active harness reports a usage/rate limit, the worker records its reset window (parsed from the limit output, e.g. `resets in 6d 23h`). When the output has no parseable reset time, the cooldown starts at 1 hour and doubles for each further limit on the same harness without one (up to 24 hours), resetting after a successful run or a limit that does say when it resets; a limit that names its quota period waits at least 24 hours for a monthly or weekly quota and 4 hours for a daily one. The worker then immediately retries the same work on the highest-priority harness that still has capacity.
 - When the primary harness's window elapses, the worker automatically fails back to it and logs the switch. Fallback agents hitting their own limits mid-run advance the chain again.
 - If every harness in the chain is limited at once, new agent work is deferred until the earliest window ends (the webhook queue pauses; polling/review/automation runs return to their next tick).
@@ -689,7 +697,7 @@ Run `devintern sandbox` at any time for a full diagnosis: which providers are in
 | Value    | What it is                                                                                                                                                                                  | Works with                                             |
 | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
 | `none`   | No sandboxing (default)                                                                                                                                                                     | all harnesses                                          |
-| `auto`   | Best available option (native, then nono); runs unsandboxed with a warning if none is available. Docker, which needs per-user setup, is never picked automatically | depends on pick                                        |
+| `auto`   | Best available option per harness (native, then nono, skipping a provider that cannot wrap the harness, so `opencode` and `grok` get nono even when native is available); runs unsandboxed with a warning if none is available. Docker, which needs per-user setup, is never picked automatically | depends on pick                                        |
 | `native` | The harness's own built-in OS sandbox, enabled and configured by DevIntern. Zero install, nothing to set up                                                                                 | `claude-code`, `codex`                                 |
 | `nono`   | Kernel-enforced isolation (Landlock on Linux, Seatbelt on macOS), zero setup ([nono.sh](https://nono.sh))                                                                                   | all harnesses                                          |
 | `docker` | [Docker Sandboxes](https://www.docker.com/products/docker-sandboxes) microVM via the `sbx` CLI; the supported microVM option; never picked by `auto` (requires per-user setup, see below)   | `claude-code`, `codex`, `cursor`, `gemini`, `opencode` |
