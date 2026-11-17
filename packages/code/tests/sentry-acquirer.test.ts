@@ -1403,4 +1403,221 @@ describe("ErrorMonitorAcquirer with Sentry issues", () => {
     expect(failures).toHaveLength(2);
     expect(failures[1]).toContain("3 consecutive failed reads");
   });
+
+  describe("retry window", () => {
+    function scriptedProvider(script: () => SentryIssue[] | Error) {
+      const calls = { count: 0 };
+      const provider = {
+        providerName: "sentry",
+        fetchIssues: async () => {
+          calls.count++;
+          const next = script();
+          if (next instanceof Error) throw next;
+          return next;
+        },
+        validateIssue: () => ({ valid: true }),
+        buildTaskMarkdown: () => "task",
+      };
+      return { provider, calls };
+    }
+
+    test("skips reads while retryAfterAt is in the future without counting a failure", async () => {
+      const store = new AutomationStateStore(join(dir, "status.db"));
+      let clock = 10_000;
+      const { provider, calls } = scriptedProvider(
+        () => new SourceFetchError("rate-limited", "HTTP 429", { retryAfterMs: 30_000 }),
+      );
+      const fixed: SentryIssue[] = [];
+      const acquirer = new ErrorMonitorAcquirer<SentryIssue>({
+        sourceId: "primary",
+        intervalSeconds: 60,
+        queue,
+        provider,
+        statusStore: store,
+        now: () => clock,
+        executeTask: async (item) => {
+          fixed.push(item);
+          return true;
+        },
+      });
+      const capture = captureConsole();
+      try {
+        expect((await acquirer.tick()).status).toBe("rate-limited");
+        expect(calls.count).toBe(1);
+        const before = store.getSourceStatus("sentry", "primary");
+        expect(before?.retryAfterAt).toBe(40_000);
+        expect(before?.consecutiveFailures).toBe(1);
+
+        clock = 20_000;
+        const skipped = await acquirer.tick();
+        clock = 39_999;
+        await acquirer.tick();
+
+        expect(skipped.skipped).toBe(true);
+        expect(skipped.status).toBe("rate-limited");
+        expect(skipped.retryAfterMs).toBe(20_000);
+        expect(calls.count).toBe(1);
+        expect(fixed).toHaveLength(0);
+        // A skip is not a read: the persisted row is untouched.
+        expect(store.getSourceStatus("sentry", "primary")).toEqual(before);
+      } finally {
+        capture.restore();
+        store.close();
+      }
+    });
+
+    test("resumes reading once retryAfterAt has passed", async () => {
+      let clock = 10_000;
+      let limited = true;
+      const { provider, calls } = scriptedProvider(() =>
+        limited ? new SourceFetchError("rate-limited", "HTTP 429", { retryAfterMs: 30_000 }) : [],
+      );
+      const acquirer = new ErrorMonitorAcquirer<SentryIssue>({
+        sourceId: "primary",
+        intervalSeconds: 60,
+        queue,
+        provider,
+        now: () => clock,
+        executeTask: async () => true,
+      });
+      const capture = captureConsole();
+      try {
+        await acquirer.tick();
+        limited = false;
+        clock = 40_000;
+        const resumed = await acquirer.tick();
+        expect(resumed.status).toBe("ok");
+        expect(resumed.skipped).toBeUndefined();
+        expect(calls.count).toBe(2);
+        await acquirer.tick();
+        expect(calls.count).toBe(3);
+      } finally {
+        capture.restore();
+      }
+    });
+
+    test("honors a retry window persisted before a restart", async () => {
+      const store = new AutomationStateStore(join(dir, "status.db"));
+      store.recordSourceStatus({
+        provider: "sentry",
+        sourceId: "primary",
+        status: "rate-limited",
+        checkedAt: 1_000,
+        message: "HTTP 429",
+        retryAfterMs: 60_000,
+      });
+      const { provider, calls } = scriptedProvider(() => []);
+      const acquirer = new ErrorMonitorAcquirer<SentryIssue>({
+        sourceId: "primary",
+        intervalSeconds: 60,
+        queue,
+        provider,
+        statusStore: store,
+        now: () => 30_000,
+        executeTask: async () => true,
+      });
+      const capture = captureConsole();
+      try {
+        expect((await acquirer.tick()).skipped).toBe(true);
+        expect(calls.count).toBe(0);
+        expect(store.getSourceStatus("sentry", "primary")?.consecutiveFailures).toBe(1);
+      } finally {
+        capture.restore();
+        store.close();
+      }
+    });
+
+    test("a rate-limited source does not stop another source from polling", async () => {
+      const store = new AutomationStateStore(join(dir, "status.db"));
+      const limited = scriptedProvider(
+        () => new SourceFetchError("rate-limited", "HTTP 429", { retryAfterMs: 30_000 }),
+      );
+      const healthy = scriptedProvider(() => []);
+      const make = (sourceId: string, provider: typeof limited.provider) =>
+        new ErrorMonitorAcquirer<SentryIssue>({
+          sourceId,
+          intervalSeconds: 60,
+          queue,
+          provider,
+          statusStore: store,
+          now: () => 10_000,
+          executeTask: async () => true,
+        });
+      const first = make("limited", limited.provider);
+      const second = make("healthy", healthy.provider);
+      const capture = captureConsole();
+      try {
+        await first.tick();
+        await first.tick();
+        await second.tick();
+        await second.tick();
+        expect(limited.calls.count).toBe(1);
+        expect(healthy.calls.count).toBe(2);
+        expect(store.getSourceStatus("sentry", "healthy")?.status).toBe("ok");
+      } finally {
+        capture.restore();
+        store.close();
+      }
+    });
+
+    test("a rate limit without Retry-After keeps polling every tick", async () => {
+      const { provider, calls } = scriptedProvider(
+        () => new SourceFetchError("rate-limited", "HTTP 429"),
+      );
+      const acquirer = new ErrorMonitorAcquirer<SentryIssue>({
+        sourceId: "primary",
+        intervalSeconds: 60,
+        queue,
+        provider,
+        now: () => 10_000,
+        executeTask: async () => true,
+      });
+      const capture = captureConsole();
+      try {
+        await acquirer.tick();
+        await acquirer.tick();
+        expect(calls.count).toBe(2);
+      } finally {
+        capture.restore();
+      }
+    });
+
+    test("logs the window start once and later skips only when verbose", async () => {
+      for (const verbose of [false, true]) {
+        let clock = 10_000;
+        const { provider } = scriptedProvider(
+          () => new SourceFetchError("rate-limited", "HTTP 429", { retryAfterMs: 30_000 }),
+        );
+        const acquirer = new ErrorMonitorAcquirer<SentryIssue>({
+          sourceId: "primary",
+          intervalSeconds: 60,
+          queue,
+          provider,
+          verbose,
+          now: () => clock,
+          executeTask: async () => true,
+        });
+        const capture = captureConsole();
+        try {
+          await acquirer.tick();
+          clock = 15_000;
+          await acquirer.tick();
+          clock = 20_000;
+          await acquirer.tick();
+          clock = 25_000;
+          await acquirer.tick();
+        } finally {
+          capture.restore();
+        }
+        const skips = capture.logs.filter((line) => line.includes("skipping reads until"));
+        const normal = skips.filter((line) => line.startsWith("⏳"));
+        expect(normal).toHaveLength(1);
+        expect(skips).toHaveLength(verbose ? 3 : 1);
+        // The skip is never reported as another read failure.
+        expect(
+          capture.warnings.filter((line) => line.includes("source is unreadable")),
+        ).toHaveLength(1);
+      }
+    });
+  });
 });

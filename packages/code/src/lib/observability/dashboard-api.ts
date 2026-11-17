@@ -68,6 +68,8 @@ import {
 import { WorkerState } from "../state/worker-state";
 import type { Cursor } from "../state/worker-state";
 import { deriveTaskTitle } from "./task-title";
+import { loadConfiguredWorkspaceSources, readConfiguredSourceHealth } from "./dashboard-sources";
+import type { ConfiguredSource, DashboardSourcesResult } from "./dashboard-sources";
 import { scheduledJobRunFilter, toAutomationView } from "./dashboard-automation-view";
 import type { DashboardAutomationView } from "./dashboard-automation-view";
 
@@ -161,6 +163,8 @@ export interface DashboardDataOptions {
   logDirs?: string[];
   /** Tail window per capture file; tests shrink this for truncation cases. */
   maxLogBytesPerFile?: number;
+  /** Sources the running config polls; defaults to the workspace.toml list. */
+  configuredSources?: () => ConfiguredSource[];
 }
 
 interface Stores {
@@ -285,6 +289,7 @@ export class DashboardData {
   /** Automation listing/triggering; lazily defaults to the standalone spawn path. */
   private automationActions: DashboardAutomationActions | null = null;
   private automationActionsOverride?: DashboardAutomationActions;
+  private readonly configuredSources: () => ConfiguredSource[];
 
   constructor(options: DashboardDataOptions = {}) {
     this.workingDir = options.workingDir ?? process.cwd();
@@ -299,6 +304,8 @@ export class DashboardData {
     this.inflightRetryTtlMs = options.inflightRetryTtlMs ?? INFLIGHT_RETRY_TTL_MS;
     this.inflightAutomationTtlMs = options.inflightAutomationTtlMs ?? INFLIGHT_RETRY_TTL_MS;
     this.automationActionsOverride = options.automationActions;
+    this.configuredSources =
+      options.configuredSources ?? (() => loadConfiguredWorkspaceSources(this.workspaceDir));
     if (options.logDirs !== undefined) {
       // Explicit dirs keep tests hermetic; the workspace home is not probed.
       this.logDirs = options.logDirs;
@@ -580,6 +587,11 @@ export class DashboardData {
       const lastRun = this.read(undefined, (stores) => stores.runs.listRuns(filter)[0]);
       return toAutomationView(status, lastRun);
     });
+  }
+
+  /** Health of each configured automation source; never throws. */
+  getSources(): DashboardSourcesResult {
+    return readConfiguredSourceHealth(this.dbPath, this.configuredSources);
   }
 
   /** True while a dashboard-triggered manual run for the automation is starting. */
@@ -1410,11 +1422,13 @@ export function resolveWorkerStatus(
 }
 
 /**
- * `GET /api/worker` — worker liveness, queue counts, agent PRs, poll cursors.
+ * `GET /api/worker` — worker liveness, queue counts, agent PRs, poll cursors,
+ * and automation source health.
  *
  * @param data - Dashboard data source
  */
 export function handleWorkerStatus(data: DashboardData): ApiResponse {
+  const sources = data.getSources();
   return {
     status: 200,
     body: {
@@ -1431,6 +1445,9 @@ export function handleWorkerStatus(data: DashboardData): ApiResponse {
       dbMissing: data.dbMissing,
       queueDbPath: data.queueDbPath,
       queueDbMissing: data.queueDbMissing,
+      // Additive: configured automation source health (empty on read errors).
+      sources: sources.sources,
+      ...(sources.error !== undefined ? { sourcesError: sources.error } : {}),
     },
   };
 }

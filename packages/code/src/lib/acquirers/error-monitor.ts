@@ -136,6 +136,15 @@ export class ErrorMonitorAcquirer<TIssue extends ErrorMonitorIssue> implements A
   private consecutiveReadFailures = 0;
   /** Wall-clock time of the last failure warning, for the heartbeat interval. */
   private lastFailureLogAt: number | null = null;
+  /**
+   * Epoch ms before which the provider asked us not to read (rate-limited
+   * `Retry-After`). Mirrors the persisted `retry_after_at`; null when unset.
+   */
+  private retryAfterAt: number | null = null;
+  /** Whether {@link retryAfterAt} was seeded from the durable store yet. */
+  private retryWindowSeeded = false;
+  /** Retry window whose start was already logged at normal level. */
+  private loggedRetryWindow: number | null = null;
 
   constructor(options: ErrorMonitorAcquirerOptions<TIssue>) {
     this.options = {
@@ -182,6 +191,8 @@ export class ErrorMonitorAcquirer<TIssue extends ErrorMonitorIssue> implements A
     const { queue, provider, minOccurrences, maxIssuesPerTick, verbose } = this.options;
     const dedupeSource = this.name;
     try {
+      const skip = this.retryWindowSkip();
+      if (skip) return skip;
       let issues: TIssue[];
       try {
         issues = await provider.fetchIssues();
@@ -259,6 +270,66 @@ export class ErrorMonitorAcquirer<TIssue extends ErrorMonitorIssue> implements A
   }
 
   /**
+   * Honor a provider-requested retry window. While the window is open no read
+   * is attempted, nothing is persisted, and failure counters stay put; other
+   * sources poll on their own timers. The first skip of a window is logged at
+   * normal level, later skips in the same window only when verbose.
+   */
+  private retryWindowSkip(): SourceFetchOutcome<TIssue> | null {
+    this.seedRetryWindow();
+    const retryAfterAt = this.retryAfterAt;
+    if (retryAfterAt === null) return null;
+    const now = this.now();
+    if (retryAfterAt <= now) {
+      // Window passed: read on this tick and keep the normal cadence.
+      this.retryAfterAt = null;
+      this.loggedRetryWindow = null;
+      return null;
+    }
+    const waitSeconds = Math.ceil((retryAfterAt - now) / 1000);
+    const line =
+      `⏳ [${this.name}] rate-limited; skipping reads until ` +
+      `${new Date(retryAfterAt).toISOString()} (${waitSeconds}s) as the provider requested.`;
+    if (this.loggedRetryWindow !== retryAfterAt) {
+      this.loggedRetryWindow = retryAfterAt;
+      console.log(line);
+    } else if (this.options.verbose) {
+      console.log(`   ${line}`);
+    }
+    return {
+      status: "rate-limited",
+      issues: [],
+      error: this.lastOutcome.error,
+      retryAfterMs: retryAfterAt - now,
+      skipped: true,
+    };
+  }
+
+  /**
+   * Load a retry window persisted before this process started, once. Only a
+   * rate-limited row carries one; storage errors fall back to polling.
+   */
+  private seedRetryWindow(): void {
+    if (this.retryWindowSeeded) return;
+    this.retryWindowSeeded = true;
+    const store = this.options.statusStore;
+    if (!store?.getSourceStatus) return;
+    try {
+      const record = store.getSourceStatus(
+        this.options.provider.providerName,
+        this.options.sourceId,
+      );
+      if (record?.status === "rate-limited" && record.retryAfterAt !== undefined) {
+        this.retryAfterAt = record.retryAfterAt;
+      }
+    } catch (error) {
+      console.warn(
+        `⚠️  [${this.name}] could not read persisted source status: ${(error as Error).message}`,
+      );
+    }
+  }
+
+  /**
    * Classify a failed read, persist the per-source status, and return the
    * outcome. Callers must not mark any issue processed on this path: a source
    * that could not be read was not read, so its cursor stays put and the next
@@ -269,11 +340,15 @@ export class ErrorMonitorAcquirer<TIssue extends ErrorMonitorIssue> implements A
     const status: SourceFetchFailureStatus = failure?.status ?? "unreadable";
     const message = failure?.message ?? (error as Error).message;
     const retryAfterMs = failure?.retryAfterMs;
+    const checkedAt = this.now();
+    // Same derivation as the persisted `retry_after_at`.
+    this.retryAfterAt =
+      status === "rate-limited" && retryAfterMs !== undefined ? checkedAt + retryAfterMs : null;
     this.persistSourceStatus({
       sourceId: this.options.sourceId,
       provider: this.options.provider.providerName,
       status,
-      checkedAt: this.now(),
+      checkedAt,
       message,
       retryAfterMs,
     });
@@ -294,6 +369,7 @@ export class ErrorMonitorAcquirer<TIssue extends ErrorMonitorIssue> implements A
     this.lastLoggedFailure = null;
     this.consecutiveReadFailures = 0;
     this.lastFailureLogAt = null;
+    this.retryAfterAt = null;
     if (recoveredFrom) {
       console.log(
         `✅ [${this.name}] source is readable again (was ${recoveredFrom.status}); polling resumed.`,
@@ -371,7 +447,9 @@ export class ErrorMonitorAcquirer<TIssue extends ErrorMonitorIssue> implements A
       case "rate-limited":
         console.warn(
           `⏳ [${this.name}] source is unreadable${streak}: rate-limited${retry} — ${message}. ` +
-            "No issues were read; the cursor was left unchanged and the next tick will retry.",
+            (retryAfterMs !== undefined
+              ? "No issues were read; the cursor was left unchanged and reads pause until the provider's retry window passes."
+              : "No issues were read; the cursor was left unchanged and the next tick will retry."),
         );
         break;
       default:

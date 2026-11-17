@@ -31,6 +31,7 @@ import {
   handleWorkerStatus,
 } from "./lib/observability/dashboard-api";
 import { handleOverview } from "./lib/observability/dashboard-overview";
+import { handleSources } from "./lib/observability/dashboard-sources";
 import { handleQueuedWork } from "./lib/observability/queued-work";
 import { handleCreateTask } from "./lib/observability/dashboard-tasks";
 import { DashboardReports } from "./lib/observability/dashboard-report";
@@ -193,6 +194,8 @@ export interface DashboardServerOptions {
   automationDeps?: AutomationRunDeps;
   /** Directories to search for worker capture files (primary first). */
   logDirs?: string[];
+  /** Automation sources the running config polls (embedded worker dashboard). */
+  configuredSources?: () => import("./lib/observability/dashboard-sources").ConfiguredSource[];
   /**
    * Explicitly trusted non-loopback origins (`--allow-origin`,
    * `[dashboard].allowed_origins`); merged with `DASHBOARD_ALLOWED_ORIGINS`.
@@ -320,6 +323,7 @@ export function startDashboardServer(
     retryMode: options.retryMode,
     automationActions: options.automationActions,
     logDirs: options.logDirs,
+    configuredSources: options.configuredSources,
   });
   const reports = new DashboardReports(data, options.reportDeps);
   const uiDir = resolveUiDir();
@@ -447,6 +451,9 @@ export function startDashboardServer(
         }
         if (pathname === "/api/worker") {
           return json(handleWorkerStatus(data));
+        }
+        if (pathname === "/api/sources") {
+          return json(handleSources(data));
         }
         if (pathname === "/api/queue") {
           return json(handleQueuedWork(data));
