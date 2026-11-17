@@ -298,7 +298,7 @@ describe.concurrent("Address Review - Worktree Integration", () => {
 
       // Fail at the GitHub API step (auth or transient network) — proves we got past arg parsing.
       expect(output).toMatch(
-        /Bad credentials|GitHub API error|typo in the url|ENOTFOUND|ETIMEOUT|ECONNREFUSED|fetch failed/i,
+        /Bad credentials|GitHub API error|typo in the url|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|ETIMEOUT|ECONNREFUSED|ECONNRESET|ENETUNREACH|EHOSTUNREACH|fetch failed/i,
       );
 
       // Command should exit with non-zero status due to API failure
