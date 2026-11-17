@@ -114,6 +114,17 @@ export interface AgentRunResult {
   structured?: StructuredOutputResult;
 }
 
+/** Options for {@link AgentHarness.probe} and the shared version probe helpers. */
+export interface HarnessProbeOptions {
+  /**
+   * Environment for the spawned probe process. Defaults to `process.env`.
+   * Pass the environment the real run will use so the probe sees the same
+   * HOME/XDG directories (a CLI may fail `--version` when its log directory
+   * is read-only).
+   */
+  env?: NodeJS.ProcessEnv | Record<string, string>;
+}
+
 /**
  * Best-effort capability snapshot of an installed harness CLI, produced by
  * {@link AgentHarness.probe} before {@link AgentHarness.buildArgs} runs.
@@ -225,9 +236,14 @@ export interface AgentHarness {
    * unknown so callers fall back to baseline behavior.
    *
    * @param executablePath - Resolved path/command of the CLI to probe.
+   * @param options - Optional environment for the probe process (defaults to
+   *   `process.env`).
    * @returns Capability snapshot, or `{}` when nothing could be determined.
    */
-  probe?(executablePath: string): Promise<HarnessProbe> | HarnessProbe;
+  probe?(
+    executablePath: string,
+    options?: HarnessProbeOptions,
+  ): Promise<HarnessProbe> | HarnessProbe;
   /**
    * Build CLI arguments for the given run options.
    *
