@@ -20,7 +20,7 @@ describe("opt-in e2e suites (not run by `test`)", () => {
     const command = packageScripts[suite.script] ? `; run ${optInSuiteCommand(suite.script)}` : "";
     if (suite.status === "todo") {
       test.todo(`${suite.name} — ${suite.reason}${command}`, () => {
-        throw new Error("Planned coverage; see docs/tracker-e2e-plan.md");
+        throw new Error("Planned coverage; see docs/coverage/trackers.md");
       });
       continue;
     }

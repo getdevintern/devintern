@@ -52,10 +52,24 @@ import { cliResultToTaskResult, runWithFailover } from "../worker/failover";
 import type { WorkerState } from "../state/worker-state";
 import type { ConflictResolutionMode } from "../workspace/config";
 import type { Acquirer } from "../../worker";
+import {
+  CONFLICT_WINDOW_SOURCE,
+  extendConflictWindow,
+  isConflictWindowOpen,
+  openConflictWindow,
+  parseConflictWindowState,
+  resolveConflictWindowGraceMs,
+} from "./conflict-window";
+import type {
+  ConflictWindowState,
+  ConflictWindowStatus,
+  ConflictWindowTriggerOutcome,
+} from "./conflict-window";
 
 // The PR-state protocol types live with the reconciler, which shares them;
 // re-exported so poller consumers keep their existing import paths.
 export type { ConditionalResult, PolledPr };
+export type { ConflictWindowStatus, ConflictWindowTriggerOutcome };
 
 export interface PolledReview {
   id: number;
@@ -182,32 +196,7 @@ export interface ReviewPollingAcquirerOptions {
 /** Dedupe source for review/comment ids. */
 const SOURCE = "github:reviews";
 const BASE_SYNC_SOURCE = "github:base-sync";
-/** Durable cursor source for the scheduled conflict-resolution window. */
-const CONFLICT_WINDOW_SOURCE = "worker:conflict-window";
 const prRunTails = new Map<string, Promise<void>>();
-
-/** Default minutes a scheduled conflict-resolution window stays open. */
-export const DEFAULT_CONFLICT_WINDOW_GRACE_MINUTES = 60;
-
-/** Durable state for scheduled conflict resolution (persisted per worker). */
-/** Dashboard view of the scheduled conflict-resolution window. */
-export interface ConflictWindowStatus {
-  schedule: CronOrIntervalSchedule;
-  /** Next scheduled window (ms epoch); absent before the first tick registered it. */
-  nextWindowAt?: number;
-  /** A window (scheduled or opened on demand) is open until this instant. */
-  openUntil?: number;
-}
-
-/** Result of opening the conflict window on demand (dashboard "Run now"). */
-export type ConflictWindowTriggerOutcome = { ok: true } | { ok: false; reason: string };
-
-interface ConflictWindowState {
-  /** Next scheduled occurrence (ms epoch). */
-  nextWindowAt: number;
-  /** Resolution attempts are allowed until this instant (0 = none opened yet). */
-  windowOpenUntil: number;
-}
 
 /**
  * Consecutive `deferred` resolver outcomes tolerated for one base-sync event
@@ -1173,6 +1162,7 @@ export class ReviewPollingAcquirer implements Acquirer {
     const { repo, prNumber, externalId, now, headSha, baseSha, branch } = params;
 
     const attempt = queue.beginBaseSyncAttempt(externalId, now);
+    this.extendConflictWindowForDrain(now);
     let runId: number | null = null;
     try {
       runId =
@@ -1196,32 +1186,9 @@ export class ReviewPollingAcquirer implements Acquirer {
     } catch (error) {
       result = { outcome: "failed", message: (error as Error).message };
     }
-    const terminal = result.outcome !== "failed" && result.outcome !== "deferred";
-    if (terminal) {
-      this.deferCounts.delete(externalId);
-      queue.completeBaseSyncEvent(BASE_SYNC_SOURCE, externalId);
-    } else if (result.outcome === "deferred") {
-      const defers = (this.deferCounts.get(externalId) ?? 0) + 1;
-      this.deferCounts.set(externalId, defers);
-      console.warn(
-        `⚠️  [${this.name}] ${repo}#${prNumber} base sync deferred: ${result.message} ` +
-          `(${defers}/${MAX_CONSECUTIVE_DEFERS})`,
-      );
-      if (defers >= MAX_CONSECUTIVE_DEFERS) {
-        console.warn(
-          `⛔ [${this.name}] ${repo}#${prNumber} base sync keeps deferring; giving up until ` +
-            `the head or base moves again`,
-        );
-        this.deferCounts.delete(externalId);
-        queue.exhaustBaseSyncEvent(BASE_SYNC_SOURCE, externalId, result.message);
-      } else {
-        queue.deferBaseSyncAttempt(externalId);
-      }
-    } else {
-      console.warn(`⚠️  [${this.name}] ${repo}#${prNumber} base sync failed: ${result.message}`);
-      const exhausted = queue.failBaseSyncEvent(externalId, result.message, now);
-      if (exhausted) queue.exhaustBaseSyncEvent(BASE_SYNC_SOURCE, externalId, result.message);
-    }
+    const exhausted = this.settleBaseSync(repo, prNumber, externalId, result, now);
+    // Live (or just-landed) conflict work keeps a scheduled window draining.
+    if (!exhausted) this.extendConflictWindowForDrain(this.now());
     if (runId !== null) {
       try {
         runStore?.finishRun(
@@ -1237,6 +1204,45 @@ export class ReviewPollingAcquirer implements Acquirer {
         console.warn(`⚠️  Run recording (base sync end) failed: ${(error as Error).message}`);
       }
     }
+  }
+
+  /** Persist a resolver outcome on its base-sync event; returns true when exhausted. */
+  private settleBaseSync(
+    repo: string,
+    prNumber: number,
+    externalId: string,
+    result: AutomaticResolveResult,
+    now: number,
+  ): boolean {
+    const { queue } = this.options;
+    if (result.outcome !== "failed" && result.outcome !== "deferred") {
+      this.deferCounts.delete(externalId);
+      queue.completeBaseSyncEvent(BASE_SYNC_SOURCE, externalId);
+      return false;
+    }
+    if (result.outcome === "deferred") {
+      const defers = (this.deferCounts.get(externalId) ?? 0) + 1;
+      this.deferCounts.set(externalId, defers);
+      console.warn(
+        `⚠️  [${this.name}] ${repo}#${prNumber} base sync deferred: ${result.message} ` +
+          `(${defers}/${MAX_CONSECUTIVE_DEFERS})`,
+      );
+      if (defers >= MAX_CONSECUTIVE_DEFERS) {
+        console.warn(
+          `⛔ [${this.name}] ${repo}#${prNumber} base sync keeps deferring; giving up until ` +
+            `the head or base moves again`,
+        );
+        this.deferCounts.delete(externalId);
+        queue.exhaustBaseSyncEvent(BASE_SYNC_SOURCE, externalId, result.message);
+        return true;
+      }
+      queue.deferBaseSyncAttempt(externalId);
+      return false;
+    }
+    console.warn(`⚠️  [${this.name}] ${repo}#${prNumber} base sync failed: ${result.message}`);
+    const exhausted = queue.failBaseSyncEvent(externalId, result.message, now);
+    if (exhausted) queue.exhaustBaseSyncEvent(BASE_SYNC_SOURCE, externalId, result.message);
+    return exhausted;
   }
 
   private async maybeSyncBase(repo: string, prNumber: number, pr: PolledPr): Promise<void> {
@@ -1281,6 +1287,10 @@ export class ReviewPollingAcquirer implements Acquirer {
       now,
     });
     if (event.status !== "pending") return;
+    // A conflict first seen (or whose head moved) while a scheduled window
+    // is open keeps that window draining long enough to resolve it.
+    const windowOpen = isConflictWindowOpen(this.conflictWindowState, now);
+    if (event.updatedAt === now && windowOpen) this.extendConflictWindowForDrain(now);
 
     // Retry backoff: a previously failed event waits (doubled per further
     // failure) before another attempt. The anchor is the event's own
@@ -1294,7 +1304,7 @@ export class ReviewPollingAcquirer implements Acquirer {
     // `devintern resolve-conflicts <pr-url>` still runs on demand; once the
     // PR is no longer conflicting, the mergeability check above keeps the
     // queued event out of execution without spending tokens.
-    if (this.options.conflictSchedule && !this.conflictWindowOpen(now)) return;
+    if (this.options.conflictSchedule && !windowOpen) return;
 
     const quietMs = (this.options.quietPeriodSeconds ?? 30) * 1000;
     if (now - event.headObservedAt < quietMs) return;
@@ -1334,29 +1344,19 @@ export class ReviewPollingAcquirer implements Acquirer {
     if (!schedule) return;
     const now = this.now();
     if (this.conflictWindowState === undefined) {
-      this.conflictWindowState = null;
-      const raw = this.options.workerState.getCursor(CONFLICT_WINDOW_SOURCE)?.cursorValue;
-      if (raw) {
-        try {
-          const parsed = JSON.parse(raw) as Partial<ConflictWindowState>;
-          if (
-            typeof parsed.nextWindowAt === "number" &&
-            typeof parsed.windowOpenUntil === "number"
-          ) {
-            this.conflictWindowState = {
-              nextWindowAt: parsed.nextWindowAt,
-              windowOpenUntil: parsed.windowOpenUntil,
-            };
-          }
-        } catch {
-          // Corrupt state re-initializes below.
-        }
-      }
+      // Corrupt or missing state re-initializes below.
+      this.conflictWindowState = parseConflictWindowState(
+        this.options.workerState.getCursor(CONFLICT_WINDOW_SOURCE)?.cursorValue,
+      );
     }
 
     let state = this.conflictWindowState;
     if (!state) {
-      state = { nextWindowAt: nextScheduleOccurrence(schedule, now), windowOpenUntil: 0 };
+      state = {
+        nextWindowAt: nextScheduleOccurrence(schedule, now),
+        windowOpenUntil: 0,
+        windowCapAt: 0,
+      };
       this.saveConflictWindowState(state);
       return;
     }
@@ -1365,10 +1365,11 @@ export class ReviewPollingAcquirer implements Acquirer {
       // still pending (including from a missed window while the worker was
       // down) resolves now.
       this.deferCounts.clear();
-      state = {
-        nextWindowAt: nextScheduleOccurrence(schedule, now),
-        windowOpenUntil: now + this.conflictWindowGraceMs(),
-      };
+      state = openConflictWindow(
+        nextScheduleOccurrence(schedule, now),
+        now,
+        this.conflictWindowGraceMs(),
+      );
       this.saveConflictWindowState(state);
       console.log(
         `⏰ [${this.name}] conflict-resolution window open until ${new Date(
@@ -1422,10 +1423,9 @@ export class ReviewPollingAcquirer implements Acquirer {
       this.conflictWindowState?.nextWindowAt ??
       nextScheduleOccurrence(this.options.conflictSchedule, now);
     this.deferCounts.clear();
-    this.saveConflictWindowState({
-      nextWindowAt,
-      windowOpenUntil: now + this.conflictWindowGraceMs(),
-    });
+    this.saveConflictWindowState(
+      openConflictWindow(nextWindowAt, now, this.conflictWindowGraceMs()),
+    );
     console.log(
       `⏰ [${this.name}] conflict-resolution window opened on demand (dashboard) until ${new Date(
         now + this.conflictWindowGraceMs(),
@@ -1436,10 +1436,19 @@ export class ReviewPollingAcquirer implements Acquirer {
     return { ok: true };
   }
 
-  /** Scheduled mode only: are resolution attempts currently allowed? */
-  private conflictWindowOpen(now: number): boolean {
+  /**
+   * Scheduled mode: keep the window open for the drain grace past `now`, up
+   * to its hard cap. Only called for work begun inside an open window, so a
+   * late event after an idle close never reopens it.
+   */
+  private extendConflictWindowForDrain(now: number): void {
+    if (!this.options.conflictSchedule) return;
     const state = this.conflictWindowState;
-    return state != null && now <= state.windowOpenUntil;
+    const extended = state ? extendConflictWindow(state, now) : null;
+    if (!extended) return;
+    this.saveConflictWindowState(extended);
+    const until = new Date(extended.windowOpenUntil).toISOString();
+    console.log(`⏰ [${this.name}] conflict window kept open until ${until} while work drains`);
   }
 
   private saveConflictWindowState(state: ConflictWindowState): void {
@@ -1448,14 +1457,7 @@ export class ReviewPollingAcquirer implements Acquirer {
   }
 
   private conflictWindowGraceMs(): number {
-    return (
-      this.options.conflictWindowGraceMs ??
-      parseEnvInteger(
-        "WORKER_RESOLVE_WINDOW_GRACE_MINUTES",
-        DEFAULT_CONFLICT_WINDOW_GRACE_MINUTES,
-        { min: 0 },
-      ) * 60_000
-    );
+    return resolveConflictWindowGraceMs(this.options.conflictWindowGraceMs);
   }
 
   private scheduleLabel(): string {
