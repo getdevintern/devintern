@@ -38,6 +38,9 @@ const STEP_LABELS: Record<string, string> = {
   finalize: "Finalize",
   "auto-review": "Auto-review",
   publish: "Publish",
+  // Auto-merge checks: queued behind the repo's slot, then evaluating.
+  "waiting-for-slot": "Waiting for a slot",
+  "auto-merge": "Merge check",
 };
 
 const STEP_PHASES: Record<string, Phase> = {
