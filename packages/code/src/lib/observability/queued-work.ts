@@ -60,6 +60,14 @@ export interface QueuedWorkItem {
   lastError?: string;
   /** Automation: the scheduled job waiting for a slot (its dashboard id). */
   automationId?: string;
+  /** Ad-hoc: task keys this task depends on. */
+  dependsOn?: string[];
+  /** Ad-hoc: how it waits on {@link dependsOn} (`merged` or `stacked`). */
+  dependencyMode?: "merged" | "stacked";
+  /** Ad-hoc: `waiting` or `blocked` on a dependency; unset once claimable. */
+  dependencyState?: "waiting" | "blocked";
+  /** Ad-hoc: why, naming the dependency (`local-foo PR #12 not merged`). */
+  dependencyReason?: string;
 }
 
 export interface QueuedWorkResponse {
@@ -90,7 +98,24 @@ export function injectedTaskToQueuedItem(task: InjectedTask): QueuedWorkItem {
     message: task.message,
     body: task.body.trim() ? task.body.slice(0, QUEUED_BODY_LIMIT) : undefined,
     bodyTruncated: truncated || undefined,
+    ...(task.dependsOn.length > 0
+      ? {
+          dependsOn: task.dependsOn,
+          dependencyMode: task.dependencyMode ?? "merged",
+          dependencyState: task.dependencyState,
+          dependencyReason: task.dependencyReason,
+        }
+      : {}),
   };
+}
+
+/** One-line dependency status of a queued item (`waiting: local-foo PR #12 not merged`). */
+export function queuedDependencyStatus(item: QueuedWorkItem): string | undefined {
+  if (!item.dependsOn?.length) return undefined;
+  if (item.dependencyState && item.dependencyReason) {
+    return `${item.dependencyState}: ${item.dependencyReason}`;
+  }
+  return `dependencies satisfied (${item.dependsOn.join(", ")})`;
 }
 
 /** A pending `scheduled_retries` row, as far as the Overview needs it. */

@@ -91,10 +91,13 @@ records, and the [dashboard](dashboard.md), and start on a `feature/local-<slug>
 | `--body <text>`            | Task description                                                                                                                |
 | `--body-file <path>`       | Read the description from a file (`-` reads stdin)                                                                              |
 | `--idempotency-key <key>`  | Dedupe key; while a task with the key is pending/running a retry reuses it, and once it settles the key starts a new occurrence |
+| `--after <taskKey>`        | Start only after this ad-hoc task (same repo) finishes; repeatable. See [Dependent tasks](#dependent-tasks---after) |
+| `--stack`                  | Dependency mode `stacked`: start on an unmerged dependency's branch once it succeeded (overrides `[defaults].dependency_mode`) |
+| `--wait-merge`             | Dependency mode `merged`: wait until every dependency's PR merged (overrides `[defaults].dependency_mode`)                      |
 | `--resume <taskKey>`       | Re-queue a settled ad-hoc task under its existing key (a failed or interrupted attempt resumes its branch and prior report)     |
 | `--wait`                   | Block until the run finishes; exit `0` on success, `1` on failure                                                               |
 | `--wait-timeout <seconds>` | Give up waiting after this long (default 21600 = 6h; `0` waits without a limit)                                                 |
-| `--json`                   | Emit a single `{ id, taskKey, repo, status, deduplicated }` object on stdout (failed `--wait` runs add an `error` field; see [JSON output](#json-output) for `harnessPausedUntil`) |
+| `--json`                   | Emit a single `{ id, taskKey, repo, status, deduplicated }` object on stdout (failed `--wait` runs add an `error` field; see [JSON output](#json-output) for `harnessPausedUntil` and the dependency fields) |
 | `--workspace <path>`       | Use this `workspace.toml` (default `~/.devintern/workspace.toml`, or `DEVINTERN_WORKSPACE_DIR`)                                 |
 
 Validation happens before anything is written. An empty title, a body over
@@ -113,6 +116,13 @@ failure reason when it failed, or a `status: "failed"` object with an `error` on
 a timeout/worker-stop/inconclusive wait, not an interim pending object plus a
 final one. Successful results have no `error`. Without `--json`, diagnostics and
 the result line print to stdout as usual.
+
+
+A task with dependencies also carries `dependsOn` (the stored keys) and
+`dependencyMode` (`merged` or `stacked`, after `--stack` / `--wait-merge` and
+`[defaults].dependency_mode` are applied). While it is pending and not yet
+claimable, `dependencyState` (`waiting` or `blocked`) and `dependencyReason`
+explain why.
 
 ### When every agent harness is usage-limited
 
@@ -145,6 +155,104 @@ behind a usage limit until that time, not as about to start.
 Check the exit code as well as the object; validation failures may produce no
 result object. The enqueue response does not include a PR URL. Confirm a PR from
 the run artifacts or the dashboard before reporting one.
+
+## Dependent tasks (`--after`)
+
+Enqueue dependent work immediately instead of waiting for the first task to
+finish or merge. The worker holds the dependent task until its dependencies are
+far enough along:
+
+```bash
+devintern worker add --repo backend --title 'Add the orders API' --json
+# → { "taskKey": "local-add-the-orders-api", ... }
+devintern worker add --repo backend --title 'Use the orders API in checkout' \
+  --after local-add-the-orders-api --json
+```
+
+`--after` is repeatable. A line in the body works too, with the same markdown
+flexibility as `Target branch:` (headings, bold/italic, list items, table
+cells):
+
+```markdown
+**Depends on**: local-add-the-orders-api, local-add-order-events
+```
+
+`--after` keys and `Depends on:` keys are merged and de-duplicated, then stored
+on the task. Only words shaped like task keys (`local-…` or `PROJ-12`) count on
+a `Depends on:` line, so prose such as `Depends on: the orders API being
+deployed` declares nothing. Every `--after` key must name an existing ad-hoc
+task (any status); a `Depends on:` key that names no ad-hoc task (for example a
+tracker ticket mentioned for context) is ignored, and `worker add` prints a
+warning. Dependencies must be **in the same repo** and must not form a cycle;
+otherwise the command fails with an error and enqueues nothing. Cross-repo
+dependencies are not supported.
+
+### Modes: merged and stacked
+
+| Mode               | Starts when                                                                 | Base and PR target                       |
+| ------------------ | --------------------------------------------------------------------------- | ---------------------------------------- |
+| `merged` (default) | every dependency's PR has merged (a dependency that succeeded with nothing to deliver counts as satisfied) | the default branch, as usual |
+| `stacked`          | every dependency's latest run succeeded (its PR may still be open)          | the one unmerged dependency's branch      |
+
+Pick the workspace default with `[defaults].dependency_mode` in
+[`workspace.toml`](./workspaces.md#the-workspace-file), and override it per task with
+`--stack` or `--wait-merge` (mutually exclusive). The resolved mode is stored on
+the task.
+
+- **merged** is the safe choice: each PR is reviewed and merged against the
+  default branch, at the cost of waiting for each merge before the next task
+  starts.
+- **stacked** keeps work moving while reviews are pending. With exactly one
+  dependency unmerged, the task branches from that dependency's branch, its PR
+  targets it, and auto-review diffs against it; the PR description opens with
+  "Stacked on #N". With **two or more** dependencies still unmerged, a branch
+  cannot have two bases, so the task waits until at most one remains unmerged.
+  With all of them merged, it behaves like merged mode.
+- An explicit `Target branch:` line in the body wins over the stacked base; the
+  worker logs a warning.
+- A stacked PR that merges into its base's branch does not put its work on the
+  default branch. Tasks that depend on it count it as merged only once its base
+  has merged too. Until then, merged mode waits on the base's PR, and stacked
+  mode stacks on the base's branch, which now carries both tasks' work. Once
+  both have merged, the worker compares GitHub's merge times: a stacked PR
+  merged into its base's branch **after** the base merged never reached the
+  default branch, so dependents are blocked ("merged into feature/… after …
+  merged") until that work lands and they are re-queued. A stacked PR that was
+  retargeted to the default branch before merging counts as merged directly;
+  on GitHub, one merged into any other branch blocks its dependents too. The
+  worker learns merge times and the merged-into branch from GitHub (and asks
+  GitHub while it has not yet) and from GitLab when it sees a merge request
+  merge. When it cannot tell the order (Bitbucket, or GitLab without a merge
+  time), dependents of a stacked PR merged into its base's branch keep waiting.
+
+**Stacked limitation:** the worker does not yet retarget or restack a stacked PR
+after its base PR merges, changes, or closes. Until it does, a human (or the
+worker's existing base sync on conflicts) needs to retarget the stacked PR to
+the default branch after its base merges. Avoid auto-merging the base PR of a
+stack without checking the stacked PR afterwards.
+
+### Waiting and blocked
+
+A dependent task stays `pending` while it waits; the worker re-checks it on
+every injected-task tick from the local run and PR records. For a GitHub repo
+it also asks GitHub about a dependency PR it is waiting on (closed with an
+unknown reason, or still open locally) at most once every 5 minutes per PR, so
+a merge is noticed even when no review poller watches that PR.
+**Bitbucket:** the worker cannot see Bitbucket PRs merge yet, so merged mode
+waits indefinitely there; use `--stack` (or `dependency_mode = "stacked"`) for
+Bitbucket repos. Waiting tasks do not take a concurrency slot, are not counted as
+deferrals, and cannot hit the deferral cap.
+
+A task is **blocked** when a dependency's task failed, its latest run is
+`failed`, `escalated`, or `abandoned`, its PR was closed without merging, or
+it pushed its branch but PR creation failed (`pushed but PR creation failed`).
+Blocked tasks stay pending too: re-queue the dependency
+(`devintern worker add --resume <dependencyKey>`), and once it satisfies the
+mode the dependent task starts.
+
+`devintern worker queue` (and `--json`, `GET /api/queue`, and the dashboard's
+Queued list) shows each dependent task's dependencies, mode, and reason, for
+example `waiting: local-foo PR #12 not merged` or `blocked: local-foo escalated`.
 
 ## Idempotency
 

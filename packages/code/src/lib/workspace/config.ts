@@ -12,6 +12,8 @@ import { parseWorkerScheduleSection } from "../worker/schedule";
 import { parseEstimationEntries } from "../automation/estimation-config";
 import type { EstimationConfig } from "../automation/estimation-config";
 import { parseToml } from "./toml";
+import { DEFAULT_DEPENDENCY_MODE, DEPENDENCY_MODES, isDependencyMode } from "../dependencies/gate";
+import type { DependencyMode } from "../dependencies/gate";
 import { parseAgentSelection } from "../agent/selection";
 import type { HarnessPinnedEntry } from "../agent/selection";
 import { parseDashboardAllowedOriginList } from "../observability/dashboard-origins";
@@ -433,7 +435,20 @@ function parseDefaultsSection(
         min: 1,
         message: "[defaults].poll_interval must be a positive integer (seconds).",
       }) ?? DEFAULT_POLL_INTERVAL_SECONDS,
+    dependencyMode: readDependencyMode(defaultsTable, errors),
   };
+}
+
+/** `[defaults].dependency_mode`: `merged` (default) or `stacked`. */
+function readDependencyMode(
+  defaultsTable: Record<string, unknown>,
+  errors: string[],
+): DependencyMode {
+  const raw = readString(defaultsTable, "dependency_mode", "[defaults]", errors);
+  if (raw === undefined) return DEFAULT_DEPENDENCY_MODE;
+  if (isDependencyMode(raw)) return raw;
+  errors.push(`[defaults].dependency_mode must be one of: ${DEPENDENCY_MODES.join(", ")}.`);
+  return DEFAULT_DEPENDENCY_MODE;
 }
 
 /** Fill each team's omitted tracker/query from `[defaults]`, reporting gaps. */
