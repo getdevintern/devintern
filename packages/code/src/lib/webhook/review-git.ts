@@ -2,6 +2,7 @@ import type { ResolvedHarness } from "@devintern/agent-harness";
 import { GitHubAppAuth } from "../code-host/github/app-auth";
 import { WorkerState } from "../state/worker-state";
 import { Utils } from "../utils";
+import { setWorktreeGitIdentity } from "../utils/worktree-setup";
 import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "../agent/git-hook-fixer";
 import { runAutoReviewLoop } from "../review/auto-review-loop";
 import { processReviewComment } from "../code-host/github/webhook";
@@ -50,14 +51,8 @@ export async function configureReviewGitAuthor(
   gitAuthor: { name: string; email: string },
   config: WebhookServerConfig,
 ): Promise<void> {
-  await Utils.executeGitCommand(["config", "user.name", gitAuthor.name], {
-    verbose: config.debug,
-    cwd: worktreePath,
-  });
-  await Utils.executeGitCommand(["config", "user.email", gitAuthor.email], {
-    verbose: config.debug,
-    cwd: worktreePath,
-  });
+  // Per-worktree: concurrent reviews share the repository config.
+  await setWorktreeGitIdentity(worktreePath, gitAuthor, { verbose: config.debug });
   console.log(`🤖 Git author set to: ${gitAuthor.name}`);
 }
 

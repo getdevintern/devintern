@@ -25,6 +25,7 @@ import { randomUUID } from "crypto";
 
 import { Utils } from "../utils";
 import { excludeWorkerRuntimeFiles } from "../utils/git-exclude";
+import { withRepoGitLock } from "../utils/repo-git-lock";
 import type { RepoConfig } from "./config";
 import { reposDir, resolveWorkspaceDir, worktreesDir } from "./paths";
 
@@ -178,12 +179,17 @@ export class RepoManager {
    * creation; task subprocesses install dependencies after preparing their
    * final branch, including every reuse by an automation.
    *
-   * A reused checkout is reset to the fetched default branch. It is shared by
-   * automations and review jobs, and a previous run can leave it on its own
-   * feature branch at an old commit; without the reset the next automation
-   * would start from that stale head instead of the default branch.
+   * A reused checkout is reset to the fetched default branch. A previous
+   * automation can leave it on its own feature branch at an old commit;
+   * without the reset the next automation would start from that stale head
+   * instead of the default branch.
+   *
+   * @param options.sync - `false` only creates a missing checkout and never
+   *   resets an existing one. PR jobs pass this: they run alongside an
+   *   automation that may be using the checkout, and only need it as the
+   *   repository to create their own PR worktrees from.
    */
-  async ensureBaseWorktree(repo: RepoConfig): Promise<string> {
+  async ensureBaseWorktree(repo: RepoConfig, options?: { sync?: boolean }): Promise<string> {
     return this.withAdminLock(repo.name, async () => {
       const path = this.baseWorktreePath(repo.name);
       const branch = await this.resolveDefaultBranch(repo);
@@ -191,7 +197,7 @@ export class RepoManager {
         await this.addWorktreeUnlocked(repo.name, path, `origin/${branch}`);
         return path;
       }
-      await this.syncBaseWorktreeUnlocked(path, branch);
+      if (options?.sync !== false) await this.syncBaseWorktreeUnlocked(path, branch);
       return path;
     });
   }
@@ -314,7 +320,15 @@ export class RepoManager {
     excludeWorkerRuntimeFiles(path);
   }
 
-  /** Serialize compound Git administration without nesting public locks. */
+  /**
+   * Serialize compound Git administration without nesting public locks.
+   *
+   * Within this process the calls queue per repo; across processes (PR job
+   * CLI subprocesses preparing review worktrees from the same bare clone)
+   * the repository's git metadata lock is held around the operation. The
+   * first clone runs without it: the bare clone directory, which holds the
+   * lock file, does not exist yet.
+   */
   private async withAdminLock<T>(repoName: string, operation: () => Promise<T>): Promise<T> {
     const previous = this.adminTails.get(repoName) ?? Promise.resolve();
     let release!: () => void;
@@ -325,7 +339,10 @@ export class RepoManager {
     this.adminTails.set(repoName, tail);
     await previous;
     try {
-      return await operation();
+      const clonePath = this.bareClonePath(repoName);
+      return existsSync(clonePath)
+        ? await withRepoGitLock(clonePath, operation)
+        : await operation();
     } finally {
       release();
       if (this.adminTails.get(repoName) === tail) {

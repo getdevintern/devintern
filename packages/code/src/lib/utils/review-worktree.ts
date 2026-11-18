@@ -1,12 +1,100 @@
-import { existsSync, readdirSync, rmSync } from "fs";
-import { basename, dirname, join } from "path";
+import { existsSync, readFileSync, readdirSync, rmSync, statSync } from "fs";
+import { basename, dirname, isAbsolute, join, resolve } from "path";
 import type { GitCommandResult, GitOptions } from "./types";
 import { GIT_CLEAN_ARGS } from "./constants";
 import { logVerbose } from "./general";
 import { Utils } from "./registry";
+import { withRepoGitLock } from "./repo-git-lock";
+import {
+  acquireReviewWorktreeLease,
+  deleteReviewWorktreeLease,
+  isReviewWorktreeLeased,
+  readReviewWorktreeLease,
+  releaseReviewWorktreeLease,
+} from "./review-worktree-lease";
+
+/** Idle review worktrees kept per repository never drop below this. */
+export const REVIEW_WORKTREE_MIN_IDLE_CAP = 2;
+
+/** Idle review worktrees unused for longer than this are always removed. */
+export const REVIEW_WORKTREE_IDLE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Env var the worker sets on PR job subprocesses so their cleanup keeps as
+ * many idle worktrees per repository as can run at once.
+ */
+export const MAX_CONCURRENCY_PER_REPO_ENV = "DEVINTERN_MAX_CONCURRENCY_PER_REPO";
+
+/**
+ * Idle review worktrees kept per repository: `max(maxConcurrencyPerRepo, 2)`.
+ *
+ * @param maxConcurrencyPerRepo - Per-repo job limit; read from
+ *   {@link MAX_CONCURRENCY_PER_REPO_ENV} when omitted (1 when unset)
+ */
+export function reviewWorktreeIdleCap(maxConcurrencyPerRepo?: number): number {
+  const fromEnv = Number.parseInt(process.env[MAX_CONCURRENCY_PER_REPO_ENV] ?? "", 10);
+  const limit = maxConcurrencyPerRepo ?? (Number.isInteger(fromEnv) && fromEnv > 0 ? fromEnv : 1);
+  return Math.max(limit, REVIEW_WORKTREE_MIN_IDLE_CAP);
+}
+
+function reviewWorktreeBasePath(): string {
+  return process.env.DEVINTERN_REVIEW_WORKTREE_PATH || "/tmp/devintern-review-worktree";
+}
+
+/**
+ * Absolute common git directory of the repository at `cwd` (the bare clone,
+ * or a checkout's `.git`); null outside a repository.
+ */
+async function resolveGitCommonDir(cwd?: string): Promise<string | null> {
+  const result = await Utils.executeGitCommand(["rev-parse", "--git-common-dir"], {
+    verbose: false,
+    cwd,
+  });
+  const dir = result.output.trim();
+  if (!result.success || !dir) return null;
+  return isAbsolute(dir) ? dir : resolve(cwd || process.cwd(), dir);
+}
+
+/** Run `fn` under the repository's git metadata lock when the repo resolved. */
+function withOptionalGitLock<T>(gitDir: string | null, fn: () => Promise<T>): Promise<T> {
+  return gitDir && existsSync(gitDir) ? withRepoGitLock(gitDir, fn) : fn();
+}
+
+/**
+ * Common git directory that owns a linked worktree, read from its `.git`
+ * file (`gitdir: <common>/worktrees/<name>`); null when it is not one.
+ */
+function worktreeOwnerGitDir(worktreePath: string): string | null {
+  try {
+    const dotGit = readFileSync(join(worktreePath, ".git"), "utf8");
+    const match = /^gitdir:\s*(.+)$/m.exec(dotGit);
+    if (!match) return null;
+    const adminDir = resolve(worktreePath, match[1]!.trim());
+    let common = "../..";
+    try {
+      common = readFileSync(join(adminDir, "commondir"), "utf8").trim() || common;
+    } catch {
+      // Older layouts: <common>/worktrees/<name>
+    }
+    return resolve(adminDir, common);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Release this process's lease on a review worktree without removing it, so
+ * a later review of the same branch can reuse it (dependencies stay cached)
+ * and cleanup can count it as idle. Call in `finally` after the job.
+ */
+export function releaseReviewWorktree(worktreePath: string): void {
+  releaseReviewWorktreeLease(worktreePath);
+}
 
 /**
  * Remove a git worktree directory and unregister it from git.
+ *
+ * A worktree leased by another live process is left in place.
  *
  * @param worktreePath - Absolute worktree path
  * @param options - Verbose logging and the owning repository directory
@@ -21,7 +109,13 @@ export async function removeReviewWorktree(
   const cwd = options?.cwd;
 
   try {
+    const lease = readReviewWorktreeLease(worktreePath);
+    if (lease && lease.pid !== process.pid && isReviewWorktreeLeased(worktreePath)) {
+      logVerbose(verbose, `⏭️  Worktree ${worktreePath} is in use by pid ${lease.pid}; keeping it`);
+      return { success: true };
+    }
     if (!existsSync(worktreePath)) {
+      deleteReviewWorktreeLease(worktreePath);
       if (verbose) {
         console.log(`⏭️  Worktree does not exist: ${worktreePath}`);
       }
@@ -32,19 +126,23 @@ export async function removeReviewWorktree(
       console.log(`\n🗑️  Removing worktree: ${worktreePath}`);
     }
 
-    // Try to remove via git first
-    const removeResult = await Utils.executeGitCommand(
-      ["worktree", "remove", worktreePath, "--force"],
-      { verbose, cwd },
-    );
+    const gitDir = worktreeOwnerGitDir(worktreePath) ?? (await resolveGitCommonDir(cwd));
+    await withOptionalGitLock(gitDir, async () => {
+      // Try to remove via git first
+      const removeResult = await Utils.executeGitCommand(
+        ["worktree", "remove", worktreePath, "--force"],
+        { verbose, cwd: gitDir && existsSync(gitDir) ? gitDir : cwd },
+      );
 
-    if (!removeResult.success) {
-      if (verbose) {
-        console.log(`   Git worktree remove failed, deleting directory...`);
+      if (!removeResult.success) {
+        if (verbose) {
+          console.log(`   Git worktree remove failed, deleting directory...`);
+        }
+        // Forcefully delete the directory
+        rmSync(worktreePath, { recursive: true, force: true });
       }
-      // Forcefully delete the directory
-      rmSync(worktreePath, { recursive: true, force: true });
-    }
+    });
+    deleteReviewWorktreeLease(worktreePath);
 
     if (verbose) {
       console.log(`✅ Worktree removed successfully`);
@@ -86,8 +184,14 @@ export async function pullReviewWorktreeBranch(
  *
  * The path is scoped to the branch so a PR's own test suite can never delete
  * the worktree the review is running in (see `getReviewWorktreePath`). The
- * same branch reuses its directory across reviews (deps stay cached);
- * worktrees from other branches are pruned to bound disk usage.
+ * same branch reuses its directory across reviews (deps stay cached).
+ *
+ * The worktree is leased to this process from here until
+ * {@link releaseReviewWorktree} / {@link removeReviewWorktree} (or until the
+ * process exits), so concurrent PR jobs' cleanups leave it alone. Idle
+ * worktrees of other branches are pruned down to a per-repository cap. The
+ * shared git metadata steps (fetch, worktree add, branch updates) run under
+ * the repository's git metadata lock; the dependency install does not.
  *
  * @param branch - PR head branch to check out
  * @param options - Verbose logging; `installDependencies: false` skips the
@@ -107,56 +211,62 @@ export async function prepareReviewWorktree(
   const repoOpts = { verbose, cwd };
   const repoOptsQuiet = { verbose: false, cwd };
 
+  // Branch-scoped worktree path - one directory per PR branch
+  const worktreePath = Utils.getReviewWorktreePath(branch);
+  let leased = false;
   try {
-    // Branch-scoped worktree path - one directory per PR branch
-    const worktreePath = Utils.getReviewWorktreePath(branch);
+    acquireReviewWorktreeLease(worktreePath);
+    leased = true;
 
-    // Remove worktrees left over from reviews of other branches.
+    // Remove idle worktrees left over from reviews of other branches.
     await Utils.cleanupStaleReviewWorktrees(worktreePath, { verbose, cwd });
 
     logVerbose(verbose, `\n📂 Preparing review worktree for branch: ${branch}`);
     logVerbose(verbose, `   Worktree path: ${worktreePath}`);
 
-    // Fetch latest from origin. Never with --depth: a depth-limited fetch
-    // into a full clone marks the WHOLE repository shallow (.git/shallow),
-    // breaking merge-base and future merges in the user's own checkout.
-    // An incremental fetch only transfers missing objects anyway.
-    logVerbose(verbose, `   Fetching branch ${branch} from origin...`);
-    const fetchResult = await Utils.executeGitCommand(["fetch", "origin", branch], repoOpts);
-    logVerbose(verbose, `   ✓ Fetch completed (success: ${fetchResult.success})`);
+    const gitDir = await resolveGitCommonDir(cwd);
+    const prepared = await withOptionalGitLock(gitDir, async () => {
+      // Fetch latest from origin. Never with --depth: a depth-limited fetch
+      // into a full clone marks the WHOLE repository shallow (.git/shallow),
+      // breaking merge-base and future merges in the user's own checkout.
+      // An incremental fetch only transfers missing objects anyway.
+      logVerbose(verbose, `   Fetching branch ${branch} from origin...`);
+      const fetchResult = await Utils.executeGitCommand(["fetch", "origin", branch], repoOpts);
+      logVerbose(verbose, `   ✓ Fetch completed (success: ${fetchResult.success})`);
 
-    if (!fetchResult.success) {
-      console.warn(`⚠️  Fetch failed: ${fetchResult.error || fetchResult.output}`);
-      console.warn(`   Continuing anyway - worktree may have cached version...`);
-    }
-
-    // Check if worktree directory exists on filesystem
-    const worktreeExists = existsSync(worktreePath);
-    logVerbose(verbose, `   Worktree directory exists: ${worktreeExists}`);
-
-    if (worktreeExists) {
-      if (await tryReuseReviewWorktree(worktreePath, branch, verbose, installDependencies)) {
-        return { success: true, path: worktreePath };
+      if (!fetchResult.success) {
+        console.warn(`⚠️  Fetch failed: ${fetchResult.error || fetchResult.output}`);
+        console.warn(`   Continuing anyway - worktree may have cached version...`);
       }
 
-      // Worktree is corrupted or invalid - clean it up
-      logVerbose(verbose, `   Worktree is invalid/corrupted, cleaning up...`);
-      await removeInvalidReviewWorktree(worktreePath, repoOptsQuiet);
+      // Check if worktree directory exists on filesystem
+      const worktreeExists = existsSync(worktreePath);
+      logVerbose(verbose, `   Worktree directory exists: ${worktreeExists}`);
+
+      if (worktreeExists) {
+        if (await tryReuseReviewWorktree(worktreePath, branch, verbose)) {
+          return { success: true };
+        }
+
+        // Worktree is corrupted or invalid - clean it up
+        logVerbose(verbose, `   Worktree is invalid/corrupted, cleaning up...`);
+        await removeInvalidReviewWorktree(worktreePath, repoOptsQuiet);
+      }
+
+      return createReviewWorktree(worktreePath, branch, verbose, repoOpts, repoOptsQuiet);
+    });
+    if (!prepared.success) {
+      releaseReviewWorktreeLease(worktreePath);
+      return { success: false, error: prepared.error };
     }
 
-    const created = await createReviewWorktree(
-      worktreePath,
-      branch,
-      verbose,
-      repoOpts,
-      repoOptsQuiet,
-      installDependencies,
-    );
-    if (!created.success) {
-      return { success: false, error: created.error };
-    }
+    // Install dependencies so agents that build or test have what they need.
+    // Outside the git lock: installs take minutes and touch only the worktree.
+    if (installDependencies) await Utils.prepareWorktreeForAgent(worktreePath, { verbose });
+    logVerbose(verbose, `✅ Worktree preparation complete!`);
     return { success: true, path: worktreePath };
   } catch (error) {
+    if (leased) releaseReviewWorktreeLease(worktreePath);
     return {
       success: false,
       error: `Worktree preparation failed: ${(error as Error).message}`,
@@ -183,7 +293,7 @@ export async function prepareReviewWorktree(
  * worktree at an isolated directory.
  */
 export function getReviewWorktreePath(branch?: string): string {
-  const base = process.env.DEVINTERN_REVIEW_WORKTREE_PATH || "/tmp/devintern-review-worktree";
+  const base = reviewWorktreeBasePath();
   if (!branch) {
     return base;
   }
@@ -202,25 +312,43 @@ function sanitizeBranchForPath(branch: string): string {
   return branch.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "branch";
 }
 
+/** An idle review worktree considered for removal. */
+interface IdleReviewWorktree {
+  path: string;
+  /** Last use: the directory mtime, stamped when its lease is released. */
+  lastUsedMs: number;
+}
+
 /**
- * Remove sibling review worktrees left over from reviews of *other* branches.
+ * Remove idle sibling review worktrees left over from reviews of other
+ * branches, bounding `/tmp` disk use without touching live ones.
  *
- * With branch-scoped worktrees, each PR review creates its own directory under
- * the base path's parent. The webhook queue is sequential, so at most one is
- * live at a time; this prunes the rest to keep `/tmp` from accumulating stale
- * `node_modules`-heavy checkouts. The `keepPath` (the worktree currently being
- * prepared) is always preserved.
+ * - Worktrees with a live lease (a running job, in any process) are skipped.
+ *   A lease whose pid is dead counts as idle.
+ * - Per owning repository, idle worktrees unused for more than
+ *   {@link REVIEW_WORKTREE_IDLE_MAX_AGE_MS} are removed, then the oldest
+ *   others until at most `idleCap` remain ({@link reviewWorktreeIdleCap}).
+ * - The `keepPath` (the worktree being prepared) and the bare base path
+ *   (`/tmp/devintern-review-worktree`, the path project test suites target)
+ *   are never removed.
+ *
+ * Each repository's removals run under its git metadata lock and re-check
+ * the lease right before removing, so a job that leases a worktree while the
+ * cleanup runs keeps it.
  *
  * @param keepPath - Branch-scoped worktree path to preserve
- * @param options - Verbose logging
+ * @param options - Verbose logging, the source repository, the idle cap, and
+ *   a clock for tests
  */
 export async function cleanupStaleReviewWorktrees(
   keepPath: string,
-  options?: { verbose?: boolean; cwd?: string },
+  options?: { verbose?: boolean; cwd?: string; idleCap?: number; now?: number },
 ): Promise<void> {
   const verbose = options?.verbose ?? false;
   const cwd = options?.cwd;
-  const base = process.env.DEVINTERN_REVIEW_WORKTREE_PATH || "/tmp/devintern-review-worktree";
+  const now = options?.now ?? Date.now();
+  const idleCap = options?.idleCap ?? reviewWorktreeIdleCap();
+  const base = reviewWorktreeBasePath();
   const parent = dirname(base);
   const prefix = basename(base);
   const keepName = basename(keepPath);
@@ -232,34 +360,70 @@ export async function cleanupStaleReviewWorktrees(
     return;
   }
 
+  // Group idle candidates by the repository that owns them ("" = orphaned
+  // directories with no readable worktree link).
+  const groups = new Map<string, IdleReviewWorktree[]>();
   for (const entry of entries) {
-    // Match the base worktree itself and any branch-scoped sibling, but never
-    // the worktree we're keeping.
-    if (entry !== prefix && !entry.startsWith(`${prefix}-`)) {
-      continue;
-    }
-    if (entry === keepName) {
-      continue;
-    }
-
-    const stalePath = join(parent, entry);
-    if (verbose) {
-      console.log(`   🧹 Removing stale review worktree: ${stalePath}`);
-    }
-
-    await Utils.executeGitCommand(["worktree", "remove", stalePath, "--force"], {
-      verbose: false,
-      cwd,
-    });
+    if (!entry.startsWith(`${prefix}-`) || entry === keepName) continue;
+    const path = join(parent, entry);
+    let lastUsedMs: number;
     try {
-      rmSync(stalePath, { recursive: true, force: true });
+      const stat = statSync(path);
+      if (!stat.isDirectory()) continue;
+      lastUsedMs = stat.mtimeMs;
     } catch {
-      // Ignore
+      continue;
     }
+    if (isReviewWorktreeLeased(path, now)) continue;
+    const owner = worktreeOwnerGitDir(path) ?? "";
+    const group = groups.get(owner) ?? [];
+    group.push({ path, lastUsedMs });
+    groups.set(owner, group);
   }
 
-  // Drop any dangling registrations the removals left behind.
-  await Utils.executeGitCommand(["worktree", "prune"], { verbose: false, cwd });
+  for (const [owner, idle] of groups) {
+    idle.sort((a, b) => a.lastUsedMs - b.lastUsedMs);
+    const expired = idle.filter((item) => now - item.lastUsedMs > REVIEW_WORKTREE_IDLE_MAX_AGE_MS);
+    const fresh = idle.filter((item) => !expired.includes(item));
+    const overCap = fresh.slice(0, Math.max(0, fresh.length - idleCap));
+    const doomed = [...expired, ...overCap];
+    if (doomed.length === 0) continue;
+
+    const ownerDir = owner && existsSync(owner) ? owner : null;
+    await withOptionalGitLock(ownerDir, async () => {
+      for (const { path } of doomed) {
+        // Re-check under the lock: a job may have leased it meanwhile.
+        if (isReviewWorktreeLeased(path)) continue;
+        if (verbose) {
+          console.log(`   🧹 Removing idle review worktree: ${path}`);
+        }
+        if (ownerDir) {
+          await Utils.executeGitCommand(["worktree", "remove", path, "--force"], {
+            verbose: false,
+            cwd: ownerDir,
+          });
+        }
+        try {
+          rmSync(path, { recursive: true, force: true });
+        } catch {
+          // Ignore
+        }
+        deleteReviewWorktreeLease(path);
+      }
+      if (ownerDir) {
+        await Utils.executeGitCommand(["worktree", "prune"], { verbose: false, cwd: ownerDir });
+      }
+    });
+  }
+
+  // Drop dangling registrations (including ones from old worktree paths) in
+  // the source repository too.
+  const sourceGitDir = await resolveGitCommonDir(cwd);
+  if (sourceGitDir && !groups.has(sourceGitDir)) {
+    await withOptionalGitLock(sourceGitDir, () =>
+      Utils.executeGitCommand(["worktree", "prune"], { verbose: false, cwd }),
+    );
+  }
 }
 
 /** Reuse an existing valid review worktree for `branch`; false when unusable. */
@@ -267,7 +431,6 @@ async function tryReuseReviewWorktree(
   worktreePath: string,
   branch: string,
   verbose: boolean,
-  installDependencies: boolean,
 ): Promise<boolean> {
   // Check if it's a valid git worktree by testing if .git exists and is valid
   if (!existsSync(join(worktreePath, ".git"))) {
@@ -317,8 +480,6 @@ async function tryReuseReviewWorktree(
   // Clean again after checkout to remove any untracked files from the new branch state
   await Utils.executeGitCommand(GIT_CLEAN_ARGS, { verbose: false, cwd: worktreePath });
   logVerbose(verbose, `✅ Switched to branch ${branch}`);
-
-  if (installDependencies) await Utils.prepareWorktreeForAgent(worktreePath, { verbose });
   return true;
 }
 
@@ -407,7 +568,6 @@ async function createReviewWorktree(
   verbose: boolean,
   repoOpts: GitOptions,
   repoOptsQuiet: GitOptions,
-  installDependencies: boolean,
 ): Promise<{ success: boolean; error?: string }> {
   logVerbose(verbose, `   Creating worktree at ${worktreePath}...`);
 
@@ -491,10 +651,6 @@ async function createReviewWorktree(
   }
 
   logVerbose(verbose, `✅ Worktree ready at ${worktreePath}`);
-
-  // Install dependencies so agents that build or test have what they need.
-  if (installDependencies) await Utils.prepareWorktreeForAgent(worktreePath, { verbose });
-  logVerbose(verbose, `✅ Worktree preparation complete!`);
   return { success: true };
 }
 
@@ -504,4 +660,5 @@ Object.assign(Utils, {
   prepareReviewWorktree,
   getReviewWorktreePath,
   cleanupStaleReviewWorktrees,
+  releaseReviewWorktree,
 });

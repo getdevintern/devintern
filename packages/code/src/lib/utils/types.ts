@@ -158,8 +158,9 @@ export interface UtilsSurface {
   getReviewWorktreePath(branch?: string): string;
   cleanupStaleReviewWorktrees(
     keepPath: string,
-    options?: { verbose?: boolean; cwd?: string },
+    options?: { verbose?: boolean; cwd?: string; idleCap?: number; now?: number },
   ): Promise<void>;
+  releaseReviewWorktree(worktreePath: string): void;
   isolateWorktreeHooks(worktreePath: string, options?: { verbose?: boolean }): Promise<void>;
   enableWorktreeConfig(cwd: string): Promise<{ success: boolean; output: string; error?: string }>;
   prepareWorktreeForAgent(

@@ -163,6 +163,47 @@ export async function enableWorktreeConfig(
   );
 }
 
+/**
+ * Set (or with `null`, unset) the commit identity of one linked worktree
+ * through its per-worktree config.
+ *
+ * PR jobs on one repository run in parallel worktrees of the same repository,
+ * and a plain `git config user.name` writes the *shared* config: concurrent
+ * jobs then race on `config.lock` and overwrite or restore each other's
+ * identity mid-run. `--worktree` keeps the value private to this worktree.
+ * Falls back to the plain (shared) write only when per-worktree config cannot
+ * be enabled.
+ *
+ * @param worktreePath - Linked worktree to configure
+ * @param author - Identity to set, or `null` to remove it again
+ */
+export async function setWorktreeGitIdentity(
+  worktreePath: string,
+  author: { name: string; email: string } | null,
+  options?: { verbose?: boolean },
+): Promise<void> {
+  const verbose = options?.verbose ?? false;
+  const enabled = await Utils.enableWorktreeConfig(worktreePath);
+  const scope = enabled.success ? ["--worktree"] : [];
+  if (author) {
+    await Utils.executeGitCommand(["config", ...scope, "user.name", author.name], {
+      verbose,
+      cwd: worktreePath,
+    });
+    await Utils.executeGitCommand(["config", ...scope, "user.email", author.email], {
+      verbose,
+      cwd: worktreePath,
+    });
+    return;
+  }
+  for (const key of ["user.name", "user.email"]) {
+    await Utils.executeGitCommand(["config", ...scope, "--unset", key], {
+      verbose: false,
+      cwd: worktreePath,
+    });
+  }
+}
+
 /** Run a `git config` write, retrying while another process holds the lock. */
 function writeGitConfig(
   args: string[],

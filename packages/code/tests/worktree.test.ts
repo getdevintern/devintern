@@ -114,7 +114,7 @@ describe("Git Worktree Utilities - Single Reusable Worktree", () => {
     expect(result.path).toBe(Utils.getReviewWorktreePath("feature/test-branch"));
   });
 
-  test("should use a separate worktree per branch and prune the old one", async () => {
+  test("should use a separate worktree per branch and keep idle ones up to the cap", async () => {
     // Prepare worktree for first branch
     const result1 = await Utils.prepareReviewWorktree("feature/test-branch", {
       verbose: false,
@@ -124,6 +124,8 @@ describe("Git Worktree Utilities - Single Reusable Worktree", () => {
     expect(result1.success).toBe(true);
     const path1 = result1.path!;
     expect(existsSync(join(path1, "feature.txt"))).toBe(true);
+    // The first job ends: its worktree becomes idle.
+    Utils.releaseReviewWorktree(path1);
 
     // Now prepare a different branch - gets its own branch-scoped worktree
     const result2 = await Utils.prepareReviewWorktree("feature/another-branch", {
@@ -136,8 +138,13 @@ describe("Git Worktree Utilities - Single Reusable Worktree", () => {
     expect(result2.path).not.toBe(path1);
     // New worktree has the other branch's file
     expect(existsSync(join(result2.path!, "another.txt"))).toBe(true);
-    // The previous branch's worktree was pruned to bound disk usage
+    // One idle worktree is within the per-repo cap, so it is kept for reuse
+    expect(existsSync(path1)).toBe(true);
+
+    // Over the cap, idle worktrees are pruned to bound disk usage
+    await Utils.cleanupStaleReviewWorktrees(result2.path!, { cwd: repoDir, idleCap: 0 });
     expect(existsSync(path1)).toBe(false);
+    expect(existsSync(result2.path!)).toBe(true);
   });
 
   test("should reuse the same worktree for the same branch", async () => {
@@ -456,6 +463,7 @@ describe("Git Worktree with Origin Remote", () => {
     });
     expect(result1.success).toBe(true);
     expect(existsSync(join(result1.path!, "feature.txt"))).toBe(true);
+    Utils.releaseReviewWorktree(result1.path!);
 
     // Switch to another branch - its own branch-scoped worktree
     const result2 = await Utils.prepareReviewWorktree("feature/another-branch", {
@@ -466,7 +474,7 @@ describe("Git Worktree with Origin Remote", () => {
     expect(result2.path).not.toBe(result1.path);
     expect(existsSync(join(result2.path!, "another.txt"))).toBe(true);
     expect(existsSync(join(result2.path!, "feature.txt"))).toBe(false);
-    // The first branch's worktree was pruned
-    expect(existsSync(result1.path!)).toBe(false);
+    // The first branch's worktree is idle and kept (within the cap) for reuse
+    expect(existsSync(result1.path!)).toBe(true);
   });
 });

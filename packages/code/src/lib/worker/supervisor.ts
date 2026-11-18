@@ -15,7 +15,20 @@ export type JobKind =
   | "automation"
   | "estimation";
 
-export type HostCheckoutClass = "task_worktree" | "shared_base" | "workspace";
+/**
+ * What a job occupies on the worker host while it runs.
+ *
+ * - `task_worktree`: a disposable per-task worktree. Counts against
+ *   `maxConcurrencyPerRepo`.
+ * - `pr_worktree`: a branch-scoped PR worktree (review replies, conflict
+ *   resolution, CI fix, auto-merge). Shares the `maxConcurrencyPerRepo`
+ *   budget with `task_worktree`; pair it with {@link ScheduleRequest.exclusiveKey}
+ *   so two jobs on one PR never run at once.
+ * - `shared_base`: the repository's persistent base checkout (automations).
+ *   Exclusive per repository and outside the per-repo budget.
+ * - `workspace`: no repository checkout.
+ */
+export type HostCheckoutClass = "task_worktree" | "pr_worktree" | "shared_base" | "workspace";
 
 export interface ScheduleRequest<T> {
   id: string;
@@ -24,7 +37,35 @@ export interface ScheduleRequest<T> {
   kind: JobKind;
   label?: string;
   checkoutClass: HostCheckoutClass;
+  /**
+   * Mutual-exclusion key (for PR jobs, `owner/repo#123`). A queued job whose
+   * key is held by a running job stays queued without taking a slot, so jobs
+   * on one PR run strictly one after another.
+   */
+  exclusiveKey?: string;
   run: (signal: AbortSignal) => Promise<T>;
+}
+
+/** Why a queued job has not started yet. */
+export type QueuedJobWaitReason =
+  /** Another job holding the same {@link ScheduleRequest.exclusiveKey} is running. */
+  | "exclusive"
+  /** The repository's checkout budget (per-repo limit or shared base) is in use. */
+  | "repo"
+  /** Every global slot is in use. */
+  | "global";
+
+/** A queued job as reported by {@link TaskSupervisor.queuedJobs}. */
+export interface QueuedJobSnapshot {
+  id: string;
+  source: string;
+  repo?: string;
+  kind: JobKind;
+  label?: string;
+  checkoutClass: HostCheckoutClass;
+  exclusiveKey?: string;
+  enqueuedAt: number;
+  waitingOn: QueuedJobWaitReason;
 }
 
 export interface SupervisorLimits {
@@ -75,6 +116,11 @@ export interface TaskSupervisor {
   isDraining(): boolean;
   /** How many admitted jobs are currently running. */
   inFlightCount(): number;
+  /**
+   * Jobs waiting to start, oldest first, with what each is waiting on
+   * (dashboard Queued list). Optional so lightweight test doubles can omit it.
+   */
+  queuedJobs?(): QueuedJobSnapshot[];
   /**
    * How many admitted jobs are waiting to start (queued behind concurrency
    * limits). Supervisors that defer admissions instead of rejecting them
@@ -152,6 +198,9 @@ function validateRequest(request: ScheduleRequest<unknown>): void {
   if (request.checkoutClass !== "workspace" && !request.repo?.trim()) {
     throw new Error(`${request.checkoutClass} jobs require a repository.`);
   }
+  if (request.exclusiveKey !== undefined && !request.exclusiveKey.trim()) {
+    throw new Error("exclusiveKey must be non-empty when set.");
+  }
 }
 
 /** Create the minimal in-memory supervisor used by the host executor. */
@@ -174,35 +223,58 @@ export function createTaskSupervisor(
   const running = new Map<string, RunningJob>();
   const knownIds = new Set<string>();
   const taskCounts = new Map<string, number>();
+  const prCounts = new Map<string, number>();
   const occupiedBaseRepos = new Set<string>();
+  const heldExclusiveKeys = new Set<string>();
 
-  const canStart = (request: ScheduleRequest<unknown>): boolean => {
-    if (running.size >= limits.maxConcurrency) return false;
-    if (request.checkoutClass === "task_worktree") {
-      return (taskCounts.get(request.repo!) ?? 0) < limits.maxConcurrencyPerRepo;
-    }
-    if (request.checkoutClass === "shared_base") {
-      return !occupiedBaseRepos.has(request.repo!);
-    }
-    return true;
+  const increment = (counts: Map<string, number>, repo: string): void => {
+    counts.set(repo, (counts.get(repo) ?? 0) + 1);
   };
+  const decrement = (counts: Map<string, number>, repo: string): void => {
+    const next = (counts.get(repo) ?? 1) - 1;
+    if (next <= 0) counts.delete(repo);
+    else counts.set(repo, next);
+  };
+  /** Task and PR worktree jobs running on `repo` (the per-repo budget). */
+  const repoWorktreeCount = (repo: string): number =>
+    (taskCounts.get(repo) ?? 0) + (prCounts.get(repo) ?? 0);
+
+  /** Why `request` cannot start right now, or null when it can. */
+  const blockedOn = (request: ScheduleRequest<unknown>): QueuedJobWaitReason | null => {
+    if (request.exclusiveKey !== undefined && heldExclusiveKeys.has(request.exclusiveKey)) {
+      return "exclusive";
+    }
+    if (request.checkoutClass === "task_worktree" || request.checkoutClass === "pr_worktree") {
+      if (repoWorktreeCount(request.repo!) >= limits.maxConcurrencyPerRepo) return "repo";
+    } else if (request.checkoutClass === "shared_base") {
+      if (occupiedBaseRepos.has(request.repo!)) return "repo";
+    }
+    if (running.size >= limits.maxConcurrency) return "global";
+    return null;
+  };
+
+  const canStart = (request: ScheduleRequest<unknown>): boolean => blockedOn(request) === null;
 
   const acquireResources = (request: ScheduleRequest<unknown>): void => {
     if (request.checkoutClass === "task_worktree") {
-      taskCounts.set(request.repo!, (taskCounts.get(request.repo!) ?? 0) + 1);
+      increment(taskCounts, request.repo!);
+    } else if (request.checkoutClass === "pr_worktree") {
+      increment(prCounts, request.repo!);
     } else if (request.checkoutClass === "shared_base") {
       occupiedBaseRepos.add(request.repo!);
     }
+    if (request.exclusiveKey !== undefined) heldExclusiveKeys.add(request.exclusiveKey);
   };
 
   const releaseResources = (request: ScheduleRequest<unknown>): void => {
     if (request.checkoutClass === "task_worktree") {
-      const next = (taskCounts.get(request.repo!) ?? 1) - 1;
-      if (next === 0) taskCounts.delete(request.repo!);
-      else taskCounts.set(request.repo!, next);
+      decrement(taskCounts, request.repo!);
+    } else if (request.checkoutClass === "pr_worktree") {
+      decrement(prCounts, request.repo!);
     } else if (request.checkoutClass === "shared_base") {
       occupiedBaseRepos.delete(request.repo!);
     }
+    if (request.exclusiveKey !== undefined) heldExclusiveKeys.delete(request.exclusiveKey);
   };
 
   /** Effective priority: the kind's level, or the top level once aged. */
@@ -381,6 +453,22 @@ export function createTaskSupervisor(
 
     inFlightCount(): number {
       return running.size;
+    },
+
+    queuedJobs(): QueuedJobSnapshot[] {
+      return queued.map(({ request, enqueuedAt }) => ({
+        id: request.id,
+        source: request.source,
+        ...(request.repo !== undefined ? { repo: request.repo } : {}),
+        kind: request.kind,
+        ...(request.label !== undefined ? { label: request.label } : {}),
+        checkoutClass: request.checkoutClass,
+        ...(request.exclusiveKey !== undefined ? { exclusiveKey: request.exclusiveKey } : {}),
+        enqueuedAt,
+        // A job left in the queue after a pump is blocked; "global" covers the
+        // brief window before the pump admits it.
+        waitingOn: blockedOn(request) ?? "global",
+      }));
     },
 
     queuedCount(): number {

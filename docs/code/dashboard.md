@@ -39,7 +39,7 @@ Each **Active work** row shows the task, repository, harness, attempt, current p
 Below the running rows:
 
 - **Waiting to retry**: tasks deferred in the last 48 hours, for example after a usage limit, with the reason.
-- **Queued**: accepted work that has not started, such as ad-hoc tasks, dashboard retries, PR events, and automations waiting for their repository's checkout. Expand a row for its details.
+- **Queued**: accepted work that has not started, such as ad-hoc tasks, dashboard retries, PR events, automations waiting for their repository's checkout, and PR jobs (shown as `owner/repo#N`) waiting for a free slot or for another job on the same PR. Expand a row for its details.
 - **Recently finished**: the last five finished tasks with outcome and PR. **View all runs** opens **Runs**.
 
 ## Retry a failed run

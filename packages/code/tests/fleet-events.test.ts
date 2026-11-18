@@ -61,7 +61,8 @@ class FakeRepoManager implements RepoManagerLike {
     this.calls.push(`fetch:${repoName}`);
   }
 
-  async ensureBaseWorktree(repo: RepoConfig): Promise<string> {
+  async ensureBaseWorktree(repo: RepoConfig, options?: { sync?: boolean }): Promise<string> {
+    this.calls.push(`base:${repo.name}:${options?.sync === false ? "no-sync" : "sync"}`);
     const path = join(this.root, "worktrees", repo.name, "base");
     mkdirSync(path, { recursive: true });
     return path;
@@ -202,15 +203,19 @@ describe("fleet event handlers", () => {
     expect(reviews).toHaveLength(0);
   });
 
-  test("shared-base reviews serialize while a task worktree can overlap", async () => {
+  test("reviews of different PRs share the per-repo budget with task worktrees", async () => {
     const supervisor = createTaskSupervisor({ maxConcurrency: 3, maxConcurrencyPerRepo: 2 });
     let releaseFirst!: () => void;
     const firstGate = new Promise<void>((resolve) => {
       releaseFirst = resolve;
     });
-    let markFirstStarted!: () => void;
-    const firstStarted = new Promise<void>((resolve) => {
-      markFirstStarted = resolve;
+    let releaseSecond!: () => void;
+    const secondGate = new Promise<void>((resolve) => {
+      releaseSecond = resolve;
+    });
+    let bothStarted!: () => void;
+    const bothRunning = new Promise<void>((resolve) => {
+      bothStarted = resolve;
     });
     const started: string[] = [];
     const addressPr = createFleetAddressPr({
@@ -218,16 +223,15 @@ describe("fleet event handlers", () => {
       supervisor,
       runReview: async (_slug, prNumber) => {
         started.push(`review-${prNumber}`);
-        if (prNumber === 1) {
-          markFirstStarted();
-          await firstGate;
-        }
+        if (started.length === 2) bothStarted();
+        await (prNumber === 1 ? firstGate : secondGate);
         return true;
       },
     });
 
     const first = addressPr("acme/backend", 1);
     const second = addressPr("acme/backend", 2);
+    await bothRunning;
     const task = supervisor.schedule({
       id: "task",
       source: "test",
@@ -236,19 +240,65 @@ describe("fleet event handlers", () => {
       checkoutClass: "task_worktree",
       run: async () => started.push("task"),
     });
-
-    await Promise.all([task, firstStarted]);
-    expect(started).toContain("review-1");
-    expect(started).toContain("task");
-    expect(started).not.toContain("review-2");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    // Two PR jobs fill max_concurrency_per_repo = 2; the task waits.
+    expect(started).toEqual(["review-1", "review-2"]);
+    expect(supervisor.queuedJobs?.()).toMatchObject([{ id: "task", waitingOn: "repo" }]);
     releaseFirst();
+    await task;
+    expect(started).toEqual(["review-1", "review-2", "task"]);
+    releaseSecond();
     await Promise.all([first, second]);
-    expect(started.at(-1)).toBe("review-2");
+  });
+
+  test("two jobs on the same PR run one after another without holding a slot", async () => {
+    const supervisor = createTaskSupervisor({ maxConcurrency: 3, maxConcurrencyPerRepo: 2 });
+    let releaseReview!: () => void;
+    const reviewGate = new Promise<void>((resolve) => {
+      releaseReview = resolve;
+    });
+    let reviewStarted!: () => void;
+    const reviewRunning = new Promise<void>((resolve) => {
+      reviewStarted = resolve;
+    });
+    const started: string[] = [];
+    const addressPr = createFleetAddressPr({
+      ...deps(),
+      supervisor,
+      runReview: async () => {
+        started.push("review");
+        reviewStarted();
+        await reviewGate;
+        return true;
+      },
+    });
+    const fix = createFleetCiFix({
+      ...deps(),
+      supervisor,
+      runCiFix: async () => {
+        started.push("ci-fix");
+        return true;
+      },
+    });
+    const review = addressPr("acme/backend", 7);
+    await reviewRunning;
+    const ciFix = fix("acme/backend", 7, "/tmp/ci-feedback.json");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(started).toEqual(["review"]);
+    expect(supervisor.inFlightCount()).toBe(1);
+    expect(supervisor.queuedJobs?.()).toMatchObject([
+      { label: "acme/backend#7", exclusiveKey: "acme/backend#7", waitingOn: "exclusive" },
+    ]);
+    releaseReview();
+    await Promise.all([review, ciFix]);
+    expect(started).toEqual(["review", "ci-fix"]);
   });
 
   test("CI fixes run from the matching repo base worktree", async () => {
     const fix = createFleetCiFix(deps());
     expect(await fix("acme/backend", 42, "/tmp/ci-feedback.json")).toBe(true);
+    // PR jobs never reset the base checkout an automation may be using.
+    expect(repoManager.calls).toContain("base:backend:no-sync");
     expect(ciFixes).toEqual([
       {
         slug: "acme/backend",

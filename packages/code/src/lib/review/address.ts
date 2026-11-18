@@ -31,6 +31,7 @@ import type { RunOrigin } from "../state/run-recorder";
 import { formatCiFixPrompt, formatReviewPrompt } from "./formatter";
 import type { CiFailureFeedback } from "./formatter";
 import { GIT_CLEAN_ARGS, Utils } from "../utils";
+import { setWorktreeGitIdentity } from "../utils/worktree-setup";
 import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "../agent/git-hook-fixer";
 
 export interface AddressReviewOptions {
@@ -338,42 +339,21 @@ async function prepareReviewPrompt(
   };
 }
 
-/** Point the worktree's git identity at the bot author, returning the prior values. */
+/**
+ * Point the worktree's git identity at the bot author. The identity goes to
+ * the worktree's own config, so parallel PR jobs on the repository never
+ * write (or restore over) each other's shared config.
+ */
 async function configureBotGitAuthor(
   workDir: string,
   gitAuthor: GitAuthor | undefined,
   verbose: boolean,
-): Promise<{ originalGitName: string | null; originalGitEmail: string | null }> {
-  let originalGitName: string | null = null;
-  let originalGitEmail: string | null = null;
-  if (!gitAuthor) {
-    return { originalGitName, originalGitEmail };
-  }
-
-  const nameResult = await Utils.executeGitCommand(["config", "user.name"], {
-    verbose: false,
-    cwd: workDir,
-  });
-  if (nameResult.success && nameResult.output.trim()) {
-    originalGitName = nameResult.output.trim();
-  }
-  const emailResult = await Utils.executeGitCommand(["config", "user.email"], {
-    verbose: false,
-    cwd: workDir,
-  });
-  if (emailResult.success && emailResult.output.trim()) {
-    originalGitEmail = emailResult.output.trim();
-  }
-
-  await Utils.executeGitCommand(["config", "user.name", gitAuthor.name], { verbose, cwd: workDir });
-  await Utils.executeGitCommand(["config", "user.email", gitAuthor.email], {
-    verbose,
-    cwd: workDir,
-  });
+): Promise<void> {
+  if (!gitAuthor) return;
+  await setWorktreeGitIdentity(workDir, gitAuthor, { verbose });
   if (verbose) {
     console.log(`   Set git config to bot author: ${gitAuthor.name} <${gitAuthor.email}>`);
   }
-  return { originalGitName, originalGitEmail };
 }
 
 /** Switch back to the PR branch if the agent drifted off it, stashing if needed. */
@@ -561,41 +541,14 @@ async function cleanupUntrackedFiles(workDir: string, verbose: boolean): Promise
   await Utils.executeGitCommand(GIT_CLEAN_ARGS, { verbose: false, cwd: workDir });
 }
 
-/** Restore the git identity saved by {@link configureBotGitAuthor}. */
+/** Drop the worktree identity set by {@link configureBotGitAuthor}. */
 async function restoreBotGitAuthor(
   workDir: string,
   gitAuthor: GitAuthor | undefined,
-  originalGitName: string | null,
-  originalGitEmail: string | null,
   verbose: boolean,
 ): Promise<void> {
-  if (!gitAuthor) {
-    return;
-  }
-  if (originalGitName) {
-    await Utils.executeGitCommand(["config", "user.name", originalGitName], {
-      verbose: false,
-      cwd: workDir,
-    });
-  } else {
-    await Utils.executeGitCommand(["config", "--unset", "user.name"], {
-      verbose: false,
-      cwd: workDir,
-    });
-  }
-
-  if (originalGitEmail) {
-    await Utils.executeGitCommand(["config", "user.email", originalGitEmail], {
-      verbose: false,
-      cwd: workDir,
-    });
-  } else {
-    await Utils.executeGitCommand(["config", "--unset", "user.email"], {
-      verbose: false,
-      cwd: workDir,
-    });
-  }
-
+  if (!gitAuthor) return;
+  await setWorktreeGitIdentity(workDir, null);
   if (verbose) {
     console.log("   Restored original git config");
   }
@@ -798,11 +751,7 @@ export async function addressReview(
   console.log(`✅ Worktree ready at: ${workDir}`);
 
   // Set git config for bot author if available (so Agent's commits are attributed to bot)
-  const { originalGitName, originalGitEmail } = await configureBotGitAuthor(
-    workDir,
-    gitAuthor,
-    verbose,
-  );
+  await configureBotGitAuthor(workDir, gitAuthor, verbose);
 
   try {
     // Run Agent (prompt is passed via stdin, no file created)
@@ -887,6 +836,9 @@ export async function addressReview(
     await cleanupUntrackedFiles(workDir, verbose);
 
     // Restore original git config if we changed it
-    await restoreBotGitAuthor(workDir, gitAuthor, originalGitName, originalGitEmail, verbose);
+    await restoreBotGitAuthor(workDir, gitAuthor, verbose);
+    // Keep the worktree for the next review of this branch, but let other
+    // jobs' cleanups count it as idle again.
+    Utils.releaseReviewWorktree(workDir);
   }
 }

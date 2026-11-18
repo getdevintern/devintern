@@ -3,7 +3,7 @@
  */
 
 import { describe, test, expect, beforeAll, afterAll, beforeEach, afterEach } from "bun:test";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { Utils } from "../src/lib/utils";
@@ -171,8 +171,9 @@ describe("Webhook Integration - Sequential Processing with Branch-Scoped Worktre
     expect(existsSync(join(result2.path!, "pr2.txt"))).toBe(true);
     expect(existsSync(join(result2.path!, "pr1.txt"))).toBe(false);
 
-    // pr-1's worktree was pruned to bound disk usage
-    expect(existsSync(path1)).toBe(false);
+    // pr-1's worktree is still leased by this process (its review never
+    // released it), so it is never pruned from under a running job
+    expect(existsSync(path1)).toBe(true);
 
     // Verify we're on pr-2 branch
     const branch2Check = await Utils.executeGitCommand(["branch", "--show-current"], {
@@ -203,32 +204,31 @@ describe("Webhook Integration - Sequential Processing with Branch-Scoped Worktre
     }
   });
 
-  test("should keep only the active branch's worktree on disk", async () => {
-    // Process first PR
-    const result1 = await Utils.prepareReviewWorktree("pr-1", {
-      verbose: false,
-      cwd: repoDir,
-    });
-    expect(result1.success).toBe(true);
-    expect(existsSync(result1.path!)).toBe(true);
-
-    // Process second PR - first is pruned
-    const result2 = await Utils.prepareReviewWorktree("pr-2", {
-      verbose: false,
-      cwd: repoDir,
-    });
-    expect(result2.success).toBe(true);
-    expect(existsSync(result2.path!)).toBe(true);
-    expect(existsSync(result1.path!)).toBe(false);
-
-    // Process third PR - second is pruned
-    const result3 = await Utils.prepareReviewWorktree("pr-3", {
-      verbose: false,
-      cwd: repoDir,
-    });
-    expect(result3.success).toBe(true);
-    expect(existsSync(result3.path!)).toBe(true);
-    expect(existsSync(result2.path!)).toBe(false);
+  test("should bound idle worktrees on disk to the per-repo cap", async () => {
+    // Each review finishes (releases its lease) before the next starts, as in
+    // the sequential queue. The default cap keeps two idle worktrees.
+    const paths: string[] = [];
+    for (const [index, branch] of ["pr-1", "pr-2", "pr-3", "pr-large"].entries()) {
+      if (branch === "pr-large") {
+        execSync("git branch pr-large pr-1", { cwd: repoDir });
+      }
+      const result = await Utils.prepareReviewWorktree(branch, {
+        verbose: false,
+        cwd: repoDir,
+      });
+      expect(result.success).toBe(true);
+      expect(existsSync(result.path!)).toBe(true);
+      Utils.releaseReviewWorktree(result.path!);
+      // Distinct last-use times, oldest first.
+      const at = new Date(Date.now() - (10 - index) * 1_000);
+      utimesSync(result.path!, at, at);
+      paths.push(result.path!);
+    }
+    // Preparing the fourth pruned the oldest idle one (pr-1) down to the cap.
+    expect(existsSync(paths[0]!)).toBe(false);
+    expect(existsSync(paths[1]!)).toBe(true);
+    expect(existsSync(paths[2]!)).toBe(true);
+    expect(existsSync(paths[3]!)).toBe(true);
   });
 
   test("should reuse the same worktree path when switching back to a branch", async () => {
@@ -309,7 +309,8 @@ describe("Webhook Integration - Sequential Processing with Branch-Scoped Worktre
       expect(existsSync(join(largePath, `file${i}.txt`))).toBe(true);
     }
 
-    // Switch to pr-1 (its own worktree; pr-large is pruned)
+    // pr-large's review finishes; switch to pr-1 (its own worktree)
+    Utils.releaseReviewWorktree(largePath);
     const result2 = await Utils.prepareReviewWorktree("pr-1", {
       verbose: false,
       cwd: repoDir,
@@ -317,7 +318,8 @@ describe("Webhook Integration - Sequential Processing with Branch-Scoped Worktre
     expect(result2.success).toBe(true);
     expect(result2.path).not.toBe(largePath);
 
-    // The large branch's worktree (and its files) are gone
+    // Over the idle cap, the large branch's worktree (and its files) are gone
+    await Utils.cleanupStaleReviewWorktrees(result2.path!, { cwd: repoDir, idleCap: 0 });
     expect(existsSync(largePath)).toBe(false);
 
     // pr-1 worktree has only pr-1's file

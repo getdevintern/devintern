@@ -3,8 +3,13 @@
  * every repo in the workspace.
  *
  * The workspace worker has no ambient checkout, so every event run is a CLI
- * subprocess in the repo's persistent base worktree with that repo's composed
- * environment. The permission gate for mention-driven runs
+ * subprocess started from the repo's persistent base worktree with that
+ * repo's composed environment. The subprocess does its work in a
+ * branch-scoped PR worktree and only reads the base checkout, so PR jobs are
+ * admitted as `pr_worktree`: jobs for different PRs on one repository run in
+ * parallel (bounded by `max_concurrency_per_repo`) and alongside an
+ * automation in the base checkout, while jobs on one PR stay serialized by
+ * their exclusive key. The permission gate for mention-driven runs
  * (write/maintain/admin; a confirmed denial skips, an API error propagates so
 the caller retries) therefore lives HERE, before the
  * subprocess: `devintern address-review` is a manual command and performs no
@@ -26,6 +31,42 @@ import { toRoutableTask } from "./router";
 import type { createFleetTaskExecutor, FleetTask, RepoManagerLike } from "./fleet-executor";
 import { JobNotStartedError } from "../worker/supervisor";
 import type { TaskSupervisor } from "../worker/supervisor";
+import { MAX_CONCURRENCY_PER_REPO_ENV } from "../utils/review-worktree";
+
+/**
+ * Supervisor exclusive key for one GitHub PR (`owner/repo#123`, lowercased
+ * like `serializePrRun`), so jobs on the same PR never run at once.
+ */
+export function prExclusiveKey(slug: string, prNumber: number): string {
+  return `${slug.toLowerCase()}#${prNumber}`;
+}
+
+/**
+ * Environment for a PR job subprocess: the repo env plus the per-repo limit,
+ * which sizes how many idle review worktrees the job's cleanup keeps.
+ */
+export function prJobEnv(
+  config: WorkspaceConfig,
+  env: Record<string, string | undefined>,
+): Record<string, string | undefined> {
+  return {
+    ...env,
+    [MAX_CONCURRENCY_PER_REPO_ENV]: String(config.workspace.execution.maxConcurrencyPerRepo),
+  };
+}
+
+/**
+ * Prepare a repo for a PR job: clone/fetch the bare repository and make sure
+ * the base checkout exists, without resetting it. PR jobs run in their own
+ * branch-scoped worktrees (`pr_worktree`), possibly while an automation is
+ * working in the base checkout, so they must not move it; the CLI only uses it
+ * as the repository to create the PR worktree from.
+ */
+async function preparePrJobRepo(repoManager: RepoManagerLike, repo: RepoConfig): Promise<string> {
+  await repoManager.ensureBareClone(repo);
+  await repoManager.fetch(repo.name);
+  return repoManager.ensureBaseWorktree(repo, { sync: false });
+}
 
 export interface FleetEventDeps {
   config: WorkspaceConfig;
@@ -163,12 +204,10 @@ export function createFleetAddressPr(deps: FleetEventDeps): AddressPr {
       return false;
     }
     const invoke = async (signal?: AbortSignal) => {
-      await repoManager.ensureBareClone(repo);
-      await repoManager.fetch(repo.name);
-      const base = await repoManager.ensureBaseWorktree(repo);
+      const base = await preparePrJobRepo(repoManager, repo);
       return runReview(slug, prNumber, {
         cwd: base,
-        env: buildRepoEnv(repo, workspaceDir),
+        env: prJobEnv(config, buildRepoEnv(repo, workspaceDir)),
         signal,
       });
     };
@@ -180,7 +219,8 @@ export function createFleetAddressPr(deps: FleetEventDeps): AddressPr {
           repo: repo.name,
           kind: "review",
           label: `${slug}#${prNumber}`,
-          checkoutClass: "shared_base",
+          checkoutClass: "pr_worktree",
+          exclusiveKey: prExclusiveKey(slug, prNumber),
           run: invoke,
         });
       }
@@ -208,14 +248,12 @@ export function createFleetResolveConflicts(
       return { outcome: "skipped", message: "repository is not configured in this workspace" };
     }
     const invoke = async (signal?: AbortSignal) => {
-      await repoManager.ensureBareClone(repo);
-      await repoManager.fetch(repo.name);
-      const base = await repoManager.ensureBaseWorktree(repo);
+      const base = await preparePrJobRepo(repoManager, repo);
       // Read at run time so a live reload of the conflict agent applies.
       const agentSelection = config.workspace.conflictAgent;
       return runResolve(slug, prNumber, {
         cwd: base,
-        env: buildRepoEnv(repo, workspaceDir, { agentSelection }),
+        env: prJobEnv(config, buildRepoEnv(repo, workspaceDir, { agentSelection })),
         harnessPin: agentSelection?.harness,
         expectedHeadSha: expected.headSha,
         expectedBaseSha: expected.baseSha,
@@ -230,7 +268,8 @@ export function createFleetResolveConflicts(
           repo: repo.name,
           kind: "conflict",
           label: `${slug}#${prNumber}`,
-          checkoutClass: "shared_base",
+          checkoutClass: "pr_worktree",
+          exclusiveKey: prExclusiveKey(slug, prNumber),
           run: invoke,
         });
       }
@@ -286,9 +325,7 @@ export function createFleetAutoMerge(
     const invoke = async (signal?: AbortSignal) => {
       // Admitted: the repo's slot is ours, so the check is no longer waiting.
       options?.onStart?.();
-      await repoManager.ensureBareClone(repo);
-      await repoManager.fetch(repo.name);
-      const base = await repoManager.ensureBaseWorktree(repo);
+      const base = await preparePrJobRepo(repoManager, repo);
       // Read at run time so live reloads of the policy and agent apply.
       const settings = config.workspace.autoMerge;
       const agentSelection = settings.agent;
@@ -303,7 +340,7 @@ export function createFleetAutoMerge(
         lastAttempt: options?.lastAttempt ?? false,
         ...(options?.runId !== undefined ? { runId: options.runId } : {}),
         cwd: base,
-        env: buildRepoEnv(repo, workspaceDir, { agentSelection }),
+        env: prJobEnv(config, buildRepoEnv(repo, workspaceDir, { agentSelection })),
         harnessPin: agentSelection?.harness,
         signal,
       });
@@ -316,7 +353,8 @@ export function createFleetAutoMerge(
           repo: repo.name,
           kind: "auto_merge",
           label: `${slug}#${prNumber}`,
-          checkoutClass: "shared_base",
+          checkoutClass: "pr_worktree",
+          exclusiveKey: prExclusiveKey(slug, prNumber),
           run: invoke,
         });
       }
@@ -347,12 +385,10 @@ export function createFleetCiFix(
       return false;
     }
     const invoke = async (signal?: AbortSignal) => {
-      await deps.repoManager.ensureBareClone(repo);
-      await deps.repoManager.fetch(repo.name);
-      const base = await deps.repoManager.ensureBaseWorktree(repo);
+      const base = await preparePrJobRepo(deps.repoManager, repo);
       return runCiFix(slug, prNumber, feedbackPath, {
         cwd: base,
-        env: buildRepoEnv(repo, deps.workspaceDir),
+        env: prJobEnv(deps.config, buildRepoEnv(repo, deps.workspaceDir)),
         ...(expectedHeadSha ? { expectedHeadSha } : {}),
         signal,
       });
@@ -365,7 +401,8 @@ export function createFleetCiFix(
           repo: repo.name,
           kind: "ci_fix",
           label: `${slug}#${prNumber}`,
-          checkoutClass: "shared_base",
+          checkoutClass: "pr_worktree",
+          exclusiveKey: prExclusiveKey(slug, prNumber),
           run: invoke,
         });
       } catch (error) {
