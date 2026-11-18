@@ -6,7 +6,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { readFileSync, rmSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -16,6 +16,7 @@ import { pickupSelection, resolveSessionPickup } from "../src/lib/state/session-
 import type { SessionPickupDecision } from "../src/lib/state/session-pickup";
 import { buildRetryPromptContext, taskSteps } from "../src/lib/task/pipeline";
 import { runTaskSteps } from "../src/lib/task/step-runner";
+import { MarkdownTaskTrackerClient } from "../src/lib/trackers/markdown/markdown-task-tracker-client";
 import { Utils } from "../src/lib/utils";
 import { WORKSPACE_REPO_ENV } from "../src/lib/workspace/env";
 import type { FormattedTaskDetails } from "../src/types/task-tracker";
@@ -137,6 +138,56 @@ describe("pipeline session pickup wiring", () => {
       else expect(context.resumeBranch).toBeUndefined();
     },
   );
+  test("a local task-file prompt tells the agent to continue the resumed branch", async () => {
+    // Ad-hoc `worker add` tasks are local task files; a re-queue that resumes
+    // the prior branch must carry the same guidance as tracker prompts.
+    runContext.options = { git: true } as never;
+    Utils.continueFeatureBranch = async (branch) => ({
+      success: true,
+      branchName: branch,
+      message: "resumed",
+    });
+    const taskDir = `${dbPath}.output/task-src`;
+    mkdirSync(taskDir, { recursive: true });
+    const mdFile = join(taskDir, "local-add-helper.md");
+    writeFileSync(mdFile, "# Add helper\n\nAdd truncate() to lib/utils.\n");
+    const tracker = new MarkdownTaskTrackerClient({ cwd: taskDir });
+    const task = await tracker.getTask(mdFile);
+    const context = {
+      taskKey: mdFile,
+      workflowKey: "local-add-helper",
+      effectiveTargetBranch: "main",
+      resumeBranch: "feature/local-add-helper",
+      task,
+      tracker,
+      relatedIssues: [],
+      priorRetryState: null,
+      taskDetails: tracker.formatTaskDetails(task, [], [], []),
+      pickup: {
+        kind: "resume",
+        session: {
+          runId: 591,
+          taskKey: "local-add-helper",
+          status: "succeeded",
+          branch: "feature/local-add-helper",
+          report: "added truncate() and pushed",
+        },
+      } as SessionPickupDecision,
+      outputFile: "",
+      taskDir: "",
+      attachmentMap: new Map(),
+    };
+    const steps = taskSteps.filter((step) =>
+      ["prepare-branch", "prepare-prompt"].includes(step.name),
+    );
+    await runTaskSteps(steps, context as never);
+    const prompt = readFileSync(context.outputFile, "utf8");
+    expect(prompt).toContain("Add truncate() to lib/utils.");
+    expect(prompt).toContain("`feature/local-add-helper`, which has been\nchecked out for you");
+    expect(prompt).toContain("added truncate() and pushed");
+    expect(prompt).toContain("do not reimplement it");
+  });
+
   test("resumes the excluded prior attempt's branch through the prepare-branch step", async () => {
     const prior = resumableRun("PROJ-1", "feature/proj-1", "prior report");
     // The pipeline opens the current run before resolving pickup; the resolver

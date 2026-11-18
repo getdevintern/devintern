@@ -17,6 +17,7 @@ import { runAgentHarness } from "../agent/run-harness";
 import { flushAnalyticsAndExit } from "../cli/bootstrap";
 import { isWorkerTaskProcess, runContext } from "../cli/context";
 import { GitHubAppAuth } from "../code-host/github/app-auth";
+import { PRManager } from "../code-host/manager";
 import { resolveOutputDir } from "../config/output-dir";
 import {
   getActiveTrackerType,
@@ -47,7 +48,7 @@ import {
   replaceRunStage,
 } from "../state/run-recorder";
 import { pickupSelection, resolveSessionPickup } from "../state/session-pickup";
-import type { SessionPickupDecision } from "../state/session-pickup";
+import type { SessionPickupDecision, SessionPickupOptions } from "../state/session-pickup";
 import { finishTaskRun } from "../state/task-run";
 import { outcomeRunDisposition } from "../agent/implementation-outcome";
 import { TaskFormatter } from "../task/formatter";
@@ -840,6 +841,19 @@ async function resolveEffectiveTargetBranch(descriptionText: string | undefined)
 }
 
 /**
+ * Whether the code host has an open PR for `branch`.
+ *
+ * @returns `undefined` when the state cannot be checked: only GitHub supports
+ *   the lookup today
+ */
+async function isChangeRequestOpen(branch: string): Promise<boolean | undefined> {
+  const manager = new PRManager();
+  const repo = await manager.detectRepository();
+  if (repo.platform !== "github") return undefined;
+  return (await manager.findOpenChangeRequest(branch)) !== undefined;
+}
+
+/**
  * Build the retry/prompt context handed to the formatter, or undefined when
  * there is nothing to tell the agent.
  *
@@ -955,37 +969,42 @@ async function materializeTaskPrompt(input: {
     console.log(`✅ Downloaded ${attachmentMap.size} total attachments to: ${attachmentDir}`);
   }
 
+  // On a retry, tell the agent it is a retry, why the last attempt
+  // stopped, and which comments arrived since. When the prior attempt left
+  // resumable state (a branch and its own report), session pickup hands that
+  // to the agent so it continues instead of re-deriving it.
+  let retryContext: RetryPromptContext | undefined;
+  if (priorRetryState || pickup.kind === "resume") {
+    let lastFailureSummary: string | undefined;
+    if (pickup.kind !== "resume") {
+      try {
+        const lastRun = new RunStore()
+          .listRuns({ taskKey: workflowKey, limit: 10 })
+          .find((run) => run.status === "escalated" || run.status === "failed");
+        lastFailureSummary = lastRun?.outcomeReason;
+      } catch {
+        // Prompt context only — proceed without it.
+      }
+    }
+    retryContext = buildRetryPromptContext({
+      pickup,
+      priorRetryState,
+      gitEnabled: Boolean(runContext.options.git),
+      lastFailureSummary,
+    });
+  }
+
   if (isMarkdownTaskTracker(tracker)) {
-    tracker.writeAgentPrompt(outputFile, task);
+    // Local task files (including `worker add` ad-hoc tasks) get the same
+    // resume guidance, so a re-queued task continues its inherited branch.
+    tracker.writeAgentPrompt(
+      outputFile,
+      task,
+      retryContext ? TaskFormatter.formatRetrySection(retryContext) : undefined,
+    );
     console.log(`\n💾 Saved task details to: ${outputFile}`);
   } else {
     console.log(`\n💾 Saving formatted task details to: ${outputFile}`);
-
-    // On a retry, tell the agent it is a retry, why the last attempt
-    // stopped, and which comments arrived since. When the prior attempt left
-    // resumable state (a branch and its own report), session pickup hands that
-    // to the agent so it continues instead of re-deriving it.
-    let retryContext: RetryPromptContext | undefined;
-    if (priorRetryState || pickup.kind === "resume") {
-      let lastFailureSummary: string | undefined;
-      if (pickup.kind !== "resume") {
-        try {
-          const lastRun = new RunStore()
-            .listRuns({ taskKey: workflowKey, limit: 10 })
-            .find((run) => run.status === "escalated" || run.status === "failed");
-          lastFailureSummary = lastRun?.outcomeReason;
-        } catch {
-          // Prompt context only — proceed without it.
-        }
-      }
-      retryContext = buildRetryPromptContext({
-        pickup,
-        priorRetryState,
-        gitEnabled: Boolean(runContext.options.git),
-        lastFailureSummary,
-      });
-    }
-
     TaskFormatter.saveFormattedTask(
       taskDetails,
       outputFile,
@@ -1306,18 +1325,28 @@ export async function processSingleTask(
     };
     let pickup: SessionPickupDecision;
     try {
+      const scope: NonNullable<SessionPickupOptions["scope"]> =
+        currentRunId !== undefined
+          ? (pickupStore.getRun(currentRunId) ?? {})
+          : {
+              tracker: process.env.TASK_TRACKER || "jira",
+              team: process.env.DEVINTERN_WORKSPACE_TEAM,
+              repo: process.env.DEVINTERN_WORKSPACE_REPO,
+            };
       pickup = await resolveSessionPickup({
         runStore: pickupStore,
         taskKey: workflowKey,
-        scope:
-          currentRunId !== undefined
-            ? (pickupStore.getRun(currentRunId) ?? {})
-            : {
-                tracker: process.env.TASK_TRACKER || "jira",
-                team: process.env.DEVINTERN_WORKSPACE_TEAM,
-                repo: process.env.DEVINTERN_WORKSPACE_REPO,
-              },
+        scope,
         ...pickupSelection(currentRunId),
+        // An ad-hoc task only reruns when it is re-queued (`worker add
+        // --resume`, dashboard re-queue, startup auto-resume). A prior run
+        // that succeeded but never opened its PR, or whose PR is still open,
+        // continues on that branch instead of cutting `-attempt-N`.
+        ...(scope.origin === "local" && runContext.options.git
+          ? {
+              reopenSucceeded: { isChangeRequestOpen: ({ branch }) => isChangeRequestOpen(branch) },
+            }
+          : {}),
         branchExists: async (branch) =>
           (await Utils.gitRefExists(`refs/heads/${branch}`)) ||
           (await Utils.gitRefExists(`refs/remotes/origin/${branch}`)),

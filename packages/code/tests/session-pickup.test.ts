@@ -544,3 +544,135 @@ describe("pickupSelection", () => {
     });
   });
 });
+
+describe("resolveSessionPickup reopenSucceeded (ad-hoc re-queue)", () => {
+  let dbPath: string;
+  let store: RunStore;
+  const scope = { origin: "local" as const, tracker: "local", repo: "x-rep" };
+  const branch = "feature/local-add-helper";
+
+  beforeEach(() => {
+    dbPath = join(
+      tmpdir(),
+      `pickup-reopen-${Date.now()}-${Math.random().toString(36).slice(2)}.db`,
+    );
+    store = new RunStore(dbPath);
+  });
+
+  afterEach(() => {
+    store.close();
+    for (const suffix of ["", "-wal", "-shm"]) {
+      rmSync(`${dbPath}${suffix}`, { force: true });
+    }
+  });
+
+  /** A succeeded run with a report, optionally with a recorded PR, plus the re-queued current run. */
+  function succeededRun(prUrl?: string): { prior: number; current: number } {
+    const prior = store.createRun({ ...scope, taskKey: "local-add-helper", branch });
+    store.addStage(
+      prior,
+      "implementation",
+      "succeeded",
+      "implemented",
+      JSON.stringify({ report: "added truncate()" }),
+    );
+    if (prUrl) store.setRunPr(prior, { url: prUrl, prNumber: 15 });
+    store.finishRun(prior, "succeeded");
+    const current = store.createRun({ ...scope, taskKey: "local-add-helper" });
+    return { prior, current };
+  }
+
+  async function resolve(
+    current: number,
+    probes: {
+      branchExists?: boolean;
+      landed?: boolean;
+      open?: boolean | undefined;
+      reopen?: boolean;
+      onProbe?: () => void;
+    } = {},
+  ) {
+    return resolveSessionPickup({
+      runStore: store,
+      taskKey: "local-add-helper",
+      scope,
+      excludeRunId: current,
+      branchExists: () => probes.branchExists ?? true,
+      hasLandedCommits: () => probes.landed ?? true,
+      ...((probes.reopen ?? true)
+        ? {
+            reopenSucceeded: {
+              isChangeRequestOpen: () => {
+                probes.onProbe?.();
+                return probes.open;
+              },
+            },
+          }
+        : {}),
+    });
+  }
+
+  test("pushed-no-PR branch resumes without consulting the PR probe", async () => {
+    const { prior, current } = succeededRun();
+    let probed = false;
+    const pickup = await resolve(current, { onProbe: () => (probed = true) });
+    expect(pickup.kind).toBe("resume");
+    if (pickup.kind !== "resume") return;
+    expect(pickup.session).toMatchObject({
+      runId: prior,
+      status: "succeeded",
+      branch,
+      report: "added truncate()",
+    });
+    expect(probed).toBe(false);
+  });
+
+  test("open-PR branch resumes and carries the recorded PR", async () => {
+    const prUrl = "https://github.com/acme/x-rep/pull/15";
+    const { prior, current } = succeededRun(prUrl);
+    const pickup = await resolve(current, { open: true });
+    expect(pickup.kind).toBe("resume");
+    if (pickup.kind !== "resume") return;
+    expect(pickup.session).toMatchObject({ runId: prior, branch, prUrl });
+  });
+
+  test("closed or merged PR starts fresh", async () => {
+    const { current } = succeededRun("https://github.com/acme/x-rep/pull/15");
+    expect(await resolve(current, { open: false })).toEqual({
+      kind: "fresh",
+      reason: `prior run's PR for '${branch}' is no longer open`,
+    });
+  });
+
+  test("a PR whose state cannot be confirmed starts fresh", async () => {
+    const { current } = succeededRun("https://gitlab.com/acme/x-rep/-/merge_requests/15");
+    expect(await resolve(current, { open: undefined })).toEqual({
+      kind: "fresh",
+      reason: `could not confirm prior run's PR for '${branch}' is still open`,
+    });
+  });
+
+  test("missing branch starts fresh", async () => {
+    const { current } = succeededRun();
+    expect(await resolve(current, { branchExists: false })).toEqual({
+      kind: "fresh",
+      reason: `branch '${branch}' no longer exists`,
+    });
+  });
+
+  test("a pushed-no-PR branch without commits ahead starts fresh", async () => {
+    const { current } = succeededRun();
+    expect(await resolve(current, { landed: false })).toEqual({
+      kind: "fresh",
+      reason: `branch '${branch}' has no commits to resume`,
+    });
+  });
+
+  test("without the opt-in a succeeded run stays final", async () => {
+    const { current } = succeededRun();
+    expect(await resolve(current, { reopen: false })).toEqual({
+      kind: "fresh",
+      reason: "prior run is succeeded",
+    });
+  });
+});

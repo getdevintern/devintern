@@ -331,12 +331,18 @@ export class MarkdownTaskTrackerClient implements TaskTrackerClient {
    * so its whole contents are framed as untrusted external data. The
    * generic implementation instructions always follow the frame, regardless
    * of headings in the task file.
+   *
+   * @param outputPath - Where to write the prompt
+   * @param task - Task loaded by {@link getTask}
+   * @param retrySection - Pre-rendered "Previous Attempt" section (session
+   *   pickup / retry context), placed between the task and the instructions
    */
-  writeAgentPrompt(outputPath: string, task: Task): void {
+  writeAgentPrompt(outputPath: string, task: Task, retrySection?: string): void {
     const raw = task.raw as MarkdownTaskRaw;
     const content = raw.fullContent;
     const framed = untrustedContentBlock(content.trimEnd(), "local task file");
-    const prompt = `${framed}\n\n${IMPLEMENTATION_INSTRUCTIONS}\n`;
+    const retry = retrySection?.trim() ? `${retrySection.trim()}\n\n` : "";
+    const prompt = `${framed}\n\n${retry}${IMPLEMENTATION_INSTRUCTIONS}\n`;
     writeFileSync(outputPath, prompt, "utf8");
   }
 

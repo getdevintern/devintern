@@ -18,6 +18,10 @@
  * an empty branch. Incomplete state (no branch, no report and no landed
  * commits, or a branch that no longer exists) falls back to a fresh run.
  *
+ * A `succeeded` run is normally final. Explicit re-queues of ad-hoc tasks opt
+ * in to resuming one whose branch was pushed without a PR or whose PR is still
+ * open (see {@link SessionPickupOptions.reopenSucceeded}).
+ *
  * Every read is best-effort: a storage or parse error degrades to "fresh", the
  * safe default.
  */
@@ -66,8 +70,11 @@ export function pickupSelection(
 export interface SessionPickup {
   runId: number;
   taskKey: string;
-  /** Terminal status the prior run ended in. */
-  status: PickupRunStatus;
+  /**
+   * Terminal status the prior run ended in. `succeeded` only when
+   * {@link SessionPickupOptions.reopenSucceeded} allowed an undelivered branch.
+   */
+  status: PickupRunStatus | "succeeded";
   /** Feature branch the prior run created or resumed. */
   branch: string;
   /** Attempt number of the prior run (1-based), when recorded. */
@@ -124,6 +131,29 @@ export interface SessionPickupOptions {
    * false → the run stays fresh.
    */
   hasLandedCommits?: (session: { branch: string; run: RunRecord }) => boolean | Promise<boolean>;
+  /**
+   * Opt-in: also resume a `succeeded` run whose branch was left undelivered or
+   * still awaits review, instead of starting a fresh `-attempt-N` branch.
+   *
+   * Explicit re-queues of ad-hoc tasks (`worker add --resume`, dashboard
+   * re-queue) set this: a run can succeed and still fail its PR step (for
+   * example on bad credentials), leaving a pushed branch without a PR. Such a
+   * run resumes when its branch has landed commits and either recorded no PR
+   * (pushed without a PR) or its PR is still open. A recorded PR that is no
+   * longer open (merged or closed), or whose state cannot be confirmed, keeps
+   * the fresh-branch path. The probe is only consulted when the run recorded
+   * a PR.
+   */
+  reopenSucceeded?: {
+    /**
+     * Whether an open PR/MR exists for the branch. `undefined` means the state
+     * is unknown (unsupported code host, lookup failure).
+     */
+    isChangeRequestOpen: (session: {
+      branch: string;
+      run: RunRecord;
+    }) => boolean | undefined | Promise<boolean | undefined>;
+  };
   /** Optional description of already-landed work (git log/diff). Never fatal. */
   describeLanded?: (session: {
     branch: string;
@@ -264,6 +294,32 @@ function findCandidateRun(
 }
 
 /**
+ * Why a reopened `succeeded` run's recorded PR blocks resume, or `undefined`
+ * when the PR is confirmed open.
+ *
+ * A merged or closed PR means the branch is finished, and an unknown state is
+ * not worth the risk of stacking new work on a merged branch. A run without a
+ * recorded PR never reaches this check: its branch was pushed (or committed)
+ * without one, and the commit probe decides.
+ */
+async function recordedPrNotOpen(
+  reopen: NonNullable<SessionPickupOptions["reopenSucceeded"]>,
+  branch: string,
+  run: RunRecord,
+): Promise<string | undefined> {
+  let open: boolean | undefined;
+  try {
+    open = await reopen.isChangeRequestOpen({ branch, run });
+  } catch {
+    open = undefined;
+  }
+  if (open === true) return undefined;
+  return open === false
+    ? `prior run's PR for '${branch}' is no longer open`
+    : `could not confirm prior run's PR for '${branch}' is still open`;
+}
+
+/**
  * Reconstruct a resumable session from the run store, or explain why a fresh
  * run is required.
  *
@@ -283,6 +339,7 @@ export async function resolveSessionPickup(
     scope,
     branchExists,
     hasLandedCommits,
+    reopenSucceeded,
     describeLanded,
   } = options;
 
@@ -297,7 +354,13 @@ export async function resolveSessionPickup(
     return { kind: "fresh", reason: candidate.reason };
   }
   const run = candidate.run;
-  if (!isPickupStatus(run.status)) {
+  const reopening = run.status === "succeeded" && reopenSucceeded !== undefined;
+  const status: SessionPickup["status"] | undefined = isPickupStatus(run.status)
+    ? run.status
+    : reopening
+      ? "succeeded"
+      : undefined;
+  if (!status) {
     return { kind: "fresh", reason: `prior run is ${run.status}` };
   }
   // An agent-reported `blocked` outcome escalates a run that otherwise
@@ -325,6 +388,11 @@ export async function resolveSessionPickup(
     }
   }
 
+  if (reopening && reopenSucceeded && run.prUrl) {
+    const closed = await recordedPrNotOpen(reopenSucceeded, branch, run);
+    if (closed) return { kind: "fresh", reason: closed };
+  }
+
   const implementation = readImplementationStage(runStore, run.id);
   const report = implementation.report;
   // A report proves the agent wrote a summary, not that the branch carries
@@ -334,7 +402,7 @@ export async function resolveSessionPickup(
   // empty. A supplied commit probe is therefore authoritative for every
   // status; without one, a failed stage (incomplete handoff or a delivery halt
   // after the early success record) still requires commits ahead of the base.
-  if (hasLandedCommits || !report || implementation.status === "failed") {
+  if (hasLandedCommits || !report || implementation.status === "failed" || reopening) {
     let landedCommits = false;
     if (hasLandedCommits) {
       try {
@@ -369,7 +437,7 @@ export async function resolveSessionPickup(
     session: {
       runId: run.id,
       taskKey: run.taskKey ?? taskKey,
-      status: run.status,
+      status,
       branch,
       attempt: run.attempt,
       report,
