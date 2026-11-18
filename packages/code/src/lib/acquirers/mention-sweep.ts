@@ -32,6 +32,7 @@
  * marked handled immediately.
  */
 
+import { startFirstTickInBackground } from "./background-tick";
 import { classifyWebhookError } from "../webhook/webhook-errors";
 import type { WebhookQueue } from "../state/webhook-queue";
 import type { WorkerState } from "../state/worker-state";
@@ -191,8 +192,11 @@ export class MentionSweepAcquirer implements Acquirer {
     console.log(
       `🔎 Sweeping ${this.options.repo} for @mentions every ${this.options.intervalSeconds}s`,
     );
-    await this.tick();
+    // Arm the interval first, then run the first tick in the background: the
+    // busy guard turns an interval fire during it into a no-op, and a long
+    // first tick must not hold later acquirers (see background-tick.ts).
     this.timer = setInterval(() => void this.tick(), this.options.intervalSeconds * 1000);
+    startFirstTickInBackground(this.name, () => this.tick());
   }
 
   /** Stop sweeping (an in-flight tick finishes its current mention). */

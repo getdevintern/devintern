@@ -1,5 +1,13 @@
 import { Database } from "bun:sqlite";
-import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  setDefaultTimeout,
+  setSystemTime,
+  test,
+} from "bun:test";
 import { createHash } from "crypto";
 import {
   chmodSync,
@@ -82,6 +90,21 @@ function run(command: WorkerReadCommand, args: string[]): Captured {
 function wire(response: ApiResponse): unknown {
   expect(response.status).toBe(200);
   return JSON.parse(JSON.stringify(response.body));
+}
+
+/**
+ * Drop busy time accrued by the in-progress `local` fixture run: it counts up
+ * to "now", so the CLI subprocess and the in-process handler see different
+ * values milliseconds apart. Everything else in the body must match exactly.
+ */
+function withoutLiveBusyTime(body: unknown): unknown {
+  const activity = (
+    body as { stats?: { activity?: { cells?: { origin: string; busyMs?: number }[] } } }
+  )?.stats?.activity;
+  for (const cell of activity?.cells ?? []) {
+    if (cell.origin === "local") delete cell.busyMs;
+  }
+  return body;
 }
 
 /** Hash every file in the state dir so any write (DB, WAL, new file) shows up. */
@@ -192,6 +215,9 @@ describe("devintern worker read-only dashboard commands", () => {
   }
 
   test("--json prints exactly the dashboard handler body for every command", () => {
+    // Freeze the clock: the in-progress fixture run's busy time counts up to
+    // `now`, so CLI and handler output would otherwise differ by a millisecond.
+    setSystemTime(new Date());
     const data = embeddedDashboardData();
     try {
       const cases: [WorkerReadCommand, string[], () => ApiResponse][] = [
@@ -256,6 +282,9 @@ describe("devintern worker read-only dashboard commands", () => {
           () => handleLogs(data, new URLSearchParams({ limit: "1", level: "info" })),
         ],
       ];
+      // The in-progress "local-active" run counts busy time up to `now`, so the
+      // CLI call and the reference handler call must see the same clock.
+      setSystemTime(Date.now());
       for (const [command, args, handler] of cases) {
         const result = run(command, [...args, "--json"]);
         expect({ args: [command, ...args], stderr: result.stderr, code: result.code }).toEqual({
@@ -263,7 +292,9 @@ describe("devintern worker read-only dashboard commands", () => {
           stderr: "",
           code: 0,
         });
-        expect(JSON.parse(result.stdout)).toEqual(wire(handler()));
+        expect(withoutLiveBusyTime(JSON.parse(result.stdout))).toEqual(
+          withoutLiveBusyTime(wire(handler())),
+        );
       }
 
       // Overview carries a generation timestamp; everything else must match.
@@ -276,7 +307,9 @@ describe("devintern worker read-only dashboard commands", () => {
       >;
       expect(cliOverview).toEqual(apiOverview);
     } finally {
+      setSystemTime();
       data.close();
+      setSystemTime();
     }
   });
 

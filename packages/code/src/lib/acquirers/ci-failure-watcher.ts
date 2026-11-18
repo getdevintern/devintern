@@ -28,6 +28,7 @@
  *   or CI passes, which resets the budget outright.
  */
 
+import { startFirstTickInBackground } from "./background-tick";
 import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -40,7 +41,7 @@ import type { Acquirer } from "../../worker";
 import type { CiFailureFeedback } from "../review/formatter";
 import { classifyAgentPrState } from "../review/agent-pr-reconciler";
 import { serializePrRun } from "./review-polling";
-import { describeGitHubAuthFailure, isGitHubAuthError } from "../code-host/github/reviews";
+import { describeGitHubAuthFailure, isGitHubAuthError } from "../code-host/github/github-errors";
 
 import type {
   CiProvider,
@@ -345,8 +346,11 @@ export class CiFailureWatcherAcquirer implements Acquirer {
           this.options.workerState.listOpenAgentPrs().length
         } open change request(s))`,
     );
-    await this.tick();
+    // Arm the interval first, then run the first tick in the background: the
+    // busy guard turns an interval fire during it into a no-op, and a long
+    // first tick must not hold later acquirers (see background-tick.ts).
     this.timer = setInterval(() => void this.tick(), this.options.intervalSeconds * 1000);
+    startFirstTickInBackground(this.name, () => this.tick());
   }
 
   /** Stop watching (an in-flight tick finishes its current PR). */
@@ -466,7 +470,7 @@ export class CiFailureWatcherAcquirer implements Acquirer {
     console.warn(
       `⚠️  [${this.name}] GitHub rejected the credential while polling ${repo}#${prNumber}: ` +
         `${error.message} ${describeGitHubAuthFailure(error, "ci")} ` +
-        "See docs/code/worker.md#ci-failures-on-the-agents-prs.",
+        "See docs/code/pr-follow-up.md#ci-failures-on-the-agents-prs.",
     );
   }
 

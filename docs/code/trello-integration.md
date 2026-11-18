@@ -104,7 +104,7 @@ This workflow:
 
 ### Actioned cards (worker)
 
-When the worker creates a PR it moves the card to `prStatus` (when configured) and records it as actioned locally, so the ready-tasks query no longer re-implements it. This also covers a failed or unconfigured transition. Re-arm an actioned card by editing its description, moving the card back to a ready list, or changing labels — see [Tickets already actioned after a PR](./worker.md#tickets-already-actioned-after-a-pr).
+When the worker creates a PR it moves the card to `prStatus` (when configured) and records it as actioned locally, so the ready-tasks query no longer re-implements it. This also covers a failed or unconfigured transition. Re-arm an actioned card by editing its description, moving the card back to a ready list, or changing labels — see [Tickets already actioned after a PR](./worker-troubleshooting.md#tickets-already-actioned-after-a-pr).
 
 ## Batch processing with --query
 

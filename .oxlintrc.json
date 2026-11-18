@@ -62,14 +62,14 @@
     "react/hook-use-state": "error",
 
     // Complexity / size metrics. All are enforced as errors globally. The
-    // `size-ratchet-baseline` overrides below exempt the current largest files
-    // and functions; shrink those lists as the files/functions are split.
+    // `size-ratchet-baseline` override below exempts the current largest files;
+    // shrink that list as the files are split rather than adding new entries.
     "complexity": ["error", 30],
     "max-depth": ["error", 6],
     "max-params": ["error", 6],
     "max-nested-callbacks": ["error", 5],
     "max-classes-per-file": ["error", 3],
-    "max-lines": ["error", 1500],
+    "max-lines": ["error", 1000],
     "max-lines-per-function": ["error", 500],
     "max-statements": ["error", 110],
 
@@ -167,6 +167,28 @@
       ],
       "rules": {
         "typescript/no-explicit-any": "off"
+      }
+    },
+    {
+      // size-ratchet-baseline: files that predate the 1000-line `max-lines`
+      // limit. Keep them under the previous 1500-line cap and remove each entry
+      // once the file is split; do not add new ones.
+      "files": [
+        "packages/code/src/lib/acquirers/review-polling.ts",
+        "packages/code/src/lib/init/worker-init.ts",
+        "packages/code/src/lib/observability/dashboard-api.ts",
+        "packages/code/src/lib/relay/connect.ts",
+        "packages/code/src/lib/review/conflict-resolver.ts",
+        "packages/code/src/lib/state/run-recorder.ts",
+        "packages/code/src/lib/state/webhook-queue.ts",
+        "packages/code/src/lib/state/worker-state.ts",
+        "packages/code/src/lib/task/pipeline.ts",
+        "packages/code/src/lib/workspace/workspace-worker.ts",
+        "packages/e2e/helpers/worker.ts",
+        "packages/task-trackers/src/clients/jira.ts"
+      ],
+      "rules": {
+        "max-lines": ["error", 1500]
       }
     },
     {

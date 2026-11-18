@@ -17,7 +17,7 @@ import {
   windowSpec,
   workerUptime,
 } from "@/components/overview/overview-model";
-import type { OverviewHarnesses, OverviewResponse } from "@/lib/api";
+import type { OverviewHarnesses, OverviewResponse } from "@/lib/api-overview";
 
 const NOW = new Date(2026, 10, 13, 12, 20, 0).getTime();
 const SECOND = 1000;

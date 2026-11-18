@@ -2,14 +2,11 @@ import { expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import {
-  OverviewAlertBanner,
-  OverviewScreen,
-  queueBreakdown,
-  queueParts,
-  queueProgress,
-} from "@/views/OverviewView";
-import type { OverviewResponse, RunRecord, WorkerResponse } from "@/lib/api";
+import { OverviewAlertBanner } from "@/components/overview/OverviewAlertBanner";
+import { queueBreakdown, queueParts, queueProgress } from "@/components/overview/WorkerFacts";
+import { OverviewScreen } from "@/views/OverviewView";
+import type { RunRecord, WorkerResponse } from "@/lib/api";
+import type { OverviewResponse } from "@/lib/api-overview";
 
 const NOW = new Date(2026, 10, 13, 12, 20, 0).getTime();
 const MINUTE = 60_000;

@@ -4,331 +4,117 @@ sidebarLabel: "Configuration"
 description: "Environment variables, tracker credentials, and defaults for @devintern/pm."
 section: "Create Tasks"
 order: 2
-dateModified: 2026-11-12
+dateModified: 2026-11-18
 ---
 
 # DevIntern PM Configuration
 
-@devintern/pm uses per-project configuration stored in `.devintern-pm/.env` in your project directory. Run `devpm init` in a terminal for a guided setup: it asks which tracker you use, links to each provider's token creation page, validates the connection, and writes the file for you. Prefer editing by hand (or setting up in CI)? Run `devpm init --yes` to write the configuration template instead, then fill in values for your selected backend as described below.
+DevIntern PM reads per-project settings from `.devintern-pm/.env`. Run `devpm init` in your project for a guided setup: it asks which tracker you use, links to the token page, validates the connection, and writes the file (and adds it to `.gitignore`). For CI or hand editing, `devpm init --yes` writes a template instead.
+
+devpm looks for `.devintern-pm/.env` in the current directory and its parents, up to the nearest `.git` directory or your home directory, so you can run it from any subdirectory. DevIntern PM is free under the FSL license and needs no license key.
 
 ## Select a Backend
 
-Set `TASK_TRACKER` to choose your PM tool. Defaults to `jira` if not specified.
+Set `TASK_TRACKER` (default `jira`) and the variables for that tracker only; other trackers' variables are ignored.
 
-Supported backends: `jira`, `linear`, `trello`, `azure-devops`, `asana`, `github`, `gitlab`, `markdown`
-
-```bash
-TASK_TRACKER=jira
-```
-
-## Backend-Specific Configuration
-
-Only configure the section that matches your `TASK_TRACKER`. Other backend variables are ignored.
-
-### Jira
-
-```bash
-TASK_TRACKER=jira
-JIRA_BASE_URL=https://your-org.atlassian.net
-JIRA_EMAIL=your-email@example.com
-JIRA_API_TOKEN=your-api-token
-JIRA_DEFAULT_PROJECT_KEY=PROJ
-```
-
-Create an API token at [https://id.atlassian.com/manage-profile/security/api-tokens](https://id.atlassian.com/manage-profile/security/api-tokens). Use the Atlassian account email that owns the token for `JIRA_EMAIL`.
-
-**Project key**: the short prefix on issue keys (e.g. `PROJ` in `PROJ-123`). Find it in any issue URL or under **Project settings → Details → Key**.
-
-See the [Jira Integration guide](./jira-integration.md) for step-by-step setup and troubleshooting.
-
-### Linear
+| `TASK_TRACKER` | Required variables                                                          | Optional                                                                           | Guide                                         |
+| -------------- | --------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- | --------------------------------------------- |
+| `jira`         | `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_DEFAULT_PROJECT_KEY` |                                                                                    | [Jira](./jira-integration.md)                 |
+| `linear`       | `LINEAR_API_KEY`                                                            | `LINEAR_DEFAULT_TEAM_KEY`                                                          | [Linear](./linear-integration.md)             |
+| `trello`       | `TRELLO_API_TOKEN`                                                          | `TRELLO_DEFAULT_BOARD_ID`, `TRELLO_DEFAULT_LIST_NAME`, `TRELLO_API_KEY`            | [Trello](./trello-integration.md)             |
+| `azure-devops` | `AZURE_DEVOPS_ORG`, `AZURE_DEVOPS_PAT`, `AZURE_DEVOPS_PROJECT`              |                                                                                    | [Azure DevOps](./azure-devops-integration.md) |
+| `asana`        | `ASANA_API_TOKEN`                                                           | `ASANA_DEFAULT_PROJECT_GID`                                                        | [Asana](./asana-integration.md)               |
+| `github`       | `GITHUB_TOKEN`, `GITHUB_REPO`                                               |                                                                                    | [GitHub Issues](./github-integration.md)      |
+| `gitlab`       | `GITLAB_TOKEN`, `GITLAB_PROJECT`                                            | `GITLAB_BASE_URL` (self-hosted)                                                    | [GitLab](./gitlab-integration.md)             |
+| `markdown`     | none                                                                        | `MARKDOWN_TASKS_DIR` (default `.devintern-pm/tasks`, relative to the project root) |                                               |
 
 ```bash
+# .devintern-pm/.env
 TASK_TRACKER=linear
 LINEAR_API_KEY=lin_api_xxxxxxxxxxxx
-# LINEAR_DEFAULT_TEAM_KEY=ENG  # optional, first team if omitted
 ```
 
-Create a **Personal API key** at [https://linear.app/settings/api](https://linear.app/settings/api) (Settings → API → Personal API keys). Keys start with `lin_api_` and cannot be viewed again after creation.
-
-**Team key**: the short prefix on issue identifiers (e.g. `ENG` in `ENG-42`). Find it under team Settings → Key, or pick a team in interactive mode (Ctrl+P).
-
-See the [Linear Integration guide](./linear-integration.md) for step-by-step setup and troubleshooting.
-
-### Trello
-
-`TRELLO_API_TOKEN` is the only required variable: @devintern/pm includes a bundled Power-Up key so you don't need to register your own app.
-
-```bash
-TASK_TRACKER=trello
-TRELLO_API_TOKEN=your-api-token        # required
-# TRELLO_API_KEY=your-api-key          # optional: use your own Power-Up
-# TRELLO_DEFAULT_BOARD_ID=abc123       # optional, first board if omitted
-# TRELLO_DEFAULT_LIST_NAME="To Do"     # optional, first list if omitted
-```
-
-See the [Trello Integration guide](./trello-integration.md) for step-by-step setup.
-
-### Azure DevOps
-
-```bash
-TASK_TRACKER=azure-devops
-AZURE_DEVOPS_ORG=your-organization
-AZURE_DEVOPS_PAT=your-personal-access-token
-AZURE_DEVOPS_PROJECT=YourProject
-```
-
-All three variables are **required**. Use the organization slug from your URL (`https://dev.azure.com/your-org/...` → `your-org`), not the full URL.
-
-Create a **Personal Access Token** at `https://dev.azure.com/your-org/_usersSettings/tokens` with **Work Items (Read & write)** and **Project and Team (Read)** scopes.
-
-**Project name**: must match exactly as shown in Azure DevOps (from the URL path or project picker). Work item types depend on your process template (Agile, Scrum, Basic, etc.).
-
-See the [Azure DevOps Integration guide](./azure-devops-integration.md) for step-by-step setup and troubleshooting.
-
-### Asana
-
-```bash
-TASK_TRACKER=asana
-ASANA_API_TOKEN=your-asana-pat
-# ASANA_DEFAULT_PROJECT_GID=2222222222222222  # optional, first project if omitted
-```
-
-Create a token at [https://app.asana.com/0/developer-console](https://app.asana.com/0/developer-console).
-
-**Project GID**: the numeric ID after `/project/` in your project URL (e.g. `https://app.asana.com/1/…/project/2222222222222222/list/…` → `2222222222222222`).
-
-See the [Asana Integration guide](./asana-integration.md) for step-by-step setup and troubleshooting.
-
-### GitHub Issues
-
-@devintern/pm creates issues in a repository via the GitHub REST API.
-
-```bash
-TASK_TRACKER=github
-GITHUB_TOKEN=ghp_xxxxxxxxxxxx
-GITHUB_REPO=your-username-or-org/your-repo
-```
-
-**Personal Access Token**: both types work; fine-grained is recommended:
-
-- **Fine-grained:** [Generate token](https://github.com/settings/personal-access-tokens/new) with **Issues: Read and write** on the target repo
-- **Classic:** [Generate token](https://github.com/settings/tokens/new) with `repo` scope (private repos) or `public_repo` (public repos only)
-
-See the [GitHub Issues Integration guide](./github-integration.md) for step-by-step setup, label mapping, and troubleshooting.
-
-### Markdown (local file export)
-
-```bash
-TASK_TRACKER=markdown
-# MARKDOWN_TASKS_DIR=.devintern-pm/tasks  # optional, defaults to .devintern-pm/tasks
-```
-
-Tasks are written as Markdown files under this directory (relative to the project root).
+With `markdown`, tasks are written as local Markdown files instead of being sent to a tracker.
 
 ## Agent Harness
 
-Configure which AI agent CLI runs when generating stories and tasks:
+DevIntern PM drafts stories by running an AI agent CLI on your machine.
 
-```bash
-# Which harness to use (default: claude-code)
-AGENT_HARNESS=claude-code
+| Variable / flag                         | Default                 | Purpose                                                                                                 |
+| --------------------------------------- | ----------------------- | ------------------------------------------------------------------------------------------------------- |
+| `AGENT_HARNESS` / `--harness`           | `claude-code`           | Agent to run. A comma-separated list enables failover (below).                                          |
+| `AGENT_MODEL` / `--model`, `-m`         | harness default         | Model string, in the harness's own format (e.g. `sonnet`, a Codex model ID, an `agy models` slug).      |
+| `AGENT_EFFORT` / `--effort`             | unset (no flag emitted) | Reasoning effort: `low`, `medium`, or `high`.                                                           |
+| `AGENT_CLI_PATH`                        | found on `PATH`         | Path to the agent binary, only if it is not on `PATH` or has a non-standard name.                       |
+| `<HARNESS>_CLI_PATH`, `<HARNESS>_MODEL` |                         | Per-harness path and model (e.g. `OPENCODE_CLI_PATH`, `GROK_MODEL`), used when `AGENT_*` doesn't apply. |
 
-# Optional: path to the agent executable (leave unset in most cases)
-# AGENT_CLI_PATH=/custom/path/to/claude
-```
+Flags override the environment for a single run. In interactive mode, `Ctrl+G` switches among installed agents. In the desktop app, **Settings → Agent model** and **Settings → Agent effort** save the same values to `.devintern-pm/.env`.
 
-In most cases you only need `AGENT_HARNESS`. By default each harness uses its standard command (for example `claude` for `claude-code`), and devintern locates it on your `PATH` automatically. Set `AGENT_CLI_PATH` only when the CLI is not on your `PATH` or uses a non-standard name.
+The binary is resolved from `AGENT_CLI_PATH`, then `<HARNESS>_CLI_PATH`, then the harness's default command on `PATH`.
 
-You can also override the harness for a single run with `--harness <name>` (CLI or interactive). In interactive mode, `Ctrl+G` opens a picker of installed agents; an explicit selection uses that harness's own path env vars and does not keep a previous `AGENT_CLI_PATH`.
+**Supported harnesses:**
 
-**Resolution order for the executable path:**
+| `AGENT_HARNESS`                | Binary         | Notes                                                                                                                                                                                                                                                          |
+| ------------------------------ | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `claude-code` (alias `claude`) | `claude`       | Required for Figma sources (with the Figma MCP server).                                                                                                                                                                                                        |
+| `opencode`                     | `opencode`     | On OpenCode v2, effort applies only when a model is set.                                                                                                                                                                                                       |
+| `codex`                        | `codex`        |                                                                                                                                                                                                                                                                |
+| `cursor`                       | `cursor-agent` | Enable the CLI in Cursor's settings.                                                                                                                                                                                                                           |
+| `grok`                         | `grok`         | Grok Build, from [x.ai/cli](https://x.ai/cli). Log in, or set `XAI_API_KEY`.                                                                                                                                                                                   |
+| `deepseek`                     | `reasonix`     | `npm i -g reasonix`, then set `DEEPSEEK_API_KEY` or run `reasonix setup`.                                                                                                                                                                                      |
+| `antigravity` (alias `agy`)    | `agy`          | [Install](https://antigravity.google/docs/cli/install); `ANTIGRAVITY_TOKEN` for CI. `gemini` still works but is deprecated.                                                                                                                                    |
+| `muse` (alias `muse-code`)     | `muse`         | Muse Code 1.4.9+, via Meta's installer (`curl -fsSL https://dev.meta.ai/install.sh \| sh`). Default model `muse-spark-1.2`. Set `META_API_KEY` for unattended runs (required on macOS under `nono`). See [Muse auth](https://dev.meta.ai/docs/muse-code/auth). |
+| `cline`, `goose`, `kimi`       | same as id     |                                                                                                                                                                                                                                                                |
+| `kilo-code`                    | `kilo`         |                                                                                                                                                                                                                                                                |
+| `qwen`                         | `qwen`         | Model can also be set in `~/.qwen/settings.json`.                                                                                                                                                                                                              |
+| `pi`                           | `pi`           | Effort applies only when a model is set.                                                                                                                                                                                                                       |
 
-1. `AGENT_CLI_PATH`
-2. Harness-specific env var (e.g. `OPENCODE_CLI_PATH` when `AGENT_HARNESS=opencode`)
-3. Harness default command, located on your `PATH` (e.g. `claude`)
-
-Common `AGENT_HARNESS` values include `claude-code` (alias `claude`), `opencode`, `codex`, `cursor`, `grok`, `deepseek`, `antigravity`, `cline`, `goose`, `kilo-code`, `kimi`, `muse`, and `qwen`. If you do need to set a path explicitly, run `which` for the harness binary (`claude`, `opencode`, `codex`, `cursor-agent`, `grok`, `reasonix`, `agy`, `cline`, `goose`, `kilo`, `kimi`, `muse`, or `qwen`).
-
-**Cursor note:** The Cursor harness uses Cursor's headless `cursor-agent` CLI (not a command named `cursor`). Cursor also installs an `agent` alias, but devpm looks for `cursor-agent` because other tools use the `agent` name too. Install Cursor and enable the CLI from Cursor's settings, then set `AGENT_HARNESS=cursor`.
-
-**Grok note:** Product name is Grok Build; the CLI binary is `grok`. Install from [x.ai/cli](https://x.ai/cli), authenticate (browser login or `XAI_API_KEY`), then set `AGENT_HARNESS=grok`.
-
-**DeepSeek note:** Harness id is `deepseek`; the CLI binary is `reasonix` (DeepSeek-Reasonix). Install with `npm i -g reasonix`, set `DEEPSEEK_API_KEY` (or run `reasonix setup`), then set `AGENT_HARNESS=deepseek`.
-
-**Antigravity note:** Harness id is `antigravity` (alias `agy`); the CLI binary is `agy`. Google retired consumer Gemini CLI on 2026-06-18 in favor of Antigravity CLI. Install from [antigravity.google/docs/cli/install](https://antigravity.google/docs/cli/install), authenticate (browser/keyring, or `ANTIGRAVITY_TOKEN` for CI), then set `AGENT_HARNESS=antigravity`. Legacy `AGENT_HARNESS=gemini` still routes to Antigravity with a deprecation warning. Prefer `AGENT_CLI_PATH` / `ANTIGRAVITY_CLI_PATH` / `AGY_CLI_PATH` over `GEMINI_CLI_PATH`.
-
-**Muse Code note:** Harness id is `muse` (alias `muse-code`); the CLI binary is `muse`. Install with Meta's one-line installer (`curl -fsSL https://dev.meta.ai/install.sh | sh`), confirm `muse --version`, then set `AGENT_HARNESS=muse` (or point `MUSE_CLI_PATH` / `AGENT_CLI_PATH` at the binary). DevIntern requires **Muse Code 1.4.9 or newer** (older builds lack `--disable-request-user-input` and fail with an upgrade message). Authenticate interactively on first run (`muse`, then browser sign-in or "Paste an API key"), or set `META_API_KEY` for unattended runs (`muse auth set` stores a key; `muse logout` clears stored credentials). The default model is `muse-spark-1.2`; override it with `AGENT_MODEL` or `--model`. `--effort`/`AGENT_EFFORT` maps to Muse's `--reasoning-effort`, and devpm's drafting run caps Muse with `--max-model-steps`; exhausting that budget fails the draft with Muse's step-limit diagnostic instead of being parsed as a completed story. DevIntern runs `muse exec`, passes `--disable-request-user-input` so drafting never blocks on a question, and uses `--disable-approval` when permissions are skipped — Muse's OS sandbox stays on, while egress is opened with `--sandbox-network enabled` because a headless draft cannot answer Muse's per-destination network review (the outer sandbox still enforces any configured domain allowlist). DevIntern never auto-emits `--yolo` and never auto-trusts the workspace, so project `AGENTS.md`/skills/hooks load only after you trust that checkout yourself. Muse has no headless plan mode; `readonly` uses Muse's `:read-only` permission profile, and a requested `plan` mode fails closed. Oversized prompts use `--prompt-file`; `--json` is used only when structured output is requested. On Linux the Muse sandbox needs a working bubblewrap and a non-musl build. On macOS under `nono`, DevIntern disables Muse's inner Seatbelt to avoid nested sandboxing (the outer wrapper remains the boundary) and therefore requires `META_API_KEY`: the stored `~/.config/muse/auth.json` credential is hidden from the run, so agent shell commands cannot read it. See [Muse Code authentication](https://dev.meta.ai/docs/muse-code/auth), [launch flags](https://dev.meta.ai/docs/muse-code/configuration#launch-flags), and [permissions](https://dev.meta.ai/docs/muse-code/permissions). A Muse exit code of `0` means the turn completed, not that generated tasks or tests are correct.
-
-**Kilo Code note:** Harness id is `kilo-code`; the CLI binary is `kilo`.
-
-**Qwen note:** Qwen Code accepts a model via `--model` (e.g. `qwen3-coder-plus`); you can also keep the model in `~/.qwen/settings.json`.
+A few harnesses have no model flag and ignore `AGENT_MODEL`. Harnesses without a reasoning-effort option ignore `AGENT_EFFORT` with a one-line warning.
 
 ### Failover on usage limits
 
-`AGENT_HARNESS` may list several harnesses, comma-separated, in priority order. The first entry is your preferred harness; later entries are fallbacks devpm switches to when the active harness reports a usage limit:
+List several harnesses in priority order to fall back when one hits its usage limit:
 
 ```bash
-# .devintern-pm/.env
 AGENT_HARNESS=opencode,grok
-# Optional: model for the fallback (otherwise grok's CLI default applies)
-# GROK_MODEL=grok-4.7
+# GROK_MODEL=grok-4.7   # optional model for the fallback
 ```
 
-- Unknown or not-installed entries are skipped with a warning; the first usable entry runs first. If the first entry is the one skipped, the entry that runs in its place is treated as a fallback: the first-entry settings below do not apply to it.
-- When a harness hits its usage limit, devpm prints one line on stderr (limited harness, reset time when known, next harness) and re-runs the same request on the next entry. Other failures, such as a non-zero exit or the turn limit, do not fail over.
-- Once a fallback succeeds, devpm keeps using it for the rest of that process, including the strict-JSON retry. Nothing is persisted; the next `devpm` run starts with the first entry again.
-- If every entry is usage-limited, the run fails with a message listing each limited harness.
-- `AGENT_MODEL`/`--model` and `AGENT_EFFORT`/`--effort` apply to the first entry only, because model ids are harness-specific. A fallback uses its own `<HARNESS>_MODEL` (for example `GROK_MODEL`, `CLAUDE_CODE_MODEL`) or its CLI default, and runs with its default effort. Likewise, `AGENT_CLI_PATH` applies to the first entry only; a fallback uses `<HARNESS>_CLI_PATH` or `PATH`.
-- `--harness <name>`, or picking a harness in the interactive picker, disables failover: only that harness runs.
+- devpm prints one line naming the limited harness and the next one, then retries the same request there. Other failures do not fail over.
+- Unknown or uninstalled entries are skipped with a warning. If every entry is limited, the run fails with a list of them.
+- `AGENT_MODEL`, `AGENT_EFFORT`, and `AGENT_CLI_PATH` apply to the first entry only; fallbacks use their `<HARNESS>_MODEL` / `<HARNESS>_CLI_PATH` or defaults.
+- A successful fallback is used for the rest of that run; the next run starts from the first entry again.
+- `--harness` or picking an agent in the interactive picker turns failover off. In the desktop app, picking an agent moves it to the front of the list (`opencode,grok` → `grok,opencode`).
 
-The DevIntern PM desktop app uses the same engine, so it fails over the same way when the project's `AGENT_HARNESS` lists several harnesses. Picking a harness in the desktop app moves it to the front of the list in `.devintern-pm/.env` and keeps the other entries as fallbacks. For example, picking `grok` with `AGENT_HARNESS=opencode,grok` saves `AGENT_HARNESS=grok,opencode`.
+## Other Settings
 
-### Model selection
+| Variable                                                         | Default | Purpose                                                                         |
+| ---------------------------------------------------------------- | ------- | ------------------------------------------------------------------------------- |
+| `DEVINTERN_VERBOSE=1` (or `--verbose`, `-v`)                     | off     | Log every API request, status, and retry. Useful for auth and network problems. |
+| `SENTRY_DISABLED=1`                                              | off     | Stop sending error reports (see below).                                         |
+| `DEVPM_NO_UPDATE=1` / `DEVINTERN_NO_UPDATE=1` (or `--no-update`) | off     | Skip the daily update check.                                                    |
+| `DEVPM_AUTO_UPDATE=1` / `DEVINTERN_AUTO_UPDATE=1`                | off     | Install updates without prompting, including in CI.                             |
+| `AGENT_SPAWN_ENOENT_RETRIES`                                     | `5`     | Retries when the agent binary is briefly missing during its own auto-update.    |
+| `AGENT_SPAWN_ENOENT_BACKOFF_MS`                                  | `1000`  | First retry delay for the above (doubles each attempt).                         |
 
-Set the model the agent harness runs with using `AGENT_MODEL` in `.devintern-pm/.env`:
+### Proxy
 
-```bash
-# .devintern-pm/.env
-AGENT_MODEL=sonnet
-```
+Set `HTTPS_PROXY`, `HTTP_PROXY`, and `NO_PROXY` (or lowercase forms) in your **shell**, not in `.devintern-pm/.env`, which loads too late. On Node.js 24.14+ or 25.4+ devpm enables proxy support automatically; on older Node, run with `NODE_USE_ENV_PROXY=1` or upgrade. Network errors print the underlying cause (e.g. `ECONNREFUSED`), never the proxy URL.
 
-The model string is harness-specific — see your harness's CLI docs for accepted values (e.g. Claude Code aliases like `sonnet`, Codex/OpenAI model IDs, Antigravity slugs from `agy models`). For a single run, override it with `--model <model>`; the flag wins over the environment. A few harnesses have no model flag and ignore the setting.
+### Error reporting
 
-In the DevIntern PM desktop app, set the same override per project from **Settings → Agent model**; it persists to `.devintern-pm/.env` (same file the CLI reads) and applies to new agent runs immediately.
+The CLI and desktop app send crash and error reports to DevIntern's Sentry. Prompts, ticket text, project paths, `.env` contents, and credentials are never sent. Opt out with `SENTRY_DISABLED=1` in your shell or `.devintern-pm/.env`; in the desktop app, turning off **Settings → Anonymous analytics** disables both analytics and error reporting.
 
-### Reasoning effort
+### Updates
 
-Alongside the model you can tune how deeply the agent reasons with `AGENT_EFFORT` in `.devintern-pm/.env`:
-
-```bash
-# .devintern-pm/.env
-AGENT_EFFORT=medium
-```
-
-Valid values are `low`, `medium`, and `high` (anything else fails with a clear error). Lower effort runs faster and cheaper; higher effort reasons more deeply. For a single run, override it with `--effort <level>`; the flag wins over the environment. Harnesses that expose reasoning effort emit it (Claude Code, Grok, Antigravity, and Reasonix via `--effort`, and Muse Code via `--reasoning-effort`; Cline via `--thinking`; Opencode v1 and Kilo Code via `--variant`; Codex via its `model_reasoning_effort` config override; pi composes it into the model string); harnesses that do not ignore it with a one-line warning. Because pi encodes effort in the model string, it only applies when a model is configured (`AGENT_MODEL` or `--model`); with no model set, pi ignores the effort and prints a one-line warning. OpenCode v2 removed `--variant` and folds the effort into the model reference (`provider/model#variant`), so on v2 it likewise only applies when a model is configured. When unset, no extra flags are emitted and behavior is unchanged.
-
-In the DevIntern PM desktop app, set the same override per project from **Settings → Agent effort**; it persists to `.devintern-pm/.env` and applies to new agent runs immediately.
-
-**Advanced spawn tuning** (rarely needed):
-
-```bash
-# Retry attempts when the agent CLI path is momentarily missing (e.g. during an auto-update)
-# Default: 5
-AGENT_SPAWN_ENOENT_RETRIES=5
-
-# Initial backoff delay in milliseconds between retries (doubles each attempt)
-# Default: 1000
-AGENT_SPAWN_ENOENT_BACKOFF_MS=1000
-```
-
-These control how devpm handles a brief window where the agent CLI symlink is missing because the tool is updating itself. The defaults are sufficient for all common auto-updaters.
-
-## Verbose API Logging
-
-Enable detailed API call logging for debugging:
-
-```bash
-DEVINTERN_VERBOSE=1
-```
-
-When set to `1` or `true`, every API request, response status, and retry attempt is printed to the console. This is useful for diagnosing authentication or connectivity issues. The same effect can be achieved at runtime by passing `--verbose` (or `-v`) to `devpm`.
-
-## Behind an HTTP Proxy
-
-devpm sends tracker, update, and other requests through a proxy when one of these variables is set in your shell environment:
-
-- `HTTPS_PROXY` / `https_proxy`
-- `HTTP_PROXY` / `http_proxy`
-- `NO_PROXY` / `no_proxy` (comma-separated hosts that bypass the proxy)
-
-On Node.js v24.14+ or v25.4+, devpm turns on Node's built-in proxy support at startup automatically. On older Node versions, run devpm with `NODE_USE_ENV_PROXY=1` (supported for `fetch` from Node v22.21 and v24.0), or upgrade Node:
-
-```bash
-NODE_USE_ENV_PROXY=1 devpm --prompt "..."
-```
-
-Set proxy variables in your shell, not in `.devintern-pm/.env`: that file loads after startup, too late to configure the proxy. When a request fails at the network level, devpm prints the underlying cause (for example `ECONNREFUSED` or `ENOTFOUND`), plus a hint if a proxy variable is set but Node is not using it. devpm never prints the proxy URL, since it can contain credentials.
-
-## No License Required
-
-@devintern/pm is free to use under the FSL license: it performs no license check, trial gate, or `LICENSE_KEY` validation. Just run `devpm init` and start creating tasks.
-
-## Environment File Location
-
-@devintern/pm searches for `.devintern-pm/.env` by traversing up from the current working directory to the project root (the nearest `.git` directory or your home directory). You can run `devpm` from any subdirectory of your project and it will find the correct config automatically.
-
-Run `devpm init` once per project to create this file (guided wizard in a terminal, or `devpm init --yes` for the template).
-
-## Error Reporting
-
-The CLI and the DevIntern PM desktop app report errors to DevIntern's Sentry project by default so failures can be detected and fixed quickly. What is reported:
-
-- Crashes and unhandled errors in the CLI and the desktop app's main process
-- Failed desktop-app operations: agent runs (generate/edit/decompose stories, create tasks) and other IPC operations, with the failing channel as context
-- Renderer errors: uncaught window errors, unhandled promise rejections, and React crashes (reported with a component stack)
-
-What is **never** reported: prompts, ticket text, project paths, `.env` contents, tokens, or credentials. Error payloads are scrubbed of token-like strings before they are sent.
-
-To opt out:
-
-```bash
-SENTRY_DISABLED=1
-```
-
-Set this in your shell environment or in `.devintern-pm/.env`. In the desktop app, you can also disable **Settings → Anonymous analytics**: that toggle gates both usage analytics and error reporting (forwarded renderer errors included), and can be changed while the app is running.
-
-## CLI Updates
-
-On startup, a globally installed `devpm` checks the npm registry (at most once per day) for a newer `@getdevintern/pm` version.
-
-| Mode                                            | Behavior                                                                                                |
-| ----------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| Interactive terminal                            | Offers an update prompt (`Update? (Y/n)`). Accepting installs the new version and re-runs your command. |
-| Non-interactive (CI, scripts, piped stdin)      | **Skips install** (safe default). Prints a one-line notice at most once per check window.               |
-| Opt-out                                         | `DEVPM_NO_UPDATE=1` (or `DEVINTERN_NO_UPDATE=1`) or `--no-update`                                       |
-| Opt-in auto-install (including non-interactive) | `DEVPM_AUTO_UPDATE=1` (or `DEVINTERN_AUTO_UPDATE=1`)                                                    |
-
-Only global npm or bun installs are updated. Monorepo checkouts, `bun link`, and local project `node_modules` installs are left alone.
-
-To upgrade immediately without waiting for the prompt or notice, reinstall globally with the package manager you installed with:
-
-```bash
-npm install -g @getdevintern/pm@latest
-# or
-bun install -g @getdevintern/pm@latest
-```
-
-Update-check state (last check time, seen version) is cached per package in `~/.devintern/update-check.json`; delete that file to force a fresh registry lookup on the next run.
+A globally installed `devpm` checks npm for a new version at most once a day. In a terminal it asks `Update? (Y/n)`; in CI and scripts it only prints a notice. Local and linked installs are never updated. To upgrade now: `npm install -g @getdevintern/pm@latest` (or `bun install -g`). Delete `~/.devintern/update-check.json` to force a fresh check.
 
 ## Troubleshooting
 
-**"Missing required environment variables"**
+**"Missing required environment variables"**: run `devpm init`, and check you set the variables for your `TASK_TRACKER` (see the [table above](#select-a-backend)).
 
-- Make sure you've run `devpm init` or copied `.env.example` to `.devintern-pm/.env`
-- Verify you've set the variables for your selected `TASK_TRACKER` (not every backend block)
+**"API error (401)" or "(403)"**: the token is wrong, revoked, or lacks permissions. See the Troubleshooting section of your tracker's guide: [Jira](./jira-integration.md#troubleshooting), [Linear](./linear-integration.md#troubleshooting), [Trello](./trello-integration.md#troubleshooting), [Azure DevOps](./azure-devops-integration.md#troubleshooting), [Asana](./asana-integration.md#troubleshooting), [GitHub](./github-integration.md#troubleshooting), [GitLab](./gitlab-integration.md#troubleshooting).
 
-**"API error (401)"**
+**"Unknown agent harness"**: check the spelling of `AGENT_HARNESS` against the list in the error, and make sure the CLI is installed and on `PATH` (or set `AGENT_CLI_PATH`).
 
-- Verify your API token is correct for the selected backend
-- Check that your credentials match your account
-- For GitHub fine-grained tokens on org repos, confirm an admin has approved the token
-- For Linear, confirm `LINEAR_API_KEY` is the raw `lin_api_…` value (no `Bearer` prefix), see the [Linear Integration guide](./linear-integration.md#troubleshooting)
-- For Azure DevOps, confirm all three variables are set and the PAT has **Work Items (Read & write)**: see the [Azure DevOps Integration guide](./azure-devops-integration.md#troubleshooting)
-- For Jira, confirm `JIRA_EMAIL` matches the account that created the API token, see the [Jira Integration guide](./jira-integration.md#troubleshooting)
-
-**"GitHub API error (403)" or "(422)"**
-
-- See the [GitHub Issues Integration guide](./github-integration.md#troubleshooting) for token permissions, repository access, and label setup
-
-**"Unknown agent harness"**
-
-- Check `AGENT_HARNESS` spelling (use kebab-case, e.g. `claude-code`, `grok`, `deepseek`)
-- The error lists every valid harness name; pick one from that list
-- Ensure the matching CLI is installed and on your `PATH`, or set `AGENT_CLI_PATH` / `<HARNESS>_CLI_PATH`
-
-**"Failed to parse story from agent output" / "malformed output"**
-
-- devpm automatically repairs common agent-output drift (markdown fences, narration, comments, trailing commas, unquoted keys, stray quotes) and re-runs the agent once with a strict-JSON reminder when repair isn't possible
-- If parsing still fails, the full agent output is saved to `/tmp/devpm-<step>-<timestamp>.log` — check the log to see what came back, then retry
-- Persistent failures usually mean the harness/model emits non-canonical JSON around long descriptions; switching harness (or pinning a different model) resolves it
+**"Failed to parse story from agent output"**: devpm already repairs common output problems and retries once. If it still fails, the raw output is saved to `/tmp/devpm-<step>-<timestamp>.log`. Persistent failures usually go away with a different harness or model.

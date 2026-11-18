@@ -1,4 +1,5 @@
-import type { OverviewRunningRun, RunRecord } from "@/lib/api";
+import type { RunRecord } from "@/lib/api";
+import type { OverviewRunningRun } from "@/lib/api-overview";
 import { groupRunAttempts, runGroupKey } from "@/lib/run-groups";
 import type { RunGroup } from "@/lib/run-groups";
 import { formatSpan } from "@/lib/utils";

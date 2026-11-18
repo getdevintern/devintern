@@ -4,74 +4,52 @@ sidebarLabel: "Multiple Repositories"
 description: "Use when one worker should serve several repositories or tracker teams: workspace.toml, routing rules, and isolated per-task worktrees."
 section: "Automation"
 order: 3
-dateModified: 2026-11-14
+dateModified: 2026-11-18
 ---
 
 # Workspaces (Multi-Repo Fleet)
 
-Workspace mode lets one `devintern worker` process serve every repository you automate. Instead of one worker per repo, you describe repositories once in `~/.devintern/workspace.toml`, then use either one default tracker query or several isolated team tracker sources.
+A workspace lets one `devintern worker` serve every repository you automate. You describe the repositories once in `~/.devintern/workspace.toml`, then poll either one default tracker query or several separate tracker teams. One automation license covers the whole workspace.
 
-The shortest path is `devintern worker init` inside a checkout: that writes a 1-repo workspace, validates `[defaults].task_query`, and asks about task pickup hours, conflict handling, and automatic CI repair. Add more repos later with `devintern worker add-repo`.
+`devintern worker init` inside a checkout writes a one-repo workspace. Add more later:
 
-Workspace mode runs under the same automation access as the rest of the worker: any Supporter, Team, or Business key covers it, and a signed-in user can first use the no-card Worker Pilot for 14 days with no task-count limit. One entitlement spans all applicable repositories in the fleet.
+```bash
+devintern worker scaffold        # create ~/.devintern/workspace.toml and .env
+cd ~/code/backend && devintern worker add-repo
+cd ~/code/frontend && devintern worker add-repo
+```
+
+`worker add-repo` adds a `[[repos]]` entry from the checkout's `origin` remote, merges new keys from its `.devintern-code/.env` into the shared `.env` (conflicting values go to that repo's `[repos.env]`), and seeds a routing rule for a Jira or Linear project key. Running it again is a no-op, and comments in `workspace.toml` are preserved. The repo's `.devintern-code/settings.json` needs no changes.
 
 ## How it works
 
-- Without `[[teams]]`, the worker polls `[defaults].task_query`. With teams, it creates one isolated tracker client, query, cursor, and dedupe scope per team.
-- A team can set `repo` for a fixed destination. A team spanning repositories omits `repo` and uses routing rules. A task runs only when its applicable rules agree on one repository; unmatched or ambiguous work is recorded rather than guessed. **A 1-repo workspace needs no routing rules** — N=1 already implies the only checkout (`devintern worker init` starts this way).
-- The worker manages a bare clone of each repository under `~/.devintern/repos/` and runs every task in a fresh, disposable worktree under `~/.devintern/worktrees/`. Your own checkouts are never touched. Worktrees are removed after a successful run, kept for debugging when a run fails, and swept after `worktrees_ttl_days` — at worker startup and then hourly while the worker runs.
-- Every task worktree is ready for the agent before it starts: git hooks are isolated when the worktree is created (so package postinstalls like lefthook cannot rewrite the shared `.git/hooks`), then dependencies are installed after the task's final branch is prepared by auto-detecting the package manager from the lockfile (bun/pnpm/yarn/npm, uv/poetry/pip, bundle, go, cargo, composer, maven, gradle). The install inherits the same layered workspace, repo, and team environment as the agent, including registry auth; if no lockfile is found or the install fails, the run continues with a warning — the agent can still set dependencies up itself.
-- The worker queue, cursors, PR registry, run records, and routing skips live at `~/.devintern/state/queue.db`. Worker auth, license, and relay state lives at `~/.devintern/state/code/`. Task subprocesses derive that path from their worker workspace context; regular CLI commands remain project scoped. `devintern worker init` copies an existing project sign-in there if the workspace has no session, and existing workspace credentials and relay pairing are carried forward from the old location. Use `devintern worker login` (or `devintern worker login --workspace /path/to/workspace.toml`) to sign in later. Worker-managed clones also exclude known `.devintern-code/` runtime files through `.git/info/exclude`, while new project `settings.json`, `.env.example`, and `automations.toml` remain stageable in task PRs. Checkouts under `/tmp` made from your own repository are not modified.
-- Agent runs use one workspace supervisor. The default global and per-repository limits are both 1; you can explicitly opt into bounded host concurrency as described below. One systemd unit (or one terminal) drives the whole fleet.
+- The worker keeps a bare clone of each repository under `~/.devintern/repos/` and runs each task in a fresh worktree under `~/.devintern/worktrees/`. Your own checkouts are never touched.
+- Before the agent starts, dependencies are installed by detecting the package manager from the lockfile. If that fails, the run continues with a warning.
+- Worktrees are removed after a successful run and kept after a failure for debugging, then deleted after `worktrees_ttl_days`.
+- Runs, queue, and schedule state live in `~/.devintern/state/queue.db`. Worker sign-in and relay pairing live in `~/.devintern/state/code/`; use `devintern worker login` to sign in.
 
-## workspace.toml
+## The workspace file
+
+A short example with two repositories and one tracker query:
 
 ```toml
 [workspace]
-worktrees_ttl_days = 7
-dashboard = true
-# dashboard_port = 4400
-# Batch automatic conflict resolution off-peak instead of instant (default "auto"):
-# conflict_resolution = "scheduled"
-# conflict_resolution_cron = "0 3 * * *"      # worker host timezone
-# conflict_resolution_interval = "1d"         # exactly one of cron / interval
-# Or turn it off entirely: conflict_resolution = "disabled"
-# conflict_resolution_model = "sonnet"        # cheaper model for conflict resolution (primary harness)
-# Merge the agent's own PRs once they are green and safe (off by default):
-# auto_merge = true
-# auto_merge_safe_paths = ["**/*.md", "docs/**"]   # merge with no agent run
-# auto_merge_deny_paths = ["**/migrations/**"]     # never auto-merge
-# auto_merge_review = true                          # agent decides the rest
-
-# Optional bounded host concurrency (see warning below):
-# [workspace.execution]
-# isolation = "best_effort_host"
-# max_concurrency = 4
-# max_concurrency_per_repo = 1
-
-# Optional non-loopback dashboard origins (reverse proxy); `tailscale serve`
-# is detected automatically. See dashboard.md#allowed-origins.
-# [dashboard]
-# allowed_origins = ["https://dash.example.internal"]
-# tailscale_autodetect = true
+worktrees_ttl_days = 7          # delete kept worktrees after this many days
+dashboard = true                # embedded dashboard on dashboard_port (default 4400)
 
 [defaults]
 tracker = "jira"
 task_query = "sprint in openSprints() AND labels = devintern"
-worker_task_args = "--create-pr"
-poll_interval = 60
-# pr_labels = ["devintern", "auto-pr"]
-# pipeline_file = "pipelines/default.json"   # optional fleet-wide pipeline
+worker_task_args = "--create-pr"  # flags for every task run
+poll_interval = 60                # seconds
+pr_labels = ["devintern"]         # GitHub only
 
 [[repos]]
 name = "backend"
 remote = "git@github.com:acme/backend.git"
-default_branch = "main"
-# pr_labels = ["backend"]
-# pipeline_file = "pipelines/backend.json"   # optional per-repo override
-# env_file = "env/backend.env"        # optional, relative to ~/.devintern
-# sync_team_prs = true                # optional: also base-sync teammates' open PRs
-  [repos.env]                         # optional per-repo overrides
+default_branch = "main"         # optional; default is the remote's HEAD
+env_file = "env/backend.env"    # optional, relative to ~/.devintern
+  [repos.env]
   GITHUB_REPO = "acme/backend"
 
 [[repos]]
@@ -84,374 +62,123 @@ project = "BACK"
 
 [[routing.rules]]
 repo = "frontend"
-project = "WEB"
 labels = ["frontend"]
-
-[worker]
-auto_update = true           # false disables the worker's idle CLI self-update
-
-[worker.schedule]
-active = ["22:00-06:00"]     # optional quiet hours: drain new tasks only at night
-blocked = []                 # subtract from active windows (conflicts resolve to quiet)
-timezone = ""                # blank = worker machine's local time
-catch_up_missed = true
-
-[[automations]]
-id = "backend-maintenance"
-enabled = true
-interval = "6h"
-repo = "backend"
-prompt = "Inspect the backend and implement one safe maintenance improvement."
-
-[[automations]]
-id = "weekly-frontend-cleanup"
-enabled = true
-cron = "0 9 * * 1"
-repo = "frontend"
-prompt = "Review the frontend and clean up one source of recurring noise."
 ```
 
-- `[defaults].tracker` picks the tracker for the single-source fleet query; any tracker with polling support works (Jira, Linear, GitHub Issues, GitLab Issues, Azure DevOps, Asana, Trello, Markdown).
-- `pr_labels` applies labels to every PR the fleet creates (GitHub only). A repo's `pr_labels` overrides `[defaults].pr_labels`. Outside a workspace, single-repo users get the same behavior by setting `PR_LABELS` (comma-separated) in `.devintern-code/.env`.
-- `pipeline_file` points at a standalone JSON pipeline definition. `[defaults].pipeline_file` is the fleet-wide fallback; a repo's `pipeline_file` overrides both it and the repo's checked-in `.devintern-code/settings.json` pipeline. See [Pipelines for the fleet and per repository](#pipelines-for-the-fleet-and-per-repository).
-- `sync_team_prs = true` (GitHub repos only, off by default) extends automatic base sync to teammates' open PRs and requires an explicit `AGENT_SANDBOX` provider. See [Syncing teammates' open PRs](./worker.md#syncing-teammates-open-prs).
-- Each repository follows its advertised `origin/HEAD` unless its `[[repos]]` entry sets an explicit `default_branch` override.
-- Repo names must be unique and filesystem-safe; they become directory names under `repos/` and `worktrees/`.
-- Rule criteria combine with AND; list values (`components`, `labels`) match when the task carries any of them. Comparisons are case-insensitive. `project` matches the task key prefix for `PROJ-123` style keys (Jira, Linear); trackers with numeric or opaque ids route via labels or components.
-- `[worker.schedule]` gates only new-task pickup: multiple windows union, windows may cross midnight, `blocked` wins on overlap, and a missed whole window triggers one catch-up drain at startup. Timezone/DST semantics and `devintern worker run-now` are covered in [Running the Worker Unattended: Working windows](./automated-task-processing.md#working-windows-quiet-hours).
-- `[worker].auto_update` keeps a globally installed CLI current while the worker is idle (checked at most daily, installed without interrupting work, restart on success). See [Running the Worker Unattended: Keeping the worker up to date](./worker.md#keeping-the-worker-up-to-date).
-- `[[automations]]` uses the same schema as single-repo `.devintern-code/automations.toml`. An entry must name `repo` when the workspace has more than one repository. `open_pr` (boolean, default `false`) decides whether occurrences open a pull request: opt-in per automation, and workspace-level `worker_task_args` never overrides it. `allow_no_changes` (boolean, default `false`) records an occurrence that changes nothing as a successful no-op instead of a failed run — use it for jobs whose prompt says to make no changes when nothing needs doing. See [Worker Daemon → Recurring automations](./worker.md#recurring-automations) for prompt-writing guidance and schedule semantics.
-- `[[estimations]]` schedules unattended story-point sweeps (tracker query + cron/interval, no `prompt`, no `repo`). An entry runs against `[defaults].tracker`, or against one team's tracker and credentials when it sets `team = "<team name>"`. That tracker must support estimation. See [Worker Daemon → Scheduled story-point estimation](./worker.md#scheduled-story-point-estimation).
-- `[[automations]]` and `[[estimations]]` entries may each set `harness` (one agent name), `model`, and `effort` (`"low"`, `"medium"`, or `"high"`) to run that schedule on a different agent than the workspace default. Precedence for an entry's runs is **entry field > team/repo env > workspace env > harness default**; omitted fields keep the existing workspace/repo/team values. A `model` without `harness` applies to the workspace's primary harness only (as its `<HARNESS>_MODEL`), so `model = "sonnet"` alone keeps failover and a fallback harness runs on its own default model. A pinned `harness` opts the entry out of failover; when it names a different agent than the workspace primary, an inherited `model`/`effort` and the primary's `AGENT_CLI_PATH` (plus the `CLAUDE_CLI_PATH` fallback for a non-`claude-code` pin) are dropped so the pinned agent uses its own binary and defaults. An unknown `harness` or an `effort` outside the three levels fails validation naming the entry id and field. A pinned `harness` whose CLI is not installed is warned about at worker startup and on reload, naming the entry. `effort` on a harness that does not support reasoning effort is ignored with a warning instead of failing the run. These overrides apply on live reload to subsequent occurrences; in-flight runs finish under the selection they started with. See [Worker Daemon → Choosing the agent per schedule](./worker.md#choosing-the-agent-per-schedule).
-- `[[error_monitors]]` maps each Sentry project to one repo and an optional team, with per-source credential layers for multi-project setups. See [Sentry Auto-fixes](./sentry-integration.md).
+Keys not shown here are documented on the page for their feature:
 
-### Bounded host concurrency
+| Keys                                                                                                     | Page                                                                               |
+| -------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| `[[automations]]`                                                                                        | [Recurring Automations](./automations.md)                                          |
+| `[[estimations]]`                                                                                        | [Story Points Estimation](./story-points-estimation.md#scheduled-estimation-with-the-worker) |
+| `[[error_monitors]]`                                                                                     | [Sentry Auto-fixes](./sentry-integration.md)                                       |
+| `[workspace].conflict_resolution*`, `auto_merge*`, `ci_failure_fix`; `[[repos]].sync_team_prs`, `auto_merge_safe_paths`, `auto_merge_deny_paths` | [PR Follow-up](./pr-follow-up.md)                     |
+| `[worker.schedule]`, `[worker].auto_update`, `[workspace].dashboard_port`                                | [Worker Daemon](./worker.md)                                                       |
+| `[dashboard].allowed_origins`, `tailscale_autodetect`                                                    | [Dashboard](./dashboard.md#allowed-origins)                                        |
+| `pipeline_file`                                                                                          | [below](#pipelines-for-the-fleet-and-per-repository)                               |
 
-By default the worker admits one agent job globally and one disposable-worktree task per repository. To process independent work concurrently, explicitly acknowledge the shared-host execution model:
+Notes on the keys above:
 
-```toml
-[workspace.execution]
-isolation = "best_effort_host"
-max_concurrency = 4
-max_concurrency_per_repo = 1
-```
+- `[defaults].tracker` can be any tracker with polling support.
+- A repo's `pr_labels` replaces `[defaults].pr_labels`. Outside a workspace, set `PR_LABELS` (comma-separated) in `.devintern-code/.env`.
+- Repo names must be unique and filesystem-safe; they become directory names.
 
-`max_concurrency` bounds all agent work across polling, relay events, retries, error monitors, reviews, mentions, CI fixes, conflict resolution, automations, estimations, and ad-hoc `worker add` tasks. `max_concurrency_per_repo` bounds task jobs that receive disposable worktrees in one repository. Shared-base jobs such as reviews and CI fixes remain serialized per repository even when the per-repository task limit is larger.
+## Routing tasks to repositories
 
-When jobs wait for the same slot, short pull-request work starts first: auto-merge checks, review and mention replies, and CI fixes, then conflict resolution, then automations, tasks, and estimations. Jobs of the same kind keep their order, and a job that has waited 15 minutes moves to the front, so a stream of merge checks cannot hold back a conflict resolution or automation indefinitely. An auto-merge check that is waiting shows **Waiting for a slot** as its step in the dashboard until it starts.
+A one-repo workspace needs no routing rules. With several repositories, each task must match rules that agree on exactly one repo. Tasks that match none, or match rules naming different repos, are recorded as skipped and not run; fix the rules or the task's labels, then edit the task.
 
-The limits are a live cap, not a one-time batch gate: polling keeps running while jobs are in flight, so each poll fills every free slot with newly available tasks, and a task is admitted as soon as an in-flight job frees its slot. The worker never admits more than the configured limits at once.
+| Rule key     | Matches                                                         |
+| ------------ | --------------------------------------------------------------- |
+| `repo`       | Target repository (required)                                    |
+| `project`    | Key prefix for `PROJ-123` style keys (Jira, Linear)            |
+| `labels`     | Any of the listed labels                                        |
+| `components` | Any of the listed components                                    |
+| `team`       | Limits the rule to one [team](#multiple-teams-and-tracker-boards) |
 
-Raising either limit above 1 requires the explicit `best_effort_host` value. This mode is **not a security or isolation boundary**. Concurrent jobs share the host kernel, network namespace, localhost ports, process table, Docker daemon, browser profiles, package-manager caches, and linked Git metadata. Typical consequences include `EADDRINUSE`, Docker Compose published-port conflicts, cache/profile lock contention, Git ref-lock failures, and several jobs consuming the same agent account quota. Leftover child processes from one run may affect another. Each tracker task still has a separate worktree, but that does not isolate those host resources.
+Criteria in one rule are ANDed, and comparisons are case-insensitive. Trackers with numeric ids route by labels or components.
 
-Use concurrency only for repositories and tasks that tolerate those conflicts. A later isolated execution mode will retain these capacity keys while running each workflow in its own private clone and microVM.
+## Multiple teams and tracker boards
 
-### Multiple teams and tracker boards
-
-Use `[[teams]]` when one worker must poll separate boards, tracker accounts, or tracker products. Each team has a stable name, tracker, query, and optional credential layers:
+Use `[[teams]]` when one worker polls separate boards, tracker accounts, or tracker products. Each team has its own query, polling state, and credentials:
 
 ```toml
 [[teams]]
 name = "platform"
 tracker = "jira"
 task_query = "project = PLAT AND labels = devintern"
-repo = "api"
+repo = "api"                    # every task from this team runs in api
 env_file = "env/platform.env"
 
 [[teams]]
 name = "growth"
 tracker = "linear"
 task_query = '{"team":{"key":{"eq":"GROW"}}}'
-repo = "web"
   [teams.env]
   LINEAR_API_KEY = "lin_api_..."
+
+[[routing.rules]]
+team = "growth"
+repo = "web"
+labels = ["web"]
 ```
 
-`repo` is a fixed mapping: every task acquired from that team runs in that repository, regardless of task labels or key shape. This is the simplest and safest setup when a tracker board belongs to one codebase. The named repository must exist in `[[repos]]`. A fixed team cannot also have team-scoped routing rules, because two competing routing models would make precedence unclear.
+- A team with `repo` sends every task to that repository and ignores routing rules. It cannot also have team-scoped rules.
+- A team without `repo` uses rules that name it plus rules with no `team`. It needs at least one applicable rule in a multi-repo workspace.
+- Credentials layer as workspace `.env`, then the team's `env_file`, then `[teams.env]`. The shared `.env` can also hold team-specific values named `<TRACKER>_<TEAM>_<SETTING>`, for example `JIRA_PLATFORM_API_TOKEN`. The team name is uppercased, and characters other than letters and digits become `_`.
+- Once any team exists, `[defaults].task_query` is no longer polled on its own. A workspace with only automations, estimations, or Sentry monitors needs no task query at all.
+- Connect each team to the [relay](./relay.md) separately: `devintern worker connect jira --team platform`.
 
-When one team owns several repositories, omit `repo` and add rules scoped to the team:
+## Pipelines for the fleet and per repository
 
-```toml
-[[teams]]
-name = "platform"
-tracker = "jira"
-task_query = "project in (PLAT, SRE) AND labels = devintern"
-env_file = "env/platform.env"
-
-[[repos]]
-name = "api"
-remote = "git@github.com:acme/api.git"
-
-[[repos]]
-name = "infra"
-remote = "git@github.com:acme/infra.git"
-
-[[routing.rules]]
-team = "platform"
-repo = "api"
-project = "PLAT"
-
-[[routing.rules]]
-team = "platform"
-repo = "infra"
-project = "SRE"
-
-[[routing.rules]]
-repo = "infra"
-labels = ["infrastructure"] # unscoped: available to every non-fixed team
-```
-
-Team routing follows these rules:
-
-- Rules naming another team are invisible. Rules naming the acquiring team and rules without `team` are applicable.
-- Set criteria are ANDed; lists are any-of. If applicable matches disagree on the repository, the task is recorded as ambiguous and not run.
-- An unfixed team in a multi-repo workspace must have at least one applicable rule. Tasks that match none are recorded as unrouted.
-- Fixed teams ignore unscoped routing rules and always use their configured `repo`.
-- In a one-repo workspace, omitting both `team.repo` and routing rules still selects the only repository.
-
-Credentials layer as workspace `.env` < team `env_file` < inline `[teams.env]` for tracker clients. Task subprocesses retain repository settings and then apply the acquiring team's credential layers, with `TASK_TRACKER` pinned to that team's tracker so comments and transitions go back to the correct board. Team cursor keys use `tracker:team` (for example `jira:platform`), so separate boards of the same tracker never share polling cursors or dedupe records.
-
-The shared `.env` can also namespace credentials as `<TRACKER>_<TEAM>_<SETTING>`. For example, `JIRA_PLATFORM_URL`, `JIRA_PLATFORM_EMAIL`, and `JIRA_PLATFORM_API_TOKEN` are projected onto Jira's normal variables only for team `platform`. Team names are uppercased and punctuation becomes `_`; team `env_file` and inline values still win.
-
-`[defaults].tracker` and `[defaults].task_query` are optional fallbacks for team entries. Once any `[[teams]]` exist, there is no separate defaults poller. Scheduled estimations without `team` still use `[defaults].tracker`; configure it explicitly for them, or set `team` on each `[[estimations]]` entry to estimate against that team's tracker ([per-team estimations](./worker.md#per-team-estimations)).
-
-Team `task_query` and `repo` changes live-reload along with routing rules. Team names, tracker types, `env_file`, and inline credentials are startup-only because changing them requires rebuilding tracker clients and detectors; restart the worker after changing those fields.
-
-Tracker relay registrations and `task.changed` envelopes carry the stable team name. Connect same-tracker boards separately with `devintern worker connect jira --team platform` and `devintern worker connect jira --team growth`; each tracker/team pair gets its own idempotent ingest URL and dispatches only to that exact team, even if task keys overlap. Unknown or removed teams are safely skipped and acknowledged. Legacy team-less buffered envelopes still use source-only routing when the tracker has one unambiguous source. GitHub repository relay is unchanged.
-
-Deploy the team-aware relay control plane before the matching CLI release. A new CLI against an old relay fails team-scoped registration with an actionable upgrade message; old CLI team-less registrations remain supported by the new control plane.
-
-### Pipelines for the fleet and per repository
-
-For the pipeline model itself — the default flow, required ordering, the
-`verify` step, the plugin API, and runnable examples — see the dedicated
-[Customizing the Task Pipeline](./pipelines.md) guide.
-
-Task delivery runs a configurable pipeline (`implement`, `commit`, optional `verify`/`auto-review`, `finalize`, plus any registered plugin steps). In a fleet the pipeline can be customized once for the whole workspace, per repository, or in the repository's own checkout. Declare a fleet-wide default in `[defaults]` and a per-repository override in `[[repos]]`:
+Set `pipeline_file` to a JSON pipeline definition (same schema as the `pipeline` block in `settings.json`) for the whole fleet in `[defaults]`, or for one repo in `[[repos]]`. Paths resolve against `~/.devintern`.
 
 ```toml
 [defaults]
-tracker = "jira"
-task_query = "labels = devintern"
-pipeline_file = "pipelines/default.json"    # fleet-wide fallback
+pipeline_file = "pipelines/default.json"   # fleet-wide
 
 [[repos]]
 name = "backend"
 remote = "git@github.com:acme/backend.git"
-pipeline_file = "pipelines/backend.json"    # this repo only
-
-[[repos]]
-name = "frontend"
-remote = "git@github.com:acme/frontend.git"
-# no pipeline_file: uses the fleet default (or the repo's settings.json)
+pipeline_file = "pipelines/backend.json"   # this repo only
 ```
 
-The referenced file is a JSON document with the same pipeline schema as `settings.json`:
+Exactly one pipeline runs per task, chosen in this order: the repo's `pipeline_file`, the repository's checked-in `.devintern-code/settings.json` pipeline, `[defaults].pipeline_file`, then the built-in default. Relative plugin and prompt paths in a `pipeline_file` resolve against that file's directory, so install plugin dependencies there. An invalid pipeline fails the run with the file named. See [Customizing the Task Pipeline](./pipelines.md) for steps and plugins.
 
-```json
-{
-  "plugins": ["./steps/check-policy.ts"],
-  "steps": [
-    { "use": "implement" },
-    { "use": "commit" },
-    { "use": "verify", "prompt": "./prompts/verify.md", "onFail": "loopback" },
-    { "use": "finalize" }
-  ]
-}
-```
+## Bounded host concurrency
 
-`pipeline_file` is resolved against the workspace directory (normally `~/.devintern`), so the example above reads `~/.devintern/pipelines/backend.json`.
-
-**Precedence.** Exactly one complete pipeline runs for a task; ordered step arrays are never merged across scopes. From highest to lowest:
-
-1. The routed repo's `[[repos]].pipeline_file` (workspace per-repository override).
-2. The repository's checked-in `.devintern-code/settings.json` `pipeline` block.
-3. `[defaults].pipeline_file` (workspace default).
-4. The built-in default (`implement → commit → auto-review → finalize`).
-
-Two repositories served by one worker can therefore run entirely different pipelines, and a repository that customizes nothing keeps the current flow.
-
-**Relative paths and plugin dependencies.** Relative `plugins` and `verify.prompt` paths in a `pipeline_file` resolve against the directory containing that file (for the example above, `~/.devintern/pipelines`), while a `settings.json` pipeline keeps resolving them against the repository root. Package plugin names resolve from the same base, so a shared plugin's dependencies must be installed next to the declaring file — install `pipeline_file` plugin dependencies in that file's directory (for the example above, `cd ~/.devintern/pipelines && bun add <package>`; a relative module such as `./steps/check-policy.ts` must live at `~/.devintern/pipelines/steps/check-policy.ts`), and repository plugin dependencies in the repository. A relative `verify.prompt` is treated as a file path **only when a file of that name exists** next to the declaring `pipeline_file`. When no such file exists the string is left relative, and the verify step then resolves it against the task working directory (the repository worktree) before falling back to using it verbatim as inline instructions. A misspelled or absent path therefore does not fail the run — it either silently picks up a same-named file in the repository or becomes a literal prompt — so verify the file resolves in the intended location before relying on it. Each task runs in its own CLI subprocess, so plugin registries never leak between tasks.
-
-**Validation.** Before implementation starts, the worker reads the selected definition, loads its plugins, and validates the step order. A missing file, invalid JSON, unknown step, or invalid ordering fails the run with the configuration scope, the file path, and the routed repository named — it never silently falls back to another scope. Step arrays from different scopes are not combined.
-
-**Flags.** A selected workspace pipeline is a complete definition; step arrays from different scopes are never merged. `--create-pr` and `--auto-review` keep their existing meaning: they decide whether `finalize` opens a PR and whether `auto-review` does work. Verification is a pipeline step (`{ "use": "verify" }`), not a CLI flag. These are operator-controlled fallbacks, not a fleet policy: enforcing non-bypassable steps is out of scope and will be designed separately. See [Customizing the Task Pipeline → Built-in steps and CLI flags](./pipelines.md#built-in-steps-and-cli-flags).
-
-**Live reload.** Changing a `pipeline_file` reference in `workspace.toml`, or editing the referenced JSON file, applies to subsequent task runs without restarting the worker. A task already in flight keeps the pipeline it selected. Task logs record the selection (scope, configuration path, and step sequence) without exposing secret values.
-
-### Automatic conflict resolution: `auto` vs `scheduled` vs `disabled`
-
-When a watched PR conflicts with its base branch, the worker normally resolves it right away (`conflict_resolution = "auto"`, the default — no behavior change on upgrade). Every resolution hands the conflicted files to the AI agent, which consumes tokens — even at 3am when nobody is reviewing the PR anyway.
-
-Set `conflict_resolution = "scheduled"` to batch those resolutions into an off-peak window. Polling still detects every conflict immediately and queues it (the PR stays conflicted until then, and the worker logs which mode is active at startup); the agent only runs inside the window:
+By default the worker runs one agent job at a time. To run independent jobs in parallel, opt in explicitly:
 
 ```toml
-[workspace]
-conflict_resolution = "scheduled"
-conflict_resolution_cron = "0 3 * * *"   # or conflict_resolution_interval = "1d"
+[workspace.execution]
+isolation = "best_effort_host"
+max_concurrency = 4              # all agent jobs across the workspace
+max_concurrency_per_repo = 1     # task worktrees per repository
 ```
 
-The schedule uses the same format as `[[automations]]`: a five-field cron expression (worker host timezone) or a positive `15m`/`6h`/`1d` interval — exactly one of the two. Exactly one window pass runs per occurrence; if the worker is down when the window arrives (a missed nightly run), the queued conflicts resolve on the first tick after restart. Inside a window the usual safety rules still apply: failed attempts wait out their retry backoff, PRs whose head is still moving wait out the quiet period, and anything not finished before the window closes (60 minutes by default, `WORKER_RESOLVE_WINDOW_GRACE_MINUTES`) waits for the next one. The window does not cut off a chain of sibling PRs mid-way, though: each conflict observed and each resolution attempt made while it is open keeps it open for at least 15 more minutes (enough for the auto-merge quiet period and CI on the PR just resolved, so the conflict its merge creates in the next sibling is still caught), but never longer than one extra grace period past its nominal end. A conflict first seen after an idle window has closed, or one that exhausted its retries, does not extend or reopen it. PRs merged upstream before the window opens are skipped — the worker re-checks GitHub's mergeability before invoking the agent.
-
-Two things are never delayed by scheduled mode: review feedback on the agent's PRs is addressed immediately as usual, and you can always run `devintern resolve-conflicts <pr-url>` by hand to fix one PR without waiting for the window — once GitHub reports the PR conflict-free, the queued event never triggers an agent run.
-
-The setting is workspace-wide (per-repo overrides are not supported in v1) and live-reloads with the rest of the runtime configuration. The tradeoff to keep in mind: between windows a conflicted PR cannot be merged, so on fast-moving branches where an instant rebase unblocks a waiting reviewer, `auto` stays the better choice. See [Worker Daemon → Merge conflicts on the agent's PRs](./worker.md#merge-conflicts-on-the-agents-prs) for how resolution itself works.
-
-**Choosing the agent.** Conflict resolution is usually mechanical, so it can run on a cheaper model than feature work. Set any of `conflict_resolution_harness`, `conflict_resolution_model`, and `conflict_resolution_effort` under `[workspace]`; they behave exactly like an automation's `harness` / `model` / `effort` (see [Worker Daemon → Choosing the agent per schedule](./worker.md#choosing-the-agent-per-schedule)) and apply to automatic resolution on GitHub (`auto` and `scheduled`) and GitLab (`auto`):
-
-```toml
-[workspace]
-conflict_resolution_model = "sonnet"     # a model id for your primary harness (here claude-code); failover still applies
-# conflict_resolution_harness = "codex"  # pin one agent (opts out of failover)
-# conflict_resolution_effort = "low"
-```
-
-A model-only setting applies to the workspace's primary harness and keeps failover. A pinned harness that hits a usage limit does not fail over: the resolution is deferred and retried on later polls, and after three consecutive deferrals the PR waits until its head or base moves again (or until you run `devintern resolve-conflicts <pr-url>`). Changes live-reload; a manual `devintern resolve-conflicts <pr-url>` uses the normal environment.
-
-Set `conflict_resolution = "disabled"` to turn automatic conflict resolution off entirely: the worker stops watching for conflicts on the agent's PRs altogether — no detection, no queuing, no agent runs. A PR that conflicts with its base simply stays conflicted until someone resolves it (by hand, or on demand via `devintern resolve-conflicts <pr-url>`). Review feedback and @mention handling are unaffected. This is a valid choice when the team prefers to rebase manually, or when the agent is not trusted to resolve conflicts in a sensitive repository.
-
-### Auto-merging safe PRs
-
-Set `auto_merge = true` to have the worker merge its own pull requests once they are green and safe, so docs fixes or new e2e tests do not wait in a review queue. It is off by default, applies only to the PRs the worker opened (the same watch list as review polling), and is GitHub-only for now.
-
-```toml
-[workspace]
-auto_merge = true
-auto_merge_safe_paths = ["**/*.md", "docs/**", "packages/*/tests/e2e/**"]
-auto_merge_deny_paths = ["**/migrations/**", "**/package.json", "bun.lock"]
-auto_merge_review = true          # ask the agent about PRs that leave the safe paths
-auto_merge_method = "squash"      # merge | squash | rebase
-auto_merge_review_label = "needs-human-review"  # label PRs left open; "" disables
-# auto_merge_model = "sonnet"     # also auto_merge_harness / auto_merge_effort
-
-[[repos]]
-name = "api"
-remote = "git@github.com:acme/api.git"
-auto_merge_safe_paths = ["e2e/**"]  # replaces the workspace list for this repo
-```
-
-Each candidate PR goes through these gates in order, and any "no" leaves it open for a human:
-
-1. **Ready.** The PR is open, not a draft, not from a fork, and GitHub reports it mergeable with passing checks (`mergeable_state` is `clean`), so failing, pending, or conflicting PRs wait. Branch protection still applies: a PR that needs an approval is `blocked` and waits. No reviewer's latest review requests changes, and the head commit has not moved for 5 minutes (`WORKER_AUTO_MERGE_QUIET_SECONDS`).
-2. **Deny paths.** If any changed file matches `auto_merge_deny_paths`, or a built-in deny path (`.github/**`, `**/CODEOWNERS`, `.devintern-code/**`), the PR is never auto-merged.
-3. **Safe paths.** If every changed file matches `auto_merge_safe_paths`, the PR merges right away. No agent runs, so no tokens are spent.
-4. **Agent review.** Otherwise, with `auto_merge_review = true` (the default), the agent reads the diff in a checkout of the PR and returns a verdict. The PR merges only on an explicit "safe". A missing or malformed verdict never merges. The verdict must be the last line of the agent's final answer on stdout; JSON anywhere else, including the agent's transcript or stderr, is ignored. With `auto_merge_review = false`, PRs outside the safe paths are left open.
-
-Globs are repo-relative ([`Bun.Glob`](https://bun.sh/docs/api/glob) syntax). `docs/` is shorthand for `docs/**`. A rename counts both its old and new path, so moving a source file into `docs/` is not docs-only. A per-repo list replaces the workspace list rather than extending it.
-
-The merge is pinned to the head SHA that passed the gates, and the PR is re-checked right before merging, so a commit pushed during the review is never merged unreviewed. Each decision is made once per head SHA and policy: a PR that was left open is evaluated again after new commits, or after you change its safe paths, deny paths, or `auto_merge_review`. The agent review runs at most once per head and policy. Changes to these settings live-reload.
-
-Every decision is also stated on the PR itself, in a single **status comment** that devintern creates on the first decision and edits in place afterwards, so pushes do not add new comments. A merged PR's comment names the merge method and commit, and the reason (safe paths, or the merge-safety review's verdict). A PR left open gets the reason and the next steps: for paths outside the safe list, the comment lists the files (up to 10) and suggests widening `auto_merge_safe_paths` or enabling `auto_merge_review`; for a deny-path hit, it names the file and the deny path; for a negative review, it quotes the agent's reason. "Not ready yet" checks post nothing. Only comments written by the worker's own GitHub credential are edited, and editing needs the same `Pull requests: Read and write` permission as posting.
-
-PRs left open for a human (including a check that kept failing) also get a **review label**, `needs-human-review` by default, so they stand out in the pull request list. GitHub creates the label on first use. When auto-merge later merges the PR, it removes the label. Set `auto_merge_review_label` to another name to use your own label, or to `""` to turn labeling off. Renaming the label does not re-evaluate PRs that were already decided. A failure to add or remove the label only logs a warning; it never blocks the merge.
-
-**Agent usage limits.** A review that hits the agent's usage limit never drops the PR. With failover, the next harness in the chain takes over. When every harness is limited, or `auto_merge_harness` pins one that is, the check is **Deferred** until the quota resets, using the reset time from the agent's limit message, or the same fallback cooldown as other worker jobs. The PR is not checked again before then, so no check is relaunched into the limit, and it is reviewed on the first pass after the quota returns. A deferral never counts against the PR's attempts. Ordinary failures (for example, an agent that returns no verdict) retry after 5 and then 10 minutes. After the third failure for the same commit, the status comment says the check kept failing, and the PR waits for new commits or a policy change.
-
-In the dashboard, each check shows in the run list with the **Auto-merge** origin while it runs. Merges stay as **Succeeded**, PRs left open as **Escalated** with the reason, and errors as **Failed**. Checks that end in "not ready yet" (for example, changes requested) are removed once they finish. The **Automations** page lists an **Auto-merge** entry while it is enabled, with the current policy. Its **Run now** checks every open PR immediately, skipping the quiet period and retry backoff. GitHub must still report each PR green and conflict-free.
-
-To check a PR by hand without merging it, run `devintern auto-merge <pr-url> --safe-path '**/*.md' --dry-run`. Flags: `--safe-path` and `--deny-path` (repeatable), `--no-review`, `--method`, `--review-label <name>` and `--no-review-label` (a manual run labels PRs it leaves open with `needs-human-review` by default). The dry run goes through every gate, including the agent review.
-
-### How workspace automations differ from single-repo ones
-
-The scheduling is identical; only where the work runs changes:
-
-- Each occurrence runs in the repo's persistent base worktree (`~/.devintern/worktrees/<repo>/base`) with the same layered environment as review work: shared `.env` → repo `env_file` → `[repos.env]`. When `open_pr = true`, dependencies are reinstalled after the occurrence prepares its final branch, so they stay aligned with its lockfile. Reuse resets the checkout to the fetched default branch first, so a previous occurrence's branch, stale commit, or tracked edits cannot become the next run's starting point; the previous branch itself is left intact.
-- It takes the normal per-repo run lock, so it never mutates a checkout concurrently with a task or PR run.
-- Occurrence task files land under the workspace home (`~/.devintern/automations/<id>/`), next to `repos/`, `worktrees/`, and the central database — not inside the repo worktrees.
-
-## Creating a workspace
-
-```bash
-devintern worker scaffold     # scaffold ~/.devintern/workspace.toml and .env
-cd ~/code/backend
-devintern worker add-repo     # add this repo to the workspace
-cd ~/code/frontend
-devintern worker add-repo
-
-devintern worker connect sentry # add a Sentry auto-fix project
-```
-
-`worker add-repo` reads the repo's origin remote and its `.devintern-code/.env`:
-
-- The remote becomes a `[[repos]]` entry (name derived from the remote, unique and filesystem-safe; default branch from `origin/HEAD` when it differs from the workspace default).
-- Env keys the workspace does not have yet are merged into the shared `.env`. Values that conflict with the workspace `.env` are kept repo-local in that repo's `[repos.env]`; nothing is silently overwritten.
-- When the repo's env carries a default project key (Jira or Linear), a starter routing rule is seeded for it.
-- Re-running `add-repo` for the same repo is a no-op. Hand-written comments in `workspace.toml` are preserved; new entries are appended.
-- `.devintern-code/settings.json` needs no migration: it travels with the repo and applies inside each task worktree.
-
-Once repos are registered you can dispatch one-off work without a tracker ticket. `devintern worker add --repo <name> --title "..."` enqueues a durable task pinned to that repo; see [Delegate Tasks to the Worker](./delegation.md).
+Raising either limit above 1 requires `isolation = "best_effort_host"`. This is **not an isolation boundary**: parallel jobs share the host's ports, processes, Docker daemon, caches, and agent quota, which can cause `EADDRINUSE`, port conflicts, and lock errors. Use it only for repositories whose tasks tolerate that. Reviews and CI fixes stay serialized per repository, and short PR jobs get slots before tasks.
 
 ## Environment
 
-Secrets live in one shared owner-only `~/.devintern/.env` (tracker credentials, `GITHUB_TOKEN`, agent settings). Worker setup and repository imports enforce mode `0600`. Advanced no-relay installations may also keep customer-owned GitHub App credentials there. Each repo can layer more on top:
-
-The workspace worker uses this shared `.env` even when started inside a repository. It does not load that repository's `.devintern-code/.env`; use the repo layers below for credentials that should differ by repository. Worker task subprocesses also use their composed workspace and repo layers instead of reading the checkout's local `.env`. Manual `devintern resolve-conflicts <pr-url>` and `devintern address-review <pr-url>` use the workspace and repo credential layers and the workspace login session when the current checkout and PR URL both match a registered repo. Other checkouts keep their project-local configuration.
+Secrets live in one owner-only `~/.devintern/.env`: tracker credentials, `GITHUB_TOKEN`, and agent settings. The worker does not read a checkout's `.devintern-code/.env`. Each repository can layer more on top, highest last:
 
 1. Shared workspace `.env`
-2. The repo's `env_file` (if set)
-3. Inline `[repos.env]` values (highest precedence)
+2. The repo's `env_file`
+3. Inline `[repos.env]` values
 
-For GitHub remotes the worker fills `GITHUB_REPO` automatically from the remote URL. For GitLab remotes it fills `GITLAB_PROJECT` with the API project path (`group/sub/repo`, subgroups preserved) for task, review, CI-fix, error-monitor, and automation subprocesses when the remote belongs to the tracker instance and no workspace-wide `GITLAB_PROJECT` selects a project first: `gitlab.com` remotes only while `GITLAB_BASE_URL` is unset or itself `gitlab.com`, and self-managed remotes only when their host matches the effective `GITLAB_BASE_URL` (configured with or without a protocol) or a `GITLAB_CODE_HOST_ALIASES` SSH alias whose `GITLAB_CODE_HOST_URL` resolves to the same instance as `GITLAB_BASE_URL`. Without `GITLAB_BASE_URL`, self-managed GitLab hosts and aliases are not detected; GitHub and Bitbucket remotes are never auto-pinned. Explicit `GITHUB_REPO` / `GITLAB_PROJECT` values in the workspace `.env`, the repo `env_file`, `[repos.env]`, or team layers win over derived values, so a workspace that centralizes GitLab issues in one project keeps using it. Team credentials are layered afterwards, so a derived pin is re-derived against the team's `GITLAB_BASE_URL`; a pin that no longer belongs to that instance is dropped rather than pointed at another host. The worker's polling loop and issue search still use the workspace or team `GITLAB_PROJECT`, not the per-repo pin, so keep a centralized tracker project in the shared `.env`. Automations inherit exactly the same layered environment as task and review runs, including these auto-pins.
+For GitHub remotes, `GITHUB_REPO` is filled in from the remote URL. For GitLab remotes on your tracker instance, `GITLAB_PROJECT` is filled in with the project path (`group/sub/repo`): `gitlab.com` remotes while `GITLAB_BASE_URL` is unset or `gitlab.com`, and self-managed remotes when their host (or a `GITLAB_CODE_HOST_ALIASES` alias) matches `GITLAB_BASE_URL`. A `GITHUB_REPO` or `GITLAB_PROJECT` you set in any layer, including a team's, wins over the derived value. Polling and issue search still use the workspace or team `GITLAB_PROJECT`, so keep a centralized tracker project in the shared `.env`. GitHub API calls for a repo use that repo's `GITHUB_TOKEN` layers, or a fixed team's credentials when one targets the repo. Artifact upload settings (`DEVINTERN_ARTIFACT_*`) use the same layers; see [upload configuration](./artifacts.md#files-sdk-uploader).
 
-Other trackers have no reliable repo-to-project mapping, so set per-repo project keys in the repo layers — for example `JIRA_DEFAULT_PROJECT_KEY`, `LINEAR_DEFAULT_TEAM_KEY`, `ASANA_DEFAULT_PROJECT_GID`, `AZURE_DEVOPS_PROJECT`, or `TRELLO_DEFAULT_BOARD_ID` in `env_file` / `[repos.env]`. Do not rely on `automation.repo` to derive them.
+Other trackers have no repo-to-project mapping, so set per-repo keys such as `JIRA_DEFAULT_PROJECT_KEY`, `LINEAR_DEFAULT_TEAM_KEY`, `ASANA_DEFAULT_PROJECT_GID`, `AZURE_DEVOPS_PROJECT`, or `TRELLO_DEFAULT_BOARD_ID` in the repo's `env_file` or `[repos.env]`.
 
-Artifact upload targets use the same layers: set `DEVINTERN_ARTIFACT_*` in the
-shared `.env` or a repo `env_file`. Select the built-in Files SDK uploader in
-the pipeline to use Cloudflare R2 or S3; see [upload configuration](./artifacts.md#files-sdk-uploader).
-GitHub review, CI, mention, and relay requests use the matching repo's `GITHUB_TOKEN` layers.
-When a fixed GitHub team targets that repo, its `env_file` and `[teams.env]` can override the
-token. Without a repo or team override, those requests use the workspace token.
+## Editing the config while running
 
-## Running
+The worker reloads `workspace.toml` a moment after you save it. Work already running finishes with the old config. Send `SIGHUP` to force a reload. A broken edit is logged and the last valid config keeps running.
 
-```bash
-devintern worker            # auto-detects ~/.devintern/workspace.toml
-devintern worker --workspace /path/to/workspace.toml
-```
+Most settings apply on reload, including repos, routing rules, queries, team `repo`, automations, estimations, pipelines, concurrency, and PR follow-up settings. These need a restart:
 
-The single-source fleet query comes from `[defaults].task_query`; multi-team workspaces use each team's `task_query`. A workspace with automations, estimations, or an enabled error monitor can omit the defaults query. Poll interval, per-task flags, and the embedded dashboard are also set in `workspace.toml` (`poll_interval`, `worker_task_args`, `[worker.schedule]` quiet hours, `[workspace].dashboard` / `dashboard_port`). Direct webhooks are an advanced repo-local service: run `devintern webhook serve` from that repository as a separate process. Automation and estimation schedule state and leases, plus task-polling and error-monitor deduplication state, live in the central workspace database.
+- team `name`, `tracker`, `env_file`, and `[teams.env]`
+- `[[error_monitors]]`
+- `[defaults].tracker` and tracker credentials in the workspace `.env`
+- `[worker.schedule]`
+- `[workspace].dashboard` and `dashboard_port`
 
-While the daemon is running you can request one immediate drain (for example while quiet hours are closed) with `devintern worker run-now`; see [Working windows](./automated-task-processing.md#working-windows-quiet-hours).
-
-### Editing workspace.toml while running
-
-The worker watches `workspace.toml` and reloads it automatically a moment after you save — no restart, and no missed tracker events or relay messages during the bounce:
-
-- **Routing rules, repos, defaults/team `task_query`, team `repo`, `[[automations]]`, `[[estimations]]`, `worker_task_args`, `pipeline_file` references, `poll_interval`, `worktrees_ttl_days`, execution concurrency limits, conflict-resolution mode/schedules, and `[worker].auto_update` apply to subsequent work.** Runs already in progress finish under the configuration they started with; everything picked up afterwards uses the new one. Lowering a concurrency limit does not cancel work already admitted. Changing a repo's `remote` updates its managed bare clone the next time that repo is prepared.
-- **Team identity and credentials are startup-only.** Restart after changing a team's name, tracker, `env_file`, or inline `[teams.env]` values.
-- **Error monitor clients are startup-only.** Restart after changing `[[error_monitors]]`, including project routing or source credentials.
-- **A broken edit never takes the daemon down.** The reload validates the file first; parse or schema errors are logged (naming the offending entries) and the last valid configuration keeps serving until you fix it. Rewriting identical content is ignored.
-- **Manual fallback:** send SIGHUP (`kill -HUP <pid>`) to force an immediate reload if file watching is unavailable on your system.
-- **Startup-only settings** still require a restart: tracker credentials in the workspace `.env` and `[defaults].tracker` (the tracker client and its detector are built once), `[worker.schedule]` quiet hours (the working-window gate is built once at startup), plus `[workspace].dashboard` / `dashboard_port`. A reload that changes one of these settings is rejected in full, so the active config remains internally consistent.
-
-`devintern worker init` can install and start a user-level systemd unit on Linux or launchd agent on macOS (declining keeps it manual and prints the commands). One service runs the whole workspace. For a hand-written Linux unit:
-
-```ini
-[Unit]
-Description=DevIntern fleet worker
-After=network-online.target
-
-[Service]
-ExecStart=/usr/local/bin/devintern worker
-Restart=on-failure
-WorkingDirectory=/home/you/.devintern
-
-[Install]
-WantedBy=multi-user.target
-```
-
-## Reviews, mentions, and the relay
-
-With GitHub credentials in the workspace `.env`, the fleet worker also reacts to PR activity across every GitHub repo in the workspace:
-
-- **The agent's own PRs**: one poller watches every PR the fleet created (the registry is shared across repos) and addresses actionable review feedback automatically. With `[workspace].ci_failure_fix = true`, it also repairs failing CI. Entries for repos no longer in `workspace.toml` are unwatched at startup.
-- **@mentions on any PR**: each GitHub repo gets a mention sweep. Mention-triggered runs are permission gated: the mentioning user needs write, maintain, or admin access, and a GitHub API error during the check is retried rather than treated as a denial. Fork PRs are skipped unless maintainer edits are allowed. Standard workspaces recognize the central `devintern-ai` identity through the relay and use `GITHUB_TOKEN` for local API calls. No-relay installations need an advanced customer-owned App.
-- **Relay (instant events)**: accept relay setup in `devintern worker init`; its durable pairing is stored owner-only under the workspace home and starts automatically with the worker. GitHub uses the central App. GitLab.com and Self-Managed projects receive automatically tested project hooks when local credentials have Maintainer or Owner access; only reference metadata reaches the relay, and every action re-fetches authoritative state locally. Tracker events re-run the applicable defaults/team query and then use the same fixed mapping or routing rules as polling. A tracker type used by several teams stays polling-only because current relay envelopes do not identify the team registration; the worker fails closed instead of guessing. Events for repositories not in the workspace are ignored.
-
-To reconnect after adding repositories, run `devintern worker connect`. The command walks every GitHub and GitLab repository in `workspace.toml`, skips verified GitHub App pairings, and creates or rotates GitLab hooks without manual URLs or secrets. `devintern worker connect status` reports GitHub and GitLab readiness independently. Use `devintern worker connect gitlab` for a focused repair, or add `--disconnect` to remove only remembered GitLab hooks/routes while preserving polling. Tracker targets such as `devintern worker connect linear --team growth` compose the selected team's credentials on top of the shared workspace `.env`.
-
-Review and mention runs execute as subprocesses in the repo's persistent base checkout under `~/.devintern/worktrees/<repo>/base`, with the same layered environment as task runs.
-
-## Skipped tasks
-
-Ambiguous and unmatched tasks are recorded in the workspace database with the rules that matched. Fix the routing rules (or the task's labels), touch the task, and the worker picks it up on the next change. Skips never loop: a skipped task is not retried until it changes.
+A reload that changes a restart-only setting is rejected as a whole.

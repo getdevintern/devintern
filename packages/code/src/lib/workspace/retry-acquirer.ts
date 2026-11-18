@@ -12,6 +12,7 @@
  * busy repo re-queues the row for the next tick.
  */
 
+import { startFirstTickInBackground } from "../acquirers/background-tick";
 import type { Acquirer } from "../../worker";
 import type { ScheduledRetry, ScheduledRetryStore } from "../state/run-retry";
 import type { TaskExecutionResult } from "../acquirers/task-polling";
@@ -61,8 +62,11 @@ export class RetryQueueAcquirer implements Acquirer {
   /** Start draining: immediate first tick, then on the configured interval. */
   async start(): Promise<void> {
     console.log(`🔁 Draining scheduled dashboard retries every ${this.options.intervalSeconds}s`);
-    await this.tick();
+    // Arm the interval first, then run the first tick in the background: the
+    // busy guard turns an interval fire during it into a no-op, and a long
+    // first tick must not hold later acquirers (see background-tick.ts).
     this.timer = setInterval(() => void this.tick(), this.options.intervalSeconds * 1000);
+    startFirstTickInBackground(this.name, () => this.tick());
   }
 
   stop(): void {
