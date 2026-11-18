@@ -68,18 +68,25 @@ Each task runs through the normal pipeline with `[defaults].worker_task_args` (d
 
 ### Ticket dependencies
 
-On Jira, Linear, and GitHub Issues, the worker picks up polled tickets in dependency order using the tracker's own "blocked by" links. Nothing needs to be turned on:
+The worker picks up polled tickets in dependency order. It reads the tracker's own "blocked by" links where the tracker has them, and a `Depends on:` line in the description where it does not. Nothing needs to be turned on:
 
-| Tracker       | Blockers it reads                                                                                          |
-| ------------- | ---------------------------------------------------------------------------------------------------------- |
-| Jira          | "Blocks" issue links where the ticket "is blocked by" another issue                                         |
-| Linear        | "Blocked by" relations                                                                                      |
-| GitHub Issues | Issue dependencies ("Blocked by"). If the repository or account does not have them, tickets run as before |
+| Tracker       | Blockers it reads                                                                                                        | Blocker counts as done                                                              |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------- |
+| Jira          | "Blocks" issue links where the ticket "is blocked by" another issue                                                       | "Done" status category                                                              |
+| Linear        | "Blocked by" relations                                                                                                    | Completed or canceled                                                               |
+| GitHub Issues | Issue dependencies ("Blocked by"). If the repository or account does not have them, tickets run as before                | Closed                                                                              |
+| GitLab        | "Is blocked by" linked items. Blocking links need GitLab Premium; on Free, tickets run as before                          | Closed                                                                              |
+| Azure DevOps  | Predecessor links                                                                                                         | State in the Completed or Removed category (for example Closed, Done, Removed)      |
+| Asana         | Task dependencies ("waiting on"). If the workspace's plan does not include them, tasks run as before                      | Completed                                                                           |
+| Trello        | A `Depends on:` line in the card description, naming cards by short link or card URL                                      | Archived, due date marked complete, or in a list named Done, Complete, or Closed    |
+| Markdown      | A `Depends on:` line in the task file, naming other tasks by key (filename without `.md`, or frontmatter `key`)           | Frontmatter `status` is Done, Complete, Completed, Closed, or Canceled              |
+
+For example, a Trello card description can contain `Depends on: aB3dE5fG, https://trello.com/c/Xy7Zq2Wv`, and a markdown task `Depends on: add-api, add-schema`. A `Depends on:` key that names no existing card or task keeps the ticket waiting with `not found`, so fix or remove it.
 
 A blocked ticket is held back without being started, transitioned, or commented on. The worker checks it again on the next poll, then less often while it keeps waiting (up to every 15 minutes). Editing the ticket triggers a check right away:
 
 - **A blocker the worker implemented** follows the same rules as [dependent ad-hoc tasks](./delegation.md#modes-merged-and-stacked). In `merged` mode (the default) the ticket waits until the blocker's PR merges. In `stacked` mode it starts on the blocker's branch once the blocker's run succeeded, and its PR targets that branch.
-- **A blocker the worker never handled** counts only once the tracker marks it done (Jira "Done" status category, Linear completed or canceled, closed GitHub issue).
+- **A blocker the worker never handled** counts only once the tracker marks it done (see the table).
 - **A blocker whose run failed, or whose PR was closed without merging,** keeps the ticket blocked. Marking the blocker done in the tracker, or re-running it, releases the ticket.
 
 Set the mode with `[defaults].dependency_mode`, or per team with `dependency_mode` in a [`[[teams]]`](./workspaces.md#multiple-teams-and-tracker-boards) entry. A blocker can only be stacked on within the same repository; a blocker in another repo is waited on until its PR merges.

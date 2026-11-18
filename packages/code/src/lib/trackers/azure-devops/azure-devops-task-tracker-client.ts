@@ -21,7 +21,7 @@ import type {
   TaskTrackerCommentContent,
 } from "../../../types/task-tracker";
 import { TaskTrackerError } from "../../../types/task-tracker";
-import type { TaskTrackerClient } from "../client";
+import type { TaskBlocker, TaskTrackerClient } from "../client";
 import {
   ESTIMATION_COMMENT_MARKER,
   formatAssessmentFailureMarkdown,
@@ -216,6 +216,20 @@ export class AzureDevOpsTaskTrackerClient implements TaskTrackerClient {
     }
 
     return resources;
+  }
+
+  /**
+   * Predecessor links (`System.LinkTypes.Dependency-Reverse`). A predecessor
+   * is done when its state's category is `Completed` or `Removed`, so custom
+   * process states count without configuration.
+   */
+  async getBlockers(taskKey: string): Promise<TaskBlocker[]> {
+    const predecessors = await this.azureClient.getPredecessors(this.toWorkItemId(taskKey));
+    return predecessors.map(({ id, state, done }) => ({
+      key: String(id),
+      ...(done !== undefined ? { done } : {}),
+      ...(state ? { status: state } : {}),
+    }));
   }
 
   async getRelatedWorkItems(task: Task): Promise<DetailedRelatedIssue[]> {

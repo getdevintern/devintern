@@ -20,7 +20,7 @@ import type {
   TaskTrackerCommentContent,
 } from "../../../types/task-tracker";
 import { TaskTrackerError } from "../../../types/task-tracker";
-import type { TaskTrackerClient } from "../client";
+import type { TaskBlocker, TaskTrackerClient } from "../client";
 import {
   ESTIMATION_COMMENT_MARKER,
   formatAssessmentFailureMarkdown,
@@ -63,6 +63,8 @@ export function parseAsanaTaskReference(value: string): string | null {
 }
 
 export class AsanaTaskTrackerClient implements TaskTrackerClient {
+  /** Set once the dependencies API answered 402 (warned once per client). */
+  private warnedDependenciesUnavailable = false;
   private asanaClient: AsanaClient;
   private apiToken: string;
   private defaultProjectGid?: string;
@@ -172,6 +174,30 @@ export class AsanaTaskTrackerClient implements TaskTrackerClient {
     }
 
     return resources;
+  }
+
+  /**
+   * Task dependencies ("waiting on"). A workspace whose plan lacks
+   * dependencies reports no blockers, warning once.
+   */
+  async getBlockers(taskKey: string): Promise<TaskBlocker[]> {
+    const dependencies = await this.asanaClient.getTaskDependencies(this.toTaskGid(taskKey));
+    if (!dependencies) {
+      if (!this.warnedDependenciesUnavailable) {
+        this.warnedDependenciesUnavailable = true;
+        console.warn(
+          "⚠️  Asana task dependencies are not available on this workspace's plan (402); " +
+            "tasks are not held back on their dependencies",
+        );
+      }
+      return [];
+    }
+    return dependencies.map(({ gid, completed }) => ({
+      key: gid,
+      ...(completed !== undefined
+        ? { done: completed, status: completed ? "completed" : "incomplete" }
+        : {}),
+    }));
   }
 
   async getRelatedWorkItems(_task: Task): Promise<DetailedRelatedIssue[]> {

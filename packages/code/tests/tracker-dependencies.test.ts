@@ -61,13 +61,20 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 describe("tracker capability", () => {
-  test("Jira, Linear, and GitHub model native blockers; others do not", () => {
-    expect(supportsDependencies("jira")).toBe(true);
-    expect(supportsDependencies("linear")).toBe(true);
-    expect(supportsDependencies("github")).toBe(true);
-    for (const tracker of ["gitlab", "azure-devops", "asana", "trello", "markdown", "nope"]) {
-      expect(supportsDependencies(tracker)).toBe(false);
+  test("every built-in tracker reports blockers; unknown trackers do not", () => {
+    for (const tracker of [
+      "jira",
+      "linear",
+      "github",
+      "gitlab",
+      "azure-devops",
+      "asana",
+      "trello",
+      "markdown",
+    ]) {
+      expect(supportsDependencies(tracker)).toBe(true);
     }
+    expect(supportsDependencies("nope")).toBe(false);
   });
 });
 

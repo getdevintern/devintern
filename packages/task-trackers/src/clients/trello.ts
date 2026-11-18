@@ -59,6 +59,18 @@ export interface TrelloCardDetail extends TrelloCard {
   shortUrl: string;
 }
 
+/** Completion state of a card, for dependency checks. */
+export interface TrelloCardStatus {
+  id: string;
+  shortLink: string;
+  /** Archived. */
+  closed?: boolean;
+  /** Due date marked complete. */
+  dueComplete?: boolean;
+  /** Name of the card's list (`Done`), when returned. */
+  listName?: string;
+}
+
 export interface TrelloAction {
   id: string;
   type: string;
@@ -378,6 +390,44 @@ export class TrelloClient {
       board: "true",
       board_fields: "id,shortLink",
     } as Record<string, string>);
+  }
+
+  /**
+   * Fetch a card's completion state: archived, due complete, and its list name.
+   *
+   * @param cardIdOrShortLink - Card ID, short link, or card URL.
+   * @returns The card's state, or `null` when the card does not exist (404).
+   * @throws When the Trello API request fails for another reason.
+   */
+  async getCardStatus(cardIdOrShortLink: string): Promise<TrelloCardStatus | null> {
+    const cardId = encodeURIComponent(this.normalizeCardId(cardIdOrShortLink));
+    const response = await fetchWithRetry(
+      this.buildUrl(`/cards/${cardId}`, {
+        fields: "id,shortLink,closed,dueComplete",
+        list: "true",
+        list_fields: "name",
+      }),
+      { method: "GET" },
+    );
+    if (response.status === 404) return null;
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Trello API error (${response.status}): ${errorText}`);
+    }
+    const card = (await response.json()) as {
+      id: string;
+      shortLink: string;
+      closed?: boolean;
+      dueComplete?: boolean;
+      list?: { name?: string } | null;
+    };
+    return {
+      id: card.id,
+      shortLink: card.shortLink,
+      ...(typeof card.closed === "boolean" ? { closed: card.closed } : {}),
+      ...(typeof card.dueComplete === "boolean" ? { dueComplete: card.dueComplete } : {}),
+      ...(card.list?.name ? { listName: card.list.name } : {}),
+    };
   }
 
   /**

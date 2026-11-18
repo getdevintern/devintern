@@ -36,6 +36,21 @@ export interface GitLabIssue {
   references?: { full: string };
 }
 
+/**
+ * A linked issue from the issue links API, with the link's type. A link of
+ * type `is_blocked_by` means the linked issue blocks the requested one.
+ */
+export interface GitLabIssueLink {
+  iid: number;
+  project_id: number;
+  /** `opened` or `closed`. */
+  state?: string;
+  /** `relates_to`, `blocks`, or `is_blocked_by`. */
+  link_type?: string;
+  /** Full reference (`group/sub/repo#12`), when the instance returns it. */
+  references?: { full?: string };
+}
+
 export interface GitLabIssueComment {
   id: number;
   /** Comment body in markdown. */
@@ -369,6 +384,21 @@ export class GitLabClient {
       }
       throw error;
     }
+  }
+
+  /**
+   * Issues linked to this one, with each link's type
+   * (`GET /projects/:id/issues/:iid/links`). Blocking link types
+   * (`blocks`, `is_blocked_by`) need GitLab Premium; on Free the API returns
+   * only `relates_to` links.
+   *
+   * @param issueIid - Project-scoped issue number.
+   * @returns Linked issues (the endpoint is not paginated).
+   * @throws When the GitLab API request fails.
+   */
+  async listIssueLinks(issueIid: number): Promise<GitLabIssueLink[]> {
+    const links = await this.request<unknown>(`${this.projectEndpoint}/issues/${issueIid}/links`);
+    return Array.isArray(links) ? (links as GitLabIssueLink[]) : [];
   }
 
   /**

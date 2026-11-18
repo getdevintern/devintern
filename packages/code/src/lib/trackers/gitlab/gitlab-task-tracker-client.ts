@@ -23,7 +23,7 @@ import type {
   TaskTrackerCommentContent,
 } from "../../../types/task-tracker";
 import { TaskTrackerError } from "../../../types/task-tracker";
-import type { TaskTrackerClient } from "../client";
+import type { TaskBlocker, TaskTrackerClient } from "../client";
 import {
   ESTIMATION_COMMENT_MARKER,
   formatAssessmentFailureMarkdown,
@@ -78,6 +78,8 @@ export class GitLabTaskTrackerClient implements TaskTrackerClient {
   private baseUrl: string;
   /** Mutually exclusive status label names swapped on transition. */
   private statusLabels: string[];
+  /** Configured project path (`group/sub/repo`) or numeric id. */
+  private projectPath: string;
 
   constructor(
     token: string,
@@ -85,6 +87,7 @@ export class GitLabTaskTrackerClient implements TaskTrackerClient {
     options?: { baseUrl?: string; statusLabels?: string[] },
   ) {
     this.token = token;
+    this.projectPath = projectPath;
     this.baseUrl = sanitizeGitlabBaseUrl(options?.baseUrl);
     this.gitlabClient = new GitLabClient({ token, projectPath, baseUrl: this.baseUrl });
     this.statusLabels = options?.statusLabels ?? [];
@@ -105,6 +108,38 @@ export class GitLabTaskTrackerClient implements TaskTrackerClient {
       tasks: result.issues.map((issue) => this.normalizeIssue(issue)),
       total: result.total,
     };
+  }
+
+  /**
+   * Issues linked to this one as "is blocked by". A blocker in the configured
+   * project is keyed by its iid, like polled tasks; one in another project is
+   * keyed by its full reference (`group/repo#12`). Blocking links need GitLab
+   * Premium; on Free the API returns only `relates_to` links, so there are no
+   * blockers.
+   */
+  async getBlockers(taskKey: string): Promise<TaskBlocker[]> {
+    const links = await this.gitlabClient.listIssueLinks(this.toIssueIid(taskKey));
+    const blockers = new Map<string, TaskBlocker>();
+    for (const link of links) {
+      if (link.link_type !== "is_blocked_by" || typeof link.iid !== "number") continue;
+      const key = this.blockerKey(link.iid, link.project_id, link.references?.full);
+      blockers.set(key, {
+        key,
+        ...(link.state ? { done: link.state === "closed", status: link.state } : {}),
+      });
+    }
+    return [...blockers.values()];
+  }
+
+  /** Iid for a same-project issue, else its full reference. */
+  private blockerKey(iid: number, projectId: number | undefined, fullReference?: string): string {
+    if (projectId !== undefined && String(projectId) === this.projectPath) return String(iid);
+    if (!fullReference) return String(iid);
+    const hash = fullReference.lastIndexOf("#");
+    const projectOfReference = hash > 0 ? fullReference.slice(0, hash) : "";
+    return projectOfReference.toLowerCase() === this.projectPath.toLowerCase()
+      ? String(iid)
+      : fullReference;
   }
 
   async getComments(taskKey: string): Promise<Comment[]> {

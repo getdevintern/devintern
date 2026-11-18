@@ -34,6 +34,9 @@ import { createDependencyMergeStateResolver } from "./fleet-event-acquirers";
 import type { UnknownMergeStateLookup } from "./injected-acquirer";
 import { MERGE_STATE_LOOKUP_COOLDOWN_MS, MERGE_STATE_LOOKUP_TIMEOUT_MS } from "./injected-acquirer";
 
+/** Trackers whose task keys are unique only within one team's source. */
+const TEAM_SCOPED_KEY_TRACKERS = new Set(["github", "gitlab", "markdown"]);
+
 /**
  * The gate's answer for one ticket. A stacked verdict's base is passed to the
  * task subprocess, which records the ticket's `stacked_on` only once its
@@ -55,7 +58,7 @@ export type TrackerDependencyGate = ((
 export interface TrackerDependencyGateOptions {
   /** Workspace DB (`state/queue.db`): runs, PR registry, gate state. */
   dbPath: string;
-  /** Tracker type of the polled source (`jira`, `linear`, `github`). */
+  /** Tracker type of the polled source (`jira`, `linear`, `github`, …). */
   tracker: string;
   /** Team of the polled source (multi-team workspaces). */
   team?: string;
@@ -167,13 +170,16 @@ export function createTrackerDependencyGate(
     return answers.some(Boolean);
   };
 
-  // A GitHub issue is keyed by its bare number, unique only within the
-  // team's repository: another GitHub-issue team's `12` is a different
-  // ticket, so only this team's runs count as handling a blocker locally.
-  // Jira and Linear keys are workspace-wide, so a blocker another team
-  // implemented still counts.
+  // A GitHub or GitLab issue is keyed by its bare number, unique only within
+  // the team's repository or project, and a markdown task by a slug unique
+  // only within the team's tasks directory: another team's `12` is a
+  // different ticket, so only this team's runs count as handling a blocker
+  // locally. Jira, Linear, Azure DevOps, Asana, and Trello keys are
+  // workspace-wide, so a blocker another team implemented still counts.
   const localScope =
-    options.tracker === "github" && options.team !== undefined ? { team: options.team } : undefined;
+    TEAM_SCOPED_KEY_TRACKERS.has(options.tracker) && options.team !== undefined
+      ? { team: options.team }
+      : undefined;
 
   const evaluateTicket = async (taskKey: string, repo: string): Promise<TrackerGateOutcome> => {
     let blockers: TaskBlocker[];

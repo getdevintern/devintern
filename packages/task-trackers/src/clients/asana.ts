@@ -38,6 +38,13 @@ export interface AsanaTask {
   permalink_url: string;
 }
 
+/** A task this one depends on (it must be completed first). */
+export interface AsanaTaskDependency {
+  gid: string;
+  /** Whether the dependency is completed, when returned. */
+  completed?: boolean;
+}
+
 export interface AsanaSection {
   gid: string;
   name: string;
@@ -564,6 +571,43 @@ export class AsanaClient {
    */
   async getTaskDetail(taskGid: string): Promise<AsanaTaskDetail> {
     return this.request<AsanaTaskDetail>(`/tasks/${taskGid}?opt_fields=${TASK_DETAIL_FIELDS}`);
+  }
+
+  /**
+   * Tasks this one depends on (`GET /tasks/:task_gid/dependencies`). Asana
+   * caps dependencies per task well below one page, so this is not paginated.
+   *
+   * @param taskGid - Task GID.
+   * @returns Dependencies with their completion state, or `null` when the
+   *   workspace's plan does not include dependencies (402 Payment Required).
+   * @throws When the Asana API request fails for another reason.
+   */
+  async getTaskDependencies(taskGid: string): Promise<AsanaTaskDependency[] | null> {
+    const response = await fetch(
+      `${this.baseUrl}/tasks/${taskGid}/dependencies?opt_fields=gid,completed`,
+      {
+        method: "GET",
+        headers: { Authorization: `Bearer ${this.apiToken}`, Accept: "application/json" },
+      },
+    );
+    if (response.status === 402) return null;
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Asana API error (${response.status}): ${errorText}`);
+    }
+    const json = (await response.json()) as { data?: unknown };
+    if (!Array.isArray(json.data)) return [];
+    const dependencies: AsanaTaskDependency[] = [];
+    for (const entry of json.data as unknown[]) {
+      if (typeof entry !== "object" || entry === null) continue;
+      const task = entry as Record<string, unknown>;
+      if (typeof task.gid !== "string" || !task.gid) continue;
+      dependencies.push({
+        gid: task.gid,
+        ...(typeof task.completed === "boolean" ? { completed: task.completed } : {}),
+      });
+    }
+    return dependencies;
   }
 
   /**

@@ -49,6 +49,24 @@ export interface AzureDevOpsWorkItemDetail {
   }>;
 }
 
+/** A predecessor work item (one that must finish before this one). */
+export interface AzureDevOpsPredecessor {
+  id: number;
+  /** `System.State` (`Active`), when the token can read the work item. */
+  state?: string;
+  /**
+   * Whether the state's category is `Completed` or `Removed`, when the work
+   * item and its type's states could be read.
+   */
+  done?: boolean;
+}
+
+/** Work item state categories that no longer block successors. */
+const DONE_STATE_CATEGORIES = new Set(["Completed", "Removed"]);
+
+/** Most ids the work items batch endpoint accepts per request. */
+const WORK_ITEMS_BATCH_LIMIT = 200;
+
 export interface AzureDevOpsComment {
   id: number;
   /** Comment text (HTML). */
@@ -68,6 +86,8 @@ export class AzureDevOpsClient {
   private projectsCache: AzureDevOpsProject[] | null = null;
   private workItemTypesCache = new Map<string, AzureDevOpsWorkItemType[]>();
   private workItemCache = new Map<string, { id: number; url: string }>();
+  /** State name → category, per project and work item type. */
+  private stateCategoryCache = new Map<string, Map<string, string>>();
 
   /**
    * Create an Azure DevOps WIT REST API client.
@@ -437,6 +457,89 @@ export class AzureDevOpsClient {
       fields: result.fields || {},
       relations: result.relations || [],
     };
+  }
+
+  /**
+   * Predecessors of a work item: its `System.LinkTypes.Dependency-Reverse`
+   * relations, with each predecessor's state and whether that state's
+   * category (`Completed`, `Removed`) means it is finished.
+   *
+   * @param id - Work item numeric ID.
+   * @returns Predecessors in relation order. One the token cannot read is
+   *   returned with its id only.
+   * @throws When an API request fails.
+   */
+  async getPredecessors(id: number): Promise<AzureDevOpsPredecessor[]> {
+    const item = await this.request<{ relations?: Array<{ rel?: string; url?: string }> | null }>(
+      `${this.baseUrl}/_apis/wit/workitems/${id}?$expand=relations&api-version=7.0`,
+    );
+    const ids: number[] = [];
+    for (const relation of item.relations ?? []) {
+      if (relation.rel !== "System.LinkTypes.Dependency-Reverse") continue;
+      const match = relation.url?.match(/\/workItems\/(\d+)$/i);
+      const predecessorId = match ? Number(match[1]) : NaN;
+      if (Number.isInteger(predecessorId) && !ids.includes(predecessorId)) ids.push(predecessorId);
+    }
+    if (ids.length === 0) return [];
+
+    const fields = new Map<number, Record<string, unknown>>();
+    for (let start = 0; start < ids.length; start += WORK_ITEMS_BATCH_LIMIT) {
+      const batch = ids.slice(start, start + WORK_ITEMS_BATCH_LIMIT);
+      const result = await this.request<{
+        value?: Array<{ id?: number; fields?: Record<string, unknown> } | null>;
+      }>(
+        `${this.baseUrl}/_apis/wit/workitems?ids=${batch.join(",")}` +
+          `&fields=System.State,System.WorkItemType,System.TeamProject` +
+          `&errorPolicy=omit&api-version=7.0`,
+      );
+      for (const entry of result.value ?? []) {
+        if (entry && typeof entry.id === "number") fields.set(entry.id, entry.fields ?? {});
+      }
+    }
+
+    const predecessors: AzureDevOpsPredecessor[] = [];
+    for (const predecessorId of ids) {
+      const itemFields = fields.get(predecessorId);
+      const state = itemFields?.["System.State"];
+      if (typeof state !== "string") {
+        predecessors.push({ id: predecessorId });
+        continue;
+      }
+      const type = itemFields?.["System.WorkItemType"];
+      const project = itemFields?.["System.TeamProject"];
+      const categories =
+        typeof type === "string"
+          ? await this.getStateCategories(typeof project === "string" ? project : "", type)
+          : undefined;
+      const category = categories?.get(state);
+      predecessors.push({
+        id: predecessorId,
+        state,
+        ...(category ? { done: DONE_STATE_CATEGORIES.has(category) } : {}),
+      });
+    }
+    return predecessors;
+  }
+
+  /**
+   * State name → state category (`Proposed`, `InProgress`, `Resolved`,
+   * `Completed`, `Removed`) for a work item type, cached per project and type.
+   */
+  private async getStateCategories(project: string, type: string): Promise<Map<string, string>> {
+    const targetProject = project || this.defaultProject;
+    const cacheKey = `${targetProject}\u0000${type}`;
+    const cached = this.stateCategoryCache.get(cacheKey);
+    if (cached) return cached;
+    const result = await this.request<{ value?: Array<{ name?: string; category?: string }> }>(
+      `${this.baseUrl}/${encodeURIComponent(targetProject)}/_apis/wit/workitemtypes/` +
+        `${encodeURIComponent(type)}/states?api-version=7.0`,
+    );
+    const categories = new Map<string, string>();
+    for (const entry of result.value ?? []) {
+      if (entry.name && entry.category) categories.set(entry.name, entry.category);
+    }
+    this.stateCategoryCache.set(cacheKey, categories);
+    return categories;
   }
 
   /**

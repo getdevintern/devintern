@@ -5,7 +5,7 @@
  * Estimation operations are not supported (Trello has no story-points concept).
  */
 
-import { TrelloClient } from "@devintern/task-trackers";
+import { TrelloClient, parseTrelloCardReference } from "@devintern/task-trackers";
 import type { TrelloAction, TrelloCardDetail } from "@devintern/task-trackers";
 import type {
   Comment,
@@ -16,7 +16,8 @@ import type {
   TaskTrackerCommentContent,
 } from "../../../types/task-tracker";
 import { TaskTrackerError } from "../../../types/task-tracker";
-import type { TaskTrackerClient } from "../client";
+import type { TaskBlocker, TaskTrackerClient } from "../client";
+import { extractDependsOn } from "../../utils/general";
 import {
   formatAssessmentFailureMarkdown,
   formatClarityAssessmentMarkdown,
@@ -28,6 +29,26 @@ import {
 import type { ClarityAssessmentLike } from "../shared/markdown-comment-formatter";
 import { mkdirSync, writeFileSync } from "fs";
 import path from "path";
+
+/** List names that mean a card is finished. */
+const DONE_LIST_NAMES = new Set(["done", "complete", "completed", "closed"]);
+
+/**
+ * Map a `Depends on:` token to a Trello card reference: a card URL
+ * (`https://trello.com/c/AbC12xYz/…`), a short link (8 letters/digits with at
+ * least one digit or capital after the first character, so plain words such as
+ * `database` are prose), or a 24-hex card id.
+ *
+ * @returns The short link or card id, or `undefined` when the token is not one.
+ */
+export function trelloDependencyKey(token: string): string | undefined {
+  const isUrl = /trello\.com\/c\//i.test(token);
+  const reference = isUrl ? parseTrelloCardReference(token) : token;
+  if (/^[0-9a-f]{24}$/i.test(reference)) return reference;
+  if (!/^[A-Za-z0-9]{8}$/.test(reference)) return undefined;
+  if (isUrl || /\d/.test(reference) || /[A-Z]/.test(reference.slice(1))) return reference;
+  return undefined;
+}
 
 export class TrelloTaskTrackerClient implements TaskTrackerClient {
   private trelloClient: TrelloClient;
@@ -65,6 +86,40 @@ export class TrelloTaskTrackerClient implements TaskTrackerClient {
       tasks.push(this.normalizeCard(detail));
     }
     return { tasks, total: result.total };
+  }
+
+  /**
+   * Trello has no native dependencies: blockers are the cards named on a
+   * `Depends on:` line of the card description, keyed by short link like
+   * polled cards. A card is done once archived, its due date is marked
+   * complete, or it sits in a list named Done/Complete/Closed. A card that does
+   * not exist stays a blocker (status `not found`) so a typo is visible.
+   */
+  async getBlockers(taskKey: string): Promise<TaskBlocker[]> {
+    const card = await this.trelloClient.getCardWithDetails(taskKey);
+    const self = new Set([card.id, card.shortLink, taskKey]);
+    const blockers = new Map<string, TaskBlocker>();
+    for (const reference of extractDependsOn(card.desc, trelloDependencyKey)) {
+      if (self.has(reference)) continue;
+      const status = await this.trelloClient.getCardStatus(reference);
+      if (!status) {
+        if (!blockers.has(reference))
+          blockers.set(reference, { key: reference, status: "not found" });
+        continue;
+      }
+      if (self.has(status.id) || self.has(status.shortLink)) continue;
+      const done =
+        status.closed === true ||
+        status.dueComplete === true ||
+        DONE_LIST_NAMES.has((status.listName ?? "").trim().toLowerCase());
+      const label = status.closed ? "archived" : status.listName;
+      blockers.set(status.shortLink, {
+        key: status.shortLink,
+        done,
+        ...(label ? { status: label } : {}),
+      });
+    }
+    return [...blockers.values()];
   }
 
   async getComments(taskKey: string): Promise<Comment[]> {
