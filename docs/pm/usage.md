@@ -4,61 +4,39 @@ sidebarLabel: "Using DevIntern PM"
 description: "Interactive drafting, source inputs, and posting flows for @devintern/pm."
 section: "Create Tasks"
 order: 1
-dateModified: 2026-11-12
+dateModified: 2026-11-18
 ---
 
 # DevIntern PM Usage Guide
 
-[DevIntern PM](https://devintern.com/pm-desktop/) is the primary way to create and review tickets. This guide covers the CLI for terminal workflows and automation.
+[DevIntern PM Desktop](https://devintern.com/pm-desktop/) is the main way to create and review tickets. This guide covers its Quick Capture shortcut and the `devpm` CLI for terminal workflows and automation.
 
 ## Quick Capture (Desktop)
 
-DevIntern PM Desktop can register an OS-level global shortcut so you can turn fleeting context into ticket drafts without switching apps:
+Turn on **Settings → Quick Capture** to get a global shortcut (default `Cmd+Alt+Q` on macOS, `Ctrl+Alt+Q` on Windows/Linux; you can record your own). The shortcut brings the app forward and opens a new ticket tab, prefilled from the clipboard: a Figma URL opens the **Figma** tab, a stack trace opens **Error log**, and other text opens **Prompt**. Other tickets and running agents keep working in the background.
 
-- Enable it in **Settings → Quick Capture**. The default binding is `Cmd+Alt+Q` on macOS and `Ctrl+Alt+Q` on Windows/Linux, and you can record any combination.
-- Invoking the shortcut focuses (or launches) the app and opens a **new** ticket workspace as the active tab — open tickets and running agents keep working in the background.
-- If the clipboard holds useful text, it is prefilled and the source tab is inferred automatically (Figma URL → **Figma**, stack-trace-like text → **Error log**, anything else → **Prompt**). An empty clipboard opens an empty Prompt field with the cursor ready.
-- If no project is configured yet, capturing just brings the app forward so you can finish setup first. If the shortcut is already taken by another app, Settings shows how to change the binding.
-
-## Interactive Mode (Recommended)
-
-The interactive mode provides a step-by-step terminal UI for creating tasks:
+## Interactive Mode
 
 ```bash
 devpm --interactive
+devpm --interactive --harness opencode   # use a different agent for this session
 ```
 
-Override the agent for a single session:
+The terminal UI walks you through:
 
-```bash
-devpm --interactive --harness opencode
-devpm --prompt "Add login" --harness codex
-```
+1. **Source type**: Figma URL, error log, or free-form prompt
+2. **Source input**: paste the URL, log, or requirements
+3. **Custom instructions** (optional)
+4. **Epic linking** (optional): Jira, Linear, Azure DevOps, and Asana only
+5. **Issue type**: Jira, Azure DevOps, GitHub, GitLab, and Markdown only. Task is the default.
+6. **Prompt style**: PM or Technical
+7. **Confirmation**
 
-The interactive mode will guide you through:
+Keys: `Enter` confirms, `Esc` goes back, `Ctrl+C` exits, `Ctrl+P` switches project, `Ctrl+G` switches agent (installed ones only). The header shows the active `Tracker/Project`, e.g. `Jira/PROJ`.
 
-1. **Source type selection**: Choose between Figma URL, error log, or free-form prompt
-2. **Source input**: Enter your Figma URL, error log, or requirements
-3. **Custom instructions** (optional): Add additional requirements or focus areas
-4. **Epic linking** (optional): Link the story to an existing epic. This step is skipped for trackers that do not support a real epic/parent hierarchy (Trello, GitHub Issues, and Markdown). Supported by Jira, Linear, Azure DevOps, and Asana.
-5. **Issue type** (Jira, Azure DevOps, GitHub, Markdown only): Select Story, Task, Bug, Epic, or enter a custom type. This step is skipped for Linear, Trello, and Asana, which do not support setting an issue type.
-6. **Prompt style**: Choose between PM style or Technical style
-7. **Confirmation**: Review your configuration before proceeding
+## CLI Mode
 
-**Features:**
-
-- Step-by-step guided workflow
-- Keyboard navigation (Enter to confirm, ESC to go back, Ctrl+C to exit)
-- Header shows active tracker and project as `Tracker/Project` (e.g., `Jira/PROJ`, `Trello/My Board`) so you always know your context
-- Press `Ctrl+P` at any step to switch to a different project without restarting
-- Press `Ctrl+G` at any step to switch AI agent harness (only installed CLIs are listed)
-- Visual preview of your configuration
-- No need to remember command-line flags
-- Works great for both technical and non-technical users
-
-## CLI Usage (For Power Users)
-
-For power users who prefer command-line flags:
+Pass one source and any options:
 
 ```bash
 devpm --figma <url> [options]
@@ -66,98 +44,44 @@ devpm --log <text> [options]
 devpm --prompt <text> [options]
 ```
 
-### Source Options (one required)
-
-- `--figma <url>`: Figma design node URL to analyze
-- `--log <text>`: Error log or bug report text to analyze
-- `--prompt <text>`: Free-form text describing requirements or features
-
-### Additional Options
-
-- `--epic, -e <key>`: Link the created story to an epic (e.g., PROJ-100). Ignored for trackers that do not support a real epic/parent hierarchy (Trello, GitHub Issues, GitLab, Markdown).
-- `--type, -t <type>`: Issue type (default: "Task"). Common types: Task, Story, Bug, Epic. Only applied by backends that support issue types (Jira, Azure DevOps, GitHub, Markdown); ignored by Linear, Trello, and Asana.
-- `--custom, -c <text>`: Additional custom instructions for the requirements
-- `--attach <path>`: Attach a local file for agent context (and upload on create when the tracker supports it). Repeatable. Supported: images, text/docs, PDF (not Office binaries such as `.docx`). Max 10 files.
-- `--style, -s <type>`: Prompt style: "pm" (default) or "technical"
-  - **pm**: Focuses on user stories and Given/When/Then acceptance criteria, non-goals, and success metrics
-  - **technical**: Adds a Technical Considerations section on top of the PM rubric
-- `--model, -m <model>`: AI model to use (e.g., "sonnet", "opus", or full model name). Overrides the `AGENT_MODEL` environment variable. The model string is harness-specific (see your harness's CLI docs); unsupported by a few harnesses (e.g. Antigravity accepts slugs from `agy models`).
-- `--effort <level>`: Reasoning effort for agent runs — `low`, `medium`, or `high`. Overrides the `AGENT_EFFORT` environment variable. Emitted only by harnesses that support reasoning effort (Claude Code, Grok, Antigravity, and Reasonix (`reasonix`) via `--effort`, and Muse Code via `--reasoning-effort`; Cline via `--thinking`; Opencode v1 and Kilo Code via `--variant`; Codex via its `model_reasoning_effort` config override; pi composes it into the model string); ignored by the others with a warning (the official `deepseek` harness is config-only and names the profile file in its warning). Because pi encodes effort in the model string, it only applies when a model is set (`AGENT_MODEL` or `--model`); with no model, pi ignores the effort with a warning. OpenCode v2 removed `--variant` and folds the effort into the model reference (`provider/model#variant`), so on v2 it likewise only applies when a model is set.
-- `--decompose`: Decompose the story into subtasks (default: off)
-- `--confirm`: Interactively confirm each subtask before creating
-- `--verbose, -v`: Enable verbose API logging for debugging (same as setting `DEVINTERN_VERBOSE=1`)
-- `--help, -h`: Show help message
+| Option                | Description                                                                                                                                           |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--figma <url>`       | Figma design node URL. Needs Claude Code with the [Figma MCP server](https://developers.figma.com/docs/figma-mcp-server/remote-server-installation/). |
+| `--log <text>`        | Error log or bug report.                                                                                                                              |
+| `--prompt <text>`     | Free-form requirements.                                                                                                                               |
+| `--epic, -e <key>`    | Link to an epic (e.g. `PROJ-100`). Ignored by Trello, GitHub, GitLab, and Markdown.                                                                   |
+| `--type, -t <type>`   | Issue type, default `Task` (e.g. Story, Bug, Epic). Ignored by Linear, Trello, and Asana.                                                             |
+| `--custom, -c <text>` | Extra instructions for the draft.                                                                                                                     |
+| `--attach <path>`     | Attach a local file (repeatable, max 10). See [Attachments](#attachments).                                                                            |
+| `--style, -s <style>` | `pm` (default: user story, Given/When/Then criteria, non-goals, success metrics) or `technical` (adds Technical Considerations).                      |
+| `--harness <name>`    | Agent to run for this command. See [Configuration](./configuration.md#agent-harness).                                                                 |
+| `--model, -m <model>` | Model for this run (overrides `AGENT_MODEL`); format depends on the harness.                                                                          |
+| `--effort <level>`    | `low`, `medium`, or `high` (overrides `AGENT_EFFORT`).                                                                                                |
+| `--decompose`         | Also break the story into subtasks.                                                                                                                   |
+| `--confirm`           | Confirm each subtask before it is created.                                                                                                            |
+| `--verbose, -v`       | Log API calls (same as `DEVINTERN_VERBOSE=1`).                                                                                                        |
+| `--no-update`         | Skip the update check for this run.                                                                                                                   |
+| `--help, -h`          | Show help.                                                                                                                                            |
 
 ### Examples
 
-**Figma designs:**
-
-> **Note**: Figma functionality requires the Figma MCP server to be installed and configured in your AI agent (Claude Code only).
-
 ```bash
-devpm --figma "https://www.figma.com/design/abc/file?node-id=123-456"
-devpm --figma "https://..." --epic PROJ-100
-devpm --figma "https://..." -c "Focus on accessibility"
-devpm --figma "https://..." --style technical --decompose
-devpm --figma "https://..." --type Task
-```
-
-**Error logs:**
-
-```bash
-devpm --log "Error: Cannot read property 'id' of undefined at line 42"
-devpm --log "$(cat error.log)" --epic PROJ-200 --type Bug
-devpm --log "Stack trace..." --style technical --model opus
-```
-
-**Free-form prompts:**
-
-```bash
-devpm --prompt "Add user profile settings page with theme preferences"
-devpm --prompt "$(cat requirements.txt)" --epic PROJ-300
-devpm --prompt "Implement OAuth login" --style technical --decompose
+devpm --figma "https://www.figma.com/design/abc/file?node-id=123-456" --epic PROJ-100
+devpm --log "$(cat error.log)" --type Bug --style technical
+devpm --prompt "Implement OAuth login" --decompose --confirm
 devpm --prompt "Refine checkout" --attach ./notes.md --attach ./shot.png
 ```
 
-## Chat Bot Mode
+## Attachments
 
-> **Alpha:** The chat bot is experimental and may not work properly. Expect bugs and breaking changes.
+Attach screenshots, transcripts, or specs with `--attach`, or the **Attach** control on the desktop app's Prompt and Error log tabs. The agent reads them while drafting. After the ticket is created, files are uploaded to it on Jira, Linear, Azure DevOps, Asana, Trello, and Markdown; GitHub and GitLab keep them as draft context only.
 
-Prefer creating tasks from Slack or Telegram? Run the bot daemon:
+Use images, `.md`, `.txt`, or `.pdf`. Office files such as `.docx` are rejected because agents can't read them reliably.
 
-```bash
-devpm connect telegram   # or: devpm connect slack
-devpm serve
-```
+## What Gets Created
 
-Mention the bot with a rough idea, refine the draft in a thread, and approve it to file the task. See the [Chat bot guide](./chat-bot.md) for details.
+Each draft includes a user story, Given/When/Then acceptance criteria with edge cases, non-goals, success metrics, technical considerations, and design notes (Figma) or reproduction steps (bugs). Drafts describe observable behavior rather than vague words like "fast" or "intuitive". With `--decompose`, subtasks are scoped to a single responsibility, about 1–2 days each, and linked to the story. See your [tracker's guide](./configuration.md#select-a-backend) for how each item maps to tracker objects.
 
-### Attachments
+## Chat Bot (Alpha)
 
-Attach local context files (screenshots, transcripts, roadmaps, specs) with `--attach` (CLI) or the Attach control in pm-desktop (Prompt and Error log tabs).
-
-- The agent reads attached files while drafting (Codex also receives images via native `-i` flags; other harnesses get file paths in the prompt).
-- After create, files are uploaded to the ticket when the tracker supports attachments: Jira, Linear, Azure DevOps, Asana, Trello, and Markdown. GitHub Issues has no file attachment API, so files stay draft-context only.
-- Prefer `.md`, `.txt`, `.pdf`, and images. Office formats such as `.docx` are rejected because coding agents cannot reliably read them.
-
-## How It Works
-
-1. **Input Analysis**: Your AI agent analyzes your input:
-   - **Figma designs**: Uses the Figma MCP integration to extract design specifications
-   - **Error logs**: Parses error messages and stack traces to identify root causes
-   - **Free-form prompts**: Interprets requirements and feature descriptions
-   - **Attachments** (optional): Local files listed for the agent to open before drafting
-2. **Story Creation**: Creates a comprehensive story with:
-   - User story format
-   - Acceptance criteria in Given/When/Then form, plus negative and edge cases
-   - Explicit non-goals and measurable success metrics
-   - Technical considerations
-   - Design notes (for Figma) or reproduction steps (for bugs)
-
-   Drafts avoid vague adjectives (e.g. "fast", "intuitive", "robust") in favor of observable, measurable behavior.
-3. **Epic Linking** (optional): Links the story to the specified epic. Only runs for trackers with a real epic/parent hierarchy (Jira, Linear, Azure DevOps, Asana). Skipped for Trello, GitHub Issues, and Markdown.
-4. **Attachment upload** (optional): Uploads attached files to the created issue when the tracker supports it.
-5. **Task Decomposition** (optional): Breaks down the story into subtasks that are:
-   - Focused on single responsibilities
-   - Completable within 1-2 days
-   - Properly linked to the parent story
+To draft tasks from Slack or Telegram instead, run `devpm connect slack` (or `telegram`) and then `devpm serve`. See the [Chat bot guide](./chat-bot.md).

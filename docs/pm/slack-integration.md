@@ -4,17 +4,15 @@ description: "Try the alpha @devintern/pm integration for creating tracker tasks
 section: "Create Tasks"
 order: 12
 sidebarHidden: true
-dateModified: 2026-11-12
+dateModified: 2026-11-18
 tags: ["slack", "devintern/pm", "integration", "chat", "bot"]
 ---
 
 # Slack Integration (Alpha)
 
-> **Alpha:** The Slack chat bot is experimental and may not work properly. Expect bugs and breaking changes, and do not rely on it for critical workflows yet.
+> **Alpha:** The Slack bot is experimental. Expect bugs and breaking changes.
 
-Draft and file tracker tasks without leaving Slack. Your team mentions the bot with a rough idea, refines the AI draft in a thread, and approves it to create the task in Jira, Linear, or any other supported tracker.
-
-The bot uses Slack's Socket Mode, so the [devpm chat bot](./chat-bot.md) connects outbound from your machine: no public URL, no request signing setup, and no app review. You create your own Slack app from a pre-filled manifest, so all tokens stay in your workspace and your `.devintern-pm/.env`.
+Draft and file tracker tasks from Slack with the [devpm chat bot](./chat-bot.md). You create your own Slack app from a pre-filled manifest; it uses Socket Mode, so no public URL or app review is needed.
 
 ## Create the app
 
@@ -24,7 +22,7 @@ From your project directory:
 devpm connect slack
 ```
 
-The command prints a link that opens Slack's "create an app from manifest" page with everything pre-configured: the bot user, the `/devpm` slash command, Socket Mode, and the required scopes (`app_mentions:read`, `chat:write`, `commands`, `reactions:read`, `reactions:write`, plus channel, group, and DM history).
+The command prints a link to Slack's "create an app from manifest" page with the bot user, `/devpm` slash command, Socket Mode, and scopes already filled in.
 
 1. Open the printed link, pick your workspace, and click Create
 2. Install the app: Settings, then Install App, then Install to Workspace
@@ -45,7 +43,7 @@ Invite the bot to a channel, then either:
 - Mention it: `@devpm users should be able to reset their password`
 - Or use the slash command: `/devpm users should be able to reset their password`
 
-The bot posts a drafted story in a thread with Create and Split into subtasks buttons. Reply in the thread to refine the draft, `type Bug` to change the issue type, `project PROJ` to retarget it, and approve with the Create button, a `create` reply, or a checkmark reaction. The bot posts the task link when it is filed.
+The bot replies with a draft in a thread. Refine it by replying, then approve with the **Create** button, a `create` reply, or a checkmark reaction. See [Using the bot](./chat-bot.md#using-the-bot) for thread commands.
 
 ## Troubleshooting
 
