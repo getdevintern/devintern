@@ -4,81 +4,47 @@ sidebarLabel: "Trello Integration"
 description: "Create Trello cards from AI drafts on the boards your team already uses."
 section: "Create Tasks"
 order: 5
-dateModified: 2026-11-12
+dateModified: 2026-11-18
 sidebarHidden: true
 ---
 
 # Create Trello Cards with DevIntern PM
 
-@devintern/pm creates Trello cards directly from AI-generated stories and tasks. Setup takes about a minute: you only need to generate an API token.
+DevIntern PM creates Trello cards from AI-drafted stories. It ships with a built-in Power-Up key, so you only need to authorize your account once.
 
-## How It Works
+## Prerequisites
 
-@devintern/pm ships with a built-in Trello Power-Up, so you don't need to register your own app. You just authorize your Trello account once and paste the token into your config.
-
-Each story becomes a card. Subtasks become checklist items on the parent card. Issue type selection and epic linking are both skipped: Trello does not expose Jira-style issue types or a native parent hierarchy.
+- A Trello account with at least one board that has at least one list.
 
 ## Setup
 
-### 1. Set the backend
+1. Set `TASK_TRACKER=trello` in `.devintern-pm/.env` (or run `devpm init`).
+2. Run `devpm`. It prints an authorization URL; open it, click **Allow**, and copy the token. You can also open the URL directly:
 
-In your `.devintern-pm/.env`:
+   ```
+   https://trello.com/1/authorize?expiration=never&scope=read,write&response_type=token&name=DevIntern&key=b2d5d1ced28b515c6eb66c40187400b0
+   ```
 
-```bash
-TASK_TRACKER=trello
-```
+3. Add the token:
 
-### 2. Generate your API token
+   ```bash
+   TRELLO_API_TOKEN=your-generated-token
+   ```
 
-Run `devpm`. If `TRELLO_API_TOKEN` is missing, it will print a direct authorization URL. Visit the URL, click **Allow**, and copy the token from the next page.
+The token does not expire; revoke it any time from your [Trello account settings](https://trello.com/u/me/account).
 
-Alternatively, you can generate the token manually at any time:
+| Variable                   | Required | Purpose                                                                                                   |
+| -------------------------- | -------- | --------------------------------------------------------------------------------------------------------- |
+| `TRELLO_API_TOKEN`         | yes      | Token from the authorization URL above.                                                                   |
+| `TRELLO_DEFAULT_BOARD_ID`  | no       | Board ID from the URL (`abc123` in `trello.com/b/abc123/My-Board`). Defaults to your first board.          |
+| `TRELLO_DEFAULT_LIST_NAME` | no       | Exact list title, e.g. `"To Do"`. Defaults to the first list (also used if the name doesn't match).        |
+| `TRELLO_API_KEY`           | no       | Your own Power-Up key, from [trello.com/power-ups/admin](https://trello.com/power-ups/admin) → **API Key**, if you need separate rate limits for heavy automation. |
 
-```
-https://trello.com/1/authorize?expiration=never&scope=read,write&response_type=token&name=DevIntern&key=b2d5d1ced28b515c6eb66c40187400b0
-```
-
-> The `expiration=never` parameter creates a long-lived token so you don't need to re-authorize periodically. You can revoke it at any time from your [Trello account settings](https://trello.com/u/me/account).
-
-### 3. Add the token to your config
-
-```bash
-TRELLO_API_TOKEN=your-generated-token
-```
-
-That's it. Run `devpm --interactive` to create your first card.
-
-## Optional Configuration
-
-### Default board and list
-
-Without these set, @devintern/pm uses your first board and first list. To pin a specific destination:
+## Usage
 
 ```bash
-TRELLO_DEFAULT_BOARD_ID=abc123
-TRELLO_DEFAULT_LIST_NAME="To Do"
+devpm --interactive
 ```
-
-**Finding your board ID:** Open the board in Trello and look at the URL, `trello.com/b/{boardId}/{board-name}`. The short alphanumeric segment is the ID (e.g. `abc123` in `trello.com/b/abc123/My-Board`).
-
-**List name:** Use the exact list title as shown on the board (e.g. `"To Do"`, `"Backlog"`). If the name doesn't match any list on the board, @devintern/pm falls back to the first list.
-
-### Using your own Power-Up
-
-If you need isolated rate limits (enterprise use, high-volume automation), register your own Power-Up:
-
-1. Go to [trello.com/power-ups/admin](https://trello.com/power-ups/admin) and create a new Power-Up
-2. Navigate to **API Key** tab → **Generate a new API Key**
-3. Add to your config:
-
-```bash
-TRELLO_API_KEY=your-own-api-key
-TRELLO_API_TOKEN=your-api-token
-```
-
-When `TRELLO_API_KEY` is set, it overrides the bundled key.
-
-## What Gets Created
 
 | devpm concept      | Trello object                     |
 | ------------------ | --------------------------------- |
@@ -86,24 +52,14 @@ When `TRELLO_API_KEY` is set, it overrides the bundled key.
 | Subtask            | Checklist item on the parent card |
 | Epic link          | Not supported (step is skipped)   |
 
+Issue type selection is also skipped.
+
 ## Troubleshooting
 
-**"Trello backend requires TRELLO_API_TOKEN"**
+**"Trello backend requires TRELLO_API_TOKEN"**: open the URL printed in the error, click **Allow**, and add the token.
 
-Visit the authorization URL printed in the error, click Allow, and add the resulting token to your `.devintern-pm/.env`.
+**"No Trello boards found" / "No lists found on Trello board"**: create a board, and at least one list on it.
 
-**"No Trello boards found"**
+**401 errors after it worked before**: the token was revoked. Check [account settings](https://trello.com/u/me/account) and authorize again.
 
-Your token authorized successfully but the account has no boards. Create at least one board in Trello first.
-
-**"No lists found on Trello board"**
-
-The target board exists but has no lists. Trello boards need at least one list before cards can be created.
-
-**API 401 errors after working previously**
-
-Your token was revoked. Go to [Trello account settings → Applications](https://trello.com/u/me/account) to check. Re-run the authorization flow to generate a new token.
-
-**Rate limit errors (429)**
-
-@devintern/pm uses the shared Power-Up key, which allows 300 requests per 10 seconds across all users. For a typical `devpm` run (3–5 API calls), this limit is never reached in practice. If you hit it under heavy automation, switch to your own Power-Up key via `TRELLO_API_KEY`.
+**Rate limit errors (429)**: the shared key allows 300 requests per 10 seconds across all users, far above a normal run. Under heavy automation, set your own `TRELLO_API_KEY`.
