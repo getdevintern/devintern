@@ -62,7 +62,7 @@ The doctor does not start the worker or edit anything. It never writes `workspac
 
 ## Agent failover
 
-Set `AGENT_HARNESS=codex,grok` (comma-separated, priority first) in the workspace `.env` so the worker keeps going when one agent hits a usage limit. Failover applies to every worker job: tracker tasks, PR review addressing, `@mention` runs, conflict resolution, scheduled automations, estimations, dashboard retries, and relay-driven work — except automations, estimations, or conflict resolution that pin their own `harness` (see [Choosing the agent per schedule](#choosing-the-agent-per-schedule)). Details: [Failover across multiple harnesses](./configuration.md#failover-across-multiple-harnesses).
+Set `AGENT_HARNESS=codex,grok` (comma-separated, priority first) in the workspace `.env` so the worker keeps going when one agent hits a usage limit. Failover applies to every worker job: tracker tasks, PR review addressing, `@mention` runs, conflict resolution, scheduled automations, estimations, dashboard retries, and relay-driven work — except automations, estimations, or conflict resolution that pin their own `harness` (see [Choosing the agent per schedule](#choosing-the-agent-per-schedule)). Details: [Failover across multiple harnesses](./agent-harness.md#failover-across-multiple-harnesses).
 
 When every harness in the chain is usage-limited, automation and estimation occurrences that come due are skipped (logged as `occurrence skipped: no agent harness is available until …`) and the schedule moves on to its next occurrence. They are not queued for catch-up. Dashboard **Run now** is rejected with the same reason. An entry that pins its own `harness` is skipped only while that harness is limited.
 
@@ -460,7 +460,7 @@ poll_interval = 60
 | `--workspace <path>` | Use this `workspace.toml` (default `~/.devintern/workspace.toml`, or `DEVINTERN_WORKSPACE_DIR`) |
 | `-v, --verbose`      | Verbose logging                                                                                 |
 
-Unattended automation is exactly where sandboxing the agent matters most: set `AGENT_SANDBOX=auto` in the workspace `.env` to confine agent runs to the project workspace. See [Sandboxing the Agent](./configuration.md#sandboxing-the-agent) for providers and setup.
+Unattended automation is exactly where sandboxing the agent matters most: set `AGENT_SANDBOX=auto` in the workspace `.env` to confine agent runs to the project workspace. See [Sandboxing the Agent](./sandboxing.md) for providers and setup.
 
 ## Keeping the worker up to date
 

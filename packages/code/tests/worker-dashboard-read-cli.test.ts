@@ -1,5 +1,13 @@
 import { Database } from "bun:sqlite";
-import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  setDefaultTimeout,
+  setSystemTime,
+  test,
+} from "bun:test";
 import { createHash } from "crypto";
 import {
   chmodSync,
@@ -256,14 +264,21 @@ describe("devintern worker read-only dashboard commands", () => {
           () => handleLogs(data, new URLSearchParams({ limit: "1", level: "info" })),
         ],
       ];
-      for (const [command, args, handler] of cases) {
-        const result = run(command, [...args, "--json"]);
-        expect({ args: [command, ...args], stderr: result.stderr, code: result.code }).toEqual({
-          args: [command, ...args],
-          stderr: "",
-          code: 0,
-        });
-        expect(JSON.parse(result.stdout)).toEqual(wire(handler()));
+      // Stats measure the in-progress run's busy time up to "now"; freeze the
+      // clock so the CLI call and the handler call see the same instant.
+      setSystemTime(new Date());
+      try {
+        for (const [command, args, handler] of cases) {
+          const result = run(command, [...args, "--json"]);
+          expect({ args: [command, ...args], stderr: result.stderr, code: result.code }).toEqual({
+            args: [command, ...args],
+            stderr: "",
+            code: 0,
+          });
+          expect(JSON.parse(result.stdout)).toEqual(wire(handler()));
+        }
+      } finally {
+        setSystemTime();
       }
 
       // Overview carries a generation timestamp; everything else must match.

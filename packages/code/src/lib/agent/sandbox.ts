@@ -671,7 +671,7 @@ export function buildSandboxDoctorReport(
 
   lines.push(
     "\nEnable by setting AGENT_SANDBOX in .devintern-code/.env or passing --sandbox <name>." +
-      "\nProvider setup guide: https://devintern.com/docs/code/configuration#sandboxing-the-agent",
+      "\nProvider setup guide: https://devintern.com/docs/code/sandboxing",
   );
   return { lines, nextRunFails };
 }

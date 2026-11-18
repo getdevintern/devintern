@@ -1400,15 +1400,10 @@ export function handleStats(data: DashboardData, params: URLSearchParams): ApiRe
 /**
  * Resolve worker liveness from the daemon's lock file.
  *
- * The worker writes `.worker.lock` under `.devintern-code/` of its working
- * directory (simple mode) or directly into the workspace home (fleet mode),
- * so both locations are consulted. A readable lock with a dead pid (a stale
- * lock left behind by a crashed worker) must not shadow a live lock in the
- * other location: the live lock wins, and `stopped` is only reported when
- * every readable lock belongs to a dead process. When no readable lock file
- * exists in either location, liveness is `unknown`: the worker may be
- * running elsewhere, and claiming "stopped" would be wrong. A lock from another
- * PID namespace (read inside a sandbox) is `unknown` too and beats a stale one.
+ * Both `.devintern-code/.worker.lock` (simple mode) and the workspace-home lock
+ * (fleet mode) are consulted. A live lock beats a stale (dead-pid) one; `stopped`
+ * only when every readable lock is dead. No readable lock, or one from another
+ * PID namespace (read inside a sandbox, and beats a stale one), means `unknown`.
  *
  * @param workingDir - Project root the dashboard was started from
  * @param workspaceDir - Workspace home whose lock is also consulted

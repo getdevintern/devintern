@@ -12,7 +12,7 @@ tags: ["troubleshooting", "bug-report", "diagnostics", "privacy"]
 
 `devintern report` files a bug report for DevIntern itself: the CLI, worker, pipeline, or agent integration. It gathers a redacted diagnostic bundle and shows exactly what will be sent before anything leaves your machine.
 
-Use it when a run completes with incorrect behavior, DevIntern crashes, a run fails in a way the output does not explain, or `devintern doctor` reports a problem that looks like a product defect. For tracker credentials, missing agent CLIs, usage limits, and failed verification checks, start with [doctor](configuration.md#readiness-check) and the relevant integration guide instead.
+Use it when a run completes with incorrect behavior, DevIntern crashes, a run fails in a way the output does not explain, or `devintern doctor` reports a problem that looks like a product defect. For tracker credentials, missing agent CLIs, usage limits, and failed verification checks, start with [doctor](advanced-settings.md#readiness-check) and the relevant integration guide instead.
 
 ## File a report
 
