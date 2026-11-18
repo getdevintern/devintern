@@ -17,7 +17,7 @@ import { agentSandboxPolicy, getSandbox } from "../agent/sandbox";
 import { harnessSpawnEnv } from "../agent/spawn";
 import { createHarnessLogSink } from "../observability/harness-logs";
 import { resolveOutputDir } from "../config/output-dir";
-import { getStoryPointsFieldForProject } from "../config/project-settings";
+import { getStoryPointsFieldForProject, resolveProjectKey } from "../config/project-settings";
 import type { TaskTrackerClient } from "../trackers/client";
 import type { ProjectSettings } from "../../types/settings";
 
@@ -85,6 +85,11 @@ export interface RunEstimationOptions {
   harness: AgentHarness;
   executablePath: string;
   taskKey: string;
+  /**
+   * Fetched task, used to resolve the project key for the story-points field
+   * override (Trello board / Asana project come from the ticket's `raw`).
+   */
+  task?: { raw: unknown };
   tracker: TaskTrackerClient;
   settings: ProjectSettings | null;
   skipComments: boolean;
@@ -108,6 +113,7 @@ export async function runEstimation(
     harness,
     executablePath,
     taskKey,
+    task,
     tracker,
     settings,
     skipComments,
@@ -267,7 +273,10 @@ export async function runEstimation(
           }
 
           // Discover or use configured estimation field
-          const projectKey = taskKey.split("-")[0];
+          // Resolve per tracker (Azure DevOps project, GitHub repo, Trello
+          // board, ...) like every other project-settings lookup; non-Jira ids
+          // such as `100` or `#42` carry no project prefix.
+          const projectKey = resolveProjectKey(taskKey, task);
           const configuredField = getStoryPointsFieldForProject(projectKey, settings);
           if (configuredField) {
             console.log(`📊 Using configured story points field: ${configuredField}`);
