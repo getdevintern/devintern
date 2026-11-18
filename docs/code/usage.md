@@ -39,7 +39,7 @@ You can mix a tracker task with local files: `devintern PROJ-123 ./extra-context
 | `--query <query>`                   |                 | Select tasks in bulk. Syntax depends on the tracker (see [Batch runs](#batch-runs)). `--jql` is a deprecated alias.                     |
 | `--create-pr`                       | off             | Push the branch and open a pull request after the run.                                                                                  |
 | `--pr-target-branch <branch>`       | repo default    | Base branch for the PR. Falls back to the repository default branch if the named branch does not exist on the remote.                   |
-| `--auto-review`                     | off             | Run the automatic review-and-fix loop after creating the PR (requires `--create-pr`). See [Auto-Review Loop](./configuration.md#auto-review-loop). |
+| `--auto-review`                     | off             | Run the automatic review-and-fix loop after creating the PR (requires `--create-pr`). See [Auto-Review Loop](./advanced-settings.md#auto-review-loop). |
 | `--auto-review-iterations <n>`      | `2`             | Maximum review-fix cycles for `--auto-review` (env: `AUTO_REVIEW_ITERATIONS`).                                                          |
 | `--no-git`                          | off             | Skip branch creation.                                                                                                                   |
 | `--no-auto-commit`                  | off             | Do not commit after the agent finishes.                                                                                                 |

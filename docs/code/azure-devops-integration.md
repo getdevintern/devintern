@@ -5,43 +5,52 @@ description: "Fetch Azure DevOps work items, run WIQL batches, implement with yo
 section: "Automation"
 order: 5
 sidebarHidden: true
-dateModified: 2026-11-12
+dateModified: 2026-11-18
 tags: ["azure-devops", "devintern/code", "integration"]
 ---
 
 # Implement Azure DevOps Work Items with DevIntern Code
 
-@devintern/code can implement work directly from Azure DevOps work items: fetch work item details and comments, run a feasibility check, move the item through workflow states, execute your AI agent, commit changes, open a pull request, and post results back to the work item.
+DevIntern Code reads an Azure DevOps work item (description, tags, attachments, comments, and linked parent/child/related items), checks that it is clear enough to implement, moves it through workflow states, runs your coding agent, opens a pull request, and posts the result back on the work item. HTML descriptions are converted to Markdown for the agent, and comments are posted back as HTML.
 
 ## Prerequisites
 
-- [Bun](https://bun.sh) and `@getdevintern/code` installed globally
-- Azure DevOps Personal Access Token (PAT) with Work Items read/write
-- Git repository for your project
+- `@getdevintern/code` installed and a Git repository for your project
+- A Personal Access Token (User settings → Personal access tokens) with **Work Items (Read and write)**
 
 ## Setup
 
-### 1. Set the task tracker
+Set in `.devintern-code/.env`:
 
-In `.devintern-code/.env`:
+| Variable               | Required | Description                                             |
+| ---------------------- | -------- | ------------------------------------------------------- |
+| `TASK_TRACKER`         | Yes      | `azure-devops`                                          |
+| `AZURE_DEVOPS_ORG`     | Yes      | Organization: the segment after `dev.azure.com/`        |
+| `AZURE_DEVOPS_PAT`     | Yes      | Personal Access Token                                   |
+| `AZURE_DEVOPS_PROJECT` | Yes      | Name of the project that contains your work items       |
+
+## Run a task
+
+Pass a work item ID or full URL:
 
 ```bash
-TASK_TRACKER=azure-devops
+devintern 4211 --create-pr
+devintern https://dev.azure.com/your-org/YourProject/_workitems/edit/4211 --create-pr
 ```
 
-### 2. Add Azure DevOps credentials
+Batch runs take [WIQL](https://learn.microsoft.com/en-us/azure/devops/boards/queries/wiql-syntax), scoped to your project. The first 100 matches run in sequence:
 
 ```bash
-AZURE_DEVOPS_ORG=your-organization
-AZURE_DEVOPS_PAT=your-pat-token
-AZURE_DEVOPS_PROJECT=YourProject
+devintern --query "SELECT [System.Id] FROM WorkItems WHERE [System.State] = 'New'" --create-pr
 ```
 
-The organization is the segment after `dev.azure.com/` in your URLs. Create the PAT under User settings, Personal access tokens, with the **Work Items (Read and write)** scope. The project is the project name that contains your work items.
+Use `--skip-clarity-check` to skip the feasibility check and `--skip-comments` to skip comments and state changes.
 
-### 3. Configure state transitions
+`--estimate` writes `Microsoft.VSTS.Scheduling.StoryPoints` (Agile template default). For another field, such as `Effort` in Scrum, set `storyPointsField` for the project. See [Story Points Estimation](./story-points-estimation.md).
 
-Edit `.devintern-code/settings.json` using the project name as the project key:
+## Status mapping
+
+Configure states in `.devintern-code/settings.json`, keyed by the project name. Names must match the states of your work item types (for example `New`, `Active`, `Resolved`, `Closed` in the Agile template).
 
 ```json
 {
@@ -57,82 +66,21 @@ Edit `.devintern-code/settings.json` using the project name as the project key:
 }
 ```
 
-State names must match the workflow states of your work item types (for example `New`, `Active`, `Resolved`, `Closed` in the Agile template). @devintern/code moves work items to:
+| Field              | When it is applied                                   |
+| ------------------ | ---------------------------------------------------- |
+| `inProgressStatus` | Implementation starts (after the feasibility check)  |
+| `prStatus`         | A pull request is created                            |
+| `todoStatus`       | The run is incomplete, fails, or hits the turn limit |
 
-- **inProgressStatus** when implementation starts (after the clarity check)
-- **prStatus** after a pull request is created
-- **todoStatus** when implementation is incomplete or max turns are reached
+## Worker notes
 
-See [Configuration](./configuration.md) for all settings fields.
-
-## Running a work item
-
-Pass a numeric work item ID or a full work item URL:
-
-```bash
-# Work item ID
-devintern 4211 --create-pr
-
-# Full work item URL
-devintern https://dev.azure.com/your-org/YourProject/_workitems/edit/4211 --create-pr
-```
-
-This workflow:
-
-1. Fetches the work item description (HTML converted to markdown), tags, attachments, and comments
-2. Runs a feasibility assessment (skippable with `--skip-clarity-check`)
-3. Moves the item to `inProgressStatus` (unless `--skip-comments` is set)
-4. Creates a feature branch, runs your agent, commits, and optionally opens a PR
-5. Moves the item to `prStatus` after PR creation
-6. Posts implementation or assessment comments on the work item
-
-Parent, child, and related work item links are fetched and included in the agent context.
-
-### Actioned work items (worker)
-
-When the worker creates a PR it moves the work item to `prStatus` (when configured) and records it as actioned locally, so the ready-tasks query no longer re-implements it. This also covers a failed or unconfigured transition. Re-arm an actioned work item by editing its description, moving it back to a ready state, or changing fields — see [Tickets already actioned after a PR](./worker-troubleshooting.md#tickets-already-actioned-after-a-pr).
-
-## Batch processing with --query
-
-Select multiple work items with [WIQL](https://learn.microsoft.com/en-us/azure/devops/boards/queries/wiql-syntax), scoped to your configured project:
-
-```bash
-devintern --query "SELECT [System.Id] FROM WorkItems WHERE [System.State] = 'New'" --create-pr
-devintern --query "SELECT [System.Id] FROM WorkItems WHERE [System.Tags] CONTAINS 'bug'" --create-pr
-```
-
-The first 100 matching work items are processed in sequence.
-
-## Story points estimation
-
-Estimation mode is fully supported via the `Microsoft.VSTS.Scheduling.StoryPoints` field (the Agile template default):
-
-```bash
-devintern 4211 --estimate
-```
-
-If your process template uses a different field (for example `Effort` in Scrum), set `storyPointsField` in `settings.json` for the project.
-
-## Limitations
-
-- **Description format:** work item descriptions are HTML. They are converted to markdown for the agent, and automation comments are converted from markdown to HTML before posting.
-- **Comments API:** Azure DevOps work item comments use a preview API version (7.1-preview.3), pinned by the integration.
-- **Comments:** use `--skip-comments` to skip work item comments and state transitions for a run.
+- The [worker](./worker.md#polling-mode) polls with your WIQL as `[defaults].task_query`. PR'd work items are marked actioned and not re-implemented until they change; see [Tickets already actioned after a PR](./worker-troubleshooting.md#tickets-already-actioned-after-a-pr).
+- For instant pickup, run `devintern worker connect azure-devops` to create work item service hooks through the [relay](./relay.md).
 
 ## Troubleshooting
 
-**"Missing required Azure DevOps environment variables"**
-
-Ensure `AZURE_DEVOPS_ORG`, `AZURE_DEVOPS_PAT`, and `AZURE_DEVOPS_PROJECT` are set in `.devintern-code/.env`.
-
-**"Failed to move work item ... to state"**
-
-State names differ per process template and work item type. Check the states available for the work item type in your project settings and match them exactly in `settings.json`.
-
-**401 or 403 errors**
-
-Verify the PAT has not expired and includes the Work Items (Read and write) scope for the target organization.
-
-### Offline fake API for local tests
-
-The E2E suite can redirect Azure DevOps requests to a loopback fake server by exporting `DEVINTERN_E2E_FAKE_AZURE_DEVOPS=1` **before starting** the CLI and setting `AZURE_DEVOPS_BASE_URL` to an absolute `http(s)` URL on `127.0.0.1` or `[::1]`. Project `.env` files cannot enable this override. Normal runs use `https://dev.azure.com/<organization>` so a project cannot redirect a PAT.
+| Symptom                                               | Fix                                                                                     |
+| ----------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| `Missing required Azure DevOps environment variables` | Set `AZURE_DEVOPS_ORG`, `AZURE_DEVOPS_PAT`, and `AZURE_DEVOPS_PROJECT`.                  |
+| `Failed to move work item ... to state`               | States differ per process template and work item type; match them exactly in `settings.json`. |
+| 401 or 403 errors                                     | The PAT expired or lacks the Work Items (Read and write) scope for this organization.    |

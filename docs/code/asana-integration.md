@@ -5,42 +5,53 @@ description: "Fetch Asana tasks, move project sections, implement with your codi
 section: "Automation"
 order: 5
 sidebarHidden: true
-dateModified: 2026-11-12
+dateModified: 2026-11-18
 tags: ["asana", "devintern/code", "integration"]
 ---
 
 # Implement Asana Tasks with DevIntern Code
 
-@devintern/code can implement work directly from Asana tasks: fetch task details and comments, run a feasibility check, move the task between project sections, execute your AI agent, commit changes, open a pull request, and post results back as task comments.
+DevIntern Code reads an Asana task (notes, tags, attachments, comments), checks that it is clear enough to implement, moves it between project sections, runs your coding agent, opens a pull request, and posts the result back as a task comment.
 
 ## Prerequisites
 
-- [Bun](https://bun.sh) and `@getdevintern/code` installed globally
-- Asana personal access token
-- Git repository for your project
+- `@getdevintern/code` installed and a Git repository for your project
+- An Asana personal access token from [Asana developer settings](https://app.asana.com/0/my-apps)
 
 ## Setup
 
-### 1. Set the task tracker
+Set in `.devintern-code/.env`:
 
-In `.devintern-code/.env`:
+| Variable                    | Required    | Description                                                                                       |
+| --------------------------- | ----------- | ------------------------------------------------------------------------------------------------- |
+| `TASK_TRACKER`              | Yes         | `asana`                                                                                           |
+| `ASANA_API_TOKEN`           | Yes         | Personal access token                                                                             |
+| `ASANA_DEFAULT_PROJECT_GID` | For worker  | Project GID from the project URL. Default project for queries and tasks outside a project; required for worker polling and relay |
+| `ASANA_STORY_POINTS_FIELD`  | No          | Name of a numeric custom field (e.g. `Story Points`) that `--estimate` writes; without it, estimates are comment-only |
+
+## Run a task
+
+Pass a task GID or full task URL:
 
 ```bash
-TASK_TRACKER=asana
+devintern 1200000000000001 --create-pr
+devintern https://app.asana.com/0/1200000000000000/1200000000000001 --create-pr
 ```
 
-### 2. Add Asana credentials
+Asana has no query language, so `--query` takes a small filter syntax. Remaining text matches task names:
 
 ```bash
-ASANA_API_TOKEN=your-asana-pat
-ASANA_DEFAULT_PROJECT_GID=1200000000000000
+devintern --query 'section:"To Do" completed:false' --create-pr
+devintern --query 'project:1200000000000000 assignee:Ada login bug' --create-pr
 ```
 
-Create the personal access token in [Asana developer settings](https://app.asana.com/0/my-apps). `ASANA_DEFAULT_PROJECT_GID` is optional but recommended: it anchors section transitions and batch queries to a specific project. Find the GID in the project URL.
+Filters: `project:<gid>` (defaults to `ASANA_DEFAULT_PROJECT_GID`), `section:"<name>"`, `assignee:<name>`, `completed:true|false`. Queries read the first 100 tasks of the project (this works on free plans), so narrow large projects by section.
 
-### 3. Configure section transitions
+Use `--skip-clarity-check` to skip the feasibility check and `--skip-comments` to skip comments and section moves. For estimation, see [Story Points Estimation](./story-points-estimation.md).
 
-Asana has no global workflow states, so @devintern/code maps statuses to project sections. Configure them in `.devintern-code/settings.json` using the project GID as the project key:
+## Status mapping
+
+Asana has no workflow states, so statuses map to project sections. Configure them in `.devintern-code/settings.json`, keyed by the project GID. Section names are matched case-insensitively; a status of `done`, `completed`, or `closed` marks the task complete instead.
 
 ```json
 {
@@ -56,85 +67,23 @@ Asana has no global workflow states, so @devintern/code maps statuses to project
 }
 ```
 
-Section names must match your project's sections (case-insensitive). Transitioning to `done`, `completed`, or `closed` marks the task complete instead of moving sections.
+| Field              | When it is applied                                   |
+| ------------------ | ---------------------------------------------------- |
+| `inProgressStatus` | Implementation starts (after the feasibility check)  |
+| `prStatus`         | A pull request is created                            |
+| `todoStatus`       | The run is incomplete, fails, or hits the turn limit |
 
-## Running a task
+## Worker notes
 
-Pass a task GID or a full task URL:
-
-```bash
-# Task GID
-devintern 1200000000000001 --create-pr
-
-# Full task URL
-devintern https://app.asana.com/0/1200000000000000/1200000000000001 --create-pr
-```
-
-This workflow:
-
-1. Fetches the task notes, tags, attachments, and comments
-2. Runs a feasibility assessment (skippable with `--skip-clarity-check`)
-3. Moves the task to the `inProgressStatus` section (unless `--skip-comments` is set)
-4. Creates a feature branch, runs your agent, commits, and optionally opens a PR
-5. Moves the task to the `prStatus` section after PR creation
-6. Posts implementation or assessment comments on the task
-
-### Actioned tasks (worker)
-
-When the worker creates a PR it moves the task to `prStatus` (when configured) and records it as actioned locally, so the ready-tasks query no longer re-implements it. This also covers a failed or unconfigured transition. Re-arm an actioned task by editing its description, moving it back to a ready section, or changing fields — see [Tickets already actioned after a PR](./worker-troubleshooting.md#tickets-already-actioned-after-a-pr).
-
-## Batch processing with --query
-
-Asana has no query language, so @devintern/code provides a small filter syntax:
-
-```bash
-devintern --query 'section:"To Do" completed:false' --create-pr
-devintern --query 'project:1200000000000000 assignee:Ada login bug' --create-pr
-```
-
-Supported filters: `project:<gid>` (defaults to `ASANA_DEFAULT_PROJECT_GID`), `section:"<name>"`, `assignee:<name>`, `completed:true|false`. Any remaining text matches task names (case-insensitive).
-
-The integration lists the project's tasks (first 100) and filters them locally, which keeps it working on free Asana plans (the workspace search API requires Premium).
-
-## Story points estimation
-
-Asana has no built-in estimation field. If your project has a numeric custom field for points, name it in `.devintern-code/.env`:
-
-```bash
-ASANA_STORY_POINTS_FIELD=Story Points
-```
-
-With the field configured, `devintern <gid> --estimate` sets the custom field value and posts an estimation comment. Without it, estimates are posted as comments only.
-
-## Limitations
-
-- **Batch size:** queries read the first 100 tasks of a project. Narrow with sections for larger projects.
-- **Rich text:** comments are posted as Asana rich text with a plain-text fallback when formatting is rejected.
-- **Comments:** use `--skip-comments` to skip task comments and section moves for a run.
+- [Worker polling](./worker.md#polling-mode) uses Asana's Events API and requires `ASANA_DEFAULT_PROJECT_GID`. PR'd tasks are marked actioned and not re-implemented until they change; see [Tickets already actioned after a PR](./worker-troubleshooting.md#tickets-already-actioned-after-a-pr).
+- For instant pickup, run `devintern worker connect asana` to register a project webhook through the [relay](./relay.md).
 
 ## Troubleshooting
 
-**"Missing required Asana environment variables"**
-
-Ensure `ASANA_API_TOKEN` is set in `.devintern-code/.env`.
-
-**"Cannot resolve a project for task"**
-
-The task is not in any project and no `ASANA_DEFAULT_PROJECT_GID` is set. Add the task to a project or set the default project GID.
-
-**"Section \"In Progress\" not found in the project"**
-
-Check the section names in your project against `settings.json`. Available sections are listed in the error message.
-
-**"Asana task search requires a project"**
-
-Pass `project:<gid>` in the query or set `ASANA_DEFAULT_PROJECT_GID`.
-
-**`ASANA_API_BASE_URL` has no effect**
-
-This override is reserved for the offline E2E fake server. It is only honored
-when `DEVINTERN_E2E_FAKE_ASANA=1` was exported before the CLI started — values
-loaded from a project `.env` are ignored — and the URL points at a loopback
-host. A project `.env` therefore cannot redirect your personal access token,
-and even an exported override cannot send it to a remote host. Production
-always uses `https://app.asana.com/api/1.0`.
+| Symptom                                         | Fix                                                                               |
+| ----------------------------------------------- | --------------------------------------------------------------------------------- |
+| `Missing required Asana environment variables`  | Set `ASANA_API_TOKEN`.                                                            |
+| `Cannot resolve a project for task`             | Add the task to a project or set `ASANA_DEFAULT_PROJECT_GID`.                      |
+| `Section "In Progress" not found in the project` | Fix the section name; the error lists available sections.                        |
+| `Asana task search requires a project`          | Pass `project:<gid>` in the query or set `ASANA_DEFAULT_PROJECT_GID`.              |
+| Comment formatting lost                         | Rich text Asana rejects is posted as plain text instead.                           |

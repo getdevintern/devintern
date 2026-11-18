@@ -132,10 +132,7 @@ export interface DashboardDataOptions {
    * same workspace as the queue counts.
    */
   workspaceDir?: string;
-  /**
-   * Live working-window snapshot from the worker process (embedded
-   * dashboard only; standalone servers return null).
-   */
+  /** Live working-window snapshot from the worker (embedded only; standalone returns null). */
   scheduleSnapshot?: () => ScheduleSnapshot | null;
   /**
    * How a retry is executed. `spawn` (default) starts a detached CLI
@@ -146,15 +143,9 @@ export interface DashboardDataOptions {
    * alongside the fleet worker.
    */
   retryMode?: "spawn" | "schedule";
-  /**
-   * How long a triggered retry blocks further retries of its task
-   * (tests); defaults to {@link INFLIGHT_RETRY_TTL_MS}.
-   */
+  /** How long a triggered retry blocks retries of its task; defaults to INFLIGHT_RETRY_TTL_MS. */
   inflightRetryTtlMs?: number;
-  /**
-   * How long a triggered manual automation run blocks further triggers of
-   * the automation; defaults to {@link INFLIGHT_RETRY_TTL_MS}.
-   */
+  /** How long a manual automation run blocks re-triggers; defaults to INFLIGHT_RETRY_TTL_MS. */
   inflightAutomationTtlMs?: number;
   /**
    * Automation listing/triggering overrides. The workspace worker passes its
