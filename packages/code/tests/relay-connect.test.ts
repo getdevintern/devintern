@@ -620,6 +620,33 @@ describe("relay-connect auth", () => {
       ).toEqual(["acme/new", "acme/web"]);
     });
 
+    test("locally verified repo the relay now reports not_installed still pairs", async () => {
+      await connectGitHubRepo({
+        repos: ["acme/web"],
+        accessToken: "supa-access",
+        workingDir: dir,
+        relayUrl: RELAY_URL,
+        fetchImpl: relay({ verifiable: ["acme/web"] }),
+      });
+
+      // The App has since lost access: the relay verifies nothing new and
+      // explicitly reports acme/web unverified.
+      const pairingRepos: string[][] = [];
+      const verified: string[][] = [];
+      await connectGitHubRepo({
+        repos: ["acme/web"],
+        accessToken: "supa-access",
+        workingDir: dir,
+        relayUrl: RELAY_URL,
+        fetchImpl: relay({ verifiable: [], pairingRepos }),
+        sleep: async () => {},
+        onVerified: (repos) => verified.push(repos),
+      });
+
+      expect(verified).toEqual([]);
+      expect(pairingRepos).toEqual([["acme/web"]]);
+    });
+
     for (const [label, response] of [
       [
         "400 unsupported action",

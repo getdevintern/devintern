@@ -26,20 +26,24 @@ export interface RelayAutoVerifyOptions {
 
 /**
  * Build a verifier to call at worker startup and after config reloads. It
- * contacts the relay only when unverified workspace repositories exist and
- * skips a repeat attempt for an unchanged set, so it logs at most one line
- * per change. It never throws.
+ * contacts the relay whenever unverified workspace repositories exist (so a
+ * repo the App gained access to since the last attempt verifies on the next
+ * reload) and logs a result line only when it differs from the last one. It
+ * never throws.
  */
 export function createRelayAutoVerifier(options: RelayAutoVerifyOptions): () => Promise<void> {
   const log = options.log ?? ((line: string) => console.log(line));
   const warn = options.warn ?? ((line: string) => console.warn(line));
-  let lastAttempted = "";
+  let lastLogged = "";
+  const logOnce = (line: string) => {
+    if (line === lastLogged) return;
+    lastLogged = line;
+    log(line);
+  };
   return async () => {
     try {
       const pending = unverifiedWorkspaceRelayRepos(options.config, options.workspaceDir);
-      const key = [...pending].sort().join(",");
-      if (pending.length === 0 || key === lastAttempted) return;
-      lastAttempted = key;
+      if (pending.length === 0) return;
       const result = await verifyGitHubReposWithRelayToken({
         repos: pending,
         relayToken: options.relayToken,
@@ -49,7 +53,7 @@ export function createRelayAutoVerifier(options: RelayAutoVerifyOptions): () => 
       });
       if (result.kind === "unsupported") {
         if (options.verbose) {
-          log("   [relay] relay does not support browser-free GitHub verification yet.");
+          logOnce("   [relay] relay does not support browser-free GitHub verification yet.");
         }
         return;
       }
@@ -63,10 +67,10 @@ export function createRelayAutoVerifier(options: RelayAutoVerifyOptions): () => 
             "(run `devintern worker connect github`)",
         );
       }
-      log(`🔐 [relay] GitHub repositories: ${parts.join("; ")}`);
+      logOnce(`🔐 [relay] GitHub repositories: ${parts.join("; ")}`);
     } catch (error) {
       // Retry on the next startup or config reload.
-      lastAttempted = "";
+      lastLogged = "";
       warn(`⚠️  [relay] GitHub repository auto-verification failed: ${(error as Error).message}`);
     }
   };

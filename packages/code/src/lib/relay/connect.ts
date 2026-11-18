@@ -549,8 +549,11 @@ async function applyVerificationResponse(
   const newlyVerified = verifiedRepositoriesFromResponse(data).length > 0;
   const existing = newlyVerified ? null : loadRelayState(workingDir);
   const state = existing ?? mergeConnectState(workingDir, relayUrl, data, relayToken);
-  const verified = verifiedGitHubRelayRepositories(state).filter((repository) =>
-    requested.includes(repository.repo),
+  // The relay is authoritative for the repos it was asked about: a repo it
+  // reports unverified (e.g. the App lost access) stays unverified even when
+  // local state still lists it from an earlier pairing.
+  const verified = verifiedGitHubRelayRepositories(state).filter(
+    (repository) => requested.includes(repository.repo) && !reasons.has(repository.repo),
   );
   const unverified = requested
     .filter((repo) => !verified.some((repository) => repository.repo === repo))

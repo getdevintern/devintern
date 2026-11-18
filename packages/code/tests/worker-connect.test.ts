@@ -614,9 +614,10 @@ remote = "git@github.com:acme/web.git"
       ]);
     });
 
-    test("reports repos that still need a browser pairing once per unchanged set", async () => {
+    test("retries an unchanged set on every reload but logs an unchanged result once", async () => {
       seedState();
       let requests = 0;
+      let appHasAccess = false;
       const fetchImpl = (async () => {
         requests++;
         return new Response(
@@ -624,8 +625,10 @@ remote = "git@github.com:acme/web.git"
             customerId: "customer-1",
             licenseSource: "solo-automation",
             registrations: [],
-            repositories: [],
-            unverified: [{ repo: "acme/web", reason: "not_installed" }],
+            repositories: appHasAccess
+              ? [{ repo: "acme/web", installationId: 10, repositoryId: 21 }]
+              : [],
+            unverified: appHasAccess ? [] : [{ repo: "acme/web", reason: "not_installed" }],
           }),
           { status: 200 },
         );
@@ -634,11 +637,19 @@ remote = "git@github.com:acme/web.git"
       const verify = verifier(fetchImpl);
       await verify();
       await verify();
+      expect(requests).toBe(2);
 
-      expect(requests).toBe(1);
+      // The user grants the App access on GitHub; the next reload verifies it.
+      appHasAccess = true;
+      await verify();
+      expect(requests).toBe(3);
+      await verify();
+      expect(requests).toBe(3);
+
       expect(logs.filter((line) => line.includes("[relay]"))).toEqual([
         "🔐 [relay] GitHub repositories: still unverified acme/web " +
           "(run `devintern worker connect github`)",
+        "🔐 [relay] GitHub repositories: verified acme/web",
       ]);
     });
 
