@@ -93,6 +93,13 @@ bun run --filter @getdevintern/pm build
 
 Product documentation lives in `docs/{code,pm}` and is also rendered at https://devintern.com/docs. Update the relevant Markdown guide when changing user-facing CLI behavior, flags, or environment variables.
 
+Write docs for people installing and operating DevIntern, not for contributors:
+
+- Cover what a feature does, when to use it, how to turn it on, the settings users actually set (with defaults), and fixes for common problems. Add new content to the page that owns the topic and link to it from elsewhere instead of repeating it.
+- Leave out implementation internals: queue or database mechanics, retry and backoff algorithms, race conditions, internal file layouts, and step-by-step code paths. Those belong in code comments or `packages/*/CLAUDE.md`.
+- Keep it short: one example per concept, tables for lists of options, no long sample output. Put niche settings in a compact reference table instead of a new prose section.
+- Keep page slugs stable, because the product and the website link to them. If a page grows past about 250 lines, split it: the original page becomes an overview that links to the new pages, and each new page gets full frontmatter. When you move or rename a heading, update every link to its old anchor.
+
 ## References
 
 - `packages/code/CLAUDE.md`: detailed architecture for `@getdevintern/code` (workflows, config, output structure)

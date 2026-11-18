@@ -54,7 +54,7 @@ export class NativeSandboxProvider implements SandboxProvider {
   readonly displayName = "Harness native sandbox";
   readonly priority = 40; // above the external wrappers: zero install, nothing to set up
   readonly docsUrl =
-    "https://devintern.com/docs/code/configuration#claude-code-native-sandbox-details";
+    "https://devintern.com/docs/code/sandboxing#claude-code-native-sandbox-details";
 
   async detect(): Promise<SandboxDetection> {
     const platform = unsupportedPlatform();
