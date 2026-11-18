@@ -5,16 +5,19 @@ import { tmpdir } from "os";
 import { dirname, join } from "path";
 
 import { startDashboardServer } from "../src/dashboard-server";
-import { DashboardData } from "../src/lib/observability/dashboard-api";
+import { DashboardData, handleRetryRun } from "../src/lib/observability/dashboard-api";
 import { handleCancelTask } from "../src/lib/observability/dashboard-tasks";
 import type { DashboardCancelTaskResponse } from "../src/lib/observability/dashboard-tasks";
 import { handleQueuedWork } from "../src/lib/observability/queued-work";
 import type { QueuedWorkResponse } from "../src/lib/observability/queued-work";
 import { InjectedTaskStore } from "../src/lib/state/injected-tasks";
+import { RunStore } from "../src/lib/state/run-recorder";
+import { isRunRetriable } from "../src/lib/state/run-retry";
 import { classifyDependency } from "../src/lib/dependencies/gate";
 import { readLocalDependencyFacts } from "../src/lib/dependencies/local-facts";
 import { runWorkerAdd, WAIT_CANCELLED_EXIT_CODE } from "../src/lib/workspace/add-command";
 import { parseWorkerCancelArgs, runWorkerCancel } from "../src/lib/workspace/cancel-command";
+import { cancelInjectedTask } from "../src/lib/workspace/injected-cancel";
 import { InjectedTaskAcquirer } from "../src/lib/workspace/injected-acquirer";
 import { workspaceConfigPath, workspaceDbPath } from "../src/lib/workspace/paths";
 import type { TaskExecutionResult } from "../src/lib/acquirers/task-polling";
@@ -153,6 +156,68 @@ describe("InjectedTaskStore.cancel", () => {
       expect(store.cancel("local-deferred", { actor: "cli" }).outcome).toBe("cancelled");
       expect(store.claimNext([], Date.now() + 7 * 24 * 60 * 60 * 1000)).toBeNull();
     });
+  });
+
+  test("cancelling a usage-limit-deferred task settles its deferred run", () => {
+    seed("local-deferred-run");
+    withStore((store) => {
+      const claimed = store.claimNext()!;
+      store.defer(claimed.id, { maxDeferrals: 5, backoffMs: () => 60_000, exhaustedMessage: "x" });
+    });
+    const runs = new RunStore(dbPath);
+    try {
+      const other = runs.createRun({ origin: "local", taskKey: "local-other" });
+      runs.finishRun(other, "deferred", "usage limit");
+      const runId = runs.createRun({ origin: "local", taskKey: "local-deferred-run" });
+      runs.finishRun(runId, "deferred", "usage limit");
+      expect(isRunRetriable(runs.getRun(runId)!).reason).toContain("retried automatically");
+
+      expect(
+        withStore(
+          (store) =>
+            cancelInjectedTask(store, "local-deferred-run", { actor: "cli", reason: "dup" })
+              .outcome,
+        ),
+      ).toBe("cancelled");
+
+      const settled = runs.getRun(runId)!;
+      expect(settled.status).toBe("abandoned");
+      expect(settled.outcomeReason).toMatch(/^cancelled by cli at .* \(reason: dup\)$/);
+      expect(runs.listStages(runId).filter((s) => s.stage === "outcome")).toMatchObject([
+        { status: "abandoned" },
+      ]);
+      // No longer claims an automatic retry; a manual Retry is refused by the
+      // handler because the injected row is cancelled.
+      expect(isRunRetriable(settled)).toEqual({ eligible: true, kind: "injected" });
+      // Another task's deferred run is untouched.
+      expect(runs.getRun(other)!.status).toBe("deferred");
+    } finally {
+      runs.close();
+    }
+  });
+
+  test("cancel leaves a task's earlier settled run alone and is a no-op without runs", () => {
+    seed("local-failed-before");
+    seed("local-no-runs");
+    const runs = new RunStore(dbPath);
+    try {
+      const runId = runs.createRun({ origin: "local", taskKey: "local-failed-before" });
+      runs.finishRun(runId, "failed", "boom");
+      const store = new InjectedTaskStore(dbPath);
+      try {
+        expect(cancelInjectedTask(store, "local-failed-before", { actor: "cli" }).outcome).toBe(
+          "cancelled",
+        );
+        expect(cancelInjectedTask(store, "local-no-runs", { actor: "cli" }).outcome).toBe(
+          "cancelled",
+        );
+      } finally {
+        store.close();
+      }
+      expect(runs.getRun(runId)).toMatchObject({ status: "failed", outcomeReason: "boom" });
+    } finally {
+      runs.close();
+    }
   });
 
   test("a row requeued after a claim cancels as cancelled, never as already started", () => {
@@ -506,6 +571,28 @@ describe("dashboard cancel", () => {
       cancelledBy: "dashboard",
       cancelReason: "dup",
     });
+  });
+
+  test("dashboard cancel settles the task's deferred run", async () => {
+    seed("local-a");
+    const runs = new RunStore(dbPath);
+    try {
+      const runId = runs.createRun({ origin: "local", taskKey: "local-a" });
+      runs.finishRun(runId, "deferred", "usage limit");
+      expect(handleCancelTask(data, "local-a", undefined).status).toBe(200);
+      expect(runs.getRun(runId)).toMatchObject({ status: "abandoned" });
+      expect(runs.getRun(runId)!.outcomeReason).toMatch(/^cancelled by dashboard at /);
+      // A manual Retry of the settled run is refused, not silently re-queued.
+      const retry = await handleRetryRun(data, String(runId));
+      expect(retry.status).toBe(409);
+      expect(JSON.stringify(retry.body)).toContain("was cancelled");
+      // The run-detail GET must not offer a Retry button the POST would refuse.
+      const retryInfo = data.getRetryInfo(runId);
+      expect(retryInfo?.eligible).toBe(false);
+      expect(retryInfo?.reason).toContain("was cancelled");
+    } finally {
+      runs.close();
+    }
   });
 
   test("a row claimed after the list loaded reports already started, unchanged", () => {

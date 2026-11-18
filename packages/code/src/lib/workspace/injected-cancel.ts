@@ -13,6 +13,7 @@ import type {
   InjectedTask,
   InjectedTaskStore,
 } from "../state/injected-tasks";
+import { RunStore } from "../state/run-recorder";
 
 /** What one cancel attempt reported (the `worker cancel --json` object). */
 export interface InjectedCancelReport {
@@ -74,5 +75,27 @@ export function cancelInjectedTask(
   options: { actor: InjectedCancelActor; reason?: string; now?: number },
 ): InjectedCancelReport {
   const { outcome, task } = store.cancel(taskKey, options);
+  if (cancelSucceeded(outcome) && task) settleDeferredRun(store.path, task);
   return { taskKey, outcome, message: outcomeMessage(taskKey, outcome, task), task };
+}
+
+/**
+ * Settle the cancelled task's run if it was left `deferred` (a usage-limit
+ * pause backing off). Otherwise the dashboard keeps listing the task as
+ * "waiting to retry" and its run claims an automatic retry that never comes.
+ * Runs on `already_cancelled` too, so a cancel interrupted between the two
+ * writes converges on the next attempt. Best-effort: run recording must never
+ * fail the cancel itself.
+ */
+function settleDeferredRun(dbPath: string, task: InjectedTask): void {
+  let runs: RunStore | undefined;
+  try {
+    runs = new RunStore(dbPath);
+    const detail = describeCancellation(task);
+    runs.abandonDeferredRun(task.taskKey, `cancelled${detail ? ` ${detail}` : ""}`);
+  } catch {
+    /* best-effort */
+  } finally {
+    runs?.close();
+  }
 }

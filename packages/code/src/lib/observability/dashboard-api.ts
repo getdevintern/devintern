@@ -786,6 +786,12 @@ function resolveRetryEligibility(data: DashboardData, run: RunRecord): RetryElig
       reason: `ad-hoc task ${run.taskKey} is already ${task.status} (task #${task.id})`,
     };
   }
+  if (task.status === "cancelled") {
+    return {
+      eligible: false,
+      reason: `ad-hoc task ${run.taskKey} was cancelled; a cancelled task cannot be re-queued, enqueue it again instead`,
+    };
+  }
   return eligibility;
 }
 

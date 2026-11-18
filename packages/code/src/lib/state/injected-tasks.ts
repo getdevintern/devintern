@@ -274,6 +274,11 @@ export class InjectedTaskStore {
     private options: { readonly?: boolean } = {},
   ) {}
 
+  /** Database file holding `injected_tasks` (the workspace queue DB, shared with run records). */
+  get path(): string {
+    return this.dbPath;
+  }
+
   /** Whether `close()` has released this store's connection. */
   isClosed(): boolean {
     return this.closed;
