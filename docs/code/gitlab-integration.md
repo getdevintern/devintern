@@ -76,7 +76,7 @@ Statuses map to labels. Create the labels in the project, then configure them in
 
 ## Worker notes
 
-- [Worker polling](./worker.md#polling-mode) needs `GITLAB_TOKEN` and `GITLAB_PROJECT`. A label query such as `is:open label:intern` keeps matching after the MR, so the worker's local actioned marker stops re-implementation. See [Tickets already actioned after a PR](./worker.md#tickets-already-actioned-after-a-pr).
+- [Worker polling](./worker.md#polling-mode) needs `GITLAB_TOKEN` and `GITLAB_PROJECT`. A label query such as `is:open label:intern` keeps matching after the MR, so the worker's local actioned marker stops re-implementation. See [Tickets already actioned after a PR](./worker-troubleshooting.md#tickets-already-actioned-after-a-pr).
 - `devintern worker connect gitlab` creates and tests project hooks for instant MR events (see [Advanced](#advanced-merge-requests-and-webhooks)).
 
 ## Advanced: merge requests and webhooks

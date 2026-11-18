@@ -75,7 +75,7 @@ Configure states in `.devintern-code/settings.json`, keyed by the team key (`ENG
 
 ## Worker notes
 
-- The [worker](./worker.md#polling-mode) polls with your IssueFilter as `[defaults].task_query`. PR'd issues are marked actioned and not re-implemented until they change; see [Tickets already actioned after a PR](./worker.md#tickets-already-actioned-after-a-pr).
+- The [worker](./worker.md#polling-mode) polls with your IssueFilter as `[defaults].task_query`. PR'd issues are marked actioned and not re-implemented until they change; see [Tickets already actioned after a PR](./worker-troubleshooting.md#tickets-already-actioned-after-a-pr).
 - For instant pickup, run `devintern worker connect linear` to register a webhook through the [relay](./relay.md).
 
 ## Troubleshooting

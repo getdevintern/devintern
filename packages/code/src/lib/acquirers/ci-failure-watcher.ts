@@ -41,7 +41,7 @@ import type { Acquirer } from "../../worker";
 import type { CiFailureFeedback } from "../review/formatter";
 import { classifyAgentPrState } from "../review/agent-pr-reconciler";
 import { serializePrRun } from "./review-polling";
-import { describeGitHubAuthFailure, isGitHubAuthError } from "../code-host/github/reviews";
+import { describeGitHubAuthFailure, isGitHubAuthError } from "../code-host/github/github-errors";
 
 import type {
   CiProvider,
@@ -470,7 +470,7 @@ export class CiFailureWatcherAcquirer implements Acquirer {
     console.warn(
       `⚠️  [${this.name}] GitHub rejected the credential while polling ${repo}#${prNumber}: ` +
         `${error.message} ${describeGitHubAuthFailure(error, "ci")} ` +
-        "See docs/code/worker.md#ci-failures-on-the-agents-prs.",
+        "See docs/code/pr-follow-up.md#ci-failures-on-the-agents-prs.",
     );
   }
 

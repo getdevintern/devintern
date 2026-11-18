@@ -75,7 +75,7 @@ Asana has no workflow states, so statuses map to project sections. Configure the
 
 ## Worker notes
 
-- [Worker polling](./worker.md#polling-mode) uses Asana's Events API and requires `ASANA_DEFAULT_PROJECT_GID`. PR'd tasks are marked actioned and not re-implemented until they change; see [Tickets already actioned after a PR](./worker.md#tickets-already-actioned-after-a-pr).
+- [Worker polling](./worker.md#polling-mode) uses Asana's Events API and requires `ASANA_DEFAULT_PROJECT_GID`. PR'd tasks are marked actioned and not re-implemented until they change; see [Tickets already actioned after a PR](./worker-troubleshooting.md#tickets-already-actioned-after-a-pr).
 - For instant pickup, run `devintern worker connect asana` to register a project webhook through the [relay](./relay.md).
 
 ## Troubleshooting

@@ -75,7 +75,7 @@ Configure lists in `.devintern-code/settings.json`, keyed by the board short ID 
 
 ## Worker notes
 
-- [Worker polling](./worker.md#polling-mode) reads the board's activity feed and refuses to start without `TRELLO_DEFAULT_BOARD_ID`. PR'd cards are marked actioned and not re-implemented until they change; see [Tickets already actioned after a PR](./worker.md#tickets-already-actioned-after-a-pr).
+- [Worker polling](./worker.md#polling-mode) reads the board's activity feed and refuses to start without `TRELLO_DEFAULT_BOARD_ID`. PR'd cards are marked actioned and not re-implemented until they change; see [Tickets already actioned after a PR](./worker-troubleshooting.md#tickets-already-actioned-after-a-pr).
 - For instant pickup, run `devintern worker connect trello` to register a board webhook through the [relay](./relay.md).
 
 ## Troubleshooting

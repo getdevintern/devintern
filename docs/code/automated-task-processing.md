@@ -23,7 +23,7 @@ Where to find the details:
 | Polling, retries, and actioned tickets         | [Worker: Polling mode](./worker.md#polling-mode)                                            |
 | Installing as a systemd or launchd service     | [Worker: Running as a service](./worker.md#running-as-a-service)                            |
 | Worker Pilot and automation licenses           | [Worker: Worker Pilot and licenses](./worker.md#worker-pilot-and-licenses)                  |
-| Failure comments and crash recovery            | [Re-running a task](./worker.md#re-running-a-task), [Interrupted runs](./worker.md#interrupted-runs-are-recovered-on-startup) |
+| Failure comments and crash recovery            | [Re-running a task](./worker-troubleshooting.md#re-running-a-task), [Interrupted runs](./worker-troubleshooting.md#interrupted-runs) |
 | Scheduled story-point estimation               | [Story Points Estimation](./story-points-estimation.md)                                     |
 | Sandboxing unattended agent runs               | [Sandboxing the Agent](./configuration.md#sandboxing-the-agent)                             |
 

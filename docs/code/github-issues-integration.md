@@ -76,7 +76,7 @@ GitHub has no workflow states, so statuses map to labels. Create the labels in t
 
 ## Worker notes
 
-- A typical worker query is `is:open label:intern`. Label transitions do not remove your trigger label, so the worker's local actioned marker is what stops a PR'd issue from being re-implemented. See [Tickets already actioned after a PR](./worker.md#tickets-already-actioned-after-a-pr).
+- A typical worker query is `is:open label:intern`. Label transitions do not remove your trigger label, so the worker's local actioned marker is what stops a PR'd issue from being re-implemented. See [Tickets already actioned after a PR](./worker-troubleshooting.md#tickets-already-actioned-after-a-pr).
 - `devintern worker connect github` pairs the repository with the relay for instant PR events.
 
 ## Troubleshooting

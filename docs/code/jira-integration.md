@@ -72,7 +72,7 @@ The legacy top-level `projects` key (without `jira`) still works.
 
 ## Worker notes
 
-- The [worker](./worker.md#polling-mode) uses your JQL as `[defaults].task_query`. Moving issues to `prStatus` removes them from a `status = 'To Do'` query; the worker also marks PR'd issues as actioned so they are not re-implemented. See [Tickets already actioned after a PR](./worker.md#tickets-already-actioned-after-a-pr).
+- The [worker](./worker.md#polling-mode) uses your JQL as `[defaults].task_query`. Moving issues to `prStatus` removes them from a `status = 'To Do'` query; the worker also marks PR'd issues as actioned so they are not re-implemented. See [Tickets already actioned after a PR](./worker-troubleshooting.md#tickets-already-actioned-after-a-pr).
 - For instant pickup, run `devintern worker connect jira` and paste the printed ingest URL into a Jira admin webhook. See [Relay](./relay.md).
 
 ## Troubleshooting
