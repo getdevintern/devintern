@@ -397,7 +397,7 @@ async function runImplementation(input: ImplementationInput): Promise<void> {
 }
 
 /** Identifies the task attempt for failure handling. */
-interface TaskAttempt {
+export interface TaskAttempt {
   taskKey: string;
   taskIndex: number;
   totalTasks: number;
@@ -406,8 +406,10 @@ interface TaskAttempt {
 /**
  * Handle a failed task attempt. Usage limits defer without failing the task;
  * other errors record tracker feedback and either rethrow (batch) or exit.
+ *
+ * Exported for tests; production callers go through {@link processSingleTask}.
  */
-async function handleTaskFailure(error: unknown, attempt: TaskAttempt): Promise<never> {
+export async function handleTaskFailure(error: unknown, attempt: TaskAttempt): Promise<never> {
   const { taskKey, taskIndex, totalTasks } = attempt;
   const options = runContext.options;
 

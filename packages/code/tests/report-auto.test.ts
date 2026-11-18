@@ -282,15 +282,163 @@ describe("maybeAutoReportFailure", () => {
     expect(env[AUTO_REPORT_ACTIVE_ENV]).toBeUndefined();
   });
 
-  test("gives up after the timeout", async () => {
+  test("gives up after the timeout and releases the guard after a grace period", async () => {
+    const env: NodeJS.ProcessEnv = { DEVINTERN_AUTO_REPORT: "1" };
     const outcome = await maybeAutoReportFailure(
       { error: devInternTypeError() },
       deps({
+        env,
         timeoutMs: 20,
+        // Ignores the abort signal and never settles.
         fetchImpl: (() => new Promise<Response>(() => {})) as unknown as typeof fetch,
       }),
     );
     expect(outcome.status).toBe("error");
+    expect(env[AUTO_REPORT_ACTIVE_ENV]).toBe("1");
+    await Bun.sleep(60);
+    expect(env[AUTO_REPORT_ACTIVE_ENV]).toBeUndefined();
+  });
+});
+
+describe("analyzeFailure in the published bundle", () => {
+  const INSTALLED = "/usr/lib/node_modules/@getdevintern/code";
+
+  function stackError(
+    frames: string[],
+    message = "undefined is not an object (evaluating 'e.a.b')",
+  ) {
+    const error = new TypeError(message);
+    error.stack = [`TypeError: ${message}`, ...frames.map((frame) => `    at ${frame}`)].join("\n");
+    return error;
+  }
+
+  test("is inconclusive when frames still point at the unmapped bundle", () => {
+    const error = stackError([
+      `Kq (${INSTALLED}/dist/index.js:812:4410)`,
+      `zR (${INSTALLED}/dist/index.js:1990:12)`,
+    ]);
+    const analysis = analyzeFailure(error, { packageRoot: INSTALLED });
+    expect(analysis.verdict).toBe("inconclusive");
+    expect(analysis.rationale).toContain("source map");
+  });
+
+  test("attributes source-mapped frames and drops minified names", () => {
+    const error = stackError([
+      `Kq (${INSTALLED}/src/lib/task/formatter.ts:120:15)`,
+      `zR (${INSTALLED}/src/lib/task/pipeline.ts:610:7)`,
+    ]);
+    const analysis = analyzeFailure(error, { packageRoot: INSTALLED, minifiedNames: true });
+    expect(analysis.verdict).toBe("defect");
+    expect(analysis.frames).toEqual([
+      { file: "src/lib/task/formatter.ts", line: 120 },
+      { file: "src/lib/task/pipeline.ts", line: 610 },
+    ]);
+    const { title, description } = describeDefect(analysis, { cliVersion: "2.25.0" });
+    expect(title).toContain("src/lib/task/formatter.ts");
+    expect(description).not.toContain("Kq");
+    expect(description).toContain("DevIntern version: 2.25.0");
+  });
+
+  test("treats source-mapped vendored dependencies as outside DevIntern", () => {
+    // `../../../node_modules/<dep>` in the map, resolved from the installed dist/.
+    const error = stackError([
+      "turndown (/usr/lib/node_modules/node_modules/turndown/lib/turndown.es.js:613:17)",
+      `zR (${INSTALLED}/src/lib/task/formatter.ts:120:15)`,
+    ]);
+    expect(analyzeFailure(error, { packageRoot: INSTALLED }).verdict).toBe("inconclusive");
+  });
+
+  test("attributes bundled shared packages mapped next to the package root", () => {
+    const error = stackError([
+      "Yx (/usr/lib/node_modules/@getdevintern/utils/src/fetch-with-retry.ts:40:3)",
+      `zR (${INSTALLED}/src/lib/task/formatter.ts:120:15)`,
+    ]);
+    const analysis = analyzeFailure(error, { packageRoot: INSTALLED, minifiedNames: true });
+    expect(analysis.verdict).toBe("defect");
+    expect(analysis.frames?.[0]).toEqual({ file: "utils/src/fetch-with-retry.ts", line: 40 });
+  });
+
+  test("keeps the signature stable across releases", () => {
+    const before = stackError(
+      [`Kq (${INSTALLED}/src/lib/task/formatter.ts:120:15)`],
+      "undefined is not an object (evaluating 'e.a.b')",
+    );
+    const after = stackError(
+      [`Wv (${INSTALLED}/src/lib/task/formatter.ts:131:9)`],
+      "undefined is not an object (evaluating 'r.a.b')",
+    );
+    const options = { packageRoot: INSTALLED, minifiedNames: true, failedStep: "implementation" };
+    expect(analyzeFailure(before, options).signature).toBe(
+      analyzeFailure(after, options).signature,
+    );
+
+    const elsewhere = stackError([`Kq (${INSTALLED}/src/lib/task/pipeline.ts:120:15)`]);
+    expect(analyzeFailure(elsewhere, options).signature).not.toBe(
+      analyzeFailure(before, options).signature,
+    );
+  });
+});
+
+describe("analyzeFailure message filters", () => {
+  test("does not mistake identifiers in programming errors for task failures", () => {
+    for (const message of [
+      "x.timeout is not a function",
+      "timeout is not a function",
+      "undefined is not an object (evaluating 'res.notFound.rejected')",
+      "Cannot read properties of undefined (reading 'isRequired')",
+    ]) {
+      expect(analyzeFailure(devInternTypeError(message), { packageRoot: ROOT }).verdict).toBe(
+        "defect",
+      );
+    }
+  });
+
+  test("still treats environment prose in programming errors as task failures", () => {
+    expect(analyzeFailure(new TypeError("fetch failed"), { packageRoot: ROOT }).verdict).toBe(
+      "task",
+    );
+    expect(
+      analyzeFailure(devInternTypeError("Request timed out after 30s"), { packageRoot: ROOT })
+        .verdict,
+    ).toBe("task");
+  });
+});
+
+describe("maybeAutoReportFailure timeout", () => {
+  test("aborts the in-flight submission and keeps the guard until it settles", async () => {
+    let aborted = false;
+    let settle: (() => void) | undefined;
+    const settled = new Promise<void>((resolve) => {
+      settle = resolve;
+    });
+    const env: NodeJS.ProcessEnv = { DEVINTERN_AUTO_REPORT: "1" };
+    const hanging = ((_input: Parameters<typeof fetch>[0], init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => {
+          aborted = true;
+          // Settle a moment later, like a real socket teardown.
+          setTimeout(() => {
+            reject(new Error("aborted"));
+            setTimeout(() => settle?.(), 0);
+          }, 30);
+        });
+      })) as unknown as typeof fetch;
+
+    const outcome = await maybeAutoReportFailure(
+      { error: devInternTypeError() },
+      deps({ env, timeoutMs: 20, fetchImpl: hanging }),
+    );
+    expect(outcome).toEqual({ status: "error", error: "timed out after 20 ms" });
+    expect(aborted).toBe(true);
+    // The abandoned attempt is still winding down: a new failure must not start another.
+    expect(env[AUTO_REPORT_ACTIVE_ENV]).toBe("1");
+    expect(
+      (await maybeAutoReportFailure({ error: devInternTypeError() }, deps({ env }))).status,
+    ).toBe("recursive");
+
+    await settled;
+    await Bun.sleep(5);
+    expect(env[AUTO_REPORT_ACTIVE_ENV]).toBeUndefined();
   });
 });
 

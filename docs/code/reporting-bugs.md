@@ -106,14 +106,14 @@ DEVINTERN_AUTO_REPORT=1
 | Tracker, code host, or network errors, credentials, usage limits, agent exits, merge conflicts, failed verification | Not reported |
 | Anything else, including errors raised in dependencies, plugins, or your project | Not reported (inconclusive) |
 
-An automatic report goes to the same DevIntern intake as `devintern report` (or to `DEVINTERN_REPORT_URL`), never to your task's repository or tracker. It contains the error type, a cleaned-up error message, DevIntern stack frames, the failed step, and the environment block described above. Logs, run history, task content, repository details, and credentials are left out.
+An automatic report goes to the same DevIntern intake as `devintern report` (or to `DEVINTERN_REPORT_URL`), never to your task's repository or tracker. It contains the error type, a cleaned-up error message, DevIntern source locations (file and line), the failed step, the DevIntern version, and the environment block described above. Logs, run history, task content, repository details, and credentials are left out.
 
 | Setting | Default | Purpose |
 | --- | --- | --- |
 | `DEVINTERN_AUTO_REPORT` | off | `1`, `true`, `yes`, or `on` turns automatic reports on |
 | `DEVINTERN_REPORT_EMAIL` | none | Contact address used when you are not signed in. Without a sign-in or this address, defects are found but not sent |
 
-The run output prints whether a report was sent, with a link to it. The failed run in the [dashboard](dashboard.md) gets a **DevIntern issue report** stage with the same information. `devintern report list` shows automatic reports next to manual ones; their titles start with `[auto]`. The same defect is sent once per 30 days, and later failures link to the existing report. If sending fails, the report is saved locally and resent the next time the defect occurs; you can also resend it with the printed `devintern report --from <path>` command. Turning reports on never changes the result of the failed run.
+The run output prints whether a report was sent, with a link to it when the intake returns one (otherwise the report id). The failed run in the [dashboard](dashboard.md) gets a **DevIntern issue report** stage with the same information. `devintern report list` shows automatic reports next to manual ones; their titles start with `[auto]`. The same defect is sent once per 30 days, and later failures link to the existing report. If sending fails, the report is saved locally and resent the next time the defect occurs; you can also resend it with the printed `devintern report --from <path>` command. Turning reports on never changes the result of the failed run.
 
 ## Report with a coding agent
 

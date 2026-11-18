@@ -99,10 +99,21 @@ function findDuplicate(reportDir: string, signature: string, now: Date): SpoolEn
   return null;
 }
 
+/** Wrap `fetch` so every request is also cancelled by `signal`. */
+function abortableFetch(base: typeof fetch, signal: AbortSignal): typeof fetch {
+  const wrapped = (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) =>
+    base(input, {
+      ...init,
+      signal: init?.signal ? AbortSignal.any([init.signal, signal]) : signal,
+    });
+  return Object.assign(wrapped, base);
+}
+
 async function runAutoReport(
   input: AutoReportInput,
   deps: AutoReportDeps,
   env: NodeJS.ProcessEnv,
+  signal: AbortSignal,
 ): Promise<AutoReportOutcome> {
   const cwd = deps.cwd ?? process.cwd();
   const now = deps.now ?? (() => new Date());
@@ -143,7 +154,7 @@ async function runAutoReport(
     cliVersion: input.cliVersion ?? "unknown",
     installKind: currentInstallKind(),
     ...(contactEmail ? { contactEmail } : {}),
-    ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}),
+    fetchImpl: abortableFetch(deps.fetchImpl ?? fetch, signal),
     timeoutMs: 10_000,
     now,
   };
@@ -178,6 +189,8 @@ async function runAutoReport(
         ],
       });
 
+  // The caller already gave up (timeout): do not start a submission it cannot see.
+  if (signal.aborted) return { status: "error", error: "cancelled after timeout" };
   const outcome = await submitWithSpool(reporter, prepared, reportDir);
   if (outcome.ok) {
     return {
@@ -207,25 +220,47 @@ export async function maybeAutoReportFailure(
   const previousMarker = env[AUTO_REPORT_ACTIVE_ENV];
   env[AUTO_REPORT_ACTIVE_ENV] = "1";
   const timeoutMs = deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    return await Promise.race([
-      runAutoReport(input, deps, env),
-      new Promise<AutoReportOutcome>((resolve) => {
-        timer = setTimeout(
-          () => resolve({ status: "error", error: `timed out after ${timeoutMs} ms` }),
-          timeoutMs,
-        );
-        (timer as { unref?: () => void }).unref?.();
-      }),
-    ]);
-  } catch (error) {
-    return { status: "error", error: error instanceof Error ? error.message : String(error) };
-  } finally {
-    if (timer) clearTimeout(timer);
+  const work = (async () => {
+    try {
+      return await runAutoReport(input, deps, env, controller.signal);
+    } catch (error) {
+      return {
+        status: "error",
+        error: error instanceof Error ? error.message : String(error),
+      } satisfies AutoReportOutcome;
+    }
+  })();
+  // The recursion guard stays up until the work really settles, even when the
+  // caller stops waiting on a timeout: a later failure in the same process
+  // cannot start a second analysis while this one is still winding down. A
+  // grace period bounds that, so work that never settles cannot silence
+  // every later report in a long batch.
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
     if (previousMarker === undefined) delete env[AUTO_REPORT_ACTIVE_ENV];
     else env[AUTO_REPORT_ACTIVE_ENV] = previousMarker;
     running = false;
+  };
+  void work.finally(release);
+  try {
+    return await Promise.race([
+      work,
+      new Promise<AutoReportOutcome>((resolve) => {
+        timer = setTimeout(() => {
+          controller.abort();
+          const grace = setTimeout(release, timeoutMs);
+          (grace as { unref?: () => void }).unref?.();
+          resolve({ status: "error", error: `timed out after ${timeoutMs} ms` });
+        }, timeoutMs);
+        (timer as { unref?: () => void }).unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 

@@ -11,6 +11,12 @@
  * JavaScript programming error (TypeError, ReferenceError, RangeError, …)
  * whose innermost application frame is DevIntern's own code. Everything else
  * that is not recognisably task-specific is `inconclusive` and never sent.
+ *
+ * Attribution is by source path. The published bundle (`dist/index.js`) ships
+ * with `dist/index.js.map`, which Bun applies to stack traces, so frames
+ * resolve to `<pkg>/src/...`, sibling shared packages, or `node_modules/...`.
+ * A frame that still points at the bundle itself (map missing or unreadable)
+ * cannot be attributed, and makes the verdict `inconclusive`.
  */
 
 import { existsSync, readFileSync } from "node:fs";
@@ -50,6 +56,12 @@ export interface AnalyzeFailureOptions {
   homeDir?: string;
   /** Pipeline step that was active when the run failed (e.g. `implementation`). */
   failedStep?: string;
+  /**
+   * Whether function names in stack frames are minified (the published
+   * bundle). They are dropped then: unreadable, and they change every release.
+   * Defaults to whether this module is running from the bundle.
+   */
+  minifiedNames?: boolean;
 }
 
 const MAX_FRAMES = 8;
@@ -118,21 +130,60 @@ export function resolveDevInternPackageRoot(startDir: string = import.meta.dir):
   return found;
 }
 
+/** Whether this module is running from the published bundle, not `src/`. */
+const RUNNING_FROM_BUNDLE = !/\.tsx?$/.test(import.meta.path);
+
 /** Shared monorepo packages bundled into DevIntern Code. */
+const SHARED_PACKAGES = new Set([
+  "agent-harness",
+  "auth",
+  "license-check",
+  "license-policy",
+  "text-formatter",
+  "utils",
+  "task-trackers",
+]);
 const SHARED_PACKAGE_PATTERN =
   /[\\/](?:node_modules[\\/]@devintern|packages)[\\/](agent-harness|auth|license-check|license-policy|text-formatter|utils|task-trackers)[\\/](.+)$/;
 
-/** Map an absolute frame path to a package-relative DevIntern path, or null. */
-function devInternRelativePath(file: string, packageRoot: string | null): string | null {
+/** Unmapped frame inside the bundle: DevIntern and vendored code are indistinguishable. */
+const BUNDLE_FRAME = Symbol("bundle-frame");
+
+function toPosix(path: string): string {
+  return path.split(sep).join("/");
+}
+
+function isInside(rel: string): boolean {
+  return Boolean(rel) && !rel.startsWith("..") && !rel.startsWith(sep) && !/^[A-Za-z]:/.test(rel);
+}
+
+/**
+ * Map an absolute frame path to a package-relative DevIntern path, null for
+ * code DevIntern does not own, or {@link BUNDLE_FRAME} for an unmapped bundle.
+ */
+function devInternRelativePath(
+  file: string,
+  packageRoot: string | null,
+): string | typeof BUNDLE_FRAME | null {
   if (packageRoot) {
     const rel = relative(packageRoot, file);
-    if (rel && !rel.startsWith("..") && !rel.startsWith(sep) && !rel.includes("node_modules")) {
-      return rel.split(sep).join("/");
+    if (isInside(rel)) {
+      if (rel.includes("node_modules")) return null;
+      const posix = toPosix(rel);
+      return posix.startsWith("dist/") ? BUNDLE_FRAME : posix;
+    }
+    // Shared packages resolve to siblings of the package root: `packages/<name>`
+    // in the monorepo, and the same relative location once installed, because
+    // the bundle's source map records them as `../../<name>/src/...`.
+    const siblingRel = relative(dirname(packageRoot), file);
+    if (isInside(siblingRel) && !siblingRel.includes("node_modules")) {
+      const [name, ...rest] = toPosix(siblingRel).split("/");
+      if (name && SHARED_PACKAGES.has(name) && rest.length > 0) return `${name}/${rest.join("/")}`;
     }
   }
   const shared = SHARED_PACKAGE_PATTERN.exec(file);
   if (shared && !shared[2].includes("node_modules")) {
-    return `${shared[1]}/${shared[2].split(sep).join("/")}`;
+    return `${shared[1]}/${toPosix(shared[2])}`;
   }
   return null;
 }
@@ -143,9 +194,11 @@ const FRAME_PATTERN = /^\s*at\s+(?:(?:async\s+)?(.+?)\s+\()?(.+?):(\d+)(?::\d+)?
 export function devInternFrames(
   stack: string | undefined,
   packageRoot: string | null,
-): { frames: DevInternFrame[]; innermostIsDevIntern: boolean } {
+  options: { minifiedNames?: boolean } = {},
+): { frames: DevInternFrame[]; innermostIsDevIntern: boolean; innermostIsBundle: boolean } {
   const frames: DevInternFrame[] = [];
   let innermostIsDevIntern = false;
+  let innermostIsBundle = false;
   let sawApplicationFrame = false;
   for (const line of (stack ?? "").split("\n")) {
     const match = FRAME_PATTERN.exec(line);
@@ -157,17 +210,18 @@ export function devInternFrames(
     const rel = devInternRelativePath(file, packageRoot);
     if (!sawApplicationFrame) {
       sawApplicationFrame = true;
-      innermostIsDevIntern = rel !== null;
+      innermostIsBundle = rel === BUNDLE_FRAME;
+      innermostIsDevIntern = typeof rel === "string";
     }
-    if (!rel || frames.length >= MAX_FRAMES) continue;
-    const fn = fnRaw?.trim();
+    if (typeof rel !== "string" || frames.length >= MAX_FRAMES) continue;
+    const fn = options.minifiedNames ? undefined : fnRaw?.trim();
     frames.push({
       ...(fn && /^[\w$.<>[\]\s]{1,80}$/.test(fn) ? { fn } : {}),
       file: rel,
       line: Number(lineRaw),
     });
   }
-  return { frames, innermostIsDevIntern };
+  return { frames, innermostIsDevIntern, innermostIsBundle };
 }
 
 /**
@@ -190,6 +244,26 @@ export function sanitizeErrorMessage(
     homeDir: options.homeDir,
     maxChars: MAX_MESSAGE_CHARS,
   }).trim();
+}
+
+/**
+ * Strip code expressions from a programming error's message before matching
+ * task patterns, so `x.timeout is not a function` or JSC's
+ * `(evaluating 'res.notFound')` is not mistaken for a timeout or a 404.
+ */
+function messageProse(message: string): string {
+  return message
+    .replace(/(["'`])(?:(?!\1).)*\1/g, " ")
+    .replace(/[\w$]+(?:(?:\?\.|\.)[\w$]+|\[[^\]]*\]|\(\))+/g, " ")
+    .replace(/^\s*[\w$]+(?=\s+is\s+(?:not|undefined|null)\b)/, " ");
+}
+
+/** Message reduced to its stable shape for duplicate detection across releases. */
+function signatureMessage(message: string): string {
+  return message
+    .replace(/(["'`])(?:(?!\1).)*\1/g, "<expr>")
+    .replace(/[\w$]+(?:(?:\?\.|\.)[\w$]+)+/g, "<expr>")
+    .replace(/\d+/g, "<n>");
 }
 
 /** Read `name`/`message`/`stack` from an unknown thrown value. */
@@ -228,7 +302,10 @@ export function analyzeFailure(
   if (TASK_ERROR_NAMES.has(name) || hasRemoteStatus(error)) {
     return { verdict: "task", rationale: `${name} is an expected task or environment outcome` };
   }
-  if (TASK_MESSAGE_PATTERNS.some((pattern) => pattern.test(message))) {
+  // Engine-raised errors name code (`x.timeout is not a function`); only their
+  // prose can point at the environment (`fetch failed`).
+  const matchable = PROGRAMMING_ERRORS.has(name) ? messageProse(message) : message;
+  if (TASK_MESSAGE_PATTERNS.some((pattern) => pattern.test(matchable))) {
     return {
       verdict: "task",
       rationale: "the error points at the task, repository, credentials, or network",
@@ -241,7 +318,15 @@ export function analyzeFailure(
     };
   }
 
-  const { frames, innermostIsDevIntern } = devInternFrames(stack, packageRoot);
+  const { frames, innermostIsDevIntern, innermostIsBundle } = devInternFrames(stack, packageRoot, {
+    minifiedNames: options.minifiedNames ?? RUNNING_FROM_BUNDLE,
+  });
+  if (innermostIsBundle) {
+    return {
+      verdict: "inconclusive",
+      rationale: `${name} was raised in the bundle without a source map, so its origin is unknown`,
+    };
+  }
   if (!innermostIsDevIntern || frames.length === 0) {
     return {
       verdict: "inconclusive",
@@ -251,10 +336,12 @@ export function analyzeFailure(
 
   const sanitized = sanitizeErrorMessage(message, options);
   const top = frames[0];
+  // Source file, error shape, and step only: no line numbers or function
+  // names, which move between releases and would re-report the same defect.
   const signature = buildFingerprint({
-    title: `${name} ${top.fn ?? ""} ${top.file}`,
+    title: `${name} ${top.file}`,
     errorName: name,
-    errorMessage: sanitized,
+    errorMessage: signatureMessage(sanitized),
     ...(options.failedStep ? { failedStep: options.failedStep } : {}),
   });
   return {

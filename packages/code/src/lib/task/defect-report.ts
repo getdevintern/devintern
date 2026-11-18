@@ -7,6 +7,7 @@
  */
 
 import { VERSION } from "../cli/bootstrap";
+import { resolveRuntimeStateDir } from "../config/config-dir";
 import { autoReportMessage, autoReportStage, maybeAutoReportFailure } from "../report/auto-report";
 import type { AutoReportOutcome } from "../report/auto-report";
 import { recordStageForRun } from "../state/run-recorder";
@@ -24,12 +25,17 @@ export interface DefectReportInput {
 export async function reportDevInternDefect(input: DefectReportInput): Promise<AutoReportOutcome> {
   let outcome: AutoReportOutcome;
   try {
-    outcome = await maybeAutoReportFailure({
-      error: input.error,
-      taskKey: input.taskKey,
-      cliVersion: VERSION,
-      ...(input.failedStep ? { failedStep: input.failedStep } : {}),
-    });
+    outcome = await maybeAutoReportFailure(
+      {
+        error: input.error,
+        taskKey: input.taskKey,
+        cliVersion: VERSION,
+        ...(input.failedStep ? { failedStep: input.failedStep } : {}),
+      },
+      // Same state directory as `devintern report`: the worker workspace for
+      // worker runs, never a `.devintern-code` inside the task's checkout.
+      { configDir: resolveRuntimeStateDir() },
+    );
   } catch (error) {
     outcome = { status: "error", error: (error as Error).message };
   }
