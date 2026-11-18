@@ -30,12 +30,12 @@ JIRA_API_TOKEN=your-api-token
 JIRA_DEFAULT_PROJECT_KEY=PROJ
 ```
 
-| Variable                   | Required | Where to find it                                                                                                     |
-| -------------------------- | -------- | -------------------------------------------------------------------------------------------------------------------- |
-| `JIRA_BASE_URL`            | yes      | The site URL you open Jira at, without a trailing slash.                                                             |
-| `JIRA_EMAIL`               | yes      | Email of the Atlassian account that owns the API token.                                                              |
-| `JIRA_API_TOKEN`           | yes      | [Atlassian API tokens](https://id.atlassian.com/manage-profile/security/api-tokens) → **Create API token**.          |
-| `JIRA_DEFAULT_PROJECT_KEY` | yes      | The prefix on issue keys (`PROJ` in `PROJ-123`), or **Project settings → Details → Key**.                            |
+| Variable                   | Required | Where to find it                                                                                            |
+| -------------------------- | -------- | ----------------------------------------------------------------------------------------------------------- |
+| `JIRA_BASE_URL`            | yes      | The site URL you open Jira at, without a trailing slash.                                                    |
+| `JIRA_EMAIL`               | yes      | Email of the Atlassian account that owns the API token.                                                     |
+| `JIRA_API_TOKEN`           | yes      | [Atlassian API tokens](https://id.atlassian.com/manage-profile/security/api-tokens) → **Create API token**. |
+| `JIRA_DEFAULT_PROJECT_KEY` | yes      | The prefix on issue keys (`PROJ` in `PROJ-123`), or **Project settings → Details → Key**.                   |
 
 ## Usage
 
@@ -43,11 +43,11 @@ JIRA_DEFAULT_PROJECT_KEY=PROJ
 devpm --interactive
 ```
 
-| devpm concept             | Jira object                                          |
-| ------------------------- | ---------------------------------------------------- |
-| Story / Bug / Task / Epic | Issue of the selected type in the target project     |
-| Subtask                   | Subtask issue linked to the parent                   |
-| Epic link                 | Parent field set to the epic key (e.g. `PROJ-42`)    |
+| devpm concept             | Jira object                                       |
+| ------------------------- | ------------------------------------------------- |
+| Story / Bug / Task / Epic | Issue of the selected type in the target project  |
+| Subtask                   | Subtask issue linked to the parent                |
+| Epic link                 | Parent field set to the epic key (e.g. `PROJ-42`) |
 
 The issue type step lists the types configured in your project. Press `Ctrl+P` to create in a different project for this run; otherwise `JIRA_DEFAULT_PROJECT_KEY` is used.
 

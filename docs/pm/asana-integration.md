@@ -26,10 +26,10 @@ ASANA_API_TOKEN=your-asana-pat
 # ASANA_DEFAULT_PROJECT_GID=2222222222222222
 ```
 
-| Variable                    | Required | Where to find it                                                                                                                                         |
-| --------------------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ASANA_API_TOKEN`           | yes      | [Asana developer console](https://app.asana.com/0/developer-console) → new **Personal access token**.                                                    |
-| `ASANA_DEFAULT_PROJECT_GID` | no       | The number right after `/project/` in the project URL (not the workspace ID before it or the view ID after it). Defaults to your first project.          |
+| Variable                    | Required | Where to find it                                                                                                                                |
+| --------------------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ASANA_API_TOKEN`           | yes      | [Asana developer console](https://app.asana.com/0/developer-console) → new **Personal access token**.                                           |
+| `ASANA_DEFAULT_PROJECT_GID` | no       | The number right after `/project/` in the project URL (not the workspace ID before it or the view ID after it). Defaults to your first project. |
 
 ```
 https://app.asana.com/1/1111111111111111/project/2222222222222222/list/3333333333333333

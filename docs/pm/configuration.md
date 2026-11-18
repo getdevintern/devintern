@@ -17,16 +17,16 @@ devpm looks for `.devintern-pm/.env` in the current directory and its parents, u
 
 Set `TASK_TRACKER` (default `jira`) and the variables for that tracker only; other trackers' variables are ignored.
 
-| `TASK_TRACKER` | Required variables                                          | Optional                                                                    | Guide                                       |
-| -------------- | ----------------------------------------------------------- | --------------------------------------------------------------------------- | ------------------------------------------- |
-| `jira`         | `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_DEFAULT_PROJECT_KEY` |                                                             | [Jira](./jira-integration.md)               |
-| `linear`       | `LINEAR_API_KEY`                                            | `LINEAR_DEFAULT_TEAM_KEY`                                                   | [Linear](./linear-integration.md)           |
-| `trello`       | `TRELLO_API_TOKEN`                                          | `TRELLO_DEFAULT_BOARD_ID`, `TRELLO_DEFAULT_LIST_NAME`, `TRELLO_API_KEY`     | [Trello](./trello-integration.md)           |
-| `azure-devops` | `AZURE_DEVOPS_ORG`, `AZURE_DEVOPS_PAT`, `AZURE_DEVOPS_PROJECT` |                                                                          | [Azure DevOps](./azure-devops-integration.md) |
-| `asana`        | `ASANA_API_TOKEN`                                           | `ASANA_DEFAULT_PROJECT_GID`                                                 | [Asana](./asana-integration.md)             |
-| `github`       | `GITHUB_TOKEN`, `GITHUB_REPO`                               |                                                                             | [GitHub Issues](./github-integration.md)    |
-| `gitlab`       | `GITLAB_TOKEN`, `GITLAB_PROJECT`                            | `GITLAB_BASE_URL` (self-hosted)                                             | [GitLab](./gitlab-integration.md)           |
-| `markdown`     | none                                                        | `MARKDOWN_TASKS_DIR` (default `.devintern-pm/tasks`, relative to the project root) |                                      |
+| `TASK_TRACKER` | Required variables                                                          | Optional                                                                           | Guide                                         |
+| -------------- | --------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- | --------------------------------------------- |
+| `jira`         | `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_DEFAULT_PROJECT_KEY` |                                                                                    | [Jira](./jira-integration.md)                 |
+| `linear`       | `LINEAR_API_KEY`                                                            | `LINEAR_DEFAULT_TEAM_KEY`                                                          | [Linear](./linear-integration.md)             |
+| `trello`       | `TRELLO_API_TOKEN`                                                          | `TRELLO_DEFAULT_BOARD_ID`, `TRELLO_DEFAULT_LIST_NAME`, `TRELLO_API_KEY`            | [Trello](./trello-integration.md)             |
+| `azure-devops` | `AZURE_DEVOPS_ORG`, `AZURE_DEVOPS_PAT`, `AZURE_DEVOPS_PROJECT`              |                                                                                    | [Azure DevOps](./azure-devops-integration.md) |
+| `asana`        | `ASANA_API_TOKEN`                                                           | `ASANA_DEFAULT_PROJECT_GID`                                                        | [Asana](./asana-integration.md)               |
+| `github`       | `GITHUB_TOKEN`, `GITHUB_REPO`                                               |                                                                                    | [GitHub Issues](./github-integration.md)      |
+| `gitlab`       | `GITLAB_TOKEN`, `GITLAB_PROJECT`                                            | `GITLAB_BASE_URL` (self-hosted)                                                    | [GitLab](./gitlab-integration.md)             |
+| `markdown`     | none                                                                        | `MARKDOWN_TASKS_DIR` (default `.devintern-pm/tasks`, relative to the project root) |                                               |
 
 ```bash
 # .devintern-pm/.env
@@ -40,13 +40,13 @@ With `markdown`, tasks are written as local Markdown files instead of being sent
 
 DevIntern PM drafts stories by running an AI agent CLI on your machine.
 
-| Variable / flag                  | Default                    | Purpose                                                                                     |
-| -------------------------------- | -------------------------- | ------------------------------------------------------------------------------------------- |
-| `AGENT_HARNESS` / `--harness`    | `claude-code`              | Agent to run. A comma-separated list enables failover (below).                               |
-| `AGENT_MODEL` / `--model`, `-m`  | harness default            | Model string, in the harness's own format (e.g. `sonnet`, a Codex model ID, an `agy models` slug). |
-| `AGENT_EFFORT` / `--effort`      | unset (no flag emitted)    | Reasoning effort: `low`, `medium`, or `high`.                                                |
-| `AGENT_CLI_PATH`                 | found on `PATH`            | Path to the agent binary, only if it is not on `PATH` or has a non-standard name.            |
-| `<HARNESS>_CLI_PATH`, `<HARNESS>_MODEL` |                     | Per-harness path and model (e.g. `OPENCODE_CLI_PATH`, `GROK_MODEL`), used when `AGENT_*` doesn't apply. |
+| Variable / flag                         | Default                 | Purpose                                                                                                 |
+| --------------------------------------- | ----------------------- | ------------------------------------------------------------------------------------------------------- |
+| `AGENT_HARNESS` / `--harness`           | `claude-code`           | Agent to run. A comma-separated list enables failover (below).                                          |
+| `AGENT_MODEL` / `--model`, `-m`         | harness default         | Model string, in the harness's own format (e.g. `sonnet`, a Codex model ID, an `agy models` slug).      |
+| `AGENT_EFFORT` / `--effort`             | unset (no flag emitted) | Reasoning effort: `low`, `medium`, or `high`.                                                           |
+| `AGENT_CLI_PATH`                        | found on `PATH`         | Path to the agent binary, only if it is not on `PATH` or has a non-standard name.                       |
+| `<HARNESS>_CLI_PATH`, `<HARNESS>_MODEL` |                         | Per-harness path and model (e.g. `OPENCODE_CLI_PATH`, `GROK_MODEL`), used when `AGENT_*` doesn't apply. |
 
 Flags override the environment for a single run. In interactive mode, `Ctrl+G` switches among installed agents. In the desktop app, **Settings → Agent model** and **Settings → Agent effort** save the same values to `.devintern-pm/.env`.
 
@@ -54,20 +54,20 @@ The binary is resolved from `AGENT_CLI_PATH`, then `<HARNESS>_CLI_PATH`, then th
 
 **Supported harnesses:**
 
-| `AGENT_HARNESS`               | Binary         | Notes                                                                                                     |
-| ----------------------------- | -------------- | --------------------------------------------------------------------------------------------------------- |
-| `claude-code` (alias `claude`) | `claude`      | Required for Figma sources (with the Figma MCP server).                                                   |
-| `opencode`                    | `opencode`     | On OpenCode v2, effort applies only when a model is set.                                                   |
-| `codex`                       | `codex`        |                                                                                                           |
-| `cursor`                      | `cursor-agent` | Enable the CLI in Cursor's settings.                                                                       |
-| `grok`                        | `grok`         | Grok Build, from [x.ai/cli](https://x.ai/cli). Log in, or set `XAI_API_KEY`.                               |
-| `deepseek`                    | `reasonix`     | `npm i -g reasonix`, then set `DEEPSEEK_API_KEY` or run `reasonix setup`.                                  |
-| `antigravity` (alias `agy`)   | `agy`          | [Install](https://antigravity.google/docs/cli/install); `ANTIGRAVITY_TOKEN` for CI. `gemini` still works but is deprecated. |
-| `muse` (alias `muse-code`)    | `muse`         | Muse Code 1.4.9+. Default model `muse-spark-1.2`. Set `META_API_KEY` for unattended runs (required on macOS under `nono`). See [Muse auth](https://dev.meta.ai/docs/muse-code/auth). |
-| `cline`, `goose`, `kimi`      | same as id     |                                                                                                           |
-| `kilo-code`                   | `kilo`         |                                                                                                           |
-| `qwen`                        | `qwen`         | Model can also be set in `~/.qwen/settings.json`.                                                          |
-| `pi`                          | `pi`           | Effort applies only when a model is set.                                                                   |
+| `AGENT_HARNESS`                | Binary         | Notes                                                                                                                                                                                                                                                          |
+| ------------------------------ | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `claude-code` (alias `claude`) | `claude`       | Required for Figma sources (with the Figma MCP server).                                                                                                                                                                                                        |
+| `opencode`                     | `opencode`     | On OpenCode v2, effort applies only when a model is set.                                                                                                                                                                                                       |
+| `codex`                        | `codex`        |                                                                                                                                                                                                                                                                |
+| `cursor`                       | `cursor-agent` | Enable the CLI in Cursor's settings.                                                                                                                                                                                                                           |
+| `grok`                         | `grok`         | Grok Build, from [x.ai/cli](https://x.ai/cli). Log in, or set `XAI_API_KEY`.                                                                                                                                                                                   |
+| `deepseek`                     | `reasonix`     | `npm i -g reasonix`, then set `DEEPSEEK_API_KEY` or run `reasonix setup`.                                                                                                                                                                                      |
+| `antigravity` (alias `agy`)    | `agy`          | [Install](https://antigravity.google/docs/cli/install); `ANTIGRAVITY_TOKEN` for CI. `gemini` still works but is deprecated.                                                                                                                                    |
+| `muse` (alias `muse-code`)     | `muse`         | Muse Code 1.4.9+, via Meta's installer (`curl -fsSL https://dev.meta.ai/install.sh \| sh`). Default model `muse-spark-1.2`. Set `META_API_KEY` for unattended runs (required on macOS under `nono`). See [Muse auth](https://dev.meta.ai/docs/muse-code/auth). |
+| `cline`, `goose`, `kimi`       | same as id     |                                                                                                                                                                                                                                                                |
+| `kilo-code`                    | `kilo`         |                                                                                                                                                                                                                                                                |
+| `qwen`                         | `qwen`         | Model can also be set in `~/.qwen/settings.json`.                                                                                                                                                                                                              |
+| `pi`                           | `pi`           | Effort applies only when a model is set.                                                                                                                                                                                                                       |
 
 A few harnesses have no model flag and ignore `AGENT_MODEL`. Harnesses without a reasoning-effort option ignore `AGENT_EFFORT` with a one-line warning.
 
@@ -88,14 +88,14 @@ AGENT_HARNESS=opencode,grok
 
 ## Other Settings
 
-| Variable                                                  | Default | Purpose                                                                                       |
-| --------------------------------------------------------- | ------- | --------------------------------------------------------------------------------------------- |
-| `DEVINTERN_VERBOSE=1` (or `--verbose`, `-v`)              | off     | Log every API request, status, and retry. Useful for auth and network problems.               |
-| `SENTRY_DISABLED=1`                                       | off     | Stop sending error reports (see below).                                                       |
-| `DEVPM_NO_UPDATE=1` / `DEVINTERN_NO_UPDATE=1` (or `--no-update`) | off | Skip the daily update check.                                                            |
-| `DEVPM_AUTO_UPDATE=1` / `DEVINTERN_AUTO_UPDATE=1`         | off     | Install updates without prompting, including in CI.                                           |
-| `AGENT_SPAWN_ENOENT_RETRIES`                              | `5`     | Retries when the agent binary is briefly missing during its own auto-update.                  |
-| `AGENT_SPAWN_ENOENT_BACKOFF_MS`                           | `1000`  | First retry delay for the above (doubles each attempt).                                       |
+| Variable                                                         | Default | Purpose                                                                         |
+| ---------------------------------------------------------------- | ------- | ------------------------------------------------------------------------------- |
+| `DEVINTERN_VERBOSE=1` (or `--verbose`, `-v`)                     | off     | Log every API request, status, and retry. Useful for auth and network problems. |
+| `SENTRY_DISABLED=1`                                              | off     | Stop sending error reports (see below).                                         |
+| `DEVPM_NO_UPDATE=1` / `DEVINTERN_NO_UPDATE=1` (or `--no-update`) | off     | Skip the daily update check.                                                    |
+| `DEVPM_AUTO_UPDATE=1` / `DEVINTERN_AUTO_UPDATE=1`                | off     | Install updates without prompting, including in CI.                             |
+| `AGENT_SPAWN_ENOENT_RETRIES`                                     | `5`     | Retries when the agent binary is briefly missing during its own auto-update.    |
+| `AGENT_SPAWN_ENOENT_BACKOFF_MS`                                  | `1000`  | First retry delay for the above (doubles each attempt).                         |
 
 ### Proxy
 

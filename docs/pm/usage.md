@@ -44,24 +44,24 @@ devpm --log <text> [options]
 devpm --prompt <text> [options]
 ```
 
-| Option                  | Description                                                                                                                                                                       |
-| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--figma <url>`         | Figma design node URL. Needs Claude Code with the [Figma MCP server](https://developers.figma.com/docs/figma-mcp-server/remote-server-installation/).                              |
-| `--log <text>`          | Error log or bug report.                                                                                                                                                          |
-| `--prompt <text>`       | Free-form requirements.                                                                                                                                                           |
-| `--epic, -e <key>`      | Link to an epic (e.g. `PROJ-100`). Ignored by Trello, GitHub, GitLab, and Markdown.                                                                                               |
-| `--type, -t <type>`     | Issue type, default `Task` (e.g. Story, Bug, Epic). Ignored by Linear, Trello, and Asana.                                                                                         |
-| `--custom, -c <text>`   | Extra instructions for the draft.                                                                                                                                                 |
-| `--attach <path>`       | Attach a local file (repeatable, max 10). See [Attachments](#attachments).                                                                                                        |
-| `--style, -s <style>`   | `pm` (default: user story, Given/When/Then criteria, non-goals, success metrics) or `technical` (adds Technical Considerations).                                                  |
-| `--harness <name>`      | Agent to run for this command. See [Configuration](./configuration.md#agent-harness).                                                                                             |
-| `--model, -m <model>`   | Model for this run (overrides `AGENT_MODEL`); format depends on the harness.                                                                                                      |
-| `--effort <level>`      | `low`, `medium`, or `high` (overrides `AGENT_EFFORT`).                                                                                                                            |
-| `--decompose`           | Also break the story into subtasks.                                                                                                                                               |
-| `--confirm`             | Confirm each subtask before it is created.                                                                                                                                        |
-| `--verbose, -v`         | Log API calls (same as `DEVINTERN_VERBOSE=1`).                                                                                                                                    |
-| `--no-update`           | Skip the update check for this run.                                                                                                                                               |
-| `--help, -h`            | Show help.                                                                                                                                                                        |
+| Option                | Description                                                                                                                                           |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--figma <url>`       | Figma design node URL. Needs Claude Code with the [Figma MCP server](https://developers.figma.com/docs/figma-mcp-server/remote-server-installation/). |
+| `--log <text>`        | Error log or bug report.                                                                                                                              |
+| `--prompt <text>`     | Free-form requirements.                                                                                                                               |
+| `--epic, -e <key>`    | Link to an epic (e.g. `PROJ-100`). Ignored by Trello, GitHub, GitLab, and Markdown.                                                                   |
+| `--type, -t <type>`   | Issue type, default `Task` (e.g. Story, Bug, Epic). Ignored by Linear, Trello, and Asana.                                                             |
+| `--custom, -c <text>` | Extra instructions for the draft.                                                                                                                     |
+| `--attach <path>`     | Attach a local file (repeatable, max 10). See [Attachments](#attachments).                                                                            |
+| `--style, -s <style>` | `pm` (default: user story, Given/When/Then criteria, non-goals, success metrics) or `technical` (adds Technical Considerations).                      |
+| `--harness <name>`    | Agent to run for this command. See [Configuration](./configuration.md#agent-harness).                                                                 |
+| `--model, -m <model>` | Model for this run (overrides `AGENT_MODEL`); format depends on the harness.                                                                          |
+| `--effort <level>`    | `low`, `medium`, or `high` (overrides `AGENT_EFFORT`).                                                                                                |
+| `--decompose`         | Also break the story into subtasks.                                                                                                                   |
+| `--confirm`           | Confirm each subtask before it is created.                                                                                                            |
+| `--verbose, -v`       | Log API calls (same as `DEVINTERN_VERBOSE=1`).                                                                                                        |
+| `--no-update`         | Skip the update check for this run.                                                                                                                   |
+| `--help, -h`          | Show help.                                                                                                                                            |
 
 ### Examples
 

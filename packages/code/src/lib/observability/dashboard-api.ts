@@ -1402,8 +1402,8 @@ export function handleStats(data: DashboardData, params: URLSearchParams): ApiRe
  *
  * The worker writes `.worker.lock` under `.devintern-code/` of its working
  * directory (simple mode) or directly into the workspace home (fleet mode), so
- * both are consulted. A live lock wins, then an unverifiable one from another
- * PID namespace (`unknown`), then a stale dead-pid lock (`stopped`). No
+ * both are consulted. A live lock wins, then one from another PID namespace
+ * (`unknown`); `stopped` only when every readable lock has a dead pid. No
  * readable lock anywhere is `unknown`: the worker may be running elsewhere.
  *
  * @param workingDir - Project root the dashboard was started from

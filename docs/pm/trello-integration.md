@@ -33,11 +33,11 @@ DevIntern PM creates Trello cards from AI-drafted stories. It ships with a built
 
 The token does not expire; revoke it any time from your [Trello account settings](https://trello.com/u/me/account).
 
-| Variable                   | Required | Purpose                                                                                                   |
-| -------------------------- | -------- | --------------------------------------------------------------------------------------------------------- |
-| `TRELLO_API_TOKEN`         | yes      | Token from the authorization URL above.                                                                   |
-| `TRELLO_DEFAULT_BOARD_ID`  | no       | Board ID from the URL (`abc123` in `trello.com/b/abc123/My-Board`). Defaults to your first board.          |
-| `TRELLO_DEFAULT_LIST_NAME` | no       | Exact list title, e.g. `"To Do"`. Defaults to the first list (also used if the name doesn't match).        |
+| Variable                   | Required | Purpose                                                                                                                                                            |
+| -------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `TRELLO_API_TOKEN`         | yes      | Token from the authorization URL above.                                                                                                                            |
+| `TRELLO_DEFAULT_BOARD_ID`  | no       | Board ID from the URL (`abc123` in `trello.com/b/abc123/My-Board`). Defaults to your first board.                                                                  |
+| `TRELLO_DEFAULT_LIST_NAME` | no       | Exact list title, e.g. `"To Do"`. Defaults to the first list (also used if the name doesn't match).                                                                |
 | `TRELLO_API_KEY`           | no       | Your own Power-Up key, from [trello.com/power-ups/admin](https://trello.com/power-ups/admin) → **API Key**, if you need separate rate limits for heavy automation. |
 
 ## Usage

@@ -27,10 +27,10 @@ LINEAR_API_KEY=lin_api_xxxxxxxxxxxx
 # LINEAR_DEFAULT_TEAM_KEY=ENG
 ```
 
-| Variable                  | Required | Where to find it                                                                                                   |
-| ------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------ |
-| `LINEAR_API_KEY`          | yes      | [Linear API settings](https://linear.app/settings/api) → **Personal API keys** → **Create key**. Shown only once.   |
-| `LINEAR_DEFAULT_TEAM_KEY` | no       | The prefix on issue IDs (`ENG` in `ENG-42`), or **Settings → Teams → Key**. Defaults to your first team.           |
+| Variable                  | Required | Where to find it                                                                                                  |
+| ------------------------- | -------- | ----------------------------------------------------------------------------------------------------------------- |
+| `LINEAR_API_KEY`          | yes      | [Linear API settings](https://linear.app/settings/api) → **Personal API keys** → **Create key**. Shown only once. |
+| `LINEAR_DEFAULT_TEAM_KEY` | no       | The prefix on issue IDs (`ENG` in `ENG-42`), or **Settings → Teams → Key**. Defaults to your first team.          |
 
 ## Usage
 
@@ -38,11 +38,11 @@ LINEAR_API_KEY=lin_api_xxxxxxxxxxxx
 devpm --interactive
 ```
 
-| devpm concept      | Linear object                    |
-| ------------------ | -------------------------------- |
-| Story / Task / Bug | Issue in the target team         |
-| Subtask            | Sub-issue of the parent          |
-| Epic link          | Parent issue                     |
+| devpm concept      | Linear object            |
+| ------------------ | ------------------------ |
+| Story / Task / Bug | Issue in the target team |
+| Subtask            | Sub-issue of the parent  |
+| Epic link          | Parent issue             |
 
 Linear has no Jira-style issue types, so that step is skipped. Press `Ctrl+P` to pick a different team for this run.
 

@@ -27,9 +27,9 @@ GITHUB_TOKEN=github_pat_xxxxxxxxxxxx
 GITHUB_REPO=acme/my-app
 ```
 
-| Variable       | Required | Where to find it                                                                                                                                                                                                                                       |
-| -------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `GITHUB_REPO`  | yes      | The repository as `owner/repo`. All issues are created here.                                                                                                                                                                                            |
+| Variable       | Required | Where to find it                                                                                                                                                                                                                                         |
+| -------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GITHUB_REPO`  | yes      | The repository as `owner/repo`. All issues are created here.                                                                                                                                                                                             |
 | `GITHUB_TOKEN` | yes      | Recommended: a [fine-grained token](https://github.com/settings/personal-access-tokens/new) with access to the repo and **Issues: Read and write**. Or a [classic token](https://github.com/settings/tokens/new) with `repo` (private) or `public_repo`. |
 
 For organization repos, an org admin may need to approve a fine-grained token before it works.

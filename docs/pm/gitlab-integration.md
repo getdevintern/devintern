@@ -29,11 +29,11 @@ GITLAB_PROJECT=group/repo
 # GITLAB_BASE_URL=https://gitlab.example.com   # self-hosted only
 ```
 
-| Variable          | Required        | Where to find it                                                                                                                                                         |
-| ----------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `GITLAB_TOKEN`    | yes             | **User Settings → Access Tokens** with the **`api`** scope (`read_api` is not enough). Project or group access tokens with `api` and Reporter also work. Shown only once. |
-| `GITLAB_PROJECT`  | yes             | Project path (`group/repo`, subgroups allowed) or numeric project ID from the project overview.                                                                           |
-| `GITLAB_BASE_URL` | self-hosted only | Instance root URL without `/api/v4`. Defaults to `https://gitlab.com`; `http://` internal hosts work.                                                                    |
+| Variable          | Required         | Where to find it                                                                                                                                                          |
+| ----------------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GITLAB_TOKEN`    | yes              | **User Settings → Access Tokens** with the **`api`** scope (`read_api` is not enough). Project or group access tokens with `api` and Reporter also work. Shown only once. |
+| `GITLAB_PROJECT`  | yes              | Project path (`group/repo`, subgroups allowed) or numeric project ID from the project overview.                                                                           |
+| `GITLAB_BASE_URL` | self-hosted only | Instance root URL without `/api/v4`. Defaults to `https://gitlab.com`; `http://` internal hosts work.                                                                     |
 
 ## Usage
 

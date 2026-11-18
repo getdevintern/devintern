@@ -28,8 +28,8 @@ AZURE_DEVOPS_PAT=your-pat-token
 AZURE_DEVOPS_PROJECT=MyProject
 ```
 
-| Variable               | Required | Where to find it                                                                                                                                         |
-| ---------------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Variable               | Required | Where to find it                                                                                                                                          |
+| ---------------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `AZURE_DEVOPS_ORG`     | yes      | The slug after `dev.azure.com/` (`contoso` in `https://dev.azure.com/contoso/...`), not the full URL.                                                     |
 | `AZURE_DEVOPS_PAT`     | yes      | `https://dev.azure.com/<org>/_usersSettings/tokens` → **New Token** with **Work Items: Read & write** and **Project and Team: Read**, scoped to your org. |
 | `AZURE_DEVOPS_PROJECT` | yes      | The project **name** exactly as in the URL or **Project settings → Overview** (case-sensitive).                                                           |
