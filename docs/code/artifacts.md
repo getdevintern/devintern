@@ -5,84 +5,37 @@ description: "Capture, inspect, and publish files produced by DevIntern pipeline
 section: "Automation"
 order: 6
 sidebarHidden: true
-dateModified: 2026-10-16
+dateModified: 2026-11-18
 ---
 
 # Pipeline artifacts
 
-Artifacts are files deliberately registered by a pipeline step for inspection.
-Capture, dashboard presentation, uploads, and PR publication share one contract.
-A filename or plugin name never opts a file into publication.
+Artifacts are files that pipeline steps register for review: verification reports, auto-review feedback, change explanations, screenshots. You can inspect them in the dashboard and choose which ones appear on the pull request. Nothing is published unless you select it.
 
-## Capture
+## What gets captured
 
-Built-in verification registers `verification` (JSON) and `verification-prompt`
-(text). Auto-review registers each iteration's feedback and prompt plus an
-`auto-review` summary. Plugins use the same API:
+- Built-in `verify` registers `verification` (the JSON verdict) and `verification-prompt`.
+- `auto-review` registers each iteration's feedback and prompt, plus an `auto-review` summary.
+- [Plugin steps](./pipeline-plugins.md#artifacts-from-steps) register their own files with `context.artifacts.addFile({ key, path, title, kind, mediaType })`.
 
-```ts
-await context.artifacts.addFile({
-  key: "explanation-narrative",
-  path: reportPath,
-  title: "Change explanation",
-  kind: "explanation",
-  mediaType: "text/markdown",
-});
-```
+| Field       | Rules                                                                                                     |
+| ----------- | --------------------------------------------------------------------------------------------------------- |
+| `key`       | 1–128 letters, numbers, dots, underscores, or hyphens, starting with a letter or number. Used to select it for publication. |
+| `path`      | Relative to `context.workingDir`; must be inside `context.workingDir` or `context.outputDir`.             |
+| `kind`      | `explanation`, `verification`, `image`, `report`, or `debug`.                                             |
+| `mediaType` | Controls the preview, for example `text/markdown` or `image/png`.                                         |
 
-Keys are 1–128 characters: letters, numbers, dots, underscores, and hyphens,
-starting with a letter or number. Kinds are `explanation`, `verification`,
-`image`, `report`, and `debug`. Media types identify how to preview content.
-Relative paths resolve against `context.workingDir`. Source files must be within
-`context.workingDir` or `context.outputDir`.
+Each registration saves a snapshot tied to the run, step, and commit, so later edits, retries, and loopbacks never overwrite earlier evidence. Files are limited to 32 MiB and 200 snapshots per run. Text is ANSI-stripped and secrets are redacted. A capture failure only produces a warning; it never fails the run.
 
-The runtime immediately snapshots the file and records its run ID, producing
-step, step execution number, current commit SHA when available, timestamp,
-size, and SHA-256 checksum. Later writes to the original file cannot change
-that snapshot. Registration before a step fails or requests a loopback preserves
-that attempt's evidence. Reusing a logical key creates another snapshot.
-`data` in a step result remains available for programmatic results; artifact
-bodies do not need to be duplicated there.
+Snapshots are stored under `~/.devintern/artifacts/` (or under `DEVINTERN_WORKSPACE_DIR` when set), so they outlive task worktrees and `/tmp` output. There is no automatic cleanup.
 
-Use `context.artifacts.list()` to inspect captured metadata and
-`context.artifacts.readText(id)` to read a bounded text artifact, or
-`readBytes(id)` for binary data. The explainer examples read registered
-verification reports to ground their explanations in recorded evidence.
+## Where to see it
 
-Capture failures warn and return `null`; they never turn a passing implementation
-into a failed run. Files are limited to 32 MiB and 200 snapshots per run. Text
-is ANSI-stripped and secret-redacted before storage. Binary files retain their
-original bytes; selecting them for upload is an explicit publication choice.
+Open a run in the [dashboard](./dashboard.md). Run details list the artifacts registered by that attempt, including runs without a ticket key. Markdown, text, JSON, and PNG/JPEG/GIF/WebP images preview inline (text previews show the first 512 KiB); other files, including HTML and SVG, are download-only. The dashboard and worker must share the same workspace directory.
 
-## Dashboard and storage
+## Choose what appears on the PR
 
-Metadata lives in the run database. Snapshots live under
-`~/.devintern/artifacts/<database-namespace>/` (or the overridden
-`DEVINTERN_WORKSPACE_DIR`), outside disposable task worktrees and `/tmp` output.
-Run detail lists only registered outputs belonging to that exact attempt,
-including runs without a ticket key. Debug-directory scanning is not used.
-
-The dashboard previews Markdown, text/JSON, and PNG/JPEG/GIF/WebP images. Other
-files can be downloaded. Text previews show the first 512 KiB; larger artifacts
-remain downloadable. HTML and SVG are downloaded rather than served as active
-pages. Missing files remain listed as expired or missing; metadata is retained.
-Automatic artifact retention is not configured by this feature.
-
-Endpoints:
-
-- `GET /api/runs/:id/artifacts`: registered metadata in capture order.
-- `GET /api/runs/:id/artifacts/:artifactId`: bounded text preview, or `null`
-  content for binary files.
-- `GET /api/runs/:id/artifacts/:artifactId/file`: safe raster preview or download.
-  Add `?download=1` to force download.
-
-Artifact IDs are opaque and scoped to their run; filenames are not API keys.
-The dashboard and worker must share the database and workspace artifact storage.
-
-## Select what appears on the PR
-
-Publication is disabled by default. Add this alongside `steps` and `plugins`
-in a pipeline definition (inside `pipeline` for repository settings):
+Publication is off by default. Add an `artifacts` block next to `steps` and `plugins` in the pipeline definition (inside `pipeline` in `.devintern-code/settings.json`):
 
 ```json
 {
@@ -99,69 +52,33 @@ in a pipeline definition (inside `pipeline` for repository settings):
 }
 ```
 
-`finalize` publishes the latest snapshot of each selected key to one managed
-**Artifacts & verification** GitHub comment. Later runs update that comment,
-including when a PR already exists. Author matching and a hidden marker prevent
-editing human comments. The PR description is unaffected. The comment identifies
-the run and each output's producing execution/commit. Earlier snapshots remain
-available in the dashboard.
+| Presentation | Renders                                                     | Needs an uploader |
+| ------------ | ----------------------------------------------------------- | ----------------- |
+| `inline`     | The text in the comment body (non-Markdown text is fenced). | No                |
+| `collapsed`  | The text inside a collapsible section.                      | No                |
+| `embed`      | An image from its uploaded URL.                             | Yes               |
+| `link`       | A link to the uploaded file.                                | Yes               |
 
-`inline` and `collapsed` render text; non-Markdown text is fenced. `embed` and
-`link` require an uploaded URL. Missing artifacts, oversized previews, and
-missing upload URLs are reported explicitly. Comments have a bounded preview
-budget; complete Markdown sections are omitted when needed instead of being
-cut midway. Publication failures warn and are recorded separately from run
-success. GitLab and Bitbucket comment publication currently report a skipped
-status; local capture and dashboard access still work.
+`finalize` posts the latest snapshot of each selected key to one managed **Artifacts & verification** comment on the GitHub PR and updates it on later runs. It never edits human comments or the PR description. Long comments drop whole sections rather than cutting them mid-way, and missing artifacts or upload URLs are noted in the comment. Publication problems are warnings and do not fail the run. GitLab and Bitbucket comment publication is not supported yet; artifacts are still captured and visible in the dashboard.
+
+### Reference artifacts from Markdown
+
+Inside a Markdown artifact, refer to other artifacts by key instead of by path:
+
+```markdown
+![After the change](artifact:screenshot)
+[Download browser trace](artifact:browser-trace)
+```
+
+The dashboard links these to its local copies. On the PR they become uploaded URLs, so the referenced artifact must also be selected with `embed` or `link`. Unresolved references are shown as plain text.
 
 ## Upload files
 
-GitHub comments contain Markdown; binary upload is a separate operation.
-Select the built-in `"files-sdk"` uploader for R2/S3 (see below), or configure
-a trusted module implementing `ArtifactUploader`:
-
-```json
-{
-  "artifacts": {
-    "publish": {
-      "destination": "pr-comment",
-      "uploader": "./adapters/artifact-storage.ts",
-      "select": [
-        { "key": "explanation-narrative", "presentation": "inline" },
-        { "key": "screenshot", "presentation": "embed" },
-        { "key": "browser-trace", "presentation": "link" }
-      ]
-    }
-  }
-}
-```
-
-The module must default-export an object implementing this interface:
-
-```ts
-import type { RunArtifact } from "@getdevintern/code/pipeline";
-
-interface ArtifactUploader {
-  upload(artifact: RunArtifact, bytes: Uint8Array): Promise<{ url: string }>;
-}
-```
-
-Relative module paths resolve next to a workspace pipeline file, or against the
-repository for repository settings. Installed package names are supported too.
-Uploader exports are validated before implementation starts. Hosting credentials
-are never bundled. The adapter owns access control, retention,
-and URL lifetime, and should use the artifact checksum or ID for idempotent
-object naming. Return a durable HTTP(S) URL that intended reviewers can access;
-short-lived signed URLs will eventually expire in existing comments.
-
-Only explicitly selected `embed`/`link` artifacts are uploaded. Successful URLs
-are persisted per artifact and uploader module, so publishing again can reuse
-them. Upload failures are recorded independently and do not block PR creation.
+`embed` and `link` need the file hosted somewhere reviewers can reach. Set `uploader` to the built-in `"files-sdk"` uploader, or to your own module. Only artifacts selected as `embed` or `link` are uploaded, uploaded URLs are reused on later publications, and upload failures never block PR creation.
 
 ### Files SDK uploader
 
-`@getdevintern/code` includes `files-sdk` as a runtime dependency. The public
-pipeline configuration can select its built-in R2/S3 uploader without a module:
+The built-in uploader supports Cloudflare R2 and AWS S3 with no extra install:
 
 ```json
 {
@@ -175,41 +92,34 @@ pipeline configuration can select its built-in R2/S3 uploader without a module:
 }
 ```
 
-For Cloudflare R2, set the following in the workspace `.env` (default
-`~/.devintern/.env`) or a repository `env_file`:
+Configure it in the workspace `.env` (default `~/.devintern/.env`) or a repository `env_file`, then restart the worker:
 
 ```dotenv
+# r2 or s3
 DEVINTERN_ARTIFACT_PROVIDER=r2
+# R2 only
 DEVINTERN_ARTIFACT_ACCOUNT_ID=<32-character-cloudflare-account-id>
 DEVINTERN_ARTIFACT_BUCKET=review-artifacts
-DEVINTERN_ARTIFACT_ACCESS_KEY_ID=<r2-access-key-id>
-DEVINTERN_ARTIFACT_SECRET_ACCESS_KEY=<r2-secret-access-key>
+DEVINTERN_ARTIFACT_ACCESS_KEY_ID=<access-key-id>
+DEVINTERN_ARTIFACT_SECRET_ACCESS_KEY=<secret-access-key>
 DEVINTERN_ARTIFACT_PUBLIC_BASE_URL=https://artifacts.example.com/
-# Optional; defaults to devintern/artifacts
-DEVINTERN_ARTIFACT_KEY_PREFIX=devintern/artifacts
 ```
 
-The R2 target derives its endpoint from the account ID and uses region `auto`.
-It requires artifact-specific S3 credentials, not a Cloudflare bearer token;
-ambient AWS/S3 credentials are never substituted. Create the bucket and enable
-a public custom domain yourself. No user module or additional SDK installation
-is needed for R2/S3.
+| Variable                          | Default               | Notes                                                       |
+| --------------------------------- | --------------------- | ----------------------------------------------------------- |
+| `DEVINTERN_ARTIFACT_KEY_PREFIX`   | `devintern/artifacts` | Prefix for object keys and URLs.                            |
+| `DEVINTERN_ARTIFACT_REGION`       | `us-east-1`           | S3 only. R2 always uses `auto`.                             |
+| `DEVINTERN_ARTIFACT_ENDPOINT`     | AWS                   | S3 only. Points at another S3-compatible service.           |
 
-For AWS S3, use provider `s3` and `DEVINTERN_ARTIFACT_REGION` (default
-`us-east-1`). `DEVINTERN_ARTIFACT_ENDPOINT` optionally selects another
-S3-compatible service. The bucket, artifact-specific credentials, and public
-base URL are required for both providers. Missing/invalid settings fail pipeline
-resolution before implementation; connection/upload failures remain advisory
-at publication time. SDK initialization is lazy and uses Bun's S3 adapter.
-Changing the destination produces a new upload-cache identity.
+Use credentials created for this bucket; for R2 that means R2 S3 API keys, not a Cloudflare API token. Ambient AWS credentials are never used. Create the bucket and make `DEVINTERN_ARTIFACT_PUBLIC_BASE_URL` (for R2, a public custom domain) readable by reviewers yourself; DevIntern does not change bucket visibility or create signed links. Missing or invalid settings fail the run before implementation starts.
 
-Workspace values apply across repositories; repo `env_file` and `[repos.env]`
-can override them. Worker tasks do not load checkout `.devintern-code/.env`.
-Direct CLI users can use that project-local file or shell variables. Keep
-secret environment files uncommitted and restart the worker after changes.
+Workspace values apply to every repository; a repository's `env_file` or `[repos.env]` can override them. Worker tasks do not read a checkout's `.devintern-code/.env`, but direct CLI runs do. Keep these files out of git.
 
-For other providers, the public pipeline API exports a reusable factory for
-any configured Files SDK backend:
+The [PNG explainer example](https://github.com/getdevintern/devintern/tree/main/examples/pipeline-plugins/pr-explainer-image) shows generation, capture, upload, and the PR comment end to end.
+
+### Custom uploader
+
+For other storage, point `uploader` at a module path or package name (resolved like [plugins](./pipeline-plugins.md#loading-plugins-and-resolving-paths)). It must default-export an object with `upload(artifact, bytes): Promise<{ url: string }>`. To reuse the Files SDK with another backend, use the exported factory:
 
 ```ts
 import { Files } from "files-sdk";
@@ -223,53 +133,8 @@ export default createFilesArtifactUploader({
 });
 ```
 
-When your own module imports `files-sdk`, declare it in that project's
-dependencies too (`bun add files-sdk`). Provider-specific peers are needed
-only for the Files SDK adapters that require them; `bun-s3` uses Bun's native
-S3 client. Swap the adapter to use another provider.
-
-The factory uploads arbitrary bytes with the artifact's media type. Stable
-keys include a hash of the content and media type plus a sanitized filename.
-It sets an overall upload deadline (`timeoutMs`, default 30000, maximum 300000)
-and allows two retries within it. Keep the Files instance's own `prefix` empty;
-the factory's `keyPrefix` is applied to both storage keys and URLs.
-
-`publicBaseUrl` must serve the same storage root through a durable HTTP(S)
-endpoint without credentials or query parameters. Configure bucket/CDN read
-access and retention yourself. The factory constructs URLs; it does not probe
-them, alter bucket visibility, or generate expiring signed links. Private
-storage without a stable reviewer-accessible endpoint needs a custom uploader.
-
-See the [PNG explainer example](https://github.com/getdevintern/devintern/tree/main/examples/pipeline-plugins/pr-explainer-image)
-for the full generation → capture → upload → PR comment configuration.
-
-## Reference files from Markdown
-
-Use logical artifact references instead of absolute paths:
-
-```markdown
-![After the change](artifact:screenshot)
-[Download browser trace](artifact:browser-trace)
-```
-
-The dashboard resolves these to local artifact endpoints for the same commit.
-PR comments resolve them to uploaded URLs. Referenced files must also be selected
-for `embed` or `link` publication to be uploaded. Unavailable references become
-plain text; local dashboard URLs are never inferred as remote upload locations.
+Add `files-sdk` to that project's dependencies (`bun add files-sdk`). The factory accepts `timeoutMs` (default `30000`, max `300000`). Return durable URLs: short-lived signed URLs stop working in existing comments.
 
 ## Explainer plugins
 
-The narrative and visual examples share `explainer.ts`. Each gathers the task,
-final diff, and recorded verification evidence, runs the configured agent, and
-writes Markdown under `context.outputDir`.
-
-The narrative example registers `explanation-narrative`; the visual example
-registers `explanation-visual`. Their step-result `data` contains the source
-`path`, while the artifact registry stores the report content and metadata.
-Both artifacts appear in the run's dashboard. Their example pipeline settings
-select narrative output inline and visual output collapsed in the managed PR
-comment.
-
-Copy the plugin wrapper, shared scaffold, and prompt files as described in each
-example's README, then configure its pipeline step and publication selection.
-Generation and capture failures remain advisory.
+The `pr-explainer-narrative` and `pr-explainer-visual` examples read the task, the final diff, and recorded verification results, ask the agent to explain the change, and register `explanation-narrative` and `explanation-visual`. Their example settings publish the narrative inline and the visual summary collapsed. Copy the files listed in each example's [README](https://github.com/getdevintern/devintern/tree/main/examples/pipeline-plugins), then add the step and the `select` entries to your pipeline. Failures in these steps are warnings only.

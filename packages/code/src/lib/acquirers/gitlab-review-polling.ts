@@ -1,5 +1,6 @@
 /** Poll only DevIntern-registered GitLab MRs for actionable discussions. */
 
+import { startFirstTickInBackground } from "./background-tick";
 import { captureError } from "@devintern/utils";
 import type { Acquirer } from "../../worker";
 import type { TaskExecutionResult } from "./task-polling";
@@ -60,8 +61,11 @@ export class GitLabReviewPollingAcquirer implements Acquirer {
     console.log(
       `🔎 Polling reviews on ${watched.length} registered GitLab MR(s) every ${this.options.intervalSeconds}s`,
     );
-    await this.tick();
+    // Arm the interval first, then run the first tick in the background: the
+    // busy guard turns an interval fire during it into a no-op, and a long
+    // first tick must not hold later acquirers (see background-tick.ts).
     this.timer = setInterval(() => void this.tick(), this.options.intervalSeconds * 1000);
+    startFirstTickInBackground(this.name, () => this.tick());
   }
 
   stop(): void {

@@ -25,6 +25,7 @@
  * The PR is reviewed on the first pass after the quota returns.
  */
 
+import { startFirstTickInBackground } from "./background-tick";
 import type { Acquirer } from "../../worker";
 import type { AutoMergeResult } from "../review/auto-merge";
 import type { ConditionalResult, PolledPr } from "../review/agent-pr-reconciler";
@@ -166,8 +167,11 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
           `(watching ${this.options.workerState.listOpenAgentPrs().length} open PR(s))`,
       );
     }
-    await this.tick();
+    // Arm the interval first, then run the first pass in the background: the
+    // busy guard turns an interval fire during it into a no-op, and a long
+    // first pass must not hold later acquirers (see background-tick.ts).
     this.startTimer();
+    startFirstTickInBackground(this.name, () => this.tick());
   }
 
   private startTimer(): void {

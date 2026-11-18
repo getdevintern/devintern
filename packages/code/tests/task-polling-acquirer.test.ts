@@ -1393,8 +1393,14 @@ describe("TaskPollingAcquirer", () => {
         gate: stubGate({ shouldCatchUpOnStart: () => true }),
       });
 
+      // start() backgrounds the catch-up drain rather than awaiting it.
       await acquirer.start();
       acquirer.stop();
+      const deadline = Date.now() + 2000;
+      while (executed.length === 0 && Date.now() < deadline) {
+        // oxlint-disable-next-line promise/avoid-new -- wait for the background drain.
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
       expect(executed).toEqual(["TASK-9"]);
     });
 

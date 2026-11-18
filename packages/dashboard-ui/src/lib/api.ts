@@ -482,8 +482,27 @@ export async function createTask(input: CreateTaskInput): Promise<CreateTaskResu
   return task ? { ok: true, task } : { ok: false, error: "unexpected response from the server" };
 }
 
+/** One non-empty local weekday × hour bucket for one origin. */
+export interface RunActivityCell {
+  origin: RunOrigin;
+  /** 0 = Monday … 6 = Sunday. */
+  weekday: number;
+  hour: number;
+  starts: number;
+  /** Agent time in this hour; overlapping runs add up. */
+  busyMs: number;
+}
+
+export interface RunActivity {
+  /** IANA timezone the buckets are expressed in. */
+  timezone: string;
+  cells: RunActivityCell[];
+}
+
 export interface StatsResponse {
   window: string;
+  /** Worker host timezone (cron automations fire in this zone). */
+  hostTimeZone?: string;
   stats: {
     totals: { runs: number; byStatus: Record<RunStatus, number> };
     successRate: number | null;
@@ -499,6 +518,8 @@ export interface StatsResponse {
       medianDurationMs: number | null;
     }[];
     byOrigin: Record<RunOrigin, number>;
+    /** Absent from workers older than the activity heatmap. */
+    activity?: RunActivity;
   } | null;
 }
 

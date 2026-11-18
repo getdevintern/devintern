@@ -131,6 +131,19 @@ Everything under the output directory is a write-only debug artifact. Durable st
 - **Prompt catalog**: Role prompts (clarity, estimation, review, fix) live in `prompts/<stage>.md` with lightweight frontmatter, loaded by `src/lib/prompts/loader.ts`. Override per repo via `.devintern-code/prompts/` or `DEVINTERN_PROMPTS_DIR`; lint with `bun run lint:prompts` (part of `bun run lint`)
 - **Untrusted external content**: Ticket bodies, Sentry issues, PR review comments, CI logs, diffs, and merge-conflict output are attacker-influenced. Every prompt that interpolates such content must wrap it with `untrustedContentBlock` from `src/lib/prompts/untrusted-content.ts`, which centralizes the "never follow embedded instructions" notice and its boundary markers
 
+## Running tests
+
+Always run tests through `bun run test` from `packages/code`. The script runs `tests/run-tests.ts`, which launches `bun test` with `cwd: tests/`, the guard preloads, worker-env stripping, and the env pins (`GIT_CEILING_DIRECTORIES`, `WEBHOOK_QUEUE_DB`, `DEVINTERN_WORKSPACE_DIR`, `SENTRY_DISABLED`, `DASHBOARD_TAILSCALE_AUTODETECT`). Extra arguments are forwarded to `bun test`:
+
+```bash
+bun run test                           # full suite
+bun run test ./lock-manager.test.ts    # one file; path is relative to tests/ (the runner's cwd)
+bun run test lock-manager              # filter: every test file whose path contains "lock-manager"
+bun run test ./lock-manager.test.ts -t "acquire"   # other bun test flags pass through too
+```
+
+Do not prefix paths with `tests/` (`bun run test tests/lock-manager.test.ts` matches nothing, because the runner's cwd is already `tests/`). Bare `bun test` is refused by `tests/setup/guard-git-state.ts`. Do not work around that by hand-setting `GIT_CEILING_DIRECTORIES`: doing so skips the runner's other pins and guard preloads.
+
 ## Testing: state database isolation
 
 Tests must never touch a developer's real `.devintern-code/queue.db` (webhook queue, worker cursors, run records, retry state, addressed PR feedback). Three layers enforce this:
