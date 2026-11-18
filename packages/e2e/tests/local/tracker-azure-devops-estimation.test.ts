@@ -292,17 +292,11 @@ test.skipIf(!existsSync(cliPath))(
 );
 
 /**
- * KNOWN PRODUCT BUG (marked `.failing`, fix out of scope for this e2e change):
- * `runEstimationMode` (`packages/code/src/lib/automation/estimation.ts`) looks
- * up the override with `taskKey.split("-")[0]`, which for an Azure DevOps work
- * item id such as `100` is `100`, not the project name `resolveProjectKey`
- * returns from `AZURE_DEVOPS_PROJECT`. The documented project-keyed override is
- * ignored and the default `Microsoft.VSTS.Scheduling.StoryPoints` is written.
- * The assertions describe the correct behavior; once the lookup uses
- * `resolveProjectKey`, Bun reports this test as an unexpected pass, and
- * `.failing` must be removed.
+ * The override is keyed by the Azure DevOps project name (`AZURE_DEVOPS_PROJECT`),
+ * not the numeric work item id, so this pins that estimation resolves the
+ * project the same way as the rest of the pipeline.
  */
-test.skipIf(!existsSync(cliPath)).failing(
+test.skipIf(!existsSync(cliPath))(
   "built CLI writes Azure DevOps story points to the configured storyPointsField override",
   async () => {
     const tracker = new FakeAzureDevOpsTracker();

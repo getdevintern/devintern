@@ -41,9 +41,9 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 ### Azure DevOps: configured `storyPointsField` override
 
 - Surface: CLI `--estimate`; `.devintern-code/settings.json`
-- Status: `blocked`
-- Evidence: `tests/local/tracker-azure-devops-estimation.test.ts` ("writes Azure DevOps story points to the configured storyPointsField override", gap `e2e-tracker-azure-devops-story-points-field`), marked `test.failing` because of the product bug below.
-- Missing: Product fix. Finding: with `{"azure-devops": {"projects": {"<AZURE_DEVOPS_PROJECT>": {"storyPointsField": "Custom.…"}}}}`, the CLI ignores the override and writes `Microsoft.VSTS.Scheduling.StoryPoints`. `runEstimationMode` in `packages/code/src/lib/automation/estimation.ts` looks the override up with `taskKey.split("-")[0]`, which for a work item id such as `100` is `100`, instead of `resolveProjectKey` (the project name). Prerequisite: use `resolveProjectKey(taskKey, task)` there, then drop `.failing` (Bun reports the test as an unexpected pass once fixed).
+- Status: `default`
+- Evidence: `tests/local/tracker-azure-devops-estimation.test.ts` ("writes Azure DevOps story points to the configured storyPointsField override"): with `{"azure-devops": {"projects": {"<AZURE_DEVOPS_PROJECT>": {"storyPointsField": "Custom.…"}}}}`, points land in the override and the default `Microsoft.VSTS.Scheduling.StoryPoints` is untouched.
+- Missing: Live project; the worker `[[estimations]]` sweep with an override (the CLI path is covered).
 - Last reviewed: 2026-11-19
 
 ## Tracker plan status
@@ -52,7 +52,7 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 
 - Default `test`: yes (offline fake)
 - Opt-in suite: none
-- Notes: Fake lifecycle: key/`--query`, state transition, comment, decoy isolation. Worker polling (WIQL `ChangedDate` delta, dedupe, re-arm, cursor restart) is offline. CLI `--estimate` (story points field, HTML estimation comment, in-place re-estimation, <24h skip, `--skip-comments`) is offline. Worker `[[estimations]]` sweep over a WIQL query is offline. The `storyPointsField` override is blocked on a product bug (see its row).
+- Notes: Fake lifecycle: key/`--query`, state transition, comment, decoy isolation. Worker polling (WIQL `ChangedDate` delta, dedupe, re-arm, cursor restart) is offline. CLI `--estimate` (story points field, HTML estimation comment, in-place re-estimation, <24h skip, `--skip-comments`) is offline. Worker `[[estimations]]` sweep over a WIQL query is offline. The `storyPointsField` project override is offline.
 - Last reviewed: 2026-11-19
 
 ## Layer 3 fake (implemented)
@@ -167,9 +167,7 @@ bun test tests/local/tracker-azure-devops-estimation.test.ts
 - The `storyPointsField` override test writes
   `.devintern-code/settings.json` with
   `"azure-devops".projects.<project>.storyPointsField = "Custom.E2EStoryPointsOverride"`
-  and asserts the points land in that field and not in the default one. It is
-  marked `test.failing` because the product ignores the project-keyed override
-  (see the coverage row); remove `.failing` once the lookup is fixed.
+  and asserts the points land in that field and not in the default one.
 
 ### Worker Azure DevOps scheduled estimation
 

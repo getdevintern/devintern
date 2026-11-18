@@ -225,6 +225,7 @@ export async function runEstimationBatch(input: EstimationBatchInput): Promise<v
           harness: resolvedAgent.harness,
           executablePath: resolvedAgent.path,
           taskKey,
+          task,
           tracker,
           settings: projectSettings,
           skipComments: options.skipComments,
