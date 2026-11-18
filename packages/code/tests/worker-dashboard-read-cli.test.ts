@@ -1,13 +1,5 @@
 import { Database } from "bun:sqlite";
-import {
-  afterEach,
-  beforeEach,
-  describe,
-  expect,
-  setDefaultTimeout,
-  setSystemTime,
-  test,
-} from "bun:test";
+import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { createHash } from "crypto";
 import {
   chmodSync,
@@ -90,6 +82,21 @@ function run(command: WorkerReadCommand, args: string[]): Captured {
 function wire(response: ApiResponse): unknown {
   expect(response.status).toBe(200);
   return JSON.parse(JSON.stringify(response.body));
+}
+
+/**
+ * Drop busy time accrued by the in-progress `local` fixture run: it counts up
+ * to "now", so the CLI subprocess and the in-process handler see different
+ * values milliseconds apart. Everything else in the body must match exactly.
+ */
+function withoutLiveBusyTime(body: unknown): unknown {
+  const activity = (
+    body as { stats?: { activity?: { cells?: { origin: string; busyMs?: number }[] } } }
+  )?.stats?.activity;
+  for (const cell of activity?.cells ?? []) {
+    if (cell.origin === "local") delete cell.busyMs;
+  }
+  return body;
 }
 
 /** Hash every file in the state dir so any write (DB, WAL, new file) shows up. */
@@ -264,21 +271,16 @@ describe("devintern worker read-only dashboard commands", () => {
           () => handleLogs(data, new URLSearchParams({ limit: "1", level: "info" })),
         ],
       ];
-      // Stats measure the in-progress run's busy time up to "now"; freeze the
-      // clock so the CLI call and the handler call see the same instant.
-      setSystemTime(new Date());
-      try {
-        for (const [command, args, handler] of cases) {
-          const result = run(command, [...args, "--json"]);
-          expect({ args: [command, ...args], stderr: result.stderr, code: result.code }).toEqual({
-            args: [command, ...args],
-            stderr: "",
-            code: 0,
-          });
-          expect(JSON.parse(result.stdout)).toEqual(wire(handler()));
-        }
-      } finally {
-        setSystemTime();
+      for (const [command, args, handler] of cases) {
+        const result = run(command, [...args, "--json"]);
+        expect({ args: [command, ...args], stderr: result.stderr, code: result.code }).toEqual({
+          args: [command, ...args],
+          stderr: "",
+          code: 0,
+        });
+        expect(withoutLiveBusyTime(JSON.parse(result.stdout))).toEqual(
+          withoutLiveBusyTime(wire(handler())),
+        );
       }
 
       // Overview carries a generation timestamp; everything else must match.
