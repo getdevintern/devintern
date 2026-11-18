@@ -5,75 +5,47 @@ description: "Fetch Jira Cloud issues, run the feasibility gate, implement with 
 section: "Automation"
 order: 4
 sidebarHidden: true
-dateModified: 2026-11-12
+dateModified: 2026-11-18
 tags: ["jira", "devintern/code", "integration", "jira cloud"]
 ---
 
 # Implement Jira Issues with DevIntern Code
 
-@devintern/code implements work from Jira Cloud issues: fetch issue details, comments, and attachments, run a feasibility check, transition statuses, execute your AI agent, commit changes, open pull requests, and post results back to the issue.
+DevIntern Code reads a Jira issue (description, human comments, attachments), checks that it is clear enough to implement, runs your coding agent, opens a pull request, and posts the result back as a Jira comment. It supports **Jira Cloud** (`*.atlassian.net`) only; Jira Data Center / Server is not supported.
 
-This integration targets **Jira Cloud** (`*.atlassian.net`). Jira Data Center / Server is not supported.
+## Prerequisites
 
-## How It Works
-
-@devintern/code uses the [Jira Cloud REST API](https://developer.atlassian.com/cloud/jira/platform/rest/v3/) to read and update issues you pass on the command line or select with JQL.
-
-- Issue descriptions are converted from **Atlassian Document Format (ADF)** to markdown for your AI agent
-- Comments from humans are included; prior @devintern/code comments are filtered out to reduce noise
-- Attachments are downloaded into the task output directory when present
-- Status transitions use workflow status **names** from your `settings.json` (for example, "In Progress", "In Review")
-- After a run, feasibility, implementation, or incomplete summaries are posted as Jira comments
+- `@getdevintern/code` installed and a Git repository for your project
+- A Jira Cloud account with an [API token](https://id.atlassian.com/manage-profile/security/api-tokens)
+- Jira permissions: **Browse projects**, **Add comments** (unless you use `--skip-comments`), **Transition issues** (for status changes), **Edit issues** (for `--estimate`)
 
 ## Setup
 
-### 1. Initialize project config
+Run `devintern init` in the repository root, then set these in `.devintern-code/.env` (kept out of Git by `devintern init`):
 
-From your repository root:
+| Variable                   | Required | Description                                                                                  |
+| -------------------------- | -------- | -------------------------------------------------------------------------------------------- |
+| `TASK_TRACKER`             | No       | `jira` (the default when unset)                                                              |
+| `JIRA_BASE_URL`            | Yes      | Your site URL without a trailing slash, e.g. `https://your-org.atlassian.net`                |
+| `JIRA_EMAIL`               | Yes      | Email of the Atlassian account that owns the API token                                       |
+| `JIRA_API_TOKEN`           | Yes      | API token from [Atlassian API tokens](https://id.atlassian.com/manage-profile/security/api-tokens) |
+| `JIRA_DEFAULT_PROJECT_KEY` | No       | Default project key (e.g. `PROJ`); `devintern worker init` uses it to seed a routing rule     |
 
-```bash
-devintern init
-```
-
-This creates `.devintern-code/.env` and `.devintern-code/settings.json`.
-
-### 2. Set Jira credentials
-
-In `.devintern-code/.env`:
+## Run a task
 
 ```bash
-TASK_TRACKER=jira
-JIRA_BASE_URL=https://your-org.atlassian.net
-JIRA_EMAIL=your-email@example.com
-JIRA_API_TOKEN=your-api-token
+devintern PROJ-123 --create-pr
+devintern PROJ-123 PROJ-124 --create-pr                       # several issues in order
+devintern --query "project = PROJ AND status = 'To Do'" --create-pr   # JQL batch
 ```
 
-`TASK_TRACKER` defaults to `jira` if omitted. All three Jira variables are required.
+`--jql` is a deprecated alias for `--query`. Use `--skip-clarity-check` to skip the feasibility check and `--skip-comments` to skip all comments and status transitions for a run.
 
-### 3. Create an API token
+DevIntern posts a comment for the feasibility assessment, a completed or incomplete implementation, and story-point estimates. For AI estimation (`--estimate`, `storyPointsField`), see [Story Points Estimation](./story-points-estimation.md).
 
-1. Go to [Atlassian API tokens](https://id.atlassian.com/manage-profile/security/api-tokens)
-2. Click **Create API token**, add a label (e.g. `DevIntern`), and copy the token
-3. Paste the token into `JIRA_API_TOKEN`
+## Status mapping
 
-Use the **email address** of the Atlassian account that owns the token for `JIRA_EMAIL`. Authentication is Basic auth (`email:token`).
-
-Store credentials in `.devintern-code/.env`. That file should stay out of version control (`devintern init` adds it to `.gitignore`).
-
-### 4. Find your Jira site URL
-
-Your site URL is the hostname you use to open Jira in the browser:
-
-```
-https://your-org.atlassian.net/jira/...
-        └─ JIRA_BASE_URL ─┘
-```
-
-Set `JIRA_BASE_URL` to the full URL **without** a trailing slash.
-
-### 5. Configure status transitions (optional)
-
-Edit `.devintern-code/settings.json` using the **project key** as the lookup key (the prefix in issue keys, e.g. `PROJ` in `PROJ-123`):
+Configure transitions in `.devintern-code/settings.json`, keyed by the project key (`PROJ` in `PROJ-123`). Status names must match your workflow exactly; omit a field to skip that transition.
 
 ```json
 {
@@ -90,110 +62,27 @@ Edit `.devintern-code/settings.json` using the **project key** as the lookup key
 }
 ```
 
-@devintern/code transitions issues to:
+| Field              | When it is applied                                     |
+| ------------------ | ------------------------------------------------------ |
+| `inProgressStatus` | Implementation starts (after the feasibility check)    |
+| `prStatus`         | A pull request is created                              |
+| `todoStatus`       | The run is incomplete, fails, or hits the turn limit   |
 
-- **inProgressStatus** when implementation starts (after the clarity check)
-- **prStatus** after a pull request is created
-- **todoStatus** when implementation is incomplete or max turns are reached
+The legacy top-level `projects` key (without `jira`) still works.
 
-Status names must match your Jira workflow exactly. Omit a field to skip that transition.
+## Worker notes
 
-See [Configuration](./configuration.md) for legacy `projects` format and other settings.
-
-### Actioned issues (worker)
-
-A Jira query usually filters on `status = 'To Do'`, so moving the issue to `prStatus` already removes it from the sweep. The worker additionally records every PR'd issue as actioned locally, which keeps it out of the sweep if it still matches the query (for example after a failed or unconfigured transition) without re-implementing it. Re-arm an actioned issue by editing its summary or description, moving it back to your to-do status, or changing labels — see [Tickets already actioned after a PR](./worker.md#tickets-already-actioned-after-a-pr).
-
-## Running tasks
-
-### Single issue
-
-```bash
-devintern PROJ-123
-devintern PROJ-123 --create-pr
-devintern PROJ-123 --skip-clarity-check --create-pr
-```
-
-### Multiple issues
-
-```bash
-devintern PROJ-123 PROJ-124 PROJ-125 --create-pr
-```
-
-### Batch with JQL
-
-```bash
-devintern --jql "project = PROJ AND status = 'To Do'" --create-pr
-
-devintern --query "assignee = currentUser() AND status = 'To Do'" --create-pr
-```
-
-`--query` is the preferred flag; `--jql` remains available with a deprecation warning.
-
-### Story points estimation
-
-Batch mode for AI-assisted estimation (also available for Linear):
-
-```bash
-devintern PROJ-123 --estimate
-devintern --estimate --query "project = PROJ AND status = 'To Do'"
-```
-
-See [Story Points Estimation](./story-points-estimation.md) for field discovery, re-estimation, and automation examples.
-
-## What Gets Posted
-
-| Stage                     | Jira comment                                             |
-| ------------------------- | -------------------------------------------------------- |
-| Feasibility check         | Automated Task Feasibility Assessment (markdown summary) |
-| Successful implementation | Implementation Completed by @devintern/code              |
-| Incomplete / max turns    | Implementation Incomplete                                |
-| Estimation (`--estimate`) | Automated Story Points Estimation                        |
-
-Use `--skip-comments` to skip all Jira comments and status transitions for a run.
-
-## Permissions
-
-Your Jira user needs, at minimum:
-
-- **Browse projects** and **View issues** on target projects
-- **Transition issues** if you configure status changes
-- **Add comments** unless you use `--skip-comments`
-- **Edit issues** for story points when using `--estimate`
+- The [worker](./worker.md#polling-mode) uses your JQL as `[defaults].task_query`. Moving issues to `prStatus` removes them from a `status = 'To Do'` query; the worker also marks PR'd issues as actioned so they are not re-implemented. See [Tickets already actioned after a PR](./worker.md#tickets-already-actioned-after-a-pr).
+- For instant pickup, run `devintern worker connect jira` and paste the printed ingest URL into a Jira admin webhook. See [Relay](./relay.md).
 
 ## Troubleshooting
 
-**"Missing required JIRA environment variables"**
-
-Set `JIRA_BASE_URL`, `JIRA_EMAIL`, and `JIRA_API_TOKEN` in `.devintern-code/.env`.
-
-**"Issue not found"**
-
-- Verify the issue key exists and you have access
-- Confirm `JIRA_BASE_URL` matches your Cloud site
-- Check that `JIRA_EMAIL` matches the account that created the API token
-
-**Jira API error (401)**
-
-- API token is invalid or revoked. Create a new token at [Atlassian API tokens](https://id.atlassian.com/manage-profile/security/api-tokens)
-- `JIRA_EMAIL` does not match the token owner
-
-**Jira API error (403)**
-
-- Your account lacks permission on the issue or project
-- Ask a Jira admin to grant browse, comment, or transition permissions
-
-**Status transition failed**
-
-- The status name in `settings.json` does not match your workflow (check spelling and capitalization)
-- The transition may not be valid from the issue's current status
-- @devintern/code logs a warning and continues the run when a transition fails
-
-**JQL returns no issues**
-
-- Test the query in Jira's issue search first
-- Quote project names and statuses that contain spaces: `project = "My Project"`
-
-**Descriptions look wrong in agent context**
-
-@devintern/code converts ADF to markdown. Unusual ADF structures may lose formatting; simplify the issue description in Jira if needed.
+| Symptom                                      | Fix                                                                                                                  |
+| -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `Missing required JIRA environment variables` | Set `JIRA_BASE_URL`, `JIRA_EMAIL`, and `JIRA_API_TOKEN` in `.devintern-code/.env`.                                    |
+| `Issue not found`                            | Check the key, that `JIRA_BASE_URL` is your Cloud site, and that `JIRA_EMAIL` owns the token.                         |
+| 401 error                                    | The token is invalid or revoked, or `JIRA_EMAIL` is not the token owner. Create a new token.                          |
+| 403 error                                    | Your account lacks permission on the project; ask a Jira admin for browse, comment, or transition rights.            |
+| Status transition failed (warning)           | The name in `settings.json` does not match your workflow, or the transition is not allowed from the current status. The run continues. |
+| JQL returns no issues                        | Test the query in Jira's issue search; quote values with spaces (`project = "My Project"`).                           |
+| Description formatting looks wrong           | Jira's rich text (ADF) is converted to Markdown; simplify unusual formatting in the issue.                            |

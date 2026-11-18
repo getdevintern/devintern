@@ -5,41 +5,53 @@ description: "Fetch Linear issues, move workflow states, implement with your cod
 section: "Automation"
 order: 5
 sidebarHidden: true
-dateModified: 2026-11-12
+dateModified: 2026-11-18
 tags: ["linear", "devintern/code", "integration"]
 ---
 
 # Implement Linear Issues with DevIntern Code
 
-@devintern/code can implement work directly from Linear issues: fetch issue details and comments, run a feasibility check, move the issue through your workflow states, execute your AI agent, commit changes, open a pull request, and post results back to the issue.
+DevIntern Code reads a Linear issue (description, labels, attachments, comments), checks that it is clear enough to implement, moves it through your workflow states, runs your coding agent, opens a pull request, and posts the result back on the issue.
 
 ## Prerequisites
 
-- [Bun](https://bun.sh) and `@getdevintern/code` installed globally
-- Linear Personal API key
-- Git repository for your project
+- `@getdevintern/code` installed and a Git repository for your project
+- A Linear Personal API key (it inherits your account's permissions)
 
 ## Setup
 
-### 1. Set the task tracker
+Create the key at [Linear API settings](https://linear.app/settings/api) under **Personal API keys**. It starts with `lin_api_` and is shown only once. Then set in `.devintern-code/.env`:
 
-In `.devintern-code/.env`:
+| Variable                  | Required | Description                                                                          |
+| ------------------------- | -------- | ------------------------------------------------------------------------------------ |
+| `TASK_TRACKER`            | Yes      | `linear`                                                                             |
+| `LINEAR_API_KEY`          | Yes      | Personal API key (`lin_api_...`)                                                     |
+| `LINEAR_DEFAULT_TEAM_KEY` | No       | Default team key (e.g. `ENG`); `devintern worker init` uses it to seed a routing rule |
+
+## Run a task
+
+Pass identifiers (case-insensitive) or full issue URLs:
 
 ```bash
-TASK_TRACKER=linear
+devintern ENG-42 --create-pr
+devintern eng-42 eng-43 --create-pr
+devintern https://linear.app/acme/issue/ENG-42/fix-login-bug --create-pr
 ```
 
-### 2. Add your Linear API key
+Batch runs take a [Linear IssueFilter](https://studio.linear.app/graphql) as JSON, or plain text matched against titles. The first 50 matches run in sequence:
 
 ```bash
-LINEAR_API_KEY=lin_api_xxxxxxxxxxxx
+devintern --query '{"state":{"name":{"eq":"Todo"}},"team":{"key":{"eq":"ENG"}}}' --create-pr
+devintern --query "login bug" --create-pr
 ```
 
-Create the key at [Linear API settings](https://linear.app/settings/api): under **Personal API keys**, click **Create key**, add a label (e.g. `DevIntern`), and copy the key. It starts with `lin_api_` and cannot be viewed again after you leave the page. The key inherits your Linear account permissions.
+Files on `uploads.linear.app` are downloaded for the agent; other links (Figma, Google Docs) are passed as links. Use `--skip-clarity-check` to skip the feasibility check and `--skip-comments` to skip comments and state changes.
 
-### 3. Configure workflow state transitions
+`--estimate` writes Linear's native estimate field and posts the reasoning as a comment. See [Story Points Estimation](./story-points-estimation.md).
 
-Edit `.devintern-code/settings.json` using the team key (the prefix in identifiers like `ENG-42`) as the project key:
+## Status mapping
+
+Configure states in `.devintern-code/settings.json`, keyed by the team key (`ENG` in `ENG-42`). Names are matched case-insensitively against the team's workflow states.
 
 ```json
 {
@@ -55,87 +67,22 @@ Edit `.devintern-code/settings.json` using the team key (the prefix in identifie
 }
 ```
 
-State names must match your team's workflow states (case-insensitive). @devintern/code moves issues to:
+| Field              | When it is applied                                   |
+| ------------------ | ---------------------------------------------------- |
+| `inProgressStatus` | Implementation starts (after the feasibility check)  |
+| `prStatus`         | A pull request is created                            |
+| `todoStatus`       | The run is incomplete, fails, or hits the turn limit |
 
-- **inProgressStatus** when implementation starts (after the clarity check)
-- **prStatus** after a pull request is created
-- **todoStatus** when implementation is incomplete or max turns are reached
+## Worker notes
 
-See [Configuration](./configuration.md) for all settings fields.
-
-## Running an issue
-
-Pass one or more issue identifiers or full issue URLs. Identifiers are case-insensitive (`dan-6` is the same as `DAN-6`). Multiple keys are processed in order:
-
-```bash
-# Identifier
-devintern ENG-42 --create-pr
-
-# Several issues in one run
-devintern dan-6 dan-7 dan-8 --create-pr
-
-# Full issue URL
-devintern https://linear.app/acme/issue/ENG-42/fix-login-bug --create-pr
-```
-
-This workflow:
-
-1. Fetches the issue description, labels, attachments, and comments
-2. Runs a feasibility assessment (skippable with `--skip-clarity-check`)
-3. Moves the issue to `inProgressStatus` (unless `--skip-comments` is set)
-4. Creates a feature branch, runs your agent, commits, and optionally opens a PR
-5. Moves the issue to `prStatus` after PR creation
-6. Posts implementation or assessment comments on the issue
-
-### Actioned issues (worker)
-
-When the worker creates a PR it moves the issue to `prStatus` (when configured) and records it as actioned locally, so your ready-tasks query no longer re-implements it. The local marker also covers the case where no `prStatus` is set or the transition fails. Re-arm an actioned issue by editing its summary or description, moving it back to a ready state, or changing labels — see [Tickets already actioned after a PR](./worker.md#tickets-already-actioned-after-a-pr).
-
-## Batch processing with --query
-
-Select multiple issues with a [Linear IssueFilter](https://studio.linear.app/graphql) expressed as JSON:
-
-```bash
-devintern --query '{"state":{"name":{"eq":"Todo"}},"team":{"key":{"eq":"ENG"}}}' --create-pr
-```
-
-Plain text works too and matches against issue titles (case-insensitive contains):
-
-```bash
-devintern --query "login bug" --create-pr
-```
-
-The first 50 matching issues are processed in sequence.
-
-## Story points estimation
-
-Linear has a native estimate field, so estimation mode is fully supported:
-
-```bash
-devintern ENG-42 --estimate
-```
-
-This analyzes the issue, sets the native estimate value, and posts (or updates) an estimation comment with reasoning, risks, and unclear areas.
-
-## Limitations
-
-- **Attachments:** files hosted on `uploads.linear.app` are downloaded with your API key. External attachment links (Figma, Google Docs) are passed to the agent as links.
-- **Comments:** use `--skip-comments` to skip Linear comments and state transitions for a run.
+- The [worker](./worker.md#polling-mode) polls with your IssueFilter as `[defaults].task_query`. PR'd issues are marked actioned and not re-implemented until they change; see [Tickets already actioned after a PR](./worker.md#tickets-already-actioned-after-a-pr).
+- For instant pickup, run `devintern worker connect linear` to register a webhook through the [relay](./relay.md).
 
 ## Troubleshooting
 
-**"Missing required Linear environment variables"**
-
-Ensure `LINEAR_API_KEY` is set in `.devintern-code/.env`.
-
-**Issue does not move between states**
-
-Confirm the state names in `settings.json` match your team's workflow states, and that the project key is the team key from the issue identifier (`ENG` for `ENG-42`).
-
-**"Workflow state \"In Progress\" not found for team"**
-
-Check spelling against your team's workflow states in Linear settings. Available states are shown in the error message.
-
-**"Invalid Linear IssueFilter JSON"**
-
-Quote the JSON filter in single quotes in your shell and validate it against the IssueFilter schema in the [Linear GraphQL explorer](https://studio.linear.app/graphql).
+| Symptom                                           | Fix                                                                                                     |
+| ------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `Missing required Linear environment variables`   | Set `LINEAR_API_KEY` in `.devintern-code/.env`.                                                          |
+| Issue does not change state                       | Check the state names, and that the `settings.json` key is the team key from the identifier.            |
+| `Workflow state "In Progress" not found for team` | Fix the spelling; the error lists the team's available states.                                           |
+| `Invalid Linear IssueFilter JSON`                 | Wrap the JSON in single quotes and validate it in the [Linear GraphQL explorer](https://studio.linear.app/graphql). |
