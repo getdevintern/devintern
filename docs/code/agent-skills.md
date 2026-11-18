@@ -4,7 +4,7 @@ sidebarLabel: "Agent Skills"
 description: "Use when you want Codex or Claude Code to set up a DevIntern worker, configure a workspace, delegate tasks, or file a bug report."
 section: "Automation"
 order: 1
-dateModified: 2026-11-12
+dateModified: 2026-11-18
 tags: ["skills", "codex", "claude-code", "worker"]
 ---
 
@@ -23,13 +23,7 @@ bunx skills add getdevintern/devintern \
 
 For Claude Code, replace `--agent codex` with `--agent claude-code`. To install for both, use `--agent codex claude-code`. Add `--global` for user-wide availability; otherwise installation is scoped to the current project. Select fewer names after `--skill` to install only what you need.
 
-To list the skills available from the public repository without installing them:
-
-```bash
-bunx skills add getdevintern/devintern --list
-```
-
-The skills live in the repository's [plugin skills directory](https://github.com/getdevintern/devintern/tree/main/plugins/devintern/skills). The [Skills CLI](https://github.com/vercel-labs/skills) installs their instructions and supporting references for the selected agent.
+To list the available skills without installing, run `bunx skills add getdevintern/devintern --list`. The skills live in the repository's [plugin skills directory](https://github.com/getdevintern/devintern/tree/main/plugins/devintern/skills) and are installed with the [Skills CLI](https://github.com/vercel-labs/skills).
 
 ### Install as a Claude Code plugin
 
@@ -69,9 +63,7 @@ To offer the plugin to everyone who works in a repository, commit this `.claude/
 }
 ```
 
-Running `claude plugin marketplace add getdevintern/devintern --scope project --sparse .claude-plugin plugins` and then `claude plugin install devintern@devintern --scope project` from the repository root writes the same file.
-
-After a teammate accepts the workspace trust dialog for the repository, Claude Code registers the DevIntern marketplace for them. Enabling the plugin in project settings does not download it, so each teammate runs `claude plugin install devintern@devintern --scope project` once. For Codex and other agents, use `bunx skills add` as described above.
+Running `claude plugin marketplace add getdevintern/devintern --scope project --sparse .claude-plugin plugins` and then `claude plugin install devintern@devintern --scope project` from the repository root writes the same file. Each teammate still runs `claude plugin install devintern@devintern --scope project` once after trusting the repository. For Codex and other agents, use `bunx skills add`.
 
 ## Choose a skill
 
@@ -82,16 +74,14 @@ After a teammate accepts the workspace trust dialog for the repository, Claude C
 | [devintern-delegate](https://github.com/getdevintern/devintern/tree/main/plugins/devintern/skills/devintern-delegate)   | Dispatch agreed implementation work to a registered worker repository without creating a tracker ticket. | "Delegate the checkout retry fix we agreed on to the backend repo through DevIntern. Include the acceptance criteria and return the task ID."             |
 | [devintern-report](https://github.com/getdevintern/devintern/tree/main/plugins/devintern/skills/devintern-report)       | Diagnose a DevIntern failure and file a redacted bug report without leaking secrets or task content.     | "The worker crashed after switching harnesses. Check whether this is a DevIntern bug and, if so, file a report with the last run and the log."            |
 
-Skills can be installed independently. Each includes instructions for its scope and links to the relevant DevIntern documentation.
-
 ## Prerequisites
 
 Installing a skill gives your agent instructions. It does not install DevIntern, connect accounts, start a service, or grant automation access.
 
 - **Setup:** the setup skill helps check or install Bun, Git, DevIntern Code, and your chosen coding agent. You still need to authorize source-control, tracker, and agent access on the worker host. See the [quick start](quick-start.md) and [relay guide](relay.md).
 - **Workspace configuration:** an existing workspace is required. The skill preserves existing settings and checks whether a change needs a live reload or restart. See [workspaces](workspaces.md).
-- **Delegation:** configure the target repository in the workspace and run a worker with automation access through the Worker Pilot or a paid license. The installed CLI must support `devintern worker add`, including the flags used by the skill; check `devintern worker add --help`. The agent checks repository identity and submits a self-contained brief. See [Delegate Tasks to the Worker](delegation.md).
-- **Bug reports:** the installed CLI must support `devintern report`; check `devintern report --help`. Signed-in reports are preferred, while anonymous reports need a contact email. The skill previews the redacted payload and asks before submitting. See [reporting bugs](reporting-bugs.md).
+- **Delegation:** the target repository must be in the workspace, and the worker needs automation access (Worker Pilot or a paid license). Check that your CLI supports `devintern worker add --help`. See [Delegate Tasks to the Worker](delegation.md).
+- **Bug reports:** check that your CLI supports `devintern report --help`. Anonymous reports need a contact email. The skill previews the redacted payload and asks before submitting. See [reporting bugs](reporting-bugs.md).
 
 The skills operate DevIntern Code. DevIntern PM and PM Desktop setup use their own [quick start](../pm/quick-start.md).
 
@@ -103,4 +93,4 @@ From the project where you installed the skills, update them with:
 bunx skills update devintern-setup devintern-workspace devintern-delegate devintern-report
 ```
 
-Name only the skills you installed. For a global installation, add `--global`. Skills and the DevIntern CLI update separately; updating one does not update the other. Check installed command help when a skill refers to a command or flag your CLI does not recognize.
+Name only the skills you installed, and add `--global` for a global installation. Skills and the DevIntern CLI update separately. If a skill uses a command or flag your CLI does not recognize, update the CLI.

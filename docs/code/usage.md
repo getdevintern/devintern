@@ -4,186 +4,115 @@ sidebarLabel: "CLI Reference"
 description: "Use when looking up DevIntern Code CLI commands and flags for single tasks, markdown tasks, batch runs, git behavior, and outputs."
 section: "Automation Reference"
 order: 1
-dateModified: 2026-11-12
+dateModified: 2026-11-18
 ---
 
 # DevIntern Code Usage Guide
 
-## Single Task Processing
-
-Process a single task from your configured tracker:
+`devintern` takes one or more task references, or a `--query`, and runs your AI agent on each task in the current repository. Run `devintern --help` for the version you have installed.
 
 ```bash
-# Jira (default)
-devintern TASK-123
-
-# Linear (TASK_TRACKER=linear)
-devintern ENG-42
-
-# Trello (TASK_TRACKER=trello)
-devintern 4uWKPOTv
-devintern https://trello.com/c/4uWKPOTv/card-slug --create-pr
-
-# Local markdown file (no PM credentials required)
-devintern ./tasks/feature-spec.md
-devintern /path/to/my-task.md --create-pr
-
-# Skip git branch creation
-devintern TASK-123 --no-git
-
-# Use custom .env file
-devintern TASK-123 --env-file /path/to/custom.env
-
-# Verbose output for debugging
-devintern TASK-123 -v
-
-# Custom AI agent CLI path
-devintern TASK-123 --agent-path /path/to/claude
-
-# Override max turns for very complex tasks (default: 500)
-devintern TASK-123 --max-turns 1000
-
-# Retry git hook failures N times (default: 10). After each agent repair the
-# commit is retried through the hooks (never with --no-verify); 0 disables repair
-devintern TASK-123 --hook-retries 3
-
-# Skip automatic commit after AI agent completes
-devintern TASK-123 --no-auto-commit
-
-# Create pull request after implementation
-devintern TASK-123 --create-pr
-
-# Create PR targeting specific branch
-devintern TASK-123 --create-pr --pr-target-branch develop
-
-# Skip ALL task tracker comments (and Trello list transitions)
-devintern TASK-123 --skip-comments
-
-# Skip clarity check for faster processing
-devintern TASK-123 --skip-clarity-check
-
-# Re-run a task even if a previous attempt was reported incomplete
-# and the ticket is unchanged (normally you edit the description or
-# add a comment instead)
-devintern TASK-123 --force
+devintern PROJ-123 --create-pr                 # one tracker task, then open a PR
+devintern ./tasks/feature-spec.md --create-pr  # a local markdown file, no tracker needed
+devintern PROJ-123 PROJ-124 PROJ-125           # several tasks, in sequence
+devintern --query "project = PROJ AND status = 'To Do'" --create-pr
 ```
 
-## Markdown File Tasks
+## Task references
 
-Pass one or more local `.md` files as arguments. No task tracker credentials are needed:
+| Tracker                         | Reference                                                     |
+| ------------------------------- | ------------------------------------------------------------- |
+| Jira (default)                  | `PROJ-123`                                                    |
+| Linear (`TASK_TRACKER=linear`)  | `ENG-42` or the issue URL                                     |
+| GitHub Issues / GitLab          | `123`, `#123` (GitHub), or the issue URL                      |
+| Azure DevOps                    | Work item ID (`4211`) or URL                                  |
+| Asana                           | Task ID or URL                                                |
+| Trello (`TASK_TRACKER=trello`)  | Card short link (`4uWKPOTv`), full card URL, or 24-char ID    |
+| Markdown file                   | A path such as `./tasks/feature-spec.md`; no credentials needed |
+
+You can mix a tracker task with local files: `devintern PROJ-123 ./extra-context.md`. See [Markdown File Tasks](./markdown-tasks.md) for frontmatter, status tracking, and `TASK_TRACKER=markdown` mode.
+
+## Options
+
+| Flag                                | Default         | Effect                                                                                                                                  |
+| ----------------------------------- | --------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `--query <query>`                   |                 | Select tasks in bulk. Syntax depends on the tracker (see [Batch runs](#batch-runs)). `--jql` is a deprecated alias.                     |
+| `--create-pr`                       | off             | Push the branch and open a pull request after the run.                                                                                  |
+| `--pr-target-branch <branch>`       | repo default    | Base branch for the PR. Falls back to the repository default branch if the named branch does not exist on the remote.                   |
+| `--auto-review`                     | off             | Run the automatic review-and-fix loop after creating the PR (requires `--create-pr`). See [Auto-Review Loop](./configuration.md#auto-review-loop). |
+| `--auto-review-iterations <n>`      | `2`             | Maximum review-fix cycles for `--auto-review` (env: `AUTO_REVIEW_ITERATIONS`).                                                          |
+| `--no-git`                          | off             | Skip branch creation.                                                                                                                   |
+| `--no-auto-commit`                  | off             | Do not commit after the agent finishes.                                                                                                 |
+| `--hook-retries <n>`                | `10`            | Times the agent may repair a failing git hook before the commit is retried through the hooks (never `--no-verify`). `0` disables repair. |
+| `--allow-no-changes`                | off             | Treat a run that changes nothing as a successful no-op.                                                                                 |
+| `--max-turns <n>`                   | `500`           | Maximum agent turns for very large tasks.                                                                                               |
+| `--skip-clarity-check`              | off             | Skip the feasibility assessment before implementation.                                                                                  |
+| `--skip-comments`                   | off             | Post no tracker comments and make no Trello list transitions.                                                                           |
+| `--force`                           | off             | Re-run a task that was reported incomplete even though the ticket is unchanged. Normally you edit the description or add a comment instead. |
+| `--estimate`                        | off             | Add story-point estimates instead of implementing. See [Story Points Estimation](./story-points-estimation.md).                         |
+| `--sandbox <provider>`              | `AGENT_SANDBOX` | Run the agent in a sandbox: `none`, `auto`, `native`, `nono`, or `docker`. See [Sandboxing the Agent](./configuration.md#sandboxing-the-agent). |
+| `--agent-path <path>`               | `PATH` lookup   | Path to the agent CLI executable.                                                                                                       |
+| `--env-file <path>`                 | `.devintern-code/.env` | Load a different `.env` file.                                                                                                    |
+| `-v`, `--verbose`                   | off             | Verbose output for debugging.                                                                                                           |
+| `--no-update`                       | off             | Skip the update check for this run.                                                                                                     |
+
+The agent harness, model, and reasoning effort are set in your environment, not by flags. See [Agent Harness](./configuration.md#agent-harness) in the configuration guide.
+
+## Subcommands
+
+| Command                                  | Use it to                                                                     |
+| ---------------------------------------- | ----------------------------------------------------------------------------- |
+| `devintern init`                         | Create `.devintern-code/` configuration with the setup wizard (`--yes` for a template). |
+| `devintern doctor`                       | Check runtime, git, agent CLI, tracker credentials, sign-in, and license.     |
+| `devintern worker`                       | Run the workspace worker. See [Worker](./worker.md).                          |
+| `devintern dashboard`                    | Open run history without the worker. See [Dashboard](./dashboard.md).          |
+| `devintern address-review`               | Address review feedback on an existing pull request.                          |
+| `devintern resolve-conflicts`            | Merge a PR's base branch into it and resolve conflicts.                       |
+| `devintern auto-merge`                   | Merge a PR if it is green and safe.                                           |
+| `devintern sandbox`                      | Show available sandbox providers and what the next run will do.               |
+| `devintern report`                       | File a redacted bug report. See [Reporting Bugs](./reporting-bugs.md).        |
+| `devintern login` / `logout` / `whoami`  | Manage your DevIntern sign-in.                                                |
+
+Run `devintern <subcommand> --help` for subcommand options.
+
+## Batch runs
+
+`--query` selects every matching task. Its syntax follows the tracker:
 
 ```bash
-# Single file
-devintern ./tasks/feature-spec.md --create-pr
-
-# Multiple files (processed in sequence)
-devintern ./epic.md ./subtask-a.md ./subtask-b.md
-
-# Mix a PM task with a local file
-devintern PROJ-123 ./extra-context.md
-```
-
-See the [Markdown File Tasks](./markdown-tasks.md) guide for frontmatter options, status tracking, and `TASK_TRACKER=markdown` mode.
-
-## Batch Processing
-
-Process multiple tasks at once. The query syntax depends on the active tracker; `--query` accepts JQL for Jira, and either a JSON `IssueFilter` or a plain-text title search for Linear. See the per-tracker integration guides for full details.
-
-### Jira
-
-```bash
-# Process multiple specific tasks
-devintern PROJ-123 PROJ-124 PROJ-125
-
-# Process tasks matching a JQL query (Jira only; --jql is a deprecated alias)
-devintern --query "project = PROJ AND status = 'To Do'"
-
-# Complex JQL with custom fields
-devintern --query "project = \"My Project\" AND cf[10016] <= 3 AND labels IN (FrontEnd, MobileApp)"
-
-# Batch process with PR creation
+# Jira: JQL
 devintern --query "assignee = currentUser() AND status = 'To Do'" --create-pr
 
-# High-complexity batch with extended turns
-devintern --query "labels = 'refactoring' AND type = Story" --max-turns 1000 --create-pr
-
-# Batch with skipped clarity checks
-devintern PROJ-101 PROJ-102 PROJ-103 --skip-clarity-check --create-pr
-```
-
-### Linear
-
-```bash
-# Process multiple specific issues
-devintern ENG-42 ENG-43 ENG-44
-
-# Process issues with a given label (e.g. "intern")
+# Linear: a JSON IssueFilter (single-quoted) or plain-text title search
 devintern --query '{"labels":{"name":{"eq":"intern"}}}' --create-pr
 
-# Process "In Progress" issues assigned to me
-devintern --query '{"state":{"name":{"eq":"In Progress"}},"assignee":{"isMe":{"eq":true}}}' --create-pr
-
-# High-priority issues
-devintern --query '{"priority":{"lte":2}}' --create-pr
+# GitHub Issues / GitLab: search qualifiers
+devintern --query "is:open label:bug" --create-pr
 ```
 
-Wrap JSON filters in single quotes so the shell does not interpret the inner double quotes. See the [Linear Integration guide](./linear-integration.md) for the full `IssueFilter` schema.
+Each integration guide documents its query syntax, for example the [Linear `IssueFilter` schema](./linear-integration.md).
 
-## Workflow Examples
+## What a run does
 
-### Standard Development Workflow
+1. Fetches the task (description, supported custom fields, comments, attachments) and formats it for the agent.
+2. Creates or switches to the branch `feature/<task-key>` in lowercase, for example `feature/proj-123`. The working tree must be clean.
+3. Runs a feasibility check, unless `--skip-clarity-check` is set.
+4. Runs the agent and saves its implementation summary.
+5. Commits all changes as `feat: implement TASK-123 - Task Summary`.
+6. With `--create-pr`, pushes the branch and opens a GitHub or Bitbucket pull request titled `[TASK-123] Task Summary`.
+7. Posts the result to the tracker, unless `--skip-comments` is set.
 
-```bash
-# 1. Go to your project directory
-cd ~/projects/my-app
+If the agent ends by asking you a decision question, devintern posts the questions on the task and stops without committing or opening a PR. Answer in the task and run it again.
 
-# 2. Check git status (should be clean)
-git status
+The PR body uses a fixed template: Why, What changed, Scope, Tradeoffs, Blast Radius, and Verification. A section shows `N/A` when the agent did not supply it.
 
-# 3. Run devintern
-devintern MYAPP-456
+### Target branch from the task
 
-# Expected output:
-# 🔍 Fetching JIRA task: MYAPP-456
-# 📋 Task Summary: Implement user authentication
-# 💾 Saving formatted task details to: /tmp/devintern-tasks/myapp-456/task-details.md
-# 🌿 Creating feature branch...
-# ✅ Created and switched to new branch 'feature/myapp-456'
-# 🤖 Running Claude Code with task details...
-# [Agent implements the task...]
-# ✅ Agent execution completed successfully
-# 📝 Committing changes...
-# ✅ Successfully committed changes for MYAPP-456
-```
-
-## Git Integration Details
-
-### Automatic Branch Creation
-
-- Creates branches with format: `feature/task-id`
-- Converts task keys to lowercase: `PROJ-123` → `feature/proj-123`
-- Checks for uncommitted changes before creating branches
-- Switches to existing branch if it already exists
-
-### Automatic Commit
-
-- Commits all changes after AI agent successfully completes
-- Uses descriptive commit message: `feat: implement TASK-123 - Task Summary`
-- Can be disabled with `--no-auto-commit` flag
-- Skipped when the agent ends its run by asking you decision questions (for example "How should I proceed?" or a list of options). devintern prints the questions, posts them as a comment on the task, and stops without committing or opening a PR. Answer in the task and re-run.
-
-### Pull Request Creation
-
-- Automatically creates PRs on GitHub or Bitbucket
-- Detects repository platform from git remote URL
-- PR title format: `[TASK-123] Task Summary`
-- PR body uses a fixed template — `Why`, `What changed`, `Scope`, `Tradeoffs`, `Blast Radius`, and `Verification`. Implementation and repair agents are asked to supply all six sections in a marked final briefing, which is published without progress messages. Raw agent output remains in the task files and harness logs for diagnostics. If an agent omits or truncates the briefing markers, devintern falls back to parsing its original output and marks missing sections `N/A` (meaning no section was supplied, not that it is necessarily inapplicable).
-- Target branch can be specified with `--pr-target-branch`. If omitted (or if the named branch does not exist on the remote), the repository default branch is used
-- Target branch can also be auto-detected from the task description. Add a line like `Target branch: develop` to the card or issue and `devintern` will pick it up. Supported patterns: `Target branch:`, `Base branch:`, `PR target:`. Falls back to `--pr-target-branch` if no pattern matches.
+Instead of `--pr-target-branch`, a task description can name its base branch on its own line: `Target branch: develop` (also `Base branch:` or `PR target:`). The flag is used when no such line is found.
 
 ### Per-Task Execution Preferences
 
-Just like the target branch, you can override the agent harness, model, and reasoning effort for a single task from the task description — without changing your defaults or restarting the worker. Preferences are read only from an explicit block, so ordinary ticket prose is never mistaken for configuration:
+A task can override the agent harness, model, and reasoning effort for that task alone. Add a block to the description that starts with an `Execution preferences` heading:
 
 ```markdown
 ## Execution preferences
@@ -192,64 +121,35 @@ Model: anthropic/claude-opus-4-6
 Effort: high
 ```
 
-The block starts at an `Execution preferences` (or `Agent execution preferences`) heading and ends at the next heading. Trackers that flatten headings to plain text (Jira ADF, Azure DevOps HTML) are also recognized: a line containing only `Execution preferences` opens a block, which ends at the next heading or at a blank line followed by ordinary prose (blank lines between the heading and its fields, or between fields, are ignored). Fenced code samples and `<pre>` / `<code>` sections are ignored, so pasting the example above does not configure the task. If the heading disappears entirely for your tracker, use the comment form below. You can also put the lines in a `devintern` HTML comment, which stays hidden in rendered descriptions:
+To keep the lines hidden in the rendered description, use a `devintern` HTML comment:
 
 ```markdown
-<!-- devintern: Harness: codex -->
 <!-- devintern
+Harness: codex
 Model: gpt-5.2
 Effort: high
 -->
 ```
 
-- All three are optional and independent. Omitted preferences use your existing defaults (`AGENT_HARNESS`, `AGENT_MODEL`, `AGENT_EFFORT`).
-- Recognized labels (case-insensitive, markdown formatting tolerated): `Harness:` / `Agent harness:`, `Model:` / `Agent model:`, `Effort:` / `Reasoning effort:` / `Agent effort:`. Each label and value must be on its own line; a bare `Harness:`/`Model:`/`Effort:` line elsewhere in the description is ignored.
-- `Model:` is passed unchanged to the selected harness. Use a model identifier or a native alias supported by that CLI (including OpenCode v2 `provider/model#variant` references). DevIntern does not define model aliases, choose model versions, or validate model availability.
-- `Effort:` is `low`, `medium`, or `high`. It is applied only when the selected harness supports reasoning effort; otherwise the preference is ignored with a warning and the task proceeds.
-- Unknown harnesses, conflicting values (the same label twice with different values), and invalid effort values fail the task with an actionable message. Model compatibility and availability are validated by the selected harness.
-- When only `Harness:` is set, `AGENT_MODEL` is **not** carried over (it is harness-specific); the task uses that harness's `<HARNESS>_MODEL` when configured, otherwise its own default model. `Model:` still wins when present.
-- A task-selected harness resolves its CLI from `<HARNESS>_CLI_PATH` (or your `PATH`); `AGENT_CLI_PATH` applies only to the environment-selected primary harness.
-- In unattended worker runs, failover pins each attempt to the active harness. If the description names a different harness, that preference is ignored with a warning so the worker can still fail over correctly; reorder `AGENT_HARNESS` to change which harness the worker uses.
-- The effective harness, resolved model, and applied (or ignored) effort are printed before the run starts and recorded in the run history.
+- Each line is optional. Omitted values use your defaults (`AGENT_HARNESS`, `AGENT_MODEL`, `AGENT_EFFORT`; see [Agent Harness](./configuration.md#agent-harness)).
+- Labels are case-insensitive. `Agent harness:`, `Agent model:`, `Reasoning effort:`, and `Agent effort:` also work, and so does an `Agent execution preferences` heading. Only lines inside the block are read; `Harness:` elsewhere in the description is ignored, and so are code samples.
+- The block ends at the next heading. Where a tracker flattens headings to plain text (Jira, Azure DevOps), it also ends at a blank line followed by ordinary prose. If your tracker drops the heading entirely, use the comment form.
+- `Model:` is passed unchanged to the harness. DevIntern does not validate it.
+- `Effort:` is `low`, `medium`, or `high`. Harnesses without reasoning effort ignore it with a warning.
+- Setting only `Harness:` does not carry over `AGENT_MODEL`. The task uses `<HARNESS>_MODEL` if set, otherwise that harness's default. The CLI comes from `<HARNESS>_CLI_PATH` or your `PATH`.
+- An unknown harness, an invalid effort, or the same label twice with different values fails the task with a message saying what to fix.
+- During worker failover, a preference for a different harness than the active one is ignored with a warning.
 
-## What It Does
-
-1. **Fetches** task details (description, custom fields where supported, comments, attachments)
-2. **Formats** the information for your AI agent
-3. **Creates** a feature branch named `feature/task-id`
-4. **Runs** optional feasibility assessment (skippable with `--skip-clarity-check`)
-5. **Executes** your AI agent with enhanced permissions (default: 500 max turns)
-6. **Saves** implementation summary to local files
-7. **Commits** all changes automatically
-8. **Pushes** the feature branch (when creating PRs)
-9. **Creates** pull requests on GitHub or Bitbucket (optional)
-10. **Posts** implementation results back to your task tracker (skippable with `--skip-comments`)
+The effective harness, model, and effort are printed before the run and saved in run history.
 
 ## Troubleshooting
 
-**"There are uncommitted changes"**
+**"There are uncommitted changes"**: commit or stash your changes, or pass `--no-git` to skip branch creation.
 
-- Commit your changes: `git add . && git commit -m "message"`
-- Or stash them: `git stash`
-- Or use `--no-git` to skip branch creation
+**"Agent reached maximum turns limit"**: raise `--max-turns` (for example `1000`) or split the task into smaller ones.
 
-**"Agent reached maximum turns limit"**
+**"PR creation failed"**: check that your GitHub or Bitbucket token (or GitHub App installation) has access to the repository, then run again with `--verbose`. The branch is already pushed and a `Pull request could not be created` comment is posted on the ticket. Fix the cause and re-run with `--create-pr`.
 
-- Task is too complex for the current turn limit (default: 500)
-- Increase max turns: `--max-turns 1000`
-- Consider breaking the task into smaller subtasks
+**"Issue not found" / card fetch errors**: check the tracker credentials in `.devintern-code/.env` and that the task exists and you can access it. For Jira, check `JIRA_BASE_URL`. For Trello, set `TASK_TRACKER=trello`, `TRELLO_API_KEY`, and `TRELLO_API_TOKEN`.
 
-**"PR creation failed"**
-
-- Ensure you have the correct token configured
-- Check token/App permissions
-- For GitHub App: Ensure the App is installed on the repository
-- Use `--verbose` flag to see detailed error messages
-- The branch stays pushed, and a `Pull request could not be created` comment is posted on the ticket (unless `--skip-comments` is set). Fix the cause and re-run with `--create-pr`
-
-**"Issue not found" / card fetch errors**
-
-- Check tracker credentials in `.devintern-code/.env`
-- Verify the task key or card ID exists and you have access
-- For Jira, ensure `JIRA_BASE_URL` is correct
-- For Trello, confirm `TASK_TRACKER=trello` and both `TRELLO_API_KEY` and `TRELLO_API_TOKEN` are set
+Run `devintern doctor` to check your setup.
