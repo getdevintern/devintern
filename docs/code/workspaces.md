@@ -124,8 +124,8 @@ labels = ["web"]
 
 - A team with `repo` sends every task to that repository and ignores routing rules. It cannot also have team-scoped rules.
 - A team without `repo` uses rules that name it plus rules with no `team`. It needs at least one applicable rule in a multi-repo workspace.
-- Credentials layer as workspace `.env`, then the team's `env_file`, then `[teams.env]`. The shared `.env` can also hold team-specific values named `<TRACKER>_<TEAM>_<SETTING>`, for example `JIRA_PLATFORM_API_TOKEN`.
-- Once any team exists, `[defaults].task_query` is no longer polled on its own.
+- Credentials layer as workspace `.env`, then the team's `env_file`, then `[teams.env]`. The shared `.env` can also hold team-specific values named `<TRACKER>_<TEAM>_<SETTING>`, for example `JIRA_PLATFORM_API_TOKEN`. The team name is uppercased, and characters other than letters and digits become `_`.
+- Once any team exists, `[defaults].task_query` is no longer polled on its own. A workspace with only automations, estimations, or Sentry monitors needs no task query at all.
 - Connect each team to the [relay](./relay.md) separately: `devintern worker connect jira --team platform`.
 
 ## Pipelines for the fleet and per repository

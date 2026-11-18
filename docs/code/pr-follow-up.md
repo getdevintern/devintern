@@ -24,7 +24,7 @@ All of these settings apply without a restart. The worker never force-pushes: if
 
 ## Review feedback on the agent's PRs
 
-When someone requests changes or leaves new inline comments on a PR the worker created, the worker addresses the feedback automatically. No mention is needed. Review feedback runs before new task pickup. Merged and closed PRs drop off the watch list within one poll. If a run fails after the agent opened a PR itself, the worker still labels and watches that PR.
+When someone requests changes or leaves new inline comments on a PR the worker created, the worker addresses the feedback automatically. No mention is needed. Review feedback runs before new task pickup. Merged and closed PRs drop off the watch list within one poll. If a run fails after the agent opened a PR itself, the worker still labels and watches that PR. Only repositories listed in `workspace.toml` are watched: after you rename or transfer a repository, update its `[[repos]]` entry, or its open PRs are dropped from the watch list at the next startup.
 
 ## Merge conflicts on the agent's PRs
 
@@ -35,6 +35,10 @@ The worker waits until the PR head has been quiet for a short period before acti
 ```bash
 devintern resolve-conflicts <pr-url>
 ```
+
+Run from a checkout of a workspace repository, `resolve-conflicts` and `address-review` use the workspace and repo credentials and the worker's sign-in. In other checkouts they use that project's own `.devintern-code` configuration.
+
+On GitLab, conflict resolution supports `auto` mode and the manual command. `scheduled` mode does not process GitLab MRs yet; see [GitLab integration](./gitlab-integration.md).
 
 ### Choosing when conflicts are resolved
 
@@ -67,7 +71,7 @@ conflict_resolution_model = "sonnet"     # primary harness; failover still appli
 # conflict_resolution_effort = "low"
 ```
 
-These keys behave like an automation's [`harness`, `model`, and `effort`](./automations.md#choosing-the-agent-per-schedule). A pinned harness that hits its usage limit defers the resolution to later polls. A manual `resolve-conflicts` run uses the normal environment.
+These keys behave like an automation's [`harness`, `model`, and `effort`](./automations.md#choosing-the-agent-per-schedule). A pinned harness that hits its usage limit defers the resolution to later polls; after three deferrals in a row, the PR waits until its head or base moves, or until you run `resolve-conflicts` by hand. A manual `resolve-conflicts` run uses the normal environment.
 
 ### Tuning
 
@@ -121,7 +125,7 @@ Each PR passes these gates in order. Any "no" leaves it open for a human:
 
 Globs are repo-relative; `docs/` means `docs/**`. A rename counts both paths. Per-repo `auto_merge_safe_paths` and `auto_merge_deny_paths` replace the workspace lists. The merge is pinned to the commit that passed the gates. A PR left open is checked again after new commits or a policy change.
 
-The worker explains each decision in one status comment on the PR, edited in place, and labels PRs left open with `auto_merge_review_label`. If the agent is usage-limited, the check waits for the quota to reset. The dashboard's **Automations** page lists an **Auto-merge** entry; its **Run now** checks every open PR immediately.
+The worker explains each decision in one status comment on the PR, edited in place, and labels PRs left open with `auto_merge_review_label`. If the agent is usage-limited, the check waits for the quota to reset, and that wait does not count as a failed attempt. A check that fails (for example, the agent returns no verdict) is retried after 5 and then 10 minutes. After the third failure on the same commit, the status comment says the check kept failing, and the PR waits for new commits or a policy change. The dashboard's **Automations** page lists an **Auto-merge** entry; its **Run now** checks every open PR immediately.
 
 The GitHub credential needs `Pull requests: Read and write` and `Contents: Read and write`. To test the gates on one PR without merging:
 
@@ -137,7 +141,7 @@ Set `[workspace].ci_failure_fix = true` to have the agent repair failing CI on t
 
 The worker watches GitHub Actions workflow runs and commit statuses while each PR is open. Failed and timed-out runs trigger a repair; the worker waits for pending workflows first. Each failure gets up to `CI_FIX_MAX_ATTEMPTS` repair attempts (default 3), then the worker comments on the PR and waits for a human push or a green run. For GitLab code hosts, the same setting watches pipelines and required jobs on the worker's MRs; `allow_failure`, manual, skipped, and canceled jobs are ignored.
 
-A fine-grained token (or a customer-owned App) needs **Actions: Read** and **Commit statuses: Read** in addition to the normal PR and contents permissions. CI providers that only publish check runs are not watched unless they also publish a commit status. A missing or rejected credential is logged once per hour per repository, and repair resumes once access works again.
+A fine-grained token (or a customer-owned App) needs **Actions: Read** and **Commit statuses: Read** in addition to the normal PR and contents permissions. If you add these permissions to an existing GitHub App installation, re-approve the installation. CI providers that only publish check runs are not watched unless they also publish a commit status. A missing or rejected credential is logged once per hour per repository, and repair resumes once access works again.
 
 ## Mention the bot on any PR
 
