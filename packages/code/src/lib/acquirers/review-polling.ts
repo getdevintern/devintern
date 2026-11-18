@@ -50,7 +50,7 @@ import {
   describeGitHubAuthFailure,
   isGitHubAuthError,
   isGitHubTransientError,
-} from "../code-host/github/reviews";
+} from "../code-host/github/github-errors";
 import { nextScheduleOccurrence } from "../automation/config";
 import type { CronOrIntervalSchedule } from "../automation/config";
 import type { RunStore } from "../state/run-recorder";

@@ -13,7 +13,7 @@ For first-time installation, credentials, source-control/tracker authorization, 
 
 Read the existing TOML and identify the intended repository remotes, tracker sources, and requested behavior. Inspect credential variable names or presence without printing secret values. Preserve unrelated settings, comments, and existing repository names: names are routing identifiers as well as directory names.
 
-Use the [workspace guide](https://devintern.com/docs/code/workspaces) for the fields involved in the change. In the DevIntern source repository, read `docs/code/workspaces.md` and, for exact schema behavior, `packages/code/src/lib/workspace/config.ts`. Installed skills must not assume that the source checkout is available.
+Use the [workspace guide](https://devintern.com/docs/code/workspaces) for the fields involved in the change. In the DevIntern source repository, read `docs/code/workspaces.md` and, for exact schema behavior, `packages/code/src/lib/workspace/config.ts` (field types are in `config-types.ts`). Installed skills must not assume that the source checkout is available.
 
 ## Read worker state
 

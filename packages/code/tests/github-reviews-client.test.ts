@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
 
+import { GitHubReviewsClient } from "../src/lib/code-host/github/reviews";
 import {
-  GitHubReviewsClient,
   isGitHubAuthError,
   isGitHubTransientError,
-} from "../src/lib/code-host/github/reviews";
+} from "../src/lib/code-host/github/github-errors";
 
 const originalFetch = globalThis.fetch;
 const originalRetryEnv = process.env.DEVINTERN_FETCH_MAX_RETRIES;

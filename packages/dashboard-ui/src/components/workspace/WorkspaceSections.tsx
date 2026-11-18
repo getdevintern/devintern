@@ -29,7 +29,7 @@ import type {
   WorkspaceErrorMonitorView,
   WorkspaceEstimationView,
   WorkspaceRepoView,
-} from "@/lib/api";
+} from "@/lib/api-workspace";
 import { groupAutomationsByRepo, showsGroupHeaders } from "@/lib/automation-groups";
 import { Markdown } from "@/lib/markdown";
 import { cn } from "@/lib/utils";

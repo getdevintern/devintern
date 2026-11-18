@@ -3,7 +3,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { WorkspaceScreen } from "@/views/WorkspaceView";
-import type { WorkspaceResponse } from "@/lib/api";
+import type { WorkspaceResponse } from "@/lib/api-workspace";
 import {
   CONFIG_PATH,
   okResponse,

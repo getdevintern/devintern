@@ -12,7 +12,7 @@ import type {
   AutoMergeOptions,
   AutoMergePolicy,
 } from "../src/lib/review/auto-merge";
-import type { PullRequestFile, PullRequestInfo } from "../src/lib/code-host/github/reviews";
+import type { PullRequestFile, PullRequestInfo } from "../src/lib/code-host/github/reviews-types";
 
 const URL = "https://github.com/acme/widgets/pull/7";
 const HEAD = "a".repeat(40);
