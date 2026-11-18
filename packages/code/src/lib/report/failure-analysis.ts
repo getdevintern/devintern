@@ -96,6 +96,25 @@ const TASK_MESSAGE_PATTERNS: RegExp[] = [
   /\b(?:exited with code|exit code|killed|SIGTERM|SIGKILL|timed out|timeout)\b/i,
   /\b(?:verification failed|tests? failed|lint failed|typecheck failed|implementation incomplete)\b/i,
   /\b(?:not configured|missing (?:required )?(?:env|environment|setting|config)|is required)\b/i,
+  // Built-in constructors rejecting bad input (a misconfigured base URL, a
+  // malformed token in a header, an unparseable tracker date). They throw
+  // TypeError/RangeError with no frame of their own, so the innermost frame
+  // is DevIntern's caller even though the cause is configuration or data.
+  /\b(?:invalid url|cannot be parsed as a url|invalid (?:header )?value|invalid header name|invalid time value|invalid date)\b/i,
+];
+
+/** Top-level domains that mark a dotted token as a hostname rather than code. */
+const HOST_TLDS =
+  "com|net|org|io|dev|app|cloud|ai|co|me|biz|info|internal|local|localhost|lan|corp|intra|intranet|home|example|test|uk|de|eu|us|ca|au|nl|ch|se|fr|jp|in";
+
+/** URL-like, hostname, IP, and absolute-path tokens that may name a customer's systems. */
+const LOCATION_PATTERNS: RegExp[] = [
+  /\b[a-z][\w+.-]*:\/\/\S+/gi,
+  /\b\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?\b/g,
+  new RegExp(`\\b(?:[a-z0-9-]+\\.)+(?:${HOST_TLDS})(?::\\d+)?\\b`, "gi"),
+  /\b[a-z0-9-]+:\d{2,5}\b/gi,
+  /(?<![\w.<>\]])\/[^\s'"`(),]+/g,
+  /\b[a-z]:\\[^\s'"`(),]+/gi,
 ];
 
 let cachedRoot: string | null | undefined;
@@ -225,8 +244,9 @@ export function devInternFrames(
 }
 
 /**
- * Remove anything from an error message that could carry task content:
- * quoted free text, long literals, paths, task keys, emails, and secrets.
+ * Remove anything from an error message that could carry task content or name
+ * the customer's systems: quoted free text, long literals, URLs, hostnames,
+ * IPs, absolute paths, task keys, emails, and secrets.
  * Short identifier-like quotes (`reading 'summary'`) are code, and kept.
  */
 export function sanitizeErrorMessage(
@@ -239,11 +259,17 @@ export function sanitizeErrorMessage(
       /^[\w$.[\]()?]{1,60}$/.test(inner) ? whole : "<value>",
     )
     .replace(/\b\S{81,}\b/g, "<value>");
-  return redactReportText(unquoted, {
+  // Secrets, emails, and checkout/home paths first (they get specific
+  // placeholders), then any remaining location token.
+  const redacted = redactReportText(unquoted, {
     cwd: options.cwd,
     homeDir: options.homeDir,
     maxChars: MAX_MESSAGE_CHARS,
-  }).trim();
+  });
+  return LOCATION_PATTERNS.reduce(
+    (text, pattern) => text.replace(pattern, "<value>"),
+    redacted,
+  ).trim();
 }
 
 /**

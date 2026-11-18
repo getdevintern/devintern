@@ -157,6 +157,17 @@ describe("sanitizeErrorMessage", () => {
     expect(message).not.toContain(workdir);
   });
 
+  test("drops URLs, hostnames, IPs, and absolute paths but keeps code expressions", () => {
+    const message = sanitizeErrorMessage(
+      "Invalid URL: https://user:hunter2@jira.acme.internal/rest/api near git.acme.com:8443, 10.1.2.3 and /srv/acme/repo/x.ts (reading 'res.notFound')",
+    );
+    for (const leaked of ["acme", "hunter2", "10.1.2.3", "/srv", "8443"]) {
+      expect(message).not.toContain(leaked);
+    }
+    expect(message).toContain("'res.notFound'");
+    expect(sanitizeErrorMessage("x.timeout is not a function")).toBe("x.timeout is not a function");
+  });
+
   test("keeps only the first line", () => {
     expect(sanitizeErrorMessage("first\nsecond line with secrets")).toBe("first");
   });
@@ -404,6 +415,20 @@ describe("analyzeFailure message filters", () => {
   });
 });
 
+describe("analyzeFailure input errors from built-ins", () => {
+  test("classifies URL, header, and date parse errors as task failures", () => {
+    for (const error of [
+      devInternTypeError("Invalid URL: https://jira.acme.internal/rest/api"),
+      devInternTypeError('"jira.acme.internal" cannot be parsed as a URL.'),
+      devInternTypeError("Header 'Authorization' has invalid value: 'Bearer abc def'"),
+      devInternTypeError("Invalid header value."),
+      Object.assign(devInternTypeError("Invalid time value"), { name: "RangeError" }),
+    ]) {
+      expect(analyzeFailure(error, { packageRoot: ROOT }).verdict).toBe("task");
+    }
+  });
+});
+
 describe("maybeAutoReportFailure timeout", () => {
   test("aborts the in-flight submission and keeps the guard until it settles", async () => {
     let aborted = false;
@@ -449,5 +474,15 @@ describe("describeDefect", () => {
     expect(title.length).toBeLessThanOrEqual(200);
     expect(description).toContain("formatTaskDetails (src/lib/task/formatter.ts:120)");
     expect(description).not.toContain("node_modules");
+  });
+
+  test("keeps customer hostnames out of the serialized report", async () => {
+    const error = devInternTypeError(
+      "Cannot read properties of undefined (reading 'id') from https://jira.acme.internal/rest/api and git.acme.com",
+    );
+    const outcome = await maybeAutoReportFailure({ error, failedStep: "verify" }, deps());
+    expect(outcome.status).toBe("reported");
+    expect(requests).toHaveLength(1);
+    expect(JSON.stringify(requests[0])).not.toContain("acme");
   });
 });
