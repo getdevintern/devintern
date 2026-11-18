@@ -44,10 +44,6 @@ export interface QueuedWorkItem {
   deferCount?: number;
   /** Last status message recorded on the row (e.g. the deferral reason). */
   message?: string;
-  /** Ad-hoc prompt body, clipped to {@link QUEUED_BODY_LIMIT} characters. */
-  body?: string;
-  /** Whether {@link body} was clipped. */
-  bodyTruncated?: boolean;
   /** Retry: the run being retried. */
   runId?: number;
   /** Webhook: provider event type (`issue_comment`, `gitlab:note`, ...). */
@@ -110,15 +106,14 @@ export function injectedTaskToCancelledItem(task: InjectedTask): CancelledTaskIt
   };
 }
 
-/** Characters of an ad-hoc prompt served to the Overview. */
-export const QUEUED_BODY_LIMIT = 4_000;
-
 /** Rows read per source; the Overview shows a short list, not the whole backlog. */
 export const QUEUED_SOURCE_LIMIT = 50;
 
-/** Map a pending ad-hoc row to its queued item. */
+/**
+ * Map a pending ad-hoc row to its queued item. The prompt body is never
+ * served: the queue lists what will run and where, not the prompt itself.
+ */
 export function injectedTaskToQueuedItem(task: InjectedTask): QueuedWorkItem {
-  const truncated = task.body.length > QUEUED_BODY_LIMIT;
   return {
     id: `ad-hoc:${task.id}`,
     kind: "ad-hoc",
@@ -130,8 +125,6 @@ export function injectedTaskToQueuedItem(task: InjectedTask): QueuedWorkItem {
     notBefore: task.notBefore,
     deferCount: task.deferCount > 0 ? task.deferCount : undefined,
     message: task.message,
-    body: task.body.trim() ? task.body.slice(0, QUEUED_BODY_LIMIT) : undefined,
-    bodyTruncated: truncated || undefined,
     ...(task.dependsOn.length > 0
       ? {
           dependsOn: task.dependsOn,

@@ -39,7 +39,7 @@ Each **Active work** row shows the task, repository, harness, attempt, current p
 Below the running rows:
 
 - **Waiting to retry**: tasks deferred in the last 48 hours, for example after a usage limit, with the reason.
-- **Queued**: accepted work that has not started, such as ad-hoc tasks, dashboard retries, PR events, and automations waiting for their repository's checkout. Expand a row for its details. Expanding a pending ad-hoc task shows **Cancel task**: confirm it and the task is withdrawn before the worker starts it. If the worker started it in the meantime, the dashboard says it already started and changes nothing. Recently cancelled tasks are listed below the queue with who cancelled them and when. See [Cancel a pending task](delegation.md#cancel-a-pending-task).
+- **Queued**: accepted work that has not started, such as ad-hoc tasks, dashboard retries, PR events, and automations waiting for their repository's checkout. Expand a row for its details: task key, repository, who queued it, when, and why it may be held back. The prompt itself is not shown. Expanding a pending ad-hoc task shows **Cancel task**: confirm it and the task is withdrawn before the worker starts it. If the worker started it in the meantime, the dashboard says it already started and changes nothing. Recently cancelled tasks are listed below the queue with who cancelled them and when. See [Cancel a pending task](delegation.md#cancel-a-pending-task).
 - **Recently finished**: the last five finished tasks with outcome and PR. **View all runs** opens **Runs**.
 
 ## Retry a failed run

@@ -155,6 +155,21 @@ describe("InjectedTaskStore.cancel", () => {
     });
   });
 
+  test("a row requeued after a claim cancels as cancelled, never as already started", () => {
+    seed("local-requeued");
+    withStore((store) => {
+      const claimed = store.claimNext()!;
+      expect(store.cancel("local-requeued", { actor: "cli" }).outcome).toBe("already_started");
+      store.requeue(claimed.id);
+      const result = store.cancel("local-requeued", { actor: "dashboard" });
+      expect(result.outcome).toBe("cancelled");
+      expect(store.getByTaskKey("local-requeued")).toMatchObject({
+        status: "cancelled",
+        cancelledBy: "dashboard",
+      });
+    });
+  });
+
   test("cancel and claimNext on two connections: exactly one wins", () => {
     for (let round = 0; round < 20; round++) {
       const key = `local-race-${round}`;

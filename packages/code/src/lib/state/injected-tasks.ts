@@ -476,29 +476,37 @@ export class InjectedTaskStore {
   ): InjectedCancelResult {
     const db = this.ensureDb();
     const reason = options.reason?.trim() ? options.reason.trim() : null;
-    const cancelled = db
-      .query(
-        `UPDATE injected_tasks
-         SET status = 'cancelled', finished_at = ?, cancelled_by = ?, cancel_reason = ?,
-             child_pid = NULL, child_started_at = NULL
-         WHERE task_key = ? AND status = 'pending'
-         RETURNING *`,
-      )
-      .get(options.now ?? Date.now(), options.actor, reason, taskKey) as InjectedTaskRow | null;
-    if (cancelled) return { outcome: "cancelled", task: rowToInjectedTask(cancelled) };
-    const current = this.getByTaskKey(taskKey);
-    if (!current) return { outcome: "not_found" };
-    switch (current.status) {
-      case "cancelled":
-        return { outcome: "already_cancelled", task: current };
-      case "running":
-        return { outcome: "already_started", task: current };
-      case "pending":
-        // Unreachable: the guarded UPDATE above matches every pending row.
-        return { outcome: "already_started", task: current };
-      default:
-        return { outcome: "already_finished", task: current };
-    }
+    // `.immediate()` takes the write lock at BEGIN, so no claim, requeue, or
+    // recovery in another process can change the row between the guarded
+    // UPDATE and the read that explains why it did not match. A row read back
+    // as `pending` is therefore impossible, and the outcome is never wrong.
+    return db
+      .transaction((): InjectedCancelResult => {
+        const cancelled = db
+          .query(
+            `UPDATE injected_tasks
+             SET status = 'cancelled', finished_at = ?, cancelled_by = ?, cancel_reason = ?,
+                 child_pid = NULL, child_started_at = NULL
+             WHERE task_key = ? AND status = 'pending'
+             RETURNING *`,
+          )
+          .get(options.now ?? Date.now(), options.actor, reason, taskKey) as InjectedTaskRow | null;
+        if (cancelled) return { outcome: "cancelled", task: rowToInjectedTask(cancelled) };
+        const current = this.getByTaskKey(taskKey);
+        if (!current) return { outcome: "not_found" };
+        switch (current.status) {
+          case "cancelled":
+            return { outcome: "already_cancelled", task: current };
+          case "pending":
+          case "running":
+            // `pending` cannot be read here (see above); treat it like a claim
+            // rather than report a cancel that did not happen.
+            return { outcome: "already_started", task: current };
+          default:
+            return { outcome: "already_finished", task: current };
+        }
+      })
+      .immediate();
   }
 
   /**

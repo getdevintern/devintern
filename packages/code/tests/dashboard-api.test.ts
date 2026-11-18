@@ -412,9 +412,9 @@ describe("dashboard API", () => {
       title: "Add dark mode",
       taskKey: "local-next",
       repo: "acme/webapp",
-      bodyTruncated: true,
     });
-    expect((body.items[0].body as string).length).toBe(4_000);
+    expect(body.items[0]).not.toHaveProperty("body");
+    expect(body.items[0]).not.toHaveProperty("bodyTruncated");
     expect(body.items[1]).toMatchObject({
       title: "Fix flaky checkout",
       taskKey: "PROJ-9",

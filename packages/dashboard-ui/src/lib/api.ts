@@ -673,9 +673,6 @@ export interface QueuedWorkItem {
   notBefore?: number;
   deferCount?: number;
   message?: string;
-  /** Ad-hoc prompt body, clipped server-side. */
-  body?: string;
-  bodyTruncated?: boolean;
   /** Retry: the run being retried. */
   runId?: number;
   eventType?: string;
@@ -780,10 +777,33 @@ export interface PollState<T> {
 }
 
 /**
+ * Window event fired after the queue changed from this tab (a cancel), so
+ * every poll that shows queue contents or counts re-fetches at once instead
+ * of waiting for its next interval.
+ */
+export const QUEUE_CHANGED_EVENT = "devintern:queue-changed";
+
+/** Tell every listening poll that the queue changed. */
+export function notifyQueueChanged(): void {
+  // `window.Event`, not the global, so the event belongs to the same realm as `window`.
+  if (typeof window !== "undefined") window.dispatchEvent(new window.Event(QUEUE_CHANGED_EVENT));
+}
+
+export interface PollOptions {
+  /** Window event that triggers an immediate re-fetch. */
+  refreshOn?: string;
+}
+
+/**
  * Fetch a JSON endpoint now and on an interval, pausing while the tab is
  * hidden. Stale responses (superseded by a newer request) are discarded.
  */
-export function usePoll<T>(url: string, intervalMs = 5000): PollState<T> {
+export function usePoll<T>(
+  url: string,
+  intervalMs = 5000,
+  options: PollOptions = {},
+): PollState<T> {
+  const { refreshOn } = options;
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -825,12 +845,18 @@ export function usePoll<T>(url: string, intervalMs = 5000): PollState<T> {
         controller = load();
       }
     }, intervalMs);
+    const onRefresh = () => {
+      controller.abort();
+      controller = load();
+    };
+    if (refreshOn) window.addEventListener(refreshOn, onRefresh);
     return () => {
       clearInterval(timer);
+      if (refreshOn) window.removeEventListener(refreshOn, onRefresh);
       controller.abort();
       requestSeq.current += 1; // invalidate in-flight handlers
     };
-  }, [load, intervalMs]);
+  }, [load, intervalMs, refreshOn]);
 
   return { data, error, loading, refresh: () => void load() };
 }
