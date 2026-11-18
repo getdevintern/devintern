@@ -18,7 +18,7 @@ dateModified: 2026-11-18
 - **Follow-up on pull requests**: review feedback, merge conflicts, CI failures, auto-merge, and `@mentions`. See [PR Follow-up](./pr-follow-up.md).
 - **Scheduled story-point estimation**. See [Story Points Estimation](./story-points-estimation.md#scheduled-estimation-with-the-worker).
 - **Production errors** from Sentry. See [Sentry Auto-fixes](./sentry-integration.md).
-- **Ad-hoc tasks** you enqueue with `devintern worker add`. See [Delegate Tasks to the Worker](./delegation.md).
+- **Ad-hoc tasks** you enqueue with `devintern worker add`. See [Delegate Tasks to the Worker](./delegation.md). Withdraw one that has not started with `devintern worker cancel <taskKey>` (see [Cancel a pending task](./delegation.md#cancel-a-pending-task)).
 
 When something does not get picked up, see [Worker Troubleshooting](./worker-troubleshooting.md).
 

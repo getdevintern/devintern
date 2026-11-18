@@ -95,7 +95,7 @@ records, and the [dashboard](dashboard.md), and start on a `feature/local-<slug>
 | `--stack`                  | Dependency mode `stacked`: start on an unmerged dependency's branch once it succeeded (overrides `[defaults].dependency_mode`) |
 | `--wait-merge`             | Dependency mode `merged`: wait until every dependency's PR merged (overrides `[defaults].dependency_mode`)                      |
 | `--resume <taskKey>`       | Re-queue a settled ad-hoc task under its existing key (a failed or interrupted attempt resumes its branch and prior report)     |
-| `--wait`                   | Block until the run finishes; exit `0` on success, `1` on failure                                                               |
+| `--wait`                   | Block until the run finishes; exit `0` on success, `1` on failure, `3` if the task was [cancelled](#cancel-a-pending-task) first |
 | `--wait-timeout <seconds>` | Give up waiting after this long (default 21600 = 6h; `0` waits without a limit)                                                 |
 | `--json`                   | Emit a single `{ id, taskKey, repo, status, deduplicated }` object on stdout (failed `--wait` runs add an `error` field; see [JSON output](#json-output) for `harnessPausedUntil` and the dependency fields) |
 | `--workspace <path>`       | Use this `workspace.toml` (default `~/.devintern/workspace.toml`, or `DEVINTERN_WORKSPACE_DIR`)                                 |
@@ -114,7 +114,8 @@ With `--json`, stdout carries exactly one JSON object; every human/status line
 emits a single object: the settled state, with `error` carrying the task's
 failure reason when it failed, or a `status: "failed"` object with an `error` on
 a timeout/worker-stop/inconclusive wait, not an interim pending object plus a
-final one. Successful results have no `error`. Without `--json`, diagnostics and
+final one. Successful results have no `error`. A task cancelled while you wait
+reports `status: "cancelled"` with a `message` (and no `error`). Without `--json`, diagnostics and
 the result line print to stdout as usual.
 
 
@@ -341,6 +342,40 @@ error and the existing run in the dashboard or worker logs before enqueuing
 again. Do not edit the queue database or managed prompt files to retry or cancel
 work.
 
+If the task is [cancelled](#cancel-a-pending-task) while you wait, `--wait`
+returns within one poll (about a second), prints that the task was cancelled,
+and exits `3`, so scripts can tell a withdrawn task from a failed run (`1`).
+
+## Cancel a pending task
+
+Withdraw a task that has not started yet, for example one with the wrong repo,
+a bad brief, or a duplicate:
+
+```bash
+devintern worker cancel local-fix-flaky-checkout-test --reason "wrong repo"
+```
+
+The task never runs: no branch, run, or PR is created for it. The dashboard's
+**Cancel task** action in the Overview's **Queued** list does the same. Only
+`pending` tasks can be cancelled, including ones held back by a usage-limit
+pause or a dependency; a task the worker already started keeps running.
+
+| Outcome (`--json` `outcome`) | Exit | Meaning                                                       |
+| ---------------------------- | ---- | ------------------------------------------------------------- |
+| `cancelled`                  | `0`  | Printed as `Cancelled <taskKey>`                              |
+| `already_cancelled`          | `0`  | Cancelled earlier; the first cancel's time and actor are kept |
+| `already_started`            | `1`  | The worker claimed it first; nothing changed                  |
+| `already_finished`           | `1`  | It already settled `done` or `failed`; nothing changed        |
+| `not_found`                  | `1`  | No ad-hoc task with that key in this workspace                |
+
+`--json` prints one `{ taskKey, outcome, message }` object. `--reason <text>`
+(up to 500 characters) is recorded with the cancel time and who cancelled it
+(`cli` or `dashboard`); `devintern worker queue` and the dashboard list
+recently cancelled tasks with those details. A cancelled task frees its
+`--idempotency-key` for a new task, cannot be restarted with `--resume` (enqueue
+it again instead), and is pruned with other settled tasks after the retention
+window. A task that depends on a cancelled one stays blocked.
+
 ## Resuming and interrupted tasks (`--resume`)
 
 - **Durable.** Enqueue writes to `queue.db`, so a task survives worker restarts
@@ -374,7 +409,7 @@ work.
   branch and PR. A task whose prior attempt already succeeded has no interrupted
   work to inherit, so resuming it starts a fresh attempt rather than reusing the
   prior branch and report. A task that never started is still `pending` and
-  needs no resume.
+  needs no resume. A [cancelled](#cancel-a-pending-task) task cannot be resumed.
 - **A graceful shutdown does not launder a real failure.** Draining the worker
   aborts running task children; the aborted run is reported as _interrupted_,
   so its row stays `running` for the successor's startup recovery. A pipeline

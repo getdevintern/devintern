@@ -45,6 +45,15 @@ function idleNext({
     : "new work starts when a task is queued";
 }
 
+/** `/api/queue` fields for the Queued list; empty until the queue loads. */
+function queuedWorkProps(queuedWork: QueuedWorkResponse | null) {
+  return {
+    items: queuedWork?.items ?? [],
+    total: queuedWork?.total ?? 0,
+    cancelled: queuedWork?.cancelled ?? [],
+  };
+}
+
 export function ActiveWorkSection({
   capacity,
   activityRuns,
@@ -56,6 +65,7 @@ export function ActiveWorkSection({
   paused,
   schedule,
   now,
+  onQueueChanged,
 }: {
   capacity: OverviewCapacity;
   /** `/api/task-activity` runs that enrich the rows; null until it loads. */
@@ -70,6 +80,8 @@ export function ActiveWorkSection({
   /** Agent work is paused: the pause countdown owns the hero size. */
   paused: boolean;
   now: number;
+  /** Refresh the queue and its counts after a cancel from the queued list. */
+  onQueueChanged?: () => void;
 }) {
   const work = buildActiveWork(capacity.runs, activityRuns ?? [], now);
   const { running, maxConcurrency: max } = capacity;
@@ -157,7 +169,7 @@ export function ActiveWorkSection({
           />
         ) : null}
         <WaitingRows entries={work.waiting} now={now} onOpen={openRun} />
-        <QueuedWork items={queuedWork?.items ?? []} total={queuedWork?.total ?? 0} now={now} />
+        <QueuedWork {...queuedWorkProps(queuedWork)} now={now} onChanged={onQueueChanged} />
         <RecentlyFinished
           entries={work.finished}
           hidden={work.finishedHidden}

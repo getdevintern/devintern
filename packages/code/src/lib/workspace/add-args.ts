@@ -50,6 +50,7 @@ export function workerAddUsage(): string {
     "                            (default: [defaults].dependency_mode, else stacked)",
     "  --resume <taskKey>        Re-queue a settled ad-hoc task (resumes its branch)",
     "  --wait                    Block until the run finishes; exit with its status",
+    "                            (3 when the task is cancelled before it runs)",
     "  --wait-timeout <seconds>  Give up waiting after this long (0 = no limit; default 21600)",
     "  --json                    Emit a machine-readable result on stdout",
     "  --workspace <path>        Use this workspace.toml (default: ~/.devintern/)",

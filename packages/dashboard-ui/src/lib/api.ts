@@ -484,6 +484,60 @@ export async function createTask(input: CreateTaskInput): Promise<CreateTaskResu
   return task ? { ok: true, task } : { ok: false, error: "unexpected response from the server" };
 }
 
+/** Outcome of `POST /api/tasks/:id/cancel` (same values as `worker cancel --json`). */
+export type CancelTaskOutcome =
+  | "cancelled"
+  | "already_cancelled"
+  | "already_started"
+  | "already_finished"
+  | "not_found";
+
+const CANCEL_OUTCOMES: readonly CancelTaskOutcome[] = [
+  "cancelled",
+  "already_cancelled",
+  "already_started",
+  "already_finished",
+  "not_found",
+];
+
+export type CancelTaskResult =
+  | { ok: true; outcome: CancelTaskOutcome; message: string }
+  | { ok: false; outcome?: CancelTaskOutcome; error: string };
+
+/** URL of the cancel action for one ad-hoc task key. */
+export function cancelTaskUrl(taskKey: string): string {
+  return `${TASKS_URL}/${encodeURIComponent(taskKey)}/cancel`;
+}
+
+/**
+ * Cancel a pending ad-hoc task. Same-origin JSON POST, so it passes the
+ * dashboard's Origin/Content-Type write guard. `ok` is true only when the
+ * task ends up cancelled (now or earlier).
+ */
+export async function cancelTask(taskKey: string): Promise<CancelTaskResult> {
+  let response: Response;
+  try {
+    response = await fetch(cancelTaskUrl(taskKey), {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+  } catch (cause) {
+    return { ok: false, error: cause instanceof Error ? cause.message : String(cause) };
+  }
+  const body: unknown = await response.json().catch(() => null);
+  const record = typeof body === "object" && body !== null ? (body as Record<string, unknown>) : {};
+  const outcome = CANCEL_OUTCOMES.find((value) => value === record.outcome);
+  const message = typeof record.message === "string" ? record.message : undefined;
+  if (response.ok && outcome) {
+    return { ok: true, outcome, message: message ?? `Cancelled ${taskKey}` };
+  }
+  const error =
+    message ?? (typeof record.error === "string" ? record.error : `HTTP ${response.status}`);
+  return { ok: false, outcome, error };
+}
+
 /** One non-empty local weekday × hour bucket for one origin. */
 export interface RunActivityCell {
   origin: RunOrigin;
@@ -641,11 +695,26 @@ export interface QueuedWorkItem {
   dependencyReason?: string;
 }
 
+/** A recently cancelled ad-hoc task (audit trail; it will not run). */
+export interface CancelledTaskItem {
+  id: string;
+  taskKey: string;
+  title: string;
+  repo: string;
+  createdAt: number;
+  cancelledAt?: number;
+  /** `cli` (`devintern worker cancel`) or `dashboard`. */
+  cancelledBy?: "cli" | "dashboard";
+  cancelReason?: string;
+}
+
 export interface QueuedWorkResponse {
   /** Pending items in the order they become claimable. */
   items: QueuedWorkItem[];
   /** Every pending item, including any beyond the listed ones. */
   total: number;
+  /** Most recently cancelled ad-hoc tasks, newest first (absent on older servers). */
+  cancelled?: CancelledTaskItem[];
 }
 
 /** One agent-created PR (registry rows reconciled with GitHub by the worker). */

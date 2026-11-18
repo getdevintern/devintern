@@ -70,10 +70,44 @@ export interface QueuedWorkItem {
   dependencyReason?: string;
 }
 
+/** A recently cancelled ad-hoc task (audit trail; it will not run). */
+export interface CancelledTaskItem {
+  /** Stable across polls: `ad-hoc:<row id>`. */
+  id: string;
+  taskKey: string;
+  title: string;
+  repo: string;
+  createdAt: number;
+  /** When it was cancelled (epoch ms). */
+  cancelledAt?: number;
+  /** `cli` (`worker cancel`) or `dashboard`. */
+  cancelledBy?: "cli" | "dashboard";
+  cancelReason?: string;
+}
+
 export interface QueuedWorkResponse {
   items: QueuedWorkItem[];
   /** Every pending item, including those beyond the per-source limit. */
   total: number;
+  /** Most recently cancelled ad-hoc tasks, newest first. */
+  cancelled: CancelledTaskItem[];
+}
+
+/** Recently cancelled ad-hoc tasks served next to the queue. */
+export const CANCELLED_TASK_LIMIT = 10;
+
+/** Map a cancelled ad-hoc row to its audit item. */
+export function injectedTaskToCancelledItem(task: InjectedTask): CancelledTaskItem {
+  return {
+    id: `ad-hoc:${task.id}`,
+    taskKey: task.taskKey,
+    title: task.title,
+    repo: task.repo,
+    createdAt: task.createdAt,
+    cancelledAt: task.finishedAt,
+    cancelledBy: task.cancelledBy,
+    cancelReason: task.cancelReason,
+  };
 }
 
 /** Characters of an ad-hoc prompt served to the Overview. */
@@ -313,6 +347,8 @@ export interface QueuedWorkSources {
   pendingTotal: number;
   /** Scheduled jobs on this worker, for occurrences still waiting for a slot. */
   listAutomations?: () => DashboardAutomationView[];
+  /** Recently cancelled ad-hoc rows, newest first; may throw when the DB is missing. */
+  listCancelled?: (limit: number) => InjectedTask[];
 }
 
 /**
@@ -390,10 +426,19 @@ export function collectQueuedWork(sources: QueuedWorkSources): QueuedWorkRespons
   const items = [...adHoc, ...retries, ...webhooks, ...automations].sort(
     (a, b) => queuedEligibleAt(a) - queuedEligibleAt(b),
   );
+  let cancelled: CancelledTaskItem[] = [];
+  try {
+    cancelled = (sources.listCancelled?.(CANCELLED_TASK_LIMIT) ?? []).map(
+      injectedTaskToCancelledItem,
+    );
+  } catch {
+    // Missing DB or table: nothing cancelled yet.
+  }
   // Waiting automations are not counted by the durable queues behind pendingTotal.
   return {
     items,
     total: Math.max(items.length, sources.pendingTotal + automations.length),
+    cancelled,
   };
 }
 
@@ -411,6 +456,7 @@ export function handleQueuedWork(data: DashboardData): ApiResponse {
     lookupRun: (id) => data.getRunDetail(id)?.run ?? null,
     pendingTotal: stats.pending + stats.injected.pending + stats.retries.pending,
     listAutomations: () => data.getAutomations(),
+    listCancelled: (limit) => data.getInjectedTaskReadStore().listRecentlyCancelled(limit),
   });
   return { status: 200, body };
 }

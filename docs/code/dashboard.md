@@ -39,7 +39,7 @@ Each **Active work** row shows the task, repository, harness, attempt, current p
 Below the running rows:
 
 - **Waiting to retry**: tasks deferred in the last 48 hours, for example after a usage limit, with the reason.
-- **Queued**: accepted work that has not started, such as ad-hoc tasks, dashboard retries, PR events, and automations waiting for their repository's checkout. Expand a row for its details.
+- **Queued**: accepted work that has not started, such as ad-hoc tasks, dashboard retries, PR events, and automations waiting for their repository's checkout. Expand a row for its details. Expanding a pending ad-hoc task shows **Cancel task**: confirm it and the task is withdrawn before the worker starts it. If the worker started it in the meantime, the dashboard says it already started and changes nothing. Recently cancelled tasks are listed below the queue with who cancelled them and when. See [Cancel a pending task](delegation.md#cancel-a-pending-task).
 - **Recently finished**: the last five finished tasks with outcome and PR. **View all runs** opens **Runs**.
 
 ## Retry a failed run
@@ -93,7 +93,7 @@ The response matches `devintern worker add --json`: `{ id, taskKey, repo, status
 devintern dashboard
 ```
 
-This shows existing run history while the worker is stopped. Only explicit actions such as **Retry** and **New task** write anything.
+This shows existing run history while the worker is stopped. Only explicit actions such as **Retry**, **New task**, and **Cancel task** write anything.
 
 | Option                      | Default     | Effect                                                                                     |
 | --------------------------- | ----------- | ------------------------------------------------------------------------------------------ |
@@ -133,7 +133,7 @@ The commands use the workspace from `--workspace`, then `DEVINTERN_WORKSPACE_DIR
 
 ## Local by design
 
-The dashboard listens only on a loopback address and cannot be bound to another one. It has no login of its own, and its actions retry runs, trigger automations, enqueue tasks, and send bug reports with your credentials.
+The dashboard listens only on a loopback address and cannot be bound to another one. It has no login of its own, and its actions retry runs, trigger automations, enqueue and cancel tasks, and send bug reports with your credentials.
 
 To protect it from other websites open in your browser, the API accepts requests only for `localhost`, `127.0.0.1`, `[::1]` (any port), or an [allowed origin](#allowed-origins). Actions must come from the same origin as the dashboard page and send `Content-Type: application/json`.
 

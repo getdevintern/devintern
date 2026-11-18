@@ -598,3 +598,38 @@
     transition: none;
   }
 }
+
+.aq-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.aq-cancelled {
+  display: grid;
+  gap: 6px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--border);
+  font-size: 0.75rem;
+}
+
+.aq-cancelled-title {
+  margin: 0;
+  color: var(--subtle-foreground);
+  font-weight: 500;
+}
+
+.aq-cancelled ul {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.aq-cancelled-row {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}

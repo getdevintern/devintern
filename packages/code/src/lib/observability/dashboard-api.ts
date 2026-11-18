@@ -985,6 +985,11 @@ function retryInjectedRun(
   if (task.status === "pending" || task.status === "running") {
     return conflict(`ad-hoc task ${taskKey} is already ${task.status} (task #${task.id})`);
   }
+  if (task.status === "cancelled") {
+    return conflict(
+      `ad-hoc task ${taskKey} was cancelled; a cancelled task cannot be re-queued, enqueue it again instead`,
+    );
+  }
   // Re-queueing force-removes the worktree the surviving child is working in.
   if (interruptedChildStillRunning(task)) {
     return conflict(injectedChildStillRunningMessage(taskKey, task.childPid!));

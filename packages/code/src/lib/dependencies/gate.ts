@@ -63,7 +63,13 @@ export function resolveDependencyMode(input: {
 }
 
 /** Where a dependency's own work item stands. */
-export type DependencyWorkState = "missing" | "queued" | "running" | "done" | "failed";
+export type DependencyWorkState =
+  | "missing"
+  | "queued"
+  | "running"
+  | "done"
+  | "failed"
+  | "cancelled";
 
 /** A dependency's PR as far as the gate needs it. */
 export interface DependencyPr {
@@ -241,6 +247,7 @@ export function classifyDependency(facts: DependencyFacts): DependencyStatus {
   if (work === "queued") return { key, state: "pending", reason: `${key} not started` };
   if (work === "running") return { key, state: "pending", reason: `${key} running` };
   if (work === "failed") return { key, state: "blocked", reason: `${key} failed` };
+  if (work === "cancelled") return { key, state: "blocked", reason: `${key} was cancelled` };
   if (!latestRun) {
     // A settled row with no run (e.g. skipped as unchanged) produced nothing
     // to wait for; a missing row with no run is unknown work.

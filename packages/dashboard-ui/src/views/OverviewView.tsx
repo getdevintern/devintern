@@ -26,6 +26,7 @@ export function OverviewScreen({
   activityRuns = null,
   queuedWork = null,
   now,
+  onQueueChanged,
 }: {
   overview: OverviewResponse;
   workerInfo: WorkerResponse | null;
@@ -34,6 +35,8 @@ export function OverviewScreen({
   /** `/api/task-activity` runs: row detail plus the waiting and finished lists. */
   activityRuns?: RunRecord[] | null;
   now: number;
+  /** Re-fetch the queue and worker counts after a cancel. */
+  onQueueChanged?: () => void;
 }) {
   const alerts = overviewAlerts(overview, now);
   const workerRunning = overview.worker.status === "running";
@@ -68,6 +71,7 @@ export function OverviewScreen({
             workerRunning={workerRunning}
             paused={overview.harnesses.allExhausted}
             schedule={workerInfo?.schedule}
+            onQueueChanged={onQueueChanged}
             now={now}
           />
           <RepoSection
@@ -127,11 +131,11 @@ function OverviewSkeleton() {
 export function OverviewView() {
   // Shared with the status strip's harness pill: one request, one truth.
   const { data, error } = useOverviewPoll();
-  const { data: workerInfo } = usePoll<WorkerResponse>("/api/worker");
+  const { data: workerInfo, refresh: refreshWorker } = usePoll<WorkerResponse>("/api/worker");
   // Row detail, waiting and finished tasks; the in-progress set stays the overview's.
   const { data: activity } = usePoll<TaskActivityResponse>("/api/task-activity");
   // Pending work the worker has accepted but not started.
-  const { data: queuedWork } = usePoll<QueuedWorkResponse>("/api/queue");
+  const { data: queuedWork, refresh: refreshQueue } = usePoll<QueuedWorkResponse>("/api/queue");
   // Elapsed times and countdowns tick between polls.
   const now = useNow(5_000);
   if (!data) {
@@ -148,6 +152,10 @@ export function OverviewView() {
       activityRuns={activity?.runs ?? null}
       queuedWork={queuedWork}
       now={Math.max(now, data.generatedAt)}
+      onQueueChanged={() => {
+        refreshQueue();
+        refreshWorker();
+      }}
     />
   );
 }
