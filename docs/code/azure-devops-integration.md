@@ -90,7 +90,7 @@ Parent, child, and related work item links are fetched and included in the agent
 
 ### Actioned work items (worker)
 
-When the worker creates a PR it moves the work item to `prStatus` (when configured) and records it as actioned locally, so the ready-tasks query no longer re-implements it. This also covers a failed or unconfigured transition. Re-arm an actioned work item by editing its description, moving it back to a ready state, or changing fields — see [Tickets already actioned after a PR](./worker.md#tickets-already-actioned-after-a-pr).
+When the worker creates a PR it moves the work item to `prStatus` (when configured) and records it as actioned locally, so the ready-tasks query no longer re-implements it. This also covers a failed or unconfigured transition. Re-arm an actioned work item by editing its description, moving it back to a ready state, or changing fields — see [Tickets already actioned after a PR](./worker-troubleshooting.md#tickets-already-actioned-after-a-pr).
 
 ## Batch processing with --query
 

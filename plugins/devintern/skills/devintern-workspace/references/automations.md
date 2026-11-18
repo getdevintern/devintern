@@ -2,7 +2,7 @@
 
 Use `[[automations]]` in the selected `workspace.toml` for recurring prompt-based work. Each occurrence runs the normal task pipeline in the registered repository's persistent base worktree with shared workspace and repo environment layers. It does not create a tracker ticket or receive team-specific tracker credentials. An automation-only workspace can omit the task query and tracker credentials; the workspace schema still requires `[defaults].tracker` to name a supported tracker. Unattended execution needs worker automation access and a configured agent.
 
-Read the [recurring automation guide](https://devintern.com/docs/code/worker#recurring-automations) for product behavior and the [workspace guide](https://devintern.com/docs/code/workspaces#how-workspace-automations-differ-from-single-repo-ones) for execution context. In a source checkout, use `docs/code/worker.md`, `docs/code/workspaces.md`, and `packages/code/src/lib/automation/config.ts`. Installed skills must work without that checkout.
+Read the [recurring automation guide](https://devintern.com/docs/code/automations) for product behavior and [How occurrences run](https://devintern.com/docs/code/automations#how-occurrences-run) for execution context. In a source checkout, use `docs/code/automations.md`, `docs/code/workspaces.md`, and `packages/code/src/lib/automation/config.ts`. Installed skills must work without that checkout.
 
 ## Translate the request into an entry
 

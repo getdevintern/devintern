@@ -563,10 +563,9 @@ export class DashboardData {
   /** Automation listing/triggering, defaulting to the standalone spawn path. */
   getAutomationActions(): DashboardAutomationActions {
     if (!this.automationActions) {
-      // Standalone dashboards (spawn mode) read the project's own automation
-      // config; a worker-embedded dashboard without an in-process scheduler
-      // has none to offer (workspace [[automations]] would need the fleet
-      // pipeline), so it serves an empty catalog rather than a wrong one.
+      // Standalone dashboards (spawn mode) read the project's automation config;
+      // a worker-embedded one without an in-process scheduler has none (workspace
+      // [[automations]] need the fleet pipeline), so it serves an empty catalog.
       this.automationActions =
         this.automationActionsOverride ??
         (this.retryMode === "spawn"
@@ -596,9 +595,8 @@ export class DashboardData {
 
   /** Health of each configured automation source; never throws. */
   getSources(): DashboardSourcesResult {
-    // The worker records source health in the workspace (or fleet) database,
-    // the same one worker liveness and the durable queue are read from; the
-    // run-history database differs for a standalone `devintern dashboard`.
+    // Source health lives in the workspace (or fleet) database with liveness and
+    // the queue; a standalone `devintern dashboard` uses a different run-history db.
     return readConfiguredSourceHealth(this.queueDbPath, this.configuredSources);
   }
 
@@ -878,8 +876,7 @@ export async function handleRetryRun(
   }
   const taskKey = run.taskKey;
 
-  // A live run for the task blocks every kind of retry: the worker records one
-  // as soon as it picks the ticket (or the re-queued ad-hoc row) up.
+  // A live run blocks every kind of retry (recorded once the worker picks it up).
   const activeRun = data
     .listRuns({ taskKey, limit: MAX_LIMIT, offset: 0 })
     .runs.find(
@@ -901,8 +898,7 @@ export async function handleRetryRun(
     return retryInjectedRun(data, id, taskKey, actorLabel);
   }
 
-  // Concurrent retries: another dashboard retry for this task, or a live run
-  // for the task (the worker records one as soon as it picks the ticket up).
+  // Concurrent retries: another dashboard retry for this task.
   if (data.retryMode === "schedule") {
     if (data.getScheduledRetryStore().hasActive(taskKey, run.team)) {
       return conflict(`a retry of ${taskKey} is already scheduled or running`);
@@ -1182,9 +1178,8 @@ export async function handleRunAutomation(
     );
   }
 
-  // Standalone spawn mode: the spawned CLI needs a moment to create its run
-  // row, so rapid repeat triggers are debounced until the TTL lapses. The
-  // worker-embedded dashboard relies on the automation's schedule lease.
+  // Spawn mode debounces repeat triggers until the TTL lapses (the CLI needs a
+  // moment to create its run row); embedded dashboards use the schedule lease.
   if (data.retryMode === "spawn" && !data.claimAutomationRun(automationId)) {
     return conflict(`a manual run of "${automationId}" was just triggered and is starting`);
   }

@@ -282,7 +282,7 @@ describe("CiFailureWatcherAcquirer", () => {
       expect(warns[0]).toContain("403");
       expect(warns[0]).toContain("Actions: Read");
       expect(warns[0]).toContain("Commit statuses: Read");
-      expect(warns[0]).toContain("docs/code/worker.md");
+      expect(warns[0]).toContain("docs/code/pr-follow-up.md#ci-failures-on-the-agents-prs");
 
       now += 60_000;
       await acquirer.tick();
