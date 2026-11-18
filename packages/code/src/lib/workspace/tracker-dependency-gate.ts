@@ -34,13 +34,23 @@ import { createDependencyMergeStateResolver } from "./fleet-event-acquirers";
 import type { UnknownMergeStateLookup } from "./injected-acquirer";
 import { MERGE_STATE_LOOKUP_COOLDOWN_MS, MERGE_STATE_LOOKUP_TIMEOUT_MS } from "./injected-acquirer";
 
-/** The gate's answer for one ticket. */
+/**
+ * The gate's answer for one ticket. A stacked verdict's base is passed to the
+ * task subprocess, which records the ticket's `stacked_on` only once its
+ * pipeline actually targets that base.
+ */
 export type TrackerGateOutcome =
   | { kind: "ready"; stackedOn?: StackBase }
   | { kind: "waiting" | "blocked"; reason: string };
 
 /** Gate one routed ticket: `(taskKey, repo)` → outcome. */
-export type TrackerDependencyGate = (taskKey: string, repo: string) => Promise<TrackerGateOutcome>;
+export type TrackerDependencyGate = ((
+  taskKey: string,
+  repo: string,
+) => Promise<TrackerGateOutcome>) & {
+  /** Clear waits of tickets the poll search no longer returns. */
+  clearStaleWaits?: (polledKeys: ReadonlySet<string>) => void;
+};
 
 export interface TrackerDependencyGateOptions {
   /** Workspace DB (`state/queue.db`): runs, PR registry, gate state. */
@@ -84,6 +94,10 @@ export function createTrackerDependencyGate(
   const lastLookup = new Map<string, number>();
   /** Final PR states the code host reported, per `repo#number`. */
   const observed = new Map<string, MergeStateAnswer>();
+  /** One connection per gate, opened on first use (not per evaluation). */
+  let store: TrackerDependencyStore | undefined;
+  const openStore = (): TrackerDependencyStore =>
+    (store ??= new TrackerDependencyStore(options.dbPath));
 
   const overlay = (facts: DependencyFacts, fallbackRepo: string): DependencyFacts => {
     const repo = facts.latestRun?.repo ?? fallbackRepo;
@@ -153,7 +167,15 @@ export function createTrackerDependencyGate(
     return answers.some(Boolean);
   };
 
-  return async (taskKey, repo) => {
+  // A GitHub issue is keyed by its bare number, unique only within the
+  // team's repository: another GitHub-issue team's `12` is a different
+  // ticket, so only this team's runs count as handling a blocker locally.
+  // Jira and Linear keys are workspace-wide, so a blocker another team
+  // implemented still counts.
+  const localScope =
+    options.tracker === "github" && options.team !== undefined ? { team: options.team } : undefined;
+
+  const evaluateTicket = async (taskKey: string, repo: string): Promise<TrackerGateOutcome> => {
     let blockers: TaskBlocker[];
     let readError: string | undefined;
     try {
@@ -164,82 +186,119 @@ export function createTrackerDependencyGate(
       readError = `could not read ${taskKey}'s blockers from ${options.tracker}: ${(error as Error).message}`;
     }
 
-    const store = new TrackerDependencyStore(options.dbPath);
+    const store = openStore();
+    const keys = [...new Set(blockers.map((blocker) => blocker.key))];
+    const verdictBase = {
+      taskKey,
+      team: options.team,
+      tracker: options.tracker,
+      repo,
+      dependsOn: keys,
+      dependencyMode: options.mode(),
+    };
+    if (readError) {
+      if (store.record({ ...verdictBase, state: "waiting", reason: readError }, now())) {
+        console.warn(`⚠️  ${scope} ${taskKey} waiting: ${readError}`);
+      }
+      return { kind: "waiting", reason: readError };
+    }
+    if (keys.length === 0) {
+      // `stacked_on` is kept: an earlier stacked run's PR may still target
+      // that base (see TrackerDependencyStore.clear).
+      store.clear(taskKey, options.team);
+      return { kind: "ready" };
+    }
+
+    const evaluate = (): { decision: DependencyGateDecision; facts: DependencyFacts[] } => {
+      const facts = trackerBlockerFacts(
+        blockers,
+        readLocalDependencyFacts(store.connection(), keys, localScope),
+      ).map((entry) => overlay(entry, repo));
+      return { decision: evaluateDependencyGate(verdictBase.dependencyMode, facts), facts };
+    };
+    let { decision, facts } = evaluate();
+    if (decision.kind === "waiting" && decision.mergeStateLookups.length > 0) {
+      if (await lookUp(decision, facts, repo)) ({ decision, facts } = evaluate());
+    }
+
+    let outcome: TrackerGateOutcome =
+      decision.kind === "ready"
+        ? { kind: "ready", ...(decision.stackedOn ? { stackedOn: decision.stackedOn } : {}) }
+        : { kind: decision.kind, reason: decision.reason };
+    if (outcome.kind === "ready" && outcome.stackedOn) {
+      // A branch can only be stacked on within one repository.
+      const base = outcome.stackedOn;
+      const baseRepo = facts.find((entry) => entry.key === base.taskKey)?.latestRun?.repo;
+      if (baseRepo !== undefined && baseRepo !== repo) {
+        // Unstackable, so every blocker must merge: evaluate in merged mode,
+        // which also asks the code host about the base's possibly stale
+        // `open` PR row (same cooldown as any other lookup).
+        let merged = evaluateDependencyGate("merged", facts);
+        if (merged.kind === "waiting" && merged.mergeStateLookups.length > 0) {
+          if (await lookUp(merged, facts, repo)) {
+            ({ facts } = evaluate());
+            merged = evaluateDependencyGate("merged", facts);
+          }
+        }
+        outcome =
+          merged.kind === "ready"
+            ? { kind: "ready" }
+            : merged.kind === "blocked"
+              ? { kind: "blocked", reason: merged.reason }
+              : {
+                  kind: "waiting",
+                  reason:
+                    `${base.taskKey} PR #${base.prNumber} not merged (it is in repo ${baseRepo}, ` +
+                    `not ${repo}, so it cannot be stacked on)`,
+                };
+      }
+    }
+
+    const changed = store.record(
+      {
+        ...verdictBase,
+        state: outcome.kind === "ready" ? null : outcome.kind,
+        reason: outcome.kind === "ready" ? null : outcome.reason,
+      },
+      now(),
+    );
+    if (outcome.kind === "ready") {
+      // `stacked_on` is recorded by the task subprocess once its pipeline
+      // confirms the stack (see recordTrackerStackedOn): an explicit
+      // `Target branch:` or a base missing on the remote drops it.
+      if (changed) console.log(`✅ ${scope} ${taskKey} blockers satisfied (${keys.join(", ")})`);
+    } else if (changed) {
+      if (outcome.kind === "blocked") {
+        console.warn(`⛔ ${scope} ${taskKey} blocked: ${outcome.reason}`);
+      } else {
+        console.log(`⏳ ${scope} ${taskKey} waiting: ${outcome.reason}`);
+      }
+    }
+    return outcome;
+  };
+
+  const gate: TrackerDependencyGate = async (taskKey, repo) => {
     try {
-      const keys = [...new Set(blockers.map((blocker) => blocker.key))];
-      const verdictBase = {
-        taskKey,
-        team: options.team,
-        tracker: options.tracker,
-        repo,
-        dependsOn: keys,
-        dependencyMode: options.mode(),
-      };
-      if (readError) {
-        if (store.record({ ...verdictBase, state: "waiting", reason: readError }, now())) {
-          console.warn(`⚠️  ${scope} ${taskKey} waiting: ${readError}`);
-        }
-        return { kind: "waiting", reason: readError };
+      return await evaluateTicket(taskKey, repo);
+    } catch (error) {
+      // A state DB error (locked, corrupt, schema drift) must not reject: the
+      // poller has already claimed the ticket's change, and a rejected run
+      // would leave it claimed until the ticket is edited again. Fail closed
+      // with a "waiting" verdict (not persisted: the DB is what failed) so the
+      // poller re-admits the ticket next tick; reopen the connection then.
+      const reason = `could not evaluate ${taskKey}'s blockers: ${(error as Error).message}`;
+      console.warn(`⚠️  ${scope} ${taskKey} waiting: ${reason}`);
+      try {
+        store?.close();
+      } catch {
+        // Already unusable; dropping the handle is enough.
       }
-      if (keys.length === 0) {
-        store.clear(taskKey, options.team);
-        store.setStackedOn(taskKey, options.team, null);
-        return { kind: "ready" };
-      }
-
-      const evaluate = (): { decision: DependencyGateDecision; facts: DependencyFacts[] } => {
-        const facts = trackerBlockerFacts(
-          blockers,
-          readLocalDependencyFacts(store.connection(), keys),
-        ).map((entry) => overlay(entry, repo));
-        return { decision: evaluateDependencyGate(verdictBase.dependencyMode, facts), facts };
-      };
-      let { decision, facts } = evaluate();
-      if (decision.kind === "waiting" && decision.mergeStateLookups.length > 0) {
-        if (await lookUp(decision, facts, repo)) ({ decision, facts } = evaluate());
-      }
-
-      let outcome: TrackerGateOutcome =
-        decision.kind === "ready"
-          ? { kind: "ready", ...(decision.stackedOn ? { stackedOn: decision.stackedOn } : {}) }
-          : { kind: decision.kind, reason: decision.reason };
-      if (outcome.kind === "ready" && outcome.stackedOn) {
-        // A branch can only be stacked on within one repository.
-        const base = outcome.stackedOn;
-        const baseRepo = facts.find((entry) => entry.key === base.taskKey)?.latestRun?.repo;
-        if (baseRepo !== undefined && baseRepo !== repo) {
-          outcome = {
-            kind: "waiting",
-            reason:
-              `${base.taskKey} PR #${base.prNumber} not merged (it is in repo ${baseRepo}, ` +
-              `not ${repo}, so it cannot be stacked on)`,
-          };
-        }
-      }
-
-      const changed = store.record(
-        {
-          ...verdictBase,
-          state: outcome.kind === "ready" ? null : outcome.kind,
-          reason: outcome.kind === "ready" ? null : outcome.reason,
-        },
-        now(),
-      );
-      if (outcome.kind === "ready") {
-        store.setStackedOn(taskKey, options.team, outcome.stackedOn?.taskKey ?? null);
-        if (changed) console.log(`✅ ${scope} ${taskKey} blockers satisfied (${keys.join(", ")})`);
-      } else if (changed) {
-        if (outcome.kind === "blocked") {
-          console.warn(`⛔ ${scope} ${taskKey} blocked: ${outcome.reason}`);
-        } else {
-          console.log(`⏳ ${scope} ${taskKey} waiting: ${outcome.reason}`);
-        }
-      }
-      return outcome;
-    } finally {
-      store.close();
+      store = undefined;
+      return { kind: "waiting", reason };
     }
   };
+  gate.clearStaleWaits = (polledKeys) => openStore().clearWaitsExcept(options.team, polledKeys);
+  return gate;
 }
 
 /**
@@ -282,23 +341,6 @@ export function trackerDependencyDeps(input: {
   });
   return {
     dependencyGate,
-    onPolledTasks: (keys) => clearStaleTrackerWaits(state.dbPath, teamName, keys),
+    onPolledTasks: (keys) => dependencyGate.clearStaleWaits?.(keys),
   };
-}
-
-/**
- * Clear waits of one source's tickets its poll search no longer returns, so
- * `worker queue` does not list closed or reassigned tickets forever.
- */
-export function clearStaleTrackerWaits(
-  dbPath: string,
-  team: string | undefined,
-  polledKeys: ReadonlySet<string>,
-): void {
-  const store = new TrackerDependencyStore(dbPath);
-  try {
-    store.clearWaitsExcept(team, polledKeys);
-  } finally {
-    store.close();
-  }
 }

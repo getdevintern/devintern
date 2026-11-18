@@ -32,6 +32,8 @@ import { shouldSkipRetry } from "../state/retry-gate";
 import { clearRetryState, getRetryState } from "../state/retry-state";
 import { actionedSourceKeyFromEnv, recordTaskActioned } from "./actioned-state";
 import { recordActionedWithoutPr } from "./actioned-without-pr";
+import { recordTrackerStackedOn } from "../state/tracker-dependencies";
+import { resolveQueueDbPath } from "../state/webhook-queue";
 import { WorkerState } from "../state/worker-state";
 import { QUEUE_CLAIM_ENV } from "../workspace/queue-failure-reason";
 import {
@@ -53,9 +55,11 @@ import { outcomeRunDisposition } from "../agent/implementation-outcome";
 import { TaskFormatter } from "../task/formatter";
 import {
   renderStackedOnSection,
+  STACKED_ON_ENV,
   stackBaseFromEnv,
   takeStackBaseFromEnv,
 } from "../dependencies/stacked-base";
+import type { StackBase } from "../dependencies/gate";
 import type { RetryPromptContext } from "../task/formatter";
 import { buildTicketUrl } from "../task/ticket-url";
 import type { TaskTrackerClient } from "../trackers/client";
@@ -70,7 +74,7 @@ import {
   isWorkerChild,
   writeUsageLimitHint,
 } from "../worker/usage-limit-protocol";
-import { WORKSPACE_REPO_ENV } from "../workspace/env";
+import { WORKSPACE_REPO_ENV, WORKSPACE_TEAM_ENV } from "../workspace/env";
 import { resolveWorkspaceDir, worktreesDir } from "../workspace/paths";
 import { reportProcessingFailure } from "./processing-failure";
 import { resolveRunIdentity } from "./run-identity";
@@ -806,6 +810,60 @@ function displayTaskSummary(input: {
 }
 
 /**
+ * Record a worker-stacked tracker ticket's base for its dependents, once the
+ * run really targets it. Nothing is recorded when the stack was dropped: an
+ * explicit `Target branch:` removed the env marker in {@link prepareTask}, or
+ * the base branch is missing on the remote and the target fell back to the
+ * default branch. Best-effort: a storage failure only logs.
+ *
+ * @returns Whether the base was recorded
+ */
+export function recordConfirmedStackBase(
+  taskKey: string,
+  stackBase: StackBase | undefined,
+  effectiveTargetBranch: string,
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  if (!stackBase || effectiveTargetBranch !== stackBase.branch) return false;
+  try {
+    recordTrackerStackedOn(
+      env.WEBHOOK_QUEUE_DB || resolveQueueDbPath(),
+      taskKey,
+      env[WORKSPACE_TEAM_ENV] || undefined,
+      stackBase.taskKey,
+    );
+    return true;
+  } catch (error) {
+    console.warn(`⚠️  Could not record ${taskKey}'s stack base: ${(error as Error).message}`);
+    return false;
+  }
+}
+
+/**
+ * Drop a worker-provided stack base the run will not use because the target
+ * fell back to the default branch (the base branch is missing on the remote).
+ * Removes the env marker so the PR body does not claim the stack, and the
+ * prompt section so the agent is not told to build on a branch it never got.
+ *
+ * @returns Whether the stack was dropped
+ */
+export function dropUnusedStackBase(
+  stackBase: StackBase | undefined,
+  effectiveTargetBranch: string,
+  taskDetails: { stackedOnSection?: string },
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  if (!stackBase || effectiveTargetBranch === stackBase.branch) return false;
+  delete env[STACKED_ON_ENV];
+  delete taskDetails.stackedOnSection;
+  console.warn(
+    `⚠️  Not stacking on ${stackBase.taskKey} PR #${stackBase.prNumber}: ` +
+      `base branch '${stackBase.branch}' is unavailable, targeting '${effectiveTargetBranch}' instead`,
+  );
+  return true;
+}
+
+/**
  * Resolve the PR target branch: per-task override from the description, else the
  * CLI option, validated against the remote default branch.
  */
@@ -1291,11 +1349,15 @@ export async function processSingleTask(
 
     displayTaskSummary({ taskDetails, tracker, linkedResources, relatedIssues, comments });
 
+    // Set only for a tracker ticket the worker stacked (see prepareTask).
+    const stackBase = stackBaseFromEnv();
     const effectiveTargetBranch = await resolveEffectiveTargetBranch(
       descriptionText,
-      // Set only for a tracker ticket the worker stacked (see prepareTask).
-      stackBaseFromEnv()?.branch,
+      stackBase?.branch,
     );
+    recordConfirmedStackBase(taskKey, stackBase, effectiveTargetBranch);
+    // Before the prompt and PR body are built, so neither claims a dropped stack.
+    dropUnusedStackBase(stackBase, effectiveTargetBranch, taskDetails);
 
     // Per-task execution preferences (harness / model / effort), parsed from
     // an explicit `Execution preferences` section or `devintern` HTML comment

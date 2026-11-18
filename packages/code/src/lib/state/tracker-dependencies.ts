@@ -6,8 +6,11 @@
  * - `state` / `reason`: why the ticket is not being picked up yet
  *   (`waiting` / `blocked`), `NULL` once it may start. `worker queue` and the
  *   dashboard list rows with a state.
- * - `stacked_on`: the blocker ticket whose unmerged branch the ticket's latest
- *   run was stacked on. Dependents of this ticket read it (see
+ * - `stacked_on`: the blocker ticket whose unmerged branch the ticket's most
+ *   recent stacked run was stacked on. Set by the task subprocess once its
+ *   pipeline targets that base (see {@link recordTrackerStackedOn}), and never
+ *   cleared by a later unstacked verdict, because the ticket's branch and PR
+ *   keep targeting that base. Dependents of this ticket read it (see
  *   `readLocalDependencyFacts`) so a merge into that branch counts only once the
  *   base merged too, the same rule ad-hoc tasks follow via
  *   `injected_tasks.stacked_on`.
@@ -163,8 +166,8 @@ export class TrackerDependencyStore {
     return changed;
   }
 
-  /** Record the blocker ticket a starting run is stacked on (`null`: none). */
-  setStackedOn(taskKey: string, team: string | undefined, stackedOn: string | null): void {
+  /** Record the blocker ticket a starting run is stacked on. */
+  setStackedOn(taskKey: string, team: string | undefined, stackedOn: string): void {
     this.db
       .query(
         `UPDATE ${TRACKER_DEPENDENCIES_TABLE} SET stacked_on = ?, updated_at = ?
@@ -208,6 +211,28 @@ export class TrackerDependencyStore {
 
   close(): void {
     this.db.close();
+  }
+}
+
+/**
+ * Record, from a tracker ticket's task subprocess, the blocker whose branch
+ * the run actually targets. Only the pipeline knows this: an explicit
+ * `Target branch:` or a base missing on the remote drops the stack the
+ * worker's gate proposed. Updates the row the gate wrote; a missing row (a run
+ * the gate did not stack) is left alone.
+ */
+export function recordTrackerStackedOn(
+  dbPath: string,
+  taskKey: string,
+  team: string | undefined,
+  stackedOn: string,
+): void {
+  if (!existsSync(dbPath)) return;
+  const store = new TrackerDependencyStore(dbPath);
+  try {
+    store.setStackedOn(taskKey, team, stackedOn);
+  } finally {
+    store.close();
   }
 }
 

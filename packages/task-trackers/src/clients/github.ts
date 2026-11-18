@@ -66,11 +66,23 @@ export interface GitHubLabel {
   description: string | null;
 }
 
+/**
+ * Whether a GitHub 403 is a (primary or secondary) rate limit rather than a
+ * permission denial.
+ */
+function isRateLimited(response: Response, body: string): boolean {
+  if (response.headers.get("x-ratelimit-remaining") === "0") return true;
+  if (response.headers.get("retry-after") !== null) return true;
+  return /rate limit/i.test(body);
+}
+
 export class GitHubClient {
   private token: string;
   private owner: string;
   private repo: string;
   private baseUrl = "https://api.github.com";
+  /** Set once the dependencies API answered 403 (warned once per client). */
+  private warnedDependenciesForbidden = false;
 
   /**
    * Create a GitHub REST API client for a single repository.
@@ -136,9 +148,11 @@ export class GitHubClient {
    *
    * @param issueNumber - Issue number in the configured repo.
    * @returns Blockers (up to 100), or `null` when the API is not available for
-   *   this repository or account (404/410), so callers can treat that as "no
-   *   blockers" rather than a failure.
-   * @throws When the API request fails for another reason.
+   *   this repository or account (404/410), or the token may not read issue
+   *   dependencies (a 403 that is not a rate limit), so callers can treat
+   *   that as "no blockers" rather than a failure.
+   * @throws When the API request fails for another reason (including a
+   *   rate-limited 403, which is transient).
    */
   async listIssueBlockedBy(issueNumber: number): Promise<GitHubIssueBlocker[] | null> {
     const response = await this.send(
@@ -148,6 +162,16 @@ export class GitHubClient {
     if (response.status === 404 || response.status === 410) return null;
     if (!response.ok) {
       const errorText = await response.text();
+      if (response.status === 403 && !isRateLimited(response, errorText)) {
+        if (!this.warnedDependenciesForbidden) {
+          this.warnedDependenciesForbidden = true;
+          console.warn(
+            `⚠️  GitHub token cannot read issue dependencies in ${this.owner}/${this.repo} ` +
+              `(403); issues are not held back on their blockers`,
+          );
+        }
+        return null;
+      }
       throw new Error(`GitHub API error (${response.status}): ${errorText}`);
     }
     const data: unknown = await response.json();
