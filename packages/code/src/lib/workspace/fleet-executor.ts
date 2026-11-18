@@ -89,8 +89,9 @@ export interface FleetTask {
 /** Structural slice of {@link RepoManager} the acquirer uses (injectable). */
 export interface RepoManagerLike {
   ensureBareClone(repo: RepoConfig): Promise<string>;
-  fetch(repoName: string): Promise<void>;
-  ensureBaseWorktree(repo: RepoConfig, options?: { sync?: boolean }): Promise<string>;
+  fetch(repoName: string, options?: { timeoutMs?: number }): Promise<void>;
+  ensureBaseWorktree(repo: RepoConfig): Promise<string>;
+  ensurePrJobWorktree(repo: RepoConfig): Promise<string>;
   createTaskWorktree(repo: RepoConfig, taskKey: string): Promise<string>;
   removeTaskWorktree(repoName: string, worktreePath: string): Promise<void>;
   sweepStaleWorktrees(repoName: string, ttlDays: number): Promise<string[]>;

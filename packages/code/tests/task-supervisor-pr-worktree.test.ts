@@ -135,6 +135,29 @@ describe("TaskSupervisor pr_worktree class", () => {
     expect(started).toHaveLength(n + 2);
   });
 
+  test("one PR job still starts while tasks fill the per-repo budget", async () => {
+    const supervisor = createTaskSupervisor({ maxConcurrency: 4, maxConcurrencyPerRepo: 1 });
+    const started: string[] = [];
+    const task = heldJob("task", { kind: "task", checkoutClass: "task_worktree", started });
+    const review = heldJob("review", { kind: "review", exclusiveKey: "o/web#1", started });
+    const ciFix = heldJob("ci-fix", { kind: "ci_fix", exclusiveKey: "o/web#2", started });
+    const queuedTask = heldJob("task-2", { kind: "task", checkoutClass: "task_worktree", started });
+    const runs = [task, review, ciFix, queuedTask].map((job) => supervisor.schedule(job.request));
+    await tick();
+    // The review does not wait for the long task (the pre-parallel behavior);
+    // a second PR job and a second task do wait for the per-repo budget.
+    expect(started).toEqual(["task", "review"]);
+    expect(supervisor.queuedJobs?.()).toMatchObject([
+      { id: "ci-fix", waitingOn: "repo" },
+      { id: "task-2", waitingOn: "repo" },
+    ]);
+    review.release();
+    await tick();
+    expect(started).toEqual(["task", "review", "ci-fix"]);
+    for (const job of [task, ciFix, queuedTask]) job.release();
+    await Promise.all(runs);
+  });
+
   test("the global limit caps PR jobs across repositories", async () => {
     const supervisor = createTaskSupervisor({ maxConcurrency: 3, maxConcurrencyPerRepo: 3 });
     const started: string[] = [];

@@ -1,4 +1,5 @@
-import { existsSync, readFileSync, readdirSync, rmSync, statSync } from "fs";
+import { createHash } from "crypto";
+import { existsSync, readFileSync, readdirSync, realpathSync, rmSync, statSync } from "fs";
 import { basename, dirname, isAbsolute, join, resolve } from "path";
 import type { GitCommandResult, GitOptions } from "./types";
 import { GIT_CLEAN_ARGS } from "./constants";
@@ -6,6 +7,7 @@ import { logVerbose } from "./general";
 import { Utils } from "./registry";
 import { withRepoGitLock } from "./repo-git-lock";
 import {
+  ReviewWorktreeInUseError,
   acquireReviewWorktreeLease,
   deleteReviewWorktreeLease,
   isReviewWorktreeLeased,
@@ -79,6 +81,14 @@ function worktreeOwnerGitDir(worktreePath: string): string | null {
     return resolve(adminDir, common);
   } catch {
     return null;
+  }
+}
+
+function canonicalPath(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve(path);
   }
 }
 
@@ -157,25 +167,17 @@ export async function removeReviewWorktree(
   }
 }
 
-/**
- * Pull the latest changes for `branch` in `worktreePath`, logging when verbose.
- *
- * @param worktreePath - Worktree to pull inside
- * @param branch - Branch to pull
- * @param verbose - Whether to log progress
- */
-export async function pullReviewWorktreeBranch(
-  worktreePath: string,
-  branch: string,
-  verbose: boolean,
-): Promise<void> {
-  if (verbose) {
-    console.log(`   Pulling latest changes...`);
-  }
-  await Utils.executeGitCommand(["pull", "origin", branch, "--ff-only"], {
-    verbose,
-    cwd: worktreePath,
-  });
+/** Outcome of {@link prepareReviewWorktree}. */
+export interface PrepareReviewWorktreeResult {
+  success: boolean;
+  path?: string;
+  error?: string;
+  /**
+   * Set when another live job holds the worktree (two PRs from one head
+   * branch in one repository). Temporary contention: callers should defer
+   * and retry rather than report a failure.
+   */
+  inUse?: boolean;
 }
 
 /**
@@ -190,8 +192,9 @@ export async function pullReviewWorktreeBranch(
  * {@link releaseReviewWorktree} / {@link removeReviewWorktree} (or until the
  * process exits), so concurrent PR jobs' cleanups leave it alone. Idle
  * worktrees of other branches are pruned down to a per-repository cap. The
- * shared git metadata steps (fetch, worktree add, branch updates) run under
- * the repository's git metadata lock; the dependency install does not.
+ * shared git metadata steps (worktree add, branch updates) run under the
+ * repository's git metadata lock; the network fetch and the dependency
+ * install do not.
  *
  * @param branch - PR head branch to check out
  * @param options - Verbose logging; `installDependencies: false` skips the
@@ -201,7 +204,7 @@ export async function pullReviewWorktreeBranch(
 export async function prepareReviewWorktree(
   branch: string,
   options?: { verbose?: boolean; cwd?: string; installDependencies?: boolean },
-): Promise<{ success: boolean; path?: string; error?: string }> {
+): Promise<PrepareReviewWorktreeResult> {
   const verbose = options?.verbose ?? false;
   const cwd = options?.cwd;
   const installDependencies = options?.installDependencies ?? true;
@@ -211,8 +214,10 @@ export async function prepareReviewWorktree(
   const repoOpts = { verbose, cwd };
   const repoOptsQuiet = { verbose: false, cwd };
 
-  // Branch-scoped worktree path - one directory per PR branch
-  const worktreePath = Utils.getReviewWorktreePath(branch);
+  // Repository- and branch-scoped path: one directory per PR branch per
+  // repository, so repositories sharing a branch name never collide.
+  const gitDir = await resolveGitCommonDir(cwd);
+  const worktreePath = Utils.getReviewWorktreePath(branch, gitDir ?? undefined);
   let leased = false;
   try {
     acquireReviewWorktreeLease(worktreePath);
@@ -224,21 +229,22 @@ export async function prepareReviewWorktree(
     logVerbose(verbose, `\n📂 Preparing review worktree for branch: ${branch}`);
     logVerbose(verbose, `   Worktree path: ${worktreePath}`);
 
-    const gitDir = await resolveGitCommonDir(cwd);
+    // Fetch latest from origin. Never with --depth: a depth-limited fetch
+    // into a full clone marks the WHOLE repository shallow (.git/shallow),
+    // breaking merge-base and future merges in the user's own checkout.
+    // An incremental fetch only transfers missing objects anyway. The fetch
+    // runs before the git metadata lock: it is network-bound and can take
+    // minutes, and other jobs on the repository must not wait on it.
+    logVerbose(verbose, `   Fetching branch ${branch} from origin...`);
+    const fetchResult = await Utils.executeGitCommand(["fetch", "origin", branch], repoOpts);
+    logVerbose(verbose, `   ✓ Fetch completed (success: ${fetchResult.success})`);
+
+    if (!fetchResult.success) {
+      console.warn(`⚠️  Fetch failed: ${fetchResult.error || fetchResult.output}`);
+      console.warn(`   Continuing anyway - worktree may have cached version...`);
+    }
+
     const prepared = await withOptionalGitLock(gitDir, async () => {
-      // Fetch latest from origin. Never with --depth: a depth-limited fetch
-      // into a full clone marks the WHOLE repository shallow (.git/shallow),
-      // breaking merge-base and future merges in the user's own checkout.
-      // An incremental fetch only transfers missing objects anyway.
-      logVerbose(verbose, `   Fetching branch ${branch} from origin...`);
-      const fetchResult = await Utils.executeGitCommand(["fetch", "origin", branch], repoOpts);
-      logVerbose(verbose, `   ✓ Fetch completed (success: ${fetchResult.success})`);
-
-      if (!fetchResult.success) {
-        console.warn(`⚠️  Fetch failed: ${fetchResult.error || fetchResult.output}`);
-        console.warn(`   Continuing anyway - worktree may have cached version...`);
-      }
-
       // Check if worktree directory exists on filesystem
       const worktreeExists = existsSync(worktreePath);
       logVerbose(verbose, `   Worktree directory exists: ${worktreeExists}`);
@@ -270,6 +276,7 @@ export async function prepareReviewWorktree(
     return {
       success: false,
       error: `Worktree preparation failed: ${(error as Error).message}`,
+      ...(error instanceof ReviewWorktreeInUseError ? { inUse: true } : {}),
     };
   }
 }
@@ -289,15 +296,28 @@ export async function prepareReviewWorktree(
  *   (surfacing as a misleading `posix_spawn ENOENT` when the hook-fixer agent
  *   was spawned). Without a branch, returns the base path.
  *
+ * With `gitCommonDir`, a short hash of the repository is appended
+ * (`<base>-<branch>-<hash>`) so repositories sharing a branch name never map
+ * to one directory.
+ *
  * Honors `DEVINTERN_REVIEW_WORKTREE_PATH` so tests can point the base
  * worktree at an isolated directory.
  */
-export function getReviewWorktreePath(branch?: string): string {
+export function getReviewWorktreePath(branch?: string, gitCommonDir?: string): string {
   const base = reviewWorktreeBasePath();
   if (!branch) {
     return base;
   }
-  return `${base}-${sanitizeBranchForPath(branch)}`;
+  const scoped = `${base}-${sanitizeBranchForPath(branch)}`;
+  return gitCommonDir ? `${scoped}-${repositoryPathKey(gitCommonDir)}` : scoped;
+}
+
+/**
+ * Short stable key for a repository's common git dir, so review worktrees of
+ * different repositories with the same branch name get distinct paths.
+ */
+function repositoryPathKey(gitCommonDir: string): string {
+  return createHash("sha256").update(canonicalPath(gitCommonDir)).digest("hex").slice(0, 8);
 }
 
 /**
@@ -472,10 +492,10 @@ async function tryReuseReviewWorktree(
     return false;
   }
 
-  // Pull latest changes if origin exists
-  if (hasOrigin) {
-    await Utils.pullReviewWorktreeBranch(worktreePath, branch, verbose);
-  }
+  // No pull: this runs under the git metadata lock, and `checkout -B ...
+  // origin/<branch>` already put the branch at the commit the fetch before
+  // the lock brought in. A network call here would hold every other job on
+  // the repository behind the remote.
 
   // Clean again after checkout to remove any untracked files from the new branch state
   await Utils.executeGitCommand(GIT_CLEAN_ARGS, { verbose: false, cwd: worktreePath });
@@ -656,7 +676,6 @@ async function createReviewWorktree(
 
 Object.assign(Utils, {
   removeReviewWorktree,
-  pullReviewWorktreeBranch,
   prepareReviewWorktree,
   getReviewWorktreePath,
   cleanupStaleReviewWorktrees,

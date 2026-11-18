@@ -46,6 +46,7 @@ import type { Acquirer } from "../../worker";
 import type { CiFailureFeedback } from "../review/formatter";
 import { classifyAgentPrState, resolveAgentPrMerge } from "../review/agent-pr-reconciler";
 import { serializePrRun } from "./review-polling";
+import { WORKTREE_BUSY_EXIT_CODE } from "../worker/usage-limit-protocol";
 import { describeGitHubAuthFailure, isGitHubAuthError } from "../code-host/github/github-errors";
 
 import type {
@@ -212,9 +213,9 @@ export function runCiFixViaCli(
     expectedHeadSha?: string;
     signal?: AbortSignal;
   } = {},
-): Promise<boolean> {
+): Promise<CiFixResult> {
   const prUrl = opts.webUrl ?? `https://github.com/${repo}/pull/${prNumber}`;
-  return serializePrRun(
+  return serializePrRun<CiFixResult>(
     opts.serializationKey ?? repo,
     prNumber,
     () =>
@@ -222,7 +223,7 @@ export function runCiFixViaCli(
         let settled = false;
         let killTimer: ReturnType<typeof setTimeout> | undefined;
         let abort: (() => void) | undefined;
-        const finish = (ok: boolean) => {
+        const finish = (ok: CiFixResult) => {
           if (settled) return;
           settled = true;
           if (abort) opts.signal?.removeEventListener("abort", abort);
@@ -272,7 +273,9 @@ export function runCiFixViaCli(
         };
         opts.signal?.addEventListener("abort", abort, { once: true });
         child.on("close", (code) => {
-          finish(code === 0);
+          // Worktree held by another PR job on the same head branch: defer so
+          // the watcher keeps its retry budget and posts no escalation.
+          finish(code === WORKTREE_BUSY_EXIT_CODE ? "deferred" : code === 0);
         });
         child.on("error", (error) => {
           console.error(`❌ Failed to spawn ci-fix for ${prUrl}: ${error.message}`);

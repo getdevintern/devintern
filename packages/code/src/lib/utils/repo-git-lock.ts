@@ -10,32 +10,42 @@
  *
  * {@link withRepoGitLock} serializes those sections on one host with an
  * exclusive-create lock file in the repository's git directory. It is held
- * only for the metadata commands, never across an agent run. A lock left by
- * a crashed process (dead pid, or older than {@link REPO_GIT_LOCK_STALE_MS})
- * is taken over. Coordination across hosts is out of scope.
+ * only for the metadata commands, never across an agent run or a network
+ * fetch. The holder refreshes a heartbeat in the lock file while it runs, so
+ * a slow section is never mistaken for an abandoned one. A lock left by a
+ * crashed process (dead pid, or a heartbeat older than
+ * {@link REPO_GIT_LOCK_STALE_MS}) is taken over. Coordination across hosts is
+ * out of scope.
  */
 
-import { randomUUID } from "crypto";
-import {
-  closeSync,
-  linkSync,
-  openSync,
-  readFileSync,
-  renameSync,
-  statSync,
-  unlinkSync,
-  writeSync,
-} from "fs";
+import { createHash, randomUUID } from "crypto";
+import { linkSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "fs";
 import { join, resolve } from "path";
 
 /** Lock file created inside the repository's git directory. */
 export const REPO_GIT_LOCK_FILE = "devintern-meta.lock";
 
-/** A lock older than this is treated as abandoned even when its pid is alive. */
+/**
+ * A lock whose heartbeat is older than this is treated as abandoned even when
+ * its pid is alive (a reused pid, or a holder frozen for minutes).
+ */
 export const REPO_GIT_LOCK_STALE_MS = 120_000;
 
-/** How long an acquirer waits before giving up. */
-export const REPO_GIT_LOCK_TIMEOUT_MS = 60_000;
+/** Upper bound on how often a holder refreshes its heartbeat. */
+const HEARTBEAT_MAX_INTERVAL_MS = 15_000;
+
+/**
+ * How long an acquirer waits before giving up. Longer than
+ * {@link REPO_GIT_LOCK_STALE_MS}, so a lock leaked by a live process (no
+ * heartbeat) goes stale and is taken over before every waiter gives up.
+ */
+export const REPO_GIT_LOCK_TIMEOUT_MS = 180_000;
+
+/**
+ * A takeover guard older than this is abandoned even when its pid is alive
+ * (a reused pid). The guarded section is one read plus one unlink.
+ */
+const TAKEOVER_GUARD_STALE_MS = 30_000;
 
 const RETRY_INITIAL_MS = 25;
 const RETRY_MAX_MS = 500;
@@ -64,6 +74,8 @@ export interface RepoGitLockOptions {
 interface LockContent {
   pid: number;
   acquiredAt: number;
+  /** Last refresh by the holder; staleness is judged from this. */
+  heartbeatAt: number;
   token: string;
 }
 
@@ -97,6 +109,7 @@ function parseLockContent(raw: string): LockContent | null {
     return {
       pid: record.pid,
       acquiredAt: record.acquiredAt,
+      heartbeatAt: typeof record.heartbeatAt === "number" ? record.heartbeatAt : record.acquiredAt,
       token: typeof record.token === "string" ? record.token : "",
     };
   } catch {
@@ -112,27 +125,39 @@ function readRaw(path: string): string | null {
   }
 }
 
-function tryCreate(lockPath: string, content: LockContent): boolean {
-  let fd: number;
+/**
+ * Create `path` with `data` only when it does not exist. The content is
+ * written to a private temp file and hard-linked into place: `link` fails
+ * with EEXIST atomically, and a reader never sees an empty or half-written
+ * file (so every lock file's content is unique, carrying its token).
+ */
+function tryCreateFile(path: string, data: string): boolean {
+  const tmp = `${path}.new-${process.pid}-${randomUUID()}`;
+  writeFileSync(tmp, data);
   try {
-    fd = openSync(lockPath, "wx");
+    linkSync(tmp, path);
+    return true;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
     throw error;
-  }
-  try {
-    writeSync(fd, JSON.stringify(content));
   } finally {
-    closeSync(fd);
+    try {
+      unlinkSync(tmp);
+    } catch {
+      // Ignore
+    }
   }
-  return true;
+}
+
+function tryCreate(lockPath: string, content: LockContent): boolean {
+  return tryCreateFile(lockPath, JSON.stringify(content));
 }
 
 /**
  * Whether the lock file content describes an abandoned lock.
  *
- * Unparseable content (a holder that crashed between create and write) is
- * judged by the file's age.
+ * Unparseable content (written by something other than this module; lock
+ * files are created whole) is judged by the file's age.
  */
 function isStale(lockPath: string, raw: string, staleMs: number, at: number): boolean {
   const content = parseLockContent(raw);
@@ -143,7 +168,7 @@ function isStale(lockPath: string, raw: string, staleMs: number, at: number): bo
       return true;
     }
   }
-  if (at - content.acquiredAt > staleMs) return true;
+  if (at - content.heartbeatAt > staleMs) return true;
   if (content.pid === process.pid) {
     // This process serializes its own acquisitions, so a lock carrying our
     // pid that we do not hold was leaked by an earlier failure.
@@ -152,31 +177,81 @@ function isStale(lockPath: string, raw: string, staleMs: number, at: number): bo
   return !isProcessAlive(content.pid);
 }
 
-/**
- * Remove a stale lock, but only the exact file judged stale: rename it aside,
- * then restore it if another acquirer replaced it in between.
- */
-function takeOver(lockPath: string, staleRaw: string): void {
-  const aside = `${lockPath}.stale-${process.pid}-${randomUUID()}`;
-  try {
-    renameSync(lockPath, aside);
-  } catch {
-    return; // Someone else removed it first.
-  }
-  const moved = readRaw(aside);
-  if (moved !== null && moved !== staleRaw) {
-    // We moved a fresh lock another acquirer had just created; put it back
-    // unless yet another acquirer has already created a new one.
+/** Whether a takeover guard file was left by a crashed or reused-pid process. */
+function isGuardStale(guardPath: string, raw: string | null): boolean {
+  const parsed = raw ? parseLockContent(raw) : null;
+  if (!parsed) {
     try {
-      linkSync(aside, lockPath);
+      return Date.now() - statSync(guardPath).mtimeMs > TAKEOVER_GUARD_STALE_MS;
     } catch {
-      // The slot is taken again; that holder owns the lock now.
+      return true;
     }
   }
+  // The guarded section is synchronous, so a guard carrying this process's
+  // pid is never one we are inside of.
+  if (parsed.pid === process.pid) return true;
+  return Date.now() - parsed.acquiredAt > TAKEOVER_GUARD_STALE_MS || !isProcessAlive(parsed.pid);
+}
+
+/**
+ * Remove a stale lock file, but only while it still holds exactly the
+ * content that was judged stale. Never moves or restores a lock file, so a
+ * fresh lock another acquirer created is never displaced.
+ *
+ * Contenders that judged the same content stale serialize on a guard file
+ * named after that content. The winner re-reads the lock and unlinks it only
+ * if the content is unchanged. Nothing else can replace that content while
+ * the guard is held: `tryCreate` needs the path to be absent, and every lock
+ * file's content is unique (it carries a random token), so once the stale
+ * file is gone a later guard holder sees different content and leaves it.
+ * The only writer that could still change it is the stale holder itself,
+ * which by definition is dead or frozen past the stale window.
+ *
+ * Callers retry their create after this returns, whether or not it removed
+ * anything.
+ *
+ * @param lockPath - Lock file to remove
+ * @param staleRaw - The content that was judged stale
+ */
+export function takeOverStaleFile(lockPath: string, staleRaw: string): void {
+  const digest = createHash("sha256").update(staleRaw).digest("hex").slice(0, 16);
+  const guardPath = `${lockPath}.takeover-${digest}`;
+  const guardToken = randomUUID();
+  const guard: LockContent = {
+    pid: process.pid,
+    acquiredAt: Date.now(),
+    heartbeatAt: Date.now(),
+    token: guardToken,
+  };
+  if (!tryCreateFile(guardPath, JSON.stringify(guard))) {
+    const guardRaw = readRaw(guardPath);
+    // Another contender is removing this exact stale file; let it finish.
+    // A guard abandoned by a crashed contender is dropped so the next
+    // attempt can take it.
+    if (isGuardStale(guardPath, guardRaw) && readRaw(guardPath) === guardRaw) {
+      try {
+        unlinkSync(guardPath);
+      } catch {
+        // Ignore
+      }
+    }
+    return;
+  }
   try {
-    unlinkSync(aside);
-  } catch {
-    // Ignore
+    if (readRaw(lockPath) !== staleRaw) return; // Released or replaced: not ours to remove.
+    try {
+      unlinkSync(lockPath);
+    } catch {
+      // Already gone.
+    }
+  } finally {
+    if (parseLockContent(readRaw(guardPath) ?? "")?.token === guardToken) {
+      try {
+        unlinkSync(guardPath);
+      } catch {
+        // Ignore
+      }
+    }
   }
 }
 
@@ -194,14 +269,14 @@ async function acquireFileLock(
   let delay = RETRY_INITIAL_MS;
   for (;;) {
     const at = options.now();
-    if (tryCreate(lockPath, { pid: process.pid, acquiredAt: at, token })) {
+    if (tryCreate(lockPath, { pid: process.pid, acquiredAt: at, heartbeatAt: at, token })) {
       heldTokens.add(token);
       return token;
     }
     const raw = readRaw(lockPath);
     if (raw === null) continue; // Released between our create and read.
     if (isStale(lockPath, raw, options.staleMs, at)) {
-      takeOver(lockPath, raw);
+      takeOverStaleFile(lockPath, raw);
       continue;
     }
     if (at - started >= options.timeoutMs) {
@@ -211,6 +286,39 @@ async function acquireFileLock(
     await new Promise((resolveDelay) => setTimeout(resolveDelay, delay + jitter));
     delay = Math.min(delay * 2, RETRY_MAX_MS);
   }
+}
+
+/**
+ * Keep a held lock's heartbeat fresh until the returned stop function runs.
+ *
+ * Refreshes rewrite the file atomically (temp file + rename) and only while
+ * it still carries this holder's token. Waiters see a recent heartbeat and
+ * keep waiting (or time out) instead of taking over a live, slow holder.
+ */
+function startHeartbeat(
+  lockPath: string,
+  token: string,
+  staleMs: number,
+  now: () => number,
+): () => void {
+  const interval = Math.max(10, Math.min(Math.floor(staleMs / 4), HEARTBEAT_MAX_INTERVAL_MS));
+  const timer = setInterval(() => {
+    const content = parseLockContent(readRaw(lockPath) ?? "");
+    if (content?.token !== token) return;
+    const tmp = `${lockPath}.hb-${process.pid}-${randomUUID()}`;
+    try {
+      writeFileSync(tmp, JSON.stringify({ ...content, heartbeatAt: now() }));
+      renameSync(tmp, lockPath);
+    } catch {
+      try {
+        unlinkSync(tmp);
+      } catch {
+        // Ignore
+      }
+    }
+  }, interval);
+  timer.unref?.();
+  return () => clearInterval(timer);
 }
 
 function releaseFileLock(lockPath: string, token: string): void {
@@ -257,9 +365,11 @@ export async function withRepoGitLock<T>(
   await previous;
   try {
     const token = await acquireFileLock(lockPath, resolved);
+    const stopHeartbeat = startHeartbeat(lockPath, token, resolved.staleMs, resolved.now);
     try {
       return await fn();
     } finally {
+      stopHeartbeat();
       releaseFileLock(lockPath, token);
     }
   } finally {

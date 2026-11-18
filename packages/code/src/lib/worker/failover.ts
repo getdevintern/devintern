@@ -46,6 +46,7 @@ import {
   USAGE_LIMIT_EXIT_CODE,
   USAGE_LIMIT_FILE_ENV,
   WORKER_CHILD_ENV,
+  WORKTREE_BUSY_EXIT_CODE,
 } from "./usage-limit-protocol";
 import type { UsageLimitHint } from "./usage-limit-protocol";
 
@@ -449,6 +450,7 @@ export async function runWithFailover(
     if (code === USAGE_LIMIT_EXIT_CODE) return "deferred";
     if (code === AUTOMATION_ACCESS_EXIT_CODE) return "deferred";
     if (code === HARNESS_UNAVAILABLE_EXIT_CODE) return "deferred";
+    if (code === WORKTREE_BUSY_EXIT_CODE) return "deferred";
     if (code === TASK_SKIP_EXIT_CODE) return "skipped";
     return code === 0 ? "ok" : "failed";
   }
@@ -456,6 +458,7 @@ export async function runWithFailover(
     const code = await spawnOnce(baseEnv);
     if (code === AUTOMATION_ACCESS_EXIT_CODE) return "deferred";
     if (code === HARNESS_UNAVAILABLE_EXIT_CODE) return "deferred";
+    if (code === WORKTREE_BUSY_EXIT_CODE) return "deferred";
     if (code === TASK_SKIP_EXIT_CODE) return "skipped";
     return code === 0 ? "ok" : "failed";
   }
@@ -473,6 +476,7 @@ export async function runWithFailover(
     try {
       const code = await spawnOnce(failover.childEnv(baseEnv, hintPath));
       if (code === AUTOMATION_ACCESS_EXIT_CODE) return "deferred";
+      if (code === WORKTREE_BUSY_EXIT_CODE) return "deferred";
       if (code === TASK_SKIP_EXIT_CODE) return "skipped";
       if (code === HARNESS_UNAVAILABLE_EXIT_CODE) {
         // The child never started: skip this entry for the process and try

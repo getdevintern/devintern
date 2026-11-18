@@ -2,6 +2,7 @@ import type { ResolvedHarness } from "@devintern/agent-harness";
 import { GitHubAppAuth } from "../code-host/github/app-auth";
 import { WorkerState } from "../state/worker-state";
 import { Utils } from "../utils";
+import { WorktreeBusyError } from "../worker/usage-limit-protocol";
 import { setWorktreeGitIdentity } from "../utils/worktree-setup";
 import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "../agent/git-hook-fixer";
 import { runAutoReviewLoop } from "../review/auto-review-loop";
@@ -444,6 +445,7 @@ export async function publishReviewChanges(
  * @param branch - PR head branch name
  * @param verbose - Enable verbose git logging
  * @returns Worktree path, or `null` on failure
+ * @throws {WorktreeBusyError} When another live job holds the worktree lease
  */
 export async function prepareRepository(branch: string, verbose = false): Promise<string | null> {
   const isGitRepo = await Utils.isGitRepository();
@@ -459,6 +461,11 @@ export async function prepareRepository(branch: string, verbose = false): Promis
   });
 
   if (!worktreeResult.success) {
+    // Another live job holds this branch's worktree: temporary contention the
+    // caller defers and retries, not a failure.
+    if (worktreeResult.inUse) {
+      throw new WorktreeBusyError(`Review worktree busy: ${worktreeResult.error}`);
+    }
     console.error(`❌ Failed to prepare worktree: ${worktreeResult.error}`);
     return null;
   }

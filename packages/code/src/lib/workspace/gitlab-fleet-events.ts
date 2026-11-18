@@ -13,7 +13,7 @@ import type { WorkspaceConfig, RepoConfig } from "./config";
 import type { WorkspaceState } from "./state";
 import type { RepoManagerLike } from "./fleet-executor";
 import { buildRepoEnv } from "./env";
-import { prJobEnv } from "./fleet-events";
+import { PR_JOB_FETCH_TIMEOUT_MS, prJobEnv } from "./fleet-events";
 
 /**
  * Close the exact registered MR the GitLab CI watcher saw terminal, forwarding
@@ -76,10 +76,10 @@ export async function buildGitLabFleetAcquirers(options: {
     const run = async (signal?: AbortSignal) => {
       if (signal?.aborted) throw new JobNotStartedError();
       await repoManager.ensureBareClone(repo);
-      await repoManager.fetch(repo.name);
-      // Never reset the base checkout: an automation may be using it while
-      // this MR job runs in its own branch-scoped worktree.
-      const base = await repoManager.ensureBaseWorktree(repo, { sync: false });
+      await repoManager.fetch(repo.name, { timeoutMs: PR_JOB_FETCH_TIMEOUT_MS });
+      // Never the base checkout: an automation may be using it while this MR
+      // job runs. The PR-job checkout tracks the default branch.
+      const base = await repoManager.ensurePrJobWorktree(repo);
       return execute(base, signal);
     };
     if (!options.supervisor) return run();

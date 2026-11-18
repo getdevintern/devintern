@@ -3,7 +3,7 @@
  * concurrent worktree setup against one shared bare repository.
  */
 
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { execFileSync } from "child_process";
 import {
   existsSync,
@@ -24,9 +24,17 @@ import {
   reviewWorktreeIdleCap,
 } from "../src/lib/utils/review-worktree";
 import {
+  acquireReviewWorktreeLease,
   isReviewWorktreeLeased,
+  readReviewWorktreeLease,
+  releaseReviewWorktreeLease,
   reviewWorktreeLeasePath,
 } from "../src/lib/utils/review-worktree-lease";
+import { repoGitLockPath } from "../src/lib/utils/repo-git-lock";
+import {
+  restoreWorktreeGitIdentity,
+  setWorktreeGitIdentity,
+} from "../src/lib/utils/worktree-setup";
 import { RepoManager } from "../src/lib/workspace/repo-manager";
 import type { RepoConfig } from "../src/lib/workspace/config";
 
@@ -125,6 +133,42 @@ describe("review worktree leases and parallel setup", () => {
     return git(bare, "worktree", "list", "--porcelain").includes(`worktree ${path}\n`);
   }
 
+  test("reusing a worktree runs no network git command under the repo git lock", async () => {
+    const path = await prepareIdle("feature/a");
+
+    // The PR branch moves on upstream between two jobs.
+    const seed = join(testDir, "seed");
+    git(seed, "checkout", "feature/a");
+    writeFileSync(join(seed, "next.txt"), "next\n");
+    git(seed, "add", ".");
+    git(seed, "commit", "-m", "next");
+    git(seed, "push", "origin", "feature/a");
+    const upstreamHead = git(seed, "rev-parse", "HEAD").trim();
+
+    const lockPath = repoGitLockPath(bare);
+    const network: string[] = [];
+    const realExecute = Utils.executeGitCommand.bind(Utils);
+    const spy = spyOn(Utils, "executeGitCommand").mockImplementation(async (args, options) => {
+      if (["fetch", "pull", "push", "ls-remote"].includes(args[0]!)) {
+        network.push(`${args[0]} lockHeld=${existsSync(lockPath)}`);
+      }
+      return realExecute(args, options);
+    });
+    try {
+      const result = await Utils.prepareReviewWorktree("feature/a", {
+        cwd: base,
+        installDependencies: false,
+      });
+      expect(result).toMatchObject({ success: true, path });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(network).toEqual(["fetch lockHeld=false"]);
+    // The reused worktree still lands on the freshly fetched PR head.
+    expect(git(path, "rev-parse", "HEAD").trim()).toBe(upstreamHead);
+    expect(existsSync(join(path, "next.txt"))).toBe(true);
+  });
+
   test("idle cap constants", () => {
     expect(REVIEW_WORKTREE_MIN_IDLE_CAP).toBe(2);
     expect(REVIEW_WORKTREE_IDLE_MAX_AGE_MS).toBe(24 * 60 * 60 * 1000);
@@ -191,13 +235,14 @@ describe("review worktree leases and parallel setup", () => {
   });
 
   test("a second job cannot take a worktree another live process leases", async () => {
-    const path = Utils.getReviewWorktreePath("feature/a");
+    const path = Utils.getReviewWorktreePath("feature/a", bare);
     writeLease(path, liveForeignPid());
     const result = await Utils.prepareReviewWorktree("feature/a", {
       cwd: base,
       installDependencies: false,
     });
     expect(result.success).toBe(false);
+    expect(result.inUse).toBe(true);
     expect(result.error).toContain("in use by another job");
   });
 
@@ -347,5 +392,164 @@ writeFileSync(out, JSON.stringify({ startedAt, finishedAt: Date.now(), present, 
     const earliestFinish = Math.min(...runs.map((run) => run.finishedAt));
     expect(latestStart).toBeLessThan(earliestFinish);
     expect(existsSync(join(bare, "devintern-meta.lock"))).toBe(false);
+  });
+  test("of several processes racing for one lease, exactly one acquires it", async () => {
+    const path = Utils.getReviewWorktreePath("feature/shared");
+    const script = join(testDir, "acquire.ts");
+    writeFileSync(
+      script,
+      `import { acquireReviewWorktreeLease } from ${JSON.stringify(join(import.meta.dir, "../src/lib/utils/review-worktree-lease.ts"))};
+const [path, goAt] = process.argv.slice(2) as [string, string];
+while (Date.now() < Number(goAt)) {}
+try {
+  acquireReviewWorktreeLease(path);
+  console.log("ACQUIRED " + process.pid);
+  await Bun.sleep(1500);
+} catch (error) {
+  console.log("REFUSED " + (error as Error).message);
+}
+`,
+    );
+    const goAt = String(Date.now() + 1500);
+    const children = Array.from({ length: 8 }, () =>
+      Bun.spawn(["bun", script, path, goAt], { env: process.env, stdout: "pipe", stderr: "pipe" }),
+    );
+    const outputs = await Promise.all(children.map((child) => new Response(child.stdout).text()));
+    const acquired = outputs.filter((out) => out.startsWith("ACQUIRED"));
+    const refused = outputs.filter((out) => out.includes("in use by another job"));
+    expect(acquired).toHaveLength(1);
+    expect(refused).toHaveLength(children.length - 1);
+  }, 20_000);
+
+  test("a lease left by a dead process is taken over atomically", () => {
+    const path = Utils.getReviewWorktreePath("feature/a");
+    writeLease(path, DEAD_PID);
+    acquireReviewWorktreeLease(path);
+    expect(readReviewWorktreeLease(path)?.pid).toBe(process.pid);
+    expect(isReviewWorktreeLeased(path)).toBe(true);
+    releaseReviewWorktreeLease(path);
+    expect(existsSync(reviewWorktreeLeasePath(path))).toBe(false);
+  });
+
+  test("the repository fetch does not wait for the git metadata lock", async () => {
+    // A live process holds web.git's metadata lock (e.g. a long worktree add).
+    writeFileSync(
+      repoGitLockPath(bare),
+      JSON.stringify({
+        pid: liveForeignPid(),
+        acquiredAt: Date.now(),
+        heartbeatAt: Date.now(),
+        token: "foreign",
+      }),
+    );
+    const repoManager = new RepoManager(workspaceDir);
+    const started = Date.now();
+    await repoManager.fetch("web", { timeoutMs: 10_000 });
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(existsSync(repoGitLockPath(bare))).toBe(true);
+  });
+
+  test("review worktree setup fetches before taking the metadata lock", async () => {
+    // Push a new commit to feature/a; prepare must fetch it even though the
+    // fetch is now outside the locked section.
+    const seed = join(testDir, "seed");
+    git(seed, "checkout", "feature/a");
+    writeFileSync(join(seed, "new.txt"), "new");
+    git(seed, "add", ".");
+    git(seed, "commit", "-m", "new");
+    git(seed, "push", "origin", "feature/a");
+    const head = git(seed, "rev-parse", "HEAD").trim();
+    const result = await Utils.prepareReviewWorktree("feature/a", {
+      cwd: base,
+      installDependencies: false,
+    });
+    expect(result.success).toBe(true);
+    expect(git(result.path!, "rev-parse", "HEAD").trim()).toBe(head);
+    Utils.releaseReviewWorktree(result.path!);
+  });
+
+  test("gives each repository its own worktree for a shared branch name", async () => {
+    // Repo "api" has its own feature/a, the same branch name as web's.
+    const apiOrigin = join(testDir, "api-origin.git");
+    git(testDir, "init", "--bare", "--initial-branch=main", apiOrigin);
+    const apiSeed = join(testDir, "api-seed");
+    git(testDir, "clone", apiOrigin, apiSeed);
+    git(apiSeed, "config", "user.email", "t@t.dev");
+    git(apiSeed, "config", "user.name", "T");
+    writeFileSync(join(apiSeed, "API.md"), "# api\n");
+    git(apiSeed, "add", ".");
+    git(apiSeed, "commit", "-m", "init");
+    git(apiSeed, "checkout", "-b", "feature/a");
+    git(apiSeed, "push", "origin", "HEAD:main", "feature/a");
+    const apiHead = git(apiSeed, "rev-parse", "HEAD").trim();
+    const apiBare = join(workspaceDir, "repos", "api.git");
+    git(testDir, "clone", "--bare", apiOrigin, apiBare);
+    git(apiBare, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*");
+    git(apiBare, "fetch", "origin");
+    const apiBase = join(workspaceDir, "worktrees", "api", "base");
+    git(apiBare, "worktree", "add", "--detach", apiBase, "origin/main");
+
+    // web's job holds its feature/a worktree while api's job runs.
+    const web = await Utils.prepareReviewWorktree("feature/a", {
+      cwd: base,
+      installDependencies: false,
+    });
+    expect(web.success).toBe(true);
+    const webHead = git(bare, "rev-parse", "refs/heads/feature/a").trim();
+
+    const api = await Utils.prepareReviewWorktree("feature/a", {
+      cwd: apiBase,
+      installDependencies: false,
+    });
+    expect(api.success).toBe(true);
+    expect(api.path).not.toBe(web.path!);
+    // api's checkout is api's commit and files.
+    expect(git(api.path!, "rev-parse", "HEAD").trim()).toBe(apiHead);
+    expect(existsSync(join(api.path!, "API.md"))).toBe(true);
+    expect(existsSync(join(api.path!, "feature-a.txt"))).toBe(false);
+    expect(git(api.path!, "rev-parse", "--git-common-dir").trim()).toBe(apiBare);
+    // web's worktree and branch are untouched.
+    expect(git(web.path!, "rev-parse", "--git-common-dir").trim()).toBe(bare);
+    expect(existsSync(join(web.path!, "feature-a.txt"))).toBe(true);
+    expect(git(bare, "rev-parse", "refs/heads/feature/a").trim()).toBe(webHead);
+    expect(git(bare, "worktree", "list")).not.toContain(api.path!);
+    Utils.releaseReviewWorktree(web.path!);
+    Utils.releaseReviewWorktree(api.path!);
+  });
+
+  describe("bot git identity", () => {
+    const bot = { name: "bot[bot]", email: "bot@users.noreply.github.com" };
+
+    test("goes to the worktree scope and the restore unsets only that scope", async () => {
+      const path = await prepareIdle("feature/a");
+      git(bare, "config", "user.name", "Shared User");
+      const restore = await setWorktreeGitIdentity(path, bot);
+      expect(restore.scope).toBe("worktree");
+      expect(git(path, "config", "user.name").trim()).toBe(bot.name);
+      expect(git(bare, "config", "--local", "user.name").trim()).toBe("Shared User");
+      await restoreWorktreeGitIdentity(path, restore);
+      expect(git(path, "config", "user.name").trim()).toBe("Shared User");
+    });
+
+    test("falls back to the local config and puts the user's values back", async () => {
+      const path = await prepareIdle("feature/a");
+      git(path, "config", "--local", "user.name", "Real User");
+      git(path, "config", "--local", "user.email", "real@example.com");
+      const original = Utils.enableWorktreeConfig;
+      Utils.enableWorktreeConfig = async () => ({ success: false, output: "", error: "denied" });
+      let restore;
+      try {
+        restore = await setWorktreeGitIdentity(path, bot);
+      } finally {
+        Utils.enableWorktreeConfig = original;
+      }
+      expect(restore.scope).toBe("local");
+      expect(git(path, "config", "--local", "user.name").trim()).toBe(bot.name);
+      // The restore enables worktree config itself no longer; it uses the
+      // scope the set call chose, so the shared values come back.
+      await restoreWorktreeGitIdentity(path, restore);
+      expect(git(path, "config", "--local", "user.name").trim()).toBe("Real User");
+      expect(git(path, "config", "--local", "user.email").trim()).toBe("real@example.com");
+    });
   });
 });

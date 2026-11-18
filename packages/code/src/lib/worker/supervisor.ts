@@ -22,8 +22,10 @@ export type JobKind =
  *   `maxConcurrencyPerRepo`.
  * - `pr_worktree`: a branch-scoped PR worktree (review replies, conflict
  *   resolution, CI fix, auto-merge). Shares the `maxConcurrencyPerRepo`
- *   budget with `task_worktree`; pair it with {@link ScheduleRequest.exclusiveKey}
- *   so two jobs on one PR never run at once.
+ *   budget with `task_worktree`, except that the first PR job on a repo
+ *   always starts, even when tasks fill the budget; pair it with
+ *   {@link ScheduleRequest.exclusiveKey} so two jobs on one PR never run at
+ *   once.
  * - `shared_base`: the repository's persistent base checkout (automations).
  *   Exclusive per repository and outside the per-repo budget.
  * - `workspace`: no repository checkout.
@@ -244,8 +246,18 @@ export function createTaskSupervisor(
     if (request.exclusiveKey !== undefined && heldExclusiveKeys.has(request.exclusiveKey)) {
       return "exclusive";
     }
-    if (request.checkoutClass === "task_worktree" || request.checkoutClass === "pr_worktree") {
+    if (request.checkoutClass === "task_worktree") {
       if (repoWorktreeCount(request.repo!) >= limits.maxConcurrencyPerRepo) return "repo";
+    } else if (request.checkoutClass === "pr_worktree") {
+      // The first PR job on a repo always gets a slot, even when tasks fill
+      // the per-repo budget: before PR jobs had their own worktrees, one PR
+      // job per repo ran alongside tasks, and review replies, CI fixes, and
+      // merge checks must not wait for a long task to finish. Further PR
+      // jobs share the budget with tasks.
+      const prRunning = prCounts.get(request.repo!) ?? 0;
+      if (prRunning > 0 && repoWorktreeCount(request.repo!) >= limits.maxConcurrencyPerRepo) {
+        return "repo";
+      }
     } else if (request.checkoutClass === "shared_base") {
       if (occupiedBaseRepos.has(request.repo!)) return "repo";
     }

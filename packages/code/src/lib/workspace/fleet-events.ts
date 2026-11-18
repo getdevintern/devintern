@@ -3,11 +3,11 @@
  * every repo in the workspace.
  *
  * The workspace worker has no ambient checkout, so every event run is a CLI
- * subprocess started from the repo's persistent base worktree with that
- * repo's composed environment. The subprocess does its work in a
- * branch-scoped PR worktree and only reads the base checkout, so PR jobs are
- * admitted as `pr_worktree`: jobs for different PRs on one repository run in
- * parallel (bounded by `max_concurrency_per_repo`) and alongside an
+ * subprocess started from the repo's persistent PR-job checkout (default
+ * branch) with that repo's composed environment. The subprocess does its work
+ * in a branch-scoped PR worktree and never uses the base checkout, so PR jobs
+ * are admitted as `pr_worktree`: jobs for different PRs on one repository run
+ * in parallel (bounded by `max_concurrency_per_repo`) and alongside an
  * automation in the base checkout, while jobs on one PR stay serialized by
  * their exclusive key. The permission gate for mention-driven runs
  * (write/maintain/admin; a confirmed denial skips, an API error propagates so
@@ -42,6 +42,12 @@ export function prExclusiveKey(slug: string, prNumber: number): string {
 }
 
 /**
+ * Upper bound on the repository fetch before a PR job. A hung remote fails
+ * the job (retried like any other failure) instead of holding its slot.
+ */
+export const PR_JOB_FETCH_TIMEOUT_MS = 5 * 60_000;
+
+/**
  * Environment for a PR job subprocess: the repo env plus the per-repo limit,
  * which sizes how many idle review worktrees the job's cleanup keeps.
  */
@@ -56,16 +62,17 @@ export function prJobEnv(
 }
 
 /**
- * Prepare a repo for a PR job: clone/fetch the bare repository and make sure
- * the base checkout exists, without resetting it. PR jobs run in their own
+ * Prepare a repo for a PR job: clone/fetch the bare repository and return the
+ * PR-job checkout (default branch). PR jobs run their agents in their own
  * branch-scoped worktrees (`pr_worktree`), possibly while an automation is
- * working in the base checkout, so they must not move it; the CLI only uses it
- * as the repository to create the PR worktree from.
+ * working in the base checkout, so they never touch the base checkout; the CLI
+ * starts from the PR-job checkout, which supplies the default branch's project
+ * settings and the repository to create the PR worktree from.
  */
 async function preparePrJobRepo(repoManager: RepoManagerLike, repo: RepoConfig): Promise<string> {
   await repoManager.ensureBareClone(repo);
-  await repoManager.fetch(repo.name);
-  return repoManager.ensureBaseWorktree(repo, { sync: false });
+  await repoManager.fetch(repo.name, { timeoutMs: PR_JOB_FETCH_TIMEOUT_MS });
+  return repoManager.ensurePrJobWorktree(repo);
 }
 
 export interface FleetEventDeps {
@@ -99,7 +106,7 @@ export interface FleetEventDeps {
       expectedHeadSha?: string;
       signal?: AbortSignal;
     },
-  ) => Promise<boolean>;
+  ) => Promise<CiFixResult>;
   /** Base-sync runner (injected for tests; defaults to the CLI subprocess). */
   runResolve?: typeof runResolveConflictsViaCli;
   /** Auto-merge runner (injected for tests; defaults to the CLI subprocess). */

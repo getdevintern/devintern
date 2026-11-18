@@ -5,9 +5,18 @@
 import { describe, test, expect, beforeAll, afterAll, beforeEach, afterEach } from "bun:test";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
-import { join } from "path";
+import { join, resolve } from "path";
 import { Utils } from "../src/lib/utils";
 import { execSync } from "child_process";
+
+/** Review worktree path `prepareReviewWorktree` uses for `branch` in `repo`. */
+function reviewPath(repo: string, branch: string): string {
+  const commonDir = execSync("git rev-parse --git-common-dir", {
+    cwd: repo,
+    encoding: "utf8",
+  }).trim();
+  return Utils.getReviewWorktreePath(branch, resolve(repo, commonDir));
+}
 
 describe("Webhook Integration - Sequential Processing with Branch-Scoped Worktrees", () => {
   let testDir: string;
@@ -105,7 +114,7 @@ describe("Webhook Integration - Sequential Processing with Branch-Scoped Worktre
       });
 
       expect(result.success).toBe(true);
-      expect(result.path).toBe(Utils.getReviewWorktreePath(branch)); // Branch-scoped path
+      expect(result.path).toBe(reviewPath(repoDir, branch)); // Branch-scoped path
 
       // Verify we're on the correct branch
       const branchCheck = await Utils.executeGitCommand(["branch", "--show-current"], {
@@ -193,7 +202,7 @@ describe("Webhook Integration - Sequential Processing with Branch-Scoped Worktre
       });
 
       expect(result.success).toBe(true);
-      expect(result.path).toBe(Utils.getReviewWorktreePath(branch));
+      expect(result.path).toBe(reviewPath(repoDir, branch));
 
       // Verify correct branch
       const branchCheck = await Utils.executeGitCommand(["branch", "--show-current"], {
@@ -240,7 +249,7 @@ describe("Webhook Integration - Sequential Processing with Branch-Scoped Worktre
       cwd: repoDir,
     });
     expect(result1.success).toBe(true);
-    const expectedPath = Utils.getReviewWorktreePath(branch);
+    const expectedPath = reviewPath(repoDir, branch);
     expect(result1.path).toBe(expectedPath);
 
     // Switch to another branch (prunes pr-1's worktree)
@@ -272,11 +281,11 @@ describe("Webhook Integration - Sequential Processing with Branch-Scoped Worktre
         cwd: repoDir,
       });
       expect(result.success).toBe(true);
-      expect(result.path).toBe(Utils.getReviewWorktreePath(branch));
+      expect(result.path).toBe(reviewPath(repoDir, branch));
     }
 
     // The final state should be pr-3 (the last one processed) in its own worktree
-    const finalPath = Utils.getReviewWorktreePath("pr-3");
+    const finalPath = reviewPath(repoDir, "pr-3");
     expect(existsSync(finalPath)).toBe(true);
 
     const finalBranch = await Utils.executeGitCommand(["branch", "--show-current"], {

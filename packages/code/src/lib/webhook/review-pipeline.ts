@@ -6,6 +6,7 @@ import { beginRun, endRun } from "../state/run-recorder";
 import { WorkerState } from "../state/worker-state";
 import { formatReviewPrompt } from "../review/formatter";
 import { Utils } from "../utils";
+import { WorktreeBusyError } from "../worker/usage-limit-protocol";
 import {
   processReviewComment,
   processReviewEvent,
@@ -39,6 +40,9 @@ import { runAgentHarnessForReview } from "./agent-review";
  * Trigger phrases that indicate the reviewer wants an auto-review loop
  * instead of addressing specific comments.
  */
+/** Delay before retrying a review whose worktree another job holds. */
+const WORKTREE_BUSY_RETRY_MS = 60_000;
+
 const AUTO_REVIEW_TRIGGER_PHRASES = [
   "enhance",
   "improve",
@@ -127,6 +131,21 @@ export async function processReviewWithPersistence(
       reviewQueue
         .add(() => processReviewWithPersistence(eventId, event, config, delivery))
         .catch((e) => console.error("❌ Error reprocessing deferred review:", e));
+      return;
+    }
+    if (error instanceof WorktreeBusyError) {
+      // Another job holds this branch's worktree. Keep the event pending (no
+      // attempt consumed, no error report) and retry once that job is likely
+      // done. The delivery stays in flight until the retry settles.
+      console.log(`⏳ ${error.message}; retrying in ${WORKTREE_BUSY_RETRY_MS / 1000}s`);
+      if (eventId && runtime.queue) {
+        runtime.queue.requeuePending(eventId);
+      }
+      setTimeout(() => {
+        reviewQueue
+          .add(() => processReviewWithPersistence(eventId, event, config, delivery))
+          .catch((e) => console.error("❌ Error reprocessing deferred review:", e));
+      }, WORKTREE_BUSY_RETRY_MS);
       return;
     }
     const permanent = classifyWebhookError(error) === "permanent";
@@ -595,6 +614,11 @@ async function processReviewAsync(
 
     console.log(`\n✅ Successfully addressed review for PR #${prNumber}`);
   } catch (error) {
+    if (error instanceof WorktreeBusyError) {
+      runStatus = "deferred";
+      runReason = error.message;
+      throw error;
+    }
     if (error instanceof UsageLimitError) {
       // Account-global usage limit: propagate to the persistence wrapper so
       // it can fail over to the next harness (or pause + re-queue until the

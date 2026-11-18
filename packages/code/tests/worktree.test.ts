@@ -5,9 +5,18 @@
 import { describe, test, expect, beforeAll, afterAll, beforeEach, afterEach } from "bun:test";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
-import { join } from "path";
+import { join, resolve } from "path";
 import { Utils } from "../src/lib/utils";
 import { execSync } from "child_process";
+
+/** Review worktree path `prepareReviewWorktree` uses for `branch` in `repo`. */
+function reviewPath(repo: string, branch: string): string {
+  const commonDir = execSync("git rev-parse --git-common-dir", {
+    cwd: repo,
+    encoding: "utf8",
+  }).trim();
+  return Utils.getReviewWorktreePath(branch, resolve(repo, commonDir));
+}
 
 describe("Git Worktree Utilities - Single Reusable Worktree", () => {
   let testDir: string;
@@ -111,7 +120,7 @@ describe("Git Worktree Utilities - Single Reusable Worktree", () => {
     expect(existsSync(featureFile)).toBe(true);
 
     // Verify path is the branch-scoped worktree path
-    expect(result.path).toBe(Utils.getReviewWorktreePath("feature/test-branch"));
+    expect(result.path).toBe(reviewPath(repoDir, "feature/test-branch"));
   });
 
   test("should use a separate worktree per branch and keep idle ones up to the cap", async () => {
@@ -178,6 +187,15 @@ describe("Git Worktree Utilities - Single Reusable Worktree", () => {
     expect(scoped).not.toBe(base);
   });
 
+  test("scopes the worktree path by repository too", () => {
+    const web = Utils.getReviewWorktreePath("feature/dev-16", "/repos/web.git");
+    const api = Utils.getReviewWorktreePath("feature/dev-16", "/repos/api.git");
+    expect(web).toMatch(/-feature-dev-16-[0-9a-f]{8}$/);
+    expect(api).toMatch(/-feature-dev-16-[0-9a-f]{8}$/);
+    expect(web).not.toBe(api);
+    expect(Utils.getReviewWorktreePath("feature/dev-16", "/repos/web.git")).toBe(web);
+  });
+
   test("should default to /tmp path without override", () => {
     const saved = process.env.DEVINTERN_REVIEW_WORKTREE_PATH;
     delete process.env.DEVINTERN_REVIEW_WORKTREE_PATH;
@@ -237,7 +255,7 @@ describe("Git Worktree Utilities - Single Reusable Worktree", () => {
     // Switch to branch2 - its own branch-scoped worktree
     const result2 = await Utils.prepareReviewWorktree(branch2, { verbose: false, cwd: repoDir });
     expect(result2.success).toBe(true);
-    expect(result2.path).toBe(Utils.getReviewWorktreePath(branch2));
+    expect(result2.path).toBe(reviewPath(repoDir, branch2));
     expect(result2.path).not.toBe(path1);
 
     // Verify branch2 content
@@ -343,7 +361,7 @@ describe("Git Worktree with Origin Remote", () => {
   afterEach(() => {
     // Clean up the branch-scoped worktrees this suite may have created
     for (const branch of ["feature/test-branch", "feature/another-branch"]) {
-      const worktreePath = Utils.getReviewWorktreePath(branch);
+      const worktreePath = reviewPath(repoDir, branch);
       try {
         execSync(`git worktree remove --force "${worktreePath}"`, {
           cwd: repoDir,

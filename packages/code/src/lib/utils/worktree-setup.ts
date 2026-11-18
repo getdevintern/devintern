@@ -164,43 +164,81 @@ export async function enableWorktreeConfig(
 }
 
 /**
- * Set (or with `null`, unset) the commit identity of one linked worktree
- * through its per-worktree config.
+ * What {@link setWorktreeGitIdentity} changed, so
+ * {@link restoreWorktreeGitIdentity} undoes exactly that: same config scope,
+ * prior values put back.
+ */
+export interface GitIdentityRestore {
+  /** Config scope the identity was written to. */
+  scope: "worktree" | "local";
+  /** Values the scope held before (null: unset). */
+  previous: { "user.name": string | null; "user.email": string | null };
+}
+
+const IDENTITY_KEYS = ["user.name", "user.email"] as const;
+
+/**
+ * Set the commit identity of one linked worktree through its per-worktree
+ * config.
  *
  * PR jobs on one repository run in parallel worktrees of the same repository,
  * and a plain `git config user.name` writes the *shared* config: concurrent
  * jobs then race on `config.lock` and overwrite or restore each other's
  * identity mid-run. `--worktree` keeps the value private to this worktree.
- * Falls back to the plain (shared) write only when per-worktree config cannot
- * be enabled.
+ * Falls back to the repository's own (`--local`) config only when
+ * per-worktree config cannot be enabled; the returned handle records the
+ * prior values there so the restore puts the user's identity back.
  *
  * @param worktreePath - Linked worktree to configure
- * @param author - Identity to set, or `null` to remove it again
+ * @param author - Identity to set
+ * @returns What to pass to {@link restoreWorktreeGitIdentity}
  */
 export async function setWorktreeGitIdentity(
   worktreePath: string,
-  author: { name: string; email: string } | null,
+  author: { name: string; email: string },
   options?: { verbose?: boolean },
-): Promise<void> {
+): Promise<GitIdentityRestore> {
   const verbose = options?.verbose ?? false;
   const enabled = await Utils.enableWorktreeConfig(worktreePath);
-  const scope = enabled.success ? ["--worktree"] : [];
-  if (author) {
-    await Utils.executeGitCommand(["config", ...scope, "user.name", author.name], {
-      verbose,
-      cwd: worktreePath,
-    });
-    await Utils.executeGitCommand(["config", ...scope, "user.email", author.email], {
-      verbose,
-      cwd: worktreePath,
-    });
-    return;
-  }
-  for (const key of ["user.name", "user.email"]) {
-    await Utils.executeGitCommand(["config", ...scope, "--unset", key], {
+  const scope: GitIdentityRestore["scope"] = enabled.success ? "worktree" : "local";
+  const previous: GitIdentityRestore["previous"] = { "user.name": null, "user.email": null };
+  for (const key of IDENTITY_KEYS) {
+    const current = await Utils.executeGitCommand(["config", `--${scope}`, "--get", key], {
       verbose: false,
       cwd: worktreePath,
     });
+    previous[key] = current.success && current.output.trim() ? current.output.trim() : null;
+  }
+  await Utils.executeGitCommand(["config", `--${scope}`, "user.name", author.name], {
+    verbose,
+    cwd: worktreePath,
+  });
+  await Utils.executeGitCommand(["config", `--${scope}`, "user.email", author.email], {
+    verbose,
+    cwd: worktreePath,
+  });
+  return { scope, previous };
+}
+
+/**
+ * Undo {@link setWorktreeGitIdentity}: in the scope it wrote, restore each
+ * prior value, or unset the key when there was none.
+ *
+ * @param worktreePath - Worktree the identity was set on
+ * @param restore - Handle returned by the set call
+ */
+export async function restoreWorktreeGitIdentity(
+  worktreePath: string,
+  restore: GitIdentityRestore,
+): Promise<void> {
+  for (const key of IDENTITY_KEYS) {
+    const value = restore.previous[key];
+    await Utils.executeGitCommand(
+      value === null
+        ? ["config", `--${restore.scope}`, "--unset", key]
+        : ["config", `--${restore.scope}`, key, value],
+      { verbose: false, cwd: worktreePath },
+    );
   }
 }
 

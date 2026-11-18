@@ -31,7 +31,9 @@ import type { RunOrigin } from "../state/run-recorder";
 import { formatCiFixPrompt, formatReviewPrompt } from "./formatter";
 import type { CiFailureFeedback } from "./formatter";
 import { GIT_CLEAN_ARGS, Utils } from "../utils";
-import { setWorktreeGitIdentity } from "../utils/worktree-setup";
+import { WorktreeBusyError } from "../worker/usage-limit-protocol";
+import { restoreWorktreeGitIdentity, setWorktreeGitIdentity } from "../utils/worktree-setup";
+import type { GitIdentityRestore } from "../utils/worktree-setup";
 import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "../agent/git-hook-fixer";
 
 export interface AddressReviewOptions {
@@ -348,12 +350,13 @@ async function configureBotGitAuthor(
   workDir: string,
   gitAuthor: GitAuthor | undefined,
   verbose: boolean,
-): Promise<void> {
-  if (!gitAuthor) return;
-  await setWorktreeGitIdentity(workDir, gitAuthor, { verbose });
+): Promise<GitIdentityRestore | null> {
+  if (!gitAuthor) return null;
+  const restore = await setWorktreeGitIdentity(workDir, gitAuthor, { verbose });
   if (verbose) {
     console.log(`   Set git config to bot author: ${gitAuthor.name} <${gitAuthor.email}>`);
   }
+  return restore;
 }
 
 /** Switch back to the PR branch if the agent drifted off it, stashing if needed. */
@@ -541,14 +544,14 @@ async function cleanupUntrackedFiles(workDir: string, verbose: boolean): Promise
   await Utils.executeGitCommand(GIT_CLEAN_ARGS, { verbose: false, cwd: workDir });
 }
 
-/** Drop the worktree identity set by {@link configureBotGitAuthor}. */
+/** Undo the identity change made by {@link configureBotGitAuthor}. */
 async function restoreBotGitAuthor(
   workDir: string,
-  gitAuthor: GitAuthor | undefined,
+  restore: GitIdentityRestore | null,
   verbose: boolean,
 ): Promise<void> {
-  if (!gitAuthor) return;
-  await setWorktreeGitIdentity(workDir, null);
+  if (!restore) return;
+  await restoreWorktreeGitIdentity(workDir, restore);
   if (verbose) {
     console.log("   Restored original git config");
   }
@@ -691,6 +694,27 @@ function logReviewSuccess(
 }
 
 /**
+ * Return the prepared review worktree path or throw.
+ *
+ * @throws {WorktreeBusyError} When another live job holds the worktree (two
+ *   open PRs from one head branch): temporary contention, not a failure. The
+ *   CLI entrypoint exits `WORKTREE_BUSY_EXIT_CODE` so the worker defers.
+ * @throws {Error} For any other preparation failure.
+ */
+export function requirePreparedWorktree(result: {
+  success: boolean;
+  path?: string;
+  error?: string;
+  inUse?: boolean;
+}): string {
+  if (result.success && result.path) return result.path;
+  if (result.inUse) {
+    throw new WorktreeBusyError(`Review worktree busy: ${result.error}`);
+  }
+  throw new Error(`Failed to prepare worktree: ${result.error ?? "no worktree path"}`);
+}
+
+/**
  * Fetch PR review feedback and run an agent to address unaddressed comments.
  *
  * @param prUrl - Full GitHub pull request or GitLab merge-request URL
@@ -743,15 +767,11 @@ export async function addressReview(
     verbose,
   });
 
-  if (!worktreeResult.success) {
-    throw new Error(`Failed to prepare worktree: ${worktreeResult.error}`);
-  }
-
-  const workDir = worktreeResult.path!;
+  const workDir = requirePreparedWorktree(worktreeResult);
   console.log(`✅ Worktree ready at: ${workDir}`);
 
   // Set git config for bot author if available (so Agent's commits are attributed to bot)
-  await configureBotGitAuthor(workDir, gitAuthor, verbose);
+  const identityRestore = await configureBotGitAuthor(workDir, gitAuthor, verbose);
 
   try {
     // Run Agent (prompt is passed via stdin, no file created)
@@ -836,7 +856,7 @@ export async function addressReview(
     await cleanupUntrackedFiles(workDir, verbose);
 
     // Restore original git config if we changed it
-    await restoreBotGitAuthor(workDir, gitAuthor, verbose);
+    await restoreBotGitAuthor(workDir, identityRestore, verbose);
     // Keep the worktree for the next review of this branch, but let other
     // jobs' cleanups count it as idle again.
     Utils.releaseReviewWorktree(workDir);

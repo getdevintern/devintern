@@ -61,9 +61,16 @@ class FakeRepoManager implements RepoManagerLike {
     this.calls.push(`fetch:${repoName}`);
   }
 
-  async ensureBaseWorktree(repo: RepoConfig, options?: { sync?: boolean }): Promise<string> {
-    this.calls.push(`base:${repo.name}:${options?.sync === false ? "no-sync" : "sync"}`);
+  async ensureBaseWorktree(repo: RepoConfig): Promise<string> {
+    this.calls.push(`base:${repo.name}`);
     const path = join(this.root, "worktrees", repo.name, "base");
+    mkdirSync(path, { recursive: true });
+    return path;
+  }
+
+  async ensurePrJobWorktree(repo: RepoConfig): Promise<string> {
+    this.calls.push(`pr-jobs:${repo.name}`);
+    const path = join(this.root, "worktrees", repo.name, "pr-jobs");
     mkdirSync(path, { recursive: true });
     return path;
   }
@@ -186,13 +193,13 @@ describe("fleet event handlers", () => {
     rmSync(workspaceDir, { recursive: true, force: true });
   });
 
-  test("addressPr runs the review from the repo's base worktree with its env", async () => {
+  test("addressPr runs the review from the repo's PR-job checkout with its env", async () => {
     const addressPr = createFleetAddressPr(deps());
     const ok = await addressPr("acme/backend", 42);
 
     expect(ok).toBe(true);
     expect(reviews).toHaveLength(1);
-    expect(reviews[0].cwd).toBe(join(workspaceDir, "worktrees", "backend", "base"));
+    expect(reviews[0].cwd).toBe(join(workspaceDir, "worktrees", "backend", "pr-jobs"));
     expect(reviews[0].env.GITHUB_REPO).toBe("acme/backend");
     expect(repoManager.calls).toContain("fetch:backend");
   });
@@ -294,17 +301,18 @@ describe("fleet event handlers", () => {
     expect(started).toEqual(["review", "ci-fix"]);
   });
 
-  test("CI fixes run from the matching repo base worktree", async () => {
+  test("CI fixes run from the matching repo's PR-job checkout", async () => {
     const fix = createFleetCiFix(deps());
     expect(await fix("acme/backend", 42, "/tmp/ci-feedback.json")).toBe(true);
-    // PR jobs never reset the base checkout an automation may be using.
-    expect(repoManager.calls).toContain("base:backend:no-sync");
+    // PR jobs never touch the base checkout an automation may be using.
+    expect(repoManager.calls).toContain("pr-jobs:backend");
+    expect(repoManager.calls.some((call) => call.startsWith("base:"))).toBe(false);
     expect(ciFixes).toEqual([
       {
         slug: "acme/backend",
         prNumber: 42,
         feedbackPath: "/tmp/ci-feedback.json",
-        cwd: join(workspaceDir, "worktrees", "backend", "base"),
+        cwd: join(workspaceDir, "worktrees", "backend", "pr-jobs"),
       },
     ]);
   });
@@ -352,7 +360,7 @@ describe("fleet event handlers", () => {
       {
         slug: "acme/backend",
         prNumber: 42,
-        cwd: join(workspaceDir, "worktrees", "backend", "base"),
+        cwd: join(workspaceDir, "worktrees", "backend", "pr-jobs"),
         expectedHeadSha: "head1",
         expectedBaseSha: "base1",
       },
