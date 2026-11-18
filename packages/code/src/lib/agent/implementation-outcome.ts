@@ -182,6 +182,11 @@ export function outcomeRunDisposition(
 /** Prefix of the `outcome_reason` recorded for a run whose PR could not be created. */
 export const PR_DELIVERY_FAILED_REASON_PREFIX = "pushed but PR creation failed: ";
 
+/** Whether a recorded `outcome_reason` marks a run whose PR could not be created. */
+export function isPrDeliveryFailedReason(reason: string | undefined): boolean {
+  return reason?.startsWith(PR_DELIVERY_FAILED_REASON_PREFIX) === true;
+}
+
 /**
  * Apply a PR delivery failure to the disposition implied by the agent's outcome.
  *

@@ -3,7 +3,10 @@ import { rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
-import { outcomeRunDisposition } from "../src/lib/agent/implementation-outcome";
+import {
+  deliveryRunDisposition,
+  outcomeRunDisposition,
+} from "../src/lib/agent/implementation-outcome";
 import { RunStore } from "../src/lib/state/run-recorder";
 import type { SessionPickupRunStore } from "../src/lib/state/session-pickup";
 import {
@@ -174,6 +177,55 @@ describe("resolveSessionPickup", () => {
       kind: "fresh",
       reason: "branch 'feature/proj-5c' has no commits to resume",
     });
+  });
+
+  test("starts fresh after a run that failed only at PR creation", async () => {
+    // The branch was pushed (commits landed) but the code host rejected the
+    // PR. The re-run starts a new session, as it did when such runs were
+    // recorded succeeded.
+    const disposition = deliveryRunDisposition(outcomeRunDisposition(undefined), "Not Found");
+    expect(disposition.status).toBe("failed");
+    const prFailed = store.createRun({
+      origin: "task",
+      taskKey: "PROJ-PR",
+      branch: "feature/proj-pr",
+    });
+    store.addStage(
+      prFailed,
+      "implementation",
+      "succeeded",
+      "implemented",
+      JSON.stringify({ report: "done" }),
+    );
+    store.finishRun(prFailed, disposition.status, disposition.reason);
+    const next = store.createRun({ origin: "task", taskKey: "PROJ-PR" });
+
+    const probes = { branchExists: () => true, hasLandedCommits: () => true };
+    for (const selection of [{ excludeRunId: next }, { runId: prFailed }]) {
+      expect(
+        await resolveSessionPickup({
+          runStore: store,
+          taskKey: "PROJ-PR",
+          ...selection,
+          ...probes,
+        }),
+      ).toEqual({ kind: "fresh", reason: "prior run failed only at PR creation" });
+    }
+
+    // Any other failure on the same branch stays resumable.
+    const pushFailed = store.createRun({
+      origin: "task",
+      taskKey: "PROJ-PR",
+      branch: "feature/proj-pr",
+    });
+    store.finishRun(pushFailed, "failed", "push failed");
+    const resumed = await resolveSessionPickup({
+      runStore: store,
+      taskKey: "PROJ-PR",
+      runId: pushFailed,
+      ...probes,
+    });
+    expect(resumed.kind).toBe("resume");
   });
 
   test("starts the next automation occurrence fresh after a blocked PR-opening run", async () => {

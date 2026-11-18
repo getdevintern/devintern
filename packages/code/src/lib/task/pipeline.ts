@@ -345,6 +345,33 @@ async function runImplementation(input: ImplementationInput): Promise<void> {
     },
   );
 
+  await settleImplementationRun({
+    tracker,
+    task,
+    workflowKey,
+    taskDir,
+    incomplete: implementationIncomplete,
+    outcome,
+  });
+}
+
+/**
+ * Finish the run record after the agent session and clear the active task
+ * context: mark a markdown task Done only on success, record the ticket as
+ * actioned, and end the run with the disposition from the agent's outcome
+ * marker and any PR delivery failure the harness left on
+ * `runContext.activeTaskContext`. Exported for pipeline-level tests.
+ */
+export async function settleImplementationRun(input: {
+  tracker: TaskTrackerClient;
+  task: ImplementationInput["task"];
+  workflowKey: string;
+  taskDir: string;
+  incomplete: boolean;
+  outcome: ReturnType<typeof readImplementationReport>["outcome"];
+}): Promise<void> {
+  const { tracker, task, workflowKey, taskDir, outcome } = input;
+  const implementationIncomplete = input.incomplete;
   // The agent's own outcome marker decides between success and escalation
   // for a clean run, and a requested PR that failed after the push turns it
   // into a failure. Resolve it before any tracker transition so a blocked or

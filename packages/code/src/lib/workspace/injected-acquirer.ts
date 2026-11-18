@@ -18,7 +18,7 @@ import type { InjectedTask, InjectedTaskStore } from "../state/injected-tasks";
 import type { TaskExecutionResult } from "../acquirers/task-polling";
 import { randomUUID } from "crypto";
 import { getWorkerFailover } from "../worker/failover";
-import { queueFailureReason } from "./queue-failure-reason";
+import { cleanExitFailureReason, queueFailureReason } from "./queue-failure-reason";
 
 /** Source label surfaced in worker logs, run records, and the dashboard. */
 export const INJECTED_TASK_SOURCE = "local:add";
@@ -264,7 +264,15 @@ export class InjectedTaskAcquirer implements Acquirer {
         return;
       }
       if (result === true) {
-        store.finish(task.id, "done");
+        // The pipeline exits cleanly after recording a delivery failure it
+        // reports on the run (pushed, but no PR), so the run record decides.
+        const failure = cleanExitFailureReason(this.options.runDbPath, queueClaim);
+        if (failure === undefined) {
+          store.finish(task.id, "done");
+        } else {
+          store.finish(task.id, "failed", failure);
+          console.error(`❌ [${this.name}] ${task.taskKey} failed: ${failure}`);
+        }
       } else if (result === "skipped") {
         // Defensive: a skip means the ticket was left untouched, which is a
         // settled row rather than a failure.
