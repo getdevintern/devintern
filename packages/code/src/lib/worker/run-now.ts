@@ -122,8 +122,12 @@ export function runWorkerRunNow(args: string[], options: RunNowOptions = {}): nu
     error(`❌ No workspace.toml at ${configPath}.`);
     return 1;
   }
-  const workerRunning =
+  // Only a verified live worker exempts the config check: an unverifiable one
+  // (lock from another PID namespace, e.g. read inside a sandbox) takes the
+  // stricter not-running path.
+  const workerLiveness =
     LockManager.readLockStatus(selectedDir, ".worker.lock", { plainDir: true })?.running ?? false;
+  const workerRunning = workerLiveness === true;
 
   // An existing file is not necessarily a workspace config: `--workspace
   // ./package.json` would otherwise drop `.run-now` into a random checkout
@@ -163,7 +167,9 @@ export function runWorkerRunNow(args: string[], options: RunNowOptions = {}): nu
   log(`✅ Run-now requested for ${configPath}`);
   log(`   Marker: ${markerPath}`);
   log("   The worker drains within one poll interval and removes the marker.");
-  if (!workerRunning) {
+  if (workerLiveness === "unknown") {
+    log("ℹ️  Could not verify the worker from this sandbox; the marker is read on its next poll.");
+  } else if (!workerRunning) {
     log("⚠️  No worker is running; the marker stays until the next worker's first poll.");
   }
   return 0;

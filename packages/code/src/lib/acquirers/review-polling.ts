@@ -22,8 +22,18 @@
  * Review/comment ids dedupe via `processed_events`, so webhook redeliveries
  * or window overlap never double-run. ETags and comment cursors persist per
  * PR in `cursors`.
+ *
+ * Team-PR base sync (opt-in, `sync_team_prs = true` per workspace repo): for
+ * each opted-in repo the tick also lists open PRs (ETag-conditional) and runs
+ * base sync — never review-feedback addressing — on teammates' open,
+ * non-draft, same-repo PRs whose `author_association` marks a team member
+ * (see {@link isTeamAuthor}). Those PRs flow through the same
+ * `maybeSyncBase` → `refetchForBaseSync` → `executeBaseSync` path as the
+ * agent's own, so mode, schedule window, quiet period, retry backoff, and
+ * defer caps apply unchanged. The agent's own PRs are skipped in the sweep.
  */
 
+import { startFirstTickInBackground } from "./background-tick";
 import { captureError } from "@devintern/utils";
 
 import { parseHarnessList } from "@devintern/agent-harness";
@@ -40,7 +50,7 @@ import {
   describeGitHubAuthFailure,
   isGitHubAuthError,
   isGitHubTransientError,
-} from "../code-host/github/reviews";
+} from "../code-host/github/github-errors";
 import { nextScheduleOccurrence } from "../automation/config";
 import type { CronOrIntervalSchedule } from "../automation/config";
 import type { RunStore } from "../state/run-recorder";
@@ -50,6 +60,8 @@ import type { WorkerState } from "../state/worker-state";
 import type { ConflictResolutionMode } from "../workspace/config";
 import type { Acquirer } from "../../worker";
 import type { AutomaticResolveResult } from "./review-cli";
+import { isTeamAuthor, TeamPrSweeper } from "./team-pr-sweep";
+import type { PolledPrListItem, TeamPrSweepHost } from "./team-pr-sweep";
 import {
   CONFLICT_WINDOW_SOURCE,
   extendConflictWindow,
@@ -67,6 +79,14 @@ import type {
 // The PR-state protocol types live with the reconciler, which shares them;
 // re-exported so poller consumers keep their existing import paths.
 export type { ConditionalResult, PolledPr };
+export {
+  isTeamAuthor,
+  OPEN_PR_LIST_PAGE_SIZE,
+  TEAM_AUTHOR_ASSOCIATIONS,
+  teamPrListCursorSource,
+  teamPrStateCursorSource,
+} from "./team-pr-sweep";
+export type { PolledPrListItem } from "./team-pr-sweep";
 // Resolver/feedback subprocess helpers live in ./review-cli; re-exported so
 // existing importers keep their paths.
 export {
@@ -105,6 +125,14 @@ export interface ReviewPollingGitHub {
     prNumber: number,
     sinceIso: string,
   ): Promise<PolledComment[]>;
+  /**
+   * List a repo's open PRs (team-PR base sync discovery). Optional: without
+   * it, `sync_team_prs` repos fall back to own-PR-only base sync.
+   */
+  listOpenPullRequests?(
+    repo: string,
+    etag?: string,
+  ): Promise<ConditionalResult<PolledPrListItem[]>>;
 }
 
 /**
@@ -112,7 +140,7 @@ export interface ReviewPollingGitHub {
  * a successful metadata-only PR fetch cannot clear a reviews/comments throttle
  * that was never re-tested.
  */
-type PollStage = "pr-state" | "reviews" | "comments" | "write";
+type PollStage = "pr-state" | "reviews" | "comments" | "write" | "open-prs";
 
 /** Human label for a stage, used in credential warnings. */
 const POLL_STAGE_LABELS: Record<PollStage, string> = {
@@ -120,6 +148,7 @@ const POLL_STAGE_LABELS: Record<PollStage, string> = {
   reviews: "reading reviews",
   comments: "reading review comments",
   write: "posting a review comment",
+  "open-prs": "listing open PRs",
 };
 
 interface AuthFailureEntry {
@@ -195,6 +224,35 @@ export interface ReviewPollingAcquirerOptions {
    * or 60 minutes.
    */
   conflictWindowGraceMs?: number;
+  /**
+   * GitHub slugs opted into team-PR base sync (`sync_team_prs = true`).
+   * Factory form so live config reloads apply on the next tick. Empty or
+   * omitted keeps own-PR-only base sync with no extra API requests.
+   * Requires `github.listOpenPullRequests` and `resolveConflicts`.
+   */
+  syncTeamPrsRepos?: string[] | (() => string[]);
+}
+
+/** Per-tick stage bookkeeping for credential-failure throttling. */
+interface TickStages {
+  /** Stages that completed in this tick, per repo (union over its requests). */
+  succeeded: Map<string, Set<PollStage>>;
+  /** Stages that failed with a credential error in this tick, per repo. */
+  failed: Map<string, Set<PollStage>>;
+}
+
+/** Add `stages` to `repo`'s entry in a per-tick stage map. */
+function recordStages(
+  target: Map<string, Set<PollStage>>,
+  repo: string,
+  stages: Iterable<PollStage>,
+): void {
+  let entry = target.get(repo);
+  if (!entry) {
+    entry = new Set();
+    target.set(repo, entry);
+  }
+  for (const stage of stages) entry.add(stage);
 }
 
 /** Dedupe source for review/comment ids. */
@@ -257,6 +315,8 @@ export class ReviewPollingAcquirer implements Acquirer {
   private authFailures = new Map<string, AuthFailureEntry>();
   /** Per-repo throttle for "404 may mean access lost" warnings. */
   private inaccessibleWarnAt = new Map<string, number>();
+  /** Team-PR base sync discovery state (`sync_team_prs`). */
+  private teamPrs = new TeamPrSweeper(this.name);
 
   constructor(options: ReviewPollingAcquirerOptions) {
     this.options = options;
@@ -286,8 +346,20 @@ export class ReviewPollingAcquirer implements Acquirer {
     );
     this.syncConflictWindow();
     this.logConflictMode();
-    await this.tick();
+    if (
+      this.resolveTeamSyncRepos(allowedRepos).length > 0 &&
+      !this.options.github.listOpenPullRequests
+    ) {
+      console.warn(
+        `⚠️  [${this.name}] sync_team_prs is enabled but the GitHub client cannot list open ` +
+          "PRs; only the agent's own PRs are base-synced",
+      );
+    }
+    // Arm the interval first, then run the first tick in the background: the
+    // busy guard turns an interval fire during it into a no-op, and a long
+    // first tick must not hold later acquirers (see background-tick.ts).
     this.timer = setInterval(() => void this.tick(), this.options.intervalSeconds * 1000);
+    startFirstTickInBackground(this.name, () => this.tick());
   }
 
   /** Stop polling (an in-flight tick finishes its current PR). */
@@ -325,6 +397,31 @@ export class ReviewPollingAcquirer implements Acquirer {
   private resolveAllowedRepos(): string[] | undefined {
     const raw = this.options.allowedRepos;
     return typeof raw === "function" ? raw() : raw;
+  }
+
+  /** Opted-in team-PR sync slugs, restricted to the repos this worker manages. */
+  private resolveTeamSyncRepos(allowedRepos: string[] | undefined): string[] {
+    const raw = this.options.syncTeamPrsRepos;
+    const repos = (typeof raw === "function" ? raw() : raw) ?? [];
+    if (!allowedRepos || allowedRepos.length === 0) return repos;
+    const allowed = new Set(allowedRepos.map((repo) => repo.toLowerCase()));
+    return repos.filter((repo) => allowed.has(repo.toLowerCase()));
+  }
+
+  /**
+   * Repos the team-PR sweep runs on this tick: empty unless discovery and
+   * conflict resolution are both available and the mode is not `disabled`
+   * (disabled mode spends no discovery requests).
+   */
+  private activeTeamSyncRepos(allowedRepos: string[] | undefined): string[] {
+    if (
+      !this.options.resolveConflicts ||
+      !this.options.github.listOpenPullRequests ||
+      this.options.conflictResolution === "disabled"
+    ) {
+      return [];
+    }
+    return this.resolveTeamSyncRepos(allowedRepos);
   }
 
   /** One polling cycle over all watched PRs. Skipped while busy. */
@@ -373,29 +470,16 @@ export class ReviewPollingAcquirer implements Acquirer {
       for (const key of this.prCache.keys()) {
         if (!watchedKeys.has(key)) this.clearPrCache(key);
       }
-      const watchedRepos = new Set(watchedPrs.map((pr) => pr.repo));
+      const teamSyncRepos = this.activeTeamSyncRepos(allowedRepos);
+      this.teamPrs.prune(teamSyncRepos);
+      const watchedRepos = new Set([...watchedPrs.map((pr) => pr.repo), ...teamSyncRepos]);
       for (const [key, entry] of this.authFailures) {
         if (!watchedRepos.has(entry.repo)) this.authFailures.delete(key);
       }
       for (const repo of this.inaccessibleWarnAt.keys()) {
         if (!watchedRepos.has(repo)) this.inaccessibleWarnAt.delete(repo);
       }
-      /** Stages that completed in this tick, per repo (union over its PRs). */
-      const succeededStages = new Map<string, Set<PollStage>>();
-      /** Stages that failed with a credential error in this tick, per repo. */
-      const failedStages = new Map<string, Set<PollStage>>();
-      const recordStages = (
-        target: Map<string, Set<PollStage>>,
-        repo: string,
-        stages: Iterable<PollStage>,
-      ): void => {
-        let entry = target.get(repo);
-        if (!entry) {
-          entry = new Set();
-          target.set(repo, entry);
-        }
-        for (const stage of stages) entry.add(stage);
-      };
+      const stages: TickStages = { succeeded: new Map(), failed: new Map() };
       for (const pr of watchedPrs) {
         // Defensive: rows registered mid-run for a foreign repo (or when
         // startup pruning could not run) are skipped, never acted on.
@@ -413,43 +497,26 @@ export class ReviewPollingAcquirer implements Acquirer {
             progress,
           );
         } catch (error) {
-          recordStages(succeededStages, pr.repo, progress.completed);
-          if (isGitHubAuthError(error)) {
-            // Credential failures (401/rejected, 403/under-scoped) are
-            // configuration problems that fail identically on every PR every
-            // tick. Warn the operator at most once per repo per stage per hour
-            // and intentionally skip captureError so a permanently rejected
-            // credential does not flood error tracking with duplicates.
-            const stage = progress.current ?? "write";
-            recordStages(failedStages, pr.repo, [stage]);
-            this.warnAuthFailure(pr.repo, pr.prNumber, error as Error, stage);
-            continue;
-          }
-          // A 408/429/5xx survived the client's retries: GitHub is momentarily
-          // unavailable and the next tick retries it. Keep the warning visible,
-          // but do not report expected upstream noise as a fresh issue.
-          if (!isGitHubTransientError(error)) {
-            captureError(error, {
-              acquirer: this.name,
-              repo: pr.repo,
-              prNumber: pr.prNumber,
-              stage: "poll-pr",
-            });
-          }
-          console.warn(
-            `⚠️  [${this.name}] polling ${pr.repo}#${pr.prNumber} failed: ${(error as Error).message}`,
-          );
+          recordStages(stages.succeeded, pr.repo, progress.completed);
+          this.handlePollFailure(stages, pr.repo, pr.prNumber, error, progress.current ?? "write");
           continue;
         }
-        recordStages(succeededStages, pr.repo, progress.completed);
+        recordStages(stages.succeeded, pr.repo, progress.completed);
       }
+
+      // Team-PR base sync (opt-in per repo); no-op with no repo opted in.
+      if (teamSyncRepos.length > 0) {
+        const host = this.teamPrSweepHost(stages);
+        for (const repo of teamSyncRepos) await this.teamPrs.sweep(repo, watchedKeys, host);
+      }
+
       // Only a tick where the same stage succeeded proves that stage's
       // credential works again. A metadata-only PR fetch must not clear a
       // reviews/comments throttle it never exercised, and one PR's failure
       // must not mask another's success in the same repo.
-      for (const [repo, stages] of succeededStages) {
-        const failed = failedStages.get(repo);
-        for (const stage of stages) {
+      for (const [repo, succeeded] of stages.succeeded) {
+        const failed = stages.failed.get(repo);
+        for (const stage of succeeded) {
           if (failed?.has(stage)) continue;
           this.noteAuthRecovery(repo, stage);
         }
@@ -459,6 +526,46 @@ export class ReviewPollingAcquirer implements Acquirer {
     }
   }
 
+  /**
+   * Shared failure policy for one polling request: credential errors warn
+   * (throttled per repo/stage) without captureError, transient GitHub errors
+   * only warn, anything else is captured and warned.
+   */
+  private handlePollFailure(
+    stages: TickStages,
+    repo: string,
+    prNumber: number | undefined,
+    error: unknown,
+    stage: PollStage,
+  ): void {
+    if (isGitHubAuthError(error)) {
+      // Credential failures (401/rejected, 403/under-scoped) are
+      // configuration problems that fail identically on every PR every
+      // tick. Warn the operator at most once per repo per stage per hour
+      // and intentionally skip captureError so a permanently rejected
+      // credential does not flood error tracking with duplicates.
+      recordStages(stages.failed, repo, [stage]);
+      this.warnAuthFailure(repo, prNumber, error as Error, stage);
+      return;
+    }
+    // A 408/429/5xx survived the client's retries: GitHub is momentarily
+    // unavailable and the next tick retries it. Keep the warning visible,
+    // but do not report expected upstream noise as a fresh issue.
+    if (!isGitHubTransientError(error)) {
+      captureError(error, {
+        acquirer: this.name,
+        repo,
+        prNumber,
+        stage: stage === "open-prs" ? "list-open-prs" : "poll-pr",
+      });
+    }
+    const target = prNumber === undefined ? repo : `${repo}#${prNumber}`;
+    console.warn(
+      `⚠️  [${this.name}] ${stage === "open-prs" ? "listing open PRs on" : "polling"} ` +
+        `${target} failed: ${(error as Error).message}`,
+    );
+  }
+
   /** One credential warning per repo per stage per rolling hour. */
   private static AUTH_WARN_INTERVAL_MS = 60 * 60 * 1000;
 
@@ -466,7 +573,12 @@ export class ReviewPollingAcquirer implements Acquirer {
     return `${repo.toLowerCase()}\u0000${stage}`;
   }
 
-  private warnAuthFailure(repo: string, prNumber: number, error: Error, stage: PollStage): void {
+  private warnAuthFailure(
+    repo: string,
+    prNumber: number | undefined,
+    error: Error,
+    stage: PollStage,
+  ): void {
     const key = ReviewPollingAcquirer.authKey(repo, stage);
     const entry = this.authFailures.get(key) ?? {
       repo,
@@ -487,7 +599,7 @@ export class ReviewPollingAcquirer implements Acquirer {
     this.authFailures.set(key, entry);
     console.warn(
       `⚠️  [${this.name}] GitHub rejected the credential while ${POLL_STAGE_LABELS[stage]} ` +
-        `on ${repo}#${prNumber}: ` +
+        `on ${prNumber === undefined ? repo : `${repo}#${prNumber}`}: ` +
         `${error.message} ${describeGitHubAuthFailure(error, stage === "write" ? "comment" : "reviews")}`,
     );
   }
@@ -704,6 +816,41 @@ export class ReviewPollingAcquirer implements Acquirer {
     return actionable;
   }
 
+  /** Poller services for one team-PR sweep pass (shares this tick's stages). */
+  private teamPrSweepHost(stages: TickStages): TeamPrSweepHost {
+    const { github, workerState } = this.options;
+    return {
+      workerState,
+      listOpenPullRequests: (repo, etag) =>
+        github.listOpenPullRequests
+          ? github.listOpenPullRequests(repo, etag)
+          : Promise.resolve({ data: [], notModified: false }),
+      fetchPr: (repo, prNumber, etag) => github.fetchPr(repo, prNumber, etag),
+      syncBase: (repo, prNumber, pr) => this.maybeSyncBase(repo, prNumber, pr, { external: true }),
+      onSuccess: (repo, stage) => recordStages(stages.succeeded, repo, [stage]),
+      onFailure: (repo, prNumber, error, stage) =>
+        this.handlePollFailure(stages, repo, prNumber, error, stage),
+      warnPrInaccessible: (repo, prNumber) => this.warnPrInaccessible(repo, prNumber),
+      warnListInaccessible: (repo) => this.warnRepoListInaccessible(repo),
+    };
+  }
+
+  private warnRepoListInaccessible(repo: string): void {
+    const now = this.now();
+    const lastWarnAt = this.inaccessibleWarnAt.get(repo);
+    if (
+      lastWarnAt !== undefined &&
+      now - lastWarnAt < ReviewPollingAcquirer.AUTH_WARN_INTERVAL_MS
+    ) {
+      return;
+    }
+    this.inaccessibleWarnAt.set(repo, now);
+    console.warn(
+      `⚠️  [${this.name}] GitHub returned 404 listing open PRs on ${repo}; team-PR base sync ` +
+        "is paused for it. Check GITHUB_TOKEN access to this repository.",
+    );
+  }
+
   /**
    * Re-fetch the PR immediately before executing a base sync. Returns a "go"
    * with the fresh refs, or "stop" after recording/deferring or when the PR
@@ -712,21 +859,26 @@ export class ReviewPollingAcquirer implements Acquirer {
   private async refetchForBaseSync(
     repo: string,
     prNumber: number,
-    expectedHeadSha: string,
-    expectedBaseSha: string,
+    expected: { headSha: string; baseSha: string },
     externalId: string,
     now: number,
+    external = false,
   ): Promise<
     { kind: "go"; headSha: string; baseSha: string; branch: string | undefined } | { kind: "stop" }
   > {
     const { github, queue } = this.options;
     const freshResult = await github.fetchPr(repo, prNumber);
     const fresh = freshResult.data;
+    // Teammate PRs: eligibility must still hold on the payload the run acts
+    // on (the author's association or draft flag may have changed).
+    if (external && fresh && (fresh.draft === true || !isTeamAuthor(fresh.author_association))) {
+      return { kind: "stop" };
+    }
     if (
       !fresh ||
       fresh.state !== "open" ||
-      fresh.head?.sha !== expectedHeadSha ||
-      fresh.base?.sha !== expectedBaseSha
+      fresh.head?.sha !== expected.headSha ||
+      fresh.base?.sha !== expected.baseSha
     ) {
       if (fresh?.state === "open" && fresh.head?.sha && fresh.base?.sha) {
         queue.observeBaseSyncEvent({
@@ -763,6 +915,8 @@ export class ReviewPollingAcquirer implements Acquirer {
     headSha: string;
     baseSha: string;
     branch: string | undefined;
+    /** Teammate PR (team-PR base sync); affects logging only. */
+    external?: boolean;
   }): Promise<void> {
     const { queue, resolveConflicts, runStore } = this.options;
     if (!resolveConflicts) return;
@@ -786,7 +940,10 @@ export class ReviewPollingAcquirer implements Acquirer {
       console.warn(`⚠️  Run recording (base sync begin) failed: ${(error as Error).message}`);
     }
 
-    console.log(`\n🔀 [${this.name}] syncing ${repo}#${prNumber} with its advanced base`);
+    console.log(
+      `\n🔀 [${this.name}] syncing ${repo}#${prNumber}` +
+        `${params.external ? " (external PR)" : ""} with its advanced base`,
+    );
     let result: AutomaticResolveResult;
     try {
       result = await resolveConflicts(repo, prNumber, { headSha, baseSha });
@@ -868,7 +1025,12 @@ export class ReviewPollingAcquirer implements Acquirer {
     return exhausted;
   }
 
-  private async maybeSyncBase(repo: string, prNumber: number, pr: PolledPr): Promise<void> {
+  private async maybeSyncBase(
+    repo: string,
+    prNumber: number,
+    pr: PolledPr,
+    opts: { external?: boolean } = {},
+  ): Promise<void> {
     const { queue, resolveConflicts } = this.options;
     if (!resolveConflicts || this.options.conflictResolution === "disabled") return;
     if (!pr.head?.sha || !pr.base?.sha || !pr.head.ref) return;
@@ -940,10 +1102,10 @@ export class ReviewPollingAcquirer implements Acquirer {
     const freshState = await this.refetchForBaseSync(
       repo,
       prNumber,
-      pr.head.sha,
-      pr.base.sha,
+      { headSha: pr.head.sha, baseSha: pr.base.sha },
       externalId,
       now,
+      opts.external,
     );
     if (freshState.kind === "stop") return;
     await this.executeBaseSync({
@@ -954,6 +1116,7 @@ export class ReviewPollingAcquirer implements Acquirer {
       headSha: freshState.headSha,
       baseSha: freshState.baseSha,
       branch: freshState.branch,
+      external: opts.external,
     });
   }
 

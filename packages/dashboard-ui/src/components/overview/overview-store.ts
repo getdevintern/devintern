@@ -8,7 +8,7 @@
 import { useSyncExternalStore } from "react";
 
 import { OVERVIEW_URL } from "@/lib/api";
-import type { OverviewResponse } from "@/lib/api";
+import type { OverviewResponse } from "@/lib/api-overview";
 
 const INTERVAL_MS = 5000;
 

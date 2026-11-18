@@ -47,7 +47,7 @@ if (leaked.length > 0) {
       "the REAL repository instead of their temp dirs (Bun children get the " +
       "process-start environment, so the guard cannot strip it in-process).\n" +
       "Re-run with the variables removed, e.g.: env -u GIT_DIR -u GIT_WORK_TREE " +
-      "-u GIT_INDEX_FILE -u GIT_COMMON_DIR bun test",
+      "-u GIT_INDEX_FILE -u GIT_COMMON_DIR bun run test",
   );
   process.exit(1);
 }
@@ -66,8 +66,16 @@ if (!gitCeilings.includes(tempRoot)) {
   console.error(
     `Refusing to run tests: GIT_CEILING_DIRECTORIES must include ${tempRoot}.\n` +
       "Fixture git init commands could otherwise discover an ambient ancestor " +
-      ".git directory and rewrite the real repository. Run `bun run test` so " +
-      "tests/run-tests.ts can launch Bun with the safe environment.",
+      ".git directory and rewrite the real repository.\n" +
+      "Run tests through tests/run-tests.ts, which launches Bun with the safe " +
+      "environment and guard preloads. From packages/code:\n" +
+      "  bun run test                          # full suite\n" +
+      "  bun run test ./<file>.test.ts         # single file, path relative to tests/\n" +
+      "  bun run test <filter>                 # files whose path contains <filter>\n" +
+      "e.g. `bun run test ./lock-manager.test.ts`. Do not pass a `tests/` prefix " +
+      "(the runner's cwd is tests/), and do not hand-set GIT_CEILING_DIRECTORIES: " +
+      "that skips the runner's other pins (WEBHOOK_QUEUE_DB, DEVINTERN_WORKSPACE_DIR, " +
+      "SENTRY_DISABLED, DASHBOARD_TAILSCALE_AUTODETECT, worker-env stripping).",
   );
   process.exit(1);
 }

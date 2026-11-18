@@ -13,6 +13,8 @@
  */
 
 import { Database } from "bun:sqlite";
+import { computeRunActivity, hostTimeZone } from "./run-activity";
+import type { RunActivity } from "./run-activity";
 import { configureSqliteConnection } from "./sqlite";
 import { prepareQueueDbDirectory, resolveQueueDbPath } from "./webhook-queue";
 
@@ -151,6 +153,8 @@ export interface RunStats {
   medianDurationMs: number | null;
   byHarness: RunStatsHarness[];
   byOrigin: Record<RunOrigin, number>;
+  /** When runs happen: local weekday × hour buckets (starts and busy time) per origin. */
+  activity: RunActivity<RunOrigin>;
 }
 
 /** Statuses that no longer change (excluded: in_progress and deferred-for-retry). */
@@ -741,9 +745,11 @@ export class RunStore {
    *
    * @param windowMs - Include runs started within the last `windowMs`
    *                   milliseconds; `null` for all time
+   * @param timeZone - IANA zone for the activity buckets (default: worker host zone)
    */
-  getStats(windowMs: number | null): RunStats {
-    const since = windowMs === null ? 0 : Date.now() - windowMs;
+  getStats(windowMs: number | null, timeZone: string = hostTimeZone()): RunStats {
+    const now = Date.now();
+    const since = windowMs === null ? 0 : now - windowMs;
     const rows = this.db
       .query(
         `SELECT origin, harness, status, pr_url, started_at, finished_at
@@ -831,6 +837,7 @@ export class RunStore {
           medianDurationMs: median(data.durations),
         })),
       byOrigin,
+      activity: computeRunActivity(rows, timeZone, since, now),
     };
   }
 

@@ -32,7 +32,7 @@ import {
   collectIssues,
 } from "@/components/workspace/workspace-model";
 import { usePoll, WORKSPACE_URL } from "@/lib/api";
-import type { WorkspaceConfigView, WorkspaceResponse } from "@/lib/api";
+import type { WorkspaceConfigView, WorkspaceResponse } from "@/lib/api-workspace";
 import { cn, formatAge, formatTime } from "@/lib/utils";
 // oxlint-disable-next-line import/no-unassigned-import -- view styles
 import "./workspace.css";

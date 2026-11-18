@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -52,6 +53,73 @@ describe("WorkerState", () => {
       const cursor = state.getCursor("jira");
       expect(cursor?.cursorValue).toBe("2026-07-02T00:00:00Z");
       expect(cursor?.etag).toBeUndefined();
+    });
+
+    test("startup sweep drops only closed PRs' per-PR cursors and is idempotent", () => {
+      const kinds = ["pr", "reviews", "cipr", "ciactions", "cistatus"];
+      const seed = (n: number) => {
+        for (const kind of kinds) state.setCursor(`github:${kind}:acme/widgets#${n}`, "v", "e");
+        state.setCursor(`github:prcomments:acme/widgets#${n}`, "2026-11-01T00:00:00Z");
+      };
+      state.recordAgentPr({ repo: "acme/widgets", prNumber: 1 });
+      state.recordAgentPr({ repo: "acme/widgets", prNumber: 2 });
+      state.recordAgentPr({ repo: "acme/widgets", prNumber: 3 });
+      // Close rows the pre-pruning way: state flip only, cursors left behind.
+      for (const n of [1, 2, 3]) seed(n);
+      const db = new Database(dbPath);
+      db.run("UPDATE agent_prs SET state = 'closed' WHERE pr_number IN (1, 3)");
+      db.close();
+      seed(4); // no agent_prs row: another subsystem's, never touched
+      for (const source of ["jira", "github:mention:prcomments:acme/widgets", "worker:relay"]) {
+        state.setCursor(source, "v");
+      }
+
+      expect(state.pruneClosedChangeRequestCursors()).toBe(10);
+
+      const sources = state.listCursors().map((cursor) => cursor.source);
+      for (const n of [1, 3]) {
+        expect(sources.filter((source) => source.endsWith(`#${n}`))).toEqual([
+          `github:prcomments:acme/widgets#${n}`,
+        ]);
+      }
+      for (const n of [2, 4]) {
+        for (const kind of kinds) expect(sources).toContain(`github:${kind}:acme/widgets#${n}`);
+      }
+      expect(sources).toContain("jira");
+      expect(sources).toContain("github:mention:prcomments:acme/widgets");
+      expect(sources).toContain("worker:relay");
+
+      expect(state.pruneClosedChangeRequestCursors()).toBe(0);
+      expect(state.listCursors().map((cursor) => cursor.source)).toEqual(sources);
+    });
+
+    test("markAgentPrClosed leaves cursors of an unregistered PR alone", () => {
+      state.setCursor("github:pr:acme/widgets#5", "state", "e");
+      state.markAgentPrClosed("acme/widgets", 5);
+      expect(state.getCursor("github:pr:acme/widgets#5")).not.toBeNull();
+    });
+
+    test("closing a GitLab MR drops its CI watcher cursors", () => {
+      const mr = {
+        provider: "gitlab" as const,
+        instanceUrl: "https://gitlab.example",
+        projectPath: "group/app",
+        number: 9,
+        webUrl: "https://gitlab.example/group/app/-/merge_requests/9",
+      };
+      state.recordAgentChangeRequest(mr);
+      state.recordAgentChangeRequest({ ...mr, number: 10, webUrl: `${mr.webUrl}0` });
+      for (const n of [9, 10]) {
+        for (const kind of ["cipr", "ciactions", "cistatus"]) {
+          state.setCursor(`gitlab:${kind}:https://gitlab.example:group/app#${n}`, "v");
+        }
+      }
+
+      state.markAgentChangeRequestClosed(mr);
+
+      const sources = state.listCursors().map((cursor) => cursor.source);
+      expect(sources.some((source) => source.endsWith("#9"))).toBe(false);
+      expect(sources.filter((source) => source.endsWith("#10"))).toHaveLength(3);
     });
 
     test("clearCursor removes the source", () => {

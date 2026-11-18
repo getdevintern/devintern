@@ -4,7 +4,7 @@ sidebarLabel: "Worker"
 description: "Use when running DevIntern as a long-running worker that picks up tracker tasks, handles PR reviews and CI failures, and runs as a service."
 section: "Automation"
 order: 2
-dateModified: 2026-11-12
+dateModified: 2026-11-17
 ---
 
 # Worker Daemon
@@ -62,7 +62,7 @@ The doctor does not start the worker or edit anything. It never writes `workspac
 
 ## Agent failover
 
-Set `AGENT_HARNESS=codex,grok` (comma-separated, priority first) in the workspace `.env` so the worker keeps going when one agent hits a usage limit. Failover applies to every worker job: tracker tasks, PR review addressing, `@mention` runs, conflict resolution, scheduled automations, estimations, dashboard retries, and relay-driven work — except automations, estimations, or conflict resolution that pin their own `harness` (see [Choosing the agent per schedule](#choosing-the-agent-per-schedule)). Details: [Failover across multiple harnesses](./configuration.md#failover-across-multiple-harnesses).
+Set `AGENT_HARNESS=codex,grok` (comma-separated, priority first) in the workspace `.env` so the worker keeps going when one agent hits a usage limit. Failover applies to every worker job: tracker tasks, PR review addressing, `@mention` runs, conflict resolution, scheduled automations, estimations, dashboard retries, and relay-driven work — except automations, estimations, or conflict resolution that pin their own `harness` (see [Choosing the agent per schedule](#choosing-the-agent-per-schedule)). Details: [Failover across multiple harnesses](./agent-harness.md#failover-across-multiple-harnesses).
 
 When every harness in the chain is usage-limited, automation and estimation occurrences that come due are skipped (logged as `occurrence skipped: no agent harness is available until …`) and the schedule moves on to its next occurrence. They are not queued for catch-up. Dashboard **Run now** is rejected with the same reason. An entry that pins its own `harness` is skipped only while that harness is limited.
 
@@ -127,7 +127,7 @@ Migrating an existing workspace: PRs used to be the default. Any automation that
 
 Some recurring jobs are supposed to do nothing when there is nothing to do — "keep main green", "release only when warranted", "find flaky tests". Their prompts say to make no changes and report, but a PR-opening run with no commit used to fail with `Implementation was not committed`.
 
-Set `allow_no_changes = true` (boolean, default `false`) on those entries. When the agent finishes without changing the repository, the occurrence is recorded as a successful no-op: the run succeeds, no branch or PR is created, and no review or publish step runs. Without the flag the existing behavior is unchanged — a missing commit still fails the run.
+Set `allow_no_changes = true` (boolean, default `false`) on those entries. When the agent finishes without changing the repository, the occurrence is recorded as a successful no-op: the run succeeds, no branch or PR is created, and no review or publish step runs. Without the flag the existing behavior is unchanged — a missing commit still fails the run. A run whose agent reports that it could not meet its goal is escalated instead of succeeding; see [Reporting a blocked run](#reporting-a-blocked-run).
 
 ```toml
 [[automations]]
@@ -142,6 +142,29 @@ make no changes and report that main is already green."""
 ```
 
 The equivalent CLI flag is `--allow-no-changes` for a one-off run. Scheduled occurrences receive it automatically from the automation setting.
+
+### Reporting a blocked run
+
+A clean agent exit only means the agent stopped. A release job whose test gate failed, or a report job whose data source was unreachable, used to finish with no changes and be recorded as a successful no-op. Every implementation run (automations and tracker tasks) is now asked to state the outcome explicitly, with one line right after its final `<!-- devintern:summary:end -->` marker:
+
+```text
+<!-- devintern:outcome status=blocked reason="the unit test gate (bun run test) failed" -->
+```
+
+| `status`         | Meaning                                                                                                                                      | Recorded run                                                                                    |
+| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `blocked`        | The goal was not met: a required gate failed, a required step (push, merge, permission) was refused, or a needed dependency was unavailable. | `escalated`, with `outcome_reason` = `blocked: <reason>`                                        |
+| `partial`        | Part of the goal was met; the reason says what is missing.                                                                                   | `succeeded`, with `outcome_reason` = `partial: <reason>`, so the delivered work stays a success |
+| `noop` or `done` | Nothing to do, or the goal was met.                                                                                                          | `succeeded`                                                                                     |
+| no marker        | Same as before.                                                                                                                              | `succeeded`                                                                                     |
+
+"Nothing to do" is not blocked. A `main-red-fixer` that finds main already green should omit the marker or use `status=noop`. Your prompts can rely on the built-in instruction, or say explicitly which failures count as blocked (for example "if the test gate fails, report the run as blocked").
+
+An escalated run shows up wherever escalations already do: the dashboard run list and the automation's last run, the stats escalation rate, and `devintern report --last`. The worker logs `🛑 [automation:<id>] escalated: blocked: <reason>` instead of `✅ … completed`. The child process still exits 0, so agent failover and the transient-failure retry paths are unaffected. The next attempt is the next scheduled occurrence, or a manual **Run now** or dashboard retry.
+
+For tracker tasks, a blocked outcome changes only the run record and the markdown status. Delivery has already happened by the time the outcome is read, so a PR the run opened stays open and a remote ticket still moves to its PR status. A markdown task (`TASK_TRACKER=markdown`) is not set to `Status: Done`. It is still recorded as actioned, so polling does not dispatch it again until you edit the file. A blocked run is never resumed by session pickup: the next attempt, whether a retry, a reopened ticket, or the next occurrence, starts from a fresh branch.
+
+The marker is agent output, so it is parsed defensively. Only a whole line matching the format above counts. It is read only from the final report (the last complete summary block and what follows it, or the last 40 lines when there is no summary), never from inside a code fence, and the last valid marker wins. Unknown statuses and malformed markers are ignored. The reason is collapsed to one line and truncated to 300 characters. A run already escalated as an incomplete implementation is not affected by the marker.
 
 Automation occurrences always skip the clarity (feasibility) check, as if run with `--skip-clarity-check`. The prompt is operator-authored rather than a tracker ticket, so the extra assessment would only cost an agent call per run.
 
@@ -233,6 +256,8 @@ On shutdown the scheduler stops its timer, terminates active automation subproce
 | Task files pile up under `~/.devintern/automations/` | They are small and safe to delete — they are only run inputs; the durable record is the run history in `queue.db`.                                                                        |
 | A run failed and you need to know why                | Open the dashboard's Logs tab to read recent worker output without a shell on the machine ([details](./dashboard.md)).                                                                    |
 | The dashboard Logs tab is empty                      | The daemon tees its output to `worker.stdout.log` / `worker.stderr.log` in the workspace home. Check those files or `journalctl --user -u devintern-worker`.                              |
+| You need run data in a script or a sandboxed agent | Use the read-only `devintern worker runs`, `stats`, `automations`, `queue`, `status`, and `logs` commands. With `--json` they print the dashboard API body without needing the dashboard port ([details](./dashboard.md#read-dashboard-data-from-the-command-line)). |
+| `worker status` says `unknown` inside a sandbox | Expected. The worker records its Linux PID namespace in `.worker.lock`, and a command running inside a PID-isolated sandbox (for example bubblewrap `--unshare-pid`) cannot see the worker's pid, so it reports `unknown` instead of `stopped`. In that case `worker add` still enqueues durably and allows `--wait`, and a worker started from inside the sandbox refuses to take over the lock while the lock's heartbeat (refreshed every 20 seconds) is fresh. The same applies in reverse: a worker running inside a sandbox reports `unknown` to commands outside it, because a pid from another namespace is never probed (it could match an unrelated process). Once the heartbeat is more than 2 minutes old, the worker counts as stopped. After 5 minutes the lock is reclaimed automatically, so a worker restarted in a new PID namespace (a new container, a fresh sandbox) recovers after a crash without a manual `rm` (only the worker lock is reclaimed this way; the lock of a CLI task run, which can block on long synchronous `git` calls, is never taken over across namespaces). Reclaiming waits longer than the stopped status so a worker that is only briefly slow to refresh its heartbeat is not replaced by a second instance. Run `devintern worker status` from the worker's own namespace to confirm. If it says `stopped` inside a sandbox while the worker runs, the worker was started before upgrading: its lock has no PID namespace or heartbeat, so the sandbox falls back to the pid probe and cannot see it. Restart the worker after upgrading so its lock records its PID namespace. |
 
 ## Scheduled story-point estimation
 
@@ -314,7 +339,7 @@ How a poll cycle works:
 3. Each ready task is picked up once per change: the worker remembers the task's last seen update stamp, so a task re-enters only when it is updated again.
 4. Each ready task is handed to the workspace's admission supervisor and runs through the normal pipeline (branch, implementation, PR, tracker updates), with `[defaults].worker_task_args` controlling the flags (default `--create-pr`). Polling keeps running while tasks are in flight, so a task created during a run is picked up on the next tick and fills a free concurrency slot instead of waiting for the current batch to finish.
 
-Cursors persist in `~/.devintern/state/queue.db`; after a restart the worker resumes where it left off instead of starting from "now".
+Cursors persist in `~/.devintern/state/queue.db`; after a restart the worker resumes where it left off instead of starting from "now". Per-PR poll cursors (the PR-state, reviews, and CI ETags) are dropped when the worker sees an agent PR or GitLab MR close, and a startup sweep removes any left behind by PRs already recorded as closed.
 
 Polling is available for all eight trackers: Jira, Linear, GitHub Issues, GitLab Issues, Azure DevOps, Asana, Trello, and markdown. Trello polling uses the board actions feed and requires `TRELLO_DEFAULT_BOARD_ID` (without it, a worker with a `task_query` refuses to start with `Could not initialize the trello change detector`); Asana polling uses the Events API and requires `ASANA_DEFAULT_PROJECT_GID`; GitLab Issues polling requires `GITLAB_TOKEN` and `GITLAB_PROJECT`. A folder of markdown tasks is the fastest way to try the worker: no tracker account needed. Point `[defaults].tracker` at `markdown`, set `MARKDOWN_TASKS_DIR` in the workspace `.env`, and put the ready-tasks filter in `[defaults].task_query`.
 
@@ -435,7 +460,7 @@ poll_interval = 60
 | `--workspace <path>` | Use this `workspace.toml` (default `~/.devintern/workspace.toml`, or `DEVINTERN_WORKSPACE_DIR`) |
 | `-v, --verbose`      | Verbose logging                                                                                 |
 
-Unattended automation is exactly where sandboxing the agent matters most: set `AGENT_SANDBOX=auto` in the workspace `.env` to confine agent runs to the project workspace. See [Sandboxing the Agent](./configuration.md#sandboxing-the-agent) for providers and setup.
+Unattended automation is exactly where sandboxing the agent matters most: set `AGENT_SANDBOX=auto` in the workspace `.env` to confine agent runs to the project workspace. See [Sandboxing the Agent](./sandboxing.md) for providers and setup.
 
 ## Keeping the worker up to date
 
@@ -473,9 +498,11 @@ When a watched PR falls behind its base branch, the worker catches the branch up
 
 Success is verified, not assumed: after a push the resolver re-fetches the PR (a bounded window of a few seconds) and only reports success once GitHub shows the merge commit and no longer reports conflicts. If GitHub still says `dirty` after that window — usually because the base advanced again mid-run — the run counts as failed so another sync opens, and if the push itself cannot be published, every failure path posts a comment on the PR explaining what is missing, so automation never dies silently while the local work looked done.
 
+The review worktree's dependencies are installed from the PR branch's lockfile, so when the merge changes a dependency manifest or lockfile (`package.json`, `bun.lock`, `pnpm-lock.yaml`, `uv.lock`, `go.sum`, and the other files the install step detects), the worker reinstalls with the same install step before commit hooks, the agent, or the push run. A bumped formatter or linter on the base then applies to the merge, not the branch's older version. On a clean merge the reinstall runs right after the merge, before the push. When the conflicts don't touch dependency files, the merged lockfile is installed before the agent starts. When a lockfile is itself conflicted, the agent is told to run the install after resolving it and before committing, and the worker reinstalls again after the commit, before the push. A merge that leaves dependency files unchanged does not reinstall. After the agent commits, the worker compares the committed dependency files against what it last installed, so a resolution that changes a lockfile, or puts it back to the branch's version, is reinstalled before the push. If the reinstall fails, the sync aborts with a PR comment rather than pushing with stale tooling. If the worktree's first install had already failed (for example, the package manager isn't on the worker's `PATH`), a failed reinstall only logs a warning and the sync goes ahead, the same as before.
+
 Transient push problems recover on their own: a rejection caused by concurrent forward movement (someone pushed to the branch while the agent was resolving) triggers a bounded refresh-and-retry that rebuilds the merge on top of the new commits, keeping the eventual push a fast-forward. Rollbacks or history rewrites are left alone and deferred instead.
 
-This applies only to the agent's own PRs (the same watch list as review polling). Each base/head SHA pair is a durable event in `~/.devintern/state/queue.db`; new commits on the PR branch open a fresh event, so an exhausted attempt is retried after the next push. Failures retry up to `WEBHOOK_MAX_RETRIES` (default 3), including across worker restarts, waiting out an exponential backoff between attempts (30s after the first failure, doubling up to 10 minutes) so persistent failures do not hammer the API on every poll tick. Before acting, the worker requires the PR head SHA to remain unchanged for `WORKER_BASE_SYNC_QUIET_SECONDS` (default 30) and then re-fetches both SHAs. Recent or concurrent pushes defer the run without consuming an attempt; if a run defers several times in a row, the event is given up until the head or base moves again. GitHub's PR API can report an outdated `base.sha` for a while, so the resolver always merges the actual fetched tip of the base branch rather than trusting that field. Each resolve run is bounded by `WORKER_RESOLVE_TIMEOUT_SECONDS` (default 1800; `0` disables) — a hung resolver subprocess is killed and counted as a failed attempt, and runs left `in_progress` by a crashed or killed worker are marked failed at the next startup. The same merge logic is available manually for any PR via `devintern resolve-conflicts <pr-url>`; manual runs exit non-zero with a clear message when the fix could not be published.
+By default this applies only to the agent's own PRs (the same watch list as review polling); see [Syncing teammates' open PRs](#syncing-teammates-open-prs) to opt repos in for the rest of the team's PRs. Each base/head SHA pair is a durable event in `~/.devintern/state/queue.db`; new commits on the PR branch open a fresh event, so an exhausted attempt is retried after the next push. Failures retry up to `WEBHOOK_MAX_RETRIES` (default 3), including across worker restarts, waiting out an exponential backoff between attempts (30s after the first failure, doubling up to 10 minutes) so persistent failures do not hammer the API on every poll tick. Before acting, the worker requires the PR head SHA to remain unchanged for `WORKER_BASE_SYNC_QUIET_SECONDS` (default 30) and then re-fetches both SHAs. Recent or concurrent pushes defer the run without consuming an attempt; if a run defers several times in a row, the event is given up until the head or base moves again. GitHub's PR API can report an outdated `base.sha` for a while, so the resolver always merges the actual fetched tip of the base branch rather than trusting that field. Each resolve run is bounded by `WORKER_RESOLVE_TIMEOUT_SECONDS` (default 1800; `0` disables) — a hung resolver subprocess is killed and counted as a failed attempt, and runs left `in_progress` by a crashed or killed worker are marked failed at the next startup. The same merge logic is available manually for any PR via `devintern resolve-conflicts <pr-url>`; manual runs exit non-zero with a clear message when the fix could not be published.
 
 #### Scheduled conflict resolution
 
@@ -492,6 +519,23 @@ In scheduled mode the poller still detects every conflict on the first tick it a
 The setting applies to the whole workspace and live-reloads with `workspace.toml`. Between windows a conflicted PR cannot be merged, so teams that rely on instant rebases should keep `auto`. See [Workspaces → Automatic conflict resolution](./workspaces.md#automatic-conflict-resolution-auto-vs-scheduled-vs-disabled) for the config reference and tradeoffs.
 
 To turn automatic conflict resolution off entirely — no detection, no queuing, no agent runs — set `conflict_resolution = "disabled"`: conflicted PRs stay conflicted until resolved by hand or via `devintern resolve-conflicts <pr-url>`.
+
+### Syncing teammates' open PRs
+
+Base sync can also cover the rest of the team's open PRs, not just the agent's own. Opt in per repository in `workspace.toml`:
+
+```toml
+[[repos]]
+name = "backend"
+remote = "git@github.com:acme/backend.git"
+sync_team_prs = true
+```
+
+For each opted-in repo the worker lists open PRs on every poll (one ETag-conditional `GET /repos/{owner}/{repo}/pulls?state=open&per_page=100`; `304` responses reuse the previous list) and catches eligible ones up with their base exactly like the agent's own PRs: same `mergeable_state` check, quiet period, retry backoff, defer cap, `conflict_resolution` mode (`disabled` turns this off too and skips the listing), and scheduled windows. Runs are recorded as `conflict_resolution` in run history. Teammates' PRs only get base sync — review feedback on them is never addressed.
+
+A PR is eligible only when it is open, not a draft, its branch lives in the same repository (forks are skipped), and GitHub's `author_association` for its author is `OWNER`, `MEMBER`, `COLLABORATOR`, or `MAINTAIN`. The author check runs on the list entry, again on the PR itself, and once more right before the resolver starts. The agent's own PRs are excluded from the sweep because they already go through the full pipeline. The worker logs `👀 watching owner/repo#N (open PR) for base sync` when it starts watching a PR, `🚧 skipping … (non-team author: …)` once per skipped PR, `👋 … left the open-PR list` when a PR closes or merges, and marks the sync line with `(external PR)`. Only the first 100 open PRs are discovered; the worker warns once while a repo's list sits at that cap.
+
+Because conflict resolution hands teammates' code to the coding agent, `sync_team_prs` requires an explicit sandbox provider in each opted-in repo's effective environment (workspace `.env`, then the repo's `env_file`, then `[repos.env]`): `AGENT_SANDBOX=native`, `nono`, or `docker` (see `devintern sandbox`). Unset, `none`, and `auto` are refused — `auto` falls back to running unsandboxed when no provider fits the harness, which the worker cannot rule out ahead of time. The worker refuses to start, and rejects a live reload, listing each offending repo. `sync_team_prs` is GitHub-only: setting it on a GitLab (or any non-github.com) repo is a config error. The flag live-reloads; turning it off drops that repo's discovery state on the next poll.
 
 ## Auto-merge of the agent's PRs
 

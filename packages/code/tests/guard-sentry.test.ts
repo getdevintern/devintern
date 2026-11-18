@@ -146,6 +146,10 @@ describe("test Sentry pin", () => {
 
     expect(exitCode).not.toBe(0);
     expect(output).toContain("GIT_CEILING_DIRECTORIES must include");
+    // The refusal must name the documented single-file runner command so a
+    // reader does not fall back to hand-setting GIT_CEILING_DIRECTORIES.
+    expect(output).toContain("bun run test ./<file>.test.ts");
+    expect(output).toContain("do not hand-set GIT_CEILING_DIRECTORIES");
     expect(output).not.toContain("1 pass");
   });
 });

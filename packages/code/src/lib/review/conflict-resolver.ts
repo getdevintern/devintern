@@ -2,7 +2,8 @@ import { assertCurrentGitLabOrigin } from "../code-host/change-origin";
 import { createConflictChangeAdapter } from "./conflict-change-adapter";
 import type { ChangeRequestInfo } from "./conflict-change-adapter";
 /**
- * Merge-conflict resolution for the agent's own PRs.
+ * Merge-conflict resolution for the agent's own PRs, plus teammates' PRs in
+ * repos opted into team-PR base sync (`sync_team_prs = true`).
  *
  * When a watched PR falls behind its base and GitHub reports it conflicting
  * (`mergeable_state: "dirty"`), the worker merges the base branch into the PR
@@ -16,8 +17,11 @@ import type { ChangeRequestInfo } from "./conflict-change-adapter";
  * refresh-and-retry of the merge+push, and every failure path posts a comment
  * on the PR so a silent dead-end is impossible.
  *
- * Guardrails: only the agent's own PRs are handled (the review poller's
- * watch list), fork PRs are skipped, and pushes are never forced — retries
+ * Guardrails: automatic runs only reach PRs the review poller selects — the
+ * agent's own PRs (its watch list) and, per opted-in repo, open non-draft
+ * same-repo PRs by team members (`author_association` OWNER/MEMBER/
+ * COLLABORATOR/MAINTAIN, run only under an explicit agent sandbox); fork
+ * PRs are skipped, and pushes are never forced — retries
  * always build on top of whatever is actually published, so a human push
  * that lands mid-resolution is incorporated rather than fought.
  *
@@ -36,9 +40,9 @@ import type { ChangeRequestInfo } from "./conflict-change-adapter";
 
 import { runAgent } from "./address";
 import { parseChangeRequestUrl } from "../code-host/index";
-import type { PullRequestInfo } from "../code-host/github/reviews";
+import type { PullRequestInfo } from "../code-host/github/reviews-types";
 import { untrustedContentBlock } from "../prompts/untrusted-content";
-import { Utils } from "../utils";
+import { isDependencyFile, Utils } from "../utils";
 
 export interface ResolveConflictsOptions {
   verbose?: boolean;
@@ -91,7 +95,23 @@ export function buildConflictPrompt(options: {
   baseRef: string;
   branch: string;
   conflictedFiles: string[];
+  /**
+   * Conflicted dependency manifests/lockfiles. The worker cannot install a
+   * lockfile that still has conflict markers, so the agent must reinstall
+   * after resolving them and before committing (the commit runs hooks).
+   */
+  conflictedDependencyFiles?: string[];
 }): string {
+  const dependencyStep =
+    options.conflictedDependencyFiles && options.conflictedDependencyFiles.length > 0
+      ? `
+4. Dependency manifests or lockfiles are among the conflicted files. Once they are
+   resolved, run the project's dependency install (for example \`bun install\`) BEFORE
+   committing, so commit hooks (formatters, linters) run with the merged toolchain
+   rather than the branch's older one.`
+      : "";
+  const commitStep = dependencyStep ? "5" : "4";
+  const finalStep = dependencyStep ? "6" : "5";
   return `# Resolve Merge Conflicts
 
 A merge of \`origin/${options.baseRef}\` into \`${options.branch}\` is in progress in this
@@ -110,10 +130,10 @@ Instructions:
 2. Watch for semantic conflicts that merge cleanly textually but break the build
    (renamed functions, changed signatures, moved files). Check call sites of
    anything the base renamed or removed.
-3. Run the project's typecheck and affected tests if available to verify the result.
-4. Stage everything and complete the merge commit with:
+3. Run the project's typecheck and affected tests if available to verify the result.${dependencyStep}
+${commitStep}. Stage everything and complete the merge commit with:
    git add -A && git commit --no-edit
-5. Do NOT push. Do NOT amend or rebase existing commits. Do NOT abort the merge.
+${finalStep}. Do NOT push. Do NOT amend or rebase existing commits. Do NOT abort the merge.
 
 When you are done, every conflict must be resolved and the merge commit created.`;
 }
@@ -335,9 +355,129 @@ type MergeAttempt =
   | { kind: "aborted"; message: string };
 
 /**
+ * Dependency manifests/lockfiles whose content differs between `fromRev` and
+ * the working tree (index included). `null` when git cannot tell, which
+ * callers treat as "changed" so a broken diff never skips a needed install.
+ */
+async function changedDependencyFiles(workDir: string, fromRev: string): Promise<string[] | null> {
+  const diff = await Utils.executeGitCommand(["diff", "--name-only", fromRev], { cwd: workDir });
+  if (!diff.success) return null;
+  return diff.output
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((path) => path !== "" && isDependencyFile(path));
+}
+
+/**
+ * Blob ids of `paths` as currently staged (stage 0). Taken right before the
+ * conflict agent runs so the worker can tell afterwards whether the agent's
+ * resolution changed dependency files the pre-agent install already covered.
+ */
+async function stagedBlobIds(workDir: string, paths: string[]): Promise<Map<string, string>> {
+  const ids = new Map<string, string>();
+  if (paths.length === 0) return ids;
+  const listed = await Utils.executeGitCommand(["ls-files", "-s", "--", ...paths], {
+    cwd: workDir,
+  });
+  for (const line of listed.output.split("\n")) {
+    // "<mode> <sha> <stage>\t<path>"
+    const match = /^\d+ ([0-9a-f]+) 0\t(.+)$/.exec(line.trim());
+    if (match) ids.set(match[2], match[1]);
+  }
+  return ids;
+}
+
+/** Blob ids of `paths` in the HEAD commit. */
+async function headBlobIds(workDir: string, paths: string[]): Promise<Map<string, string>> {
+  const ids = new Map<string, string>();
+  if (paths.length === 0) return ids;
+  const listed = await Utils.executeGitCommand(["ls-tree", "-r", "HEAD", "--", ...paths], {
+    cwd: workDir,
+  });
+  for (const line of listed.output.split("\n")) {
+    // "<mode> blob <sha>\t<path>"
+    const match = /^\d+ blob ([0-9a-f]+)\t(.+)$/.exec(line.trim());
+    if (match) ids.set(match[2], match[1]);
+  }
+  return ids;
+}
+
+/**
+ * Reinstall dependencies after the base merge changed manifests/lockfiles,
+ * reusing worktree preparation (hook isolation, submodules, install) so this
+ * cannot drift from the initial install. Installers can rewrite tracked
+ * files (e.g. `bun install` normalizing `bun.lock`); those rewrites are
+ * restored from the index so the merge stays exactly what git produced.
+ * Paths in `keep` (still-conflicted files the agent has yet to resolve) are
+ * never touched.
+ *
+ * When `fatal` is set (the initial preparation install succeeded), a failure
+ * here aborts the sync: no hook or agent may run against tooling older than
+ * the merged lockfile. When the initial install had already failed (e.g. the
+ * package manager is not on the worker's PATH), the sync never had installed
+ * tooling to drift from, so a failure only warns, matching the non-fatal
+ * contract of `prepareWorktreeForAgent`.
+ */
+async function reinstallMergedDependencies(params: {
+  workDir: string;
+  verbose: boolean;
+  changed: string[] | null;
+  fatal: boolean;
+  keep?: string[];
+}): Promise<{ success: true } | { success: false; error: string }> {
+  const summary =
+    params.changed === null
+      ? "could not diff dependency files"
+      : params.changed.slice(0, 5).join(", ") + (params.changed.length > 5 ? ", …" : "");
+  console.log(`📦 Base merge changed dependency files (${summary}); reinstalling dependencies`);
+  const install = await Utils.prepareWorktreeForAgent(params.workDir, {
+    verbose: params.verbose,
+  });
+  if (!install.success) {
+    const error = install.error ?? "unknown install error";
+    if (params.fatal) return { success: false, error };
+    console.warn(
+      `⚠️  Reinstall after the base merge failed, but the initial dependency install had already failed; continuing: ${error}`,
+    );
+  }
+  const dirty = await Utils.executeGitCommand(["diff", "--name-only"], { cwd: params.workDir });
+  const keep = new Set(params.keep ?? []);
+  const rewritten = dirty.output
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((path) => path !== "" && !keep.has(path));
+  if (rewritten.length > 0) {
+    await Utils.executeGitCommand(["checkout", "--", ...rewritten], { cwd: params.workDir });
+  }
+  return { success: true };
+}
+
+/**
  * Merge `origin/<baseRef>` into the worktree, resolving conflicts with the
  * agent when needed. Returns an abort/skip outcome instead of commenting so the
  * caller owns the `failWith` side effects.
+ *
+ * Dependencies were installed from the PR branch's lockfile during worktree
+ * preparation, so when the merge changes a manifest or lockfile they are
+ * reinstalled before anything else runs against them. Ordering:
+ * - Clean merge: `git merge` commits immediately (it runs no pre-commit
+ *   hook), then dependencies are reinstalled before returning, i.e. before
+ *   the pre-push hook and any hook-fix agent.
+ * - rerere auto-resolution: reinstall before the worker's `git commit`
+ *   (which runs pre-commit hooks).
+ * - Conflicts with no dependency file among them: the merged lockfile is
+ *   already in the index, so it is installed before the agent runs; the
+ *   agent and its commit hooks use the merged toolchain.
+ * - A conflicted dependency file: there is no installable lockfile until the
+ *   agent resolves it, so the prompt tells the agent to install before
+ *   committing. If the agent leaves the merge uncommitted, the worker
+ *   installs the resolved files before its own `git commit`; otherwise it
+ *   reinstalls after the agent's commit, before push.
+ * After the agent, the worker also reinstalls whenever the committed
+ * dependency files differ from what it last installed.
+ *
+ * `installFatal` is whether the worktree preparation install succeeded; only
+ * then is a failed reinstall a regression worth aborting the sync for.
  */
 async function attemptMerge(params: {
   workDir: string;
@@ -345,6 +485,7 @@ async function attemptMerge(params: {
   branch: string;
   verbose: boolean;
   agentRunner: AgentRunner;
+  installFatal: boolean;
 }): Promise<MergeAttempt> {
   // Worktree preparation installs dependencies, and installers can rewrite
   // tracked files (e.g. `bun install` normalizing `bun.lock`), leaving the
@@ -356,6 +497,15 @@ async function attemptMerge(params: {
     verbose: false,
     cwd: params.workDir,
   });
+
+  const preMerge = await Utils.executeGitCommand(["rev-parse", "HEAD"], { cwd: params.workDir });
+  // Without a pre-merge revision the diff cannot be scoped; fall back to
+  // treating dependency files as changed (reinstalling is the safe side).
+  const preMergeHead = preMerge.success ? preMerge.output.trim() : null;
+  const dependencyChanges = async (): Promise<string[] | null> =>
+    preMergeHead ? await changedDependencyFiles(params.workDir, preMergeHead) : null;
+  const needsInstall = (changed: string[] | null): boolean =>
+    changed === null || changed.length > 0;
 
   const mergeTarget = `origin/${params.baseRef}`;
   const merge = await Utils.executeGitCommand(["merge", mergeTarget, "--no-edit"], {
@@ -376,6 +526,21 @@ async function attemptMerge(params: {
       return { kind: "skipped", message: "already up to date with base" };
     }
     console.log(`✅ origin/${params.baseRef} merged cleanly`);
+    const changed = await dependencyChanges();
+    if (needsInstall(changed)) {
+      const install = await reinstallMergedDependencies({
+        workDir: params.workDir,
+        verbose: params.verbose,
+        changed,
+        fatal: params.installFatal,
+      });
+      if (!install.success) {
+        return {
+          kind: "aborted",
+          message: `dependency install after merging origin/${params.baseRef} failed: ${install.error}`,
+        };
+      }
+    }
     return { kind: "ok", outcome: "clean" };
   }
 
@@ -401,6 +566,23 @@ async function attemptMerge(params: {
     }
     console.log(`♻️  Conflicts auto-resolved from a previous identical merge; committing`);
     await Utils.executeGitCommand(["add", "-A"], { cwd: params.workDir });
+    // The commit below runs pre-commit hooks: install the merged lockfile first.
+    const changed = await dependencyChanges();
+    if (needsInstall(changed)) {
+      const install = await reinstallMergedDependencies({
+        workDir: params.workDir,
+        verbose: params.verbose,
+        changed,
+        fatal: params.installFatal,
+      });
+      if (!install.success) {
+        await Utils.executeGitCommand(["merge", "--abort"], { cwd: params.workDir });
+        return {
+          kind: "aborted",
+          message: `dependency install after merging origin/${params.baseRef} failed: ${install.error}`,
+        };
+      }
+    }
     const commit = await Utils.executeGitCommand(["commit", "--no-edit"], {
       cwd: params.workDir,
     });
@@ -411,11 +593,44 @@ async function attemptMerge(params: {
     return { kind: "ok", outcome: "resolved" };
   }
 
+  const conflictedDependencyFiles = conflictedFiles.filter(isDependencyFile);
+  // What the worker installed for, as staged blob ids; `null` = nothing
+  // installed since worktree preparation (pre-merge dependencies).
+  let installedFor: Map<string, string> | null = null;
+  if (conflictedDependencyFiles.length === 0) {
+    // The merged manifests/lockfiles are already resolved in the index, so
+    // install them now: the agent and its commit hooks then run with the
+    // merged toolchain. Conflicted files are left untouched for the agent.
+    const changed = await dependencyChanges();
+    if (needsInstall(changed)) {
+      const install = await reinstallMergedDependencies({
+        workDir: params.workDir,
+        verbose: params.verbose,
+        changed,
+        fatal: params.installFatal,
+        keep: conflictedFiles,
+      });
+      if (!install.success) {
+        await Utils.executeGitCommand(["merge", "--abort"], { cwd: params.workDir });
+        return {
+          kind: "aborted",
+          message: `dependency install after merging origin/${params.baseRef} failed: ${install.error}`,
+        };
+      }
+      installedFor = await stagedBlobIds(params.workDir, changed ?? []);
+    }
+  }
+
   console.log(`⚔️  ${conflictedFiles.length} conflicted file(s); handing to the agent`);
   let agentResult: { success: boolean; output: string };
   try {
     agentResult = await params.agentRunner(
-      buildConflictPrompt({ baseRef: params.baseRef, branch: params.branch, conflictedFiles }),
+      buildConflictPrompt({
+        baseRef: params.baseRef,
+        branch: params.branch,
+        conflictedFiles,
+        conflictedDependencyFiles,
+      }),
       params.workDir,
       params.verbose,
     );
@@ -443,15 +658,73 @@ async function attemptMerge(params: {
     };
   }
 
+  // Whether the installed dependencies differ from `changes` as recorded in
+  // `blobIds` (the index before the worker's commit, HEAD after it).
+  // Compare against what was installed, not only against the pre-merge HEAD:
+  // an agent that reverts a merged lockfile to the branch's version drops it
+  // from the diff while the merged toolchain is still installed.
+  const installIsStale = async (
+    changes: string[] | null,
+    blobIds: (workDir: string, paths: string[]) => Promise<Map<string, string>>,
+  ): Promise<boolean> => {
+    if (!installedFor || !changes) return needsInstall(changes);
+    const installed = installedFor;
+    const paths = [...new Set([...installed.keys(), ...changes])];
+    const current = await blobIds(params.workDir, paths);
+    return paths.some((path) => current.get(path) !== installed.get(path));
+  };
+
   if (mergeHead.success) {
-    // Agent resolved but did not commit; finish the merge.
+    // Agent resolved but did not commit; finish the merge. The commit below
+    // runs pre-commit hooks, so install the resolved dependencies first (the
+    // agent may have skipped the install the prompt asked for).
     await Utils.executeGitCommand(["add", "-A"], { cwd: params.workDir });
+    const resolvedChanges = await dependencyChanges();
+    if (await installIsStale(resolvedChanges, stagedBlobIds)) {
+      const install = await reinstallMergedDependencies({
+        workDir: params.workDir,
+        verbose: params.verbose,
+        changed: resolvedChanges,
+        fatal: params.installFatal,
+      });
+      if (!install.success) {
+        await Utils.executeGitCommand(["merge", "--abort"], { cwd: params.workDir });
+        return {
+          kind: "aborted",
+          message: `dependency install after resolving the merge with origin/${params.baseRef} failed: ${install.error}`,
+        };
+      }
+      if (resolvedChanges) {
+        installedFor = await stagedBlobIds(params.workDir, resolvedChanges);
+      }
+    }
     const commit = await Utils.executeGitCommand(["commit", "--no-edit"], {
       cwd: params.workDir,
     });
     if (!commit.success) {
       await Utils.executeGitCommand(["merge", "--abort"], { cwd: params.workDir });
       return { kind: "aborted", message: `merge commit failed: ${commit.error}` };
+    }
+  }
+
+  // The merge is committed. Before push (pre-push hook, hook-fix agent),
+  // make sure the installed dependencies match the committed ones: either
+  // nothing was installed yet (a dependency file was conflicted) or the
+  // agent's resolution changed a dependency file after the pre-agent install.
+  // Pre-commit hooks that rewrote a lockfile also show up here.
+  const committedChanges = await dependencyChanges();
+  if (await installIsStale(committedChanges, headBlobIds)) {
+    const install = await reinstallMergedDependencies({
+      workDir: params.workDir,
+      verbose: params.verbose,
+      changed: committedChanges,
+      fatal: params.installFatal,
+    });
+    if (!install.success) {
+      return {
+        kind: "aborted",
+        message: `dependency install after resolving the merge with origin/${params.baseRef} failed: ${install.error}`,
+      };
     }
   }
   return { kind: "ok", outcome: "resolved" };
@@ -743,11 +1016,19 @@ export async function resolveConflictsOnPr(
         console.log(`🔁 Retry ${attempt - 1}/${MAX_SYNC_ATTEMPTS - 1}: rebuilding the merge`);
       }
 
-      const worktree = await Utils.prepareReviewWorktree(branch, { verbose, cwd });
+      const worktree = await Utils.prepareReviewWorktree(branch, {
+        verbose,
+        cwd,
+        installDependencies: false,
+      });
       if (!worktree.success || !worktree.path) {
         return await failWith("setup", `worktree preparation failed: ${worktree.error}`);
       }
       workDir = worktree.path;
+      // Installed here rather than inside `prepareReviewWorktree` so the
+      // result is known: a post-merge reinstall failure is only fatal when
+      // this baseline install worked.
+      const baselineInstall = await Utils.prepareWorktreeForAgent(workDir, { verbose });
 
       if (leaseSha) {
         const preparedHead = await Utils.executeGitCommand(["rev-parse", "HEAD"], {
@@ -792,7 +1073,14 @@ export async function resolveConflictsOnPr(
         }
       }
 
-      const mergeAttempt = await attemptMerge({ workDir, baseRef, branch, verbose, agentRunner });
+      const mergeAttempt = await attemptMerge({
+        workDir,
+        baseRef,
+        branch,
+        verbose,
+        agentRunner,
+        installFatal: baselineInstall.success,
+      });
       if (mergeAttempt.kind === "skipped") {
         return { outcome: "skipped", message: mergeAttempt.message };
       }

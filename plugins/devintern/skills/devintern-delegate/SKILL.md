@@ -7,6 +7,15 @@ description: Delegate agreed implementation work to a DevIntern worker as ad-hoc
 
 Use `devintern worker add` to hand work to an existing workspace worker. It runs the task through the configured implementation pipeline in a separate checkout. Creating tracker tickets with `devpm` is a different workflow.
 
+## Local or remote worker
+
+`devintern worker add` must run on the machine that runs the worker. The worker is remote when the user names an SSH host for it, or when `DEVINTERN_WORKER_SSH` is set in your environment (a skill convention; the CLI does not read it). In that case run every step below on that host: `ssh <host> '<command>'` for each `devintern` command and each workspace read, with paths such as `~/.devintern/workspace.toml` and `--workspace` resolved on the host. Do not look for a local install or local workspace in remote mode, and do not install DevIntern locally to work around a remote problem.
+
+- Check `ssh <host> 'devintern worker add --help'` first. If `devintern` is not found over SSH, retry once with `~/.bun/bin/devintern`. If SSH itself fails (unknown host, authentication, timeout), report the blocker and point at the [remote delegation setup](https://devintern.com/docs/code/delegation#delegate-from-another-machine); do not change SSH or Tailscale configuration unasked.
+- Send the brief on stdin with `--body-file -` (`ssh <host> "devintern worker add … --body-file - --json" < brief.md`) so the remote shell never parses it. Keep the title free of single quotes, or escape it for the remote shell.
+- The worker uses its own checkout. Push the commits the task depends on, or copy the needed findings into the brief; local-only branches and files are invisible to it.
+- A dropped SSH connection ends `--wait` locally but not the task. Prefer short bounded waits, and check `worker runs` over SSH before enqueueing again.
+
 ## Check the destination
 
 - Check `devintern worker add --help` before dispatching. This command was introduced by [PR #278](https://github.com/getdevintern/devintern/pull/278); older installations do not support it. If unavailable, report the missing capability rather than silently switching to a foreground implementation run or installing an unreleased build.
@@ -40,10 +49,10 @@ Replace the example repo, file, title, and key with the actual task values. Add 
 
 Wait only when completion is needed for the caller's next step. Append `--wait --wait-timeout 600` for a bounded ten-minute wait, choosing a limit appropriate to the task. The CLI default is six hours; `0` disables the timeout. With `--wait --json`, stdout still contains one final object. Exit `0` indicates success and `1` indicates failure to complete the wait successfully.
 
-A timeout, worker stop, or inconclusive wait can produce a `status: "failed"` result with an `error` even though the task itself has not failed or been cancelled. Inspect the error and existing run in the dashboard or worker logs before considering another enqueue. Do not edit the queue database or managed prompt files to retry or cancel work.
+A timeout, worker stop, or inconclusive wait can produce a `status: "failed"` result with an `error` even though the task itself has not failed or been cancelled. Inspect the error and existing run before considering another enqueue: `devintern worker runs --task-key <taskKey> --json` and `devintern worker runs show <id> --json` read the run history without the dashboard (they also work inside a sandbox), and `devintern worker logs --level warn` shows recent worker output. Do not edit the queue database or managed prompt files to retry or cancel work.
 
 ## Report the outcome
 
-Return the repository, task ID/key, and whether this was a new enqueue or a deduplicated task. Say whether the task is queued, completed, failed, or its completion is unknown. If the result carried `harnessPausedUntil`, say the task is queued behind a usage limit until that time. Include a PR URL only when confirmed by the run artifacts or dashboard; the enqueue response itself does not provide one.
+Return the repository, task ID/key, and whether this was a new enqueue or a deduplicated task. Say whether the task is queued, completed, failed, or its completion is unknown. If the result carried `harnessPausedUntil`, say the task is queued behind a usage limit until that time. Include a PR URL only when confirmed by the run record (`prUrl` in `devintern worker runs show <id> --json`), its artifacts, or the dashboard; the enqueue response itself does not provide one.
 
 For command behavior and troubleshooting, consult the [delegation guide](https://devintern.com/docs/code/delegation). When working in the DevIntern source repository, the corresponding source is `docs/code/delegation.md`; check the installed CLI's help when documentation and installed capabilities differ.

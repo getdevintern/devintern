@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
+import { ActivityHeatmap } from "@/components/ActivityHeatmap";
 import { EmptyState, FilterGroup } from "@/components/shared";
 import {
   Table,
@@ -11,6 +12,7 @@ import {
 } from "@/components/ui/table";
 import { usePoll } from "@/lib/api";
 import type { RunOrigin, RunStatus, StatsResponse } from "@/lib/api";
+import { browserTimeZone, sameClock } from "@/lib/run-activity";
 import { formatRunOrigin } from "@/lib/run-origin";
 import { cn, formatDuration, formatRate } from "@/lib/utils";
 
@@ -373,8 +375,25 @@ function StatsSkeleton() {
 /** Aggregate stats over a selectable window. */
 export function StatsView() {
   const [window, setWindow] = useState<(typeof WINDOWS)[number]>("30d");
-  const { data, error } = usePoll<StatsResponse>(`/api/stats?window=${window}`);
+  // Default to the worker host zone: cron automations fire there, so that is
+  // the clock to rebalance them on.
+  const [zone, setZone] = useState<"worker" | "browser">("worker");
+  const viewerZone = browserTimeZone();
+  const tzParam = zone === "browser" && viewerZone ? `&tz=${encodeURIComponent(viewerZone)}` : "";
+  const { data, error } = usePoll<StatsResponse>(`/api/stats?window=${window}${tzParam}`);
   const stats = data?.stats ?? null;
+  const hostZone = data?.hostTimeZone;
+  const zoneControl =
+    hostZone && viewerZone && !sameClock(hostZone, viewerZone) ? (
+      <FilterGroup
+        options={["worker", "browser"] as const}
+        value={zone}
+        onChange={setZone}
+        formatLabel={(option) =>
+          option === "worker" ? `Worker · ${hostZone}` : `Yours · ${viewerZone}`
+        }
+      />
+    ) : null;
 
   return (
     <div className="space-y-4">
@@ -418,6 +437,17 @@ export function StatsView() {
               </div>
             </section>
           </div>
+
+          {stats.activity ? (
+            <section className="rounded-lg border border-border bg-card p-4">
+              <h2 className="section-title">When runs happen</h2>
+              <p className="subtle-text mt-1 mb-3 text-xs">
+                Pickups and agent time by weekday and hour. Schedule new automations into quiet
+                hours to spread load.
+              </p>
+              <ActivityHeatmap activity={stats.activity} timeZoneControl={zoneControl} />
+            </section>
+          ) : null}
 
           {stats.byHarness.length > 0 ? (
             <section>

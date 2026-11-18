@@ -10,12 +10,12 @@ import {
   formatPastTime,
   formatSpan,
 } from "@/lib/utils";
+import type { WorkerStatus } from "@/lib/api";
 import type {
   OverviewHarnesses,
   OverviewResponse,
   OverviewTrackerSource,
-  WorkerStatus,
-} from "@/lib/api";
+} from "@/lib/api-overview";
 
 const SECOND = 1000;
 const MINUTE = 60 * SECOND;

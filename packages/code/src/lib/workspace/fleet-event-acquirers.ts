@@ -10,6 +10,7 @@ import type { ChangeDetector } from "../acquirers/change-detector";
 import type { TeamConfig, WorkspaceConfig } from "./config";
 import { buildRepoEnv, buildTeamTaskEnv, gitHubSlugFromRemote } from "./env";
 import { createFleetTaskExecutor, resolveActionedSource } from "./fleet-executor";
+import { assertTeamPrSyncSandbox, teamPrSyncSlugs } from "./team-pr-sync";
 import type { FleetTask, RepoManagerLike } from "./fleet-executor";
 import type { openWorkspaceState } from "./state";
 import type { TaskSupervisor } from "../worker/supervisor";
@@ -146,7 +147,7 @@ function buildFleetCiProvider(
     },
     fetchWorkflowRuns: async (repo, sha, etag) => {
       const result = await gh(repo).conditionalGet<{
-        workflow_runs: import("../code-host/github/reviews").WorkflowRunSummary[];
+        workflow_runs: import("../code-host/github/reviews-types").WorkflowRunSummary[];
       }>(
         `/repos/${repo}/actions/runs?head_sha=${encodeURIComponent(sha)}&per_page=100`,
         ownerOf(repo),
@@ -209,7 +210,7 @@ async function buildAutoMergeWatcher(params: {
   const { AutoMergeWatcherAcquirer: Watcher, DEFAULT_AUTO_MERGE_QUIET_SECONDS } =
     await import("../acquirers/auto-merge-watcher");
   const { parseHarnessList } = await import("@devintern/agent-harness");
-  const { isGitHubNotFound } = await import("../code-host/github/reviews");
+  const { isGitHubNotFound } = await import("../code-host/github/github-errors");
   const { fleetAutoMergePolicyFingerprint } = await import("./fleet-events");
   const settings = config.workspace.autoMerge;
   if (
@@ -307,6 +308,10 @@ export async function buildFleetEventAcquirers(options: {
   const intervalUpdaters = options.intervalUpdaters ?? [];
   const acquirers: import("../../worker").Acquirer[] = [];
 
+  // `sync_team_prs` hands teammates' code to the coding agent; refuse to
+  // start unless every opted-in repo's effective env names a sandbox.
+  assertTeamPrSyncSandbox(config, workspaceDir);
+
   const {
     createFleetAddressPr,
     createFleetAutoMerge,
@@ -399,8 +404,9 @@ export async function buildFleetEventAcquirers(options: {
 
     // Tier 1: the agent's own PRs (central agent_prs registry is repo-keyed,
     // so one acquirer covers the whole fleet).
-    const { ReviewPollingAcquirer } = await import("../acquirers/review-polling");
-    const { isGitHubNotFound } = await import("../code-host/github/reviews");
+    const { ReviewPollingAcquirer, OPEN_PR_LIST_PAGE_SIZE } =
+      await import("../acquirers/review-polling");
+    const { isGitHubNotFound } = await import("../code-host/github/github-errors");
     const runStore = new RunStore(state.dbPath);
     const reviewAcquirer = new ReviewPollingAcquirer({
       intervalSeconds,
@@ -442,6 +448,19 @@ export async function buildFleetEventAcquirers(options: {
           );
           return result.data ?? [];
         },
+        listOpenPullRequests: async (repo, etag) => {
+          try {
+            return await gh(repo).conditionalGet(
+              `/repos/${repo}/pulls?state=open&per_page=${OPEN_PR_LIST_PAGE_SIZE}`,
+              ownerOf(repo),
+              nameOf(repo),
+              etag,
+            );
+          } catch (error) {
+            if (isGitHubNotFound(error)) return { data: null, notModified: false, gone: true };
+            throw error;
+          }
+        },
       },
       addressPr: fleetAddressPr,
       resolveConflicts,
@@ -452,6 +471,9 @@ export async function buildFleetEventAcquirers(options: {
       // Factory form: repos added at runtime become watchable without a
       // restart (a static list would pin the startup slug set).
       allowedRepos: () => fleetGitHubSlugs(config),
+      // Factory form for the same reason: reloads toggling `sync_team_prs`
+      // apply on the next tick (and prune per-repo state when turned off).
+      syncTeamPrsRepos: () => teamPrSyncSlugs(config),
       verbose,
     });
     acquirers.push(reviewAcquirer);
