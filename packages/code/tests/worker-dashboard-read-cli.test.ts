@@ -215,6 +215,9 @@ describe("devintern worker read-only dashboard commands", () => {
   }
 
   test("--json prints exactly the dashboard handler body for every command", () => {
+    // Freeze the clock: the in-progress fixture run's busy time counts up to
+    // `now`, so CLI and handler output would otherwise differ by a millisecond.
+    setSystemTime(new Date());
     const data = embeddedDashboardData();
     try {
       const cases: [WorkerReadCommand, string[], () => ApiResponse][] = [
@@ -306,6 +309,7 @@ describe("devintern worker read-only dashboard commands", () => {
     } finally {
       setSystemTime();
       data.close();
+      setSystemTime();
     }
   });
 

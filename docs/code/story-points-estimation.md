@@ -4,12 +4,40 @@ description: "Schedule unattended AI story-point estimation via [[estimations]] 
 section: "Automation"
 order: 6
 sidebarHidden: true
-dateModified: 2026-11-12
+dateModified: 2026-11-18
 ---
 
 # Story Points Estimation
 
-Let the [workspace worker](./worker.md) estimate stories on a schedule with `[[estimations]]` in `workspace.toml`, or use the `--estimate` flag as a CLI one-shot. In both modes your AI agent analyzes tasks and automatically assigns story point estimates — useful for backlog grooming, sprint planning, or keeping estimates up to date as tasks evolve.
+DevIntern can estimate tracker tasks with your AI agent, either as a one-shot CLI run with `--estimate` or on a schedule with the [worker](./worker.md). Use it for backlog grooming or to keep estimates current as tasks change.
+
+For each task the agent reads the description, comments, linked resources, and related issues, then:
+
+- picks a Fibonacci estimate (1, 2, 3, 5, 8, 13, 21),
+- writes it to the tracker's story points field, and
+- posts a comment with its confidence (high, medium, low), reasoning, risks, and unclear areas.
+
+Estimation works with Jira, Linear, Azure DevOps, and Asana (via a custom field). GitHub and GitLab get a comment only. Trello and markdown are not supported.
+
+## One-shot from the CLI
+
+```bash
+devintern PROJ-123 --estimate
+
+# Batch: every task matching a query
+devintern --estimate --query "project = PROJ AND sprint in openSprints() AND 'Story Points' is EMPTY"
+```
+
+`--jql` still works as a deprecated alias of `--query`.
+
+## Which tasks are skipped
+
+- Tasks created less than 24 hours ago, so the team has time to refine them.
+- Tasks with an estimate comment that have not changed since. A task updated after its estimate is re-estimated, and the existing comment is updated instead of a new one being posted.
+
+## Scheduled estimation with the worker
+
+Add `[[estimations]]` entries to `workspace.toml`. The worker runs `devintern --estimate --query "<query>"` when each entry comes due. Estimation never implements, creates branches, or opens PRs.
 
 ```toml
 [[estimations]]
@@ -19,77 +47,44 @@ cron = "0 9 * * 1-5"
 query = "status = 'To Do' AND labels IN (NeedsEstimate)"
 ```
 
-## What It Does
+| Key                          | Description                                                                                                 |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `id`                         | Stable, unique name. Required.                                                                              |
+| `enabled`                    | `true` or `false`. Required.                                                                                |
+| `query`                      | Tracker query for the tasks to estimate. Required.                                                          |
+| `cron` or `interval`         | Exactly one. Same format as [automations](./automations.md#defining-an-automation).                        |
+| `team`                       | Estimate against this [team's](./workspaces.md#multiple-teams-and-tracker-boards) tracker and credentials. |
+| `harness`, `model`, `effort` | Agent for this schedule. See [Choosing the agent per schedule](./automations.md#choosing-the-agent-per-schedule). |
 
-- Analyzes task description, comments, linked resources, and related issues
-- Produces a **Fibonacci-scale** estimate (1, 2, 3, 5, 8, 13, 21)
-- Provides **confidence level** (high / medium / low), reasoning, risks, and unclear areas
-- Sets the story points field directly in JIRA
-- Posts a rich estimation comment with full context
+Without `team`, an entry uses `[defaults].tracker` and the shared `.env`. With `team`, it uses that team's tracker, its credential layers, and its tracker's query language; a team's fixed `repo` is ignored. The worker refuses to start if `team` names an unknown team or one whose tracker cannot estimate. There is no `repo` key: estimation never touches a repository.
 
-## Usage (CLI one-shot)
+```toml
+[[teams]]
+name = "oss"
+tracker = "github"
+task_query = "label:devintern"
+env_file = "teams/oss.env"   # GITHUB_TOKEN, GITHUB_REPO=acme/sdk
 
-`--estimate` remains the interactive/one-shot path; scheduled sweeps run the same engine from the worker.
-
-### Single Task
-
-```bash
-devintern PROJ-123 --estimate
+[[estimations]]
+id = "oss-groom"
+enabled = true
+team = "oss"
+interval = "6h"
+query = "label:needs-estimate"
 ```
 
-### Batch via JQL
+Notes:
 
-```bash
-# Estimate all tasks in the backlog
-devintern --estimate --query "project = PROJ AND status = 'To Do'"
+- Without `[[estimations]]`, estimation is off. `[defaults].task_query` is never estimated on its own. `worker init` does not set up estimations.
+- Entries can be added, changed, or removed while the worker runs. A sweep in progress is not interrupted.
+- While estimations are configured, the worker runs one agent at a time, so sweeps do not compete with other work for usage limits.
+- A usage limit ends the sweep cleanly; the next occurrence continues. Missed and overlapping occurrences follow the same rules as [automations](./automations.md#how-occurrences-run).
+- A task where only the field or only the comment was written is reported as failed and retried on the next sweep.
+- Each sweep appears in the [dashboard](./dashboard.md) with the `estimate` origin.
 
-# Estimate unestimated tasks in the current sprint
-devintern --estimate --query "project = PROJ AND sprint in openSprints() AND 'Story Points' is EMPTY"
+## Story points field (Jira)
 
-# Estimate recently updated tasks
-devintern --estimate --query "project = PROJ AND updated >= -7d"
-```
-
-`--jql` still works as a deprecated alias of `--query`.
-
-## Smart Behavior
-
-### Skip Recently Created Tasks
-
-Tasks created less than **24 hours ago** are automatically skipped. This gives the team time to refine the description before estimation.
-
-### Smart Re-Estimation
-
-If a task already has an estimation comment:
-
-- If the task hasn't been updated since the last estimate → **skipped**
-- If the task was updated after the last estimate → **re-estimated in place** (existing comment is updated, not duplicated)
-
-This keeps estimates fresh without creating comment clutter.
-
-## Story Points Scale
-
-| Points | Meaning                                                  |
-| ------ | -------------------------------------------------------- |
-| **1**  | Trivial change, config tweak, typo fix                   |
-| **2**  | Small, well-defined task, single file change             |
-| **3**  | Moderate task, a few files, clear requirements           |
-| **5**  | Significant feature, multiple files, some complexity     |
-| **8**  | Large feature, cross-cutting concerns, integration work  |
-| **13** | Very large, multiple subsystems, high complexity         |
-| **21** | Epic-sized, major architectural change, high uncertainty |
-
-## Configuration
-
-### Story Points Field
-
-The tool auto-discovers the story points field in JIRA by searching for common names like:
-
-- `Story Points`
-- `Story Point Estimate`
-- `Story point estimate`
-
-If your JIRA instance uses a custom field name, you can override it in `.devintern-code/settings.json`:
+DevIntern finds the field by common names such as `Story Points` and `Story Point Estimate`. If yours has another name, set it in `.devintern-code/settings.json`:
 
 ```json
 {
@@ -101,73 +96,10 @@ If your JIRA instance uses a custom field name, you can override it in `.devinte
 }
 ```
 
----
-
-## Scheduled Estimation with the Worker
-
-The [workspace worker](./worker.md) runs unattended estimation for you via `[[estimations]]` in `workspace.toml`. No more cron of `--estimate`: the worker owns the timer, the durable schedule state, and serialization with all other agent work.
-
-```toml
-[[estimations]]
-id = "weekday-groom"
-enabled = true
-cron = "0 9 * * 1-5"
-query = "status = 'To Do' AND labels IN (NeedsEstimate)"
-
-[[estimations]]
-id = "sprint-gaps"
-enabled = true
-cron = "0 10 * * 3"
-query = "sprint in openSprints() AND \"Story Points\" is EMPTY"
-```
-
-Each entry needs a unique `id`, boolean `enabled`, a non-empty `query`, and exactly one of `cron` or `interval`. There is no `prompt` and no `repo`: a due entry runs one-shot `devintern --estimate --query "<query>"`, which estimates — never implements, branches, or opens PRs. Estimating does not depend on `[defaults].task_query`; an omitted or empty `[[estimations]]` table simply means estimation is off.
-
-You can add, remove, enable, disable, reschedule, or change the query of an estimation entry while the worker is running. The worker validates and reconciles the edit automatically without interrupting an in-progress sweep.
-
-Notes:
-
-- Works with Jira, Linear, Azure DevOps, Asana, GitHub, and GitLab (GitHub and GitLab are comment-only). Trello/markdown workspaces fail at startup.
-- In a multi-team workspace, set `team = "<team name>"` on an entry to estimate that team's board with its own tracker and credentials, for example a GitHub Issues team next to Jira defaults. Entries without `team` use `[defaults].tracker`. See [Worker Daemon → Per-team estimations](./worker.md#per-team-estimations).
-- Runs use the full skip/re-estimate behavior above (24h gate, update-in-place). A partial tracker update (field or comment fails) is reported as failed and retried on the next sweep, even if the successful half changed the task or comment timestamp.
-- Usage-limit aborts end the sweep cleanly; the next occurrence retries. Tickets already written stay done.
-- Each sweep is visible in the [dashboard](./dashboard.md) under its own `estimate` origin.
-
-See [Worker Daemon → Scheduled story-point estimation](./worker.md#scheduled-story-point-estimation) for semantics and troubleshooting.
-
-## Example Output
-
-```
-📊 Running in estimation mode...
-
-============================================================
-📊 Estimating: PROJ-456
-
-🔄 Re-estimating PROJ-456: task updated since last estimate
-✅ Estimated PROJ-456: 5 story points (high confidence)
-
-============================================================
-📊 Estimation Summary:
-   Estimated: 3
-   Skipped (< 24h old): 1
-   Skipped (not updated): 2
-   Failed: 0
-```
-
 ## Troubleshooting
 
-**"Story points field not found"**
-
-- Check your JIRA instance's custom field name for story points
-- Set `storyPointsField` in `.devintern-code/settings.json`
-
-**"Failed to parse estimation response"**
-
-- The AI agent may have returned non-JSON output
-- Try running with `--verbose` to see the raw response
-- Check that your agent CLI is working correctly
-
-**Low confidence estimates**
-
-- The estimation comment will flag low confidence and ask for more details
-- Consider refining the task description before re-estimating
+| Problem                                   | Fix                                                                                       |
+| ----------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `Story points field not found`            | Set `storyPointsField` in `.devintern-code/settings.json`.                                |
+| `Failed to parse estimation response`     | The agent returned non-JSON output. Run with `--verbose` and check that the agent CLI works. |
+| Low-confidence estimates                  | The comment asks for more detail. Refine the task description; the next run re-estimates it. |

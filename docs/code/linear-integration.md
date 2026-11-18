@@ -89,7 +89,7 @@ This workflow:
 
 ### Actioned issues (worker)
 
-When the worker creates a PR it moves the issue to `prStatus` (when configured) and records it as actioned locally, so your ready-tasks query no longer re-implements it. The local marker also covers the case where no `prStatus` is set or the transition fails. Re-arm an actioned issue by editing its summary or description, moving it back to a ready state, or changing labels — see [Tickets already actioned after a PR](./worker.md#tickets-already-actioned-after-a-pr).
+When the worker creates a PR it moves the issue to `prStatus` (when configured) and records it as actioned locally, so your ready-tasks query no longer re-implements it. The local marker also covers the case where no `prStatus` is set or the transition fails. Re-arm an actioned issue by editing its summary or description, moving it back to a ready state, or changing labels — see [Tickets already actioned after a PR](./worker-troubleshooting.md#tickets-already-actioned-after-a-pr).
 
 ## Batch processing with --query
 

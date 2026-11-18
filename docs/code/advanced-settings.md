@@ -115,7 +115,7 @@ To override `clarity.md` or `estimation.md`, put a file with the same name in `.
 
 | Field              | Effect                                                                                                              |
 | ------------------ | ------------------------------------------------------------------------------------------------------------------- |
-| `prStatus`         | Status, state, or label to set after the PR is created. This also moves the ticket out of sweep queries ([details](./worker.md#tickets-already-actioned-after-a-pr)) |
+| `prStatus`         | Status, state, or label to set after the PR is created. This also moves the ticket out of sweep queries ([details](./worker-troubleshooting.md#tickets-already-actioned-after-a-pr)) |
 | `inProgressStatus` | Status to set when work starts                                                                                      |
 | `todoStatus`       | Status to restore if implementation fails                                                                           |
 | `storyPointsField` | Custom field for story points. Found automatically if omitted                                                        |
@@ -141,4 +141,4 @@ Every failure comes with a suggested fix. The probes only run `<cli> --version` 
 | `1`       | Not ready: a check failed, for example no harness in the chain can run or the primary can't start |
 | `2`       | Only with `--strict`: warnings but no failures, for CI that requires a fully ready setup       |
 
-`devintern init` runs some of these checks at the end. For the unattended worker, use [`devintern worker doctor`](./worker.md#checking-worker-readiness-worker-doctor). If a failure looks like a DevIntern bug, run `devintern report` ([Reporting bugs](./reporting-bugs.md)).
+`devintern init` runs some of these checks at the end. For the unattended worker, use [`devintern worker doctor`](./worker.md#checking-readiness-worker-doctor). If a failure looks like a DevIntern bug, run `devintern report` ([Reporting bugs](./reporting-bugs.md)).

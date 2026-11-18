@@ -195,7 +195,7 @@ dependencies are not supported.
 | `stacked`          | every dependency's latest run succeeded (its PR may still be open)          | the one unmerged dependency's branch      |
 
 Pick the workspace default with `[defaults].dependency_mode` in
-[`workspace.toml`](./workspaces.md#workspacetoml), and override it per task with
+[`workspace.toml`](./workspaces.md#the-workspace-file), and override it per task with
 `--stack` or `--wait-merge` (mutually exclusive). The resolved mode is stored on
 the task.
 
