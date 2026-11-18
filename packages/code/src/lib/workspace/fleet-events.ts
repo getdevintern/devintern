@@ -298,6 +298,7 @@ export function createFleetAutoMerge(
           review: settings.review,
           method: settings.method,
           reviewLabel: settings.reviewLabel,
+          once: settings.once,
         },
         expectedHeadSha,
         lastAttempt: options?.lastAttempt ?? false,

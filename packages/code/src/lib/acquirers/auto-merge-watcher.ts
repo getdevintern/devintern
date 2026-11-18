@@ -15,6 +15,10 @@
  * (for example widening the safe paths or enabling the review). `waiting`
  * outcomes back off without consuming attempts; failures retry up to a cap.
  *
+ * With `once` (`[workspace].auto_merge_once`, the default), a decision is also
+ * recorded per PR and policy, so later commits (updates, conflict
+ * resolutions) are not checked again; only a policy change re-checks the PR.
+ *
  * Each evaluation is recorded as a run while it executes, so the dashboard
  * shows it live. Evaluations that end in "not ready yet" (waiting, skipped)
  * are discarded afterwards; decisions stay in the run list.
@@ -78,6 +82,12 @@ export interface AutoMergeWatcherOptions {
    */
   policyFingerprint?: (repo: string) => string;
   /**
+   * Live `[workspace].auto_merge_once` switch: once a PR has a decision, its
+   * later head commits are not checked again (default: off here; the
+   * workspace default is on).
+   */
+  once?: () => boolean;
+  /**
    * Whether `baseRef` is a branch some tracked task's PR is stacked on (the
    * stacked-PR maintainer's links), beyond the agent PR branches the registry
    * already knows. A PR targeting one is never merged.
@@ -131,6 +141,16 @@ export function autoMergeDecisionKey(
   policyFingerprint?: string,
 ): string {
   const base = `${repo.toLowerCase()}#${prNumber}@${headSha}`;
+  return policyFingerprint ? `${base}:${policyFingerprint}` : base;
+}
+
+/** Durable key of a PR-level auto-merge decision (`auto_merge_once`). */
+export function autoMergePrDecisionKey(
+  repo: string,
+  prNumber: number,
+  policyFingerprint?: string,
+): string {
+  const base = `${repo.toLowerCase()}#${prNumber}:once`;
   return policyFingerprint ? `${base}:${policyFingerprint}` : base;
 }
 
@@ -317,15 +337,29 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
     if (!READY_STATES.has(pr.mergeable_state ?? "")) return;
     const quietMs = (this.options.quietSeconds ?? DEFAULT_AUTO_MERGE_QUIET_SECONDS) * 1000;
     if (!force && now - state.headSeenAt < quietMs) return;
-    const decisionKey = autoMergeDecisionKey(
-      repo,
-      prNumber,
-      headSha,
-      this.options.policyFingerprint?.(repo),
-    );
-    if (this.options.queue.hasProcessed(AUTO_MERGE_SOURCE, decisionKey)) return;
+    const decisionKeys = this.undecidedKeys(repo, prNumber, headSha);
+    if (!decisionKeys) return;
 
-    await this.evaluate(repo, prNumber, state, decisionKey);
+    await this.evaluate(repo, prNumber, state, decisionKeys);
+  }
+
+  /**
+   * Decision keys (per head, per PR) for a head that still needs a check, or
+   * `null` when this head, or with `once` this PR, was already decided under
+   * the current policy.
+   */
+  private undecidedKeys(
+    repo: string,
+    prNumber: number,
+    headSha: string,
+  ): [head: string, pr: string] | null {
+    const fingerprint = this.options.policyFingerprint?.(repo);
+    const headKey = autoMergeDecisionKey(repo, prNumber, headSha, fingerprint);
+    const prKey = autoMergePrDecisionKey(repo, prNumber, fingerprint);
+    const { queue } = this.options;
+    if (queue.hasProcessed(AUTO_MERGE_SOURCE, headKey)) return null;
+    if (this.options.once?.() && queue.hasProcessed(AUTO_MERGE_SOURCE, prKey)) return null;
+    return [headKey, prKey];
   }
 
   /** Whether a stacked PR must be skipped; logs the reason once per head and base. */
@@ -365,7 +399,7 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
     repo: string,
     prNumber: number,
     state: PrTracking,
-    decisionKey: string,
+    decisionKeys: [head: string, pr: string],
   ): Promise<void> {
     const runId = this.beginRun(repo, prNumber);
     // The run row exists before the check is admitted: until the supervisor
@@ -384,6 +418,11 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
     }
     const label = `${repo}#${prNumber}`;
     const finishedAt = this.now();
+    // Both keys are always recorded, so turning `once` on later also skips
+    // PRs decided while it was off.
+    const markDecided = () => {
+      for (const key of decisionKeys) this.options.queue.markProcessed(AUTO_MERGE_SOURCE, key);
+    };
 
     switch (result.outcome) {
       case "merged":
@@ -392,12 +431,12 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
         this.options.workerState.markAgentPrClosed(repo, prNumber, "merged", {
           mergedAt: finishedAt,
         });
-        this.options.queue.markProcessed(AUTO_MERGE_SOURCE, decisionKey);
+        markDecided();
         break;
       case "would-merge":
       case "rejected":
       case "skipped":
-        this.options.queue.markProcessed(AUTO_MERGE_SOURCE, decisionKey);
+        markDecided();
         break;
       case "waiting":
         state.nextAttemptAt = finishedAt + WAITING_BACKOFF_MS;
@@ -414,7 +453,7 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
             `⛔ [${this.name}] ${label} auto-merge failed ${state.failures} time(s); ` +
               "giving up until new commits land",
           );
-          this.options.queue.markProcessed(AUTO_MERGE_SOURCE, decisionKey);
+          markDecided();
         } else {
           state.nextAttemptAt =
             finishedAt +

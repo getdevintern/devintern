@@ -84,6 +84,13 @@ export interface AutoMergeSettings {
    * (`auto_merge_review_label`, default `needs-human-review`; `""` disables).
    */
   reviewLabel: string;
+  /**
+   * Check each PR once (`auto_merge_once`, default true): after a decision,
+   * later commits (updates, conflict resolutions) are not re-checked, which
+   * saves agent review tokens. A policy change still re-checks. When false,
+   * every new head commit is checked again.
+   */
+  once: boolean;
   /** Agent for the merge-safety review (`auto_merge_harness` / `_model` / `_effort`). */
   agent?: AgentSelection;
 }

@@ -108,6 +108,7 @@ auto_merge_deny_paths = ["**/migrations/**", "**/package.json", "bun.lock"]
 auto_merge_review = true                         # agent reviews PRs outside the safe paths
 auto_merge_method = "squash"                     # merge | squash | rebase
 auto_merge_review_label = "needs-human-review"   # label for PRs left open; "" disables
+auto_merge_once = true                           # check each PR once; false re-checks after new commits
 # auto_merge_model = "sonnet"                    # also auto_merge_harness / auto_merge_effort
 
 [[repos]]
@@ -123,9 +124,11 @@ Each PR passes these gates in order. Any "no" leaves it open for a human:
 3. **Safe paths.** If every changed file matches `auto_merge_safe_paths`, the PR merges with no agent run.
 4. **Agent review.** Otherwise, with `auto_merge_review = true` (the default), the agent reviews the diff and the PR merges only on an explicit "safe" verdict.
 
-Globs are repo-relative; `docs/` means `docs/**`. A rename counts both paths. Per-repo `auto_merge_safe_paths` and `auto_merge_deny_paths` replace the workspace lists. The merge is pinned to the commit that passed the gates. A PR left open is checked again after new commits or a policy change.
+Globs are repo-relative; `docs/` means `docs/**`. A rename counts both paths. Per-repo `auto_merge_safe_paths` and `auto_merge_deny_paths` replace the workspace lists. The merge is pinned to the commit that passed the gates.
 
-The worker explains each decision in one status comment on the PR, edited in place, and labels PRs left open with `auto_merge_review_label`. If the agent is usage-limited, the check waits for the quota to reset, and that wait does not count as a failed attempt. A check that fails (for example, the agent returns no verdict) is retried after 5 and then 10 minutes. After the third failure on the same commit, the status comment says the check kept failing, and the PR waits for new commits or a policy change. The dashboard's **Automations** page lists an **Auto-merge** entry; its **Run now** checks every open PR immediately.
+By default (`auto_merge_once = true`) each PR is checked once. A PR left open is not checked again when new commits land, for example from review fixes or conflict resolution, so the merge-safety review does not spend tokens on every update. Changing the auto-merge policy (safe paths, deny paths, or `auto_merge_review`) checks it again. Set `auto_merge_once = false` to check again after every new commit.
+
+The worker explains each decision in one status comment on the PR, edited in place, and labels PRs left open with `auto_merge_review_label`. If the agent is usage-limited, the check waits for the quota to reset, and that wait does not count as a failed attempt. A check that fails (for example, the agent returns no verdict) is retried after 5 and then 10 minutes. After the third failure on the same commit, the status comment says the check kept failing, and the PR waits for a policy change (or, with `auto_merge_once = false`, for new commits). The dashboard's **Automations** page lists an **Auto-merge** entry; its **Run now** checks every open PR immediately.
 
 The GitHub credential needs `Pull requests: Read and write` and `Contents: Read and write`. To test the gates on one PR without merging:
 

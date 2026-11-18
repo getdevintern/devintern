@@ -52,6 +52,7 @@ ci_failure_fix = false
 # auto_merge_review = true
 # auto_merge_method = "squash"                # merge | squash | rebase
 # auto_merge_review_label = "needs-human-review"  # label PRs left open; "" disables
+# auto_merge_once = true                      # false: re-check after every new commit
 
 # Optional bounded host concurrency. This is throughput, not VM isolation:
 # concurrent jobs share ports, processes, Docker, caches, and linked Git data.

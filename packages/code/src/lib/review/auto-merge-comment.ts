@@ -22,7 +22,13 @@ export type LeftOpenReason =
 
 export type AutoMergeCommentStatus =
   | { kind: "merged"; method: AutoMergeMethod; headSha: string; agentReason?: string }
-  | { kind: "left-open"; headSha: string; reason: LeftOpenReason };
+  | {
+      kind: "left-open";
+      headSha: string;
+      reason: LeftOpenReason;
+      /** Checked once per PR (`auto_merge_once`): new commits are not re-checked. */
+      once?: boolean;
+    };
 
 /** Neutralize mentions and flatten whitespace in text posted to the PR. */
 export function sanitizeCommentText(text: string, maxLength = 600): string {
@@ -94,6 +100,8 @@ export function buildAutoMergeStatusComment(status: AutoMergeCommentStatus): str
     "",
     ...leftOpenBody(status.reason),
     "",
-    "<sub>devintern checks again after new commits or a change to the auto-merge policy.</sub>",
+    status.once
+      ? "<sub>devintern checks each pull request once and does not check again after new commits; a change to the auto-merge policy re-checks it.</sub>"
+      : "<sub>devintern checks again after new commits or a change to the auto-merge policy.</sub>",
   ].join("\n");
 }

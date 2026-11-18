@@ -54,4 +54,17 @@ describe("buildAutoMergeStatusComment", () => {
     });
     expect(denied).toContain("`a'b.md`");
   });
+
+  test("the footer says whether new commits are re-checked", () => {
+    const reason = { kind: "agent-unsafe" as const, reason: "risky" };
+    const every = buildAutoMergeStatusComment({ kind: "left-open", headSha: SHA, reason });
+    expect(every).toContain("checks again after new commits");
+    const once = buildAutoMergeStatusComment({
+      kind: "left-open",
+      headSha: SHA,
+      reason,
+      once: true,
+    });
+    expect(once).toContain("does not check again after new commits");
+  });
 });
