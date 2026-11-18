@@ -208,7 +208,8 @@ work.
 ## Resuming and interrupted tasks (`--resume`)
 
 - **Durable.** Enqueue writes to `queue.db`, so a task survives worker restarts
-  and runs on the next poll. If no worker is running the task is still queued
+  and runs on the next poll (every 5 seconds; set
+  `WORKER_INJECTED_INTERVAL_SECONDS` to change it). If no worker is running the task is still queued
   (`worker add` says so) and `--wait` refuses to block. Settled rows are pruned
   after 30 days by default; set `WORKER_INJECTED_TASK_RETENTION_DAYS` to change
   that window. Pruned outcomes remain available to `--wait` for 24 hours after

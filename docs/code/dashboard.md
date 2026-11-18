@@ -71,7 +71,7 @@ The page also tells you whether the running worker has applied the latest versio
 
 ## Retry a failed run
 
-Open the failed run and choose **Retry**. The worker queues a fresh attempt using the same task and workspace routing rules.
+Open the failed run and choose **Retry**. The worker queues a fresh attempt using the same task and workspace routing rules, and checks the retry queue every 5 seconds (`WORKER_RETRY_INTERVAL_SECONDS`).
 
 Retry after correcting the underlying problem, for example missing credentials, unclear task details, or a temporary agent failure. The dashboard prevents duplicate retries while another attempt is already queued or running.
 
