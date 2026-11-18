@@ -10,9 +10,9 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 
 - Surface: External dependency: relay, auth, licensing, and observability services
 - Status: `default`
-- Evidence: `tests/local/dashboard-api.test.ts` (read API and a worker-consumed ad-hoc retry); `tests/local/dashboard-embedded.test.ts` (Host/Origin guard with `--allow-origin` and `DASHBOARD_ALLOWED_ORIGINS`) (`bun run --filter @devintern/e2e test`)
-- Missing: Automation run-now against the standalone spawn path (covered only through the worker-embedded dashboard).
-- Last reviewed: 2026-11-17
+- Evidence: `tests/local/dashboard-api.test.ts` (read API and a worker-consumed ad-hoc retry); `tests/local/dashboard-embedded.test.ts` (Host/Origin guard with `--allow-origin` and `DASHBOARD_ALLOWED_ORIGINS`); `tests/local/dashboard-standalone-run-now.test.ts` (automation run-now through the spawn path: claim, spawned run in history with the automation id, concurrent and repeated triggers refused) (`bun run --filter @devintern/e2e test`)
+- Missing: Retrying a failed automation run through the standalone dashboard (`retryAutomationRun`), and run-now for an automation with `open_pr = true`.
+- Last reviewed: 2026-11-19
 
 ### Worker/dashboard logs and artifacts
 
@@ -26,17 +26,17 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 
 - Surface: `devintern` command surface
 - Status: `default`
-- Evidence: `tests/local/dashboard-api.test.ts`, `tests/local/dashboard-embedded.test.ts` (`bun run --filter @devintern/e2e test`)
-- Missing: Standalone automation run-now spawn path.
-- Last reviewed: 2026-11-17
+- Evidence: `tests/local/dashboard-api.test.ts`, `tests/local/dashboard-embedded.test.ts`, `tests/local/dashboard-standalone-run-now.test.ts` (`bun run --filter @devintern/e2e test`)
+- Missing: `--workspace` mode's read-only workspace automation catalog.
+- Last reviewed: 2026-11-19
 
 ### Dashboard embedded in the worker
 
 - Surface: `devintern worker` surface
 - Status: `default`
-- Evidence: `tests/local/dashboard-embedded.test.ts` (`bun run --filter @devintern/e2e test`)
-- Missing: Retry through the embedded dashboard (`retryMode: "schedule"`).
-- Last reviewed: 2026-11-17
+- Evidence: `tests/local/dashboard-embedded.test.ts`; `tests/local/dashboard-embedded-retry.test.ts` (ad-hoc retry re-queued through the worker's own queue, concurrent double-POST, Host/Origin guard on the retry route, audit and eligibility) (`bun run --filter @devintern/e2e test`)
+- Missing: A tracker-task retry in schedule mode (the `scheduled_retries` row the worker drains); the ad-hoc retry uses the same `injected_tasks` re-queue in both modes.
+- Last reviewed: 2026-11-19
 
 ### GET /api/workspace redacted workspace view
 
@@ -51,7 +51,7 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 Priority numbers are the global ranking from the
 [index](../coverage-matrix.md#priority-backlog); lower runs first.
 
-- Priority 10: Retry through the worker-embedded dashboard and standalone automation run-now. Embedded mode, embedded run-now, the Host/Origin guard, and log redaction are covered by `tests/local/dashboard-embedded.test.ts`; the standalone server, its read API, and a successful ad-hoc retry by `tests/local/dashboard-api.test.ts`.
+- ~~Priority 10: Retry through the worker-embedded dashboard and standalone automation run-now. Embedded mode, embedded run-now, the Host/Origin guard, and log redaction are covered by `tests/local/dashboard-embedded.test.ts`; the standalone server, its read API, and a successful ad-hoc retry by `tests/local/dashboard-api.test.ts`.~~ Done: `tests/local/dashboard-embedded-retry.test.ts` and `tests/local/dashboard-standalone-run-now.test.ts`.
 
 ## Test notes
 
@@ -163,6 +163,54 @@ bun run --filter @getdevintern/code build
 bun run --filter @devintern/e2e test
 # or just this file
 cd packages/e2e && bun test tests/local/dashboard-embedded.test.ts
+```
+
+### Retry through the worker-embedded dashboard
+
+`tests/local/dashboard-embedded-retry.test.ts` runs in the default offline
+suite. It starts a `WorkerFixture` with `dashboard: { port }` and one injected
+task that the deterministic agent fails once before editing
+(`E2E_FAIL_ONCE_FILE`), then drives the retry through the worker's own
+dashboard port, with no standalone `devintern dashboard`. It asserts:
+
+- the failed run is eligible (`kind: "injected"`); a retry POST with no Origin,
+  a foreign Origin, or a rebound Host returns 403, and `text/plain` returns 415.
+  None of them re-queues the row or writes an audit entry;
+- two concurrent `POST /api/runs/:id/retry` requests with the loopback Origin:
+  one returns 202 `{ status: "scheduled", runId, taskKey }` with no `pid` or
+  `command` (nothing was spawned), the other 409 with the documented in-flight
+  refusal. There is one `run_retry_audit` row (`scheduled`, actor
+  `local-dashboard`) and no `scheduled_retries` row;
+- the same daemon completes the re-queued row: attempt 2 `succeeded` on
+  `feature/<task-key>-attempt-2` with the greeting edit on the remote, nothing
+  pushed for the failed attempt, and the base branch and seed unchanged;
+- `GET /api/runs/:id` afterwards reports the success as not retriable ("this
+  run already succeeded") and keeps the single audit entry on the failed run.
+
+### Standalone automation run-now
+
+`tests/local/dashboard-standalone-run-now.test.ts` runs in the default offline
+suite. It writes one automation (January 1st cron, `open_pr = false`) to the
+seed checkout's `.devintern-code/automations.toml` and starts the standalone
+`devintern dashboard` there without `--workspace`, so it serves that file
+through the spawn path. No worker daemon runs. It asserts:
+
+- `/api/automations` lists the entry with no last run, and a run-now POST
+  without an Origin returns 403 and starts nothing;
+- two concurrent run-now POSTs: one returns 202 `{ status: "triggered",
+automationId }`, the other 409 (`a manual run of "<id>" was just triggered
+and is starting`, or the in-progress refusal if the spawned CLI already
+  opened its run row);
+- the spawned CLI records one `manual` run with the automation id that
+  succeeds, with one agent invocation, the edit applied in the checkout, one
+  occurrence file, and no pushed branch. The run shows in
+  `/api/runs?automationId=…` and as the automation's `lastRun`;
+- a third trigger after the run finished still returns the claim refusal,
+  because the in-flight claim outlives the run until its TTL.
+
+```sh
+bun run --filter @getdevintern/code build
+cd packages/e2e && bun test tests/local/dashboard-embedded-retry.test.ts tests/local/dashboard-standalone-run-now.test.ts
 ```
 
 ### Run artifact and harness-log readback, and the redacted workspace view

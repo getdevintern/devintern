@@ -26,9 +26,9 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 
 - Surface: External dependency: relay, auth, licensing, and observability services
 - Status: `default`
-- Evidence: `tests/local/worker-sentry-monitor.test.ts`
-- Missing: Live Sentry project; issue status resolution after deployment; multiple concurrent issues.
-- Last reviewed: 2026-11-17
+- Evidence: `tests/local/worker-sentry-monitor.test.ts` (single-issue happy path, success comment, dedupe) and `tests/local/worker-sentry-selection.test.ts` (`bun run --filter @devintern/e2e test`). With five fake unresolved issues, `min_occurrences = 5`, `max_per_tick = 2`, and `query = "environment:production"`: the below-threshold issue is never actioned, an issue at exactly the threshold is, the first poll starts two runs and the third eligible issue waits for a later poll, an issue whose count is raised past the threshold mid-test gets one run on a later poll, and every eligible issue gets exactly one run and one success comment across repeated polls. Every issue-list request carries `is:unresolved environment:production`; the threshold is applied client-side, not in the query.
+- Missing: Live Sentry project; issue status resolution after deployment.
+- Last reviewed: 2026-11-19
 
 ### Anonymous telemetry opt-out and update check
 
@@ -50,16 +50,24 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 
 - Surface: `devintern worker` surface
 - Status: `default`
-- Evidence: `tests/local/worker-sentry-monitor.test.ts`
-- Missing: Live Sentry project and multiple concurrent issues.
-- Last reviewed: 2026-11-17
+- Evidence: `tests/local/worker-sentry-monitor.test.ts` and `tests/local/worker-sentry-selection.test.ts`: `min_occurrences`, `max_per_tick`, and `query` from `[[error_monitors]]` all reach the poll (see the polling row above).
+- Missing: Live Sentry project.
+- Last reviewed: 2026-11-19
+
+### Sentry: failed remediation comment and comment_on_action = false
+
+- Surface: `devintern worker` surface
+- Status: `default`
+- Evidence: `tests/local/worker-sentry-selection.test.ts`. A run that fails (the fake agent exits `18` before editing) is recorded `failed` and posts exactly the `SENTRY_ACTION_FAILED_COMMENT` text, never the success text; the issue stays claimed, so later polls neither retry nor comment again. With `comment_on_action = false`, a successful run is still recorded and no comment request reaches the fake.
+- Missing: A comment rejected by Sentry (401/403 or 5xx) is not exercised end to end; only a live project would prove the real comment endpoint accepts the body.
+- Last reviewed: 2026-11-19
 
 ## Backlog
 
 Priority numbers are the global ranking from the
 [index](../coverage-matrix.md#priority-backlog); lower runs first.
 
-- Priority 15: Sentry auto-fix with a fake or opt-in project.
+- ~~Priority 15: Sentry auto-fix with a fake or opt-in project.~~
 - Priority 16: Auth/license (`login`, `logout`, `whoami`, trial, expired/offline) with a safe fake or explicit account suite. Offline signed-out and fail-closed paths are covered; `login`, trial, grace, and signed-in paths remain (need a Supabase URL override or an account suite).
 
 ## Test notes
@@ -70,3 +78,10 @@ Priority numbers are the global ranking from the
 - How: unsets `DEVINTERN_SKIP_LICENSE_CHECK` for these children only and routes HTTP(S) through `helpers/recording-proxy.ts`, which refuses every tunnel and records target hosts. Assertions allow only `api.polar.sh` (fake `LICENSE_KEY`) or the hardcoded Supabase host (fake session). Credentials are obviously fake strings, and the tests assert none appears in stdout or stderr. Session files are written to `<project>/.devintern-code/.auth-session.json`.
 - Run: `bun run --filter @devintern/e2e test`, or `bun test tests/local/services-license-gate.test.ts` from `packages/e2e`.
 - Prerequisites: the built CLI (`bun run --filter @getdevintern/code build`); otherwise the file skips. No network or account. The two expired-session cases take about 25 s each because supabase-js retries the refresh.
+
+### `tests/local/worker-sentry-selection.test.ts`
+
+- Proves: Sentry issue selection across several unresolved issues (`min_occurrences` threshold including the boundary, the `max_per_tick` budget per poll with the remainder taken by later polls, an issue crossing the threshold between polls, exactly one run and one comment per eligible issue, and the configured `query` on every list request); the failed-run comment text; and that `comment_on_action = false` posts nothing while still recording the run.
+- How: `WorkerFixture` with `[[error_monitors]]` pointing at `providers/fake-sentry.ts` (now able to seed several issues, change an issue's count, and timestamp each list request). Runs per poll are derived from run records: each run is attributed to the latest list read before its `started_at`, which is exact because a poll is single-flight and runs its picks one after another. The failure uses the fake agent's `E2E_FAIL_ONCE_FILE`. The Sentry token is a random fake string and is never printed.
+- Run: `bun run --filter @devintern/e2e test`, or `bun test tests/local/worker-sentry-selection.test.ts` from `packages/e2e`.
+- Prerequisites: the built CLI (`bun run --filter @getdevintern/code build`); otherwise the file skips. No network or account. About 10 s for all three tests.
