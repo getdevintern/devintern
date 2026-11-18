@@ -1323,9 +1323,7 @@ export function handleRunHarnessLog(
     return badRequest("invalid log name");
   }
   const content = data.readRunHarnessLog(id, name);
-  if (!content) {
-    return { status: 404, body: { error: "harness log not found" } };
-  }
+  if (!content) return { status: 404, body: { error: "harness log not found" } };
   return { status: 200, body: content };
 }
 
@@ -1369,9 +1367,7 @@ export function handleRunArtifact(
     return badRequest("invalid artifact name");
   }
   const content = data.readRunArtifact(id, name);
-  if (!content) {
-    return { status: 404, body: { error: "artifact not found" } };
-  }
+  if (!content) return { status: 404, body: { error: "artifact not found" } };
   return { status: 200, body: content };
 }
 
@@ -1397,13 +1393,14 @@ export function handleStats(data: DashboardData, params: URLSearchParams): ApiRe
 /**
  * Resolve worker liveness from the daemon's lock file.
  *
- * The worker writes `.worker.lock` under `.devintern-code/` of its working directory (simple mode)
- * or directly into the workspace home (fleet mode), so both locations are consulted. A readable
- * lock with a dead pid (a stale lock left behind by a crashed worker) must not shadow a live lock
- * in the other location: the live lock wins, and `stopped` is only reported when every readable
- * lock belongs to a dead process. When no readable lock file exists in either location, liveness is
- * `unknown`: the worker may be running elsewhere, and claiming "stopped" would be wrong. A lock
- * from another PID namespace (read inside a sandbox) is `unknown` too and beats a stale one.
+ * The worker writes `.worker.lock` under `.devintern-code/` of its working directory
+ * (simple mode) or directly into the workspace home (fleet mode), so both locations are
+ * consulted. A readable lock with a dead pid (a stale lock left behind by a crashed worker)
+ * must not shadow a live lock in the other location: the live lock wins, and `stopped` is
+ * only reported when every readable lock belongs to a dead process. When no readable lock
+ * file exists in either location, liveness is `unknown`: the worker may be running
+ * elsewhere, and claiming "stopped" would be wrong. A lock from another PID namespace
+ * (read inside a sandbox) is `unknown` too and beats a stale one.
  *
  * @param workingDir - Project root the dashboard was started from
  * @param workspaceDir - Workspace home whose lock is also consulted
