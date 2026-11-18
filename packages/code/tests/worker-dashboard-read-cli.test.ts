@@ -84,6 +84,21 @@ function wire(response: ApiResponse): unknown {
   return JSON.parse(JSON.stringify(response.body));
 }
 
+/**
+ * Drop busy time accrued by the in-progress `local` fixture run: it counts up
+ * to "now", so the CLI subprocess and the in-process handler see different
+ * values milliseconds apart. Everything else in the body must match exactly.
+ */
+function withoutLiveBusyTime(body: unknown): unknown {
+  const activity = (
+    body as { stats?: { activity?: { cells?: { origin: string; busyMs?: number }[] } } }
+  )?.stats?.activity;
+  for (const cell of activity?.cells ?? []) {
+    if (cell.origin === "local") delete cell.busyMs;
+  }
+  return body;
+}
+
 /** Hash every file in the state dir so any write (DB, WAL, new file) shows up. */
 function snapshotStateDir(dir: string): Record<string, string> {
   const result: Record<string, string> = {};
@@ -263,7 +278,9 @@ describe("devintern worker read-only dashboard commands", () => {
           stderr: "",
           code: 0,
         });
-        expect(JSON.parse(result.stdout)).toEqual(wire(handler()));
+        expect(withoutLiveBusyTime(JSON.parse(result.stdout))).toEqual(
+          withoutLiveBusyTime(wire(handler())),
+        );
       }
 
       // Overview carries a generation timestamp; everything else must match.
