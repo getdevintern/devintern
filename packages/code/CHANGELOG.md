@@ -1,5 +1,16 @@
 # @devintern/code Changelog
 
+## [Unreleased]
+
+### Added
+
+- **Stacked PRs are maintained after their base changes, merges, or closes (GitHub)**: for `worker add --after` tasks in stacked mode, the worker checks each stacked PR about once a minute (`WORKER_STACKED_PRS_INTERVAL_SECONDS`, default 60). When the base PR gets new commits, the stacked branch is rebased onto the new base head with `git rebase --onto` and force-pushed with a lease, and chains A → B → C follow along. When the base merges, the stacked PR is retargeted to the branch the base merged into (unless GitHub already retargeted it) and rebased so only its own commits remain, which drops a squash-merged base's original commits. A rebase that conflicts is aborted, nothing is pushed, and the PR is left to the existing conflict resolution. When the base closes without merging, the stacked PR gets one comment explaining why it is blocked and its run is marked escalated, and it is not retargeted. GitLab merge requests are not restacked yet, and Bitbucket is not supported. See `docs/code/delegation.md#modes-merged-and-stacked`
+
+### Changed
+
+- **`dependency_mode` defaults to `stacked`**: dependent tasks now start once their dependency succeeded, on top of its branch, instead of waiting for its PR to merge. Set `[defaults].dependency_mode = "merged"` or pass `--wait-merge` to keep the old behavior. Tasks already in the queue keep the mode they were enqueued with
+- **Auto-merge skips stacked PRs**: the auto-merge watcher never merges a PR whose base is another agent PR's branch or a tracked stacked base. It logs the reason and considers the PR again once the PR targets the default branch
+
 ## [2.25.0] - 2026-11-18
 
 Sandboxed-agent release: agents and operators can read worker state with `devintern worker runs|stats|automations|prs|queue|status|overview|logs` without reaching the dashboard over the network, a worker that cannot be seen from inside a PID-namespaced sandbox is reported as unknown instead of stopped, and the worker can keep teammates' open PRs caught up with their base (`sync_team_prs`, off by default). The dashboard now shows automation source health, and blocked automation runs, feature-branch lock races, and leftover poll cursors are fixed.

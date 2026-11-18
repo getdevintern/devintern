@@ -17,7 +17,11 @@ import { mkdirSync, unlinkSync, writeFileSync } from "fs";
 import { join } from "path";
 
 import type { DependencyMode } from "../dependencies/gate";
-import { evaluateDependencyGate, findDependencyCycle } from "../dependencies/gate";
+import {
+  DEFAULT_DEPENDENCY_MODE,
+  evaluateDependencyGate,
+  findDependencyCycle,
+} from "../dependencies/gate";
 import type {
   EnqueueInjectedTaskResult,
   InjectedTask,
@@ -248,7 +252,7 @@ export function enqueueInjectedTask(
     request.after,
     request.body,
   );
-  const dependencyMode = request.dependencyMode ?? "merged";
+  const dependencyMode = request.dependencyMode ?? DEFAULT_DEPENDENCY_MODE;
 
   const dir = injectedTasksDir(workspaceDir);
   // Prompts hold arbitrary operator context, so keep them owner-only like the

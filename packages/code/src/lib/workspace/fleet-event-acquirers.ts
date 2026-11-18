@@ -86,7 +86,7 @@ export function fleetGitHubTokenForRepo(
     .GITHUB_TOKEN;
 }
 
-function createFleetGitHubClientResolver(
+export function createFleetGitHubClientResolver(
   config: WorkspaceConfig,
   workspaceDir: string,
   usesHostedApp: boolean,
@@ -206,6 +206,7 @@ async function buildAutoMergeWatcher(params: {
   runStore: RunStore;
   intervalSeconds: number;
   verbose: boolean | undefined;
+  isStackedBase?: AutoMergeWatcherOptions["isStackedBase"];
 }): Promise<AutoMergeWatcherAcquirer> {
   const { config, gh } = params;
   const { AutoMergeWatcherAcquirer: Watcher, DEFAULT_AUTO_MERGE_QUIET_SECONDS } =
@@ -248,6 +249,7 @@ async function buildAutoMergeWatcher(params: {
           parseHarnessList(process.env.AGENT_HARNESS)[0])
         : undefined,
     policyFingerprint: (slug) => fleetAutoMergePolicyFingerprint(config, slug),
+    isStackedBase: params.isStackedBase,
     quietSeconds: parseEnvInteger(
       "WORKER_AUTO_MERGE_QUIET_SECONDS",
       DEFAULT_AUTO_MERGE_QUIET_SECONDS,
@@ -283,6 +285,8 @@ export async function buildFleetEventAcquirers(options: {
   intervalUpdaters?: Array<(seconds: number) => void>;
   /** Published once event acquirers are wired (mention-sweep reconcile). */
   reloadHooksOut?: { hooks?: FleetEventReloadHooks };
+  /** Stacked-base lookup for the auto-merge guard (see `stacked-pr-acquirer.ts`). */
+  isStackedBase?: (slug: string, baseRef: string) => boolean;
   /** Shared admission supervisor for every fleet execution path. */
   supervisor?: TaskSupervisor;
 }): Promise<import("../../worker").Acquirer[]> {
@@ -504,6 +508,7 @@ export async function buildFleetEventAcquirers(options: {
       runStore,
       intervalSeconds,
       verbose,
+      isStackedBase: options.isStackedBase,
     });
     acquirers.push(autoMergeWatcher);
     intervalUpdaters.push((seconds) => autoMergeWatcher.updateInterval(seconds));

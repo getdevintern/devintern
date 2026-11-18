@@ -439,7 +439,7 @@ function parseDefaultsSection(
   };
 }
 
-/** `[defaults].dependency_mode`: `merged` (default) or `stacked`. */
+/** `[defaults].dependency_mode`: `stacked` (default) or `merged`. */
 function readDependencyMode(
   defaultsTable: Record<string, unknown>,
   errors: string[],

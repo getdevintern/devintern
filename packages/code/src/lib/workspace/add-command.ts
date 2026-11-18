@@ -33,7 +33,7 @@ import {
   InjectedTaskDependencyError,
   MAX_INJECTED_BODY_CHARS,
 } from "./injected-enqueue";
-import { resolveDependencyMode } from "../dependencies/gate";
+import { DEFAULT_DEPENDENCY_MODE, resolveDependencyMode } from "../dependencies/gate";
 import type { DependencyMode } from "../dependencies/gate";
 import {
   injectedChildStillRunningMessage,
@@ -403,7 +403,7 @@ async function enqueueNewTask(
     status(`✅ Enqueued ${task.taskKey} for repo "${task.repo}" (task #${task.id}).`);
     if (task.dependsOn.length > 0) {
       status(
-        `   Depends on ${task.dependsOn.join(", ")} (${task.dependencyMode ?? "merged"} mode)` +
+        `   Depends on ${task.dependsOn.join(", ")} (${task.dependencyMode ?? DEFAULT_DEPENDENCY_MODE} mode)` +
           (task.dependencyState ? `; ${task.dependencyState}: ${task.dependencyReason}` : ""),
       );
     }
@@ -453,7 +453,7 @@ function serialize(
     ...(dependent
       ? {
           dependsOn: task.dependsOn,
-          dependencyMode: task.dependencyMode ?? "merged",
+          dependencyMode: task.dependencyMode ?? DEFAULT_DEPENDENCY_MODE,
           ...(task.status === "pending" && task.dependencyState
             ? { dependencyState: task.dependencyState, dependencyReason: task.dependencyReason }
             : {}),

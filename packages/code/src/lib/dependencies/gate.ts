@@ -15,9 +15,9 @@
  *   closed without merging. Re-queueing that dependency can unblock it.
  *
  * Modes:
- * - `merged` (default): every dependency's PR must be merged (or the
+ * - `merged`: every dependency's PR must be merged (or the
  *   dependency succeeded without a PR). The run starts from the default branch.
- * - `stacked`: every dependency's latest run must have succeeded. With exactly
+ * - `stacked` (default): every dependency's latest run must have succeeded. With exactly
  *   one dependency still unmerged, the task branches from and targets that
  *   dependency's branch; with two or more unmerged it waits until at most one
  *   remains (a branch has one base); with none unmerged it behaves like
@@ -32,7 +32,7 @@ export type DependencyMode = "merged" | "stacked";
 export const DEPENDENCY_MODES = ["merged", "stacked"] as const satisfies readonly DependencyMode[];
 
 /** Mode used when neither the task nor `[defaults].dependency_mode` sets one. */
-export const DEFAULT_DEPENDENCY_MODE: DependencyMode = "merged";
+export const DEFAULT_DEPENDENCY_MODE: DependencyMode = "stacked";
 
 /** Whether a value is a known {@link DependencyMode}. */
 export function isDependencyMode(value: unknown): value is DependencyMode {

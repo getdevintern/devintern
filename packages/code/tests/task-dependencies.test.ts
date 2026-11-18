@@ -95,8 +95,8 @@ name = "backend"
 remote = "git@github.com:acme/backend.git"
 `;
 
-  test("defaults to merged", () => {
-    expect(parseWorkspaceConfig(base("")).defaults.dependencyMode).toBe("merged");
+  test("defaults to stacked", () => {
+    expect(parseWorkspaceConfig(base("")).defaults.dependencyMode).toBe("stacked");
   });
 
   test("accepts merged and stacked", () => {
@@ -118,7 +118,7 @@ remote = "git@github.com:acme/backend.git"
   });
 
   test("per-task override wins over the configured default", () => {
-    expect(resolveDependencyMode({})).toBe("merged");
+    expect(resolveDependencyMode({})).toBe("stacked");
     expect(resolveDependencyMode({ configured: "stacked" })).toBe("stacked");
     expect(resolveDependencyMode({ override: "merged", configured: "stacked" })).toBe("merged");
   });
@@ -406,7 +406,9 @@ describe("ad-hoc task dependencies", () => {
       title,
       body: options.body ?? "",
       after: options.after,
-      dependencyMode: options.mode,
+      // These cases were written against the old `merged` default; the
+      // built-in default (stacked) has its own test.
+      dependencyMode: options.mode ?? "merged",
     }).task;
   }
 
@@ -445,6 +447,17 @@ describe("ad-hoc task dependencies", () => {
       ...extra,
     });
   }
+
+  test("a dependent task enqueued without a mode is stacked by default", () => {
+    add("First");
+    const task = enqueueInjectedTask(store, dir, {
+      repo: "backend",
+      title: "Second",
+      body: "",
+      after: ["local-first"],
+    }).task;
+    expect(task.dependencyMode).toBe("stacked");
+  });
 
   describe("enqueue validation", () => {
     test("rejects an unknown key", () => {

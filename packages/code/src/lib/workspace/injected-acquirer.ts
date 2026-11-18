@@ -23,7 +23,7 @@ import type {
   DependencyPr,
   MergeStateAnswer,
 } from "../dependencies/gate";
-import { evaluateDependencyGate } from "../dependencies/gate";
+import { DEFAULT_DEPENDENCY_MODE, evaluateDependencyGate } from "../dependencies/gate";
 import { applyStackBase } from "../dependencies/stacked-base";
 import { getWorkerFailover } from "../worker/failover";
 import { rewriteInjectedTaskFile } from "./injected-enqueue";
@@ -275,7 +275,7 @@ export class InjectedTaskAcquirer implements Acquirer {
   /** Evaluate one row's dependency gate from local facts. */
   private evaluateGate(task: InjectedTask): DependencyGateDecision {
     return evaluateDependencyGate(
-      task.dependencyMode ?? "merged",
+      task.dependencyMode ?? DEFAULT_DEPENDENCY_MODE,
       this.options.store
         .dependencyFacts(task.dependsOn)
         .map((facts) => this.withObservedPrState(task.repo, facts)),
