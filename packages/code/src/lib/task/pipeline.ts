@@ -49,7 +49,7 @@ import {
 import { pickupSelection, resolveSessionPickup } from "../state/session-pickup";
 import type { SessionPickupDecision } from "../state/session-pickup";
 import { finishTaskRun } from "../state/task-run";
-import { outcomeRunDisposition } from "../agent/implementation-outcome";
+import { deliveryRunDisposition, outcomeRunDisposition } from "../agent/implementation-outcome";
 import { TaskFormatter } from "../task/formatter";
 import type { RetryPromptContext } from "../task/formatter";
 import { buildTicketUrl } from "../task/ticket-url";
@@ -346,10 +346,14 @@ async function runImplementation(input: ImplementationInput): Promise<void> {
   );
 
   // The agent's own outcome marker decides between success and escalation
-  // for a clean run. Resolve it before any tracker transition so a blocked
-  // markdown task is not written as Done while its run is escalated.
-  const disposition = outcomeRunDisposition(outcome);
-  if (isMarkdownTaskTracker(tracker) && disposition.status !== "escalated") {
+  // for a clean run, and a requested PR that failed after the push turns it
+  // into a failure. Resolve it before any tracker transition so a blocked or
+  // undelivered markdown task is not written as Done.
+  const disposition = deliveryRunDisposition(
+    outcomeRunDisposition(outcome),
+    runContext.activeTaskContext?.prDeliveryFailure?.message,
+  );
+  if (isMarkdownTaskTracker(tracker) && disposition.status === "succeeded") {
     await tracker.markDoneIfSuccessful(workflowKey, taskDir);
   }
   if (implementationIncomplete) {
@@ -384,6 +388,8 @@ async function runImplementation(input: ImplementationInput): Promise<void> {
     // it; a markdown task stays out of Done so the file still shows it open.
     if (disposition.status === "escalated") {
       console.log(`\n🛑 Agent reported the goal as not met (${disposition.reason})`);
+    } else if (disposition.status === "failed") {
+      console.log(`\n❌ Run not delivered: ${disposition.reason}`);
     } else if (disposition.reason) {
       console.log(`\nℹ️  Agent reported the goal as ${disposition.reason}`);
     }

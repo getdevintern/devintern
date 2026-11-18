@@ -791,6 +791,7 @@ describe("runAgentHarness git delivery", () => {
     await runAgentHarness({ ...baseInput(), createPr: true });
 
     expect(runContext.activeTaskContext?.prCreationFailure).toBeUndefined();
+    expect(runContext.activeTaskContext?.prDeliveryFailure).toBeUndefined();
     expect(tracker.postComment).not.toHaveBeenCalled();
   });
 
@@ -812,6 +813,10 @@ describe("runAgentHarness git delivery", () => {
     await runAgentHarness({ ...baseInput(), createPr: true });
 
     expect(runContext.activeTaskContext?.prCreationFailure).toBeUndefined();
+    expect(runContext.activeTaskContext?.prDeliveryFailure).toEqual({
+      message: "GitHub client not configured. Please set GITHUB_TOKEN",
+      permanent: true,
+    });
     expect(tracker.postComment).toHaveBeenCalledTimes(1);
     const [, content] = (tracker.postComment as ReturnType<typeof mock>).mock.calls[0] as [
       string,
@@ -833,6 +838,10 @@ describe("runAgentHarness git delivery", () => {
     await runAgentHarness({ ...baseInput(), createPr: true, skipComments: true });
 
     expect(runContext.activeTaskContext?.prCreationFailure).toBe("rate limited");
+    expect(runContext.activeTaskContext?.prDeliveryFailure).toEqual({
+      message: "rate limited",
+      permanent: false,
+    });
     expect(tracker.postComment).not.toHaveBeenCalled();
   });
 

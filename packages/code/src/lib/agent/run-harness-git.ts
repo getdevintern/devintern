@@ -204,8 +204,12 @@ export function createGitHelpers(ctx: FinalizeContext) {
     message: string,
     options: { branch?: string; permanent?: boolean } = {},
   ) => {
-    if (runContext.activeTaskContext && !options.permanent) {
-      runContext.activeTaskContext.prCreationFailure = message;
+    if (runContext.activeTaskContext) {
+      runContext.activeTaskContext.prDeliveryFailure = {
+        message,
+        permanent: options.permanent === true,
+      };
+      if (!options.permanent) runContext.activeTaskContext.prCreationFailure = message;
     }
     if (!(taskKey && tracker) || skipComments) return;
     const { branch } = options;
@@ -329,9 +333,9 @@ export function createGitHelpers(ctx: FinalizeContext) {
         return prResult;
       } else {
         console.log(`⚠️  PR creation failed: ${prResult.message}`);
-        // The run "succeeds" without a PR — a silent user-visible
-        // degradation worth tracking. prResult.message can quote API
-        // errors; captureError redacts token-like substrings.
+        // The pipeline records the run as failed (pushed, no PR).
+        // prResult.message can quote API errors; captureError redacts
+        // token-like substrings.
         captureError(new Error(prResult.message || "PR creation failed"), {
           taskKey,
           stage: "create-pr",

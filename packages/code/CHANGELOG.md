@@ -1,5 +1,11 @@
 # @devintern/code Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **Runs whose PR could not be created are recorded as failed, not succeeded.** When `--create-pr` was requested and the branch was pushed but the code host rejected the PR (for example `GitHub PR creation failed: Not Found`), the run was recorded `succeeded` with no PR, so the dashboard, stats, `devintern worker runs --status failed`, and automation logs counted it as a success. Such runs (tracker tickets, ad-hoc `worker add` tasks, and automations) are now recorded `failed` with `outcome_reason` `pushed but PR creation failed: <message>`, and automations log `❌ [automation:<id>] failed: …`. A run the agent reported as blocked stays `escalated` with the PR failure appended to its reason. Retry behavior is unchanged: a temporary failure still re-runs the ticket up to 3 times, and a permanent one (auth, not found, validation, missing config) is not retried. Runs with `--no-git`, without `--create-pr`, or on an unsupported code host are still `succeeded`
+
 ## [2.25.0] - 2026-11-18
 
 Sandboxed-agent release: agents and operators can read worker state with `devintern worker runs|stats|automations|prs|queue|status|overview|logs` without reaching the dashboard over the network, a worker that cannot be seen from inside a PID-namespaced sandbox is reported as unknown instead of stopped, and the worker can keep teammates' open PRs caught up with their base (`sync_team_prs`, off by default). The dashboard now shows automation source health, and blocked automation runs, feature-branch lock races, and leftover poll cursors are fixed.

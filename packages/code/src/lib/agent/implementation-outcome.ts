@@ -149,7 +149,7 @@ export function isBlockedOutcomeReason(reason: string | undefined): boolean {
 
 /** Run status and recorded reason implied by a reported outcome. */
 export interface OutcomeRunDisposition {
-  status: "succeeded" | "escalated";
+  status: "succeeded" | "escalated" | "failed";
   reason?: string;
 }
 
@@ -177,6 +177,36 @@ export function outcomeRunDisposition(
     };
   }
   return { status: "succeeded" };
+}
+
+/** Prefix of the `outcome_reason` recorded for a run whose PR could not be created. */
+export const PR_DELIVERY_FAILED_REASON_PREFIX = "pushed but PR creation failed: ";
+
+/**
+ * Apply a PR delivery failure to the disposition implied by the agent's outcome.
+ *
+ * A run that was asked to open a PR, pushed its branch, and then failed to
+ * create the PR delivered nothing reviewable, so it must not count as a
+ * success. It is recorded `failed`, like the other delivery halts (commit,
+ * push), whichever way the agent reported its goal. An agent-reported
+ * `blocked` outcome stays `escalated` (a human must act either way, and
+ * session pickup keys off that reason) with the PR failure appended to its
+ * reason. Retry policy is unchanged: it lives in the worker's actioned
+ * bookkeeping, not in this status.
+ *
+ * @param disposition - Disposition from {@link outcomeRunDisposition}
+ * @param prFailure - Message of the PR creation failure, when one happened
+ */
+export function deliveryRunDisposition(
+  disposition: OutcomeRunDisposition,
+  prFailure: string | undefined,
+): OutcomeRunDisposition {
+  if (prFailure === undefined) return disposition;
+  const prReason = `${PR_DELIVERY_FAILED_REASON_PREFIX}${prFailure}`;
+  if (disposition.status === "escalated") {
+    return { status: "escalated", reason: `${disposition.reason}; ${prReason}` };
+  }
+  return { status: "failed", reason: prReason };
 }
 
 /** Prompt instruction describing the marker; appended to the summary request. */
