@@ -470,7 +470,7 @@ export class CiFailureWatcherAcquirer implements Acquirer {
     console.warn(
       `⚠️  [${this.name}] GitHub rejected the credential while polling ${repo}#${prNumber}: ` +
         `${error.message} ${describeGitHubAuthFailure(error, "ci")} ` +
-        "See docs/code/worker.md#ci-failures-on-the-agents-prs.",
+        "See docs/code/pr-follow-up.md#ci-failures-on-the-agents-prs.",
     );
   }
 

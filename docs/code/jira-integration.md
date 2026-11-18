@@ -102,7 +102,7 @@ See [Configuration](./configuration.md) for legacy `projects` format and other s
 
 ### Actioned issues (worker)
 
-A Jira query usually filters on `status = 'To Do'`, so moving the issue to `prStatus` already removes it from the sweep. The worker additionally records every PR'd issue as actioned locally, which keeps it out of the sweep if it still matches the query (for example after a failed or unconfigured transition) without re-implementing it. Re-arm an actioned issue by editing its summary or description, moving it back to your to-do status, or changing labels — see [Tickets already actioned after a PR](./worker.md#tickets-already-actioned-after-a-pr).
+A Jira query usually filters on `status = 'To Do'`, so moving the issue to `prStatus` already removes it from the sweep. The worker additionally records every PR'd issue as actioned locally, which keeps it out of the sweep if it still matches the query (for example after a failed or unconfigured transition) without re-implementing it. Re-arm an actioned issue by editing its summary or description, moving it back to your to-do status, or changing labels — see [Tickets already actioned after a PR](./worker-troubleshooting.md#tickets-already-actioned-after-a-pr).
 
 ## Running tasks
 

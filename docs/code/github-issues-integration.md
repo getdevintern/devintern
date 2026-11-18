@@ -91,7 +91,7 @@ This workflow:
 
 ### Actioned issues (worker)
 
-When the worker creates a PR it records the issue as actioned locally, so `is:open label:intern` (or however your ready-tasks query is written) no longer re-implements it even though the issue stays open and keeps its trigger label. Label transitions only add the `prStatus` label; they do not remove your trigger label, so the local actioned marker — not the query — is what actually stops the loop. Set `prStatus` if you also want a visible label. Re-arm an actioned issue by editing its summary or description, re-opening it, or changing its labels — see [Tickets already actioned after a PR](./worker.md#tickets-already-actioned-after-a-pr).
+When the worker creates a PR it records the issue as actioned locally, so `is:open label:intern` (or however your ready-tasks query is written) no longer re-implements it even though the issue stays open and keeps its trigger label. Label transitions only add the `prStatus` label; they do not remove your trigger label, so the local actioned marker — not the query — is what actually stops the loop. Set `prStatus` if you also want a visible label. Re-arm an actioned issue by editing its summary or description, re-opening it, or changing its labels — see [Tickets already actioned after a PR](./worker-troubleshooting.md#tickets-already-actioned-after-a-pr).
 
 ## Batch processing with --query
 

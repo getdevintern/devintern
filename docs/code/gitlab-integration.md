@@ -94,7 +94,7 @@ This workflow:
 
 ### Actioned issues (worker)
 
-When the worker creates a merge request it applies the `prStatus` label (when configured) and records the issue as actioned locally, so `is:open label:...` no longer re-implements it even though the issue stays open and keeps its trigger label. Re-arm an actioned issue by editing its summary or description, re-opening it, or changing its labels — see [Tickets already actioned after a PR](./worker.md#tickets-already-actioned-after-a-pr).
+When the worker creates a merge request it applies the `prStatus` label (when configured) and records the issue as actioned locally, so `is:open label:...` no longer re-implements it even though the issue stays open and keeps its trigger label. Re-arm an actioned issue by editing its summary or description, re-opening it, or changing its labels — see [Tickets already actioned after a PR](./worker-troubleshooting.md#tickets-already-actioned-after-a-pr).
 
 ## Experimental merge-request creation
 

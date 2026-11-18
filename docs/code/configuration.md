@@ -248,7 +248,7 @@ The active tracker is read from the `TASK_TRACKER` environment variable (default
 
 **Fields (all optional):**
 
-- `prStatus`: Status/state/label to transition to after PR creation (e.g., "In Review"). The worker also records the ticket locally as actioned so a sweep query that still matches it does not re-implement it; setting `prStatus` additionally moves it out of the tracker query. See [Tickets already actioned after a PR](./worker.md#tickets-already-actioned-after-a-pr).
+- `prStatus`: Status/state/label to transition to after PR creation (e.g., "In Review"). The worker also records the ticket locally as actioned so a sweep query that still matches it does not re-implement it; setting `prStatus` additionally moves it out of the tracker query. See [Tickets already actioned after a PR](./worker-troubleshooting.md#tickets-already-actioned-after-a-pr).
 - `inProgressStatus`: Status to set when starting work (e.g., "In Progress", "Doing")
 - `todoStatus`: Status to reset to if implementation fails (e.g., "To Do", "Backlog")
 - `storyPointsField`: Custom field ID for story points (e.g., `"customfield_10016"` for Jira); auto-discovered if omitted
@@ -420,7 +420,7 @@ Each failing row gets a fix hint. Exit codes:
 
 The interactive `devintern init` wizard runs a subset of these checks automatically at the end of setup.
 
-`devintern doctor` is project-scoped. When a worker workspace exists it adds one line pointing to `devintern worker doctor`, which checks the unattended worker instead (see [Worker readiness](./worker.md#checking-worker-readiness-worker-doctor)).
+`devintern doctor` is project-scoped. When a worker workspace exists it adds one line pointing to `devintern worker doctor`, which checks the unattended worker instead (see [Worker readiness](./worker.md#checking-readiness-worker-doctor)).
 
 If a check fails in a way that looks like a DevIntern defect rather than a configuration problem, run `devintern report` to file it with the readiness context attached.
 
