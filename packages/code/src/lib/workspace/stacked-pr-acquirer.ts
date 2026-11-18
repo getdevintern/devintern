@@ -13,10 +13,12 @@ import type { StackHost, StackPrSnapshot } from "../dependencies/stack-maintaine
 import { STACK_NOTICE_MARKER, StackMaintainer } from "../dependencies/stack-maintainer";
 import { createGitStack } from "../dependencies/stack-git";
 import type { InjectedTaskStore } from "../state/injected-tasks";
-import type { RunStore } from "../state/run-recorder";
+import { RunStore } from "../state/run-recorder";
+import { Utils } from "../utils";
 import type { Acquirer } from "../../worker";
 import type { WorkspaceConfig } from "./config";
-import { gitHubSlugFromRemote } from "./env";
+import { repoGitHubSlug } from "./env";
+import { workspaceDbPath } from "./paths";
 import { createFleetGitHubClientResolver } from "./fleet-event-acquirers";
 import type { RepoManager } from "./repo-manager";
 
@@ -28,7 +30,7 @@ export const DEFAULT_STACKED_PR_INTERVAL_SECONDS = 60;
 /** The GitHub `owner/name` of a workspace repo, if it has one. */
 function slugOf(config: WorkspaceConfig, repoName: string): string | undefined {
   const repo = config.repos.find((candidate) => candidate.name === repoName);
-  return repo ? (repo.env.GITHUB_REPO ?? gitHubSlugFromRemote(repo.remote)) : undefined;
+  return repo ? repoGitHubSlug(repo) : undefined;
 }
 
 /** GitHub single-PR payload fields the adapter reads (untrusted). */
@@ -139,6 +141,51 @@ export function createStackedBaseChecker(
   };
 }
 
+/**
+ * Whether an agent run (review follow-up, CI fix, base sync) is in progress on
+ * a workspace repo's PR. Those runs record the GitHub slug, PR number and
+ * branch but no task key, so they are matched on those.
+ */
+export function createPrBusyChecker(
+  config: WorkspaceConfig,
+  runStore: Pick<RunStore, "listRuns">,
+): (repo: string, prNumber: number, branch: string) => boolean {
+  return (repo, prNumber, branch) => {
+    const names = new Set([repo.toLowerCase()]);
+    const slug = slugOf(config, repo);
+    if (slug) names.add(slug.toLowerCase());
+    return runStore
+      .listRuns({ status: "in_progress", limit: 1000 })
+      .some(
+        (run) =>
+          run.repo !== undefined &&
+          names.has(run.repo.toLowerCase()) &&
+          (run.prNumber === prNumber || run.branch === branch),
+      );
+  };
+}
+
+/**
+ * The head SHA of `origin/<branch>` in a repo's bare clone, fetched first so
+ * it matches what a run starting now branches from; `null` when absent.
+ */
+export async function remoteHead(
+  config: WorkspaceConfig,
+  repoManager: Pick<RepoManager, "ensureBareClone" | "fetch">,
+  repoName: string,
+  branch: string,
+): Promise<string | null> {
+  const repo = config.repos.find((candidate) => candidate.name === repoName);
+  if (!repo) return null;
+  const clonePath = await repoManager.ensureBareClone(repo);
+  await repoManager.fetch(repo.name);
+  const result = await Utils.executeGitCommand(
+    ["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${branch}^{commit}`],
+    { cwd: clonePath },
+  );
+  return result.success ? result.output.trim() || null : null;
+}
+
 /** Polls stacked links and runs one {@link StackMaintainer} pass per tick. */
 export class StackedPrAcquirer implements Acquirer {
   readonly name = "poll:stacked-prs";
@@ -179,10 +226,12 @@ export async function buildStackedPrAcquirer(options: {
   config: WorkspaceConfig;
   workspaceDir: string;
   store: InjectedTaskStore;
-  runStore: Pick<RunStore, "latestRunByTaskKey" | "finishRun">;
+  /** Run registry for the busy check; defaults to the workspace DB. */
+  runStore?: Pick<RunStore, "listRuns">;
   repoManager: RepoManager;
 }): Promise<StackedPrAcquirer> {
-  const { config, workspaceDir, store, runStore, repoManager } = options;
+  const { config, workspaceDir, store, repoManager } = options;
+  const runStore = options.runStore ?? new RunStore(workspaceDbPath(workspaceDir));
   const { GITHUB_AUTH_MODE_ENV, GitHubReviewsClient } = await import("../code-host/github/reviews");
   const gh = createFleetGitHubClientResolver(
     config,
@@ -203,10 +252,7 @@ export async function buildStackedPrAcquirer(options: {
         return { cwd, release: () => repoManager.removeTaskWorktree(repo.name, cwd) };
       },
     }),
-    escalate: (taskKey, reason) => {
-      const run = runStore.latestRunByTaskKey([taskKey]).get(taskKey);
-      if (run && run.status === "succeeded") runStore.finishRun(run.id, "escalated", reason);
-    },
+    isPrBusy: createPrBusyChecker(config, runStore),
   });
   return new StackedPrAcquirer(
     maintainer,

@@ -26,7 +26,10 @@ export interface GitStackOptions {
   env?: NodeJS.ProcessEnv;
 }
 
-type Git = (args: string[]) => Promise<{ success: boolean; output: string; error?: string }>;
+type Git = (
+  args: string[],
+  env?: NodeJS.ProcessEnv,
+) => Promise<{ success: boolean; output: string; error?: string }>;
 
 async function revParse(git: Git, ref: string): Promise<string | null> {
   const result = await git(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]);
@@ -41,15 +44,31 @@ function tail(text: string, lines = 6): string {
   return text.trim().split("\n").slice(-lines).join(" | ");
 }
 
+/**
+ * Committer identity for the rebase. The restack checkout is a worktree of a
+ * bare clone that nothing configures an identity on, so on a host without a
+ * global `user.name`/`user.email` git refuses to commit ("Please tell me who
+ * you are"). When no identity resolves, reuse the committer of the branch tip
+ * (the identity the task run committed with, e.g. the GitHub App bot); rebase
+ * keeps each commit's author either way.
+ */
+async function committerEnv(git: Git, head: string): Promise<NodeJS.ProcessEnv | undefined> {
+  if ((await git(["var", "GIT_COMMITTER_IDENT"])).success) return undefined;
+  const ident = await git(["log", "-1", "--format=%cn%x00%ce", head]);
+  const [name = "", email = ""] = ident.success ? ident.output.trim().split("\0") : [];
+  if (name === "" || email === "") return undefined;
+  return { GIT_COMMITTER_NAME: name, GIT_COMMITTER_EMAIL: email };
+}
+
 /** {@link StackGit} backed by the git CLI. */
 export function createGitStack(options: GitStackOptions): StackGit {
   return {
     async restack({ repo, branch, expectedHeadSha, onto, oldBaseCandidates }) {
       const checkout = await options.checkout(repo);
-      const git: Git = (args) =>
+      const git: Git = (args, env) =>
         Utils.executeGitCommand(args, {
           cwd: checkout.cwd,
-          env: { GIT_EDITOR: "true", GIT_SEQUENCE_EDITOR: "true", ...options.env },
+          env: { GIT_EDITOR: "true", GIT_SEQUENCE_EDITOR: "true", ...options.env, ...env },
         });
       try {
         return await restackIn(git, { branch, expectedHeadSha, onto, oldBaseCandidates });
@@ -94,7 +113,7 @@ async function restackIn(
     oldBase = mergeBase.output.trim();
   }
 
-  const rebase = await git(["rebase", "--onto", ontoSha, oldBase]);
+  const rebase = await git(["rebase", "--onto", ontoSha, oldBase], await committerEnv(git, head));
   if (!rebase.success) {
     const unmerged = await git(["diff", "--name-only", "--diff-filter=U"]);
     const output = `${rebase.output}\n${rebase.error ?? ""}`;
@@ -116,7 +135,13 @@ async function restackIn(
   ]);
   if (!push.success) {
     const output = `${push.output}\n${push.error ?? ""}`;
-    if (/stale info|rejected|fetch first|non-fast-forward/i.test(output)) {
+    // `[remote rejected]` is the server refusing the update (pre-receive hook,
+    // branch protection, a token without the `workflows` scope): retrying
+    // pushes the same refusal. Only a lease or race failure is stale.
+    if (/\[remote rejected\]/i.test(output)) {
+      return { kind: "push-rejected", detail: tail(output) };
+    }
+    if (/stale info|fetch first|non-fast-forward/i.test(output)) {
       return { kind: "stale", detail: tail(output) };
     }
     throw new Error(`push failed: ${tail(output)}`);

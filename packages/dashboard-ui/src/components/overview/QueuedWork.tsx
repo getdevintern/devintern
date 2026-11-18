@@ -80,7 +80,7 @@ function QueuedDetails({ item, now }: { item: QueuedWorkItem; now: number }) {
         ) : null}
         {item.dependsOn?.length ? (
           <Fact label="Depends on">
-            {item.dependsOn.join(", ")} ({item.dependencyMode ?? "stacked"})
+            {item.dependsOn.join(", ")} ({item.dependencyMode ?? "merged"})
           </Fact>
         ) : null}
         {item.dependencyState && item.dependencyReason ? (

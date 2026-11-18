@@ -191,13 +191,15 @@ dependencies are not supported.
 
 | Mode                | Starts when                                                                                                | Base and PR target                   |
 | ------------------- | ---------------------------------------------------------------------------------------------------------- | ------------------------------------ |
-| `stacked` (default) | every dependency's latest run succeeded (its PR may still be open)                                         | the one unmerged dependency's branch |
-| `merged`            | every dependency's PR has merged (a dependency that succeeded with nothing to deliver counts as satisfied) | the default branch, as usual         |
+| `stacked` (default on GitHub) | every dependency's latest run succeeded (its PR may still be open)                                         | the one unmerged dependency's branch |
+| `merged` (default elsewhere)  | every dependency's PR has merged (a dependency that succeeded with nothing to deliver counts as satisfied) | the default branch, as usual         |
 
 Pick the workspace default with `[defaults].dependency_mode` in
 [`workspace.toml`](./workspaces.md#the-workspace-file), and override it per task with
-`--stack` or `--wait-merge` (mutually exclusive). The resolved mode is stored on
-the task.
+`--stack` or `--wait-merge` (mutually exclusive). When `dependency_mode` is not
+set, tasks for GitHub repos are stacked and tasks for other repos (GitLab,
+Bitbucket) wait for the merge, because the worker only maintains stacked PRs
+on GitHub. The resolved mode is stored on the task.
 
 - **merged** is the safe choice: each PR is reviewed and merged against the
   default branch, at the cost of waiting for each merge before the next task
@@ -229,7 +231,8 @@ the task.
 keeps the stacked PR up to date. It checks about once a minute
 (`WORKER_STACKED_PRS_INTERVAL_SECONDS`, default `60`):
 
-- **Base gets new commits** (review fixes, or the base was itself restacked):
+- **Base gets new commits** (review fixes, an amended and force-pushed base,
+  or the base was itself restacked):
   the stacked branch is rebased onto the base's new head and force-pushed. A
   chain A → B → C follows along: when B moves, C is rebased onto B.
 - **Base merges:** the stacked PR is retargeted to the branch the base merged
@@ -237,10 +240,16 @@ keeps the stacked PR up to date. It checks about once a minute
   rebased so only its own commits remain. After a squash merge this drops the
   base's original commits, which would otherwise show up again and conflict.
 - **Base closes without merging:** the stacked PR is not retargeted. The worker
-  posts one comment on it explaining why it is blocked and marks its run
-  escalated. The dashboard shows the escalation, and tasks that depend on the
-  stacked task show `blocked: <task> escalated` in `worker queue`. Reopen and
-  merge the base, re-queue it, or retarget the PR by hand.
+  posts one comment on it explaining why it is blocked, and tasks that depend
+  on the stacked task show `blocked: <task> blocked: <base> PR #<n> closed
+  without merging` in `worker queue`. Reopen (and merge) the base, and the
+  worker lifts the block, updates its comment, and resumes keeping the PR up
+  to date. Or re-queue the base, or retarget the PR by hand: the block lifts on
+  the next pass, and the worker leaves that PR's base alone from then on. Once
+  the stacked PR itself merges or closes, its dependents follow that PR.
+
+A stacked PR with a review, CI-fix, or conflict-resolution run in progress is
+rebased only after that run finishes.
 
 If a rebase conflicts, the worker pushes nothing and leaves the PR to the
 regular [conflict resolution](./pr-follow-up.md#merge-conflicts-on-the-agents-prs)

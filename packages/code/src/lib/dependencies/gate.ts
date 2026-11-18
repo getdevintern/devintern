@@ -31,7 +31,12 @@ export type DependencyMode = "merged" | "stacked";
 
 export const DEPENDENCY_MODES = ["merged", "stacked"] as const satisfies readonly DependencyMode[];
 
-/** Mode used when neither the task nor `[defaults].dependency_mode` sets one. */
+/**
+ * Mode used when neither the task nor `[defaults].dependency_mode` sets one,
+ * for a repo whose stacked PRs the worker maintains (GitHub). Other repos
+ * default to `merged` ({@link resolveDependencyMode}): their stacked PRs would
+ * never be retargeted or restacked after the base merges.
+ */
 export const DEFAULT_DEPENDENCY_MODE: DependencyMode = "stacked";
 
 /** Whether a value is a known {@link DependencyMode}. */
@@ -42,13 +47,19 @@ export function isDependencyMode(value: unknown): value is DependencyMode {
 /**
  * Resolve the mode for one task: a per-task override (`--stack` /
  * `--wait-merge`) wins over the workspace default, which wins over
- * {@link DEFAULT_DEPENDENCY_MODE}.
+ * {@link DEFAULT_DEPENDENCY_MODE} for a repo whose stacked PRs are maintained
+ * (`stackMaintained`) and `merged` for any other repo.
  */
 export function resolveDependencyMode(input: {
   override?: DependencyMode;
   configured?: DependencyMode;
+  stackMaintained: boolean;
 }): DependencyMode {
-  return input.override ?? input.configured ?? DEFAULT_DEPENDENCY_MODE;
+  return (
+    input.override ??
+    input.configured ??
+    (input.stackMaintained ? DEFAULT_DEPENDENCY_MODE : "merged")
+  );
 }
 
 /** Where a dependency's own work item stands. */
@@ -112,6 +123,15 @@ export interface DependencyFacts {
    * the dependency is only as merged as its base is.
    */
   stackBase?: DependencyFacts;
+  /**
+   * Set when the dependency's own stacked PR is blocked because the PR it is
+   * stacked on closed without merging (the stacked-PR maintainer's
+   * `stack_notice`). The dependency's run still reads `succeeded`, so this is
+   * what keeps its dependents blocked while that PR is open; it clears if the
+   * base is reopened or the PR is retargeted by hand, and is ignored once the
+   * PR merges or closes.
+   */
+  stackBlocked?: string;
 }
 
 /** One dependency, classified. */
@@ -274,6 +294,11 @@ export function classifyDependency(facts: DependencyFacts): DependencyStatus {
     case "closed-unknown":
       return { key, state: "merge-unknown", pr: withBranch };
     case "open":
+      // The stack block only matters while the stacked PR is open on its
+      // closed base; once it merges or closes, its PR state decides.
+      if (facts.stackBlocked) {
+        return { key, state: "blocked", reason: `${key} ${facts.stackBlocked}` };
+      }
       return { key, state: "unmerged", pr: withBranch };
   }
 }

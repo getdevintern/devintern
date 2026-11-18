@@ -23,6 +23,7 @@ import { WorkerState } from "../src/lib/state/worker-state";
 import { resolveEffectiveTargetBranch } from "../src/lib/task/pipeline";
 import { extractDependsOn, extractTargetBranch } from "../src/lib/utils/general";
 import { parseWorkspaceConfig } from "../src/lib/workspace/config";
+import { repoGitHubSlug } from "../src/lib/workspace/env";
 import {
   InjectedTaskAcquirer,
   MAX_INJECTED_DEFERRALS,
@@ -95,8 +96,8 @@ name = "backend"
 remote = "git@github.com:acme/backend.git"
 `;
 
-  test("defaults to stacked", () => {
-    expect(parseWorkspaceConfig(base("")).defaults.dependencyMode).toBe("stacked");
+  test("leaves an unset default to be resolved per repo", () => {
+    expect(parseWorkspaceConfig(base("")).defaults.dependencyMode).toBeUndefined();
   });
 
   test("accepts merged and stacked", () => {
@@ -118,9 +119,24 @@ remote = "git@github.com:acme/backend.git"
   });
 
   test("per-task override wins over the configured default", () => {
-    expect(resolveDependencyMode({})).toBe("stacked");
-    expect(resolveDependencyMode({ configured: "stacked" })).toBe("stacked");
-    expect(resolveDependencyMode({ override: "merged", configured: "stacked" })).toBe("merged");
+    expect(resolveDependencyMode({ stackMaintained: true })).toBe("stacked");
+    expect(resolveDependencyMode({ configured: "stacked", stackMaintained: true })).toBe("stacked");
+    expect(
+      resolveDependencyMode({ override: "merged", configured: "stacked", stackMaintained: true }),
+    ).toBe("merged");
+  });
+
+  test("unset default is stacked only where stacked PRs are maintained (GitHub)", () => {
+    // GitLab/Bitbucket stacked PRs are never retargeted or restacked.
+    expect(resolveDependencyMode({ stackMaintained: false })).toBe("merged");
+    expect(resolveDependencyMode({ configured: "stacked", stackMaintained: false })).toBe(
+      "stacked",
+    );
+    expect(resolveDependencyMode({ override: "stacked", stackMaintained: false })).toBe("stacked");
+    expect(repoGitHubSlug({ env: {}, remote: "git@gitlab.com:acme/backend.git" })).toBeUndefined();
+    expect(repoGitHubSlug({ env: {}, remote: "git@github.com:acme/backend.git" })).toBe(
+      "acme/backend",
+    );
   });
 });
 
@@ -182,6 +198,22 @@ describe("dependency gate", () => {
       kind: "blocked",
       reason: "local-a PR #12 closed without merging",
     });
+  });
+
+  test("a stack block holds only while the dependency's PR is open", () => {
+    const stackBlocked = "blocked: local-a PR #1 closed without merging";
+    expect(
+      evaluateDependencyGate("merged", [{ ...succeededWithPr("local-b", "open"), stackBlocked }]),
+    ).toMatchObject({
+      kind: "blocked",
+      reason: "local-b blocked: local-a PR #1 closed without merging",
+    });
+    expect(
+      evaluateDependencyGate("merged", [{ ...succeededWithPr("local-b", "merged"), stackBlocked }]),
+    ).toMatchObject({ kind: "ready" });
+    expect(
+      evaluateDependencyGate("merged", [{ ...succeededWithPr("local-b", "closed"), stackBlocked }]),
+    ).toMatchObject({ kind: "blocked", reason: "local-b PR #12 closed without merging" });
   });
 
   test("unknown merge state waits and asks for a lookup", () => {
@@ -448,7 +480,9 @@ describe("ad-hoc task dependencies", () => {
     });
   }
 
-  test("a dependent task enqueued without a mode is stacked by default", () => {
+  test("a dependent task enqueued without a resolved mode falls back to merged", () => {
+    // Callers resolve the per-repo default (`resolveDependencyMode`); the
+    // enqueue fallback is the mode that needs no stacked-PR maintenance.
     add("First");
     const task = enqueueInjectedTask(store, dir, {
       repo: "backend",
@@ -456,7 +490,7 @@ describe("ad-hoc task dependencies", () => {
       body: "",
       after: ["local-first"],
     }).task;
-    expect(task.dependencyMode).toBe("stacked");
+    expect(task.dependencyMode).toBe("merged");
   });
 
   describe("enqueue validation", () => {
@@ -726,6 +760,69 @@ describe("ad-hoc task dependencies", () => {
       expect(store.getById(c.id)?.dependencyReason).toContain(
         "local-b PR #2 merged into feature/local-a after local-a PR #1 merged",
       );
+    });
+
+    test("a stacked claim records its base head and clears an earlier claim's block", async () => {
+      add("A");
+      settle("local-a", "done");
+      finishRun("local-a", "succeeded", { number: 1 });
+      const b = add("B", { after: ["local-a"], mode: "stacked" });
+      // Left over from an earlier claim of B (e.g. before `--resume`).
+      store.setStackBaseSha(b.id, "stale-sha");
+      store.setStackNotice(b.id, "blocked: local-a PR #1 closed without merging");
+      const asked: Array<[string, string]> = [];
+      const shaAtRun: Array<string | null> = [];
+      const executed: InjectedTask[] = [];
+      const worker = acquirer(executed, {
+        resolveBranchHead: async (repo, branch) => {
+          asked.push([repo, branch]);
+          return "a".repeat(40);
+        },
+        execute: async (task): Promise<TaskExecutionResult> => {
+          executed.push(task);
+          shaAtRun.push(
+            (
+              raw.query("SELECT stack_base_sha FROM injected_tasks WHERE id = ?").get(task.id) as {
+                stack_base_sha: string | null;
+              }
+            ).stack_base_sha,
+          );
+          return true;
+        },
+      });
+      await worker.tick();
+      expect(executed.map((task) => task.taskKey)).toEqual(["local-b"]);
+      expect(asked).toEqual([["backend", "feature/local-a"]]);
+      // Recorded before the run starts, so it is the head the run branches from.
+      expect(shaAtRun).toEqual(["a".repeat(40)]);
+      const [link] = store.listStackedLinks();
+      expect(link).toMatchObject({ taskKey: "local-b", baseHeadSha: "a".repeat(40) });
+      expect(link?.notice).toBeUndefined();
+    });
+
+    test("a closed-base block keeps dependents blocked without touching the stacked run", async () => {
+      add("A");
+      settle("local-a", "done");
+      finishRun("local-a", "succeeded", { number: 1 });
+      const b = add("B", { after: ["local-a"], mode: "stacked" });
+      const executed: InjectedTask[] = [];
+      await acquirer(executed).tick(); // B claimed stacked on A
+      finishRun("local-b", "succeeded", { number: 2 });
+      const c = add("C", { after: ["local-b"], mode: "stacked" });
+
+      store.setStackNotice(b.id, "blocked: local-a PR #1 closed without merging");
+      await acquirer(executed).tick();
+      expect(executed.map((task) => task.taskKey)).toEqual(["local-b"]);
+      expect(store.getById(c.id)?.dependencyState).toBe("blocked");
+      expect(store.getById(c.id)?.dependencyReason).toContain(
+        "local-b blocked: local-a PR #1 closed without merging",
+      );
+      expect(runs.latestRunByTaskKey(["local-b"]).get("local-b")?.status).toBe("succeeded");
+
+      // The base is reopened: the maintainer clears the notice and C proceeds.
+      store.setStackNotice(b.id, null);
+      await acquirer(executed).tick();
+      expect(executed.map((task) => task.taskKey)).toEqual(["local-b", "local-c"]);
     });
 
     test("a hung merge-state lookup does not hold the claim section", async () => {
@@ -1071,6 +1168,60 @@ remote = "git@github.com:acme/backend.git"
       message: "--stack and --wait-merge are mutually exclusive.",
     });
     expect(parseWorkerAddArgs(["--resume", "local-x", "--after", "local-a"]).kind).toBe("error");
+  });
+
+  test("without [defaults].dependency_mode: GitHub repos stack, other repos wait for merge", async () => {
+    writeFileSync(
+      configPath,
+      `[workspace]
+dashboard = false
+
+[defaults]
+tracker = "markdown"
+
+[[repos]]
+name = "backend"
+remote = "git@github.com:acme/backend.git"
+
+[[repos]]
+name = "infra"
+remote = "git@gitlab.com:acme/infra.git"
+`,
+    );
+    expect((await run(["--title", "Base", "--repo", "backend", "--json"])).code).toBe(0);
+    expect((await run(["--title", "Ops", "--repo", "infra", "--json"])).code).toBe(0);
+
+    const github = await run([
+      "--title",
+      "Next",
+      "--repo",
+      "backend",
+      "--after",
+      "local-base",
+      "--json",
+    ]);
+    expect(JSON.parse(github.out.at(-1)!)).toMatchObject({ dependencyMode: "stacked" });
+    const gitlab = await run([
+      "--title",
+      "Ops2",
+      "--repo",
+      "infra",
+      "--after",
+      "local-ops",
+      "--json",
+    ]);
+    expect(JSON.parse(gitlab.out.at(-1)!)).toMatchObject({ dependencyMode: "merged" });
+    const forced = await run([
+      "--title",
+      "Ops3",
+      "--repo",
+      "infra",
+      "--after",
+      "local-ops",
+      "--stack",
+      "--json",
+    ]);
+    expect(JSON.parse(forced.out.at(-1)!)).toMatchObject({ dependencyMode: "stacked" });
   });
 
   test("JSON includes dependsOn and the resolved mode; unknown keys fail without a row", async () => {

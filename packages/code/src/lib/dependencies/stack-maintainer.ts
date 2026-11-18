@@ -18,13 +18,19 @@
  *   shows the base's changes again and usually conflicts. The record is
  *   updated so later gating treats the PR as targeting its new base.
  * - **Base closed without merging**: post one comment on the stacked PR and
- *   escalate its run, so `worker queue` (dependents read the escalated run as
- *   blocked) and the dashboard show why. The PR is not retargeted.
+ *   record the block in the row's `stack_notice`, which the dependency gate
+ *   reads (dependents show `blocked` in `worker queue`). The stacked task's own
+ *   run is left as it was, so if the base is reopened (and merged) later the
+ *   notice is cleared and maintenance resumes. The PR is not retargeted. The
+ *   notice is also cleared once the PR is retargeted by hand off the base's
+ *   branch, or the stacked PR itself merges or closes.
  *
  * A rebase that conflicts is aborted and left to the review poller's base
  * sync (a conflict-resolution agent run), which picks the PR up once the code
  * host reports it conflicting. Only providers whose {@link StackHost} answers
- * are maintained (GitHub today); others are skipped.
+ * are maintained (GitHub today); others are skipped. A PR with a follow-up
+ * agent run in progress (review fixes, CI fix, base sync) is not restacked
+ * until that run finishes ({@link StackMaintainerOptions.isPrBusy}).
  */
 
 import type { DependencyFacts } from "./gate";
@@ -99,7 +105,9 @@ export type RestackResult =
   /** The rebase conflicted and was aborted; nothing pushed. */
   | { kind: "conflict"; detail: string }
   /** The branch moved (or the lease failed); retry on a later pass. */
-  | { kind: "stale"; detail: string };
+  | { kind: "stale"; detail: string }
+  /** The remote refused the push (hook, protection, permission); nothing pushed. */
+  | { kind: "push-rejected"; detail: string };
 
 /** Git operations the maintainer needs. */
 export interface StackGit {
@@ -131,8 +139,12 @@ export interface StackMaintainerOptions {
   store: StackStore;
   host: StackHost;
   git: StackGit;
-  /** Mark a task's latest run escalated with this reason (dashboard / gate). */
-  escalate?: (taskKey: string, reason: string) => void;
+  /**
+   * Whether an agent run is working on this PR right now (a review follow-up,
+   * CI fix, or base sync in its own worktree). Restacking under it would race
+   * its push, so the link is retried on a later pass.
+   */
+  isPrBusy?: (repo: string, prNumber: number, branch: string) => boolean;
   log?: (message: string) => void;
   warn?: (message: string) => void;
 }
@@ -145,7 +157,10 @@ export type StackLinkOutcome =
   | "retargeted"
   | "conflict"
   | "stale"
-  | "notified";
+  | "rejected"
+  | "busy"
+  | "notified"
+  | "unblocked";
 
 /** Hidden marker opening the maintainer's comment, so it is posted once. */
 export const STACK_NOTICE_MARKER = "<!-- devintern:stack-blocked -->";
@@ -178,10 +193,13 @@ export function renderStackBlockedNotice(input: {
  * caches; everything that must survive a restart is in {@link StackStore}.
  */
 export class StackMaintainer {
-  /** Conflicts already handed to base sync, per `repo#pr:head:base`. */
-  private readonly conflicts = new Set<string>();
-  /** Stacked PRs seen merged or closed this process; never re-fetched. */
-  private readonly settled = new Set<string>();
+  /**
+   * Restacks that cannot succeed until a head or base moves (a conflict handed
+   * to base sync, or a push the remote refused), per `repo#pr:head:base`.
+   */
+  private readonly settled = new Map<string, RestackResult>();
+  /** Stacked PRs seen merged this process (final); never re-fetched. */
+  private readonly merged = new Set<string>();
 
   constructor(private readonly options: StackMaintainerOptions) {}
 
@@ -216,18 +234,20 @@ export class StackMaintainer {
     const { store, host } = this.options;
     const [dependent, base] = store.dependencyFacts([link.taskKey, link.stackedOn]);
     if (!dependent || dependent.latestRun?.status !== "succeeded") return "skipped";
-    if (dependent.pr && dependent.pr.state !== "open") return "skipped";
+    if (dependent.pr?.state === "merged") return this.settleStackedPr(link, "merged");
     const prNumber = prNumberOf(dependent);
     const basePrNumber = prNumberOf(base);
     if (prNumber === undefined || basePrNumber === undefined || !base) return "skipped";
-    const settledKey = `${link.repo}#${prNumber}`;
-    if (this.settled.has(settledKey)) return "skipped";
+    const mergedKey = `${link.repo}#${prNumber}`;
+    if (this.merged.has(mergedKey)) return "skipped";
 
+    // A closed stacked PR is fetched again each pass (ETag-cached) so a reopen
+    // resumes maintenance; only a merge is final.
     const pr = await host.getPr(link.repo, prNumber);
     if (!pr) return "skipped";
     if (pr.state !== "open") {
-      this.settled.add(settledKey);
-      return "skipped";
+      if (pr.state === "merged") this.merged.add(mergedKey);
+      return this.settleStackedPr(link, pr.state);
     }
     const basePr = await host.getPr(link.repo, basePrNumber);
     if (!basePr) return "skipped";
@@ -235,6 +255,18 @@ export class StackMaintainer {
     const baseLabel = `${link.stackedOn} PR #${basePrNumber}`;
 
     if (basePr.state === "closed") return this.notifyClosedBase(link, pr, basePr, base);
+    if (link.notice) {
+      await this.clearNotice(
+        link,
+        pr,
+        `${link.stackedOn} PR #${basePr.number} is ${basePr.state === "merged" ? "merged" : "open again"}`,
+      );
+    }
+
+    if (this.options.isPrBusy?.(link.repo, prNumber, pr.headRef)) {
+      this.log(`   [stacked-prs] ${label} has an agent run in progress; retrying next pass`);
+      return "busy";
+    }
 
     if (basePr.state === "open") {
       if (pr.baseRef !== basePr.headRef) {
@@ -247,7 +279,21 @@ export class StackMaintainer {
       return this.settleOpenRestack(link, pr, result, pushed, `${baseLabel} moved`);
     }
 
-    // Base merged: move the PR to the branch the base merged into.
+    return this.followMergedBase(link, pr, basePr, base, pushed);
+  }
+
+  /** Base merged: move the PR to the branch the base merged into, then restack. */
+  private async followMergedBase(
+    link: StackLink,
+    pr: StackPrSnapshot,
+    basePr: StackPrSnapshot,
+    base: DependencyFacts,
+    pushed: Map<string, string>,
+  ): Promise<StackLinkOutcome> {
+    const { store, host } = this.options;
+    const prNumber = pr.number;
+    const label = `${link.taskKey} PR #${prNumber}`;
+    const baseLabel = `${link.stackedOn} PR #${basePr.number}`;
     const target = basePr.baseRef;
     if (pr.baseRef === basePr.headRef) {
       await host.retarget(link.repo, prNumber, target);
@@ -272,6 +318,8 @@ export class StackMaintainer {
           `(conflict resolution): ${result.detail}`,
       );
     }
+    // A rejected push was already warned about in restack(); hand the link off
+    // like a conflict so it is not rebased and refused again every pass.
     // The PR now targets the base's merge target. If that is the base's own
     // stack base (the base merged into another task's branch), keep stacking
     // on that task; otherwise it is no longer stacked.
@@ -280,6 +328,7 @@ export class StackMaintainer {
     const stackedOn = next && nextBranch === target ? next.key : null;
     store.setStackedOn(link.id, stackedOn);
     store.setStackBaseSha(link.id, null);
+    if (result.kind === "push-rejected") return "rejected";
     return result.kind === "conflict" ? "conflict" : "retargeted";
   }
 
@@ -289,10 +338,11 @@ export class StackMaintainer {
     onto: string,
     candidates: Array<string | undefined>,
   ): Promise<RestackResult> {
-    const conflictKey = `${link.repo}#${pr.number}:${pr.headSha}:${onto}:${candidates.join(",")}`;
-    if (this.conflicts.has(conflictKey)) {
+    const key = `${link.repo}#${pr.number}:${pr.headSha}:${onto}:${candidates.join(",")}`;
+    const settled = this.settled.get(key);
+    if (settled?.kind === "conflict")
       return { kind: "conflict", detail: "already handed to base sync" };
-    }
+    if (settled) return { kind: "push-rejected", detail: "already reported" };
     const result = await this.options.git.restack({
       repo: link.repo,
       branch: pr.headRef,
@@ -300,7 +350,15 @@ export class StackMaintainer {
       onto,
       oldBaseCandidates: candidates.filter((sha): sha is string => Boolean(sha)),
     });
-    if (result.kind === "conflict") this.conflicts.add(conflictKey);
+    if (result.kind === "conflict") this.settled.set(key, result);
+    if (result.kind === "push-rejected") {
+      this.settled.set(key, result);
+      this.warn(
+        `⚠️  [stacked-prs] ${link.taskKey} PR #${pr.number}: the remote rejected the restack push ` +
+          `onto ${onto}; not retrying until the PR or its base moves. Restack it by hand ` +
+          `or fix the push permission: ${result.detail}`,
+      );
+    }
     return result;
   }
 
@@ -329,6 +387,8 @@ export class StackMaintainer {
         return "conflict";
       case "stale":
         return "stale";
+      case "push-rejected":
+        return "rejected";
     }
   }
 
@@ -338,6 +398,15 @@ export class StackMaintainer {
     basePr: StackPrSnapshot,
     base: DependencyFacts,
   ): Promise<StackLinkOutcome> {
+    if (pr.baseRef !== basePr.headRef) {
+      // Retargeted by hand off the closed base: no longer ours, and no longer
+      // blocked by it.
+      if (link.notice) {
+        await this.clearNotice(link, pr, `now targets ${pr.baseRef}`);
+        return "unblocked";
+      }
+      return "skipped";
+    }
     if (link.notice) return "unchanged";
     // Reuse the dependency gate's wording for a closed base.
     const status = classifyDependency({
@@ -358,11 +427,40 @@ export class StackMaintainer {
         baseBranch: pr.baseRef,
       }),
     );
-    const escalation = `blocked: ${reason}`;
-    this.options.escalate?.(link.taskKey, escalation);
-    this.options.store.setStackNotice(link.id, escalation);
-    this.warn(`⛔ [stacked-prs] ${link.taskKey} PR #${pr.number} ${escalation}`);
+    const notice = `blocked: ${reason}`;
+    this.options.store.setStackNotice(link.id, notice);
+    this.warn(`⛔ [stacked-prs] ${link.taskKey} PR #${pr.number} ${notice}`);
     return "notified";
+  }
+
+  /**
+   * The stacked PR itself merged or closed: its own PR state now decides its
+   * dependents (the gate ignores the stack block), so drop the stale block.
+   * `stacked_on` stays: the gate still needs it to tell whether a merge into
+   * the base's branch reached the default branch.
+   */
+  private settleStackedPr(link: StackLink, state: "merged" | "closed"): StackLinkOutcome {
+    if (link.notice) {
+      this.options.store.setStackNotice(link.id, null);
+      link.notice = undefined;
+      this.log(`   [stacked-prs] ${link.taskKey} PR ${state}; cleared its stack block`);
+    }
+    return "skipped";
+  }
+
+  /**
+   * The closed-base block no longer applies (the base was reopened or merged,
+   * or the PR was retargeted by hand): lift it and replace the PR comment.
+   */
+  private async clearNotice(link: StackLink, pr: StackPrSnapshot, why: string): Promise<void> {
+    await this.options.host.postNotice(
+      link.repo,
+      pr.number,
+      [STACK_NOTICE_MARKER, `✅ ${why}; this PR is no longer blocked by DevIntern.`].join("\n"),
+    );
+    this.options.store.setStackNotice(link.id, null);
+    link.notice = undefined;
+    this.log(`   [stacked-prs] ${link.taskKey} PR #${pr.number} unblocked: ${why}`);
   }
 }
 

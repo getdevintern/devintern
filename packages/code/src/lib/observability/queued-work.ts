@@ -14,7 +14,6 @@ import { Database } from "bun:sqlite";
 import { existsSync } from "fs";
 import { resolve } from "path";
 
-import { DEFAULT_DEPENDENCY_MODE } from "../dependencies/gate";
 import type { InjectedTask } from "../state/injected-tasks";
 import type { RunRecord } from "../state/run-recorder";
 import { configureSqliteConnection } from "../state/sqlite";
@@ -102,7 +101,7 @@ export function injectedTaskToQueuedItem(task: InjectedTask): QueuedWorkItem {
     ...(task.dependsOn.length > 0
       ? {
           dependsOn: task.dependsOn,
-          dependencyMode: task.dependencyMode ?? DEFAULT_DEPENDENCY_MODE,
+          dependencyMode: task.dependencyMode ?? "merged",
           dependencyState: task.dependencyState,
           dependencyReason: task.dependencyReason,
         }

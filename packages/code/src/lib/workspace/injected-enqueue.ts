@@ -17,11 +17,7 @@ import { mkdirSync, unlinkSync, writeFileSync } from "fs";
 import { join } from "path";
 
 import type { DependencyMode } from "../dependencies/gate";
-import {
-  DEFAULT_DEPENDENCY_MODE,
-  evaluateDependencyGate,
-  findDependencyCycle,
-} from "../dependencies/gate";
+import { evaluateDependencyGate, findDependencyCycle } from "../dependencies/gate";
 import type {
   EnqueueInjectedTaskResult,
   InjectedTask,
@@ -252,7 +248,9 @@ export function enqueueInjectedTask(
     request.after,
     request.body,
   );
-  const dependencyMode = request.dependencyMode ?? DEFAULT_DEPENDENCY_MODE;
+  // Callers resolve the mode per repo (`resolveDependencyMode`); without one,
+  // fall back to the mode that needs no stacked-PR maintenance.
+  const dependencyMode = request.dependencyMode ?? "merged";
 
   const dir = injectedTasksDir(workspaceDir);
   // Prompts hold arbitrary operator context, so keep them owner-only like the

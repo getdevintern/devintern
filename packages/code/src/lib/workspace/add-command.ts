@@ -27,13 +27,13 @@ import type { RepoConfig, WorkspaceConfig } from "./config";
 import { loadWorkspaceConfig } from "./config";
 import { InjectedTaskStore } from "../state/injected-tasks";
 import type { InjectedTask } from "../state/injected-tasks";
-import { applyWorkspaceProcessEnv } from "./env";
+import { applyWorkspaceProcessEnv, repoGitHubSlug } from "./env";
 import {
   enqueueInjectedTask,
   InjectedTaskDependencyError,
   MAX_INJECTED_BODY_CHARS,
 } from "./injected-enqueue";
-import { DEFAULT_DEPENDENCY_MODE, resolveDependencyMode } from "../dependencies/gate";
+import { resolveDependencyMode } from "../dependencies/gate";
 import type { DependencyMode } from "../dependencies/gate";
 import {
   injectedChildStillRunningMessage,
@@ -373,6 +373,7 @@ async function enqueueNewTask(
       dependencyMode: resolveDependencyMode({
         override: add.dependencyMode,
         configured: ctx.dependencyModeDefault,
+        stackMaintained: repoGitHubSlug(repo) !== undefined,
       }),
     });
   } catch (dependencyError) {
@@ -403,7 +404,7 @@ async function enqueueNewTask(
     status(`✅ Enqueued ${task.taskKey} for repo "${task.repo}" (task #${task.id}).`);
     if (task.dependsOn.length > 0) {
       status(
-        `   Depends on ${task.dependsOn.join(", ")} (${task.dependencyMode ?? DEFAULT_DEPENDENCY_MODE} mode)` +
+        `   Depends on ${task.dependsOn.join(", ")} (${task.dependencyMode ?? "merged"} mode)` +
           (task.dependencyState ? `; ${task.dependencyState}: ${task.dependencyReason}` : ""),
       );
     }
@@ -453,7 +454,7 @@ function serialize(
     ...(dependent
       ? {
           dependsOn: task.dependsOn,
-          dependencyMode: task.dependencyMode ?? DEFAULT_DEPENDENCY_MODE,
+          dependencyMode: task.dependencyMode ?? "merged",
           ...(task.status === "pending" && task.dependencyState
             ? { dependencyState: task.dependencyState, dependencyReason: task.dependencyReason }
             : {}),

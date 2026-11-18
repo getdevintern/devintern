@@ -15,7 +15,9 @@ import type {
   StackStore,
 } from "../src/lib/dependencies/stack-maintainer";
 import { InjectedTaskStore } from "../src/lib/state/injected-tasks";
-import { parseStackPr } from "../src/lib/workspace/stacked-pr-acquirer";
+import { RunStore } from "../src/lib/state/run-recorder";
+import type { WorkspaceConfig } from "../src/lib/workspace/config";
+import { createPrBusyChecker, parseStackPr } from "../src/lib/workspace/stacked-pr-acquirer";
 
 /** In-memory {@link StackStore}: links plus the facts each task key reads as. */
 class FakeStore implements StackStore {
@@ -101,21 +103,23 @@ describe("stacked PR maintainer", () => {
   let store: FakeStore;
   let host: FakeHost;
   let gitOps: FakeGit;
-  let escalations: Array<[string, string]>;
   let maintainer: StackMaintainer;
+  let busy: Set<number>;
+  let warnings: string[];
 
   beforeEach(() => {
+    warnings = [];
     store = new FakeStore();
     host = new FakeHost();
     gitOps = new FakeGit();
-    escalations = [];
+    busy = new Set();
     maintainer = new StackMaintainer({
       store,
       host,
       git: gitOps,
-      escalate: (key, reason) => escalations.push([key, reason]),
+      isPrBusy: (_repo, prNumber) => busy.has(prNumber),
       log: () => {},
-      warn: () => {},
+      warn: (message) => warnings.push(message),
     });
     // A (PR #15 → main) ← B (PR #16 → feature/local-a).
     store.task("local-a", 15);
@@ -216,6 +220,36 @@ describe("stacked PR maintainer", () => {
     expect(gitOps.calls).toHaveLength(1);
   });
 
+  test("an open-base push the remote rejects is warned once and not retried", async () => {
+    host.pr(15, { headRef: "feature/local-a", headSha: "a-fixed" });
+    gitOps.results = [
+      { kind: "push-rejected", detail: "[remote rejected] (pre-receive hook declined)" },
+    ];
+
+    expect((await maintainer.tick()).get("local-b")).toBe("rejected");
+    expect((await maintainer.tick()).get("local-b")).toBe("rejected");
+    expect(gitOps.calls).toHaveLength(1);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("remote rejected the restack push");
+
+    // The base moves again: a new attempt.
+    host.pr(15, { headRef: "feature/local-a", headSha: "a-fixed-2" });
+    store.links[0]!.baseHeadSha = "a-fixed";
+    expect((await maintainer.tick()).get("local-b")).toBe("restacked");
+    expect(gitOps.calls).toHaveLength(2);
+  });
+
+  test("a rejected push after the merge warns and hands the link off", async () => {
+    host.pr(15, { headRef: "feature/local-a", headSha: "a-merged-head", state: "merged" });
+    gitOps.results = [{ kind: "push-rejected", detail: "[remote rejected]" }];
+
+    expect((await maintainer.tick()).get("local-b")).toBe("rejected");
+    expect(host.retargets).toEqual([[16, "main"]]);
+    expect(store.stackedOn).toEqual([[2, null]]);
+    expect(warnings).toHaveLength(1);
+    expect((await maintainer.tick()).size).toBe(0);
+  });
+
   test("chain A → B → C: C restacks onto B's new head in the same pass", async () => {
     store.task("local-c", 17);
     store.links.push({
@@ -263,7 +297,7 @@ describe("stacked PR maintainer", () => {
     expect(store.stackedOn).toEqual([[2, null]]);
   });
 
-  test("base closed without merging: one comment, escalated, never retargeted", async () => {
+  test("base closed without merging: one comment, run untouched, never retargeted", async () => {
     host.pr(15, {
       headRef: "feature/local-a",
       headSha: "a-tip",
@@ -279,10 +313,97 @@ describe("stacked PR maintainer", () => {
     expect(number).toBe(16);
     expect(body?.startsWith(STACK_NOTICE_MARKER)).toBe(true);
     expect(body).toContain("local-a ([PR #15](https://github.com/acme/backend/pull/15))");
-    expect(escalations).toEqual([["local-b", "blocked: local-a PR #15 closed without merging"]]);
     expect(store.links[0]?.notice).toBe("blocked: local-a PR #15 closed without merging");
+    // The stacked task's own run still reads succeeded (no escalation).
+    expect(store.facts.get("local-b")?.latestRun?.status).toBe("succeeded");
     expect(host.retargets).toEqual([]);
     expect(gitOps.calls).toEqual([]);
+  });
+
+  test("closed → notified → reopened and merged → notice cleared, retargeted", async () => {
+    host.pr(15, { headRef: "feature/local-a", headSha: "a-tip", state: "closed" });
+    expect((await maintainer.tick()).get("local-b")).toBe("notified");
+
+    // The operator reopens and merges the base.
+    host.pr(15, { headRef: "feature/local-a", headSha: "a-merged-head", state: "merged" });
+    expect((await maintainer.tick()).get("local-b")).toBe("retargeted");
+
+    expect(store.links[0]?.notice).toBeUndefined();
+    expect(host.retargets).toEqual([[16, "main"]]);
+    expect(host.notices).toHaveLength(2);
+    expect(host.notices[1]?.[1]).toContain("local-a PR #15 is merged");
+    expect(gitOps.calls.map((call) => [call.branch, call.onto])).toEqual([
+      ["feature/local-b", "main"],
+    ]);
+  });
+
+  test("closed base, PR retargeted by hand: block cleared, then left alone", async () => {
+    host.pr(15, { headRef: "feature/local-a", headSha: "a-tip", state: "closed" });
+    expect((await maintainer.tick()).get("local-b")).toBe("notified");
+
+    host.pr(16, { headRef: "feature/local-b", baseRef: "main" });
+    expect((await maintainer.tick()).get("local-b")).toBe("unblocked");
+    expect(store.links[0]?.notice).toBeUndefined();
+    expect(host.notices[1]?.[1]).toContain("now targets main");
+
+    // Not re-notified on later passes, and never restacked or retargeted.
+    expect((await maintainer.tick()).get("local-b")).toBe("skipped");
+    expect(host.notices).toHaveLength(2);
+    expect(host.retargets).toEqual([]);
+    expect(gitOps.calls).toEqual([]);
+  });
+
+  test("closed base, stacked PR then merged or closed: block cleared, stack kept", async () => {
+    host.pr(15, { headRef: "feature/local-a", headSha: "a-tip", state: "closed" });
+    expect((await maintainer.tick()).get("local-b")).toBe("notified");
+
+    host.pr(16, { headRef: "feature/local-b", baseRef: "feature/local-a", state: "closed" });
+    expect((await maintainer.tick()).get("local-b")).toBe("skipped");
+    expect(store.links[0]?.notice).toBeUndefined();
+
+    // Notified again after a reopen: closed PRs are not cached.
+    host.pr(16, { headRef: "feature/local-b", baseRef: "feature/local-a" });
+    expect((await maintainer.tick()).get("local-b")).toBe("notified");
+
+    // The registry learns the merge: cleared without asking the host.
+    const b = store.facts.get("local-b");
+    if (b?.pr) b.pr.state = "merged";
+    host.prs.delete(16);
+    expect((await maintainer.tick()).get("local-b")).toBe("skipped");
+    expect(store.links[0]?.notice).toBeUndefined();
+    // stacked_on stays: the gate needs it to judge where the merge landed.
+    expect(store.stackedOn).toEqual([]);
+  });
+
+  test("a reopened stacked PR is maintained again; a merged one is never re-fetched", async () => {
+    host.pr(16, { headRef: "feature/local-b", baseRef: "feature/local-a", state: "closed" });
+    expect((await maintainer.tick()).get("local-b")).toBe("skipped");
+
+    host.pr(15, { headRef: "feature/local-a", headSha: "a-fix" });
+    host.pr(16, { headRef: "feature/local-b", baseRef: "feature/local-a" });
+    expect((await maintainer.tick()).get("local-b")).toBe("restacked");
+
+    host.pr(16, { headRef: "feature/local-b", baseRef: "feature/local-a", state: "merged" });
+    expect((await maintainer.tick()).get("local-b")).toBe("skipped");
+    let fetched = 0;
+    const getPr = host.getPr.bind(host);
+    host.getPr = async (repo, number) => {
+      if (number === 16) fetched += 1;
+      return getPr(repo, number);
+    };
+    expect((await maintainer.tick()).get("local-b")).toBe("skipped");
+    expect(fetched).toBe(0);
+  });
+
+  test("a PR with an agent run in progress is not restacked until it finishes", async () => {
+    host.pr(15, { headRef: "feature/local-a", headSha: "a-fix" });
+    busy.add(16);
+    expect((await maintainer.tick()).get("local-b")).toBe("busy");
+    expect(gitOps.calls).toEqual([]);
+
+    busy.clear();
+    expect((await maintainer.tick()).get("local-b")).toBe("restacked");
+    expect(gitOps.calls).toHaveLength(1);
   });
 
   test("skips a stacked PR that is closed, retargeted elsewhere, or unsupported", async () => {
@@ -346,6 +467,49 @@ describe("stacked links in the injected-task store", () => {
 
     store.setStackedOn(b, null);
     expect(store.listStackedLinks().map((link) => link.taskKey)).toEqual(["local-c"]);
+  });
+});
+
+describe("PR busy check (fleet)", () => {
+  let dir: string;
+  let runs: RunStore;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "stacked-busy-"));
+    runs = new RunStore(join(dir, "queue.db"));
+  });
+  afterEach(() => {
+    runs.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("an in-progress follow-up run on the PR or its branch makes it busy", () => {
+    const config = {
+      repos: [{ name: "backend", env: {}, remote: "git@github.com:acme/backend.git" }],
+    } as unknown as WorkspaceConfig;
+    const busy = createPrBusyChecker(config, runs);
+    expect(busy("backend", 16, "feature/local-b")).toBe(false);
+
+    // Review follow-ups record the slug, PR number and branch but no task key.
+    const review = runs.createRun({
+      origin: "pr_mention",
+      repo: "acme/backend",
+      prNumber: 16,
+      branch: "feature/local-b",
+    });
+    expect(busy("backend", 16, "feature/local-b")).toBe(true);
+    expect(busy("backend", 17, "feature/local-c")).toBe(false);
+    runs.finishRun(review, "succeeded");
+    expect(busy("backend", 16, "feature/local-b")).toBe(false);
+
+    // Base sync matched on branch alone; a run with no repo never matches.
+    runs.createRun({
+      origin: "conflict_resolution",
+      repo: "Acme/Backend",
+      branch: "feature/local-b",
+    });
+    runs.createRun({ origin: "local", prNumber: 17 });
+    expect(busy("backend", 99, "feature/local-b")).toBe(true);
+    expect(busy("backend", 17, "feature/local-c")).toBe(false);
   });
 });
 

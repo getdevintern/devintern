@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
@@ -80,12 +80,13 @@ class GitFixture {
     return Number(git(this.remote, "rev-list", "--count", `${from}..${to}`));
   }
 
-  stack(): StackGit {
+  stack(options: { env?: NodeJS.ProcessEnv; prepare?: (cwd: string) => void } = {}): StackGit {
     return createGitStack({
-      env: GIT_ENV,
+      env: options.env ?? GIT_ENV,
       checkout: async () => {
         const cwd = join(this.root, `checkout-${++this.checkouts}`);
         git(this.root, "clone", "--quiet", this.remote, cwd);
+        options.prepare?.(cwd);
         return { cwd, release: async () => rmSync(cwd, { recursive: true, force: true }) };
       },
     });
@@ -133,6 +134,48 @@ describe("deterministic restack (git)", () => {
     const head = fx.remoteHead("feature/b");
     expect(result).toEqual({ kind: "restacked", headSha: head, baseSha: fx.remoteHead("main") });
     expect(fx.commitCount("main", "feature/b")).toBe(1);
+    expect(fx.diffNames("main", "feature/b")).toEqual(["b.txt"]);
+  });
+
+  test("a host with no git identity restacks as the branch tip's committer", async () => {
+    const { aHead, bHead } = stackAB();
+    fx.squashMerge("feature/a");
+    const emptyGlobal = join(fx.root, "empty-gitconfig");
+    writeFileSync(emptyGlobal, "");
+    // No identity anywhere, and git may not guess one from the hostname.
+    const env = {
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_CONFIG_GLOBAL: emptyGlobal,
+      HOME: fx.root,
+      GIT_AUTHOR_NAME: "",
+      GIT_AUTHOR_EMAIL: "",
+      GIT_COMMITTER_NAME: "",
+      GIT_COMMITTER_EMAIL: "",
+      EMAIL: "",
+    };
+    const prepare = (cwd: string): void => {
+      git(cwd, "config", "user.useConfigOnly", "true");
+      // Precondition: a plain commit in this checkout is refused.
+      const probe = Bun.spawnSync(["git", "var", "GIT_COMMITTER_IDENT"], {
+        cwd,
+        env: { ...process.env, ...env },
+        stderr: "pipe",
+      });
+      expect(probe.exitCode).not.toBe(0);
+    };
+
+    const result = await fx.stack({ env, prepare }).restack({
+      repo: "backend",
+      branch: "feature/b",
+      expectedHeadSha: bHead,
+      onto: "main",
+      oldBaseCandidates: [aHead],
+    });
+
+    expect(result.kind).toBe("restacked");
+    expect(git(fx.remote, "log", "-1", "--format=%cn <%ce>", "feature/b")).toBe(
+      "Test <test@example.com>",
+    );
     expect(fx.diffNames("main", "feature/b")).toEqual(["b.txt"]);
   });
 
@@ -188,6 +231,84 @@ describe("deterministic restack (git)", () => {
     expect(fx.commitCount("feature/b", "feature/c")).toBe(1);
     expect(fx.diffNames("feature/b", "feature/c")).toEqual(["c.txt"]);
     expect(fx.commitCount("main", "feature/c")).toBe(5);
+  });
+
+  test("base amended and force-pushed: the recorded base head strips A's old commits", async () => {
+    const { aHead, bHead } = stackAB();
+    // A's review fix is folded in by amending, then force-pushed.
+    fx.branch("feature/a", "origin/feature/a");
+    git(fx.work, "reset", "--hard", "HEAD~1");
+    writeFileSync(join(fx.work, "a.txt"), "a1\na2-fixed\n");
+    git(fx.work, "commit", "-am", "a2 (amended)");
+    fx.push("feature/a");
+
+    // The plain merge-base fallback (no recorded head) replays A's old a2 onto
+    // the rewritten A: it conflicts on a.txt.
+    const fallback = await fx.stack().restack({
+      repo: "backend",
+      branch: "feature/b",
+      expectedHeadSha: bHead,
+      onto: "feature/a",
+      oldBaseCandidates: [],
+    });
+    expect(fallback.kind).toBe("conflict");
+    expect(fx.remoteHead("feature/b")).toBe(bHead);
+
+    // With the base head recorded when B's run started, only B's commit moves.
+    const result = await fx.stack().restack({
+      repo: "backend",
+      branch: "feature/b",
+      expectedHeadSha: bHead,
+      onto: "feature/a",
+      oldBaseCandidates: [aHead],
+    });
+    expect(result.kind).toBe("restacked");
+    expect(fx.commitCount("feature/a", "feature/b")).toBe(1);
+    expect(fx.diffNames("feature/a", "feature/b")).toEqual(["b.txt"]);
+  });
+
+  test("a push the remote's pre-receive hook declines is push-rejected, not stale", async () => {
+    const { aHead, bHead } = stackAB();
+    fx.squashMerge("feature/a");
+    const hook = join(fx.remote, "hooks", "pre-receive");
+    writeFileSync(hook, "#!/bin/sh\necho 'protected branch hook declined' >&2\nexit 1\n");
+    chmodSync(hook, 0o755);
+
+    const result = await fx.stack().restack({
+      repo: "backend",
+      branch: "feature/b",
+      expectedHeadSha: bHead,
+      onto: "main",
+      oldBaseCandidates: [aHead],
+    });
+
+    expect(result.kind).toBe("push-rejected");
+    expect(fx.remoteHead("feature/b")).toBe(bHead);
+  });
+
+  test("a branch pushed between fetch and push fails the lease as stale", async () => {
+    const { aHead, bHead } = stackAB();
+    fx.squashMerge("feature/a");
+    let moved = "";
+    const stack = fx.stack({
+      // The checkout has fetched bHead; someone pushes B right after.
+      prepare: () => {
+        fx.branch("feature/b", bHead);
+        moved = fx.commit("b2.txt", "b2\n", "b2");
+        fx.push("feature/b");
+      },
+    });
+
+    const result = await stack.restack({
+      repo: "backend",
+      branch: "feature/b",
+      expectedHeadSha: bHead,
+      onto: "main",
+      oldBaseCandidates: [aHead],
+    });
+
+    expect(result).toMatchObject({ kind: "stale", detail: expect.stringContaining("stale info") });
+    expect(fx.remoteHead("feature/b")).toBe(moved);
   });
 
   test("a branch already on its base is up to date; a moved branch is stale", async () => {
