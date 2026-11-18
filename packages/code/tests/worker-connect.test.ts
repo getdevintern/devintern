@@ -3,8 +3,14 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync }
 import { tmpdir } from "os";
 import { join } from "path";
 
-import { saveRelayState } from "../src/lib/relay/connect";
+import {
+  loadRelayState,
+  saveRelayState,
+  verifiedGitHubRelayRepositories,
+} from "../src/lib/relay/connect";
+import { createRelayAutoVerifier } from "../src/lib/relay/auto-verify";
 import { runWorkerConnectCommand } from "../src/lib/init/worker-connect";
+import { loadWorkspaceConfig } from "../src/lib/workspace/config";
 
 describe("runWorkerConnectCommand", () => {
   let workspaceDir: string;
@@ -366,6 +372,7 @@ remote = "git@gitlab.com:acme/platform.git"
 
     expect(result).toBe(0);
     expect(logs.join("\n")).toContain("Unverified workspace repositories: acme/web");
+    expect(logs.join("\n")).toContain('"All repositories" access verify automatically');
   });
 
   test("status reports GitLab verification independently from GitHub", async () => {
@@ -533,5 +540,134 @@ remote = "git@github.com:acme/web.git"
     expect(result).toBe(1);
     expect(errors.join("\n")).toContain("No workspace found");
     expect(errors.join("\n")).toContain("devintern worker init");
+  });
+
+  describe("worker relay auto-verify", () => {
+    function seedState(): void {
+      saveRelayState(
+        {
+          relayUrl: "https://relay.test",
+          customerId: "customer-1",
+          connectedAt: "2026-09-02T00:00:00.000Z",
+          registrations: [],
+          relayToken: "drt_worker",
+          githubRepositories: [{ repo: "acme/api", installationId: 10, repositoryId: 20 }],
+        },
+        workspaceDir,
+      );
+    }
+
+    function verifier(fetchImpl: typeof fetch, warnings: string[] = []) {
+      return createRelayAutoVerifier({
+        config: loadWorkspaceConfig(join(workspaceDir, "workspace.toml")),
+        workspaceDir,
+        relayUrl: "https://relay.test",
+        relayToken: "drt_worker",
+        fetchImpl,
+        log: (line) => logs.push(line),
+        warn: (line) => warnings.push(line),
+      });
+    }
+
+    test("merges verified repositories into relay state and logs one line", async () => {
+      seedState();
+      const requests: Array<{ url: string; auth?: string; body: unknown }> = [];
+      const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+        requests.push({
+          url: String(input),
+          auth: (init?.headers as Record<string, string> | undefined)?.Authorization,
+          body: JSON.parse(String(init?.body)),
+        });
+        return new Response(
+          JSON.stringify({
+            customerId: "customer-1",
+            licenseSource: "solo-automation",
+            registrations: [],
+            repositories: [{ repo: "acme/web", installationId: 10, repositoryId: 21 }],
+            unverified: [],
+          }),
+          { status: 200 },
+        );
+      }) as typeof fetch;
+
+      const verify = verifier(fetchImpl);
+      await verify();
+      // Nothing left to verify: a reload does not contact the relay again.
+      await verify();
+
+      expect(requests).toEqual([
+        {
+          url: "https://relay.test/v1/github/verify",
+          auth: "Bearer drt_worker",
+          body: { repos: ["acme/web"] },
+        },
+      ]);
+      const state = loadRelayState(workspaceDir);
+      expect(state?.relayToken).toBe("drt_worker");
+      expect(
+        verifiedGitHubRelayRepositories(state)
+          .map((repository) => repository.repo)
+          .sort(),
+      ).toEqual(["acme/api", "acme/web"]);
+      expect(logs.filter((line) => line.includes("[relay]"))).toEqual([
+        "🔐 [relay] GitHub repositories: verified acme/web",
+      ]);
+    });
+
+    test("reports repos that still need a browser pairing once per unchanged set", async () => {
+      seedState();
+      let requests = 0;
+      const fetchImpl = (async () => {
+        requests++;
+        return new Response(
+          JSON.stringify({
+            customerId: "customer-1",
+            licenseSource: "solo-automation",
+            registrations: [],
+            repositories: [],
+            unverified: [{ repo: "acme/web", reason: "not_installed" }],
+          }),
+          { status: 200 },
+        );
+      }) as unknown as typeof fetch;
+
+      const verify = verifier(fetchImpl);
+      await verify();
+      await verify();
+
+      expect(requests).toBe(1);
+      expect(logs.filter((line) => line.includes("[relay]"))).toEqual([
+        "🔐 [relay] GitHub repositories: still unverified acme/web " +
+          "(run `devintern worker connect github`)",
+      ]);
+    });
+
+    test("tolerates network errors and older relays without throwing", async () => {
+      seedState();
+      const warnings: string[] = [];
+      const failing = verifier(
+        (async () => {
+          throw new Error("connection refused");
+        }) as unknown as typeof fetch,
+        warnings,
+      );
+      await failing();
+      expect(warnings).toEqual([
+        "⚠️  [relay] GitHub repository auto-verification failed: connection refused",
+      ]);
+
+      const legacy = verifier(
+        (async () => new Response("not found", { status: 404 })) as unknown as typeof fetch,
+        warnings,
+      );
+      await legacy();
+      expect(warnings).toHaveLength(1);
+      expect(logs.filter((line) => line.includes("[relay]"))).toEqual([]);
+      expect(
+        verifiedGitHubRelayRepositories(loadRelayState(workspaceDir)).map(
+          (repository) => repository.repo,
+        ),
+      ).toEqual(["acme/api"]);
+    });
   });
 });

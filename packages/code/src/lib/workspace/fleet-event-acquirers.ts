@@ -257,6 +257,30 @@ async function buildAutoMergeWatcher(params: {
 }
 
 /**
+ * Verify GitHub repos added after the first pairing without a browser (they
+ * verify when they fall under an installation this customer already paired),
+ * and publish the verifier for config reloads. Fire-and-forget so a slow or
+ * failing relay never blocks worker startup.
+ */
+async function startRelayAutoVerify(
+  options: Parameters<typeof buildFleetEventAcquirers>[0],
+  relayUrl: string,
+  relayToken: string,
+): Promise<void> {
+  const { createRelayAutoVerifier } = await import("../relay/auto-verify");
+  const verifyRelayRepos = createRelayAutoVerifier({
+    config: options.config,
+    workspaceDir: options.workspaceDir,
+    relayUrl,
+    relayToken,
+    fetchImpl: options.relayFetchImpl,
+    verbose: options.verbose,
+  });
+  if (options.reloadHooksOut) options.reloadHooksOut.verifyRelayRepos = verifyRelayRepos;
+  void verifyRelayRepos();
+}
+
+/**
  * Wire the fleet's event acquirers: review polling on the agent's own PRs,
  * a mention sweep per GitHub repo, and the relay when configured.
  *
@@ -281,7 +305,13 @@ export async function buildFleetEventAcquirers(options: {
   /** Collectors of cadence changes, applied on live config reloads. */
   intervalUpdaters?: Array<(seconds: number) => void>;
   /** Published once event acquirers are wired (mention-sweep reconcile). */
-  reloadHooksOut?: { hooks?: FleetEventReloadHooks };
+  reloadHooksOut?: {
+    hooks?: FleetEventReloadHooks;
+    /** Browser-free relay verification of unverified GitHub repos; never throws. */
+    verifyRelayRepos?: () => Promise<void>;
+  };
+  /** Injectable relay fetch for tests. */
+  relayFetchImpl?: typeof fetch;
   /** Shared admission supervisor for every fleet execution path. */
   supervisor?: TaskSupervisor;
 }): Promise<import("../../worker").Acquirer[]> {
@@ -650,6 +680,7 @@ export async function buildFleetEventAcquirers(options: {
         "⚠️  Relay is configured but no relay token is stored in the workspace — re-run `devintern worker init`. Polling continues.",
       );
     } else if (relayUrl) {
+      await startRelayAutoVerify(options, relayUrl, relayToken);
       const { RelayAcquirer } = await import("../relay/acquirer");
       const { botMentionCandidates, mentionsAnyBot } = await import("../acquirers/mention-sweep");
       const relayTaskSources = taskSources.map((source) => {
