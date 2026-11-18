@@ -44,7 +44,9 @@ export type RunStage =
   | "verify"
   | "auto_review"
   | "change_request"
-  | "outcome";
+  | "outcome"
+  // Optional automatic DevIntern defect report for a failed run.
+  | "defect_report";
 
 export type StageStatus =
   | "succeeded"
@@ -1018,6 +1020,47 @@ export function recordRunStage(
     currentStore.addStage(currentRunId, stage, data.status, data.summary, detail);
   } catch (error) {
     warnOnce(`stage:${stage}`, error);
+  }
+}
+
+/**
+ * Append a stage to a specific run, including one that already finished.
+ * Used by post-run consumers (automatic defect reports) that run after
+ * {@link endRun} cleared the active context. No-op when no store is open.
+ *
+ * @param runId - Run id captured before the run ended
+ * @param stage - Pipeline stage name
+ * @param data - Stage outcome, summary, and optional structured detail
+ */
+export function recordStageForRun(
+  runId: number,
+  stage: RunStage,
+  data: { status: StageStatus; summary?: string; detail?: unknown },
+): void {
+  if (currentStore === null) {
+    return;
+  }
+  try {
+    const detail = data.detail === undefined ? undefined : JSON.stringify(data.detail);
+    currentStore.addStage(runId, stage, data.status, data.summary, detail);
+  } catch (error) {
+    warnOnce(`stage:${stage}`, error);
+  }
+}
+
+/**
+ * Last pipeline step recorded on a run, or undefined. Best-effort.
+ *
+ * @param runId - Run id
+ */
+export function readRunStep(runId: number): string | undefined {
+  if (currentStore === null) {
+    return undefined;
+  }
+  try {
+    return currentStore.getRun(runId)?.step ?? undefined;
+  } catch {
+    return undefined;
   }
 }
 

@@ -9,6 +9,7 @@ export const STAGE_LABELS: Record<RunStageRecord["stage"], string> = {
   auto_review: "Self-review",
   change_request: "Change request",
   outcome: "Outcome",
+  defect_report: "DevIntern issue report",
 };
 
 export function formatStageLabel(stage: string): string {

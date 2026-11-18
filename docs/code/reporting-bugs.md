@@ -87,9 +87,33 @@ The payload contains:
 
 Task descriptions, prompts, agent transcripts, diffs, source files, and `.env` contents are not collected. Known credentials, checkout and home paths, task keys, and the repository slug are masked; `--share-identifiers` keeps task and repository identifiers. Redaction cannot recognize every secret, so review the preview of your description and attached logs before submitting.
 
-Crashes are already captured through Sentry. A manual report adds what an exception cannot: what you expected, how to reproduce it, and wrong results from runs that succeeded. A report is sent only when you confirm (or pass `--yes`); task runs never send one.
+Crashes are already captured through Sentry. A manual report adds what an exception cannot: what you expected, how to reproduce it, and wrong results from runs that succeeded. A manual report is sent only when you confirm (or pass `--yes`). Task runs send nothing unless you turn on [automatic defect reports](#automatic-defect-reports).
 
 To send reports to your own support intake, set `DEVINTERN_REPORT_URL`, or pass `--endpoint <url>` for one command.
+
+## Automatic defect reports
+
+Automatic defect reports are off by default. When you turn them on, DevIntern checks each failed task run on your machine and reports the failure only when it finds a defect in DevIntern itself:
+
+```bash
+# .devintern-code/.env (or the worker's environment)
+DEVINTERN_AUTO_REPORT=1
+```
+
+| Failure | Result |
+| --- | --- |
+| Unhandled programming error (for example `TypeError`) raised in DevIntern's own code | Reported |
+| Tracker, code host, or network errors, credentials, usage limits, agent exits, merge conflicts, failed verification | Not reported |
+| Anything else, including errors raised in dependencies, plugins, or your project | Not reported (inconclusive) |
+
+An automatic report goes to the same DevIntern intake as `devintern report` (or to `DEVINTERN_REPORT_URL`), never to your task's repository or tracker. It contains the error type, a cleaned-up error message, DevIntern stack frames, the failed step, and the environment block described above. Logs, run history, task content, repository details, and credentials are left out.
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `DEVINTERN_AUTO_REPORT` | off | `1`, `true`, `yes`, or `on` turns automatic reports on |
+| `DEVINTERN_REPORT_EMAIL` | none | Contact address used when you are not signed in. Without a sign-in or this address, defects are found but not sent |
+
+The run output prints whether a report was sent, with a link to it. The failed run in the [dashboard](dashboard.md) gets a **DevIntern issue report** stage with the same information. `devintern report list` shows automatic reports next to manual ones; their titles start with `[auto]`. The same defect is sent once per 30 days, and later failures link to the existing report. If sending fails, the report is saved locally and resent the next time the defect occurs; you can also resend it with the printed `devintern report --from <path>` command. Turning reports on never changes the result of the failed run.
 
 ## Report with a coding agent
 
