@@ -24,7 +24,7 @@ import { readWorkerHarnessPause } from "../observability/harness-pause";
 import type { WorkerHarnessPause } from "../observability/harness-pause";
 import { loadSupabaseConfig } from "../cli/bootstrap";
 import type { RepoConfig, WorkspaceConfig } from "./config";
-import { loadWorkspaceConfig } from "./config";
+import { loadWorkspaceConfig, resolveCredentialTeam } from "./config";
 import { InjectedTaskStore } from "../state/injected-tasks";
 import type { InjectedTask } from "../state/injected-tasks";
 import { applyWorkspaceProcessEnv } from "./env";
@@ -90,6 +90,8 @@ export interface WorkerAddOptions {
 export interface AddOptions {
   workspacePath?: string;
   repo?: string;
+  /** `[[teams]]` entry whose credentials the run uses. */
+  team?: string;
   title: string;
   body?: string;
   bodyFile?: string;
@@ -118,6 +120,8 @@ function usage(): string {
     "Options:",
     "  --title <text>            Task title (required unless --resume)",
     "  --repo <name>             [[repos]] name to target (default: the only repo)",
+    "  --team <name>             Use this [[teams]] entry's credentials (default: the",
+    "                            team fixed to the repo, if exactly one)",
     "  --body <text>             Task description",
     "  --body-file <path>        Read the description from a file ('-' for stdin)",
     "  --idempotency-key <key>   Dedupe key; a retry reuses the existing task",
@@ -134,6 +138,7 @@ function usage(): string {
 const VALUE_FLAGS = new Set([
   "--workspace",
   "--repo",
+  "--team",
   "--title",
   "--body",
   "--body-file",
@@ -160,6 +165,7 @@ function validateResumeArgs(options: AddOptions): string | null {
     options.body !== undefined ? "--body" : undefined,
     options.bodyFile !== undefined ? "--body-file" : undefined,
     options.repo !== undefined ? "--repo" : undefined,
+    options.team !== undefined ? "--team" : undefined,
     options.idempotencyKey !== undefined ? "--idempotency-key" : undefined,
   ].filter((flag): flag is string => flag !== undefined);
   if (conflicting.length > 0) {
@@ -201,6 +207,9 @@ export function parseWorkerAddArgs(args: string[]): ParsedAddArgs {
           break;
         case "--repo":
           options.repo = value;
+          break;
+        case "--team":
+          options.team = value;
           break;
         case "--title":
           options.title = value;
@@ -251,6 +260,10 @@ export function parseWorkerAddArgs(args: string[]): ParsedAddArgs {
     return { kind: "error", message: "--idempotency-key cannot be empty." };
   }
   return { kind: "ok", options };
+}
+
+function capitalize(text: string): string {
+  return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
 function displayPath(path: string): string {
@@ -395,14 +408,29 @@ export async function runWorkerAdd(
 
   // `--resume` re-queues an existing row, so title/body/repo resolution (and
   // their validation) apply only to a new enqueue.
-  let target: { repo: RepoConfig; body: string } | null = null;
+  let target: { repo: RepoConfig; body: string; credentialTeam?: string } | null = null;
   if (!add.resume) {
     const repoResult = resolveTargetRepo(config, add.repo, error);
     if (!repoResult.ok) return repoResult.code;
 
+    // Validated now so a typo or an ambiguous fixed-team setup fails here, not
+    // later in the worker after the task was queued.
+    const teamResult = resolveCredentialTeam(config, repoResult.repo.name, add.team);
+    if (!teamResult.ok) {
+      error(`❌ ${capitalize(teamResult.error)}.`);
+      if (teamResult.reason === "ambiguous") {
+        error("   Pick whose credentials the task uses with --team <name>.");
+      }
+      return 1;
+    }
+
     const bodyResult = resolveInjectedBody(add, options, error);
     if (!bodyResult.ok) return 1;
-    target = { repo: repoResult.repo, body: bodyResult.body };
+    target = {
+      repo: repoResult.repo,
+      body: bodyResult.body,
+      ...(teamResult.team ? { credentialTeam: teamResult.team.name } : {}),
+    };
   }
 
   if (!(await checkAutomationAccess(selectedDir, status, error))) return 1;
@@ -441,7 +469,7 @@ export async function runWorkerAdd(
     }
     // `await` is load-bearing: without it the surrounding `finally` would
     // `store.close()` while `reportTask`/`waitForTask` is still polling.
-    return await enqueueNewTask(add, target.body, target.repo, context);
+    return await enqueueNewTask(add, target, context);
   } catch (enqueueError) {
     // Filesystem/DB failures (including a sandbox denying writes to the
     // workspace state) must not escape as a minified stack trace: agents parse
@@ -506,15 +534,16 @@ interface TaskContext {
 /** Create the markdown file + durable row, then optionally wait. */
 async function enqueueNewTask(
   add: AddOptions,
-  body: string,
-  repo: RepoConfig,
+  target: { repo: RepoConfig; body: string; credentialTeam?: string },
   ctx: TaskContext & { workerRunning: PidLiveness },
 ): Promise<number> {
+  const { repo, body } = target;
   const { store, selectedDir, workerRunning, log, status } = ctx;
   // Only an active (pending/running) task dedupes; a settled one under the
   // same key is history and a new occurrence is enqueued.
   const { task, deduplicated } = enqueueInjectedTask(store, selectedDir, {
     repo: repo.name,
+    ...(add.team ? { team: add.team } : {}),
     title: add.title,
     body,
     idempotencyKey: add.idempotencyKey,
@@ -527,6 +556,9 @@ async function enqueueNewTask(
   const pause = readHarnessPause(selectedDir);
   if (!add.json) {
     status(`✅ Enqueued ${task.taskKey} for repo "${task.repo}" (task #${task.id}).`);
+    if (target.credentialTeam) {
+      status(`   Credentials: team "${target.credentialTeam}" (env_file and [teams.env]).`);
+    }
     if (workerRunning === "unknown") {
       status(`ℹ️  ${UNVERIFIED_WORKER_NOTICE}`);
     } else if (!workerRunning) {

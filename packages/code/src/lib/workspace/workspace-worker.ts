@@ -28,7 +28,13 @@ import { ScheduledRetryStore } from "../state/run-retry";
 import { InjectedTaskStore } from "../state/injected-tasks";
 import { createTaskActionedGate } from "../task/actioned-state";
 import type { TaskTrackerClient } from "../trackers/client";
-import { findRepo, findTeam, harnessPinnedJobs, loadWorkspaceConfig } from "./config";
+import {
+  findRepo,
+  findTeam,
+  harnessPinnedJobs,
+  loadWorkspaceConfig,
+  resolveCredentialTeam,
+} from "./config";
 import {
   resolveWorkspaceAutomationContext,
   resolveWorkspaceEstimationContext,
@@ -538,10 +544,23 @@ export function buildInjectedTaskAcquirer(
   return new InjectedTaskAcquirer({
     store,
     runDbPath: workspaceDbPath(deps.workspaceDir),
-    execute: (task, queueClaim) =>
-      createFleetTaskExecutor(deps, {
+    execute: (task, queueClaim) => {
+      // Resolved per run against the live config: the row's `--team`, else
+      // the repo's single fixed team. A config change that made the choice
+      // ambiguous (or removed the team) fails the row with the reason rather
+      // than silently running with the shared workspace credentials.
+      const credentials = resolveCredentialTeam(deps.config, task.repo, task.team);
+      if (!credentials.ok) {
+        const hint =
+          credentials.reason === "ambiguous"
+            ? "; re-enqueue with `devintern worker add --team <name>`"
+            : "";
+        return Promise.reject(new Error(`${credentials.error}${hint}`));
+      }
+      return createFleetTaskExecutor(deps, {
         extraArgs: () => fleetTaskArgs(deps.config),
         repo: task.repo,
+        ...(credentials.team ? { credentialTeam: credentials.team } : {}),
         source: INJECTED_TASK_SOURCE,
         runOrigin: "local",
         queueClaim,
@@ -551,7 +570,8 @@ export function buildInjectedTaskAcquirer(
         onChildSpawn: (pid) => {
           if (!store.isClosed()) store.setChildPid(task.id, pid);
         },
-      })(task.taskKey, toRoutableTask({ key: task.taskKey, labels: [], components: [] })),
+      })(task.taskKey, toRoutableTask({ key: task.taskKey, labels: [], components: [] }));
+    },
     intervalSeconds: parseEnvInteger("WORKER_INJECTED_INTERVAL_SECONDS", 5, { min: 1 }),
     maxConcurrency: deps.config.workspace.execution.maxConcurrency,
     maxConcurrencyPerRepo: deps.config.workspace.execution.maxConcurrencyPerRepo,

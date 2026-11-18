@@ -793,6 +793,51 @@ export function findTeam(config: WorkspaceConfig, name: string): TeamConfig | un
   return config.teams.find((team) => team.name === name);
 }
 
+/** Outcome of {@link resolveCredentialTeam}. */
+export type CredentialTeamResolution =
+  | { ok: true; team?: TeamConfig }
+  | { ok: false; reason: "unknown-team" | "ambiguous"; error: string };
+
+/**
+ * Pick the `[[teams]]` entry whose credentials a repo-scoped run without a
+ * tracker ticket (ad-hoc `worker add` task, scheduled automation) layers.
+ *
+ * - `requested` set: that team, which must exist (any team, fixed or not).
+ * - Otherwise exactly one team fixed to the repo (`repo = "<name>"`): that team.
+ * - No fixed team: none (the plain repo env, unchanged behavior).
+ * - Several fixed teams and no `requested`: an error naming them, because
+ *   silently picking one could push with the wrong account.
+ *
+ * @param config - Workspace config.
+ * @param repoName - Destination `[[repos]]` name.
+ * @param requested - Explicit team name (`worker add --team`).
+ */
+export function resolveCredentialTeam(
+  config: WorkspaceConfig,
+  repoName: string,
+  requested?: string,
+): CredentialTeamResolution {
+  if (requested !== undefined) {
+    const team = findTeam(config, requested);
+    if (team) return { ok: true, team };
+    const names = config.teams.map((candidate) => candidate.name);
+    return {
+      ok: false,
+      reason: "unknown-team",
+      error:
+        `unknown team "${requested}"` +
+        (names.length > 0 ? `; valid teams: ${names.join(", ")}` : "; no [[teams]] are configured"),
+    };
+  }
+  const fixed = config.teams.filter((team) => team.repo === repoName);
+  if (fixed.length <= 1) return { ok: true, team: fixed[0] };
+  return {
+    ok: false,
+    reason: "ambiguous",
+    error: `repo "${repoName}" is the fixed repo of several teams (${fixed.map((team) => team.name).join(", ")})`,
+  };
+}
+
 /**
  * Every workspace job that may pin its own harness: automations,
  * estimations, and automatic conflict resolution.

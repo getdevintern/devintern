@@ -53,6 +53,11 @@ export interface InjectedTask {
   taskKey: string;
   /** `[[repos]]` name the task is pinned to. */
   repo: string;
+  /**
+   * `[[teams]]` name whose credentials the run layers (`worker add --team`).
+   * Unset: the worker uses the repo's single fixed team, if any.
+   */
+  team?: string;
   title: string;
   body: string;
   /** Absolute path of the markdown prompt materialized for this task. */
@@ -98,6 +103,7 @@ interface InjectedTaskRow {
   id: number;
   task_key: string;
   repo: string;
+  team: string | null;
   title: string;
   body: string;
   task_file: string;
@@ -120,6 +126,7 @@ function rowToInjectedTask(row: InjectedTaskRow): InjectedTask {
     id: row.id,
     taskKey: row.task_key,
     repo: row.repo,
+    team: row.team ?? undefined,
     title: row.title,
     body: row.body,
     taskFile: row.task_file,
@@ -216,6 +223,7 @@ export interface DeferInjectedTaskOptions {
 export interface EnqueueInjectedTaskInput {
   taskKey: string;
   repo: string;
+  team?: string;
   title: string;
   body: string;
   taskFile: string;
@@ -296,7 +304,8 @@ export class InjectedTaskStore {
         not_before INTEGER,
         created_at INTEGER NOT NULL,
         started_at INTEGER,
-        finished_at INTEGER
+        finished_at INTEGER,
+        team TEXT
       )
     `);
     this.db.run(`
@@ -327,6 +336,9 @@ export class InjectedTaskStore {
     }
     if (!columns.some((column) => column.name === "not_before")) {
       addColumnIfMissing(this.db, "not_before INTEGER");
+    }
+    if (!columns.some((column) => column.name === "team")) {
+      addColumnIfMissing(this.db, "team TEXT");
     }
     this.db.run("CREATE INDEX IF NOT EXISTS idx_injected_tasks_status ON injected_tasks(status)");
     this.db.run(
@@ -385,11 +397,12 @@ export class InjectedTaskStore {
       }
       db.query(
         `INSERT INTO injected_tasks
-           (task_key, repo, title, body, task_file, idempotency_key, actor, status, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
+           (task_key, repo, team, title, body, task_file, idempotency_key, actor, status, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
       ).run(
         input.taskKey,
         input.repo,
+        input.team ?? null,
         input.title,
         input.body,
         input.taskFile,

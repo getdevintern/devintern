@@ -301,6 +301,50 @@ export function buildTeamTaskEnv(
 }
 
 /**
+ * Compose the environment for a repo-scoped run that has no tracker ticket
+ * (an ad-hoc `worker add` task or a scheduled automation), optionally borrowing
+ * one team's credentials.
+ *
+ * Without `team` this is exactly {@link buildRepoEnv}. With `team` the team's
+ * `env_file` and inline `[teams.env]` layer over the repo env, as for a task
+ * the team polled:
+ *
+ * process env < workspace `.env` < repo `env_file` < `[repos.env]` <
+ * team `env_file` < team inline < worker runtime paths.
+ *
+ * Unlike {@link buildTeamTaskEnv}, the run keeps the repo env's tracker
+ * selection: `TASK_TRACKER` and `GITHUB_REPO` (the GitHub Issues coordinate)
+ * are restored after the team layer, and no team attribution is set, so the
+ * run stays a local/scheduled run and only code-host and other credentials
+ * come from the team.
+ *
+ * @param repo - Destination repo.
+ * @param team - Team whose credentials to layer, if any.
+ * @param workspaceDir - Workspace home (defaults to `~/.devintern`).
+ */
+export function buildRepoRunEnv(
+  repo: RepoConfig,
+  team: TeamConfig | undefined,
+  workspaceDir: string = resolveWorkspaceDir(),
+  options: Parameters<typeof buildRepoEnv>[2] = {},
+): Record<string, string | undefined> {
+  const env = buildRepoEnv(repo, workspaceDir, options);
+  if (!team) return env;
+  const kept = { TASK_TRACKER: env.TASK_TRACKER, GITHUB_REPO: env.GITHUB_REPO };
+  Object.assign(env, teamLayerEnv(team, workspaceDir));
+  for (const [key, value] of Object.entries(kept)) {
+    if (value === undefined) delete env[key];
+    else env[key] = value;
+  }
+  pinWorkerRuntimeEnv(env, workspaceDir);
+  pinPipelineEnv(env, repo, workspaceDir, options);
+  applyAgentSelectionEnv(env, options.agentSelection);
+  env[WORKSPACE_REPO_ENV] = repo.name;
+  delete env[WORKSPACE_TEAM_ENV];
+  return env;
+}
+
+/**
  * Compose credentials and task context for one error-monitor source.
  *
  * Precedence: process < workspace < repo < team < source env_file < source

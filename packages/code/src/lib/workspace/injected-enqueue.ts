@@ -96,6 +96,8 @@ function unlinkQuietly(path: string): void {
 export interface InjectedTaskRequest {
   /** Registered `[[repos]]` name (callers validate membership). */
   repo: string;
+  /** Validated `[[teams]]` name whose credentials the run layers. */
+  team?: string;
   /** Non-empty task title. */
   title: string;
   /** Markdown description, at most {@link MAX_INJECTED_BODY_CHARS}. */
@@ -148,6 +150,7 @@ export function enqueueInjectedTask(
       enqueued = store.enqueue({
         taskKey,
         repo: request.repo,
+        ...(request.team ? { team: request.team } : {}),
         title: request.title.trim(),
         body: request.body,
         taskFile,

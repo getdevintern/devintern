@@ -87,6 +87,7 @@ records, and the [dashboard](dashboard.md), and start on a `feature/local-<slug>
 | Option                     | Description                                                                                                                     |
 | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
 | `--repo <name>`            | `[[repos]]` name to target (default: the only repo, else required)                                                              |
+| `--team <name>`            | Run with this `[[teams]]` entry's credentials (default: the team fixed to the repo, if exactly one; required when several are)   |
 | `--title <text>`           | Task title (required unless `--resume`)                                                                                         |
 | `--body <text>`            | Task description                                                                                                                |
 | `--body-file <path>`       | Read the description from a file (`-` reads stdin)                                                                              |
@@ -96,6 +97,8 @@ records, and the [dashboard](dashboard.md), and start on a `feature/local-<slug>
 | `--wait-timeout <seconds>` | Give up waiting after this long (default 21600 = 6h; `0` waits without a limit)                                                 |
 | `--json`                   | Emit a single `{ id, taskKey, repo, status, deduplicated }` object on stdout (failed `--wait` runs add an `error` field; see [JSON output](#json-output) for `harnessPausedUntil`) |
 | `--workspace <path>`       | Use this `workspace.toml` (default `~/.devintern/workspace.toml`, or `DEVINTERN_WORKSPACE_DIR`)                                 |
+
+The task runs with the repository's credentials, plus the `env_file` and `[teams.env]` of the team fixed to that repo (`repo = "<name>"`) or the team named with `--team`. The task stays a local task: only credentials come from the team, not its tracker. See [Environment](workspaces.md#environment).
 
 Validation happens before anything is written. An empty title, a body over
 20,000 characters, a missing `--body-file`, and passing both `--body` and
