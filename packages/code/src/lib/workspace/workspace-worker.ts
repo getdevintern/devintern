@@ -41,6 +41,7 @@ import {
   resolveWorkspaceEstimationContext,
 } from "./schedule-context";
 import type { RepoConfig, WorkspaceConfig } from "./config";
+import { workspaceHasConfiguredWork, workspaceHasStartupWork } from "./startup-work";
 import { applyWorkspaceProcessEnv, buildErrorMonitorEnv, buildTeamEnv } from "./env";
 import {
   automationsDir,
@@ -72,6 +73,11 @@ import { flushAnalytics, trackWorkerStarted } from "../observability/analytics";
 import { startWorkerFailover, getWorkerFailover } from "../worker/failover";
 import { RetryQueueAcquirer } from "./retry-acquirer";
 import { InjectedTaskAcquirer, INJECTED_TASK_SOURCE } from "./injected-acquirer";
+import {
+  buildStackedPrAcquirer,
+  createStackedBaseChecker,
+  remoteHead,
+} from "./stacked-pr-acquirer";
 import { createInjectedStartupRecovery } from "./injected-recovery";
 import { toRoutableTask } from "./router";
 import { createIdleWorkerAutoUpdater } from "./worker-auto-update";
@@ -560,6 +566,7 @@ export function buildInjectedTaskAcquirer(
         })
       : undefined,
     runDbPath: workspaceDbPath(deps.workspaceDir),
+    resolveBranchHead: (repo, branch) => remoteHead(deps.config, deps.repoManager, repo, branch),
     execute: async (task, queueClaim) => {
       // Async so a team the live config no longer resolves rejects the run.
       const credentialTeam = requireInjectedTaskTeam(deps.config, task.repo, task.team);
@@ -996,6 +1003,10 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
     ),
   );
 
+  // Keep stacked PRs on their base: restack, retarget after a merge.
+  const stackStores = { config, workspaceDir, store: injectedTasks, repoManager };
+  acquirers.push(await buildStackedPrAcquirer(stackStores));
+
   // Always assembled (even with no automations yet): a live reload can add
   // [[automations]] without restarting, and applyAutomations schedules them.
   // Semantic problems were already rejected at startup above and are
@@ -1233,6 +1244,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       intervalUpdaters,
       reloadHooksOut: eventReloadHooks,
       supervisor,
+      isStackedBase: createStackedBaseChecker(config, injectedTasks),
     })),
   );
 
@@ -1421,45 +1433,6 @@ function applyWorkspaceEnv(
   };
 }
 
-/** Whether the workspace config itself contains ongoing work. */
-export function workspaceHasConfiguredWork(
-  config: WorkspaceConfig,
-  multiTeam: boolean,
-  initialQuery: string | undefined,
-): boolean {
-  return (
-    multiTeam ||
-    Boolean(initialQuery) ||
-    config.automations.length > 0 ||
-    config.estimations.length > 0 ||
-    config.errorMonitors.some((source) => source.enabled)
-  );
-}
-
-/**
- * Whether startup has any work to keep the worker alive.
- *
- * Scheduled dashboard retries and queued/in-flight injected tasks are the
- * exceptions to the task-query requirement: the worker can still run to drain
- * them (and to recover an interrupted injected row under the post-lock hook).
- * A `running` injected row counts here because only that hook can resume or
- * fail it.
- */
-export function workspaceHasStartupWork(
-  config: WorkspaceConfig,
-  retryQueue: Pick<ScheduledRetryStore, "hasPending">,
-  injectedTasks: Pick<InjectedTaskStore, "hasPending" | "listRunning">,
-  multiTeam: boolean,
-  initialQuery: string | undefined,
-): boolean {
-  return (
-    workspaceHasConfiguredWork(config, multiTeam, initialQuery) ||
-    retryQueue.hasPending() ||
-    injectedTasks.hasPending() ||
-    injectedTasks.listRunning().length > 0
-  );
-}
-
 /**
  * Exit when workspace mode has no work configured.
  *
@@ -1487,6 +1460,7 @@ function assertWorkspaceHasWork(
   );
 }
 
+export { workspaceHasConfiguredWork, workspaceHasStartupWork } from "./startup-work";
 export {
   createFleetTaskExecutor,
   createWorkspaceTaskAcquirer,

@@ -51,7 +51,7 @@ export function workerAddUsage(): string {
     "                            A 'Depends on: <key>, ...' line in the body works too",
     "  --stack                   Stack on an unmerged dependency's branch once it succeeded",
     "  --wait-merge              Wait until every dependency's PR merged",
-    "                            (default: [defaults].dependency_mode, else merged)",
+    "                            (default: [defaults].dependency_mode, else stacked)",
     "  --resume <taskKey>        Re-queue a settled ad-hoc task (resumes its branch)",
     "  --wait                    Block until the run finishes; exit with its status",
     "  --wait-timeout <seconds>  Give up waiting after this long (0 = no limit; default 21600)",

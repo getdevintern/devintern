@@ -24,9 +24,23 @@ import { existsSync, unlinkSync } from "fs";
 import { readLocalDependencyFacts } from "../dependencies/local-facts";
 import type { DependencyFacts, DependencyMode } from "../dependencies/gate";
 import { isDependencyMode } from "../dependencies/gate";
+import { orderStackLinks } from "../dependencies/stack-maintainer";
+import type { StackLink } from "../dependencies/stack-maintainer";
 import { prepareQueueDbDirectory } from "./webhook-queue";
 import { configureSqliteConnection } from "./sqlite";
 import type { RunRecord } from "./run-recorder";
+import {
+  addAutoResumeColumn,
+  addChildPidColumn,
+  addChildStartedAtColumn,
+  addColumnIfMissing,
+} from "./injected-tasks-migrations";
+
+export {
+  addAutoResumeColumn,
+  addChildPidColumn,
+  addChildStartedAtColumn,
+} from "./injected-tasks-migrations";
 
 export type InjectedTaskStatus = "pending" | "running" | "done" | "failed";
 
@@ -187,70 +201,6 @@ function rowToInjectedTask(row: InjectedTaskRow): InjectedTask {
   };
 }
 
-/**
- * Add the durable auto-resume column to a legacy table.
- *
- * The injected-task DB is shared by the worker, the dashboard, and CLI
- * processes, so two first-upgrades can both observe the column missing and
- * race the `ALTER TABLE`. The loser sees SQLite's duplicate-column error,
- * which means the migration already applied and is safe to ignore; any other
- * failure (locked/corrupt DB) must still surface instead of leaving the store
- * half-migrated.
- */
-export function addAutoResumeColumn(db: Database): void {
-  try {
-    db.run("ALTER TABLE injected_tasks ADD COLUMN auto_resume_count INTEGER NOT NULL DEFAULT 0");
-  } catch (error) {
-    if (!/duplicate column name/i.test((error as Error).message)) {
-      throw error;
-    }
-  }
-}
-
-/**
- * Add the durable child-pid column to a legacy table. Same race rule as
- * {@link addAutoResumeColumn}: a concurrent opener's duplicate-column error
- * means the migration already applied.
- */
-export function addChildPidColumn(db: Database): void {
-  try {
-    db.run("ALTER TABLE injected_tasks ADD COLUMN child_pid INTEGER");
-  } catch (error) {
-    if (!/duplicate column name/i.test((error as Error).message)) {
-      throw error;
-    }
-  }
-}
-
-/**
- * Add the child start-time column to a legacy table. Same race rule as
- * {@link addAutoResumeColumn}.
- */
-export function addChildStartedAtColumn(db: Database): void {
-  try {
-    db.run("ALTER TABLE injected_tasks ADD COLUMN child_started_at INTEGER");
-  } catch (error) {
-    if (!/duplicate column name/i.test((error as Error).message)) {
-      throw error;
-    }
-  }
-}
-
-/**
- * Add a column to a legacy table. Same race rule as
- * {@link addAutoResumeColumn}: a concurrent opener's duplicate-column error
- * means the migration already applied.
- */
-function addColumnIfMissing(db: Database, ddl: string): void {
-  try {
-    db.run(`ALTER TABLE injected_tasks ADD COLUMN ${ddl}`);
-  } catch (error) {
-    if (!/duplicate column name/i.test((error as Error).message)) {
-      throw error;
-    }
-  }
-}
-
 /** Deferral budget and backoff applied by {@link InjectedTaskStore.defer}. */
 export interface DeferInjectedTaskOptions {
   /** Settle the row `failed` once this many consecutive deferrals happened. */
@@ -356,6 +306,8 @@ export class InjectedTaskStore {
         dependency_state TEXT,
         dependency_reason TEXT,
         stacked_on TEXT,
+        stack_base_sha TEXT,
+        stack_notice TEXT,
         created_at INTEGER NOT NULL,
         started_at INTEGER,
         finished_at INTEGER,
@@ -400,6 +352,8 @@ export class InjectedTaskStore {
       "dependency_state",
       "dependency_reason",
       "stacked_on",
+      "stack_base_sha",
+      "stack_notice",
     ]) {
       if (!columns.some((column) => column.name === name)) {
         addColumnIfMissing(this.db, `${name} TEXT`);
@@ -775,6 +729,53 @@ export class InjectedTaskStore {
       stackedOnTaskKey,
       id,
     ]);
+  }
+
+  /**
+   * Settled (`done`) rows whose PR is stacked on another task's branch (the
+   * stacked-PR maintainer's work list), each base before its dependents.
+   */
+  listStackedLinks(): StackLink[] {
+    const rows = this.ensureDb()
+      .query(
+        `SELECT id, task_key, repo, stacked_on, stack_base_sha, stack_notice FROM injected_tasks
+         WHERE status = 'done' AND stacked_on IS NOT NULL AND stacked_on != ''
+         ORDER BY finished_at ASC, id ASC`,
+      )
+      .all() as Array<{
+      id: number;
+      task_key: string;
+      repo: string;
+      stacked_on: string;
+      stack_base_sha: string | null;
+      stack_notice: string | null;
+    }>;
+    const links = rows.map((row): StackLink => ({
+      id: row.id,
+      taskKey: row.task_key,
+      repo: row.repo,
+      stackedOn: row.stacked_on,
+      baseHeadSha: row.stack_base_sha ?? undefined,
+      notice: row.stack_notice ?? undefined,
+    }));
+    return orderStackLinks(links);
+  }
+
+  /**
+   * Record the base head a stacked row's branch is built on (`null` forgets
+   * it, e.g. once the row no longer stacks). The next restack strips commits
+   * up to this SHA.
+   */
+  setStackBaseSha(id: number, sha: string | null): void {
+    this.ensureDb().run("UPDATE injected_tasks SET stack_base_sha = ? WHERE id = ?", [sha, id]);
+  }
+
+  /**
+   * Record that the stacked-PR maintainer told the PR why it is blocked
+   * (`null` clears it), so the comment is posted once.
+   */
+  setStackNotice(id: number, notice: string | null): void {
+    this.ensureDb().run("UPDATE injected_tasks SET stack_notice = ? WHERE id = ?", [notice, id]);
   }
 
   /** Every row currently claimed as `running` (startup auto-resume scan). */

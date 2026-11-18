@@ -20,6 +20,8 @@ import {
   InjectedTaskDependencyError,
   MAX_INJECTED_BODY_CHARS,
 } from "../workspace/injected-enqueue";
+import { resolveDependencyMode } from "../dependencies/gate";
+import { repoGitHubSlug } from "../workspace/env";
 import { workspaceConfigPath } from "../workspace/paths";
 import type { ApiResponse, DashboardData } from "./dashboard-api";
 import { loadDashboardWorkspaceConfig } from "./dashboard-workspace";
@@ -165,6 +167,7 @@ export function handleCreateTask(data: DashboardData, raw: unknown): ApiResponse
     return { status: 400, body: { error: `${credentials.error}${hint}` } };
   }
 
+  const repoConfig = load.config.repos.find((repo) => repo.name === request.repo);
   try {
     const { task, deduplicated } = enqueueInjectedTask(
       data.getInjectedTaskStore(),
@@ -172,7 +175,10 @@ export function handleCreateTask(data: DashboardData, raw: unknown): ApiResponse
       {
         ...request,
         actor: DASHBOARD_TASK_ACTOR,
-        dependencyMode: load.config.defaults.dependencyMode,
+        dependencyMode: resolveDependencyMode({
+          configured: load.config.defaults.dependencyMode,
+          stackMaintained: repoConfig !== undefined && repoGitHubSlug(repoConfig) !== undefined,
+        }),
       },
     );
     const body: DashboardTaskResponse = {
