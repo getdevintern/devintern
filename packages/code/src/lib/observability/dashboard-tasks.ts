@@ -15,7 +15,11 @@
  */
 
 import { resolveCredentialTeam } from "../workspace/config";
-import { enqueueInjectedTask, MAX_INJECTED_BODY_CHARS } from "../workspace/injected-enqueue";
+import {
+  enqueueInjectedTask,
+  InjectedTaskDependencyError,
+  MAX_INJECTED_BODY_CHARS,
+} from "../workspace/injected-enqueue";
 import { workspaceConfigPath } from "../workspace/paths";
 import type { ApiResponse, DashboardData } from "./dashboard-api";
 import { loadDashboardWorkspaceConfig } from "./dashboard-workspace";
@@ -165,7 +169,11 @@ export function handleCreateTask(data: DashboardData, raw: unknown): ApiResponse
     const { task, deduplicated } = enqueueInjectedTask(
       data.getInjectedTaskStore(),
       data.workspaceDir,
-      { ...request, actor: DASHBOARD_TASK_ACTOR },
+      {
+        ...request,
+        actor: DASHBOARD_TASK_ACTOR,
+        dependencyMode: load.config.defaults.dependencyMode,
+      },
     );
     const body: DashboardTaskResponse = {
       id: task.id,
@@ -176,6 +184,9 @@ export function handleCreateTask(data: DashboardData, raw: unknown): ApiResponse
     };
     return { status: deduplicated ? 200 : 201, body };
   } catch (error) {
+    if (error instanceof InjectedTaskDependencyError) {
+      return { status: 400, body: { error: error.message } };
+    }
     const message = error instanceof Error ? error.message : String(error);
     return { status: 500, body: { error: `could not enqueue the task: ${message}` } };
   }

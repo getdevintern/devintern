@@ -3,7 +3,12 @@ import type { Acquirer } from "../../worker";
 import { createGitLabCiProvider } from "../code-host/gitlab/ci-provider";
 import { JobNotStartedError } from "../worker/supervisor";
 import type { JobKind, TaskSupervisor } from "../worker/supervisor";
-import type { AgentPr, AgentPrCloseOptions, WorkerState } from "../state/worker-state";
+import type {
+  AgentPr,
+  AgentPrCloseReason,
+  AgentPrMergeDetails,
+  WorkerState,
+} from "../state/worker-state";
 import type { WorkspaceConfig, RepoConfig } from "./config";
 import type { WorkspaceState } from "./state";
 import type { RepoManagerLike } from "./fleet-executor";
@@ -19,8 +24,8 @@ import { buildFleetEventEnv } from "./env";
 export function gitLabCiMarkClosed(
   workerState: Pick<WorkerState, "markAgentChangeRequestClosed">,
   ciRow: (key: string, number: number) => AgentPr | undefined,
-): (key: string, number: number, options?: AgentPrCloseOptions) => void {
-  return (key, number, options) => {
+): (key: string, number: number, reason?: AgentPrCloseReason, merge?: AgentPrMergeDetails) => void {
+  return (key, number, reason, merge) => {
     const mr = ciRow(key, number);
     if (!mr) return;
     workerState.markAgentChangeRequestClosed(
@@ -32,7 +37,8 @@ export function gitLabCiMarkClosed(
         number: mr.changeNumber,
         webUrl: mr.webUrl,
       },
-      options,
+      reason,
+      merge,
     );
   };
 }

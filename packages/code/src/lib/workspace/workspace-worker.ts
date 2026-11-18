@@ -26,6 +26,7 @@ import { readImplementationReport } from "../state/session-pickup";
 import { RetryStateStore } from "../state/retry-state";
 import { ScheduledRetryStore } from "../state/run-retry";
 import { InjectedTaskStore } from "../state/injected-tasks";
+import type { WorkerState } from "../state/worker-state";
 import { createTaskActionedGate } from "../task/actioned-state";
 import type { TaskTrackerClient } from "../trackers/client";
 import {
@@ -33,7 +34,7 @@ import {
   findTeam,
   harnessPinnedJobs,
   loadWorkspaceConfig,
-  resolveCredentialTeam,
+  requireInjectedTaskTeam,
 } from "./config";
 import {
   resolveWorkspaceAutomationContext,
@@ -53,7 +54,6 @@ import {
 } from "./paths";
 import { appliedConfigRecorder, WorkspaceConfigReloader } from "./config-reload";
 import { createWorkspaceLock, openWorkspaceState } from "./state";
-import type { WorkerState } from "../state/worker-state";
 import { BASE_WORKTREE_NAME, RepoManager } from "./repo-manager";
 import { Utils } from "../utils";
 import { probePushAccess } from "../code-host/github/push-probe";
@@ -83,7 +83,10 @@ import {
   resolveActionedSource,
 } from "./fleet-executor";
 import type { FleetExecutorDeps, RepoManagerLike } from "./fleet-executor";
-import { buildFleetEventAcquirers } from "./fleet-event-acquirers";
+import {
+  buildFleetEventAcquirers,
+  createDependencyMergeStateResolver,
+} from "./fleet-event-acquirers";
 import { assertTeamPrSyncSandbox } from "./team-pr-sync";
 import type { FleetEventReloadHooks, FleetSourceRuntime } from "./fleet-event-acquirers";
 
@@ -534,33 +537,36 @@ export function isHarnessChainPaused(): boolean {
 
 /**
  * Build the `worker add` drain acquirer: claims durable injected rows and runs
- * each through the fleet executor, pinned to the repo the row names.
+ * each through the fleet executor, pinned to the repo the row names. Ad-hoc
+ * tasks drain on the same short interval as retries and run through the normal
+ * pipeline (which inherits `[defaults].worker_task_args`, e.g. `--create-pr`).
+ *
+ * @param workerState - PR registry; when given, the dependency gate can ask
+ *   GitHub whether a closed dependency PR merged and record the answer there
  */
 export function buildInjectedTaskAcquirer(
   deps: FleetExecutorDeps,
   store: InjectedTaskStore,
   verbose?: boolean,
+  workerState?: Pick<WorkerState, "markAgentPrClosed">,
 ): InjectedTaskAcquirer {
   return new InjectedTaskAcquirer({
     store,
+    resolveMergeState: workerState
+      ? createDependencyMergeStateResolver({
+          config: deps.config,
+          workspaceDir: deps.workspaceDir,
+          workerState,
+        })
+      : undefined,
     runDbPath: workspaceDbPath(deps.workspaceDir),
-    execute: (task, queueClaim) => {
-      // Resolved per run against the live config: the row's `--team`, else
-      // the repo's single fixed team. A config change that made the choice
-      // ambiguous (or removed the team) fails the row with the reason rather
-      // than silently running with the shared workspace credentials.
-      const credentials = resolveCredentialTeam(deps.config, task.repo, task.team);
-      if (!credentials.ok) {
-        const hint =
-          credentials.reason === "ambiguous"
-            ? "; re-enqueue with `devintern worker add --team <name>`"
-            : "";
-        return Promise.reject(new Error(`${credentials.error}${hint}`));
-      }
+    execute: async (task, queueClaim) => {
+      // Async so a team the live config no longer resolves rejects the run.
+      const credentialTeam = requireInjectedTaskTeam(deps.config, task.repo, task.team);
       return createFleetTaskExecutor(deps, {
         extraArgs: () => fleetTaskArgs(deps.config),
         repo: task.repo,
-        ...(credentials.team ? { credentialTeam: credentials.team } : {}),
+        ...(credentialTeam ? { credentialTeam } : {}),
         source: INJECTED_TASK_SOURCE,
         runOrigin: "local",
         queueClaim,
@@ -981,14 +987,12 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
     ),
   );
 
-  // Ad-hoc `worker add` tasks: drained on the same short interval as retries,
-  // pinned to their explicit repo, and run through the normal pipeline (which
-  // inherits `[defaults].worker_task_args`, e.g. `--create-pr`).
   acquirers.push(
     buildInjectedTaskAcquirer(
       { config, workspaceDir, skips: state.skips, repoManager, supervisor },
       injectedTasks,
       options.verbose,
+      state.workerState,
     ),
   );
 

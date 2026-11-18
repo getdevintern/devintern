@@ -30,6 +30,10 @@ function heldUntil(item: QueuedWorkItem, now: number): number | undefined {
 
 /** One-line reason under the kind label: backoff, failed attempts, or who queued it. */
 function statusDetail(item: QueuedWorkItem, now: number): string | undefined {
+  if (item.dependencyState) {
+    const label = item.dependencyState === "blocked" ? "Blocked" : "Waiting";
+    return item.dependencyReason ? `${label}: ${item.dependencyReason}` : label;
+  }
   const held = heldUntil(item, now);
   if (held !== undefined) {
     const times = item.deferCount ? ` · deferred ${item.deferCount}×` : "";
@@ -72,6 +76,20 @@ function QueuedDetails({ item, now }: { item: QueuedWorkItem; now: number }) {
         {held !== undefined ? (
           <Fact label="Eligible">
             {formatTime(held)} ({formatIn(held, now)})
+          </Fact>
+        ) : null}
+        {item.dependsOn?.length ? (
+          <Fact label="Depends on">
+            {item.dependsOn.join(", ")} ({item.dependencyMode ?? "merged"})
+          </Fact>
+        ) : null}
+        {item.dependencyState && item.dependencyReason ? (
+          <Fact label={item.dependencyState === "blocked" ? "Blocked" : "Waiting"}>
+            {item.dependencyState === "blocked" ? (
+              <span className="text-danger">{item.dependencyReason}</span>
+            ) : (
+              item.dependencyReason
+            )}
           </Fact>
         ) : null}
         {item.deferCount ? <Fact label="Deferrals">{item.deferCount}</Fact> : null}

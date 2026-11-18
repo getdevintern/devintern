@@ -3,7 +3,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { UsageLimitError } from "@devintern/agent-harness";
 import { WorkerState } from "../state/worker-state";
-import type { AgentPr } from "../state/worker-state";
+import type { AgentPr, AgentPrMergeDetails } from "../state/worker-state";
 import {
   gitLabWebhookDeliveryId,
   matchesRegisteredGitLabChange,
@@ -190,6 +190,24 @@ export async function processGitLabWithPersistence(
   }
 }
 
+/**
+ * Merge facts from a merge-request hook payload: the target branch, and the
+ * merge time when the payload carries one. Missing fields stay `undefined`.
+ */
+function lifecycleMergeDetails(payload: Record<string, unknown>): AgentPrMergeDetails {
+  const attributes = payload.object_attributes;
+  if (typeof attributes !== "object" || attributes === null) return {};
+  const { target_branch: targetBranch, merged_at: mergedAtRaw } = attributes as Record<
+    string,
+    unknown
+  >;
+  const mergedAt = typeof mergedAtRaw === "string" ? Date.parse(mergedAtRaw) : Number.NaN;
+  return {
+    mergedAt: Number.isFinite(mergedAt) ? mergedAt : undefined,
+    mergedInto: typeof targetBranch === "string" && targetBranch !== "" ? targetBranch : undefined,
+  };
+}
+
 async function processGitLabEvent({ event, target }: QueuedGitLabWebhook): Promise<void> {
   const serializationKey = `${target.instanceUrl}:${target.projectPath}!${target.changeNumber}`;
   if (event.kind === "lifecycle") {
@@ -204,7 +222,8 @@ async function processGitLabEvent({ event, target }: QueuedGitLabWebhook): Promi
           number: target.changeNumber,
           webUrl: target.webUrl,
         },
-        { merged: event.state === "merged" || event.state === "merge" },
+        event.state === "closed" ? "closed" : "merged",
+        event.state === "closed" ? undefined : lifecycleMergeDetails(event.payload),
       );
     } finally {
       state.close();

@@ -35,7 +35,12 @@ import { join } from "path";
 import { spawn } from "child_process";
 
 import type { WebhookQueue } from "../state/webhook-queue";
-import type { AgentPrCloseOptions, CiFixState, WorkerState } from "../state/worker-state";
+import type {
+  AgentPrCloseReason,
+  AgentPrMergeDetails,
+  CiFixState,
+  WorkerState,
+} from "../state/worker-state";
 import { RowParseError } from "../state/row-parse";
 import type { Acquirer } from "../../worker";
 import type { CiFailureFeedback } from "../review/formatter";
@@ -77,7 +82,12 @@ export interface CiFailureWatcherAcquirerOptions {
   /** Optional provider-specific watch list; defaults to registered GitHub PRs. */
   watchedChanges?: () => Array<{ repo: string; prNumber: number }>;
   /** Optional provider-specific close operation. */
-  markClosed?: (repo: string, prNumber: number, options?: AgentPrCloseOptions) => void;
+  markClosed?: (
+    repo: string,
+    prNumber: number,
+    reason?: AgentPrCloseReason,
+    merge?: AgentPrMergeDetails,
+  ) => void;
   /** Durable key namespace; defaults to `github`. */
   namespace?: string;
   /** Human-readable provider label used for missing-log diagnostics. */
@@ -682,9 +692,9 @@ export class CiFailureWatcherAcquirer implements Acquirer {
           const close = resolveAgentPrMerge(lifecycle, prResult.data);
           console.log(
             `👁️  [${this.name}] ${this.describe(repo, prNumber)} is ` +
-              `${close.merged ? "merged" : lifecycle}; unwatching`,
+              `${close.reason === "merged" ? "merged" : lifecycle}; unwatching`,
           );
-          this.markClosed(repo, prNumber, close);
+          this.markClosed(repo, prNumber, close.reason, close.merge);
           return "removed";
         }
       }
@@ -863,9 +873,14 @@ export class CiFailureWatcherAcquirer implements Acquirer {
     return this.namespace === "github" ? SOURCE : `${this.namespace}:ci`;
   }
 
-  private markClosed(repo: string, prNumber: number, options: AgentPrCloseOptions): void {
-    if (this.options.markClosed) this.options.markClosed(repo, prNumber, options);
-    else this.options.workerState.markAgentPrClosed(repo, prNumber, options);
+  private markClosed(
+    repo: string,
+    prNumber: number,
+    reason?: AgentPrCloseReason,
+    merge?: AgentPrMergeDetails,
+  ): void {
+    if (this.options.markClosed) this.options.markClosed(repo, prNumber, reason, merge);
+    else this.options.workerState.markAgentPrClosed(repo, prNumber, reason, merge);
   }
 
   private describe(repo: string, prNumber: number): string {

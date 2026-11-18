@@ -75,6 +75,7 @@ Keys not shown here are documented on the page for their feature:
 | `[workspace].conflict_resolution*`, `auto_merge*`, `ci_failure_fix`; `[[repos]].sync_team_prs`, `auto_merge_safe_paths`, `auto_merge_deny_paths` | [PR Follow-up](./pr-follow-up.md)                     |
 | `[worker.schedule]`, `[worker].auto_update`, `[workspace].dashboard_port`                                | [Worker Daemon](./worker.md)                                                       |
 | `[dashboard].allowed_origins`, `tailscale_autodetect`                                                    | [Dashboard](./dashboard.md#allowed-origins)                                        |
+| `[defaults].dependency_mode`                                                                             | [Delegation: Dependent tasks](./delegation.md#dependent-tasks---after)             |
 | `pipeline_file`                                                                                          | [below](#pipelines-for-the-fleet-and-per-repository)                               |
 
 Notes on the keys above:

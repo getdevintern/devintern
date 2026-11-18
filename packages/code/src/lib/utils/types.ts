@@ -57,6 +57,7 @@ export interface UtilsSurface {
     key: string;
   };
   extractTargetBranch(description: string | undefined): string | null;
+  extractDependsOn(description: string | undefined): string[];
   extractExecutionPreferences(description: string | undefined): ExtractedExecutionPreferences;
   generateTaskFilename(taskKey: string, extension: string): string;
   executeGitCommand(

@@ -969,7 +969,7 @@ describe("dashboard API", () => {
     state.recordAgentPr({ repo: "acme/webapp", prNumber: 7, taskKey: "DEV-1" });
     state.recordAgentPr({ repo: "acme/webapp", prNumber: 8 });
     state.recordAgentPr({ repo: "acme/webapp", prNumber: 9 });
-    state.markAgentPrClosed("acme/webapp", 7, { merged: true });
+    state.markAgentPrClosed("acme/webapp", 7, "merged");
     state.markAgentPrClosed("acme/webapp", 8);
     state.close();
 

@@ -12,6 +12,8 @@ import { parseWorkerScheduleSection } from "../worker/schedule";
 import { parseEstimationEntries } from "../automation/estimation-config";
 import type { EstimationConfig } from "../automation/estimation-config";
 import { parseToml } from "./toml";
+import { DEFAULT_DEPENDENCY_MODE, DEPENDENCY_MODES, isDependencyMode } from "../dependencies/gate";
+import type { DependencyMode } from "../dependencies/gate";
 import { parseAgentSelection } from "../agent/selection";
 import type { HarnessPinnedEntry } from "../agent/selection";
 import { parseDashboardAllowedOriginList } from "../observability/dashboard-origins";
@@ -433,7 +435,20 @@ function parseDefaultsSection(
         min: 1,
         message: "[defaults].poll_interval must be a positive integer (seconds).",
       }) ?? DEFAULT_POLL_INTERVAL_SECONDS,
+    dependencyMode: readDependencyMode(defaultsTable, errors),
   };
+}
+
+/** `[defaults].dependency_mode`: `merged` (default) or `stacked`. */
+function readDependencyMode(
+  defaultsTable: Record<string, unknown>,
+  errors: string[],
+): DependencyMode {
+  const raw = readString(defaultsTable, "dependency_mode", "[defaults]", errors);
+  if (raw === undefined) return DEFAULT_DEPENDENCY_MODE;
+  if (isDependencyMode(raw)) return raw;
+  errors.push(`[defaults].dependency_mode must be one of: ${DEPENDENCY_MODES.join(", ")}.`);
+  return DEFAULT_DEPENDENCY_MODE;
 }
 
 /** Fill each team's omitted tracker/query from `[defaults]`, reporting gaps. */
@@ -836,6 +851,28 @@ export function resolveCredentialTeam(
     reason: "ambiguous",
     error: `repo "${repoName}" is the fixed repo of several teams (${fixed.map((team) => team.name).join(", ")})`,
   };
+}
+
+/**
+ * Resolve an ad-hoc task's credential team at run time against the live
+ * config: the row's `--team`, else the repo's single fixed team. A config
+ * change that made the choice ambiguous (or removed the team) throws with the
+ * reason rather than silently running with the shared workspace credentials.
+ *
+ * @returns The team to layer, or undefined for the plain repo env.
+ */
+export function requireInjectedTaskTeam(
+  config: WorkspaceConfig,
+  repoName: string,
+  requested?: string,
+): TeamConfig | undefined {
+  const credentials = resolveCredentialTeam(config, repoName, requested);
+  if (credentials.ok) return credentials.team;
+  const hint =
+    credentials.reason === "ambiguous"
+      ? "; re-enqueue with `devintern worker add --team <name>`"
+      : "";
+  throw new Error(`${credentials.error}${hint}`);
 }
 
 /**
