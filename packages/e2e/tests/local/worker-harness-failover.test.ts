@@ -10,103 +10,12 @@
  */
 
 import { expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync } from "node:fs";
+import { configureFailover, invocationCount } from "../../helpers/harness-stubs";
 import { checkedCommand } from "../../helpers/process";
 import { cliPath, WorkerFixture } from "../../helpers/worker";
 
 const cliTest = test.skipIf(!existsSync(cliPath));
-
-/**
- * Two lines so the detector matches `Claude usage limit reached` and reads the
- * adjacent `resets in 1 hour` hint (a single combined sentence is not a
- * recognized limit line).
- */
-const LIMIT_LINES = ["Claude usage limit reached", "resets in 1 hour"];
-
-interface FailoverStubs {
-  primaryInvocations: string;
-  fallbackInvocations: string;
-}
-
-/** Write an executable shell stub. */
-function writeStub(path: string, lines: string[]): void {
-  writeFileSync(path, `${lines.join("\n")}\n`, { mode: 0o700 });
-  chmodSync(path, 0o700);
-}
-
-/** Append one line to a stub's invocation log on every spawn. */
-function recordInvocation(path: string): string {
-  return `printf '%s\\n' invoked >> "${path}"`;
-}
-
-/** Stub that only reports an exhausted usage window and exits non-zero. */
-function createLimitStub(dir: string, name: string, invocations: string): string {
-  const path = join(dir, name);
-  writeStub(path, [
-    "#!/bin/sh",
-    recordInvocation(invocations),
-    `printf '%s\\n' ${LIMIT_LINES.map((line) => `'${line}'`).join(" ")} >&2`,
-    "exit 1",
-  ]);
-  return path;
-}
-
-/** Stub that hands the original argv to the deterministic fixture agent. */
-function createDelegateStub(
-  dir: string,
-  name: string,
-  invocations: string,
-  agentPath: string,
-): string {
-  const path = join(dir, name);
-  writeStub(path, [
-    "#!/bin/sh",
-    recordInvocation(invocations),
-    `exec "${process.execPath}" "${agentPath}" "$@"`,
-  ]);
-  return path;
-}
-
-/**
- * Install the harness stubs and point the chain at them.
- *
- * The fixture's `prepare()` pins `AGENT_CLI_PATH` at the fake agent, and that
- * global override wins over every `<HARNESS>_CLI_PATH` during env-driven
- * resolution — including the failover entry. Clearing it is what makes the
- * retry spawn the codex stub instead of the primary again.
- */
-function configureFailover(
-  worker: WorkerFixture,
-  fallbackBehavior: "delegate" | "limit" = "delegate",
-): FailoverStubs {
-  const dir = join(worker.root, "harness-stubs");
-  mkdirSync(dir, { recursive: true });
-  const primaryInvocations = join(dir, "claude-code-invocations.txt");
-  const fallbackInvocations = join(dir, "codex-invocations.txt");
-  const primary = createLimitStub(dir, "claude-code-limit.sh", primaryInvocations);
-  const fallback =
-    fallbackBehavior === "limit"
-      ? createLimitStub(dir, "codex-limit.sh", fallbackInvocations)
-      : createDelegateStub(
-          dir,
-          "codex-delegate.sh",
-          fallbackInvocations,
-          join(worker.root, "agent.ts"),
-        );
-
-  delete worker.env.AGENT_CLI_PATH;
-  worker.env.AGENT_HARNESS = "claude-code,codex";
-  worker.env.CLAUDE_CODE_CLI_PATH = primary;
-  worker.env.CODEX_CLI_PATH = fallback;
-  return { primaryInvocations, fallbackInvocations };
-}
-
-/** Number of times a stub was spawned. */
-function invocationCount(path: string): number {
-  if (!existsSync(path)) return 0;
-  return readFileSync(path, "utf8").trim().split("\n").filter(Boolean).length;
-}
 
 /** Branch refs currently present on the local bare remote. */
 async function remoteBranches(worker: WorkerFixture): Promise<string[]> {
@@ -209,7 +118,7 @@ cliTest(
     const worker = new WorkerFixture();
     try {
       await worker.prepare();
-      const stubs = configureFailover(worker, "limit");
+      const stubs = configureFailover(worker, { fallback: "limit" });
       const task = await worker.addTask({
         title: "Every harness is limited",
         body: "Change the greeting to Hello, world! and run bun test.",
