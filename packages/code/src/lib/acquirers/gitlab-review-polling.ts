@@ -128,7 +128,9 @@ export class GitLabReviewPollingAcquirer implements Acquirer {
     }
 
     if (snapshot.state !== "opened") {
-      this.options.workerState.markAgentChangeRequestClosed(this.identity(mr));
+      this.options.workerState.markAgentChangeRequestClosed(this.identity(mr), {
+        merged: snapshot.state === "merged",
+      });
       this.retries.delete(key);
       console.log(
         `🧹 [${this.name}] ${mr.projectPath}!${mr.changeNumber} is ${snapshot.state}; unwatching`,

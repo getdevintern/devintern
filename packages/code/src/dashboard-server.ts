@@ -465,7 +465,7 @@ export function startDashboardServer(
           return json(handleWorkspace(data));
         }
         if (pathname === "/api/agent-prs") {
-          return json(handleAgentPrs(data));
+          return json(handleAgentPrs(data, url.searchParams));
         }
         if (pathname === "/api/logs") {
           return json(handleLogs(data, url.searchParams));

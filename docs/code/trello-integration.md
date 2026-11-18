@@ -5,59 +5,53 @@ description: "Fetch Trello cards, move lists, implement with your coding agent, 
 section: "Automation"
 order: 5
 sidebarHidden: true
-dateModified: 2026-11-12
+dateModified: 2026-11-18
 ---
 
 # Implement Trello Cards with DevIntern Code
 
-@devintern/code can implement work directly from Trello cards: fetch card details and comments, run a feasibility check, move the card between lists, execute your AI agent, commit changes, open a pull request, and post results back to the card.
+DevIntern Code reads a Trello card (description, labels, comments), checks that it is clear enough to implement, moves it between lists, runs your coding agent, opens a pull request, and posts the result back on the card.
 
 ## Prerequisites
 
-- [Bun](https://bun.sh) and `@getdevintern/code` installed globally
-- Trello Power-Up API key and user token with read/write access
-- Git repository for your project
+- `@getdevintern/code` installed and a Git repository for your project
+- A Trello Power-Up API key and a user token with read/write access
 
 ## Setup
 
-### 1. Set the task tracker
+1. **API key:** create or open a Power-Up at [trello.com/power-ups/admin](https://trello.com/power-ups/admin) and copy the key from the **API Key** tab.
+2. **Token:** open this URL with your key, click **Allow**, and copy the token:
+   `https://trello.com/1/authorize?expiration=never&scope=read,write&response_type=token&name=DevIntern&key=YOUR_API_KEY`
 
-In `.devintern-code/.env`:
+Then set in `.devintern-code/.env`:
 
-```bash
-TASK_TRACKER=trello
-```
+| Variable                  | Required    | Description                                                                                    |
+| ------------------------- | ----------- | ---------------------------------------------------------------------------------------------- |
+| `TASK_TRACKER`            | Yes         | `trello`                                                                                       |
+| `TRELLO_API_KEY`          | Yes         | Power-Up API key                                                                               |
+| `TRELLO_API_TOKEN`        | Yes         | User token                                                                                     |
+| `TRELLO_DEFAULT_BOARD_ID` | For worker  | Board short ID from `trello.com/b/{boardId}/...`. Scopes `--query`, is the settings fallback, and is required for worker polling and relay |
 
-### 2. Add Trello credentials
+## Run a task
 
-Both variables are required for @devintern/code:
-
-```bash
-TRELLO_API_KEY=your-power-up-api-key
-TRELLO_API_TOKEN=your-user-token
-```
-
-**API key:** Create or open a Power-Up at [trello.com/power-ups/admin](https://trello.com/power-ups/admin), then copy the API key from the **API Key** tab.
-
-**API token:** Generate a token by visiting (replace `YOUR_API_KEY` with your key):
-
-```
-https://trello.com/1/authorize?expiration=never&scope=read,write&response_type=token&name=DevIntern&key=YOUR_API_KEY
-```
-
-Click **Allow**, then copy the token from the page.
-
-Optionally pin a default board:
+Pass a card short link, full URL, or 24-character card ID:
 
 ```bash
-TRELLO_DEFAULT_BOARD_ID=abc123       # board short ID from trello.com/b/{boardId}/board-name
+devintern 4uWKPOTv --create-pr
+devintern https://trello.com/c/4uWKPOTv/card-slug --create-pr
 ```
 
-`TRELLO_DEFAULT_BOARD_ID` is used for settings lookup when the board cannot be inferred from the card. Status transitions are driven entirely by the list names you configure in `settings.json` (see below), not by an environment variable.
+Batch runs use [Trello search operators](https://support.atlassian.com/trello/docs/searching-for-cards-all-boards/), scoped to `TRELLO_DEFAULT_BOARD_ID` when set. The first 100 matches run in sequence:
 
-### 3. Configure list transitions
+```bash
+devintern --query 'list:"To Do" is:open' --create-pr
+```
 
-Edit `.devintern-code/settings.json` using the board short ID as the project key:
+Use `--skip-clarity-check` to skip the feasibility check. `--skip-comments` skips comments **and** list moves. `--estimate` is not supported for Trello.
+
+## Status mapping
+
+Configure lists in `.devintern-code/settings.json`, keyed by the board short ID (from the board URL, not the 24-character internal ID). List names are matched case-insensitively.
 
 ```json
 {
@@ -73,69 +67,22 @@ Edit `.devintern-code/settings.json` using the board short ID as the project key
 }
 ```
 
-List names must match your board exactly (case-insensitive). @devintern/code moves cards to:
+| Field              | When it is applied                                   |
+| ------------------ | ---------------------------------------------------- |
+| `inProgressStatus` | Implementation starts (after the feasibility check)  |
+| `prStatus`         | A pull request is created                            |
+| `todoStatus`       | The run is incomplete, fails, or hits the turn limit |
 
-- **inProgressStatus** when implementation starts (after the clarity check)
-- **prStatus** after a pull request is created
-- **todoStatus** when implementation is incomplete or max turns are reached
+## Worker notes
 
-See [Configuration](./configuration.md) for all settings fields.
-
-## Running a card
-
-Pass a card short link, full URL, or 24-character card ID:
-
-```bash
-# Short link
-devintern 4uWKPOTv --create-pr
-
-# Full card URL
-devintern https://trello.com/c/4uWKPOTv/card-slug --create-pr
-```
-
-This workflow:
-
-1. Fetches card description, labels, and comments
-2. Runs a feasibility assessment (skippable with `--skip-clarity-check`)
-3. Moves the card to `inProgressStatus` (unless `--skip-comments` is set)
-4. Creates a feature branch, runs your agent, commits, and optionally opens a PR
-5. Moves the card to `prStatus` after PR creation
-6. Posts implementation or assessment comments on the card
-
-### Actioned cards (worker)
-
-When the worker creates a PR it moves the card to `prStatus` (when configured) and records it as actioned locally, so the ready-tasks query no longer re-implements it. This also covers a failed or unconfigured transition. Re-arm an actioned card by editing its description, moving the card back to a ready list, or changing labels — see [Tickets already actioned after a PR](./worker-troubleshooting.md#tickets-already-actioned-after-a-pr).
-
-## Batch processing with --query
-
-Select multiple cards with [Trello search operators](https://support.atlassian.com/trello/docs/searching-for-cards-all-boards/), scoped to `TRELLO_DEFAULT_BOARD_ID` when set:
-
-```bash
-devintern --query 'list:"To Do" is:open' --create-pr
-devintern --query 'label:bug login' --create-pr
-```
-
-The first 100 matching cards are processed in sequence.
-
-## Limitations
-
-- **Story points:** Estimation mode (`--estimate`) is not supported for Trello (no estimation concept). Estimation works with Jira, Linear, Azure DevOps, Asana, GitHub, and GitLab (GitHub and GitLab are comment-only).
-- **Comments:** Use `--skip-comments` to skip Trello comments and list transitions for a run.
+- [Worker polling](./worker.md#polling-mode) reads the board's activity feed and refuses to start without `TRELLO_DEFAULT_BOARD_ID`. PR'd cards are marked actioned and not re-implemented until they change; see [Tickets already actioned after a PR](./worker-troubleshooting.md#tickets-already-actioned-after-a-pr).
+- For instant pickup, run `devintern worker connect trello` to register a board webhook through the [relay](./relay.md).
 
 ## Troubleshooting
 
-**"Missing required Trello environment variables"**
-
-Ensure `TRELLO_API_KEY` and `TRELLO_API_TOKEN` are set in `.devintern-code/.env`.
-
-**Card does not move between lists**
-
-Confirm list names in `settings.json` match your board, and that the project key is the board short ID (from the board URL, not the 24-character internal ID). Set `TRELLO_DEFAULT_BOARD_ID` to the same short ID if needed.
-
-**"List \"Doing\" not found on board"**
-
-Check spelling and capitalization against the lists on your Trello board. Available lists are shown in the error message.
-
-**Transitions skipped entirely**
-
-List moves are tied to comment posting. Do not pass `--skip-comments` if you expect cards to move.
+| Symptom                                         | Fix                                                                                                    |
+| ----------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `Missing required Trello environment variables` | Set `TRELLO_API_KEY` and `TRELLO_API_TOKEN`.                                                            |
+| Card does not move between lists                | Check list names and that the `settings.json` key is the board short ID. Do not pass `--skip-comments`. |
+| `List "Doing" not found on board`               | Fix the spelling; the error lists the board's lists.                                                    |
+| `Could not initialize the trello change detector` | Set `TRELLO_DEFAULT_BOARD_ID` for the worker.                                                        |
