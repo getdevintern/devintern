@@ -12,8 +12,10 @@ export interface CiChange {
    * that as "unknown", never as "not open".
    */
   state?: unknown;
-  /** Whether a closed change merged (`true`/`false`); unknown otherwise. */
+  /** Host merge flag (GitHub reports merged PRs as `state: "closed"`). */
   merged?: unknown;
+  /** Host merge timestamp (ISO string), when the provider reports one. */
+  mergedAt?: unknown;
   headSha?: string;
   headRepository?: string;
 }

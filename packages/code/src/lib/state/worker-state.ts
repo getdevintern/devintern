@@ -91,7 +91,11 @@ export interface AgentPr {
   state: AgentPrState;
   /** Set once the PR is known to be closed; see {@link AgentPrCloseReason}. */
   closeReason?: AgentPrCloseReason;
-  /** When the worker first recorded the merge (epoch ms). */
+  /**
+   * When the PR merged (epoch ms): the host-reported merge time when known,
+   * else when the worker first recorded the merge. Absent for open PRs, PRs
+   * closed without merging, and rows closed before merges were recorded.
+   */
   mergedAt?: number;
   createdAt: number;
   updatedAt: number;
@@ -223,7 +227,9 @@ function parseAgentPrRow(row: unknown): AgentPr {
       "close_reason",
       "agent_prs row",
     ),
-    mergedAt: optionalNumber(record, "merged_at", "agent_prs row"),
+    mergedAt:
+      optionalNumber(record, "host_merged_at", "agent_prs row") ??
+      optionalNumber(record, "merged_at", "agent_prs row"),
     createdAt: requireNumber(record, "created_at", "agent_prs row"),
     updatedAt: requireNumber(record, "updated_at", "agent_prs row"),
   };
@@ -394,6 +400,8 @@ export class WorkerState {
     }
 
     const columns = readColumnNames(this.db, "agent_prs");
+    // Provider-aware registries get merge columns from addAgentPrCloseColumns;
+    // existing closed rows keep them NULL (merge vs. close is unknown for them).
     if (columns.includes("provider")) return;
 
     const hasTicketUrl = columns.includes("ticket_url");
@@ -749,6 +757,30 @@ export class WorkerState {
     const rows = this.db
       .query(`SELECT * FROM agent_prs WHERE state = 'open' ORDER BY created_at ASC`)
       .all();
+    return this.mapAgentPrRows(rows);
+  }
+
+  /**
+   * List agent-created change requests the worker saw merged, most recently
+   * merged first (dashboard history view). A readonly database that predates
+   * the `merged_at` column has no recorded merges and returns an empty list.
+   *
+   * @param limit - Maximum rows returned
+   */
+  listMergedAgentChangeRequests(limit: number): AgentPr[] {
+    const columns = readColumnNames(this.db, "agent_prs");
+    if (!columns.includes("merged_at")) return [];
+    // Host merge time orders merges correctly; fall back to the worker's clock.
+    const mergedAt = columns.includes("host_merged_at")
+      ? "COALESCE(host_merged_at, merged_at)"
+      : "merged_at";
+    const rows = this.db
+      .query(
+        `SELECT * FROM agent_prs
+         WHERE state = 'closed' AND merged_at IS NOT NULL
+         ORDER BY ${mergedAt} DESC LIMIT ?`,
+      )
+      .all(limit);
     return this.mapAgentPrRows(rows);
   }
 

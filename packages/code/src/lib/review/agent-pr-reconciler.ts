@@ -36,8 +36,12 @@ import type {
  */
 export interface PolledPr {
   state?: unknown;
-  /** GitHub reports `state: "closed"` for merged PRs; these tell them apart. */
+  /**
+   * GitHub reports merged PRs as `state: "closed"`; these two fields are what
+   * distinguish a merge from a plain close. Untrusted like `state`.
+   */
   merged?: unknown;
+  /** ISO timestamp of the merge, `null` when not merged. */
   merged_at?: unknown;
   /** GitHub's computed merge state; `"dirty"` means merge conflicts. */
   mergeable_state?: string;
@@ -116,6 +120,42 @@ export function mergeDetailsFromPr(pr: Pick<PolledPr, "merged_at" | "base">): Ag
         ? mergedInto === defaultBranch
         : undefined,
   };
+}
+
+/** How a terminal PR closed, as {@link WorkerState.markAgentPrClosed} records it. */
+export interface AgentPrClose {
+  /** `undefined` when the payload cannot tell a merge from a plain close. */
+  reason?: AgentPrCloseReason;
+  /** Host-reported merge facts; only set for merges. */
+  merge?: AgentPrMergeDetails;
+}
+
+/**
+ * Decide whether a terminal change was merged, and when, from a normalized
+ * CI-provider payload.
+ *
+ * GitHub's REST pulls payload never reports `state: "merged"`: a merged PR is
+ * `state: "closed"` with `merged: true` and a `merged_at` timestamp. GitLab
+ * (and normalized providers) report `"merged"` directly. Either signal counts;
+ * a parseable host timestamp is recorded as the host merge time. Only an
+ * explicit `merged: false` proves "closed without merging".
+ *
+ * @param state - Terminal lifecycle from {@link classifyAgentPrState}
+ * @param payload - Host-reported merge flag and timestamp (untrusted)
+ */
+export function resolveAgentPrMerge(
+  state: TerminalAgentPrState,
+  payload: { merged?: unknown; mergedAt?: unknown },
+): AgentPrClose {
+  const mergedAtMs =
+    typeof payload.mergedAt === "string" && payload.mergedAt !== ""
+      ? Date.parse(payload.mergedAt)
+      : Number.NaN;
+  const hasMergedAt = Number.isFinite(mergedAtMs);
+  if (state === "merged" || payload.merged === true || hasMergedAt) {
+    return { reason: "merged", merge: hasMergedAt ? { mergedAt: mergedAtMs } : {} };
+  }
+  return payload.merged === false ? { reason: "closed" } : {};
 }
 
 /** PRs already reported as having an unusable state (one warning per process). */
@@ -256,7 +296,7 @@ export function applyAgentPrFetch(
     reason,
     reason === "merged" ? mergeDetailsFromPr(data) : undefined,
   );
-  return { repo: pr.repo, prNumber: pr.prNumber, reason: state };
+  return { repo: pr.repo, prNumber: pr.prNumber, reason: reason === "merged" ? "merged" : state };
 }
 
 /**

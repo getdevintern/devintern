@@ -35,11 +35,16 @@ import { join } from "path";
 import { spawn } from "child_process";
 
 import type { WebhookQueue } from "../state/webhook-queue";
-import type { AgentPrCloseReason, CiFixState, WorkerState } from "../state/worker-state";
+import type {
+  AgentPrCloseReason,
+  AgentPrMergeDetails,
+  CiFixState,
+  WorkerState,
+} from "../state/worker-state";
 import { RowParseError } from "../state/row-parse";
 import type { Acquirer } from "../../worker";
 import type { CiFailureFeedback } from "../review/formatter";
-import { classifyAgentPrState } from "../review/agent-pr-reconciler";
+import { classifyAgentPrState, resolveAgentPrMerge } from "../review/agent-pr-reconciler";
 import { serializePrRun } from "./review-polling";
 import { describeGitHubAuthFailure, isGitHubAuthError } from "../code-host/github/github-errors";
 
@@ -77,7 +82,12 @@ export interface CiFailureWatcherAcquirerOptions {
   /** Optional provider-specific watch list; defaults to registered GitHub PRs. */
   watchedChanges?: () => Array<{ repo: string; prNumber: number }>;
   /** Optional provider-specific close operation. */
-  markClosed?: (repo: string, prNumber: number, reason?: AgentPrCloseReason) => void;
+  markClosed?: (
+    repo: string,
+    prNumber: number,
+    reason?: AgentPrCloseReason,
+    merge?: AgentPrMergeDetails,
+  ) => void;
   /** Durable key namespace; defaults to `github`. */
   namespace?: string;
   /** Human-readable provider label used for missing-log diagnostics. */
@@ -679,10 +689,12 @@ export class CiFailureWatcherAcquirer implements Acquirer {
         // Only a confirmed terminal state may remove a PR from the registry:
         // an unusable payload (missing/null/unknown state) must keep polling.
         if (lifecycle === "closed" || lifecycle === "merged") {
+          const close = resolveAgentPrMerge(lifecycle, prResult.data);
           console.log(
-            `👁️  [${this.name}] ${this.describe(repo, prNumber)} is ${lifecycle}; unwatching`,
+            `👁️  [${this.name}] ${this.describe(repo, prNumber)} is ` +
+              `${close.reason === "merged" ? "merged" : lifecycle}; unwatching`,
           );
-          this.markClosed(repo, prNumber, ciCloseReason(lifecycle, prResult.data.merged));
+          this.markClosed(repo, prNumber, close.reason, close.merge);
           return "removed";
         }
       }
@@ -861,23 +873,19 @@ export class CiFailureWatcherAcquirer implements Acquirer {
     return this.namespace === "github" ? SOURCE : `${this.namespace}:ci`;
   }
 
-  private markClosed(repo: string, prNumber: number, reason?: AgentPrCloseReason): void {
-    if (this.options.markClosed) this.options.markClosed(repo, prNumber, reason);
-    else this.options.workerState.markAgentPrClosed(repo, prNumber, reason);
+  private markClosed(
+    repo: string,
+    prNumber: number,
+    reason?: AgentPrCloseReason,
+    merge?: AgentPrMergeDetails,
+  ): void {
+    if (this.options.markClosed) this.options.markClosed(repo, prNumber, reason, merge);
+    else this.options.workerState.markAgentPrClosed(repo, prNumber, reason, merge);
   }
 
   private describe(repo: string, prNumber: number): string {
     return this.options.describeChange?.(repo, prNumber) ?? `${repo}#${prNumber}`;
   }
-}
-
-/** Merge outcome of a terminal change from its CI-provider payload. */
-function ciCloseReason(
-  lifecycle: "closed" | "merged",
-  merged: unknown,
-): AgentPrCloseReason | undefined {
-  if (lifecycle === "merged" || merged === true) return "merged";
-  return merged === false ? "closed" : undefined;
 }
 
 /** Read `CI_FIX_MAX_ATTEMPTS` (default {@link DEFAULT_CI_FIX_MAX_ATTEMPTS}). */

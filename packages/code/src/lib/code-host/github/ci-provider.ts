@@ -7,8 +7,9 @@ import type {
 export interface PolledCiPr {
   /** Optional/untrusted: a payload can omit state or report an unknown value. */
   state?: unknown;
-  /** GitHub reports merged PRs as `state: "closed"` with `merged: true`. */
+  /** True for merged PRs, which GitHub reports as `state: "closed"`. */
   merged?: unknown;
+  /** ISO merge timestamp, `null` when not merged. */
   merged_at?: unknown;
   head?: {
     sha: string;
@@ -139,11 +140,8 @@ export function createGitHubCiProvider(client: CiFailureWatcherGitHub): CiProvid
         data: result.data
           ? {
               state: result.data.state,
-              merged:
-                result.data.merged === true ||
-                (typeof result.data.merged_at === "string" && result.data.merged_at !== "")
-                  ? true
-                  : result.data.merged,
+              merged: result.data.merged,
+              mergedAt: result.data.merged_at,
               headSha: result.data.head?.sha,
               headRepository: result.data.head?.repo?.full_name,
             }

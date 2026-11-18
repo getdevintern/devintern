@@ -4,192 +4,80 @@ sidebarLabel: "Sentry Auto-fixes"
 description: "Turn Sentry error groups into repo-routed fixes from the workspace worker"
 section: "Automation Reference"
 order: 3
-dateModified: 2026-10-16
+dateModified: 2026-11-18
 ---
 
 # Sentry Auto-fixes
 
-The workspace worker can poll one or more Sentry projects for unresolved error
-groups and run actionable errors through the normal fix pipeline: isolated
-worktree, coding agent, tests, commit, and pull request.
+The workspace [worker](./worker.md) can poll Sentry projects for unresolved error groups and run actionable errors through the normal fix pipeline: isolated worktree, coding agent, tests, commit, and pull request. Sentry is an extra work source; the worker still needs its normal tracker and ready-tasks query.
 
-For the first project in a workspace, the shortest path is
-`devintern worker init`. Its optional Sentry step validates the project and
-token before writing an enabled monitor, pins the monitor to the initial
-repository, and stores the token in a source-specific file with owner-only
-permissions. The worker still requires its normal tracker and ready-tasks
-query; Sentry is an additional work source.
+## Prerequisites
 
-To add a project to an existing workspace, run:
+- A running workspace worker (`devintern worker init`)
+- A Sentry auth token with `event:write` access, plus the organization and project slugs. A DSN does not work: it only sends events into Sentry.
+
+## Setup
+
+`devintern worker init` has an optional Sentry step for the first project. It validates the token and project, writes an enabled monitor pinned to the initial repository, and stores the token in an owner-only file. To add a project later:
 
 ```bash
 devintern worker connect sentry
-# Select explicitly when the workspace has several repositories:
-devintern worker connect sentry --repo backend
+devintern worker connect sentry --repo backend   # pick the repository explicitly
 ```
 
-The command infers a one-repository workspace and, when possible, the current
-checkout in a multi-repository workspace. Otherwise it asks which configured
-repository owns the Sentry project. Use manual configuration below for advanced
-options.
-
-## Configure projects in `workspace.toml`
-
-Add one `[[error_monitors]]` entry per Sentry project. Every entry maps to the
-repository that owns the code, so a multi-repo worker never has to guess where
-an error should be fixed.
+For manual setup, add one `[[error_monitors]]` entry per Sentry project in `workspace.toml`:
 
 ```toml
 [[error_monitors]]
 id = "api-production"
 provider = "sentry"
 repo = "backend"
-team = "platform"             # optional; must match a [[teams]] name
 organization = "acme"
 project = "api"
 query = "environment:production level:error"
-poll_interval = 60
-min_occurrences = 5
-max_per_tick = 3
-comment_on_action = true
-env_file = "env/sentry-api.env"
-
-[[error_monitors]]
-id = "web-production"
-provider = "sentry"
-repo = "frontend"
-organization = "acme"
-project = "web"
-env_file = "env/sentry-web.env"
+env_file = "env/sentry-api.env"   # contains SENTRY_AUTH_TOKEN=sntrys_...
 ```
 
-`repo` may be omitted only when the workspace has exactly one `[[repos]]`
-entry. In a multi-repo workspace it is required. `team` is optional and lets
-the fix run inherit that team's environment and identity in addition to the
-repository environment.
+| Key                 | Default                       | Description                                                                         |
+| ------------------- | ----------------------------- | ----------------------------------------------------------------------------------- |
+| `id`                | (required)                    | Unique source id; handled issues are tracked per id                                 |
+| `provider`          | (required)                    | `sentry`                                                                            |
+| `enabled`           | `true`                        | Set `false` to keep the entry without polling it                                    |
+| `repo`              | only repo                     | Repository that owns the code; required when the workspace has several `[[repos]]`  |
+| `team`              | —                             | A `[[teams]]` name whose environment and identity the fix run inherits               |
+| `organization`      | (required)                    | Sentry organization slug                                                            |
+| `project`           | (required)                    | Sentry project slug                                                                 |
+| `query`             | —                             | Sentry issue search filter                                                          |
+| `base_url`          | `https://sentry.io`           | Self-hosted Sentry URL                                                              |
+| `poll_interval`     | `[defaults].poll_interval`    | Seconds between polls                                                               |
+| `min_occurrences`   | `5`                           | Minimum event count before an issue is eligible                                     |
+| `max_per_tick`      | `3`                           | Maximum issues dispatched per poll                                                  |
+| `comment_on_action` | `false`                       | Comment on the Sentry issue when a fix run succeeds or fails (best effort)          |
+| `env_file` / `[error_monitors.env]` | —             | Credentials for this source, such as `SENTRY_AUTH_TOKEN`                            |
 
-Each source is independent: use a separate `env_file` or
-`[error_monitors.env]` table when projects need different credentials.
+Credentials resolve from lowest to highest precedence: process environment, workspace `.env`, repo `env_file`, `[repos.env]`, team credentials, the monitor's `env_file`, then `[error_monitors.env]`. Projects with different tokens can share one worker.
 
-```bash
-# env/sentry-api.env
-SENTRY_AUTH_TOKEN=sntrys_...
-```
-
-```toml
-[[error_monitors]]
-id = "internal-api"
-provider = "sentry"
-repo = "backend"
-organization = "acme"
-project = "api"
-base_url = "https://sentry.internal.example"
-  [error_monitors.env]
-  SENTRY_AUTH_TOKEN = "sntrys_..."
-```
-
-Do not put a Sentry DSN here. A DSN sends events into Sentry; polling issues
-requires an auth token plus the organization and project slugs. Create a
-personal auth token with `event:write` access.
-
-When `comment_on_action = true`, DevIntern leaves a short comment on the Sentry
-issue after a remediation run finishes successfully or fails. Comments are best
-effort and never change the run outcome or the issue status.
-
-Credential precedence, from lowest to highest, is: process environment,
-workspace `.env`, repo `env_file`, `[repos.env]`, team credentials, the error
-monitor's `env_file`, then `[error_monitors.env]`. This allows one worker to
-serve teams and projects whose tokens differ.
+Changes to `[[error_monitors]]` are validated on live reload but need a worker restart to take effect.
 
 ## Behavior
 
-An error is eligible when it meets `min_occurrences` (default `5`) and includes
-a title plus a culprit, exception type, or filename. At most `max_per_tick`
-(default `3`) errors are dispatched per poll. `poll_interval` defaults to
-`[defaults].poll_interval`. Because the watcher has already applied those
-actionability checks and supplied concrete runtime evidence, Sentry runs skip
-the generic task feasibility assessment and proceed directly to implementation.
+- An issue is eligible when it reaches `min_occurrences` and has a title plus a culprit, exception type, or filename. Sentry runs skip the feasibility check and go straight to implementation.
+- A run that concludes no code change is needed (already fixed, not reproducible, environment-specific) is a successful no-op: no branch, no PR, and the Sentry issue stays unresolved.
+- A failed fix is not retried automatically. A run deferred because the repository or agent is busy is retried on a later poll.
+- Issues below the threshold are skipped quietly; run the worker with `--verbose` to see why.
+- Runs appear in the dashboard with an `error_monitor` origin rather than as tracker tasks.
 
-A remediation run that concludes no code change is needed is a successful
-no-op, not a failed run. The issue may already be fixed in the current code,
-may not be reproducible from this repository, or may be environment-specific.
-Treating that conclusion as a failure would report the same error back to the
-Sentry issue and feed the next remediation attempt, so those runs deliver no
-branch or pull request and leave the issue unresolved.
+## Source health in the dashboard
 
-Polling stays quiet while issues sit below `min_occurrences`: skipped issues
-are only explained with `--verbose` output. When an issue is picked up, the
-worker logs the project, issue id, and occurrence count once.
+A Sentry read that fails is reported as `auth-failed` (rejected token), `rate-limited` (HTTP 429), or `unreadable` (network error, timeout, or bad response); it is never treated as "no new errors". Nothing is skipped: the next poll retries from the same point. When Sentry sends `Retry-After`, the worker waits out that window, capped at ten poll intervals or one hour, whichever is longer, even across restarts. Repeated failures are logged once and then as periodic reminders.
 
-A source that cannot be read is never reported as a quiet source. If a fetch
-fails, the tick yields an explicit failure status instead of an empty success:
-`unreadable` for a transient or malformed response, `rate-limited` when Sentry
-returns HTTP 429 (the `Retry-After` window is recorded alongside the status),
-and `auth-failed` for a rejected token. Transient network errors and Sentry 5xx
-responses are retried twice with short backoff, before the tick reports
-`unreadable`; the whole retry loop shares a 4-second total wait budget. A
-`Retry-After` is honored exactly when it fits the remaining budget, and when it
-does not fit the fetch fails instead of sleeping only part of the window and
-sending an early request. Every request also carries a 10-second abort timeout
-and the whole read is capped at 15 seconds of wall-clock time, so a peer that
-accepts the connection and never responds ends as an explicit `unreadable`
-failure and the next tick polls normally instead of leaving the source stuck
-mid-poll. The first poll runs in the background, so even a slow or throttled
-read cannot delay worker startup or successor readiness. Auth and
-rate-limit responses are classified immediately. On any of these the cursor is
-left unchanged, so the next tick retries and no error is skipped simply because
-it was not fetched. Repeated identical failures are logged once, then repeated as a
-heartbeat every tenth consecutive failure or after about 15 minutes, so a long
-outage stays visible instead of looking like a dead worker; a recovery line is
-logged when the source reads successfully again. The per-source status (including
-consecutive failures and the last successful read) is persisted in the workspace
-database beside the schedule state; authentication failures are additionally
-logged as errors and are visible immediately.
+When any source is unhealthy, the [dashboard](./dashboard.md) header shows a warning such as **1 source needs attention**. It links to **Source health** under **Automations**, which lists each source's status, last successful read, consecutive failures, last error, and next retry time. `GET /api/sources` returns the same list as JSON.
 
-### Source health in the dashboard
+## Troubleshooting
 
-When any configured error monitor's last read was not `ok`, the
-[dashboard](./dashboard.md) header shows a warning such as **1 source needs
-attention**. Select it to jump to **Source health** at the top of
-**Automations**, which lists each configured source with its provider, id,
-exact status (`auth-failed`, `unreadable`, or `rate-limited`), last successful
-read, consecutive failures, last error message, and the next retry time while
-a rate-limit window is open. Both clear on the next header poll after the
-source reads successfully again. While every source is healthy, the header
-shows nothing and Automations shows a single quiet line instead of the table.
-Only sources in the current `workspace.toml` (enabled `[[error_monitors]]`)
-are listed; rows for removed sources stay in the database for history but are
-hidden. `GET /api/sources` returns the same list as JSON, and `GET /api/worker`
-includes it as `sources`.
-
-### Rate-limit retry window
-
-When Sentry rate-limits a read and sends `Retry-After`, the worker records the
-earliest retry time and honors it: ticks inside that window skip the read
-entirely, so no request is sent, no run is recorded, and the consecutive-failure
-count does not grow. Other error monitors keep polling on their own schedules.
-The first skipped tick of a window logs one line; later skips log only with
-`--verbose`. Once the window passes, reads resume on the normal `poll_interval`
-cadence. The window is persisted, so a worker restarted mid-window still waits
-it out. A 429 without `Retry-After` keeps polling on `poll_interval`.
-
-The honored window is capped at ten poll intervals or one hour, whichever is
-longer. A larger `Retry-After` (for example from a misconfigured proxy) is
-clamped with a warning, and a persisted window beyond the cap is shortened on
-restart, so a bad hint can never stop a source indefinitely.
-
-Handled issue IDs are stored in the workspace database under a source key that
-includes the provider and configured source `id`. That prevents collisions
-between Sentry projects. A failed fix is not automatically repeated; a run
-deferred because the repo or agent capacity is busy is released and retried on
-a later poll. Runs are recorded with an `error_monitor` origin rather than as
-tracker tasks. If the worker restarts during a run, startup recovery marks the
-interrupted run failed locally without trying to fetch its synthetic identifier
-from Jira or another task tracker.
-
-The provider contract is shared by all error monitors. Sentry is the first
-adapter; adding Datadog support does not require another polling, deduplication,
-or workspace-routing implementation.
-
-`[[error_monitors]]` changes are validated by live reload but require a worker
-restart because clients and credentials are startup-scoped.
+| Symptom                                       | Fix                                                                                      |
+| --------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `Error monitor "<id>" is missing SENTRY_AUTH_TOKEN` | Add the token to the monitor's `env_file`, `[error_monitors.env]`, or the workspace `.env`. |
+| Source shows `auth-failed`                    | The token was rejected; create a new auth token with `event:write` and restart the worker. |
+| Errors never get picked up                    | Check `min_occurrences` and `query`; run the worker with `--verbose` to see skipped issues. |
+| Config change has no effect                   | Restart the worker; error monitors are loaded at startup.                                 |

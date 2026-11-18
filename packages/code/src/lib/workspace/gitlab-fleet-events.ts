@@ -3,11 +3,45 @@ import type { Acquirer } from "../../worker";
 import { createGitLabCiProvider } from "../code-host/gitlab/ci-provider";
 import { JobNotStartedError } from "../worker/supervisor";
 import type { JobKind, TaskSupervisor } from "../worker/supervisor";
-import type { AgentPr } from "../state/worker-state";
+import type {
+  AgentPr,
+  AgentPrCloseReason,
+  AgentPrMergeDetails,
+  WorkerState,
+} from "../state/worker-state";
 import type { WorkspaceConfig, RepoConfig } from "./config";
 import type { WorkspaceState } from "./state";
 import type { RepoManagerLike } from "./fleet-executor";
 import { buildRepoEnv } from "./env";
+
+/**
+ * Close the exact registered MR the GitLab CI watcher saw terminal, forwarding
+ * the watcher's merge verdict so merged MRs land in the dashboard Merged tab.
+ *
+ * @param workerState - Registry holding the agent's change requests
+ * @param ciRow - Looks up the registered MR row by project key and IID
+ */
+export function gitLabCiMarkClosed(
+  workerState: Pick<WorkerState, "markAgentChangeRequestClosed">,
+  ciRow: (key: string, number: number) => AgentPr | undefined,
+): (key: string, number: number, reason?: AgentPrCloseReason, merge?: AgentPrMergeDetails) => void {
+  return (key, number, reason, merge) => {
+    const mr = ciRow(key, number);
+    if (!mr) return;
+    workerState.markAgentChangeRequestClosed(
+      {
+        provider: mr.provider,
+        instanceUrl: mr.instanceUrl,
+        projectId: mr.projectId,
+        projectPath: mr.projectPath,
+        number: mr.changeNumber,
+        webUrl: mr.webUrl,
+      },
+      reason,
+      merge,
+    );
+  };
+}
 
 /** Registered GitLab polling and relay reconciliation share one live repository resolver. */
 export async function buildGitLabFleetAcquirers(options: {
@@ -210,22 +244,7 @@ export async function buildGitLabFleetAcquirers(options: {
             return { repo: key, prNumber: mr.changeNumber };
           });
       },
-      markClosed: (key, n, reason) => {
-        const mr = ciRow(key, n);
-        if (mr) {
-          state.workerState.markAgentChangeRequestClosed(
-            {
-              provider: mr.provider,
-              instanceUrl: mr.instanceUrl,
-              projectId: mr.projectId,
-              projectPath: mr.projectPath,
-              number: mr.changeNumber,
-              webUrl: mr.webUrl,
-            },
-            reason,
-          );
-        }
-      },
+      markClosed: gitLabCiMarkClosed(state.workerState, ciRow),
       provider: createGitLabCiProvider(resolveCi),
       fixPr: async (key, n, feedbackPath, expectedHeadSha) => {
         const { mr, client } = resolveCi(key, n);

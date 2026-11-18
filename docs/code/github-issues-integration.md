@@ -5,46 +5,54 @@ description: "Fetch GitHub issues, track status labels, implement with your codi
 section: "Automation"
 order: 5
 sidebarHidden: true
-dateModified: 2026-11-12
+dateModified: 2026-11-18
 tags: ["github", "github-issues", "devintern/code", "integration"]
 ---
 
 # Implement GitHub Issues with DevIntern Code
 
-@devintern/code can implement work directly from GitHub Issues: fetch issue details and comments, run a feasibility check, move status labels, execute your AI agent, commit changes, open a pull request in the same repository, and post results back on the issue.
+DevIntern Code reads a GitHub issue (body, labels, comments, embedded files), checks that it is clear enough to implement, tracks progress with status labels, runs your coding agent, opens a pull request in the same repository, and posts the result back on the issue.
 
-Looking for unattended PR review automation? Use the [worker](./worker.md) (polling plus the [relay](./relay.md)). Direct GitHub webhooks are an advanced path: [GitHub Webhooks and PR Automation](./github-integration.md).
+For PR review automation, use the [worker](./worker.md) with the [relay](./relay.md). Self-hosted webhooks are an advanced alternative: [GitHub Webhooks and PR Automation](./github-integration.md).
 
 ## Prerequisites
 
-- [Bun](https://bun.sh) and `@getdevintern/code` installed globally
-- GitHub personal access token
-- Git repository for your project
+- `@getdevintern/code` installed and a Git repository for your project
+- A GitHub token: classic with `repo` scope, or fine-grained with **Issues** and **Pull requests** read/write
 
 ## Setup
 
-### 1. Set the task tracker
+Set in `.devintern-code/.env`:
 
-In `.devintern-code/.env`:
+| Variable               | Required | Description                                                                         |
+| ---------------------- | -------- | ----------------------------------------------------------------------------------- |
+| `TASK_TRACKER`         | Yes      | `github`                                                                            |
+| `GITHUB_TOKEN`         | Yes      | Personal access token (the same one used for PR creation)                            |
+| `GITHUB_REPO`          | Yes      | Repository whose issues you implement, as `owner/repo`                              |
+| `GITHUB_STATUS_LABELS` | No       | Comma-separated status labels (e.g. `To Do,In Progress,In Review`); on each transition the others are removed |
+
+GitHub App credentials (`GITHUB_APP_ID` + private key) cannot replace `GITHUB_TOKEN` for this tracker. See [GitHub authentication](./configuration.md#github-authentication).
+
+## Run a task
+
+Pass an issue number, `#number`, or full URL:
 
 ```bash
-TASK_TRACKER=github
+devintern 123 --create-pr
+devintern https://github.com/acme/webapp/issues/123 --create-pr
 ```
 
-### 2. Add GitHub credentials
+Batch runs use [GitHub search qualifiers](https://docs.github.com/en/search-github/searching-on-github/searching-issues-and-pull-requests), automatically scoped with `repo:owner/repo is:issue` (if you add your own `repo:`, add `is:issue` too). The first 100 matches run in sequence; GitHub search is limited to 30 requests per minute.
 
 ```bash
-GITHUB_TOKEN=ghp_xxxxxxxxxxxx
-GITHUB_REPO=owner/repo
+devintern --query "is:open label:bug" --create-pr
 ```
 
-The same `GITHUB_TOKEN` used for pull request creation works here. It needs the `repo` scope (classic token) or `Issues: Read and write` plus `Pull requests: Read and write` (fine-grained token). `GITHUB_REPO` is the repository whose issues you want to implement, in `owner/repo` form.
+Use `--skip-clarity-check` to skip the feasibility check and `--skip-comments` to skip comments and label changes. `--estimate` posts a comment only (GitHub has no estimate field); see [Story Points Estimation](./story-points-estimation.md).
 
-GitHub App credentials (`GITHUB_APP_ID` + private key) cannot substitute for this tracker. The Issues client only accepts `GITHUB_TOKEN`. Standard relay-backed workspaces use that token locally and the central DevIntern AI App for events. Customer-owned App credentials are only for advanced no-relay installations. See [Configuration](./configuration.md#github-authentication).
+## Status mapping
 
-### 3. Configure status labels
-
-GitHub has no built-in workflow states, so @devintern/code maps statuses to labels. Create the labels in your repository, then configure them in `.devintern-code/settings.json` using `owner/repo` as the project key:
+GitHub has no workflow states, so statuses map to labels. Create the labels in the repository, then configure them in `.devintern-code/settings.json`, keyed by `owner/repo`. A status of `closed` or `done` closes the issue instead.
 
 ```json
 {
@@ -60,74 +68,21 @@ GitHub has no built-in workflow states, so @devintern/code maps statuses to labe
 }
 ```
 
-To keep statuses mutually exclusive, also list them in `.devintern-code/.env`:
+| Field              | When it is applied                                   |
+| ------------------ | ---------------------------------------------------- |
+| `inProgressStatus` | Implementation starts (after the feasibility check)  |
+| `prStatus`         | A pull request is created                            |
+| `todoStatus`       | The run is incomplete, fails, or hits the turn limit |
 
-```bash
-GITHUB_STATUS_LABELS=To Do,In Progress,In Review
-```
+## Worker notes
 
-When a status changes, @devintern/code adds the target label and removes the other labels in this list. Transitioning to `closed` or `done` closes the issue instead of applying a label.
-
-## Running an issue
-
-Pass an issue number, `#number`, or a full issue URL:
-
-```bash
-# Issue number
-devintern 123 --create-pr
-
-# Full issue URL
-devintern https://github.com/acme/webapp/issues/123 --create-pr
-```
-
-This workflow:
-
-1. Fetches the issue body, labels, and comments
-2. Runs a feasibility assessment (skippable with `--skip-clarity-check`)
-3. Applies the `inProgressStatus` label (unless `--skip-comments` is set)
-4. Creates a feature branch, runs your agent, commits, and optionally opens a PR
-5. Applies the `prStatus` label after PR creation
-6. Posts implementation or assessment comments on the issue
-
-### Actioned issues (worker)
-
-When the worker creates a PR it records the issue as actioned locally, so `is:open label:intern` (or however your ready-tasks query is written) no longer re-implements it even though the issue stays open and keeps its trigger label. Label transitions only add the `prStatus` label; they do not remove your trigger label, so the local actioned marker — not the query — is what actually stops the loop. Set `prStatus` if you also want a visible label. Re-arm an actioned issue by editing its summary or description, re-opening it, or changing its labels — see [Tickets already actioned after a PR](./worker-troubleshooting.md#tickets-already-actioned-after-a-pr).
-
-## Batch processing with --query
-
-Select multiple issues with [GitHub search qualifiers](https://docs.github.com/en/search-github/searching-on-github/searching-issues-and-pull-requests). The query is automatically scoped to your repository with `repo:owner/repo is:issue`:
-
-```bash
-devintern --query "is:open label:bug" --create-pr
-devintern --query 'is:open "login flow"' --create-pr
-```
-
-The first 100 matching issues are processed in sequence. Note that GitHub's search API is rate-limited to 30 requests per minute.
-
-## Story points estimation
-
-GitHub Issues has no estimation field, so `--estimate` runs in comment-only mode: the analysis is posted (or updated) as an issue comment with the suggested points, reasoning, risks, and unclear areas.
-
-## Limitations
-
-- **Attachments:** GitHub has no attachment API. Images and files embedded in the issue body (`user-attachments` links) are downloaded for the agent.
-- **Status labels:** labels named in `settings.json` must already exist in the repository. The error message lists available labels when one is missing.
-- **Comments:** use `--skip-comments` to skip issue comments and label transitions for a run.
+- A typical worker query is `is:open label:intern`. Label transitions do not remove your trigger label, so the worker's local actioned marker is what stops a PR'd issue from being re-implemented. See [Tickets already actioned after a PR](./worker-troubleshooting.md#tickets-already-actioned-after-a-pr).
+- `devintern worker connect github` pairs the repository with the relay for instant PR events.
 
 ## Troubleshooting
 
-**"Missing required GitHub environment variables"**
-
-Ensure `GITHUB_TOKEN` and `GITHUB_REPO` are set in `.devintern-code/.env`. A GitHub App ID and private key are not enough for this tracker.
-
-**"Label \"In Progress\" not found in the repository"**
-
-Create the label in your repository (Issues → Labels) or change the status names in `settings.json` to match existing labels.
-
-**Old status labels pile up on issues**
-
-Set `GITHUB_STATUS_LABELS` to the full list of status label names so transitions remove the previous status.
-
-**Search returns pull requests**
-
-Queries are scoped with `is:issue` automatically. If you pass your own `repo:` qualifier, include `is:issue` yourself.
+| Symptom                                          | Fix                                                                                     |
+| ------------------------------------------------ | --------------------------------------------------------------------------------------- |
+| `Missing required GitHub environment variables`  | Set `GITHUB_TOKEN` and `GITHUB_REPO`. An App ID and key are not enough.                  |
+| `Label "In Progress" not found in the repository` | Create the label (Issues → Labels) or change the names in `settings.json`; the error lists existing labels. |
+| Old status labels pile up                        | Set `GITHUB_STATUS_LABELS` to the full list of status labels.                            |
