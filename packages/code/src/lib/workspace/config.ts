@@ -839,6 +839,33 @@ export function resolveCredentialTeam(
 }
 
 /**
+ * Pick the team whose credentials PR/MR event work for one repo uses: event
+ * reads (review, CI and conflict polling) and the follow-up runs that push back
+ * to the PR (address review, resolve conflicts, CI fix, auto-merge).
+ *
+ * Same pick as {@link resolveCredentialTeam} without a requested team, so a
+ * PR's follow-ups run with the account that opened it. When several teams are
+ * fixed to the repo there is no single pushing account; the one GitHub-tracker
+ * team among them is used (its issues are the PRs' source), or none (plain
+ * repo env) when there are zero or several, instead of silently taking the
+ * first.
+ *
+ * @param config - Workspace config.
+ * @param repoName - `[[repos]]` name the event belongs to.
+ */
+export function resolveFleetEventTeam(
+  config: WorkspaceConfig,
+  repoName: string,
+): TeamConfig | undefined {
+  const resolved = resolveCredentialTeam(config, repoName);
+  if (resolved.ok) return resolved.team;
+  const githubTeams = config.teams.filter(
+    (candidate) => candidate.tracker === "github" && candidate.repo === repoName,
+  );
+  return githubTeams.length === 1 ? githubTeams[0] : undefined;
+}
+
+/**
  * Every workspace job that may pin its own harness: automations,
  * estimations, and automatic conflict resolution.
  */

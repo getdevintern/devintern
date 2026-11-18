@@ -168,7 +168,7 @@ Secrets live in one owner-only `~/.devintern/.env`: tracker credentials, `GITHUB
 
 Ad-hoc tasks (`devintern worker add`) and scheduled automations on a repo also get layer 4 when exactly one team is fixed to that repo with `repo = "<name>"`. `worker add --team <name>` picks the team explicitly, and is required when several teams are fixed to the repo. These runs keep the repo's `TASK_TRACKER` and `GITHUB_REPO`, so only the team's credentials apply. An automation on a repo with several fixed teams uses layers 1-3 and logs a warning; set `env_file` on the `[[repos]]` entry to choose its credentials.
 
-For GitHub remotes, `GITHUB_REPO` is filled in from the remote URL. GitHub API calls for a repo use that repo's `GITHUB_TOKEN` layers, or a fixed team's credentials when one targets the repo. Artifact upload settings (`DEVINTERN_ARTIFACT_*`) use the same layers; see [upload configuration](./artifacts.md#files-sdk-uploader).
+For GitHub remotes, `GITHUB_REPO` is filled in from the remote URL. GitHub and GitLab API calls for a repo, and the follow-up runs on its PRs (review feedback, conflict resolution, CI fixes, auto-merge), pick the team the same way, so they use the account that opened the PR. If several teams are fixed to the repo, they use the one with `tracker = "github"`; with none or several such teams, they use layers 1-3. Artifact upload settings (`DEVINTERN_ARTIFACT_*`) use the same layers; see [upload configuration](./artifacts.md#files-sdk-uploader).
 
 ## Editing the config while running
 

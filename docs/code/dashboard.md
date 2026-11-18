@@ -70,7 +70,7 @@ An automation runs in its repository's base checkout, which only one job uses at
 
 ## Delegate a task
 
-Choose **New task** in the header to hand the worker a one-off task, the dashboard equivalent of [`devintern worker add`](delegation.md). Pick a registered repository, give it a title, and describe the work in Markdown (up to 20,000 characters). The worker sees only this text, so [write a self-contained brief](delegation.md#write-a-self-contained-brief). Press <kbd>Ctrl</kbd>+<kbd>Enter</kbd> (<kbd>⌘</kbd>+<kbd>Enter</kbd> on macOS) to submit.
+Choose **New task** in the header to hand the worker a one-off task, the dashboard equivalent of [`devintern worker add`](delegation.md). Pick a registered repository (and, when several teams are fixed to it, the team whose credentials the run uses, like `--team`), give it a title, and describe the work in Markdown (up to 20,000 characters). The worker sees only this text, so [write a self-contained brief](delegation.md#write-a-self-contained-brief). Press <kbd>Ctrl</kbd>+<kbd>Enter</kbd> (<kbd>⌘</kbd>+<kbd>Enter</kbd> on macOS) to submit.
 
 The task is queued and the running worker picks it up on its next poll. Ad-hoc tasks ignore [working windows](worker.md#working-windows-quiet-hours) and use `[defaults].worker_task_args` (default `--create-pr`). The dialog shows the task key (`local-<slug>`) and links to the run once it starts. Submitting twice returns the task that is already queued instead of creating a duplicate.
 

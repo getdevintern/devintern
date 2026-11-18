@@ -7,7 +7,7 @@ import type { AgentPr, AgentPrCloseOptions, WorkerState } from "../state/worker-
 import type { WorkspaceConfig, RepoConfig } from "./config";
 import type { WorkspaceState } from "./state";
 import type { RepoManagerLike } from "./fleet-executor";
-import { buildRepoEnv } from "./env";
+import { buildFleetEventEnv } from "./env";
 
 /**
  * Close the exact registered MR the GitLab CI watcher saw terminal, forwarding
@@ -84,7 +84,7 @@ export async function buildGitLabFleetAcquirers(options: {
     await import("../code-host");
   const resolveGitLabRepo = (mr: import("../state/worker-state").AgentPr) =>
     config.repos.find((repo) => {
-      const env = buildRepoEnv(repo, workspaceDir);
+      const env = buildFleetEventEnv(config, repo, workspaceDir);
       const remote = parseGitRemoteUrl(repo.remote, {
         gitlabBaseUrl: env.GITLAB_CODE_HOST_URL,
         gitlabHostAliases: parseGitLabHostAliases(env.GITLAB_CODE_HOST_ALIASES),
@@ -96,7 +96,7 @@ export async function buildGitLabFleetAcquirers(options: {
       );
     });
   const hasGitLabProfile = config.repos.some((repo) => {
-    const env = buildRepoEnv(repo, workspaceDir);
+    const env = buildFleetEventEnv(config, repo, workspaceDir);
     const remote = parseGitRemoteUrl(repo.remote, {
       gitlabBaseUrl: env.GITLAB_CODE_HOST_URL,
       gitlabHostAliases: parseGitLabHostAliases(env.GITLAB_CODE_HOST_ALIASES),
@@ -120,7 +120,7 @@ export async function buildGitLabFleetAcquirers(options: {
     const clientForGitLabMr = (mr: import("../state/worker-state").AgentPr) => {
       const repo = resolveGitLabRepo(mr);
       if (!repo) return null;
-      const env = buildRepoEnv(repo, workspaceDir);
+      const env = buildFleetEventEnv(config, repo, workspaceDir);
       const resolved = resolveGitLabCodeHostConfig(mr.instanceUrl, env);
       if (!resolved.ok) return null;
       try {
@@ -151,7 +151,7 @@ export async function buildGitLabFleetAcquirers(options: {
             {
               cwd: base,
               signal,
-              env: buildRepoEnv(repo, workspaceDir),
+              env: buildFleetEventEnv(config, repo, workspaceDir),
             },
           );
         };
@@ -176,7 +176,7 @@ export async function buildGitLabFleetAcquirers(options: {
             {
               cwd: base,
               signal,
-              env: buildRepoEnv(repo, workspaceDir, { agentSelection }),
+              env: buildFleetEventEnv(config, repo, workspaceDir, { agentSelection }),
               harnessPin: agentSelection?.harness,
               expectedHeadSha: expected.headSha,
               expectedBaseSha: expected.baseSha,
@@ -249,7 +249,7 @@ export async function buildGitLabFleetAcquirers(options: {
         const invoke = async (base: string, signal?: AbortSignal) => {
           return runCiFixViaCli(mr.projectPath, mr.changeNumber, feedbackPath, {
             cwd: base,
-            env: buildRepoEnv(repo, workspaceDir),
+            env: buildFleetEventEnv(config, repo, workspaceDir),
             webUrl: mr.webUrl,
             serializationKey: `${mr.instanceUrl}:${mr.projectPath}!${mr.changeNumber}`,
             expectedHeadSha,

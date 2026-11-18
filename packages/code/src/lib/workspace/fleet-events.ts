@@ -21,7 +21,7 @@ import type { AutomaticResolveResult } from "../acquirers/review-polling";
 import type { TaskExecutionResult } from "../acquirers/task-polling";
 import { autoMergePathsFor } from "./config";
 import type { RepoConfig, WorkspaceConfig } from "./config";
-import { buildRepoEnv, gitHubSlugFromRemote } from "./env";
+import { buildFleetEventEnv, gitHubSlugFromRemote } from "./env";
 import { toRoutableTask } from "./router";
 import type { createFleetTaskExecutor, FleetTask, RepoManagerLike } from "./fleet-executor";
 import { JobNotStartedError } from "../worker/supervisor";
@@ -168,7 +168,7 @@ export function createFleetAddressPr(deps: FleetEventDeps): AddressPr {
       const base = await repoManager.ensureBaseWorktree(repo);
       return runReview(slug, prNumber, {
         cwd: base,
-        env: buildRepoEnv(repo, workspaceDir),
+        env: buildFleetEventEnv(config, repo, workspaceDir),
         signal,
       });
     };
@@ -215,7 +215,7 @@ export function createFleetResolveConflicts(
       const agentSelection = config.workspace.conflictAgent;
       return runResolve(slug, prNumber, {
         cwd: base,
-        env: buildRepoEnv(repo, workspaceDir, { agentSelection }),
+        env: buildFleetEventEnv(config, repo, workspaceDir, { agentSelection }),
         harnessPin: agentSelection?.harness,
         expectedHeadSha: expected.headSha,
         expectedBaseSha: expected.baseSha,
@@ -303,7 +303,7 @@ export function createFleetAutoMerge(
         lastAttempt: options?.lastAttempt ?? false,
         ...(options?.runId !== undefined ? { runId: options.runId } : {}),
         cwd: base,
-        env: buildRepoEnv(repo, workspaceDir, { agentSelection }),
+        env: buildFleetEventEnv(config, repo, workspaceDir, { agentSelection }),
         harnessPin: agentSelection?.harness,
         signal,
       });
@@ -352,7 +352,7 @@ export function createFleetCiFix(
       const base = await deps.repoManager.ensureBaseWorktree(repo);
       return runCiFix(slug, prNumber, feedbackPath, {
         cwd: base,
-        env: buildRepoEnv(repo, deps.workspaceDir),
+        env: buildFleetEventEnv(deps.config, repo, deps.workspaceDir),
         ...(expectedHeadSha ? { expectedHeadSha } : {}),
         signal,
       });

@@ -11,8 +11,8 @@
 import { existsSync, readFileSync } from "fs";
 import { isAbsolute, join } from "path";
 
-import { gitHubSlugFromRemote } from "./config";
-import type { ErrorMonitorConfig, RepoConfig, TeamConfig } from "./config";
+import { gitHubSlugFromRemote, resolveFleetEventTeam } from "./config";
+import type { ErrorMonitorConfig, RepoConfig, TeamConfig, WorkspaceConfig } from "./config";
 import { resolveWorkspaceDir, workspaceDbPath, workspaceEnvPath } from "./paths";
 import { applyAgentSelectionEnv } from "../agent/selection";
 import type { AgentSelection } from "../agent/selection";
@@ -342,6 +342,27 @@ export function buildRepoRunEnv(
   env[WORKSPACE_REPO_ENV] = repo.name;
   delete env[WORKSPACE_TEAM_ENV];
   return env;
+}
+
+/**
+ * Compose the environment for PR/MR event work on one repo (review, conflict,
+ * CI-fix and auto-merge runs, and the code-host clients that read the events).
+ *
+ * {@link buildRepoRunEnv} with the team from {@link resolveFleetEventTeam}, so
+ * follow-ups push with the same account that opened the PR, without the team
+ * re-routing the tracker.
+ *
+ * @param config - Workspace config.
+ * @param repo - Repo the PR/MR belongs to.
+ * @param workspaceDir - Workspace home (defaults to `~/.devintern`).
+ */
+export function buildFleetEventEnv(
+  config: WorkspaceConfig,
+  repo: RepoConfig,
+  workspaceDir: string = resolveWorkspaceDir(),
+  options: Parameters<typeof buildRepoEnv>[2] = {},
+): Record<string, string | undefined> {
+  return buildRepoRunEnv(repo, resolveFleetEventTeam(config, repo.name), workspaceDir, options);
 }
 
 /**
