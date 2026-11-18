@@ -172,6 +172,11 @@ export function parseTaskKey(taskKey: string): {
  */
 const DEPENDENCY_KEY = /^(?:local-[a-z0-9][a-z0-9-]*|[a-z][a-z0-9_]*-\d+)$/i;
 
+/** Whether `token` is shaped like an ad-hoc `local-…` or `PROJ-12` task key. */
+export function isDependencyKeyShape(token: string): boolean {
+  return DEPENDENCY_KEY.test(token);
+}
+
 /**
  * Extract the task keys named on `Depends on:` lines of a task description.
  *
@@ -196,7 +201,7 @@ const DEPENDENCY_KEY = /^(?:local-[a-z0-9][a-z0-9-]*|[a-z][a-z0-9_]*-\d+)$/i;
  */
 export function extractDependsOn(
   description: string | undefined,
-  toKey: (token: string) => string | null = (token) => (DEPENDENCY_KEY.test(token) ? token : null),
+  toKey: (token: string) => string | null = (token) => (isDependencyKeyShape(token) ? token : null),
 ): string[] {
   if (!description) return [];
   const pattern = /^[\t >*+-]*(?:\|\s*)?#{0,6}\s*[*_]{0,3}depends\s+on[*_]{0,3}\s*:\s*([^\n]*)$/gim;

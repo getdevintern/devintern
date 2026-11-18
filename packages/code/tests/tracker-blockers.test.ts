@@ -20,6 +20,7 @@ import {
   TrelloTaskTrackerClient,
   toTrelloCardKey,
 } from "../src/lib/trackers/trello/trello-task-tracker-client";
+import { trackerBlockerFacts } from "../src/lib/dependencies/tracker-facts";
 import { extractDependsOn } from "../src/lib/utils/general";
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -299,13 +300,14 @@ describe("Depends on: parsing per tracker key format", () => {
   test("Trello accepts card URLs, ids, and short links, not plain words", () => {
     const description = [
       "Depends on: https://trello.com/c/Xy12Zw34/5-orders-api, 5f1e2d3c4b5a69788796a5b4",
-      "Depends on: AbCdEfGh and database, Frontend, DATABASE, PROJ-12",
+      "Depends on: Ab3dEfGh and database, Frontend, DATABASE, PROJ-12",
+      "Depends on: DynamoDB migration and LinkedIn approval",
       "Depends on: [https://trello.com/c/Qq9wErTy](https://trello.com/c/Qq9wErTy)",
     ].join("\n");
     expect(extractDependsOn(description, toTrelloCardKey)).toEqual([
       "Xy12Zw34",
       "5f1e2d3c4b5a69788796a5b4",
-      "AbCdEfGh",
+      "Ab3dEfGh",
       "Qq9wErTy",
     ]);
   });
@@ -436,7 +438,7 @@ describe("markdown getBlockers", () => {
     task(
       "checkout",
       { status: "todo" },
-      "# Checkout\n\nDepends on: api-schema, orders-api.md, pay-1 and ghost-task — the rest is prose",
+      "# Checkout\n\nDepends on: api-schema, orders-api.md, pay-1, ghost-12, local-add-login and third-party, v2 — the rest is prose",
     );
 
     const client = new MarkdownTaskTrackerClient({ tasksDirectory: dir, cwd: dir });
@@ -444,8 +446,45 @@ describe("markdown getBlockers", () => {
       { key: "api-schema", done: true, status: "done" },
       { key: "orders-api", done: false, status: "in progress" },
       { key: "pay-1", done: true, status: "Cancelled" },
-      { key: "ghost-task", status: "not found" },
+      // Unresolved but key-shaped: kept, waits for a local run or the file.
+      { key: "ghost-12", status: "not found" },
+      { key: "local-add-login", status: "not found" },
+      // Unresolved prose (`third-party`, `v2`) is not a blocker.
     ]);
+  });
+
+  test("finds a mixed-case blocker file name with no key: frontmatter", async () => {
+    task("Orders-API", { status: "done" }, "# Orders API");
+    task("Api_Schema", { status: "todo" }, "# API schema");
+    task("checkout", { status: "todo" }, "# Checkout\n\nDepends on: Orders-API, api-schema");
+    const client = new MarkdownTaskTrackerClient({ tasksDirectory: dir, cwd: dir });
+    expect((await client.getTask("Orders-API")).key).toBe("orders-api");
+    expect(await client.getBlockers("checkout")).toEqual([
+      { key: "orders-api", done: true, status: "done" },
+      { key: "api-schema", done: false, status: "todo" },
+    ]);
+  });
+
+  test("a missing Jira-style blocker keeps its case so local facts match it", async () => {
+    // `proj-7` has a task file, so the uppercase token resolves to it.
+    task("proj-7", { status: "done" }, "# Proj 7");
+    task(
+      "checkout",
+      { status: "todo" },
+      "# Checkout\n\nDepends on: PROJ-12, proj-12, PROJ-7, local-Add-Login",
+    );
+    const client = new MarkdownTaskTrackerClient({ tasksDirectory: dir, cwd: dir });
+    const blockers = await client.getBlockers("checkout");
+    expect(blockers).toEqual([
+      { key: "PROJ-12", status: "not found" },
+      { key: "proj-7", done: true, status: "done" },
+      // Ad-hoc keys are generated lowercase.
+      { key: "local-add-login", status: "not found" },
+    ]);
+    // The worker's merged PR for PROJ-12 releases the ticket.
+    expect(
+      trackerBlockerFacts(blockers, [{ key: "PROJ-12", work: "done" }]).map((f) => f.work),
+    ).toEqual(["done", "done", "open"]);
   });
 
   test("a Depends on: line inside frontmatter is not read", async () => {

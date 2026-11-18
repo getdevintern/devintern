@@ -80,6 +80,13 @@ export interface TrackerDependencyGateOptions {
 /** Trackers whose task keys are unique only within one team's source. */
 const TEAM_SCOPED_KEY_TRACKERS = new Set(["github", "gitlab", "markdown"]);
 
+/** Prefix of generated ad-hoc task keys (`worker add`), unique per workspace. */
+const AD_HOC_KEY_PREFIX = "local-";
+
+/** A blocker the tracker could not find: reported with no done state. */
+const isUnresolvedBlocker = (blocker: TaskBlocker): boolean =>
+  blocker.status === "not found" && blocker.done === undefined;
+
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {
@@ -182,6 +189,29 @@ export function createTrackerDependencyGate(
       ? { team: options.team }
       : undefined;
 
+  /**
+   * Read local facts for the blockers. Ad-hoc `local-…` keys are generated
+   * unique per workspace (see deriveInjectedTaskKey) and their runs usually
+   * carry no team, so they are always read unscoped (which also consults
+   * `injected_tasks`). So is a key this tracker cannot find (`not found`, no
+   * done state): it is not one of this team's own tickets, but may be another
+   * tracker's key (a markdown ticket naming `PROJ-12`) whose only runs belong
+   * to the team that owns it. Only keys this tracker resolved are team-scoped.
+   */
+  const readLocalFacts = (
+    db: Parameters<typeof readLocalDependencyFacts>[0],
+    keys: string[],
+    unresolved: ReadonlySet<string>,
+  ) => {
+    if (!localScope) return readLocalDependencyFacts(db, keys, undefined);
+    const unscoped = keys.filter((key) => key.startsWith(AD_HOC_KEY_PREFIX) || unresolved.has(key));
+    const scoped = keys.filter((key) => !unscoped.includes(key));
+    return [
+      ...readLocalDependencyFacts(db, unscoped, undefined),
+      ...readLocalDependencyFacts(db, scoped, localScope),
+    ];
+  };
+
   const evaluateTicket = async (taskKey: string, repo: string): Promise<TrackerGateOutcome> => {
     let blockers: TaskBlocker[];
     let readError: string | undefined;
@@ -216,10 +246,11 @@ export function createTrackerDependencyGate(
       return { kind: "ready" };
     }
 
+    const unresolved = new Set(blockers.filter(isUnresolvedBlocker).map((blocker) => blocker.key));
     const evaluate = (): { decision: DependencyGateDecision; facts: DependencyFacts[] } => {
       const facts = trackerBlockerFacts(
         blockers,
-        readLocalDependencyFacts(store.connection(), keys, localScope),
+        readLocalFacts(store.connection(), keys, unresolved),
       ).map((entry) => overlay(entry, repo));
       return { decision: evaluateDependencyGate(verdictBase.dependencyMode, facts), facts };
     };
@@ -279,6 +310,15 @@ export function createTrackerDependencyGate(
         console.warn(`⛔ ${scope} ${taskKey} blocked: ${outcome.reason}`);
       } else {
         console.log(`⏳ ${scope} ${taskKey} waiting: ${outcome.reason}`);
+      }
+      // A blocker the tracker cannot find (a typo, a deleted card) waits until
+      // the description is edited; surface it so the stall is noticed.
+      const missing = blockers.filter(isUnresolvedBlocker).map((blocker) => blocker.key);
+      if (missing.length > 0) {
+        console.warn(
+          `⚠️  ${scope} ${taskKey} names blockers ${options.tracker} cannot find: ` +
+            `${missing.join(", ")} (fix the ticket's dependencies if they are not ad-hoc tasks)`,
+        );
       }
     }
     return outcome;

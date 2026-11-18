@@ -34,19 +34,15 @@ import path from "path";
 /**
  * Map a `Depends on:` token to a Trello card key: a card URL
  * (`https://trello.com/c/AbCd1234/…`), a 24-hex card id, or a bare short link.
- * A bare short link must contain a digit or mixed case, so ordinary 8-letter
- * words (`database`, `Frontend`) are not read as cards.
+ * A bare short link must contain a digit, so 8-letter words and product names
+ * (`database`, `DynamoDB`, `LinkedIn`) are not read as cards; a short link
+ * with no digit must be written as a card URL.
  */
 export function toTrelloCardKey(token: string): string | null {
   const url = token.match(/trello\.com\/c\/([A-Za-z0-9]+)/i);
   if (url) return url[1];
   if (/^[0-9a-f]{24}$/i.test(token)) return token;
-  if (
-    /^[A-Za-z0-9]{8}$/.test(token) &&
-    (/\d/.test(token) || (/[a-z]/.test(token.slice(1)) && /[A-Z]/.test(token.slice(1))))
-  ) {
-    return token;
-  }
+  if (/^[A-Za-z0-9]{8}$/.test(token) && /\d/.test(token)) return token;
   return null;
 }
 

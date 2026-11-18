@@ -81,7 +81,7 @@ The worker picks up polled tickets in dependency order. Trackers with their own 
 | Trello         | `Depends on:` line in the card description, listing card links or short links (`Depends on: https://trello.com/c/Ab12Cd34`) | Archived, or in a list named Done, Complete(d), Closed, or Cancel(l)ed |
 | Markdown files | `Depends on:` line in the task body, listing task keys (file names without `.md`, such as `Depends on: api-schema, task-12`)  | `status:` is done, complete(d), closed, or cancel(l)ed |
 
-On Trello and markdown, separate keys with commas or spaces. Text after a dash or parenthesis is ignored, and words that are not shaped like a key are skipped: a Trello short link needs a digit or mixed case, and a markdown key needs a hyphen or digit. A key that matches no card or task file keeps the ticket waiting with `not found` as the reason.
+On Trello and markdown, separate keys with commas or spaces. Text after a dash or parenthesis is ignored, and words that are not shaped like a key are skipped: a Trello short link needs a digit (write a short link without one as a card URL), and a markdown key needs a hyphen or digit. A Trello key that matches no card keeps the ticket waiting with `not found` as the reason, and the worker logs a warning. On markdown, a word with no task file is ignored unless it looks like a ticket key (`local-add-login`, `task-12`), which waits as `not found`.
 
 A blocked ticket is held back without being started, transitioned, or commented on. The worker checks it again on the next poll, then less often while it keeps waiting (up to every 15 minutes). Editing the ticket triggers a check right away:
 
