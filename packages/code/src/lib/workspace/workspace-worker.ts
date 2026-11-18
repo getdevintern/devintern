@@ -66,6 +66,11 @@ import { flushAnalytics, trackWorkerStarted } from "../observability/analytics";
 import { startWorkerFailover, getWorkerFailover } from "../worker/failover";
 import { RetryQueueAcquirer } from "./retry-acquirer";
 import { InjectedTaskAcquirer, INJECTED_TASK_SOURCE } from "./injected-acquirer";
+import {
+  buildStackedPrAcquirer,
+  createStackedBaseChecker,
+  remoteHead,
+} from "./stacked-pr-acquirer";
 import { createInjectedStartupRecovery } from "./injected-recovery";
 import { toRoutableTask } from "./router";
 import { createIdleWorkerAutoUpdater } from "./worker-auto-update";
@@ -554,6 +559,7 @@ export function buildInjectedTaskAcquirer(
         })
       : undefined,
     runDbPath: workspaceDbPath(deps.workspaceDir),
+    resolveBranchHead: (repo, branch) => remoteHead(deps.config, deps.repoManager, repo, branch),
     execute: (task, queueClaim) =>
       createFleetTaskExecutor(deps, {
         extraArgs: () => fleetTaskArgs(deps.config),
@@ -986,6 +992,10 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
     ),
   );
 
+  // Keep stacked PRs on their base: restack, retarget after a merge.
+  const stackStores = { config, workspaceDir, store: injectedTasks, repoManager };
+  acquirers.push(await buildStackedPrAcquirer(stackStores));
+
   // Always assembled (even with no automations yet): a live reload can add
   // [[automations]] without restarting, and applyAutomations schedules them.
   // Semantic problems were already rejected at startup above and are
@@ -1223,6 +1233,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       intervalUpdaters,
       reloadHooksOut: eventReloadHooks,
       supervisor,
+      isStackedBase: createStackedBaseChecker(config, injectedTasks),
     })),
   );
 

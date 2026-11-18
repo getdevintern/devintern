@@ -24,6 +24,8 @@ import { existsSync, unlinkSync } from "fs";
 import { readLocalDependencyFacts } from "../dependencies/local-facts";
 import type { DependencyFacts, DependencyMode } from "../dependencies/gate";
 import { isDependencyMode } from "../dependencies/gate";
+import { orderStackLinks } from "../dependencies/stack-maintainer";
+import type { StackLink } from "../dependencies/stack-maintainer";
 import { prepareQueueDbDirectory } from "./webhook-queue";
 import { configureSqliteConnection } from "./sqlite";
 import type { RunRecord } from "./run-recorder";
@@ -348,6 +350,8 @@ export class InjectedTaskStore {
         dependency_state TEXT,
         dependency_reason TEXT,
         stacked_on TEXT,
+        stack_base_sha TEXT,
+        stack_notice TEXT,
         created_at INTEGER NOT NULL,
         started_at INTEGER,
         finished_at INTEGER
@@ -388,6 +392,8 @@ export class InjectedTaskStore {
       "dependency_state",
       "dependency_reason",
       "stacked_on",
+      "stack_base_sha",
+      "stack_notice",
     ]) {
       if (!columns.some((column) => column.name === name)) {
         addColumnIfMissing(this.db, `${name} TEXT`);
@@ -762,6 +768,53 @@ export class InjectedTaskStore {
       stackedOnTaskKey,
       id,
     ]);
+  }
+
+  /**
+   * Settled (`done`) rows whose PR is stacked on another task's branch (the
+   * stacked-PR maintainer's work list), each base before its dependents.
+   */
+  listStackedLinks(): StackLink[] {
+    const rows = this.ensureDb()
+      .query(
+        `SELECT id, task_key, repo, stacked_on, stack_base_sha, stack_notice FROM injected_tasks
+         WHERE status = 'done' AND stacked_on IS NOT NULL AND stacked_on != ''
+         ORDER BY finished_at ASC, id ASC`,
+      )
+      .all() as Array<{
+      id: number;
+      task_key: string;
+      repo: string;
+      stacked_on: string;
+      stack_base_sha: string | null;
+      stack_notice: string | null;
+    }>;
+    const links = rows.map((row): StackLink => ({
+      id: row.id,
+      taskKey: row.task_key,
+      repo: row.repo,
+      stackedOn: row.stacked_on,
+      baseHeadSha: row.stack_base_sha ?? undefined,
+      notice: row.stack_notice ?? undefined,
+    }));
+    return orderStackLinks(links);
+  }
+
+  /**
+   * Record the base head a stacked row's branch is built on (`null` forgets
+   * it, e.g. once the row no longer stacks). The next restack strips commits
+   * up to this SHA.
+   */
+  setStackBaseSha(id: number, sha: string | null): void {
+    this.ensureDb().run("UPDATE injected_tasks SET stack_base_sha = ? WHERE id = ?", [sha, id]);
+  }
+
+  /**
+   * Record that the stacked-PR maintainer told the PR why it is blocked
+   * (`null` clears it), so the comment is posted once.
+   */
+  setStackNotice(id: number, notice: string | null): void {
+    this.ensureDb().run("UPDATE injected_tasks SET stack_notice = ? WHERE id = ?", [notice, id]);
   }
 
   /** Every row currently claimed as `running` (startup auto-resume scan). */

@@ -27,7 +27,7 @@ import type { RepoConfig, WorkspaceConfig } from "./config";
 import { loadWorkspaceConfig } from "./config";
 import { InjectedTaskStore } from "../state/injected-tasks";
 import type { InjectedTask } from "../state/injected-tasks";
-import { applyWorkspaceProcessEnv } from "./env";
+import { applyWorkspaceProcessEnv, repoGitHubSlug } from "./env";
 import {
   enqueueInjectedTask,
   InjectedTaskDependencyError,
@@ -373,6 +373,7 @@ async function enqueueNewTask(
       dependencyMode: resolveDependencyMode({
         override: add.dependencyMode,
         configured: ctx.dependencyModeDefault,
+        stackMaintained: repoGitHubSlug(repo) !== undefined,
       }),
     });
   } catch (dependencyError) {

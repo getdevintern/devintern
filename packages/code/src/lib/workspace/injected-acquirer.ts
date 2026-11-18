@@ -22,6 +22,7 @@ import type {
   DependencyGateDecision,
   DependencyPr,
   MergeStateAnswer,
+  StackBase,
 } from "../dependencies/gate";
 import { evaluateDependencyGate } from "../dependencies/gate";
 import { applyStackBase } from "../dependencies/stacked-base";
@@ -124,6 +125,14 @@ export interface InjectedTaskAcquirerOptions {
    * the host cannot tell; the dependent keeps waiting.
    */
   resolveMergeState?: (lookup: UnknownMergeStateLookup) => Promise<MergeStateAnswer | null>;
+  /**
+   * Resolve a branch's current head SHA on the repo's remote (freshly
+   * fetched). A stacked task records its base's head when its run starts, so
+   * the first restack after the base is rewritten (amended, rebased) strips
+   * exactly the commits the task was built on. Unset or failing: nothing is
+   * recorded and the restack falls back to the merge base.
+   */
+  resolveBranchHead?: (repo: string, branch: string) => Promise<string | null>;
   /** Per-lookup timeout (defaults to {@link MERGE_STATE_LOOKUP_TIMEOUT_MS}; tests). */
   mergeStateLookupTimeoutMs?: number;
   /** Clock for claims and backoff (tests). */
@@ -243,8 +252,12 @@ export class InjectedTaskAcquirer implements Acquirer {
           continue;
         }
         this.reserveSlot(task.repo);
-        if (decision) this.prepareDependencyBase(task, decision);
-        executions.push(this.runOne(task).finally(() => this.releaseSlot(task.repo)));
+        const stackBase = decision ? this.prepareDependencyBase(task, decision) : undefined;
+        executions.push(
+          this.recordStackBaseHead(task, stackBase)
+            .then(() => this.runOne(task))
+            .finally(() => this.releaseSlot(task.repo)),
+        );
       }
     } finally {
       this.claiming = false;
@@ -427,14 +440,21 @@ export class InjectedTaskAcquirer implements Acquirer {
    * other dependent task is rewritten from its original body so a stale base
    * from an earlier claim cannot linger.
    */
-  private prepareDependencyBase(task: InjectedTask, decision: DependencyGateDecision): void {
-    if (task.dependsOn.length === 0 || decision.kind !== "ready") return;
+  private prepareDependencyBase(
+    task: InjectedTask,
+    decision: DependencyGateDecision,
+  ): StackBase | undefined {
+    if (task.dependsOn.length === 0 || decision.kind !== "ready") return undefined;
     const applied = applyStackBase(task.body, decision.stackedOn, (message) =>
       console.warn(`⚠️  [${this.name}] ${task.taskKey}: ${message}`),
     );
     // Recorded before the rewrite so dependents never read a stale base: a
     // merged PR of this task counts only once its stack base's work merged.
     this.options.store.setStackedOn(task.id, applied.stackedOn?.taskKey ?? null);
+    // A re-claim (e.g. `--resume`) starts a new stacked build: forget the
+    // previous claim's base head and closed-base block.
+    this.options.store.setStackBaseSha(task.id, null);
+    this.options.store.setStackNotice(task.id, null);
     try {
       rewriteInjectedTaskFile(task, applied.body);
     } catch (error) {
@@ -447,6 +467,29 @@ export class InjectedTaskAcquirer implements Acquirer {
       console.log(
         `🧱 [${this.name}] ${task.taskKey} stacked on ${applied.stackedOn.taskKey} ` +
           `PR #${applied.stackedOn.prNumber} (${applied.stackedOn.branch})`,
+      );
+    }
+    return applied.stackedOn;
+  }
+
+  /**
+   * Record the head of the branch a stacked task is about to branch from
+   * (see {@link InjectedTaskAcquirerOptions.resolveBranchHead}). Best effort:
+   * a failure only costs the restack its exact old-base hint.
+   */
+  private async recordStackBaseHead(
+    task: InjectedTask,
+    base: StackBase | undefined,
+  ): Promise<void> {
+    const resolve = this.options.resolveBranchHead;
+    if (!base || !resolve) return;
+    try {
+      const sha = await this.withLookupTimeout(resolve(task.repo, base.branch));
+      if (sha && !this.options.store.isClosed()) this.options.store.setStackBaseSha(task.id, sha);
+    } catch (error) {
+      console.warn(
+        `⚠️  [${this.name}] ${task.taskKey}: could not read ${base.branch}'s head: ` +
+          (error as Error).message,
       );
     }
   }

@@ -248,6 +248,8 @@ export function enqueueInjectedTask(
     request.after,
     request.body,
   );
+  // Callers resolve the mode per repo (`resolveDependencyMode`); without one,
+  // fall back to the mode that needs no stacked-PR maintenance.
   const dependencyMode = request.dependencyMode ?? "merged";
 
   const dir = injectedTasksDir(workspaceDir);
