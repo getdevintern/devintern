@@ -1,5 +1,13 @@
 import { Database } from "bun:sqlite";
-import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  setDefaultTimeout,
+  setSystemTime,
+  test,
+} from "bun:test";
 import { createHash } from "crypto";
 import {
   chmodSync,
@@ -192,6 +200,9 @@ describe("devintern worker read-only dashboard commands", () => {
   }
 
   test("--json prints exactly the dashboard handler body for every command", () => {
+    // Stats busy time counts the in-progress run up to `now`, so freeze the
+    // clock: the CLI and the handler would otherwise read it a tick apart.
+    setSystemTime(Date.now());
     const data = embeddedDashboardData();
     try {
       const cases: [WorkerReadCommand, string[], () => ApiResponse][] = [
@@ -276,6 +287,7 @@ describe("devintern worker read-only dashboard commands", () => {
       >;
       expect(cliOverview).toEqual(apiOverview);
     } finally {
+      setSystemTime();
       data.close();
     }
   });
