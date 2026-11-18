@@ -587,8 +587,9 @@ describe("resolveSessionPickup reopenSucceeded (ad-hoc re-queue)", () => {
     probes: {
       branchExists?: boolean;
       landed?: boolean;
-      open?: boolean | undefined;
+      open?: "open" | "closed" | "none" | undefined;
       reopen?: boolean;
+      notBefore?: number;
       onProbe?: () => void;
     } = {},
   ) {
@@ -602,6 +603,7 @@ describe("resolveSessionPickup reopenSucceeded (ad-hoc re-queue)", () => {
       ...((probes.reopen ?? true)
         ? {
             reopenSucceeded: {
+              notBefore: probes.notBefore ?? 0,
               isChangeRequestOpen: () => {
                 probes.onProbe?.();
                 return probes.open;
@@ -612,10 +614,10 @@ describe("resolveSessionPickup reopenSucceeded (ad-hoc re-queue)", () => {
     });
   }
 
-  test("pushed-no-PR branch resumes without consulting the PR probe", async () => {
+  test("pushed-no-PR branch with no PR on the host resumes", async () => {
     const { prior, current } = succeededRun();
     let probed = false;
-    const pickup = await resolve(current, { onProbe: () => (probed = true) });
+    const pickup = await resolve(current, { open: "none", onProbe: () => (probed = true) });
     expect(pickup.kind).toBe("resume");
     if (pickup.kind !== "resume") return;
     expect(pickup.session).toMatchObject({
@@ -624,13 +626,27 @@ describe("resolveSessionPickup reopenSucceeded (ad-hoc re-queue)", () => {
       branch,
       report: "added truncate()",
     });
-    expect(probed).toBe(false);
+    expect(probed).toBe(true);
+  });
+
+  test("pushed-no-PR branch resumes when the PR state is unknown", async () => {
+    const { prior, current } = succeededRun();
+    const pickup = await resolve(current, { open: undefined });
+    expect(pickup).toMatchObject({ kind: "resume", session: { runId: prior, branch } });
+  });
+
+  test("pushed-no-PR branch whose hand-opened PR was merged starts fresh", async () => {
+    const { current } = succeededRun();
+    expect(await resolve(current, { open: "closed" })).toEqual({
+      kind: "fresh",
+      reason: `a PR for '${branch}' was already merged or closed`,
+    });
   });
 
   test("open-PR branch resumes and carries the recorded PR", async () => {
     const prUrl = "https://github.com/acme/x-rep/pull/15";
     const { prior, current } = succeededRun(prUrl);
-    const pickup = await resolve(current, { open: true });
+    const pickup = await resolve(current, { open: "open" });
     expect(pickup.kind).toBe("resume");
     if (pickup.kind !== "resume") return;
     expect(pickup.session).toMatchObject({ runId: prior, branch, prUrl });
@@ -638,7 +654,7 @@ describe("resolveSessionPickup reopenSucceeded (ad-hoc re-queue)", () => {
 
   test("closed or merged PR starts fresh", async () => {
     const { current } = succeededRun("https://github.com/acme/x-rep/pull/15");
-    expect(await resolve(current, { open: false })).toEqual({
+    expect(await resolve(current, { open: "closed" })).toEqual({
       kind: "fresh",
       reason: `prior run's PR for '${branch}' is no longer open`,
     });
@@ -666,6 +682,19 @@ describe("resolveSessionPickup reopenSucceeded (ad-hoc re-queue)", () => {
       kind: "fresh",
       reason: `branch '${branch}' has no commits to resume`,
     });
+  });
+
+  test("a succeeded run from before the queue row was enqueued stays final", async () => {
+    // A pruned row's key reused by a later `worker add` with the same title:
+    // the old run predates the new row, so it is not this task's prior attempt.
+    const { prior, current } = succeededRun();
+    const startedAt = store.getRun(prior)!.startedAt;
+    expect(await resolve(current, { notBefore: startedAt + 1 })).toEqual({
+      kind: "fresh",
+      reason: "prior run is succeeded",
+    });
+    // A run of the same row (started at or after enqueue) still reopens.
+    expect((await resolve(current, { notBefore: startedAt })).kind).toBe("resume");
   });
 
   test("without the opt-in a succeeded run stays final", async () => {

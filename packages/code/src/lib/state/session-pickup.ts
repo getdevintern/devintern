@@ -35,6 +35,9 @@ export const PICKUP_STATUSES: readonly RunStatus[] = ["failed", "escalated", "ab
 /** Run statuses that qualify a run as a pickup candidate. */
 export type PickupRunStatus = "failed" | "escalated" | "abandoned";
 
+/** Code-host PR/MR state for a branch: any open, all merged/closed, or none. */
+export type ChangeRequestState = "open" | "closed" | "none";
+
 /**
  * Env marker carrying the run a retry targets (`retry.runId`), so the pipeline
  * resolves pickup from that specific run instead of guessing by task key. Set
@@ -47,6 +50,22 @@ export function parsePickupRunId(raw: string | undefined): number | undefined {
   if (!raw || !/^\d+$/.test(raw)) return undefined;
   const id = Number(raw);
   return Number.isSafeInteger(id) && id > 0 ? id : undefined;
+}
+
+/**
+ * Env marker carrying the enqueue time (epoch ms) of the injected queue row a
+ * `worker add` task runs for. Runs that started before it belong to an earlier
+ * task that happened to share the `local-<slug>` key (settled rows are pruned,
+ * so a later `worker add` with the same title can reuse the key), never to a
+ * re-queue of this row. Set by the injected-task acquirer.
+ */
+export const INJECTED_CREATED_AT_ENV = "DEVINTERN_INJECTED_CREATED_AT";
+
+/** Parse a `DEVINTERN_INJECTED_CREATED_AT` value, ignoring malformed input. */
+export function parseInjectedCreatedAt(raw: string | undefined): number | undefined {
+  if (!raw || !/^\d+$/.test(raw)) return undefined;
+  const at = Number(raw);
+  return Number.isSafeInteger(at) && at > 0 ? at : undefined;
 }
 
 /**
@@ -141,18 +160,28 @@ export interface SessionPickupOptions {
    * run resumes when its branch has landed commits and either recorded no PR
    * (pushed without a PR) or its PR is still open. A recorded PR that is no
    * longer open (merged or closed), or whose state cannot be confirmed, keeps
-   * the fresh-branch path. The probe is only consulted when the run recorded
-   * a PR.
+   * the fresh-branch path. The probe is consulted even when the run recorded
+   * no PR: a PR opened by hand from the branch and then merged or closed also
+   * keeps the fresh-branch path.
    */
   reopenSucceeded?: {
     /**
-     * Whether an open PR/MR exists for the branch. `undefined` means the state
-     * is unknown (unsupported code host, lookup failure).
+     * Only a succeeded run that started at or after this time (epoch ms) is
+     * reopened. The injected row's enqueue time: a run from before it belongs
+     * to an earlier task that reused the key, so only a re-queue of the same
+     * row can find a qualifying run.
+     */
+    notBefore: number;
+    /**
+     * State of the branch's PR/MR on the code host: `"open"` when any is
+     * open, `"closed"` when all are merged or closed, `"none"` when the branch
+     * has none. `undefined` means the state is unknown (unsupported code host,
+     * lookup failure).
      */
     isChangeRequestOpen: (session: {
       branch: string;
       run: RunRecord;
-    }) => boolean | undefined | Promise<boolean | undefined>;
+    }) => ChangeRequestState | undefined | Promise<ChangeRequestState | undefined>;
   };
   /** Optional description of already-landed work (git log/diff). Never fatal. */
   describeLanded?: (session: {
@@ -294,27 +323,43 @@ function findCandidateRun(
 }
 
 /**
- * Why a reopened `succeeded` run's recorded PR blocks resume, or `undefined`
- * when the PR is confirmed open.
- *
- * A merged or closed PR means the branch is finished, and an unknown state is
- * not worth the risk of stacking new work on a merged branch. A run without a
- * recorded PR never reaches this check: its branch was pushed (or committed)
- * without one, and the commit probe decides.
+ * Whether a `succeeded` run may be reopened: the caller opted in and the run
+ * started no earlier than the injected row it would be re-queued for.
  */
-async function recordedPrNotOpen(
+function mayReopenSucceeded(
+  run: RunRecord,
+  reopen: SessionPickupOptions["reopenSucceeded"],
+): boolean {
+  return run.status === "succeeded" && reopen !== undefined && run.startedAt >= reopen.notBefore;
+}
+
+/**
+ * Why a reopened `succeeded` run's branch PR blocks resume, or `undefined`
+ * when resume may proceed.
+ *
+ * A run that recorded a PR resumes only on a confirmed `open`: a merged or
+ * closed PR means the branch is finished, and an unknown state (or no PR where
+ * one was recorded) is not worth the risk of stacking new work on a merged
+ * branch. A run that recorded no PR was pushed (or committed) without one, so
+ * `none` or an unknown state lets the commit probe decide; only a PR someone
+ * opened by hand and then merged or closed (`closed`) blocks it.
+ */
+async function prBlocksReopen(
   reopen: NonNullable<SessionPickupOptions["reopenSucceeded"]>,
   branch: string,
   run: RunRecord,
 ): Promise<string | undefined> {
-  let open: boolean | undefined;
+  let state: ChangeRequestState | undefined;
   try {
-    open = await reopen.isChangeRequestOpen({ branch, run });
+    state = await reopen.isChangeRequestOpen({ branch, run });
   } catch {
-    open = undefined;
+    state = undefined;
   }
-  if (open === true) return undefined;
-  return open === false
+  if (!run.prUrl) {
+    return state === "closed" ? `a PR for '${branch}' was already merged or closed` : undefined;
+  }
+  if (state === "open") return undefined;
+  return state === "closed"
     ? `prior run's PR for '${branch}' is no longer open`
     : `could not confirm prior run's PR for '${branch}' is still open`;
 }
@@ -354,7 +399,7 @@ export async function resolveSessionPickup(
     return { kind: "fresh", reason: candidate.reason };
   }
   const run = candidate.run;
-  const reopening = run.status === "succeeded" && reopenSucceeded !== undefined;
+  const reopening = mayReopenSucceeded(run, reopenSucceeded);
   const status: SessionPickup["status"] | undefined = isPickupStatus(run.status)
     ? run.status
     : reopening
@@ -388,8 +433,8 @@ export async function resolveSessionPickup(
     }
   }
 
-  if (reopening && reopenSucceeded && run.prUrl) {
-    const closed = await recordedPrNotOpen(reopenSucceeded, branch, run);
+  if (reopening && reopenSucceeded) {
+    const closed = await prBlocksReopen(reopenSucceeded, branch, run);
     if (closed) return { kind: "fresh", reason: closed };
   }
 

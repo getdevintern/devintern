@@ -12,6 +12,7 @@
  * recording must never fail or slow a run.
  */
 
+import { redactText } from "@devintern/utils";
 import { Database } from "bun:sqlite";
 import { computeRunActivity, hostTimeZone } from "./run-activity";
 import type { RunActivity } from "./run-activity";
@@ -100,6 +101,12 @@ export interface RunRecord extends RunMeta {
    * evidence that no duplicate crash comment is needed.
    */
   cleanStop?: boolean;
+  /**
+   * Why the run's requested PR/MR creation failed, when it did. Positive
+   * evidence that a `succeeded` run left a branch the PR step meant to open a
+   * PR from; a run that never requested a PR leaves this unset.
+   */
+  prFailure?: string;
   /** Explicit current/last step; never inferred from completed stage records. */
   step?: string;
   stepStartedAt?: number;
@@ -233,7 +240,8 @@ export class RunStore {
         ticket_url TEXT,
         task_description TEXT,
         queue_claim TEXT,
-        clean_stop INTEGER NOT NULL DEFAULT 0
+        clean_stop INTEGER NOT NULL DEFAULT 0,
+        pr_failure TEXT
       )
     `);
 
@@ -271,6 +279,9 @@ export class RunStore {
     }
     if (!columns.some((c) => c.name === "queue_claim")) {
       this.db.run("ALTER TABLE runs ADD COLUMN queue_claim TEXT");
+    }
+    if (!columns.some((c) => c.name === "pr_failure")) {
+      this.db.run("ALTER TABLE runs ADD COLUMN pr_failure TEXT");
     }
     // Not unique: one queue claim can produce several runs when the worker changes harnesses.
     this.db.run("CREATE INDEX IF NOT EXISTS idx_runs_queue_claim ON runs(queue_claim)");
@@ -440,6 +451,19 @@ export class RunStore {
        WHERE id = ?`,
       [pr.repo ?? null, pr.prNumber ?? null, pr.url ?? null, runId],
     );
+  }
+
+  /**
+   * Record that the run's PR/MR creation was attempted and failed.
+   *
+   * @param runId - Run id
+   * @param message - Failure reason (redacted before persisting)
+   */
+  setRunPrFailure(runId: number, message: string): void {
+    this.db.run(`UPDATE runs SET pr_failure = ? WHERE id = ?`, [
+      redactText(message).slice(0, 2_000),
+      runId,
+    ]);
   }
 
   /**
@@ -888,6 +912,7 @@ export class RunStore {
       stepStartedAt: typeof row.step_started_at === "number" ? row.step_started_at : undefined,
       stepActive: row.status === "in_progress" && row.step_active === 1,
       cleanStop: (row.clean_stop as number | null) === 1 ? true : undefined,
+      prFailure: (row.pr_failure as string | null) ?? undefined,
     };
   }
 
@@ -1079,6 +1104,23 @@ export function recordRunPr(pr: { repo?: string; prNumber?: number; url?: string
   }
   try {
     currentStore.setRunPr(currentRunId, pr);
+  } catch (error) {
+    warnOnce("pr", error);
+  }
+}
+
+/**
+ * Mark the current run's PR/MR creation as attempted and failed (no-op when no
+ * run is active).
+ *
+ * @param message - Failure reason
+ */
+export function recordRunPrFailure(message: string): void {
+  if (currentStore === null || currentRunId === null) {
+    return;
+  }
+  try {
+    currentStore.setRunPrFailure(currentRunId, message);
   } catch (error) {
     warnOnce("pr", error);
   }

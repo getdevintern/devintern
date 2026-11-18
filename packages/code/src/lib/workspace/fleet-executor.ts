@@ -18,7 +18,7 @@ import { effectiveRoutingRules, routeTask, routeTaskWithRules, toRoutableTask } 
 import type { RoutableTask } from "./router";
 import { RUN_ORIGIN_ENV } from "../observability/analytics";
 import { AUTOMATION_ID_ENV } from "../automation/acquirer";
-import { PICKUP_RUN_ID_ENV } from "../state/session-pickup";
+import { INJECTED_CREATED_AT_ENV, PICKUP_RUN_ID_ENV } from "../state/session-pickup";
 import { actionedSourceKey } from "../task/actioned-state";
 import { QUEUE_CLAIM_ENV } from "./queue-failure-reason";
 import { workspaceDbPath } from "./paths";
@@ -311,6 +311,12 @@ export function createFleetTaskExecutor(
      * resolves from that specific run.
      */
     pickupRunId?: number;
+    /**
+     * Enqueue time (epoch ms) of the injected row this run serves. Threaded to
+     * the task subprocess as `DEVINTERN_INJECTED_CREATED_AT` so session pickup
+     * only reopens a succeeded run of that same row.
+     */
+    injectedCreatedAt?: number;
     /** Unique queue execution whose run record should receive this outcome. */
     queueClaim?: string;
     /**
@@ -420,6 +426,9 @@ export function createFleetTaskExecutor(
             [QUEUE_CLAIM_ENV]: options.queueClaim,
             ...(options.pickupRunId !== undefined
               ? { [PICKUP_RUN_ID_ENV]: String(options.pickupRunId) }
+              : {}),
+            ...(options.injectedCreatedAt !== undefined
+              ? { [INJECTED_CREATED_AT_ENV]: String(options.injectedCreatedAt) }
               : {}),
           };
 

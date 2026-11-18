@@ -97,6 +97,7 @@ let prResult: {
 let prCreateOptions: { artifactComment?: string } | undefined;
 let postImplementationCommentMock: ReturnType<typeof mock>;
 let recordedStages: Array<{ stage: string; data: unknown }>;
+let recordedPrFailures: string[] = [];
 let autoReviewError: Error | undefined;
 
 const HEAD_BEFORE = "1111111111111111111111111111111111111111";
@@ -219,6 +220,9 @@ mock.module("../src/lib/review/auto-review-loop", () => ({
 mock.module("../src/lib/state/retry-state", () => ({ recordIncompleteAttempt: () => {} }));
 mock.module("../src/lib/state/run-recorder", () => ({
   recordRunPr: () => {},
+  recordRunPrFailure: (message: string) => {
+    recordedPrFailures.push(message);
+  },
   recordRunStage: (stage: string, data: unknown) => {
     recordedStages.push({ stage, data });
   },
@@ -310,6 +314,7 @@ beforeEach(() => {
   agentPrompts = [];
   autoReviewOptions = [];
   recordedStages = [];
+  recordedPrFailures = [];
   autoReviewError = undefined;
   pipelineConfig = undefined;
   prResult = { success: true, url: "https://github.com/o/r/pull/1", warnings: [] };
@@ -655,6 +660,8 @@ describe("runAgentHarness git delivery", () => {
 
     expect(postImplementationCommentMock).toHaveBeenCalledTimes(1);
     expect(tracker.transitionStatus).not.toHaveBeenCalled();
+    // No PR requested → no PR failure recorded, so the run is not re-queueable.
+    expect(recordedPrFailures).toEqual([]);
   });
 
   test("creates a PR and transitions the task to the PR status", async () => {
@@ -664,6 +671,7 @@ describe("runAgentHarness git delivery", () => {
 
     expect(postImplementationCommentMock).toHaveBeenCalledTimes(1);
     expect(tracker.transitionStatus).toHaveBeenCalledWith("TASK-1", "In Review");
+    expect(recordedPrFailures).toEqual([]);
   });
 
   test("flags a retryable PR failure and tells the tracker the ticket is stuck", async () => {
@@ -692,6 +700,8 @@ describe("runAgentHarness git delivery", () => {
     }
 
     expect(runContext.activeTaskContext?.prCreationFailure).toBe("GitHub API 502 Bad Gateway");
+    // The run itself records the failed attempt (dashboard re-queue evidence).
+    expect(recordedPrFailures).toEqual(["GitHub API 502 Bad Gateway"]);
     expect(tracker.postComment).toHaveBeenCalledTimes(1);
     const [key, content] = (tracker.postComment as ReturnType<typeof mock>).mock.calls[0] as [
       string,
@@ -812,6 +822,8 @@ describe("runAgentHarness git delivery", () => {
     await runAgentHarness({ ...baseInput(), createPr: true });
 
     expect(runContext.activeTaskContext?.prCreationFailure).toBeUndefined();
+    // Still a failed attempt on the run, even though the worker will not re-run it.
+    expect(recordedPrFailures).toEqual(["GitHub client not configured. Please set GITHUB_TOKEN"]);
     expect(tracker.postComment).toHaveBeenCalledTimes(1);
     const [, content] = (tracker.postComment as ReturnType<typeof mock>).mock.calls[0] as [
       string,

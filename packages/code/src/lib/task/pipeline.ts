@@ -47,8 +47,17 @@ import {
   recordRunTicket,
   replaceRunStage,
 } from "../state/run-recorder";
-import { pickupSelection, resolveSessionPickup } from "../state/session-pickup";
-import type { SessionPickupDecision, SessionPickupOptions } from "../state/session-pickup";
+import {
+  INJECTED_CREATED_AT_ENV,
+  parseInjectedCreatedAt,
+  pickupSelection,
+  resolveSessionPickup,
+} from "../state/session-pickup";
+import type {
+  ChangeRequestState,
+  SessionPickupDecision,
+  SessionPickupOptions,
+} from "../state/session-pickup";
 import { finishTaskRun } from "../state/task-run";
 import { outcomeRunDisposition } from "../agent/implementation-outcome";
 import { TaskFormatter } from "../task/formatter";
@@ -841,31 +850,28 @@ async function resolveEffectiveTargetBranch(descriptionText: string | undefined)
 }
 
 /**
- * Whether the code host has an open PR for `branch`.
+ * State of the code host's PR(s) for `branch`.
  *
- * Only a confirmed state counts: a failed lookup (expired token, rate limit,
- * network error), an unsupported code host, or a branch with no PR at all
- * (the run recorded one, so its absence is unexplained) all read as unknown.
+ * `"none"` (the branch has no PR) is kept apart from unknown so the caller can
+ * tell a branch pushed without a PR from one whose state could not be checked.
+ * A failed lookup (expired token, rate limit, network error) or an unsupported
+ * code host reads as unknown.
  *
  * @param branch - Head/feature branch name
  * @param lookup - PR state lookup (defaults to {@link PRManager.getChangeRequestState})
- * @returns `true` when open, `false` when closed or merged, `undefined` when
- *   the state cannot be confirmed
+ * @returns `"open"`, `"closed"` (closed or merged), `"none"`, or `undefined`
+ *   when the state cannot be confirmed
  */
 export async function isChangeRequestOpen(
   branch: string,
-  lookup: (branch: string) => Promise<"open" | "closed" | "none" | undefined> = (b) =>
+  lookup: (branch: string) => Promise<ChangeRequestState | undefined> = (b) =>
     new PRManager().getChangeRequestState(b),
-): Promise<boolean | undefined> {
-  let state: "open" | "closed" | "none" | undefined;
+): Promise<ChangeRequestState | undefined> {
   try {
-    state = await lookup(branch);
+    return await lookup(branch);
   } catch {
     return undefined;
   }
-  if (state === "open") return true;
-  if (state === "closed") return false;
-  return undefined;
 }
 
 /**
@@ -874,20 +880,28 @@ export async function isChangeRequestOpen(
  *
  * Only ad-hoc (`origin: "local"`) runs qualify: tracker tasks keep a succeeded
  * run final. Without git delivery there is no branch to check out, so the
- * option is omitted too.
+ * option is omitted too. It is also omitted without the injected row's enqueue
+ * time ({@link INJECTED_CREATED_AT_ENV}); with it, only runs of that same row
+ * (so only a re-queue) can be reopened, never a run left by an earlier task
+ * that reused the `local-<slug>` key.
  *
  * @param input.origin - Origin of the run being picked up for
  * @param input.gitEnabled - Whether the feature branch will be checked out
+ * @param input.env - Environment carrying the injected row's enqueue time
  * @param input.lookup - PR state lookup override (tests)
  */
 export function reopenSucceededPickupOption(input: {
   origin?: string;
   gitEnabled: boolean;
+  env?: NodeJS.ProcessEnv;
   lookup?: Parameters<typeof isChangeRequestOpen>[1];
 }): Pick<SessionPickupOptions, "reopenSucceeded"> {
   if (input.origin !== "local" || !input.gitEnabled) return {};
+  const notBefore = parseInjectedCreatedAt((input.env ?? process.env)[INJECTED_CREATED_AT_ENV]);
+  if (notBefore === undefined) return {};
   return {
     reopenSucceeded: {
+      notBefore,
       isChangeRequestOpen: ({ branch }) => isChangeRequestOpen(branch, input.lookup),
     },
   };
@@ -1378,10 +1392,11 @@ export async function processSingleTask(
         taskKey: workflowKey,
         scope,
         ...pickupSelection(currentRunId),
-        // An ad-hoc task only reruns when it is re-queued (`worker add
-        // --resume`, dashboard re-queue, startup auto-resume). A prior run
-        // that succeeded but never opened its PR, or whose PR is still open,
-        // continues on that branch instead of cutting `-attempt-N`.
+        // A re-queued ad-hoc task (`worker add --resume`, dashboard re-queue,
+        // startup auto-resume) whose prior run of the same queue row succeeded
+        // but never opened its PR, or whose PR is still open, continues on
+        // that branch instead of cutting `-attempt-N`. A first run has no
+        // earlier run of its row, so it never reopens one.
         ...reopenSucceededPickupOption({
           origin: scope.origin,
           gitEnabled: Boolean(runContext.options.git),

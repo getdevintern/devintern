@@ -39,7 +39,7 @@ import {
   WORKSPACE_REPO_ENV,
   WORKSPACE_TEAM_ENV,
 } from "../src/lib/workspace/env";
-import { PICKUP_RUN_ID_ENV } from "../src/lib/state/session-pickup";
+import { INJECTED_CREATED_AT_ENV, PICKUP_RUN_ID_ENV } from "../src/lib/state/session-pickup";
 import type { TaskTrackerClient } from "../src/lib/trackers/client";
 import type { Task } from "../src/types/task-tracker";
 import { createRepoRunLock, openWorkspaceState } from "../src/lib/workspace/state";
@@ -847,6 +847,8 @@ describe("buildInjectedTaskAcquirer", () => {
       // the task key, and the subprocess is marked as a `local` origin run.
       expect(observed?.taskRef).toBe(taskFile);
       expect(observed?.env[RUN_ORIGIN_ENV]).toBe("local");
+      // The row's enqueue time lets session pickup reopen only runs of this row.
+      expect(observed?.env[INJECTED_CREATED_AT_ENV]).toBe(String(task.createdAt));
       expect(observed?.args).toEqual(["--create-pr", "--auto-review"]);
       expect(repoManager.calls).toContain("worktree:backend:local-bump-deps");
       expect(store.getById(task.id)?.status).toBe("done");

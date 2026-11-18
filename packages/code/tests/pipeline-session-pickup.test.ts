@@ -18,7 +18,11 @@ import {
   getActiveRunContext,
   recordRunPr,
 } from "../src/lib/state/run-recorder";
-import { pickupSelection, resolveSessionPickup } from "../src/lib/state/session-pickup";
+import {
+  INJECTED_CREATED_AT_ENV,
+  pickupSelection,
+  resolveSessionPickup,
+} from "../src/lib/state/session-pickup";
 import type { SessionPickupDecision } from "../src/lib/state/session-pickup";
 import {
   buildRetryPromptContext,
@@ -359,15 +363,15 @@ describe("ad-hoc re-queue pickup wiring", () => {
   const BRANCH = "feature/local-add-truncate-helper";
   const PR = "https://github.com/owner/repo/pull/12";
 
-  test.each<[PrState | "throws", boolean | undefined]>([
-    ["open", true],
-    ["closed", false],
-    // The run recorded a PR but the host has none for the branch: unexplained, so unknown.
-    ["none", undefined],
+  test.each<[PrState | "throws", PrState]>([
+    ["open", "open"],
+    ["closed", "closed"],
+    // Kept apart from unknown: a branch pushed without a PR has none.
+    ["none", "none"],
     // Unsupported host, no credentials, or a 401/403/429/5xx lookup failure.
     [undefined, undefined],
     ["throws", undefined],
-  ])("maps PR state %p to open=%p", async (state, expected) => {
+  ])("maps PR state %p to %p", async (state, expected) => {
     const lookup = async (): Promise<PrState> => {
       if (state === "throws") throw new Error("Bad credentials");
       return state;
@@ -375,16 +379,33 @@ describe("ad-hoc re-queue pickup wiring", () => {
     expect(await isChangeRequestOpen(BRANCH, lookup)).toBe(expected);
   });
 
+  /** Env the injected acquirer gives the child: the queue row's enqueue time. */
+  const rowEnv = (createdAt = 1) =>
+    ({ [INJECTED_CREATED_AT_ENV]: String(createdAt) }) as NodeJS.ProcessEnv;
+
   test("only local runs with git delivery may reopen a succeeded run", () => {
+    const env = rowEnv(1234);
     expect(
-      reopenSucceededPickupOption({ origin: "local", gitEnabled: true }).reopenSucceeded,
-    ).toBeDefined();
-    expect(reopenSucceededPickupOption({ origin: "local", gitEnabled: false })).toEqual({});
-    expect(reopenSucceededPickupOption({ origin: "task", gitEnabled: true })).toEqual({});
-    expect(reopenSucceededPickupOption({ origin: undefined, gitEnabled: true })).toEqual({});
+      reopenSucceededPickupOption({ origin: "local", gitEnabled: true, env }).reopenSucceeded,
+    ).toMatchObject({ notBefore: 1234 });
+    expect(reopenSucceededPickupOption({ origin: "local", gitEnabled: false, env })).toEqual({});
+    expect(reopenSucceededPickupOption({ origin: "task", gitEnabled: true, env })).toEqual({});
+    expect(reopenSucceededPickupOption({ origin: undefined, gitEnabled: true, env })).toEqual({});
   });
 
-  async function pickupFor(origin: string, lookup: () => Promise<PrState>) {
+  test("without the injected row's enqueue time a succeeded run is never reopened", () => {
+    const env = {} as NodeJS.ProcessEnv;
+    expect(reopenSucceededPickupOption({ origin: "local", gitEnabled: true, env })).toEqual({});
+    expect(
+      reopenSucceededPickupOption({
+        origin: "local",
+        gitEnabled: true,
+        env: { [INJECTED_CREATED_AT_ENV]: "garbage" } as NodeJS.ProcessEnv,
+      }),
+    ).toEqual({});
+  });
+
+  async function pickupFor(origin: string, lookup: () => Promise<PrState>, env = rowEnv()) {
     const current = store.createRun({ origin: origin as "local", taskKey: KEY });
     const pickup = await resolveSessionPickup({
       runStore: store,
@@ -392,22 +413,41 @@ describe("ad-hoc re-queue pickup wiring", () => {
       // The pipeline scopes pickup by the current run's own record.
       scope: store.getRun(current) ?? {},
       ...pickupSelection(current, {} as NodeJS.ProcessEnv),
-      ...reopenSucceededPickupOption({ origin, gitEnabled: true, lookup }),
+      ...reopenSucceededPickupOption({ origin, gitEnabled: true, lookup, env }),
       branchExists: () => true,
       hasLandedCommits: () => true,
     });
     return pickup;
   }
 
-  test("a pushed-without-PR branch resumes without asking the code host", async () => {
+  test.each<[string, () => Promise<PrState>, "resume" | "fresh", string | undefined]>([
+    ["has no PR", async () => "none", "resume", undefined],
+    // The host cannot be asked: the branch was pushed without a PR, so the
+    // commit probe decides rather than an unknown PR state.
+    ["unverifiable (undefined)", async () => undefined, "resume", undefined],
+    [
+      "unverifiable (401)",
+      async () => {
+        throw new Error("401 Bad credentials");
+      },
+      "resume",
+      undefined,
+    ],
+    ["has an open PR opened by hand", async () => "open", "resume", undefined],
+    // A PR opened by hand from the branch and squash-merged: resuming would
+    // open a second PR carrying already-merged work.
+    ["has a hand-opened PR that was merged", async () => "closed", "fresh", "merged or closed"],
+  ])("a pushed-without-PR branch that %s → %s", async (_label, lookup, kind, reason) => {
     const prior = succeededLocalRun(KEY, BRANCH);
     let lookups = 0;
     const pickup = await pickupFor("local", async () => {
       lookups++;
-      return undefined;
+      return lookup();
     });
-    expect(pickup).toMatchObject({ kind: "resume", session: { runId: prior, branch: BRANCH } });
-    expect(lookups).toBe(0);
+    expect(lookups).toBe(1);
+    expect(pickup.kind).toBe(kind);
+    if (pickup.kind === "fresh") expect(pickup.reason).toContain(reason!);
+    else expect(pickup).toMatchObject({ session: { runId: prior, branch: BRANCH } });
   });
 
   test.each<[string, () => Promise<PrState>, "resume" | "fresh", string | undefined]>([
@@ -429,6 +469,15 @@ describe("ad-hoc re-queue pickup wiring", () => {
     const pickup = await pickupFor("local", lookup);
     expect(pickup.kind).toBe(kind);
     if (pickup.kind === "fresh") expect(pickup.reason).toContain(reason!);
+  });
+
+  test("a first run of a new row never continues an older task's branch under a reused key", async () => {
+    // The old row was pruned, so a new `worker add` with the same title got
+    // the same `local-<slug>` key; its run predates the new row.
+    const prior = succeededLocalRun(KEY, BRANCH);
+    const rowCreatedAt = store.getRun(prior)!.startedAt + 1;
+    const pickup = await pickupFor("local", async () => "open", rowEnv(rowCreatedAt));
+    expect(pickup).toEqual({ kind: "fresh", reason: "prior run is succeeded" });
   });
 
   test("a succeeded tracker-task run stays final", async () => {
