@@ -669,6 +669,18 @@ A single agent run is also bounded by wall-clock time; raise or lower that bound
 AGENT_HARNESS_TIMEOUT_MINUTES=60
 ```
 
+PR follow-up runs (`address-review`, `resolve-conflicts`, the auto-merge review, and webhook review jobs) do not accept `--max-turns` or `--hook-retries`; they read these variables instead:
+
+```bash
+# Max agent turns for PR follow-up runs
+# Default: 500
+CLAUDE_MAX_TURNS=500
+
+# Git hook repair attempts for address-review and webhook review jobs
+# Default: 10
+HOOK_RETRIES=10
+```
+
 **CLI options:**
 
 - `--agent-path`: override the agent executable path

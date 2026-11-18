@@ -45,7 +45,7 @@ devintern PROJ-123 --create-pr 2>&1 | tee /tmp/devintern-run.log
 devintern report --last --log /tmp/devintern-run.log
 ```
 
-Log attachment is bounded (64 KB per source) and credentials are masked.
+Log attachment is bounded (64 KB per source) and credentials are masked. Pass `--no-logs` to omit log text, or `--no-diagnostics` to skip run metadata and logs.
 
 ## Report from the dashboard
 
@@ -95,7 +95,7 @@ DevIntern already captures exceptions through Sentry. Manual reports add the con
 
 Warnings and failed checks in user code are not automatically DevIntern defects. Diagnose them before filing a report. The report command sends only when you confirm submission (or explicitly pass `--yes`); task execution does not submit bug reports to this endpoint.
 
-For a custom support intake, set `DEVINTERN_REPORT_URL` to its report endpoint.
+For a custom support intake, set `DEVINTERN_REPORT_URL` to its report endpoint, or pass `--endpoint <url>` for a single command.
 
 ## Report with a coding agent
 
