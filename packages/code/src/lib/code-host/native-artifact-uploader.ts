@@ -32,7 +32,9 @@ function originRemoteUrl(cwd: string): string {
 
 /**
  * Resolve a native code-host uploader for the checkout's origin remote using
- * code-host credentials only (never tracker credentials or another backend).
+ * the same credentials as PR/MR creation (never another uploader backend).
+ * For GitLab that includes resolveGitLabCodeHostConfig's documented fallback
+ * to the tracker GITLAB_TOKEN when TASK_TRACKER=gitlab targets the same instance.
  * Unsupported setups yield an adapter whose uploads fail with an actionable
  * status, so publication stays advisory instead of failing the run.
  *
@@ -93,16 +95,25 @@ export function loadNativeArtifactUploader(
     const id = `native-gitlab:${scope}`;
     const config = resolveGitLabCodeHostConfig(repository.instanceUrl, env);
     if (!config.ok) return { id, adapter: unavailable(config.message) };
-    return {
-      id,
-      adapter: createGitLabUploadAdapter({
-        token: config.token,
-        instanceUrl: config.instanceUrl,
-        caFile: config.caFile,
-        proxy: config.proxy,
-        projectPath: repository.projectPath,
-      }),
-    };
+    try {
+      return {
+        id,
+        adapter: createGitLabUploadAdapter({
+          token: config.token,
+          instanceUrl: config.instanceUrl,
+          caFile: config.caFile,
+          proxy: config.proxy,
+          projectPath: repository.projectPath,
+        }),
+      };
+    } catch (error) {
+      // GitLabApi reads GITLAB_CODE_HOST_CA_FILE eagerly; keep a bad path advisory.
+      const reason = error instanceof Error ? error.message : String(error);
+      return {
+        id,
+        adapter: unavailable(`Cannot read GITLAB_CODE_HOST_CA_FILE: ${reason}`),
+      };
+    }
   }
 
   return {

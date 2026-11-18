@@ -16,6 +16,7 @@ import { GitLabMRClient } from "../src/lib/code-host/gitlab/mr-client";
 import {
   createGitLabUploadAdapter,
   gitLabMediaAccessNotice,
+  isGitLabUploadLinkPublic,
   normalizeGitLabUploadUrl,
 } from "../src/lib/code-host/gitlab/upload-adapter";
 import { loadNativeArtifactUploader } from "../src/lib/code-host/native-artifact-uploader";
@@ -199,6 +200,22 @@ describe("native GitHub attachments", () => {
       }).id,
     ).toBe("native-gitlab:https://git.example.com/gitlab/group/sub/proj");
   });
+
+  test("an unreadable GitLab CA file stays advisory instead of throwing", async () => {
+    const env = {
+      DEVINTERN_EXPERIMENTAL_GITLAB_CODE_HOST: "true",
+      GITLAB_CODE_HOST_TOKEN: "x",
+      GITLAB_CODE_HOST_CA_FILE: join(tmpdir(), "devintern-missing-ca", "ca.pem"),
+    };
+    const loaded = loadNativeArtifactUploader("gitlab", {
+      remoteUrl: "https://gitlab.com/g/p.git",
+      env,
+    });
+    expect(loaded.id).toBe("native-gitlab:https://gitlab.com/g/p");
+    await expect(loaded.adapter.upload(artifact(), png)).rejects.toThrow(
+      "Cannot read GITLAB_CODE_HOST_CA_FILE",
+    );
+  });
 });
 
 describe("native GitLab uploads", () => {
@@ -252,6 +269,7 @@ describe("native GitLab uploads", () => {
       url: "https://git.example.com/gitlab/-/project/9/uploads/s/screen.png",
       remoteId: "gitlab-upload:9:5",
       notice: expect.stringContaining("anyone with the link"),
+      linkPublic: true,
     });
     const upload = requests[1]!;
     expect(upload.url).toBe("https://git.example.com/gitlab/api/v4/projects/9/uploads");
@@ -459,4 +477,102 @@ describe("destination-scoped native publication", () => {
     expect(body).not.toContain(dir);
     expect(registry.list()[0]!.upload?.status).toBe("failed");
   });
+
+  test("upload errors are redacted before reaching the comment, console, or store", async () => {
+    await captureScreenshot();
+    const token = `ghp_${"A".repeat(36)}`;
+    const fineGrained = `github_pat_11${"B".repeat(30)}`;
+    const gitlab = `glpat-${"C".repeat(20)}`;
+    const presigned =
+      "https://bucket.s3.amazonaws.com/a.png?X-Amz-Signature=deadbeefcafe&X-Amz-Expires=60";
+    const failures = new Map<string, string>();
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => warnings.push(args.join(" "));
+    try {
+      await uploadSelectedArtifacts(
+        registry,
+        embedPolicy,
+        {
+          id: "custom",
+          adapter: {
+            upload: () =>
+              Promise.reject(
+                new Error(
+                  `auth failed with token ${token} at ${presigned}; ${fineGrained} ${gitlab} ` +
+                    "https://u:p@host/x.png https://bare-token@host/y.png",
+                ),
+              ),
+          },
+        },
+        failures,
+      );
+    } finally {
+      console.warn = originalWarn;
+    }
+    const body = buildArtifactComment(registry, embedPolicy, new Map(), failures)!.body;
+    for (const text of [body, failures.get("screen")!, warnings.join("\n")]) {
+      expect(text).not.toContain("ghp_");
+      expect(text).not.toContain("AAAAAAAAAAAAAAAA");
+      expect(text).not.toContain("X-Amz-Signature");
+      expect(text).not.toContain("deadbeefcafe");
+      expect(text).not.toContain("github_pat_");
+      expect(text).not.toContain("BBBBBBBBBBBBBBBB");
+      expect(text).not.toContain("glpat-");
+      expect(text).not.toContain("CCCCCCCCCCCCCCCC");
+      expect(text).not.toContain("u:p@");
+      expect(text).not.toContain("bare-token");
+    }
+    expect(body).toContain("upload failed: auth failed with token \\[redacted\\]");
+    expect(registry.list()[0]!.upload?.message).not.toContain("ghp_");
+  });
+
+  test("link-public uploads warn the operator and note access in the comment", async () => {
+    await captureScreenshot();
+    const project = { id: 1, path_with_namespace: "g/a", visibility: "private" as const };
+    const notice = gitLabMediaAccessNotice(project);
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => warnings.push(args.join(" "));
+    let urls: Map<string, string>;
+    try {
+      urls = await uploadSelectedArtifacts(registry, embedPolicy, {
+        id: "native-gitlab:https://gitlab.com/g/a",
+        adapter: {
+          upload: async () => ({
+            url: "https://gitlab.com/g/a/uploads/x/s.png",
+            notice,
+            linkPublic: true,
+          }),
+        },
+      });
+    } finally {
+      console.warn = originalWarn;
+    }
+    expect(warnings.join("\n")).toContain("viewable by anyone with its link");
+    const body = buildArtifactComment(registry, embedPolicy, urls)!.body;
+    expect(body).toContain(
+      "_Access: Private project: uploads are viewable by anyone with the link",
+    );
+    expect(isGitLabUploadLinkPublic(project)).toBe(true);
+    expect(isGitLabUploadLinkPublic({ ...project, enforce_auth_checks_on_uploads: true })).toBe(
+      false,
+    );
+    expect(isGitLabUploadLinkPublic({ ...project, visibility: "public" })).toBe(false);
+  });
+});
+
+// Opt-in live check against github.com (creates a real attachment asset):
+// DEVINTERN_LIVE_GITHUB_ATTACHMENT_REPO=owner/repo GITHUB_TOKEN=... bun run test native-artifact-uploaders
+const liveRepo = process.env.DEVINTERN_LIVE_GITHUB_ATTACHMENT_REPO;
+describe.skipIf(!liveRepo || !process.env.GITHUB_TOKEN)("live GitHub attachment upload", () => {
+  test("github.com accepts the native attachment request", async () => {
+    globalThis.fetch = originalFetch;
+    const uploader = createGitHubAttachmentUploader({
+      token: process.env.GITHUB_TOKEN!,
+      repository: liveRepo!,
+    });
+    const result = await uploader.upload(artifact({ name: "devintern-live-check.png" }), png);
+    expect(result.url).toMatch(/^https:\/\/github\.com\/user-attachments\/assets\//);
+  }, 30_000);
 });

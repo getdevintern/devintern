@@ -1,6 +1,6 @@
 import { isAbsolute, resolve } from "path";
 import { pathToFileURL } from "url";
-import { selectPublishedArtifacts } from "./publication";
+import { redactUploadError, selectPublishedArtifacts } from "./publication";
 import { loadFilesArtifactUploader } from "./files-sdk-env";
 import {
   isNativeArtifactUploader,
@@ -72,12 +72,16 @@ export async function uploadSelectedArtifacts(
           remoteId: typeof result.remoteId === "string" ? result.remoteId : undefined,
           notice: typeof result.notice === "string" ? result.notice : undefined,
         });
-        if (typeof result.notice === "string")
+        if (result.linkPublic === true)
+          console.warn(
+            `⚠️ Artifact ${artifact.key} is viewable by anyone with its link: ${result.notice ?? "the destination does not require sign-in for uploads"}`,
+          );
+        else if (typeof result.notice === "string")
           console.log(`ℹ️  Artifact ${artifact.key} uploaded: ${result.notice}`);
       }
       urls.set(artifact.key, url.replace(/\(/g, "%28").replace(/\)/g, "%29"));
     } catch (error) {
-      const message = (error as Error).message;
+      const message = redactUploadError(String((error as Error)?.message ?? error));
       registry.recordUpload(artifact.id, uploader.id, { error: message });
       failures?.set(artifact.key, message);
       console.warn(`⚠️ Artifact upload failed (${artifact.key}): ${message}`);

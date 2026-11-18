@@ -68,6 +68,11 @@ export interface ArtifactUploadResult {
   remoteId?: string;
   /** Effective visibility/access behavior to surface to operators. */
   notice?: string;
+  /**
+   * True when anyone holding the URL can open the file even though the source
+   * project is not public (for example GitLab media without enforced auth).
+   */
+  linkPublic?: boolean;
 }
 
 export interface ArtifactPublication {

@@ -102,9 +102,9 @@ Use the code host itself when you don't want to set up storage:
 }
 ```
 
-The destination is the repository from the checkout's `origin` remote. Credentials come from the code-host settings DevIntern already uses to open PRs and MRs, never from task tracker settings. Uploading doesn't create comments, commits, or branches.
+The destination is the repository from the checkout's `origin` remote. Uploads use the same credentials DevIntern uses to open PRs and MRs: `GITHUB_TOKEN` for GitHub, and `GITLAB_CODE_HOST_TOKEN` for GitLab, which falls back to `GITLAB_TOKEN` only when `TASK_TRACKER=gitlab` and `GITLAB_BASE_URL` is the same instance (see [GitLab integration](./gitlab-integration.md)). Uploading doesn't create comments, commits, or branches.
 
-**GitHub** uses the same attachment upload as the GitHub CLI.
+**GitHub** uses the attachment endpoint the GitHub CLI uses for file attachments. GitHub doesn't document this endpoint as part of its public REST API, so it may change. If an upload fails, the comment says so and the PR is still created.
 
 | Setting      | Supported                                                                                                       |
 | ------------ | --------------------------------------------------------------------------------------------------------------- |
@@ -126,7 +126,7 @@ Who can open an uploaded file depends on the project:
 | Private or internal (the default)                             | Anyone with the link can open them                   |
 | Private or internal with **Require authentication to view media files** | Only signed-in users with project access can open them |
 
-DevIntern never changes project visibility or media settings. When GitLab reports the setting, run details in the dashboard show which of these applies to each upload. To require sign-in, enable **Settings → General → Visibility, project features, permissions → Require authentication to view media files**.
+DevIntern never changes project visibility or media settings. The MR comment notes under each uploaded file who can open it, the run log warns when files from a private or internal project are viewable by anyone with the link, and run details in the dashboard show the same. To require sign-in, enable **Settings → General → Visibility, project features, permissions → Require authentication to view media files**.
 
 If native uploads are unavailable, for example because of an unsupported token, read-only access, an unsupported file type, an oversized file, or an API error, the PR comment and the dashboard both show the reason. The run and the PR still succeed, and the local copy stays in the dashboard.
 

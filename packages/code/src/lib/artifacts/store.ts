@@ -60,15 +60,21 @@ export class ArtifactStore {
       PRIMARY KEY (artifact_id, uploader)
     )`);
     if (!options.readonly) {
-      const columns = new Set(
-        (this.db.query("PRAGMA table_info(run_artifact_uploads)").all() as { name: string }[]).map(
-          (column) => column.name,
-        ),
-      );
-      if (!columns.has("remote_id"))
-        this.db.exec("ALTER TABLE run_artifact_uploads ADD COLUMN remote_id TEXT");
-      if (!columns.has("notice"))
-        this.db.exec("ALTER TABLE run_artifact_uploads ADD COLUMN notice TEXT");
+      // Several worker processes open the shared queue.db concurrently; take the
+      // write lock before reading table_info so check-then-ALTER is atomic.
+      this.db
+        .transaction(() => {
+          const columns = new Set(
+            (
+              this.db.query("PRAGMA table_info(run_artifact_uploads)").all() as { name: string }[]
+            ).map((column) => column.name),
+          );
+          if (!columns.has("remote_id"))
+            this.db.exec("ALTER TABLE run_artifact_uploads ADD COLUMN remote_id TEXT");
+          if (!columns.has("notice"))
+            this.db.exec("ALTER TABLE run_artifact_uploads ADD COLUMN notice TEXT");
+        })
+        .immediate();
     }
   }
 

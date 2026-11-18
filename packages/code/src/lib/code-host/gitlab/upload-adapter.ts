@@ -29,6 +29,11 @@ export function gitLabMediaAccessNotice(project: GitLabUploadProject): string {
   return `${scope}: uploads are viewable by anyone with the link unless "Require authentication to view media files" is enabled (setting not reported by this GitLab).`;
 }
 
+/** Non-public project whose uploads are not known to require sign-in. */
+export function isGitLabUploadLinkPublic(project: GitLabUploadProject): boolean {
+  return project.visibility !== "public" && project.enforce_auth_checks_on_uploads !== true;
+}
+
 /**
  * Turn a GitLab upload reference into an absolute URL without losing the
  * instance's relative installation path. `full_path` is either
@@ -107,6 +112,7 @@ export function createGitLabUploadAdapter(options: GitLabUploadAdapterOptions): 
         url: normalizeGitLabUploadUrl(api.instanceUrl, resolved.path_with_namespace, upload),
         ...(upload.id ? { remoteId: `gitlab-upload:${resolved.id}:${upload.id}` } : {}),
         notice: gitLabMediaAccessNotice(resolved),
+        linkPublic: isGitLabUploadLinkPublic(resolved),
       };
     },
   };

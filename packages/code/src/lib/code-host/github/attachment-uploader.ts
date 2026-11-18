@@ -48,7 +48,7 @@ export function classifyGitHubToken(token: string): GitHubTokenKind {
 }
 
 export const GITHUB_APP_INSTALLATION_UNSUPPORTED =
-  "GitHub App installation tokens cannot upload native attachments (the official GitHub CLI uploader excludes them). Set GITHUB_TOKEN to an OAuth or personal access token with write access, or use the files-sdk or a custom uploader.";
+  "GitHub App installation tokens are not supported for native attachments. Set GITHUB_TOKEN to an OAuth or personal access token with write access, or use the files-sdk or a custom uploader.";
 
 export interface GitHubAttachmentUploaderOptions {
   token: string;
@@ -62,6 +62,15 @@ export interface GitHubAttachmentUploaderOptions {
  * Native github.com user-attachment uploads, mirroring the official GitHub CLI
  * flow: POST raw bytes to uploads.github.com/user-attachments/assets with the
  * destination repository ID. Never creates comments, commits, or branches.
+ *
+ * This endpoint is not part of GitHub's documented REST API. The request shape
+ * (query `name`/`content_type`/`repository_id`, `application/octet-stream`
+ * body, `{ url }` response, 404 for tokens without write access) mirrors
+ * cli/cli `internal/attachments/client.go` (`postAsset`, `uploadError`) and
+ * `internal/ghinstance/host.go` (`UserAssetUploadPrefix`) as of commit
+ * 17ac598e (2026-10-23). gh leaves App credentials to the endpoint; we refuse
+ * installation tokens up front instead. Opt-in live check:
+ * DEVINTERN_LIVE_GITHUB_ATTACHMENT_REPO in tests/native-artifact-uploaders.test.ts.
  */
 export function createGitHubAttachmentUploader(
   options: GitHubAttachmentUploaderOptions,
