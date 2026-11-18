@@ -47,7 +47,7 @@ bun run --filter @getdevintern/pm build
 ### `@getdevintern/code`
 
 - Entry: `src/index.ts`
-- Tests: `bun test` (Bun native test runner in `tests/`)
+- Tests: always run through `bun run test` from `packages/code` (it launches `bun test` via `tests/run-tests.ts` with the safe env pins and guard preloads). Single file: `bun run test ./lock-manager.test.ts` (path relative to `tests/`, the runner's cwd; a `tests/` prefix does not match) or a filter such as `bun run test lock-manager`. Bare `bun test` is refused by `tests/setup/guard-git-state.ts`; do not work around it by hand-setting `GIT_CEILING_DIRECTORIES`, which skips the runner's other pins
 - Build: `bun run build.ts`: bundles with `Bun.build`, then replaces shebang from `node` to `bun` in `dist/index.js`
 - Run locally: `bun start TASK-123`
 - Tests use isolated temp directories, essential for parallel execution (do not share temp dirs across tests)
