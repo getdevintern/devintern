@@ -78,7 +78,7 @@ const INJECTED_COLUMNS = [
 ].join(", ");
 
 /** Serialize one scheduled automation as a TOML `[[automations]]` table. */
-function automationTable(automation: WorkerAutomation): string[] {
+export function automationTable(automation: WorkerAutomation): string[] {
   const lines = [
     "[[automations]]",
     `id = ${JSON.stringify(automation.id)}`,
