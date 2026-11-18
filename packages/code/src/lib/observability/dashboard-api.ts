@@ -1473,8 +1473,7 @@ export function handleAgentPrs(data: DashboardData): ApiResponse {
  * capture files with an entry-count bound.
  *
  * @param data - Dashboard data source
- * @param params - Query params: `limit` (1..1000, default 500) and
- *                 `level` (all | info | warn | error, default all)
+ * @param params - `limit` (1..1000, default 500); `level` (all | info | warn | error, default all)
  */
 export function handleLogs(data: DashboardData, params: URLSearchParams): ApiResponse {
   const rawLimit = params.get("limit");

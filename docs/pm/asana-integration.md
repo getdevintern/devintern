@@ -4,97 +4,60 @@ sidebarLabel: "Asana Integration"
 description: "Create structured Asana tasks from AI drafts in the projects your team already uses."
 section: "Create Tasks"
 order: 7
-dateModified: 2026-11-12
+dateModified: 2026-11-18
 sidebarHidden: true
 ---
 
 # Create Asana Tasks with DevIntern PM
 
-@devintern/pm creates Asana tasks directly from AI-generated stories and tasks. Setup takes a few minutes: you need a Personal Access Token and optionally a default project.
+DevIntern PM creates Asana tasks and subtasks from AI-drafted stories, with rich-text descriptions.
 
-## How It Works
+## Prerequisites
 
-@devintern/pm uses the [Asana REST API](https://developers.asana.com/reference/rest-api-reference) to create tasks in a project you configure.
-
-- New work items appear as **tasks** in the target project (descriptions use Asana rich text via `html_notes`, not raw markdown in `notes`)
-- Subtasks are created as Asana subtasks on the parent task
-- Epic links use Asana's parent-task relationship
-- Issue type selection is skipped: Asana does not expose Jira-style issue types through this integration
+- An Asana account with at least one project you can add tasks to.
 
 ## Setup
 
-### 1. Set the backend
-
-In your `.devintern-pm/.env`:
+Run `devpm init` and pick Asana, or set these in `.devintern-pm/.env`:
 
 ```bash
 TASK_TRACKER=asana
 ASANA_API_TOKEN=your-asana-pat
+# ASANA_DEFAULT_PROJECT_GID=2222222222222222
 ```
 
-### 2. Create a Personal Access Token
-
-1. Go to the [Asana developer console](https://app.asana.com/0/developer-console)
-2. Create a new **Personal access token**
-3. Copy the token into `ASANA_API_TOKEN`
-
-The token must be able to read projects and create tasks in the workspaces you use.
-
-### 3. (Optional) Pin a default project
-
-If you omit `ASANA_DEFAULT_PROJECT_GID`, @devintern/pm uses the first accessible project. To always create tasks in a specific project, set:
-
-```bash
-ASANA_DEFAULT_PROJECT_GID=2222222222222222
-```
-
-#### Finding your project GID
-
-Open the project in Asana and copy the numeric ID that appears right after `/project/` in the URL:
+| Variable                    | Required | Where to find it                                                                                                                                |
+| --------------------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ASANA_API_TOKEN`           | yes      | [Asana developer console](https://app.asana.com/0/developer-console) → new **Personal access token**.                                           |
+| `ASANA_DEFAULT_PROJECT_GID` | no       | The number right after `/project/` in the project URL (not the workspace ID before it or the view ID after it). Defaults to your first project. |
 
 ```
 https://app.asana.com/1/1111111111111111/project/2222222222222222/list/3333333333333333
                                               └─ project GID ─┘
 ```
 
-Use `2222222222222222` as `ASANA_DEFAULT_PROJECT_GID`. The first number is the workspace ID; the last number is a view/section ID. Neither of those is the project GID.
-
-### 4. Create your first task
+## Usage
 
 ```bash
 devpm --interactive
 ```
 
-## What Gets Created
+| devpm concept      | Asana object                  |
+| ------------------ | ----------------------------- |
+| Story / Task / Bug | Task in the target project    |
+| Subtask            | Subtask under the parent task |
+| Epic link          | Parent task                   |
 
-| devpm concept      | Asana object                                                                                |
-| ------------------ | ------------------------------------------------------------------------------------------- |
-| Story / Task / Bug | Task in the target project (markdown from devpm is converted to Asana HTML in `html_notes`) |
-| Subtask            | Subtask under the parent task                                                               |
-| Epic link          | Parent task relationship via `setParent`                                                    |
+Asana has no Jira-style issue types, so that step is skipped.
 
 ## Troubleshooting
 
-**"Asana backend selected but ASANA_API_TOKEN is missing"**
+**"Asana backend selected but ASANA_API_TOKEN is missing"**: create a token and set `ASANA_API_TOKEN`.
 
-Set `ASANA_API_TOKEN` in `.devintern-pm/.env` after creating a token in the [developer console](https://app.asana.com/0/developer-console).
+**"Asana API error (401)"**: the token is invalid, revoked, or has extra spaces.
 
-**"Asana API error (401)"**
+**"Asana API error (403)"**: your account can't create tasks in that project, or the project is in a workspace the token can't access.
 
-- Token is invalid or revoked: generate a new PAT
-- Confirm the token was copied without extra spaces
+**Tasks land in the wrong project**: set `ASANA_DEFAULT_PROJECT_GID`, or pick the project in interactive mode.
 
-**"Asana API error (403)"**
-
-- Your account may lack permission to create tasks in the target project
-- The project may be in a workspace the token cannot access
-
-**Tasks land in the wrong project**
-
-- Set `ASANA_DEFAULT_PROJECT_GID` to the numeric ID from that project's Asana URL
-- In interactive mode, pick the correct project before confirming
-
-**"Could not fetch projects" warning in interactive mode**
-
-- Check `ASANA_API_TOKEN` and network access to `app.asana.com`
-- Ensure your Asana account has at least one project; create one in the UI if needed
+**"Could not fetch projects"**: check the token and access to `app.asana.com`, and that your account has at least one project.
