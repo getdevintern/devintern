@@ -1,6 +1,7 @@
 import { spawn } from "child_process";
 import { chmodSync, copyFileSync, existsSync, readdirSync, statSync } from "fs";
 import { isAbsolute, join, resolve } from "path";
+import { executeGitCommandWithConfigLockRetry } from "./git-exec";
 import { Utils } from "./registry";
 
 /**
@@ -162,29 +163,12 @@ export async function enableWorktreeConfig(
   );
 }
 
-const CONFIG_LOCK_ERROR = /could not lock config file/i;
-
-/** Delays between retries of a config write that lost the lock race. */
-const CONFIG_LOCK_RETRY_DELAYS_MS = [50, 100, 200, 400, 800, 1600];
-
-/**
- * Run a `git config` write, retrying while another process holds the config
- * lock. Git never waits for that lock itself; the holder is usually a
- * concurrent task's own config write that finishes within milliseconds.
- */
-async function writeGitConfig(
+/** Run a `git config` write, retrying while another process holds the lock. */
+function writeGitConfig(
   args: string[],
   cwd: string,
 ): Promise<{ success: boolean; output: string; error?: string }> {
-  let result = await Utils.executeGitCommand(args, { cwd });
-  for (const delayMs of CONFIG_LOCK_RETRY_DELAYS_MS) {
-    if (result.success || !CONFIG_LOCK_ERROR.test(result.error ?? "")) {
-      return result;
-    }
-    await Bun.sleep(delayMs);
-    result = await Utils.executeGitCommand(args, { cwd });
-  }
-  return result;
+  return executeGitCommandWithConfigLockRetry(args, { cwd });
 }
 
 /**
@@ -259,6 +243,158 @@ export async function prepareWorktreeForAgent(
   }
 }
 
+/** One auto-detected package manager: its manifest, lockfile(s), and install command. */
+interface PackageManagerSpec {
+  name: string;
+  manifestFile: string;
+  lockFile: string | string[] | null;
+  command: string;
+  args: string[];
+}
+
+// Define package managers for each language/ecosystem
+const PACKAGE_MANAGERS: PackageManagerSpec[] = [
+  // JavaScript/TypeScript (only with lock files)
+  {
+    name: "bun",
+    manifestFile: "package.json",
+    // Bun switched to a text `bun.lock` in 1.2; older repos still carry
+    // the binary `bun.lockb`.
+    lockFile: ["bun.lockb", "bun.lock"],
+    command: "bun",
+    args: ["install"],
+  },
+  {
+    name: "pnpm",
+    manifestFile: "package.json",
+    lockFile: "pnpm-lock.yaml",
+    command: "pnpm",
+    args: ["install", "--frozen-lockfile"],
+  },
+  {
+    name: "yarn",
+    manifestFile: "package.json",
+    lockFile: "yarn.lock",
+    command: "yarn",
+    args: ["install", "--frozen-lockfile"],
+  },
+  {
+    name: "npm",
+    manifestFile: "package.json",
+    lockFile: "package-lock.json",
+    command: "npm",
+    args: ["ci"],
+  },
+
+  // Python
+  {
+    name: "uv",
+    manifestFile: "pyproject.toml",
+    lockFile: "uv.lock",
+    command: "uv",
+    args: ["sync"],
+  },
+  {
+    name: "poetry",
+    manifestFile: "pyproject.toml",
+    lockFile: "poetry.lock",
+    command: "poetry",
+    args: ["install", "--no-root"],
+  },
+  {
+    name: "pip",
+    manifestFile: "requirements.txt",
+    lockFile: null,
+    command: "pip",
+    args: ["install", "-r", "requirements.txt"],
+  },
+  {
+    name: "pipenv",
+    manifestFile: "Pipfile",
+    lockFile: "Pipfile.lock",
+    command: "pipenv",
+    args: ["install", "--deploy"],
+  },
+
+  // Ruby
+  {
+    name: "bundle",
+    manifestFile: "Gemfile",
+    lockFile: "Gemfile.lock",
+    command: "bundle",
+    args: ["install"],
+  },
+
+  // Go
+  {
+    name: "go",
+    manifestFile: "go.mod",
+    lockFile: "go.sum",
+    command: "go",
+    args: ["mod", "download"],
+  },
+
+  // Rust
+  {
+    name: "cargo",
+    manifestFile: "Cargo.toml",
+    lockFile: "Cargo.lock",
+    command: "cargo",
+    args: ["fetch"],
+  },
+
+  // PHP
+  {
+    name: "composer",
+    manifestFile: "composer.json",
+    lockFile: "composer.lock",
+    command: "composer",
+    args: ["install", "--no-interaction"],
+  },
+
+  // Java (no lock files, so only install if we find these files)
+  {
+    name: "maven",
+    manifestFile: "pom.xml",
+    lockFile: null,
+    command: "mvn",
+    args: ["dependency:resolve"],
+  },
+  {
+    name: "gradle",
+    manifestFile: "build.gradle",
+    lockFile: null,
+    command: "gradle",
+    args: ["dependencies", "--quiet"],
+  },
+  {
+    name: "gradle",
+    manifestFile: "build.gradle.kts",
+    lockFile: null,
+    command: "gradle",
+    args: ["dependencies", "--quiet"],
+  },
+];
+
+/** Basenames of every manifest and lockfile `installDependencies` keys on. */
+const DEPENDENCY_FILE_NAMES: ReadonlySet<string> = new Set(
+  PACKAGE_MANAGERS.flatMap((pm) => [
+    pm.manifestFile,
+    ...(pm.lockFile === null ? [] : Array.isArray(pm.lockFile) ? pm.lockFile : [pm.lockFile]),
+  ]),
+);
+
+/**
+ * Whether a repo-relative path is a dependency manifest or lockfile that the
+ * worktree install step keys on (at any depth, so workspace `package.json`
+ * files count). A change to one of these means installed dependencies may
+ * be stale.
+ */
+export function isDependencyFile(path: string): boolean {
+  const base = path.split("/").pop() ?? path;
+  return DEPENDENCY_FILE_NAMES.has(base);
+}
+
 /**
  * Auto-detect package managers and install project dependencies in a worktree.
  *
@@ -271,133 +407,9 @@ export async function installDependencies(
 ): Promise<{ success: boolean; packageManager?: string; error?: string }> {
   const verbose = options?.verbose ?? false;
 
-  // Define package managers for each language/ecosystem
-  const packageManagers = [
-    // JavaScript/TypeScript (only with lock files)
-    {
-      name: "bun",
-      manifestFile: "package.json",
-      // Bun switched to a text `bun.lock` in 1.2; older repos still carry
-      // the binary `bun.lockb`.
-      lockFile: ["bun.lockb", "bun.lock"],
-      command: "bun",
-      args: ["install"],
-    },
-    {
-      name: "pnpm",
-      manifestFile: "package.json",
-      lockFile: "pnpm-lock.yaml",
-      command: "pnpm",
-      args: ["install", "--frozen-lockfile"],
-    },
-    {
-      name: "yarn",
-      manifestFile: "package.json",
-      lockFile: "yarn.lock",
-      command: "yarn",
-      args: ["install", "--frozen-lockfile"],
-    },
-    {
-      name: "npm",
-      manifestFile: "package.json",
-      lockFile: "package-lock.json",
-      command: "npm",
-      args: ["ci"],
-    },
-
-    // Python
-    {
-      name: "uv",
-      manifestFile: "pyproject.toml",
-      lockFile: "uv.lock",
-      command: "uv",
-      args: ["sync"],
-    },
-    {
-      name: "poetry",
-      manifestFile: "pyproject.toml",
-      lockFile: "poetry.lock",
-      command: "poetry",
-      args: ["install", "--no-root"],
-    },
-    {
-      name: "pip",
-      manifestFile: "requirements.txt",
-      lockFile: null,
-      command: "pip",
-      args: ["install", "-r", "requirements.txt"],
-    },
-    {
-      name: "pipenv",
-      manifestFile: "Pipfile",
-      lockFile: "Pipfile.lock",
-      command: "pipenv",
-      args: ["install", "--deploy"],
-    },
-
-    // Ruby
-    {
-      name: "bundle",
-      manifestFile: "Gemfile",
-      lockFile: "Gemfile.lock",
-      command: "bundle",
-      args: ["install"],
-    },
-
-    // Go
-    {
-      name: "go",
-      manifestFile: "go.mod",
-      lockFile: "go.sum",
-      command: "go",
-      args: ["mod", "download"],
-    },
-
-    // Rust
-    {
-      name: "cargo",
-      manifestFile: "Cargo.toml",
-      lockFile: "Cargo.lock",
-      command: "cargo",
-      args: ["fetch"],
-    },
-
-    // PHP
-    {
-      name: "composer",
-      manifestFile: "composer.json",
-      lockFile: "composer.lock",
-      command: "composer",
-      args: ["install", "--no-interaction"],
-    },
-
-    // Java (no lock files, so only install if we find these files)
-    {
-      name: "maven",
-      manifestFile: "pom.xml",
-      lockFile: null,
-      command: "mvn",
-      args: ["dependency:resolve"],
-    },
-    {
-      name: "gradle",
-      manifestFile: "build.gradle",
-      lockFile: null,
-      command: "gradle",
-      args: ["dependencies", "--quiet"],
-    },
-    {
-      name: "gradle",
-      manifestFile: "build.gradle.kts",
-      lockFile: null,
-      command: "gradle",
-      args: ["dependencies", "--quiet"],
-    },
-  ];
-
   // Find all applicable package managers for this project
   // Prioritize those with lock files, only use manifest-only as fallback
-  const pmsWithLock = packageManagers.filter((pm) => {
+  const pmsWithLock = PACKAGE_MANAGERS.filter((pm) => {
     const manifestExists = existsSync(join(workingDir, pm.manifestFile));
     if (!manifestExists) return false;
 
@@ -409,7 +421,7 @@ export async function installDependencies(
     return false;
   });
 
-  const pmsWithoutLock = packageManagers.filter((pm) => {
+  const pmsWithoutLock = PACKAGE_MANAGERS.filter((pm) => {
     const manifestExists = existsSync(join(workingDir, pm.manifestFile));
     if (!manifestExists) return false;
 

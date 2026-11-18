@@ -70,6 +70,7 @@ default_branch = "main"
 # pr_labels = ["backend"]
 # pipeline_file = "pipelines/backend.json"   # optional per-repo override
 # env_file = "env/backend.env"        # optional, relative to ~/.devintern
+# sync_team_prs = true                # optional: also base-sync teammates' open PRs
   [repos.env]                         # optional per-repo overrides
   GITHUB_REPO = "acme/backend"
 
@@ -113,6 +114,7 @@ prompt = "Review the frontend and clean up one source of recurring noise."
 - `[defaults].tracker` picks the tracker for the single-source fleet query; any tracker with polling support works (Jira, Linear, GitHub Issues, GitLab Issues, Azure DevOps, Asana, Trello, Markdown).
 - `pr_labels` applies labels to every PR the fleet creates (GitHub only). A repo's `pr_labels` overrides `[defaults].pr_labels`. Outside a workspace, single-repo users get the same behavior by setting `PR_LABELS` (comma-separated) in `.devintern-code/.env`.
 - `pipeline_file` points at a standalone JSON pipeline definition. `[defaults].pipeline_file` is the fleet-wide fallback; a repo's `pipeline_file` overrides both it and the repo's checked-in `.devintern-code/settings.json` pipeline. See [Pipelines for the fleet and per repository](#pipelines-for-the-fleet-and-per-repository).
+- `sync_team_prs = true` (GitHub repos only, off by default) extends automatic base sync to teammates' open PRs and requires an explicit `AGENT_SANDBOX` provider. See [Syncing teammates' open PRs](./worker.md#syncing-teammates-open-prs).
 - Each repository follows its advertised `origin/HEAD` unless its `[[repos]]` entry sets an explicit `default_branch` override.
 - Repo names must be unique and filesystem-safe; they become directory names under `repos/` and `worktrees/`.
 - Rule criteria combine with AND; list values (`components`, `labels`) match when the task carries any of them. Comparisons are case-insensitive. `project` matches the task key prefix for `PROJ-123` style keys (Jira, Linear); trackers with numeric or opaque ids route via labels or components.

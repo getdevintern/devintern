@@ -1,6 +1,6 @@
 import type { ChangeRequestIdentity } from "../code-host/index";
 import { GitHubReviewsClient } from "../code-host/github/reviews";
-import type { PullRequestInfo } from "../code-host/github/reviews";
+import type { PullRequestInfo } from "../code-host/github/reviews-types";
 import { GitLabReviewsClient } from "../code-host/gitlab/reviews";
 import { resolveGitLabCodeHostConfig } from "../code-host/index";
 import { GitHubAppAuth } from "../code-host/github/app-auth";

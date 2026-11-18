@@ -25,7 +25,7 @@ import type {
   PullRequestFile,
   PullRequestInfo,
   PullRequestMergeResult,
-} from "../code-host/github/reviews";
+} from "../code-host/github/reviews-types";
 import { loadPrompt } from "../prompts/loader";
 import { untrustedContentBlock } from "../prompts/untrusted-content";
 import { Utils } from "../utils";

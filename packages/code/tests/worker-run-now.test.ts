@@ -287,6 +287,32 @@ describe("runWorkerRunNow", () => {
     expect(cap.out[3]).toBe(`   Marker: ${join(dir, ".run-now")}`);
   });
 
+  test("an unverifiable worker gets the strict config check and a neutral notice", () => {
+    // Lock from another PID namespace (read from inside a sandbox): the worker
+    // may be alive, but it cannot vouch for an invalid config.
+    writeFileSync(
+      join(dir, ".worker.lock"),
+      JSON.stringify({
+        pid: 999_999_999,
+        timestamp: new Date().toISOString(),
+        pidNamespace: "pid:[foreign-test-namespace]",
+      }),
+    );
+    writeFileSync(configPath, "[broken");
+    const broken = capture();
+    expect(runWorkerRunNow(["--workspace", configPath], broken.options)).toBe(1);
+    expect(broken.err[0]?.startsWith(`❌ Could not read ${configPath}:`)).toBe(true);
+    expect(existsSync(join(dir, ".run-now"))).toBe(false);
+
+    writeFileSync(configPath, WORKSPACE_TOML);
+    const ok = capture();
+    expect(runWorkerRunNow(["--workspace", configPath], ok.options)).toBe(0);
+    expect(existsSync(join(dir, ".run-now"))).toBe(true);
+    expect(ok.out.at(-1)).toBe(
+      "ℹ️  Could not verify the worker from this sandbox; the marker is read on its next poll.",
+    );
+  });
+
   test("rejects a transiently invalid default config when no worker is running", () => {
     writeFileSync(configPath, "[broken");
 

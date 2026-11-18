@@ -261,6 +261,11 @@ export class FakeLinearTracker implements TrackerFixture {
     issue.updatedAt = this.timestamp();
   }
 
+  /** Native `estimate` field value, or `undefined` while it is unset. */
+  getEstimate(ticketKey: string): number | undefined {
+    return this.requireIssue(ticketKey).estimate ?? undefined;
+  }
+
   /** Current `updatedAt` stamp, which the worker dedupes on. */
   updatedAt(ticketKey: string): string {
     return this.requireIssue(ticketKey).updatedAt;
@@ -375,6 +380,8 @@ export class FakeLinearTracker implements TrackerFixture {
         return this.teamStates(variables);
       case "CommentCreate":
         return this.commentCreate(variables);
+      case "CommentUpdate":
+        return this.commentUpdate(variables);
       case "IssueUpdate":
         return this.issueUpdate(variables);
       case "SearchIssues":
@@ -464,6 +471,38 @@ export class FakeLinearTracker implements TrackerFixture {
     });
     issue.updatedAt = timestamp;
     return json({ data: { commentCreate: { success: true, comment: { id } } } });
+  }
+
+  /**
+   * `commentUpdate(id, input: { body })`: rewrite one markdown comment in
+   * place. Only `body` is accepted; the comment keeps its id and `createdAt`
+   * while its own and its issue's `updatedAt` advance.
+   */
+  private commentUpdate(variables: Record<string, unknown>): Response {
+    const id = variables.id;
+    const input = asRecord(variables.input);
+    if (typeof id !== "string" || !id.trim() || !input) {
+      return this.unexpected("CommentUpdate requires string `id` and object `input`");
+    }
+    for (const key of Object.keys(input)) {
+      if (key !== "body") {
+        return this.unexpected(`CommentUpdate: unsupported input field "${key}"`);
+      }
+    }
+    if (typeof input.body !== "string") {
+      return this.unexpected("CommentUpdate requires string `input.body`");
+    }
+    for (const issue of this.issues.values()) {
+      const comment = issue.comments.find((candidate) => candidate.id === id);
+      if (comment) {
+        const timestamp = this.timestamp();
+        comment.body = input.body;
+        comment.updatedAt = timestamp;
+        issue.updatedAt = timestamp;
+        return json({ data: { commentUpdate: { success: true } } });
+      }
+    }
+    return this.unexpected(`CommentUpdate: unknown comment id "${id}"`);
   }
 
   private issueUpdate(variables: Record<string, unknown>): Response {

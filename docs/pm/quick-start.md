@@ -4,90 +4,54 @@ sidebarLabel: "Quick Start"
 description: "Use when installing DevIntern PM (desktop app or CLI) and creating your first AI-drafted ticket in Jira, Linear, Trello, or another tracker."
 section: "Create Tasks"
 order: 0
-dateModified: 2026-11-12
+dateModified: 2026-11-18
 tags: ["devintern/pm", "quick start", "jira", "linear", "cli"]
 ---
 
 # DevIntern PM Quick Start
 
-**@devintern/pm** automates story and task creation across multiple project management tools with AI. Transform Figma designs, error logs, or requirements into well-structured issues in seconds.
+DevIntern PM turns Figma designs, error logs, or written requirements into AI-drafted stories and files them in your tracker.
 
-For the primary visual workflow, [download DevIntern PM](https://devintern.com/pm-desktop/). The desktop app checks on launch that **Git** and **at least one supported agent CLI** are on your PATH (including common GUI-launch locations). If something is missing, install it and choose **Check again**. Continue here if you prefer to work in the terminal.
+Most people start with the [DevIntern PM desktop app](https://devintern.com/pm-desktop/). On launch it checks that **Git** and at least one supported agent CLI are installed; if one is missing, install it and choose **Check again**. Continue here to use the `devpm` CLI instead.
 
 ## Prerequisites
 
 - **[Node.js](https://nodejs.org) 20 or newer**: Required to run @devintern/pm ([Bun](https://bun.sh) works too)
 - **Git**: Required for project folders, GitHub connect, and update-from-remote
 - AI agent CLI installed and configured (e.g., Claude Code, OpenCode, Codex, Cursor)
-- Account with at least one supported PM tool (Jira, Linear, Trello, Azure DevOps, Asana, or GitHub)
-- **For Figma functionality**: [Figma MCP server](https://developers.figma.com/docs/figma-mcp-server/remote-server-installation/) must be installed and configured in your AI agent (Claude Code only)
+- An account on a supported tracker (Jira, Linear, Trello, Azure DevOps, Asana, GitHub Issues, or GitLab), or use local Markdown files
+- **For Figma sources**: Claude Code with the [Figma MCP server](https://developers.figma.com/docs/figma-mcp-server/remote-server-installation/) configured
 
 ## Installation
 
-Install globally with npm:
-
 ```bash
 npm install -g @getdevintern/pm
-```
-
-Or with Bun:
-
-```bash
+# or
 bun install -g @getdevintern/pm
 ```
 
 ## Initialize Configuration
 
-Navigate to your project directory and run:
+From your project directory:
 
 ```bash
 devpm init
 ```
 
-In a terminal, this starts an interactive setup wizard that:
+The wizard asks which tracker you use, links to its token page, validates the connection, and writes `.devintern-pm/.env` (adding it to `.gitignore`). If the project already has a DevIntern Code config (`.devintern-code/.env`), it offers to reuse those tracker credentials. Otherwise it can reuse credentials from your DevIntern workspace `.env` (`~/.devintern/.env` by default). Project-specific values (project key, repository, board, team key, task directory) are always asked for in the current project.
 
-- Detects an existing @devintern/code configuration (`.devintern-code/.env`) in the same project and offers to reuse those tracker credentials, so you skip straight to validation; when that config is unavailable, it can reuse credentials from the DevIntern workspace `.env` (`$DEVINTERN_WORKSPACE_DIR/.env`, default `~/.devintern/.env`). Repo-scoped values (project key, repository, board, team key, task directory) are always asked for in the current project rather than copied from the shared workspace.
-- Asks which tracker you use (Jira, Linear, Trello, Azure DevOps, Asana, GitHub Issues, GitLab, or markdown files)
-- Links you directly to the provider's token creation page and prompts for each credential, with a pointer to the matching setup guide in these docs
-- Validates the connection with a real API call before finishing (you can retry, edit values, or skip)
-- Writes your answers to `.devintern-pm/.env` and updates your `.gitignore` to exclude `.devintern-pm/.env` (to prevent leaking secrets)
-
-If you need to create credentials manually, use the setup guide for your tracker: [Jira](./jira-integration.md), [Linear](./linear-integration.md), [Trello](./trello-integration.md), [Asana](./asana-integration.md), [Azure DevOps](./azure-devops-integration.md), [GitHub Issues](./github-integration.md), or [GitLab](./gitlab-integration.md).
-
-For scripted or CI setups, pass `--yes` (or `--no-interactive`) to skip the prompts and write the configuration template instead. The non-interactive path resolves the tracker from `.devintern-code/.env`, or from the workspace (the `[[teams]]`/`[[repos]]` mapping for the current checkout, then `[defaults].tracker` in `$DEVINTERN_WORKSPACE_DIR/workspace.toml`, which wins over a `TASK_TRACKER` in the shared `.env`), and migrates that tracker's credentials plus agent settings. Repo-scoped values (project key, repository, board, team key, task directory) are never inherited from the workspace — set them for the current project after the scaffold runs. When no tracker can be resolved yet, the scaffold leaves `TASK_TRACKER` and every credential placeholder commented out, so a workspace configured later still supplies them:
-
-```bash
-devpm init --yes
-```
+To set up credentials by hand, follow your tracker's guide: [Jira](./jira-integration.md), [Linear](./linear-integration.md), [Trello](./trello-integration.md), [Asana](./asana-integration.md), [Azure DevOps](./azure-devops-integration.md), [GitHub Issues](./github-integration.md), or [GitLab](./gitlab-integration.md). For scripts or CI, `devpm init --yes` writes a template. It takes the tracker from `.devintern-code/.env` or your workspace (`workspace.toml` first), and leaves `TASK_TRACKER` commented out when it can't tell, so a workspace you set up later still applies.
 
 ## First Run
-
-The interactive mode provides a step-by-step terminal UI for creating tasks. This is the recommended way to use @devintern/pm:
 
 ```bash
 devpm --interactive
 ```
 
-You can also pick a different agent up front:
-
-```bash
-devpm --interactive --harness opencode
-```
-
-In interactive mode, press `Ctrl+G` at any step to switch among installed agent harnesses without restarting.
-
-The interactive mode will guide you through:
-
-1. **Source type selection**: Choose between Figma URL, error log, or free-form prompt
-2. **Source input**: Enter your Figma URL, error log, or requirements
-3. **Custom instructions** (optional): Add additional requirements or focus areas
-4. **Epic linking** (optional): Link to an existing Jira epic
-5. **Issue type** (Jira, Azure DevOps, GitHub, Markdown only): Select Task, Story, Bug, Epic, or enter a custom type. Task is the default; press Enter to accept it. This step is skipped for Linear, Trello, and Asana, which do not support setting an issue type.
-6. **Prompt style**: Choose between PM style or Technical style
-7. **Confirmation**: Review your configuration before proceeding
+The terminal UI walks you through choosing a source (Figma URL, error log, or prompt), adding instructions, and confirming the draft before it is filed. Press `Ctrl+G` to switch agents or `Ctrl+P` to switch projects at any step. See the [Usage guide](./usage.md#interactive-mode) for each step and the non-interactive flags.
 
 ## What's Next?
 
-- [Configure your PM backend](./configuration.md)
+- [Configure your tracker and agent](./configuration.md)
 - [Learn CLI usage patterns](./usage.md)
 - [Create tasks from Slack or Telegram](./chat-bot.md)

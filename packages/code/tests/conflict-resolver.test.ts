@@ -12,7 +12,7 @@ import {
 } from "../src/lib/review/conflict-resolver";
 import { UNTRUSTED_CONTENT_NOTICE } from "../src/lib/prompts/untrusted-content";
 import { Utils } from "../src/lib/utils";
-import type { PullRequestInfo } from "../src/lib/code-host/github/reviews";
+import type { PullRequestInfo } from "../src/lib/code-host/github/reviews-types";
 
 const PR_URL = "https://github.com/acme/widgets/pull/7";
 
@@ -1199,6 +1199,352 @@ git --git-dir="${originDir}" update-ref refs/heads/feature/change "${competingTi
     expect(git(testDir, `--git-dir=${originDir} rev-parse refs/heads/feature/change`).trim()).toBe(
       landedSha,
     );
+  });
+
+  describe("dependency reinstall after the base merge", () => {
+    let eventLog: string;
+    let originalInstall: typeof Utils.installDependencies;
+    let failInstallFor: string | null;
+
+    function events(): string[] {
+      return existsSync(eventLog)
+        ? readFileSync(eventLog, "utf8")
+            .split("\n")
+            .filter((line) => line !== "")
+        : [];
+    }
+
+    function record(event: string): void {
+      writeFileSync(eventLog, `${event}\n`, { flag: "a" });
+    }
+
+    /**
+     * Rebuild origin so main and feature/change share a `bun.lock` pinning
+     * the old formatter, then let each side diverge as requested.
+     */
+    function rebuildFixture(options: {
+      conflict: boolean;
+      mainLock?: string;
+      branchLock?: string;
+    }): void {
+      const fx = join(testDir, "deps-fixture");
+      const script = [
+        "set -e",
+        `git clone -q ${originDir} ${fx}`,
+        `cd ${fx}`,
+        "git config user.email t@t.co",
+        "git config user.name T",
+        "git checkout -q main",
+        "printf 'oxfmt@0.44.0\\n' > bun.lock",
+        "printf '{}\\n' > package.json",
+        "git add .",
+        "git commit -qm 'add deps'",
+        "git push -q origin main",
+        "git checkout -qB feature/change main",
+        options.conflict
+          ? "printf 'hello from the branch\\n' > greeting.txt"
+          : "printf 'separate change\\n' > other.txt",
+        ...(options.branchLock ? [`printf '${options.branchLock}\\n' > bun.lock`] : []),
+        "git add .",
+        "git commit -qm 'branch change'",
+        "git push -qf origin feature/change",
+        "git checkout -q main",
+        options.mainLock
+          ? `printf '${options.mainLock}\\n' > bun.lock`
+          : "printf 'main only\\n' > main-only.txt",
+        ...(options.conflict ? ["printf 'hello again from main\\n' > greeting.txt"] : []),
+        "git add .",
+        "git commit -qm 'main moves on'",
+        "git push -q origin main",
+      ].join("\n");
+      execSync(script, { cwd: testDir, encoding: "utf8", stdio: "ignore" });
+    }
+
+    beforeEach(() => {
+      eventLog = join(testDir, "events.log");
+      failInstallFor = null;
+      // Pre-push runs after every install the resolver performs.
+      writeFileSync(
+        join(repoDir, ".git", "hooks", "pre-push"),
+        `#!/bin/sh\necho pre-push >> "${eventLog}"\n`,
+        { mode: 0o755 },
+      );
+      originalInstall = Utils.installDependencies;
+      // Record which lockfile each install saw: worktree preparation sees the
+      // branch's, a post-merge reinstall must see the merged one.
+      Utils.installDependencies = (async (dir: string) => {
+        const lockPath = join(dir, "bun.lock");
+        const lock = existsSync(lockPath) ? readFileSync(lockPath, "utf8").trim() : "none";
+        record(`install:${lock}`);
+        if (failInstallFor && lock === failInstallFor) {
+          return { success: false, packageManager: "bun", error: "bun exited with code 1" };
+        }
+        return { success: true, packageManager: "bun" };
+      }) as typeof Utils.installDependencies;
+    });
+
+    afterEach(() => {
+      Utils.installDependencies = originalInstall;
+    });
+
+    test("reinstalls after a clean merge that changes bun.lock, before push", async () => {
+      rebuildFixture({ conflict: false, mainLock: "oxfmt@0.70.0" });
+      let agentCalled = false;
+      const result = await resolveConflictsOnPr(PR_URL, {
+        cwd: repoDir,
+        noComment: true,
+        fetchPr: async () => prInfo(),
+        agentRunner: async () => {
+          agentCalled = true;
+          return { success: true, output: "" };
+        },
+      });
+
+      expect(result.outcome).toBe("clean");
+      expect(agentCalled).toBe(false);
+      expect(events()).toEqual(["install:oxfmt@0.44.0", "install:oxfmt@0.70.0", "pre-push"]);
+    });
+
+    test("does not reinstall after a clean merge that leaves dependency files alone", async () => {
+      rebuildFixture({ conflict: false });
+      const result = await resolveConflictsOnPr(PR_URL, {
+        cwd: repoDir,
+        noComment: true,
+        fetchPr: async () => prInfo(),
+        agentRunner: async () => ({ success: true, output: "" }),
+      });
+
+      expect(result.outcome).toBe("clean");
+      expect(events()).toEqual(["install:oxfmt@0.44.0", "pre-push"]);
+    });
+
+    test("installs a cleanly merged lockfile before the conflict agent runs", async () => {
+      rebuildFixture({ conflict: true, mainLock: "oxfmt@0.70.0" });
+      const prompts: string[] = [];
+      const result = await resolveConflictsOnPr(PR_URL, {
+        cwd: repoDir,
+        noComment: true,
+        fetchPr: async () => prInfo(),
+        agentRunner: async (prompt, workDir) => {
+          prompts.push(prompt);
+          record("agent");
+          writeFileSync(join(workDir, "greeting.txt"), "hello from main and the branch\n");
+          git(workDir, "add -A");
+          git(workDir, "commit --no-edit");
+          return { success: true, output: "done" };
+        },
+      });
+
+      expect(result.outcome).toBe("resolved");
+      // The agent's commit hooks ran with the merged toolchain, and the
+      // unchanged lockfile is not reinstalled a second time before push.
+      expect(events()).toEqual([
+        "install:oxfmt@0.44.0",
+        "install:oxfmt@0.70.0",
+        "agent",
+        "pre-push",
+      ]);
+      expect(prompts[0]).not.toContain("dependency install");
+    });
+
+    test("reinstalls again before push when the agent changes a pre-installed lockfile", async () => {
+      rebuildFixture({ conflict: true, mainLock: "oxfmt@0.70.0" });
+      const result = await resolveConflictsOnPr(PR_URL, {
+        cwd: repoDir,
+        noComment: true,
+        fetchPr: async () => prInfo(),
+        agentRunner: async (_prompt, workDir) => {
+          record("agent");
+          writeFileSync(join(workDir, "greeting.txt"), "hello from main and the branch\n");
+          writeFileSync(join(workDir, "bun.lock"), "oxfmt@0.71.0\n");
+          git(workDir, "add -A");
+          git(workDir, "commit --no-edit");
+          return { success: true, output: "done" };
+        },
+      });
+
+      expect(result.outcome).toBe("resolved");
+      expect(events()).toEqual([
+        "install:oxfmt@0.44.0",
+        "install:oxfmt@0.70.0",
+        "agent",
+        "install:oxfmt@0.71.0",
+        "pre-push",
+      ]);
+    });
+
+    test("reinstalls before push when the agent reverts a pre-installed lockfile to the branch's", async () => {
+      rebuildFixture({ conflict: true, mainLock: "oxfmt@0.70.0" });
+      const result = await resolveConflictsOnPr(PR_URL, {
+        cwd: repoDir,
+        noComment: true,
+        fetchPr: async () => prInfo(),
+        agentRunner: async (_prompt, workDir) => {
+          record("agent");
+          writeFileSync(join(workDir, "greeting.txt"), "hello from main and the branch\n");
+          // Back to the pre-merge lockfile: it drops out of the HEAD diff, but
+          // the merged 0.70.0 toolchain is what is installed.
+          writeFileSync(join(workDir, "bun.lock"), "oxfmt@0.44.0\n");
+          git(workDir, "add -A");
+          git(workDir, "commit --no-edit");
+          return { success: true, output: "done" };
+        },
+      });
+
+      expect(result.outcome).toBe("resolved");
+      expect(events()).toEqual([
+        "install:oxfmt@0.44.0",
+        "install:oxfmt@0.70.0",
+        "agent",
+        "install:oxfmt@0.44.0",
+        "pre-push",
+      ]);
+    });
+
+    test("with a conflicted lockfile, reinstalls after the agent commits and before push", async () => {
+      rebuildFixture({ conflict: true, mainLock: "oxfmt@0.70.0", branchLock: "oxfmt@0.50.0" });
+      const prompts: string[] = [];
+      const result = await resolveConflictsOnPr(PR_URL, {
+        cwd: repoDir,
+        noComment: true,
+        fetchPr: async () => prInfo(),
+        agentRunner: async (prompt, workDir) => {
+          prompts.push(prompt);
+          record("agent");
+          writeFileSync(join(workDir, "greeting.txt"), "hello from main and the branch\n");
+          writeFileSync(join(workDir, "bun.lock"), "oxfmt@0.70.0\n");
+          git(workDir, "add -A");
+          git(workDir, "commit --no-edit");
+          return { success: true, output: "done" };
+        },
+      });
+
+      expect(result.outcome).toBe("resolved");
+      // No installable lockfile exists while bun.lock has conflict markers,
+      // so the worker installs once the agent committed, before any push.
+      expect(events()).toEqual([
+        "install:oxfmt@0.50.0",
+        "agent",
+        "install:oxfmt@0.70.0",
+        "pre-push",
+      ]);
+      expect(prompts[0]).toContain("- bun.lock");
+      expect(prompts[0]).toContain("dependency install");
+      expect(prompts[0]).toContain("BEFORE\n   committing");
+    });
+
+    test("with a conflicted lockfile the agent left uncommitted, installs before the worker's commit", async () => {
+      rebuildFixture({ conflict: true, mainLock: "oxfmt@0.70.0", branchLock: "oxfmt@0.50.0" });
+      writeFileSync(
+        join(repoDir, ".git", "hooks", "pre-commit"),
+        `#!/bin/sh\necho pre-commit >> "${eventLog}"\n`,
+        { mode: 0o755 },
+      );
+      const result = await resolveConflictsOnPr(PR_URL, {
+        cwd: repoDir,
+        noComment: true,
+        fetchPr: async () => prInfo(),
+        agentRunner: async (_prompt, workDir) => {
+          record("agent");
+          writeFileSync(join(workDir, "greeting.txt"), "hello from main and the branch\n");
+          writeFileSync(join(workDir, "bun.lock"), "oxfmt@0.70.0\n");
+          git(workDir, "add -A");
+          // Resolved, but neither installed nor committed.
+          return { success: true, output: "done" };
+        },
+      });
+
+      expect(result.outcome).toBe("resolved");
+      // The worker's commit hook runs with the merged toolchain, and the
+      // committed lockfile is not reinstalled a second time before push.
+      expect(events()).toEqual([
+        "install:oxfmt@0.50.0",
+        "agent",
+        "install:oxfmt@0.70.0",
+        "pre-commit",
+        "pre-push",
+      ]);
+    });
+
+    test("does not reinstall before the worker's commit when the pre-agent install still matches", async () => {
+      rebuildFixture({ conflict: true, mainLock: "oxfmt@0.70.0" });
+      writeFileSync(
+        join(repoDir, ".git", "hooks", "pre-commit"),
+        `#!/bin/sh\necho pre-commit >> "${eventLog}"\n`,
+        { mode: 0o755 },
+      );
+      const result = await resolveConflictsOnPr(PR_URL, {
+        cwd: repoDir,
+        noComment: true,
+        fetchPr: async () => prInfo(),
+        agentRunner: async (_prompt, workDir) => {
+          record("agent");
+          writeFileSync(join(workDir, "greeting.txt"), "hello from main and the branch\n");
+          git(workDir, "add -A");
+          return { success: true, output: "done" };
+        },
+      });
+
+      expect(result.outcome).toBe("resolved");
+      expect(events()).toEqual([
+        "install:oxfmt@0.44.0",
+        "install:oxfmt@0.70.0",
+        "agent",
+        "pre-commit",
+        "pre-push",
+      ]);
+    });
+
+    test("fails with a PR comment and pushes nothing when the reinstall fails", async () => {
+      rebuildFixture({ conflict: false, mainLock: "oxfmt@0.70.0" });
+      failInstallFor = "oxfmt@0.70.0";
+      const untouchedHead = git(
+        testDir,
+        `--git-dir=${originDir} rev-parse refs/heads/feature/change`,
+      ).trim();
+      const comments: string[] = [];
+      const result = await resolveConflictsOnPr(PR_URL, {
+        cwd: repoDir,
+        prCommenter: async (body) => {
+          comments.push(body);
+        },
+        fetchPr: async () => prInfo(),
+        agentRunner: async () => ({ success: true, output: "" }),
+      });
+
+      expect(result.outcome).toBe("failed");
+      expect(result.failureKind).toBe("aborted");
+      expect(result.message).toContain("dependency install");
+      expect(comments).toHaveLength(1);
+      expect(comments[0]).toContain("dependency install");
+      expect(events()).not.toContain("pre-push");
+      expect(
+        git(testDir, `--git-dir=${originDir} rev-parse refs/heads/feature/change`).trim(),
+      ).toBe(untouchedHead);
+    });
+
+    test("only warns when the reinstall fails after the initial install already failed", async () => {
+      rebuildFixture({ conflict: false, mainLock: "oxfmt@0.70.0" });
+      // e.g. the package manager is not on the worker's PATH: every install fails.
+      Utils.installDependencies = (async (dir: string) => {
+        const lock = readFileSync(join(dir, "bun.lock"), "utf8").trim();
+        record(`install:${lock}`);
+        return { success: false, packageManager: "bun", error: "Failed to run bun: ENOENT" };
+      }) as typeof Utils.installDependencies;
+      const comments: string[] = [];
+      const result = await resolveConflictsOnPr(PR_URL, {
+        cwd: repoDir,
+        prCommenter: async (body) => {
+          comments.push(body);
+        },
+        fetchPr: async () => prInfo(),
+        agentRunner: async () => ({ success: true, output: "" }),
+      });
+
+      expect(result.outcome).toBe("clean");
+      expect(comments.join("\n")).not.toContain("dependency install");
+      expect(events()).toEqual(["install:oxfmt@0.44.0", "install:oxfmt@0.70.0", "pre-push"]);
+    });
   });
 });
 

@@ -3,7 +3,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { AutomationsTable } from "@/components/workspace/WorkspaceSections";
-import type { WorkspaceAutomationView } from "@/lib/api";
+import type { WorkspaceAutomationView } from "@/lib/api-workspace";
 
 function automation(overrides: Partial<WorkspaceAutomationView> = {}): WorkspaceAutomationView {
   return {

@@ -1,4 +1,6 @@
 import { useEffect, useState } from "react";
+import { consumeSourceHealthFocus, SOURCE_HEALTH_SECTION_ID } from "@/components/overview/focus";
+import { formatClock, formatIn } from "@/components/overview/overview-model";
 import { Check, GitPullRequest, Play } from "lucide-react";
 
 import { AutomationActivityStatus, visibleActivity } from "@/components/AutomationActivity";
@@ -15,7 +17,12 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { triggerAutomation, usePoll } from "@/lib/api";
-import type { AutomationSchedule, AutomationsResponse } from "@/lib/api";
+import type {
+  AutomationSchedule,
+  AutomationsResponse,
+  SourceHealth,
+  SourcesResponse,
+} from "@/lib/api";
 import { groupAutomationsByRepo, showsGroupHeaders } from "@/lib/automation-groups";
 import {
   jobKind,
@@ -26,7 +33,14 @@ import {
 } from "@/lib/scheduled-jobs";
 import { automationHash } from "@/lib/routes";
 import { formatRunOrigin } from "@/lib/run-origin";
-import { cn, formatAge, formatTime } from "@/lib/utils";
+import {
+  SOURCE_STATUS_HINTS,
+  SOURCE_STATUS_TONES,
+  nextRetryAt,
+  providerLabel,
+  sourcesNeedingAttention,
+} from "@/lib/source-health";
+import { cn, formatAge, formatPastTime, formatTime } from "@/lib/utils";
 import { formatNextRun, humanizeSchedule } from "@/views/automation-schedule";
 // oxlint-disable-next-line import/no-unassigned-import -- view styles
 import "./automations.css";
@@ -280,6 +294,129 @@ export function AutomationsTable({
   );
 }
 
+/** Muted placeholder for a value the source has never recorded. */
+function Missing() {
+  return <span className="text-muted-foreground">–</span>;
+}
+
+/** One source row: the exact status value, last success, and any retry window. */
+function SourceHealthRow({ source, now }: { source: SourceHealth; now: number }) {
+  const retryAt = nextRetryAt(source, now);
+  const lastSuccessAt = typeof source.lastSuccessAt === "number" ? source.lastSuccessAt : null;
+  return (
+    <TableRow data-source-status={source.status}>
+      <TableCell className="px-4 py-2">{providerLabel(source.provider)}</TableCell>
+      <TableCell className="px-4 py-2 font-medium">{source.sourceId}</TableCell>
+      <TableCell className="px-4 py-2" title={SOURCE_STATUS_HINTS[source.status]}>
+        <StatusPill tone={SOURCE_STATUS_TONES[source.status]}>{source.status}</StatusPill>
+      </TableCell>
+      <TableCell
+        className="px-4 py-2 whitespace-nowrap"
+        title={lastSuccessAt !== null ? formatTime(lastSuccessAt) : undefined}
+      >
+        {lastSuccessAt !== null ? formatPastTime(lastSuccessAt, now) : <Missing />}
+      </TableCell>
+      <TableCell className="px-4 py-2 tabular-nums">{source.consecutiveFailures}</TableCell>
+      <TableCell
+        className="max-w-sm truncate px-4 py-2 text-muted-foreground"
+        title={source.message ?? undefined}
+      >
+        {source.message ? source.message : <Missing />}
+      </TableCell>
+      <TableCell
+        className="px-4 py-2 whitespace-nowrap"
+        title={retryAt !== null ? formatTime(retryAt) : undefined}
+      >
+        {retryAt !== null ? (
+          <span data-next-retry={retryAt}>
+            {formatClock(retryAt, now)}{" "}
+            <span className="text-muted-foreground">({formatIn(retryAt, now)})</span>
+          </span>
+        ) : (
+          <Missing />
+        )}
+      </TableCell>
+    </TableRow>
+  );
+}
+
+/**
+ * Source health for automation sources (error monitors today), listed only
+ * for sources in the current config. Hidden when none is configured. While
+ * every source reads normally it collapses to one muted line, so a healthy
+ * worker never carries a permanent success table; any failing source expands
+ * it into a compact table of every source.
+ */
+export function SourceHealthSection({
+  sources,
+  now = Date.now(),
+}: {
+  sources: readonly SourceHealth[];
+  now?: number;
+}) {
+  useEffect(() => {
+    consumeSourceHealthFocus();
+  }, []);
+  if (sources.length === 0) return null;
+  const unhealthy = sourcesNeedingAttention(sources);
+  if (unhealthy.length === 0) {
+    return (
+      <p
+        id={SOURCE_HEALTH_SECTION_ID}
+        tabIndex={-1}
+        className="ov-focus-target rounded-lg text-sm text-muted-foreground"
+        data-source-health="healthy"
+      >
+        Source health: {sources.length === 1 ? "1 source" : `${sources.length} sources`} reading
+        normally.
+      </p>
+    );
+  }
+  return (
+    <section
+      id={SOURCE_HEALTH_SECTION_ID}
+      tabIndex={-1}
+      aria-labelledby="source-health-heading"
+      className="ov-focus-target space-y-2 rounded-lg"
+      data-source-health="attention"
+    >
+      <h2 id="source-health-heading" className="text-sm font-semibold">
+        Source health
+      </h2>
+      <div className="overflow-x-auto rounded-lg border border-border bg-card">
+        <Table className="text-sm">
+          <TableHeader>
+            <TableRow>
+              <TableHead className="px-4">Provider</TableHead>
+              <TableHead className="px-4">Source</TableHead>
+              <TableHead className="px-4">Status</TableHead>
+              <TableHead className="px-4">Last success</TableHead>
+              <TableHead className="px-4">Failures</TableHead>
+              <TableHead className="px-4">Message</TableHead>
+              <TableHead className="px-4">Next retry</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {sources.map((source) => (
+              <SourceHealthRow
+                key={`${source.provider}:${source.sourceId}`}
+                source={source}
+                now={now}
+              />
+            ))}
+          </TableBody>
+        </Table>
+      </div>
+    </section>
+  );
+}
+
+/** Source health fed by its own poll, so a failing read never blocks automations. */
+function SourceHealthPanel() {
+  const { data } = usePoll<SourcesResponse>("/api/sources");
+  return data ? <SourceHealthSection sources={data.sources ?? []} /> : null;
+}
+
 /** "Run now" trigger state shared by the list and detail pages. */
 export function useRunNow(refresh: () => void) {
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -335,6 +472,8 @@ export function AutomationsView({ onOpenRun }: { onOpenRun: (id: number) => void
   return (
     <div className="space-y-4">
       {feedback ? <RunFeedback {...feedback} /> : null}
+
+      <SourceHealthPanel />
 
       {error ? <EmptyState title="Could not load automations" body={error} /> : null}
 
