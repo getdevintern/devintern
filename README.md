@@ -224,7 +224,7 @@ Source is under the [Functional Source License, Version 1.1, ALv2 Future License
 
 - **Interactive use** → free forever
 - **Worker Pilot** → 14 days with no task-count limit, no card required; `devintern login` required
-- **Worker (unattended)** → Supporter ($99 once for one person's own and client repos) or a Team/Business subscription
+- **Worker (unattended)** → Supporter ($99 once for one person's own repos and freelance client work, not an employer's repos) or a Team/Business subscription
 
 Details: [devintern.com/pricing](https://devintern.com/pricing/)
 
