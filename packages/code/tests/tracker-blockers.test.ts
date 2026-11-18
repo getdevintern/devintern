@@ -128,6 +128,24 @@ describe("GitLab getBlockers", () => {
     expect(await client.getBlockers("20")).toEqual([]);
   });
 
+  test("a blocker without a reference outside a numeric project match is keyed by project_id", async () => {
+    fetchSpy = mockFetch([
+      [
+        "/links",
+        () =>
+          jsonResponse([
+            { iid: 4, project_id: 9, state: "opened", link_type: "is_blocked_by" },
+            { iid: 6, state: "opened", link_type: "is_blocked_by" },
+          ]),
+      ],
+    ]);
+    const client = new GitLabTaskTrackerClient("tok", "acme/webapp");
+    expect(await client.getBlockers("20")).toEqual([
+      { key: "9#4", done: false, status: "opened" },
+      { key: "6", done: false, status: "opened" },
+    ]);
+  });
+
   test("API failures throw", async () => {
     fetchSpy = mockFetch([["/links", () => jsonResponse({ message: "boom" }, 500)]]);
     const client = new GitLabTaskTrackerClient("tok", "acme/webapp");
@@ -402,6 +420,22 @@ describe("Trello getBlockers", () => {
     ]);
   });
 
+  test("a 400 invalid id answer reports the card as not found", async () => {
+    fetchSpy = mockFetch([
+      [/\/cards\/Bad1defg\?.*closed/, () => new Response("invalid id", { status: 400 })],
+      [
+        /\/cards\/Abc1defg\?.*closed/,
+        () => status("5f0000000000000000000001", "Abc1defg", { list: "Done" }),
+      ],
+      [/\/cards\/Self0020\?/, () => card("Depends on: Bad1defg, Abc1defg")],
+    ]);
+    const client = new TrelloTaskTrackerClient("key", "tok");
+    expect(await client.getBlockers("Self0020")).toEqual([
+      { key: "Bad1defg", status: "not found" },
+      { key: "Abc1defg", done: true, status: "Done" },
+    ]);
+  });
+
   test("a card without a Depends on: line has no blockers", async () => {
     fetchSpy = mockFetch([[/\/cards\/Self0020\?/, () => card("Just a card.")]]);
     const client = new TrelloTaskTrackerClient("key", "tok");
@@ -434,6 +468,18 @@ describe("Markdown getBlockers", () => {
       { key: "add-schema", done: true, status: "Done" },
       { key: "login-copy", done: false, status: "todo" },
       { key: "missing-task", status: "not found" },
+    ]);
+  });
+
+  test("matches mixed-case filenames, and never a longer {key}-slug file", async () => {
+    write("Add-API.md", "---\nstatus: Done\n---\n# Add API\n");
+    write("add-schema-v2.md", "---\nstatus: todo\n---\n# Schema v2\n");
+    write("login.md", "---\nstatus: todo\n---\n# Login\n\nDepends on: Add-API, add-schema\n");
+
+    const client = new MarkdownTaskTrackerClient({ tasksDirectory: dir });
+    expect(await client.getBlockers("login")).toEqual([
+      { key: "add-api", done: true, status: "Done" },
+      { key: "add-schema", status: "not found" },
     ]);
   });
 

@@ -131,10 +131,14 @@ export class GitLabTaskTrackerClient implements TaskTrackerClient {
     return [...blockers.values()];
   }
 
-  /** Iid for a same-project issue, else its full reference. */
+  /**
+   * Iid for a same-project issue, else its full reference. Without a reference
+   * (older instances), an issue that cannot be matched to the configured
+   * project is keyed `{project_id}#{iid}` so it never collides with a local iid.
+   */
   private blockerKey(iid: number, projectId: number | undefined, fullReference?: string): string {
     if (projectId !== undefined && String(projectId) === this.projectPath) return String(iid);
-    if (!fullReference) return String(iid);
+    if (!fullReference) return projectId === undefined ? String(iid) : `${projectId}#${iid}`;
     const hash = fullReference.lastIndexOf("#");
     const projectOfReference = hash > 0 ? fullReference.slice(0, hash) : "";
     return projectOfReference.toLowerCase() === this.projectPath.toLowerCase()

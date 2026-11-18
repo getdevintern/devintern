@@ -517,8 +517,20 @@ export class FakeAsanaTracker implements TrackerFixture {
     return this.diagnostic(`Unmatched fake Asana request: ${method} ${path}`);
   }
 
-  /** Top-level GET collections: the Events API feed and task attachments. */
+  /**
+   * GET collections: the Events API feed, task attachments, and task
+   * dependencies.
+   */
   private handleCollection(path: string, url: URL, request: Request): Response | undefined {
+    // Fake tasks declare no dependencies ("waiting on"), so the worker's
+    // tracker dependency gate always finds them unblocked.
+    const dependenciesMatch = path.match(/^\/api\/1\.0\/tasks\/([^/]+)\/dependencies$/);
+    if (dependenciesMatch?.[1]) {
+      if (!this.tasks.has(dependenciesMatch[1])) {
+        return this.diagnostic(`Unknown fake Asana task: ${dependenciesMatch[1]}`);
+      }
+      return json({ data: [] });
+    }
     if (path === `${API_PREFIX}/events`) {
       return this.getEvents(url.searchParams, request.headers.get("authorization"));
     }

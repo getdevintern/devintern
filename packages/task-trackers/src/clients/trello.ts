@@ -396,7 +396,7 @@ export class TrelloClient {
    * Fetch a card's completion state: archived, due complete, and its list name.
    *
    * @param cardIdOrShortLink - Card ID, short link, or card URL.
-   * @returns The card's state, or `null` when the card does not exist (404).
+   * @returns The card's state, or `null` when the card does not exist (404, or 400 "invalid id").
    * @throws When the Trello API request fails for another reason.
    */
   async getCardStatus(cardIdOrShortLink: string): Promise<TrelloCardStatus | null> {
@@ -412,6 +412,8 @@ export class TrelloClient {
     if (response.status === 404) return null;
     if (!response.ok) {
       const errorText = await response.text();
+      // Trello answers 400 "invalid id" for a malformed card reference.
+      if (response.status === 400 && /invalid id/i.test(errorText)) return null;
       throw new Error(`Trello API error (${response.status}): ${errorText}`);
     }
     const card = (await response.json()) as {

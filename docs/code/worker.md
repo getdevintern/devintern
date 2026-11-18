@@ -81,7 +81,7 @@ The worker picks up polled tickets in dependency order. It reads the tracker's o
 | Trello        | A `Depends on:` line in the card description, naming cards by short link or card URL                                      | Archived, due date marked complete, or in a list named Done, Complete, or Closed    |
 | Markdown      | A `Depends on:` line in the task file, naming other tasks by key (filename without `.md`, or frontmatter `key`)           | Frontmatter `status` is Done, Complete, Completed, Closed, or Canceled              |
 
-For example, a Trello card description can contain `Depends on: aB3dE5fG, https://trello.com/c/Xy7Zq2Wv`, and a markdown task `Depends on: add-api, add-schema`. A `Depends on:` key that names no existing card or task keeps the ticket waiting with `not found`, so fix or remove it.
+For example, a Trello card description can contain `Depends on: aB3dE5fG, https://trello.com/c/Xy7Zq2Wv`, and a markdown task `Depends on: add-api, add-schema`. A `Depends on:` key that names no existing card or task keeps the ticket waiting with `not found`, so fix or remove it. Markdown keys must match a task's key exactly (case does not matter), so `add-schema` does not match `add-schema-v2`. On Trello, a card URL is the most reliable form: a bare short link is recognized only when it contains a digit or a capital letter after the first character, so an all-lowercase short link must be written as a URL, and an 8-character word with a digit (such as `iPhone12`) is read as a card.
 
 A blocked ticket is held back without being started, transitioned, or commented on. The worker checks it again on the next poll, then less often while it keeps waiting (up to every 15 minutes). Editing the ticket triggers a check right away:
 

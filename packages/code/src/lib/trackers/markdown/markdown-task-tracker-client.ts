@@ -15,7 +15,7 @@ import {
   updateMarkdownFrontmatterField,
 } from "@devintern/task-trackers";
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "fs";
-import { basename, join } from "path";
+import { basename, join, resolve } from "path";
 import type {
   Comment,
   DetailedRelatedIssue,
@@ -220,10 +220,14 @@ export class MarkdownTaskTrackerClient implements TaskTrackerClient {
     const blockers = new Map<string, TaskBlocker>();
     for (const key of extractDependsOn(content, markdownDependencyKey)) {
       if (key === task.key) continue;
-      let blocker: Task;
+      const blockerPath = this.findDependencyFile(key);
+      let blocker: Task | undefined;
       try {
-        blocker = await this.getTask(key);
+        blocker = blockerPath ? await this.getTask(blockerPath) : undefined;
       } catch {
+        blocker = undefined;
+      }
+      if (!blocker) {
         if (!blockers.has(key)) blockers.set(key, { key, status: "not found" });
         continue;
       }
@@ -236,6 +240,45 @@ export class MarkdownTaskTrackerClient implements TaskTrackerClient {
       });
     }
     return [...blockers.values()];
+  }
+
+  /**
+   * Task file whose sanitized frontmatter `key` or sanitized filename stem
+   * equals `key` exactly. Unlike task lookup by reference, this neither needs
+   * the filename's case to match nor accepts a `{key}-{slug}` prefix, so
+   * `Depends on: add-schema` never gates on `add-schema-v2.md`.
+   */
+  private findDependencyFile(key: string): string | undefined {
+    if (!this.tasksDirectory) return undefined;
+    const directory = resolve(this.cwd, this.tasksDirectory);
+    let entries: string[];
+    try {
+      entries = readdirSync(directory).filter((name) => name.toLowerCase().endsWith(".md"));
+    } catch {
+      return undefined;
+    }
+    let stemMatch: string | undefined;
+    for (const name of entries) {
+      const filePath = join(directory, name);
+      let frontmatterKey: string | undefined;
+      try {
+        const { frontmatter, hasFrontmatter } = parseMarkdownFrontmatter(
+          readFileSync(filePath, "utf8"),
+        );
+        frontmatterKey = hasFrontmatter ? frontmatter.key : undefined;
+      } catch {
+        continue;
+      }
+      if (frontmatterKey !== undefined) {
+        // A file with a frontmatter key is known by that key only.
+        if (sanitizeMarkdownTaskKey(frontmatterKey) === key) return filePath;
+        continue;
+      }
+      if (!stemMatch && sanitizeMarkdownTaskKey(markdownFilenameStem(name)) === key) {
+        stemMatch = filePath;
+      }
+    }
+    return stemMatch;
   }
 
   async getComments(_taskKey: string): Promise<Comment[]> {
