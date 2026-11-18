@@ -36,6 +36,7 @@ interface RunDetailResponse {
     branch?: string;
     attempt?: number;
     outcomeReason?: string;
+    prUrl?: string;
   };
   stages: Array<{ runId: number; stage: string; status: string }>;
   retry: {
@@ -247,8 +248,10 @@ test.skipIf(!builtCli)(
       expect(detail.stages.length).toBeGreaterThan(0);
       expect(detail.stages.every((stage) => stage.runId === run.id)).toBe(true);
       expect(detail.stages.map((stage) => stage.stage)).toContain("implementation");
-      // A succeeded run has no retry write path to trigger.
-      expect(detail.retry.eligible).toBe(false);
+      // The fixture remote opens no PR, so this succeeded ad-hoc run left a
+      // branch with no PR and stays re-queueable to open one from it.
+      expect(detail.run.prUrl).toBeUndefined();
+      expect(detail.retry).toMatchObject({ eligible: true, kind: "injected" });
       expect(detail.harnessLogs).toBeArray();
       expect(detail.artifacts).toBeArray();
 
@@ -318,16 +321,15 @@ test.skipIf(!builtCli)(
       const bareRetry = await fetch(`${baseUrl}/api/runs/${run.id}/retry`, { method: "POST" });
       expect(bareRetry.status).toBe(403);
 
-      // The fixture run succeeded, so the retry handler refuses before it can
-      // spawn detached CLI work (run-retry.ts:95-96).
-      const retrySettled = await fetch(`${baseUrl}/api/runs/${run.id}/retry`, {
+      // An unknown run is refused before any work is queued. (The fixture run
+      // itself is re-queueable: it succeeded with a branch but no PR.)
+      const missingRunId = run.id + 1000;
+      const retryMissing = await fetch(`${baseUrl}/api/runs/${missingRunId}/retry`, {
         method: "POST",
         headers: dashboardWriteHeaders(baseUrl),
       });
-      expect(retrySettled.status).toBe(409);
-      expect(await retrySettled.json()).toEqual({
-        error: "not retriable: this run already succeeded",
-      });
+      expect(retryMissing.status).toBe(404);
+      expect(await retryMissing.json()).toEqual({ error: `run ${missingRunId} not found` });
 
       const retryMalformed = await fetch(`${baseUrl}/api/runs/not-an-int/retry`, {
         method: "POST",
@@ -637,9 +639,10 @@ test.skipIf(!builtCli)(
         branch: successBranch,
         attempt: 2,
       });
+      // Succeeded with a branch but no PR: re-queueable so a PR can be opened.
       expect(successDetail.retry).toMatchObject({
-        eligible: false,
-        reason: "this run already succeeded",
+        eligible: true,
+        kind: "injected",
         audit: [],
       });
       const failedDetail = await readJson<RunDetailResponse>(

@@ -11,10 +11,21 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { runContext } from "../src/lib/cli/context";
-import { RunStore } from "../src/lib/state/run-recorder";
+import {
+  RunStore,
+  beginRun,
+  endRun,
+  getActiveRunContext,
+  recordRunPr,
+} from "../src/lib/state/run-recorder";
 import { pickupSelection, resolveSessionPickup } from "../src/lib/state/session-pickup";
 import type { SessionPickupDecision } from "../src/lib/state/session-pickup";
-import { buildRetryPromptContext, taskSteps } from "../src/lib/task/pipeline";
+import {
+  buildRetryPromptContext,
+  isChangeRequestOpen,
+  reopenSucceededPickupOption,
+  taskSteps,
+} from "../src/lib/task/pipeline";
 import { runTaskSteps } from "../src/lib/task/step-runner";
 import { MarkdownTaskTrackerClient } from "../src/lib/trackers/markdown/markdown-task-tracker-client";
 import { Utils } from "../src/lib/utils";
@@ -320,5 +331,157 @@ describe("pipeline session pickup wiring", () => {
         gitEnabled: true,
       }),
     ).toBeUndefined();
+  });
+});
+
+/**
+ * A `succeeded` ad-hoc run that left a branch behind, as `worker add` run 591
+ * did when its PR step failed on bad credentials (`prUrl` unset) or when its PR
+ * is still open (`prUrl` set).
+ */
+function succeededLocalRun(taskKey: string, branch: string, prUrl?: string): number {
+  const runId = store.createRun({ origin: "local", taskKey, branch, ...(prUrl ? { prUrl } : {}) });
+  store.addStage(
+    runId,
+    "implementation",
+    "succeeded",
+    "implemented",
+    JSON.stringify({ report: "done" }),
+  );
+  store.finishRun(runId, "succeeded");
+  return runId;
+}
+
+type PrState = "open" | "closed" | "none" | undefined;
+
+describe("ad-hoc re-queue pickup wiring", () => {
+  const KEY = "local-add-truncate-helper";
+  const BRANCH = "feature/local-add-truncate-helper";
+  const PR = "https://github.com/owner/repo/pull/12";
+
+  test.each<[PrState | "throws", boolean | undefined]>([
+    ["open", true],
+    ["closed", false],
+    // The run recorded a PR but the host has none for the branch: unexplained, so unknown.
+    ["none", undefined],
+    // Unsupported host, no credentials, or a 401/403/429/5xx lookup failure.
+    [undefined, undefined],
+    ["throws", undefined],
+  ])("maps PR state %p to open=%p", async (state, expected) => {
+    const lookup = async (): Promise<PrState> => {
+      if (state === "throws") throw new Error("Bad credentials");
+      return state;
+    };
+    expect(await isChangeRequestOpen(BRANCH, lookup)).toBe(expected);
+  });
+
+  test("only local runs with git delivery may reopen a succeeded run", () => {
+    expect(
+      reopenSucceededPickupOption({ origin: "local", gitEnabled: true }).reopenSucceeded,
+    ).toBeDefined();
+    expect(reopenSucceededPickupOption({ origin: "local", gitEnabled: false })).toEqual({});
+    expect(reopenSucceededPickupOption({ origin: "task", gitEnabled: true })).toEqual({});
+    expect(reopenSucceededPickupOption({ origin: undefined, gitEnabled: true })).toEqual({});
+  });
+
+  async function pickupFor(origin: string, lookup: () => Promise<PrState>) {
+    const current = store.createRun({ origin: origin as "local", taskKey: KEY });
+    const pickup = await resolveSessionPickup({
+      runStore: store,
+      taskKey: KEY,
+      // The pipeline scopes pickup by the current run's own record.
+      scope: store.getRun(current) ?? {},
+      ...pickupSelection(current, {} as NodeJS.ProcessEnv),
+      ...reopenSucceededPickupOption({ origin, gitEnabled: true, lookup }),
+      branchExists: () => true,
+      hasLandedCommits: () => true,
+    });
+    return pickup;
+  }
+
+  test("a pushed-without-PR branch resumes without asking the code host", async () => {
+    const prior = succeededLocalRun(KEY, BRANCH);
+    let lookups = 0;
+    const pickup = await pickupFor("local", async () => {
+      lookups++;
+      return undefined;
+    });
+    expect(pickup).toMatchObject({ kind: "resume", session: { runId: prior, branch: BRANCH } });
+    expect(lookups).toBe(0);
+  });
+
+  test.each<[string, () => Promise<PrState>, "resume" | "fresh", string | undefined]>([
+    ["open", async () => "open", "resume", undefined],
+    ["merged or closed", async () => "closed", "fresh", "no longer open"],
+    // An expired token must not read as "PR closed", but it is not proof the PR
+    // is open either: stay on the safe fresh path and say why.
+    [
+      "unverifiable (401)",
+      async () => {
+        throw new Error("401 Bad credentials");
+      },
+      "fresh",
+      "could not confirm",
+    ],
+    ["unverifiable (no PR found)", async () => "none", "fresh", "could not confirm"],
+  ])("a recorded PR that is %s → %s", async (_label, lookup, kind, reason) => {
+    succeededLocalRun(KEY, BRANCH, PR);
+    const pickup = await pickupFor("local", lookup);
+    expect(pickup.kind).toBe(kind);
+    if (pickup.kind === "fresh") expect(pickup.reason).toContain(reason!);
+  });
+
+  test("a succeeded tracker-task run stays final", async () => {
+    const runId = store.createRun({ origin: "task", taskKey: KEY, branch: BRANCH });
+    store.finishRun(runId, "succeeded");
+    const pickup = await pickupFor("task", async () => "open");
+    expect(pickup.kind).toBe("fresh");
+  });
+
+  test("the resumed run records the branch its reused PR is on", async () => {
+    succeededLocalRun(KEY, BRANCH, PR);
+    const pickup = await pickupFor("local", async () => "open");
+    expect(pickup.kind).toBe("resume");
+    if (pickup.kind !== "resume") return;
+
+    let createdFresh = false;
+    Utils.continueFeatureBranch = async (branch) => ({
+      success: true,
+      branchName: branch,
+      message: `Resumed '${branch}'`,
+    });
+    Utils.createFeatureBranch = async () => {
+      createdFresh = true;
+      return { success: true, branchName: `${BRANCH}-attempt-2`, message: "fresh" };
+    };
+    runContext.options = { git: true } as never;
+
+    beginRun({ origin: "local", taskKey: KEY });
+    const runId = getActiveRunContext()?.id;
+    expect(runId).toBeDefined();
+    try {
+      const step = taskSteps.find((candidate) => candidate.name === "prepare-branch");
+      await runTaskSteps([step!], {
+        taskKey: KEY,
+        workflowKey: KEY,
+        effectiveTargetBranch: "main",
+        resumeBranch: pickup.session.branch,
+      } as never);
+      // The PR step adopts the existing PR (GitHub 422 → existing lookup) and
+      // records it on the new run; dependents read branch + PR from here.
+      recordRunPr({ repo: "owner/repo", prNumber: 12, url: PR });
+    } finally {
+      endRun("succeeded");
+    }
+
+    expect(createdFresh).toBe(false);
+    const recorder = new RunStore();
+    try {
+      const recorded = recorder.getRun(runId!);
+      expect(recorded?.branch).toBe(BRANCH);
+      expect(recorded?.prUrl).toBe(PR);
+    } finally {
+      recorder.close();
+    }
   });
 });

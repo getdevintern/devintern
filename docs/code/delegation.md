@@ -242,7 +242,8 @@ work.
   agent is told to verify the inherited work and not redo it. A fresh
   `-attempt-N` branch is used only when the prior branch is gone, has no
   commits, or its PR was merged or closed. Checking whether a PR is still open
-  works on GitHub; on other code hosts a recorded PR starts a fresh attempt. A
+  works on GitHub; on other code hosts, or when the check fails (for example an
+  expired token or a rate limit), a recorded PR starts a fresh attempt. A
   task that never started is still `pending` and needs no resume.
 - **A graceful shutdown does not launder a real failure.** Draining the worker
   aborts running task children; the aborted run is reported as _interrupted_,

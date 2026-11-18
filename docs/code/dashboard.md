@@ -46,7 +46,7 @@ Below the running rows:
 
 Fix the cause first (missing credentials, unclear task details, a temporary agent failure), then open the run and choose **Retry**. The worker queues a fresh attempt with the same routing and checks for queued retries every 5 seconds (`WORKER_RETRY_INTERVAL_SECONDS`). A run that already has an attempt queued or running cannot be retried again.
 
-Ad-hoc tasks from `devintern worker add` show **Re-queue task** instead. It resumes the prior attempt on its existing branch rather than opening a second PR, including an attempt that pushed its branch but failed to open the PR. A fresh branch is used only when the old branch is gone or its PR was merged or closed. The worker also resumes an interrupted ad-hoc task once on its own at startup when there is work to resume. If a task cannot be re-queued, for example because its queue entry expired after 30 days, the run explains why; use `devintern worker add` to submit it again.
+Ad-hoc tasks from `devintern worker add` show **Re-queue task** instead. It resumes the prior attempt on its existing branch rather than opening a second PR. It is also offered on a successful run that pushed its branch but failed to open the PR (for example on bad credentials); the re-queued run opens the PR from that branch. A fresh branch is used only when the old branch is gone or its PR was merged or closed. The worker also resumes an interrupted ad-hoc task once on its own at startup when there is work to resume. If a task cannot be re-queued, for example because its queue entry expired after 30 days, the run explains why; use `devintern worker add` to submit it again.
 
 ## Report a problem with a run
 

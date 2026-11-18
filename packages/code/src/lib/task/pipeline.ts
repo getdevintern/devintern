@@ -843,14 +843,54 @@ async function resolveEffectiveTargetBranch(descriptionText: string | undefined)
 /**
  * Whether the code host has an open PR for `branch`.
  *
- * @returns `undefined` when the state cannot be checked: only GitHub supports
- *   the lookup today
+ * Only a confirmed state counts: a failed lookup (expired token, rate limit,
+ * network error), an unsupported code host, or a branch with no PR at all
+ * (the run recorded one, so its absence is unexplained) all read as unknown.
+ *
+ * @param branch - Head/feature branch name
+ * @param lookup - PR state lookup (defaults to {@link PRManager.getChangeRequestState})
+ * @returns `true` when open, `false` when closed or merged, `undefined` when
+ *   the state cannot be confirmed
  */
-async function isChangeRequestOpen(branch: string): Promise<boolean | undefined> {
-  const manager = new PRManager();
-  const repo = await manager.detectRepository();
-  if (repo.platform !== "github") return undefined;
-  return (await manager.findOpenChangeRequest(branch)) !== undefined;
+export async function isChangeRequestOpen(
+  branch: string,
+  lookup: (branch: string) => Promise<"open" | "closed" | "none" | undefined> = (b) =>
+    new PRManager().getChangeRequestState(b),
+): Promise<boolean | undefined> {
+  let state: "open" | "closed" | "none" | undefined;
+  try {
+    state = await lookup(branch);
+  } catch {
+    return undefined;
+  }
+  if (state === "open") return true;
+  if (state === "closed") return false;
+  return undefined;
+}
+
+/**
+ * Session-pickup option that lets a re-queued ad-hoc task continue a
+ * `succeeded` prior run whose branch has no PR or an open one.
+ *
+ * Only ad-hoc (`origin: "local"`) runs qualify: tracker tasks keep a succeeded
+ * run final. Without git delivery there is no branch to check out, so the
+ * option is omitted too.
+ *
+ * @param input.origin - Origin of the run being picked up for
+ * @param input.gitEnabled - Whether the feature branch will be checked out
+ * @param input.lookup - PR state lookup override (tests)
+ */
+export function reopenSucceededPickupOption(input: {
+  origin?: string;
+  gitEnabled: boolean;
+  lookup?: Parameters<typeof isChangeRequestOpen>[1];
+}): Pick<SessionPickupOptions, "reopenSucceeded"> {
+  if (input.origin !== "local" || !input.gitEnabled) return {};
+  return {
+    reopenSucceeded: {
+      isChangeRequestOpen: ({ branch }) => isChangeRequestOpen(branch, input.lookup),
+    },
+  };
 }
 
 /**
@@ -1342,11 +1382,10 @@ export async function processSingleTask(
         // --resume`, dashboard re-queue, startup auto-resume). A prior run
         // that succeeded but never opened its PR, or whose PR is still open,
         // continues on that branch instead of cutting `-attempt-N`.
-        ...(scope.origin === "local" && runContext.options.git
-          ? {
-              reopenSucceeded: { isChangeRequestOpen: ({ branch }) => isChangeRequestOpen(branch) },
-            }
-          : {}),
+        ...reopenSucceededPickupOption({
+          origin: scope.origin,
+          gitEnabled: Boolean(runContext.options.git),
+        }),
         branchExists: async (branch) =>
           (await Utils.gitRefExists(`refs/heads/${branch}`)) ||
           (await Utils.gitRefExists(`refs/remotes/origin/${branch}`)),

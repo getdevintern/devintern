@@ -48,6 +48,8 @@ export interface RetryEligibility {
  * `kind: "injected"`: their task key names no tracker ticket either, so the
  * handler re-queues the durable injected row instead of forcing the CLI. The
  * row keeps its key, so the retried run resumes the recorded branch and report.
+ * A `succeeded` ad-hoc run that recorded a branch but no PR (its PR step
+ * failed) is also re-queueable, so the PR can be opened from that branch.
  */
 export type RetryKind = "task" | "automation" | "injected";
 
@@ -59,7 +61,8 @@ export interface RetryEligibility {
 }
 
 export function isRunRetriable(
-  run: Pick<RunRecord, "status" | "taskKey" | "automationId"> & { origin?: RunRecord["origin"] },
+  run: Pick<RunRecord, "status" | "taskKey" | "automationId"> &
+    Partial<Pick<RunRecord, "origin" | "branch" | "prUrl">>,
 ): RetryEligibility {
   if (run.origin === "local" && run.taskKey) {
     // Ad-hoc work: the retry re-queues the durable injected row under the same
@@ -67,6 +70,12 @@ export function isRunRetriable(
     // session pickup can inherit the interrupted attempt. The row itself is
     // resolved by the handler (it may already be gone or still active).
     if (RETRIABLE_RUN_STATUSES.includes(run.status)) {
+      return { eligible: true, kind: "injected" };
+    }
+    // A run whose PR step failed (bad credentials, say) still finishes
+    // `succeeded`, leaving a branch with no PR. Re-queueing it lets session
+    // pickup continue that branch and open the PR from it.
+    if (run.status === "succeeded" && run.branch?.trim() && !run.prUrl) {
       return { eligible: true, kind: "injected" };
     }
     return notRetriableByStatus(run.status);
