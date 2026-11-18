@@ -131,6 +131,9 @@ export class GitLabReviewPollingAcquirer implements Acquirer {
       this.options.workerState.markAgentChangeRequestClosed(
         this.identity(mr),
         snapshot.state === "merged" ? "merged" : snapshot.state === "closed" ? "closed" : undefined,
+        snapshot.state === "merged"
+          ? { mergedAt: snapshot.mergedAt, mergedInto: snapshot.targetBranch || undefined }
+          : undefined,
       );
       this.retries.delete(key);
       console.log(

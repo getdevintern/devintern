@@ -1,6 +1,7 @@
 import { createGitHubCiProvider } from "../code-host/github/ci-provider";
 import { parseEnvInteger } from "../config/env-integer";
 import { RunStore } from "../state/run-recorder";
+import type { MergeStateAnswer } from "../dependencies/gate";
 import type { TaskExecutionResult } from "../acquirers/task-polling";
 import type {
   ConflictWindowStatus,
@@ -776,7 +777,7 @@ export function createDependencyMergeStateResolver(options: {
   config: WorkspaceConfig;
   workspaceDir: string;
   workerState: Pick<WorkerState, "markAgentPrClosed">;
-}): (lookup: { repo: string; pr: { number: number } }) => Promise<"merged" | "closed" | null> {
+}): (lookup: { repo: string; pr: { number: number } }) => Promise<MergeStateAnswer | null> {
   const { config, workspaceDir, workerState } = options;
   let resolver: ((slug: string) => FleetGitHubClient) | undefined;
   return async ({ repo, pr }) => {
@@ -801,12 +802,8 @@ export function createDependencyMergeStateResolver(options: {
     if (!result.data) return null;
     const reason = closeReasonFromPr("closed", result.data);
     if (!reason || result.data.state === "open") return null;
-    workerState.markAgentPrClosed(
-      slug,
-      pr.number,
-      reason,
-      reason === "merged" ? mergeDetailsFromPr(result.data) : undefined,
-    );
-    return reason;
+    const merge = reason === "merged" ? mergeDetailsFromPr(result.data) : undefined;
+    workerState.markAgentPrClosed(slug, pr.number, reason, merge);
+    return { state: reason, ...merge };
   };
 }

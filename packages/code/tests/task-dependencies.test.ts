@@ -14,7 +14,7 @@ import type { DependencyFacts } from "../src/lib/dependencies/gate";
 import { readLocalDependencyFacts } from "../src/lib/dependencies/local-facts";
 import { applyStackBase, parseStackedOnMarker } from "../src/lib/dependencies/stacked-base";
 import { buildPrBody } from "../src/lib/code-host/pr-body";
-import { applyAgentPrFetch } from "../src/lib/review/agent-pr-reconciler";
+import { applyAgentPrFetch, mergeDetailsFromPr } from "../src/lib/review/agent-pr-reconciler";
 import { collectQueuedWork, queuedDependencyStatus } from "../src/lib/observability/queued-work";
 import { InjectedTaskStore } from "../src/lib/state/injected-tasks";
 import { RunStore } from "../src/lib/state/run-recorder";
@@ -246,7 +246,7 @@ describe("dependency gate", () => {
       pr: { number: 2, branch: "feature/local-b", state: "merged", mergedAt, mergedInto: "main" },
     });
     const stacked = (
-      merge: { mergedAt?: number; mergedInto?: string },
+      merge: { mergedAt?: number; mergedInto?: string; mergedIntoDefault?: boolean },
       stackBase: DependencyFacts,
     ): DependencyFacts => ({
       ...succeededWithPr("local-a", "merged", 1),
@@ -278,6 +278,25 @@ describe("dependency gate", () => {
     test("retargeted away from the base's branch before merging is satisfied", () => {
       const facts = stacked({ mergedAt: T0 + 60_000, mergedInto: "main" }, base(T0));
       expect(evaluateDependencyGate("merged", [facts]).kind).toBe("ready");
+      const known = stacked(
+        { mergedAt: T0 + 60_000, mergedInto: "main", mergedIntoDefault: true },
+        base(T0),
+      );
+      expect(evaluateDependencyGate("merged", [known]).kind).toBe("ready");
+    });
+
+    test("retargeted to a branch that is not the default branch blocks", () => {
+      const facts = stacked(
+        { mergedAt: T0 + 60_000, mergedInto: "feature/local-c", mergedIntoDefault: false },
+        base(T0),
+      );
+      for (const mode of ["merged", "stacked"] as const) {
+        const decision = evaluateDependencyGate(mode, [facts]);
+        if (decision.kind !== "blocked") throw new Error("expected blocked");
+        expect(decision.reason).toContain(
+          "local-a PR #1 merged into feature/local-c, which is neither the default branch",
+        );
+      }
     });
 
     test("unknown merge order waits and looks up the PR missing a host merge time", () => {
@@ -294,6 +313,22 @@ describe("dependency gate", () => {
       if (unknownBase.kind !== "waiting") throw new Error("expected waiting");
       expect(unknownBase.mergeStateLookups.map((entry) => entry.pr.number)).toEqual([2]);
     });
+  });
+
+  test("reads merge facts, including whether the base is the default branch, from a PR payload", () => {
+    const payload = (ref: string) => ({
+      merged_at: "2026-11-17T10:00:00Z",
+      base: { sha: "abc", ref, repo: { default_branch: "main" } },
+    });
+    expect(mergeDetailsFromPr(payload("main"))).toEqual({
+      mergedAt: Date.parse("2026-11-17T10:00:00Z"),
+      mergedInto: "main",
+      mergedIntoDefault: true,
+    });
+    expect(mergeDetailsFromPr(payload("feature/x")).mergedIntoDefault).toBe(false);
+    expect(
+      mergeDetailsFromPr({ base: { sha: "abc", ref: "main" } }).mergedIntoDefault,
+    ).toBeUndefined();
   });
 
   test("finds cycles through existing edges", () => {
@@ -576,7 +611,7 @@ describe("ad-hoc task dependencies", () => {
       const resolveMergeState = async ({ pr }: { pr: { number: number } }) => {
         lookups.push(pr.number);
         prs.markAgentPrClosed(SLUG, pr.number, "merged");
-        return "merged" as const;
+        return { state: "merged" as const };
       };
       const executed: InjectedTask[] = [];
       await acquirer(executed, { resolveMergeState }).tick();
@@ -595,7 +630,7 @@ describe("ad-hoc task dependencies", () => {
       const lookups: number[] = [];
       const resolveMergeState = async ({ pr }: { pr: { number: number } }) => {
         lookups.push(pr.number);
-        return answer;
+        return answer && { state: answer };
       };
       const executed: InjectedTask[] = [];
       const worker = acquirer(executed, { resolveMergeState, now: () => now });
@@ -640,7 +675,7 @@ describe("ad-hoc task dependencies", () => {
             ? { mergedAt: T0 + 60_000, mergedInto: "main" }
             : { mergedAt: T0, mergedInto: "feature/local-a" },
         );
-        return "merged" as const;
+        return { state: "merged" as const };
       };
       const worker = acquirer(executed, { resolveMergeState });
       await worker.tick(); // A's PR is open locally: asks about #1
@@ -648,6 +683,36 @@ describe("ad-hoc task dependencies", () => {
       await worker.tick();
       expect(lookups).toEqual([1, 2]);
       expect(executed.map((task) => task.taskKey)).toEqual(["local-b", "local-c"]);
+    });
+
+    test("an unregistered stacked PR the host reports merged still follows its stack base", async () => {
+      add("A");
+      settle("local-a", "done");
+      finishRun("local-a", "succeeded", { number: 1 });
+      add("B", { after: ["local-a"], mode: "stacked" });
+      const executed: InjectedTask[] = [];
+      await acquirer(executed).tick(); // B claimed stacked on A
+      settle("local-b", "done");
+      // B's run recorded PR #2, but the registry never saw it.
+      finishRun("local-b", "succeeded", { number: 2, unregistered: true });
+      const T0 = Date.parse("2026-11-17T10:00:00Z");
+      prs.markAgentPrClosed(SLUG, 1, "merged", { mergedAt: T0, mergedInto: "main" });
+      const c = add("C", { after: ["local-b"] });
+
+      // A merged into main first; B merged into A's branch afterwards.
+      const resolveMergeState = async () => ({
+        state: "merged" as const,
+        mergedAt: T0 + 60_000,
+        mergedInto: "feature/local-a",
+      });
+      const worker = acquirer(executed, { resolveMergeState });
+      await worker.tick();
+      await worker.tick();
+      expect(executed.map((task) => task.taskKey)).toEqual(["local-b"]);
+      expect(store.getById(c.id)?.dependencyState).toBe("blocked");
+      expect(store.getById(c.id)?.dependencyReason).toContain(
+        "local-b PR #2 merged into feature/local-a after local-a PR #1 merged",
+      );
     });
 
     test("a hung merge-state lookup does not hold the claim section", async () => {
@@ -689,7 +754,7 @@ describe("ad-hoc task dependencies", () => {
 
       const resolveMergeState = async ({ pr }: { pr: { number: number } }) => {
         prs.markAgentPrClosed(SLUG, pr.number, "closed");
-        return "closed" as const;
+        return { state: "closed" as const };
       };
       const executed: InjectedTask[] = [];
       const worker = acquirer(executed, { resolveMergeState });
@@ -722,7 +787,7 @@ describe("ad-hoc task dependencies", () => {
       let answer: "closed" | null = "closed";
       const executed: InjectedTask[] = [];
       const worker = acquirer(executed, {
-        resolveMergeState: async () => answer,
+        resolveMergeState: async () => answer && { state: answer },
         execute: async (task) => {
           executed.push(task);
           // The re-run reopens and reports the same PR number.
@@ -756,7 +821,9 @@ describe("ad-hoc task dependencies", () => {
       const executed: InjectedTask[] = [];
       // No agent_prs row: the resolver cannot record anything; the acquirer
       // still honors its answer.
-      await acquirer(executed, { resolveMergeState: async () => "merged" as const }).tick();
+      await acquirer(executed, {
+        resolveMergeState: async () => ({ state: "merged" as const }),
+      }).tick();
       expect(executed.map((task) => task.taskKey)).toEqual(["local-next"]);
     });
   });

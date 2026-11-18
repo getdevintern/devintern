@@ -107,6 +107,20 @@ export interface AgentPrMergeDetails {
   mergedAt?: number;
   /** The branch the PR merged into (its base ref at merge time). */
   mergedInto?: string;
+  /**
+   * Whether {@link mergedInto} is the repo's default branch, when the host
+   * payload names the default branch (GitHub does; GitLab MR payloads do not).
+   */
+  mergedIntoDefault?: boolean;
+}
+
+/** SQL parameters for `host_merged_at`, `merged_into`, `merged_into_default`. */
+function mergeDetailParams(merge: AgentPrMergeDetails): Array<number | string | null> {
+  return [
+    merge.mergedAt ?? null,
+    merge.mergedInto ?? null,
+    merge.mergedIntoDefault === undefined ? null : merge.mergedIntoDefault ? 1 : 0,
+  ];
 }
 
 /** Consecutive CI-fix bookkeeping for one agent-created PR. */
@@ -414,6 +428,7 @@ export class WorkerState {
       ["merged_at", "INTEGER"],
       ["host_merged_at", "INTEGER"],
       ["merged_into", "TEXT"],
+      ["merged_into_default", "INTEGER"],
     ]) {
       if (columns.includes(name)) continue;
       try {
@@ -444,6 +459,7 @@ export class WorkerState {
         merged_at INTEGER,
         host_merged_at INTEGER,
         merged_into TEXT,
+        merged_into_default INTEGER,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
         PRIMARY KEY (provider, instance_url, project_path, change_number)
@@ -672,6 +688,7 @@ export class WorkerState {
          merged_at = NULL,
          host_merged_at = NULL,
          merged_into = NULL,
+         merged_into_default = NULL,
          updated_at = excluded.updated_at`,
       [
         change.provider,
@@ -819,18 +836,10 @@ export class WorkerState {
            close_reason = COALESCE(?, close_reason),
            merged_at = CASE WHEN ? = 'merged' THEN COALESCE(merged_at, ?) ELSE merged_at END,
            host_merged_at = COALESCE(?, host_merged_at),
-           merged_into = COALESCE(?, merged_into)
+           merged_into = COALESCE(?, merged_into),
+           merged_into_default = COALESCE(?, merged_into_default)
          WHERE provider = 'github' AND repo = ? AND pr_number = ?`,
-        [
-          now,
-          reason ?? null,
-          reason ?? null,
-          now,
-          merge.mergedAt ?? null,
-          merge.mergedInto ?? null,
-          repo,
-          prNumber,
-        ],
+        [now, reason ?? null, reason ?? null, now, ...mergeDetailParams(merge), repo, prNumber],
       );
       // No registry row: the cursors may belong to another subsystem.
       if (changes > 0) this.clearPrCursors(repo, prNumber);
@@ -842,10 +851,15 @@ export class WorkerState {
    * per-change poll cursors ({@link clearChangeRequestCursors}).
    *
    * @param reason - Whether it merged; omit when unknown (see {@link markAgentPrClosed})
+   * @param merge - What the code host reported about the merge, when known
    */
-  markAgentChangeRequestClosed(identity: ChangeRequestIdentity, reason?: AgentPrCloseReason): void {
+  markAgentChangeRequestClosed(
+    identity: ChangeRequestIdentity,
+    reason?: AgentPrCloseReason,
+    merge: AgentPrMergeDetails = {},
+  ): void {
     this.db.transaction(() => {
-      if (this.closeChangeRequestRow(identity, reason) > 0) {
+      if (this.closeChangeRequestRow(identity, reason, merge) > 0) {
         this.clearChangeRequestCursors(identity);
       }
     })();
@@ -854,12 +868,16 @@ export class WorkerState {
   private closeChangeRequestRow(
     identity: ChangeRequestIdentity,
     reason: AgentPrCloseReason | undefined,
+    merge: AgentPrMergeDetails,
   ): number {
     const now = Date.now();
     return this.db.run(
       `UPDATE agent_prs SET state = 'closed', updated_at = ?,
          close_reason = COALESCE(?, close_reason),
-         merged_at = CASE WHEN ? = 'merged' THEN COALESCE(merged_at, ?) ELSE merged_at END
+         merged_at = CASE WHEN ? = 'merged' THEN COALESCE(merged_at, ?) ELSE merged_at END,
+         host_merged_at = COALESCE(?, host_merged_at),
+         merged_into = COALESCE(?, merged_into),
+         merged_into_default = COALESCE(?, merged_into_default)
        WHERE provider = ? AND instance_url = ?
          AND COALESCE(project_id, '') = COALESCE(?, '')
          AND project_path = ? AND change_number = ?`,
@@ -868,6 +886,7 @@ export class WorkerState {
         reason ?? null,
         reason ?? null,
         now,
+        ...mergeDetailParams(merge),
         identity.provider,
         identity.instanceUrl,
         identity.projectId ?? null,

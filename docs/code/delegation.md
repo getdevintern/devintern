@@ -218,11 +218,12 @@ the task.
   merged into its base's branch **after** the base merged never reached the
   default branch, so dependents are blocked ("merged into feature/… after …
   merged") until that work lands and they are re-queued. A stacked PR that was
-  retargeted (for example to the default branch) before merging counts as
-  merged directly. The worker learns merge times and the merged-into branch
-  from GitHub; while it has not yet, dependents wait and it asks GitHub. On
-  other code hosts it cannot tell the order, so dependents of a stacked PR
-  merged into its base's branch keep waiting.
+  retargeted to the default branch before merging counts as merged directly;
+  on GitHub, one merged into any other branch blocks its dependents too. The
+  worker learns merge times and the merged-into branch from GitHub (and asks
+  GitHub while it has not yet) and from GitLab when it sees a merge request
+  merge. When it cannot tell the order (Bitbucket, or GitLab without a merge
+  time), dependents of a stacked PR merged into its base's branch keep waiting.
 
 **Stacked limitation:** the worker does not yet retarget or restack a stacked PR
 after its base PR merges, changes, or closes. Until it does, a human (or the

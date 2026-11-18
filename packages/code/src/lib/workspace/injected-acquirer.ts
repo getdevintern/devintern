@@ -17,7 +17,12 @@ import type { Acquirer } from "../../worker";
 import type { InjectedTask, InjectedTaskStore } from "../state/injected-tasks";
 import type { TaskExecutionResult } from "../acquirers/task-polling";
 import { randomUUID } from "crypto";
-import type { DependencyFacts, DependencyGateDecision, DependencyPr } from "../dependencies/gate";
+import type {
+  DependencyFacts,
+  DependencyGateDecision,
+  DependencyPr,
+  MergeStateAnswer,
+} from "../dependencies/gate";
 import { evaluateDependencyGate } from "../dependencies/gate";
 import { applyStackBase } from "../dependencies/stacked-base";
 import { getWorkerFailover } from "../worker/failover";
@@ -118,7 +123,7 @@ export interface InjectedTaskAcquirerOptions {
    * a registry row still unblocks. Return `null` while the PR is open or when
    * the host cannot tell; the dependent keeps waiting.
    */
-  resolveMergeState?: (lookup: UnknownMergeStateLookup) => Promise<"merged" | "closed" | null>;
+  resolveMergeState?: (lookup: UnknownMergeStateLookup) => Promise<MergeStateAnswer | null>;
   /** Per-lookup timeout (defaults to {@link MERGE_STATE_LOOKUP_TIMEOUT_MS}; tests). */
   mergeStateLookupTimeoutMs?: number;
   /** Clock for claims and backoff (tests). */
@@ -265,7 +270,7 @@ export class InjectedTaskAcquirer implements Acquirer {
    * local facts so an answer counts even when no `agent_prs` row could record
    * it (e.g. a run reported a PR the registry never saw).
    */
-  private readonly observedPrStates = new Map<string, "merged" | "closed">();
+  private readonly observedPrStates = new Map<string, MergeStateAnswer>();
 
   /** Evaluate one row's dependency gate from local facts. */
   private evaluateGate(task: InjectedTask): DependencyGateDecision {
@@ -295,7 +300,7 @@ export class InjectedTaskAcquirer implements Acquirer {
     // re-queued. Forget it once the dependency runs again, and never let it
     // override a registry row, which the resolver already wrote the answer to
     // (an `open` row there means something re-registered the PR since).
-    if (observed === "closed") {
+    if (observed.state === "closed") {
       if (facts.work === "queued" || facts.work === "running") {
         this.observedPrStates.delete(lookupKey);
         this.mergeLookups.delete(lookupKey);
@@ -310,7 +315,14 @@ export class InjectedTaskAcquirer implements Acquirer {
         number,
         url: facts.pr?.url ?? facts.latestRun?.prUrl,
         branch: facts.pr?.branch ?? facts.latestRun?.branch,
-        state: observed,
+        state: observed.state,
+        ...(observed.state === "merged"
+          ? {
+              mergedAt: observed.mergedAt ?? facts.pr?.mergedAt,
+              mergedInto: observed.mergedInto ?? facts.pr?.mergedInto,
+              mergedIntoDefault: observed.mergedIntoDefault ?? facts.pr?.mergedIntoDefault,
+            }
+          : {}),
       },
     };
   }

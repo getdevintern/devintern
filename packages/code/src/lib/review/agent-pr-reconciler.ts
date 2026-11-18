@@ -49,7 +49,7 @@ export interface PolledPr {
    */
   author_association?: string;
   head?: { sha: string; ref?: string; repo?: { full_name: string } | null };
-  base?: { sha: string; ref?: string };
+  base?: { sha: string; ref?: string; repo?: { default_branch?: unknown } | null };
 }
 
 /** GitHub PR states that prove a PR is no longer open. */
@@ -100,14 +100,21 @@ export function closeReasonFromPr(
 
 /**
  * The host-reported merge facts in a single-PR payload: GitHub's `merged_at`
- * and the base ref the PR targeted. Absent fields stay `undefined`.
+ * the base ref the PR targeted, and whether that ref is the repo's default
+ * branch (`base.repo.default_branch`). Absent fields stay `undefined`.
  */
 export function mergeDetailsFromPr(pr: Pick<PolledPr, "merged_at" | "base">): AgentPrMergeDetails {
   const mergedAt = typeof pr.merged_at === "string" ? Date.parse(pr.merged_at) : Number.NaN;
-  const mergedInto = pr.base?.ref;
+  const ref = pr.base?.ref;
+  const mergedInto = typeof ref === "string" && ref !== "" ? ref : undefined;
+  const defaultBranch = pr.base?.repo?.default_branch;
   return {
     mergedAt: Number.isFinite(mergedAt) ? mergedAt : undefined,
-    mergedInto: typeof mergedInto === "string" && mergedInto !== "" ? mergedInto : undefined,
+    mergedInto,
+    mergedIntoDefault:
+      mergedInto !== undefined && typeof defaultBranch === "string" && defaultBranch !== ""
+        ? mergedInto === defaultBranch
+        : undefined,
   };
 }
 

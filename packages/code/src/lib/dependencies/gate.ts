@@ -71,6 +71,23 @@ export interface DependencyPr {
   mergedAt?: number;
   /** The branch it merged into, from the host's PR payload. */
   mergedInto?: string;
+  /**
+   * Whether {@link mergedInto} is the repo's default branch, when the host
+   * payload says (GitHub does). `undefined` when unknown.
+   */
+  mergedIntoDefault?: boolean;
+}
+
+/**
+ * A code host's answer for a dependency PR that is no longer open. For a
+ * merge, the host's merge facts let the gate order stacked merges even when
+ * no registry row could record them.
+ */
+export interface MergeStateAnswer {
+  state: "merged" | "closed";
+  mergedAt?: DependencyPr["mergedAt"];
+  mergedInto?: DependencyPr["mergedInto"];
+  mergedIntoDefault?: DependencyPr["mergedIntoDefault"];
 }
 
 /** Everything the gate knows about one dependency. */
@@ -139,8 +156,11 @@ function prLabel(pr: Pick<DependencyPr, "number">): string {
  * Classify a dependency whose PR merged while stacked on another task's
  * branch.
  *
- * Retargeted elsewhere first (e.g. to the default branch once the base
- * merged), its work landed there directly. Otherwise its work is wherever the
+ * Retargeted to the default branch first (e.g. once the base merged), its
+ * work landed there directly; retargeted to some other branch (the host says
+ * it is not the default branch), its work is not on the default branch, so
+ * the dependency is blocked. When the host does not say which branch is the
+ * default, a retargeted merge counts as landed. Otherwise its work is wherever the
  * base's work is: an unmerged base becomes the dependency to wait on (merged
  * mode) or stack on (stacked mode; the base's branch now carries the
  * dependency's commits too). A merged base carried the dependency's work only
@@ -156,6 +176,16 @@ function classifyMergedIntoStackBase(
 ): DependencyStatus {
   const baseBranch = base.pr?.branch ?? base.latestRun?.branch;
   if (pr.mergedInto !== undefined && baseBranch !== undefined && pr.mergedInto !== baseBranch) {
+    if (pr.mergedIntoDefault === false) {
+      return {
+        key,
+        state: "blocked",
+        reason:
+          `${key} ${prLabel(pr)} merged into ${pr.mergedInto}, which is neither the default ` +
+          `branch nor ${base.key}'s branch, so its work is not on the default branch; ` +
+          `land it there, then re-queue this task`,
+      };
+    }
     return { key, state: "satisfied", via: "merged", pr };
   }
   const status = classifyDependency(base);

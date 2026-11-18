@@ -137,9 +137,12 @@ function readFacts(
     const mergeColumns = hasColumn(db, "agent_prs", "host_merged_at")
       ? ", host_merged_at, merged_into"
       : "";
+    const defaultColumn = hasColumn(db, "agent_prs", "merged_into_default")
+      ? ", merged_into_default"
+      : "";
     const rows = db
       .query(
-        `SELECT task_key, pr_number, branch, state${closeColumns}${urlColumn}${mergeColumns} FROM agent_prs
+        `SELECT task_key, pr_number, branch, state${closeColumns}${urlColumn}${mergeColumns}${defaultColumn} FROM agent_prs
          WHERE task_key IN (${placeholders}) ORDER BY created_at DESC`,
       )
       .all(...unique) as Array<Record<string, unknown>>;
@@ -171,12 +174,20 @@ function readFacts(
             state: prState(row),
             mergedAt: integer(row.host_merged_at),
             mergedInto: text(row.merged_into),
+            mergedIntoDefault:
+              row.merged_into_default === 1
+                ? true
+                : row.merged_into_default === 0
+                  ? false
+                  : undefined,
           }
         : undefined;
     const facts: DependencyFacts = { key, work: work.get(key) ?? "missing", latestRun, pr };
-    // Only a merged PR consults its stack base; read it lazily for that case.
+    // Only a merged PR consults its stack base, but read it whenever one is
+    // recorded: the caller may learn the merge from the code host after this
+    // read (a PR with no registry row, or a registry row that is stale).
     const base = stackedOn.get(key);
-    if (pr?.state === "merged" && base) {
+    if (base) {
       const chain = new Set(visiting).add(key);
       if (chain.has(base) || chain.size > MAX_STACK_BASE_DEPTH) {
         // A looping or runaway chain cannot be resolved; an unknown base
