@@ -51,8 +51,11 @@ export function resolveDependencyMode(input: {
   return input.override ?? input.configured ?? DEFAULT_DEPENDENCY_MODE;
 }
 
-/** Where a dependency's own work item stands. */
-export type DependencyWorkState = "missing" | "queued" | "running" | "done" | "failed";
+/**
+ * Where a dependency's own work item stands. `open` is a tracker blocker this
+ * worker never handled that the tracker does not report done yet.
+ */
+export type DependencyWorkState = "missing" | "queued" | "running" | "done" | "failed" | "open";
 
 /** A dependency's PR as far as the gate needs it. */
 export interface DependencyPr {
@@ -102,6 +105,8 @@ export interface DependencyFacts {
     branch?: string;
     /** Set when the run pushed its branch but could not open the PR. */
     prFailure?: string;
+    /** Repo the run worked in, when recorded. */
+    repo?: string;
   };
   /** The PR that run opened, from the PR registry. */
   pr?: DependencyPr;
@@ -112,6 +117,8 @@ export interface DependencyFacts {
    * the dependency is only as merged as its base is.
    */
   stackBase?: DependencyFacts;
+  /** Tracker status name of an `open` tracker blocker, for the wait reason. */
+  trackerStatus?: string;
 }
 
 /** One dependency, classified. */
@@ -221,6 +228,10 @@ export function classifyDependency(facts: DependencyFacts): DependencyStatus {
   if (work === "queued") return { key, state: "pending", reason: `${key} not started` };
   if (work === "running") return { key, state: "pending", reason: `${key} running` };
   if (work === "failed") return { key, state: "blocked", reason: `${key} failed` };
+  if (work === "open") {
+    const status = facts.trackerStatus ? ` (${facts.trackerStatus})` : "";
+    return { key, state: "pending", reason: `${key} not done${status}` };
+  }
   if (!latestRun) {
     // A settled row with no run (e.g. skipped as unchanged) produced nothing
     // to wait for; a missing row with no run is unknown work.

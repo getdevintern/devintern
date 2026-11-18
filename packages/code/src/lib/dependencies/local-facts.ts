@@ -1,7 +1,9 @@
 /**
- * Build {@link DependencyFacts} for ad-hoc task dependencies from the local
+ * Build {@link DependencyFacts} for task dependencies from the local
  * workspace DB: the `injected_tasks` row (work state), the latest `runs` row
  * (outcome, PR, branch), and the `agent_prs` registry (PR open/merged/closed).
+ * A stack base comes from `injected_tasks.stacked_on` (ad-hoc tasks) or
+ * `tracker_dependencies.stacked_on` (tracker tickets).
  *
  * Only local reads: the acquirer calls this on every tick. Tables that do not
  * exist yet (a fresh workspace) read as "no facts" instead of failing.
@@ -10,6 +12,7 @@
 import type { Database } from "bun:sqlite";
 
 import type { RunStatus } from "../state/run-recorder";
+import { TRACKER_DEPENDENCIES_TABLE } from "../state/tracker-dependencies";
 import type { DependencyFacts, DependencyPr, DependencyWorkState } from "./gate";
 
 const RUN_STATUSES: readonly RunStatus[] = [
@@ -102,13 +105,29 @@ function readFacts(
       if (base) stackedOn.set(row.task_key, base);
     }
   }
+  if (hasTable(db, TRACKER_DEPENDENCIES_TABLE)) {
+    const rows = db
+      .query(
+        `SELECT task_key, stacked_on FROM ${TRACKER_DEPENDENCIES_TABLE}
+         WHERE task_key IN (${placeholders}) ORDER BY updated_at ASC`,
+      )
+      .all(...unique) as Array<{ task_key: string; stacked_on?: unknown }>;
+    for (const row of rows) {
+      // An ad-hoc row's own base wins; tracker rows fill in tracker tickets.
+      if (work.has(row.task_key)) continue;
+      const base = text(row.stacked_on);
+      if (base) stackedOn.set(row.task_key, base);
+      else stackedOn.delete(row.task_key);
+    }
+  }
 
   const runs = new Map<string, NonNullable<DependencyFacts["latestRun"]>>();
   if (hasTable(db, "runs")) {
     const prFailureColumn = hasColumn(db, "runs", "pr_failure") ? ", pr_failure" : "";
+    const repoColumn = hasColumn(db, "runs", "repo") ? ", repo" : "";
     const rows = db
       .query(
-        `SELECT task_key, status, pr_number, pr_url, branch${prFailureColumn} FROM (
+        `SELECT task_key, status, pr_number, pr_url, branch${prFailureColumn}${repoColumn} FROM (
            SELECT *, ROW_NUMBER() OVER (
              PARTITION BY task_key ORDER BY started_at DESC, id DESC
            ) AS rn
@@ -126,6 +145,7 @@ function readFacts(
         prUrl: text(row.pr_url),
         branch: text(row.branch),
         prFailure: text(row.pr_failure),
+        repo: text(row.repo),
       });
     }
   }

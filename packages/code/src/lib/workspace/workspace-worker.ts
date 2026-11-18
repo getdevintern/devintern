@@ -69,6 +69,7 @@ import { InjectedTaskAcquirer, INJECTED_TASK_SOURCE } from "./injected-acquirer"
 import { createInjectedStartupRecovery } from "./injected-recovery";
 import { toRoutableTask } from "./router";
 import { createIdleWorkerAutoUpdater } from "./worker-auto-update";
+import { trackerDependencyDeps } from "./tracker-dependency-gate";
 import {
   createFleetTaskExecutor,
   createWorkspaceTaskAcquirer,
@@ -1189,6 +1190,15 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
     // Share the gate with the relay task evaluator so a relayed change caused
     // by the worker's own post-PR transition is not re-implemented either.
     source.isTaskActionedUnchanged = actionedGate;
+    const dependencyDeps = trackerDependencyDeps({
+      config,
+      workspaceDir,
+      state,
+      tracker: source.tracker,
+      teamName: source.team?.name,
+      getTracker: source.client ? () => source.client! : () => singleTrackerManager!.getClient(),
+    });
+    source.dependencyGate = dependencyDeps.dependencyGate;
     const taskAcquirer = createWorkspaceTaskAcquirer({
       config,
       workspaceDir,
@@ -1206,6 +1216,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       team: source.team,
       verbose: options.verbose,
       supervisor,
+      ...dependencyDeps,
     });
     intervalUpdaters.push((seconds) => taskAcquirer.updateInterval(seconds));
     acquirers.push(taskAcquirer);

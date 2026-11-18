@@ -411,6 +411,7 @@ function parseTeamsSection(
       repo: readString(table, "repo", label, errors),
       envFile: readString(table, "env_file", label, errors),
       env: readEnvTable(table, label, errors),
+      ...optionalDependencyMode(table, label, errors),
     });
   }
   return { teams, teamNames };
@@ -444,11 +445,23 @@ function readDependencyMode(
   defaultsTable: Record<string, unknown>,
   errors: string[],
 ): DependencyMode {
-  const raw = readString(defaultsTable, "dependency_mode", "[defaults]", errors);
-  if (raw === undefined) return DEFAULT_DEPENDENCY_MODE;
-  if (isDependencyMode(raw)) return raw;
-  errors.push(`[defaults].dependency_mode must be one of: ${DEPENDENCY_MODES.join(", ")}.`);
-  return DEFAULT_DEPENDENCY_MODE;
+  return (
+    optionalDependencyMode(defaultsTable, "[defaults]", errors).dependencyMode ??
+    DEFAULT_DEPENDENCY_MODE
+  );
+}
+
+/** An optional `dependency_mode` key (`[defaults]` or a `[[teams]]` entry). */
+function optionalDependencyMode(
+  table: Record<string, unknown>,
+  label: string,
+  errors: string[],
+): { dependencyMode?: DependencyMode } {
+  const raw = readString(table, "dependency_mode", label, errors);
+  if (raw === undefined) return {};
+  if (isDependencyMode(raw)) return { dependencyMode: raw };
+  errors.push(`${label}.dependency_mode must be one of: ${DEPENDENCY_MODES.join(", ")}.`);
+  return {};
 }
 
 /** Fill each team's omitted tracker/query from `[defaults]`, reporting gaps. */

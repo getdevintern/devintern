@@ -76,6 +76,7 @@ Keys not shown here are documented on the page for their feature:
 | `[worker.schedule]`, `[worker].auto_update`, `[workspace].dashboard_port`                                | [Worker Daemon](./worker.md)                                                       |
 | `[dashboard].allowed_origins`, `tailscale_autodetect`                                                    | [Dashboard](./dashboard.md#allowed-origins)                                        |
 | `[defaults].dependency_mode`                                                                             | [Delegation: Dependent tasks](./delegation.md#dependent-tasks---after)             |
+| `[[teams]].dependency_mode`                                                                              | [Worker Daemon: Ticket dependencies](./worker.md#ticket-dependencies)              |
 | `pipeline_file`                                                                                          | [below](#pipelines-for-the-fleet-and-per-repository)                               |
 
 Notes on the keys above:

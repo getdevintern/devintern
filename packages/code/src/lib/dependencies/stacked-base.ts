@@ -75,3 +75,44 @@ export function applyStackBase(
   }
   return { body: `${body.trimEnd()}\n\n${renderStackedOnSection(stackedOn)}\n`, stackedOn };
 }
+
+/**
+ * Env var carrying a tracker ticket's stack base into its task subprocess.
+ * Tracker tickets have no local description file to append the section to,
+ * so the worker passes the marker here and the pipeline applies it with
+ * {@link applyStackBase} to the description it read from the tracker.
+ */
+export const STACKED_ON_ENV = "DEVINTERN_STACKED_ON";
+
+/** Encode a stack base for {@link STACKED_ON_ENV}. */
+export function encodeStackBaseEnv(base: StackBase): string {
+  return renderStackedOnSection(base).split("\n")[0] ?? "";
+}
+
+/** Decode {@link STACKED_ON_ENV}; `undefined` when unset or malformed. */
+export function stackBaseFromEnv(
+  env: Record<string, string | undefined> = process.env,
+): StackBase | undefined {
+  return parseStackedOnMarker(env[STACKED_ON_ENV]) ?? undefined;
+}
+
+/**
+ * The stack base a tracker ticket's run should apply, from
+ * {@link STACKED_ON_ENV}. An explicit `Target branch:` in the description wins
+ * (as in {@link applyStackBase}); the env var is then removed so the PR body
+ * does not claim a stack the run did not use.
+ */
+export function takeStackBaseFromEnv(
+  description: string | undefined,
+  warn: (message: string) => void = () => {},
+  env: Record<string, string | undefined> = process.env,
+): StackBase | undefined {
+  const base = stackBaseFromEnv(env);
+  if (!base) return undefined;
+  const applied = applyStackBase(description ?? "", base, warn);
+  if (!applied.stackedOn) {
+    delete env[STACKED_ON_ENV];
+    return undefined;
+  }
+  return applied.stackedOn;
+}

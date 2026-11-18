@@ -1,5 +1,11 @@
 # @devintern/code Changelog
 
+## [Unreleased]
+
+### Added
+
+- **Ticket dependencies from native tracker blockers**: on Jira ("Blocks" links), Linear ("blocked by" relations), and GitHub Issues (issue dependencies), the worker now picks up polled tickets in dependency order. A ticket with unfinished blockers is held back without being started, transitioned, or commented on, and is checked again on every poll. A blocker the worker implemented follows the ad-hoc `merged` / `stacked` rules (a stacked ticket branches from and targets its blocker's open PR branch); a blocker it never handled counts once the tracker marks it done; a failed blocker blocks until it is re-run or marked done. The mode comes from `[defaults].dependency_mode` or the new per-team `[[teams]].dependency_mode`. Held-back tickets appear in `devintern worker queue` and the dashboard's Queued list as `Tracker ticket` with their reason (for example `waiting: PROJ-12 not done (In Progress)`). GitHub repositories or accounts without issue dependencies report no blockers. See `docs/code/worker.md#ticket-dependencies`
+
 ## [2.25.0] - 2026-11-18
 
 Sandboxed-agent release: agents and operators can read worker state with `devintern worker runs|stats|automations|prs|queue|status|overview|logs` without reaching the dashboard over the network, a worker that cannot be seen from inside a PID-namespaced sandbox is reported as unknown instead of stopped, and the worker can keep teammates' open PRs caught up with their base (`sync_team_prs`, off by default). The dashboard now shows automation source health, and blocked automation runs, feature-branch lock races, and leftover poll cursors are fixed.

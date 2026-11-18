@@ -50,6 +50,14 @@ export interface ReadyTask {
  */
 export type TaskExecutionResult = boolean | "deferred" | "skipped" | "interrupted";
 
+/**
+ * Outcome of a polled task execution: a {@link TaskExecutionResult}, or
+ * `"waiting"` when the dependency gate held the ticket back on its blockers
+ * without starting anything, so it is re-evaluated on every poll until they
+ * are satisfied. Only the fleet executor's gated path produces `"waiting"`.
+ */
+export type TaskPollOutcome = TaskExecutionResult | "waiting";
+
 /** Dedupe key for a ready task: one execution per `(key, update stamp)`. */
 export function processedTaskId(task: ReadyTask): string {
   return `task:${task.key}:${task.updated?.trim() ?? ""}`;
@@ -91,7 +99,7 @@ export interface TaskPollingAcquirerOptions {
   /** Evaluate step: run the user's query (injected for tests). */
   searchTasks: (query: string) => Promise<{ tasks: ReadyTask[] }>;
   /** Execute step: process, fail, or defer one ready task (injected for tests). */
-  executeTask: (taskKey: string) => Promise<TaskExecutionResult>;
+  executeTask: (taskKey: string) => Promise<TaskPollOutcome>;
   /**
    * Actioned gate: `true` when the task already produced a PR and has not
    * changed since, so it must not be re-implemented even though it still
@@ -247,6 +255,8 @@ export class TaskPollingAcquirer implements Acquirer {
    * settles still replays the re-admission on restart.
    */
   private readonly pendingRescans = new Map<string, string>();
+  /** Keys the dependency gate held back on their last pickup (log noise only). */
+  private readonly waitingKeys = new Set<string>();
   private readonly gateErrors = new Set<string>();
   /** Resume time of the harness-chain pause last logged, so it is logged once. */
   private pausedUntil: number | undefined;
@@ -396,12 +406,18 @@ export class TaskPollingAcquirer implements Acquirer {
           queue.markProcessed(detector.source, externalId);
 
           pickedUp++;
-          console.log(`\n📌 [${this.name}] picking up ${task.key}`);
+          // A ticket the dependency gate keeps holding back is re-checked every
+          // tick; announce only its first pickup (the gate logs verdict changes).
+          if (!this.waitingKeys.has(task.key)) {
+            console.log(`\n📌 [${this.name}] picking up ${task.key}`);
+          }
           this.inFlightKeys.add(task.key);
           executions.push(
             (async () => {
               try {
                 const result = await executeTask(task.key);
+                if (result === "waiting") this.waitingKeys.add(task.key);
+                else this.waitingKeys.delete(task.key);
                 if (result === "deferred") {
                   // The task never started. Release the provisional claim and
                   // track the key explicitly so the same tracker change is
@@ -413,6 +429,13 @@ export class TaskPollingAcquirer implements Acquirer {
                   this.rememberPendingRescan(detector.source, task.key, externalId);
                   tickDeferred = true;
                   console.log(`⏳ [${this.name}] ${task.key} deferred; will retry next poll`);
+                } else if (result === "waiting") {
+                  // Held back by its blockers (the gate logged why). Unlike a
+                  // deferral the cursor stays put: nothing about the ticket
+                  // changed, so only this key is re-admitted on the next tick,
+                  // which re-runs the gate.
+                  queue.unmarkProcessed(detector.source, externalId);
+                  this.rememberPendingRescan(detector.source, task.key, externalId);
                 } else if (result === "skipped") {
                   // The retry gate skipped an unchanged incomplete ticket. This
                   // is not a run: report it as skipped, and keep the dedupe

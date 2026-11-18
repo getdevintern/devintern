@@ -132,6 +132,7 @@ export class TaskFormatter {
       relatedIssues,
       comments,
       attachments,
+      stackedOnSection,
     } = taskDetails;
 
     const overviewLines = [`- **Key**: ${key}`, `- **Summary**: ${summary}`];
@@ -205,6 +206,9 @@ ${untrustedContentBlock(
         : "";
     if (descriptionMarkdown.trim()) {
       prompt += untrustedContentBlock(descriptionMarkdown.trimEnd(), "task description") + "\n\n";
+    }
+    if (stackedOnSection) {
+      prompt += `${stackedOnSection.trim()}\n\n`;
     }
 
     // Add linked resources

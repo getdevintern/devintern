@@ -132,6 +132,11 @@ export interface TeamConfig {
   envFile?: string;
   /** Inline env overrides (highest precedence within the team). */
   env: Record<string, string>;
+  /**
+   * `dependency_mode` for this team's tracker tickets that have native
+   * blockers; falls back to `[defaults].dependency_mode`.
+   */
+  dependencyMode?: DependencyMode;
 }
 
 /** One managed repository from a `[[repos]]` entry. */
