@@ -17,10 +17,10 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 ### Worker/dashboard logs and artifacts
 
 - Surface: External dependency: relay, auth, licensing, and observability services
-- Status: `partial`
-- Evidence: `tests/local/dashboard-embedded.test.ts` (`GET /api/logs` readback and secret redaction) (`bun run --filter @devintern/e2e test`)
-- Missing: Artifact and harness-log content readback and redaction.
-- Last reviewed: 2026-11-17
+- Status: `default`
+- Evidence: `tests/local/dashboard-embedded.test.ts` (`GET /api/logs` readback and secret redaction); `tests/local/dashboard-artifacts.test.ts` (artifact list, content and `/file` download, harness-log content, redaction, 4xx refusals, and `devintern worker runs artifacts|logs --json` parity) (`bun run --filter @devintern/e2e test`)
+- Missing: Binary/image artifact previews, Markdown artifact reference resolution, and truncation of oversized artifacts or logs.
+- Last reviewed: 2026-11-18
 
 ### `dashboard`
 
@@ -37,6 +37,14 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 - Evidence: `tests/local/dashboard-embedded.test.ts` (`bun run --filter @devintern/e2e test`)
 - Missing: Retry through the embedded dashboard (`retryMode: "schedule"`).
 - Last reviewed: 2026-11-17
+
+### GET /api/workspace redacted workspace view
+
+- Surface: External dependency: relay, auth, licensing, and observability services
+- Status: `default`
+- Evidence: `tests/local/dashboard-artifacts.test.ts` (`bun run --filter @devintern/e2e test`)
+- Missing: Teams, error monitors (`base_url` userinfo), and the `configSync`/`appliedConfig` state against a running worker.
+- Last reviewed: 2026-11-18
 
 ## Backlog
 
@@ -155,4 +163,57 @@ bun run --filter @getdevintern/code build
 bun run --filter @devintern/e2e test
 # or just this file
 cd packages/e2e && bun test tests/local/dashboard-embedded.test.ts
+```
+
+### Run artifact and harness-log readback, and the redacted workspace view
+
+`tests/local/dashboard-artifacts.test.ts` runs in the default offline suite and
+needs only the built CLI (the existing `dist/` skip guard is the only skip).
+
+The first case drains one injected task through a `WorkerFixture` whose
+`[defaults].pipeline_file` adds a `verify` step (`implement → commit → verify →
+finalize`). The verify prompt carries `E2EVERIFYVERDICT`, which makes the
+deterministic agent (`helpers/fake-agent.ts`, `verify` mode) print an approving
+JSON verdict. The worker env sets `E2E_AGENT_LEAK_TOKEN` to a fake `ghp_`-shaped
+value; the agent echoes it to stdout (the raw harness transcript) and into an
+extra verdict field that the product persists in the `verify-feedback.json`
+artifact, once bare and once as `E2E_API_TOKEN=<value>`. Product redaction is
+pattern-based (token shapes and credential-named keys), not env-based. The
+secret is kept out of the verdict summary and items because run stages are
+served unredacted. Through the standalone dashboard the case asserts:
+
+- `GET /api/runs/:id/artifacts` lists the `verification` (JSON) and
+  `verification-prompt` (text) artifacts for the run;
+- `GET /api/runs/:id/artifacts/:artifactId` keeps the verdict's non-secret
+  fields and shows the echoed note as `token [redacted] and
+E2E_API_TOKEN=[redacted]`; the `/file` download returns the same sanitized
+  bytes as an `application/octet-stream` attachment with `nosniff`;
+- every `GET /api/runs/:id/harness-logs/:name` body is free of the token, and
+  the verify turn's transcript shows the same `[redacted]` placeholders;
+- none of these responses contains the raw or URL-encoded token;
+- an unknown artifact id (content and `/file`) and an unknown log name return
+  404; a non-integer run id returns 400 `run id must be an integer` on the
+  artifact and harness-log routes (404 `not found` on `/file`, whose route only
+  matches integer ids);
+- `devintern worker runs artifacts <id> <artifact-id> --json` and `devintern
+worker runs logs <id> <name> --json` print bodies equal to the HTTP ones.
+
+The second case starts the standalone dashboard against a hand-written
+`workspace.toml`: one repo with fake credentials in its remote
+(`https://e2e-user:<fake>@git.e2e.invalid/...`), an `env_file`, a `[repos.env]`
+table with a `ghp_`-shaped value, and a shared workspace `.env`. `GET
+/api/workspace` returns `status: "ok"` with the repo structure, the remote
+without userinfo, and env files and tables reduced to sorted key names. No env
+value (secret or not) appears in the body. The same file is then rewritten as a
+TOML syntax error with an unquoted token (`status: "invalid"`, `Failed to
+parse ...`, value masked), as a validation error next to a credentialed remote
+(`Invalid ...` with the problem list), and removed (`status: "missing"`). Each
+response is 200 and never contains any seeded secret. The Host/Origin guard is
+covered by `dashboard-embedded.test.ts` and is not repeated here.
+
+```sh
+bun run --filter @getdevintern/code build
+bun run --filter @devintern/e2e test
+# or just this file
+cd packages/e2e && bun test tests/local/dashboard-artifacts.test.ts
 ```

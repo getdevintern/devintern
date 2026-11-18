@@ -16,4 +16,5 @@ import "./utils/review-worktree";
 import "./utils/worktree-setup";
 
 export { GIT_CLEAN_ARGS } from "./utils/constants";
+export { isDependencyFile } from "./utils/worktree-setup";
 export { Utils } from "./utils/registry";

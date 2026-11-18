@@ -24,6 +24,7 @@
  * is re-evaluated even when an overlapping tick already advanced the cursor.
  */
 
+import { startFirstTickInBackground } from "./background-tick";
 import { spawn } from "child_process";
 
 import type { ChangeDetector } from "./change-detector";
@@ -272,9 +273,9 @@ export class TaskPollingAcquirer implements Acquirer {
       // The laptop slept through the entire previous window; drain once now
       // instead of waiting for the next one.
       console.log(`🌙 [${this.name}] working window(s) elapsed while idle; running catch-up drain`);
-      await this.tick({ ignoreGate: true });
+      startFirstTickInBackground(this.name, () => this.tick({ ignoreGate: true }));
     } else {
-      await this.tick();
+      startFirstTickInBackground(this.name, () => this.tick());
     }
   }
 

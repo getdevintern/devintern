@@ -4,7 +4,7 @@ sidebarLabel: "Bug Reports"
 description: "File a redacted DevIntern bug report from the CLI or the dashboard, attach a relevant run, and preview the evidence before sending."
 section: "Automation Reference"
 order: 2
-dateModified: 2026-11-14
+dateModified: 2026-11-18
 tags: ["troubleshooting", "bug-report", "diagnostics", "privacy"]
 ---
 
@@ -12,7 +12,7 @@ tags: ["troubleshooting", "bug-report", "diagnostics", "privacy"]
 
 `devintern report` files a bug report for DevIntern itself: the CLI, worker, pipeline, or agent integration. It gathers a redacted diagnostic bundle and shows exactly what will be sent before anything leaves your machine.
 
-Use it when a run completes with incorrect behavior, DevIntern crashes, a run fails in a way the output does not explain, or `devintern doctor` reports a problem that looks like a product defect. For tracker credentials, missing agent CLIs, usage limits, and failed verification checks, start with [doctor](configuration.md#readiness-check) and the relevant integration guide instead.
+Use it when a run completes with incorrect behavior, DevIntern crashes, a run fails in a way the output does not explain, or `devintern doctor` reports a problem that looks like a product defect. For tracker credentials, missing agent CLIs, usage limits, and failed verification checks, start with [doctor](advanced-settings.md#readiness-check) and the relevant integration guide instead.
 
 ## File a report
 
@@ -38,24 +38,24 @@ devintern report --task PROJ-123
 devintern report --run 482
 ```
 
-Run history comes from the worker's local database. When the worker's log capture files exist, a bounded tail is included automatically. For an interactive run, capture the terminal output yourself and pass it explicitly:
+For worker runs, a tail of the captured logs is attached automatically. For an interactive run, save the terminal output and pass it explicitly:
 
 ```bash
 devintern PROJ-123 --create-pr 2>&1 | tee /tmp/devintern-run.log
 devintern report --last --log /tmp/devintern-run.log
 ```
 
-Log attachment is bounded (64 KB per source) and credentials are masked.
+Log attachment is bounded (64 KB per source) and credentials are masked. Pass `--no-logs` to omit log text, or `--no-diagnostics` to skip run metadata and logs.
 
 ## Report from the dashboard
 
-The [worker dashboard](dashboard.md) can file the same report for a run without a terminal. Open the run and choose **Report a problem** (shown prominently for failed, escalated, and abandoned runs and as a secondary action for runs that completed with the wrong behavior).
+The [worker dashboard](dashboard.md) can file the same report without a terminal. Open the run and choose **Report a problem**.
 
 1. Enter a title and describe what you expected and what happened. Do not paste secrets, credentials, or customer data. Leave **Share identifiers** off unless the task key and repository slug help triage (it matches `--share-identifiers`).
-2. Choose **Preview report**. The dashboard collects the bundle exactly like `devintern report --run <id>` and shows what is attached, what is never sent, and the full redacted payload. Nothing has been sent yet.
-3. Choose **Send report**. The dashboard submits the payload you previewed. Anonymous reports need a contact email on this step, which is added as the report contact; signed-in users follow up through their account.
+2. Choose **Preview report** to see the full redacted payload, collected like `devintern report --run <id>`. Nothing is sent yet.
+3. Choose **Send report**. Anonymous reports need a contact email here.
 
-The preview is held in the dashboard's memory for 15 minutes; after that, preview again. On success the dialog shows the report id. If the endpoint cannot be reached, the report is saved to `.devintern-code/reports/` like a CLI submission and the dialog shows the `devintern report --from <path>` command to retry later.
+A preview expires after 15 minutes. If the endpoint cannot be reached, the report is saved locally and the dialog shows the `devintern report --from <path>` command to retry later.
 
 ## Preview, save, and retry
 
@@ -74,7 +74,7 @@ devintern report list
 devintern report show 8f2a1c
 ```
 
-Every submission attempt is written to `.devintern-code/reports/` first. If the endpoint is unavailable, the report stays pending and the command prints the exact `--from` retry path. A successful send keeps the local copy for 30 days as an audit trail.
+Every report is saved to `.devintern-code/reports/` before sending. If sending fails, the command prints the `--from` path to retry. Sent reports are kept locally for 30 days.
 
 ## What is sent
 
@@ -85,17 +85,11 @@ The payload contains:
 - Bounded log tails you explicitly attach or that the worker captured
 - A stable failure fingerprint used to group duplicates
 
-The collector does not deliberately read task descriptions, prompts, agent transcripts, diffs, source files, or `.env` contents. Attached logs and free-text fields can still contain sensitive content: review the preview and remove anything private before submitting. Known credentials, the current checkout and home paths, task keys, and the detected repository slug are masked; `--share-identifiers` keeps task and repository identifiers.
+Task descriptions, prompts, agent transcripts, diffs, source files, and `.env` contents are not collected. Known credentials, checkout and home paths, task keys, and the repository slug are masked; `--share-identifiers` keeps task and repository identifiers. Redaction cannot recognize every secret, so review the preview of your description and attached logs before submitting.
 
-Report descriptions and log text pass through redaction before submission. Redaction cannot recognize every secret or proprietary value.
+Crashes are already captured through Sentry. A manual report adds what an exception cannot: what you expected, how to reproduce it, and wrong results from runs that succeeded. A report is sent only when you confirm (or pass `--yes`); task runs never send one.
 
-## How this complements Sentry
-
-DevIntern already captures exceptions through Sentry. Manual reports add the context an exception cannot provide: expected behavior, reproduction steps, impact, and incorrect results from a run that completed successfully. Describe those details in the report, and attach the relevant run when available.
-
-Warnings and failed checks in user code are not automatically DevIntern defects. Diagnose them before filing a report. The report command sends only when you confirm submission (or explicitly pass `--yes`); task execution does not submit bug reports to this endpoint.
-
-For a custom support intake, set `DEVINTERN_REPORT_URL` to its report endpoint.
+To send reports to your own support intake, set `DEVINTERN_REPORT_URL`, or pass `--endpoint <url>` for one command.
 
 ## Report with a coding agent
 

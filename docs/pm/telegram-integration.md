@@ -4,15 +4,15 @@ description: "Try the alpha @devintern/pm integration for creating tracker tasks
 section: "Create Tasks"
 order: 11
 sidebarHidden: true
-dateModified: 2026-11-12
+dateModified: 2026-11-18
 tags: ["telegram", "devintern/pm", "integration", "chat", "bot"]
 ---
 
 # Telegram Integration (Alpha)
 
-> **Alpha:** The Telegram chat bot is experimental and may not work properly. Expect bugs and breaking changes, and do not rely on it for critical workflows yet.
+> **Alpha:** The Telegram bot is experimental. Expect bugs and breaking changes.
 
-Draft and file tracker tasks by messaging a Telegram bot. Setup takes about two minutes and needs no server, no public URL, and no webhook: the [devpm chat bot](./chat-bot.md) long-polls Telegram from your machine.
+Draft and file tracker tasks by messaging a Telegram bot. The [devpm chat bot](./chat-bot.md) polls Telegram from your machine, so no server or webhook is needed.
 
 ## Create the bot
 
@@ -28,7 +28,7 @@ From your project directory:
 devpm connect telegram
 ```
 
-Paste the token when prompted. The command validates it against the Telegram API and saves it as `TELEGRAM_BOT_TOKEN` in `.devintern-pm/.env`. The token stays on your machine.
+Paste the token when prompted. The command validates it and saves it as `TELEGRAM_BOT_TOKEN` in `.devintern-pm/.env`.
 
 ## Use it
 
@@ -40,7 +40,7 @@ Then DM your bot a rough idea:
 
 > users should be able to reset their password
 
-The bot replies with a drafted story. Reply to refine it, `type Bug` to change the issue type, `split` for subtasks, and `create` (or a checkmark reaction) to file it. The bot answers with the task link.
+The bot replies with a draft. Reply to refine it, and send `create` (or react with a checkmark) to file it. See [Using the bot](./chat-bot.md#using-the-bot) for other commands.
 
 ## Group chats
 

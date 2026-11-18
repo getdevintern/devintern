@@ -33,6 +33,7 @@
  * defer caps apply unchanged. The agent's own PRs are skipped in the sweep.
  */
 
+import { startFirstTickInBackground } from "./background-tick";
 import { captureError } from "@devintern/utils";
 
 import { parseHarnessList } from "@devintern/agent-harness";
@@ -49,7 +50,7 @@ import {
   describeGitHubAuthFailure,
   isGitHubAuthError,
   isGitHubTransientError,
-} from "../code-host/github/reviews";
+} from "../code-host/github/github-errors";
 import { nextScheduleOccurrence } from "../automation/config";
 import type { CronOrIntervalSchedule } from "../automation/config";
 import type { RunStore } from "../state/run-recorder";
@@ -354,8 +355,11 @@ export class ReviewPollingAcquirer implements Acquirer {
           "PRs; only the agent's own PRs are base-synced",
       );
     }
-    await this.tick();
+    // Arm the interval first, then run the first tick in the background: the
+    // busy guard turns an interval fire during it into a no-op, and a long
+    // first tick must not hold later acquirers (see background-tick.ts).
     this.timer = setInterval(() => void this.tick(), this.options.intervalSeconds * 1000);
+    startFirstTickInBackground(this.name, () => this.tick());
   }
 
   /** Stop polling (an in-flight tick finishes its current PR). */

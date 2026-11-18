@@ -7,6 +7,15 @@ description: Delegate agreed implementation work to a DevIntern worker as ad-hoc
 
 Use `devintern worker add` to hand work to an existing workspace worker. It runs the task through the configured implementation pipeline in a separate checkout. Creating tracker tickets with `devpm` is a different workflow.
 
+## Local or remote worker
+
+`devintern worker add` must run on the machine that runs the worker. The worker is remote when the user names an SSH host for it, or when `DEVINTERN_WORKER_SSH` is set in your environment (a skill convention; the CLI does not read it). In that case run every step below on that host: `ssh <host> '<command>'` for each `devintern` command and each workspace read, with paths such as `~/.devintern/workspace.toml` and `--workspace` resolved on the host. Do not look for a local install or local workspace in remote mode, and do not install DevIntern locally to work around a remote problem.
+
+- Check `ssh <host> 'devintern worker add --help'` first. If `devintern` is not found over SSH, retry once with `~/.bun/bin/devintern`. If SSH itself fails (unknown host, authentication, timeout), report the blocker and point at the [remote delegation setup](https://devintern.com/docs/code/delegation#delegate-from-another-machine); do not change SSH or Tailscale configuration unasked.
+- Send the brief on stdin with `--body-file -` (`ssh <host> "devintern worker add … --body-file - --json" < brief.md`) so the remote shell never parses it. Keep the title free of single quotes, or escape it for the remote shell.
+- The worker uses its own checkout. Push the commits the task depends on, or copy the needed findings into the brief; local-only branches and files are invisible to it.
+- A dropped SSH connection ends `--wait` locally but not the task. Prefer short bounded waits, and check `worker runs` over SSH before enqueueing again.
+
 ## Check the destination
 
 - Check `devintern worker add --help` before dispatching. This command was introduced by [PR #278](https://github.com/getdevintern/devintern/pull/278); older installations do not support it. If unavailable, report the missing capability rather than silently switching to a foreground implementation run or installing an unreleased build.
