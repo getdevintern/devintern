@@ -2,7 +2,13 @@ import { expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { AgentPrsTable, sortOldestFirst } from "@/views/AgentPrsView";
+import {
+  AgentPrsTable,
+  AgentPrsView,
+  MergedAgentPrsTable,
+  sortOldestFirst,
+  sortRecentlyMergedFirst,
+} from "@/views/AgentPrsView";
 import type { AgentPrRecord } from "@/lib/api";
 
 const NOW = 1_800_000_000_000;
@@ -67,4 +73,25 @@ test("oldest-waiting PR sorts first and stale ones are counted", () => {
 
   const html = renderToStaticMarkup(createElement(AgentPrsTable, { prs: [fresh, old], now: NOW }));
   expect(html).toContain("1 waiting over 7 days");
+});
+
+test("merged PRs render newest merge first with the merge age", () => {
+  const older = pr({ prNumber: 5, mergedAt: NOW - 2 * 24 * HOUR });
+  const newer = pr({ prNumber: 6, mergedAt: NOW - 2 * HOUR });
+  expect(sortRecentlyMergedFirst([older, newer]).map((p) => p.prNumber)).toEqual([6, 5]);
+
+  const html = renderToStaticMarkup(
+    createElement(MergedAgentPrsTable, { prs: [older, newer], now: NOW }),
+  );
+  expect(html).toContain("2</span> recently merged PRs");
+  expect(html).toContain("Merged");
+  expect(html.indexOf("#6")).toBeLessThan(html.indexOf("#5"));
+  expect(html).toContain("2h");
+  expect(html).not.toContain("awaiting review");
+});
+
+test("AgentPrsView renders the Open/Merged switch", () => {
+  const html = renderToStaticMarkup(createElement(AgentPrsView));
+  expect(html).toContain("Open");
+  expect(html).toContain("Merged");
 });

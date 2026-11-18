@@ -640,14 +640,17 @@ export interface QueuedWorkResponse {
   total: number;
 }
 
-/** One open agent-created PR (registry rows reconciled with GitHub by the worker). */
+/** One agent-created PR (registry rows reconciled with GitHub by the worker). */
 export interface AgentPrRecord {
+  provider?: string;
   repo: string;
   prNumber: number;
   prUrl: string;
   branch?: string;
   taskKey?: string;
   ticketUrl?: string;
+  /** When the worker saw the PR merged (epoch ms); only in the merged list. */
+  mergedAt?: number;
   createdAt: number;
   updatedAt: number;
 }

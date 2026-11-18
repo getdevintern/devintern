@@ -16,6 +16,7 @@ The dashboard shows what the worker has been doing: current and past runs, agent
 | **Overview**    | Worker health, active and queued work, recently finished tasks. The landing page.                              |
 | **Runs**        | Full run history. Open a run to follow its stages, read each agent transcript, open the task or PR, retry, or report a problem. |
 | **Automations** | Recurring automations, estimations, and scheduled jobs, with **Run now**.                                      |
+| **Pull requests** | The agent's PRs, switchable between **Open** (awaiting review, oldest first) and **Merged** (up to the 50 most recently merged, newest first), each linked to its ticket. Merges are recorded when the worker sees them, so PRs merged before this feature and PRs closed without merging are not listed. |
 | **Workspace**   | A read-only view of `workspace.toml`: routing, repositories, automations, credentials (key names only), and policy. |
 | **Stats**       | Success rates, durations, and **When runs happen**, a weekday × hour heatmap. Use it to move automations into quiet hours. |
 
@@ -116,7 +117,7 @@ Every read-only dashboard view is also a `devintern worker` subcommand. These co
 | `devintern worker runs artifacts <id> [artifact-id]` | A run's artifacts, or one artifact's content               |
 | `devintern worker stats`                  | Success rates, durations, and activity by hour (`--window 7d\|30d\|90d\|all`, default `30d`; `--tz <zone>`) |
 | `devintern worker automations`            | Automations with next and last run                                    |
-| `devintern worker prs`                    | Open PRs and MRs opened by the agent                                  |
+| `devintern worker prs`                    | PRs and MRs opened by the agent: open (default) or recently merged (`--state open\|merged`; `--limit N`, 1..500, default 50) |
 | `devintern worker queue`                  | Queued work that has not started                                      |
 | `devintern worker status`                 | Worker liveness, queue counts, poll cursors                           |
 | `devintern worker overview`               | Capacity, harness health, tracker freshness                           |

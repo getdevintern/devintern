@@ -345,6 +345,14 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
 
     switch (result.outcome) {
       case "merged":
+        // Record the merge now instead of waiting for the next state poll,
+        // so the dashboard's merged list reflects it immediately.
+        this.options.workerState.markAgentPrClosed(repo, prNumber, {
+          merged: true,
+          mergedAt: finishedAt,
+        });
+        this.options.queue.markProcessed(AUTO_MERGE_SOURCE, decisionKey);
+        break;
       case "would-merge":
       case "rejected":
       case "skipped":

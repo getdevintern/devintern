@@ -964,6 +964,33 @@ describe("dashboard API", () => {
     });
   });
 
+  test("handleAgentPrs state=merged lists merged PRs only, newest merge first", () => {
+    const state = new WorkerState(dbPath);
+    state.recordAgentPr({ repo: "acme/webapp", prNumber: 7, taskKey: "DEV-1" });
+    state.recordAgentPr({ repo: "acme/webapp", prNumber: 8 });
+    state.recordAgentPr({ repo: "acme/webapp", prNumber: 9 });
+    state.markAgentPrClosed("acme/webapp", 7, { merged: true });
+    state.markAgentPrClosed("acme/webapp", 8);
+    state.close();
+
+    const merged = handleAgentPrs(data, new URLSearchParams("state=merged"));
+    expect(merged.status).toBe(200);
+    const body = merged.body as { prs: { prNumber: number; mergedAt?: number }[] };
+    expect(body.prs).toHaveLength(1);
+    expect(body.prs[0]).toMatchObject({ prNumber: 7, taskKey: "DEV-1" });
+    expect(body.prs[0]?.mergedAt).toBeNumber();
+
+    const open = handleAgentPrs(data, new URLSearchParams("state=open"));
+    expect((open.body as { prs: { prNumber: number }[] }).prs.map((p) => p.prNumber)).toEqual([9]);
+  });
+
+  test("handleAgentPrs rejects an unknown state or out-of-range limit", () => {
+    expect(handleAgentPrs(data, new URLSearchParams("state=closed")).status).toBe(400);
+    expect(handleAgentPrs(data, new URLSearchParams("state=merged&limit=0")).status).toBe(400);
+    expect(handleAgentPrs(data, new URLSearchParams("state=merged&limit=501")).status).toBe(400);
+    expect(handleAgentPrs(data, new URLSearchParams("state=merged&limit=2")).status).toBe(200);
+  });
+
   test("handleAgentPrs degrades to an empty list without a database", () => {
     const response = handleAgentPrs(data);
     expect(response.status).toBe(200);
