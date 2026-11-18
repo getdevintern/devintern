@@ -53,6 +53,7 @@ import { handleQueuedWork } from "../observability/queued-work";
 import type { QueuedWorkResponse } from "../observability/queued-work";
 import type { TaskArtifactContent, TaskArtifactFile } from "../observability/task-artifacts";
 import type { HarnessLogContent } from "../observability/harness-logs";
+import { hourProfile, quietestWindow } from "../state/run-activity";
 import type { RunRecord, RunStageRecord, RunStats } from "../state/run-recorder";
 import type { WorkerLogsResult } from "../observability/worker-logs";
 import { configureSqliteConnection } from "../state/sqlite";
@@ -224,14 +225,17 @@ const SPECS: Record<string, CommandSpec> = {
   "runs logs": RUNS_LOGS_SPEC,
   "runs artifacts": RUNS_ARTIFACTS_SPEC,
   stats: {
-    usage: "stats [--window 7d|30d|90d|all]",
+    usage: "stats [--window 7d|30d|90d|all] [--tz <zone>]",
     route: "GET /api/stats",
     description: "Aggregate run statistics over a time window.",
-    options: { window: { type: "string" } },
-    optionHelp: ["  --window <window>   7d | 30d | 90d | all (default 30d)"],
+    options: { window: { type: "string" }, tz: { type: "string" } },
+    optionHelp: [
+      "  --window <window>   7d | 30d | 90d | all (default 30d)",
+      "  --tz <zone>         IANA timezone for hour-of-day activity (default: worker host zone)",
+    ],
     positionals: { min: 0, max: 0 },
     run: (data, values) => ({
-      response: handleStats(data, queryParams(values, { window: "window" })),
+      response: handleStats(data, queryParams(values, { window: "window", tz: "tz" })),
       render: renderStats,
     }),
   },
@@ -695,6 +699,7 @@ function renderStats(body: { window: string; stats: RunStats | null }): string {
     `Median duration:  ${formatDuration(stats.medianDurationMs)} (succeeded runs with a PR)`,
   ];
   if (byOrigin) lines.push(`By origin:        ${byOrigin}`);
+  lines.push(...renderActivity(stats));
   if (stats.byHarness.length > 0) {
     lines.push(
       "",
@@ -712,6 +717,34 @@ function renderStats(body: { window: string; stats: RunStats | null }): string {
     );
   }
   return lines.join("\n");
+}
+
+function formatHour(hour: number): string {
+  return `${String(hour % 24).padStart(2, "0")}:00`;
+}
+
+/** Hour-of-day summary: busiest pickup hours and the quietest 4-hour block of agent time. */
+function renderActivity(stats: RunStats): string[] {
+  const { activity } = stats;
+  if (activity.cells.length === 0) return [];
+  const starts = hourProfile(activity, "starts");
+  const busiest = starts
+    .map((count, hour) => ({ count, hour }))
+    .filter((entry) => entry.count > 0)
+    .sort((a, b) => b.count - a.count || a.hour - b.hour)
+    .slice(0, 3)
+    .map((entry) => `${formatHour(entry.hour)} (${entry.count})`)
+    .join(", ");
+  const busy = hourProfile(activity, "busyMs");
+  const totalBusy = busy.reduce((sum, ms) => sum + ms, 0);
+  const quiet = quietestWindow(busy, 4);
+  const share = totalBusy > 0 ? formatPercent(quiet.total / totalBusy) : "0%";
+  const idle = busy.filter((ms) => ms === 0).length;
+  return [
+    `Busiest pickups:  ${busiest || "-"} (${activity.timezone})`,
+    `Quietest 4h:      ${formatHour(quiet.startHour)}–${formatHour(quiet.startHour + 4)} (${share} of agent time)`,
+    `Idle hours:       ${idle} of 24 with no agent time`,
+  ];
 }
 
 function renderAutomations(body: { automations: DashboardAutomationView[] }): string {
@@ -767,6 +800,9 @@ function renderQueue(body: QueuedWorkResponse): string {
 function workerLine(worker: WorkerStatusView): string {
   const pid = worker.pid === undefined ? "" : ` (pid ${worker.pid})`;
   const since = worker.startedAt ? ` since ${worker.startedAt}` : "";
+  if (worker.reason === "pid-namespace") {
+    return `${worker.status} (cannot verify from this sandbox${worker.pid === undefined ? "" : `; pid ${worker.pid}`})${since}`;
+  }
   return `${worker.status}${pid}${since}`;
 }
 

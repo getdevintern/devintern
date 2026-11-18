@@ -7,8 +7,10 @@ registration, fixtures, and an automated test that exercises its success and
 failure paths.
 
 Read [`docs/code/pipelines.md`](../../docs/code/pipelines.md) first for the
-pipeline model: default flow, required ordering, built-in `verify`, custom
-steps, and configuration precedence.
+pipeline model (default flow, required ordering, built-in `verify`, and
+configuration precedence), then
+[`docs/code/pipeline-plugins.md`](../../docs/code/pipeline-plugins.md) for the
+custom step API.
 
 ## Examples
 

@@ -20,13 +20,17 @@ const promptMarkers = [...agentInput.matchAll(/E2EPROMPTMARKER[A-Z0-9]+/g)].map(
 // implement → review → fix → review without the fixture pinning one mode.
 // The git-hook repair turn (`runAgentHarnessToFixGitHook`) is likewise sent from
 // the same run that implemented the task, so it is keyed on its bundled prompt.
-const promptMode = agentInput.includes("You are reviewing a pull request")
-  ? "auto-review-feedback"
-  : agentInput.includes("## Feedback to Address")
-    ? "auto-review-fix"
-    : agentInput.includes("# Git Hook Error - Fix Required")
-      ? "hook-fix"
-      : undefined;
+// A pipeline `verify` step whose configured prompt carries E2EVERIFYVERDICT is
+// answered with an approving JSON verdict (see the `verify` branch below).
+const promptMode = agentInput.includes("E2EVERIFYVERDICT")
+  ? "verify"
+  : agentInput.includes("You are reviewing a pull request")
+    ? "auto-review-feedback"
+    : agentInput.includes("## Feedback to Address")
+      ? "auto-review-fix"
+      : agentInput.includes("# Git Hook Error - Fix Required")
+        ? "hook-fix"
+        : undefined;
 // Per-prompt `incomplete` mode for a long-lived worker that must succeed on one
 // ticket and report another incomplete. Like E2E_FAIL_PROMPT_MARKER below, the
 // marker must be alphanumeric so Markdown escaping cannot hide it.
@@ -267,6 +271,28 @@ if (mode === "estimate") {
       risks: [],
       unclearAreas: [],
       summary: "Deterministic E2E estimation fixture.",
+    }),
+  );
+  process.exit(0);
+}
+// Pipeline verify turn: print only an approving verdict, never touch the tree.
+// `E2E_AGENT_LEAK_TOKEN` (optional) is echoed into stdout, so the raw harness
+// transcript holds it, and into an extra verdict field, which the product
+// persists in the verify-feedback.json artifact but not in the run stage. Both
+// a bare token and an `E2E_API_TOKEN=` assignment are echoed so readback
+// redaction can be checked for its token-shape and key-name rules.
+if (mode === "verify") {
+  const leak = process.env.E2E_AGENT_LEAK_TOKEN;
+  const leakNote = leak
+    ? `Checked the fixture with token ${leak} and E2E_API_TOKEN=${leak} before approving.`
+    : undefined;
+  if (leakNote) console.log(leakNote);
+  console.log(
+    JSON.stringify({
+      summary: "E2E verification approved the greeting change.",
+      approved: true,
+      items: [],
+      ...(leakNote ? { evidenceLog: leakNote } : {}),
     }),
   );
   process.exit(0);

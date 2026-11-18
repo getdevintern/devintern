@@ -4,127 +4,69 @@ sidebarLabel: "Quick Start"
 description: "Use when installing DevIntern Code for the first time and running your first markdown task or tracker ticket through a coding agent."
 section: "Automation"
 order: 0
-dateModified: 2026-11-12
+dateModified: 2026-11-18
 tags: ["devintern/code", "quick start", "jira", "trello", "cli"]
 ---
 
 # DevIntern Code Quick Start
 
-**@devintern/code** is your AI intern for automatically implementing tasks. Point it at a local markdown file or a ticket in your task tracker, and it runs your AI agent, creates a feature branch, commits the changes, and can open a pull request.
+DevIntern Code runs your AI coding agent on a task: a local markdown file or a ticket from Jira, Linear, Trello, Asana, Azure DevOps, GitHub Issues, or GitLab Issues. It creates a feature branch, commits the changes, and can open a pull request.
 
-For agent-assisted setup, use the [devintern-setup skill](https://github.com/getdevintern/devintern/tree/main/plugins/devintern/skills/devintern-setup). It covers prerequisites, source-control and tracker credentials, browser authorization when needed, and verifying worker activation. For changes to an existing worker's repositories, routing, automations, and policies, use [devintern-workspace](https://github.com/getdevintern/devintern/tree/main/plugins/devintern/skills/devintern-workspace).
-
-See [Agent Skills](agent-skills.md) for installation commands for Codex and Claude Code, prerequisites, and example prompts for setup, workspace changes, and delegation.
-
-**Recommended for ongoing use:** set up a [workspace worker](./worker.md#quick-start), even for one repository, with relay-backed integrations. Start with `devintern worker init`; it includes tracker setup when needed and can install/start the service. The standalone CLI walkthrough below remains useful for an explicitly one-off task or trial run.
-
-Supported task trackers today: **Jira** (default), **Linear**, **Trello**, **Asana**, **Azure DevOps**, **GitHub Issues**, **GitLab Issues**, and **local markdown files** (no PM account required).
+Prefer to set up from a chat? Install the [devintern-setup skill](agent-skills.md) and ask your coding agent to do it.
 
 ## Prerequisites
 
-- **[Bun](https://bun.sh) runtime** (required to run @devintern/code)
-- A local markdown file, or a task tracker account with API access (Jira, Linear, Trello, Asana, Azure DevOps, GitHub Issues, or GitLab Issues)
-- AI agent CLI installed (e.g., Claude Code, OpenCode, Codex, Cursor)
-- Git repository for your project
+- [Bun](https://bun.sh)
+- An AI agent CLI, such as Claude Code, Codex, OpenCode, or Cursor
+- A git repository for your project
+- A task tracker account with API access, or a markdown file
 
-## Installation
-
-Install globally with Bun:
+## 1. Install
 
 ```bash
-# Install Bun if not already installed
-curl -fsSL https://bun.sh/install | bash
-
-# Install @devintern/code globally
+curl -fsSL https://bun.sh/install | bash   # if Bun is not installed
 bun install -g @getdevintern/code
 ```
 
-## Initialize Configuration
+## 2. Initialize
 
-Navigate to your project directory and run:
+In your project directory:
 
 ```bash
 devintern init
 ```
 
-In a terminal, this starts an interactive setup wizard that:
+The wizard asks for your tracker, links to the page where you create its token, and validates the connection. It also detects installed agent CLIs and ends with a readiness checklist. Your answers go to `.devintern-code/.env`, which is added to `.gitignore`.
 
-- Detects an existing @devintern/pm configuration (`.devintern-pm/.env`) in the same project and offers to reuse those tracker credentials, so you skip straight to validation
-- Asks which task tracker you use — local **markdown files** lead the menu as the zero-account way to try DevIntern in minutes, followed by Jira, Linear, GitHub Issues, GitLab Issues, Azure DevOps, Asana, and Trello
-- Links you directly to the provider's token creation page and prompts for each credential, with a pointer to the matching setup guide in these docs
-- Validates the connection with a real API call before finishing (you can retry, edit values, or skip)
-- Offers an optional GitHub token for pull request creation
-- Detects installed AI agent CLIs (and warns with install steps when none are found)
-- Offers to sign in to DevIntern on the spot (`devintern login` equivalent)
-- Finishes with a readiness checklist so your first run cannot fail on something setup could have caught
-- Writes your answers to `.devintern-code/.env`, creates `settings.json` for per-project configuration, and adds a whitelist block to your `.gitignore` (`.devintern-code/*` plus `!settings.json` and `!.env.example` exceptions) so credentials and local run state never get committed, while `settings.json` and the `.env.example` template stay trackable
+No tracker account yet? Choose **Markdown files**. Tasks are read from `./tasks` and need no credentials. See [Markdown File Tasks](./markdown-tasks.md).
 
-Not ready to connect a real task tracker yet? Choose **Markdown files** in the wizard. It configures a local task directory (`./tasks` by default), requires no tracker account or API credentials, and lets you switch to Jira, Linear, or another tracker later. See [Markdown File Tasks](./markdown-tasks.md) for the supported file format and workflow.
+Run `devintern init` again to update credentials or switch trackers. For scripts and CI, `devintern init --yes` writes a commented template instead of prompting.
 
-For scripted or CI setups, pass `--yes` (or `--no-interactive`) to skip the prompts and write a commented configuration template instead:
+## 3. Run one task
+
+Check that everything is wired up:
 
 ```bash
-devintern init --yes
+devintern doctor
 ```
 
-### Re-running init on an existing setup
-
-Running `devintern init` in an already-configured project no longer refuses — it offers a short menu: **update** your current tracker's credentials (stored values become Enter-to-keep defaults), **switch** to a different tracker (your GitHub PR token carries over), or exit without changes. Updates are merged into `.env`, so comments, custom variables, and previously-skipped optionals are preserved.
-
-## Connect Your Task Tracker
-
-The wizard handles credentials for you. If you skip `init`, running a task in an unconfigured project from an interactive terminal offers to launch the guided setup inline before failing. If you used `--yes`, or want to change trackers later, edit `.devintern-code/.env` for the tracker you use. Optionally edit `.devintern-code/settings.json` for status or list transitions after a run.
-
-| Tracker            | When to use                                               | Setup guide                                                 |
-| ------------------ | --------------------------------------------------------- | ----------------------------------------------------------- |
-| **Jira** (default) | Jira Cloud issues, JQL batch runs, story point estimation | [Jira Integration](./jira-integration.md)                   |
-| **Linear**         | Linear issues by ID or URL, IssueFilter batch runs        | [Linear Integration](./linear-integration.md)               |
-| **Trello**         | Trello cards by short link or URL                         | [Trello Integration](./trello-integration.md)               |
-| **Asana**          | Asana tasks with project section transitions              | [Asana Integration](./asana-integration.md)                 |
-| **Azure DevOps**   | Azure DevOps work items by ID or URL                      | [Azure DevOps Integration](./azure-devops-integration.md)   |
-| **GitHub Issues**  | GitHub issues with status labels, PRs in the same repo    | [GitHub Issues Integration](./github-issues-integration.md) |
-| **GitLab Issues**  | GitLab issues with status labels, MRs in the same repo    | [GitLab Integration](./gitlab-integration.md)               |
-| **Markdown files** | Local `.md` specs, no PM account needed                   | [Markdown File Tasks](./markdown-tasks.md)                  |
-
-**Jira:** add `JIRA_BASE_URL`, `JIRA_EMAIL`, and `JIRA_API_TOKEN`. You do not need to set `TASK_TRACKER` (it defaults to `jira`).
-
-**Trello:** set `TASK_TRACKER=trello` plus `TRELLO_API_KEY` and `TRELLO_API_TOKEN`.
-
-Shared options (GitHub/Bitbucket PRs, agent harness, output directory) are covered in [Configuration](./configuration.md).
-
-## Run Your First Task
-
-Not sure everything is wired up? Run `devintern doctor` for a readiness check (agent CLI, tracker credentials, sign-in) with a fix hint per issue. If a failure looks like a DevIntern defect rather than a setup problem, `devintern report` files a redacted report with the run and logs attached.
-
-If you chose Markdown during setup, add `TASK-1.md` to your configured task directory and pass its filename without the extension:
+Then run a task. With Markdown, add `TASK-1.md` to your task directory and pass its name without the extension:
 
 ```bash
 devintern TASK-1
 ```
 
-For a connected tracker, pass its task reference instead:
-
-**Jira**
+With a tracker, pass the task reference:
 
 ```bash
 devintern PROJ-123 --create-pr
 ```
 
-**Trello** (`TASK_TRACKER=trello` in `.devintern-code/.env`)
+Opening a pull request needs a source-control token; see [Configuration](./configuration.md#github-authentication).
 
-```bash
-devintern AbCdEf12 --create-pr
-```
+## Next steps
 
-## What's Next?
-
-Turn the successful one-off run into a worker that watches for ready tasks and opens pull requests without you starting each run:
-
-```bash
-devintern worker init
-devintern worker
-```
-
-- [Set up the worker](./worker.md): automate task pickup, pull request feedback, and recurring work
-- [CLI reference](./usage.md): run individual tasks and queries on demand
-- [Tracker setup guides](#connect-your-task-tracker): open the guide for the tracker you selected during setup
+- [Set up the worker](./worker.md#quick-start) so tasks are picked up, implemented, and turned into PRs automatically. Start with `devintern worker init`. This is the recommended setup for ongoing use, even with one repository.
+- Open the guide for your tracker: [Jira](./jira-integration.md), [Linear](./linear-integration.md), [Trello](./trello-integration.md), [Asana](./asana-integration.md), [Azure DevOps](./azure-devops-integration.md), [GitHub Issues](./github-issues-integration.md), or [GitLab](./gitlab-integration.md).
+- [CLI reference](./usage.md): flags, batch queries, and git behavior.
+- [Reporting Bugs](./reporting-bugs.md): if a failure looks like a DevIntern defect, `devintern report` files a redacted report.

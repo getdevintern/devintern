@@ -78,6 +78,16 @@ export interface FakeAzureDevOpsWiqlRequest {
 const FAKE_IDENTITY = { displayName: "E2E Azure DevOps User" } as const;
 const FAKE_PAT = "fake-azure-devops-pat";
 
+/** Field reference name the product writes when no custom field is configured. */
+export const AZURE_DEVOPS_STORY_POINTS_FIELD = "Microsoft.VSTS.Scheduling.StoryPoints";
+
+/**
+ * Work-item comments are a preview API in Azure DevOps: requests without a
+ * `-preview` `api-version` are rejected by the real service, so the fake
+ * rejects them too (e.g. `7.1-preview.3` passes, `7.0` does not).
+ */
+const COMMENTS_API_VERSION_PATTERN = /^\d+\.\d+-preview(?:\.\d+)?$/;
+
 /** Escape HTML characters so seeded markdown text cannot inject markup. */
 function escapeHtml(value: string): string {
   return value
@@ -423,6 +433,47 @@ export class FakeAzureDevOpsTracker implements TrackerFixture {
     workItem.fields["System.ChangedDate"] = this.timestamp();
   }
 
+  /**
+   * Move the deterministic fake clock so a work item can be created "now" for
+   * the estimation <24h skip. Later timestamped writes continue from here.
+   *
+   * @param epochMs - Epoch milliseconds to use as the server's current time
+   */
+  setNow(epochMs: number): void {
+    if (!Number.isFinite(epochMs)) {
+      throw new Error(`Invalid fake Azure DevOps clock: ${epochMs}`);
+    }
+    this.now = epochMs;
+  }
+
+  /** Read one stored work-item field, or `undefined` when it was never written. */
+  getField(ticketKey: string, field: string): unknown {
+    return this.requireWorkItem(ticketKey).fields[field];
+  }
+
+  /** Story points written through the work-item JSON patch (default field). */
+  getStoryPoints(ticketKey: string, field = AZURE_DEVOPS_STORY_POINTS_FIELD): unknown {
+    return this.getField(ticketKey, field);
+  }
+
+  /**
+   * Stored comments with their raw HTML `text` and timestamps, so a test can
+   * assert the product posted HTML (not markdown) and edited in place.
+   */
+  rawComments(ticketKey: string): Array<{
+    id: string;
+    text: string;
+    createdDate: string;
+    modifiedDate: string;
+  }> {
+    return this.requireWorkItem(ticketKey).comments.map((comment) => ({
+      id: String(comment.id),
+      text: comment.text,
+      createdDate: comment.createdDate,
+      modifiedDate: comment.modifiedDate,
+    }));
+  }
+
   /** Current `System.ChangedDate` (the `updated` stamp the worker dedupes on). */
   changedDate(ticketKey: string): string {
     return String(this.requireWorkItem(ticketKey).fields["System.ChangedDate"] ?? "");
@@ -539,12 +590,24 @@ export class FakeAzureDevOpsTracker implements TrackerFixture {
     const commentsMatch = scopedPath.match(/^\/([^/]+)\/_apis\/wit\/workItems\/(\d+)\/comments$/i);
     if (commentsMatch?.[1] && commentsMatch[2]) {
       if (commentsMatch[1] !== this.project) return this.unmatched(method, path);
+      const versionError = this.checkCommentsApiVersion(method, path, url);
+      if (versionError) return versionError;
       if (method === "GET") {
         return this.getComments(Number(commentsMatch[2]));
       }
       if (method === "POST") {
         return this.postComment(Number(commentsMatch[2]), request);
       }
+    }
+
+    const commentMatch = scopedPath.match(
+      /^\/([^/]+)\/_apis\/wit\/workItems\/(\d+)\/comments\/(\d+)$/i,
+    );
+    if (commentMatch?.[1] && commentMatch[2] && commentMatch[3] && method === "PATCH") {
+      if (commentMatch[1] !== this.project) return this.unmatched(method, path);
+      const versionError = this.checkCommentsApiVersion(method, path, url);
+      if (versionError) return versionError;
+      return this.updateComment(Number(commentMatch[2]), Number(commentMatch[3]), request);
     }
 
     return this.unmatched(method, path);
@@ -554,6 +617,15 @@ export class FakeAzureDevOpsTracker implements TrackerFixture {
     const diagnostic = `Unmatched fake Azure DevOps request: ${method} ${path}`;
     this.unexpectedRequests.push(diagnostic);
     return json({ message: diagnostic, typeKey: "UnmatchedRequestException" }, 404);
+  }
+
+  /** Reject a comments request whose `api-version` is not a preview version. */
+  private checkCommentsApiVersion(method: string, path: string, url: URL): Response | undefined {
+    const version = url.searchParams.get("api-version") ?? "";
+    if (COMMENTS_API_VERSION_PATTERN.test(version)) return undefined;
+    const diagnostic = `Fake Azure DevOps comments API requires a preview api-version: ${method} ${path}?api-version=${version || "<missing>"}`;
+    this.unexpectedRequests.push(diagnostic);
+    return json({ message: diagnostic, typeKey: "VssInvalidPreviewVersionException" }, 400);
   }
 
   private async queryWorkItems(project: string, request: Request): Promise<Response> {
@@ -618,6 +690,14 @@ export class FakeAzureDevOpsTracker implements TrackerFixture {
     if (!workItem) return workItemNotFound(id);
     const body = await readJson(request);
     if (!body.ok) return body.response;
+    const contentType = request.headers.get("content-type") ?? "";
+    if (!contentType.toLowerCase().startsWith("application/json-patch+json")) {
+      // The real service answers 415 for a work-item update that is not a
+      // JSON patch document.
+      const diagnostic = `Fake Azure DevOps work-item PATCH requires application/json-patch+json, got ${contentType || "<missing>"}`;
+      this.unexpectedRequests.push(diagnostic);
+      return json({ message: diagnostic }, 415);
+    }
     if (!Array.isArray(body.value)) {
       const diagnostic = "Fake Azure DevOps work-item PATCH body must be a JSON patch array";
       this.unexpectedRequests.push(diagnostic);
@@ -625,6 +705,12 @@ export class FakeAzureDevOpsTracker implements TrackerFixture {
     }
     for (const operation of body.value) {
       const record = asRecord(operation);
+      const op = typeof record?.op === "string" ? record.op : "";
+      if (!["add", "replace"].includes(op)) {
+        const diagnostic = `Unsupported fake Azure DevOps JSON patch op: ${op || "<missing>"}`;
+        this.unexpectedRequests.push(diagnostic);
+        return json({ message: diagnostic }, 400);
+      }
       const path = typeof record?.path === "string" ? record.path : "";
       const fieldPath = path.match(/^\/fields\/(.+)$/)?.[1];
       if (!fieldPath) {
@@ -673,6 +759,36 @@ export class FakeAzureDevOpsTracker implements TrackerFixture {
     workItem.comments.push(comment);
     workItem.fields["System.ChangedDate"] = timestamp;
     return json(this.commentPayload(comment), 201);
+  }
+
+  /**
+   * Edit a comment in place, as the comments preview API does: the id and
+   * `createdDate` stay, `text` and `modifiedDate` change. Like a new comment,
+   * the edit bumps the work item's `System.ChangedDate`.
+   */
+  private async updateComment(id: number, commentId: number, request: Request): Promise<Response> {
+    const workItem = this.workItems.get(id);
+    if (!workItem) return workItemNotFound(id);
+    const comment = workItem.comments.find((candidate) => candidate.id === commentId);
+    if (!comment) {
+      const diagnostic = `Fake Azure DevOps comment ${commentId} not found on work item ${id}`;
+      this.unexpectedRequests.push(diagnostic);
+      return json({ message: diagnostic, typeKey: "CommentNotFoundException" }, 404);
+    }
+    const body = await readJson(request);
+    if (!body.ok) return body.response;
+    const record = asRecord(body.value);
+    const text = record?.text;
+    if (typeof text !== "string" || Object.keys(record ?? {}).some((key) => key !== "text")) {
+      const diagnostic = "Fake Azure DevOps comment update body must be exactly { text: string }";
+      this.unexpectedRequests.push(diagnostic);
+      return json({ message: diagnostic }, 400);
+    }
+    const timestamp = this.timestamp();
+    comment.text = text;
+    comment.modifiedDate = timestamp;
+    workItem.fields["System.ChangedDate"] = timestamp;
+    return json(this.commentPayload(comment));
   }
 
   private workItemPayload(workItem: FakeAzureDevOpsWorkItem): Record<string, unknown> {

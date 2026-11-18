@@ -2,6 +2,8 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFile
 import { homedir } from "os";
 import { join } from "path";
 
+import { readOwnPidNamespace } from "../lock-manager.ts";
+
 /**
  * Resolve the workspace home directory.
  *
@@ -94,6 +96,12 @@ export function workspaceAppliedConfigPath(workspaceDir: string = resolveWorkspa
 export interface WorkerStartMarker {
   pid: number;
   startedAt: number;
+  /**
+   * PID namespace of the writer (Linux only). A reader in another namespace
+   * cannot probe `pid` (it may be invisible or collide with an unrelated
+   * process), so it must not trust the pid; see `isReplacementWorkerStarting`.
+   */
+  pidNamespace?: string;
 }
 
 /**
@@ -102,9 +110,10 @@ export interface WorkerStartMarker {
  */
 export function writeWorkerStartMarker(workspaceDir: string, pid: number = process.pid): void {
   try {
+    const pidNamespace = readOwnPidNamespace();
     writeFileSync(
       workspaceWorkerStartPath(workspaceDir),
-      JSON.stringify({ pid, startedAt: Date.now() }),
+      JSON.stringify({ pid, startedAt: Date.now(), ...(pidNamespace ? { pidNamespace } : {}) }),
       { encoding: "utf8", mode: 0o600 },
     );
   } catch (error) {
@@ -118,9 +127,14 @@ export function readWorkerStartMarker(workspaceDir: string): WorkerStartMarker |
     const raw = JSON.parse(readFileSync(workspaceWorkerStartPath(workspaceDir), "utf8")) as {
       pid?: unknown;
       startedAt?: unknown;
+      pidNamespace?: unknown;
     };
     if (typeof raw.pid !== "number" || typeof raw.startedAt !== "number") return null;
-    return { pid: raw.pid, startedAt: raw.startedAt };
+    return {
+      pid: raw.pid,
+      startedAt: raw.startedAt,
+      ...(typeof raw.pidNamespace === "string" ? { pidNamespace: raw.pidNamespace } : {}),
+    };
   } catch {
     return null;
   }
