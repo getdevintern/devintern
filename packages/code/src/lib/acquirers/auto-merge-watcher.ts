@@ -18,6 +18,7 @@
  * With `once` (`[workspace].auto_merge_once`, the default), a decision is also
  * recorded per PR and policy, so later commits (updates, conflict
  * resolutions) are not checked again; only a policy change re-checks the PR.
+ * Exhausting the failure cap is not a decision: it gives up on that head only.
  *
  * Each evaluation is recorded as a run while it executes, so the dashboard
  * shows it live. Evaluations that end in "not ready yet" (waiting, skipped)
@@ -453,7 +454,9 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
             `⛔ [${this.name}] ${label} auto-merge failed ${state.failures} time(s); ` +
               "giving up until new commits land",
           );
-          markDecided();
+          // A failure is not a decision: only this head is given up on, so
+          // with `once` a later commit can still produce one real decision.
+          this.options.queue.markProcessed(AUTO_MERGE_SOURCE, decisionKeys[0]);
         } else {
           state.nextAttemptAt =
             finishedAt +

@@ -458,7 +458,8 @@ export async function autoMergePr(
         kind: "not-evaluable",
         detail: `the automatic check kept failing (${result.message})`,
       },
-      ...(options.policy.once ? { once: true } : {}),
+      // No `once` footer: the worker gives up on this head only, so new
+      // commits are checked again even with `auto_merge_once`.
     });
   }
   return result;

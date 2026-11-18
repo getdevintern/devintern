@@ -312,6 +312,34 @@ describe("AutoMergeWatcherAcquirer", () => {
     expect(calls).toHaveLength(3);
   });
 
+  test("once: exhausting the failure cap gives up on the head, not the PR", async () => {
+    results = Array.from({ length: 3 }, () => ({
+      outcome: "failed" as const,
+      message: "boom",
+      reviewed: false,
+    }));
+    const w = watcher({ once: true });
+    for (let i = 0; i < 4; i++) {
+      await w.tick();
+      now += 60 * 60_000;
+    }
+    expect(calls).toHaveLength(3);
+    expect(queue.hasProcessed(AUTO_MERGE_SOURCE, autoMergeDecisionKey(REPO, 7, HEAD, ""))).toBe(
+      true,
+    );
+    expect(queue.hasProcessed(AUTO_MERGE_SOURCE, autoMergePrDecisionKey(REPO, 7, ""))).toBe(false);
+    // A new commit gets one real decision, which then is final for the PR.
+    pr = { ...pr, head: { sha: "f".repeat(40), repo: null } };
+    results = [{ outcome: "rejected", message: "outside safe paths", reviewed: true }];
+    await w.tick();
+    expect(calls).toHaveLength(4);
+    expect(calls[3]?.sha).toBe("f".repeat(40));
+    pr = { ...pr, head: { sha: "e".repeat(40), repo: null } };
+    now += 60 * 60_000;
+    await w.tick();
+    expect(calls).toHaveLength(4);
+  });
+
   test("once: turning it on skips PRs decided while it was off", async () => {
     let once = false;
     results = [{ outcome: "rejected", message: "no", reviewed: true }];
