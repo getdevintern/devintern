@@ -20,7 +20,7 @@ import type {
   TaskTrackerCommentContent,
 } from "../../../types/task-tracker";
 import { TaskTrackerError } from "../../../types/task-tracker";
-import type { TaskTrackerClient } from "../client";
+import type { TaskBlocker, TaskTrackerClient } from "../client";
 import {
   ESTIMATION_COMMENT_MARKER,
   formatAssessmentFailureMarkdown,
@@ -85,6 +85,24 @@ export class AsanaTaskTrackerClient implements TaskTrackerClient {
   async getTask(taskKey: string): Promise<Task> {
     const task = await this.asanaClient.getTaskDetail(this.toTaskGid(taskKey));
     return this.normalizeTask(task);
+  }
+
+  /**
+   * Tasks this task depends on (Asana dependencies). Workspaces whose plan
+   * has no dependencies report no blockers.
+   */
+  async getBlockers(taskKey: string): Promise<TaskBlocker[]> {
+    const dependencies = await this.asanaClient.listTaskDependencies(this.toTaskGid(taskKey));
+    if (!dependencies) return [];
+    return dependencies.map((dependency) =>
+      typeof dependency.completed === "boolean"
+        ? {
+            key: dependency.gid,
+            done: dependency.completed,
+            status: dependency.completed ? "completed" : "incomplete",
+          }
+        : { key: dependency.gid },
+    );
   }
 
   async searchTasks(query: string): Promise<{ tasks: Task[]; total: number }> {

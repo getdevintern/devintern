@@ -61,13 +61,20 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 describe("tracker capability", () => {
-  test("Jira, Linear, and GitHub model native blockers; others do not", () => {
-    expect(supportsDependencies("jira")).toBe(true);
-    expect(supportsDependencies("linear")).toBe(true);
-    expect(supportsDependencies("github")).toBe(true);
-    for (const tracker of ["gitlab", "azure-devops", "asana", "trello", "markdown", "nope"]) {
-      expect(supportsDependencies(tracker)).toBe(false);
+  test("every tracker reports blockers; unknown trackers do not", () => {
+    for (const tracker of [
+      "jira",
+      "linear",
+      "github",
+      "gitlab",
+      "azure-devops",
+      "asana",
+      "trello",
+      "markdown",
+    ]) {
+      expect(supportsDependencies(tracker)).toBe(true);
     }
+    expect(supportsDependencies("nope")).toBe(false);
   });
 });
 
@@ -466,6 +473,35 @@ describe("tracker dependency gate", () => {
       kind: "blocked",
       reason: "API-12 failed",
     });
+  });
+
+  test("GitLab issue numbers and markdown keys are scoped to the team too", async () => {
+    for (const [tracker, key] of [
+      ["gitlab", "12"],
+      ["markdown", "api-schema"],
+    ] as const) {
+      const runId = runs.createRun({ origin: "task", taskKey: key, repo: "api", team: "api" });
+      runs.finishRun(runId, "failed");
+      const scoped = (team: string) =>
+        gate([{ key, done: false, status: "open" }], { tracker, team });
+      expect(await scoped("web")("30", "web")).toEqual({
+        kind: "waiting",
+        reason: `${key} not done (open)`,
+      });
+      expect(await scoped("api")("31", "api")).toEqual({
+        kind: "blocked",
+        reason: `${key} failed`,
+      });
+    }
+    // Azure DevOps, Asana, and Trello keys are workspace-wide.
+    const azureRun = runs.createRun({ origin: "task", taskKey: "77", repo: "api", team: "api" });
+    runs.finishRun(azureRun, "failed");
+    expect(
+      await gate([{ key: "77", done: false }], { tracker: "azure-devops", team: "web" })(
+        "78",
+        "web",
+      ),
+    ).toEqual({ kind: "blocked", reason: "77 failed" });
   });
 
   test("a stacked ticket's base flows to its own dependents", async () => {

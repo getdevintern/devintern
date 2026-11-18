@@ -26,7 +26,9 @@ import type {
 } from "../../../types/task-tracker";
 import { TaskTrackerError } from "../../../types/task-tracker";
 import { untrustedContentBlock } from "../../prompts/untrusted-content";
-import type { TaskTrackerClient } from "../client";
+import { extractDependsOn } from "../../utils/general";
+import type { TaskBlocker, TaskTrackerClient } from "../client";
+import { isDoneStatusName } from "../shared/done-status";
 
 export interface MarkdownTaskRaw {
   filePath: string;
@@ -50,6 +52,18 @@ const IMPLEMENTATION_INSTRUCTIONS = `${IMPLEMENTATION_INSTRUCTIONS_HEADING}
 
 Please analyze the above task description and implement the requested functionality.
 `;
+
+/**
+ * Map a `Depends on:` token to a markdown task key (the file name stem or
+ * `key:` frontmatter, sanitized). The token must contain a hyphen or a digit
+ * (`add-login`, `task-12`, `local-…`), so prose words are not read as keys; a
+ * trailing `.md` is accepted.
+ */
+export function toMarkdownTaskKey(token: string): string | null {
+  const stem = token.replace(/\.md$/i, "");
+  if (!/^[a-z0-9][a-z0-9.-]*$/i.test(stem) || !/[-\d]/.test(stem)) return null;
+  return sanitizeMarkdownTaskKey(stem) || null;
+}
 
 export class MarkdownTaskTrackerClient implements TaskTrackerClient {
   private readonly tasksDirectory?: string;
@@ -186,6 +200,40 @@ export class MarkdownTaskTrackerClient implements TaskTrackerClient {
     }
 
     return { tasks, total: tasks.length };
+  }
+
+  /**
+   * Markdown tasks have no native dependencies: blockers are the task keys
+   * named on a `Depends on:` line of the task body. A blocker task is done
+   * once its `status:` frontmatter is done / complete(d) / closed /
+   * cancel(l)ed. A key with no task file (an ad-hoc task, or a typo) is
+   * reported without a done state, so only the worker's own run of it can
+   * release the ticket.
+   */
+  async getBlockers(taskKey: string): Promise<TaskBlocker[]> {
+    const task = await this.getTask(taskKey);
+    const blockers: TaskBlocker[] = [];
+    for (const key of extractDependsOn((task.raw as MarkdownTaskRaw).body, toMarkdownTaskKey)) {
+      let filePath: string;
+      try {
+        filePath = resolveMarkdownTaskPath(key, this.tasksDirectory, this.cwd);
+      } catch {
+        blockers.push({ key, status: "not found" });
+        continue;
+      }
+      if (!existsSync(filePath)) {
+        blockers.push({ key, status: "not found" });
+        continue;
+      }
+      const blocker = await this.getTask(filePath);
+      const status = (blocker.raw as MarkdownTaskRaw).frontmatter.status;
+      blockers.push({
+        key: blocker.key,
+        done: isDoneStatusName(status),
+        ...(status ? { status } : {}),
+      });
+    }
+    return blockers;
   }
 
   async getComments(_taskKey: string): Promise<Comment[]> {

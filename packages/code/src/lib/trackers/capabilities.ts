@@ -21,9 +21,9 @@ export interface TrackerCapabilities {
   /** Supports worker Mode 1 polling (a change detector is implemented). */
   poll: boolean;
   /**
-   * Natively models "blocked by" (`TaskTrackerClient.getBlockers`), so the
-   * worker's dependency gate holds polled tickets back until their blockers
-   * are done.
+   * Reports "blocked by" (`TaskTrackerClient.getBlockers`), natively or from a
+   * `Depends on:` description line (Trello, markdown), so the worker's
+   * dependency gate holds polled tickets back until their blockers are done.
    */
   dependencies: boolean;
 }
@@ -63,7 +63,7 @@ export const TRACKER_CAPABILITIES: Record<string, TrackerCapabilities> = {
     queryExample: "is:open label:bug",
     estimate: true,
     poll: true,
-    dependencies: false,
+    dependencies: true,
   },
   "azure-devops": {
     displayName: "Azure DevOps",
@@ -72,7 +72,7 @@ export const TRACKER_CAPABILITIES: Record<string, TrackerCapabilities> = {
     queryExample: "SELECT [System.Id] FROM WorkItems WHERE [System.State] = 'New'",
     estimate: true,
     poll: true,
-    dependencies: false,
+    dependencies: true,
   },
   asana: {
     displayName: "Asana",
@@ -81,7 +81,7 @@ export const TRACKER_CAPABILITIES: Record<string, TrackerCapabilities> = {
     queryExample: `project:1200000000000000 section:"To Do" completed:false`,
     estimate: true,
     poll: true,
-    dependencies: false,
+    dependencies: true,
   },
   trello: {
     displayName: "Trello",
@@ -90,7 +90,7 @@ export const TRACKER_CAPABILITIES: Record<string, TrackerCapabilities> = {
     queryExample: `list:"To Do" is:open`,
     estimate: false,
     poll: true,
-    dependencies: false,
+    dependencies: true,
   },
   markdown: {
     displayName: "markdown",
@@ -99,7 +99,7 @@ export const TRACKER_CAPABILITIES: Record<string, TrackerCapabilities> = {
     queryExample: "status=todo",
     estimate: false,
     poll: true,
-    dependencies: false,
+    dependencies: true,
   },
 };
 
@@ -138,12 +138,12 @@ export function trackersSupportingPolling(): string[] {
   return Object.keys(TRACKER_CAPABILITIES).filter((t) => TRACKER_CAPABILITIES[t].poll);
 }
 
-/** Whether `trackerType` models native blockers. Unknown trackers report false. */
+/** Whether `trackerType` reports blockers. Unknown trackers report false. */
 export function supportsDependencies(trackerType: string): boolean {
   return TRACKER_CAPABILITIES[trackerType]?.dependencies ?? false;
 }
 
-/** Trackers whose native blockers gate polled tickets, for help/error text. */
+/** Trackers whose blockers gate polled tickets, for help/error text. */
 export function trackersSupportingDependencies(): string[] {
   return Object.keys(TRACKER_CAPABILITIES).filter((t) => TRACKER_CAPABILITIES[t].dependencies);
 }

@@ -497,6 +497,11 @@ export class FakeAsanaTracker implements TrackerFixture {
       return this.postStory(storiesMatch[1], request);
     }
 
+    const dependenciesMatch = path.match(/^\/api\/1\.0\/tasks\/([^/]+)\/dependencies$/);
+    if (dependenciesMatch?.[1] && method === "GET") {
+      return this.getDependencies(dependenciesMatch[1]);
+    }
+
     const taskMatch = path.match(/^\/api\/1\.0\/tasks\/([^/]+)$/);
     if (taskMatch?.[1] && method === "GET") {
       return this.getTask(taskMatch[1], parseOptFields(url.searchParams.get("opt_fields")));
@@ -581,6 +586,12 @@ export class FakeAsanaTracker implements TrackerFixture {
     if (!task) return this.diagnostic(`Unknown fake Asana task: ${taskGid}`);
     const stories = [...task.stories].sort((a, b) => a.created_at.localeCompare(b.created_at));
     return json({ data: stories.map((story) => this.storyPayload(story)) });
+  }
+
+  /** Fixture tasks have no Asana dependencies (blockers). */
+  private getDependencies(taskGid: string): Response {
+    if (!this.tasks.has(taskGid)) return this.diagnostic(`Unknown fake Asana task: ${taskGid}`);
+    return json({ data: [], next_page: null });
   }
 
   private async postStory(taskGid: string, request: Request): Promise<Response> {

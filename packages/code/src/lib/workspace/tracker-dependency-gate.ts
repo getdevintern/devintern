@@ -1,7 +1,8 @@
 /**
- * Dependency gate for polled tracker tickets with native blockers (Jira
+ * Dependency gate for polled tracker tickets with blockers: native ones (Jira
  * "is blocked by" links, Linear `blocks` relations, GitHub issue
- * dependencies).
+ * dependencies, GitLab blocking links, Azure DevOps predecessors, Asana
+ * dependencies) or a `Depends on:` description line (Trello, markdown).
  *
  * The fleet executor calls the gate after routing and before it touches git
  * or starts the task subprocess, so a held-back ticket is never transitioned
@@ -55,7 +56,7 @@ export type TrackerDependencyGate = ((
 export interface TrackerDependencyGateOptions {
   /** Workspace DB (`state/queue.db`): runs, PR registry, gate state. */
   dbPath: string;
-  /** Tracker type of the polled source (`jira`, `linear`, `github`). */
+  /** Tracker type of the polled source (`jira`, `linear`, `github`, …). */
   tracker: string;
   /** Team of the polled source (multi-team workspaces). */
   team?: string;
@@ -75,6 +76,9 @@ export interface TrackerDependencyGateOptions {
   scope?: string;
   now?: () => number;
 }
+
+/** Trackers whose task keys are unique only within one team's source. */
+const TEAM_SCOPED_KEY_TRACKERS = new Set(["github", "gitlab", "markdown"]);
 
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -167,13 +171,16 @@ export function createTrackerDependencyGate(
     return answers.some(Boolean);
   };
 
-  // A GitHub issue is keyed by its bare number, unique only within the
-  // team's repository: another GitHub-issue team's `12` is a different
-  // ticket, so only this team's runs count as handling a blocker locally.
-  // Jira and Linear keys are workspace-wide, so a blocker another team
-  // implemented still counts.
+  // GitHub and GitLab issues are keyed by their bare number, and markdown
+  // tasks by their file name, unique only within the team's repository,
+  // project, or tasks folder: another team's `12` is a different ticket, so
+  // only this team's runs count as handling a blocker locally. Jira, Linear,
+  // Azure DevOps, Asana, and Trello keys are workspace-wide, so a blocker
+  // another team implemented still counts.
   const localScope =
-    options.tracker === "github" && options.team !== undefined ? { team: options.team } : undefined;
+    TEAM_SCOPED_KEY_TRACKERS.has(options.tracker) && options.team !== undefined
+      ? { team: options.team }
+      : undefined;
 
   const evaluateTicket = async (taskKey: string, repo: string): Promise<TrackerGateOutcome> => {
     let blockers: TaskBlocker[];
