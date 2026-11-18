@@ -12,7 +12,7 @@ import {
 } from "../src/lib/review/conflict-resolver";
 import { UNTRUSTED_CONTENT_NOTICE } from "../src/lib/prompts/untrusted-content";
 import { Utils } from "../src/lib/utils";
-import type { PullRequestInfo } from "../src/lib/code-host/github/reviews";
+import type { PullRequestInfo } from "../src/lib/code-host/github/reviews-types";
 
 const PR_URL = "https://github.com/acme/widgets/pull/7";
 

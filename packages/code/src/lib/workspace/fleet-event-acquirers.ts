@@ -147,7 +147,7 @@ function buildFleetCiProvider(
     },
     fetchWorkflowRuns: async (repo, sha, etag) => {
       const result = await gh(repo).conditionalGet<{
-        workflow_runs: import("../code-host/github/reviews").WorkflowRunSummary[];
+        workflow_runs: import("../code-host/github/reviews-types").WorkflowRunSummary[];
       }>(
         `/repos/${repo}/actions/runs?head_sha=${encodeURIComponent(sha)}&per_page=100`,
         ownerOf(repo),
@@ -210,7 +210,7 @@ async function buildAutoMergeWatcher(params: {
   const { AutoMergeWatcherAcquirer: Watcher, DEFAULT_AUTO_MERGE_QUIET_SECONDS } =
     await import("../acquirers/auto-merge-watcher");
   const { parseHarnessList } = await import("@devintern/agent-harness");
-  const { isGitHubNotFound } = await import("../code-host/github/reviews");
+  const { isGitHubNotFound } = await import("../code-host/github/github-errors");
   const { fleetAutoMergePolicyFingerprint } = await import("./fleet-events");
   const settings = config.workspace.autoMerge;
   if (
@@ -406,7 +406,7 @@ export async function buildFleetEventAcquirers(options: {
     // so one acquirer covers the whole fleet).
     const { ReviewPollingAcquirer, OPEN_PR_LIST_PAGE_SIZE } =
       await import("../acquirers/review-polling");
-    const { isGitHubNotFound } = await import("../code-host/github/reviews");
+    const { isGitHubNotFound } = await import("../code-host/github/github-errors");
     const runStore = new RunStore(state.dbPath);
     const reviewAcquirer = new ReviewPollingAcquirer({
       intervalSeconds,

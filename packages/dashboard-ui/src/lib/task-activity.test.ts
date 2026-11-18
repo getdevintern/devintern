@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 
-import type { OverviewRunningRun, RunRecord } from "@/lib/api";
+import type { RunRecord } from "@/lib/api";
+import type { OverviewRunningRun } from "@/lib/api-overview";
 import {
   FINISHED_LIMIT,
   buildActiveWork,

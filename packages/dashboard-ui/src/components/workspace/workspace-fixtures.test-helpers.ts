@@ -1,6 +1,6 @@
 /** Test fixtures shaped like a real `GET /api/workspace` body. */
 
-import type { WorkspaceConfigView, WorkspaceResponse } from "@/lib/api";
+import type { WorkspaceConfigView, WorkspaceResponse } from "@/lib/api-workspace";
 
 export const CONFIG_PATH = "/home/dev/.devintern/workspace.toml";
 
