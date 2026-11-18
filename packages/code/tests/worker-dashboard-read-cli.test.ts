@@ -1,5 +1,13 @@
 import { Database } from "bun:sqlite";
-import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  setDefaultTimeout,
+  setSystemTime,
+  test,
+} from "bun:test";
 import { createHash } from "crypto";
 import {
   chmodSync,
@@ -207,6 +215,9 @@ describe("devintern worker read-only dashboard commands", () => {
   }
 
   test("--json prints exactly the dashboard handler body for every command", () => {
+    // Freeze the clock: the in-progress fixture run's busy time counts up to
+    // `now`, so CLI and handler output would otherwise differ by a millisecond.
+    setSystemTime(new Date());
     const data = embeddedDashboardData();
     try {
       const cases: [WorkerReadCommand, string[], () => ApiResponse][] = [
@@ -271,6 +282,9 @@ describe("devintern worker read-only dashboard commands", () => {
           () => handleLogs(data, new URLSearchParams({ limit: "1", level: "info" })),
         ],
       ];
+      // The in-progress "local-active" run counts busy time up to `now`, so the
+      // CLI call and the reference handler call must see the same clock.
+      setSystemTime(Date.now());
       for (const [command, args, handler] of cases) {
         const result = run(command, [...args, "--json"]);
         expect({ args: [command, ...args], stderr: result.stderr, code: result.code }).toEqual({
@@ -293,7 +307,9 @@ describe("devintern worker read-only dashboard commands", () => {
       >;
       expect(cliOverview).toEqual(apiOverview);
     } finally {
+      setSystemTime();
       data.close();
+      setSystemTime();
     }
   });
 

@@ -21,7 +21,7 @@ devintern automations add dependency-health
 
 Installing a pack writes one `[[automations]]` entry into `workspace.toml`. From
 then on the occurrence runs through exactly the same path as a hand-written
-automation — see [Worker Daemon → Recurring automations](./worker.md#recurring-automations)
+automation — see [Recurring Automations](./automations.md)
 for prompt-writing and schedule semantics.
 
 ## Commands
@@ -159,4 +159,4 @@ the full precedence list.
 Packs cover common chores; they are not a replacement for a prompt tuned to your
 codebase. When a pack's default scope does not fit, install it and edit the
 `[[automations]]` block, or write the entry by hand as described in
-[Worker Daemon → Recurring automations](./worker.md#recurring-automations).
+[Recurring Automations](./automations.md).

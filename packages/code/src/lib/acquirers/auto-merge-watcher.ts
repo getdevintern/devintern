@@ -30,7 +30,7 @@ import type { Acquirer } from "../../worker";
 import type { AutoMergeResult } from "../review/auto-merge";
 import type { ConditionalResult, PolledPr } from "../review/agent-pr-reconciler";
 import { classifyAgentPrState } from "../review/agent-pr-reconciler";
-import { describeGitHubAuthFailure, isGitHubAuthError } from "../code-host/github/reviews";
+import { describeGitHubAuthFailure, isGitHubAuthError } from "../code-host/github/github-errors";
 import type { RunStore } from "../state/run-recorder";
 import type { WebhookQueue } from "../state/webhook-queue";
 import type { WorkerState } from "../state/worker-state";

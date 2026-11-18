@@ -40,7 +40,7 @@ import type { ChangeRequestInfo } from "./conflict-change-adapter";
 
 import { runAgent } from "./address";
 import { parseChangeRequestUrl } from "../code-host/index";
-import type { PullRequestInfo } from "../code-host/github/reviews";
+import type { PullRequestInfo } from "../code-host/github/reviews-types";
 import { untrustedContentBlock } from "../prompts/untrusted-content";
 import { isDependencyFile, Utils } from "../utils";
 

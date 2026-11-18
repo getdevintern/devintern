@@ -23,7 +23,8 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { createTask, usePoll, WORKSPACE_URL } from "@/lib/api";
-import type { CreatedTask, RunsResponse, WorkspaceResponse } from "@/lib/api";
+import type { CreatedTask, RunsResponse } from "@/lib/api";
+import type { WorkspaceResponse } from "@/lib/api-workspace";
 import { RUNS_HASH, runHash } from "@/lib/routes";
 import { cn } from "@/lib/utils";
 
