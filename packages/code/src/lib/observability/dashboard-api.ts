@@ -822,23 +822,20 @@ function resolveRetryEligibility(data: DashboardData, run: RunRecord): RetryElig
  *    `in_progress` run for the same task key also blocks).
  *
  * The action is run-type specific:
- * - Task runs re-invoke the CLI with the tracker key. Two execution modes,
- *   picked by the server options: `schedule` (workspace worker) inserts a
- *   `pending` row into the `scheduled_retries` table which the worker drains
- *   through the normal fleet pipeline (routing, per-repo worktree, env, repo
- *   lock) with `--force`; `spawn` (standalone dashboard, default) spawns
- *   `devintern <TASK> --force` as a detached subprocess.
- * - Automation runs re-trigger the automation that produced them (the exact
- *   "Run now" pipeline with the same overlap safeguards). Their `taskKey` is
- *   the markdown occurrence file's stem — not a tracker key — so forcing it
- *   would only 404 against the tracker.
- * - Ad-hoc runs (`origin: "local"`) re-queue their durable `injected_tasks`
- *   row under the same key, which the worker's injected-task acquirer drains on
- *   its next poll. The row keeps its branch name, so session pickup can resume
- *   the interrupted attempt instead of starting a second branch/PR.
+ * - Task runs re-invoke the CLI with the tracker key. Two execution modes, picked by the server
+ *   options: `schedule` (workspace worker) inserts a `pending` row into the `scheduled_retries`
+ *   table which the worker drains through the normal fleet pipeline (routing, per-repo worktree,
+ *   env, repo lock) with `--force`; `spawn` (standalone dashboard, default) spawns `devintern
+ *   <TASK> --force` as a detached subprocess.
+ * - Automation runs re-trigger the automation that produced them (the exact "Run now" pipeline with
+ *   the same overlap safeguards). Their `taskKey` is the markdown occurrence file's stem — not a
+ *   tracker key — so forcing it would only 404 against the tracker.
+ * - Ad-hoc runs (`origin: "local"`) re-queue their durable `injected_tasks` row under the same key,
+ *   which the worker's injected-task acquirer drains on its next poll. The row keeps its branch
+ *   name, so session pickup can resume the interrupted attempt instead of starting a second
+ *   branch/PR.
  *
- * Returns 202 once the retry is queued; the new attempt then shows up in the
- * run list like any other run.
+ * Returns 202 once the retry is queued; the new attempt then shows up in the run list.
  *
  * @param data - Dashboard data source (also owns the in-flight guard)
  * @param idParam - Raw id path segment
@@ -1321,9 +1318,7 @@ export function handleRunHarnessLog(
     return badRequest("invalid log name");
   }
   const content = data.readRunHarnessLog(id, name);
-  if (!content) {
-    return { status: 404, body: { error: "harness log not found" } };
-  }
+  if (!content) return { status: 404, body: { error: "harness log not found" } };
   return { status: 200, body: content };
 }
 
@@ -1367,9 +1362,7 @@ export function handleRunArtifact(
     return badRequest("invalid artifact name");
   }
   const content = data.readRunArtifact(id, name);
-  if (!content) {
-    return { status: 404, body: { error: "artifact not found" } };
-  }
+  if (!content) return { status: 404, body: { error: "artifact not found" } };
   return { status: 200, body: content };
 }
 
@@ -1395,15 +1388,10 @@ export function handleStats(data: DashboardData, params: URLSearchParams): ApiRe
 /**
  * Resolve worker liveness from the daemon's lock file.
  *
- * The worker writes `.worker.lock` under `.devintern-code/` of its working
- * directory (simple mode) or directly into the workspace home (fleet mode),
- * so both locations are consulted. A readable lock with a dead pid (a stale
- * lock left behind by a crashed worker) must not shadow a live lock in the
- * other location: the live lock wins, and `stopped` is only reported when
- * every readable lock belongs to a dead process. When no readable lock file
- * exists in either location, liveness is `unknown`: the worker may be
- * running elsewhere, and claiming "stopped" would be wrong. A lock from another
- * PID namespace (read inside a sandbox) is `unknown` too and beats a stale one.
+ * Both `.devintern-code/.worker.lock` (simple mode) and the workspace-home lock
+ * (fleet mode) are consulted. A live lock beats a stale (dead-pid) one; `stopped`
+ * only when every readable lock is dead. No readable lock, or one from another
+ * PID namespace (read inside a sandbox, and beats a stale one), means `unknown`.
  *
  * @param workingDir - Project root the dashboard was started from
  * @param workspaceDir - Workspace home whose lock is also consulted

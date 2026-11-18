@@ -41,7 +41,7 @@ import type { Acquirer } from "../../worker";
 import type { CiFailureFeedback } from "../review/formatter";
 import { classifyAgentPrState } from "../review/agent-pr-reconciler";
 import { serializePrRun } from "./review-polling";
-import { describeGitHubAuthFailure, isGitHubAuthError } from "../code-host/github/reviews";
+import { describeGitHubAuthFailure, isGitHubAuthError } from "../code-host/github/github-errors";
 
 import type {
   CiProvider,

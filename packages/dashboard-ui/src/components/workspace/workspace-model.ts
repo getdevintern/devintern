@@ -13,7 +13,7 @@ import type {
   WorkspaceEnvFileView,
   WorkspaceRoutingRule,
   WorkspaceScheduleView,
-} from "@/lib/api";
+} from "@/lib/api-workspace";
 import { humanizeSchedule } from "@/views/automation-schedule";
 
 /** How one source's work reaches a repo. */

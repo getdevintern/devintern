@@ -68,9 +68,9 @@ Each task runs through the normal pipeline with `[defaults].worker_task_args` (d
 
 ## Agent failover and sandboxing
 
-Set `AGENT_HARNESS=codex,grok` (priority first) in the workspace `.env` so the worker keeps going when one agent hits a usage limit. Failover covers every worker job except schedules that pin their own `harness` ([details](./automations.md#choosing-the-agent-per-schedule)). When every harness is limited, task pickup pauses and due automations and estimations skip that occurrence. See [Failover across multiple harnesses](./configuration.md#failover-across-multiple-harnesses).
+Set `AGENT_HARNESS=codex,grok` (priority first) in the workspace `.env` so the worker keeps going when one agent hits a usage limit. Failover covers every worker job except schedules that pin their own `harness` ([details](./automations.md#choosing-the-agent-per-schedule)). When every harness is limited, task pickup pauses and due automations and estimations skip that occurrence. See [Failover across multiple harnesses](./agent-harness.md#failover-across-multiple-harnesses).
 
-Unattended runs are where sandboxing matters most. Set `AGENT_SANDBOX=auto` in the workspace `.env`; see [Sandboxing the Agent](./configuration.md#sandboxing-the-agent).
+Unattended runs are where sandboxing matters most. Set `AGENT_SANDBOX=auto` in the workspace `.env`; see [Sandboxing the Agent](./sandboxing.md).
 
 ## Working windows (quiet hours)
 
