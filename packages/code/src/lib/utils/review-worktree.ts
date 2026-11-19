@@ -3,6 +3,7 @@ import { basename, dirname, join } from "path";
 import type { GitCommandResult, GitOptions } from "./types";
 import { GIT_CLEAN_ARGS } from "./constants";
 import { logVerbose } from "./general";
+import { describeConfigLockPlaceholder, executeGitCommandWithConfigLockRetry } from "./git-exec";
 import { Utils } from "./registry";
 
 /**
@@ -297,9 +298,11 @@ async function tryReuseReviewWorktree(
   await Utils.executeGitCommand(["reset", "--hard"], { verbose: false, cwd: worktreePath });
   await Utils.executeGitCommand(GIT_CLEAN_ARGS, { verbose: false, cwd: worktreePath });
 
-  // Try checkout with -B to force create/reset branch tracking origin
+  // Force create/reset the branch at origin. Tracking is recorded separately
+  // and best-effort, since `--track` fails the whole checkout when the shared
+  // config is locked (see addReviewWorktree).
   const switchResult = hasOrigin
-    ? await Utils.executeGitCommand(["checkout", "-B", branch, "--track", `origin/${branch}`], {
+    ? await Utils.executeGitCommand(["checkout", "--no-track", "-B", branch, `origin/${branch}`], {
         verbose,
         cwd: worktreePath,
       })
@@ -308,6 +311,7 @@ async function tryReuseReviewWorktree(
   if (!switchResult.success) {
     return false;
   }
+  if (hasOrigin) await setReviewUpstream(worktreePath, branch, verbose);
 
   // Pull latest changes if origin exists
   if (hasOrigin) {
@@ -373,10 +377,17 @@ async function addReviewWorktree(
   }
 
   if (!branchExistsLocally) {
-    return Utils.executeGitCommand(
-      ["worktree", "add", "--track", "-b", branch, worktreePath, `origin/${branch}`],
+    // `--track` writes `branch.<name>.*` into the shared config, and git
+    // aborts the whole `worktree add` when that write loses `config.lock`.
+    // Create the branch without tracking and record the upstream afterwards,
+    // best-effort: pushes name `origin/<branch>` explicitly, so nothing here
+    // depends on it.
+    const createResult = await Utils.executeGitCommand(
+      ["worktree", "add", "--no-track", "-b", branch, worktreePath, `origin/${branch}`],
       repoOpts,
     );
+    if (createResult.success) await setReviewUpstream(worktreePath, branch, verbose);
+    return createResult;
   }
 
   // Branch exists and can't be deleted (e.g. checked out in main worktree)
@@ -391,13 +402,31 @@ async function addReviewWorktree(
       verbose: false,
       cwd: worktreePath,
     });
-    // Set up tracking
-    await Utils.executeGitCommand(["branch", `--set-upstream-to=origin/${branch}`, branch], {
-      verbose: false,
-      cwd: worktreePath,
-    });
+    await setReviewUpstream(worktreePath, branch, verbose);
   }
   return createResult;
+}
+
+/**
+ * Point `branch` at `origin/<branch>` as its upstream, retrying while another
+ * process holds the shared `config.lock`. A failure only costs interactive
+ * convenience (`git status` ahead/behind), so it is logged, never fatal.
+ */
+async function setReviewUpstream(
+  worktreePath: string,
+  branch: string,
+  verbose: boolean,
+): Promise<void> {
+  const result = await executeGitCommandWithConfigLockRetry(
+    ["branch", `--set-upstream-to=origin/${branch}`, branch],
+    { verbose: false, cwd: worktreePath },
+  );
+  if (!result.success) {
+    logVerbose(
+      verbose,
+      `   Could not set upstream for ${branch}: ${result.error ?? result.output}`,
+    );
+  }
 }
 
 /** Create a fresh review worktree, recovering from stale registrations. */
@@ -475,17 +504,15 @@ async function createReviewWorktree(
           verbose: false,
           cwd: worktreePath,
         });
-        await Utils.executeGitCommand(["branch", `--set-upstream-to=origin/${branch}`, branch], {
-          verbose: false,
-          cwd: worktreePath,
-        });
+        await setReviewUpstream(worktreePath, branch, verbose);
       }
     }
 
     if (!createResult.success) {
+      const placeholder = describeConfigLockPlaceholder(createResult);
       return {
         success: false,
-        error: `Failed to create worktree: ${createResult.error || createResult.output}`,
+        error: `Failed to create worktree: ${createResult.error || createResult.output}${placeholder ? `\n${placeholder}` : ""}`,
       };
     }
   }
