@@ -4,6 +4,7 @@ import { join } from "path";
 import { tmpdir } from "os";
 
 import {
+  baseSyncReviveCooldownMs,
   OPEN_PR_LIST_PAGE_SIZE,
   ReviewPollingAcquirer,
   runResolveConflictsViaCli,
@@ -58,6 +59,9 @@ describe("ReviewPollingAcquirer", () => {
     seenSince?: string;
     seenPrEtag?: string;
     seenReviewsEtag?: string;
+    /** Base branch tip the fake reports (absent: the branch cannot be read). */
+    baseTip?: string;
+    branchTipFetches?: number;
   }
 
   function makeAcquirer(
@@ -113,6 +117,10 @@ describe("ReviewPollingAcquirer", () => {
         async fetchReviewCommentsSince(_repo, _n, sinceIso) {
           gh.seenSince = sinceIso;
           return gh.comments;
+        },
+        async fetchBranchHeadSha() {
+          gh.branchTipFetches = (gh.branchTipFetches ?? 0) + 1;
+          return gh.baseTip ?? null;
         },
       },
       addressPr: async (repo, n) => {
@@ -700,6 +708,95 @@ describe("ReviewPollingAcquirer", () => {
     } finally {
       setSystemTime();
     }
+  });
+
+  test("an exhausted base sync gets one more attempt after its base branch moves", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    queue.close();
+    queue = new WebhookQueue({ dbPath, maxRetries: 2 });
+    // GitHub keeps reporting the PR's stale base.sha; only the branch tip moves.
+    const gh: FakeGitHubState = {
+      prState: "open",
+      mergeableState: "dirty",
+      headSha: "head1",
+      baseSha: "base1",
+      baseTip: "tipA",
+      reviews: [],
+      comments: [],
+    };
+    const results: AutomaticResolveResult[] = [
+      { outcome: "failed", message: "worktree gone" },
+      { outcome: "failed", message: "worktree gone" },
+      { outcome: "failed", message: "still conflicting" },
+      { outcome: "resolved", message: "pushed" },
+    ];
+    const eventKey = "base-sync:acme/widgets#42:base1:head1";
+    const hour = 60 * 60_000;
+    try {
+      const start = 1_750_000_000_000;
+      setSystemTime(start);
+      const { acquirer, resolved } = makeAcquirer(gh, { resolveResults: results });
+      await acquirer.tick();
+      setSystemTime(start + 31_000);
+      await acquirer.tick();
+      expect(resolved).toHaveLength(2);
+      expect(queue.hasProcessed("github:base-sync", eventKey)).toBe(true);
+      const exhaustedAt = start + 31_000;
+
+      // First sighting while exhausted only records the tip.
+      setSystemTime(exhaustedAt + 60_000);
+      await acquirer.tick();
+      expect(resolved).toHaveLength(2);
+      expect(queue.getBaseSyncEvent(eventKey)?.reviveBaseTip).toBe("tipA");
+
+      // The base moves, but the 3-hour cooldown since the last failure has not passed.
+      gh.baseTip = "tipB";
+      setSystemTime(exhaustedAt + 2 * hour);
+      await acquirer.tick();
+      expect(resolved).toHaveLength(2);
+
+      // After the cooldown: exactly one more attempt, which exhausts it again.
+      setSystemTime(exhaustedAt + 3 * hour + 1_000);
+      await acquirer.tick();
+      await acquirer.waitForBaseSyncs();
+      expect(resolved).toHaveLength(3);
+      let event = queue.getBaseSyncEvent(eventKey);
+      expect(event?.status).toBe("failed");
+      expect(event?.revivals).toBe(1);
+      expect(event?.reviveBaseTip).toBe("tipB");
+      expect(queue.hasProcessed("github:base-sync", eventKey)).toBe(true);
+      const secondFailureAt = exhaustedAt + 3 * hour + 1_000;
+
+      // Same tip: no further attempts, however long it waits.
+      setSystemTime(secondFailureAt + 30 * hour);
+      await acquirer.tick();
+      expect(resolved).toHaveLength(3);
+
+      // A new tip after the doubled (6-hour) cooldown earns the next attempt.
+      gh.baseTip = "tipC";
+      await acquirer.tick();
+      await acquirer.waitForBaseSyncs();
+      expect(resolved).toHaveLength(4);
+      event = queue.getBaseSyncEvent(eventKey);
+      expect(event?.status).toBe("completed");
+
+      // A completed event is never revived.
+      gh.baseTip = "tipD";
+      setSystemTime(secondFailureAt + 60 * hour);
+      await acquirer.tick();
+      expect(resolved).toHaveLength(4);
+    } finally {
+      setSystemTime();
+    }
+  });
+
+  test("the revival cooldown doubles per revival and caps at a day", () => {
+    const hour = 60 * 60_000;
+    expect(baseSyncReviveCooldownMs(0)).toBe(3 * hour);
+    expect(baseSyncReviveCooldownMs(1)).toBe(6 * hour);
+    expect(baseSyncReviveCooldownMs(2)).toBe(12 * hour);
+    expect(baseSyncReviveCooldownMs(3)).toBe(24 * hour);
+    expect(baseSyncReviveCooldownMs(10)).toBe(24 * hour);
   });
 
   test("failed base-sync attempts wait out an exponential backoff before retrying", async () => {
