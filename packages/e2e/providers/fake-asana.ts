@@ -25,13 +25,12 @@ import {
   htmlToPlainText,
   json,
   parseFakeAsanaQuery,
-  parseOptFields,
-  projectTaskPayload,
   readJson,
   textToHtml,
 } from "./fake-asana-helpers";
 import type { FakeAsanaFilters } from "./fake-asana-helpers";
 import type { TrackerComment, TrackerFixture, TrackerTicket, TrackerTicketState } from "./tracker";
+import { parseOptFields, projectTaskPayload } from "./fake-asana-fields";
 
 /** Task statuses are project sections in Asana. */
 export interface FakeAsanaStatuses {
