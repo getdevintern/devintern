@@ -9,7 +9,7 @@ import type {
 } from "../acquirers/review-polling";
 import type { ChangeDetector } from "../acquirers/change-detector";
 import type { TeamConfig, WorkspaceConfig } from "./config";
-import { buildRepoEnv, buildTeamTaskEnv, gitHubSlugFromRemote } from "./env";
+import { buildFleetEventEnv, gitHubSlugFromRemote } from "./env";
 import { createFleetTaskExecutor, resolveActionedSource } from "./fleet-executor";
 import { assertTeamPrSyncSandbox, teamPrSyncSlugs } from "./team-pr-sync";
 import type { FleetTask, RepoManagerLike } from "./fleet-executor";
@@ -67,7 +67,13 @@ export interface FleetSourceRuntime {
   isTaskActionedUnchanged?: (taskKey: string, updated?: string) => Promise<boolean>;
 }
 
-/** Resolve the GitHub credential used for events in one workspace repository. */
+/**
+ * Resolve the GitHub credential used for events in one workspace repository.
+ *
+ * Uses the same credentials as the follow-up runs that push to the PR
+ * ({@link buildFleetEventEnv}), so API calls read PRs with the account that
+ * pushed them.
+ */
 export function fleetGitHubTokenForRepo(
   config: WorkspaceConfig,
   workspaceDir: string,
@@ -79,11 +85,7 @@ export function fleetGitHubTokenForRepo(
       slug.toLowerCase(),
   );
   if (!repo) return process.env.GITHUB_TOKEN;
-  const team = config.teams.find(
-    (candidate) => candidate.tracker === "github" && candidate.repo === repo.name,
-  );
-  return (team ? buildTeamTaskEnv(repo, team, workspaceDir) : buildRepoEnv(repo, workspaceDir))
-    .GITHUB_TOKEN;
+  return buildFleetEventEnv(config, repo, workspaceDir).GITHUB_TOKEN;
 }
 
 export function createFleetGitHubClientResolver(

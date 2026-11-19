@@ -30,12 +30,11 @@ import { initInjectedTaskSchema } from "./injected-tasks-schema";
 import { prepareQueueDbDirectory } from "./webhook-queue";
 import { configureSqliteConnection } from "./sqlite";
 import type { RunRecord } from "./run-recorder";
-
 export {
   addAutoResumeColumn,
   addChildPidColumn,
   addChildStartedAtColumn,
-} from "./injected-tasks-schema";
+} from "./injected-tasks-migrations";
 
 export type InjectedTaskStatus = "pending" | "running" | "done" | "failed" | "cancelled";
 
@@ -95,6 +94,11 @@ export interface InjectedTask {
   taskKey: string;
   /** `[[repos]]` name the task is pinned to. */
   repo: string;
+  /**
+   * `[[teams]]` name whose credentials the run layers (`worker add --team`).
+   * Unset: the worker uses the repo's single fixed team, if any.
+   */
+  team?: string;
   title: string;
   body: string;
   /** Absolute path of the markdown prompt materialized for this task. */
@@ -153,6 +157,7 @@ interface InjectedTaskRow {
   id: number;
   task_key: string;
   repo: string;
+  team: string | null;
   title: string;
   body: string;
   task_file: string;
@@ -194,6 +199,7 @@ function rowToInjectedTask(row: InjectedTaskRow): InjectedTask {
     id: row.id,
     taskKey: row.task_key,
     repo: row.repo,
+    team: row.team ?? undefined,
     title: row.title,
     body: row.body,
     taskFile: row.task_file,
@@ -236,6 +242,7 @@ export interface DeferInjectedTaskOptions {
 export interface EnqueueInjectedTaskInput {
   taskKey: string;
   repo: string;
+  team?: string;
   title: string;
   body: string;
   taskFile: string;
@@ -344,12 +351,13 @@ export class InjectedTaskStore {
       const dependsOn = input.dependsOn?.length ? input.dependsOn : undefined;
       db.query(
         `INSERT INTO injected_tasks
-           (task_key, repo, title, body, task_file, idempotency_key, actor, status, created_at,
+           (task_key, repo, team, title, body, task_file, idempotency_key, actor, status, created_at,
             depends_on, dependency_mode, dependency_state, dependency_reason)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)`,
       ).run(
         input.taskKey,
         input.repo,
+        input.team ?? null,
         input.title,
         input.body,
         input.taskFile,

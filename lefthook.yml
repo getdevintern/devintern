@@ -20,7 +20,10 @@ pre-push:
       # env -u: git exports GIT_DIR & co to hook processes; unguarded test
       # fixtures inherit them and run git against the real repo instead of
       # their temp dirs.
-      run: 'test -n "{files}" && env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_COMMON_DIR bun run test'
+      # Same tests as CI's verify job. The offline e2e suite (~7 min, never
+      # cached) runs in CI's e2e-local job instead; run it by hand with
+      # `bun run --filter @devintern/e2e test`.
+      run: 'test -n "{files}" && env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_COMMON_DIR bun run turbo run test --filter=''!@devintern/e2e'' && bun run test:examples'
 # EXAMPLE USAGE:
 #
 #   Refer for explanation to following link:

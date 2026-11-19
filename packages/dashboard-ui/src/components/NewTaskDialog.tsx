@@ -24,7 +24,7 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { createTask, usePoll, WORKSPACE_URL } from "@/lib/api";
 import type { CreatedTask, RunsResponse } from "@/lib/api";
-import type { WorkspaceResponse } from "@/lib/api-workspace";
+import type { WorkspaceResponse, WorkspaceTeamView } from "@/lib/api-workspace";
 import { RUNS_HASH, runHash } from "@/lib/routes";
 import { cn } from "@/lib/utils";
 
@@ -34,8 +34,32 @@ export const MAX_TASK_BODY_CHARS = 20_000;
 /** The editable fields of the "New task" form. */
 export interface TaskDraft {
   repo: string;
+  /** `[[teams]]` entry whose credentials the run uses; only asked for when the repo is fixed to several. */
+  team?: string;
   title: string;
   body: string;
+}
+
+/** Teams fixed to each repo (`[[teams]] repo = ...`), keyed by repo name. */
+export type FixedTeams = ReadonlyMap<string, readonly string[]>;
+
+/** Group the workspace's teams by their fixed repo; teams routing across repos are skipped. */
+export function fixedTeamsByRepo(teams: readonly WorkspaceTeamView[]): FixedTeams {
+  const byRepo = new Map<string, string[]>();
+  for (const team of teams) {
+    if (!team.repo) continue;
+    byRepo.set(team.repo, [...(byRepo.get(team.repo) ?? []), team.name]);
+  }
+  return byRepo;
+}
+
+/**
+ * Teams the operator must pick between for `repo`, or an empty list when the
+ * server picks on its own (zero or one fixed team), mirroring `resolveCredentialTeam`.
+ */
+export function teamChoices(fixedTeams: FixedTeams | undefined, repo: string): readonly string[] {
+  const teams = fixedTeams?.get(repo) ?? [];
+  return teams.length > 1 ? teams : [];
 }
 
 /** Initial draft: preselect the repo when the workspace has exactly one. */
@@ -49,8 +73,16 @@ export function isTaskDraftDirty(draft: TaskDraft): boolean {
 }
 
 /** Why the draft cannot be submitted yet, or null when it is ready. */
-export function taskDraftError(draft: TaskDraft, repos: readonly string[]): string | null {
+export function taskDraftError(
+  draft: TaskDraft,
+  repos: readonly string[],
+  fixedTeams?: FixedTeams,
+): string | null {
   if (!draft.repo || !repos.includes(draft.repo)) return "Choose a repository.";
+  const teams = teamChoices(fixedTeams, draft.repo);
+  if (teams.length > 0 && (!draft.team || !teams.includes(draft.team))) {
+    return "Choose the team whose credentials the task uses.";
+  }
   if (!draft.title.trim()) return "Give the task a title.";
   if (draft.body.length > MAX_TASK_BODY_CHARS) {
     return `The description is ${draft.body.length - MAX_TASK_BODY_CHARS} characters over the limit.`;
@@ -98,6 +130,8 @@ export function NewTaskNotice() {
 
 export interface NewTaskFormProps {
   repos: readonly string[];
+  /** Teams fixed to each repo; a picker appears when the chosen repo has several. */
+  fixedTeams?: FixedTeams;
   draft: TaskDraft;
   onDraftChange: (next: TaskDraft) => void;
   onSubmit: () => void;
@@ -111,6 +145,7 @@ export interface NewTaskFormProps {
 /** Presentational "New task" form (state lives in the dialog session). */
 export function NewTaskForm({
   repos,
+  fixedTeams,
   draft,
   onDraftChange,
   onSubmit,
@@ -120,7 +155,8 @@ export function NewTaskForm({
   titleRef,
 }: NewTaskFormProps) {
   const formRef = useRef<HTMLFormElement>(null);
-  const invalid = taskDraftError(draft, repos);
+  const invalid = taskDraftError(draft, repos, fixedTeams);
+  const teams = teamChoices(fixedTeams, draft.repo);
   const overLimit = draft.body.length > MAX_TASK_BODY_CHARS;
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -145,7 +181,8 @@ export function NewTaskForm({
           <FieldLabel htmlFor="new-task-repo">Repository</FieldLabel>
           <Select
             value={draft.repo || undefined}
-            onValueChange={(repo) => onDraftChange({ ...draft, repo })}
+            // A team picked for another repo does not carry over.
+            onValueChange={(repo) => onDraftChange({ ...draft, repo, team: undefined })}
             disabled={submitting}
           >
             <SelectTrigger id="new-task-repo" size="sm" className="w-full sm:max-w-xs">
@@ -162,6 +199,34 @@ export function NewTaskForm({
             </SelectContent>
           </Select>
         </Field>
+
+        {teams.length > 0 ? (
+          <Field data-disabled={submitting || undefined}>
+            <FieldLabel htmlFor="new-task-team">Team</FieldLabel>
+            <Select
+              value={draft.team || undefined}
+              onValueChange={(team) => onDraftChange({ ...draft, team })}
+              disabled={submitting}
+            >
+              <SelectTrigger id="new-task-team" size="sm" className="w-full sm:max-w-xs">
+                <SelectValue placeholder="Choose a team">{draft.team || undefined}</SelectValue>
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  {teams.map((team) => (
+                    <SelectItem key={team} value={team}>
+                      {team}
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              </SelectContent>
+            </Select>
+            <FieldDescription>
+              <code>{draft.repo}</code> is the fixed repo of several teams; the task runs with the
+              chosen team&apos;s credentials.
+            </FieldDescription>
+          </Field>
+        ) : null}
 
         <Field data-disabled={submitting || undefined}>
           <FieldLabel htmlFor="new-task-title">Title</FieldLabel>
@@ -345,6 +410,9 @@ function NewTaskSession({ onClose }: { onClose: () => void }) {
   const workspace = usePoll<WorkspaceResponse>(WORKSPACE_URL, 30_000);
   const repos =
     workspace.data?.status === "ok" ? workspace.data.config.repos.map((repo) => repo.name) : [];
+  const fixedTeams = fixedTeamsByRepo(
+    workspace.data?.status === "ok" ? workspace.data.config.teams : [],
+  );
   const [draft, setDraft] = useState<TaskDraft | null>(null);
   const [idempotencyKey, setIdempotencyKey] = useState(newIdempotencyKey);
   const [submitting, setSubmitting] = useState(false);
@@ -365,7 +433,10 @@ function NewTaskSession({ onClose }: { onClose: () => void }) {
   const submit = () => {
     setSubmitting(true);
     setError(null);
-    void createTask({ ...current, idempotencyKey })
+    // Send a team only where the picker was shown; elsewhere the server picks.
+    const { team, ...rest } = current;
+    const pickedTeam = teamChoices(fixedTeams, current.repo).length > 0 ? team : undefined;
+    void createTask({ ...rest, ...(pickedTeam ? { team: pickedTeam } : {}), idempotencyKey })
       .then((result) => {
         if (result.ok) setCreated(result.task);
         else setError(result.error);
@@ -436,6 +507,7 @@ function NewTaskSession({ onClose }: { onClose: () => void }) {
       ) : workspace.data ? (
         <NewTaskForm
           repos={repos}
+          fixedTeams={fixedTeams}
           draft={current}
           onDraftChange={setDraft}
           onSubmit={submit}

@@ -417,6 +417,8 @@ export const TASKS_URL = "/api/tasks";
 /** `POST /api/tasks` body: an ad-hoc task (equivalent of `devintern worker add`). */
 export interface CreateTaskInput {
   repo: string;
+  /** `[[teams]]` entry whose credentials the run uses; required when the repo is fixed to several. */
+  team?: string;
   title: string;
   body: string;
   /** Dedupes a resubmission while the first task is pending/running. */
