@@ -1,6 +1,6 @@
 import { extractImplementationSummary } from "../agent/implementation-summary";
 import type { StackBase } from "../dependencies/gate";
-import { parseStackedOnMarker } from "../dependencies/stacked-base";
+import { parseStackedOnMarker, stackBaseFromEnv } from "../dependencies/stacked-base";
 
 /**
  * Structured PR-body template.
@@ -97,9 +97,13 @@ export interface PrBodyInput {
  * Accepts the raw tracker description (string or rich document).
  */
 export function stackedOnFromDescription(description: unknown): StackBase | undefined {
-  return typeof description === "string"
-    ? (parseStackedOnMarker(description) ?? undefined)
-    : undefined;
+  return (
+    (typeof description === "string"
+      ? (parseStackedOnMarker(description) ?? undefined)
+      : undefined) ??
+    // A stacked tracker ticket carries its base in the env (see STACKED_ON_ENV).
+    stackBaseFromEnv()
+  );
 }
 
 /** The "stacked on" note opening a stacked PR's Why section. */

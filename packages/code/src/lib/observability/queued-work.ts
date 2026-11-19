@@ -3,8 +3,9 @@
  * from `devintern worker add`, dashboard-scheduled retries, webhook
  * deliveries the worker has persisted but not picked up, automation
  * occurrences waiting for a free slot (they have no run row until admitted),
- * and PR jobs (review replies, conflict resolution, CI fixes, auto-merge
- * checks) waiting in the worker's supervisor for a slot or for their PR.
+ * PR jobs (review replies, conflict resolution, CI fixes, auto-merge
+ * checks) waiting in the worker's supervisor for a slot or for their PR,
+ * and polled tracker tickets held back by their native blockers.
  *
  * Rows that are already running are deliberately left out: they own a run
  * row and show up under "Active work" instead. Every reader here follows the
@@ -17,6 +18,8 @@ import { existsSync } from "fs";
 import { resolve } from "path";
 
 import type { InjectedTask } from "../state/injected-tasks";
+import { readTrackerDependencyWaits } from "../state/tracker-dependencies";
+import type { TrackerDependencyWait } from "../state/tracker-dependencies";
 import type { RunRecord } from "../state/run-recorder";
 import { configureSqliteConnection } from "../state/sqlite";
 import { WebhookQueue } from "../state/webhook-queue";
@@ -27,7 +30,7 @@ import type { JobKind, QueuedJobSnapshot, QueuedJobWaitReason } from "../worker/
 import { deriveTaskTitle } from "./task-title";
 
 /** Where a queued item came from. */
-export type QueuedWorkKind = "ad-hoc" | "retry" | "webhook" | "automation" | "pr-job";
+export type QueuedWorkKind = "ad-hoc" | "retry" | "webhook" | "automation" | "pr-job" | "tracker";
 
 /** One queued item as served by `GET /api/queue`. */
 export interface QueuedWorkItem {
@@ -70,14 +73,18 @@ export interface QueuedWorkItem {
    * running), `repo` (the repository's per-repo limit), or `global`.
    */
   waitingOn?: QueuedJobWaitReason;
-  /** Ad-hoc: task keys this task depends on. */
+  /** Ad-hoc / tracker: task keys this task depends on (tracker: its native blockers). */
   dependsOn?: string[];
-  /** Ad-hoc: how it waits on {@link dependsOn} (`merged` or `stacked`). */
+  /** Ad-hoc / tracker: how it waits on {@link dependsOn} (`merged` or `stacked`). */
   dependencyMode?: "merged" | "stacked";
-  /** Ad-hoc: `waiting` or `blocked` on a dependency; unset once claimable. */
+  /** Ad-hoc / tracker: `waiting` or `blocked` on a dependency; unset once claimable. */
   dependencyState?: "waiting" | "blocked";
-  /** Ad-hoc: why, naming the dependency (`local-foo PR #12 not merged`). */
+  /** Ad-hoc / tracker: why, naming the dependency (`local-foo PR #12 not merged`). */
   dependencyReason?: string;
+  /** Tracker: the tracker the ticket was polled from (`jira`). */
+  tracker?: string;
+  /** Tracker: the team that polled it (multi-team workspaces). */
+  team?: string;
 }
 
 export interface QueuedWorkResponse {
@@ -116,6 +123,25 @@ export function injectedTaskToQueuedItem(task: InjectedTask): QueuedWorkItem {
           dependencyReason: task.dependencyReason,
         }
       : {}),
+  };
+}
+
+/** Map a tracker ticket held back by its blockers to its queued item. */
+export function trackerWaitToQueuedItem(wait: TrackerDependencyWait): QueuedWorkItem {
+  return {
+    id: `tracker:${wait.team ?? ""}:${wait.taskKey}`,
+    kind: "tracker",
+    title: wait.taskKey,
+    taskKey: wait.taskKey,
+    repo: wait.repo,
+    actor: wait.team ? `poll:${wait.tracker}:${wait.team}` : `poll:${wait.tracker}`,
+    createdAt: wait.since,
+    tracker: wait.tracker,
+    team: wait.team,
+    dependsOn: wait.dependsOn,
+    dependencyMode: wait.dependencyMode,
+    dependencyState: wait.state,
+    dependencyReason: wait.reason,
   };
 }
 
@@ -450,19 +476,26 @@ export function collectQueuedWork(sources: QueuedWorkSources): QueuedWorkRespons
   } catch {
     // Best-effort like the automation catalog.
   }
-  const items = [...adHoc, ...retries, ...webhooks, ...automations, ...prJobs].sort(
+  const tracker = readTrackerDependencyWaits(sources.queueDbPath, QUEUED_SOURCE_LIMIT).map(
+    trackerWaitToQueuedItem,
+  );
+  const items = [...adHoc, ...retries, ...webhooks, ...automations, ...prJobs, ...tracker].sort(
     (a, b) => queuedEligibleAt(a) - queuedEligibleAt(b),
   );
-  // Waiting automations and supervisor jobs are not counted by the durable
-  // queues behind pendingTotal.
+  // Waiting automations, supervisor jobs, and held-back tracker tickets are not
+  // counted by the durable queues behind pendingTotal.
   return {
     items,
-    total: Math.max(items.length, sources.pendingTotal + automations.length + prJobs.length),
+    total: Math.max(
+      items.length,
+      sources.pendingTotal + automations.length + prJobs.length + tracker.length,
+    ),
   };
 }
 
 /**
- * `GET /api/queue` — pending ad-hoc tasks, retries, and webhook deliveries.
+ * `GET /api/queue` — pending ad-hoc tasks, retries, webhook deliveries,
+ * waiting automations, and tracker tickets held back by their blockers.
  *
  * @param data - Dashboard data source
  */

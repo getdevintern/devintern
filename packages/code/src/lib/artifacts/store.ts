@@ -59,6 +59,23 @@ export class ArtifactStore {
       artifact_id TEXT NOT NULL, uploader TEXT NOT NULL, url TEXT, error TEXT,
       PRIMARY KEY (artifact_id, uploader)
     )`);
+    if (!options.readonly) {
+      // Several worker processes open the shared queue.db concurrently; take the
+      // write lock before reading table_info so check-then-ALTER is atomic.
+      this.db
+        .transaction(() => {
+          const columns = new Set(
+            (
+              this.db.query("PRAGMA table_info(run_artifact_uploads)").all() as { name: string }[]
+            ).map((column) => column.name),
+          );
+          if (!columns.has("remote_id"))
+            this.db.exec("ALTER TABLE run_artifact_uploads ADD COLUMN remote_id TEXT");
+          if (!columns.has("notice"))
+            this.db.exec("ALTER TABLE run_artifact_uploads ADD COLUMN notice TEXT");
+        })
+        .immediate();
+    }
   }
 
   add(
@@ -159,9 +176,14 @@ export class ArtifactStore {
         const artifact = JSON.parse(metadata) as RunArtifact;
         const upload = this.db
           .query(
-            "SELECT url, error FROM run_artifact_uploads WHERE artifact_id = ? ORDER BY rowid DESC LIMIT 1",
+            "SELECT * FROM run_artifact_uploads WHERE artifact_id = ? ORDER BY rowid DESC LIMIT 1",
           )
-          .get(artifact.id) as { url: string | null; error: string | null } | null;
+          .get(artifact.id) as {
+          url: string | null;
+          error: string | null;
+          remote_id?: string | null;
+          notice?: string | null;
+        } | null;
         return {
           ...artifact,
           publication: publication ? (JSON.parse(publication) as ArtifactPublication) : undefined,
@@ -170,6 +192,8 @@ export class ArtifactStore {
                 status: upload.url ? ("uploaded" as const) : ("failed" as const),
                 url: upload.url ?? undefined,
                 message: upload.error ?? undefined,
+                remoteId: upload.remote_id ?? undefined,
+                notice: upload.notice ?? undefined,
               }
             : undefined,
           available: existsSync(join(this.root, artifact.id)),
@@ -216,10 +240,21 @@ export class ArtifactStore {
     return row?.url ?? undefined;
   }
 
-  recordUpload(id: string, uploader: string, result: { url?: string; error?: string }): void {
+  recordUpload(
+    id: string,
+    uploader: string,
+    result: { url?: string; error?: string; remoteId?: string; notice?: string },
+  ): void {
     this.db.run(
-      "INSERT OR REPLACE INTO run_artifact_uploads(artifact_id, uploader, url, error) VALUES (?, ?, ?, ?)",
-      [id, uploader, result.url ?? null, result.error ? redactSecrets(result.error) : null],
+      "INSERT OR REPLACE INTO run_artifact_uploads(artifact_id, uploader, url, error, remote_id, notice) VALUES (?, ?, ?, ?, ?, ?)",
+      [
+        id,
+        uploader,
+        result.url ?? null,
+        result.error ? redactSecrets(result.error) : null,
+        result.remoteId ?? null,
+        result.notice ?? null,
+      ],
     );
   }
 

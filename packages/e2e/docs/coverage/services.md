@@ -11,7 +11,7 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 - Surface: External dependency: relay, auth, licensing, and observability services
 - Status: `partial`
 - Evidence: `tests/local/services-license-gate.test.ts` (`bun run --filter @devintern/e2e test`). Offline only: with Supabase refused by a recording proxy, an expired (refresh-retry) or unexpired (`getUser`) fake session resolves to signed out, prints no token, and the CLI exits normally; `logout` still removes the local session file.
-- Missing: Any real sign-in, a successful refresh, and signed-in entitlement paths are `blocked`: the Supabase URL is hardcoded (`DEFAULT_SUPABASE_URL`, `packages/auth/src/index.ts`), so they need a product-side auth URL override or a live account suite. Finding: with Supabase unreachable, supabase-js logs each failed fetch with `console.error(e)` (`@supabase/auth-js/dist/main/lib/fetch.js`), so stderr shows raw `ERR_PROXY_TUNNEL` error dumps with bundle source snippets (no tokens); and an expired session waits about 25 s on refresh retries before giving up.
+- Missing: Any real sign-in, a successful refresh, and signed-in entitlement paths are `blocked`: the Supabase URL is hardcoded (`DEFAULT_SUPABASE_URL`, `packages/auth/src/index.ts`), so they need a product-side auth URL override or a live account suite. Finding: with Supabase unreachable, supabase-js logs each failed fetch with `console.error(e)` (`@supabase/auth-js/dist/main/lib/fetch.js`), so stderr shows raw `ERR_PROXY_TUNNEL` error dumps with bundle source snippets (no tokens); and an expired session waits about 25 s on refresh retries before giving up (the suite collapses those backoff sleeps with `helpers/fast-auth-backoff-preload.cjs`; every attempt still runs).
 - Last reviewed: 2026-11-18
 
 ### Automation license gate, Worker Pilot trial, offline/expired behavior
@@ -77,7 +77,7 @@ Priority numbers are the global ranking from the
 - Proves: the automation license gate fails closed offline for task runs (exit `77`) and `devintern worker` (exit `1`) with the exact `checkLicense` guidance, no agent invocation, and no branch on the local bare remote; and the signed-out `whoami`/`logout` behavior with no session and with an unverifiable session while Supabase is unreachable (`logout` still removes the session file).
 - How: unsets `DEVINTERN_SKIP_LICENSE_CHECK` for these children only and routes HTTP(S) through `helpers/recording-proxy.ts`, which refuses every tunnel and records target hosts. Assertions allow only `api.polar.sh` (fake `LICENSE_KEY`) or the hardcoded Supabase host (fake session). Credentials are obviously fake strings, and the tests assert none appears in stdout or stderr. Session files are written to `<project>/.devintern-code/.auth-session.json`.
 - Run: `bun run --filter @devintern/e2e test`, or `bun test tests/local/services-license-gate.test.ts` from `packages/e2e`.
-- Prerequisites: the built CLI (`bun run --filter @getdevintern/code build`); otherwise the file skips. No network or account. The two expired-session cases take about 25 s each because supabase-js retries the refresh.
+- Prerequisites: the built CLI (`bun run --filter @getdevintern/code build`); otherwise the file skips. No network or account. The two expired-session cases preload `helpers/fast-auth-backoff-preload.cjs`, which skips the sleeps between supabase-js refresh retries (about 25 s otherwise) while every attempt still reaches the refusing proxy.
 
 ### `tests/local/worker-sentry-selection.test.ts`
 

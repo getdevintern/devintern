@@ -8,6 +8,7 @@
 import {
   JiraClient as BaseJiraClient,
   convertADFToMarkdown,
+  extractIssueBlockers,
   extractLinkedResources,
   extractTextFromADF,
   formatIssueDetails,
@@ -27,7 +28,7 @@ import type {
   Task,
   TaskTrackerCommentContent,
 } from "../../../types/task-tracker";
-import type { TaskTrackerClient } from "../client";
+import type { TaskBlocker, TaskTrackerClient } from "../client";
 import { JiraFormatter } from "./jira-formatter";
 
 export class JiraTaskTrackerClient implements TaskTrackerClient {
@@ -120,6 +121,15 @@ export class JiraTaskTrackerClient implements TaskTrackerClient {
   extractLinkedResources(task: Task): LinkedResource[] {
     const issue = task.raw as JiraIssue;
     return extractLinkedResources(issue);
+  }
+
+  /** Inward "Blocks" links ("is blocked by"); each link carries the blocker's status. */
+  async getBlockers(taskKey: string): Promise<TaskBlocker[]> {
+    const issue = await this.jiraApiCall(
+      "GET",
+      `/rest/api/3/issue/${encodeURIComponent(taskKey)}?fields=issuelinks`,
+    );
+    return extractIssueBlockers(issue ?? {});
   }
 
   async getRelatedWorkItems(task: Task): Promise<DetailedRelatedIssue[]> {

@@ -37,6 +37,8 @@ A successful run that cannot create a PR at all (the remote is not GitHub, GitLa
 
 When PR creation fails for a temporary reason (a GitHub 5xx, a rate limit), the worker comments on the ticket and re-runs the whole ticket on the next poll, up to 3 times. A failure that needs a human fix (a missing token or App, a validation error) is recorded as actioned right away; fix the configuration, then edit the ticket.
 
+Either way, the run is recorded as `failed` with the reason `pushed but PR creation failed: …`, so `devintern worker runs --status failed` lists it.
+
 ## Interrupted runs
 
 A graceful stop (Ctrl-C, `SIGTERM`) comments on in-flight tickets and moves them back to To Do. After a hard crash (power loss, `kill -9`), the worker does the same at its next startup, before picking up new work. If the interrupted run already had commits on its branch, the worker continues it instead.
@@ -57,6 +59,9 @@ Search the worker log for `[poll:<tracker>]` lines (for example `[poll:jira]`):
 | `⏭️ skipping KEY (already actioned; no change since the PR)`     | A PR already exists. See [Tickets already actioned after a PR](#tickets-already-actioned-after-a-pr).        |
 | `have no update stamp from the tracker`                          | The tracker's search results lack an `updated` field, so retries cannot be detected. Run `devintern KEY` by hand. |
 | No `[poll:…]` lines at all                                       | Nothing changed on the tracker since the last poll. Edit the ticket.                                         |
+| `⏳ KEY waiting: …` / `⛔ KEY blocked: …`                         | Held back by its [blockers](./worker.md#ticket-dependencies). `devintern worker queue` shows the reason.      |
+| `⏳ KEY waiting: could not read KEY's blockers from …`            | The tracker refused the blocker read. Check that the token can read issue links (Jira, GitLab), relations (Linear), work item links (Azure DevOps), dependencies (Asana), or the blocker cards (Trello). The ticket starts once the read succeeds. |
+| `GitHub token cannot read issue dependencies … (403)`            | The `GITHUB_TOKEN` cannot read issue dependencies, so issues run without waiting on blockers. Grant the token read access to issues in that repository. |
 
 An edit made while the ticket's run is in progress is remembered and picked up after the run ends.
 

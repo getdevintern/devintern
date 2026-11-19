@@ -71,7 +71,7 @@ import type { TaskSupervisor } from "../worker/supervisor";
 import type { AutomationRunContext } from "../automation/acquirer";
 import { flushAnalytics, trackWorkerStarted } from "../observability/analytics";
 import { startWorkerFailover, getWorkerFailover } from "../worker/failover";
-import { RetryQueueAcquirer } from "./retry-acquirer";
+import { buildRetryQueueAcquirer } from "./retry-queue-builder";
 import { InjectedTaskAcquirer, INJECTED_TASK_SOURCE } from "./injected-acquirer";
 import {
   buildStackedPrAcquirer,
@@ -81,6 +81,8 @@ import {
 import { createInjectedStartupRecovery } from "./injected-recovery";
 import { toRoutableTask } from "./router";
 import { createIdleWorkerAutoUpdater } from "./worker-auto-update";
+import { trackerDependencyDeps } from "./tracker-dependency-gate";
+import type { TrackerDependencyGate } from "./tracker-dependency-gate";
 import {
   createFleetTaskExecutor,
   createWorkspaceTaskAcquirer,
@@ -577,6 +579,8 @@ export function buildInjectedTaskAcquirer(
         source: INJECTED_TASK_SOURCE,
         runOrigin: "local",
         queueClaim,
+        // Session pickup only reopens a succeeded run of this same row.
+        injectedCreatedAt: task.createdAt,
         // The CLI resolves the local markdown file; the key still names the worktree.
         taskRef: task.taskFile,
         // Persist the detached child pid for hard-kill startup recovery.
@@ -589,46 +593,6 @@ export function buildInjectedTaskAcquirer(
     maxConcurrency: deps.config.workspace.execution.maxConcurrency,
     maxConcurrencyPerRepo: deps.config.workspace.execution.maxConcurrencyPerRepo,
     isDraining: () => deps.supervisor?.isDraining() ?? false,
-    isPaused: isHarnessChainPaused,
-    verbose,
-  });
-}
-
-/**
- * Build the dashboard retry drain acquirer: claims durable retry rows and runs
- * each through the fleet executor with the persisted repo/team pinned and
- * `--force` prepended.
- */
-export function buildRetryQueueAcquirer(
-  deps: FleetExecutorDeps,
-  store: ScheduledRetryStore,
-  verbose?: boolean,
-): RetryQueueAcquirer {
-  return new RetryQueueAcquirer({
-    store,
-    runDbPath: workspaceDbPath(deps.workspaceDir),
-    execute: (taskKey, routable, retry, queueClaim) => {
-      const retryTeam = retry.team ? findTeam(deps.config, retry.team) : undefined;
-      return createFleetTaskExecutor(
-        {
-          ...deps,
-          ...(retryTeam ? { team: retryTeam } : {}),
-          actionedSource: resolveActionedSource(deps.config, retryTeam),
-        },
-        // The persisted repo/team make retries deterministic even when
-        // task keys overlap or the original route depended on labels.
-        {
-          extraArgs: () => ["--force", ...fleetTaskArgs(deps.config)],
-          repo: retry.repo,
-          queueClaim,
-          source: "retry",
-          // Pin the run this retry targets so session pickup resumes its
-          // branch and prior report instead of the just-opened run.
-          pickupRunId: retry.runId,
-        },
-      )(taskKey, routable);
-    },
-    intervalSeconds: parseEnvInteger("WORKER_RETRY_INTERVAL_SECONDS", 5, { min: 1 }),
     isPaused: isHarnessChainPaused,
     verbose,
   });
@@ -983,6 +947,9 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   await warnOnPushAuthIssues(config, repoManager);
 
   const acquirers: import("../../worker").Acquirer[] = [];
+  // Native-blocker gate per polled source (keyed by team name; `undefined`
+  // for a single-source workspace), filled as the sources are built below.
+  const dependencyGates = new Map<string | undefined, TrackerDependencyGate>();
 
   // First in the list and on a short interval: a dashboard-scheduled retry
   // gets picked up ahead of the slower pollers.
@@ -991,6 +958,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       { config, workspaceDir, skips: state.skips, repoManager, supervisor },
       retryQueue,
       options.verbose,
+      (team) => dependencyGates.get(team),
     ),
   );
 
@@ -1001,11 +969,9 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       options.verbose,
       state.workerState,
     ),
+    // Keep stacked PRs on their base: restack, retarget after a merge.
+    await buildStackedPrAcquirer({ config, workspaceDir, store: injectedTasks, repoManager }),
   );
-
-  // Keep stacked PRs on their base: restack, retarget after a merge.
-  const stackStores = { config, workspaceDir, store: injectedTasks, repoManager };
-  acquirers.push(await buildStackedPrAcquirer(stackStores));
 
   // Always assembled (even with no automations yet): a live reload can add
   // [[automations]] without restarting, and applyAutomations schedules them.
@@ -1210,6 +1176,18 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
     // Share the gate with the relay task evaluator so a relayed change caused
     // by the worker's own post-PR transition is not re-implemented either.
     source.isTaskActionedUnchanged = actionedGate;
+    const dependencyDeps = trackerDependencyDeps({
+      config,
+      workspaceDir,
+      state,
+      tracker: source.tracker,
+      teamName: source.team?.name,
+      getTracker: source.client ? () => source.client! : () => singleTrackerManager!.getClient(),
+    });
+    source.dependencyGate = dependencyDeps.dependencyGate;
+    if (dependencyDeps.dependencyGate) {
+      dependencyGates.set(source.team?.name, dependencyDeps.dependencyGate);
+    }
     const taskAcquirer = createWorkspaceTaskAcquirer({
       config,
       workspaceDir,
@@ -1227,6 +1205,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       team: source.team,
       verbose: options.verbose,
       supervisor,
+      ...dependencyDeps,
     });
     intervalUpdaters.push((seconds) => taskAcquirer.updateInterval(seconds));
     acquirers.push(taskAcquirer);
@@ -1460,6 +1439,7 @@ function assertWorkspaceHasWork(
   );
 }
 
+export { buildRetryQueueAcquirer };
 export { workspaceHasConfiguredWork, workspaceHasStartupWork } from "./startup-work";
 export {
   createFleetTaskExecutor,

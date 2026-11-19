@@ -35,14 +35,17 @@ function recordInvocation(path: string): string {
   return `printf '%s\\n' invoked >> "${path}"`;
 }
 
-/** Shell lines that print the limit pair on stderr and exit non-zero. */
+/**
+ * Shell lines that print the limit pair on stderr and exit non-zero.
+ *
+ * The pair goes out in one `write`: the CLI latches the first chunk that
+ * matches a usage limit, so a reset hint arriving in a later chunk would be
+ * dropped. A `printf` builtin writes stderr line by line, which splits the
+ * pair under load; `cat` copies the whole heredoc in one write. The heredoc
+ * body and terminator must stay unindented, even inside an `if`.
+ */
 function limitAndExit(resetHint: string): string[] {
-  return [
-    `printf '%s\\n' ${limitLines(resetHint)
-      .map((line) => `'${line}'`)
-      .join(" ")} >&2`,
-    "exit 1",
-  ];
+  return ["cat >&2 <<'E2E_USAGE_LIMIT'", ...limitLines(resetHint), "E2E_USAGE_LIMIT", "exit 1"];
 }
 
 /** Shell line that hands the original argv to the fixture agent. */
@@ -91,7 +94,7 @@ export function createLimitOnceStub(
     "#!/bin/sh",
     recordInvocation(invocations),
     `if [ "$(wc -l < "${invocations}")" -le 1 ]; then`,
-    ...limitAndExit(resetHint).map((line) => `  ${line}`),
+    ...limitAndExit(resetHint),
     "fi",
     delegateTo(agentPath),
   ]);

@@ -8,9 +8,53 @@ import type {
   JiraFormattedIssueDetails,
   JiraIssue,
   JiraIssueComment,
+  JiraIssueLink,
   JiraLinkedResource,
   JiraRelatedWorkItem,
 } from "./types.ts";
+
+/** A Jira issue that blocks another, read from its `issuelinks`. */
+export interface JiraIssueBlocker {
+  key: string;
+  /** Status category `done` (green), when the link carries the status. */
+  done?: boolean;
+  /** Status name (`In Progress`), when the link carries the status. */
+  status?: string;
+}
+
+/** Whether a link type is Jira's standard "Blocks" (`blocks` / `is blocked by`). */
+function isBlocksLinkType(type: JiraIssueLink["type"] | undefined): boolean {
+  if (!type) return false;
+  if (type.name?.trim().toLowerCase() === "blocks") return true;
+  return (
+    type.outward?.trim().toLowerCase() === "blocks" &&
+    type.inward?.trim().toLowerCase() === "is blocked by"
+  );
+}
+
+/**
+ * The issues that block `issue`: its "Blocks" links where it is the inward
+ * ("is blocked by") side. On a link of the issue itself, `inwardIssue` is the
+ * other end of the inward description, i.e. the blocker.
+ *
+ * @param issue - Issue with `fields.issuelinks` loaded
+ */
+export function extractIssueBlockers(issue: Pick<JiraIssue, "fields">): JiraIssueBlocker[] {
+  const links = Array.isArray(issue.fields?.issuelinks) ? issue.fields.issuelinks : [];
+  const blockers = new Map<string, JiraIssueBlocker>();
+  for (const link of links) {
+    const blocker = link?.inwardIssue;
+    if (!blocker?.key || !isBlocksLinkType(link.type)) continue;
+    const status = blocker.fields?.status;
+    const category = status?.statusCategory?.key;
+    blockers.set(blocker.key, {
+      key: blocker.key,
+      ...(category ? { done: category === "done" } : {}),
+      ...(status?.name ? { status: status.name } : {}),
+    });
+  }
+  return [...blockers.values()];
+}
 
 export function extractLinkedResources(issue: JiraIssue): JiraLinkedResource[] {
   const linkedResources: JiraLinkedResource[] = [];

@@ -156,7 +156,7 @@ export interface TaskArtifactFile {
     commentUrl?: string;
     message?: string;
   };
-  upload?: { status: "uploaded" | "failed"; message?: string };
+  upload?: { status: "uploaded" | "failed"; message?: string; notice?: string };
 }
 
 export interface TaskArtifactContent {
@@ -605,7 +605,7 @@ export interface SourcesResponse {
 }
 
 /** Where a queued item came from. */
-export type QueuedWorkKind = "ad-hoc" | "retry" | "webhook" | "automation" | "pr-job";
+export type QueuedWorkKind = "ad-hoc" | "retry" | "webhook" | "automation" | "pr-job" | "tracker";
 
 /** One pending item from `GET /api/queue`; running rows are active work instead. */
 export interface QueuedWorkItem {
@@ -637,14 +637,18 @@ export interface QueuedWorkItem {
   jobKind?: string;
   /** PR job: blocked by another job on the same PR, the per-repo limit, or the global limit. */
   waitingOn?: "exclusive" | "repo" | "global";
-  /** Ad-hoc: task keys this task depends on. */
+  /** Ad-hoc / tracker: task keys this task depends on (tracker: its native blockers). */
   dependsOn?: string[];
-  /** Ad-hoc: `merged` (wait for merges) or `stacked` (branch from one unmerged dependency). */
+  /** Ad-hoc / tracker: `merged` (wait for merges) or `stacked` (branch from one unmerged dependency). */
   dependencyMode?: "merged" | "stacked";
-  /** Ad-hoc: `waiting` or `blocked` on a dependency; unset once claimable. */
+  /** Ad-hoc / tracker: `waiting` or `blocked` on a dependency; unset once claimable. */
   dependencyState?: "waiting" | "blocked";
-  /** Ad-hoc: why, naming the dependency. */
+  /** Ad-hoc / tracker: why, naming the dependency. */
   dependencyReason?: string;
+  /** Tracker: the tracker the ticket was polled from. */
+  tracker?: string;
+  /** Tracker: the team that polled it. */
+  team?: string;
 }
 
 export interface QueuedWorkResponse {

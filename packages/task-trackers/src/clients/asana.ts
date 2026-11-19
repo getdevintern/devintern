@@ -68,6 +68,13 @@ export interface AsanaTaskDetail extends AsanaTask {
   custom_fields?: AsanaCustomField[];
 }
 
+/** A task this task depends on (`GET /tasks/{gid}/dependencies`). */
+export interface AsanaDependency {
+  gid: string;
+  name?: string;
+  completed?: boolean;
+}
+
 export interface AsanaStory {
   gid: string;
   /** Story subtype; comments are `comment_added`. */
@@ -564,6 +571,42 @@ export class AsanaClient {
    */
   async getTaskDetail(taskGid: string): Promise<AsanaTaskDetail> {
     return this.request<AsanaTaskDetail>(`/tasks/${taskGid}?opt_fields=${TASK_DETAIL_FIELDS}`);
+  }
+
+  /**
+   * List the tasks a task depends on (its blockers), following pagination.
+   *
+   * Dependencies are a paid Asana feature; a workspace without them answers
+   * 402 Payment Required, reported as `null` so callers can treat it as "no
+   * blockers".
+   *
+   * @param taskGid - Asana task GID (the dependent task).
+   * @returns Dependencies with their completion state, or `null` when the
+   *   workspace plan has no dependencies.
+   * @throws When the Asana API request fails for another reason.
+   */
+  async listTaskDependencies(taskGid: string): Promise<AsanaDependency[] | null> {
+    const dependencies: AsanaDependency[] = [];
+    let offset: string | undefined;
+    do {
+      const query = `opt_fields=gid,name,completed&limit=100${offset ? `&offset=${encodeURIComponent(offset)}` : ""}`;
+      let page: { data: AsanaDependency[]; nextOffset: string | undefined };
+      try {
+        page = await this.requestPage<AsanaDependency[]>(
+          `/tasks/${encodeURIComponent(taskGid)}/dependencies?${query}`,
+        );
+      } catch (error) {
+        if (error instanceof Error && error.message.startsWith("Asana API error (402)")) {
+          return null;
+        }
+        throw error;
+      }
+      for (const entry of page.data ?? []) {
+        if (entry && typeof entry.gid === "string") dependencies.push(entry);
+      }
+      offset = page.nextOffset;
+    } while (offset);
+    return dependencies;
   }
 
   /**

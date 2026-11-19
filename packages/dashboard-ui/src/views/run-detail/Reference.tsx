@@ -256,6 +256,9 @@ function ArtifactItem({ runId, file }: { runId: number; file: TaskArtifactFile }
           {file.upload?.status === "failed" ? (
             <p className="text-xs text-danger">Upload failed: {file.upload.message}</p>
           ) : null}
+          {file.upload?.status === "uploaded" && file.upload.notice ? (
+            <p className="text-xs text-muted-foreground">Upload access: {file.upload.notice}</p>
+          ) : null}
           {loading ? <p className="text-xs text-muted-foreground">Loading…</p> : null}
           {error ? <p className="text-xs text-danger">{error}</p> : null}
           {content ? (

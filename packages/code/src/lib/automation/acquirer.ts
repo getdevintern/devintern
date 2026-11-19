@@ -69,7 +69,8 @@ export interface SpawnedAutomationRun {
 /**
  * Worker log line for a settled automation run. A clean exit whose recorded
  * run escalated uses the worker's escalation wording (🛑, as auto-merge
- * rejections do) instead of claiming completion.
+ * rejections do), and one recorded as failed (for example, pushed but the PR
+ * could not be created) says so, instead of claiming completion.
  *
  * @param label - Log prefix such as `automation:release`
  * @param ok - Whether the child exited cleanly
@@ -85,6 +86,9 @@ export function automationCompletionMessage(
   if (!ok) return `⚠️  [${label}] ${subject}did not complete cleanly`;
   if (outcome?.status === "escalated") {
     return `🛑 [${label}] ${subject}escalated: ${outcome.reason ?? "handed back to a human"}`;
+  }
+  if (outcome?.status === "failed") {
+    return `❌ [${label}] ${subject}failed: ${outcome.reason ?? "run did not deliver"}`;
   }
   return `✅ [${label}] ${subject}completed`;
 }

@@ -23,7 +23,7 @@ import type {
   TaskTrackerCommentContent,
 } from "../../../types/task-tracker";
 import { TaskTrackerError } from "../../../types/task-tracker";
-import type { TaskTrackerClient } from "../client";
+import type { TaskBlocker, TaskTrackerClient } from "../client";
 import {
   ESTIMATION_COMMENT_MARKER,
   formatAssessmentFailureMarkdown,
@@ -67,9 +67,12 @@ export class GitHubTaskTrackerClient implements TaskTrackerClient {
   private token: string;
   /** Mutually exclusive status label names swapped on transition. */
   private statusLabels: string[];
+  /** `owner/repo` of the configured issues repository. */
+  private repoSlug: string;
 
   constructor(token: string, owner: string, repo: string, options?: { statusLabels?: string[] }) {
     this.token = token;
+    this.repoSlug = `${owner}/${repo}`;
     this.githubClient = new GitHubClient({ token, owner, repo });
     this.statusLabels = options?.statusLabels ?? [];
   }
@@ -89,6 +92,25 @@ export class GitHubTaskTrackerClient implements TaskTrackerClient {
       tasks: result.issues.map((issue) => this.normalizeIssue(issue)),
       total: result.total,
     };
+  }
+
+  /**
+   * Native "blocked by" issue dependencies. A blocker in this repository is
+   * keyed by its number, like polled tasks; one in another repository is keyed
+   * `owner/repo#number`. A repository or account without the dependencies API
+   * reports no blockers.
+   */
+  async getBlockers(taskKey: string): Promise<TaskBlocker[]> {
+    const blockers = await this.githubClient.listIssueBlockedBy(this.toIssueNumber(taskKey));
+    if (!blockers) return [];
+    return blockers.map((blocker) => {
+      const sameRepo =
+        !blocker.repository || blocker.repository.toLowerCase() === this.repoSlug.toLowerCase();
+      return {
+        key: sameRepo ? String(blocker.number) : `${blocker.repository}#${blocker.number}`,
+        ...(blocker.state ? { done: blocker.state === "closed", status: blocker.state } : {}),
+      };
+    });
   }
 
   async getComments(taskKey: string): Promise<Comment[]> {
