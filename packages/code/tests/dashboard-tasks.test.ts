@@ -115,6 +115,37 @@ describe("POST /api/tasks", () => {
     expect(readRows()).toHaveLength(0);
   });
 
+  test("needs a team when the repo is fixed to several, and stores the chosen one", () => {
+    writeWorkspace(`[defaults]
+tracker = "markdown"
+task_query = "is:open"
+
+[[teams]]
+name = "web-a"
+tracker = "github"
+repo = "web"
+
+[[teams]]
+name = "web-b"
+tracker = "github"
+repo = "web"
+
+[[repos]]
+name = "web"
+remote = "git@github.com:acme/web.git"
+`);
+    const ambiguous = handleCreateTask(data, { repo: "web", title: "Ambiguous" });
+    expect(ambiguous.status).toBe(400);
+    expect((ambiguous.body as { error: string }).error).toContain("several teams (web-a, web-b)");
+    expect(readRows()).toHaveLength(0);
+
+    expect(handleCreateTask(data, { repo: "web", title: "Typo", team: "web-c" }).status).toBe(400);
+
+    const picked = handleCreateTask(data, { repo: "web", title: "Picked", team: "web-b" });
+    expect(picked.status).toBe(201);
+    expect(readRows()[0]?.team).toBe("web-b");
+  });
+
   test("rejects an oversized body", () => {
     writeWorkspace();
     const response = handleCreateTask(data, {

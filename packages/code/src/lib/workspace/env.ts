@@ -11,8 +11,8 @@
 import { existsSync, readFileSync } from "fs";
 import { isAbsolute, join } from "path";
 
-import { gitHubSlugFromRemote } from "./config";
-import type { ErrorMonitorConfig, RepoConfig, TeamConfig } from "./config";
+import { gitHubSlugFromRemote, resolveFleetEventTeam } from "./config";
+import type { ErrorMonitorConfig, RepoConfig, TeamConfig, WorkspaceConfig } from "./config";
 import { resolveWorkspaceDir, workspaceDbPath, workspaceEnvPath } from "./paths";
 import { applyAgentSelectionEnv } from "../agent/selection";
 import type { AgentSelection } from "../agent/selection";
@@ -102,6 +102,15 @@ export function buildRepoCredentialEnv(
 // Defined next to the config parser (which validates `sync_team_prs`
 // against it); re-exported here for existing callers.
 export { gitHubSlugFromRemote };
+
+/**
+ * The GitHub `owner/name` of a workspace repo (`GITHUB_REPO` in its inline
+ * env, else parsed from its remote), or `undefined` for a non-GitHub repo.
+ * Stacked PR maintenance only runs for repos that have one.
+ */
+export function repoGitHubSlug(repo: Pick<RepoConfig, "env" | "remote">): string | undefined {
+  return repo.env.GITHUB_REPO ?? gitHubSlugFromRemote(repo.remote) ?? undefined;
+}
 
 /**
  * Compose the environment for a task subprocess routed to one repo.
@@ -298,6 +307,71 @@ export function buildTeamTaskEnv(
   env.TASK_TRACKER = team.tracker;
   env[WORKSPACE_TEAM_ENV] = team.name;
   return env;
+}
+
+/**
+ * Compose the environment for a repo-scoped run that has no tracker ticket
+ * (an ad-hoc `worker add` task or a scheduled automation), optionally borrowing
+ * one team's credentials.
+ *
+ * Without `team` this is exactly {@link buildRepoEnv}. With `team` the team's
+ * `env_file` and inline `[teams.env]` layer over the repo env, as for a task
+ * the team polled:
+ *
+ * process env < workspace `.env` < repo `env_file` < `[repos.env]` <
+ * team `env_file` < team inline < worker runtime paths.
+ *
+ * Unlike {@link buildTeamTaskEnv}, the run keeps the repo env's tracker
+ * selection: `TASK_TRACKER` and `GITHUB_REPO` (the GitHub Issues coordinate)
+ * are restored after the team layer, and no team attribution is set, so the
+ * run stays a local/scheduled run and only code-host and other credentials
+ * come from the team.
+ *
+ * @param repo - Destination repo.
+ * @param team - Team whose credentials to layer, if any.
+ * @param workspaceDir - Workspace home (defaults to `~/.devintern`).
+ */
+export function buildRepoRunEnv(
+  repo: RepoConfig,
+  team: TeamConfig | undefined,
+  workspaceDir: string = resolveWorkspaceDir(),
+  options: Parameters<typeof buildRepoEnv>[2] = {},
+): Record<string, string | undefined> {
+  const env = buildRepoEnv(repo, workspaceDir, options);
+  if (!team) return env;
+  const kept = { TASK_TRACKER: env.TASK_TRACKER, GITHUB_REPO: env.GITHUB_REPO };
+  Object.assign(env, teamLayerEnv(team, workspaceDir));
+  for (const [key, value] of Object.entries(kept)) {
+    if (value === undefined) delete env[key];
+    else env[key] = value;
+  }
+  pinWorkerRuntimeEnv(env, workspaceDir);
+  pinPipelineEnv(env, repo, workspaceDir, options);
+  applyAgentSelectionEnv(env, options.agentSelection);
+  env[WORKSPACE_REPO_ENV] = repo.name;
+  delete env[WORKSPACE_TEAM_ENV];
+  return env;
+}
+
+/**
+ * Compose the environment for PR/MR event work on one repo (review, conflict,
+ * CI-fix and auto-merge runs, and the code-host clients that read the events).
+ *
+ * {@link buildRepoRunEnv} with the team from {@link resolveFleetEventTeam}, so
+ * follow-ups push with the same account that opened the PR, without the team
+ * re-routing the tracker.
+ *
+ * @param config - Workspace config.
+ * @param repo - Repo the PR/MR belongs to.
+ * @param workspaceDir - Workspace home (defaults to `~/.devintern`).
+ */
+export function buildFleetEventEnv(
+  config: WorkspaceConfig,
+  repo: RepoConfig,
+  workspaceDir: string = resolveWorkspaceDir(),
+  options: Parameters<typeof buildRepoEnv>[2] = {},
+): Record<string, string | undefined> {
+  return buildRepoRunEnv(repo, resolveFleetEventTeam(config, repo.name), workspaceDir, options);
 }
 
 /**

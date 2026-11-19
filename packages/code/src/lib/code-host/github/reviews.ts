@@ -849,6 +849,25 @@ export class GitHubReviewsClient {
   }
 
   /**
+   * Change a pull request's base (target) branch.
+   *
+   * @param owner - Repository owner
+   * @param repo - Repository name
+   * @param prNumber - Pull request number
+   * @param base - New base branch name
+   */
+  async updatePullRequestBase(
+    owner: string,
+    repo: string,
+    prNumber: number,
+    base: string,
+  ): Promise<void> {
+    await this.apiRequest("PATCH", `/repos/${owner}/${repo}/pulls/${prNumber}`, owner, repo, {
+      base,
+    });
+  }
+
+  /**
    * Fetch the unified diff for a pull request.
    *
    * @param owner - Repository owner

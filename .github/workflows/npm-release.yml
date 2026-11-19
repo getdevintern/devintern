@@ -47,9 +47,20 @@ permissions:
   id-token: write # npm Trusted Publishing (OIDC)
 
 jobs:
+  # The offline e2e suite runs only here (and on demand), not on every PR:
+  # a red suite blocks publishing @getdevintern/code.
+  e2e-local:
+    if: >-
+      startsWith(github.ref, 'refs/tags/code-v') ||
+      (github.event_name == 'workflow_dispatch' && inputs.code)
+    uses: ./.github/workflows/e2e-local.yml
+    permissions:
+      contents: read
+
   # Two explicit jobs instead of a matrix: the matrix context is not
   # available in job-level `if`, which broke workflow parsing entirely.
   release-code:
+    needs: e2e-local
     if: >-
       startsWith(github.ref, 'refs/tags/code-v') ||
       (github.event_name == 'workflow_dispatch' && inputs.code)

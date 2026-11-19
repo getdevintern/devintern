@@ -39,7 +39,7 @@ Each **Active work** row shows the task, repository, harness, attempt, current p
 Below the running rows:
 
 - **Waiting to retry**: tasks deferred in the last 48 hours, for example after a usage limit, with the reason.
-- **Queued**: accepted work that has not started, such as ad-hoc tasks, dashboard retries, PR events, and automations waiting for their repository's checkout. Expand a row for its details.
+- **Queued**: accepted work that has not started, such as ad-hoc tasks, dashboard retries, PR events, automations waiting for their repository's checkout, and PR jobs (shown as `owner/repo#N`) waiting for a free slot or for another job on the same PR. Expand a row for its details.
 - **Recently finished**: the last five finished tasks with outcome and PR. **View all runs** opens **Runs**.
 
 ## Retry a failed run
@@ -70,7 +70,7 @@ An automation runs in its repository's base checkout, which only one job uses at
 
 ## Delegate a task
 
-Choose **New task** in the header to hand the worker a one-off task, the dashboard equivalent of [`devintern worker add`](delegation.md). Pick a registered repository, give it a title, and describe the work in Markdown (up to 20,000 characters). The worker sees only this text, so [write a self-contained brief](delegation.md#write-a-self-contained-brief). Press <kbd>Ctrl</kbd>+<kbd>Enter</kbd> (<kbd>⌘</kbd>+<kbd>Enter</kbd> on macOS) to submit.
+Choose **New task** in the header to hand the worker a one-off task, the dashboard equivalent of [`devintern worker add`](delegation.md). Pick a registered repository (and, when several teams are fixed to it, the team whose credentials the run uses, like `--team`), give it a title, and describe the work in Markdown (up to 20,000 characters). The worker sees only this text, so [write a self-contained brief](delegation.md#write-a-self-contained-brief). Press <kbd>Ctrl</kbd>+<kbd>Enter</kbd> (<kbd>⌘</kbd>+<kbd>Enter</kbd> on macOS) to submit.
 
 The task is queued and the running worker picks it up on its next poll. Ad-hoc tasks ignore [working windows](worker.md#working-windows-quiet-hours) and use `[defaults].worker_task_args` (default `--create-pr`). The dialog shows the task key (`local-<slug>`) and links to the run once it starts. Submitting twice returns the task that is already queued instead of creating a duplicate.
 

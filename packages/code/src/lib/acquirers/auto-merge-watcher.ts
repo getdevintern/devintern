@@ -77,6 +77,12 @@ export interface AutoMergeWatcherOptions {
    * key, so a policy change re-evaluates PRs decided under the old one.
    */
   policyFingerprint?: (repo: string) => string;
+  /**
+   * Whether `baseRef` is a branch some tracked task's PR is stacked on (the
+   * stacked-PR maintainer's links), beyond the agent PR branches the registry
+   * already knows. A PR targeting one is never merged.
+   */
+  isStackedBase?: (repo: string, baseRef: string) => boolean;
   /** Seconds a head SHA must stay unchanged before evaluation (default 300). */
   quietSeconds?: number;
   /** Failed evaluations per head SHA before giving up (default 3). */
@@ -155,6 +161,8 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
   private rerunRequested = false;
   /** The current/next pass ignores the quiet period and retry backoff. */
   private forceNextPass = false;
+  /** Stacked-base skips already logged, per `repo#pr@head:base`. */
+  private readonly stackSkipsLogged = new Set<string>();
 
   constructor(options: AutoMergeWatcherOptions) {
     this.options = options;
@@ -305,6 +313,7 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
     if (pr.head.repo?.full_name && pr.head.repo.full_name.toLowerCase() !== repo.toLowerCase()) {
       return;
     }
+    if (this.skipStacked(repo, prNumber, pr)) return;
     if (!READY_STATES.has(pr.mergeable_state ?? "")) return;
     const quietMs = (this.options.quietSeconds ?? DEFAULT_AUTO_MERGE_QUIET_SECONDS) * 1000;
     if (!force && now - state.headSeenAt < quietMs) return;
@@ -317,6 +326,39 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
     if (this.options.queue.hasProcessed(AUTO_MERGE_SOURCE, decisionKey)) return;
 
     await this.evaluate(repo, prNumber, state, decisionKey);
+  }
+
+  /** Whether a stacked PR must be skipped; logs the reason once per head and base. */
+  private skipStacked(repo: string, prNumber: number, pr: AutoMergePolledPr): boolean {
+    const reason = this.stackedBaseReason(repo, pr);
+    if (!reason) return false;
+    const skipKey = `${repo.toLowerCase()}#${prNumber}@${pr.head?.sha ?? ""}:${pr.base?.ref ?? ""}`;
+    if (!this.stackSkipsLogged.has(skipKey)) {
+      this.stackSkipsLogged.add(skipKey);
+      console.log(`ℹ️  [${this.name}] ${repo}#${prNumber} skipped: ${reason}`);
+    }
+    return true;
+  }
+
+  /**
+   * Why a PR must not be auto-merged because it is stacked, or `null`.
+   *
+   * Merging a PR whose base is another agent PR's branch lands it in that
+   * branch, not the default branch. Such a PR is considered only once it
+   * targets the default branch (the stacked-PR maintainer retargets it after
+   * its base merges).
+   */
+  private stackedBaseReason(repo: string, pr: AutoMergePolledPr): string | null {
+    const baseRef = pr.base?.ref;
+    if (typeof baseRef !== "string" || baseRef === "") return null;
+    const defaultBranch = pr.base?.repo?.default_branch;
+    if (typeof defaultBranch === "string" && defaultBranch === baseRef) return null;
+    const agentBranch = this.options.workerState.isAgentPrBranch(repo, baseRef);
+    if (!agentBranch && !this.options.isStackedBase?.(repo, baseRef)) return null;
+    return (
+      `its base ${baseRef} is ${agentBranch ? "another agent PR's branch" : "a stacked base"}, ` +
+      "not the default branch; it is considered once its base merges and it is retargeted"
+    );
   }
 
   private async evaluate(
@@ -347,8 +389,7 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
       case "merged":
         // Record the merge now instead of waiting for the next state poll,
         // so the dashboard's merged list reflects it immediately.
-        this.options.workerState.markAgentPrClosed(repo, prNumber, {
-          merged: true,
+        this.options.workerState.markAgentPrClosed(repo, prNumber, "merged", {
           mergedAt: finishedAt,
         });
         this.options.queue.markProcessed(AUTO_MERGE_SOURCE, decisionKey);

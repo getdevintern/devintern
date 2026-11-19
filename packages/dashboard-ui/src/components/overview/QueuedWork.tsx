@@ -1,7 +1,7 @@
 /**
  * Overview's "Queued" disclosure: work the worker has accepted but not
- * started (ad-hoc tasks, dashboard retries, webhook deliveries, and
- * automations waiting for a free slot). Closed by
+ * started (ad-hoc tasks, dashboard retries, webhook deliveries, automations
+ * waiting for a free slot, and PR jobs waiting for a slot or for their PR). Closed by
  * default so active work keeps the panel; each row opens in place to show
  * what will run, for which repo, and why it may be held back.
  */
@@ -21,6 +21,7 @@ const KIND_LABELS: Record<QueuedWorkKind, string> = {
   retry: "Retry",
   webhook: "PR event",
   automation: "Automation",
+  "pr-job": "PR job",
 };
 
 /** Whether the item is backing off and cannot be picked up yet. */
@@ -30,6 +31,10 @@ function heldUntil(item: QueuedWorkItem, now: number): number | undefined {
 
 /** One-line reason under the kind label: backoff, failed attempts, or who queued it. */
 function statusDetail(item: QueuedWorkItem, now: number): string | undefined {
+  if (item.dependencyState) {
+    const label = item.dependencyState === "blocked" ? "Blocked" : "Waiting";
+    return item.dependencyReason ? `${label}: ${item.dependencyReason}` : label;
+  }
   const held = heldUntil(item, now);
   if (held !== undefined) {
     const times = item.deferCount ? ` · deferred ${item.deferCount}×` : "";
@@ -38,6 +43,9 @@ function statusDetail(item: QueuedWorkItem, now: number): string | undefined {
   if (item.attempts)
     return `${item.attempts} failed ${item.attempts === 1 ? "attempt" : "attempts"}`;
   if (item.kind === "automation") return "Waiting for a slot";
+  if (item.kind === "pr-job") {
+    return item.waitingOn === "exclusive" ? "Waiting for this PR" : "Waiting for a slot";
+  }
   if (item.actor) return `Queued by ${item.actor}`;
   return undefined;
 }
@@ -74,10 +82,28 @@ function QueuedDetails({ item, now }: { item: QueuedWorkItem; now: number }) {
             {formatTime(held)} ({formatIn(held, now)})
           </Fact>
         ) : null}
+        {item.dependsOn?.length ? (
+          <Fact label="Depends on">
+            {item.dependsOn.join(", ")} ({item.dependencyMode ?? "merged"})
+          </Fact>
+        ) : null}
+        {item.dependencyState && item.dependencyReason ? (
+          <Fact label={item.dependencyState === "blocked" ? "Blocked" : "Waiting"}>
+            {item.dependencyState === "blocked" ? (
+              <span className="text-danger">{item.dependencyReason}</span>
+            ) : (
+              item.dependencyReason
+            )}
+          </Fact>
+        ) : null}
         {item.deferCount ? <Fact label="Deferrals">{item.deferCount}</Fact> : null}
         {item.attempts ? <Fact label="Attempts">{item.attempts}</Fact> : null}
         {item.message ? (
-          <Fact label={item.kind === "automation" ? "Waiting" : "Last note"}>{item.message}</Fact>
+          <Fact
+            label={item.kind === "automation" || item.kind === "pr-job" ? "Waiting" : "Last note"}
+          >
+            {item.message}
+          </Fact>
         ) : null}
         {item.lastError ? (
           <Fact label="Last error">

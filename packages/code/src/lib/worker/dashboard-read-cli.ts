@@ -49,7 +49,7 @@ import type {
 import { resolveWorkspaceArgPath } from "../observability/dashboard-db";
 import { handleOverview } from "../observability/dashboard-overview";
 import type { OverviewResponse } from "../observability/dashboard-overview";
-import { handleQueuedWork } from "../observability/queued-work";
+import { handleQueuedWork, queuedDependencyStatus } from "../observability/queued-work";
 import type { QueuedWorkResponse } from "../observability/queued-work";
 import type { TaskArtifactContent, TaskArtifactFile } from "../observability/task-artifacts";
 import type { HarnessLogContent } from "../observability/harness-logs";
@@ -803,13 +803,14 @@ function renderQueue(body: QueuedWorkResponse): string {
   if (body.items.length === 0) return "Nothing queued.";
   return [
     table(
-      ["KIND", "SUBJECT", "REPO", "QUEUED", "TITLE"],
+      ["KIND", "SUBJECT", "REPO", "QUEUED", "TITLE", "DEPENDENCIES"],
       body.items.map((item) => [
         item.kind,
         item.taskKey ?? item.automationId ?? (item.prNumber ? `PR #${item.prNumber}` : "-"),
         item.repo ?? "-",
         formatTime(item.createdAt),
         item.title,
+        queuedDependencyStatus(item) ?? "-",
       ]),
     ),
     "",

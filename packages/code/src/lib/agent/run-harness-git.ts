@@ -5,7 +5,7 @@ import { PRManager } from "../code-host";
 import { isFinalPrDeliveryAttempt, MAX_PR_DELIVERY_ATTEMPTS } from "../task/actioned-without-pr";
 import { loadProjectSettings } from "../config/project-settings";
 import { applyActionedTransition } from "../task/actioned-transition";
-import { recordRunPr } from "../state/run-recorder";
+import { recordRunPr, recordRunPrFailure } from "../state/run-recorder";
 import { parseGitHubPrUrl, recordAgentPrFromUrl } from "../state/worker-state";
 import type { TaskTrackerClient } from "../trackers/client";
 import type { Task } from "../../types/task-tracker";
@@ -204,6 +204,9 @@ export function createGitHelpers(ctx: FinalizeContext) {
     message: string,
     options: { branch?: string; permanent?: boolean } = {},
   ) => {
+    // Always on the run record (permanent or not): a succeeded run without a
+    // PR must not read as "nothing to deliver" to a dependent task's gate.
+    recordRunPrFailure(message);
     if (runContext.activeTaskContext && !options.permanent) {
       runContext.activeTaskContext.prCreationFailure = message;
     }

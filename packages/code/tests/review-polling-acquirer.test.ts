@@ -479,6 +479,110 @@ describe("ReviewPollingAcquirer", () => {
     expect(resolved.sort()).toEqual(["acme/widgets#1", "acme/widgets#2", "acme/widgets#3"]);
   });
 
+  describe("background base syncs", () => {
+    /** Three conflicting PRs whose resolutions block until released. */
+    function makeBlockingAcquirer(maxConcurrentBaseSyncs?: number) {
+      for (const prNumber of [1, 2, 3]) {
+        workerState.recordAgentPr({ repo: "acme/widgets", prNumber });
+      }
+      const started: number[] = [];
+      const release = new Map<number, () => void>();
+      let polled = 0;
+      const acquirer = new ReviewPollingAcquirer({
+        intervalSeconds: 60,
+        quietPeriodSeconds: 0,
+        maxConcurrentBaseSyncs,
+        workerState,
+        queue,
+        github: {
+          async fetchPr(_repo, n) {
+            polled++;
+            return {
+              data: {
+                state: "open",
+                mergeable_state: "dirty",
+                head: {
+                  sha: `head${n}`,
+                  ref: `agent/task-${n}`,
+                  repo: { full_name: "acme/widgets" },
+                },
+                base: { sha: "base-sha", ref: "main" },
+              },
+              notModified: false,
+            };
+          },
+          async fetchReviews() {
+            return { data: [], notModified: false };
+          },
+          async fetchReviewCommentsSince() {
+            return [];
+          },
+        },
+        addressPr: async () => true,
+        resolveConflicts: (_repo, n) => {
+          started.push(n);
+          return new Promise<AutomaticResolveResult>((resolve) => {
+            release.set(n, () => resolve({ outcome: "resolved", message: "pushed" }));
+          });
+        },
+      });
+      return { acquirer, started, release, polledCount: () => polled };
+    }
+
+    test("a tick starts every conflicting PR's sync without waiting for the first", async () => {
+      const { acquirer, started, release } = makeBlockingAcquirer(8);
+
+      // Returns while all three resolutions are still running.
+      await acquirer.tick();
+      expect(started.sort()).toEqual([1, 2, 3]);
+
+      for (const done of release.values()) done();
+      await acquirer.waitForBaseSyncs();
+      for (const n of [1, 2, 3]) {
+        expect(
+          queue.hasProcessed("github:base-sync", `base-sync:acme/widgets#${n}:base-sha:head${n}`),
+        ).toBe(true);
+      }
+    });
+
+    test("the limit caps running syncs and the rest start on later ticks", async () => {
+      const { acquirer, started, release } = makeBlockingAcquirer(2);
+
+      await acquirer.tick();
+      expect(started.sort()).toEqual([1, 2]);
+
+      // Still at the limit: nothing new starts, and running PRs are not restarted.
+      await acquirer.tick();
+      expect(started.sort()).toEqual([1, 2]);
+
+      release.get(1)?.();
+      await Bun.sleep(1); // let #1 settle and free its slot
+      await acquirer.tick();
+      expect(started.sort()).toEqual([1, 2, 3]);
+
+      release.get(2)?.();
+      release.get(3)?.();
+      await acquirer.waitForBaseSyncs();
+    });
+
+    test("a running sync does not block polling the other PRs", async () => {
+      const { acquirer, started, release, polledCount } = makeBlockingAcquirer(1);
+
+      await acquirer.tick();
+      expect(started).toEqual([1]);
+
+      // The next tick polls every PR again while #1 is still resolving
+      // (no pre-sync refetch: #1 is running and the limit is reached).
+      const before = polledCount();
+      await acquirer.tick();
+      expect(polledCount() - before).toBe(3);
+      expect(started).toEqual([1]);
+
+      release.get(1)?.();
+      await acquirer.waitForBaseSyncs();
+    });
+  });
+
   test("clean or unknown mergeability does not trigger; dirty and behind do", async () => {
     workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
     const gh: FakeGitHubState = {
