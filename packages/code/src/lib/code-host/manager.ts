@@ -135,7 +135,7 @@ export class PRManager {
     };
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       result = await this.dispatchCreatePullRequest(prInfo, repoInfo);
-      if (result.success && options.artifactComment && repoInfo.platform !== "github") {
+      if (result.success && options.artifactComment && repoInfo.platform === "bitbucket") {
         result.artifactPublication = {
           status: "skipped",
           message: `Artifact comments are not supported for ${repoInfo.platform} yet`,

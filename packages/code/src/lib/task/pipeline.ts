@@ -49,7 +49,7 @@ import {
 import { pickupSelection, resolveSessionPickup } from "../state/session-pickup";
 import type { SessionPickupDecision, SessionPickupOptions } from "../state/session-pickup";
 import { finishTaskRun } from "../state/task-run";
-import { outcomeRunDisposition } from "../agent/implementation-outcome";
+import { deliveryRunDisposition, outcomeRunDisposition } from "../agent/implementation-outcome";
 import { TaskFormatter } from "../task/formatter";
 import {
   renderStackedOnSection,
@@ -57,7 +57,7 @@ import {
   takeStackBaseFromEnv,
 } from "../dependencies/stacked-base";
 import { dropUnusedStackBase, recordConfirmedStackBase } from "./stack-base-run";
-import { reopenSucceededPickupOption } from "./pickup-reopen";
+import { reopenSucceededPickupOption } from "./reopen-pickup";
 import type { RetryPromptContext } from "../task/formatter";
 import { buildTicketUrl } from "../task/ticket-url";
 import type { TaskTrackerClient } from "../trackers/client";
@@ -352,11 +352,42 @@ async function runImplementation(input: ImplementationInput): Promise<void> {
     },
   );
 
+  await settleImplementationRun({
+    tracker,
+    task,
+    workflowKey,
+    taskDir,
+    incomplete: implementationIncomplete,
+    outcome,
+  });
+}
+
+/**
+ * Finish the run record after the agent session and clear the active task
+ * context: mark a markdown task Done only on success, record the ticket as
+ * actioned, and end the run with the disposition from the agent's outcome
+ * marker and any PR delivery failure the harness left on
+ * `runContext.activeTaskContext`. Exported for pipeline-level tests.
+ */
+export async function settleImplementationRun(input: {
+  tracker: TaskTrackerClient;
+  task: ImplementationInput["task"];
+  workflowKey: string;
+  taskDir: string;
+  incomplete: boolean;
+  outcome: ReturnType<typeof readImplementationReport>["outcome"];
+}): Promise<void> {
+  const { tracker, task, workflowKey, taskDir, outcome } = input;
+  const implementationIncomplete = input.incomplete;
   // The agent's own outcome marker decides between success and escalation
-  // for a clean run. Resolve it before any tracker transition so a blocked
-  // markdown task is not written as Done while its run is escalated.
-  const disposition = outcomeRunDisposition(outcome);
-  if (isMarkdownTaskTracker(tracker) && disposition.status !== "escalated") {
+  // for a clean run, and a requested PR that failed after the push turns it
+  // into a failure. Resolve it before any tracker transition so a blocked or
+  // undelivered markdown task is not written as Done.
+  const disposition = deliveryRunDisposition(
+    outcomeRunDisposition(outcome),
+    runContext.activeTaskContext?.prDeliveryFailure?.message,
+  );
+  if (isMarkdownTaskTracker(tracker) && disposition.status === "succeeded") {
     await tracker.markDoneIfSuccessful(workflowKey, taskDir);
   }
   if (implementationIncomplete) {
@@ -391,6 +422,8 @@ async function runImplementation(input: ImplementationInput): Promise<void> {
     // it; a markdown task stays out of Done so the file still shows it open.
     if (disposition.status === "escalated") {
       console.log(`\n🛑 Agent reported the goal as not met (${disposition.reason})`);
+    } else if (disposition.status === "failed") {
+      console.log(`\n❌ Run not delivered: ${disposition.reason}`);
     } else if (disposition.reason) {
       console.log(`\nℹ️  Agent reported the goal as ${disposition.reason}`);
     }

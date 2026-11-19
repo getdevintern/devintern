@@ -9,6 +9,13 @@ The step generates the image; `finalize` uploads and publishes the registered
 artifact through the normal pipeline. Generation, capture, upload, and comment
 failures remain advisory. No asset branch or extra repository commit is needed.
 
+No bucket? Set `"uploader": "code-host"` in `settings.json` instead of
+`"files-sdk"` to host the PNG as a native GitHub attachment or GitLab project
+upload with the PR's existing code-host credentials. The storage setup below and
+the upload probe are then unnecessary. See
+[native uploads](../../../docs/code/artifacts.md#native-github-and-gitlab-uploads)
+for the supported tokens, hosts, and size limits.
+
 ## Requirements
 
 - A DevIntern build with `createFilesArtifactUploader` in its public pipeline API.

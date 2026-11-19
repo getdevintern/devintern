@@ -24,8 +24,8 @@ import {
   resolveSessionPickup,
 } from "../src/lib/state/session-pickup";
 import type { SessionPickupDecision } from "../src/lib/state/session-pickup";
-import { isChangeRequestOpen, reopenSucceededPickupOption } from "../src/lib/task/pickup-reopen";
 import { buildRetryPromptContext, taskSteps } from "../src/lib/task/pipeline";
+import { isChangeRequestOpen, reopenSucceededPickupOption } from "../src/lib/task/reopen-pickup";
 import { runTaskSteps } from "../src/lib/task/step-runner";
 import { MarkdownTaskTrackerClient } from "../src/lib/trackers/markdown/markdown-task-tracker-client";
 import { Utils } from "../src/lib/utils";

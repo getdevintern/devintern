@@ -156,7 +156,7 @@ export interface TaskArtifactFile {
     commentUrl?: string;
     message?: string;
   };
-  upload?: { status: "uploaded" | "failed"; message?: string };
+  upload?: { status: "uploaded" | "failed"; message?: string; notice?: string };
 }
 
 export interface TaskArtifactContent {

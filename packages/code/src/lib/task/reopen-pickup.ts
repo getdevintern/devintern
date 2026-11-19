@@ -1,4 +1,7 @@
-/** Session-pickup reopening of a succeeded ad-hoc run whose PR is still open. */
+/**
+ * Session-pickup option for re-queued ad-hoc tasks: reopen a `succeeded` prior
+ * run whose branch has no PR or an open one.
+ */
 
 import { PRManager } from "../code-host/manager";
 import { INJECTED_CREATED_AT_ENV, parseInjectedCreatedAt } from "../state/session-pickup";

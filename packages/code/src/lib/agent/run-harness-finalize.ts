@@ -399,15 +399,17 @@ async function prepareArtifactPublication(
   state: DeliveryState,
 ): Promise<ReturnType<typeof buildArtifactComment>> {
   try {
+    const failures = new Map<string, string>();
     const urls =
       state.artifacts instanceof RunArtifactRegistry
         ? await uploadSelectedArtifacts(
             state.artifacts,
             state.context.artifactPolicy,
             state.context.artifactUploader,
+            failures,
           )
         : new Map<string, string>();
-    return buildArtifactComment(state.artifacts, state.context.artifactPolicy, urls);
+    return buildArtifactComment(state.artifacts, state.context.artifactPolicy, urls, failures);
   } catch (error) {
     console.warn(`⚠️ Artifact publication preparation failed: ${(error as Error).message}`);
     if (state.artifacts instanceof RunArtifactRegistry) {
