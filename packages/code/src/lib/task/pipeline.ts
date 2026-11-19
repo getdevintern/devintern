@@ -17,7 +17,6 @@ import { runAgentHarness } from "../agent/run-harness";
 import { flushAnalyticsAndExit } from "../cli/bootstrap";
 import { isWorkerTaskProcess, runContext } from "../cli/context";
 import { GitHubAppAuth } from "../code-host/github/app-auth";
-import { PRManager } from "../code-host/manager";
 import { resolveOutputDir } from "../config/output-dir";
 import {
   getActiveTrackerType,
@@ -47,20 +46,12 @@ import {
   recordRunTicket,
   replaceRunStage,
 } from "../state/run-recorder";
-import {
-  INJECTED_CREATED_AT_ENV,
-  parseInjectedCreatedAt,
-  pickupSelection,
-  resolveSessionPickup,
-} from "../state/session-pickup";
-import type {
-  ChangeRequestState,
-  SessionPickupDecision,
-  SessionPickupOptions,
-} from "../state/session-pickup";
+import { pickupSelection, resolveSessionPickup } from "../state/session-pickup";
+import type { SessionPickupDecision, SessionPickupOptions } from "../state/session-pickup";
 import { finishTaskRun } from "../state/task-run";
-import { outcomeRunDisposition } from "../agent/implementation-outcome";
+import { deliveryRunDisposition, outcomeRunDisposition } from "../agent/implementation-outcome";
 import { TaskFormatter } from "../task/formatter";
+import { reopenSucceededPickupOption } from "./reopen-pickup";
 import type { RetryPromptContext } from "../task/formatter";
 import { buildTicketUrl } from "../task/ticket-url";
 import type { TaskTrackerClient } from "../trackers/client";
@@ -355,11 +346,42 @@ async function runImplementation(input: ImplementationInput): Promise<void> {
     },
   );
 
+  await settleImplementationRun({
+    tracker,
+    task,
+    workflowKey,
+    taskDir,
+    incomplete: implementationIncomplete,
+    outcome,
+  });
+}
+
+/**
+ * Finish the run record after the agent session and clear the active task
+ * context: mark a markdown task Done only on success, record the ticket as
+ * actioned, and end the run with the disposition from the agent's outcome
+ * marker and any PR delivery failure the harness left on
+ * `runContext.activeTaskContext`. Exported for pipeline-level tests.
+ */
+export async function settleImplementationRun(input: {
+  tracker: TaskTrackerClient;
+  task: ImplementationInput["task"];
+  workflowKey: string;
+  taskDir: string;
+  incomplete: boolean;
+  outcome: ReturnType<typeof readImplementationReport>["outcome"];
+}): Promise<void> {
+  const { tracker, task, workflowKey, taskDir, outcome } = input;
+  const implementationIncomplete = input.incomplete;
   // The agent's own outcome marker decides between success and escalation
-  // for a clean run. Resolve it before any tracker transition so a blocked
-  // markdown task is not written as Done while its run is escalated.
-  const disposition = outcomeRunDisposition(outcome);
-  if (isMarkdownTaskTracker(tracker) && disposition.status !== "escalated") {
+  // for a clean run, and a requested PR that failed after the push turns it
+  // into a failure. Resolve it before any tracker transition so a blocked or
+  // undelivered markdown task is not written as Done.
+  const disposition = deliveryRunDisposition(
+    outcomeRunDisposition(outcome),
+    runContext.activeTaskContext?.prDeliveryFailure?.message,
+  );
+  if (isMarkdownTaskTracker(tracker) && disposition.status === "succeeded") {
     await tracker.markDoneIfSuccessful(workflowKey, taskDir);
   }
   if (implementationIncomplete) {
@@ -394,6 +416,8 @@ async function runImplementation(input: ImplementationInput): Promise<void> {
     // it; a markdown task stays out of Done so the file still shows it open.
     if (disposition.status === "escalated") {
       console.log(`\n🛑 Agent reported the goal as not met (${disposition.reason})`);
+    } else if (disposition.status === "failed") {
+      console.log(`\n❌ Run not delivered: ${disposition.reason}`);
     } else if (disposition.reason) {
       console.log(`\nℹ️  Agent reported the goal as ${disposition.reason}`);
     }
@@ -849,64 +873,6 @@ export async function resolveEffectiveTargetBranch(
     }
   }
   return effectiveTargetBranch;
-}
-
-/**
- * State of the code host's PR(s) for `branch`.
- *
- * `"none"` (the branch has no PR) is kept apart from unknown so the caller can
- * tell a branch pushed without a PR from one whose state could not be checked.
- * A failed lookup (expired token, rate limit, network error) or an unsupported
- * code host reads as unknown.
- *
- * @param branch - Head/feature branch name
- * @param lookup - PR state lookup (defaults to {@link PRManager.getChangeRequestState})
- * @returns `"open"`, `"closed"` (closed or merged), `"none"`, or `undefined`
- *   when the state cannot be confirmed
- */
-export async function isChangeRequestOpen(
-  branch: string,
-  lookup: (branch: string) => Promise<ChangeRequestState | undefined> = (b) =>
-    new PRManager().getChangeRequestState(b),
-): Promise<ChangeRequestState | undefined> {
-  try {
-    return await lookup(branch);
-  } catch {
-    return undefined;
-  }
-}
-
-/**
- * Session-pickup option that lets a re-queued ad-hoc task continue a
- * `succeeded` prior run whose branch has no PR or an open one.
- *
- * Only ad-hoc (`origin: "local"`) runs qualify: tracker tasks keep a succeeded
- * run final. Without git delivery there is no branch to check out, so the
- * option is omitted too. It is also omitted without the injected row's enqueue
- * time ({@link INJECTED_CREATED_AT_ENV}); with it, only runs of that same row
- * (so only a re-queue) can be reopened, never a run left by an earlier task
- * that reused the `local-<slug>` key.
- *
- * @param input.origin - Origin of the run being picked up for
- * @param input.gitEnabled - Whether the feature branch will be checked out
- * @param input.env - Environment carrying the injected row's enqueue time
- * @param input.lookup - PR state lookup override (tests)
- */
-export function reopenSucceededPickupOption(input: {
-  origin?: string;
-  gitEnabled: boolean;
-  env?: NodeJS.ProcessEnv;
-  lookup?: Parameters<typeof isChangeRequestOpen>[1];
-}): Pick<SessionPickupOptions, "reopenSucceeded"> {
-  if (input.origin !== "local" || !input.gitEnabled) return {};
-  const notBefore = parseInjectedCreatedAt((input.env ?? process.env)[INJECTED_CREATED_AT_ENV]);
-  if (notBefore === undefined) return {};
-  return {
-    reopenSucceeded: {
-      notBefore,
-      isChangeRequestOpen: ({ branch }) => isChangeRequestOpen(branch, input.lookup),
-    },
-  };
 }
 
 /**

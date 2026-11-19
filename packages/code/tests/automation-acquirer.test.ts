@@ -378,6 +378,17 @@ describe("AutomationAcquirer", () => {
     expect(run.outcome?.()).toBeUndefined();
   });
 
+  test("logs a clean exit recorded as failed as a failure, not as completed", () => {
+    expect(
+      automationCompletionMessage("automation:release", true, {
+        status: "failed",
+        reason: "pushed but PR creation failed: GitHub PR creation failed: Not Found",
+      }),
+    ).toBe(
+      "❌ [automation:release] failed: pushed but PR creation failed: GitHub PR creation failed: Not Found",
+    );
+  });
+
   test("logs an escalated clean exit with the escalation wording, not as completed", () => {
     expect(
       automationCompletionMessage("automation:release", true, {

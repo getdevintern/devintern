@@ -16,6 +16,19 @@ export interface ActiveTaskContext {
    * unmarked so the next poll retries delivery.
    */
   prCreationFailure?: string;
+  /**
+   * Set whenever this run pushed its branch but the requested PR could not be
+   * created on a supported code host, permanent or retryable. The pipeline
+   * records such a run as `failed` instead of `succeeded`.
+   */
+  prDeliveryFailure?: PrDeliveryFailure;
+}
+
+/** A PR that was requested after a successful push but could not be created. */
+export interface PrDeliveryFailure {
+  message: string;
+  /** Auth, not found, validation, or missing config: a re-run cannot fix it. */
+  permanent: boolean;
 }
 
 /**

@@ -431,6 +431,45 @@ describe("InjectedTaskAcquirer", () => {
     });
   });
 
+  test("fails the row when a cleanly exiting run was recorded failed", async () => {
+    enqueue("local-pr");
+    enqueue("local-ok");
+    const dbPath = join(dir, "queue.db");
+    const acquirer = new InjectedTaskAcquirer({
+      store,
+      runDbPath: dbPath,
+      execute: async (task, queueClaim) => {
+        const runs = new RunStore(dbPath);
+        const id = runs.createRun({
+          origin: "local",
+          taskKey: task.taskKey,
+          repo: task.repo,
+          queueClaim,
+        });
+        if (task.taskKey === "local-pr") {
+          runs.finishRun(id, "failed", "pushed but PR creation failed: Not Found");
+        } else {
+          runs.finishRun(id, "succeeded");
+        }
+        runs.close();
+        return true;
+      },
+      intervalSeconds: 3600,
+    });
+
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await acquirer.tick();
+    } finally {
+      errorSpy.mockRestore();
+    }
+    expect(store.getByTaskKey("local-pr")).toMatchObject({
+      status: "failed",
+      message: "pushed but PR creation failed: Not Found",
+    });
+    expect(store.getByTaskKey("local-ok")?.status).toBe("done");
+  });
+
   test("keeps its own reason when another local run with the same scope finishes later", async () => {
     enqueue("local-overlap");
     const dbPath = join(dir, "queue.db");

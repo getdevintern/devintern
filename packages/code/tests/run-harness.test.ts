@@ -801,6 +801,7 @@ describe("runAgentHarness git delivery", () => {
     await runAgentHarness({ ...baseInput(), createPr: true });
 
     expect(runContext.activeTaskContext?.prCreationFailure).toBeUndefined();
+    expect(runContext.activeTaskContext?.prDeliveryFailure).toBeUndefined();
     expect(tracker.postComment).not.toHaveBeenCalled();
   });
 
@@ -822,6 +823,10 @@ describe("runAgentHarness git delivery", () => {
     await runAgentHarness({ ...baseInput(), createPr: true });
 
     expect(runContext.activeTaskContext?.prCreationFailure).toBeUndefined();
+    expect(runContext.activeTaskContext?.prDeliveryFailure).toEqual({
+      message: "GitHub client not configured. Please set GITHUB_TOKEN",
+      permanent: true,
+    });
     // Still recorded on the run (a failed attempt, even though the worker will
     // not re-run it), so a dependent task's gate does not read this
     // pushed-but-PR-less success as "nothing to deliver".
@@ -847,6 +852,10 @@ describe("runAgentHarness git delivery", () => {
     await runAgentHarness({ ...baseInput(), createPr: true, skipComments: true });
 
     expect(runContext.activeTaskContext?.prCreationFailure).toBe("rate limited");
+    expect(runContext.activeTaskContext?.prDeliveryFailure).toEqual({
+      message: "rate limited",
+      permanent: false,
+    });
     expect(recordedPrFailures).toEqual(["rate limited"]);
     expect(tracker.postComment).not.toHaveBeenCalled();
   });
