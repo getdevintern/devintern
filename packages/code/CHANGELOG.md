@@ -6,6 +6,10 @@
 
 - **Cancel a pending ad-hoc task (DEV-195)**: `devintern worker cancel <taskKey> [--reason <text>] [--json]` and the dashboard's **Cancel task** action (Overview → Queued, `POST /api/tasks/:id/cancel`) withdraw a `worker add` or **New task** task before the worker claims it, including one held back by a usage-limit pause. The cancel is a single guarded write, so it races the worker's claim safely: if the worker wins, cancel reports `already started` and nothing changes; running tasks are never interrupted. A blocked `worker add --wait` returns within one poll with `status: "cancelled"` and exit code `3`. Cancelled tasks record who cancelled them (`cli` or `dashboard`), when, and the optional reason, show in `worker queue` and the dashboard as recently cancelled, free their idempotency key, cannot be `--resume`d, block their dependents, and are pruned like other settled tasks. The Overview queue (and `/api/queue`) no longer includes the ad-hoc prompt body. See `docs/code/delegation.md#cancel-a-pending-task`
 
+### Fixed
+
+- **Conflict resolutions on different PRs run in parallel**: the review poller waited for each base sync to finish before polling the next PR, so conflict resolutions ran one at a time and review feedback on other PRs waited behind them, whatever `max_concurrency_per_repo` allowed. Base syncs now start in the background, up to `[workspace.execution].max_concurrency` at once, and the per-repository limit and one-job-per-PR rule still apply
+
 ## [2.26.0] - 2026-11-19
 
 Dependent-tasks release: `devintern worker add --after` queues work that waits for other ad-hoc tasks, in merged or stacked mode, and the worker keeps stacked GitHub PRs rebased and retargeted as their bases change, merge, or close. The dashboard shows merged PRs and a weekday × hour activity heatmap, base sync reinstalls dependencies when a merge changes the lockfile, and slow first polls no longer delay worker startup.
