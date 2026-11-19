@@ -144,7 +144,11 @@ function createLimitStub(dir: string, name: string, invocations: string): string
   writeStub(path, [
     "#!/bin/sh",
     ...recordInvocation(invocations),
-    `printf '%s\\n' ${LIMIT_LINES.map((line) => shQuote(line)).join(" ")} >&2`,
+    // One write (see limitAndExit in helpers/harness-stubs.ts): a `printf`
+    // builtin can split the pair, and the CLI keeps only the first match.
+    "cat >&2 <<'E2E_USAGE_LIMIT'",
+    ...LIMIT_LINES,
+    "E2E_USAGE_LIMIT",
     "exit 1",
   ]);
   return path;

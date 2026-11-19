@@ -132,13 +132,16 @@ covers:
   `automation_schedules` has one row per enabled automation, and no unconfigured
   automation produces a run.
 - After the first window settles, a fifth automation is appended to
-  `workspace.toml`; the live reloader reconciles it and its next occurrence
-  records a `scheduled` run.
+  `workspace.toml`; the live reloader registers it with the next
+  `* * * * *` minute boundary as its cursor. Unless that boundary is under
+  five seconds away, the test moves the cursor to just ahead of now and appends
+  a disabled entry to trigger a second reload, which re-arms the live timer
+  from the moved cursor. The timer (not a startup tick) then claims the
+  occurrence and records a `scheduled` run.
 
-The file costs up to two cron boundaries for the main workspace (the first
-window and the reloaded automation share a minute) plus one more for the opt-in
-fixture, so allow roughly three minutes. Run it with the rest of the default
-local suite:
+No case waits for a real cron boundary: due occurrences come from a restart
+with moved cursors or from the re-armed live timer, so the file takes well
+under a minute. Run it with the rest of the default local suite:
 
 ```sh
 bun run --filter @getdevintern/code build
