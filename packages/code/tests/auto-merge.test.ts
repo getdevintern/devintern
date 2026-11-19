@@ -199,6 +199,23 @@ describe("autoMergePr", () => {
     expect(github.merges).toHaveLength(0);
   });
 
+  test("a fenced unsafe verdict at the end of stdout is a rejection, not a failure", async () => {
+    const github = fakeGitHub([file("src/x.ts")]);
+    const opts = options(github);
+    const stdout = [
+      "The change reorders credential precedence.",
+      "```json",
+      '{"safe": false, "reason": "changes credential precedence"}',
+      "```",
+      "",
+    ].join("\n");
+    opts.agentRunner = async () => ({ success: true, output: stdout, stdout });
+    const result = await autoMergePr(URL, opts);
+    expect(result).toMatchObject({ outcome: "rejected", reviewed: true });
+    expect(result.message).toContain("changes credential precedence");
+    expect(github.merges).toHaveLength(0);
+  });
+
   test("prose final answer with an approving JSON on stderr never merges", async () => {
     const github = fakeGitHub([file("src/x.ts")]);
     const opts = options(github);
