@@ -85,10 +85,7 @@ export interface RunEstimationOptions {
   harness: AgentHarness;
   executablePath: string;
   taskKey: string;
-  /**
-   * Fetched task, used to resolve the project key for the story-points field
-   * override (Trello board / Asana project come from the ticket's `raw`).
-   */
+  /** Fetched task; lets project-key resolution read tracker-specific fields (Trello board, Asana project). */
   task?: { raw: unknown };
   tracker: TaskTrackerClient;
   settings: ProjectSettings | null;
@@ -273,9 +270,8 @@ export async function runEstimation(
           }
 
           // Discover or use configured estimation field
-          // Resolve per tracker (Azure DevOps project, GitHub repo, Trello
-          // board, ...) like every other project-settings lookup; non-Jira ids
-          // such as `100` or `#42` carry no project prefix.
+          // Same resolver as the rest of the pipeline: Azure DevOps keys are
+          // numeric IDs, so the project comes from AZURE_DEVOPS_PROJECT.
           const projectKey = resolveProjectKey(taskKey, task);
           const configuredField = getStoryPointsFieldForProject(projectKey, settings);
           if (configuredField) {

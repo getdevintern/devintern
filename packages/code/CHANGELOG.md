@@ -1,15 +1,30 @@
 # @devintern/code Changelog
 
-## [Unreleased]
+## [2.26.0] - 2026-11-19
+
+Dependent-tasks release: `devintern worker add --after` queues work that waits for other ad-hoc tasks, in merged or stacked mode, and the worker keeps stacked GitHub PRs rebased and retargeted as their bases change, merge, or close. The dashboard shows merged PRs and a weekday × hour activity heatmap, base sync reinstalls dependencies when a merge changes the lockfile, and slow first polls no longer delay worker startup.
 
 ### Added
 
+- **Task dependencies for ad-hoc tasks**: `devintern worker add --after <taskKey>` (repeatable) or a `Depends on:` line in the task body queues a task that waits for other tasks in the same repo. In `merged` mode the task waits until every dependency's PR has merged (a dependency that succeeded without a PR counts as done); in `stacked` mode (`--stack`) it starts once every dependency's latest run succeeded and, when exactly one dependency is unmerged, branches from that dependency's branch and targets its PR there, with the PR description opening "Stacked on #N". `--wait-merge` forces merged mode, and `[defaults].dependency_mode` sets the workspace default. Unknown keys, cross-repo keys, and cycles are rejected at enqueue (the dashboard's create-task endpoint returns 400). A pending dependent task shows as **waiting** or **blocked** with its reason in `worker queue` (new DEPENDENCIES column), `/api/queue`, the dashboard's Queued list, and the `worker add --json` result (`dependsOn`, `dependencyMode`, `dependencyState`, `dependencyReason`). See `docs/code/delegation.md#dependent-tasks---after`
 - **Stacked PRs are maintained after their base changes, merges, or closes (GitHub)**: for `worker add --after` tasks in stacked mode, the worker checks each stacked PR about once a minute (`WORKER_STACKED_PRS_INTERVAL_SECONDS`, default 60). When the base PR gets new commits, the stacked branch is rebased onto the new base head with `git rebase --onto` and force-pushed with a lease, and chains A → B → C follow along. When the base merges, the stacked PR is retargeted to the branch the base merged into (unless GitHub already retargeted it) and rebased so only its own commits remain, which drops a squash-merged base's original commits. A rebase that conflicts is aborted, nothing is pushed, and the PR is left to the existing conflict resolution. When the base closes without merging, the stacked PR gets one comment explaining why it is blocked, tasks that depend on it show as blocked, and it is not retargeted; reopening (and merging) the base lifts the block and maintenance resumes. A base that is amended and force-pushed is handled: the base head a stacked task branched from is recorded when its run starts. A stacked PR with a review, CI-fix, or conflict-resolution run in progress is rebased only after that run finishes. GitLab merge requests are not restacked yet, and Bitbucket is not supported. See `docs/code/delegation.md#modes-merged-and-stacked`
+- **Merged PRs in the dashboard's Pull Requests tab**: the tab switches between **Open** and **Merged** (up to the 50 most recently merged, newest first), and `devintern worker prs --state open|merged` (`--limit N`) reads the same list. Merged GitHub PRs are now recorded with GitHub's merge time (the REST API reports them as `closed` with `merged: true`), and PRs the worker auto-merges are recorded immediately. PRs closed before this release are not backfilled
+- **When runs happen (Stats)**: a weekday × hour heatmap of runs started or agent time, with an origin filter, the peak pickup hour, the quietest 4-hour block, and idle hours, in the worker host's timezone or the browser's. `GET /api/stats` accepts `tz` and returns `hostTimeZone`, and `devintern worker stats --tz <zone>` prints the same highlights
+
+### Fixed
+
+- **Base sync reinstalls dependencies when the merge changes a lockfile or manifest**: after merging `origin/<base>` into an agent PR, hooks, the conflict agent, and the push ran on the PR branch's old tooling (for example an older formatter that CI then rejected). Dependencies are now reinstalled before any hook, agent, or push when the merge changes a dependency manifest or lockfile; a conflicted lockfile tells the agent to install before committing, and a failed reinstall aborts the sync with a PR comment instead of pushing
+- **Worker startup no longer waits for PR watchers' first ticks**: review polling, the CI-failure watcher, auto-merge, mention sweeps, GitLab review polling, the retry queue, and tracker polling now start their first poll in the background, so a first tick that runs agents no longer delays later sources and `onStarted` (previously by 46–84 minutes after a restart). A failed first poll logs `⚠️  [name] first poll failed: …`, and `stop()` during the first tick now clears the interval
 
 ### Changed
 
 - **`dependency_mode` defaults to `stacked` for GitHub repos**: when `[defaults].dependency_mode` is not set, dependent tasks for GitHub repos now start once their dependency succeeded, on top of its branch, instead of waiting for its PR to merge. Tasks for other repos (GitLab, Bitbucket) still default to `merged`, because their stacked PRs are not maintained. Set `[defaults].dependency_mode = "merged"` or pass `--wait-merge` to keep the old behavior everywhere. Tasks already in the queue keep the mode they were enqueued with
 - **Auto-merge skips stacked PRs**: the auto-merge watcher never merges a PR whose base is another agent PR's branch or a tracked stacked base. It logs the reason and considers the PR again once the PR targets the default branch
+
+### Technical
+
+- **Local E2E coverage**: `@devintern/e2e` gained offline coverage for `--max-turns` reaching the harness and deprecated flag aliases, Sentry multi-issue selection and failed-run comments, embedded-worker dashboard retry and standalone automation run-now, harness failback after the reset window and restart-time chain restore, and the scheduled Asana estimations sweep
+- **Docs moved to smaller pages**: Code and PM docs were compacted and split (configuration, sandboxing, worker, workspace, integrations, pipelines, artifacts), and sandbox error and doctor messages now link to the new `sandboxing` page anchors
 
 ## [2.25.0] - 2026-11-18
 
