@@ -33,6 +33,7 @@ interface GitLabMergeRequest {
   sha: string;
   source_branch: string;
   target_branch: string;
+  merged_at?: string | null;
   source_project_id: number | null;
   target_project_id: number;
   web_url: string;
@@ -119,6 +120,13 @@ export interface GitLabPollingFeedback {
   createdAt: string;
 }
 
+/** Parse an ISO timestamp from a GitLab payload; anything else is `undefined`. */
+function parseTimestamp(value: unknown): number | undefined {
+  if (typeof value !== "string" || value === "") return undefined;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
 export interface GitLabPollingSnapshot {
   state: string;
   headSha: string;
@@ -127,6 +135,8 @@ export interface GitLabPollingSnapshot {
   feedback: GitLabPollingFeedback[];
   sourceBranch: string;
   targetBranch: string;
+  /** When GitLab merged the MR (epoch ms), for a merged MR. */
+  mergedAt?: number;
   baseSha?: string;
   mergeability: GitLabMergeability;
 }
@@ -329,6 +339,7 @@ export class GitLabReviewsClient {
       feedback,
       sourceBranch: mergeRequest.source_branch,
       targetBranch: mergeRequest.target_branch,
+      mergedAt: parseTimestamp(mergeRequest.merged_at),
       baseSha: mergeRequest.diff_refs?.base_sha,
       mergeability: this.mergeability(mergeRequest.detailed_merge_status),
     };

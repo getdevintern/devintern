@@ -68,7 +68,7 @@ interface FakeAsanaTag {
   name: string;
 }
 
-interface FakeAsanaCustomField {
+export interface FakeAsanaCustomField {
   gid: string;
   name: string;
   type: string;
@@ -262,6 +262,7 @@ export class FakeAsanaTracker implements TrackerFixture {
   private nextTaskGid = 1_200_000_000_000_100;
   private nextStoryGid = 1_400_000_000_000_000;
   private nextTagGid = 1_500_000_000_000_000;
+  private nextCustomFieldGid = 1_600_000_000_000_000;
   private now = Date.parse("2026-01-01T00:00:00.000Z");
 
   constructor(options: FakeAsanaOptions = {}) {
@@ -313,6 +314,8 @@ export class FakeAsanaTracker implements TrackerFixture {
     title: string;
     body: string;
     labels?: string[];
+    /** Project custom fields the task carries; only `number` fields take values. */
+    customFields?: Array<{ name: string; type: "number" | "text" | "enum" }>;
   }): Promise<TrackerTicket> {
     const gid = String(this.nextTaskGid++);
     const timestamp = this.timestamp();
@@ -328,7 +331,11 @@ export class FakeAsanaTracker implements TrackerFixture {
       assignee: null,
       created_by: { name: FAKE_ACCOUNT.name },
       tags: (input.labels ?? []).map((name) => ({ gid: String(this.nextTagGid++), name })),
-      custom_fields: [],
+      custom_fields: (input.customFields ?? []).map((field) => ({
+        ...field,
+        gid: String(this.nextCustomFieldGid++),
+        number_value: null,
+      })),
       project_gid: this.projectGidValue,
       section_gid: this.sectionGid(this.statuses.todo),
       stories: [],
@@ -369,6 +376,18 @@ export class FakeAsanaTracker implements TrackerFixture {
       this.recordEvent({ type: "task", action: "changed", gid: task.gid, field: "notes" });
     }
     task.modified_at = this.timestamp();
+  }
+
+  /** Move the fake clock (epoch ms), e.g. to create a task "now" for the estimation <24h skip. */
+  setNow(epochMs: number): void {
+    if (!Number.isFinite(epochMs)) throw new Error(`Invalid fake Asana clock: ${epochMs}`);
+    this.now = epochMs;
+  }
+
+  /** Seeded custom field on a task by name, or `undefined` when the task has none. */
+  customField(ticketKey: string, name: string): FakeAsanaCustomField | undefined {
+    const field = this.requireTask(ticketKey).custom_fields.find((entry) => entry.name === name);
+    return field && { ...field };
   }
 
   /** Raw `modified_at` stamp, which the product uses as the task's `updated`. */
@@ -623,6 +642,15 @@ export class FakeAsanaTracker implements TrackerFixture {
     const data = asRecord(asRecord(body.value)?.data);
     if (!data) return this.reject("Task update requires a data object");
 
+    // Like Asana, reject a missing or non-number field or a non-number value before mutating.
+    const fieldWrites: Array<[FakeAsanaCustomField, number | null]> = [];
+    for (const [fieldGid, value] of Object.entries(asRecord(data.custom_fields) ?? {})) {
+      const field = task.custom_fields.find((entry) => entry.gid === fieldGid);
+      if (field?.type !== "number" || (value !== null && typeof value !== "number")) {
+        return this.reject(`Invalid number custom field write ${fieldGid} on task ${task.gid}`);
+      }
+      fieldWrites.push([field, value]);
+    }
     if (typeof data.completed === "boolean") {
       task.completed = data.completed;
     }
@@ -635,23 +663,7 @@ export class FakeAsanaTracker implements TrackerFixture {
     if (typeof data.html_notes === "string") {
       task.html_notes = data.html_notes;
     }
-    const customFields = asRecord(data.custom_fields);
-    if (customFields) {
-      for (const [fieldGid, value] of Object.entries(customFields)) {
-        const existing = task.custom_fields.find((field) => field.gid === fieldGid);
-        const numberValue = typeof value === "number" ? value : null;
-        if (existing) {
-          existing.number_value = numberValue;
-        } else {
-          task.custom_fields.push({
-            gid: fieldGid,
-            name: fieldGid,
-            type: "number",
-            number_value: numberValue,
-          });
-        }
-      }
-    }
+    for (const [field, value] of fieldWrites) field.number_value = value;
     task.modified_at = this.timestamp();
     for (const field of Object.keys(data)) {
       this.recordEvent({ type: "task", action: "changed", gid: task.gid, field });

@@ -822,7 +822,9 @@ function displayTaskSummary(input: {
  * Resolve the PR target branch: per-task override from the description, else the
  * CLI option, validated against the remote default branch.
  */
-async function resolveEffectiveTargetBranch(descriptionText: string | undefined): Promise<string> {
+export async function resolveEffectiveTargetBranch(
+  descriptionText: string | undefined,
+): Promise<string> {
   const options = runContext.options;
 
   // Extract target branch from task description if present

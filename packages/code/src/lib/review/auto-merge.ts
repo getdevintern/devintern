@@ -125,7 +125,9 @@ export interface AutoMergeOptions {
   ) => Promise<{ success: boolean; output: string; stdout?: string }>;
   /** Review checkout (tests); defaults to the branch-scoped review worktree. */
   worktree?: {
-    prepare(branch: string): Promise<{ success: boolean; path?: string; error?: string }>;
+    prepare(
+      branch: string,
+    ): Promise<{ success: boolean; path?: string; error?: string; inUse?: boolean }>;
     remove(path: string): Promise<void>;
   };
 }
@@ -476,6 +478,10 @@ async function reviewWithAgent(params: {
     },
   };
   const prepared = await worktree.prepare(branch);
+  if (prepared.inUse) {
+    // Another job holds this branch's worktree: not ready yet, not a failure.
+    return { kind: "waiting", ran: false, message: `worktree busy: ${prepared.error}` };
+  }
   if (!prepared.success || !prepared.path) {
     return {
       kind: "failed",

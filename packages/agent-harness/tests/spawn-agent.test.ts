@@ -84,12 +84,24 @@ describe("buildDefaultSandboxPolicy", () => {
       git("-C", repo, "worktree", "add", "-q", worktree, "-b", "feature");
 
       const commonDir = join(repo, ".git");
-      expect(gitAdminPaths(worktree)).toContain(commonDir);
+      // A global `rerere.enabled` creates rr-cache; drop it to exercise a missing subdir.
+      rmSync(join(commonDir, "rr-cache"), { recursive: true, force: true });
+      const paths = gitAdminPaths(worktree);
+      // The per-worktree git dir (index, HEAD) and the shared dirs a commit writes.
+      expect(paths).toContain(join(commonDir, "worktrees", "wt"));
+      expect(paths).toContain(join(commonDir, "objects"));
+      expect(paths).toContain(join(commonDir, "refs"));
+      expect(paths).toContain(join(commonDir, "logs"));
+      // Never the shared common dir itself: a sandbox would mask its config.lock
+      // with a placeholder file that blocks every other worktree's config writes.
+      expect(paths).not.toContain(commonDir);
+      // Missing subdirs are skipped so no sandbox has to create them.
+      expect(paths).not.toContain(join(commonDir, "rr-cache"));
 
       const policy = buildDefaultSandboxPolicy(worktree);
-      expect(policy.writablePaths).toContain(commonDir);
-      // The index itself lives inside the common dir, so committing there is writable.
+      expect(policy.writablePaths).not.toContain(commonDir);
       expect(policy.writablePaths).toContain(join(commonDir, "worktrees", "wt"));
+      expect(policy.writablePaths).toContain(join(commonDir, "objects"));
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

@@ -4,7 +4,7 @@ import { GitHubAppAuth } from "./github/app-auth";
 import { BitbucketPRClient } from "./bitbucket/pr-client";
 import { GitHubPRClient } from "./github/pr-client";
 import { GitLabMRClient } from "./gitlab/mr-client";
-import { buildPrBody } from "./pr-body";
+import { buildPrBody, stackedOnFromDescription } from "./pr-body";
 import { parseGitLabHostAliases, parseGitRemoteUrl } from "./provider";
 import type { ChangeRequestIdentity, CodeHostRepository } from "./provider";
 import { isTransientPrFailure, parsePrLabels, resolveGitLabCodeHostConfig } from "./shared";
@@ -324,6 +324,11 @@ export class PRManager {
     const key = (task as Task).key || (task as JiraIssue).key;
     const summary = (task as Task).summary || (task as JiraIssue).fields?.summary || "Unknown";
 
-    return buildPrBody({ taskKey: key, taskSummary: summary, implementationSummary });
+    return buildPrBody({
+      taskKey: key,
+      taskSummary: summary,
+      implementationSummary,
+      stackedOn: stackedOnFromDescription((task as Task).description),
+    });
   }
 }

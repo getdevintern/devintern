@@ -14,7 +14,7 @@
     align-items: start;
   }
 
-  .rd-timeline-area {
+  .rd-main-area {
     grid-column: 1;
     grid-row: 1;
   }
@@ -163,5 +163,29 @@ button.rd-stage-head:focus-visible {
   .rd-row,
   button.rd-stage-head {
     transition: none;
+  }
+}
+
+/* Report card: long reports collapse behind a fade. */
+.rd-result-fade {
+  position: absolute;
+  inset: auto 0 0;
+  height: 96px;
+  background: linear-gradient(to bottom, transparent, var(--card));
+  pointer-events: none;
+}
+
+/* Pages with a report card: tighter rhythm, rail aligned with the card's content. */
+.rd-grid[data-report] {
+  row-gap: 32px;
+}
+
+.rd-grid[data-report] .rd-stage[data-last] {
+  padding-bottom: 0;
+}
+
+@media (min-width: 1024px) {
+  .rd-grid[data-report] .rd-rail {
+    padding-top: 1rem;
   }
 }

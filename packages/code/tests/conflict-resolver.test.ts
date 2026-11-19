@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { execSync } from "child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
@@ -12,6 +12,7 @@ import {
 } from "../src/lib/review/conflict-resolver";
 import { UNTRUSTED_CONTENT_NOTICE } from "../src/lib/prompts/untrusted-content";
 import { Utils } from "../src/lib/utils";
+import { reviewWorktreeLeasePath } from "../src/lib/utils/review-worktree-lease";
 import type { PullRequestInfo } from "../src/lib/code-host/github/reviews-types";
 
 const PR_URL = "https://github.com/acme/widgets/pull/7";
@@ -285,6 +286,38 @@ describe("resolveConflictsOnPr", () => {
     expect(result.outcome).toBe("resolved");
     expect(usedWorkDir).toBeDefined();
     expect(existsSync(usedWorkDir!)).toBe(false);
+  });
+
+  test("defers without a PR comment when another job holds the branch worktree", async () => {
+    // Another live job (a sleeping child stands in) leases this branch's worktree.
+    const holder = Bun.spawn(["sleep", "30"]);
+    try {
+      const path = Utils.getReviewWorktreePath("feature/change", join(repoDir, ".git"));
+      const lease = reviewWorktreeLeasePath(path);
+      mkdirSync(join(lease, ".."), { recursive: true });
+      const now = Date.now();
+      writeFileSync(lease, JSON.stringify({ pid: holder.pid, startedAt: now, heartbeatAt: now }));
+
+      const comments: string[] = [];
+      let agentRan = false;
+      const result = await resolveConflictsOnPr(PR_URL, {
+        cwd: repoDir,
+        fetchPr: async () => prInfo(),
+        prCommenter: async (body) => {
+          comments.push(body);
+        },
+        agentRunner: async () => {
+          agentRan = true;
+          return { success: true, output: "" };
+        },
+      });
+      expect(result.outcome).toBe("deferred");
+      expect(result.message).toContain("in use by another job");
+      expect(comments).toHaveLength(0);
+      expect(agentRan).toBe(false);
+    } finally {
+      holder.kill();
+    }
   });
 
   test("removes the review worktree after a failed run", async () => {

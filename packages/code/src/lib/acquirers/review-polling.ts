@@ -188,6 +188,13 @@ export interface ReviewPollingAcquirerOptions {
   ) => Promise<AutomaticResolveResult>;
   /** Stable-head window before execution (default 30 seconds). */
   quietPeriodSeconds?: number;
+  /**
+   * Most base syncs this poller keeps running at once (default 1). Each sync
+   * runs in the background so one long conflict resolution does not hold up
+   * the rest of the tick; the fleet passes `[workspace.execution].max_concurrency`
+   * and the supervisor applies the per-repo limit. A factory picks up reloads.
+   */
+  maxConcurrentBaseSyncs?: number | (() => number);
   /** Best-effort automatic-attempt run recorder. */
   runStore?: Pick<RunStore, "createRun" | "finishRun">;
   harness?: string;
@@ -303,6 +310,8 @@ export class ReviewPollingAcquirer implements Acquirer {
   private deferCounts = new Map<string, number>();
   /** Base-sync events waiting for harness capacity, keyed to their retry time. */
   private capacityRetryAt = new Map<string, number>();
+  /** Base syncs running in the background, keyed by {@link agentPrKey}. */
+  private inFlightBaseSyncs = new Map<string, Promise<void>>();
   /** Cached scheduled-window state; `undefined` = not loaded from the cursor yet. */
   private conflictWindowState: ConflictWindowState | null | undefined;
   private lastFeedbackPollAt: number;
@@ -362,12 +371,28 @@ export class ReviewPollingAcquirer implements Acquirer {
     startFirstTickInBackground(this.name, () => this.tick());
   }
 
-  /** Stop polling (an in-flight tick finishes its current PR). */
+  /**
+   * Stop polling. An in-flight tick finishes its current PR, and base syncs
+   * already running finish in the background (see {@link waitForBaseSyncs}).
+   */
   stop(): void {
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
     }
+  }
+
+  /** Resolves once every base sync running in the background has settled. */
+  async waitForBaseSyncs(): Promise<void> {
+    while (this.inFlightBaseSyncs.size > 0) {
+      await Promise.all(this.inFlightBaseSyncs.values());
+    }
+  }
+
+  private baseSyncLimit(): number {
+    const raw = this.options.maxConcurrentBaseSyncs;
+    const limit = typeof raw === "function" ? raw() : raw;
+    return limit !== undefined && Number.isFinite(limit) && limit >= 1 ? Math.floor(limit) : 1;
   }
 
   /**
@@ -1025,6 +1050,37 @@ export class ReviewPollingAcquirer implements Acquirer {
     return exhausted;
   }
 
+  /**
+   * Run a base sync in the background: the tick goes on polling other PRs
+   * (and starting their syncs) while this resolution runs. The tick is
+   * sequential, so the caller's limit check and this registration cannot
+   * interleave.
+   */
+  private startBaseSync(syncKey: string, params: Parameters<typeof this.executeBaseSync>[0]): void {
+    const { repo, prNumber } = params;
+    const run = this.executeBaseSync(params)
+      .catch((error: unknown) => {
+        captureError(error, { acquirer: this.name, repo, prNumber, stage: "base-sync" });
+        console.warn(
+          `⚠️  [${this.name}] ${repo}#${prNumber} base sync crashed: ${(error as Error).message}`,
+        );
+      })
+      .finally(() => {
+        this.inFlightBaseSyncs.delete(syncKey);
+      });
+    this.inFlightBaseSyncs.set(syncKey, run);
+  }
+
+  /**
+   * False while the event waits for harness capacity, or while the poller is
+   * at its base-sync limit; either way the event stays pending for a later tick.
+   */
+  private canStartBaseSync(externalId: string, now: number): boolean {
+    const capacityRetryAt = this.capacityRetryAt.get(externalId);
+    if (capacityRetryAt !== undefined && now < capacityRetryAt) return false;
+    return this.inFlightBaseSyncs.size < this.baseSyncLimit();
+  }
+
   private async maybeSyncBase(
     repo: string,
     prNumber: number,
@@ -1034,6 +1090,10 @@ export class ReviewPollingAcquirer implements Acquirer {
     const { queue, resolveConflicts } = this.options;
     if (!resolveConflicts || this.options.conflictResolution === "disabled") return;
     if (!pr.head?.sha || !pr.base?.sha || !pr.head.ref) return;
+    // A sync already running for this PR settles its own event; a head or
+    // base that moved meanwhile is picked up on a later tick.
+    const syncKey = agentPrKey(repo, prNumber);
+    if (this.inFlightBaseSyncs.has(syncKey)) return;
 
     // The event key includes the head SHA so that new commits on the branch
     // (e.g. after a failed attempt was exhausted) open a fresh event without
@@ -1094,8 +1154,7 @@ export class ReviewPollingAcquirer implements Acquirer {
     const quietMs = (this.options.quietPeriodSeconds ?? 30) * 1000;
     if (now - event.headObservedAt < quietMs) return;
 
-    const capacityRetryAt = this.capacityRetryAt.get(externalId);
-    if (capacityRetryAt !== undefined && now < capacityRetryAt) return;
+    if (!this.canStartBaseSync(externalId, now)) return;
 
     // Re-fetch immediately before execution. Any movement leaves the current
     // event pending and consumes no retry; a new base supersedes it immediately.
@@ -1108,7 +1167,7 @@ export class ReviewPollingAcquirer implements Acquirer {
       opts.external,
     );
     if (freshState.kind === "stop") return;
-    await this.executeBaseSync({
+    this.startBaseSync(syncKey, {
       repo,
       prNumber,
       externalId,
