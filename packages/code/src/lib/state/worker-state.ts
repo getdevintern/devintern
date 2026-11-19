@@ -43,6 +43,19 @@ export interface Cursor {
 
 export type AgentPrState = "open" | "closed";
 
+/**
+ * Why a closed agent PR left the open state: `merged`, or `closed` without
+ * merging. Unset while open, and for rows closed by a path that could not tell
+ * (e.g. a foreign-repo sweep or an inaccessible PR): callers that must know
+ * (merged-mode task dependencies) ask the code host and record the answer.
+ */
+export type AgentPrCloseReason = "merged" | "closed";
+
+const AGENT_PR_CLOSE_REASONS = [
+  "merged",
+  "closed",
+] as const satisfies readonly AgentPrCloseReason[];
+
 const AGENT_PR_STATES = ["open", "closed"] as const satisfies readonly AgentPrState[];
 const CODE_HOST_PROVIDERS = [
   "github",
@@ -76,8 +89,42 @@ export interface AgentPr {
    */
   ticketUrl?: string;
   state: AgentPrState;
+  /** Set once the PR is known to be closed; see {@link AgentPrCloseReason}. */
+  closeReason?: AgentPrCloseReason;
+  /**
+   * When the PR merged (epoch ms): the host-reported merge time when known,
+   * else when the worker first recorded the merge. Absent for open PRs, PRs
+   * closed without merging, and rows closed before merges were recorded.
+   */
+  mergedAt?: number;
   createdAt: number;
   updatedAt: number;
+}
+
+/**
+ * Merge facts a code host reports in a PR payload. Unlike
+ * {@link AgentPr.mergedAt} (when the worker first noticed), these come from
+ * the host, so they order merges correctly.
+ */
+export interface AgentPrMergeDetails {
+  /** When the host merged the PR (epoch ms). */
+  mergedAt?: number;
+  /** The branch the PR merged into (its base ref at merge time). */
+  mergedInto?: string;
+  /**
+   * Whether {@link mergedInto} is the repo's default branch, when the host
+   * payload names the default branch (GitHub does; GitLab MR payloads do not).
+   */
+  mergedIntoDefault?: boolean;
+}
+
+/** SQL parameters for `host_merged_at`, `merged_into`, `merged_into_default`. */
+function mergeDetailParams(merge: AgentPrMergeDetails): Array<number | string | null> {
+  return [
+    merge.mergedAt ?? null,
+    merge.mergedInto ?? null,
+    merge.mergedIntoDefault === undefined ? null : merge.mergedIntoDefault ? 1 : 0,
+  ];
 }
 
 /** Consecutive CI-fix bookkeeping for one agent-created PR. */
@@ -174,6 +221,15 @@ function parseAgentPrRow(row: unknown): AgentPr {
     taskKey: optionalString(record, "task_key", "agent_prs row"),
     ticketUrl: optionalString(record, "ticket_url", "agent_prs row"),
     state: requireEnum(AGENT_PR_STATES, record.state, "state", "agent_prs row"),
+    closeReason: optionalEnum(
+      AGENT_PR_CLOSE_REASONS,
+      record.close_reason,
+      "close_reason",
+      "agent_prs row",
+    ),
+    mergedAt:
+      optionalNumber(record, "host_merged_at", "agent_prs row") ??
+      optionalNumber(record, "merged_at", "agent_prs row"),
     createdAt: requireNumber(record, "created_at", "agent_prs row"),
     updatedAt: requireNumber(record, "updated_at", "agent_prs row"),
   };
@@ -257,6 +313,7 @@ export class WorkerState {
     `);
 
     this.initializeAgentPrSchema();
+    this.addAgentPrCloseColumns();
 
     this.db.run(`
       CREATE INDEX IF NOT EXISTS idx_agent_prs_state
@@ -343,6 +400,8 @@ export class WorkerState {
     }
 
     const columns = readColumnNames(this.db, "agent_prs");
+    // Provider-aware registries get merge columns from addAgentPrCloseColumns;
+    // existing closed rows keep them NULL (merge vs. close is unknown for them).
     if (columns.includes("provider")) return;
 
     const hasTicketUrl = columns.includes("ticket_url");
@@ -365,6 +424,29 @@ export class WorkerState {
     })();
   }
 
+  /**
+   * Add the merge-outcome columns to a registry created before they existed.
+   * A concurrent opener racing the same `ALTER TABLE` sees SQLite's
+   * duplicate-column error, which means the migration already applied.
+   */
+  private addAgentPrCloseColumns(): void {
+    const columns = readColumnNames(this.db, "agent_prs");
+    for (const [name, definition] of [
+      ["close_reason", "TEXT"],
+      ["merged_at", "INTEGER"],
+      ["host_merged_at", "INTEGER"],
+      ["merged_into", "TEXT"],
+      ["merged_into_default", "INTEGER"],
+    ]) {
+      if (columns.includes(name)) continue;
+      try {
+        this.db.run(`ALTER TABLE agent_prs ADD COLUMN ${name} ${definition}`);
+      } catch (error) {
+        if (!/duplicate column name/i.test((error as Error).message)) throw error;
+      }
+    }
+  }
+
   /** Create the provider-aware change-request registry. */
   private createAgentPrTable(): void {
     this.db.run(`
@@ -381,6 +463,11 @@ export class WorkerState {
         task_key TEXT,
         ticket_url TEXT,
         state TEXT NOT NULL DEFAULT 'open',
+        close_reason TEXT,
+        merged_at INTEGER,
+        host_merged_at INTEGER,
+        merged_into TEXT,
+        merged_into_default INTEGER,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
         PRIMARY KEY (provider, instance_url, project_path, change_number)
@@ -605,6 +692,11 @@ export class WorkerState {
          task_key = excluded.task_key,
          ticket_url = excluded.ticket_url,
          state = 'open',
+         close_reason = NULL,
+         merged_at = NULL,
+         host_merged_at = NULL,
+         merged_into = NULL,
+         merged_into_default = NULL,
          updated_at = excluded.updated_at`,
       [
         change.provider,
@@ -621,6 +713,19 @@ export class WorkerState {
         now,
         now,
       ],
+    );
+  }
+
+  /**
+   * Whether `branch` is the source branch of any agent PR recorded for this
+   * GitHub repo (open or closed). A PR targeting such a branch is stacked on
+   * another agent PR, which the auto-merge watcher must never merge.
+   */
+  isAgentPrBranch(repo: string, branch: string): boolean {
+    return (
+      this.db
+        .query(`SELECT 1 FROM agent_prs WHERE lower(repo) = lower(?) AND branch = ? LIMIT 1`)
+        .get(repo, branch) !== null
     );
   }
 
@@ -665,6 +770,30 @@ export class WorkerState {
     const rows = this.db
       .query(`SELECT * FROM agent_prs WHERE state = 'open' ORDER BY created_at ASC`)
       .all();
+    return this.mapAgentPrRows(rows);
+  }
+
+  /**
+   * List agent-created change requests the worker saw merged, most recently
+   * merged first (dashboard history view). A readonly database that predates
+   * the `merged_at` column has no recorded merges and returns an empty list.
+   *
+   * @param limit - Maximum rows returned
+   */
+  listMergedAgentChangeRequests(limit: number): AgentPr[] {
+    const columns = readColumnNames(this.db, "agent_prs");
+    if (!columns.includes("merged_at")) return [];
+    // Host merge time orders merges correctly; fall back to the worker's clock.
+    const mergedAt = columns.includes("host_merged_at")
+      ? "COALESCE(host_merged_at, merged_at)"
+      : "merged_at";
+    const rows = this.db
+      .query(
+        `SELECT * FROM agent_prs
+         WHERE state = 'closed' AND merged_at IS NOT NULL
+         ORDER BY ${mergedAt} DESC LIMIT ?`,
+      )
+      .all(limit);
     return this.mapAgentPrRows(rows);
   }
 
@@ -734,13 +863,28 @@ export class WorkerState {
    *
    * @param repo - Repo slug
    * @param prNumber - PR number
+   * @param reason - Whether it merged; omit when the caller cannot tell (an
+   *   earlier recorded reason is kept)
+   * @param merge - What the code host reported about the merge, when the
+   *   caller saw the PR payload (earlier recorded values are kept otherwise)
    */
-  markAgentPrClosed(repo: string, prNumber: number): void {
+  markAgentPrClosed(
+    repo: string,
+    prNumber: number,
+    reason?: AgentPrCloseReason,
+    merge: AgentPrMergeDetails = {},
+  ): void {
     this.db.transaction(() => {
+      const now = Date.now();
       const { changes } = this.db.run(
-        `UPDATE agent_prs SET state = 'closed', updated_at = ?
+        `UPDATE agent_prs SET state = 'closed', updated_at = ?,
+           close_reason = COALESCE(?, close_reason),
+           merged_at = CASE WHEN ? = 'merged' THEN COALESCE(merged_at, ?) ELSE merged_at END,
+           host_merged_at = COALESCE(?, host_merged_at),
+           merged_into = COALESCE(?, merged_into),
+           merged_into_default = COALESCE(?, merged_into_default)
          WHERE provider = 'github' AND repo = ? AND pr_number = ?`,
-        [Date.now(), repo, prNumber],
+        [now, reason ?? null, reason ?? null, now, ...mergeDetailParams(merge), repo, prNumber],
       );
       // No registry row: the cursors may belong to another subsystem.
       if (changes > 0) this.clearPrCursors(repo, prNumber);
@@ -750,21 +894,44 @@ export class WorkerState {
   /**
    * Mark one provider-neutral registered change request closed and drop its
    * per-change poll cursors ({@link clearChangeRequestCursors}).
+   *
+   * @param reason - Whether it merged; omit when unknown (see {@link markAgentPrClosed})
+   * @param merge - What the code host reported about the merge, when known
    */
-  markAgentChangeRequestClosed(identity: ChangeRequestIdentity): void {
+  markAgentChangeRequestClosed(
+    identity: ChangeRequestIdentity,
+    reason?: AgentPrCloseReason,
+    merge: AgentPrMergeDetails = {},
+  ): void {
     this.db.transaction(() => {
-      if (this.closeChangeRequestRow(identity) > 0) this.clearChangeRequestCursors(identity);
+      if (this.closeChangeRequestRow(identity, reason, merge) > 0) {
+        this.clearChangeRequestCursors(identity);
+      }
     })();
   }
 
-  private closeChangeRequestRow(identity: ChangeRequestIdentity): number {
+  private closeChangeRequestRow(
+    identity: ChangeRequestIdentity,
+    reason: AgentPrCloseReason | undefined,
+    merge: AgentPrMergeDetails,
+  ): number {
+    const now = Date.now();
     return this.db.run(
-      `UPDATE agent_prs SET state = 'closed', updated_at = ?
+      `UPDATE agent_prs SET state = 'closed', updated_at = ?,
+         close_reason = COALESCE(?, close_reason),
+         merged_at = CASE WHEN ? = 'merged' THEN COALESCE(merged_at, ?) ELSE merged_at END,
+         host_merged_at = COALESCE(?, host_merged_at),
+         merged_into = COALESCE(?, merged_into),
+         merged_into_default = COALESCE(?, merged_into_default)
        WHERE provider = ? AND instance_url = ?
          AND COALESCE(project_id, '') = COALESCE(?, '')
          AND project_path = ? AND change_number = ?`,
       [
-        Date.now(),
+        now,
+        reason ?? null,
+        reason ?? null,
+        now,
+        ...mergeDetailParams(merge),
         identity.provider,
         identity.instanceUrl,
         identity.projectId ?? null,

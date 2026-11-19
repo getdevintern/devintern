@@ -3,7 +3,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { UsageLimitError } from "@devintern/agent-harness";
 import { WorkerState } from "../state/worker-state";
-import type { AgentPr } from "../state/worker-state";
+import type { AgentPr, AgentPrMergeDetails } from "../state/worker-state";
 import {
   gitLabWebhookDeliveryId,
   matchesRegisteredGitLabChange,
@@ -190,19 +190,41 @@ export async function processGitLabWithPersistence(
   }
 }
 
+/**
+ * Merge facts from a merge-request hook payload: the target branch, and the
+ * merge time when the payload carries one. Missing fields stay `undefined`.
+ */
+function lifecycleMergeDetails(payload: Record<string, unknown>): AgentPrMergeDetails {
+  const attributes = payload.object_attributes;
+  if (typeof attributes !== "object" || attributes === null) return {};
+  const { target_branch: targetBranch, merged_at: mergedAtRaw } = attributes as Record<
+    string,
+    unknown
+  >;
+  const mergedAt = typeof mergedAtRaw === "string" ? Date.parse(mergedAtRaw) : Number.NaN;
+  return {
+    mergedAt: Number.isFinite(mergedAt) ? mergedAt : undefined,
+    mergedInto: typeof targetBranch === "string" && targetBranch !== "" ? targetBranch : undefined,
+  };
+}
+
 async function processGitLabEvent({ event, target }: QueuedGitLabWebhook): Promise<void> {
   const serializationKey = `${target.instanceUrl}:${target.projectPath}!${target.changeNumber}`;
   if (event.kind === "lifecycle") {
     const state = new WorkerState();
     try {
-      state.markAgentChangeRequestClosed({
-        provider: target.provider,
-        instanceUrl: target.instanceUrl,
-        projectId: target.projectId,
-        projectPath: target.projectPath,
-        number: target.changeNumber,
-        webUrl: target.webUrl,
-      });
+      state.markAgentChangeRequestClosed(
+        {
+          provider: target.provider,
+          instanceUrl: target.instanceUrl,
+          projectId: target.projectId,
+          projectPath: target.projectPath,
+          number: target.changeNumber,
+          webUrl: target.webUrl,
+        },
+        event.state === "closed" ? "closed" : "merged",
+        event.state === "closed" ? undefined : lifecycleMergeDetails(event.payload),
+      );
     } finally {
       state.close();
     }
@@ -269,6 +291,7 @@ async function processGitLabEvent({ event, target }: QueuedGitLabWebhook): Promi
         serializationKey,
         expectedHeadSha: current.head.sha,
       });
+      if (ok === "deferred") throw new UsageLimitError();
       if (!ok) throw new Error("GitLab CI repair did not complete");
     } finally {
       rmSync(feedbackDir, { recursive: true, force: true });

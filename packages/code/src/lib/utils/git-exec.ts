@@ -1,4 +1,5 @@
 import { spawn } from "child_process";
+import { statSync } from "fs";
 import { Utils } from "./registry";
 
 /**
@@ -205,6 +206,44 @@ export function hasConfigLockError(result: { output?: string; error?: string }):
   return CONFIG_LOCK_ERROR.test(result.error ?? "") || CONFIG_LOCK_ERROR.test(result.output ?? "");
 }
 
+/** Captures the config path from git's "could not lock config file" message. */
+const CONFIG_LOCK_PATH = /could not lock config file (.+?): File exists/i;
+
+/**
+ * Explain a config lock failure caused by a sandbox placeholder rather than a
+ * concurrent git process.
+ *
+ * Git writes its lock files with content and removes them within
+ * milliseconds. An empty, read-only `config.lock` that persists is instead the
+ * mount point a bubblewrap sandbox (e.g. Claude Code's) creates when it masks
+ * the config of a repository it was granted write access to. It stays until
+ * that sandboxed command exits, so no retry backoff outlasts it.
+ *
+ * @param result - A failed git result
+ * @returns A hint to append to the error, or undefined when the lock looks
+ *   like an ordinary one (or is already gone).
+ */
+export function describeConfigLockPlaceholder(result: {
+  output?: string;
+  error?: string;
+}): string | undefined {
+  const match = CONFIG_LOCK_PATH.exec(`${result.error ?? ""}\n${result.output ?? ""}`);
+  if (!match?.[1]) return undefined;
+  const lockPath = `${match[1]}.lock`;
+  try {
+    const stat = statSync(lockPath);
+    if (!stat.isFile() || stat.size !== 0 || (stat.mode & 0o222) !== 0) return undefined;
+  } catch {
+    return undefined;
+  }
+  return (
+    `${lockPath} is an empty read-only file, which is the mount point a sandboxed agent ` +
+    `leaves while one of its commands runs (not a lock held by git). It clears when that ` +
+    `command exits; do not delete it by hand. Check that no agent sandbox is granted write ` +
+    `access to the shared repository directory itself.`
+  );
+}
+
 /**
  * Run a git command that may write the shared config, retrying with backoff
  * while another process holds `config.lock`. Git never waits for that lock
@@ -238,7 +277,10 @@ export async function executeGitCommandWithConfigLockRetry(
     await Bun.sleep(delayMs);
     result = await Utils.executeGitCommand(args, options);
   }
-  return result;
+  const placeholder = result.success ? undefined : describeConfigLockPlaceholder(result);
+  return placeholder
+    ? { ...result, error: `${result.error ?? ""}\n${placeholder}`.trim() }
+    : result;
 }
 
 /**

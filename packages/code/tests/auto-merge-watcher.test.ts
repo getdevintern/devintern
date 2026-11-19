@@ -106,6 +106,63 @@ describe("AutoMergeWatcherAcquirer", () => {
     expect(calls).toHaveLength(0);
   });
 
+  describe("stacked-base guard", () => {
+    test("never merges a PR whose base is another agent PR's branch", async () => {
+      workerState.recordAgentPr({ repo: REPO, prNumber: 6, branch: "feature/local-a" });
+      pr = {
+        ...pr,
+        base: { sha: "b".repeat(40), ref: "feature/local-a", repo: { default_branch: "main" } },
+      };
+      await watcher().tick();
+      expect(calls).toHaveLength(0);
+    });
+
+    test("never merges a PR whose base is a tracked stacked base", async () => {
+      pr = { ...pr, base: { sha: "b".repeat(40), ref: "feature/human-base" } };
+      const w = new AutoMergeWatcherAcquirer({
+        intervalSeconds: 60,
+        workerState,
+        queue,
+        enabled: () => true,
+        now: () => now,
+        quietSeconds: 0,
+        fetchPr: async () => ({ data: pr, notModified: false }),
+        mergePr: async (_repo, prNumber, sha) => {
+          calls.push({ prNumber, sha });
+          return { outcome: "merged", message: "ok", reviewed: false };
+        },
+        isStackedBase: (repo, ref) => repo === REPO && ref === "feature/human-base",
+      });
+      await w.tick();
+      expect(calls).toHaveLength(0);
+    });
+
+    test("considers the PR once it targets the default branch", async () => {
+      // The base merged (its row is closed, its branch still recorded).
+      workerState.recordAgentPr({ repo: REPO, prNumber: 6, branch: "feature/local-a" });
+      workerState.markAgentPrClosed(REPO, 6, "merged");
+      pr = {
+        ...pr,
+        base: { sha: "b".repeat(40), ref: "feature/local-a", repo: { default_branch: "main" } },
+      };
+      const w = watcher();
+      await w.tick();
+      expect(calls).toHaveLength(0);
+      pr = { ...pr, base: { sha: "c".repeat(40), ref: "main", repo: { default_branch: "main" } } };
+      await w.tick();
+      expect(calls).toEqual([{ prNumber: 7, sha: HEAD }]);
+    });
+
+    test("a non-default target that is no stacked base (explicit Target branch) still merges", async () => {
+      pr = {
+        ...pr,
+        base: { sha: "b".repeat(40), ref: "release/2.0", repo: { default_branch: "main" } },
+      };
+      await watcher().tick();
+      expect(calls).toEqual([{ prNumber: 7, sha: HEAD }]);
+    });
+  });
+
   test("evaluates a clean PR once per head and records the decision", async () => {
     const w = watcher();
     await w.tick();
@@ -115,6 +172,21 @@ describe("AutoMergeWatcherAcquirer", () => {
     expect(runs).toEqual([{ origin: "auto_merge", status: "succeeded" }]);
     // The run existed (in progress) while the evaluation ran.
     expect(statusDuringMerge).toEqual(["in_progress"]);
+  });
+
+  test("a successful merge is recorded in the registry immediately", async () => {
+    await watcher().tick();
+    expect(workerState.listOpenAgentPrs()).toHaveLength(0);
+    const merged = workerState.listMergedAgentChangeRequests(10);
+    expect(merged.map((row) => row.prNumber)).toEqual([7]);
+    expect(merged[0]?.mergedAt).toBe(now);
+  });
+
+  test("a rejected merge leaves the PR open and unmerged", async () => {
+    results = [{ outcome: "rejected", message: "no", reviewed: false }];
+    await watcher().tick();
+    expect(workerState.listOpenAgentPrs()).toHaveLength(1);
+    expect(workerState.listMergedAgentChangeRequests(10)).toEqual([]);
   });
 
   test("hands the open run's id to the merge check so its transcript is filed under it", async () => {

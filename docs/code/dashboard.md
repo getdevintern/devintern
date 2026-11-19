@@ -16,6 +16,7 @@ The dashboard shows what the worker has been doing: current and past runs, agent
 | **Overview**    | Worker health, active and queued work, recently finished tasks. The landing page.                              |
 | **Runs**        | Full run history. Open a run to follow its stages, read each agent transcript, open the task or PR, retry, or report a problem. |
 | **Automations** | Recurring automations, estimations, and scheduled jobs, with **Run now**.                                      |
+| **Pull requests** | The agent's PRs, switchable between **Open** (awaiting review, oldest first) and **Merged** (up to the 50 most recently merged, newest first), each linked to its ticket. Merges are recorded when the worker sees them, so PRs merged before this feature and PRs closed without merging are not listed. |
 | **Workspace**   | A read-only view of `workspace.toml`: routing, repositories, automations, credentials (key names only), and policy. |
 | **Stats**       | Success rates, durations, and **When runs happen**, a weekday × hour heatmap. Use it to move automations into quiet hours. |
 
@@ -38,7 +39,7 @@ Each **Active work** row shows the task, repository, harness, attempt, current p
 Below the running rows:
 
 - **Waiting to retry**: tasks deferred in the last 48 hours, for example after a usage limit, with the reason.
-- **Queued**: accepted work that has not started, such as ad-hoc tasks, dashboard retries, PR events, and automations waiting for their repository's checkout. Expand a row for its details.
+- **Queued**: accepted work that has not started, such as ad-hoc tasks, dashboard retries, PR events, automations waiting for their repository's checkout, and PR jobs (shown as `owner/repo#N`) waiting for a free slot or for another job on the same PR. Expand a row for its details.
 - **Recently finished**: the last five finished tasks with outcome and PR. **View all runs** opens **Runs**.
 
 ## Retry a failed run
@@ -116,7 +117,7 @@ Every read-only dashboard view is also a `devintern worker` subcommand. These co
 | `devintern worker runs artifacts <id> [artifact-id]` | A run's artifacts, or one artifact's content               |
 | `devintern worker stats`                  | Success rates, durations, and activity by hour (`--window 7d\|30d\|90d\|all`, default `30d`; `--tz <zone>`) |
 | `devintern worker automations`            | Automations with next and last run                                    |
-| `devintern worker prs`                    | Open PRs and MRs opened by the agent                                  |
+| `devintern worker prs`                    | PRs and MRs opened by the agent: open (default) or recently merged (`--state open\|merged`; `--limit N`, 1..500, default 50) |
 | `devintern worker queue`                  | Queued work that has not started                                      |
 | `devintern worker status`                 | Worker liveness, queue counts, poll cursors                           |
 | `devintern worker overview`               | Capacity, harness health, tracker freshness                           |

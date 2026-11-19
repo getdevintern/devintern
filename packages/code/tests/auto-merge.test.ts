@@ -156,6 +156,25 @@ describe("autoMergePr", () => {
     expect(seen[0]).toMatchObject({ installDependencies: false });
   });
 
+  test("a review worktree held by another job is waiting, not failed", async () => {
+    const github = fakeGitHub([file("src/x.ts")]);
+    const opts = options(github, {
+      worktree: {
+        prepare: async () => ({
+          success: false,
+          inUse: true,
+          error: "Review worktree /tmp/x is in use by another job (pid 5); retry once it finishes.",
+        }),
+        remove: async () => {},
+      },
+    });
+    const result = await autoMergePr(URL, opts);
+    expect(result.outcome).toBe("waiting");
+    expect(result.message).toContain("in use by another job");
+    expect(opts.agentCalls).toHaveLength(0);
+    expect(github.merges).toHaveLength(0);
+  });
+
   test("an unsafe verdict is a rejection with an explanatory comment", async () => {
     const github = fakeGitHub([file("src/x.ts")]);
     const result = await autoMergePr(

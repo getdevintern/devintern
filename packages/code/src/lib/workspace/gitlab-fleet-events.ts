@@ -3,11 +3,53 @@ import type { Acquirer } from "../../worker";
 import { createGitLabCiProvider } from "../code-host/gitlab/ci-provider";
 import { JobNotStartedError } from "../worker/supervisor";
 import type { JobKind, TaskSupervisor } from "../worker/supervisor";
-import type { AgentPr } from "../state/worker-state";
+import type {
+  AgentPr,
+  AgentPrCloseReason,
+  AgentPrMergeDetails,
+  WorkerState,
+} from "../state/worker-state";
 import type { WorkspaceConfig, RepoConfig } from "./config";
 import type { WorkspaceState } from "./state";
 import type { RepoManagerLike } from "./fleet-executor";
 import { buildRepoEnv } from "./env";
+import { PR_JOB_FETCH_TIMEOUT_MS, prJobEnv } from "./fleet-events";
+
+/**
+ * Close the exact registered MR the GitLab CI watcher saw terminal, forwarding
+ * the watcher's merge verdict so merged MRs land in the dashboard Merged tab.
+ *
+ * @param workerState - Registry holding the agent's change requests
+ * @param ciRow - Looks up the registered MR row by project key and IID
+ */
+export function gitLabCiMarkClosed(
+  workerState: Pick<WorkerState, "markAgentChangeRequestClosed">,
+  ciRow: (key: string, number: number) => AgentPr | undefined,
+): (key: string, number: number, reason?: AgentPrCloseReason, merge?: AgentPrMergeDetails) => void {
+  return (key, number, reason, merge) => {
+    const mr = ciRow(key, number);
+    if (!mr) return;
+    workerState.markAgentChangeRequestClosed(
+      {
+        provider: mr.provider,
+        instanceUrl: mr.instanceUrl,
+        projectId: mr.projectId,
+        projectPath: mr.projectPath,
+        number: mr.changeNumber,
+        webUrl: mr.webUrl,
+      },
+      reason,
+      merge,
+    );
+  };
+}
+
+/** Supervisor exclusive key for one GitLab MR (`<instance>:<group/project>!<iid>`). */
+export function gitLabMrExclusiveKey(
+  mr: Pick<AgentPr, "instanceUrl" | "projectPath" | "changeNumber">,
+): string {
+  return `${mr.instanceUrl}:${mr.projectPath}!${mr.changeNumber}`;
+}
 
 /** Registered GitLab polling and relay reconciliation share one live repository resolver. */
 export async function buildGitLabFleetAcquirers(options: {
@@ -34,8 +76,10 @@ export async function buildGitLabFleetAcquirers(options: {
     const run = async (signal?: AbortSignal) => {
       if (signal?.aborted) throw new JobNotStartedError();
       await repoManager.ensureBareClone(repo);
-      await repoManager.fetch(repo.name);
-      const base = await repoManager.ensureBaseWorktree(repo);
+      await repoManager.fetch(repo.name, { timeoutMs: PR_JOB_FETCH_TIMEOUT_MS });
+      // Never the base checkout: an automation may be using it while this MR
+      // job runs. The PR-job checkout tracks the default branch.
+      const base = await repoManager.ensurePrJobWorktree(repo);
       return execute(base, signal);
     };
     if (!options.supervisor) return run();
@@ -45,7 +89,10 @@ export async function buildGitLabFleetAcquirers(options: {
       repo: repo.name,
       kind,
       label: `${mr.projectPath}!${mr.changeNumber}`,
-      checkoutClass: "shared_base",
+      // Parallel across MRs (bounded by max_concurrency_per_repo), serialized
+      // per MR by the same key the CLI runners use for serializePrRun.
+      checkoutClass: "pr_worktree",
+      exclusiveKey: gitLabMrExclusiveKey(mr),
       run,
     });
   }
@@ -123,7 +170,7 @@ export async function buildGitLabFleetAcquirers(options: {
             {
               cwd: base,
               signal,
-              env: buildRepoEnv(repo, workspaceDir),
+              env: prJobEnv(config, buildRepoEnv(repo, workspaceDir)),
             },
           );
         };
@@ -148,7 +195,7 @@ export async function buildGitLabFleetAcquirers(options: {
             {
               cwd: base,
               signal,
-              env: buildRepoEnv(repo, workspaceDir, { agentSelection }),
+              env: prJobEnv(config, buildRepoEnv(repo, workspaceDir, { agentSelection })),
               harnessPin: agentSelection?.harness,
               expectedHeadSha: expected.headSha,
               expectedBaseSha: expected.baseSha,
@@ -210,19 +257,7 @@ export async function buildGitLabFleetAcquirers(options: {
             return { repo: key, prNumber: mr.changeNumber };
           });
       },
-      markClosed: (key, n) => {
-        const mr = ciRow(key, n);
-        if (mr) {
-          state.workerState.markAgentChangeRequestClosed({
-            provider: mr.provider,
-            instanceUrl: mr.instanceUrl,
-            projectId: mr.projectId,
-            projectPath: mr.projectPath,
-            number: mr.changeNumber,
-            webUrl: mr.webUrl,
-          });
-        }
-      },
+      markClosed: gitLabCiMarkClosed(state.workerState, ciRow),
       provider: createGitLabCiProvider(resolveCi),
       fixPr: async (key, n, feedbackPath, expectedHeadSha) => {
         const { mr, client } = resolveCi(key, n);
@@ -233,7 +268,7 @@ export async function buildGitLabFleetAcquirers(options: {
         const invoke = async (base: string, signal?: AbortSignal) => {
           return runCiFixViaCli(mr.projectPath, mr.changeNumber, feedbackPath, {
             cwd: base,
-            env: buildRepoEnv(repo, workspaceDir),
+            env: prJobEnv(config, buildRepoEnv(repo, workspaceDir)),
             webUrl: mr.webUrl,
             serializationKey: `${mr.instanceUrl}:${mr.projectPath}!${mr.changeNumber}`,
             expectedHeadSha,

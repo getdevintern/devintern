@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { maxTurnsValues, recordedArgv, writeArgvRecorder } from "../../helpers/argv-recorder";
 import { cliPath, FixtureWorkspace } from "../../helpers/fixture-workspace";
 import { checkedCommand } from "../../helpers/process";
 
@@ -210,6 +211,66 @@ test.skipIf(!existsSync(cliPath))(
       );
       expect(await run.git("show", `${tip}:src/greeting.ts`)).not.toContain(marker);
       expect(run.runRecords().map((record) => record.status)).toEqual(["succeeded"]);
+    } finally {
+      run.dispose();
+    }
+  },
+  60_000,
+);
+
+/**
+ * Put the argv recorder at the fixture's agent path (`bin/agent.ts`, which
+ * `runTask` passes as `--agent-path`) and move the fake agent behind it.
+ *
+ * @param run - Prepared fixture workspace
+ * @returns JSON-lines log of every harness argv
+ */
+function recordHarnessArgv(run: FixtureWorkspace): string {
+  const agent = join(run.root, "bin/agent.ts");
+  const delegate = join(run.root, "bin/fake-agent.ts");
+  renameSync(agent, delegate);
+  const log = join(run.root, "harness-argv.jsonl");
+  writeArgvRecorder(agent, delegate, log);
+  return log;
+}
+
+test.skipIf(!existsSync(cliPath))(
+  "--max-turns reaches the harness argv for the implementation and hook-fix invocations",
+  async () => {
+    const run = new FixtureWorkspace();
+    try {
+      await prepareHookedRemote(run, "fix");
+      const log = recordHarnessArgv(run);
+      const result = await run.runTask({ extraArgs: ["--hook-retries", "1", "--max-turns", "7"] });
+
+      expect(result.exitCode, output(result)).toBe(0);
+      expect(run.agentInvocations().map((entry) => entry.mode)).toEqual(["implement", "hook-fix"]);
+      const invocations = recordedArgv(log);
+      expect(invocations).toHaveLength(2);
+      // claude-code (the fixture's AGENT_HARNESS) receives exactly one cap of 7
+      // on both the implementation turn and the git-hook repair turn.
+      for (const argv of invocations) expect(maxTurnsValues(argv)).toEqual(["7"]);
+      expect(invocations[1]?.join(" ")).toContain("# Git Hook Error - Fix Required");
+    } finally {
+      run.dispose();
+    }
+  },
+  60_000,
+);
+
+test.skipIf(!existsSync(cliPath))(
+  "omitting --max-turns passes the default cap of 500 to every harness invocation",
+  async () => {
+    const run = new FixtureWorkspace();
+    try {
+      await prepareHookedRemote(run, "fix");
+      const log = recordHarnessArgv(run);
+      const result = await run.runTask({ extraArgs: ["--hook-retries", "1"] });
+
+      expect(result.exitCode, output(result)).toBe(0);
+      const invocations = recordedArgv(log);
+      expect(invocations).toHaveLength(2);
+      for (const argv of invocations) expect(maxTurnsValues(argv)).toEqual(["500"]);
     } finally {
       run.dispose();
     }

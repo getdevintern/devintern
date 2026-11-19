@@ -1,4 +1,6 @@
 import { extractImplementationSummary } from "../agent/implementation-summary";
+import type { StackBase } from "../dependencies/gate";
+import { parseStackedOnMarker } from "../dependencies/stacked-base";
 
 /**
  * Structured PR-body template.
@@ -86,6 +88,27 @@ export interface PrBodyInput {
   taskSummary: string;
   /** Agent implementation summary; parsed for template sections when present. */
   implementationSummary?: string;
+  /** The unmerged PR this one is stacked on (it targets that PR's branch). */
+  stackedOn?: StackBase;
+}
+
+/**
+ * The PR a task is stacked on, from the generated marker in its description.
+ * Accepts the raw tracker description (string or rich document).
+ */
+export function stackedOnFromDescription(description: unknown): StackBase | undefined {
+  return typeof description === "string"
+    ? (parseStackedOnMarker(description) ?? undefined)
+    : undefined;
+}
+
+/** The "stacked on" note opening a stacked PR's Why section. */
+export function renderStackedOnNote(base: StackBase): string {
+  const pr = base.prUrl ? `[#${base.prNumber}](${base.prUrl})` : `#${base.prNumber}`;
+  return (
+    `**Stacked on ${pr}** (\`${base.branch}\`, task ${base.taskKey}): ` +
+    `this PR targets that branch. Review and merge ${pr} first.`
+  );
 }
 
 /** Normalize a heading so aliases match regardless of case or punctuation. */
@@ -231,7 +254,7 @@ export function parsePrBodySections(
  * @param input - Task identity plus the optional agent summary
  */
 export function buildPrBody(input: PrBodyInput): string {
-  const { taskKey, taskSummary, implementationSummary } = input;
+  const { taskKey, taskSummary, implementationSummary, stackedOn } = input;
   const { sections: parsed, preamble } = parsePrBody(
     implementationSummary === undefined
       ? undefined
@@ -243,7 +266,9 @@ export function buildPrBody(input: PrBodyInput): string {
 
   const taskReference = `Task ${taskKey}: ${taskSummary}`.trim();
   const content: Record<PrBodySectionKey, string> = {
-    why: [taskReference, renderSection(parsed.why)].filter(Boolean).join("\n\n"),
+    why: [stackedOn ? renderStackedOnNote(stackedOn) : "", taskReference, renderSection(parsed.why)]
+      .filter(Boolean)
+      .join("\n\n"),
     "what-changed": whatChanged,
     scope: renderSection(parsed.scope),
     tradeoffs: renderSection(parsed.tradeoffs),

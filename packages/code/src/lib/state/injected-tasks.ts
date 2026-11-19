@@ -21,11 +21,23 @@
 import { Database } from "bun:sqlite";
 import { existsSync, unlinkSync } from "fs";
 
+import { readLocalDependencyFacts } from "../dependencies/local-facts";
+import type { DependencyFacts, DependencyMode } from "../dependencies/gate";
+import { isDependencyMode } from "../dependencies/gate";
+import { orderStackLinks } from "../dependencies/stack-maintainer";
+import type { StackLink } from "../dependencies/stack-maintainer";
 import { prepareQueueDbDirectory } from "./webhook-queue";
 import { configureSqliteConnection } from "./sqlite";
 import type { RunRecord } from "./run-recorder";
 
 export type InjectedTaskStatus = "pending" | "running" | "done" | "failed";
+
+/**
+ * Why a pending task with dependencies cannot be claimed yet: `waiting` for a
+ * dependency to progress, or `blocked` by one that failed or whose PR closed
+ * without merging. Unset when the task has no dependencies or is claimable.
+ */
+export type InjectedDependencyState = "waiting" | "blocked";
 
 /** Time for a waiter to recover a settled outcome after its queue row is pruned. */
 const PRUNED_OUTCOME_RECOVERY_MS = 24 * 60 * 60 * 1000;
@@ -89,6 +101,14 @@ export interface InjectedTask {
   deferCount: number;
   /** Earliest claim time (epoch ms) after a deferral backoff; unset = now. */
   notBefore?: number;
+  /** Task keys (same repo) this task waits on; empty when it has none. */
+  dependsOn: string[];
+  /** How it waits on {@link dependsOn}; set whenever it has dependencies. */
+  dependencyMode?: DependencyMode;
+  /** Last gate verdict recorded by the worker (or at enqueue). */
+  dependencyState?: InjectedDependencyState;
+  /** Human reason for {@link dependencyState}, naming the dependency. */
+  dependencyReason?: string;
   createdAt: number;
   startedAt?: number;
   finishedAt?: number;
@@ -110,9 +130,26 @@ interface InjectedTaskRow {
   child_started_at: number | null;
   defer_count: number | null;
   not_before: number | null;
+  depends_on?: string | null;
+  dependency_mode?: string | null;
+  dependency_state?: string | null;
+  dependency_reason?: string | null;
   created_at: number;
   started_at: number | null;
   finished_at: number | null;
+}
+
+/** Decode the stored dependency list; a malformed value reads as none. */
+function parseDependsOn(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed)
+      ? parsed.filter((key): key is string => typeof key === "string" && key !== "")
+      : [];
+  } catch {
+    return [];
+  }
 }
 
 function rowToInjectedTask(row: InjectedTaskRow): InjectedTask {
@@ -132,6 +169,13 @@ function rowToInjectedTask(row: InjectedTaskRow): InjectedTask {
     childStartedAt: row.child_started_at ?? undefined,
     deferCount: row.defer_count ?? 0,
     notBefore: row.not_before ?? undefined,
+    dependsOn: parseDependsOn(row.depends_on),
+    dependencyMode: isDependencyMode(row.dependency_mode) ? row.dependency_mode : undefined,
+    dependencyState:
+      row.dependency_state === "waiting" || row.dependency_state === "blocked"
+        ? row.dependency_state
+        : undefined,
+    dependencyReason: row.dependency_reason ?? undefined,
     createdAt: row.created_at,
     startedAt: row.started_at ?? undefined,
     finishedAt: row.finished_at ?? undefined,
@@ -222,6 +266,13 @@ export interface EnqueueInjectedTaskInput {
   idempotencyKey?: string;
   actor?: string;
   createdAt?: number;
+  /** Validated dependency keys (callers check existence, repo, and cycles). */
+  dependsOn?: string[];
+  /** Resolved mode; stored only when {@link dependsOn} is non-empty. */
+  dependencyMode?: DependencyMode;
+  /** Initial gate verdict, so the queue view explains the wait immediately. */
+  dependencyState?: InjectedDependencyState;
+  dependencyReason?: string;
 }
 
 export interface EnqueueInjectedTaskResult {
@@ -294,6 +345,13 @@ export class InjectedTaskStore {
         child_started_at INTEGER,
         defer_count INTEGER NOT NULL DEFAULT 0,
         not_before INTEGER,
+        depends_on TEXT,
+        dependency_mode TEXT,
+        dependency_state TEXT,
+        dependency_reason TEXT,
+        stacked_on TEXT,
+        stack_base_sha TEXT,
+        stack_notice TEXT,
         created_at INTEGER NOT NULL,
         started_at INTEGER,
         finished_at INTEGER
@@ -327,6 +385,19 @@ export class InjectedTaskStore {
     }
     if (!columns.some((column) => column.name === "not_before")) {
       addColumnIfMissing(this.db, "not_before INTEGER");
+    }
+    for (const name of [
+      "depends_on",
+      "dependency_mode",
+      "dependency_state",
+      "dependency_reason",
+      "stacked_on",
+      "stack_base_sha",
+      "stack_notice",
+    ]) {
+      if (!columns.some((column) => column.name === name)) {
+        addColumnIfMissing(this.db, `${name} TEXT`);
+      }
     }
     this.db.run("CREATE INDEX IF NOT EXISTS idx_injected_tasks_status ON injected_tasks(status)");
     this.db.run(
@@ -383,10 +454,12 @@ export class InjectedTaskStore {
           [input.idempotencyKey],
         );
       }
+      const dependsOn = input.dependsOn?.length ? input.dependsOn : undefined;
       db.query(
         `INSERT INTO injected_tasks
-           (task_key, repo, title, body, task_file, idempotency_key, actor, status, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
+           (task_key, repo, title, body, task_file, idempotency_key, actor, status, created_at,
+            depends_on, dependency_mode, dependency_state, dependency_reason)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)`,
       ).run(
         input.taskKey,
         input.repo,
@@ -396,6 +469,10 @@ export class InjectedTaskStore {
         input.idempotencyKey ?? null,
         input.actor ?? "local:add",
         input.createdAt ?? Date.now(),
+        dependsOn ? JSON.stringify(dependsOn) : null,
+        dependsOn ? (input.dependencyMode ?? "merged") : null,
+        dependsOn ? (input.dependencyState ?? null) : null,
+        dependsOn ? (input.dependencyReason ?? null) : null,
       );
     } catch (error) {
       // A concurrent caller claimed the same idempotency key between the read
@@ -612,6 +689,132 @@ export class InjectedTaskStore {
       )
       .get(taskKey) as InjectedTaskRow | null;
     return row ? rowToInjectedTask(row) : null;
+  }
+
+  /**
+   * Repo of each named task key that has a row (any status), for dependency
+   * validation at enqueue. Missing keys are absent from the map.
+   */
+  reposByTaskKey(taskKeys: readonly string[]): Map<string, string> {
+    const map = new Map<string, string>();
+    const keys = [...new Set(taskKeys)];
+    if (keys.length === 0) return map;
+    const rows = this.ensureDb()
+      .query(
+        `SELECT task_key, repo FROM injected_tasks
+         WHERE task_key IN (${keys.map(() => "?").join(", ")})`,
+      )
+      .all(...keys) as Array<{ task_key: string; repo: string }>;
+    for (const row of rows) map.set(row.task_key, row.repo);
+    return map;
+  }
+
+  /** Direct dependencies of one task key (cycle detection); empty when none. */
+  dependenciesOf(taskKey: string): string[] {
+    const row = this.ensureDb()
+      .query("SELECT depends_on FROM injected_tasks WHERE task_key = ?")
+      .get(taskKey) as { depends_on: string | null } | null;
+    return parseDependsOn(row?.depends_on);
+  }
+
+  /** Pending rows that declare dependencies (the acquirer's gate pass). */
+  listPendingWithDependencies(): InjectedTask[] {
+    const rows = this.ensureDb()
+      .query(
+        `SELECT * FROM injected_tasks
+         WHERE status = 'pending' AND depends_on IS NOT NULL AND depends_on != '[]'
+         ORDER BY created_at ASC, id ASC`,
+      )
+      .all() as InjectedTaskRow[];
+    return rows.map(rowToInjectedTask);
+  }
+
+  /**
+   * Local facts about dependency keys (task row, latest run, agent PR), read
+   * from this workspace DB. See `readLocalDependencyFacts`.
+   */
+  dependencyFacts(taskKeys: readonly string[]): DependencyFacts[] {
+    return readLocalDependencyFacts(this.ensureDb(), taskKeys);
+  }
+
+  /**
+   * Record the gate verdict on a pending row (`null` clears it once claimable).
+   * Writes only on change, so an unchanged wait costs no write per tick.
+   *
+   * @returns Whether the row changed
+   */
+  setDependencyState(
+    id: number,
+    state: InjectedDependencyState | null,
+    reason: string | null,
+  ): boolean {
+    const result = this.ensureDb().run(
+      `UPDATE injected_tasks SET dependency_state = ?, dependency_reason = ?
+       WHERE id = ? AND status = 'pending'
+         AND (COALESCE(dependency_state, '') != COALESCE(?, '')
+           OR COALESCE(dependency_reason, '') != COALESCE(?, ''))`,
+      [state, reason, id, state, reason],
+    );
+    return Number(result.changes ?? 0) > 0;
+  }
+
+  /**
+   * Record which task a claim stacked this row on (`null`: not stacked, i.e.
+   * the PR targets the default branch or an explicit `Target branch:`). Read
+   * by dependents: a merged PR of a stacked row landed in its base's branch.
+   */
+  setStackedOn(id: number, stackedOnTaskKey: string | null): void {
+    this.ensureDb().run("UPDATE injected_tasks SET stacked_on = ? WHERE id = ?", [
+      stackedOnTaskKey,
+      id,
+    ]);
+  }
+
+  /**
+   * Settled (`done`) rows whose PR is stacked on another task's branch (the
+   * stacked-PR maintainer's work list), each base before its dependents.
+   */
+  listStackedLinks(): StackLink[] {
+    const rows = this.ensureDb()
+      .query(
+        `SELECT id, task_key, repo, stacked_on, stack_base_sha, stack_notice FROM injected_tasks
+         WHERE status = 'done' AND stacked_on IS NOT NULL AND stacked_on != ''
+         ORDER BY finished_at ASC, id ASC`,
+      )
+      .all() as Array<{
+      id: number;
+      task_key: string;
+      repo: string;
+      stacked_on: string;
+      stack_base_sha: string | null;
+      stack_notice: string | null;
+    }>;
+    const links = rows.map((row): StackLink => ({
+      id: row.id,
+      taskKey: row.task_key,
+      repo: row.repo,
+      stackedOn: row.stacked_on,
+      baseHeadSha: row.stack_base_sha ?? undefined,
+      notice: row.stack_notice ?? undefined,
+    }));
+    return orderStackLinks(links);
+  }
+
+  /**
+   * Record the base head a stacked row's branch is built on (`null` forgets
+   * it, e.g. once the row no longer stacks). The next restack strips commits
+   * up to this SHA.
+   */
+  setStackBaseSha(id: number, sha: string | null): void {
+    this.ensureDb().run("UPDATE injected_tasks SET stack_base_sha = ? WHERE id = ?", [sha, id]);
+  }
+
+  /**
+   * Record that the stacked-PR maintainer told the PR why it is blocked
+   * (`null` clears it), so the comment is posted once.
+   */
+  setStackNotice(id: number, notice: string | null): void {
+    this.ensureDb().run("UPDATE injected_tasks SET stack_notice = ? WHERE id = ?", [notice, id]);
   }
 
   /** Every row currently claimed as `running` (startup auto-resume scan). */

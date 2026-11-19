@@ -4,135 +4,60 @@ description: "Choose when the worker picks up tasks and keep unattended runs hea
 section: "Automation"
 order: 5
 sidebarHidden: true
-dateModified: 2026-09-08
+dateModified: 2026-11-18
 ---
 
 # Running the Worker Unattended
 
-The [worker](./worker.md) is the unattended path for @devintern/code. It stays running, picks up ready tasks, watches the agent's pull requests, and receives instant events through the [relay](./relay.md). You do not need a separate scheduler around the CLI.
+The [worker](./worker.md) is the unattended path for DevIntern Code. It keeps running, picks up ready tasks, watches the agent's pull requests, and receives instant events through the [relay](./relay.md). You do not need cron or another scheduler around the CLI.
 
 ```bash
-devintern worker init
+devintern worker init   # workspace, ready-tasks query, relay pairing, and a user service
 devintern worker
 ```
 
-`worker init` writes a 1-repo [workspace](./workspaces.md), stores the ready-tasks query, checks any automation license (Supporter, Team, or Business), and offers zero-port relay pairing for detected GitHub and GitLab code hosts. GitHub uses the central DevIntern AI App (`@mention` handling on any PR, with `GITHUB_TOKEN` retained for local API access); GitLab uses an automatically created and tested project hook while its API token remains local. Skipped or failed pairing leaves polling active and is reminded in the summary. The wizard then offers to install and start the user-level service (systemd on Linux, launchd on macOS) so setup ends with the worker running — open http://localhost:4400 to see it. Air-gapped/no-relay GitHub installations use the separate customer-owned App workflow.
+Where to find the details:
 
-Keep the worker running and use [working windows](#working-windows-quiet-hours) when you want to control when it may pick up new tasks.
-
-## Free Worker Pilot or automation license
-
-Signed-in users can evaluate the worker without a card for 14 days with no task-count limit. Continued unattended execution requires an **automation license** (Supporter, Team, or Business). When @devintern/code detects an automated context but finds neither an active Worker Pilot nor a matching license, the run fails immediately with:
-
-```
-❌ License check failed
-   Automated execution detected (CI / systemd / cron) but no
-   automation license was found.
-```
-
-Run `devintern login` to use the Worker Pilot, or set `LICENSE_KEY` in the workspace `.env` to a key from [devintern.com/account](https://devintern.com/account). Interactive runs (`devintern PROJ-123` from your terminal) remain free and require neither login nor a license.
+| Topic                                          | Page                                                                                       |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| Polling, retries, and actioned tickets         | [Worker: Polling mode](./worker.md#polling-mode)                                            |
+| Installing as a systemd or launchd service     | [Worker: Running as a service](./worker.md#running-as-a-service)                            |
+| Worker Pilot and automation licenses           | [Worker: Worker Pilot and licenses](./worker.md#worker-pilot-and-licenses)                  |
+| Failure comments and crash recovery            | [Re-running a task](./worker-troubleshooting.md#re-running-a-task), [Interrupted runs](./worker-troubleshooting.md#interrupted-runs) |
+| Scheduled story-point estimation               | [Story Points Estimation](./story-points-estimation.md)                                     |
+| Sandboxing unattended agent runs               | [Sandboxing the Agent](./configuration.md#sandboxing-the-agent)                             |
 
 ## Working windows (quiet hours)
 
-The worker can limit new-task pickup from your tracker to wall-clock windows you choose — for example, only at night or only outside working hours. Configure them in `[worker.schedule]` in `workspace.toml` and restart the worker:
+Limit new-task pickup to chosen wall-clock windows, for example nights only, with `[worker.schedule]` in `workspace.toml`. Restart the worker after changing it.
 
 ```toml
 [worker.schedule]
-active = ["22:00-06:00"]        # drain ready tasks only during these windows (local time)
-blocked = ["12:00-13:00"]       # optional: stay quiet during lunch even inside an active window
-timezone = ""                   # optional IANA name ("America/New_York"); blank = machine local time
-catch_up_missed = true          # drain once at startup when a whole window elapsed unused
+active = ["22:00-06:00"]   # pick up ready tasks only inside these windows
+blocked = ["12:00-13:00"]  # optional; always wins over active
+timezone = ""              # optional IANA name, e.g. "Europe/Berlin"; blank = machine local time
+catch_up_missed = true     # drain once at startup if a whole window passed unused
 ```
 
-How it behaves:
+- **Only new-task pickup pauses.** Review replies, @mentions, recurring automations, and relay events keep running. A task that already started finishes even if its window closes.
+- **Windows** may cross midnight and combine when you list several. A start equal to the end is rejected.
+- **Nothing is missed.** While paused, the worker does not query the tracker, so tasks created overnight are picked up on the first tick after the window opens.
+- **Daylight saving.** Windows follow the clock: a start time skipped by "spring forward" fires at the next valid moment; a time repeated by "fall back" uses its second occurrence.
+- **Catch-up.** If the machine slept through an entire window, the next worker start drains once. Set `catch_up_missed = false` to wait for the next window instead.
 
-- **Only new-task pickup is gated.** The detect → evaluate → execute drain of the fleet query pauses; review replies, @mentions, recurring automations, relay events, and everything else continue exactly as before.
-- **In-flight tasks finish.** Execution is sequential: once a task has been picked up it runs to completion even if its window closes mid-run. Nothing is killed at the window edge.
-- **Multiple windows union.** `active = ["06:00-09:00", "18:00-23:00"]` opens two drain periods per day. Windows may cross midnight (`22:00-06:00`). A start equal to the end is rejected.
-- **Blocked wins over active.** Overlapping entries resolve toward staying quiet — the safe direction for spend.
-- **No cursor movement while paused.** Ticks that land inside a quiet window neither query the tracker nor advance cursors, so anything created overnight is detected on the first tick after the window opens.
-
-### Timezones and DST
-
-Windows are defined in **wall-clock time**. With no `timezone` set (the default), they follow the worker machine's local time, so "nights" mean _its_ nights. Set any IANA name (for example `timezone = "Europe/Berlin"`) to pin the schedule independent of where the daemon runs; the resolved zone is printed in the startup banner and shown on the dashboard.
-
-Daylight-saving transitions shift real window duration by up to an hour because windows track the clock, not absolute time:
-
-- **Spring forward**: local times that do not exist snap forward to the next valid moment — a `02:30` start begins within about half an hour of the lost hour instead of never firing.
-- **Fall back**: a wall time occurring twice is evaluated on its second (standard-time) pass.
-
-### Missed windows and catch-up
-
-If the laptop slept through an entire active window (`catch_up_missed = true`, the default), the next worker start drains once immediately instead of waiting for the next window. The check compares the persisted timestamp of the last executed drain against the most recent fully elapsed window; set `catch_up_missed = false` if you would rather skip strictly to the next scheduled one. Worker uptime is unaffected either way: catch-up triggers only on startup.
-
-### Run now, without editing the schedule
-
-`devintern worker run-now` asks the running worker for one immediate drain, ignoring the windows:
+To drain once now, ignoring the windows:
 
 ```bash
 devintern worker run-now
 devintern worker run-now --workspace /path/to/workspace.toml
 ```
 
-The command writes a `.run-now` marker into the workspace home; the worker consumes it on its next poll tick (within `[defaults].poll_interval`, 60 seconds by default), drains, and removes the marker. Logs announce the manual run; the dashboard shows it as pending until served. If no worker is running, the marker is still written and the command warns that it stays until the next worker's first poll. `--workspace` must point to a workspace config file, not a directory; a missing value or an unknown option is rejected without writing a marker.
+The running worker serves the request on its next poll (within `[defaults].poll_interval`, 60 seconds by default). If no worker is running, the request waits for the next worker start.
 
-### Seeing the current state
+The startup banner shows the windows, timezone, and whether pickup is open. Each open/close change is logged once, and the [dashboard](./dashboard.md) header shows when the window next opens or closes.
 
-- The startup banner lists the windows, the timezone, and whether pickup is currently open.
-- Every open/close flip is logged exactly once: `🌙 [schedule] outside the working window … ` / `☀️ [schedule] working window opened …`.
-- The [dashboard](./dashboard.md) header shows the active state plus when the window next opens or closes; `/api/worker` exposes the same snapshot as JSON (`schedule`).
+## Keeping unattended runs healthy
 
-Scheduled story-point estimation is a worker job too — see `[[estimations]]` in [Story Points Estimation](./story-points-estimation.md). No CLI runs on timers.
-
-### Keeping unattended runs healthy
-
-#### Pin `PATH` so the `bun` shebang resolves
-
-The `devintern` binary is a `#!/usr/bin/env bun` script, so it needs **`bun` on `PATH`** to run. Services launched by init systems start with a minimal `PATH` that usually excludes wherever your version manager (mise, asdf, nvm) installed Bun, and then fail with `bun: command not found`. Pin `PATH` explicitly in the `[Service]` section, listing the directory that contains `bun` (and `devintern`):
-
-```ini
-[Service]
-Environment="PATH=/home/youruser/.local/bin:/home/youruser/.local/share/mise/installs/bun/1.3.2/bin:/usr/local/bin:/usr/bin"
-```
-
-Confirm the path with `dirname "$(which bun)"`.
-
-#### Running as a user service (no root)
-
-Instead of system units under `/etc/systemd/system` (which need `sudo`), you can run entirely as your own user with **`systemctl --user`**: no root, and the unit can read your `~/.ssh` and version-manager installs directly. Place the unit in `~/.config/systemd/user/`, drop the `User=` line, and manage it with `systemctl --user enable --now <unit>.service`. To keep user services running after you log out, enable lingering once:
-
-```bash
-loginctl enable-linger "$USER"
-```
-
-`devintern worker init` installs and starts a user-level systemd unit (Linux) or launchd agent (macOS) for the resident worker when you accept its final offer. On Linux it also enables lingering so the worker starts at boot before login; if that last command is unavailable, the service stays running and the wizard prints the command for you. The manual steps above remain the fallback for hosts where the automatic install fails (WSL without a systemd user session, headless macOS, or a command error).
-
-#### Git push under automation
-
-If your repo's remote is SSH (`git@github.com:...`), the unattended run needs the SSH key reachable without an interactive agent. The cleanest approach is a `~/.ssh/config` host entry pointing the host at the right key: plain `git push` then resolves it (no `GIT_SSH_COMMAND` needed):
-
-```
-Host github.com
-  IdentityFile ~/.ssh/your_key
-```
-
-A `--user` service inherits your `$HOME` and reads this automatically; a system service with `User=` reads that user's `~/.ssh`. Alternatively, use an HTTPS remote with a `GITHUB_TOKEN`.
-
-#### Cleaning up processes the agent leaves running
-
-While working a task, the AI agent often starts long-running processes to verify its changes: dev servers (`npm run dev`, `vite`), watchers, `docker compose up`, and so on. If the agent does not stop them, they would otherwise outlive the run and pile up across every execution.
-
-@devintern/code prevents this. Each agent is launched in its own process group, and the entire group (the agent plus anything it spawned) is torn down when the run ends, times out, or is interrupted — the same however the worker is launched (systemd, launchd, a plain terminal), so you do not need to do anything to enable it:
-
-1. **In-process reaping (all platforms).** @devintern/code signals the whole process group on completion, on timeout, and on `SIGINT` / `SIGTERM` / `SIGHUP`. This protects launch methods without init-level cleanup of their own.
-2. **systemd cgroup cleanup (Linux, bonus).** A systemd service confines all of its processes to a unit cgroup, and the default `KillMode=control-group` reaps that entire cgroup when the unit deactivates. This catches even processes that fully daemonize (call `setsid` themselves) and escape the process group.
-
-#### Failure feedback on the task tracker
-
-A failed run never ends silently. When processing a task fails after it was moved to "In Progress" — an agent timeout, a usage limit, a crash, or the process being killed by `SIGTERM`/`SIGINT` (for example when a machine powers off) — @devintern/code posts a comment on the ticket explaining that no pull request was created, the reason for the failure, and where partial work may live (the `feature/<key>` branch or a git stash). The ticket is also moved back to its To Do status so the next pickup can retry it.
-
-The failure comment will not cause a retry loop: posting it does bump the tracker's update stamp, but the retry gate ignores the harness's own comments and records the attempt, so the ticket is only re-run after you edit the description, post your own comment, or delete the failure comment (see [worker polling](./worker-troubleshooting.md#re-running-a-task)).
-
-That covers graceful stops. When the worker itself dies mid-task (power cut, crash, `kill -9`), no comment could be posted at the time — so on its next startup the worker detects the runs left in flight, comments on their tickets with the same failure explanation, and moves them back to To Do. Tickets that moved on after the crash and orphans older than `WORKER_ORPHAN_MAX_AGE_HOURS` (default 168) are left alone. See [Interrupted runs are recovered on startup](./worker-troubleshooting.md#interrupted-runs).
-
-Pass `--skip-comments` to disable all tracker comments, including failure feedback.
+- **Git push over SSH:** the service has no interactive SSH agent. Point the host at a key in `~/.ssh/config` (`Host github.com` / `IdentityFile ~/.ssh/your_key`), or use an HTTPS remote with `GITHUB_TOKEN`.
+- **Leftover processes:** dev servers and watchers the agent starts are stopped when each run ends, times out, or is interrupted. No setup needed.
+- **Hand-written service units:** pin `PATH` to include the directory with `bun` (`dirname "$(which bun)"`), or the service fails with `bun: command not found`.

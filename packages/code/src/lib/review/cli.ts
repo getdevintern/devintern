@@ -2,7 +2,11 @@ import { captureError, flushErrorTracking } from "@devintern/utils";
 import { loadEnvironment } from "../cli/bootstrap";
 import { setManualWorkspaceStateDir } from "../config/config-dir";
 import { endRun } from "../state/run-recorder";
-import { exitIfWorkerUsageLimit } from "../worker/usage-limit-protocol";
+import {
+  exitIfWorkerUsageLimit,
+  WORKTREE_BUSY_EXIT_CODE,
+  WorktreeBusyError,
+} from "../worker/usage-limit-protocol";
 import { workspaceCredentialsForChange } from "../workspace/manual-credentials";
 import { ensureWorkspaceCodeState, resolveWorkspaceDir } from "../workspace/paths";
 
@@ -101,6 +105,13 @@ export async function runAddressReviewCommand(args: string[]): Promise<void> {
       return;
     }
     const message = error instanceof Error ? error.message : String(error);
+    if (error instanceof WorktreeBusyError) {
+      // Another job holds the worktree: defer without a failed run or an
+      // error report; the parent maps this exit code to "deferred".
+      endRun("deferred", message);
+      console.warn(`⏳ ${message}`);
+      process.exit(WORKTREE_BUSY_EXIT_CODE);
+    }
     // Close any run record addressReview opened before it failed (no-op
     // when none is active — addressReview also ends runs it completes).
     endRun("failed", message);

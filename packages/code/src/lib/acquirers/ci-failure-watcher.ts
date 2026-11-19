@@ -35,12 +35,18 @@ import { join } from "path";
 import { spawn } from "child_process";
 
 import type { WebhookQueue } from "../state/webhook-queue";
-import type { CiFixState, WorkerState } from "../state/worker-state";
+import type {
+  AgentPrCloseReason,
+  AgentPrMergeDetails,
+  CiFixState,
+  WorkerState,
+} from "../state/worker-state";
 import { RowParseError } from "../state/row-parse";
 import type { Acquirer } from "../../worker";
 import type { CiFailureFeedback } from "../review/formatter";
-import { classifyAgentPrState } from "../review/agent-pr-reconciler";
+import { classifyAgentPrState, resolveAgentPrMerge } from "../review/agent-pr-reconciler";
 import { serializePrRun } from "./review-polling";
+import { WORKTREE_BUSY_EXIT_CODE } from "../worker/usage-limit-protocol";
 import { describeGitHubAuthFailure, isGitHubAuthError } from "../code-host/github/github-errors";
 
 import type {
@@ -77,7 +83,12 @@ export interface CiFailureWatcherAcquirerOptions {
   /** Optional provider-specific watch list; defaults to registered GitHub PRs. */
   watchedChanges?: () => Array<{ repo: string; prNumber: number }>;
   /** Optional provider-specific close operation. */
-  markClosed?: (repo: string, prNumber: number) => void;
+  markClosed?: (
+    repo: string,
+    prNumber: number,
+    reason?: AgentPrCloseReason,
+    merge?: AgentPrMergeDetails,
+  ) => void;
   /** Durable key namespace; defaults to `github`. */
   namespace?: string;
   /** Human-readable provider label used for missing-log diagnostics. */
@@ -202,9 +213,9 @@ export function runCiFixViaCli(
     expectedHeadSha?: string;
     signal?: AbortSignal;
   } = {},
-): Promise<boolean> {
+): Promise<CiFixResult> {
   const prUrl = opts.webUrl ?? `https://github.com/${repo}/pull/${prNumber}`;
-  return serializePrRun(
+  return serializePrRun<CiFixResult>(
     opts.serializationKey ?? repo,
     prNumber,
     () =>
@@ -212,7 +223,7 @@ export function runCiFixViaCli(
         let settled = false;
         let killTimer: ReturnType<typeof setTimeout> | undefined;
         let abort: (() => void) | undefined;
-        const finish = (ok: boolean) => {
+        const finish = (ok: CiFixResult) => {
           if (settled) return;
           settled = true;
           if (abort) opts.signal?.removeEventListener("abort", abort);
@@ -262,7 +273,9 @@ export function runCiFixViaCli(
         };
         opts.signal?.addEventListener("abort", abort, { once: true });
         child.on("close", (code) => {
-          finish(code === 0);
+          // Worktree held by another PR job on the same head branch: defer so
+          // the watcher keeps its retry budget and posts no escalation.
+          finish(code === WORKTREE_BUSY_EXIT_CODE ? "deferred" : code === 0);
         });
         child.on("error", (error) => {
           console.error(`❌ Failed to spawn ci-fix for ${prUrl}: ${error.message}`);
@@ -679,10 +692,12 @@ export class CiFailureWatcherAcquirer implements Acquirer {
         // Only a confirmed terminal state may remove a PR from the registry:
         // an unusable payload (missing/null/unknown state) must keep polling.
         if (lifecycle === "closed" || lifecycle === "merged") {
+          const close = resolveAgentPrMerge(lifecycle, prResult.data);
           console.log(
-            `👁️  [${this.name}] ${this.describe(repo, prNumber)} is ${lifecycle}; unwatching`,
+            `👁️  [${this.name}] ${this.describe(repo, prNumber)} is ` +
+              `${close.reason === "merged" ? "merged" : lifecycle}; unwatching`,
           );
-          this.markClosed(repo, prNumber);
+          this.markClosed(repo, prNumber, close.reason, close.merge);
           return "removed";
         }
       }
@@ -861,9 +876,14 @@ export class CiFailureWatcherAcquirer implements Acquirer {
     return this.namespace === "github" ? SOURCE : `${this.namespace}:ci`;
   }
 
-  private markClosed(repo: string, prNumber: number): void {
-    if (this.options.markClosed) this.options.markClosed(repo, prNumber);
-    else this.options.workerState.markAgentPrClosed(repo, prNumber);
+  private markClosed(
+    repo: string,
+    prNumber: number,
+    reason?: AgentPrCloseReason,
+    merge?: AgentPrMergeDetails,
+  ): void {
+    if (this.options.markClosed) this.options.markClosed(repo, prNumber, reason, merge);
+    else this.options.workerState.markAgentPrClosed(repo, prNumber, reason, merge);
   }
 
   private describe(repo: string, prNumber: number): string {

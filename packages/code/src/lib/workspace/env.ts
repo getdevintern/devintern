@@ -114,6 +114,15 @@ export function buildRepoCredentialEnv(
 export { gitHubSlugFromRemote };
 
 /**
+ * The GitHub `owner/name` of a workspace repo (`GITHUB_REPO` in its inline
+ * env, else parsed from its remote), or `undefined` for a non-GitHub repo.
+ * Stacked PR maintenance only runs for repos that have one.
+ */
+export function repoGitHubSlug(repo: Pick<RepoConfig, "env" | "remote">): string | undefined {
+  return repo.env.GITHUB_REPO ?? gitHubSlugFromRemote(repo.remote) ?? undefined;
+}
+
+/**
  * Compose the environment for a task subprocess routed to one repo.
  *
  * Precedence (later wins): current process env < workspace `.env` < repo

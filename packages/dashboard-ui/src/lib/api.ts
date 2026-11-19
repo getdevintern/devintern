@@ -603,7 +603,7 @@ export interface SourcesResponse {
 }
 
 /** Where a queued item came from. */
-export type QueuedWorkKind = "ad-hoc" | "retry" | "webhook" | "automation";
+export type QueuedWorkKind = "ad-hoc" | "retry" | "webhook" | "automation" | "pr-job";
 
 /** One pending item from `GET /api/queue`; running rows are active work instead. */
 export interface QueuedWorkItem {
@@ -631,6 +631,18 @@ export interface QueuedWorkItem {
   lastError?: string;
   /** Automation: the scheduled job waiting for a slot. */
   automationId?: string;
+  /** PR job: worker job kind (`conflict`, `auto_merge`, `review`, `ci_fix`). */
+  jobKind?: string;
+  /** PR job: blocked by another job on the same PR, the per-repo limit, or the global limit. */
+  waitingOn?: "exclusive" | "repo" | "global";
+  /** Ad-hoc: task keys this task depends on. */
+  dependsOn?: string[];
+  /** Ad-hoc: `merged` (wait for merges) or `stacked` (branch from one unmerged dependency). */
+  dependencyMode?: "merged" | "stacked";
+  /** Ad-hoc: `waiting` or `blocked` on a dependency; unset once claimable. */
+  dependencyState?: "waiting" | "blocked";
+  /** Ad-hoc: why, naming the dependency. */
+  dependencyReason?: string;
 }
 
 export interface QueuedWorkResponse {
@@ -640,14 +652,17 @@ export interface QueuedWorkResponse {
   total: number;
 }
 
-/** One open agent-created PR (registry rows reconciled with GitHub by the worker). */
+/** One agent-created PR (registry rows reconciled with GitHub by the worker). */
 export interface AgentPrRecord {
+  provider?: string;
   repo: string;
   prNumber: number;
   prUrl: string;
   branch?: string;
   taskKey?: string;
   ticketUrl?: string;
+  /** When the worker saw the PR merged (epoch ms); only in the merged list. */
+  mergedAt?: number;
   createdAt: number;
   updatedAt: number;
 }

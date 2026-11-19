@@ -22,7 +22,6 @@ import type {
   ManualTriggerOutcome,
 } from "../automation/acquirer";
 import { loadStandaloneAutomationActions } from "../automation/manual";
-import type { CodeHostProvider } from "../code-host/index";
 import { RunStore } from "../state/run-recorder";
 import { hostTimeZone, isValidTimeZone } from "../state/run-activity";
 import type {
@@ -35,6 +34,7 @@ import type {
 import { InjectedTaskStore } from "../state/injected-tasks";
 import type { InjectedTask } from "../state/injected-tasks";
 import type { ScheduleSnapshot } from "../worker/schedule";
+import type { QueuedJobSnapshot } from "../worker/supervisor";
 import {
   isRunRetriable,
   RunRetryAuditStore,
@@ -68,6 +68,8 @@ import {
 } from "./dashboard-db";
 import { WorkerState } from "../state/worker-state";
 import type { Cursor } from "../state/worker-state";
+import { DEFAULT_MERGED_PR_LIMIT, parseAgentPrsQuery, toAgentPrView } from "./dashboard-agent-prs";
+import type { AgentPrView } from "./dashboard-agent-prs";
 import { deriveTaskTitle } from "./task-title";
 import {
   createCachedWorkspaceSourcesLoader,
@@ -132,10 +134,7 @@ export interface DashboardDataOptions {
    * same workspace as the queue counts.
    */
   workspaceDir?: string;
-  /**
-   * Live working-window snapshot from the worker process (embedded
-   * dashboard only; standalone servers return null).
-   */
+  /** Live working-window snapshot from the worker (embedded only; standalone returns null). */
   scheduleSnapshot?: () => ScheduleSnapshot | null;
   /**
    * How a retry is executed. `spawn` (default) starts a detached CLI
@@ -146,15 +145,9 @@ export interface DashboardDataOptions {
    * alongside the fleet worker.
    */
   retryMode?: "spawn" | "schedule";
-  /**
-   * How long a triggered retry blocks further retries of its task
-   * (tests); defaults to {@link INFLIGHT_RETRY_TTL_MS}.
-   */
+  /** How long a triggered retry blocks retries of its task; defaults to INFLIGHT_RETRY_TTL_MS. */
   inflightRetryTtlMs?: number;
-  /**
-   * How long a triggered manual automation run blocks further triggers of
-   * the automation; defaults to {@link INFLIGHT_RETRY_TTL_MS}.
-   */
+  /** How long a manual automation run blocks re-triggers; defaults to INFLIGHT_RETRY_TTL_MS. */
   inflightAutomationTtlMs?: number;
   /**
    * Automation listing/triggering overrides. The workspace worker passes its
@@ -169,6 +162,11 @@ export interface DashboardDataOptions {
   maxLogBytesPerFile?: number;
   /** Sources the running config polls; defaults to the workspace.toml list. */
   configuredSources?: () => ConfiguredSource[];
+  /**
+   * Jobs waiting in the worker's in-process supervisor (embedded dashboard
+   * only); queued PR jobs show under Queued with their PR label.
+   */
+  supervisorQueuedJobs?: () => QueuedJobSnapshot[];
 }
 
 interface Stores {
@@ -235,22 +233,7 @@ export interface WorkerStatusView {
   reason?: "pid-namespace"; // `unknown` because the lock owner is in another PID namespace
 }
 
-/** One open agent PR as served by `GET /api/agent-prs`. */
-export interface OpenAgentPrView {
-  provider: CodeHostProvider;
-  instanceUrl: string;
-  projectId?: string;
-  projectPath: string;
-  repo: string;
-  prNumber: number;
-  prUrl: string;
-  branch?: string;
-  taskKey?: string;
-  ticketUrl?: string;
-  createdAt: number;
-  updatedAt: number;
-}
-
+export type { AgentPrView, OpenAgentPrView } from "./dashboard-agent-prs";
 export type { DashboardAutomationView } from "./dashboard-automation-view";
 
 /**
@@ -294,6 +277,7 @@ export class DashboardData {
   /** Automation listing/triggering; lazily defaults to the standalone spawn path. */
   private automationActions: DashboardAutomationActions | null = null;
   private automationActionsOverride?: DashboardAutomationActions;
+  private readonly supervisorQueuedJobs: () => QueuedJobSnapshot[];
   private readonly configuredSources: () => ConfiguredSource[];
 
   constructor(options: DashboardDataOptions = {}) {
@@ -309,6 +293,7 @@ export class DashboardData {
     this.inflightRetryTtlMs = options.inflightRetryTtlMs ?? INFLIGHT_RETRY_TTL_MS;
     this.inflightAutomationTtlMs = options.inflightAutomationTtlMs ?? INFLIGHT_RETRY_TTL_MS;
     this.automationActionsOverride = options.automationActions;
+    this.supervisorQueuedJobs = options.supervisorQueuedJobs ?? (() => []);
     this.configuredSources =
       options.configuredSources ?? createCachedWorkspaceSourcesLoader(this.workspaceDir);
     if (options.logDirs !== undefined) {
@@ -593,6 +578,15 @@ export class DashboardData {
     });
   }
 
+  /** Jobs waiting in the worker's supervisor; empty for a standalone dashboard. */
+  getSupervisorQueuedJobs(): QueuedJobSnapshot[] {
+    try {
+      return this.supervisorQueuedJobs();
+    } catch {
+      return [];
+    }
+  }
+
   /** Health of each configured automation source; never throws. */
   getSources(): DashboardSourcesResult {
     // Source health lives in the workspace (or fleet) database with liveness and
@@ -644,22 +638,22 @@ export class DashboardData {
    * switches and stay correct even when this dashboard process runs
    * without tracker configuration.
    */
-  getOpenAgentPrs(): OpenAgentPrView[] {
+  getOpenAgentPrs(): AgentPrView[] {
     return this.read([], (stores) =>
-      stores.state.listOpenAgentChangeRequests().map((pr) => ({
-        provider: pr.provider,
-        instanceUrl: pr.instanceUrl,
-        projectId: pr.projectId,
-        projectPath: pr.projectPath,
-        repo: pr.repo,
-        prNumber: pr.prNumber,
-        prUrl: pr.webUrl,
-        branch: pr.branch,
-        taskKey: pr.taskKey,
-        ticketUrl: pr.ticketUrl,
-        createdAt: pr.createdAt,
-        updatedAt: pr.updatedAt,
-      })),
+      stores.state.listOpenAgentChangeRequests().map((pr) => toAgentPrView(pr)),
+    );
+  }
+
+  /**
+   * Agent-created PRs the worker saw merged, most recently merged first
+   * (`GET /api/agent-prs?state=merged`). Only merges observed after the
+   * registry started recording them are listed.
+   *
+   * @param limit - Maximum PRs returned
+   */
+  getMergedAgentPrs(limit: number = DEFAULT_MERGED_PR_LIMIT): AgentPrView[] {
+    return this.read([], (stores) =>
+      stores.state.listMergedAgentChangeRequests(limit).map((pr) => toAgentPrView(pr)),
     );
   }
 
@@ -1452,15 +1446,25 @@ export function handleWorkerStatus(data: DashboardData): ApiResponse {
 }
 
 /**
- * `GET /api/agent-prs` — open agent-created PRs with GitHub links.
+ * `GET /api/agent-prs` — agent-created PRs with GitHub links.
  *
- * The registry is reconciled with GitHub by the worker's review polling, so
- * PRs merged or closed outside the worker drop out within one poll cycle.
+ * Default (`state=open`): open PRs. The registry is reconciled with GitHub by
+ * the worker's review polling, so PRs merged or closed outside the worker drop
+ * out within one poll cycle. `state=merged`: PRs the worker saw merged, most
+ * recently merged first, bounded by `limit`.
  *
  * @param data - Dashboard data source
+ * @param params - Query params: `state` (open | merged, default open) and
+ *                 `limit` (merged only, 1..500, default 50)
  */
-export function handleAgentPrs(data: DashboardData): ApiResponse {
-  return { status: 200, body: { prs: data.getOpenAgentPrs() } };
+export function handleAgentPrs(
+  data: DashboardData,
+  params: URLSearchParams = new URLSearchParams(),
+): ApiResponse {
+  const query = parseAgentPrsQuery(params);
+  if ("error" in query) return badRequest(query.error);
+  const prs = query.state === "open" ? data.getOpenAgentPrs() : data.getMergedAgentPrs(query.limit);
+  return { status: 200, body: { prs } };
 }
 
 /**

@@ -156,6 +156,8 @@ describe("devintern worker read-only dashboard commands", () => {
       branch: "feature/proj-1",
       taskKey: "PROJ-1",
     });
+    state.recordAgentPr({ repo: "acme/web", prNumber: 6, taskKey: "PROJ-0" });
+    state.markAgentPrClosed("acme/web", 6, "merged");
     state.setCursor("markdown", "cursor-1");
     state.close();
 
@@ -329,6 +331,8 @@ describe("devintern worker read-only dashboard commands", () => {
       lastRun: { id: runIds.retro },
     });
     expect(JSON.parse(run("prs", ["--json"]).stdout).prs[0].prNumber).toBe(7);
+    const merged = JSON.parse(run("prs", ["--state", "merged", "--json"]).stdout).prs;
+    expect(merged.map((pr: { prNumber: number }) => pr.prNumber)).toEqual([6]);
     const queue = JSON.parse(run("queue", ["--json"]).stdout);
     expect(queue.items.map((item: { kind: string }) => item.kind).sort()).toEqual([
       "ad-hoc",
@@ -350,6 +354,10 @@ describe("devintern worker read-only dashboard commands", () => {
     expect(run("stats", ["--window", "all"]).stdout).toContain("Success rate:     50%");
     expect(run("status", []).stdout).toContain("Ad-hoc:     1 pending, 0 running");
     expect(run("logs", []).stdout).toContain("Processing PROJ-1");
+    const merged = run("prs", ["--state", "merged"]);
+    expect(merged.stdout).toContain("MERGED");
+    expect(merged.stdout).toContain("PROJ-0");
+    expect(run("prs", ["--state", "closed"]).code).not.toBe(0);
   });
 
   test("status says unknown when the worker lock is from another PID namespace", () => {

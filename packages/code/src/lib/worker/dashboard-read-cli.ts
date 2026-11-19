@@ -40,7 +40,7 @@ import type {
   ApiResponse,
   DashboardAutomationView,
   EnrichedLogEntry,
-  OpenAgentPrView,
+  AgentPrView,
   RunHarnessLogFile,
   RunRetryInfo,
   WorkerQueueStats,
@@ -49,7 +49,7 @@ import type {
 import { resolveWorkspaceArgPath } from "../observability/dashboard-db";
 import { handleOverview } from "../observability/dashboard-overview";
 import type { OverviewResponse } from "../observability/dashboard-overview";
-import { handleQueuedWork } from "../observability/queued-work";
+import { handleQueuedWork, queuedDependencyStatus } from "../observability/queued-work";
 import type { QueuedWorkResponse } from "../observability/queued-work";
 import type { TaskArtifactContent, TaskArtifactFile } from "../observability/task-artifacts";
 import type { HarnessLogContent } from "../observability/harness-logs";
@@ -249,13 +249,19 @@ const SPECS: Record<string, CommandSpec> = {
     run: (data) => ({ response: handleAutomations(data), render: renderAutomations }),
   },
   prs: {
-    usage: "prs",
+    usage: "prs [--state open|merged] [--limit N]",
     route: "GET /api/agent-prs",
-    description: "Open pull/merge requests created by the agent.",
-    options: {},
-    optionHelp: [],
+    description: "Pull/merge requests created by the agent: open ones, or recently merged.",
+    options: { state: { type: "string" }, limit: { type: "string" } },
+    optionHelp: [
+      "  --state <state>     open | merged (default open)",
+      "  --limit N           Merged PRs to return, 1..500 (default 50)",
+    ],
     positionals: { min: 0, max: 0 },
-    run: (data) => ({ response: handleAgentPrs(data), render: renderPrs }),
+    run: (data, values) => ({
+      response: handleAgentPrs(data, queryParams(values, { state: "state", limit: "limit" })),
+      render: values.state === "merged" ? renderMergedPrs : renderPrs,
+    }),
   },
   queue: {
     usage: "queue",
@@ -765,7 +771,7 @@ function renderAutomations(body: { automations: DashboardAutomationView[] }): st
   );
 }
 
-function renderPrs(body: { prs: OpenAgentPrView[] }): string {
+function renderPrs(body: { prs: AgentPrView[] }): string {
   if (body.prs.length === 0) return "No open agent PRs.";
   return table(
     ["REPO", "PR", "TASK", "UPDATED", "URL"],
@@ -779,17 +785,32 @@ function renderPrs(body: { prs: OpenAgentPrView[] }): string {
   );
 }
 
+function renderMergedPrs(body: { prs: AgentPrView[] }): string {
+  if (body.prs.length === 0) return "No merged agent PRs recorded.";
+  return table(
+    ["REPO", "PR", "TASK", "MERGED", "URL"],
+    body.prs.map((pr) => [
+      pr.repo,
+      `#${pr.prNumber}`,
+      pr.taskKey ?? "-",
+      pr.mergedAt !== undefined ? formatTime(pr.mergedAt) : "-",
+      pr.prUrl,
+    ]),
+  );
+}
+
 function renderQueue(body: QueuedWorkResponse): string {
   if (body.items.length === 0) return "Nothing queued.";
   return [
     table(
-      ["KIND", "SUBJECT", "REPO", "QUEUED", "TITLE"],
+      ["KIND", "SUBJECT", "REPO", "QUEUED", "TITLE", "DEPENDENCIES"],
       body.items.map((item) => [
         item.kind,
         item.taskKey ?? item.automationId ?? (item.prNumber ? `PR #${item.prNumber}` : "-"),
         item.repo ?? "-",
         formatTime(item.createdAt),
         item.title,
+        queuedDependencyStatus(item) ?? "-",
       ]),
     ),
     "",

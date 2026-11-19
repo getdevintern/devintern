@@ -1,6 +1,7 @@
 import { createGitHubCiProvider } from "../code-host/github/ci-provider";
 import { parseEnvInteger } from "../config/env-integer";
 import { RunStore } from "../state/run-recorder";
+import type { MergeStateAnswer } from "../dependencies/gate";
 import type { TaskExecutionResult } from "../acquirers/task-polling";
 import type {
   ConflictWindowStatus,
@@ -85,7 +86,7 @@ export function fleetGitHubTokenForRepo(
     .GITHUB_TOKEN;
 }
 
-function createFleetGitHubClientResolver(
+export function createFleetGitHubClientResolver(
   config: WorkspaceConfig,
   workspaceDir: string,
   usesHostedApp: boolean,
@@ -205,6 +206,7 @@ async function buildAutoMergeWatcher(params: {
   runStore: RunStore;
   intervalSeconds: number;
   verbose: boolean | undefined;
+  isStackedBase?: AutoMergeWatcherOptions["isStackedBase"];
 }): Promise<AutoMergeWatcherAcquirer> {
   const { config, gh } = params;
   const { AutoMergeWatcherAcquirer: Watcher, DEFAULT_AUTO_MERGE_QUIET_SECONDS } =
@@ -247,6 +249,7 @@ async function buildAutoMergeWatcher(params: {
           parseHarnessList(process.env.AGENT_HARNESS)[0])
         : undefined,
     policyFingerprint: (slug) => fleetAutoMergePolicyFingerprint(config, slug),
+    isStackedBase: params.isStackedBase,
     quietSeconds: parseEnvInteger(
       "WORKER_AUTO_MERGE_QUIET_SECONDS",
       DEFAULT_AUTO_MERGE_QUIET_SECONDS,
@@ -282,6 +285,8 @@ export async function buildFleetEventAcquirers(options: {
   intervalUpdaters?: Array<(seconds: number) => void>;
   /** Published once event acquirers are wired (mention-sweep reconcile). */
   reloadHooksOut?: { hooks?: FleetEventReloadHooks };
+  /** Stacked-base lookup for the auto-merge guard (see `stacked-pr-acquirer.ts`). */
+  isStackedBase?: (slug: string, baseRef: string) => boolean;
   /** Shared admission supervisor for every fleet execution path. */
   supervisor?: TaskSupervisor;
 }): Promise<import("../../worker").Acquirer[]> {
@@ -503,6 +508,7 @@ export async function buildFleetEventAcquirers(options: {
       runStore,
       intervalSeconds,
       verbose,
+      isStackedBase: options.isStackedBase,
     });
     acquirers.push(autoMergeWatcher);
     intervalUpdaters.push((seconds) => autoMergeWatcher.updateInterval(seconds));
@@ -755,4 +761,54 @@ export async function buildFleetEventAcquirers(options: {
   }
 
   return acquirers;
+}
+
+/**
+ * Build the injected-task acquirer's merge-state lookup: ask GitHub whether a
+ * dependency PR the gate waits on (closed with an unknown reason, or still
+ * `open` in the registry, or merged without a host merge time the gate needs
+ * to order stacked merges) merged or closed, and record the answer (with
+ * GitHub's `merged_at` and base ref for a merge) in `agent_prs`, so the
+ * dependency gate (and later readers) never ask again.
+ * The open case covers workspaces where no review poller watches the PR
+ * (e.g. no fleet GitHub credentials). An open PR returns `null`.
+ *
+ * Only GitHub repos are looked up; GitLab pollers record the outcome when they
+ * observe the close, and anything unresolvable (e.g. Bitbucket) stays unknown
+ * (the dependent keeps waiting). Auth follows the mode the event wiring chose
+ * (`token-only` for relay-hosted workspaces, else `app-first`).
+ */
+export function createDependencyMergeStateResolver(options: {
+  config: WorkspaceConfig;
+  workspaceDir: string;
+  workerState: Pick<WorkerState, "markAgentPrClosed">;
+}): (lookup: { repo: string; pr: { number: number } }) => Promise<MergeStateAnswer | null> {
+  const { config, workspaceDir, workerState } = options;
+  let resolver: ((slug: string) => FleetGitHubClient) | undefined;
+  return async ({ repo, pr }) => {
+    const repoConfig = config.repos.find((candidate) => candidate.name === repo);
+    const slug = repoConfig
+      ? (repoConfig.env.GITHUB_REPO ?? gitHubSlugFromRemote(repoConfig.remote))
+      : undefined;
+    if (!slug) return null;
+    const { GITHUB_AUTH_MODE_ENV, GitHubReviewsClient } =
+      await import("../code-host/github/reviews");
+    const { closeReasonFromPr, mergeDetailsFromPr } = await import("../review/agent-pr-reconciler");
+    resolver ??= createFleetGitHubClientResolver(
+      config,
+      workspaceDir,
+      process.env[GITHUB_AUTH_MODE_ENV] === "token-only",
+      GitHubReviewsClient,
+    );
+    const [owner = "", name = ""] = slug.split("/");
+    const result = await resolver(slug).conditionalGet<
+      import("../review/agent-pr-reconciler").PolledPr
+    >(`/repos/${slug}/pulls/${pr.number}`, owner, name);
+    if (!result.data) return null;
+    const reason = closeReasonFromPr("closed", result.data);
+    if (!reason || result.data.state === "open") return null;
+    const merge = reason === "merged" ? mergeDetailsFromPr(result.data) : undefined;
+    workerState.markAgentPrClosed(slug, pr.number, reason, merge);
+    return { state: reason, ...merge };
+  };
 }
