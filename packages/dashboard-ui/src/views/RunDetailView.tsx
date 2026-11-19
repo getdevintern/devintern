@@ -1,6 +1,8 @@
 import { useState } from "react";
 import {
   Check,
+  ChevronDown,
+  ChevronRight,
   CircleCheck,
   CirclePause,
   CircleX,
@@ -18,6 +20,10 @@ import type { StatusTone } from "@/components/shared";
 import { TicketKey } from "@/components/TicketKey";
 import { Button } from "@/components/ui/button";
 import { triggerRunRetry, usePoll } from "@/lib/api";
+import { Markdown } from "@/lib/markdown";
+import { automationHash } from "@/lib/routes";
+import { runReport } from "@/lib/run-report";
+import type { RunReport } from "@/lib/run-report";
 import type { RunDetailResponse, RunRecord } from "@/lib/api";
 import { formatRunOrigin } from "@/lib/run-origin";
 import { runPrHref, runWorkLink } from "@/lib/run-work";
@@ -58,7 +64,15 @@ const PANEL_ICONS: Record<StatusTone, LucideIcon> = {
 };
 
 /** The one place every run answers "what happened": outcome, why, and retry state. */
-function OutcomePanel({ data, retry }: { data: RunDetailResponse; retry: RetryState }) {
+function OutcomePanel({
+  data,
+  retry,
+  report,
+}: {
+  data: RunDetailResponse;
+  retry: RetryState;
+  report?: RunReport;
+}) {
   const { confirming, setConfirming, posting, feedback, handleRetry } = retry;
   const run = data.run;
   const tone = statusTone(run.status);
@@ -66,6 +80,7 @@ function OutcomePanel({ data, retry }: { data: RunDetailResponse; retry: RetrySt
   const prHref = runPrHref(run);
   const headline =
     run.outcomeReason ??
+    report?.headline ??
     (run.status === "succeeded"
       ? prHref && run.prNumber !== undefined
         ? `Pull request #${run.prNumber} opened`
@@ -106,6 +121,43 @@ function OutcomePanel({ data, retry }: { data: RunDetailResponse; retry: RetrySt
       ) : null}
       {feedback ? <RetryFeedback {...feedback} /> : null}
     </div>
+  );
+}
+
+/**
+ * What a prompt automation delivered: its final report, open, with the
+ * structured briefing behind a toggle. Saves opening the timeline or reading
+ * the transcript to learn what the run did.
+ */
+function ResultSection({ report }: { report: RunReport }) {
+  const [briefingOpen, setBriefingOpen] = useState(false);
+  return (
+    <section aria-labelledby="rd-result-heading" className="space-y-3">
+      <h3 id="rd-result-heading" className="section-title">
+        Result
+      </h3>
+      <Markdown>{report.body}</Markdown>
+      {report.briefing ? (
+        <div>
+          <Button
+            variant="ghost"
+            size="xs"
+            onClick={() => setBriefingOpen((open) => !open)}
+            aria-expanded={briefingOpen}
+            aria-controls="rd-result-briefing"
+            className="-ml-2 text-subtle-foreground"
+          >
+            {briefingOpen ? <ChevronDown /> : <ChevronRight />}
+            Details
+          </Button>
+          {briefingOpen ? (
+            <div id="rd-result-briefing" className="mt-2 border-l border-border pl-4">
+              <Markdown>{report.briefing}</Markdown>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+    </section>
   );
 }
 
@@ -251,10 +303,27 @@ function useRetry(data: RunDetailResponse | null | undefined, refresh: () => voi
 type RetryState = ReturnType<typeof useRetry>;
 
 /** Answer-first header: identity, outcome and why, what to do next. */
-function RunHeader({ data, retry }: { data: RunDetailResponse; retry: RetryState }) {
+function RunHeader({
+  data,
+  retry,
+  report,
+}: {
+  data: RunDetailResponse;
+  retry: RetryState;
+  report?: RunReport;
+}) {
   const { confirming, setConfirming, setFeedback } = retry;
   const run = data.run;
-  const title = runTitle(run);
+  const work = runWorkLink(run);
+  const rawTitle = runTitle(run);
+  // Automation runs title their prompt with the automation id, which the
+  // heading already shows; don't print it twice.
+  const title =
+    rawTitle && rawTitle.toLowerCase() !== work.label.toLowerCase() ? rawTitle : undefined;
+  const automationLink =
+    run.automationId && work.label === run.automationId && !work.href
+      ? automationHash(run.automationId)
+      : undefined;
   const prHref = runPrHref(run);
   return (
     <header className="space-y-4">
@@ -264,7 +333,13 @@ function RunHeader({ data, retry }: { data: RunDetailResponse; retry: RetryState
             <h2 className="text-xl font-semibold tracking-tight [overflow-wrap:anywhere]">
               {/* Same label rule as the runs list; PR-affected runs link
                   the PR they operate on. */}
-              <TicketKey {...runWorkLink(run)} />
+              {automationLink ? (
+                <a href={automationLink} className="ref-link" title="Open this automation">
+                  {work.label}
+                </a>
+              ) : (
+                <TicketKey {...work} />
+              )}
             </h2>
             <StatusBadge status={run.status} />
           </div>
@@ -308,7 +383,7 @@ function RunHeader({ data, retry }: { data: RunDetailResponse; retry: RetryState
         </div>
       </div>
 
-      <OutcomePanel data={data} retry={retry} />
+      <OutcomePanel data={data} retry={retry} report={report} />
     </header>
   );
 }
@@ -321,6 +396,7 @@ export function RunDetailView({ runId }: { runId: number; onBack?: () => void })
   const run = data?.run;
   const logs = data?.harnessLogs ?? [];
   const { attempt, total } = run ? attemptInfo(run, logs) : {};
+  const report = run && data ? runReport(run, data.stages) : undefined;
 
   return (
     <div className="space-y-6">
@@ -352,7 +428,9 @@ export function RunDetailView({ runId }: { runId: number; onBack?: () => void })
 
       {data && run ? (
         <>
-          <RunHeader data={data} retry={retry} />
+          <RunHeader data={data} retry={retry} report={report} />
+
+          {report ? <ResultSection report={report} /> : null}
 
           <div className="rd-grid">
             <div className="rd-timeline-area min-w-0">
