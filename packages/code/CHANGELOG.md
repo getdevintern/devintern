@@ -1,5 +1,11 @@
 # @devintern/code Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **Conflict resolutions on different PRs run in parallel**: the review poller waited for each base sync to finish before polling the next PR, so conflict resolutions ran one at a time and review feedback on other PRs waited behind them, whatever `max_concurrency_per_repo` allowed. Base syncs now start in the background, up to `[workspace.execution].max_concurrency` at once, and the per-repository limit and one-job-per-PR rule still apply
+
 ## [2.26.0] - 2026-11-19
 
 Dependent-tasks release: `devintern worker add --after` queues work that waits for other ad-hoc tasks, in merged or stacked mode, and the worker keeps stacked GitHub PRs rebased and retargeted as their bases change, merge, or close. The dashboard shows merged PRs and a weekday × hour activity heatmap, base sync reinstalls dependencies when a merge changes the lockfile, and slow first polls no longer delay worker startup.

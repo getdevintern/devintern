@@ -472,6 +472,11 @@ export async function buildFleetEventAcquirers(options: {
       conflictSchedule: config.workspace.conflictSchedule,
       conflictResolution: config.workspace.conflictResolution,
       quietPeriodSeconds: parseEnvInteger("WORKER_BASE_SYNC_QUIET_SECONDS", 30, { min: 0 }),
+      // Syncs run in the background; the supervisor admits them as
+      // `pr_worktree` jobs (per-repo limit, one job per PR). Without a
+      // supervisor nothing else bounds them, so keep them one at a time.
+      maxConcurrentBaseSyncs: () =>
+        options.supervisor ? config.workspace.execution.maxConcurrency : 1,
       runStore,
       // Factory form: repos added at runtime become watchable without a
       // restart (a static list would pin the startup slug set).
