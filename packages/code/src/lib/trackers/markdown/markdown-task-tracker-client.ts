@@ -26,7 +26,9 @@ import type {
 } from "../../../types/task-tracker";
 import { TaskTrackerError } from "../../../types/task-tracker";
 import { untrustedContentBlock } from "../../prompts/untrusted-content";
-import type { TaskTrackerClient } from "../client";
+import { extractDependsOn, isDependencyKeyShape } from "../../utils/general";
+import type { TaskBlocker, TaskTrackerClient } from "../client";
+import { isDoneStatusName } from "../shared/done-status";
 
 export interface MarkdownTaskRaw {
   filePath: string;
@@ -50,6 +52,18 @@ const IMPLEMENTATION_INSTRUCTIONS = `${IMPLEMENTATION_INSTRUCTIONS_HEADING}
 
 Please analyze the above task description and implement the requested functionality.
 `;
+
+/**
+ * Map a `Depends on:` token to a markdown task key (the file name stem or
+ * `key:` frontmatter, sanitized). The token must contain a hyphen or a digit
+ * (`add-login`, `task-12`, `local-…`), so prose words are not read as keys; a
+ * trailing `.md` is accepted.
+ */
+export function toMarkdownTaskKey(token: string): string | null {
+  const stem = token.replace(/\.md$/i, "");
+  if (!/^[a-z0-9][a-z0-9.-]*$/i.test(stem) || !/[-\d]/.test(stem)) return null;
+  return sanitizeMarkdownTaskKey(stem) || null;
+}
 
 export class MarkdownTaskTrackerClient implements TaskTrackerClient {
   private readonly tasksDirectory?: string;
@@ -186,6 +200,78 @@ export class MarkdownTaskTrackerClient implements TaskTrackerClient {
     }
 
     return { tasks, total: tasks.length };
+  }
+
+  /**
+   * Markdown tasks have no native dependencies: blockers are the task keys
+   * named on a `Depends on:` line of the task body. A blocker task is done
+   * once its `status:` frontmatter is done / complete(d) / closed /
+   * cancel(l)ed. A key with no task file is kept only when it is shaped like
+   * an ad-hoc or tracker key (`local-…`, `PROJ-12`, kept in its original case
+   * so it matches the worker's own run of that key), reported without a done
+   * state so only the worker's own run of it can release the ticket; other
+   * unresolved tokens (`third-party`, `v2`) are prose and ignored.
+   */
+  async getBlockers(taskKey: string): Promise<TaskBlocker[]> {
+    const task = await this.getTask(taskKey);
+    const blockers: TaskBlocker[] = [];
+    const seen = new Set<string>();
+    // Keep each token's original case: a missing blocker such as `PROJ-12`
+    // must be reported verbatim, because local run / PR facts are keyed by the
+    // exact tracker key. Only file lookups use the sanitized (lowercase) key.
+    const tokens = extractDependsOn((task.raw as MarkdownTaskRaw).body, (token) =>
+      toMarkdownTaskKey(token) ? token.replace(/\.md$/i, "") : null,
+    );
+    for (const token of tokens) {
+      const key = toMarkdownTaskKey(token);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      let filePath: string | undefined;
+      try {
+        filePath = resolveMarkdownTaskPath(key, this.tasksDirectory, this.cwd);
+      } catch {
+        filePath = undefined;
+      }
+      if (filePath === undefined || !existsSync(filePath)) {
+        filePath = filePath === undefined ? undefined : this.findTaskFileBySanitizedStem(key);
+        if (!filePath) {
+          // Ad-hoc keys are generated lowercase; tracker keys keep their case.
+          if (isDependencyKeyShape(token)) {
+            blockers.push({ key: /^local-/i.test(token) ? key : token, status: "not found" });
+          }
+          continue;
+        }
+      }
+      const blocker = await this.getTask(filePath);
+      const status = (blocker.raw as MarkdownTaskRaw).frontmatter.status;
+      blockers.push({
+        key: blocker.key,
+        done: isDoneStatusName(status),
+        ...(status ? { status } : {}),
+      });
+    }
+    return blockers;
+  }
+
+  /**
+   * `Depends on:` keys are sanitized (lowercased), but the exact-name lookup
+   * in `resolveMarkdownTaskPath` is case-sensitive on most filesystems. Match
+   * a file whose sanitized stem equals the key — the same rule `getTask` uses
+   * to derive the key — so `Orders-API.md` is found for `orders-api`.
+   */
+  private findTaskFileBySanitizedStem(key: string): string | undefined {
+    if (!this.tasksDirectory || !existsSync(this.tasksDirectory)) return undefined;
+    let names: string[];
+    try {
+      names = readdirSync(this.tasksDirectory);
+    } catch {
+      return undefined;
+    }
+    const name = names
+      .filter((n) => n.toLowerCase().endsWith(".md"))
+      .sort()
+      .find((n) => sanitizeMarkdownTaskKey(n.slice(0, -3)) === key);
+    return name ? join(this.tasksDirectory, name) : undefined;
   }
 
   async getComments(_taskKey: string): Promise<Comment[]> {

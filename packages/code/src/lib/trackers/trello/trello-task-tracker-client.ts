@@ -16,7 +16,9 @@ import type {
   TaskTrackerCommentContent,
 } from "../../../types/task-tracker";
 import { TaskTrackerError } from "../../../types/task-tracker";
-import type { TaskTrackerClient } from "../client";
+import { extractDependsOn } from "../../utils/general";
+import type { TaskBlocker, TaskTrackerClient } from "../client";
+import { isDoneStatusName } from "../shared/done-status";
 import {
   formatAssessmentFailureMarkdown,
   formatClarityAssessmentMarkdown,
@@ -28,6 +30,21 @@ import {
 import type { ClarityAssessmentLike } from "../shared/markdown-comment-formatter";
 import { mkdirSync, writeFileSync } from "fs";
 import path from "path";
+
+/**
+ * Map a `Depends on:` token to a Trello card key: a card URL
+ * (`https://trello.com/c/AbCd1234/…`), a 24-hex card id, or a bare short link.
+ * A bare short link must contain a digit, so 8-letter words and product names
+ * (`database`, `DynamoDB`, `LinkedIn`) are not read as cards; a short link
+ * with no digit must be written as a card URL.
+ */
+export function toTrelloCardKey(token: string): string | null {
+  const url = token.match(/trello\.com\/c\/([A-Za-z0-9]+)/i);
+  if (url) return url[1];
+  if (/^[0-9a-f]{24}$/i.test(token)) return token;
+  if (/^[A-Za-z0-9]{8}$/.test(token) && /\d/.test(token)) return token;
+  return null;
+}
 
 export class TrelloTaskTrackerClient implements TaskTrackerClient {
   private trelloClient: TrelloClient;
@@ -65,6 +82,35 @@ export class TrelloTaskTrackerClient implements TaskTrackerClient {
       tasks.push(this.normalizeCard(detail));
     }
     return { tasks, total: result.total };
+  }
+
+  /**
+   * Trello has no native dependencies: blockers are the cards named on a
+   * `Depends on:` line of the card description. A blocker is done once it is
+   * archived or sits in a list named Done / Complete(d) / Closed /
+   * Cancel(l)ed; a card that does not exist is reported as `not found` and
+   * keeps the ticket waiting.
+   */
+  async getBlockers(taskKey: string): Promise<TaskBlocker[]> {
+    const card = await this.trelloClient.getCardWithDetails(taskKey);
+    const blockers: TaskBlocker[] = [];
+    for (const key of extractDependsOn(card.desc, toTrelloCardKey)) {
+      const status = await this.trelloClient.getCardStatus(key);
+      if (!status) {
+        blockers.push({ key, status: "not found" });
+        continue;
+      }
+      blockers.push({
+        key: status.shortLink || status.id,
+        done: status.closed || isDoneStatusName(status.listName),
+        ...(status.closed
+          ? { status: "archived" }
+          : status.listName
+            ? { status: status.listName }
+            : {}),
+      });
+    }
+    return blockers;
   }
 
   async getComments(taskKey: string): Promise<Comment[]> {

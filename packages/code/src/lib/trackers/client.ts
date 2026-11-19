@@ -23,8 +23,10 @@ export interface TaskBlocker {
   key: string;
   /**
    * Whether the tracker reports the blocker finished (Jira status category
-   * `done`, Linear `completed`/`canceled`, a closed GitHub issue). `undefined`
-   * when the tracker response did not say.
+   * `done`, Linear `completed`/`canceled`, a closed GitHub or GitLab issue, an
+   * Azure DevOps `Completed`/`Removed` state, a completed Asana task, an
+   * archived or Done-list Trello card, a done markdown task). `undefined`
+   * when the tracker did not say (for example the blocker was not found).
    */
   done?: boolean;
   /** Tracker status name, for wait reasons (`In Progress`). */
@@ -76,10 +78,12 @@ export interface TaskTrackerClient {
   getRelatedWorkItems(task: Task): Promise<DetailedRelatedIssue[]>;
 
   /**
-   * Tickets that natively block this one ("is blocked by"), with their done
-   * state when the same response carries it. Only trackers whose capability
-   * declares `dependencies` implement it. A tracker or account without the
-   * feature returns `[]` instead of throwing; other failures throw.
+   * Tickets that block this one ("is blocked by"), natively or from a
+   * `Depends on:` description line (Trello, markdown), with their done state.
+   * Only trackers whose capability declares `dependencies` implement it. A
+   * tracker plan or account without the feature (GitLab Free, Asana without
+   * dependencies, GitHub without issue dependencies) returns `[]` instead of
+   * throwing; other failures throw.
    */
   getBlockers?(taskKey: string): Promise<TaskBlocker[]>;
 

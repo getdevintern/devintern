@@ -172,6 +172,11 @@ export function parseTaskKey(taskKey: string): {
  */
 const DEPENDENCY_KEY = /^(?:local-[a-z0-9][a-z0-9-]*|[a-z][a-z0-9_]*-\d+)$/i;
 
+/** Whether `token` is shaped like an ad-hoc `local-…` or `PROJ-12` task key. */
+export function isDependencyKeyShape(token: string): boolean {
+  return DEPENDENCY_KEY.test(token);
+}
+
 /**
  * Extract the task keys named on `Depends on:` lines of a task description.
  *
@@ -185,12 +190,19 @@ const DEPENDENCY_KEY = /^(?:local-[a-z0-9][a-z0-9-]*|[a-z][a-z0-9_]*-\d+)$/i;
  * `Depends on: the orders API being deployed` yields nothing. Every
  * matching line contributes, and the result is de-duplicated in order.
  *
- * Shared by ad-hoc task enqueue and tracker-native blocker sources.
+ * Shared by ad-hoc task enqueue and the Trello / markdown trackers, which have
+ * no native blockers. A tracker passes `toKey` to accept its own key format
+ * instead of the default `local-…` / `PROJ-12` shapes.
  *
  * @param description - Task description text
+ * @param toKey - Maps a cleaned token to a task key, or `null` when the token
+ *   is not one (defaults to the ad-hoc / Jira-style shape check)
  * @returns Dependency task keys (empty when none are declared)
  */
-export function extractDependsOn(description: string | undefined): string[] {
+export function extractDependsOn(
+  description: string | undefined,
+  toKey: (token: string) => string | null = (token) => (isDependencyKeyShape(token) ? token : null),
+): string[] {
   if (!description) return [];
   const pattern = /^[\t >*+-]*(?:\|\s*)?#{0,6}\s*[*_]{0,3}depends\s+on[*_]{0,3}\s*:\s*([^\n]*)$/gim;
   const keys: string[] = [];
@@ -201,9 +213,10 @@ export function extractDependsOn(description: string | undefined): string[] {
     const list = (match[1] ?? "").split(/\s[-\u2013\u2014]\s|[(\u2013\u2014#]/)[0] ?? "";
     const values = list.split(/[,|\s]+/);
     for (const raw of values) {
-      const key = raw.replace(/^[*_`]+/, "").replace(/[*_`.;:]+$/, "");
-      if (!key || /^and$/i.test(key) || !DEPENDENCY_KEY.test(key)) continue;
-      if (seen.has(key)) continue;
+      const token = raw.replace(/^[*_`]+/, "").replace(/[*_`.;:]+$/, "");
+      if (!token || /^and$/i.test(token)) continue;
+      const key = toKey(token);
+      if (!key || seen.has(key)) continue;
       seen.add(key);
       keys.push(key);
     }

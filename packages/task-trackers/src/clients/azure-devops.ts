@@ -49,6 +49,25 @@ export interface AzureDevOpsWorkItemDetail {
   }>;
 }
 
+/**
+ * A predecessor of a work item (a `System.LinkTypes.Dependency-Reverse`
+ * relation: the predecessor must finish first).
+ */
+export interface AzureDevOpsPredecessor {
+  id: number;
+  /** `System.State` (`Active`, `Done`, …). */
+  state?: string;
+  /**
+   * State category from the work item type's process (`Proposed`,
+   * `InProgress`, `Resolved`, `Completed`, `Removed`). Absent when the
+   * process states could not be read.
+   */
+  stateCategory?: string;
+}
+
+/** Relation type of a predecessor link, seen from the successor. */
+const PREDECESSOR_RELATION = "System.LinkTypes.Dependency-Reverse";
+
 export interface AzureDevOpsComment {
   id: number;
   /** Comment text (HTML). */
@@ -68,6 +87,8 @@ export class AzureDevOpsClient {
   private projectsCache: AzureDevOpsProject[] | null = null;
   private workItemTypesCache = new Map<string, AzureDevOpsWorkItemType[]>();
   private workItemCache = new Map<string, { id: number; url: string }>();
+  /** State name (lowercase) → category, per `project/type`. */
+  private stateCategoryCache = new Map<string, Map<string, string>>();
 
   /**
    * Create an Azure DevOps WIT REST API client.
@@ -437,6 +458,101 @@ export class AzureDevOpsClient {
       fields: result.fields || {},
       relations: result.relations || [],
     };
+  }
+
+  /**
+   * List a work item's predecessors (Predecessor links) with their state and
+   * state category.
+   *
+   * @param id - Work item numeric ID (the successor).
+   * @returns Predecessors in relation order (empty when it has none).
+   * @throws When a work item request fails.
+   */
+  async listPredecessors(id: number): Promise<AzureDevOpsPredecessor[]> {
+    const item = await this.request<{ relations?: Array<{ rel?: string; url?: string }> }>(
+      `${this.baseUrl}/_apis/wit/workitems/${id}?$expand=relations&api-version=7.0`,
+    );
+    const ids: number[] = [];
+    for (const relation of item.relations ?? []) {
+      if (relation.rel !== PREDECESSOR_RELATION) continue;
+      const match = relation.url?.match(/\/workItems\/(\d+)$/i);
+      const predecessorId = match ? Number(match[1]) : NaN;
+      if (Number.isInteger(predecessorId) && !ids.includes(predecessorId)) {
+        ids.push(predecessorId);
+      }
+    }
+    if (ids.length === 0) return [];
+
+    const fieldsById = new Map<number, Record<string, unknown>>();
+    for (let i = 0; i < ids.length; i += 200) {
+      const chunk = ids.slice(i, i + 200);
+      // `errorPolicy=omit` keeps one deleted or unreadable predecessor from
+      // failing the whole batch; it is then reported without a state.
+      const details = await this.request<{
+        value?: Array<{ id: number; fields?: Record<string, unknown> } | null>;
+      }>(
+        `${this.baseUrl}/_apis/wit/workitems?ids=${chunk.join(",")}` +
+          `&fields=System.State,System.WorkItemType,System.TeamProject&errorPolicy=omit&api-version=7.0`,
+      );
+      for (const detail of details.value ?? []) {
+        if (detail && typeof detail.id === "number") fieldsById.set(detail.id, detail.fields ?? {});
+      }
+    }
+
+    const predecessors: AzureDevOpsPredecessor[] = [];
+    for (const predecessorId of ids) {
+      const fields = fieldsById.get(predecessorId);
+      const state = typeof fields?.["System.State"] === "string" ? fields["System.State"] : "";
+      if (!state) {
+        predecessors.push({ id: predecessorId });
+        continue;
+      }
+      const type = fields?.["System.WorkItemType"];
+      const project = fields?.["System.TeamProject"];
+      const stateCategory =
+        typeof type === "string"
+          ? await this.stateCategory(
+              typeof project === "string" && project ? project : this.defaultProject,
+              type,
+              state,
+            )
+          : undefined;
+      predecessors.push({ id: predecessorId, state, ...(stateCategory ? { stateCategory } : {}) });
+    }
+    return predecessors;
+  }
+
+  /**
+   * Category of a work item state in its type's process, cached per type.
+   * Returns `undefined` when the process states cannot be read.
+   */
+  private async stateCategory(
+    project: string,
+    type: string,
+    state: string,
+  ): Promise<string | undefined> {
+    const cacheKey = `${project}/${type}`;
+    let categories = this.stateCategoryCache.get(cacheKey);
+    if (!categories) {
+      try {
+        const result = await this.request<{
+          value?: Array<{ name?: string; category?: string }>;
+        }>(
+          `${this.baseUrl}/${encodeURIComponent(project)}/_apis/wit/workitemtypes/` +
+            `${encodeURIComponent(type)}/states?api-version=7.0`,
+        );
+        categories = new Map();
+        for (const entry of result.value ?? []) {
+          if (entry.name && entry.category) {
+            categories.set(entry.name.toLowerCase(), entry.category);
+          }
+        }
+        this.stateCategoryCache.set(cacheKey, categories);
+      } catch {
+        return undefined;
+      }
+    }
+    return categories.get(state.toLowerCase());
   }
 
   /**

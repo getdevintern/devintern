@@ -61,13 +61,20 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 describe("tracker capability", () => {
-  test("Jira, Linear, and GitHub model native blockers; others do not", () => {
-    expect(supportsDependencies("jira")).toBe(true);
-    expect(supportsDependencies("linear")).toBe(true);
-    expect(supportsDependencies("github")).toBe(true);
-    for (const tracker of ["gitlab", "azure-devops", "asana", "trello", "markdown", "nope"]) {
-      expect(supportsDependencies(tracker)).toBe(false);
+  test("every tracker reports blockers; unknown trackers do not", () => {
+    for (const tracker of [
+      "jira",
+      "linear",
+      "github",
+      "gitlab",
+      "azure-devops",
+      "asana",
+      "trello",
+      "markdown",
+    ]) {
+      expect(supportsDependencies(tracker)).toBe(true);
     }
+    expect(supportsDependencies("nope")).toBe(false);
   });
 });
 
@@ -397,6 +404,24 @@ describe("tracker dependency gate", () => {
     expect(readTrackerDependencyWaits(dbPath)).toEqual([]);
   });
 
+  test("a blocker the tracker cannot find waits and is warned about once", async () => {
+    const check = gate(
+      [
+        { key: "Zz99Zz99", status: "not found" },
+        { key: "Ab12Cd34", done: false, status: "Doing" },
+      ],
+      { tracker: "trello" },
+    );
+    expect((await check("TaRg3t01", "backend")).kind).toBe("waiting");
+    await check("TaRg3t01", "backend");
+    const missing = warnSpy.mock.calls.filter(([line]) => String(line).includes("cannot find"));
+    expect(missing).toHaveLength(1);
+    expect(String(missing[0]![0])).toContain(
+      "TaRg3t01 names blockers trello cannot find: Zz99Zz99",
+    );
+    expect(String(missing[0]![0])).not.toContain("Ab12Cd34");
+  });
+
   test("a locally implemented blocker with an open PR: stacked starts on its branch, merged waits", async () => {
     finishRun("PROJ-12", "succeeded", { number: 7 });
     const blockers = [{ key: "PROJ-12", done: false, status: "In Review" }];
@@ -466,6 +491,84 @@ describe("tracker dependency gate", () => {
       kind: "blocked",
       reason: "API-12 failed",
     });
+  });
+
+  test("GitLab issue numbers and markdown keys are scoped to the team too", async () => {
+    for (const [tracker, key] of [
+      ["gitlab", "12"],
+      ["markdown", "api-schema"],
+    ] as const) {
+      const runId = runs.createRun({ origin: "task", taskKey: key, repo: "api", team: "api" });
+      runs.finishRun(runId, "failed");
+      const scoped = (team: string) =>
+        gate([{ key, done: false, status: "open" }], { tracker, team });
+      expect(await scoped("web")("30", "web")).toEqual({
+        kind: "waiting",
+        reason: `${key} not done (open)`,
+      });
+      expect(await scoped("api")("31", "api")).toEqual({
+        kind: "blocked",
+        reason: `${key} failed`,
+      });
+    }
+    // Azure DevOps, Asana, and Trello keys are workspace-wide.
+    const azureRun = runs.createRun({ origin: "task", taskKey: "77", repo: "api", team: "api" });
+    runs.finishRun(azureRun, "failed");
+    expect(
+      await gate([{ key: "77", done: false }], { tracker: "azure-devops", team: "web" })(
+        "78",
+        "web",
+      ),
+    ).toEqual({ kind: "blocked", reason: "77 failed" });
+  });
+
+  test("an ad-hoc blocker of a team-scoped markdown ticket counts even though its run has no team", async () => {
+    // `finishRun` records the run without a team, as ad-hoc runs routed by repo do.
+    finishRun("local-add-login", "succeeded", { number: 9 });
+    prs.markAgentPrClosed("acme/backend", 9, "merged");
+    const blockers: TaskBlocker[] = [
+      { key: "local-add-login", status: "not found" },
+      { key: "api-schema", done: false, status: "open" },
+    ];
+    // The tracker key is still team-scoped: another team's run is ignored.
+    const apiRun = runs.createRun({
+      origin: "task",
+      taskKey: "api-schema",
+      repo: "api",
+      team: "api",
+    });
+    runs.finishRun(apiRun, "failed");
+    expect(await gate(blockers, { tracker: "markdown", team: "web" })("signup", "web")).toEqual({
+      kind: "waiting",
+      reason: "api-schema not done (open)",
+    });
+    expect(
+      await gate([blockers[0]!], { tracker: "markdown", team: "web" })("signup", "web"),
+    ).toEqual({ kind: "ready" });
+  });
+
+  test("a markdown ticket's missing tracker-key blocker counts another team's run of it", async () => {
+    // Only the Jira team can run PROJ-12; the markdown team's ticket names it.
+    const jiraRun = runs.createRun({
+      origin: "task",
+      taskKey: "PROJ-12",
+      repo: "api",
+      team: "jira-team",
+    });
+    runs.finishRun(jiraRun, "failed");
+    expect(
+      await gate([{ key: "PROJ-12", status: "not found" }], { tracker: "markdown", team: "web" })(
+        "checkout",
+        "web",
+      ),
+    ).toEqual({ kind: "blocked", reason: "PROJ-12 failed" });
+    // A key that resolved to this team's task file stays team-scoped.
+    expect(
+      await gate([{ key: "PROJ-12", done: false, status: "todo" }], {
+        tracker: "markdown",
+        team: "web",
+      })("checkout", "web"),
+    ).toEqual({ kind: "waiting", reason: "PROJ-12 not done (todo)" });
   });
 
   test("a stacked ticket's base flows to its own dependents", async () => {

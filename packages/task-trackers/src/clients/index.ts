@@ -2,6 +2,7 @@ export { AsanaClient, parseAsanaTaskFilters } from "./asana.ts";
 export type {
   AsanaAttachment,
   AsanaCustomField,
+  AsanaDependency,
   AsanaEvent,
   AsanaProject,
   AsanaSection,
@@ -15,6 +16,7 @@ export type {
 export { AzureDevOpsClient } from "./azure-devops.ts";
 export type {
   AzureDevOpsComment,
+  AzureDevOpsPredecessor,
   AzureDevOpsProject,
   AzureDevOpsTag,
   AzureDevOpsWorkItem,
@@ -36,6 +38,7 @@ export type {
   GitLabIssue,
   GitLabIssueComment,
   GitLabLabel,
+  GitLabLinkedIssue,
   GitLabProject,
   GitLabUser,
 } from "./gitlab.ts";
@@ -59,6 +62,7 @@ export type {
   TrelloBoard,
   TrelloCard,
   TrelloCardDetail,
+  TrelloCardStatus,
   TrelloCheckItem,
   TrelloLabel,
   TrelloList,
