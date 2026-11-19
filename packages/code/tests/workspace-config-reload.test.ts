@@ -479,6 +479,9 @@ describe("createFleetTaskExecutor with live-reloaded config", () => {
     async ensureBaseWorktree(repo: RepoConfig): Promise<string> {
       return join(this.root, "worktrees", repo.name, "base");
     }
+    async ensurePrJobWorktree(repo: RepoConfig): Promise<string> {
+      return join(this.root, "worktrees", repo.name, "pr-jobs");
+    }
     async createTaskWorktree(repo: RepoConfig, taskKey: string): Promise<string> {
       const path = join(this.root, "worktrees", repo.name, taskKey.toLowerCase());
       this.worktrees.push(path);

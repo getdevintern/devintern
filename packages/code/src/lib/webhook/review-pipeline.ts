@@ -6,6 +6,7 @@ import { beginRun, endRun } from "../state/run-recorder";
 import { WorkerState } from "../state/worker-state";
 import { formatReviewPrompt } from "../review/formatter";
 import { Utils } from "../utils";
+import { WorktreeBusyError } from "../worker/usage-limit-protocol";
 import {
   processReviewComment,
   processReviewEvent,
@@ -39,6 +40,9 @@ import { runAgentHarnessForReview } from "./agent-review";
  * Trigger phrases that indicate the reviewer wants an auto-review loop
  * instead of addressing specific comments.
  */
+/** Delay before retrying a review whose worktree another job holds. */
+const WORKTREE_BUSY_RETRY_MS = 60_000;
+
 const AUTO_REVIEW_TRIGGER_PHRASES = [
   "enhance",
   "improve",
@@ -127,6 +131,21 @@ export async function processReviewWithPersistence(
       reviewQueue
         .add(() => processReviewWithPersistence(eventId, event, config, delivery))
         .catch((e) => console.error("❌ Error reprocessing deferred review:", e));
+      return;
+    }
+    if (error instanceof WorktreeBusyError) {
+      // Another job holds this branch's worktree. Keep the event pending (no
+      // attempt consumed, no error report) and retry once that job is likely
+      // done. The delivery stays in flight until the retry settles.
+      console.log(`⏳ ${error.message}; retrying in ${WORKTREE_BUSY_RETRY_MS / 1000}s`);
+      if (eventId && runtime.queue) {
+        runtime.queue.requeuePending(eventId);
+      }
+      setTimeout(() => {
+        reviewQueue
+          .add(() => processReviewWithPersistence(eventId, event, config, delivery))
+          .catch((e) => console.error("❌ Error reprocessing deferred review:", e));
+      }, WORKTREE_BUSY_RETRY_MS);
       return;
     }
     const permanent = classifyWebhookError(error) === "permanent";
@@ -344,6 +363,14 @@ async function markCommentsAsAddressed(
 }
 
 /**
+ * Drop this process's lease on a review worktree, keeping the directory for
+ * the next review of the branch (deps stay cached).
+ */
+function releaseLeasedWorktree(worktreePath: string | null): void {
+  if (worktreePath) Utils.releaseReviewWorktree(worktreePath);
+}
+
+/**
  * Process a `changes_requested` review: worktree, agent, commit, push, reactions.
  *
  * @param event - Pull request review webhook payload
@@ -361,6 +388,7 @@ async function processReviewAsync(
 
   let runStatus: "succeeded" | "failed" | "deferred" = "succeeded";
   let runReason: string | undefined;
+  let leasedWorktree: string | null = null;
 
   try {
     // Initialize GitHub client (App-first so the bot identity resolves)
@@ -453,6 +481,7 @@ async function processReviewAsync(
     // Prepare the single reusable worktree for this review
     console.log(`🌿 Preparing worktree for branch: ${branch}`);
     const worktreePath = await prepareRepository(branch, config.debug);
+    leasedWorktree = worktreePath;
 
     if (!worktreePath) {
       console.error("❌ Failed to prepare repository");
@@ -585,6 +614,11 @@ async function processReviewAsync(
 
     console.log(`\n✅ Successfully addressed review for PR #${prNumber}`);
   } catch (error) {
+    if (error instanceof WorktreeBusyError) {
+      runStatus = "deferred";
+      runReason = error.message;
+      throw error;
+    }
     if (error instanceof UsageLimitError) {
       // Account-global usage limit: propagate to the persistence wrapper so
       // it can fail over to the next harness (or pause + re-queue until the
@@ -606,8 +640,10 @@ async function processReviewAsync(
   } finally {
     // No-op when no run was started (or it already failed to open).
     endRun(runStatus, runReason);
+    // Keep the worktree (reused across reviews of the same PR, deps stay
+    // cached) but drop the lease so later cleanups may count it as idle.
+    releaseLeasedWorktree(leasedWorktree);
   }
-  // Note: We don't cleanup this branch's worktree here - it's reused across
-  // reviews of the same PR for efficiency (deps stay cached). Worktrees from
-  // other branches are pruned by prepareReviewWorktree on the next review.
+  // Worktrees from other branches are pruned by prepareReviewWorktree on the
+  // next review once they are idle.
 }

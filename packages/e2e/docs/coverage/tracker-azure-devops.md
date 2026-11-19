@@ -27,8 +27,24 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 - Surface: CLI `--estimate`; External dependency: task trackers
 - Status: `default`
 - Evidence: `tests/local/tracker-azure-devops-estimation.test.ts` (`bun run --filter @devintern/e2e test`)
-- Missing: Worker `[[estimations]]` schedule against the Azure DevOps fake (gap `e2e-tracker-azure-devops-scheduled-estimation`, deferred to keep this change small; mirror `tests/local/worker-scheduled-estimation.test.ts`); a configured `storyPointsField` override (only the default `Microsoft.VSTS.Scheduling.StoryPoints` is exercised); live project. Known product defect, not fixed here: the shared `markdownToHtmlDescription` (`packages/text-formatter`) treats the `**Story Points:** N  |  **Confidence:** …` line as a pipe table and posts it inside `<pre>` with literal asterisks; the test accepts that or a `<strong>` rendering.
-- Last reviewed: 2026-11-18
+- Missing: Live project. Known product defect, not fixed here: the shared `markdownToHtmlDescription` (`packages/text-formatter`) treats the `**Story Points:** N  |  **Confidence:** …` line as a pipe table and posts it inside `<pre>` with literal asterisks; the test accepts that or a `<strong>` rendering. The worker schedule and the `storyPointsField` override moved to their own rows below.
+- Last reviewed: 2026-11-19
+
+### Azure DevOps: worker `[[estimations]]` schedule, WIQL multi-item sweep, unchanged-item skip
+
+- Surface: `devintern worker` surface; External dependency: task trackers
+- Status: `default`
+- Evidence: `tests/local/worker-azure-devops-scheduled-estimation.test.ts` (gap `e2e-tracker-azure-devops-scheduled-estimation`, `bun run --filter @devintern/e2e test`)
+- Missing: Live project; `cron` schedules (only `interval`); a work item changed between sweeps (re-estimation through the worker; the CLI path is covered by the row above).
+- Last reviewed: 2026-11-19
+
+### Azure DevOps: configured `storyPointsField` override
+
+- Surface: CLI `--estimate`; `.devintern-code/settings.json`
+- Status: `default`
+- Evidence: `tests/local/tracker-azure-devops-estimation.test.ts` ("writes Azure DevOps story points to the configured storyPointsField override"): with `{"azure-devops": {"projects": {"<AZURE_DEVOPS_PROJECT>": {"storyPointsField": "Custom.…"}}}}`, points land in the override and the default `Microsoft.VSTS.Scheduling.StoryPoints` is untouched.
+- Missing: Live project; the worker `[[estimations]]` sweep with an override (the CLI path is covered).
+- Last reviewed: 2026-11-19
 
 ## Tracker plan status
 
@@ -36,8 +52,8 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 
 - Default `test`: yes (offline fake)
 - Opt-in suite: none
-- Notes: Fake lifecycle: key/`--query`, state transition, comment, decoy isolation. Worker polling (WIQL `ChangedDate` delta, dedupe, re-arm, cursor restart) is offline. CLI `--estimate` (story points field, HTML estimation comment, in-place re-estimation, <24h skip, `--skip-comments`) is offline.
-- Last reviewed: 2026-11-17
+- Notes: Fake lifecycle: key/`--query`, state transition, comment, decoy isolation. Worker polling (WIQL `ChangedDate` delta, dedupe, re-arm, cursor restart) is offline. CLI `--estimate` (story points field, HTML estimation comment, in-place re-estimation, <24h skip, `--skip-comments`) is offline. Worker `[[estimations]]` sweep over a WIQL query is offline. The `storyPointsField` project override is offline.
+- Last reviewed: 2026-11-19
 
 ## Layer 3 fake (implemented)
 
@@ -146,4 +162,37 @@ no credentials are needed.
 ```sh
 # from packages/e2e
 bun test tests/local/tracker-azure-devops-estimation.test.ts
+```
+
+- The `storyPointsField` override test writes
+  `.devintern-code/settings.json` with
+  `"azure-devops".projects.<project>.storyPointsField = "Custom.E2EStoryPointsOverride"`
+  and asserts the points land in that field and not in the default one.
+
+### Worker Azure DevOps scheduled estimation
+
+`tests/local/worker-azure-devops-scheduled-estimation.test.ts` starts the built
+worker with `tracker = "azure-devops"` and one `[[estimations]]` entry
+(`interval = "15m"`, WIQL `[System.Tags] CONTAINS '<marker>'`) against the fake.
+It seeds two old matching work items, a decoy outside the query, and a matching
+item created "now" (via `setNow`). It proves:
+
+- The first start only registers the schedule (`interval:15m`, no run, no WIQL).
+- After the cursor is moved to a missed due time, one sweep runs: a single WIQL
+  request with the configured query returning all three matches, two
+  `estimate`-origin runs attributed to the estimation id (no branch, repo, or
+  PR), 3 points in `Microsoft.VSTS.Scheduling.StoryPoints` and one estimation
+  comment on each old item, the new item skipped (`< 24h`), the decoy untouched,
+  and the state unchanged.
+- A second due sweep re-runs the same WIQL and skips both unchanged items: no
+  new run, agent call, field write, or comment.
+- No branch, commit, or push on the local bare remote, and no unexpected route
+  reached the fake.
+
+The prerequisite is the built CLI (`bun run --filter @getdevintern/code build`);
+no credentials are needed.
+
+```sh
+# from packages/e2e
+bun test tests/local/worker-azure-devops-scheduled-estimation.test.ts
 ```

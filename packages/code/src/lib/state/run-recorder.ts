@@ -104,6 +104,12 @@ export interface RunRecord extends RunMeta {
   step?: string;
   stepStartedAt?: number;
   stepActive?: boolean;
+  /**
+   * Set when the run pushed its branch but could not open the PR (any
+   * failure, permanent or retryable). A `succeeded` run with this set did not
+   * deliver its work to the default branch, even though it has no PR.
+   */
+  prFailure?: string;
 }
 
 export interface RunStageRecord {
@@ -271,6 +277,9 @@ export class RunStore {
     }
     if (!columns.some((c) => c.name === "queue_claim")) {
       this.db.run("ALTER TABLE runs ADD COLUMN queue_claim TEXT");
+    }
+    if (!columns.some((c) => c.name === "pr_failure")) {
+      this.db.run("ALTER TABLE runs ADD COLUMN pr_failure TEXT");
     }
     // Not unique: one queue claim can produce several runs when the worker changes harnesses.
     this.db.run("CREATE INDEX IF NOT EXISTS idx_runs_queue_claim ON runs(queue_claim)");
@@ -440,6 +449,16 @@ export class RunStore {
        WHERE id = ?`,
       [pr.repo ?? null, pr.prNumber ?? null, pr.url ?? null, runId],
     );
+  }
+
+  /**
+   * Record that a run pushed its branch but PR creation failed.
+   *
+   * @param runId - Run id
+   * @param message - Failure message (already user-facing)
+   */
+  setRunPrFailure(runId: number, message: string): void {
+    this.db.run(`UPDATE runs SET pr_failure = ? WHERE id = ?`, [message.slice(0, 2000), runId]);
   }
 
   /**
@@ -888,6 +907,7 @@ export class RunStore {
       stepStartedAt: typeof row.step_started_at === "number" ? row.step_started_at : undefined,
       stepActive: row.status === "in_progress" && row.step_active === 1,
       cleanStop: (row.clean_stop as number | null) === 1 ? true : undefined,
+      prFailure: typeof row.pr_failure === "string" ? row.pr_failure : undefined,
     };
   }
 
@@ -1081,6 +1101,24 @@ export function recordRunPr(pr: { repo?: string; prNumber?: number; url?: string
     currentStore.setRunPr(currentRunId, pr);
   } catch (error) {
     warnOnce("pr", error);
+  }
+}
+
+/**
+ * Record on the current run that PR creation failed after the push (no-op
+ * when no run is active). The dependency gate reads it so a dependent task
+ * does not start from a default branch that lacks this run's work.
+ *
+ * @param message - Failure message
+ */
+export function recordRunPrFailure(message: string): void {
+  if (currentStore === null || currentRunId === null) {
+    return;
+  }
+  try {
+    currentStore.setRunPrFailure(currentRunId, message);
+  } catch (error) {
+    warnOnce("pr-failure", error);
   }
 }
 
