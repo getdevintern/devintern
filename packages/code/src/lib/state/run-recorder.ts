@@ -104,7 +104,9 @@ export interface RunRecord extends RunMeta {
   /**
    * Why the run's requested PR/MR creation failed, when it did. Positive
    * evidence that a `succeeded` run left a branch the PR step meant to open a
-   * PR from; a run that never requested a PR leaves this unset.
+   * PR from; a run that never requested a PR leaves this unset. Set for any
+   * failure, permanent or retryable: a `succeeded` run with this set did not
+   * deliver its work to the default branch, even though it has no PR.
    */
   prFailure?: string;
   /** Explicit current/last step; never inferred from completed stage records. */
@@ -454,10 +456,11 @@ export class RunStore {
   }
 
   /**
-   * Record that the run's PR/MR creation was attempted and failed.
+   * Record that the run's PR/MR creation was attempted and failed (e.g. the
+   * branch was pushed but PR creation failed).
    *
    * @param runId - Run id
-   * @param message - Failure reason (redacted before persisting)
+   * @param message - Failure message (redacted before persisting)
    */
   setRunPrFailure(runId: number, message: string): void {
     this.db.run(`UPDATE runs SET pr_failure = ? WHERE id = ?`, [
@@ -912,7 +915,7 @@ export class RunStore {
       stepStartedAt: typeof row.step_started_at === "number" ? row.step_started_at : undefined,
       stepActive: row.status === "in_progress" && row.step_active === 1,
       cleanStop: (row.clean_stop as number | null) === 1 ? true : undefined,
-      prFailure: (row.pr_failure as string | null) ?? undefined,
+      prFailure: typeof row.pr_failure === "string" ? row.pr_failure : undefined,
     };
   }
 
@@ -1110,10 +1113,11 @@ export function recordRunPr(pr: { repo?: string; prNumber?: number; url?: string
 }
 
 /**
- * Mark the current run's PR/MR creation as attempted and failed (no-op when no
- * run is active).
+ * Record on the current run that PR creation failed after the push (no-op
+ * when no run is active). The dependency gate reads it so a dependent task
+ * does not start from a default branch that lacks this run's work.
  *
- * @param message - Failure reason
+ * @param message - Failure message
  */
 export function recordRunPrFailure(message: string): void {
   if (currentStore === null || currentRunId === null) {
@@ -1122,7 +1126,7 @@ export function recordRunPrFailure(message: string): void {
   try {
     currentStore.setRunPrFailure(currentRunId, message);
   } catch (error) {
-    warnOnce("pr", error);
+    warnOnce("pr-failure", error);
   }
 }
 

@@ -78,12 +78,33 @@ export interface SpawnedAgent {
 }
 
 /**
+ * Common-dir subdirectories a linked worktree writes when it stages, commits,
+ * stashes, or resolves conflicts: new objects, branch refs, reflogs, and the
+ * rerere cache. Everything else in the common dir (`config`, `hooks`, `info`,
+ * `packed-refs`) is shared repository state the agent must not need.
+ */
+const LINKED_WORKTREE_COMMON_SUBDIRS = ["objects", "refs", "logs", "rr-cache"] as const;
+
+/**
  * Absolute git administrative directories for `workingDir`, when it is inside
- * a repository. A linked worktree (the review worktrees under `/tmp`) keeps
- * its index, refs, and objects under the source repo's `.git`, outside the
- * worktree itself, so `git add`/`commit` there create `index.lock` outside
- * the default writable set and fail under confinement. The resolved git dir
- * and common dir are returned so callers can grant them write access.
+ * a repository. A linked worktree (fleet worktrees, the review worktrees under
+ * `/tmp`) keeps its index under `<common>/worktrees/<id>` and its refs and
+ * objects in the source repo's common dir, outside the worktree itself, so
+ * `git add`/`commit` there fail under confinement unless those are granted.
+ *
+ * For a linked worktree only the per-worktree git dir and the common-dir
+ * subdirectories commits need are returned, never the common dir itself. The
+ * common dir is shared by every worktree of the repo: granting it lets a
+ * confined agent rewrite the shared `config` and `hooks/` that the worker's
+ * own git commands then run with, and a bubblewrap sandbox handed it as a
+ * writable root masks `<common>/config.lock` with an empty read-only
+ * placeholder file on the host, which fails every other worktree's config
+ * write for as long as the sandboxed command runs. Only existing paths are
+ * returned so no sandbox has to create a placeholder for them either.
+ *
+ * Claude Code's own sandbox still grants and masks a linked worktree's common
+ * dir by itself, so worker-side git must not depend on shared config writes
+ * while agents run (see `review-worktree.ts` in `@getdevintern/code`).
  *
  * @param workingDir - The directory the agent operates in.
  * @returns Existing absolute git dir paths (empty when `workingDir` is not a repo).
@@ -101,10 +122,14 @@ export function gitAdminPaths(workingDir: string): string[] {
     const absolute = isAbsolute(value) ? value : resolve(workingDir, value);
     return existsSync(absolute) ? absolute : undefined;
   };
-  const dirs = [rev("--absolute-git-dir"), rev("--git-common-dir")].filter(
-    (p): p is string => p !== undefined,
+  const gitDir = rev("--absolute-git-dir");
+  const commonDir = rev("--git-common-dir");
+  if (!commonDir || commonDir === gitDir) return gitDir ? [gitDir] : [];
+
+  const commonSubdirs = LINKED_WORKTREE_COMMON_SUBDIRS.map((name) => join(commonDir, name)).filter(
+    (p) => existsSync(p),
   );
-  return [...new Set(dirs)];
+  return [...new Set([...(gitDir ? [gitDir] : []), ...commonSubdirs])];
 }
 
 /**

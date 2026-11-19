@@ -213,10 +213,10 @@ describe("WorkerState", () => {
       state.recordAgentPr({ repo: "acme/widgets", prNumber: 1 });
       state.recordAgentPr({ repo: "acme/widgets", prNumber: 2 });
       state.recordAgentPr({ repo: "acme/widgets", prNumber: 3 });
-      state.markAgentPrClosed("acme/widgets", 1, { merged: true });
+      state.markAgentPrClosed("acme/widgets", 1, "merged");
       state.markAgentPrClosed("acme/widgets", 2);
       insertRawRow(dbPath, "UPDATE agent_prs SET merged_at = merged_at - 1000 WHERE pr_number = 1");
-      state.markAgentPrClosed("acme/widgets", 3, { merged: true });
+      state.markAgentPrClosed("acme/widgets", 3, "merged");
 
       const merged = state.listMergedAgentChangeRequests(10);
       expect(merged.map((pr) => pr.prNumber)).toEqual([3, 1]);
@@ -226,7 +226,7 @@ describe("WorkerState", () => {
 
     test("a later plain close keeps a recorded merge; reopening clears it", () => {
       state.recordAgentPr({ repo: "acme/widgets", prNumber: 4 });
-      state.markAgentPrClosed("acme/widgets", 4, { merged: true });
+      state.markAgentPrClosed("acme/widgets", 4, "merged");
       state.markAgentPrClosed("acme/widgets", 4);
       expect(state.listMergedAgentChangeRequests(10)).toHaveLength(1);
 
@@ -245,7 +245,7 @@ describe("WorkerState", () => {
         webUrl: "https://git.example.test/acme/widgets/-/merge_requests/42",
       };
       state.recordAgentChangeRequest(identity);
-      state.markAgentChangeRequestClosed(identity, { merged: true });
+      state.markAgentChangeRequestClosed(identity, "merged");
       expect(state.listMergedAgentChangeRequests(10)).toMatchObject([
         { provider: "gitlab", changeNumber: 42 },
       ]);
@@ -390,7 +390,7 @@ describe("WorkerState", () => {
       const migrated = new WorkerState(legacyPath);
       expect(migrated.listMergedAgentChangeRequests(10)).toEqual([]);
       migrated.recordAgentPr({ repo: "acme/old", prNumber: 2 });
-      migrated.markAgentPrClosed("acme/old", 2, { merged: true });
+      migrated.markAgentPrClosed("acme/old", 2, "merged");
       expect(migrated.listMergedAgentChangeRequests(10).map((pr) => pr.prNumber)).toEqual([2]);
       migrated.close();
       for (const suffix of ["", "-wal", "-shm"]) {

@@ -822,7 +822,9 @@ describe("runAgentHarness git delivery", () => {
     await runAgentHarness({ ...baseInput(), createPr: true });
 
     expect(runContext.activeTaskContext?.prCreationFailure).toBeUndefined();
-    // Still a failed attempt on the run, even though the worker will not re-run it.
+    // Still recorded on the run (a failed attempt, even though the worker will
+    // not re-run it), so a dependent task's gate does not read this
+    // pushed-but-PR-less success as "nothing to deliver".
     expect(recordedPrFailures).toEqual(["GitHub client not configured. Please set GITHUB_TOKEN"]);
     expect(tracker.postComment).toHaveBeenCalledTimes(1);
     const [, content] = (tracker.postComment as ReturnType<typeof mock>).mock.calls[0] as [
@@ -845,6 +847,7 @@ describe("runAgentHarness git delivery", () => {
     await runAgentHarness({ ...baseInput(), createPr: true, skipComments: true });
 
     expect(runContext.activeTaskContext?.prCreationFailure).toBe("rate limited");
+    expect(recordedPrFailures).toEqual(["rate limited"]);
     expect(tracker.postComment).not.toHaveBeenCalled();
   });
 

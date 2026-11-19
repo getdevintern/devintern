@@ -23,6 +23,7 @@ import {
 } from "../src/lib/workspace/workspace-worker";
 import type { FleetTask, RepoManagerLike } from "../src/lib/workspace/workspace-worker";
 import { InjectedTaskStore } from "../src/lib/state/injected-tasks";
+import type { InjectedTask } from "../src/lib/state/injected-tasks";
 import { ScheduledRetryStore, isRunRetriable } from "../src/lib/state/run-retry";
 import { RunStore } from "../src/lib/state/run-recorder";
 import { workspaceDbPath } from "../src/lib/workspace/paths";
@@ -130,6 +131,13 @@ class FakeRepoManager implements RepoManagerLike {
     const path = join(this.root, "worktrees", repo.name, "base");
     mkdirSync(path, { recursive: true });
     this.calls.push(`base:${repo.name}`);
+    return path;
+  }
+
+  async ensurePrJobWorktree(repo: RepoConfig): Promise<string> {
+    const path = join(this.root, "worktrees", repo.name, "pr-jobs");
+    mkdirSync(path, { recursive: true });
+    this.calls.push(`pr-jobs:${repo.name}`);
     return path;
   }
 
@@ -855,6 +863,117 @@ describe("buildInjectedTaskAcquirer", () => {
     } finally {
       store.close();
     }
+  });
+
+  describe("team credentials", () => {
+    const TEAM_CONFIG = parseWorkspaceConfig(`
+[defaults]
+tracker = "markdown"
+task_query = "status=todo"
+worker_task_args = "--create-pr"
+
+[[teams]]
+name = "personal"
+tracker = "github"
+repo = "backend"
+  [teams.env]
+  GITHUB_TOKEN = "personal-token"
+
+[[teams]]
+name = "web-a"
+tracker = "github"
+repo = "frontend"
+
+[[teams]]
+name = "web-b"
+tracker = "github"
+repo = "frontend"
+  [teams.env]
+  GITHUB_TOKEN = "web-b-token"
+
+[[repos]]
+name = "backend"
+remote = "git@github.com:acme/backend.git"
+
+[[repos]]
+name = "frontend"
+remote = "git@github.com:acme/frontend.git"
+`);
+
+    async function runInjected(
+      repo: string,
+      team?: string,
+    ): Promise<{ env?: Record<string, string | undefined>; task?: InjectedTask }> {
+      const store = new InjectedTaskStore(join(workspaceDir, `injected-${repo}.db`));
+      try {
+        const { task } = store.enqueue({
+          taskKey: `local-${repo}`,
+          repo,
+          ...(team ? { team } : {}),
+          title: "Task",
+          body: "",
+          taskFile: join(workspaceDir, "injected", `local-${repo}.md`),
+        });
+        let env: Record<string, string | undefined> | undefined;
+        const acquirer = buildInjectedTaskAcquirer(
+          {
+            config: TEAM_CONFIG,
+            workspaceDir,
+            skips: state.skips,
+            repoManager: new FakeRepoManager(workspaceDir),
+            runTask: async (_taskRef, _args, options) => {
+              env = options.env;
+              return true;
+            },
+          },
+          store,
+        );
+        await acquirer.tick();
+        return { env, task: store.getById(task.id) ?? undefined };
+      } finally {
+        store.close();
+      }
+    }
+
+    test("layers the repo's single fixed team credentials but stays a local run", async () => {
+      const { env, task } = await runInjected("backend");
+      expect(task?.status).toBe("done");
+      expect(env?.GITHUB_TOKEN).toBe("personal-token");
+      expect(env?.[RUN_ORIGIN_ENV]).toBe("local");
+      expect(env?.[WORKSPACE_TEAM_ENV]).toBeUndefined();
+      expect(resolveRunIdentity(env as NodeJS.ProcessEnv).tracker).toBe("local");
+    });
+
+    test("the stored --team picks among several fixed teams", async () => {
+      const { env, task } = await runInjected("frontend", "web-b");
+      expect(task?.status).toBe("done");
+      expect(env?.GITHUB_TOKEN).toBe("web-b-token");
+    });
+
+    test("an ambiguous row fails with the reason instead of using shared credentials", async () => {
+      const { env, task } = await runInjected("frontend");
+      expect(env).toBeUndefined();
+      expect(task?.status).toBe("failed");
+      expect(task?.message).toContain("several teams (web-a, web-b)");
+    });
+
+    test("automations on a repo with one fixed team get its credentials", async () => {
+      const context = await resolveWorkspaceAutomationContext(
+        {
+          id: "scheduled",
+          enabled: true,
+          prompt: "work",
+          interval: "1h",
+          intervalMs: 3_600_000,
+          repo: "backend",
+        },
+        TEAM_CONFIG,
+        workspaceDir,
+        new FakeRepoManager(workspaceDir),
+      );
+      expect(context?.env.GITHUB_TOKEN).toBe("personal-token");
+      expect(context?.env[WORKSPACE_TEAM_ENV]).toBeUndefined();
+    });
   });
 
   test("records the spawned task child pid on the claimed row", async () => {

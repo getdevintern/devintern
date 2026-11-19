@@ -96,6 +96,9 @@ workflow does); otherwise the smoke tests skip when
 stale result is never replayed locally. Live tests require the explicit
 `test:e2e` command and fail if configuration is missing; direct `bun test` skips
 the live suite.
+The local suite does not run on pull requests or pushes to `main`. The
+**e2e-local** workflow runs it before every `@getdevintern/code` release (the npm
+release waits for it) and on demand from the Actions tab on any branch.
 Keep live tests in a trusted, uncached CI job with dedicated secrets, initially
 manual or scheduled. The included **GitHub E2E** workflow is manual
 (`workflow_dispatch`): configure the repository variable `E2E_GITHUB_REPOSITORY`

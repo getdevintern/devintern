@@ -6,6 +6,7 @@ import type { EstimationConfig } from "../automation/estimation-config";
 import type { AgentSelection } from "../agent/selection";
 import type { AutoMergeMethod } from "../review/merge-gate";
 import type { DashboardAllowedOrigin } from "../observability/dashboard-origins";
+import type { DependencyMode } from "../dependencies/gate";
 
 /** When automatic conflict resolution on the agent's PRs runs. */
 export type ConflictResolutionMode = "auto" | "scheduled" | "disabled";
@@ -104,6 +105,13 @@ export interface WorkspaceDefaults {
   pipelineFile?: string;
   /** Seconds between tracker poll ticks. */
   pollIntervalSeconds: number;
+  /**
+   * How a task with dependencies waits (`dependency_mode`): `stacked` on one
+   * unmerged dependency, or `merged` until every dependency PR merged.
+   * Unset: resolved per repo by `resolveDependencyMode` (`stacked` for GitHub
+   * repos, `merged` elsewhere).
+   */
+  dependencyMode?: DependencyMode;
 }
 
 /**

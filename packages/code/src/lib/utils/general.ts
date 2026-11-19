@@ -167,6 +167,51 @@ export function parseTaskKey(taskKey: string): {
 }
 
 /**
+ * Shape of a dependency task key: an ad-hoc `local-…` key or a tracker key
+ * (`PROJ-12`). Anything else on a `Depends on:` line is prose, not a key.
+ */
+const DEPENDENCY_KEY = /^(?:local-[a-z0-9][a-z0-9-]*|[a-z][a-z0-9_]*-\d+)$/i;
+
+/**
+ * Extract the task keys named on `Depends on:` lines of a task description.
+ *
+ * Uses the same flexible markdown handling as {@link extractTargetBranch}:
+ * headings (`## Depends on: x`), bold/italic around the label or the values
+ * (`**Depends on**: x`, `**Depends on: x**`, `Depends on: _x_`), list items,
+ * and table cells (`| Depends on: | x, y |`). Values are separated by commas,
+ * whitespace, or the word `and`; inline code backticks are stripped, and
+ * trailing prose after a dash or parenthesis is ignored. Only tokens shaped
+ * like task keys (`local-…`, `PROJ-12`) are kept, so a line such as
+ * `Depends on: the orders API being deployed` yields nothing. Every
+ * matching line contributes, and the result is de-duplicated in order.
+ *
+ * Shared by ad-hoc task enqueue and tracker-native blocker sources.
+ *
+ * @param description - Task description text
+ * @returns Dependency task keys (empty when none are declared)
+ */
+export function extractDependsOn(description: string | undefined): string[] {
+  if (!description) return [];
+  const pattern = /^[\t >*+-]*(?:\|\s*)?#{0,6}\s*[*_]{0,3}depends\s+on[*_]{0,3}\s*:\s*([^\n]*)$/gim;
+  const keys: string[] = [];
+  const seen = new Set<string>();
+  for (const match of description.matchAll(pattern)) {
+    // Prose after the list (`local-a — needs its API`, `local-a (schema)`)
+    // is not part of it.
+    const list = (match[1] ?? "").split(/\s[-\u2013\u2014]\s|[(\u2013\u2014#]/)[0] ?? "";
+    const values = list.split(/[,|\s]+/);
+    for (const raw of values) {
+      const key = raw.replace(/^[*_`]+/, "").replace(/[*_`.;:]+$/, "");
+      if (!key || /^and$/i.test(key) || !DEPENDENCY_KEY.test(key)) continue;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      keys.push(key);
+    }
+  }
+  return keys;
+}
+
+/**
  * Extract an optional target branch name from task description markdown.
  *
  * @param description - Task description text
@@ -576,6 +621,7 @@ Object.assign(Utils, {
   fetchWithRetry,
   parseTaskKey,
   extractTargetBranch,
+  extractDependsOn,
   extractExecutionPreferences,
   generateTaskFilename,
 });

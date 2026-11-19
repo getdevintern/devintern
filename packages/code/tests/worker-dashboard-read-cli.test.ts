@@ -157,7 +157,7 @@ describe("devintern worker read-only dashboard commands", () => {
       taskKey: "PROJ-1",
     });
     state.recordAgentPr({ repo: "acme/web", prNumber: 6, taskKey: "PROJ-0" });
-    state.markAgentPrClosed("acme/web", 6, { merged: true });
+    state.markAgentPrClosed("acme/web", 6, "merged");
     state.setCursor("markdown", "cursor-1");
     state.close();
 
