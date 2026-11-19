@@ -10,7 +10,8 @@ import type {
 import type { ChangeDetector } from "../acquirers/change-detector";
 import type { TeamConfig, WorkspaceConfig } from "./config";
 import { buildFleetEventEnv, gitHubSlugFromRemote } from "./env";
-import { createFleetTaskExecutor, resolveActionedSource } from "./fleet-executor";
+import { createGatedFleetTaskExecutor, resolveActionedSource } from "./fleet-executor";
+import type { TrackerDependencyGate } from "./tracker-dependency-gate";
 import { assertTeamPrSyncSandbox, teamPrSyncSlugs } from "./team-pr-sync";
 import type { FleetTask, RepoManagerLike } from "./fleet-executor";
 import type { openWorkspaceState } from "./state";
@@ -65,6 +66,11 @@ export interface FleetSourceRuntime {
    * focused-test paths.
    */
   isTaskActionedUnchanged?: (taskKey: string, updated?: string) => Promise<boolean>;
+  /**
+   * Native-blocker gate shared with the polling acquirer, so a relayed
+   * `task.changed` cannot start a ticket its blockers still hold back.
+   */
+  dependencyGate?: TrackerDependencyGate;
 }
 
 /**
@@ -329,7 +335,7 @@ export async function buildFleetEventAcquirers(options: {
   const taskSources: Array<
     Pick<
       FleetSourceRuntime,
-      "tracker" | "team" | "query" | "searchTasks" | "isTaskActionedUnchanged"
+      "tracker" | "team" | "query" | "searchTasks" | "isTaskActionedUnchanged" | "dependencyGate"
     >
   > =
     options.sources ??
@@ -700,7 +706,7 @@ export async function buildFleetEventAcquirers(options: {
       const { RelayAcquirer } = await import("../relay/acquirer");
       const { botMentionCandidates, mentionsAnyBot } = await import("../acquirers/mention-sweep");
       const relayTaskSources = taskSources.map((source) => {
-        const execute = createFleetTaskExecutor(
+        const execute = createGatedFleetTaskExecutor(
           {
             config,
             workspaceDir,
@@ -714,6 +720,7 @@ export async function buildFleetEventAcquirers(options: {
             source: source.team
               ? `relay:${source.tracker}:${source.team.name}`
               : `relay:${source.tracker}`,
+            dependencyGate: source.dependencyGate,
           },
         );
         return {

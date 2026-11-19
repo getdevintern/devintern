@@ -184,6 +184,7 @@ ${untrustedContentBlock(
       relatedIssues,
       comments,
       attachments,
+      stackedOnSection,
     } = taskDetails;
 
     const overviewLines = [`- **Key**: ${key}`, `- **Summary**: ${summary}`];
@@ -221,6 +222,9 @@ ${untrustedContentBlock(overviewLines.join("\n"), "task overview")}
         : "";
     if (descriptionMarkdown.trim()) {
       prompt += untrustedContentBlock(descriptionMarkdown.trimEnd(), "task description") + "\n\n";
+    }
+    if (stackedOnSection) {
+      prompt += `${stackedOnSection.trim()}\n\n`;
     }
 
     // Add linked resources

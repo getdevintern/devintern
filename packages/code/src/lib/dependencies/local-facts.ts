@@ -1,7 +1,9 @@
 /**
- * Build {@link DependencyFacts} for ad-hoc task dependencies from the local
+ * Build {@link DependencyFacts} for task dependencies from the local
  * workspace DB: the `injected_tasks` row (work state), the latest `runs` row
  * (outcome, PR, branch), and the `agent_prs` registry (PR open/merged/closed).
+ * A stack base comes from `injected_tasks.stacked_on` (ad-hoc tasks) or
+ * `tracker_dependencies.stacked_on` (tracker tickets).
  *
  * Only local reads: the acquirer calls this on every tick. Tables that do not
  * exist yet (a fresh workspace) read as "no facts" instead of failing.
@@ -10,6 +12,7 @@
 import type { Database } from "bun:sqlite";
 
 import type { RunStatus } from "../state/run-recorder";
+import { TRACKER_DEPENDENCIES_TABLE } from "../state/tracker-dependencies";
 import type { DependencyFacts, DependencyPr, DependencyWorkState } from "./gate";
 
 const RUN_STATUSES: readonly RunStatus[] = [
@@ -63,13 +66,29 @@ function prState(row: Record<string, unknown>): DependencyPr["state"] {
 }
 
 /**
+ * Limit facts to one workspace team, for tracker keys that are only unique
+ * within that team's source (a GitHub issue number such as `12`: two teams
+ * polling different repositories can both have an issue `12`). Runs and
+ * tracker gate rows must carry this team; PR registry rows must be the PR
+ * that team's run reported; ad-hoc (`injected_tasks`) rows are ignored.
+ */
+export interface LocalFactsScope {
+  team: string;
+}
+
+/**
  * Read the facts for each dependency key, in the order given.
  *
  * @param db - Open workspace DB connection (`state/queue.db`)
  * @param keys - Dependency task keys
+ * @param scope - Only read facts recorded for this team (see {@link LocalFactsScope})
  */
-export function readLocalDependencyFacts(db: Database, keys: readonly string[]): DependencyFacts[] {
-  return readFacts(db, keys, new Set());
+export function readLocalDependencyFacts(
+  db: Database,
+  keys: readonly string[],
+  scope?: LocalFactsScope,
+): DependencyFacts[] {
+  return readFacts(db, keys, new Set(), scope);
 }
 
 /**
@@ -78,19 +97,51 @@ export function readLocalDependencyFacts(db: Database, keys: readonly string[]):
  */
 const MAX_STACK_BASE_DEPTH = 16;
 
+/**
+ * Scoped reads keep only the registry row for the PR this team's run
+ * reported: the same task key in another team's repository has its own PRs.
+ */
+function scopedPrRows(
+  rows: Array<Record<string, unknown>>,
+  latestRun: DependencyFacts["latestRun"],
+  scope: LocalFactsScope | undefined,
+): Array<Record<string, unknown>> {
+  if (!scope) return rows;
+  const prNumber = latestRun?.prNumber;
+  if (prNumber === undefined) return [];
+  return rows.filter((row) => {
+    const url = text(row.web_url);
+    return (
+      row.pr_number === prNumber &&
+      (latestRun?.prUrl === undefined || url === undefined || url === latestRun.prUrl)
+    );
+  });
+}
+
+function teamClause(scope: LocalFactsScope | undefined): {
+  teamFilter: string;
+  teamArgs: string[];
+} {
+  return scope
+    ? { teamFilter: " AND team = ?", teamArgs: [scope.team] }
+    : { teamFilter: "", teamArgs: [] };
+}
+
 function readFacts(
   db: Database,
   keys: readonly string[],
   visiting: ReadonlySet<string>,
+  scope: LocalFactsScope | undefined,
 ): DependencyFacts[] {
   const unique = [...new Set(keys)];
   if (unique.length === 0) return [];
   const placeholders = unique.map(() => "?").join(", ");
+  const { teamFilter, teamArgs } = teamClause(scope);
 
   const work = new Map<string, DependencyWorkState>();
   const stackedOn = new Map<string, string>();
   const stackBlocked = new Map<string, string>();
-  if (hasTable(db, "injected_tasks")) {
+  if (!scope && hasTable(db, "injected_tasks")) {
     const stackedOnColumn = hasColumn(db, "injected_tasks", "stacked_on") ? ", stacked_on" : "";
     const noticeColumn = hasColumn(db, "injected_tasks", "stack_notice") ? ", stack_notice" : "";
     const rows = db
@@ -111,20 +162,41 @@ function readFacts(
       if (notice) stackBlocked.set(row.task_key, notice);
     }
   }
-
-  const runs = new Map<string, NonNullable<DependencyFacts["latestRun"]>>();
-  if (hasTable(db, "runs")) {
-    const prFailureColumn = hasColumn(db, "runs", "pr_failure") ? ", pr_failure" : "";
+  if (hasTable(db, TRACKER_DEPENDENCIES_TABLE)) {
     const rows = db
       .query(
-        `SELECT task_key, status, pr_number, pr_url, branch${prFailureColumn} FROM (
+        `SELECT task_key, stacked_on FROM ${TRACKER_DEPENDENCIES_TABLE}
+         WHERE task_key IN (${placeholders})${teamFilter}
+         ORDER BY updated_at ASC`,
+      )
+      .all(...unique, ...teamArgs) as Array<{
+      task_key: string;
+      stacked_on?: unknown;
+    }>;
+    for (const row of rows) {
+      // An ad-hoc row's own base wins; tracker rows fill in tracker tickets.
+      if (work.has(row.task_key)) continue;
+      const base = text(row.stacked_on);
+      if (base) stackedOn.set(row.task_key, base);
+      else stackedOn.delete(row.task_key);
+    }
+  }
+
+  const runs = new Map<string, NonNullable<DependencyFacts["latestRun"]>>();
+  // A scoped read of a DB whose runs predate the team column reads no runs.
+  if (hasTable(db, "runs") && (!scope || hasColumn(db, "runs", "team"))) {
+    const prFailureColumn = hasColumn(db, "runs", "pr_failure") ? ", pr_failure" : "";
+    const repoColumn = hasColumn(db, "runs", "repo") ? ", repo" : "";
+    const rows = db
+      .query(
+        `SELECT task_key, status, pr_number, pr_url, branch${prFailureColumn}${repoColumn} FROM (
            SELECT *, ROW_NUMBER() OVER (
              PARTITION BY task_key ORDER BY started_at DESC, id DESC
            ) AS rn
-           FROM runs WHERE task_key IN (${placeholders})
+           FROM runs WHERE task_key IN (${placeholders})${teamFilter}
          ) WHERE rn = 1`,
       )
-      .all(...unique) as Array<Record<string, unknown>>;
+      .all(...unique, ...teamArgs) as Array<Record<string, unknown>>;
     for (const row of rows) {
       const key = text(row.task_key);
       const status = RUN_STATUSES.find((candidate) => candidate === row.status);
@@ -135,6 +207,7 @@ function readFacts(
         prUrl: text(row.pr_url),
         branch: text(row.branch),
         prFailure: text(row.pr_failure),
+        repo: text(row.repo),
       });
     }
   }
@@ -168,7 +241,7 @@ function readFacts(
     const latestRun = runs.get(key);
     // Prefer the registry row for the PR the latest run reported; else the
     // newest PR recorded for the task.
-    const candidates = prs.get(key) ?? [];
+    const candidates = scopedPrRows(prs.get(key) ?? [], latestRun, scope);
     const row =
       (latestRun?.prNumber !== undefined
         ? candidates.find((candidate) => candidate.pr_number === latestRun.prNumber)
@@ -205,7 +278,7 @@ function readFacts(
         // classifies as blocked rather than silently satisfied.
         facts.stackBase = { key: base, work: "missing" };
       } else {
-        facts.stackBase = readFacts(db, [base], chain)[0];
+        facts.stackBase = readFacts(db, [base], chain, scope)[0];
       }
     }
     return facts;

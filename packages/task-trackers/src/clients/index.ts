@@ -23,7 +23,13 @@ export type {
 } from "./azure-devops.ts";
 
 export { GitHubClient } from "./github.ts";
-export type { GitHubIssue, GitHubIssueComment, GitHubLabel, GitHubRepository } from "./github.ts";
+export type {
+  GitHubIssue,
+  GitHubIssueBlocker,
+  GitHubIssueComment,
+  GitHubLabel,
+  GitHubRepository,
+} from "./github.ts";
 
 export { DEFAULT_GITLAB_BASE_URL, GitLabClient } from "./gitlab.ts";
 export type {
@@ -39,6 +45,7 @@ export type {
   LinearAttachment,
   LinearComment,
   LinearIssue,
+  LinearIssueBlocker,
   LinearIssueDetail,
   LinearLabel,
   LinearTeam,
