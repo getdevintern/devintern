@@ -1,3 +1,5 @@
+import { redactAgentOutput } from "../agent/harness-startup";
+import { stripAnsi } from "../observability/worker-logs";
 import type { ArtifactPolicy, ArtifactRegistry, ArtifactSelection, RunArtifact } from "./types";
 
 export const ARTIFACT_COMMENT_MARKER = "<!-- devintern:artifacts:v1 -->";
@@ -54,6 +56,25 @@ export function resolveArtifactReferences(
   );
 }
 
+/**
+ * Upload errors come from adapters (custom modules, S3 presigned URLs, code-host
+ * APIs) and may echo credentials. Mask known token shapes (including GitHub
+ * fine-grained `github_pat_` and GitLab `glpat-` PATs), strip URL userinfo, and
+ * drop URL query strings/fragments (presigned signatures) before the text
+ * leaves the machine.
+ */
+export function redactUploadError(message: string): string {
+  return redactAgentOutput(stripAnsi(message))
+    .replace(/\b(https?:\/\/)[^/\s@]+@/gi, "$1[redacted]@")
+    .replace(/\b(https?:\/\/[^\s?#"'<>]+)[?#][^\s"'<>]*/gi, "$1?[redacted]");
+}
+
+/** One-line, Markdown-inert, redacted status text for reviewer-facing comments. */
+function sanitizeStatus(message: string): string {
+  const line = redactUploadError(message).replace(/\s+/g, " ").trim().slice(0, 300);
+  return line.replace(/[\\`*_[\]<>!|#]/g, (char) => `\\${char}`);
+}
+
 /** Latest execution wins for each logical key; previous attempts remain in the dashboard. */
 export function selectPublishedArtifacts(
   registry: ArtifactRegistry,
@@ -68,6 +89,7 @@ export function buildArtifactComment(
   registry: ArtifactRegistry,
   policy: ArtifactPolicy | undefined,
   urls: ReadonlyMap<string, string> = new Map(),
+  failures: ReadonlyMap<string, string> = new Map(),
 ): { body: string; ids: string[] } | undefined {
   if (!policy?.publish) return undefined;
   const artifacts = selectPublishedArtifacts(registry, policy.publish.select);
@@ -95,8 +117,13 @@ export function buildArtifactComment(
         section.push(
           url
             ? `${selection.presentation === "embed" ? "!" : ""}[${title}](${url})`
-            : "Captured locally; no upload URL is available.",
+            : failures.has(artifact.key)
+              ? `Captured locally; upload failed: ${sanitizeStatus(failures.get(artifact.key)!)}`
+              : "Captured locally; no upload URL is available.",
         );
+        // Tell reviewers who can open the file (e.g. link-public GitLab media on a private project).
+        if (url && artifact.upload?.status === "uploaded" && artifact.upload.notice)
+          section.push("", `_Access: ${sanitizeStatus(artifact.upload.notice)}_`);
       } else {
         const text = registry.readText(artifact.id);
         if (text === null) {

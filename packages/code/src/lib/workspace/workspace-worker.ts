@@ -577,6 +577,8 @@ export function buildInjectedTaskAcquirer(
         source: INJECTED_TASK_SOURCE,
         runOrigin: "local",
         queueClaim,
+        // Session pickup only reopens a succeeded run of this same row.
+        injectedCreatedAt: task.createdAt,
         // The CLI resolves the local markdown file; the key still names the worktree.
         taskRef: task.taskFile,
         // Persist the detached child pid for hard-kill startup recovery.

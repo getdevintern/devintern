@@ -256,3 +256,42 @@ describe("managed GitHub artifact comment", () => {
     expect(result.artifactPublication?.commentId).toBe(77);
   });
 });
+
+describe("artifact store schema migration", () => {
+  test("concurrent processes migrate an old-schema queue.db without duplicate-column errors", async () => {
+    const { Database } = await import("bun:sqlite");
+    const dbPath = join(dir, "old-queue.db");
+    const old = new Database(dbPath);
+    old.exec(`PRAGMA journal_mode = WAL;
+      CREATE TABLE run_artifacts (id TEXT PRIMARY KEY, scope TEXT NOT NULL, run_id INTEGER,
+        metadata TEXT NOT NULL, publication TEXT);
+      CREATE TABLE run_artifact_uploads (artifact_id TEXT NOT NULL, uploader TEXT NOT NULL,
+        url TEXT, error TEXT, PRIMARY KEY (artifact_id, uploader))`);
+    old.close();
+    const storeModule = join(import.meta.dir, "../src/lib/artifacts/store.ts");
+    const script = `const { ArtifactStore } = await import(${JSON.stringify(storeModule)});
+      await Bun.sleep(Math.max(0, Number(process.env.START_AT) - Date.now()));
+      new ArtifactStore(process.env.DB_PATH, { root: process.env.ROOT }).close();`;
+    const startAt = String(Date.now() + 1500);
+    const children = Array.from({ length: 8 }, () =>
+      Bun.spawn([process.execPath, "-e", script], {
+        env: { ...process.env, DB_PATH: dbPath, ROOT: join(dir, "root"), START_AT: startAt },
+        stderr: "pipe",
+      }),
+    );
+    const results = await Promise.all(
+      children.map(async (child) => ({
+        code: await child.exited,
+        stderr: await new Response(child.stderr).text(),
+      })),
+    );
+    expect(results.filter((r) => r.code !== 0).map((r) => r.stderr)).toEqual([]);
+    const db = new Database(dbPath, { readonly: true });
+    const columns = (
+      db.query("PRAGMA table_info(run_artifact_uploads)").all() as { name: string }[]
+    ).map((c) => c.name);
+    db.close();
+    expect(columns).toContain("remote_id");
+    expect(columns).toContain("notice");
+  }, 20_000);
+});

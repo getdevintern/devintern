@@ -300,6 +300,29 @@ describe("GitHubPRClient adoption helpers", () => {
     expect(await client.findOpenChangeRequest("owner/repo", "feature/dev-1")).toBeUndefined();
   });
 
+  test.each<[string, unknown[], "open" | "closed" | "none"]>([
+    ["an open PR", [{ state: "closed" }, { state: "open" }], "open"],
+    ["only merged/closed PRs", [{ state: "closed", merged_at: "2026-11-01T00:00:00Z" }], "closed"],
+    ["no PR", [], "none"],
+  ])("reports PR state for a branch with %s", async (_label, pulls, expected) => {
+    let requested = "";
+    globalThis.fetch = mockFetch(async (url) => {
+      requested = String(url);
+      return jsonResponse(200, pulls);
+    });
+    const client = new GitHubPRClient("test-token");
+    expect(await client.getChangeRequestState("owner/repo", "feature/dev-1")).toBe(expected);
+    expect(requested).toContain("/repos/owner/repo/pulls?head=owner:feature/dev-1&state=all");
+  });
+
+  test("throws instead of reporting 'none' when the PR lookup fails", async () => {
+    globalThis.fetch = mockFetch(async () => jsonResponse(401, { message: "Bad credentials" }));
+    const client = new GitHubPRClient("expired");
+    await expect(client.getChangeRequestState("owner/repo", "feature/dev-1")).rejects.toThrow(
+      "401",
+    );
+  });
+
   test("applies labels to an adopted PR", async () => {
     let labelRequested = "";
     let labelBody: unknown;

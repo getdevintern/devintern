@@ -179,6 +179,66 @@ describe("WebhookQueue", () => {
     });
   });
 
+  describe("base-sync revival", () => {
+    test("an older database gains the revival columns and keeps its rows", () => {
+      queue.close();
+      const legacyPath = `${dbPath}-legacy`;
+      insertRawRow(
+        legacyPath,
+        `CREATE TABLE base_sync_events (
+           external_id TEXT PRIMARY KEY, repo TEXT NOT NULL, pr_number INTEGER NOT NULL,
+           base_sha TEXT NOT NULL, head_sha TEXT NOT NULL, head_observed_at INTEGER NOT NULL,
+           attempts INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'pending',
+           last_error TEXT, updated_at INTEGER NOT NULL)`,
+      );
+      insertRawRow(
+        legacyPath,
+        `INSERT INTO base_sync_events VALUES ('old', 'acme/widgets', 7, 'b', 'h', 1, 3, 'failed', 'boom', 1)`,
+      );
+      const migrated = new WebhookQueue({ dbPath: legacyPath });
+      try {
+        const event = migrated.getBaseSyncEvent("old");
+        expect(event?.status).toBe("failed");
+        expect(event?.revivals).toBe(0);
+        expect(event?.reviveBaseTip).toBeUndefined();
+      } finally {
+        migrated.close();
+        for (const suffix of ["", "-wal", "-shm"])
+          rmSync(`${legacyPath}${suffix}`, { force: true });
+      }
+      queue = new WebhookQueue({ dbPath });
+    });
+
+    test("revival leaves one attempt, records the tip, and withdraws the dedupe key", () => {
+      const input = {
+        externalId: "e",
+        repo: "acme/widgets",
+        prNumber: 7,
+        baseSha: "b",
+        headSha: "h",
+      };
+      queue.observeBaseSyncEvent(input);
+      for (let i = 0; i < 3; i++) queue.beginBaseSyncAttempt("e");
+      queue.exhaustBaseSyncEvent("github:base-sync", "e", "boom");
+
+      queue.noteBaseSyncBaseTip("e", "tipA");
+      queue.noteBaseSyncBaseTip("e", "tipB"); // only the first sighting is recorded
+      expect(queue.getBaseSyncEvent("e")?.reviveBaseTip).toBe("tipA");
+
+      queue.reviveBaseSyncEvent("github:base-sync", "e", "tipB");
+      const revived = queue.getBaseSyncEvent("e");
+      expect(revived?.status).toBe("pending");
+      expect(revived?.attempts).toBe(2);
+      expect(revived?.revivals).toBe(1);
+      expect(revived?.reviveBaseTip).toBe("tipB");
+      expect(queue.hasProcessed("github:base-sync", "e")).toBe(false);
+
+      // One more failure exhausts it again.
+      queue.beginBaseSyncAttempt("e");
+      expect(queue.failBaseSyncEvent("e", "still conflicting")).toBe(true);
+    });
+  });
+
   describe("delivery claims (in-flight vs handled)", () => {
     test("a claimed delivery is in flight, not handled", () => {
       expect(queue.beginDelivery("github", "d1")).toBe("started");
