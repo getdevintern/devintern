@@ -58,9 +58,9 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 
 - Surface: `devintern worker` surface
 - Status: `default`
-- Evidence: `tests/local/worker-sentry-selection.test.ts`. A run that fails (the fake agent exits `18` before editing) is recorded `failed` and posts exactly the `SENTRY_ACTION_FAILED_COMMENT` text, never the success text; the issue stays claimed, so later polls neither retry nor comment again. With `comment_on_action = false`, a successful run is still recorded and no comment request reaches the fake.
-- Missing: A comment rejected by Sentry (401/403 or 5xx) is not exercised end to end; only a live project would prove the real comment endpoint accepts the body.
-- Last reviewed: 2026-11-19
+- Evidence: `tests/local/worker-sentry-selection.test.ts`. A run that fails (the fake agent exits `18` before editing) is recorded `failed` and posts exactly the `SENTRY_ACTION_FAILED_COMMENT` text, never the success text; the issue stays claimed, so later polls neither retry nor comment again. With `comment_on_action = false`, a successful run is still recorded and no comment request reaches the fake. `tests/local/worker-sentry-comment-rejected.test.ts` (`bun run --filter @devintern/e2e test`): when the fake rejects the comment with 403 or 401 after a successful fix, or with 503, the worker stays up, the run stays recorded `succeeded`, the worker logs one `could not comment on <id>` warning (with the "Issue & Event write access" hint for 401/403), and later polls start no second run. Comment attempts stay bounded (at most 3 per issue) and at most one comment is posted after Sentry recovers. The token is absent from the worker log, run records, raw state database, and dashboard `/api/runs`, `/api/runs/:id` (plus harness logs and artifacts), `/api/logs`, `/api/sources`, and `/api/workspace`.
+- Missing: Only a live project would prove the real comment endpoint accepts the body and returns these statuses. Observed (unconfirmed intent): a 5xx comment is sent once and never retried, unlike issue-list reads, which retry 5xx twice. After Sentry recovers, the dropped comment is never re-sent, because the issue stays claimed. The test asserts only the bound and "at most one comment", not that the comment is lost.
+- Last reviewed: 2026-11-20
 
 ## Backlog
 
@@ -85,3 +85,10 @@ Priority numbers are the global ranking from the
 - How: `WorkerFixture` with `[[error_monitors]]` pointing at `providers/fake-sentry.ts` (now able to seed several issues, change an issue's count, and timestamp each list request). Runs per poll are derived from run records: each run is attributed to the latest list read before its `started_at`, which is exact because a poll is single-flight and runs its picks one after another. The failure uses the fake agent's `E2E_FAIL_ONCE_FILE`. The Sentry token is a random fake string and is never printed.
 - Run: `bun run --filter @devintern/e2e test`, or `bun test tests/local/worker-sentry-selection.test.ts` from `packages/e2e`.
 - Prerequisites: the built CLI (`bun run --filter @getdevintern/code build`); otherwise the file skips. No network or account. About 10 s for all three tests.
+
+### `tests/local/worker-sentry-comment-rejected.test.ts`
+
+- Proves: a Sentry comment rejected after remediation (403 and 401 on two issues in one poll; 503 on a single issue, which then recovers) does not crash the worker or change the run outcome. The issue stays claimed, so no duplicate run starts. Comment attempts stay bounded with at most one comment after recovery, a warning is logged, and the Sentry token never appears in the worker log, run records, state database, or dashboard API responses.
+- How: `WorkerFixture` with the embedded dashboard on a free loopback port and `[[error_monitors]]` pointing at `providers/fake-sentry.ts`. The fake now rejects comment writes with a chosen status (`rejectCommentsWith`, per-issue `commentRejections`, or `setCommentRejection` mid-test) and records each attempt's status. The token is a random fake string; diagnostics redact it, and leak checks assert booleans so a failure cannot print it.
+- Run: `bun run --filter @devintern/e2e test`, or `bun test tests/local/worker-sentry-comment-rejected.test.ts` from `packages/e2e`.
+- Prerequisites: the built CLI (`bun run --filter @getdevintern/code build`); otherwise the file skips. No network or account. About 10 s for both tests.
