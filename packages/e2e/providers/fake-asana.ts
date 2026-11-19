@@ -20,8 +20,9 @@
  * echoes it, and never makes outbound requests.
  */
 
-import { asRecord, json, parseOptFields, projectTaskPayload, readJson } from "./fake-asana-http";
 import type { TrackerComment, TrackerFixture, TrackerTicket, TrackerTicketState } from "./tracker";
+import { parseOptFields, projectTaskPayload } from "./fake-asana-fields";
+import { asRecord, json, readJson } from "./fake-asana-http";
 
 /** Task statuses are project sections in Asana. */
 export interface FakeAsanaStatuses {
