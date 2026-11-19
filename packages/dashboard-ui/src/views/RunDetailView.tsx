@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Check,
   ChevronDown,
@@ -22,7 +22,7 @@ import { Button } from "@/components/ui/button";
 import { triggerRunRetry, usePoll } from "@/lib/api";
 import { Markdown } from "@/lib/markdown";
 import { automationHash } from "@/lib/routes";
-import { runReport } from "@/lib/run-report";
+import { dropHeadline, runReport } from "@/lib/run-report";
 import type { RunReport } from "@/lib/run-report";
 import type { RunDetailResponse, RunRecord } from "@/lib/api";
 import { formatRunOrigin } from "@/lib/run-origin";
@@ -86,7 +86,8 @@ function OutcomePanel({
         ? `Pull request #${run.prNumber} opened`
         : "Completed"
       : undefined);
-  const notRetriable = data.retry.eligible ? undefined : data.retry.reason;
+  const notRetriable =
+    data.retry.eligible || run.status === "succeeded" ? undefined : data.retry.reason;
   const quiet = tone === "success";
   if (!headline && !notRetriable && !confirming && !feedback) {
     return null;
@@ -124,21 +125,70 @@ function OutcomePanel({
   );
 }
 
+/** Collapsed report height; longer reports get a fade and a "Show full report" toggle. */
+const RESULT_COLLAPSED_PX = 360;
+
 /**
- * What a prompt automation delivered: its final report, open, with the
- * structured briefing behind a toggle. Saves opening the timeline or reading
- * the transcript to learn what the run did.
+ * What a prompt automation delivered: its final report in a card, with the
+ * structured briefing behind a toggle. `headline` is the opening sentence the
+ * outcome panel already shows, so it is not repeated here.
  */
-function ResultSection({ report }: { report: RunReport }) {
+function ResultSection({ report, showsHeadline }: { report: RunReport; showsHeadline: boolean }) {
   const [briefingOpen, setBriefingOpen] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  const [overflowing, setOverflowing] = useState(false);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const body = showsHeadline ? dropHeadline(report.body) : report.body;
+
+  useEffect(() => {
+    const el = bodyRef.current;
+    if (!el) return;
+    const measure = () => setOverflowing(el.scrollHeight > RESULT_COLLAPSED_PX + 80);
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [body]);
+
+  if (!body && !report.briefing) return null;
+  const clamped = overflowing && !expanded;
   return (
-    <section aria-labelledby="rd-result-heading" className="space-y-3">
-      <h3 id="rd-result-heading" className="section-title">
-        Result
+    <section
+      aria-labelledby="rd-result-heading"
+      className="rounded-lg border border-border bg-card px-4 py-4 sm:px-5"
+    >
+      <h3 id="rd-result-heading" className="section-title mb-3">
+        Report
       </h3>
-      <Markdown>{report.body}</Markdown>
+      {body ? (
+        <div className="relative">
+          <div
+            ref={bodyRef}
+            id="rd-result-body"
+            className={cn("min-w-0 overflow-hidden", clamped && "rd-result-clamped")}
+            style={clamped ? { maxHeight: RESULT_COLLAPSED_PX } : undefined}
+          >
+            <Markdown>{body}</Markdown>
+          </div>
+          {clamped ? <div className="rd-result-fade" aria-hidden="true" /> : null}
+        </div>
+      ) : null}
+      {overflowing ? (
+        <Button
+          variant="outline"
+          size="xs"
+          onClick={() => setExpanded((open) => !open)}
+          aria-expanded={expanded}
+          aria-controls="rd-result-body"
+          className="mt-3"
+        >
+          {expanded ? <ChevronDown className="rotate-180" /> : <ChevronDown />}
+          {expanded ? "Show less" : "Show full report"}
+        </Button>
+      ) : null}
       {report.briefing ? (
-        <div>
+        <div className="mt-4 border-t border-border pt-3">
           <Button
             variant="ghost"
             size="xs"
@@ -148,10 +198,10 @@ function ResultSection({ report }: { report: RunReport }) {
             className="-ml-2 text-subtle-foreground"
           >
             {briefingOpen ? <ChevronDown /> : <ChevronRight />}
-            Details
+            Briefing
           </Button>
           {briefingOpen ? (
-            <div id="rd-result-briefing" className="mt-2 border-l border-border pl-4">
+            <div id="rd-result-briefing" className="mt-2">
               <Markdown>{report.briefing}</Markdown>
             </div>
           ) : null}
@@ -430,10 +480,9 @@ export function RunDetailView({ runId }: { runId: number; onBack?: () => void })
         <>
           <RunHeader data={data} retry={retry} report={report} />
 
-          {report ? <ResultSection report={report} /> : null}
-
           <div className="rd-grid">
-            <div className="rd-timeline-area min-w-0">
+            <div className="rd-main-area min-w-0 space-y-8">
+              {report ? <ResultSection report={report} showsHeadline={!run.outcomeReason} /> : null}
               <Timeline run={run} stages={data.stages} />
             </div>
             <aside aria-label="Run facts" className="rd-rail space-y-6">

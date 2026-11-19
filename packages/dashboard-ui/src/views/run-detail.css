@@ -14,7 +14,7 @@
     align-items: start;
   }
 
-  .rd-timeline-area {
+  .rd-main-area {
     grid-column: 1;
     grid-row: 1;
   }
@@ -164,4 +164,13 @@ button.rd-stage-head:focus-visible {
   button.rd-stage-head {
     transition: none;
   }
+}
+
+/* Report card: long reports collapse behind a fade. */
+.rd-result-fade {
+  position: absolute;
+  inset: auto 0 0;
+  height: 96px;
+  background: linear-gradient(to bottom, transparent, var(--card));
+  pointer-events: none;
 }

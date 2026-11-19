@@ -108,6 +108,20 @@ export function reportHeadline(body: string): string | undefined {
     : sentence;
 }
 
+/**
+ * The body without its opening sentence, for pages that already show that
+ * sentence as the outcome headline. Returns the body unchanged when it has no
+ * headline or the headline was truncated (the sentence is not shown whole).
+ */
+export function dropHeadline(body: string): string {
+  const text = body.trimStart();
+  const headline = reportHeadline(text);
+  if (!headline || headline.endsWith("…")) return body;
+  const paragraph = text.split(/\n\s*\n/, 1)[0] ?? "";
+  const sentence = /^[\s\S]+?[.!?](?=\s|$)/.exec(paragraph)?.[0] ?? paragraph;
+  return text.slice(sentence.length).trim();
+}
+
 /** Drop emphasis, code ticks, and link targets so a headline reads as plain text. */
 function stripInlineMarkdown(text: string): string {
   return text

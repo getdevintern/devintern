@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import type { RunStageRecord } from "@/lib/api";
-import { parseRunReport, reportHeadline, runReport } from "@/lib/run-report";
+import { dropHeadline, parseRunReport, reportHeadline, runReport } from "@/lib/run-report";
 
 function implementationStage(detail: unknown, id = 1): RunStageRecord {
   return {
@@ -102,5 +102,23 @@ describe("runReport", () => {
       undefined,
     );
     expect(runReport({ origin: "scheduled" }, [implementationStage("not json")])).toBeUndefined();
+  });
+});
+
+describe("dropHeadline", () => {
+  test("removes the opening sentence and keeps the rest of the paragraph", () => {
+    expect(dropHeadline("Nothing is blocked. One pattern turned up.\n\nGoals: none.")).toBe(
+      "One pattern turned up.\n\nGoals: none.",
+    );
+  });
+
+  test("returns an empty string when the body is a single sentence", () => {
+    expect(dropHeadline("All good.")).toBe("");
+  });
+
+  test("keeps bodies that open with a list or whose headline was truncated", () => {
+    expect(dropHeadline("- one\n- two")).toBe("- one\n- two");
+    const long = `${"word ".repeat(80)}end. Next.`;
+    expect(dropHeadline(long)).toBe(long);
   });
 });
