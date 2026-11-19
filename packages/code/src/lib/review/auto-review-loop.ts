@@ -32,6 +32,7 @@ import { validateReviewFeedback, validateReviewFeedbackStructure } from "./feedb
 import { DEFAULT_AUTO_REVIEW_ITERATIONS } from "./auto-review-config";
 import { agentSandboxPolicy, getSandbox } from "../agent/sandbox";
 import { createHarnessLogSink } from "../observability/harness-logs";
+import { stageWorkTreeChanges } from "../utils/git-stage";
 import type {
   AutoReviewLoopOptions,
   AutoReviewLoopResult,
@@ -446,16 +447,17 @@ export function filterByPriority(
 }
 
 /**
- * Stage all changes and check whether anything is ready to commit.
+ * Stage tracked changes and new files (skipping sandbox placeholders) and
+ * check whether anything is ready to commit.
  *
  * @param workingDir - Git working directory
  * @returns `true` when staged changes exist
  */
 function stageChanges(workingDir: string): boolean {
-  execSync("git add -A", {
-    cwd: workingDir,
-    maxBuffer: 10 * 1024 * 1024,
-  });
+  const staged = stageWorkTreeChanges(workingDir);
+  if (!staged.success) {
+    throw new Error(`git staging failed: ${staged.error ?? "unknown error"}`);
+  }
 
   const status = execSync("git status --porcelain", {
     cwd: workingDir,

@@ -44,6 +44,27 @@ describe("buildConflictPrompt", () => {
     expect(prompt).toContain("<!-- BEGIN UNTRUSTED EXTERNAL CONTENT: conflicted files -->");
   });
 
+  test("stages real work without bulk-staging sandbox placeholders", () => {
+    const prompts = [
+      buildConflictPrompt({ baseRef: "main", branch: "feature/x", conflictedFiles: ["a.ts"] }),
+      buildConflictPrompt({
+        baseRef: "main",
+        branch: "feature/x",
+        conflictedFiles: ["bun.lock"],
+        conflictedDependencyFiles: ["bun.lock"],
+      }),
+      buildHookFixPrompt({ branch: "feature/x", hookError: "lint failed" }),
+    ];
+    for (const prompt of prompts) {
+      expect(prompt).not.toContain("git add -A");
+      expect(prompt).not.toContain("git add .");
+      expect(prompt).toContain("git add -u");
+      // New files the agent creates must still be staged explicitly.
+      expect(prompt).toContain("git add <path>");
+    }
+    expect(prompts[0]).toContain("git commit --no-edit");
+  });
+
   test("frames pre-push hook output as untrusted", () => {
     const prompt = buildHookFixPrompt({
       branch: "feature/x",
@@ -1153,6 +1174,40 @@ git --git-dir="${originDir}" update-ref refs/heads/feature/change "${competingTi
     execSync(`git clone -b feature/change ${originDir} ${shipped}/clone`, { stdio: "ignore" });
     expect(existsSync(join(shipped, "clone", "hook-fix.txt"))).toBe(true);
     rmSync(shipped, { recursive: true, force: true });
+  });
+
+  test("finishing an uncommitted merge stages new files but not sandbox placeholders", async () => {
+    const result = await resolveConflictsOnPr(PR_URL, {
+      cwd: repoDir,
+      noComment: true,
+      fetchPr: async () => prInfo(),
+      agentRunner: async (_prompt, workDir) => {
+        // Resolve and mark the conflict, split out a new module without
+        // staging it, and leave the merge uncommitted.
+        writeFileSync(join(workDir, "greeting.txt"), "hello from main and the branch\n");
+        git(workDir, "add -u");
+        mkdirSync(join(workDir, "src"), { recursive: true });
+        writeFileSync(join(workDir, "src", "split-out.ts"), "export const x = 1;\n");
+        // Debris a sandbox leaves behind at its mount points.
+        writeFileSync(join(workDir, ".bashrc"), "");
+        mkdirSync(join(workDir, ".claude"), { recursive: true });
+        writeFileSync(join(workDir, ".claude", "settings.json"), "");
+        execSync("mkfifo .zshrc", { cwd: workDir });
+        return { success: true, output: "done" };
+      },
+    });
+
+    expect(result.outcome).toBe("resolved");
+    const files = git(
+      testDir,
+      `--git-dir=${originDir} ls-tree -r --name-only refs/heads/feature/change`,
+    )
+      .trim()
+      .split("\n");
+    expect(files).toContain("src/split-out.ts");
+    expect(files).not.toContain(".bashrc");
+    expect(files).not.toContain(".zshrc");
+    expect(files).not.toContain(".claude/settings.json");
   });
 
   test("an already-up-to-date branch stays quiet and posts nothing", async () => {
