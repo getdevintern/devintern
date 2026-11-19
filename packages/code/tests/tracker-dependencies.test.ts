@@ -23,7 +23,7 @@ import { collectQueuedWork, queuedDependencyStatus } from "../src/lib/observabil
 import { RunStore } from "../src/lib/state/run-recorder";
 import { ScheduledRetryStore } from "../src/lib/state/run-retry";
 import { buildRetryQueueAcquirer } from "../src/lib/workspace/workspace-worker";
-import { dropUnusedStackBase, recordConfirmedStackBase } from "../src/lib/task/pipeline";
+import { dropUnusedStackBase, recordConfirmedStackBase } from "../src/lib/task/stack-base-run";
 import { TaskFormatter } from "../src/lib/task/formatter";
 import type { FormattedTaskDetails } from "../src/types/task-tracker";
 import type { RunStatus } from "../src/lib/state/run-recorder";
