@@ -1,8 +1,10 @@
 /**
  * Queued (not yet started) work for the dashboard's Overview: ad-hoc tasks
  * from `devintern worker add`, dashboard-scheduled retries, webhook
- * deliveries the worker has persisted but not picked up, and automation
- * occurrences waiting for a free slot (they have no run row until admitted).
+ * deliveries the worker has persisted but not picked up, automation
+ * occurrences waiting for a free slot (they have no run row until admitted),
+ * and PR jobs (review replies, conflict resolution, CI fixes, auto-merge
+ * checks) waiting in the worker's supervisor for a slot or for their PR.
  *
  * Rows that are already running are deliberately left out: they own a run
  * row and show up under "Active work" instead. Every reader here follows the
@@ -21,10 +23,11 @@ import { WebhookQueue } from "../state/webhook-queue";
 import type { WebhookEvent } from "../state/webhook-queue";
 import type { ApiResponse, DashboardData } from "./dashboard-api";
 import type { DashboardAutomationView } from "./dashboard-automation-view";
+import type { JobKind, QueuedJobSnapshot, QueuedJobWaitReason } from "../worker/supervisor";
 import { deriveTaskTitle } from "./task-title";
 
 /** Where a queued item came from. */
-export type QueuedWorkKind = "ad-hoc" | "retry" | "webhook" | "automation";
+export type QueuedWorkKind = "ad-hoc" | "retry" | "webhook" | "automation" | "pr-job";
 
 /** One queued item as served by `GET /api/queue`. */
 export interface QueuedWorkItem {
@@ -56,6 +59,13 @@ export interface QueuedWorkItem {
   lastError?: string;
   /** Automation: the scheduled job waiting for a slot (its dashboard id). */
   automationId?: string;
+  /** PR job: the worker job kind (`conflict`, `auto_merge`, `review`, `ci_fix`). */
+  jobKind?: JobKind;
+  /**
+   * PR job: what it waits on — `exclusive` (another job on the same PR is
+   * running), `repo` (the repository's per-repo limit), or `global`.
+   */
+  waitingOn?: QueuedJobWaitReason;
   /** Ad-hoc: task keys this task depends on. */
   dependsOn?: string[];
   /** Ad-hoc: how it waits on {@link dependsOn} (`merged` or `stacked`). */
@@ -342,6 +352,51 @@ export interface QueuedWorkSources {
   listAutomations?: () => DashboardAutomationView[];
   /** Recently cancelled ad-hoc rows, newest first; may throw when the DB is missing. */
   listCancelled?: (limit: number) => InjectedTask[];
+  /** Jobs waiting in the worker's in-process supervisor (embedded dashboard only). */
+  listSupervisorJobs?: () => QueuedJobSnapshot[];
+}
+
+const PR_JOB_TITLES: Partial<Record<JobKind, string>> = {
+  review: "Review feedback",
+  conflict: "Conflict resolution",
+  ci_fix: "CI fix",
+  auto_merge: "Auto-merge check",
+};
+
+/** Human wait reason for a queued PR job. */
+export function prJobWaitMessage(waitingOn: QueuedJobWaitReason): string {
+  switch (waitingOn) {
+    case "exclusive":
+      return "Waiting for another job on this pull request to finish";
+    case "repo":
+      return "Waiting for a free slot on this repository (max_concurrency_per_repo)";
+    case "global":
+      return "Waiting for a free worker slot (max_concurrency)";
+  }
+}
+
+/**
+ * Map a supervisor job still waiting to start to a queued item when it is PR
+ * work (a `pr_worktree` job, or any job held back by an exclusive key);
+ * `null` for anything else (tasks and automations have their own rows).
+ */
+export function supervisorJobToQueuedItem(job: QueuedJobSnapshot): QueuedWorkItem | null {
+  if (job.checkoutClass !== "pr_worktree" && job.exclusiveKey === undefined) return null;
+  const what = PR_JOB_TITLES[job.kind] ?? job.kind.replaceAll("_", " ");
+  const target = job.label ?? job.exclusiveKey;
+  const prNumber = target ? Number(/[#!](\d+)$/.exec(target)?.[1]) : Number.NaN;
+  return {
+    id: `pr-job:${job.id}`,
+    kind: "pr-job",
+    title: target ? `${what} on ${target}` : what,
+    repo: job.repo,
+    actor: job.source,
+    createdAt: job.enqueuedAt,
+    ...(Number.isFinite(prNumber) ? { prNumber } : {}),
+    message: prJobWaitMessage(job.waitingOn),
+    jobKind: job.kind,
+    waitingOn: job.waitingOn,
+  };
 }
 
 /**
@@ -416,7 +471,15 @@ export function collectQueuedWork(sources: QueuedWorkSources): QueuedWorkRespons
   } catch {
     // The scheduler catalog is best-effort here: the queue still lists the rest.
   }
-  const items = [...adHoc, ...retries, ...webhooks, ...automations].sort(
+  let prJobs: QueuedWorkItem[] = [];
+  try {
+    prJobs = (sources.listSupervisorJobs?.() ?? [])
+      .map(supervisorJobToQueuedItem)
+      .filter((item): item is QueuedWorkItem => item !== null);
+  } catch {
+    // Best-effort like the automation catalog.
+  }
+  const items = [...adHoc, ...retries, ...webhooks, ...automations, ...prJobs].sort(
     (a, b) => queuedEligibleAt(a) - queuedEligibleAt(b),
   );
   let cancelled: CancelledTaskItem[] = [];
@@ -427,10 +490,11 @@ export function collectQueuedWork(sources: QueuedWorkSources): QueuedWorkRespons
   } catch {
     // Missing DB or table: nothing cancelled yet.
   }
-  // Waiting automations are not counted by the durable queues behind pendingTotal.
+  // Waiting automations and supervisor jobs are not counted by the durable
+  // queues behind pendingTotal.
   return {
     items,
-    total: Math.max(items.length, sources.pendingTotal + automations.length),
+    total: Math.max(items.length, sources.pendingTotal + automations.length + prJobs.length),
     cancelled,
   };
 }
@@ -450,6 +514,7 @@ export function handleQueuedWork(data: DashboardData): ApiResponse {
     pendingTotal: stats.pending + stats.injected.pending + stats.retries.pending,
     listAutomations: () => data.getAutomations(),
     listCancelled: (limit) => data.getInjectedTaskReadStore().listRecentlyCancelled(limit),
+    listSupervisorJobs: () => data.getSupervisorQueuedJobs(),
   });
   return { status: 200, body };
 }
