@@ -24,6 +24,7 @@ import {
   USAGE_LIMIT_EXIT_CODE,
   USAGE_LIMIT_FILE_ENV,
   writeUsageLimitHint,
+  WORKTREE_BUSY_EXIT_CODE,
 } from "../src/lib/worker/usage-limit-protocol";
 
 afterEach(() => {
@@ -167,6 +168,31 @@ describe("runWithFailover", () => {
   test("without a worker controller, exit 3 is still a skip", async () => {
     const result = await runWithFailover(async () => TASK_SKIP_EXIT_CODE);
     expect(result).toBe("skipped");
+  });
+
+  test("defers a busy-worktree exit without trying another harness", async () => {
+    await startWorkerFailover({
+      checkInstalled: false,
+      sandboxName: "none",
+      raw: "codex,grok",
+      log: () => {},
+    });
+    let calls = 0;
+    const result = await runWithFailover(async () => {
+      calls++;
+      return WORKTREE_BUSY_EXIT_CODE;
+    });
+    expect(result).toBe("deferred");
+    expect(calls).toBe(1);
+  });
+
+  test("defers a busy-worktree exit without a controller or with a pinned harness", async () => {
+    expect(await runWithFailover(async () => WORKTREE_BUSY_EXIT_CODE)).toBe("deferred");
+    expect(
+      await runWithFailover(async () => WORKTREE_BUSY_EXIT_CODE, process.env, {
+        harnessPin: "codex",
+      }),
+    ).toBe("deferred");
   });
 });
 

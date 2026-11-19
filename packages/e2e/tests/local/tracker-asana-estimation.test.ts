@@ -27,10 +27,11 @@ const TASK_BODY =
 async function prepareEstimationWorkspace(
   run: FixtureWorkspace,
   tracker: FakeAsanaTracker,
+  extraEnv: Record<string, string> = {},
 ): Promise<void> {
   const remote = join(run.root, "remote.git");
   await checkedCommand(["git", "init", "--bare", remote], run.root, run.env);
-  await run.prepare(remote, "test-token", tracker.environment());
+  await run.prepare(remote, "test-token", { ...tracker.environment(), ...extraEnv });
 }
 
 /** Run `devintern <gid> --estimate` through the isolated fixture. */
@@ -220,6 +221,95 @@ test.skipIf(!existsSync(cliPath))(
       expect(await tracker.listComments(issue.key)).toEqual([]);
 
       await assertNoGitDelivery(run, issue.key);
+      expect(tracker.unexpectedRequests).toEqual([]);
+    } finally {
+      await tracker.cleanup();
+      run.dispose();
+    }
+  },
+  120_000,
+);
+
+/** Custom-field name `ASANA_STORY_POINTS_FIELD` selects (matched case-insensitively). */
+const STORY_POINTS_FIELD_NAME = "Story Points";
+
+test.skipIf(!existsSync(cliPath))(
+  "built CLI writes Asana story points to the named number custom field and skips a same-named text field",
+  async () => {
+    const tracker = new FakeAsanaTracker();
+    const run = new FixtureWorkspace();
+    try {
+      const numbered = await tracker.createTicket({
+        title: "Expand the greeting",
+        body: TASK_BODY,
+        customFields: [
+          { name: "Priority", type: "enum" },
+          { name: STORY_POINTS_FIELD_NAME, type: "number" },
+        ],
+      });
+      // Same name, wrong type: discovery must not treat it as the points field.
+      const texted = await tracker.createTicket({
+        title: "Document the greeting",
+        body: TASK_BODY,
+        customFields: [{ name: STORY_POINTS_FIELD_NAME, type: "text" }],
+      });
+      const fieldGid = tracker.customField(numbered.key, STORY_POINTS_FIELD_NAME)!.gid;
+      await prepareEstimationWorkspace(run, tracker, {
+        // Lower case proves the name match is case-insensitive.
+        ASANA_STORY_POINTS_FIELD: STORY_POINTS_FIELD_NAME.toLowerCase(),
+      });
+
+      const first = await runEstimate(run, numbered.key, { skipComments: false });
+      expect(first.exitCode).toBe(0);
+      expect(first.stdout).not.toContain(NO_FIELD_NOTICE);
+      expect(tracker.customField(numbered.key, STORY_POINTS_FIELD_NAME)).toEqual({
+        gid: fieldGid,
+        name: STORY_POINTS_FIELD_NAME,
+        type: "number",
+        number_value: 3,
+      });
+      expect(tracker.customField(numbered.key, "Priority")?.number_value).toBeNull();
+      expect(taskWrites(tracker).map((request) => request.split("?")[0])).toEqual([
+        `PUT /api/1.0/tasks/${numbered.key}`,
+      ]);
+      const firstComments = await estimationComments(tracker, numbered.key);
+      expect(firstComments).toHaveLength(1);
+      expect(firstComments[0]?.body).toMatch(storyPoints(3));
+      expect(run.runRecords({ allTasks: true }).map((record) => record.status)).toEqual([
+        "succeeded",
+      ]);
+
+      // The field write bumps `modified_at`, but the baseline is read after the
+      // writes, so the unchanged task is skipped rather than re-estimated.
+      const unchanged = await runEstimate(run, numbered.key, { skipComments: false });
+      expect(unchanged.exitCode).toBe(0);
+      expect(unchanged.stdout).toContain("already estimated and not updated since");
+      expect(run.agentInvocations()).toHaveLength(1);
+      expect(taskWrites(tracker)).toHaveLength(1);
+
+      // A human edit re-estimates: the same field and story carry the new points.
+      tracker.editTicket(numbered.key, {
+        body: `${TASK_BODY}\nScope changed: also greet in French.\n`,
+      });
+      run.env.E2E_ESTIMATE_POINTS = "5";
+      const updated = await runEstimate(run, numbered.key, { skipComments: false });
+      expect(updated.exitCode).toBe(0);
+      expect(updated.stdout).toContain("Re-estimating");
+      expect(tracker.customField(numbered.key, STORY_POINTS_FIELD_NAME)?.number_value).toBe(5);
+      expect(taskWrites(tracker)).toHaveLength(2);
+      const updatedComments = await estimationComments(tracker, numbered.key);
+      expect(updatedComments.map((comment) => comment.id)).toEqual([firstComments[0]!.id]);
+      expect(updatedComments[0]?.body).toMatch(storyPoints(5));
+
+      // A text field with the configured name is ignored: comment-only.
+      const textOnly = await runEstimate(run, texted.key, { skipComments: false });
+      expect(textOnly.exitCode).toBe(0);
+      expect(textOnly.stdout).toContain(NO_FIELD_NOTICE);
+      expect(tracker.customField(texted.key, STORY_POINTS_FIELD_NAME)?.number_value).toBeNull();
+      expect(taskWrites(tracker).filter((request) => request.includes(texted.key))).toEqual([]);
+      expect(await estimationComments(tracker, texted.key)).toHaveLength(1);
+
+      await assertNoGitDelivery(run, numbered.key);
       expect(tracker.unexpectedRequests).toEqual([]);
     } finally {
       await tracker.cleanup();

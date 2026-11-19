@@ -9,7 +9,7 @@ import type {
 } from "../acquirers/review-polling";
 import type { ChangeDetector } from "../acquirers/change-detector";
 import type { TeamConfig, WorkspaceConfig } from "./config";
-import { buildRepoEnv, buildTeamTaskEnv, gitHubSlugFromRemote } from "./env";
+import { buildFleetEventEnv, gitHubSlugFromRemote } from "./env";
 import { createGatedFleetTaskExecutor, resolveActionedSource } from "./fleet-executor";
 import type { TrackerDependencyGate } from "./tracker-dependency-gate";
 import { assertTeamPrSyncSandbox, teamPrSyncSlugs } from "./team-pr-sync";
@@ -73,7 +73,13 @@ export interface FleetSourceRuntime {
   dependencyGate?: TrackerDependencyGate;
 }
 
-/** Resolve the GitHub credential used for events in one workspace repository. */
+/**
+ * Resolve the GitHub credential used for events in one workspace repository.
+ *
+ * Uses the same credentials as the follow-up runs that push to the PR
+ * ({@link buildFleetEventEnv}), so API calls read PRs with the account that
+ * pushed them.
+ */
 export function fleetGitHubTokenForRepo(
   config: WorkspaceConfig,
   workspaceDir: string,
@@ -85,14 +91,10 @@ export function fleetGitHubTokenForRepo(
       slug.toLowerCase(),
   );
   if (!repo) return process.env.GITHUB_TOKEN;
-  const team = config.teams.find(
-    (candidate) => candidate.tracker === "github" && candidate.repo === repo.name,
-  );
-  return (team ? buildTeamTaskEnv(repo, team, workspaceDir) : buildRepoEnv(repo, workspaceDir))
-    .GITHUB_TOKEN;
+  return buildFleetEventEnv(config, repo, workspaceDir).GITHUB_TOKEN;
 }
 
-function createFleetGitHubClientResolver(
+export function createFleetGitHubClientResolver(
   config: WorkspaceConfig,
   workspaceDir: string,
   usesHostedApp: boolean,
@@ -212,6 +214,7 @@ async function buildAutoMergeWatcher(params: {
   runStore: RunStore;
   intervalSeconds: number;
   verbose: boolean | undefined;
+  isStackedBase?: AutoMergeWatcherOptions["isStackedBase"];
 }): Promise<AutoMergeWatcherAcquirer> {
   const { config, gh } = params;
   const { AutoMergeWatcherAcquirer: Watcher, DEFAULT_AUTO_MERGE_QUIET_SECONDS } =
@@ -254,6 +257,7 @@ async function buildAutoMergeWatcher(params: {
           parseHarnessList(process.env.AGENT_HARNESS)[0])
         : undefined,
     policyFingerprint: (slug) => fleetAutoMergePolicyFingerprint(config, slug),
+    isStackedBase: params.isStackedBase,
     quietSeconds: parseEnvInteger(
       "WORKER_AUTO_MERGE_QUIET_SECONDS",
       DEFAULT_AUTO_MERGE_QUIET_SECONDS,
@@ -289,6 +293,8 @@ export async function buildFleetEventAcquirers(options: {
   intervalUpdaters?: Array<(seconds: number) => void>;
   /** Published once event acquirers are wired (mention-sweep reconcile). */
   reloadHooksOut?: { hooks?: FleetEventReloadHooks };
+  /** Stacked-base lookup for the auto-merge guard (see `stacked-pr-acquirer.ts`). */
+  isStackedBase?: (slug: string, baseRef: string) => boolean;
   /** Shared admission supervisor for every fleet execution path. */
   supervisor?: TaskSupervisor;
 }): Promise<import("../../worker").Acquirer[]> {
@@ -474,6 +480,11 @@ export async function buildFleetEventAcquirers(options: {
       conflictSchedule: config.workspace.conflictSchedule,
       conflictResolution: config.workspace.conflictResolution,
       quietPeriodSeconds: parseEnvInteger("WORKER_BASE_SYNC_QUIET_SECONDS", 30, { min: 0 }),
+      // Syncs run in the background; the supervisor admits them as
+      // `pr_worktree` jobs (per-repo limit, one job per PR). Without a
+      // supervisor nothing else bounds them, so keep them one at a time.
+      maxConcurrentBaseSyncs: () =>
+        options.supervisor ? config.workspace.execution.maxConcurrency : 1,
       runStore,
       // Factory form: repos added at runtime become watchable without a
       // restart (a static list would pin the startup slug set).
@@ -510,6 +521,7 @@ export async function buildFleetEventAcquirers(options: {
       runStore,
       intervalSeconds,
       verbose,
+      isStackedBase: options.isStackedBase,
     });
     acquirers.push(autoMergeWatcher);
     intervalUpdaters.push((seconds) => autoMergeWatcher.updateInterval(seconds));

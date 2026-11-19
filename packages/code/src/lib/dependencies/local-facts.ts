@@ -140,17 +140,26 @@ function readFacts(
 
   const work = new Map<string, DependencyWorkState>();
   const stackedOn = new Map<string, string>();
+  const stackBlocked = new Map<string, string>();
   if (!scope && hasTable(db, "injected_tasks")) {
     const stackedOnColumn = hasColumn(db, "injected_tasks", "stacked_on") ? ", stacked_on" : "";
+    const noticeColumn = hasColumn(db, "injected_tasks", "stack_notice") ? ", stack_notice" : "";
     const rows = db
       .query(
-        `SELECT task_key, status${stackedOnColumn} FROM injected_tasks WHERE task_key IN (${placeholders})`,
+        `SELECT task_key, status${stackedOnColumn}${noticeColumn} FROM injected_tasks WHERE task_key IN (${placeholders})`,
       )
-      .all(...unique) as Array<{ task_key: string; status: string; stacked_on?: unknown }>;
+      .all(...unique) as Array<{
+      task_key: string;
+      status: string;
+      stacked_on?: unknown;
+      stack_notice?: unknown;
+    }>;
     for (const row of rows) {
       work.set(row.task_key, workState(row.status));
       const base = text(row.stacked_on);
       if (base) stackedOn.set(row.task_key, base);
+      const notice = text(row.stack_notice);
+      if (notice) stackBlocked.set(row.task_key, notice);
     }
   }
   if (hasTable(db, TRACKER_DEPENDENCIES_TABLE)) {
@@ -256,6 +265,8 @@ function readFacts(
           }
         : undefined;
     const facts: DependencyFacts = { key, work: work.get(key) ?? "missing", latestRun, pr };
+    const blocked = stackBlocked.get(key);
+    if (blocked) facts.stackBlocked = blocked;
     // Only a merged PR consults its stack base, but read it whenever one is
     // recorded: the caller may learn the merge from the code host after this
     // read (a PR with no registry row, or a registry row that is stale).

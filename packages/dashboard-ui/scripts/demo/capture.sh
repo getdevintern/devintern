@@ -40,6 +40,7 @@ shoot runs.png "/runs"
 shoot pull-requests.png "/prs"
 shoot automations.png "/automations"
 shoot workspace.png "/workspace"
+shoot activity.png "/"
 echo "Screenshots written to $OUT"
 
 if [ -n "${RECORD:-}" ]; then

@@ -291,6 +291,7 @@ async function processGitLabEvent({ event, target }: QueuedGitLabWebhook): Promi
         serializationKey,
         expectedHeadSha: current.head.sha,
       });
+      if (ok === "deferred") throw new UsageLimitError();
       if (!ok) throw new Error("GitLab CI repair did not complete");
     } finally {
       rmSync(feedbackDir, { recursive: true, force: true });

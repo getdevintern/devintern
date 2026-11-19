@@ -293,3 +293,156 @@ describe("estimation batch accounting", () => {
     });
   });
 });
+
+describe("runEstimation storyPointsField override lookup", () => {
+  const ENV_KEYS = [
+    "TASK_TRACKER",
+    "AZURE_DEVOPS_PROJECT",
+    "GITHUB_REPO",
+    "GITLAB_PROJECT",
+    "TRELLO_DEFAULT_BOARD_ID",
+    "ASANA_DEFAULT_PROJECT_GID",
+  ] as const;
+  const savedEnv: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>> = {};
+
+  beforeEach(() => {
+    for (const key of ENV_KEYS) {
+      savedEnv[key] = process.env[key];
+      delete process.env[key];
+    }
+  });
+
+  afterEach(() => {
+    for (const key of ENV_KEYS) {
+      if (savedEnv[key] === undefined) delete process.env[key];
+      else process.env[key] = savedEnv[key];
+    }
+  });
+
+  async function estimateWithOverride(
+    taskKey: string,
+    settings: ProjectSettings,
+    task?: { raw: unknown },
+  ): Promise<{ fieldIds: string[]; discovered: boolean; logged: boolean }> {
+    const tracker = createTracker();
+    const logs: string[] = [];
+    const originalLog = console.log;
+    console.log = (...args: unknown[]) => {
+      logs.push(args.map(String).join(" "));
+    };
+    try {
+      await runEstimation({
+        estimationFile,
+        harness,
+        executablePath: "/fake/agent",
+        taskKey,
+        task,
+        tracker,
+        settings,
+        skipComments: true,
+        existingCommentId: undefined,
+        runOptions: { maxTurns: 1, skipPermissions: true, workingDir: process.cwd() },
+      });
+    } finally {
+      console.log = originalLog;
+    }
+    const update = tracker.updateEstimation as unknown as ReturnType<typeof mock>;
+    const discover = tracker.discoverEstimationField as unknown as ReturnType<typeof mock>;
+    return {
+      fieldIds: update.mock.calls.map((call) => call[1] as string),
+      discovered: discover.mock.calls.length > 0,
+      logged: logs.some((line) => line.includes("Using configured story points field: Custom.X")),
+    };
+  }
+
+  test("Azure DevOps resolves the override from AZURE_DEVOPS_PROJECT for a numeric work item id", async () => {
+    process.env.TASK_TRACKER = "azure-devops";
+    process.env.AZURE_DEVOPS_PROJECT = "Proj";
+    fieldId = "Microsoft.VSTS.Scheduling.StoryPoints";
+
+    const result = await estimateWithOverride("100", {
+      "azure-devops": { projects: { Proj: { storyPointsField: "Custom.X" } } },
+    });
+
+    expect(result.fieldIds).toEqual(["Custom.X"]);
+    expect(result.discovered).toBe(false);
+    expect(result.logged).toBe(true);
+  });
+
+  test("GitHub resolves the override from GITHUB_REPO", async () => {
+    process.env.TASK_TRACKER = "github";
+    process.env.GITHUB_REPO = "acme/app";
+
+    const result = await estimateWithOverride("42", {
+      github: { projects: { "acme/app": { storyPointsField: "Custom.X" } } },
+    });
+
+    expect(result.fieldIds).toEqual(["Custom.X"]);
+  });
+
+  test("GitLab resolves the override from GITLAB_PROJECT", async () => {
+    process.env.TASK_TRACKER = "gitlab";
+    process.env.GITLAB_PROJECT = "group/app";
+
+    const result = await estimateWithOverride("7", {
+      gitlab: { projects: { "group/app": { storyPointsField: "Custom.X" } } },
+    });
+
+    expect(result.fieldIds).toEqual(["Custom.X"]);
+  });
+
+  test("Trello resolves the override from the fetched card's board", async () => {
+    process.env.TASK_TRACKER = "trello";
+
+    const result = await estimateWithOverride(
+      "abc123",
+      {
+        trello: {
+          projects: {
+            other: { storyPointsField: "Custom.Other" },
+            BoardShort: { storyPointsField: "Custom.X" },
+          },
+        },
+      },
+      { raw: { idBoard: "board-id", board: { shortLink: "BoardShort" } } },
+    );
+
+    expect(result.fieldIds).toEqual(["Custom.X"]);
+  });
+
+  test("Asana resolves the override from the fetched task's project membership", async () => {
+    process.env.TASK_TRACKER = "asana";
+
+    const result = await estimateWithOverride(
+      "1209",
+      { asana: { projects: { "555": { storyPointsField: "Custom.X" } } } },
+      { raw: { memberships: [{ project: { gid: "555" } }] } },
+    );
+
+    expect(result.fieldIds).toEqual(["Custom.X"]);
+  });
+
+  test("Jira keeps resolving the override from the key prefix", async () => {
+    process.env.TASK_TRACKER = "jira";
+
+    const result = await estimateWithOverride("PROJ-123", {
+      jira: { projects: { PROJ: { storyPointsField: "Custom.X" } } },
+    });
+
+    expect(result.fieldIds).toEqual(["Custom.X"]);
+    expect(result.logged).toBe(true);
+  });
+
+  test("falls back to field discovery when no override matches the resolved project", async () => {
+    process.env.TASK_TRACKER = "azure-devops";
+    process.env.AZURE_DEVOPS_PROJECT = "Proj";
+    fieldId = "Microsoft.VSTS.Scheduling.StoryPoints";
+
+    const result = await estimateWithOverride("100", {
+      "azure-devops": { projects: { Other: { storyPointsField: "Custom.Y" } } },
+    });
+
+    expect(result.fieldIds).toEqual(["Microsoft.VSTS.Scheduling.StoryPoints"]);
+    expect(result.discovered).toBe(true);
+  });
+});

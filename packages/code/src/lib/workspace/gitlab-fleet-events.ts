@@ -12,7 +12,8 @@ import type {
 import type { WorkspaceConfig, RepoConfig } from "./config";
 import type { WorkspaceState } from "./state";
 import type { RepoManagerLike } from "./fleet-executor";
-import { buildRepoEnv } from "./env";
+import { buildFleetEventEnv } from "./env";
+import { PR_JOB_FETCH_TIMEOUT_MS, prJobEnv } from "./fleet-events";
 
 /**
  * Close the exact registered MR the GitLab CI watcher saw terminal, forwarding
@@ -43,6 +44,13 @@ export function gitLabCiMarkClosed(
   };
 }
 
+/** Supervisor exclusive key for one GitLab MR (`<instance>:<group/project>!<iid>`). */
+export function gitLabMrExclusiveKey(
+  mr: Pick<AgentPr, "instanceUrl" | "projectPath" | "changeNumber">,
+): string {
+  return `${mr.instanceUrl}:${mr.projectPath}!${mr.changeNumber}`;
+}
+
 /** Registered GitLab polling and relay reconciliation share one live repository resolver. */
 export async function buildGitLabFleetAcquirers(options: {
   config: WorkspaceConfig;
@@ -68,8 +76,10 @@ export async function buildGitLabFleetAcquirers(options: {
     const run = async (signal?: AbortSignal) => {
       if (signal?.aborted) throw new JobNotStartedError();
       await repoManager.ensureBareClone(repo);
-      await repoManager.fetch(repo.name);
-      const base = await repoManager.ensureBaseWorktree(repo);
+      await repoManager.fetch(repo.name, { timeoutMs: PR_JOB_FETCH_TIMEOUT_MS });
+      // Never the base checkout: an automation may be using it while this MR
+      // job runs. The PR-job checkout tracks the default branch.
+      const base = await repoManager.ensurePrJobWorktree(repo);
       return execute(base, signal);
     };
     if (!options.supervisor) return run();
@@ -79,7 +89,10 @@ export async function buildGitLabFleetAcquirers(options: {
       repo: repo.name,
       kind,
       label: `${mr.projectPath}!${mr.changeNumber}`,
-      checkoutClass: "shared_base",
+      // Parallel across MRs (bounded by max_concurrency_per_repo), serialized
+      // per MR by the same key the CLI runners use for serializePrRun.
+      checkoutClass: "pr_worktree",
+      exclusiveKey: gitLabMrExclusiveKey(mr),
       run,
     });
   }
@@ -90,7 +103,7 @@ export async function buildGitLabFleetAcquirers(options: {
     await import("../code-host");
   const resolveGitLabRepo = (mr: import("../state/worker-state").AgentPr) =>
     config.repos.find((repo) => {
-      const env = buildRepoEnv(repo, workspaceDir);
+      const env = buildFleetEventEnv(config, repo, workspaceDir);
       const remote = parseGitRemoteUrl(repo.remote, {
         gitlabBaseUrl: env.GITLAB_CODE_HOST_URL,
         gitlabHostAliases: parseGitLabHostAliases(env.GITLAB_CODE_HOST_ALIASES),
@@ -102,7 +115,7 @@ export async function buildGitLabFleetAcquirers(options: {
       );
     });
   const hasGitLabProfile = config.repos.some((repo) => {
-    const env = buildRepoEnv(repo, workspaceDir);
+    const env = buildFleetEventEnv(config, repo, workspaceDir);
     const remote = parseGitRemoteUrl(repo.remote, {
       gitlabBaseUrl: env.GITLAB_CODE_HOST_URL,
       gitlabHostAliases: parseGitLabHostAliases(env.GITLAB_CODE_HOST_ALIASES),
@@ -126,7 +139,7 @@ export async function buildGitLabFleetAcquirers(options: {
     const clientForGitLabMr = (mr: import("../state/worker-state").AgentPr) => {
       const repo = resolveGitLabRepo(mr);
       if (!repo) return null;
-      const env = buildRepoEnv(repo, workspaceDir);
+      const env = buildFleetEventEnv(config, repo, workspaceDir);
       const resolved = resolveGitLabCodeHostConfig(mr.instanceUrl, env);
       if (!resolved.ok) return null;
       try {
@@ -157,7 +170,7 @@ export async function buildGitLabFleetAcquirers(options: {
             {
               cwd: base,
               signal,
-              env: buildRepoEnv(repo, workspaceDir),
+              env: prJobEnv(config, buildFleetEventEnv(config, repo, workspaceDir)),
             },
           );
         };
@@ -182,7 +195,10 @@ export async function buildGitLabFleetAcquirers(options: {
             {
               cwd: base,
               signal,
-              env: buildRepoEnv(repo, workspaceDir, { agentSelection }),
+              env: prJobEnv(
+                config,
+                buildFleetEventEnv(config, repo, workspaceDir, { agentSelection }),
+              ),
               harnessPin: agentSelection?.harness,
               expectedHeadSha: expected.headSha,
               expectedBaseSha: expected.baseSha,
@@ -255,7 +271,7 @@ export async function buildGitLabFleetAcquirers(options: {
         const invoke = async (base: string, signal?: AbortSignal) => {
           return runCiFixViaCli(mr.projectPath, mr.changeNumber, feedbackPath, {
             cwd: base,
-            env: buildRepoEnv(repo, workspaceDir),
+            env: prJobEnv(config, buildFleetEventEnv(config, repo, workspaceDir)),
             webUrl: mr.webUrl,
             serializationKey: `${mr.instanceUrl}:${mr.projectPath}!${mr.changeNumber}`,
             expectedHeadSha,

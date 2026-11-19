@@ -106,10 +106,12 @@ export interface WorkspaceDefaults {
   /** Seconds between tracker poll ticks. */
   pollIntervalSeconds: number;
   /**
-   * How a task with dependencies waits (`dependency_mode`): `merged` (default)
-   * until every dependency PR merged, or `stacked` on one unmerged dependency.
+   * How a task with dependencies waits (`dependency_mode`): `stacked` on one
+   * unmerged dependency, or `merged` until every dependency PR merged.
+   * Unset: resolved per repo by `resolveDependencyMode` (`stacked` for GitHub
+   * repos, `merged` elsewhere).
    */
-  dependencyMode: DependencyMode;
+  dependencyMode?: DependencyMode;
 }
 
 /**

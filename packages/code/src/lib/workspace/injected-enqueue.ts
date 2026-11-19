@@ -103,6 +103,8 @@ function unlinkQuietly(path: string): void {
 export interface InjectedTaskRequest {
   /** Registered `[[repos]]` name (callers validate membership). */
   repo: string;
+  /** Validated `[[teams]]` name whose credentials the run layers. */
+  team?: string;
   /** Non-empty task title. */
   title: string;
   /** Markdown description, at most {@link MAX_INJECTED_BODY_CHARS}. */
@@ -248,6 +250,8 @@ export function enqueueInjectedTask(
     request.after,
     request.body,
   );
+  // Callers resolve the mode per repo (`resolveDependencyMode`); without one,
+  // fall back to the mode that needs no stacked-PR maintenance.
   const dependencyMode = request.dependencyMode ?? "merged";
 
   const dir = injectedTasksDir(workspaceDir);
@@ -280,6 +284,7 @@ export function enqueueInjectedTask(
       enqueued = store.enqueue({
         taskKey,
         repo: request.repo,
+        ...(request.team ? { team: request.team } : {}),
         title: request.title.trim(),
         body: request.body,
         taskFile,

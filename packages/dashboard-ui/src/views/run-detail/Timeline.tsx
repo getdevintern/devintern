@@ -200,8 +200,38 @@ function StageRow({
   );
 }
 
+/**
+ * A succeeded outcome stage with no summary or detail only repeats the run's
+ * status badge; hide it unless it is the only stage.
+ */
+function isEmptyOutcome(stage: RunStageRecord): boolean {
+  return (
+    stage.stage === "outcome" &&
+    stage.status === "succeeded" &&
+    !stage.summary?.trim() &&
+    !stage.detail?.trim()
+  );
+}
+
+/** Stages worth a timeline row. */
+export function visibleStages(stages: RunStageRecord[]): RunStageRecord[] {
+  const visible = stages.filter((stage) => !isEmptyOutcome(stage));
+  return visible.length > 0 ? visible : stages;
+}
+
 /** Vertical stage timeline: one line per stage, full detail on demand. */
-export function Timeline({ run, stages }: { run: RunRecord; stages: RunStageRecord[] }) {
+export function Timeline({
+  run,
+  stages: allStages,
+  compact = false,
+}: {
+  run: RunRecord;
+  stages: RunStageRecord[];
+  /** Quieter heading and spacing for pages where the timeline is secondary. */
+  compact?: boolean;
+}) {
+  const stages = visibleStages(allStages);
+  const tight = compact && stages.length <= 1;
   const [overrides, setOverrides] = useState<Record<number, boolean>>({});
   const expandableIds = stages.filter(isExpandable).map((stage) => stage.id);
 
@@ -216,7 +246,7 @@ export function Timeline({ run, stages }: { run: RunRecord; stages: RunStageReco
 
   return (
     <section aria-labelledby="rd-timeline-heading">
-      <div className="mb-3 flex items-center gap-3">
+      <div className={cn("flex items-center gap-3", tight ? "mb-1.5" : "mb-3")}>
         <h3 id="rd-timeline-heading" className="section-title">
           Timeline
         </h3>

@@ -417,6 +417,8 @@ export const TASKS_URL = "/api/tasks";
 /** `POST /api/tasks` body: an ad-hoc task (equivalent of `devintern worker add`). */
 export interface CreateTaskInput {
   repo: string;
+  /** `[[teams]]` entry whose credentials the run uses; required when the repo is fixed to several. */
+  team?: string;
   title: string;
   body: string;
   /** Dedupes a resubmission while the first task is pending/running. */
@@ -603,7 +605,7 @@ export interface SourcesResponse {
 }
 
 /** Where a queued item came from. */
-export type QueuedWorkKind = "ad-hoc" | "retry" | "webhook" | "automation" | "tracker";
+export type QueuedWorkKind = "ad-hoc" | "retry" | "webhook" | "automation" | "pr-job" | "tracker";
 
 /** One pending item from `GET /api/queue`; running rows are active work instead. */
 export interface QueuedWorkItem {
@@ -631,6 +633,10 @@ export interface QueuedWorkItem {
   lastError?: string;
   /** Automation: the scheduled job waiting for a slot. */
   automationId?: string;
+  /** PR job: worker job kind (`conflict`, `auto_merge`, `review`, `ci_fix`). */
+  jobKind?: string;
+  /** PR job: blocked by another job on the same PR, the per-repo limit, or the global limit. */
+  waitingOn?: "exclusive" | "repo" | "global";
   /** Ad-hoc / tracker: task keys this task depends on (tracker: its native blockers). */
   dependsOn?: string[];
   /** Ad-hoc / tracker: `merged` (wait for merges) or `stacked` (branch from one unmerged dependency). */

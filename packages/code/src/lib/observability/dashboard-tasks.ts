@@ -14,11 +14,14 @@
  * automation license at startup, and the worker re-checks before running.
  */
 
+import { resolveCredentialTeam } from "../workspace/config";
 import {
   enqueueInjectedTask,
   InjectedTaskDependencyError,
   MAX_INJECTED_BODY_CHARS,
 } from "../workspace/injected-enqueue";
+import { resolveDependencyMode } from "../dependencies/gate";
+import { repoGitHubSlug } from "../workspace/env";
 import { workspaceConfigPath } from "../workspace/paths";
 import type { ApiResponse, DashboardData } from "./dashboard-api";
 import { loadDashboardWorkspaceConfig } from "./dashboard-workspace";
@@ -32,6 +35,8 @@ const MAX_IDEMPOTENCY_KEY_CHARS = 200;
 /** A validated `POST /api/tasks` body. */
 export interface DashboardTaskRequest {
   repo: string;
+  /** `[[teams]]` entry whose credentials the run uses (like `worker add --team`). */
+  team?: string;
   title: string;
   body: string;
   idempotencyKey?: string;
@@ -65,12 +70,15 @@ export function parseDashboardTaskRequest(raw: unknown): ParsedDashboardTaskRequ
   if (!isRecord(raw)) {
     return { ok: false, error: "request body must be a JSON object" };
   }
-  const { repo, title, body, idempotencyKey } = raw;
+  const { repo, team, title, body, idempotencyKey } = raw;
   if (typeof repo !== "string" || !repo.trim()) {
     return { ok: false, error: "repo is required" };
   }
   if (typeof title !== "string" || !title.trim()) {
     return { ok: false, error: "title is required and cannot be empty" };
+  }
+  if (team !== undefined && team !== null && (typeof team !== "string" || !team.trim())) {
+    return { ok: false, error: "team must be a non-empty string" };
   }
   if (body !== undefined && typeof body !== "string") {
     return { ok: false, error: "body must be a string" };
@@ -97,6 +105,7 @@ export function parseDashboardTaskRequest(raw: unknown): ParsedDashboardTaskRequ
     ok: true,
     request: {
       repo,
+      ...(typeof team === "string" ? { team } : {}),
       title,
       body: description,
       ...(typeof idempotencyKey === "string" ? { idempotencyKey } : {}),
@@ -150,6 +159,15 @@ export function handleCreateTask(data: DashboardData, raw: unknown): ApiResponse
     };
   }
 
+  // Same rule as `worker add`: an explicit team must exist, and a repo fixed
+  // to several teams needs one named so the run cannot pick the wrong account.
+  const credentials = resolveCredentialTeam(load.config, request.repo, request.team);
+  if (!credentials.ok) {
+    const hint = credentials.reason === "ambiguous" ? '; set "team" to pick one' : "";
+    return { status: 400, body: { error: `${credentials.error}${hint}` } };
+  }
+
+  const repoConfig = load.config.repos.find((repo) => repo.name === request.repo);
   try {
     const { task, deduplicated } = enqueueInjectedTask(
       data.getInjectedTaskStore(),
@@ -157,7 +175,10 @@ export function handleCreateTask(data: DashboardData, raw: unknown): ApiResponse
       {
         ...request,
         actor: DASHBOARD_TASK_ACTOR,
-        dependencyMode: load.config.defaults.dependencyMode,
+        dependencyMode: resolveDependencyMode({
+          configured: load.config.defaults.dependencyMode,
+          stackMaintained: repoConfig !== undefined && repoGitHubSlug(repoConfig) !== undefined,
+        }),
       },
     );
     const body: DashboardTaskResponse = {

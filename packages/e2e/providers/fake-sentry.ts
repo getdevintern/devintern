@@ -49,8 +49,14 @@ export interface FakeSentryOptions {
   organization?: string;
   /** Project slug accepted by the project-scoped list route. */
   project?: string;
-  /** Override fields on the one seeded issue. */
+  /** Override fields on the one seeded issue. Ignored when `issues` is set. */
   issue?: Partial<FakeSentryIssue>;
+  /**
+   * Seed several unresolved issues instead of one, returned in this order by
+   * every list read. Each entry overrides the default issue's fields and must
+   * carry a unique `id`.
+   */
+  issues?: Array<Partial<FakeSentryIssue> & { id: string }>;
   /**
    * When set, issue-list reads must send `Authorization: Bearer <expectedToken>`;
    * anything else gets a 401 like Sentry's invalid-token response.
@@ -66,6 +72,8 @@ export interface FakeSentryListRequest {
   sort: string | null;
   statsPeriod: string | null;
   perPage: string | null;
+  /** `Date.now()` when the fake accepted the read; orders reads against run records. */
+  receivedAt: number;
 }
 
 /** One captured issue comment. */
@@ -103,7 +111,7 @@ export class FakeSentryServer {
 
   private readonly organization: string;
   private readonly project: string;
-  private readonly issue: FakeSentryIssue;
+  private readonly issues: FakeSentryIssue[];
   private readonly expectedToken: string | undefined;
   private readonly authorizationHeaders: Array<string | null> = [];
   private rejectedAuth = 0;
@@ -115,7 +123,13 @@ export class FakeSentryServer {
   constructor(options: FakeSentryOptions = {}) {
     this.organization = options.organization ?? "e2e-org";
     this.project = options.project ?? "e2e-project";
-    this.issue = { ...DEFAULT_ISSUE, ...options.issue };
+    this.issues = options.issues
+      ? options.issues.map((issue) => ({ ...DEFAULT_ISSUE, ...issue }))
+      : [{ ...DEFAULT_ISSUE, ...options.issue }];
+    if (this.issues.length === 0) throw new Error("FakeSentryServer needs at least one issue");
+    if (new Set(this.issues.map((issue) => issue.id)).size !== this.issues.length) {
+      throw new Error("FakeSentryServer issue ids must be unique");
+    }
     this.expectedToken = options.expectedToken;
     this.server = Bun.serve({
       hostname: "127.0.0.1",
@@ -128,6 +142,11 @@ export class FakeSentryServer {
   /** Base URL the worker's `base_url` must point at. */
   get url(): string {
     return this.baseUrl;
+  }
+
+  /** The first seeded issue; the single-issue accessors below read it. */
+  private get issue(): FakeSentryIssue {
+    return this.issues[0] as FakeSentryIssue;
   }
 
   get issueId(): string {
@@ -154,6 +173,16 @@ export class FakeSentryServer {
   /** Number of seeded unresolved issues every list read returns. */
   get seededIssueCount(): number {
     return this.issuePayloads().length;
+  }
+
+  /**
+   * Change one seeded issue's event count, so a test can make an issue cross
+   * `min_occurrences` between polls. Unknown ids throw instead of no-op.
+   */
+  setIssueCount(id: string, count: number): void {
+    const issue = this.issues.find((candidate) => candidate.id === id);
+    if (!issue) throw new Error(`FakeSentryServer has no seeded issue "${id}"`);
+    issue.count = String(count);
   }
 
   /** Issue-list reads rejected with 401 because of a wrong or missing token. */
@@ -247,6 +276,7 @@ export class FakeSentryServer {
       sort: url.searchParams.get("sort"),
       statsPeriod: url.searchParams.get("statsPeriod"),
       perPage: url.searchParams.get("per_page"),
+      receivedAt: Date.now(),
     });
 
     return json(this.issuePayloads());
@@ -258,7 +288,7 @@ export class FakeSentryServer {
     organization: string,
     issueId: string,
   ): Promise<Response> {
-    if (organization !== this.organization || issueId !== this.issue.id) {
+    if (organization !== this.organization || !this.issues.some((issue) => issue.id === issueId)) {
       return this.unmatched(
         "POST",
         path,
@@ -281,28 +311,7 @@ export class FakeSentryServer {
   }
 
   private issuePayloads(): Array<Record<string, unknown>> {
-    return [this.issuePayload()];
-  }
-
-  private issuePayload(): Record<string, unknown> {
-    return {
-      id: this.issue.id,
-      shortId: this.issue.shortId,
-      title: this.issue.title,
-      culprit: this.issue.culprit,
-      level: this.issue.level,
-      status: this.issue.status,
-      count: this.issue.count,
-      firstSeen: this.issue.firstSeen,
-      lastSeen: this.issue.lastSeen,
-      permalink: this.issue.permalink,
-      metadata: { ...this.issue.metadata },
-      project: {
-        id: "1",
-        slug: this.issue.projectSlug,
-        name: this.issue.projectSlug,
-      },
-    };
+    return this.issues.map((issue) => issuePayload(issue));
   }
 
   private unmatched(method: string, path: string, detail?: string): Response {
@@ -311,6 +320,27 @@ export class FakeSentryServer {
     this.unexpectedRequests.push(diagnostic);
     return json({ detail: diagnostic }, 404);
   }
+}
+
+function issuePayload(issue: FakeSentryIssue): Record<string, unknown> {
+  return {
+    id: issue.id,
+    shortId: issue.shortId,
+    title: issue.title,
+    culprit: issue.culprit,
+    level: issue.level,
+    status: issue.status,
+    count: issue.count,
+    firstSeen: issue.firstSeen,
+    lastSeen: issue.lastSeen,
+    permalink: issue.permalink,
+    metadata: { ...issue.metadata },
+    project: {
+      id: "1",
+      slug: issue.projectSlug,
+      name: issue.projectSlug,
+    },
+  };
 }
 
 function json(value: unknown, status = 200): Response {

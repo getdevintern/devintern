@@ -8,10 +8,10 @@ import { pickAgentSelection } from "../agent/selection";
 import type { AutomationRunContext } from "../automation/acquirer";
 import type { AutomationConfig } from "../automation/config";
 import type { EstimationConfig } from "../automation/estimation-config";
-import { findRepo, findTeam, resolveWorkspacePipelinePath } from "./config";
+import { findRepo, findTeam, resolveCredentialTeam, resolveWorkspacePipelinePath } from "./config";
 import type { WorkspaceConfig } from "./config";
 import {
-  buildRepoEnv,
+  buildRepoRunEnv,
   buildTeamWorkspaceContextEnv,
   buildWorkspaceContextEnv,
   WORKSPACE_TEAM_ENV,
@@ -93,12 +93,25 @@ export async function resolveWorkspaceAutomationContext(
       release() {},
     };
 
+  // A repo with exactly one fixed `[[teams]]` entry runs its automations with
+  // that team's credentials, like an ad-hoc task. Several fixed teams cannot
+  // be disambiguated here (automations take no team), so the occurrence keeps
+  // the plain repo env and says so.
+  const credentials = resolveCredentialTeam(config, repo.name);
+  if (!credentials.ok) {
+    console.warn(
+      `⚠️  [automation:${automation.id}] ${credentials.error}; running with the repo env only. ` +
+        "Set env_file on the [[repos]] entry to choose its credentials.",
+    );
+  }
+  const credentialTeam = credentials.ok ? credentials.team : undefined;
+
   await repoManager.ensureBareClone(repo);
   await repoManager.fetch(repo.name);
   const cwd = await repoManager.ensureBaseWorktree(repo);
   return {
     cwd,
-    env: buildRepoEnv(repo, workspaceDir, {
+    env: buildRepoRunEnv(repo, credentialTeam, workspaceDir, {
       pipelineDefaultFile: config.defaults.pipelineFile
         ? resolveWorkspacePipelinePath(workspaceDir, config.defaults.pipelineFile)
         : undefined,

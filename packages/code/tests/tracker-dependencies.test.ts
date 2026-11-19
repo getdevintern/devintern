@@ -691,6 +691,7 @@ remote = "git@github.com:acme/backend.git"
     },
     removeTaskWorktree: async () => {},
     sweepStaleWorktrees: async () => [],
+    ensurePrJobWorktree: async () => "",
   };
 
   function executor(outcome: TrackerGateOutcome, ran: Array<Record<string, string | undefined>>) {
@@ -811,6 +812,7 @@ remote = "git@github.com:acme/backend.git"
           },
           removeTaskWorktree: async () => {},
           sweepStaleWorktrees: async () => [],
+          ensurePrJobWorktree: async () => "",
         },
         isHarnessExhausted: () => false,
         runTask: async (taskKey, _args, opts) => {

@@ -717,6 +717,19 @@ export class WorkerState {
   }
 
   /**
+   * Whether `branch` is the source branch of any agent PR recorded for this
+   * GitHub repo (open or closed). A PR targeting such a branch is stacked on
+   * another agent PR, which the auto-merge watcher must never merge.
+   */
+  isAgentPrBranch(repo: string, branch: string): boolean {
+    return (
+      this.db
+        .query(`SELECT 1 FROM agent_prs WHERE lower(repo) = lower(?) AND branch = ? LIMIT 1`)
+        .get(repo, branch) !== null
+    );
+  }
+
+  /**
    * List agent-created PRs that are still open (the review-polling watch list).
    *
    * Loop-facing read, deliberately per-row tolerant (see

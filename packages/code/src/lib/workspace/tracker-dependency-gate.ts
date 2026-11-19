@@ -14,7 +14,7 @@
  * others count once the tracker reports them done.
  */
 
-import { evaluateDependencyGate } from "../dependencies/gate";
+import { evaluateDependencyGate, resolveDependencyMode } from "../dependencies/gate";
 import type {
   DependencyFacts,
   DependencyGateDecision,
@@ -29,6 +29,7 @@ import { supportsDependencies } from "../trackers/capabilities";
 import type { TaskBlocker, TaskTrackerClient } from "../trackers/client";
 import type { WorkerState } from "../state/worker-state";
 import { findTeam } from "./config";
+import { repoGitHubSlug } from "./env";
 import type { WorkspaceConfig } from "./config";
 import { createDependencyMergeStateResolver } from "./fleet-event-acquirers";
 import type { UnknownMergeStateLookup } from "./injected-acquirer";
@@ -61,8 +62,11 @@ export interface TrackerDependencyGateOptions {
   team?: string;
   /** The tracker's native blockers for a ticket. */
   getBlockers: (taskKey: string) => Promise<TaskBlocker[]>;
-  /** Mode for this source, read per evaluation so config reloads apply. */
-  mode: () => DependencyMode;
+  /**
+   * Mode for this source and the ticket's routed repo, read per evaluation so
+   * config reloads apply.
+   */
+  mode: (repo: string) => DependencyMode;
   /**
    * Ask the code host whether a blocker's PR merged (see
    * `InjectedTaskAcquirerOptions.resolveMergeState`); without it, the gate
@@ -194,7 +198,7 @@ export function createTrackerDependencyGate(
       tracker: options.tracker,
       repo,
       dependsOn: keys,
-      dependencyMode: options.mode(),
+      dependencyMode: options.mode(repo),
     };
     if (readError) {
       if (store.record({ ...verdictBase, state: "waiting", reason: readError }, now())) {
@@ -305,8 +309,9 @@ export function createTrackerDependencyGate(
  * Native-blocker gate wiring for one polled tracker source: the gate plus the
  * poll hook that clears waits of tickets the query no longer returns. Empty
  * when the tracker does not model blockers. The mode follows
- * `[[teams]].dependency_mode`, else `[defaults].dependency_mode`, read per
- * evaluation so config reloads apply.
+ * `[[teams]].dependency_mode`, else `[defaults].dependency_mode`, else the
+ * repo's default (`resolveDependencyMode`), read per evaluation so config
+ * reloads apply.
  */
 export function trackerDependencyDeps(input: {
   config: WorkspaceConfig;
@@ -329,9 +334,15 @@ export function trackerDependencyDeps(input: {
       const client = input.getTracker();
       return client.getBlockers ? client.getBlockers(taskKey) : [];
     },
-    mode: () =>
-      (teamName ? findTeam(config, teamName)?.dependencyMode : undefined) ??
-      config.defaults.dependencyMode,
+    mode: (repoName) => {
+      const repo = config.repos.find((candidate) => candidate.name === repoName);
+      return resolveDependencyMode({
+        configured:
+          (teamName ? findTeam(config, teamName)?.dependencyMode : undefined) ??
+          config.defaults.dependencyMode,
+        stackMaintained: repo !== undefined && repoGitHubSlug(repo) !== undefined,
+      });
+    },
     resolveMergeState: createDependencyMergeStateResolver({
       config,
       workspaceDir: input.workspaceDir,
