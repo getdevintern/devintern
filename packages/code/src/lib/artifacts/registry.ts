@@ -120,7 +120,11 @@ export class RunArtifactRegistry implements ArtifactRegistry {
     }
   }
 
-  recordUpload(id: string, uploader: string, result: { url?: string; error?: string }): void {
+  recordUpload(
+    id: string,
+    uploader: string,
+    result: { url?: string; error?: string; remoteId?: string; notice?: string },
+  ): void {
     let store: ArtifactStore | undefined;
     try {
       store = new ArtifactStore(this.dbPath);
