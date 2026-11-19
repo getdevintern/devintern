@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- **A base sync that gave up retries once the base branch moves**: after `WEBHOOK_MAX_RETRIES` failures, a conflicting PR was skipped until its own head changed, because GitHub's PR `base.sha` does not move when the base branch does. A PR left stuck by a temporary failure (for example a deleted worktree) stayed stuck however much `main` advanced. The worker now reads the base branch tip and, when it has moved, makes one more attempt, at least 3 hours after the last failure (then 6, 12, and at most 24 hours). See `docs/code/pr-follow-up.md#when-a-resolution-keeps-failing`
 - **Conflict resolutions on different PRs run in parallel**: the review poller waited for each base sync to finish before polling the next PR, so conflict resolutions ran one at a time and review feedback on other PRs waited behind them, whatever `max_concurrency_per_repo` allowed. Base syncs now start in the background, up to `[workspace.execution].max_concurrency` at once, and the per-repository limit and one-job-per-PR rule still apply
 
 ## [2.26.0] - 2026-11-19
