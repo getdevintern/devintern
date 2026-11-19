@@ -9,6 +9,7 @@ import { execSync } from "child_process";
 import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { Utils } from "../src/lib/utils";
+import { hasUncommittedWork } from "../src/lib/utils/git-stage";
 
 describe("Commit scope and post-commit cleanliness guards", () => {
   let testDir: string;
@@ -42,6 +43,32 @@ describe("Commit scope and post-commit cleanliness guards", () => {
     } catch {
       // Ignore cleanup errors
     }
+  });
+
+  // The review pipeline (review-pipeline.ts) and `address` (address.ts) take
+  // the "commit leftover changes" branch only when hasUncommittedWork is dirty.
+  // That gate must agree with commitChanges, or a placeholder-only tree fails
+  // the run with "No changes to commit" even though the agent's fix is committed.
+  test("hasUncommittedWork is clean exactly when commitChanges has nothing to commit", async () => {
+    // Agent committed its fix and left an empty sandbox mount point behind.
+    writeFileSync(join(repoDir, "fix.txt"), "fix\n", "utf8");
+    execSync("git add fix.txt && git commit -qm fix", { cwd: repoDir });
+    writeFileSync(join(repoDir, ".bashrc"), "", "utf8");
+    mkdirSync(join(repoDir, ".claude"));
+    writeFileSync(join(repoDir, ".claude", "settings.json"), "", "utf8");
+
+    // `git status --porcelain` (Utils.hasUncommittedChanges) still sees debris.
+    expect(await Utils.hasUncommittedChanges(repoDir)).toBe(true);
+    expect(hasUncommittedWork(repoDir)).toEqual({ success: true, dirty: false });
+    const noop = await Utils.commitChanges("TEST-123", "Test commit", { cwd: repoDir });
+    expect(noop).toMatchObject({ success: false, message: "No changes to commit" });
+
+    // Real leftover work flips both together.
+    writeFileSync(join(repoDir, "leftover.txt"), "left\n", "utf8");
+    expect(hasUncommittedWork(subDir)).toEqual({ success: true, dirty: true });
+    const committed = await Utils.commitChanges("TEST-123", "Test commit", { cwd: repoDir });
+    expect(committed.success).toBe(true);
+    expect(hasUncommittedWork(repoDir)).toEqual({ success: true, dirty: false });
   });
 
   test("commits changes outside the cwd subdirectory", async () => {
@@ -100,5 +127,36 @@ describe("Commit scope and post-commit cleanliness guards", () => {
 
     expect(result.success).toBe(false);
     expect(result.message).toContain("partial commit");
+  });
+
+  test("skips sandbox placeholders instead of failing or committing them", async () => {
+    // A FIFO stands in for the sandbox's `/dev/null` bind mount (`git add -A`
+    // fails fatally on both); the empty `.bashrc` is a leftover mount point.
+    execSync("mkfifo .gitconfig", { cwd: repoDir });
+    writeFileSync(join(repoDir, ".bashrc"), "");
+    writeFileSync(join(repoDir, "change.txt"), "change\n", "utf8");
+
+    const result = await Utils.commitChanges("TEST-123", "Test commit", { cwd: subDir });
+
+    expect(result).toEqual({
+      success: true,
+      message: "Successfully committed changes for TEST-123",
+    });
+    const committed = execSync("git show --name-only --format= HEAD", { cwd: repoDir })
+      .toString()
+      .trim()
+      .split("\n");
+    expect(committed).toEqual(["change.txt"]);
+  });
+
+  test("reports no changes when only sandbox placeholders are present", async () => {
+    execSync("mkfifo .gitconfig", { cwd: repoDir });
+    writeFileSync(join(repoDir, ".bashrc"), "");
+    const head = execSync("git rev-parse HEAD", { cwd: repoDir }).toString();
+
+    const result = await Utils.commitChanges("TEST-123", "Test commit", { cwd: repoDir });
+
+    expect(result).toEqual({ success: false, message: "No changes to commit" });
+    expect(execSync("git rev-parse HEAD", { cwd: repoDir }).toString()).toBe(head);
   });
 });

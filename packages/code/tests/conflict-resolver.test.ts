@@ -660,6 +660,42 @@ describe("resolveConflictsOnPr", () => {
     expect(git(seedDir, "rev-parse origin/feature/change").trim()).toBe(untouchedHead);
   });
 
+  test("does not amend the merge commit when the hook fix leaves only sandbox placeholders", async () => {
+    const hookPath = join(repoDir, ".git", "hooks", "pre-push");
+    const marker = join(testDir, "hook-failed-once");
+    writeFileSync(
+      hookPath,
+      `#!/bin/sh\nif [ ! -f "${marker}" ]; then touch "${marker}"; echo 'lint failed' >&2; exit 1; fi\n`,
+      { mode: 0o755 },
+    );
+
+    let mergeSha = "";
+    const result = await resolveConflictsOnPr(PR_URL, {
+      cwd: repoDir,
+      noComment: true,
+      fetchPr: async () => prInfo(),
+      agentRunner: async (prompt, workDir) => {
+        if (prompt.includes("Fix Pre-Push Hook Failures")) {
+          // Only the sandbox's leftover empty mount point remains.
+          writeFileSync(join(workDir, ".bashrc"), "");
+          // Cross a second boundary so a no-op amend would get a new SHA.
+          await Bun.sleep(1100);
+          return { success: true, output: "nothing to fix" };
+        }
+        writeFileSync(join(workDir, "greeting.txt"), "resolved\n");
+        git(workDir, "add -A");
+        git(workDir, "commit --no-edit");
+        mergeSha = git(workDir, "rev-parse HEAD").trim();
+        return { success: true, output: "done" };
+      },
+    });
+
+    expect(result.outcome).toBe("resolved");
+    expect(git(testDir, `--git-dir=${originDir} rev-parse refs/heads/feature/change`).trim()).toBe(
+      mergeSha,
+    );
+  });
+
   test("redacts credentials and local paths from the public failure comment", async () => {
     const untouchedHead = git(seedDir, "rev-parse origin/feature/change").trim();
     const leakyPath = join(testDir, "leaky-worktree");
@@ -1208,6 +1244,32 @@ git --git-dir="${originDir}" update-ref refs/heads/feature/change "${competingTi
     expect(files).not.toContain(".bashrc");
     expect(files).not.toContain(".zshrc");
     expect(files).not.toContain(".claude/settings.json");
+  });
+
+  test("a staging failure aborts the merge instead of committing a partial tree", async () => {
+    const before = git(
+      testDir,
+      `--git-dir=${originDir} rev-parse refs/heads/feature/change`,
+    ).trim();
+    const result = await resolveConflictsOnPr(PR_URL, {
+      cwd: repoDir,
+      noComment: true,
+      fetchPr: async () => prInfo(),
+      agentRunner: async (_prompt, workDir) => {
+        writeFileSync(join(workDir, "greeting.txt"), "hello from main and the branch\n");
+        git(workDir, "add -u");
+        writeFileSync(join(workDir, "new.ts"), "export {};\n");
+        // A tracked path replaced by a FIFO makes `git add -u` fail.
+        rmSync(join(workDir, "greeting.txt"));
+        execSync("mkfifo greeting.txt", { cwd: workDir });
+        return { success: true, output: "done" };
+      },
+    });
+
+    expect(result.outcome).not.toBe("resolved");
+    expect(git(testDir, `--git-dir=${originDir} rev-parse refs/heads/feature/change`).trim()).toBe(
+      before,
+    );
   });
 
   test("an already-up-to-date branch stays quiet and posts nothing", async () => {

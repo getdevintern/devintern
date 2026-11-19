@@ -43,7 +43,7 @@ import { parseChangeRequestUrl } from "../code-host/index";
 import type { PullRequestInfo } from "../code-host/github/reviews-types";
 import { untrustedContentBlock } from "../prompts/untrusted-content";
 import { isDependencyFile, Utils } from "../utils";
-import { stageWorkTreeChanges } from "../utils/git-stage";
+import { hasStagedChanges, hasUncommittedWork, stageWorkTreeChanges } from "../utils/git-stage";
 
 export interface ResolveConflictsOptions {
   verbose?: boolean;
@@ -195,11 +195,19 @@ must be clean.`;
  * @returns `true` when changes were found and successfully amended in.
  */
 async function amendHookFixIntoMergeCommit(workDir: string): Promise<boolean> {
-  const status = await Utils.executeGitCommand(["status", "--porcelain"], { cwd: workDir });
-  if (!status.success || status.output.trim() === "") {
+  const work = hasUncommittedWork(workDir);
+  if (!work.success || !work.dirty) {
     return false;
   }
-  stageWorkTreeChanges(workDir);
+  const staged = stageWorkTreeChanges(workDir);
+  if (!staged.success) {
+    console.warn(`⚠️  Could not stage hook-fix changes: ${staged.error}`);
+    return false;
+  }
+  // Only sandbox placeholders changed: nothing to amend into the merge commit.
+  if (!hasStagedChanges(workDir).staged) {
+    return false;
+  }
   const amend = await Utils.executeGitCommand(["commit", "--amend", "--no-edit"], {
     cwd: workDir,
   });
@@ -576,7 +584,11 @@ async function attemptMerge(params: {
       return { kind: "aborted", message: `merge failed: ${merge.error}` };
     }
     console.log(`♻️  Conflicts auto-resolved from a previous identical merge; committing`);
-    stageWorkTreeChanges(params.workDir);
+    const staged = stageWorkTreeChanges(params.workDir);
+    if (!staged.success) {
+      await Utils.executeGitCommand(["merge", "--abort"], { cwd: params.workDir });
+      return { kind: "aborted", message: `staging failed: ${staged.error}` };
+    }
     // The commit below runs pre-commit hooks: install the merged lockfile first.
     const changed = await dependencyChanges();
     if (needsInstall(changed)) {
@@ -689,7 +701,11 @@ async function attemptMerge(params: {
     // Agent resolved but did not commit; finish the merge. The commit below
     // runs pre-commit hooks, so install the resolved dependencies first (the
     // agent may have skipped the install the prompt asked for).
-    stageWorkTreeChanges(params.workDir);
+    const staged = stageWorkTreeChanges(params.workDir);
+    if (!staged.success) {
+      await Utils.executeGitCommand(["merge", "--abort"], { cwd: params.workDir });
+      return { kind: "aborted", message: `staging failed: ${staged.error}` };
+    }
     const resolvedChanges = await dependencyChanges();
     if (await installIsStale(resolvedChanges, stagedBlobIds)) {
       const install = await reinstallMergedDependencies({
