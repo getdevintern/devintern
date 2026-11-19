@@ -4,6 +4,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import {
   emptyTaskDraft,
+  fixedTeamsByRepo,
   isSubmitShortcut,
   isTaskDraftDirty,
   MAX_TASK_BODY_CHARS,
@@ -12,6 +13,7 @@ import {
   NewTaskForm,
   NewTaskResult,
   taskDraftError,
+  teamChoices,
 } from "@/components/NewTaskDialog";
 import type { NewTaskFormProps, TaskDraft } from "@/components/NewTaskDialog";
 import { createTask, parseCreatedTask, TASKS_URL } from "@/lib/api";
@@ -77,6 +79,45 @@ test("draft validation requires a known repo, a title, and a body within the cap
   expect(taskDraftError({ ...ok, body: "x".repeat(MAX_TASK_BODY_CHARS + 3) }, REPOS)).toContain(
     "3 characters over",
   );
+});
+
+const FIXED_TEAMS = fixedTeamsByRepo([
+  { name: "alpha", tracker: "jira", repo: "web", envKeys: [] },
+  { name: "beta", tracker: "github", repo: "web", envKeys: [] },
+  { name: "solo", tracker: "jira", repo: "backend", envKeys: [] },
+  { name: "router", tracker: "jira", envKeys: [] },
+]);
+
+test("only a repo fixed to several teams asks for a team", () => {
+  expect(teamChoices(FIXED_TEAMS, "web")).toEqual(["alpha", "beta"]);
+  // One fixed team, or none: the server picks, so no picker.
+  expect(teamChoices(FIXED_TEAMS, "backend")).toEqual([]);
+  expect(teamChoices(FIXED_TEAMS, "mobile")).toEqual([]);
+  expect(teamChoices(undefined, "web")).toEqual([]);
+});
+
+test("draft validation requires a team for a repo fixed to several teams", () => {
+  const draft: TaskDraft = { repo: "web", title: "x", body: "" };
+  expect(taskDraftError(draft, REPOS, FIXED_TEAMS)).toContain("team");
+  expect(taskDraftError({ ...draft, team: "gamma" }, REPOS, FIXED_TEAMS)).toContain("team");
+  expect(taskDraftError({ ...draft, team: "beta" }, REPOS, FIXED_TEAMS)).toBeNull();
+  expect(taskDraftError({ ...draft, repo: "backend" }, REPOS, FIXED_TEAMS)).toBeNull();
+});
+
+test("the form shows a team picker only for a repo fixed to several teams", () => {
+  const ambiguous = renderForm({ fixedTeams: FIXED_TEAMS });
+  expect(ambiguous).toContain('for="new-task-team"');
+  expect(ambiguous).toMatch(/<button[^>]*type="submit"[^>]*disabled/);
+  const picked = renderForm({
+    fixedTeams: FIXED_TEAMS,
+    draft: { repo: "web", team: "alpha", title: "Fix the flake", body: "Details" },
+  });
+  expect(picked).not.toMatch(/<button[^>]*type="submit"[^>]*disabled/);
+  const single = renderForm({
+    fixedTeams: FIXED_TEAMS,
+    draft: { repo: "backend", title: "Fix the flake", body: "Details" },
+  });
+  expect(single).not.toContain('for="new-task-team"');
 });
 
 test("a draft is dirty once it holds a title or description", () => {
@@ -185,6 +226,22 @@ test("createTask POSTs same-origin JSON and parses the result", async () => {
     title: "Fix the flake",
     body: "",
     idempotencyKey: "dashboard-1",
+  });
+});
+
+test("createTask sends the picked team", async () => {
+  const bodies: unknown[] = [];
+  globalThis.fetch = (async (_url: string, init?: RequestInit) => {
+    bodies.push(JSON.parse(String(init?.body)));
+    return new Response(JSON.stringify(TASK), { status: 201 });
+  }) as unknown as typeof fetch;
+  await createTask({ repo: "web", team: "beta", title: "x", body: "", idempotencyKey: "k" });
+  expect(bodies[0]).toEqual({
+    repo: "web",
+    team: "beta",
+    title: "x",
+    body: "",
+    idempotencyKey: "k",
   });
 });
 

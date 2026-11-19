@@ -811,6 +811,100 @@ export function findTeam(config: WorkspaceConfig, name: string): TeamConfig | un
   return config.teams.find((team) => team.name === name);
 }
 
+/** Outcome of {@link resolveCredentialTeam}. */
+export type CredentialTeamResolution =
+  | { ok: true; team?: TeamConfig }
+  | { ok: false; reason: "unknown-team" | "ambiguous"; error: string };
+
+/**
+ * Pick the `[[teams]]` entry whose credentials a repo-scoped run without a
+ * tracker ticket (ad-hoc `worker add` task, scheduled automation) layers.
+ *
+ * - `requested` set: that team, which must exist (any team, fixed or not).
+ * - Otherwise exactly one team fixed to the repo (`repo = "<name>"`): that team.
+ * - No fixed team: none (the plain repo env, unchanged behavior).
+ * - Several fixed teams and no `requested`: an error naming them, because
+ *   silently picking one could push with the wrong account.
+ *
+ * @param config - Workspace config.
+ * @param repoName - Destination `[[repos]]` name.
+ * @param requested - Explicit team name (`worker add --team`).
+ */
+export function resolveCredentialTeam(
+  config: WorkspaceConfig,
+  repoName: string,
+  requested?: string,
+): CredentialTeamResolution {
+  if (requested !== undefined) {
+    const team = findTeam(config, requested);
+    if (team) return { ok: true, team };
+    const names = config.teams.map((candidate) => candidate.name);
+    return {
+      ok: false,
+      reason: "unknown-team",
+      error:
+        `unknown team "${requested}"` +
+        (names.length > 0 ? `; valid teams: ${names.join(", ")}` : "; no [[teams]] are configured"),
+    };
+  }
+  const fixed = config.teams.filter((team) => team.repo === repoName);
+  if (fixed.length <= 1) return { ok: true, team: fixed[0] };
+  return {
+    ok: false,
+    reason: "ambiguous",
+    error: `repo "${repoName}" is the fixed repo of several teams (${fixed.map((team) => team.name).join(", ")})`,
+  };
+}
+
+/**
+ * Resolve an ad-hoc task's credential team at run time against the live
+ * config: the row's `--team`, else the repo's single fixed team. A config
+ * change that made the choice ambiguous (or removed the team) throws with the
+ * reason rather than silently running with the shared workspace credentials.
+ *
+ * @returns The team to layer, or undefined for the plain repo env.
+ */
+export function requireInjectedTaskTeam(
+  config: WorkspaceConfig,
+  repoName: string,
+  requested?: string,
+): TeamConfig | undefined {
+  const credentials = resolveCredentialTeam(config, repoName, requested);
+  if (credentials.ok) return credentials.team;
+  const hint =
+    credentials.reason === "ambiguous"
+      ? "; re-enqueue with `devintern worker add --team <name>`"
+      : "";
+  throw new Error(`${credentials.error}${hint}`);
+}
+
+/**
+ * Pick the team whose credentials PR/MR event work for one repo uses: event
+ * reads (review, CI and conflict polling) and the follow-up runs that push back
+ * to the PR (address review, resolve conflicts, CI fix, auto-merge).
+ *
+ * Same pick as {@link resolveCredentialTeam} without a requested team, so a
+ * PR's follow-ups run with the account that opened it. When several teams are
+ * fixed to the repo there is no single pushing account; the one GitHub-tracker
+ * team among them is used (its issues are the PRs' source), or none (plain
+ * repo env) when there are zero or several, instead of silently taking the
+ * first.
+ *
+ * @param config - Workspace config.
+ * @param repoName - `[[repos]]` name the event belongs to.
+ */
+export function resolveFleetEventTeam(
+  config: WorkspaceConfig,
+  repoName: string,
+): TeamConfig | undefined {
+  const resolved = resolveCredentialTeam(config, repoName);
+  if (resolved.ok) return resolved.team;
+  const githubTeams = config.teams.filter(
+    (candidate) => candidate.tracker === "github" && candidate.repo === repoName,
+  );
+  return githubTeams.length === 1 ? githubTeams[0] : undefined;
+}
+
 /**
  * Every workspace job that may pin its own harness: automations,
  * estimations, and automatic conflict resolution.
