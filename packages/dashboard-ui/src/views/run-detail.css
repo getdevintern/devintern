@@ -174,3 +174,18 @@ button.rd-stage-head:focus-visible {
   background: linear-gradient(to bottom, transparent, var(--card));
   pointer-events: none;
 }
+
+/* Pages with a report card: tighter rhythm, rail aligned with the card's content. */
+.rd-grid[data-report] {
+  row-gap: 32px;
+}
+
+.rd-grid[data-report] .rd-stage[data-last] {
+  padding-bottom: 0;
+}
+
+@media (min-width: 1024px) {
+  .rd-grid[data-report] .rd-rail {
+    padding-top: 1rem;
+  }
+}

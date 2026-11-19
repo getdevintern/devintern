@@ -63,6 +63,11 @@ const PANEL_ICONS: Record<StatusTone, LucideIcon> = {
   neutral: Info,
 };
 
+/** Whether the Report card, not the outcome panel, carries this run's headline. */
+function reportLeadsHeadline(run: RunRecord, report?: RunReport): boolean {
+  return Boolean(report?.headline) && run.status === "succeeded" && !run.outcomeReason;
+}
+
 /** The one place every run answers "what happened": outcome, why, and retry state. */
 function OutcomePanel({
   data,
@@ -78,14 +83,17 @@ function OutcomePanel({
   const tone = statusTone(run.status);
   const Icon = PANEL_ICONS[tone];
   const prHref = runPrHref(run);
-  const headline =
-    run.outcomeReason ??
-    report?.headline ??
-    (run.status === "succeeded"
-      ? prHref && run.prNumber !== undefined
-        ? `Pull request #${run.prNumber} opened`
-        : "Completed"
-      : undefined);
+  // A succeeded report run leads its Report card with the headline instead.
+  const leads = reportLeadsHeadline(run, report);
+  const headline = leads
+    ? undefined
+    : (run.outcomeReason ??
+      report?.headline ??
+      (run.status === "succeeded"
+        ? prHref && run.prNumber !== undefined
+          ? `Pull request #${run.prNumber} opened`
+          : "Completed"
+        : undefined));
   const notRetriable =
     data.retry.eligible || run.status === "succeeded" ? undefined : data.retry.reason;
   const quiet = tone === "success";
@@ -129,11 +137,20 @@ function OutcomePanel({
 const RESULT_COLLAPSED_PX = 360;
 
 /**
- * What a prompt automation delivered: its final report in a card, with the
- * structured briefing behind a toggle. `headline` is the opening sentence the
- * outcome panel already shows, so it is not repeated here.
+ * What a prompt automation delivered: its final report in a card, led by the
+ * outcome headline, with the structured briefing behind a toggle. When
+ * `leadsHeadline` is false the outcome panel owns the headline, so the body
+ * drops its opening sentence instead.
  */
-function ResultSection({ report, showsHeadline }: { report: RunReport; showsHeadline: boolean }) {
+function ResultSection({
+  report,
+  leadsHeadline,
+  showsHeadline,
+}: {
+  report: RunReport;
+  leadsHeadline: boolean;
+  showsHeadline: boolean;
+}) {
   const [briefingOpen, setBriefingOpen] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const [overflowing, setOverflowing] = useState(false);
@@ -151,22 +168,33 @@ function ResultSection({ report, showsHeadline }: { report: RunReport; showsHead
     return () => observer.disconnect();
   }, [body]);
 
-  if (!body && !report.briefing) return null;
+  if (!body && !report.briefing && !leadsHeadline) return null;
   const clamped = overflowing && !expanded;
+  const hasFooter = overflowing || Boolean(report.briefing);
   return (
     <section
       aria-labelledby="rd-result-heading"
       className="rounded-lg border border-border bg-card px-4 py-4 sm:px-5"
     >
-      <h3 id="rd-result-heading" className="section-title mb-3">
-        Report
-      </h3>
+      {leadsHeadline ? (
+        <h3
+          id="rd-result-heading"
+          className="flex items-start gap-2.5 text-base leading-snug font-semibold tracking-tight"
+        >
+          <CircleCheck className="mt-[3px] size-4 shrink-0 text-success" aria-hidden="true" />
+          <span>{report.headline}</span>
+        </h3>
+      ) : (
+        <h3 id="rd-result-heading" className="section-title">
+          Report
+        </h3>
+      )}
       {body ? (
-        <div className="relative">
+        <div className="relative mt-3">
           <div
             ref={bodyRef}
             id="rd-result-body"
-            className={cn("min-w-0 overflow-hidden", clamped && "rd-result-clamped")}
+            className={cn("min-w-0 overflow-hidden", leadsHeadline && "sm:pl-[26px]")}
             style={clamped ? { maxHeight: RESULT_COLLAPSED_PX } : undefined}
           >
             <Markdown>{body}</Markdown>
@@ -174,37 +202,39 @@ function ResultSection({ report, showsHeadline }: { report: RunReport; showsHead
           {clamped ? <div className="rd-result-fade" aria-hidden="true" /> : null}
         </div>
       ) : null}
-      {overflowing ? (
-        <Button
-          variant="outline"
-          size="xs"
-          onClick={() => setExpanded((open) => !open)}
-          aria-expanded={expanded}
-          aria-controls="rd-result-body"
-          className="mt-3"
-        >
-          {expanded ? <ChevronDown className="rotate-180" /> : <ChevronDown />}
-          {expanded ? "Show less" : "Show full report"}
-        </Button>
-      ) : null}
-      {report.briefing ? (
-        <div className="mt-4 border-t border-border pt-3">
-          <Button
-            variant="ghost"
-            size="xs"
-            onClick={() => setBriefingOpen((open) => !open)}
-            aria-expanded={briefingOpen}
-            aria-controls="rd-result-briefing"
-            className="-ml-2 text-subtle-foreground"
-          >
-            {briefingOpen ? <ChevronDown /> : <ChevronRight />}
-            Briefing
-          </Button>
-          {briefingOpen ? (
-            <div id="rd-result-briefing" className="mt-2">
-              <Markdown>{report.briefing}</Markdown>
-            </div>
+      {hasFooter ? (
+        <div className="mt-3 flex items-center gap-1 border-t border-border pt-2.5">
+          {overflowing ? (
+            <Button
+              variant="ghost"
+              size="xs"
+              onClick={() => setExpanded((open) => !open)}
+              aria-expanded={expanded}
+              aria-controls="rd-result-body"
+              className="-ml-2 text-muted-foreground"
+            >
+              <ChevronDown className={expanded ? "rotate-180" : undefined} />
+              {expanded ? "Show less" : "Show full report"}
+            </Button>
           ) : null}
+          {report.briefing ? (
+            <Button
+              variant="ghost"
+              size="xs"
+              onClick={() => setBriefingOpen((open) => !open)}
+              aria-expanded={briefingOpen}
+              aria-controls="rd-result-briefing"
+              className={cn("text-muted-foreground", overflowing ? "ml-auto" : "-ml-2")}
+            >
+              {briefingOpen ? <ChevronDown /> : <ChevronRight />}
+              Briefing
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
+      {report.briefing && briefingOpen ? (
+        <div id="rd-result-briefing" className="mt-3">
+          <Markdown>{report.briefing}</Markdown>
         </div>
       ) : null}
     </section>
@@ -377,7 +407,7 @@ function RunHeader({
   const prHref = runPrHref(run);
   return (
     <header className="space-y-4">
-      <div className="flex flex-wrap items-start gap-x-6 gap-y-3">
+      <div className="flex flex-wrap items-start gap-x-6 gap-y-2">
         <div className="min-w-0 flex-1 basis-80">
           <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
             <h2 className="text-xl font-semibold tracking-tight [overflow-wrap:anywhere]">
@@ -397,7 +427,7 @@ function RunHeader({
             <p className="mt-1.5 max-w-[72ch] text-[0.9375rem] text-muted-foreground">{title}</p>
           ) : null}
         </div>
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2 max-sm:[&>:only-child]:-ml-3">
           {data.retry.eligible && !confirming ? (
             <Button
               onClick={() => {
@@ -480,10 +510,16 @@ export function RunDetailView({ runId }: { runId: number; onBack?: () => void })
         <>
           <RunHeader data={data} retry={retry} report={report} />
 
-          <div className="rd-grid">
-            <div className="rd-main-area min-w-0 space-y-8">
-              {report ? <ResultSection report={report} showsHeadline={!run.outcomeReason} /> : null}
-              <Timeline run={run} stages={data.stages} />
+          <div className="rd-grid" data-report={report ? "" : undefined}>
+            <div className="rd-main-area min-w-0 space-y-6">
+              {report ? (
+                <ResultSection
+                  report={report}
+                  leadsHeadline={reportLeadsHeadline(run, report)}
+                  showsHeadline={!run.outcomeReason}
+                />
+              ) : null}
+              <Timeline run={run} stages={data.stages} compact={Boolean(report)} />
             </div>
             <aside aria-label="Run facts" className="rd-rail space-y-6">
               <Facts run={run} attempt={attempt} total={total} />

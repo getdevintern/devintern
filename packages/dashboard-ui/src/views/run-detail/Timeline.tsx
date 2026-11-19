@@ -220,8 +220,18 @@ export function visibleStages(stages: RunStageRecord[]): RunStageRecord[] {
 }
 
 /** Vertical stage timeline: one line per stage, full detail on demand. */
-export function Timeline({ run, stages: allStages }: { run: RunRecord; stages: RunStageRecord[] }) {
+export function Timeline({
+  run,
+  stages: allStages,
+  compact = false,
+}: {
+  run: RunRecord;
+  stages: RunStageRecord[];
+  /** Quieter heading and spacing for pages where the timeline is secondary. */
+  compact?: boolean;
+}) {
   const stages = visibleStages(allStages);
+  const tight = compact && stages.length <= 1;
   const [overrides, setOverrides] = useState<Record<number, boolean>>({});
   const expandableIds = stages.filter(isExpandable).map((stage) => stage.id);
 
@@ -236,8 +246,11 @@ export function Timeline({ run, stages: allStages }: { run: RunRecord; stages: R
 
   return (
     <section aria-labelledby="rd-timeline-heading">
-      <div className="mb-3 flex items-center gap-3">
-        <h3 id="rd-timeline-heading" className="section-title">
+      <div className={cn("flex items-center gap-3", tight ? "mb-1.5" : "mb-3")}>
+        <h3
+          id="rd-timeline-heading"
+          className={tight ? "text-xs font-medium text-subtle-foreground" : "section-title"}
+        >
           Timeline
         </h3>
         {expandableIds.length > 0 ? (
