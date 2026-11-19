@@ -89,3 +89,8 @@ export function reportedDuration(
   );
   return field?.value.kind === "duration" ? field.value.ms : undefined;
 }
+
+/** Reference tab label for the run's task text: a prompt for prompt automations. */
+export function taskTabLabel(origin: RunRecord["origin"]): string {
+  return origin === "scheduled" || origin === "manual" ? "Prompt" : "Task description";
+}

@@ -29,6 +29,18 @@ import type { StackLink } from "../dependencies/stack-maintainer";
 import { prepareQueueDbDirectory } from "./webhook-queue";
 import { configureSqliteConnection } from "./sqlite";
 import type { RunRecord } from "./run-recorder";
+import {
+  addAutoResumeColumn,
+  addChildPidColumn,
+  addChildStartedAtColumn,
+  addColumnIfMissing,
+} from "./injected-tasks-migrations";
+
+export {
+  addAutoResumeColumn,
+  addChildPidColumn,
+  addChildStartedAtColumn,
+} from "./injected-tasks-migrations";
 
 export type InjectedTaskStatus = "pending" | "running" | "done" | "failed";
 
@@ -65,6 +77,11 @@ export interface InjectedTask {
   taskKey: string;
   /** `[[repos]]` name the task is pinned to. */
   repo: string;
+  /**
+   * `[[teams]]` name whose credentials the run layers (`worker add --team`).
+   * Unset: the worker uses the repo's single fixed team, if any.
+   */
+  team?: string;
   title: string;
   body: string;
   /** Absolute path of the markdown prompt materialized for this task. */
@@ -118,6 +135,7 @@ interface InjectedTaskRow {
   id: number;
   task_key: string;
   repo: string;
+  team: string | null;
   title: string;
   body: string;
   task_file: string;
@@ -157,6 +175,7 @@ function rowToInjectedTask(row: InjectedTaskRow): InjectedTask {
     id: row.id,
     taskKey: row.task_key,
     repo: row.repo,
+    team: row.team ?? undefined,
     title: row.title,
     body: row.body,
     taskFile: row.task_file,
@@ -182,70 +201,6 @@ function rowToInjectedTask(row: InjectedTaskRow): InjectedTask {
   };
 }
 
-/**
- * Add the durable auto-resume column to a legacy table.
- *
- * The injected-task DB is shared by the worker, the dashboard, and CLI
- * processes, so two first-upgrades can both observe the column missing and
- * race the `ALTER TABLE`. The loser sees SQLite's duplicate-column error,
- * which means the migration already applied and is safe to ignore; any other
- * failure (locked/corrupt DB) must still surface instead of leaving the store
- * half-migrated.
- */
-export function addAutoResumeColumn(db: Database): void {
-  try {
-    db.run("ALTER TABLE injected_tasks ADD COLUMN auto_resume_count INTEGER NOT NULL DEFAULT 0");
-  } catch (error) {
-    if (!/duplicate column name/i.test((error as Error).message)) {
-      throw error;
-    }
-  }
-}
-
-/**
- * Add the durable child-pid column to a legacy table. Same race rule as
- * {@link addAutoResumeColumn}: a concurrent opener's duplicate-column error
- * means the migration already applied.
- */
-export function addChildPidColumn(db: Database): void {
-  try {
-    db.run("ALTER TABLE injected_tasks ADD COLUMN child_pid INTEGER");
-  } catch (error) {
-    if (!/duplicate column name/i.test((error as Error).message)) {
-      throw error;
-    }
-  }
-}
-
-/**
- * Add the child start-time column to a legacy table. Same race rule as
- * {@link addAutoResumeColumn}.
- */
-export function addChildStartedAtColumn(db: Database): void {
-  try {
-    db.run("ALTER TABLE injected_tasks ADD COLUMN child_started_at INTEGER");
-  } catch (error) {
-    if (!/duplicate column name/i.test((error as Error).message)) {
-      throw error;
-    }
-  }
-}
-
-/**
- * Add a column to a legacy table. Same race rule as
- * {@link addAutoResumeColumn}: a concurrent opener's duplicate-column error
- * means the migration already applied.
- */
-function addColumnIfMissing(db: Database, ddl: string): void {
-  try {
-    db.run(`ALTER TABLE injected_tasks ADD COLUMN ${ddl}`);
-  } catch (error) {
-    if (!/duplicate column name/i.test((error as Error).message)) {
-      throw error;
-    }
-  }
-}
-
 /** Deferral budget and backoff applied by {@link InjectedTaskStore.defer}. */
 export interface DeferInjectedTaskOptions {
   /** Settle the row `failed` once this many consecutive deferrals happened. */
@@ -260,6 +215,7 @@ export interface DeferInjectedTaskOptions {
 export interface EnqueueInjectedTaskInput {
   taskKey: string;
   repo: string;
+  team?: string;
   title: string;
   body: string;
   taskFile: string;
@@ -354,7 +310,8 @@ export class InjectedTaskStore {
         stack_notice TEXT,
         created_at INTEGER NOT NULL,
         started_at INTEGER,
-        finished_at INTEGER
+        finished_at INTEGER,
+        team TEXT
       )
     `);
     this.db.run(`
@@ -385,6 +342,9 @@ export class InjectedTaskStore {
     }
     if (!columns.some((column) => column.name === "not_before")) {
       addColumnIfMissing(this.db, "not_before INTEGER");
+    }
+    if (!columns.some((column) => column.name === "team")) {
+      addColumnIfMissing(this.db, "team TEXT");
     }
     for (const name of [
       "depends_on",
@@ -457,12 +417,13 @@ export class InjectedTaskStore {
       const dependsOn = input.dependsOn?.length ? input.dependsOn : undefined;
       db.query(
         `INSERT INTO injected_tasks
-           (task_key, repo, title, body, task_file, idempotency_key, actor, status, created_at,
+           (task_key, repo, team, title, body, task_file, idempotency_key, actor, status, created_at,
             depends_on, dependency_mode, dependency_state, dependency_reason)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)`,
       ).run(
         input.taskKey,
         input.repo,
+        input.team ?? null,
         input.title,
         input.body,
         input.taskFile,

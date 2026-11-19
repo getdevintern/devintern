@@ -176,6 +176,8 @@ export interface DashboardServerOptions {
   workspaceDir?: string;
   /** Live working-window snapshot provider (embedded dashboard). */
   scheduleSnapshot?: () => import("./lib/worker/schedule").ScheduleSnapshot | null;
+  /** Jobs waiting in the worker's supervisor (embedded dashboard). */
+  supervisorQueuedJobs?: () => import("./lib/worker/supervisor").QueuedJobSnapshot[];
   /**
    * Retry execution mode (default `spawn`). The workspace worker passes
    * `schedule` so dashboard retries are drained through the fleet pipeline;
@@ -320,6 +322,7 @@ export function startDashboardServer(
     workingDir: options.workingDir,
     workspaceDir: options.workspaceDir,
     scheduleSnapshot: options.scheduleSnapshot,
+    supervisorQueuedJobs: options.supervisorQueuedJobs,
     retryMode: options.retryMode,
     automationActions: options.automationActions,
     logDirs: options.logDirs,

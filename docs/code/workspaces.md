@@ -153,10 +153,14 @@ By default the worker runs one agent job at a time. To run independent jobs in p
 [workspace.execution]
 isolation = "best_effort_host"
 max_concurrency = 4              # all agent jobs across the workspace
-max_concurrency_per_repo = 1     # task worktrees per repository
+max_concurrency_per_repo = 1     # task and PR jobs per repository
 ```
 
-Raising either limit above 1 requires `isolation = "best_effort_host"`. This is **not an isolation boundary**: parallel jobs share the host's ports, processes, Docker daemon, caches, and agent quota, which can cause `EADDRINUSE`, port conflicts, and lock errors. Use it only for repositories whose tasks tolerate that. Reviews and CI fixes stay serialized per repository, and short PR jobs get slots before tasks.
+`max_concurrency_per_repo` limits how many jobs run at once on one repository. It covers task runs and PR jobs (review replies and mentions, conflict resolution, CI fixes, base syncs, and auto-merge checks) together, with one exception: one PR job per repository can always start, even while tasks use the whole limit, so PR feedback never waits for a long task. Each PR job runs in its own worktree, so jobs for different PRs on one repository can run in parallel. Jobs on the same PR always run one after another. Automations use the repository's base checkout instead: one automation runs per repository at a time, it does not count against `max_concurrency_per_repo`, and it runs alongside task and PR jobs. Short PR jobs get free slots before tasks.
+
+Raising either limit above 1 requires `isolation = "best_effort_host"`. This is **not an isolation boundary**: parallel jobs share the host's ports, processes, Docker daemon, caches, and agent quota, which can cause `EADDRINUSE`, port conflicts, and lock errors. Every parallel PR worktree also installs its own dependencies, which uses more disk and install time. Use it only for repositories whose tasks tolerate that.
+
+The worker keeps idle PR worktrees for reuse, at most `max_concurrency_per_repo` (minimum 2) per repository, and removes any that have been unused for 24 hours. Worktrees of running jobs are never removed. Each repository gets its own worktree per branch, so repositories that use the same branch name never share one. Two open PRs from the same head branch in one repository do share a worktree. If both need work at the same moment, the second job is deferred without a PR comment and runs on a later pass.
 
 ## Environment
 
@@ -165,8 +169,11 @@ Secrets live in one owner-only `~/.devintern/.env`: tracker credentials, `GITHUB
 1. Shared workspace `.env`
 2. The repo's `env_file`
 3. Inline `[repos.env]` values
+4. For team tasks: the team's `env_file`, then `[teams.env]`
 
-For GitHub remotes, `GITHUB_REPO` is filled in from the remote URL. GitHub API calls for a repo use that repo's `GITHUB_TOKEN` layers, or a fixed team's credentials when one targets the repo. Artifact upload settings (`DEVINTERN_ARTIFACT_*`) use the same layers; see [upload configuration](./artifacts.md#files-sdk-uploader).
+Ad-hoc tasks (`devintern worker add`) and scheduled automations on a repo also get layer 4 when exactly one team is fixed to that repo with `repo = "<name>"`. `worker add --team <name>` picks the team explicitly, and is required when several teams are fixed to the repo. These runs keep the repo's `TASK_TRACKER` and `GITHUB_REPO`, so only the team's credentials apply. An automation on a repo with several fixed teams uses layers 1-3 and logs a warning; set `env_file` on the `[[repos]]` entry to choose its credentials.
+
+For GitHub remotes, `GITHUB_REPO` is filled in from the remote URL. GitHub and GitLab API calls for a repo, and the follow-up runs on its PRs (review feedback, conflict resolution, CI fixes, auto-merge), pick the team the same way, so they use the account that opened the PR. If several teams are fixed to the repo, they use the one with `tracker = "github"`; with none or several such teams, they use layers 1-3. Artifact upload settings (`DEVINTERN_ARTIFACT_*`) use the same layers; see [upload configuration](./artifacts.md#files-sdk-uploader).
 
 ## Editing the config while running
 

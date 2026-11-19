@@ -105,18 +105,18 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 ### `--max-turns`
 
 - Surface: `devintern` command surface
-- Status: `partial`
-- Evidence: helper passes the default; no local test asserts the forwarded value
-- Missing: Assertion that a non-default `--max-turns` reaches the harness argv (including the hook-fix invocation).
-- Last reviewed: 2026-11-17
+- Status: `default`
+- Evidence: `tests/local/cli-hook-retries.test.ts` (`bun run --filter @devintern/e2e test`): an argv-recording agent stub proves `--max-turns 7` reaches claude-code's `--max-turns` on both the implementation and the git-hook repair invocation, and the default `500` reaches both when the flag is omitted.
+- Missing: Other harnesses' turn-limit flags through the CLI (builder-level only in `harness-invocation.test.ts`); push-side hook repair, auto-review, and worker paths.
+- Last reviewed: 2026-11-19
 
 ### `--verbose`, deprecated `--jql`, `--claude-path`, `--skip-jira-comments`
 
 - Surface: `devintern` command surface
-- Status: `gap`
-- Evidence: —
-- Missing: Compatibility and warning paths.
-- Last reviewed: 2026-11-17
+- Status: `default`
+- Evidence: `tests/local/cli-deprecated-flags.test.ts` (`bun run --filter @devintern/e2e test`) against the offline fake Jira: `--jql` prints `--jql is deprecated, use --query instead` and selects only the matching issue (decoy untouched); `--claude-path` routes the run to the given agent (recorded argv, and `--verbose` prints it as the resolved harness path); `--skip-jira-comments` prints `--skip-jira-comments is deprecated, use --skip-comments instead`, delivers the branch, and posts no comment or status change.
+- Missing: `--claude-path` prints no deprecation warning (observed product behavior, asserted as-is). Precedence when an alias and its canonical flag are both passed is not asserted.
+- Last reviewed: 2026-11-19
 
 ### `init`
 
@@ -237,3 +237,31 @@ bun run --filter @devintern/e2e test
 ### No-op runs (`--allow-no-changes`)
 
 `tests/local/cli-allow-no-changes.test.ts` runs the built CLI with the fixture agent's `no-change` mode against a local bare remote. Without the flag, `--create-pr` exits non-zero with `Implementation was not committed` and records a `failed` run. With `--allow-no-changes`, it exits 0, records a `succeeded` run with no `pr_url`, and pushes no branch or commit. With `--no-git` the commit step is skipped, so the flag has no effect there: a no-op succeeds with or without it, and the suite runs both forms as a regression guard. Against the offline Jira fake, the failure path posts a failure comment and moves the ticket back to its todo status. The no-op path currently posts no comment and leaves the ticket in its in-progress status. The test asserts this as observed behaviour, not as a confirmed product contract.
+
+### `--max-turns` forwarding
+
+`tests/local/cli-hook-retries.test.ts` also proves the turn cap reaches the
+harness. `helpers/argv-recorder.ts` writes an agent stub that appends its argv
+as a JSON line and then runs the fixture agent with the same argv. The test
+moves the fixture agent behind the stub at the `--agent-path` location, reuses
+the failing pre-commit hook with the `fix` repair outcome, and asserts both
+recorded invocations (implementation and `# Git Hook Error - Fix Required`)
+carry exactly one `--max-turns 7`, or `--max-turns 500` when the flag is
+omitted. The fixture's harness is `claude-code`.
+
+### Deprecated flag aliases
+
+`tests/local/cli-deprecated-flags.test.ts` runs the built CLI with an explicit
+argv against the offline fake Jira (an expected issue plus a decoy). One run
+passes `--jql`, `--claude-path` (the argv-recording stub), and `--verbose`: it
+asserts the `--jql` warning, the fake's recorded search, a single succeeded
+run for the matching issue, the implementation comment, the untouched decoy,
+one recorded stub invocation, and the verbose `resolved to: <stub>` line. A
+second run passes `--skip-jira-comments` and asserts its warning, a delivered
+branch, and unchanged comments and status. `--claude-path` has no warning in
+the product, so none is asserted.
+
+```sh
+bun run --filter @getdevintern/code build
+bun run --filter @devintern/e2e test
+```

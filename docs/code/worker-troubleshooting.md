@@ -37,6 +37,8 @@ A successful run that cannot create a PR at all (the remote is not GitHub, GitLa
 
 When PR creation fails for a temporary reason (a GitHub 5xx, a rate limit), the worker comments on the ticket and re-runs the whole ticket on the next poll, up to 3 times. A failure that needs a human fix (a missing token or App, a validation error) is recorded as actioned right away; fix the configuration, then edit the ticket.
 
+Either way, the run is recorded as `failed` with the reason `pushed but PR creation failed: …`, so `devintern worker runs --status failed` lists it.
+
 ## Interrupted runs
 
 A graceful stop (Ctrl-C, `SIGTERM`) comments on in-flight tickets and moves them back to To Do. After a hard crash (power loss, `kill -9`), the worker does the same at its next startup, before picking up new work. If the interrupted run already had commits on its branch, the worker continues it instead.

@@ -8,6 +8,8 @@ import type { DependencyMode } from "../dependencies/gate";
 export interface AddOptions {
   workspacePath?: string;
   repo?: string;
+  /** `[[teams]]` entry whose credentials the run uses. */
+  team?: string;
   title: string;
   body?: string;
   bodyFile?: string;
@@ -40,6 +42,8 @@ export function workerAddUsage(): string {
     "Options:",
     "  --title <text>            Task title (required unless --resume)",
     "  --repo <name>             [[repos]] name to target (default: the only repo)",
+    "  --team <name>             Use this [[teams]] entry's credentials (default: the",
+    "                            team fixed to the repo, if exactly one)",
     "  --body <text>             Task description",
     "  --body-file <path>        Read the description from a file ('-' for stdin)",
     "  --idempotency-key <key>   Dedupe key; a retry reuses the existing task",
@@ -48,7 +52,8 @@ export function workerAddUsage(): string {
     "  --stack                   Stack on an unmerged dependency's branch once it succeeded",
     "  --wait-merge              Wait until every dependency's PR merged",
     "                            (default: [defaults].dependency_mode, else stacked)",
-    "  --resume <taskKey>        Re-queue a settled ad-hoc task (resumes its branch)",
+    "  --resume <taskKey>        Re-queue a settled ad-hoc task (continues its branch and open",
+    "                            PR; a fresh branch if it is gone or the PR merged/closed)",
     "  --wait                    Block until the run finishes; exit with its status",
     "  --wait-timeout <seconds>  Give up waiting after this long (0 = no limit; default 21600)",
     "  --json                    Emit a machine-readable result on stdout",
@@ -61,6 +66,7 @@ export function workerAddUsage(): string {
 const VALUE_FLAGS = new Set([
   "--workspace",
   "--repo",
+  "--team",
   "--title",
   "--body",
   "--body-file",
@@ -88,6 +94,7 @@ function validateResumeArgs(options: AddOptions): string | null {
     options.body !== undefined ? "--body" : undefined,
     options.bodyFile !== undefined ? "--body-file" : undefined,
     options.repo !== undefined ? "--repo" : undefined,
+    options.team !== undefined ? "--team" : undefined,
     options.idempotencyKey !== undefined ? "--idempotency-key" : undefined,
     options.after.length > 0 ? "--after" : undefined,
     options.dependencyMode === "stacked" ? "--stack" : undefined,
@@ -111,6 +118,9 @@ function applyValueFlag(options: AddOptions, flag: string, value: string): strin
       break;
     case "--repo":
       options.repo = value;
+      break;
+    case "--team":
+      options.team = value;
       break;
     case "--title":
       options.title = value;

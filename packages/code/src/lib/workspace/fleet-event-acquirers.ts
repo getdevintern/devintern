@@ -9,7 +9,7 @@ import type {
 } from "../acquirers/review-polling";
 import type { ChangeDetector } from "../acquirers/change-detector";
 import type { TeamConfig, WorkspaceConfig } from "./config";
-import { buildRepoEnv, buildTeamTaskEnv, gitHubSlugFromRemote } from "./env";
+import { buildFleetEventEnv, gitHubSlugFromRemote } from "./env";
 import { createFleetTaskExecutor, resolveActionedSource } from "./fleet-executor";
 import { assertTeamPrSyncSandbox, teamPrSyncSlugs } from "./team-pr-sync";
 import type { FleetTask, RepoManagerLike } from "./fleet-executor";
@@ -67,7 +67,13 @@ export interface FleetSourceRuntime {
   isTaskActionedUnchanged?: (taskKey: string, updated?: string) => Promise<boolean>;
 }
 
-/** Resolve the GitHub credential used for events in one workspace repository. */
+/**
+ * Resolve the GitHub credential used for events in one workspace repository.
+ *
+ * Uses the same credentials as the follow-up runs that push to the PR
+ * ({@link buildFleetEventEnv}), so API calls read PRs with the account that
+ * pushed them.
+ */
 export function fleetGitHubTokenForRepo(
   config: WorkspaceConfig,
   workspaceDir: string,
@@ -79,11 +85,7 @@ export function fleetGitHubTokenForRepo(
       slug.toLowerCase(),
   );
   if (!repo) return process.env.GITHUB_TOKEN;
-  const team = config.teams.find(
-    (candidate) => candidate.tracker === "github" && candidate.repo === repo.name,
-  );
-  return (team ? buildTeamTaskEnv(repo, team, workspaceDir) : buildRepoEnv(repo, workspaceDir))
-    .GITHUB_TOKEN;
+  return buildFleetEventEnv(config, repo, workspaceDir).GITHUB_TOKEN;
 }
 
 export function createFleetGitHubClientResolver(
@@ -257,6 +259,39 @@ async function buildAutoMergeWatcher(params: {
     ),
     verbose: params.verbose,
   });
+}
+
+/**
+ * Read a branch's tip SHA through the repo's GitHub client; null when the
+ * branch (or repo access) is missing or the response has another shape.
+ */
+function branchHeadShaFetcher(
+  gh: (slug: string) => FleetGitHubClient,
+  isNotFound: (error: unknown) => boolean,
+): (repo: string, branch: string) => Promise<string | null> {
+  return async (repo, branch) => {
+    const [owner = "", name = ""] = repo.split("/");
+    const path = branch.split("/").map(encodeURIComponent).join("/");
+    try {
+      const result = await gh(repo).conditionalGet<unknown>(
+        `/repos/${repo}/git/ref/heads/${path}`,
+        owner,
+        name,
+      );
+      return parseRefSha(result.data);
+    } catch (error) {
+      if (isNotFound(error)) return null;
+      throw error;
+    }
+  };
+}
+
+/** Commit SHA from a GitHub `git/ref` response; null for any other shape. */
+function parseRefSha(data: unknown): string | null {
+  if (typeof data !== "object" || data === null || !("object" in data)) return null;
+  const target = data.object;
+  if (typeof target !== "object" || target === null || !("sha" in target)) return null;
+  return typeof target.sha === "string" && target.sha ? target.sha : null;
 }
 
 /**
@@ -453,6 +488,7 @@ export async function buildFleetEventAcquirers(options: {
           );
           return result.data ?? [];
         },
+        fetchBranchHeadSha: branchHeadShaFetcher(gh, isGitHubNotFound),
         listOpenPullRequests: async (repo, etag) => {
           try {
             return await gh(repo).conditionalGet(
@@ -472,6 +508,11 @@ export async function buildFleetEventAcquirers(options: {
       conflictSchedule: config.workspace.conflictSchedule,
       conflictResolution: config.workspace.conflictResolution,
       quietPeriodSeconds: parseEnvInteger("WORKER_BASE_SYNC_QUIET_SECONDS", 30, { min: 0 }),
+      // Syncs run in the background; the supervisor admits them as
+      // `pr_worktree` jobs (per-repo limit, one job per PR). Without a
+      // supervisor nothing else bounds them, so keep them one at a time.
+      maxConcurrentBaseSyncs: () =>
+        options.supervisor ? config.workspace.execution.maxConcurrency : 1,
       runStore,
       // Factory form: repos added at runtime become watchable without a
       // restart (a static list would pin the startup slug set).

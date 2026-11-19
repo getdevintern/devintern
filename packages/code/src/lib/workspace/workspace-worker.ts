@@ -29,12 +29,19 @@ import { InjectedTaskStore } from "../state/injected-tasks";
 import type { WorkerState } from "../state/worker-state";
 import { createTaskActionedGate } from "../task/actioned-state";
 import type { TaskTrackerClient } from "../trackers/client";
-import { findRepo, findTeam, harnessPinnedJobs, loadWorkspaceConfig } from "./config";
+import {
+  findRepo,
+  findTeam,
+  harnessPinnedJobs,
+  loadWorkspaceConfig,
+  requireInjectedTaskTeam,
+} from "./config";
 import {
   resolveWorkspaceAutomationContext,
   resolveWorkspaceEstimationContext,
 } from "./schedule-context";
 import type { RepoConfig, WorkspaceConfig } from "./config";
+import { workspaceHasConfiguredWork, workspaceHasStartupWork } from "./startup-work";
 import { applyWorkspaceProcessEnv, buildErrorMonitorEnv, buildTeamEnv } from "./env";
 import {
   automationsDir,
@@ -560,20 +567,26 @@ export function buildInjectedTaskAcquirer(
       : undefined,
     runDbPath: workspaceDbPath(deps.workspaceDir),
     resolveBranchHead: (repo, branch) => remoteHead(deps.config, deps.repoManager, repo, branch),
-    execute: (task, queueClaim) =>
-      createFleetTaskExecutor(deps, {
+    execute: async (task, queueClaim) => {
+      // Async so a team the live config no longer resolves rejects the run.
+      const credentialTeam = requireInjectedTaskTeam(deps.config, task.repo, task.team);
+      return createFleetTaskExecutor(deps, {
         extraArgs: () => fleetTaskArgs(deps.config),
         repo: task.repo,
+        ...(credentialTeam ? { credentialTeam } : {}),
         source: INJECTED_TASK_SOURCE,
         runOrigin: "local",
         queueClaim,
+        // Session pickup only reopens a succeeded run of this same row.
+        injectedCreatedAt: task.createdAt,
         // The CLI resolves the local markdown file; the key still names the worktree.
         taskRef: task.taskFile,
         // Persist the detached child pid for hard-kill startup recovery.
         onChildSpawn: (pid) => {
           if (!store.isClosed()) store.setChildPid(task.id, pid);
         },
-      })(task.taskKey, toRoutableTask({ key: task.taskKey, labels: [], components: [] })),
+      })(task.taskKey, toRoutableTask({ key: task.taskKey, labels: [], components: [] }));
+    },
     intervalSeconds: parseEnvInteger("WORKER_INJECTED_INTERVAL_SECONDS", 5, { min: 1 }),
     maxConcurrency: deps.config.workspace.execution.maxConcurrency,
     maxConcurrencyPerRepo: deps.config.workspace.execution.maxConcurrencyPerRepo,
@@ -1289,9 +1302,8 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   if (config.workspace.dashboard) {
     try {
       const { startDashboardServer } = await import("../../dashboard-server");
-      // `schedule`: retries are drained by this worker's retry-queue acquirer
-      // through the normal pipeline (never spawned from the workspace home);
-      // automation "Run now" triggers go through the in-process scheduler.
+      // `schedule`: retries drain through this worker's retry-queue acquirer
+      // (never spawned from the workspace home); "Run now" uses the scheduler.
       dashboardServer = startDashboardServer({
         port: config.workspace.dashboardPort,
         allowedOrigins: config.dashboard.allowedOrigins,
@@ -1299,6 +1311,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
         retryMode: "schedule",
         automationActions,
         scheduleSnapshot: () => (pickupGate.enabled ? pickupGate.snapshot() : null),
+        supervisorQueuedJobs: () => supervisor.queuedJobs?.() ?? [],
         // `[[error_monitors]]` is startup-only, so the polled set is fixed.
         configuredSources: () => configuredSourcesOf(config),
       });
@@ -1422,45 +1435,6 @@ function applyWorkspaceEnv(
   };
 }
 
-/** Whether the workspace config itself contains ongoing work. */
-export function workspaceHasConfiguredWork(
-  config: WorkspaceConfig,
-  multiTeam: boolean,
-  initialQuery: string | undefined,
-): boolean {
-  return (
-    multiTeam ||
-    Boolean(initialQuery) ||
-    config.automations.length > 0 ||
-    config.estimations.length > 0 ||
-    config.errorMonitors.some((source) => source.enabled)
-  );
-}
-
-/**
- * Whether startup has any work to keep the worker alive.
- *
- * Scheduled dashboard retries and queued/in-flight injected tasks are the
- * exceptions to the task-query requirement: the worker can still run to drain
- * them (and to recover an interrupted injected row under the post-lock hook).
- * A `running` injected row counts here because only that hook can resume or
- * fail it.
- */
-export function workspaceHasStartupWork(
-  config: WorkspaceConfig,
-  retryQueue: Pick<ScheduledRetryStore, "hasPending">,
-  injectedTasks: Pick<InjectedTaskStore, "hasPending" | "listRunning">,
-  multiTeam: boolean,
-  initialQuery: string | undefined,
-): boolean {
-  return (
-    workspaceHasConfiguredWork(config, multiTeam, initialQuery) ||
-    retryQueue.hasPending() ||
-    injectedTasks.hasPending() ||
-    injectedTasks.listRunning().length > 0
-  );
-}
-
 /**
  * Exit when workspace mode has no work configured.
  *
@@ -1488,6 +1462,7 @@ function assertWorkspaceHasWork(
   );
 }
 
+export { workspaceHasConfiguredWork, workspaceHasStartupWork } from "./startup-work";
 export {
   createFleetTaskExecutor,
   createWorkspaceTaskAcquirer,

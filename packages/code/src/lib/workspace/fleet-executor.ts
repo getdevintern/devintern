@@ -13,12 +13,12 @@ import { createTaskSupervisor, JobNotStartedError } from "../worker/supervisor";
 import type { TaskSupervisor } from "../worker/supervisor";
 import { findRepo, findTeam, resolveWorkspacePipelinePath } from "./config";
 import type { RepoConfig, TeamConfig, WorkspaceConfig } from "./config";
-import { buildRepoEnv, buildTeamTaskEnv } from "./env";
+import { buildRepoRunEnv, buildTeamTaskEnv } from "./env";
 import { effectiveRoutingRules, routeTask, routeTaskWithRules, toRoutableTask } from "./router";
 import type { RoutableTask } from "./router";
 import { RUN_ORIGIN_ENV } from "../observability/analytics";
 import { AUTOMATION_ID_ENV } from "../automation/acquirer";
-import { PICKUP_RUN_ID_ENV } from "../state/session-pickup";
+import { INJECTED_CREATED_AT_ENV, PICKUP_RUN_ID_ENV } from "../state/session-pickup";
 import { actionedSourceKey } from "../task/actioned-state";
 import { QUEUE_CLAIM_ENV } from "./queue-failure-reason";
 import { workspaceDbPath } from "./paths";
@@ -89,8 +89,9 @@ export interface FleetTask {
 /** Structural slice of {@link RepoManager} the acquirer uses (injectable). */
 export interface RepoManagerLike {
   ensureBareClone(repo: RepoConfig): Promise<string>;
-  fetch(repoName: string): Promise<void>;
+  fetch(repoName: string, options?: { timeoutMs?: number }): Promise<void>;
   ensureBaseWorktree(repo: RepoConfig): Promise<string>;
+  ensurePrJobWorktree(repo: RepoConfig): Promise<string>;
   createTaskWorktree(repo: RepoConfig, taskKey: string): Promise<string>;
   removeTaskWorktree(repoName: string, worktreePath: string): Promise<void>;
   sweepStaleWorktrees(repoName: string, ttlDays: number): Promise<string[]>;
@@ -311,8 +312,21 @@ export function createFleetTaskExecutor(
      * resolves from that specific run.
      */
     pickupRunId?: number;
+    /**
+     * Enqueue time (epoch ms) of the injected row this run serves. Threaded to
+     * the task subprocess as `DEVINTERN_INJECTED_CREATED_AT` so session pickup
+     * only reopens a succeeded run of that same row.
+     */
+    injectedCreatedAt?: number;
     /** Unique queue execution whose run record should receive this outcome. */
     queueClaim?: string;
+    /**
+     * Team whose credentials a run without an acquiring team borrows (an
+     * ad-hoc task for a repo with a fixed team, or `worker add --team`). Only
+     * the credential layers apply; see {@link buildRepoRunEnv}. Ignored when
+     * `deps.team` is set.
+     */
+    credentialTeam?: TeamConfig;
     /**
      * Called with the task child pid after it spawns. Used by the injected-task
      * queue to persist the pid for interrupt recovery.
@@ -403,7 +417,7 @@ export function createFleetTaskExecutor(
                 actionedSource: deps.actionedSource,
                 pipelineDefaultFile,
               })
-            : buildRepoEnv(repo, workspaceDir, {
+            : buildRepoRunEnv(repo, options.credentialTeam, workspaceDir, {
                 actionedSource: deps.actionedSource,
                 pipelineDefaultFile,
               });
@@ -420,6 +434,9 @@ export function createFleetTaskExecutor(
             [QUEUE_CLAIM_ENV]: options.queueClaim,
             ...(options.pickupRunId !== undefined
               ? { [PICKUP_RUN_ID_ENV]: String(options.pickupRunId) }
+              : {}),
+            ...(options.injectedCreatedAt !== undefined
+              ? { [INJECTED_CREATED_AT_ENV]: String(options.injectedCreatedAt) }
               : {}),
           };
 

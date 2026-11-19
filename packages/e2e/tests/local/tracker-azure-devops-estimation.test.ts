@@ -1,10 +1,13 @@
 import { expect, test } from "bun:test";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { checkedCommand } from "../../helpers/process";
 import { cliPath, FixtureWorkspace } from "../../helpers/fixture-workspace";
 import type { TrackerTicket } from "../../providers/tracker";
-import { FakeAzureDevOpsTracker } from "../../providers/fake-azure-devops";
+import {
+  AZURE_DEVOPS_STORY_POINTS_FIELD,
+  FakeAzureDevOpsTracker,
+} from "../../providers/fake-azure-devops";
 
 const ESTIMATION_COMMENT_MARKER = "Automated Story Points Estimation";
 
@@ -20,6 +23,9 @@ const ESTIMATION_COMMENT_MARKER = "Automated Story Points Estimation";
 function storyPointsPattern(points: number): RegExp {
   return new RegExp(`(?:\\*\\*Story Points:\\*\\*|<strong>Story Points:</strong>) ${points}\\b`);
 }
+/** Custom field reference the `storyPointsField` override names (e.g. a Scrum `Effort`-style field). */
+const CUSTOM_STORY_POINTS_FIELD = "Custom.E2EStoryPointsOverride";
+
 const TICKET = {
   title: "Expand the greeting",
   body: "# Expand the greeting\n\nChange the greeting to Hello, world! and run bun test.\n",
@@ -38,6 +44,29 @@ async function prepareEstimationWorkspace(
   const remote = join(run.root, "remote.git");
   await checkedCommand(["git", "init", "--bare", remote], run.root, run.env);
   await run.prepare(remote, "test-token", tracker.environment());
+}
+
+/**
+ * Write a project-scoped `storyPointsField` override for the Azure DevOps
+ * project, keyed the way users configure statuses: by the project name the
+ * tracker resolves (`AZURE_DEVOPS_PROJECT`). The CLI runs with the checkout as
+ * its cwd, and `.devintern-code/` is gitignored by the fixture.
+ */
+function writeStoryPointsFieldSettings(run: FixtureWorkspace, projectKey: string): void {
+  const settingsDir = join(run.cwd, ".devintern-code");
+  mkdirSync(settingsDir, { recursive: true });
+  writeFileSync(
+    join(settingsDir, "settings.json"),
+    `${JSON.stringify(
+      {
+        "azure-devops": {
+          projects: { [projectKey]: { storyPointsField: CUSTOM_STORY_POINTS_FIELD } },
+        },
+      },
+      null,
+      2,
+    )}\n`,
+  );
 }
 
 /** Run `devintern <id> --estimate` through the isolated fixture. */
@@ -251,6 +280,45 @@ test.skipIf(!existsSync(cliPath))(
       expect(tracker.rawComments(workItem.key)).toEqual([]);
       expect(run.agentInvocations()).toHaveLength(1);
       expect(run.runRecords({ allTasks: true })).toHaveLength(1);
+
+      await expectNoGitDelivery(run, workItem.key);
+      expect(tracker.unexpectedRequests).toEqual([]);
+    } finally {
+      await tracker.cleanup();
+      run.dispose();
+    }
+  },
+  90_000,
+);
+
+/**
+ * The override is keyed by the Azure DevOps project name (`AZURE_DEVOPS_PROJECT`),
+ * not the numeric work item id, so this pins that estimation resolves the
+ * project the same way as the rest of the pipeline.
+ */
+test.skipIf(!existsSync(cliPath))(
+  "built CLI writes Azure DevOps story points to the configured storyPointsField override",
+  async () => {
+    const tracker = new FakeAzureDevOpsTracker();
+    const run = new FixtureWorkspace();
+    try {
+      const workItem = await tracker.createTicket(TICKET);
+      await prepareEstimationWorkspace(run, tracker);
+      writeStoryPointsFieldSettings(run, tracker.projectKey());
+
+      const result = await runEstimate(run, workItem.key, { skipComments: false });
+      const detail = `${result.stdout}\n${result.stderr}`;
+      expect(result.exitCode, detail).toBe(0);
+      expect(run.agentInvocations().map((invocation) => invocation.mode)).toEqual(["estimate"]);
+
+      // The override receives the points; the default field is never written.
+      expect(tracker.getField(workItem.key, CUSTOM_STORY_POINTS_FIELD), detail).toBe(3);
+      expect(
+        tracker.getField(workItem.key, AZURE_DEVOPS_STORY_POINTS_FIELD),
+        detail,
+      ).toBeUndefined();
+      expect(detail).toContain(`Using configured story points field: ${CUSTOM_STORY_POINTS_FIELD}`);
+      expect(estimationComments(tracker, workItem.key)).toHaveLength(1);
 
       await expectNoGitDelivery(run, workItem.key);
       expect(tracker.unexpectedRequests).toEqual([]);

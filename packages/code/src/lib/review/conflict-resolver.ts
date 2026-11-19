@@ -1016,14 +1016,8 @@ export async function resolveConflictsOnPr(
         console.log(`🔁 Retry ${attempt - 1}/${MAX_SYNC_ATTEMPTS - 1}: rebuilding the merge`);
       }
 
-      const worktree = await Utils.prepareReviewWorktree(branch, {
-        verbose,
-        cwd,
-        installDependencies: false,
-      });
-      if (!worktree.success || !worktree.path) {
-        return await failWith("setup", `worktree preparation failed: ${worktree.error}`);
-      }
+      const worktree = await prepareAttemptWorktree(branch, { verbose, cwd }, failWith);
+      if ("result" in worktree) return worktree.result;
       workDir = worktree.path;
       // Installed here rather than inside `prepareReviewWorktree` so the
       // result is known: a post-merge reinstall failure is only fatal when
@@ -1195,6 +1189,27 @@ function successCommentBody(outcome: "clean" | "resolved", baseRef: string): str
   return outcome === "clean"
     ? `🔀 Merged \`${baseRef}\` into this branch (no conflicts).`
     : `🔀 This branch had merge conflicts with \`${baseRef}\`; devintern resolved them and pushed the merge. Please double-check the resolution.`;
+}
+
+/**
+ * Prepare the review worktree for one sync attempt. When another job holds
+ * the branch's worktree (temporary contention) the run is deferred with no
+ * PR comment; any other setup error fails it through `failWith`.
+ */
+async function prepareAttemptWorktree(
+  branch: string,
+  options: { verbose: boolean; cwd?: string },
+  failWith: (kind: FailureKind, message: string) => Promise<ResolveConflictsResult>,
+): Promise<{ path: string } | { result: ResolveConflictsResult }> {
+  const worktree = await Utils.prepareReviewWorktree(branch, {
+    ...options,
+    installDependencies: false,
+  });
+  if (worktree.success && worktree.path) return { path: worktree.path };
+  if (worktree.inUse) {
+    return { result: { outcome: "deferred", message: `worktree busy: ${worktree.error}` } };
+  }
+  return { result: await failWith("setup", `worktree preparation failed: ${worktree.error}`) };
 }
 
 async function postOutcomeComment(
