@@ -177,6 +177,31 @@ export class PRManager {
   }
 
   /**
+   * State of the change request(s) for a branch.
+   *
+   * @param sourceBranch - Head/feature branch name
+   * @returns `"open"`, `"closed"` (closed or merged), `"none"` (the branch has
+   *   no PR), or `undefined` when the state cannot be checked: unsupported
+   *   platform, no credentials, or a failed lookup
+   */
+  async getChangeRequestState(
+    sourceBranch: string,
+  ): Promise<"open" | "closed" | "none" | undefined> {
+    const repoInfo = await this.detectRepository();
+    if (repoInfo.platform !== "github") return undefined;
+    const client = await this.githubClientFor(repoInfo.repository);
+    if (!client) return undefined;
+    try {
+      return await client.getChangeRequestState(repoInfo.repository, sourceBranch);
+    } catch (error) {
+      console.warn(
+        `⚠️  Could not check the PR state of '${sourceBranch}': ${(error as Error).message}`,
+      );
+      return undefined;
+    }
+  }
+
+  /**
    * Apply labels to an existing change request (best-effort).
    *
    * @param identity - Change request returned by {@link findOpenChangeRequest}

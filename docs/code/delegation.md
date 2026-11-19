@@ -95,7 +95,7 @@ records, and the [dashboard](dashboard.md), and start on a `feature/local-<slug>
 | `--after <taskKey>`        | Start only after this ad-hoc task (same repo) finishes; repeatable. See [Dependent tasks](#dependent-tasks---after) |
 | `--stack`                  | Dependency mode `stacked`: start on an unmerged dependency's branch once it succeeded (overrides `[defaults].dependency_mode`) |
 | `--wait-merge`             | Dependency mode `merged`: wait until every dependency's PR merged (overrides `[defaults].dependency_mode`)                      |
-| `--resume <taskKey>`       | Re-queue a settled ad-hoc task under its existing key (a failed or interrupted attempt resumes its branch and prior report)     |
+| `--resume <taskKey>`       | Re-queue a settled ad-hoc task under its existing key; it continues the prior branch unless that branch is gone or its PR was merged or closed |
 | `--wait`                   | Block until the run finishes; exit `0` on success, `1` on failure, `3` if the task was [cancelled](#cancel-a-pending-task) first |
 | `--wait-timeout <seconds>` | Give up waiting after this long (default 21600 = 6h; `0` waits without a limit)                                                 |
 | `--json`                   | Emit a single `{ id, taskKey, repo, status, deduplicated }` object on stdout (failed `--wait` runs add an `error` field; see [JSON output](#json-output) for `harnessPausedUntil` and the dependency fields) |
@@ -409,10 +409,17 @@ window. A task that depends on a cancelled one stays blocked.
   automatic budget: the row keeps its key, so the retry targets the same
   `feature/local-<slug>` branch and session pickup hands the prior attempt's
   report to the agent (when it recorded one) instead of starting a second
-  branch and PR. A task whose prior attempt already succeeded has no interrupted
-  work to inherit, so resuming it starts a fresh attempt rather than reusing the
-  prior branch and report. A task that never started is still `pending` and
-  needs no resume. A [cancelled](#cancel-a-pending-task) task cannot be resumed.
+  branch and PR. The same applies when the prior attempt succeeded but did not
+  finish delivery: a branch that was pushed without a PR (for example because
+  PR creation failed on credentials) is checked out again and the PR is opened
+  from it, and a branch whose PR is still open keeps working on that PR. The
+  agent is told to verify the inherited work and not redo it. A fresh
+  `-attempt-N` branch is used only when the prior branch is gone, has no
+  commits, or its PR was merged or closed. Checking whether a PR is still open
+  works on GitHub; on other code hosts, or when the check fails (for example an
+  expired token or a rate limit), a recorded PR starts a fresh attempt. A
+  task that never started is still `pending` and needs no resume. A
+  [cancelled](#cancel-a-pending-task) task cannot be resumed.
 - **A graceful shutdown does not launder a real failure.** Draining the worker
   aborts running task children; the aborted run is reported as _interrupted_,
   so its row stays `running` for the successor's startup recovery. A pipeline
