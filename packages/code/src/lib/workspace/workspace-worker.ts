@@ -1300,9 +1300,8 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   if (config.workspace.dashboard) {
     try {
       const { startDashboardServer } = await import("../../dashboard-server");
-      // `schedule`: retries are drained by this worker's retry-queue acquirer
-      // through the normal pipeline (never spawned from the workspace home);
-      // automation "Run now" triggers go through the in-process scheduler.
+      // `schedule`: retries drain through this worker's retry-queue acquirer
+      // (never spawned from the workspace home); "Run now" uses the scheduler.
       dashboardServer = startDashboardServer({
         port: config.workspace.dashboardPort,
         allowedOrigins: config.dashboard.allowedOrigins,
@@ -1310,6 +1309,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
         retryMode: "schedule",
         automationActions,
         scheduleSnapshot: () => (pickupGate.enabled ? pickupGate.snapshot() : null),
+        supervisorQueuedJobs: () => supervisor.queuedJobs?.() ?? [],
         // `[[error_monitors]]` is startup-only, so the polled set is fixed.
         configuredSources: () => configuredSourcesOf(config),
       });

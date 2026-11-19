@@ -211,6 +211,12 @@ interface DemoRun {
   open?: boolean;
   reason?: string;
   attempt?: number;
+  /** In-progress runs: the pipeline step executing now. */
+  step?: "feasibility" | "implement" | "verify" | "auto-review";
+  /** In-progress runs: minutes the current step has been running. */
+  stepFor?: number;
+  /** In-progress runs: feasibility summary. */
+  assessment?: string;
 }
 
 const TEAM: Record<Tracker, string> = {
@@ -246,7 +252,10 @@ const CRONS: Record<string, string> = {
 const FEATURED = "PROJ-1842";
 
 const RUNS: DemoRun[] = [
-  { start: 11, origin: "task", status: "in_progress", repo: "api", harness: "claude-code", key: "PROJ-1901", tracker: "jira", title: "Add cursor pagination to the audit log endpoint" },
+  // Three tasks in flight at once (max_concurrency = 3), one per repository.
+  { start: 3, origin: "task", status: "in_progress", repo: "sdk", harness: "codex", key: "acme/sdk#61", tracker: "github", title: "Raise typed errors for API validation failures", step: "feasibility", stepFor: 1 },
+  { start: 11, origin: "task", status: "in_progress", repo: "api", harness: "claude-code", key: "PROJ-1901", tracker: "jira", title: "Add cursor pagination to the audit log endpoint", step: "implement", stepFor: 8, assessment: "Clear and implementable; touches the audit log service only." },
+  { start: 24, origin: "task", status: "in_progress", repo: "web", harness: "claude-code", key: "PRD-224", tracker: "linear", title: "Add bulk archive to the projects table", step: "auto-review", stepFor: 2, assessment: "Clear and implementable; reuses the existing archive mutation." },
   { start: 52, dur: 12, origin: "scheduled", status: "succeeded", repo: "api", harness: "claude-code", automation: "repair-failing-main", pr: 4423, open: true },
   { start: 95, dur: 31, origin: "task", status: "succeeded", repo: "web", harness: "claude-code", key: "PRD-218", tracker: "linear", title: "Show a loading skeleton on the usage dashboard", pr: 1882, open: true },
   { start: 140, dur: 26, origin: "task", status: "succeeded", repo: "infra", harness: "codex", key: "PROJ-1898", tracker: "jira", title: "Pin Terraform provider versions in the staging module", pr: 611, open: true },
@@ -361,8 +370,8 @@ for (const run of sorted) {
       run.pr ?? null,
       prUrl,
       description ?? null,
-      run.status === "in_progress" ? "implement" : null,
-      run.status === "in_progress" ? started + 3 * MIN : null,
+      run.status === "in_progress" ? (run.step ?? "implement") : null,
+      run.status === "in_progress" ? now - (run.stepFor ?? 0) * MIN : null,
       run.status === "in_progress" ? 1 : 0,
       id,
     ],
@@ -420,11 +429,19 @@ function seedStages(runId: number, run: DemoRun, started: number): void {
     return;
   }
   if (run.status === "in_progress") {
-    stage("feasibility", "succeeded", "Clear and implementable; touches the audit log service only.", started + 2 * MIN, {
-      isImplementable: true,
-      clarityScore: 9,
-      summary: "Clear and implementable; touches the audit log service only.",
+    // Record the stages finished before the current step.
+    if (run.step === "feasibility") return;
+    const summary = run.assessment ?? "Clear and implementable.";
+    stage("feasibility", "succeeded", summary, started + 2 * MIN, { isImplementable: true, clarityScore: 9, summary });
+    if (run.step === "implement") return;
+    const stepStart = now - (run.stepFor ?? 0) * MIN;
+    stage("implementation", "succeeded", null, stepStart - 4 * MIN, {
+      harness: run.harness,
+      durationMs: stepStart - 4 * MIN - (started + 2 * MIN),
+      report: "Implemented the change and added tests.",
     });
+    if (run.step === "verify") return;
+    stage("verify", "succeeded", "Tests pass.", stepStart, { approved: true, blocking: 0, total: 0, summary: "Tests pass." });
     return;
   }
   if (run.status === "escalated") {

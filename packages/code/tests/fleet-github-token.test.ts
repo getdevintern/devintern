@@ -131,6 +131,11 @@ describe("PR follow-up runs use the fixed team's credentials", () => {
       mkdirSync(path, { recursive: true });
       return path;
     },
+    ensurePrJobWorktree: async () => {
+      const path = join(workspaceDir, "pr-jobs");
+      mkdirSync(path, { recursive: true });
+      return path;
+    },
     createTaskWorktree: async () => workspaceDir,
     removeTaskWorktree: async () => {},
     sweepStaleWorktrees: async () => [],

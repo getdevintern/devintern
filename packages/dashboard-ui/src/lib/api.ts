@@ -605,7 +605,7 @@ export interface SourcesResponse {
 }
 
 /** Where a queued item came from. */
-export type QueuedWorkKind = "ad-hoc" | "retry" | "webhook" | "automation";
+export type QueuedWorkKind = "ad-hoc" | "retry" | "webhook" | "automation" | "pr-job";
 
 /** One pending item from `GET /api/queue`; running rows are active work instead. */
 export interface QueuedWorkItem {
@@ -633,6 +633,10 @@ export interface QueuedWorkItem {
   lastError?: string;
   /** Automation: the scheduled job waiting for a slot. */
   automationId?: string;
+  /** PR job: worker job kind (`conflict`, `auto_merge`, `review`, `ci_fix`). */
+  jobKind?: string;
+  /** PR job: blocked by another job on the same PR, the per-repo limit, or the global limit. */
+  waitingOn?: "exclusive" | "repo" | "global";
   /** Ad-hoc: task keys this task depends on. */
   dependsOn?: string[];
   /** Ad-hoc: `merged` (wait for merges) or `stacked` (branch from one unmerged dependency). */

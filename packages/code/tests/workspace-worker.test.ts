@@ -134,6 +134,13 @@ class FakeRepoManager implements RepoManagerLike {
     return path;
   }
 
+  async ensurePrJobWorktree(repo: RepoConfig): Promise<string> {
+    const path = join(this.root, "worktrees", repo.name, "pr-jobs");
+    mkdirSync(path, { recursive: true });
+    this.calls.push(`pr-jobs:${repo.name}`);
+    return path;
+  }
+
   async createTaskWorktree(repo: RepoConfig, taskKey: string): Promise<string> {
     const path = join(this.root, "worktrees", repo.name, taskKey.toLowerCase());
     mkdirSync(path, { recursive: true });

@@ -150,16 +150,16 @@ export interface UtilsSurface {
     worktreePath: string,
     options?: { verbose?: boolean; cwd?: string },
   ): Promise<{ success: boolean; error?: string }>;
-  pullReviewWorktreeBranch(worktreePath: string, branch: string, verbose: boolean): Promise<void>;
   prepareReviewWorktree(
     branch: string,
     options?: { verbose?: boolean; cwd?: string; installDependencies?: boolean },
-  ): Promise<{ success: boolean; path?: string; error?: string }>;
-  getReviewWorktreePath(branch?: string): string;
+  ): Promise<{ success: boolean; path?: string; error?: string; inUse?: boolean }>;
+  getReviewWorktreePath(branch?: string, gitCommonDir?: string): string;
   cleanupStaleReviewWorktrees(
     keepPath: string,
-    options?: { verbose?: boolean; cwd?: string },
+    options?: { verbose?: boolean; cwd?: string; idleCap?: number; now?: number },
   ): Promise<void>;
+  releaseReviewWorktree(worktreePath: string): void;
   isolateWorktreeHooks(worktreePath: string, options?: { verbose?: boolean }): Promise<void>;
   enableWorktreeConfig(cwd: string): Promise<{ success: boolean; output: string; error?: string }>;
   prepareWorktreeForAgent(

@@ -4,7 +4,7 @@ import type { PullRequestInfo } from "../code-host/github/reviews-types";
 import { GitLabReviewsClient } from "../code-host/gitlab/reviews";
 import { resolveGitLabCodeHostConfig } from "../code-host/index";
 import { GitHubAppAuth } from "../code-host/github/app-auth";
-import { Utils } from "../utils";
+import { setWorktreeGitIdentity } from "../utils/worktree-setup";
 
 /** State needed by the conflict workflow. */
 export interface ChangeRequestInfo {
@@ -90,8 +90,8 @@ export function createConflictChangeAdapter(
         if (appAuth) {
           try {
             const author = await appAuth.getGitAuthor();
-            await Utils.executeGitCommand(["config", "user.name", author.name], { cwd });
-            await Utils.executeGitCommand(["config", "user.email", author.email], { cwd });
+            // Per-worktree: parallel PR jobs share the repository config.
+            await setWorktreeGitIdentity(cwd, author);
           } catch {
             // Local git config applies.
           }

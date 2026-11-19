@@ -153,10 +153,14 @@ By default the worker runs one agent job at a time. To run independent jobs in p
 [workspace.execution]
 isolation = "best_effort_host"
 max_concurrency = 4              # all agent jobs across the workspace
-max_concurrency_per_repo = 1     # task worktrees per repository
+max_concurrency_per_repo = 1     # task and PR jobs per repository
 ```
 
-Raising either limit above 1 requires `isolation = "best_effort_host"`. This is **not an isolation boundary**: parallel jobs share the host's ports, processes, Docker daemon, caches, and agent quota, which can cause `EADDRINUSE`, port conflicts, and lock errors. Use it only for repositories whose tasks tolerate that. Reviews and CI fixes stay serialized per repository, and short PR jobs get slots before tasks.
+`max_concurrency_per_repo` limits how many jobs run at once on one repository. It covers task runs and PR jobs (review replies and mentions, conflict resolution, CI fixes, base syncs, and auto-merge checks) together, with one exception: one PR job per repository can always start, even while tasks use the whole limit, so PR feedback never waits for a long task. Each PR job runs in its own worktree, so jobs for different PRs on one repository can run in parallel. Jobs on the same PR always run one after another. Automations use the repository's base checkout instead: one automation runs per repository at a time, it does not count against `max_concurrency_per_repo`, and it runs alongside task and PR jobs. Short PR jobs get free slots before tasks.
+
+Raising either limit above 1 requires `isolation = "best_effort_host"`. This is **not an isolation boundary**: parallel jobs share the host's ports, processes, Docker daemon, caches, and agent quota, which can cause `EADDRINUSE`, port conflicts, and lock errors. Every parallel PR worktree also installs its own dependencies, which uses more disk and install time. Use it only for repositories whose tasks tolerate that.
+
+The worker keeps idle PR worktrees for reuse, at most `max_concurrency_per_repo` (minimum 2) per repository, and removes any that have been unused for 24 hours. Worktrees of running jobs are never removed. Each repository gets its own worktree per branch, so repositories that use the same branch name never share one. Two open PRs from the same head branch in one repository do share a worktree. If both need work at the same moment, the second job is deferred without a PR comment and runs on a later pass.
 
 ## Environment
 
