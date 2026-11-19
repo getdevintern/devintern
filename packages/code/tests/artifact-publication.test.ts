@@ -54,6 +54,38 @@ describe("artifact publication policy", () => {
     expect(comment.body).toContain("execution 2");
     expect(comment.body).toStartWith(ARTIFACT_COMMENT_MARKER);
   });
+  test("omits optional selections that were not captured", async () => {
+    await capture("present");
+    const select = (optional?: boolean): ArtifactPolicy => ({
+      publish: {
+        destination: "pr-comment",
+        select: [
+          {
+            key: "screenshot",
+            presentation: "embed",
+            ...(optional === undefined ? {} : { optional }),
+          },
+          { key: "explanation", presentation: "inline", optional: true },
+        ],
+      },
+    });
+    const required = buildArtifactComment(registry, select())!.body;
+    expect(required).toContain("### screenshot");
+    expect(required).toContain("Not captured.");
+    const optional = buildArtifactComment(registry, select(true))!.body;
+    expect(optional).not.toContain("screenshot");
+    expect(optional).not.toContain("Not captured.");
+    expect(optional).toContain("present");
+    expect(() => validateArtifactPolicy(select(true))).not.toThrow();
+    expect(() =>
+      validateArtifactPolicy({
+        publish: {
+          destination: "pr-comment",
+          select: [{ key: "x", presentation: "embed", optional: "yes" as unknown as boolean }],
+        },
+      }),
+    ).toThrow("Invalid artifact publication selection");
+  });
   test("validates policies before execution", () => {
     expect(() => validateArtifactPolicy(policy)).not.toThrow();
     expect(() =>

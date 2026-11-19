@@ -59,6 +59,8 @@ Publication is off by default. Add an `artifacts` block next to `steps` and `plu
 | `embed`      | An image from its uploaded URL.                             | Yes               |
 | `link`       | A link to the uploaded file.                                | Yes               |
 
+Add `"optional": true` to a selection when its step captures only on some runs, such as screenshots taken only for UI changes. If nothing was captured under that key, its section is left out of the comment instead of reading "Not captured."
+
 `finalize` posts the latest snapshot of each selected key to one managed **Artifacts & verification** comment (a note on GitLab merge requests) and updates it on later runs, including on PRs and MRs that already existed. It only updates a marked comment written by the same account, and never edits human comments or the PR/MR description. Long comments drop whole sections rather than cutting them mid-way, and missing artifacts, missing upload URLs, and upload failures are noted in the comment. Publication problems are warnings and do not fail the run. Bitbucket comment publication is not supported yet; artifacts are still captured and visible in the dashboard.
 
 ### Reference artifacts from Markdown
