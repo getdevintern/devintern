@@ -26,6 +26,7 @@ const KIND_LABELS: Record<QueuedWorkKind, string> = {
   webhook: "PR event",
   automation: "Automation",
   "pr-job": "PR job",
+  tracker: "Tracker ticket",
 };
 
 /** Whether the item is backing off and cannot be picked up yet. */

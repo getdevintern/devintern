@@ -26,7 +26,7 @@
  * safe default.
  */
 
-import { isBlockedOutcomeReason } from "../agent/implementation-outcome";
+import { isBlockedOutcomeReason, isPrDeliveryFailedReason } from "../agent/implementation-outcome";
 import type { RunRecord, RunStatus, RunStore, StageStatus } from "./run-recorder";
 
 /** Terminal statuses whose runs are candidates for pickup. */
@@ -414,6 +414,13 @@ export async function resolveSessionPickup(
   // next attempt starts fresh, exactly as it did when such runs succeeded.
   if (run.status === "escalated" && isBlockedOutcomeReason(run.outcomeReason)) {
     return { kind: "fresh", reason: "prior run reported its goal as blocked" };
+  }
+  // A run that pushed its branch but could not open the PR finished its agent
+  // work; the delivery failure (code host, token, config) is outside the code.
+  // Its re-run starts a fresh session, exactly as it did when such runs were
+  // recorded succeeded.
+  if (run.status === "failed" && isPrDeliveryFailedReason(run.outcomeReason)) {
+    return { kind: "fresh", reason: "prior run failed only at PR creation" };
   }
 
   const branch = run.branch?.trim();

@@ -4,6 +4,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 
 import {
+  deliveryRunDisposition,
   OUTCOME_REASON_MAX_LENGTH,
   outcomeRunDisposition,
   parseImplementationOutcome,
@@ -138,6 +139,50 @@ describe("outcomeRunDisposition", () => {
     expect(outcomeRunDisposition({ status: "done" })).toEqual({ status: "succeeded" });
     expect(outcomeRunDisposition({ status: "noop", reason: "green" })).toEqual({
       status: "succeeded",
+    });
+  });
+});
+
+describe("deliveryRunDisposition", () => {
+  const notFound = "GitHub PR creation failed: Not Found";
+
+  test("a run with no PR failure keeps its outcome disposition", () => {
+    // --no-git, no --create-pr, or a PR that was created: still a success.
+    expect(deliveryRunDisposition({ status: "succeeded" }, undefined)).toEqual({
+      status: "succeeded",
+    });
+    expect(
+      deliveryRunDisposition(
+        outcomeRunDisposition({ status: "partial", reason: "half" }),
+        undefined,
+      ),
+    ).toEqual({ status: "succeeded", reason: "partial: half" });
+  });
+
+  test("pushed but PR creation failed records a failed run with the PR message", () => {
+    expect(deliveryRunDisposition(outcomeRunDisposition(undefined), notFound)).toEqual({
+      status: "failed",
+      reason: `pushed but PR creation failed: ${notFound}`,
+    });
+    expect(
+      deliveryRunDisposition(
+        outcomeRunDisposition({ status: "partial", reason: "half" }),
+        "GitHub PR creation failed: Bad Gateway",
+      ),
+    ).toEqual({
+      status: "failed",
+      reason: "pushed but PR creation failed: GitHub PR creation failed: Bad Gateway",
+    });
+  });
+
+  test("a blocked run stays escalated and also names the PR failure", () => {
+    const disposition = deliveryRunDisposition(
+      outcomeRunDisposition({ status: "blocked", reason: "gate failed" }),
+      notFound,
+    );
+    expect(disposition).toEqual({
+      status: "escalated",
+      reason: `blocked: gate failed; pushed but PR creation failed: ${notFound}`,
     });
   });
 });

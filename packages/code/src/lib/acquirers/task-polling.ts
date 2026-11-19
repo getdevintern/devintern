@@ -50,6 +50,14 @@ export interface ReadyTask {
  */
 export type TaskExecutionResult = boolean | "deferred" | "skipped" | "interrupted";
 
+/**
+ * Outcome of a polled task execution: a {@link TaskExecutionResult}, or
+ * `"waiting"` when the dependency gate held the ticket back on its blockers
+ * without starting anything, so it is re-evaluated on every poll until they
+ * are satisfied. Only the fleet executor's gated path produces `"waiting"`.
+ */
+export type TaskPollOutcome = TaskExecutionResult | "waiting";
+
 /** Dedupe key for a ready task: one execution per `(key, update stamp)`. */
 export function processedTaskId(task: ReadyTask): string {
   return `task:${task.key}:${task.updated?.trim() ?? ""}`;
@@ -91,7 +99,7 @@ export interface TaskPollingAcquirerOptions {
   /** Evaluate step: run the user's query (injected for tests). */
   searchTasks: (query: string) => Promise<{ tasks: ReadyTask[] }>;
   /** Execute step: process, fail, or defer one ready task (injected for tests). */
-  executeTask: (taskKey: string) => Promise<TaskExecutionResult>;
+  executeTask: (taskKey: string) => Promise<TaskPollOutcome>;
   /**
    * Actioned gate: `true` when the task already produced a PR and has not
    * changed since, so it must not be re-implemented even though it still
@@ -120,7 +128,22 @@ export interface TaskPollingAcquirerOptions {
    * limit clears. Wired to the worker failover state; omitted in focused tests.
    */
   harnessBlockedUntil?: () => number | undefined;
+  /** Clock for the waiting re-check backoff (injected for tests). */
+  now?: () => number;
   verbose?: boolean;
+}
+
+/** Longest gap between re-checks of a ticket its blockers keep holding back. */
+export const WAITING_RECHECK_MAX_MS = 15 * 60_000;
+
+/**
+ * Delay before re-checking a ticket the gate held back `waits` times in a row
+ * with the same update stamp: the next poll after the first wait, then one
+ * interval, doubling up to {@link WAITING_RECHECK_MAX_MS}.
+ */
+export function waitingRecheckDelayMs(waits: number, intervalSeconds: number): number {
+  if (waits <= 1) return 0;
+  return Math.min(intervalSeconds * 1000 * 2 ** (waits - 2), WAITING_RECHECK_MAX_MS);
 }
 
 /** Default CLI flags the worker passes to each task run. */
@@ -247,6 +270,16 @@ export class TaskPollingAcquirer implements Acquirer {
    * settles still replays the re-admission on restart.
    */
   private readonly pendingRescans = new Map<string, string>();
+  /**
+   * Keys the dependency gate held back on their last pickup, with the stamp it
+   * saw, how many times in a row, and when the next re-check is due. Without
+   * the backoff every waiting ticket would force a tracker search plus one
+   * blocker read per tick. A new stamp (the ticket changed) re-checks at once.
+   */
+  private readonly waitingKeys = new Map<
+    string,
+    { externalId: string; waits: number; nextCheckAt: number }
+  >();
   private readonly gateErrors = new Set<string>();
   /** Resume time of the harness-chain pause last logged, so it is logged once. */
   private pausedUntil: number | undefined;
@@ -346,8 +379,8 @@ export class TaskPollingAcquirer implements Acquirer {
       // A task edited mid-run or deferred keeps a pending stamp. Re-evaluate
       // once its run has settled — not on every tick — so the cursor can
       // advance while the potentially many-minute agent run is still in flight.
-      const hasReadyPending = [...this.pendingRescans.keys()].some(
-        (key) => !this.inFlightKeys.has(key),
+      const hasReadyPending = [...this.pendingRescans.keys()].some((key) =>
+        this.pendingReady(key, this.now()),
       );
 
       if (detection.changed || hasReadyPending) {
@@ -355,6 +388,8 @@ export class TaskPollingAcquirer implements Acquirer {
         const skipped: string[] = [];
         const actionedSkips: string[] = [];
         const missingStamp: string[] = [];
+        /** Held-back keys whose backoff has not elapsed: kept pending, not re-gated. */
+        const backedOff = new Set<string>();
         let pickedUp = 0;
 
         // Resolve the actioned gate for every candidate before claiming any:
@@ -378,6 +413,10 @@ export class TaskPollingAcquirer implements Acquirer {
             skipped.push(task.key);
             continue;
           }
+          if (this.waitingNotDue(task.key, externalId, this.now())) {
+            backedOff.add(task.key);
+            continue;
+          }
           if (this.inFlightKeys.has(task.key)) {
             // The same task is still running (it was edited mid-run). Advance
             // the cursor past the edit instead of holding it, and persist the
@@ -396,12 +435,17 @@ export class TaskPollingAcquirer implements Acquirer {
           queue.markProcessed(detector.source, externalId);
 
           pickedUp++;
-          console.log(`\n📌 [${this.name}] picking up ${task.key}`);
+          // A ticket the dependency gate keeps holding back is re-checked every
+          // tick; announce only its first pickup (the gate logs verdict changes).
+          if (!this.waitingKeys.has(task.key)) {
+            console.log(`\n📌 [${this.name}] picking up ${task.key}`);
+          }
           this.inFlightKeys.add(task.key);
           executions.push(
             (async () => {
               try {
                 const result = await executeTask(task.key);
+                this.trackWaiting(task.key, externalId, result === "waiting", this.now());
                 if (result === "deferred") {
                   // The task never started. Release the provisional claim and
                   // track the key explicitly so the same tracker change is
@@ -413,6 +457,13 @@ export class TaskPollingAcquirer implements Acquirer {
                   this.rememberPendingRescan(detector.source, task.key, externalId);
                   tickDeferred = true;
                   console.log(`⏳ [${this.name}] ${task.key} deferred; will retry next poll`);
+                } else if (result === "waiting") {
+                  // Held back by its blockers (the gate logged why). Unlike a
+                  // deferral the cursor stays put: nothing about the ticket
+                  // changed, so only this key is re-admitted on the next tick,
+                  // which re-runs the gate.
+                  queue.unmarkProcessed(detector.source, externalId);
+                  this.rememberPendingRescan(detector.source, task.key, externalId);
                 } else if (result === "skipped") {
                   // The retry gate skipped an unchanged incomplete ticket. This
                   // is not a run: report it as skipped, and keep the dedupe
@@ -447,7 +498,7 @@ export class TaskPollingAcquirer implements Acquirer {
         // re-evaluations forever.
         let droppedPending = false;
         for (const key of Array.from(this.pendingRescans.keys())) {
-          if (!this.inFlightKeys.has(key)) {
+          if (!this.inFlightKeys.has(key) && !backedOff.has(key)) {
             this.pendingRescans.delete(key);
             droppedPending = true;
           }
@@ -455,6 +506,7 @@ export class TaskPollingAcquirer implements Acquirer {
         if (droppedPending) {
           this.persistPendingRescans(detector.source);
         }
+        this.pruneWaiting(tasks);
       }
     } catch (error) {
       // Detection, evaluation, or claim failed partway: do not advance the
@@ -591,6 +643,50 @@ export class TaskPollingAcquirer implements Acquirer {
       console.log(`▶️  [${this.name}] pickup resumed: an agent harness is available again`);
     }
     return false;
+  }
+
+  /** Clock for the waiting re-check backoff. */
+  private now(): number {
+    return (this.options.now ?? Date.now)();
+  }
+
+  /** A pending re-admission is ready once its run settled and any wait backoff elapsed. */
+  private pendingReady(key: string, now: number): boolean {
+    return !this.inFlightKeys.has(key) && !this.waitingNotDue(key, undefined, now);
+  }
+
+  /** Record a pickup's gate outcome for the waiting re-check backoff. */
+  private trackWaiting(key: string, externalId: string, waiting: boolean, now: number): void {
+    if (!waiting) {
+      this.waitingKeys.delete(key);
+      return;
+    }
+    const previous = this.waitingKeys.get(key);
+    const waits = previous?.externalId === externalId ? previous.waits + 1 : 1;
+    this.waitingKeys.set(key, {
+      externalId,
+      waits,
+      nextCheckAt: now + waitingRecheckDelayMs(waits, this.options.intervalSeconds),
+    });
+  }
+
+  /** A held-back ticket the search no longer returns starts afresh. */
+  private pruneWaiting(tasks: readonly ReadyTask[]): void {
+    const returned = new Set(tasks.map((task) => task.key));
+    for (const key of Array.from(this.waitingKeys.keys())) {
+      if (!returned.has(key) && !this.inFlightKeys.has(key)) this.waitingKeys.delete(key);
+    }
+  }
+
+  /**
+   * Whether a held-back key's re-check backoff has not elapsed yet. With an
+   * `externalId`, a different stamp (the ticket changed) is always due.
+   */
+  private waitingNotDue(key: string, externalId: string | undefined, now: number): boolean {
+    const waiting = this.waitingKeys.get(key);
+    if (!waiting) return false;
+    if (externalId !== undefined && waiting.externalId !== externalId) return false;
+    return now < waiting.nextCheckAt;
   }
 
   private resolveQuery(): string | undefined {

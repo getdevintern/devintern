@@ -59,6 +59,16 @@ export interface TrelloCardDetail extends TrelloCard {
   shortUrl: string;
 }
 
+/** Where a card sits: archived or not, and the name of its list. */
+export interface TrelloCardStatus {
+  id: string;
+  shortLink: string;
+  /** Archived. */
+  closed: boolean;
+  /** Name of the card's list, when Trello returned it. */
+  listName?: string;
+}
+
 export interface TrelloAction {
   id: string;
   type: string;
@@ -378,6 +388,40 @@ export class TrelloClient {
       board: "true",
       board_fields: "id,shortLink",
     } as Record<string, string>);
+  }
+
+  /**
+   * Fetch a card's archived flag and list name.
+   *
+   * @param cardIdOrShortLink - Card ID, short link, or card URL.
+   * @returns Card status, or `null` when the card does not exist (Trello
+   *   answers 404, or 400 `invalid id` for a malformed one).
+   * @throws When the Trello API request fails for another reason.
+   */
+  async getCardStatus(cardIdOrShortLink: string): Promise<TrelloCardStatus | null> {
+    const cardId = encodeURIComponent(this.normalizeCardId(cardIdOrShortLink));
+    let card: {
+      id: string;
+      shortLink: string;
+      closed?: boolean;
+      list?: { name?: string } | null;
+    };
+    try {
+      card = await this.request(
+        `/cards/${cardId}?fields=id,shortLink,closed&list=true&list_fields=name`,
+      );
+    } catch (error) {
+      if (error instanceof Error && /^Trello API error \((?:400|404)\)/.test(error.message)) {
+        return null;
+      }
+      throw error;
+    }
+    return {
+      id: card.id,
+      shortLink: card.shortLink,
+      closed: card.closed === true,
+      ...(card.list?.name ? { listName: card.list.name } : {}),
+    };
   }
 
   /**

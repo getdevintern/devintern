@@ -10,7 +10,8 @@ import type {
 import type { ChangeDetector } from "../acquirers/change-detector";
 import type { TeamConfig, WorkspaceConfig } from "./config";
 import { buildFleetEventEnv, gitHubSlugFromRemote } from "./env";
-import { createFleetTaskExecutor, resolveActionedSource } from "./fleet-executor";
+import { createGatedFleetTaskExecutor, resolveActionedSource } from "./fleet-executor";
+import type { TrackerDependencyGate } from "./tracker-dependency-gate";
 import { assertTeamPrSyncSandbox, teamPrSyncSlugs } from "./team-pr-sync";
 import type { FleetTask, RepoManagerLike } from "./fleet-executor";
 import type { openWorkspaceState } from "./state";
@@ -65,6 +66,11 @@ export interface FleetSourceRuntime {
    * focused-test paths.
    */
   isTaskActionedUnchanged?: (taskKey: string, updated?: string) => Promise<boolean>;
+  /**
+   * Native-blocker gate shared with the polling acquirer, so a relayed
+   * `task.changed` cannot start a ticket its blockers still hold back.
+   */
+  dependencyGate?: TrackerDependencyGate;
 }
 
 /**
@@ -262,6 +268,39 @@ async function buildAutoMergeWatcher(params: {
 }
 
 /**
+ * Read a branch's tip SHA through the repo's GitHub client; null when the
+ * branch (or repo access) is missing or the response has another shape.
+ */
+function branchHeadShaFetcher(
+  gh: (slug: string) => FleetGitHubClient,
+  isNotFound: (error: unknown) => boolean,
+): (repo: string, branch: string) => Promise<string | null> {
+  return async (repo, branch) => {
+    const [owner = "", name = ""] = repo.split("/");
+    const path = branch.split("/").map(encodeURIComponent).join("/");
+    try {
+      const result = await gh(repo).conditionalGet<unknown>(
+        `/repos/${repo}/git/ref/heads/${path}`,
+        owner,
+        name,
+      );
+      return parseRefSha(result.data);
+    } catch (error) {
+      if (isNotFound(error)) return null;
+      throw error;
+    }
+  };
+}
+
+/** Commit SHA from a GitHub `git/ref` response; null for any other shape. */
+function parseRefSha(data: unknown): string | null {
+  if (typeof data !== "object" || data === null || !("object" in data)) return null;
+  const target = data.object;
+  if (typeof target !== "object" || target === null || !("sha" in target)) return null;
+  return typeof target.sha === "string" && target.sha ? target.sha : null;
+}
+
+/**
  * Wire the fleet's event acquirers: review polling on the agent's own PRs,
  * a mention sweep per GitHub repo, and the relay when configured.
  *
@@ -296,7 +335,7 @@ export async function buildFleetEventAcquirers(options: {
   const taskSources: Array<
     Pick<
       FleetSourceRuntime,
-      "tracker" | "team" | "query" | "searchTasks" | "isTaskActionedUnchanged"
+      "tracker" | "team" | "query" | "searchTasks" | "isTaskActionedUnchanged" | "dependencyGate"
     >
   > =
     options.sources ??
@@ -455,6 +494,7 @@ export async function buildFleetEventAcquirers(options: {
           );
           return result.data ?? [];
         },
+        fetchBranchHeadSha: branchHeadShaFetcher(gh, isGitHubNotFound),
         listOpenPullRequests: async (repo, etag) => {
           try {
             return await gh(repo).conditionalGet(
@@ -666,7 +706,7 @@ export async function buildFleetEventAcquirers(options: {
       const { RelayAcquirer } = await import("../relay/acquirer");
       const { botMentionCandidates, mentionsAnyBot } = await import("../acquirers/mention-sweep");
       const relayTaskSources = taskSources.map((source) => {
-        const execute = createFleetTaskExecutor(
+        const execute = createGatedFleetTaskExecutor(
           {
             config,
             workspaceDir,
@@ -680,6 +720,7 @@ export async function buildFleetEventAcquirers(options: {
             source: source.team
               ? `relay:${source.tracker}:${source.team.name}`
               : `relay:${source.tracker}`,
+            dependencyGate: source.dependencyGate,
           },
         );
         return {

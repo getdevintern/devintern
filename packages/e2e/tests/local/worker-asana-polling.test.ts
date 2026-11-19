@@ -118,17 +118,25 @@ async function waitForSyncRequest(
   predicate: (request: FakeAsanaSyncRequest) => boolean,
   timeoutMs = 20_000,
 ): Promise<{ request: FakeAsanaSyncRequest; index: number }> {
-  return await worker.waitFor(
-    label,
-    () => {
-      for (let index = from; index < tracker.syncRequests.length; index++) {
-        const request = tracker.syncRequests[index]!;
-        if (predicate(request)) return { request, index };
-      }
-      return undefined;
-    },
-    timeoutMs,
-  );
+  try {
+    return await worker.waitFor(
+      label,
+      () => {
+        for (let index = from; index < tracker.syncRequests.length; index++) {
+          const request = tracker.syncRequests[index]!;
+          if (predicate(request)) return { request, index };
+        }
+        return undefined;
+      },
+      timeoutMs,
+    );
+  } catch (error) {
+    // The timeout alone only carries the daemon tail; the sync requests and
+    // event log show whether polling stalled or the page never came.
+    throw new Error(
+      `${(error as Error).message}\n${diagnostics(worker, tracker, `after request #${from}`)}`,
+    );
+  }
 }
 
 /**

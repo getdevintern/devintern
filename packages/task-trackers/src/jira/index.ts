@@ -1,10 +1,12 @@
 export {
   convertADFToMarkdown,
+  extractIssueBlockers,
   extractLinkedResources,
   extractTextFromADF,
   formatIssueDetails,
   getRelatedWorkItems,
 } from "./issue-utils.ts";
+export type { JiraIssueBlocker } from "./issue-utils.ts";
 
 export type {
   AtlassianDocument,
