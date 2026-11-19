@@ -42,6 +42,8 @@ export interface ArtifactRegistry {
 export interface ArtifactSelection {
   key: string;
   presentation: "inline" | "collapsed" | "embed" | "link";
+  /** Omit the section entirely when no artifact with this key was captured (instead of "Not captured."). */
+  optional?: boolean;
 }
 
 export interface ArtifactPolicy {

@@ -33,7 +33,8 @@ export function validateArtifactPolicy(policy: ArtifactPolicy | undefined): void
       !selection ||
       typeof selection.key !== "string" ||
       !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(selection.key) ||
-      !["inline", "collapsed", "embed", "link"].includes(selection.presentation)
+      !["inline", "collapsed", "embed", "link"].includes(selection.presentation) ||
+      (selection.optional !== undefined && typeof selection.optional !== "boolean")
     )
       throw new Error("Invalid artifact publication selection");
     if (keys.has(selection.key))
@@ -103,6 +104,8 @@ export function buildArtifactComment(
   ];
   for (const selection of policy.publish.select) {
     const artifact = artifacts.find((entry) => entry.key === selection.key);
+    // Conditional steps (e.g. screenshots only for UI changes) select keys that most runs never capture.
+    if (!artifact && selection.optional) continue;
     const title = artifact?.title ?? selection.key;
     const section = [`### ${title}`, ""];
     if (!artifact) {
