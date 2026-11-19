@@ -247,10 +247,7 @@ export function Timeline({
   return (
     <section aria-labelledby="rd-timeline-heading">
       <div className={cn("flex items-center gap-3", tight ? "mb-1.5" : "mb-3")}>
-        <h3
-          id="rd-timeline-heading"
-          className={tight ? "text-xs font-medium text-subtle-foreground" : "section-title"}
-        >
+        <h3 id="rd-timeline-heading" className="section-title">
           Timeline
         </h3>
         {expandableIds.length > 0 ? (

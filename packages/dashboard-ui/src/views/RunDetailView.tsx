@@ -194,7 +194,11 @@ function ResultSection({
           <div
             ref={bodyRef}
             id="rd-result-body"
-            className={cn("min-w-0 overflow-hidden", leadsHeadline && "sm:pl-[26px]")}
+            className={cn(
+              "min-w-0 overflow-hidden",
+              "[overflow-wrap:anywhere] [&_pre]:[overflow-wrap:normal]",
+              leadsHeadline && "sm:pl-[26px]",
+            )}
             style={clamped ? { maxHeight: RESULT_COLLAPSED_PX } : undefined}
           >
             <Markdown>{body}</Markdown>
@@ -233,7 +237,10 @@ function ResultSection({
         </div>
       ) : null}
       {report.briefing && briefingOpen ? (
-        <div id="rd-result-briefing" className="mt-3">
+        <div
+          id="rd-result-briefing"
+          className="mt-3 min-w-0 [overflow-wrap:anywhere] [&_pre]:[overflow-wrap:normal]"
+        >
           <Markdown>{report.briefing}</Markdown>
         </div>
       ) : null}
@@ -408,7 +415,7 @@ function RunHeader({
   return (
     <header className="space-y-4">
       <div className="flex flex-wrap items-start gap-x-6 gap-y-2">
-        <div className="min-w-0 flex-1 basis-80">
+        <div className="min-w-0 flex-1 basis-52 sm:basis-80">
           <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
             <h2 className="text-xl font-semibold tracking-tight [overflow-wrap:anywhere]">
               {/* Same label rule as the runs list; PR-affected runs link
@@ -427,7 +434,7 @@ function RunHeader({
             <p className="mt-1.5 max-w-[72ch] text-[0.9375rem] text-muted-foreground">{title}</p>
           ) : null}
         </div>
-        <div className="flex flex-wrap items-center gap-2 max-sm:[&>:only-child]:-ml-3">
+        <div className="flex flex-wrap items-center gap-2">
           {data.retry.eligible && !confirming ? (
             <Button
               onClick={() => {

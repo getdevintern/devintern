@@ -14,7 +14,7 @@ import type { HarnessLogGroup } from "@/lib/harness-log-groups";
 import { Markdown } from "@/lib/markdown";
 import { formatRunOriginLabel } from "@/lib/run-origin";
 import { formatTime } from "@/lib/utils";
-import { formatBytes, formatStageLabel, runTitle } from "./helpers";
+import { formatBytes, formatStageLabel, runTitle, taskTabLabel } from "./helpers";
 
 type RowFetch<T> = {
   open: boolean;
@@ -296,7 +296,7 @@ export function Reference({
 }) {
   const tabs: { id: TabId; label: string; count?: number }[] = [];
   if (run.taskKey || run.ticketUrl) {
-    tabs.push({ id: "task", label: "Task description" });
+    tabs.push({ id: "task", label: taskTabLabel(run.origin) });
   }
   if (logs.length > 0) {
     tabs.push({ id: "transcripts", label: "Transcripts", count: logs.length });
