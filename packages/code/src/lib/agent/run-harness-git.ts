@@ -204,8 +204,10 @@ export function createGitHelpers(ctx: FinalizeContext) {
     message: string,
     options: { branch?: string; permanent?: boolean } = {},
   ) => {
-    // Always on the run record (permanent or not): a succeeded run without a
-    // PR must not read as "nothing to deliver" to a dependent task's gate.
+    // Always on the run record (permanent or not): positive evidence for the
+    // dashboard that this run asked for a PR and did not get one (so its branch
+    // is worth re-queueing), and a succeeded run without a PR must not read as
+    // "nothing to deliver" to a dependent task's gate.
     recordRunPrFailure(message);
     if (runContext.activeTaskContext) {
       runContext.activeTaskContext.prDeliveryFailure = {
