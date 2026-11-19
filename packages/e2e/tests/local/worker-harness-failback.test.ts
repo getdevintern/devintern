@@ -10,16 +10,16 @@
  */
 
 import { expect, test } from "bun:test";
-import { existsSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   configureFailover,
   createDelegateStub,
   invocationCount,
+  settleInjectedTask as settle,
+  stubDiagnostics,
 } from "../../helpers/harness-stubs";
-import type { FailoverStubs } from "../../helpers/harness-stubs";
 import { cliPath, WorkerFixture } from "../../helpers/worker";
-import type { WorkerInjectedTask } from "../../helpers/worker";
 
 const cliTest = test.skipIf(!existsSync(cliPath));
 
@@ -29,42 +29,6 @@ const cliTest = test.skipIf(!existsSync(cliPath));
  * the limit instead of an hour later.
  */
 const SHORT_RESET = "resets in 4 seconds";
-
-/** Run one injected task to settlement and return its run statuses. */
-async function settle(
-  worker: WorkerFixture,
-  task: WorkerInjectedTask,
-  diagnostics: () => string,
-): Promise<string[]> {
-  const { task: settled, runs } = await worker.waitForSettled(task.id);
-  const detail = () =>
-    [
-      `injected task #${task.id} (${task.task_key}) settled as "${settled.status}": ${
-        settled.message ?? "no message"
-      }`,
-      `runs: ${JSON.stringify(runs)}`,
-      diagnostics(),
-    ].join("\n");
-  expect(settled.status, detail()).toBe("done");
-  return runs.map((run) => run.status);
-}
-
-/** Stub invocation counts plus the daemon tail, for assertion messages. */
-function stubDiagnostics(
-  worker: WorkerFixture,
-  stubs: FailoverStubs,
-  extra: () => string[] = () => [],
-) {
-  return () =>
-    [
-      `primary invocations: ${invocationCount(stubs.primaryInvocations)}`,
-      `fallback invocations: ${invocationCount(stubs.fallbackInvocations)}`,
-      ...extra(),
-      `rate limits: ${JSON.stringify(worker.rateLimits())}`,
-      `active harness: ${worker.activeHarness() ?? "unset"}`,
-      worker.tail(),
-    ].join("\n");
-}
 
 cliTest(
   "worker fails back to the primary harness once its usage-limit window elapses",
@@ -241,5 +205,80 @@ cliTest(
       await worker.dispose();
     }
   },
+  200_000,
+);
+
+cliTest(
+  "a failback while a task runs on the fallback lets that run finish there and moves the next task to the primary",
+  async () => {
+    const worker = new WorkerFixture();
+    try {
+      await worker.prepare();
+      const stubs = configureFailover(worker, {
+        primary: "limit-once",
+        primaryResetHint: SHORT_RESET,
+        fallback: "gated",
+      });
+      const diagnostics = stubDiagnostics(worker, stubs);
+      const first = await worker.addTask({
+        title: "Stay on the fallback through a failback",
+        body: "Change the greeting to Hello, world! and run bun test.",
+      });
+
+      worker.start();
+      await worker.waitForReady();
+      // The primary limits once; the retry spawns codex, which blocks on the gate.
+      await worker.waitFor("the fallback run to start", () =>
+        invocationCount(stubs.fallbackInvocations) === 1 ? true : undefined,
+      );
+
+      // The primary's short window elapses while the codex run is still held.
+      await worker.waitForOutput(
+        /usage-limit window elapsed — failing back to primary harness claude-code \(from codex\)/,
+        20_000,
+        "the failback log line",
+      );
+      await worker.waitFor("the primary to be persisted as active again", () =>
+        worker.activeHarness() === "claude-code" && worker.rateLimits()["claude-code"] === undefined
+          ? true
+          : undefined,
+      );
+
+      // Failback only changed the selection for future spawns: the task is
+      // still running on codex and nothing was spawned on the primary.
+      expect(worker.injectedTask(first.id)?.status, diagnostics()).toBe("running");
+      expect(invocationCount(stubs.primaryInvocations), diagnostics()).toBe(1);
+      expect(invocationCount(stubs.fallbackInvocations), diagnostics()).toBe(1);
+
+      writeFileSync(stubs.fallbackGate, "");
+      expect(await settle(worker, first, diagnostics), diagnostics()).toEqual([
+        "deferred",
+        "succeeded",
+      ]);
+      // The in-flight run finished where it started: one codex spawn, no
+      // second primary spawn for this task, one agent run, one success record.
+      expect(invocationCount(stubs.primaryInvocations), diagnostics()).toBe(1);
+      expect(invocationCount(stubs.fallbackInvocations), diagnostics()).toBe(1);
+      expect(worker.agentInvocations(), diagnostics()).toEqual([{ mode: "implement" }]);
+      // The daemon switched harness once (the failover), never mid-run.
+      expect(worker.logs.split("failing over to").length - 1, diagnostics()).toBe(1);
+      expect(worker.activeHarness(), diagnostics()).toBe("claude-code");
+
+      // The next task runs on the primary in one attempt.
+      const second = await worker.addTask({
+        title: "Run on the primary after a mid-run failback",
+        body: "Change the greeting to Hello, world! and run bun test.",
+      });
+      expect(await settle(worker, second, diagnostics), diagnostics()).toEqual(["succeeded"]);
+      expect(invocationCount(stubs.primaryInvocations), diagnostics()).toBe(2);
+      expect(invocationCount(stubs.fallbackInvocations), diagnostics()).toBe(1);
+      expect(worker.activeHarness(), diagnostics()).toBe("claude-code");
+      expect(worker.rateLimits(), diagnostics()).toEqual({});
+      expect(worker.running, diagnostics()).toBe(true);
+    } finally {
+      await worker.dispose();
+    }
+  },
+  // prepare + 20s readiness + 30s start wait + 20s failback wait + two 45s settles + 30s stop.
   200_000,
 );
