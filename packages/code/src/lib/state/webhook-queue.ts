@@ -85,6 +85,13 @@ export interface BaseSyncEvent {
    * backoff.
    */
   updatedAt: number;
+  /** Times this event was revived after exhausting, because its base branch moved. */
+  revivals: number;
+  /**
+   * Base branch tip last recorded for an exhausted event (when first seen
+   * exhausted, then at each revival); a different tip means the base moved.
+   */
+  reviveBaseTip?: string;
 }
 
 const WEBHOOK_EVENT_STATUSES = [
@@ -285,6 +292,22 @@ export class WebhookQueue {
         updated_at INTEGER NOT NULL
       )
     `);
+    // Columns added after the table shipped (base-sync revival).
+    const columnsContext = "PRAGMA table_info(base_sync_events)";
+    const baseSyncColumns = new Set(
+      this.db
+        .query(columnsContext)
+        .all()
+        .map((column) =>
+          requireString(parseRowObject(column, columnsContext), "name", columnsContext),
+        ),
+    );
+    if (!baseSyncColumns.has("revivals")) {
+      this.db.run("ALTER TABLE base_sync_events ADD COLUMN revivals INTEGER NOT NULL DEFAULT 0");
+    }
+    if (!baseSyncColumns.has("revive_base_tip")) {
+      this.db.run("ALTER TABLE base_sync_events ADD COLUMN revive_base_tip TEXT");
+    }
 
     if (this.verbose) {
       console.log("[WebhookQueue] Database initialized");
@@ -707,6 +730,37 @@ export class WebhookQueue {
     })();
   }
 
+  /** Record the base branch tip seen for an exhausted event that has none yet. */
+  noteBaseSyncBaseTip(externalId: string, baseTip: string): void {
+    this.db.run(
+      `UPDATE base_sync_events SET revive_base_tip = ?
+       WHERE external_id = ? AND status = 'failed' AND revive_base_tip IS NULL`,
+      [baseTip, externalId],
+    );
+  }
+
+  /**
+   * Give an exhausted event one more attempt because its base branch moved to
+   * `baseTip`: back to pending with a single attempt left, so one more failure
+   * exhausts it again. `updated_at` is left alone (the last failure stays the
+   * backoff and cooldown anchor), and the dedupe key is withdrawn.
+   */
+  reviveBaseSyncEvent(source: string, externalId: string, baseTip: string): void {
+    this.db.transaction(() => {
+      this.db.run(
+        `UPDATE base_sync_events
+         SET status = 'pending', attempts = ?, last_error = NULL,
+             revivals = revivals + 1, revive_base_tip = ?
+         WHERE external_id = ? AND status = 'failed'`,
+        [Math.max(0, this.maxRetries - 1), baseTip, externalId],
+      );
+      this.db.run(`DELETE FROM processed_events WHERE source = ? AND external_id = ?`, [
+        source,
+        externalId,
+      ]);
+    })();
+  }
+
   /** Explicit operator retry for an exhausted base-SHA event. */
   resetBaseSyncEvent(source: string, externalId: string): void {
     this.db.transaction(() => {
@@ -1045,6 +1099,11 @@ function parseBaseSyncEventRow(row: unknown): BaseSyncEvent {
     status: requireEnum(BASE_SYNC_EVENT_STATUSES, record.status, "status", "base_sync_events row"),
     lastError: optionalString(record, "last_error", "base_sync_events row"),
     updatedAt: requireNumber(record, "updated_at", "base_sync_events row"),
+    revivals:
+      record.revivals === undefined || record.revivals === null
+        ? 0
+        : requireNonNegativeInteger(record, "revivals", "base_sync_events row"),
+    reviveBaseTip: optionalString(record, "revive_base_tip", "base_sync_events row"),
   };
 }
 

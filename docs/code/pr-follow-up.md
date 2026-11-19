@@ -73,11 +73,15 @@ conflict_resolution_model = "sonnet"     # primary harness; failover still appli
 
 These keys behave like an automation's [`harness`, `model`, and `effort`](./automations.md#choosing-the-agent-per-schedule). A pinned harness that hits its usage limit defers the resolution to later polls; after three deferrals in a row, the PR waits until its head or base moves, or until you run `resolve-conflicts` by hand. A manual `resolve-conflicts` run uses the normal environment.
 
+### When a resolution keeps failing
+
+After `WEBHOOK_MAX_RETRIES` failed attempts, the worker stops trying on that PR. It tries again in full once the PR's head changes. If the base branch moves on in the meantime, the worker makes one more attempt. It waits at least 3 hours after the last failure, then 6, then 12, and at most a day. A temporary failure therefore clears up within hours, while a conflict the agent cannot resolve costs about one run a day instead of one per merge. To retry right away, run `devintern resolve-conflicts <pr-url>`.
+
 ### Tuning
 
 | Variable                         | Default | Description                                                         |
 | -------------------------------- | ------- | ------------------------------------------------------------------- |
-| `WEBHOOK_MAX_RETRIES`            | `3`     | Attempts per conflict before giving up until the PR changes         |
+| `WEBHOOK_MAX_RETRIES`            | `3`     | Attempts per conflict before the worker stops trying (see above)    |
 | `WORKER_BASE_SYNC_QUIET_SECONDS` | `30`    | How long the PR head must stay unchanged before the worker acts     |
 | `WORKER_RESOLVE_TIMEOUT_SECONDS` | `1800`  | Time limit per resolution run; `0` disables                         |
 
