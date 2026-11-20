@@ -11,6 +11,7 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 
+import { parseGitLabHostAliases, parseGitRemoteUrl } from "../code-host";
 import { Utils } from "../utils";
 import { loadWorkspaceConfig, parseWorkspaceConfig } from "./config";
 import { deriveRepoName, ensureWorkspaceScaffold, tomlString } from "./init";
@@ -38,6 +39,23 @@ export async function readOriginRemote(cwd: string): Promise<string | null> {
 }
 
 /**
+ * Read the checkout's `origin` when it names a recognised code-host project.
+ *
+ * Only such remotes can be matched back to a `[[repos]]` entry on later runs
+ * (`findRepoForOrigin`), so only they are registered. A local-path or unknown
+ * remote returns null and the checkout keeps the legacy `.devintern-code/`.
+ */
+export async function readRegistrableOrigin(cwd: string): Promise<string | null> {
+  const remote = await readOriginRemote(cwd);
+  if (!remote) return null;
+  const options = {
+    gitlabBaseUrl: process.env.GITLAB_CODE_HOST_URL,
+    gitlabHostAliases: parseGitLabHostAliases(process.env.GITLAB_CODE_HOST_ALIASES),
+  };
+  return parseGitRemoteUrl(remote, options) ? remote : null;
+}
+
+/**
  * Add the checkout at `cwd` to the workspace with `envContent` as its env.
  *
  * Creates the workspace when missing. Refuses when the checkout's `origin` is
@@ -53,9 +71,12 @@ export async function registerManualCheckout(
   envContent: string,
   log: WorkspaceLogFn = console.log,
 ): Promise<RegisterCheckoutResult> {
-  const remote = await readOriginRemote(cwd);
+  const remote = await readRegistrableOrigin(cwd);
   if (!remote) {
-    return { ok: false, error: "This checkout has no origin remote to register." };
+    return {
+      ok: false,
+      error: "This checkout has no GitHub, GitLab, or Bitbucket origin remote to register.",
+    };
   }
 
   const { workspaceDir, configPath, created } = ensureWorkspaceScaffold(log);

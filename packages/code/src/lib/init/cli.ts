@@ -4,9 +4,10 @@ import { detectSandboxProviders } from "@devintern/agent-harness";
 import { hasHelpArg } from "../cli/help";
 import { flushAnalytics, trackSetupCompleted, trackSetupStarted } from "../observability/analytics";
 import { findWorkspaceRepoForCheckout } from "../workspace/manual-run";
+import { migrateLegacyCheckout } from "../workspace/migrate-checkout";
 import type { ManualWorkspaceRun } from "../workspace/manual-run";
 import { workspaceConfigPath, workspaceEnvPath } from "../workspace/paths";
-import { readOriginRemote, registerManualCheckout } from "../workspace/register-checkout";
+import { readRegistrableOrigin, registerManualCheckout } from "../workspace/register-checkout";
 import { buildEnvExample, scaffoldProject } from "./scaffold";
 import { isInteractive, runInitUpgrade, runInitWizard } from "./wizard";
 
@@ -36,7 +37,7 @@ async function initializeProject(): Promise<void> {
 
   console.log("🚀 Initializing @devintern/code for this project...");
 
-  if (await readOriginRemote(process.cwd())) {
+  if (await readRegistrableOrigin(process.cwd())) {
     const registered = await registerManualCheckout(process.cwd(), buildEnvExample());
     if (!registered.ok) {
       console.error(`❌ ${registered.error}`);
@@ -92,6 +93,7 @@ export async function runInitCommand(): Promise<never> {
     console.log(INIT_USAGE);
     process.exit(0);
   }
+  await migrateLegacyCheckout();
   const registered = await findWorkspaceRepoForCheckout();
   if (registered) {
     process.exitCode = await updateRegisteredCheckout(registered);

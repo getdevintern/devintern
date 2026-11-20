@@ -42,6 +42,8 @@ import {
 } from "./schedule-context";
 import type { RepoConfig, WorkspaceConfig } from "./config";
 import { workspaceHasConfiguredWork, workspaceHasStartupWork } from "./startup-work";
+import { migrateTrackerSettings, readLegacySettings } from "./migrate-checkout";
+import { loadWorkspaceTrackerSettings } from "./tracker-settings";
 import { applyWorkspaceProcessEnv, buildErrorMonitorEnv, buildTeamEnv } from "./env";
 import {
   automationsDir,
@@ -251,7 +253,28 @@ export async function recoverOrphanedWorkspaceRuns(options: {
         .filter(existsSync),
       workspaceDir,
     ];
-    const settings = loadProjectSettingsFrom(settingsDirs, config.trackerSettings ?? null);
+    // One-time migration: copy committed settings.json tracker sections into
+    // workspace.toml [trackers] (new keys only), so they no longer depend on
+    // what each repo checks in.
+    for (const dir of settingsDirs) {
+      try {
+        const added = migrateTrackerSettings(
+          workspaceDir,
+          readLegacySettings(join(dir, ".devintern-code")),
+        );
+        if (added.length > 0) {
+          console.log(`📦 Copied tracker status names into workspace.toml: ${added.join(", ")}`);
+        }
+      } catch (error) {
+        console.warn(
+          `⚠️  Could not copy tracker settings from ${dir}: ${(error as Error).message}`,
+        );
+      }
+    }
+    const settings = loadProjectSettingsFrom(
+      settingsDirs,
+      loadWorkspaceTrackerSettings(workspaceDir) ?? config.trackerSettings ?? null,
+    );
     const trackerType = config.defaults.tracker || "multi-team";
     retryStore = new RetryStateStore(dbPath);
 

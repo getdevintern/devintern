@@ -26,6 +26,7 @@ import {
 } from "./lib/trackers/capabilities";
 import { acquireRunLocks } from "./lib/cli/run-locks";
 import { applyManualWorkspaceRun, findWorkspaceRepoForCheckout } from "./lib/workspace/manual-run";
+import { migrateLegacyCheckout } from "./lib/workspace/migrate-checkout";
 import { Utils } from "./lib/utils";
 import { isAutomatedEnvironment } from "./lib/config/env-detector";
 import {
@@ -147,6 +148,8 @@ if (process.argv[2] === "init") {
   // JIRA_BASE_URL paired with the user's real token).
   // A checkout of a registered workspace repo takes its env, state, and
   // prompts from the workspace; its own `.devintern-code/.env` is skipped.
+  // First run of this release in a legacy checkout: move its settings first.
+  await migrateLegacyCheckout();
   runContext.manualWorkspace = await findWorkspaceRepoForCheckout();
   if (runContext.manualWorkspace) applyManualWorkspaceRun(runContext.manualWorkspace);
   loadEnvironment(findEnvFileArg(process.argv), {

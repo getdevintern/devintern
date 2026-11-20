@@ -51,7 +51,7 @@ import { collectReadinessChecks, renderReadinessReport } from "../observability/
 import type { ReadinessCheck } from "../observability/readiness";
 import { TRACKER_CAPABILITIES } from "../trackers/capabilities";
 import { workspaceCodeStateDir } from "../workspace/paths";
-import { readOriginRemote, registerManualCheckout } from "../workspace/register-checkout";
+import { readRegistrableOrigin, registerManualCheckout } from "../workspace/register-checkout";
 
 export { isInteractive };
 
@@ -226,7 +226,7 @@ export async function runInitWizard(deps: InitWizardDeps = {}): Promise<void> {
 
   // A checkout with an origin is registered in the workspace as a manual-only
   // repo; without one, the legacy `.devintern-code/` scaffold is used.
-  const remote = await readOriginRemote(cwd);
+  const remote = await readRegistrableOrigin(cwd);
   let workspaceDir: string | undefined;
   const writeEnv = remote
     ? async (envContent: string): Promise<string | null> => {
