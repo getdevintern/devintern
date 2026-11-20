@@ -85,9 +85,11 @@ lib/
 - `AGENT_SANDBOX_ALLOWED_DOMAINS` - Extra network allowlist entries for sandbox providers that restrict egress (e.g. `nono`, `docker`)
 - `AGENT_SANDBOX_NONO_PROFILE` - Overrides the `nono` provider's isolation profile
 
-**Project Settings (.devintern-code/settings.json):**
+**Tracker settings (`[trackers.<tracker>.projects.<KEY>]` in `workspace.toml`):**
 
-Tracker-specific sections are supported. The tool resolves configuration based on the `TASK_TRACKER` environment variable (default: `jira`).
+Parsed by `src/lib/workspace/tracker-settings.ts` into the legacy `ProjectSettings` shape (snake_case keys → camelCase fields). `loadProjectSettings()` overlays them on the deprecated `<cwd>/.devintern-code/settings.json` (workspace wins per project key; the legacy file warns once). Worker runs (`DEVINTERN_WORKER_SUBPROCESS=1`) ignore a repository `settings.json` `pipeline`; manual runs still honor it with a deprecation warning.
+
+Legacy settings.json format (still read underneath). Tracker-specific sections are supported. The tool resolves configuration based on the `TASK_TRACKER` environment variable (default: `jira`).
 
 ```json
 {

@@ -1,7 +1,7 @@
 ---
 title: "Advanced Settings"
 sidebarLabel: "Advanced Settings"
-description: "Use when tuning DevIntern Code run limits, the auto-review loop, logging, telemetry, the output directory, prompt overrides, per-project settings.json, or checking setup with devintern doctor."
+description: "Use when tuning DevIntern Code run limits, the auto-review loop, logging, telemetry, the output directory, prompt overrides, tracker status settings, or checking setup with devintern doctor."
 section: "Automation Reference"
 order: 0.3
 dateModified: 2026-11-18
@@ -93,36 +93,33 @@ To override `clarity.md` or `estimation.md`, put a file with the same name in `.
 
 `review.md` and `fix.md` always come from the bundled copy. They run against the PR's own checkout, so a PR must not be able to rewrite its reviewer's instructions.
 
-## Per-project settings.json
+## Tracker status settings
 
-`.devintern-code/settings.json` holds per-project status mappings, grouped by tracker. `devintern init` creates it with examples. Only the section for the active `TASK_TRACKER` is used.
+Status mappings and the story-points field are set per tracker project. With a workspace, put them in `~/.devintern/workspace.toml`:
 
-```json
-{
-  "jira": {
-    "projects": {
-      "PROJ": {
-        "prStatus": "In Review",
-        "inProgressStatus": "In Progress",
-        "todoStatus": "To Do",
-        "storyPointsField": "customfield_10016"
-      }
-    }
-  },
-  "linear": { "projects": { "ENG": { "prStatus": "In Review" } } }
-}
+```toml
+[trackers.jira.projects.PROJ]
+pr_status = "In Review"
+in_progress_status = "In Progress"
+todo_status = "To Do"
+story_points_field = "customfield_10016"
+
+[trackers.linear.projects.ENG]
+pr_status = "In Review"
 ```
 
-| Field              | Effect                                                                                                              |
-| ------------------ | ------------------------------------------------------------------------------------------------------------------- |
-| `prStatus`         | Status, state, or label to set after the PR is created. This also moves the ticket out of sweep queries ([details](./worker-troubleshooting.md#tickets-already-actioned-after-a-pr)) |
-| `inProgressStatus` | Status to set when work starts                                                                                      |
-| `todoStatus`       | Status to restore if implementation fails                                                                           |
-| `storyPointsField` | Custom field for story points. Found automatically if omitted                                                        |
+| Key                  | Effect                                                                                                              |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `pr_status`          | Status, state, or label to set after the PR is created. This also moves the ticket out of sweep queries ([details](./worker-troubleshooting.md#tickets-already-actioned-after-a-pr)) |
+| `in_progress_status` | Status to set when work starts                                                                                      |
+| `todo_status`        | Status to restore if implementation fails                                                                           |
+| `story_points_field` | Custom field for story points. Found automatically if omitted                                                        |
 
-Each tracker uses its own project key (Jira project, Linear team key, Trello board ID, `owner/repo` for GitHub, and so on); see that tracker's integration guide. Older Jira-only files with a top-level `projects` key still work.
+Trackers are `jira`, `linear`, `trello`, `azure-devops`, `asana`, `github`, `gitlab`, and `markdown`. Each uses its own project key (Jira project, Linear team key, Trello board ID, `owner/repo` for GitHub, and so on); see that tracker's integration guide. Quote keys that contain spaces or slashes, for example `[trackers.github.projects."acme/web"]`. Only the section for the active `TASK_TRACKER` is used.
 
-To add verification or custom steps, use the same file's `pipeline` section; see [Customizing the Task Pipeline](./pipelines.md).
+A project without a workspace can still use `.devintern-code/settings.json`, which uses the same fields in camelCase (`prStatus`, `inProgressStatus`, `todoStatus`, `storyPointsField`), grouped as `{ "jira": { "projects": { "PROJ": { ... } } } }`. That file is deprecated and prints a warning; when both exist, the workspace value wins for a project key.
+
+To add verification or custom steps, use a workspace `pipeline_file`; see [Customizing the Task Pipeline](./pipelines.md).
 
 ## Readiness check
 
