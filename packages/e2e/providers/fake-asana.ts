@@ -21,6 +21,8 @@
  */
 
 import type { TrackerComment, TrackerFixture, TrackerTicket, TrackerTicketState } from "./tracker";
+import { FakeAsanaDependencies } from "./fake-asana-dependencies";
+import type { FakeAsanaDependencyRequest } from "./fake-asana-dependencies";
 import { parseOptFields, projectTaskPayload } from "./fake-asana-fields";
 import { asRecord, json, readJson } from "./fake-asana-http";
 
@@ -257,6 +259,7 @@ export class FakeAsanaTracker implements TrackerFixture {
   readonly projectTaskListings: string[] = [];
 
   private readonly tasks = new Map<string, FakeAsanaTask>();
+  private readonly dependencies = new FakeAsanaDependencies();
   /** Append-only Events API log for the watched project. */
   private readonly events: FakeAsanaEvent[] = [];
   /** Live sync tokens mapped to the event-log position they were issued at. */
@@ -378,6 +381,40 @@ export class FakeAsanaTracker implements TrackerFixture {
       this.recordEvent({ type: "task", action: "changed", gid: task.gid, field: "notes" });
     }
     task.modified_at = this.timestamp();
+  }
+
+  /**
+   * Set the tasks blocking `ticketKey` (Asana "Blocked by" dependencies), in
+   * the order the dependencies endpoint pages them. Each blocker must be a
+   * fixture task; its `completed` flag is read live, so {@link closeTicket}
+   * on a blocker releases it.
+   */
+  setDependencies(ticketKey: string, blockerKeys: readonly string[]): void {
+    this.requireTask(ticketKey);
+    for (const key of blockerKeys) this.requireTask(key);
+    this.dependencies.set(ticketKey, blockerKeys);
+  }
+
+  /**
+   * Cap dependencies pages at `size` records, so a fixture with more blockers
+   * than that is split across `next_page.offset` pages even though the
+   * product asks for `limit=100`.
+   */
+  setDependencyPageSize(size: number): void {
+    this.dependencies.setPageSize(size);
+  }
+
+  /**
+   * Make every dependencies request fail with `status` (402 or 500 use
+   * Asana's real error bodies), or pass `null` to serve pages again.
+   */
+  failDependencies(status: number | null): void {
+    this.dependencies.fail(status);
+  }
+
+  /** Every `GET /tasks/{gid}/dependencies` call, oldest first. */
+  get dependencyRequests(): readonly FakeAsanaDependencyRequest[] {
+    return this.dependencies.requests;
   }
 
   /** Move the fake clock (epoch ms), e.g. to create a task "now" for the estimation <24h skip. */
@@ -520,7 +557,7 @@ export class FakeAsanaTracker implements TrackerFixture {
 
     const dependenciesMatch = path.match(/^\/api\/1\.0\/tasks\/([^/]+)\/dependencies$/);
     if (dependenciesMatch?.[1] && method === "GET") {
-      return this.getDependencies(dependenciesMatch[1]);
+      return this.getDependencies(dependenciesMatch[1], url);
     }
 
     const taskMatch = path.match(/^\/api\/1\.0\/tasks\/([^/]+)$/);
@@ -609,10 +646,16 @@ export class FakeAsanaTracker implements TrackerFixture {
     return json({ data: stories.map((story) => this.storyPayload(story)) });
   }
 
-  /** Fixture tasks have no Asana dependencies (blockers). */
-  private getDependencies(taskGid: string): Response {
+  /** `GET /tasks/{gid}/dependencies`; see `fake-asana-dependencies.ts`. */
+  private getDependencies(taskGid: string, url: URL): Response {
     if (!this.tasks.has(taskGid)) return this.diagnostic(`Unknown fake Asana task: ${taskGid}`);
-    return json({ data: [], next_page: null });
+    return this.dependencies.serve(
+      taskGid,
+      url,
+      this.apiBaseUrl,
+      (gid) => this.requireTask(gid),
+      (message) => this.reject(message),
+    );
   }
 
   private async postStory(taskGid: string, request: Request): Promise<Response> {
