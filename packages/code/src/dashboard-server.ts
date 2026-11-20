@@ -189,7 +189,7 @@ export interface DashboardServerOptions {
   /**
    * Automation listing/triggering overrides. The workspace worker passes its
    * in-process scheduler so "Run now" rides the exact scheduled pipeline;
-   * a standalone dashboard falls back to the project's automations.toml.
+   * a standalone dashboard passes the workspace's read-only catalog.
    */
   automationActions?: DashboardAutomationActions;
   /** Collaborator overrides for the manual-run action (tests). */

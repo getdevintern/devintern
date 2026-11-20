@@ -21,7 +21,6 @@ import type {
   DashboardAutomationActions,
   ManualTriggerOutcome,
 } from "../automation/acquirer";
-import { loadStandaloneAutomationActions } from "../automation/manual";
 import { RunStore } from "../state/run-recorder";
 import { hostTimeZone, isValidTimeZone } from "../state/run-activity";
 import type {
@@ -151,9 +150,9 @@ export interface DashboardDataOptions {
   inflightAutomationTtlMs?: number;
   /**
    * Automation listing/triggering overrides. The workspace worker passes its
-   * in-process scheduler so manual runs ride the exact scheduled pipeline;
-   * when omitted, a standalone dashboard falls back to the project's own
-   * `.devintern-code/automations.toml` (spawn path).
+   * in-process scheduler so manual runs ride the exact scheduled pipeline; a
+   * standalone dashboard passes the workspace's read-only catalog. When
+   * omitted, no automations are listed.
    */
   automationActions?: DashboardAutomationActions;
   /** Directories to search for worker capture files (primary first). */
@@ -545,14 +544,10 @@ export class DashboardData {
   /** Automation listing/triggering, defaulting to the standalone spawn path. */
   getAutomationActions(): DashboardAutomationActions {
     if (!this.automationActions) {
-      // Standalone dashboards (spawn mode) read the project's automation config;
-      // a worker-embedded one without an in-process scheduler has none (workspace
-      // [[automations]] need the fleet pipeline), so it serves an empty catalog.
-      this.automationActions =
-        this.automationActionsOverride ??
-        (this.retryMode === "spawn"
-          ? loadStandaloneAutomationActions(this.workingDir)
-          : EMPTY_AUTOMATION_ACTIONS);
+      // Automations live in workspace.toml and run through the fleet pipeline:
+      // the worker passes its scheduler, a standalone dashboard a read-only
+      // workspace catalog. Without either there is nothing to serve.
+      this.automationActions = this.automationActionsOverride ?? EMPTY_AUTOMATION_ACTIONS;
     }
     return this.automationActions;
   }
@@ -741,7 +736,7 @@ function conflict(message: string): ApiResponse {
   return { status: 409, body: { error: message } };
 }
 
-/** No-automation bridge for worker-embedded dashboards whose worker runs none. */
+/** No-automation bridge for dashboards without a workspace automation catalog. */
 const EMPTY_AUTOMATION_ACTIONS: DashboardAutomationActions = {
   list: () => [],
   trigger: async () => ({ ok: false, reason: "no automations are configured" }),
