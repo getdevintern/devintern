@@ -37,6 +37,7 @@ import {
 } from "../src/lib/task/actioned-state";
 import {
   ACTIONED_SOURCE_ENV,
+  WORKSPACE_PIPELINE_AUTOMATION_ENV,
   WORKSPACE_REPO_ENV,
   WORKSPACE_TEAM_ENV,
 } from "../src/lib/workspace/env";
@@ -1745,6 +1746,33 @@ describe("resolveWorkspaceAutomationContext", () => {
     rmSync(workspaceDir, { recursive: true, force: true });
   });
 
+  test("pins an automation-scoped pipeline reference for the occurrence", async () => {
+    const workspaceDir = join(
+      tmpdir(),
+      `ws-automation-pipe-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    );
+    const repoManager = new FakeRepoManager(workspaceDir);
+    const context = await resolveWorkspaceAutomationContext(
+      {
+        id: "scheduled",
+        enabled: true,
+        prompt: "work",
+        interval: "1h",
+        intervalMs: 3_600_000,
+        repo: "backend",
+        pipelineFile: "pipelines/scheduled.json",
+      },
+      CONFIG,
+      workspaceDir,
+      repoManager,
+    );
+
+    expect(context?.env[WORKSPACE_PIPELINE_AUTOMATION_ENV]).toBe(
+      join(workspaceDir, "pipelines", "scheduled.json"),
+    );
+    rmSync(workspaceDir, { recursive: true, force: true });
+  });
+
   test("keeps per-repo tracker project-key overrides in the composed environment", async () => {
     const workspaceDir = join(
       tmpdir(),
@@ -1978,6 +2006,19 @@ labels = ["frontend"]
     expect(frontend?.env.DEVINTERN_WORKSPACE_PIPELINE_DEFAULT).toBe(
       join(workspaceDir, "pipelines/default.json"),
     );
+  });
+
+  test("clears a stale automation pipeline reference for fleet tasks", async () => {
+    const previous = process.env[WORKSPACE_PIPELINE_AUTOMATION_ENV];
+    process.env[WORKSPACE_PIPELINE_AUTOMATION_ENV] = "/tmp/stale-automation-pipeline.json";
+    try {
+      const executor = makeExecutor();
+      await executor("T-A", toRoutableTask({ key: "T-A", labels: ["backend"], components: [] }));
+      expect(runs[0]?.env[WORKSPACE_PIPELINE_AUTOMATION_ENV]).toBeUndefined();
+    } finally {
+      if (previous === undefined) delete process.env[WORKSPACE_PIPELINE_AUTOMATION_ENV];
+      else process.env[WORKSPACE_PIPELINE_AUTOMATION_ENV] = previous;
+    }
   });
 
   test("a live-reloaded pipeline_file reference applies to subsequent runs", async () => {

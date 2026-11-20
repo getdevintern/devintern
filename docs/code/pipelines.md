@@ -26,10 +26,11 @@ Branch preparation, the feasibility check, and the In Progress transition happen
 
 Exactly one complete definition runs. Step lists are never merged across scopes. From highest to lowest precedence:
 
-1. `pipeline_file` on a `[[repos]]` entry in `workspace.toml`.
-2. The `pipeline` block in the repository's committed `.devintern-code/settings.json`. Deprecated: worker runs ignore it (so a pull request cannot change the steps the worker runs), and manual runs print a warning. Use a `pipeline_file` instead.
-3. `pipeline_file` on `[defaults]` in `workspace.toml`.
-4. The built-in default: `implement → commit → auto-review → finalize`.
+1. `pipeline_file` on the `[[automations]]` entry whose occurrence is running. It applies to that automation's runs only; installed pack pipelines land here.
+2. `pipeline_file` on a `[[repos]]` entry in `workspace.toml`.
+3. The `pipeline` block in the repository's committed `.devintern-code/settings.json`. Deprecated: worker runs ignore it (so a pull request cannot change the steps the worker runs), and manual runs print a warning. Use a `pipeline_file` instead.
+4. `pipeline_file` on `[defaults]` in `workspace.toml`.
+5. The built-in default: `implement → commit → auto-review → finalize`.
 
 If a referenced workspace file is missing or invalid, the run fails and names the repository and file; it does not fall back. See [Workspaces → Pipelines for the fleet and per repository](./workspaces.md#pipelines-for-the-fleet-and-per-repository) for the `workspace.toml` reference.
 

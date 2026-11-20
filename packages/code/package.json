@@ -99,6 +99,7 @@
     "dist/**/*",
     "src/**/*",
     "prompts/**/*",
+    "catalog/**/*",
     "README.md",
     "LICENSE.md",
     ".env.example"

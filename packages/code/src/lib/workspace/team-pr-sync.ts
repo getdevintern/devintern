@@ -58,6 +58,8 @@ export function teamPrSyncSandboxProblems(
 /**
  * Refuse a configuration that enables `sync_team_prs` without an explicit
  * agent sandbox. Used at worker startup and as part of live-reload validation.
+ * The workspace worker calls it before taking the lock or opening state;
+ * `buildFleetEventAcquirers` re-checks for direct callers.
  *
  * @throws Listing every offending repo and its effective `AGENT_SANDBOX`.
  */

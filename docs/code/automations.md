@@ -13,6 +13,8 @@ An automation is a prompt the [worker](./worker.md) runs on a schedule. The prom
 
 To configure automations through a coding agent, use the [devintern-workspace skill](https://github.com/getdevintern/devintern/tree/main/plugins/devintern/skills/devintern-workspace). For example: "Add a weekly dependency-health automation for web-app, Mondays at 09:00, opening a PR for at most one verified upgrade."
 
+To start from a proven recipe, install a bundled [automation pack](./automation-packs.md) by name: `devintern automations add dependency-health --repo web-app` writes the `[[automations]]` entry for you.
+
 ## Defining an automation
 
 Add `[[automations]]` entries to `workspace.toml`:
@@ -46,6 +48,7 @@ under ~/Documents/Tweets/."""
 | `repo`             | Target repository. Required when the workspace has more than one repo.                            |
 | `open_pr`          | Open a pull request for the result. Default `false`.                                              |
 | `allow_no_changes` | Treat a run that changes nothing as a success. Default `false`.                                   |
+| `pipeline_file`    | Pipeline for this automation's runs only. See [pipeline precedence](./pipelines.md#where-a-task-gets-its-pipeline).               |
 | `harness`, `model`, `effort` | Agent for this schedule. See [Choosing the agent per schedule](#choosing-the-agent-per-schedule). |
 
 A worker with at least one automation runs even without a task query. Edits to `workspace.toml` apply without a restart; an invalid entry is logged and the last valid config keeps running.

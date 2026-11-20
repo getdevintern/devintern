@@ -1,0 +1,8 @@
+{
+  "id": "log-triage",
+  "name": "Local log triage",
+  "description": "Review recent application and job logs and fix at most one high-confidence defect.",
+  "schedule": { "cron": "0 5 * * *" },
+  "openPr": false,
+  "prompt": "prompt.md"
+}

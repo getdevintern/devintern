@@ -925,7 +925,6 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   if (initialFleetAutomations.problems.length > 0) {
     throw new Error(`Invalid ${configPath}:\n- ${initialFleetAutomations.problems.join("\n- ")}`);
   }
-  // Fail before lock/state; buildFleetEventAcquirers re-checks for direct callers.
   assertTeamPrSyncSandbox(config, workspaceDir);
 
   // Dashboard retries ride the shared workspace DB: the dashboard inserts a
