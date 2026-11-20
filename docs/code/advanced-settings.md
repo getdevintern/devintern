@@ -89,9 +89,11 @@ The prompts DevIntern sends to the agent are Markdown files bundled with the CLI
 | `review.md`     | Auto-review of the PR                       |
 | `fix.md`        | Addressing review feedback                  |
 
-To override `clarity.md` or `estimation.md`, put a file with the same name in `.devintern-code/prompts/`, or in a directory named by `DEVINTERN_PROMPTS_DIR`, which takes precedence. Keep the frontmatter (`name`, `description`, `placeholders`, `requiredSections`) and the `{{placeholder}}` tokens from the bundled file; a placeholder with no value fails the run.
+To override `clarity.md` or `estimation.md`, put a file with the same name in `~/.devintern/prompts/`. To override it for one repository only, use `~/.devintern/prompts/<repo>/`, where `<repo>` is the `name` of its `[[repos]]` entry in `workspace.toml`. A directory named by `DEVINTERN_PROMPTS_DIR` takes precedence over both. Keep the frontmatter (`name`, `description`, `placeholders`, `requiredSections`) and the `{{placeholder}}` tokens from the bundled file; a placeholder with no value fails the run.
 
-`review.md` and `fix.md` always come from the bundled copy. They run against the PR's own checkout, so a PR must not be able to rewrite its reviewer's instructions.
+`review.md` and `fix.md` always come from the bundled copy, because their verdicts decide whether a PR is approved.
+
+Overrides in a project's `.devintern-code/prompts/` are no longer read; DevIntern prints a warning when it finds one. Move the files to `~/.devintern/prompts/`.
 
 ## Per-project settings.json
 

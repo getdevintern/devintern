@@ -64,10 +64,10 @@ export function generateReviewPrompt(
   prDiff: string,
   iteration: number,
 ): string {
-  // Trust boundary: the review/fix prompts run inside a checkout of the PR
-  // under review, so repository-controlled overrides must never be able to
-  // rewrite them (a checked-out `.devintern-code/prompts/review.md` could
-  // otherwise force `"approved": true`). Pin lookups to the bundled catalog.
+  // Trust boundary: the review verdict gates PRs, and an agent working in a
+  // PR checkout can write files outside it (including `~/.devintern/prompts/`)
+  // unless sandboxed. Pin gating prompts to the bundled catalog so no
+  // override can force `"approved": true`.
   return loadPrompt(
     "review",
     {

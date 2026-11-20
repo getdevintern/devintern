@@ -97,8 +97,8 @@ function createMockTaskDetails(
 }
 
 // Pin prompt rendering to the bundled catalog so a developer's
-// DEVINTERN_PROMPTS_DIR or an ancestor `.devintern-code/prompts/` cannot change
-// the expected prompt content (see prompt-loader.test.ts).
+// DEVINTERN_PROMPTS_DIR or workspace prompts cannot change the expected
+// prompt content (see prompt-loader.test.ts).
 const BUNDLED_PROMPT_OPTIONS = { useAmbientOverrides: false } as const;
 
 function formatEstimationPrompt(details: FormattedTaskDetails): string {

@@ -190,8 +190,9 @@ export function buildMergeSafetyPrompt(options: {
   reviewPaths: string[];
   diff: string;
 }): string {
-  // Trust boundary: the agent runs in a checkout of the PR, so a
-  // repository-controlled prompt override could force `"safe": true`.
+  // Trust boundary: the verdict gates merges, and an unsandboxed agent could
+  // write a `~/.devintern/prompts/` override forcing `"safe": true`. Pin it to
+  // the bundled catalog.
   return loadPrompt(
     "merge-safety",
     {
