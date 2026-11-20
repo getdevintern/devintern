@@ -4,7 +4,7 @@ sidebarLabel: "Worker"
 description: "Use when running DevIntern as a long-running worker that picks up tracker tasks, handles PR reviews and CI failures, and runs as a service."
 section: "Automation"
 order: 2
-dateModified: 2026-11-18
+dateModified: 2026-11-20
 ---
 
 # Worker Daemon
@@ -85,7 +85,7 @@ On Trello and markdown, separate keys with commas or spaces. Text after a dash o
 
 A blocked ticket is held back without being started, transitioned, or commented on. The worker checks it again on the next poll, then less often while it keeps waiting (up to every 15 minutes). Editing the ticket triggers a check right away:
 
-- **A blocker the worker implemented** follows the same rules as [dependent ad-hoc tasks](./delegation.md#modes-merged-and-stacked). In `merged` mode (the default) the ticket waits until the blocker's PR merges. In `stacked` mode it starts on the blocker's branch once the blocker's run succeeded, and its PR targets that branch.
+- **A blocker the worker implemented** follows the same rules as [dependent ad-hoc tasks](./delegation-dependencies.md#modes-merged-and-stacked). When `dependency_mode` is not set, tickets in GitHub repos are stacked and tickets in other repos (GitLab, Bitbucket) wait for the merge. In `merged` mode the ticket waits until the blocker's PR merges. In `stacked` mode it starts on the blocker's branch once the blocker's run succeeded, and its PR targets that branch.
 - **A blocker the worker never handled** counts only once the tracker marks it done (see the table above).
 - **A blocker whose run failed, or whose PR was closed without merging,** keeps the ticket blocked. Marking the blocker done in the tracker, or re-running it, releases the ticket.
 
