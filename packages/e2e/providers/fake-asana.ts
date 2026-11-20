@@ -20,15 +20,6 @@
  * echoes it, and never makes outbound requests.
  */
 
-import {
-  asRecord,
-  htmlToPlainText,
-  json,
-  parseFakeAsanaQuery,
-  readJson,
-  textToHtml,
-} from "./fake-asana-helpers";
-import type { FakeAsanaFilters } from "./fake-asana-helpers";
 import type { TrackerComment, TrackerFixture, TrackerTicket, TrackerTicketState } from "./tracker";
 import { parseOptFields, projectTaskPayload } from "./fake-asana-fields";
 import { asRecord, json, readJson } from "./fake-asana-http";
@@ -56,6 +47,15 @@ export interface FakeAsanaOptions {
   projectName?: string;
   /** Override one or more section names. */
   statuses?: Partial<FakeAsanaStatuses>;
+}
+
+/** Filters the product applies after listing a project's tasks. */
+interface FakeAsanaFilters {
+  projectGid?: string;
+  sectionName?: string;
+  assignee?: string;
+  completed?: boolean;
+  text?: string;
 }
 
 interface FakeAsanaStory {
@@ -142,6 +142,95 @@ const FAKE_ACCOUNT = { name: "E2E Asana User" } as const;
 const FAKE_USER_GID = "1100000000000001";
 
 const API_PREFIX = "/api/1.0";
+
+/** Escape text for the restricted HTML subset Asana rich text accepts. */
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+/** Render plain text as Asana-style HTML notes. */
+function textToHtml(text: string): string {
+  return `<body>${escapeHtml(text).replace(/\n/g, "<br/>")}</body>`;
+}
+
+function decodeHtmlEntities(value: string): string {
+  return value
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&#x27;/g, "'")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&");
+}
+
+/**
+ * Convert stored Asana `html_text` back to readable plain text.
+ *
+ * Headings keep their `#` prefixes so the implementation summary asserts on
+ * the same literal `## What changed` heading the markdown formatter emitted.
+ */
+function htmlToPlainText(html: string): string {
+  const structured = html
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(
+      /<h([1-6])[^>]*>([\s\S]*?)<\/h\1>/gi,
+      (_match, level: string, inner: string) => `\n${"#".repeat(Number(level))} ${inner}\n`,
+    )
+    .replace(/<li[^>]*>/gi, "\n- ")
+    .replace(/<\/li>/gi, "")
+    .replace(/<\/(p|div|ul|ol|blockquote|pre)>/gi, "\n")
+    .replace(/<[^>]+>/g, "");
+
+  return decodeHtmlEntities(structured)
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+/** Parse the `--query` mini-syntax the fake's search endpoint supports. */
+function parseFakeAsanaQuery(query: string): FakeAsanaFilters {
+  const filters: FakeAsanaFilters = {};
+  const remainder: string[] = [];
+  const tokenRegex = /(\w+):(?:"([^"]*)"|(\S+))|(\S+)/g;
+
+  let match: RegExpExecArray | null;
+  while ((match = tokenRegex.exec(query)) !== null) {
+    const [, key, quoted, bare, free] = match;
+    if (free !== undefined) {
+      remainder.push(free);
+      continue;
+    }
+    if (key === undefined) continue;
+    const value = quoted ?? bare ?? "";
+    switch (key.toLowerCase()) {
+      case "project":
+        filters.projectGid = value;
+        break;
+      case "section":
+        filters.sectionName = value;
+        break;
+      case "assignee":
+        filters.assignee = value;
+        break;
+      case "completed":
+        filters.completed = value.toLowerCase() === "true";
+        break;
+      default:
+        remainder.push(match[0]);
+    }
+  }
+
+  if (remainder.length > 0) {
+    filters.text = remainder.join(" ");
+  }
+  return filters;
+}
 
 /** Asana-shaped ticket fixture backed entirely by in-memory state. */
 export class FakeAsanaTracker implements TrackerFixture {
