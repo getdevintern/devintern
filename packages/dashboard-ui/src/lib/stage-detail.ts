@@ -18,7 +18,8 @@ export type RunStage =
   | "verify"
   | "auto_review"
   | "change_request"
-  | "outcome";
+  | "outcome"
+  | "defect_report";
 
 /** A single structured field, rendered as label + value by the UI. */
 export interface DetailField {
@@ -128,6 +129,8 @@ function parseKnownShape(
       return parseAutoReview(obj);
     case "change_request":
       return parseChangeRequest(obj);
+    case "defect_report":
+      return parseDefectReport(obj);
     default:
       return null;
   }
@@ -332,6 +335,45 @@ function parseChangeRequest(obj: Record<string, unknown>): KnownShape | null {
     fields.push({
       label: "Conversation comments",
       value: { kind: "count", n: obj.conversationComments, noun: "comment" },
+    });
+  }
+  return knownShapeResult(undefined, fields);
+}
+
+/** Automatic DevIntern defect report: whether one was sent, and a link to it. */
+function parseDefectReport(obj: Record<string, unknown>): KnownShape | null {
+  if (typeof obj.reported !== "boolean") {
+    return null;
+  }
+  const fields: DetailField[] = [
+    {
+      label: "Reported",
+      value: {
+        kind: "bool",
+        value: obj.reported,
+        yes: obj.duplicate === true ? "Already reported" : "Yes",
+        no: "No",
+      },
+    },
+  ];
+  if (typeof obj.url === "string" && obj.url.startsWith("https://")) {
+    fields.push({ label: "Issue", value: { kind: "markdown", text: `[${obj.url}](${obj.url})` } });
+  } else if (typeof obj.reportId === "string") {
+    fields.push({ label: "Report id", value: { kind: "text", text: obj.reportId } });
+  }
+  if (typeof obj.verdict === "string") {
+    fields.push({ label: "Verdict", value: { kind: "text", text: obj.verdict } });
+  }
+  if (typeof obj.rationale === "string") {
+    fields.push({ label: "Reason", value: { kind: "text", text: obj.rationale } });
+  }
+  if (typeof obj.error === "string") {
+    fields.push({ label: "Error", value: { kind: "text", text: obj.error } });
+  }
+  if (typeof obj.savedPath === "string") {
+    fields.push({
+      label: "Retry",
+      value: { kind: "text", text: `devintern report --from ${obj.savedPath}` },
     });
   }
   return knownShapeResult(undefined, fields);

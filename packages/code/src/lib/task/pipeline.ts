@@ -40,6 +40,7 @@ import {
   getActiveRunContext,
   hasRunStage,
   latestRunStage,
+  readRunStep,
   recordRunBranch,
   recordRunHarness,
   recordRunStage,
@@ -49,6 +50,7 @@ import {
 import { pickupSelection, resolveSessionPickup } from "../state/session-pickup";
 import type { SessionPickupDecision, SessionPickupOptions } from "../state/session-pickup";
 import { finishTaskRun } from "../state/task-run";
+import { reportDevInternDefect } from "./defect-report";
 import { deliveryRunDisposition, outcomeRunDisposition } from "../agent/implementation-outcome";
 import { TaskFormatter } from "../task/formatter";
 import {
@@ -435,7 +437,7 @@ export async function settleImplementationRun(input: {
 }
 
 /** Identifies the task attempt for failure handling. */
-interface TaskAttempt {
+export interface TaskAttempt {
   taskKey: string;
   taskIndex: number;
   totalTasks: number;
@@ -444,8 +446,10 @@ interface TaskAttempt {
 /**
  * Handle a failed task attempt. Usage limits defer without failing the task;
  * other errors record tracker feedback and either rethrow (batch) or exit.
+ *
+ * Exported for tests; production callers go through {@link processSingleTask}.
  */
-async function handleTaskFailure(error: unknown, attempt: TaskAttempt): Promise<never> {
+export async function handleTaskFailure(error: unknown, attempt: TaskAttempt): Promise<never> {
   const { taskKey, taskIndex, totalTasks } = attempt;
   const options = runContext.options;
 
@@ -501,6 +505,9 @@ async function handleTaskFailure(error: unknown, attempt: TaskAttempt): Promise<
   }
 
   const err = error as Error;
+  // Captured before the run ends so a defect report can be attached to it.
+  const failedRunId = getActiveRunContext()?.id;
+  const failedStep = failedRunId === undefined ? undefined : readRunStep(failedRunId);
   await finishTaskRun("failed", err.message);
 
   // A failed run may still have pushed a branch and opened a PR itself (agents
@@ -524,6 +531,14 @@ async function handleTaskFailure(error: unknown, attempt: TaskAttempt): Promise<
   } catch {
     /* best-effort */
   }
+  // Opt-in (DEVINTERN_AUTO_REPORT): report confirmed DevIntern defects.
+  // Never throws, and runs after the failure is recorded and fed back.
+  await reportDevInternDefect({
+    error,
+    taskKey,
+    ...(failedRunId !== undefined ? { runId: failedRunId } : {}),
+    ...(failedStep ? { failedStep } : {}),
+  });
   runContext.activeTaskContext = null;
 
   if (totalTasks > 1) {

@@ -299,3 +299,36 @@ test("null and primitive JSON values are handled safely", () => {
   expect(parseStageDetail("outcome", "42")).toEqual({ fallback: "42", raw: "42" });
   expect(parseStageDetail("outcome", "true")).toEqual({ fallback: "true", raw: "true" });
 });
+
+test("defect_report stage links the submitted DevIntern issue", () => {
+  const detail = JSON.stringify({
+    reported: true,
+    reportId: "r-1",
+    url: "https://devintern.com/reports/r-1",
+    rationale: "TypeError raised inside DevIntern (src/lib/task/formatter.ts)",
+  });
+  const result = parseStageDetail("defect_report", detail);
+  const labels = result.fields?.map((field) => field.label);
+  expect(labels).toEqual(["Reported", "Issue", "Reason"]);
+  expect(result.fields?.[1]?.value).toEqual({
+    kind: "markdown",
+    text: "[https://devintern.com/reports/r-1](https://devintern.com/reports/r-1)",
+  });
+});
+
+test("defect_report stage shows why nothing was reported and ignores non-https links", () => {
+  const skipped = parseStageDetail(
+    "defect_report",
+    JSON.stringify({ reported: false, verdict: "task", rationale: "network error" }),
+  );
+  expect(skipped.fields?.map((field) => field.label)).toEqual(["Reported", "Verdict", "Reason"]);
+  const unsafe = parseStageDetail(
+    "defect_report",
+    JSON.stringify({ reported: true, reportId: "r-2", url: "javascript:alert(1)" }),
+  );
+  expect(unsafe.fields?.find((field) => field.label === "Issue")).toBeUndefined();
+  expect(unsafe.fields?.find((field) => field.label === "Report id")?.value).toEqual({
+    kind: "text",
+    text: "r-2",
+  });
+});
