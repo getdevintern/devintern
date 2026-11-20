@@ -2,8 +2,8 @@
  * Automatic migration of a checkout's legacy `.devintern-code/` into the
  * workspace, run on the first manual run (or `init`) of a release that keeps
  * configuration in `~/.devintern`. There is no migrate command: a checkout
- * that still has a local `.devintern-code/.env` and a recognised `origin` is
- * registered as a `manual_only` repo the moment DevIntern starts in it.
+ * that still has a local `.devintern-code/.env` is registered as a
+ * `manual_only` repo (by its `origin`, or by its directory without one) the moment DevIntern starts in it.
  *
  * What moves:
  * - `.devintern-code/.env` becomes `~/.devintern/env/<repo>.env` (the local
@@ -28,7 +28,7 @@ import { parseWorkspaceConfig } from "./config";
 import type { WorkspaceLogFn } from "./init";
 import { findWorkspaceRepoForCheckout } from "./manual-run";
 import { workspaceCodeStateDir, workspaceConfigPath } from "./paths";
-import { readRegistrableOrigin, registerManualCheckout } from "./register-checkout";
+import { registerManualCheckout } from "./register-checkout";
 import { appendTrackerSettings } from "./tracker-settings";
 
 /** Local, gitignored state files moved into `state/code/`. */
@@ -70,7 +70,7 @@ export function migrateTrackerSettings(
  * Register a legacy checkout in the workspace, once.
  *
  * Skipped in worker task subprocesses, without a local `.devintern-code/.env`,
- * without a recognised `origin`, or when the checkout is already registered.
+ * or when the checkout is already registered.
  * Failures are reported and leave the legacy setup working.
  *
  * @param cwd - Directory the CLI started in (any depth inside the checkout)
@@ -85,7 +85,6 @@ export async function migrateLegacyCheckout(
   const legacyDir = join(projectRoot, ".devintern-code");
   const legacyEnv = join(legacyDir, ".env");
   if (!existsSync(legacyEnv)) return { migrated: false };
-  if (!(await readRegistrableOrigin(projectRoot))) return { migrated: false };
   if (await findWorkspaceRepoForCheckout({ cwd: projectRoot })) return { migrated: false };
 
   let envContent: string;

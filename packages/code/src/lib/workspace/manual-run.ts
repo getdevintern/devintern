@@ -10,7 +10,8 @@
  * overrides. It stays a manual run: the worker-subprocess marker is not set.
  */
 
-import { existsSync } from "fs";
+import { existsSync, realpathSync } from "fs";
+import { resolve, sep } from "path";
 
 import { parseGitLabHostAliases, parseGitRemoteUrl } from "../code-host";
 import type { CodeHostRepository } from "../code-host";
@@ -22,8 +23,25 @@ import {
 import { Utils } from "../utils";
 import { loadWorkspaceConfig, resolveWorkspacePipelinePath } from "./config";
 import type { RepoConfig, WorkspaceConfig } from "./config";
-import { buildRepoCredentialEnv, buildRepoEnv } from "./env";
+import { ANALYTICS_CONFIG_DIR_ENV } from "../observability/analytics";
+import {
+  buildRepoCredentialEnv,
+  buildRepoEnv,
+  WORKSPACE_PIPELINE_DEFAULT_ENV,
+  WORKSPACE_PIPELINE_REPO_ENV,
+  WORKSPACE_REPO_ENV,
+} from "./env";
 import { ensureWorkspaceCodeState, resolveWorkspaceDir, workspaceConfigPath } from "./paths";
+
+/** Workspace state and pipeline keys a manual run takes even with `--env-file`. */
+const RUNTIME_KEYS = [
+  "WEBHOOK_QUEUE_DB",
+  "DEVINTERN_WORKSPACE_DIR",
+  WORKSPACE_REPO_ENV,
+  ANALYTICS_CONFIG_DIR_ENV,
+  WORKSPACE_PIPELINE_REPO_ENV,
+  WORKSPACE_PIPELINE_DEFAULT_ENV,
+];
 
 /** A workspace repository a manual run in the current checkout belongs to. */
 export interface ManualWorkspaceRun {
@@ -66,6 +84,7 @@ export function findRepoForOrigin(
   workspaceDir: string,
 ): RepoConfig | null {
   for (const repo of config.repos) {
+    if (!repo.remote) continue;
     const options = remoteParseOptions(repo, workspaceDir);
     const current = parseGitRemoteUrl(origin.trim(), options);
     const registered = parseGitRemoteUrl(repo.remote, options);
@@ -74,13 +93,54 @@ export function findRepoForOrigin(
   return null;
 }
 
+/** Real path of a directory, or its resolved path when it cannot be read. */
+function realDir(dir: string): string {
+  try {
+    return realpathSync(resolve(dir));
+  } catch {
+    return resolve(dir);
+  }
+}
+
+/**
+ * Find the path-registered repo whose directory is `dir` or contains it
+ * (the deepest one wins, so nested checkouts resolve to their own entry).
+ */
+export function findRepoForPath(config: WorkspaceConfig, dir: string): RepoConfig | null {
+  const target = realDir(dir);
+  let best: { repo: RepoConfig; length: number } | null = null;
+  for (const repo of config.repos) {
+    if (!repo.path) continue;
+    const root = realDir(repo.path);
+    if (target !== root && !target.startsWith(root + sep)) continue;
+    if (!best || root.length > best.length) best = { repo, length: root.length };
+  }
+  return best?.repo ?? null;
+}
+
+/**
+ * Find the entry for a checkout: by its `origin` remote first, then by a
+ * path-registered entry containing `dir`.
+ */
+export function findRepoForCheckout(
+  config: WorkspaceConfig,
+  checkout: { origin: string | null; dir: string },
+  workspaceDir: string,
+): RepoConfig | null {
+  const byOrigin = checkout.origin
+    ? findRepoForOrigin(config, checkout.origin, workspaceDir)
+    : null;
+  return byOrigin ?? findRepoForPath(config, checkout.dir);
+}
+
 /**
  * Resolve the workspace repository the checkout at `cwd` belongs to.
  *
  * Returns null inside worker task subprocesses (they already carry their
- * composed environment), without a `workspace.toml`, without an `origin`
- * remote, or when no `[[repos]]` entry matches. An invalid `workspace.toml`
- * is reported and treated as no match, so a manual run keeps working.
+ * composed environment), without a `workspace.toml`, or when no `[[repos]]`
+ * entry matches the checkout's `origin` or directory. An invalid
+ * `workspace.toml` is reported and treated as no match, so a manual run
+ * keeps working.
  */
 export async function findWorkspaceRepoForCheckout(
   options: { cwd?: string; workspaceDir?: string } = {},
@@ -93,7 +153,7 @@ export async function findWorkspaceRepoForCheckout(
   const originResult = await Utils.executeGitCommand(["remote", "get-url", "origin"], {
     cwd: options.cwd,
   });
-  if (!originResult.success) return null;
+  const origin = originResult.success && originResult.output.trim() ? originResult.output : null;
 
   let config: WorkspaceConfig;
   try {
@@ -102,7 +162,11 @@ export async function findWorkspaceRepoForCheckout(
     console.warn(`⚠️  Ignoring ${configPath} for this run: ${(error as Error).message}`);
     return null;
   }
-  const repo = findRepoForOrigin(config, originResult.output, workspaceDir);
+  const repo = findRepoForCheckout(
+    config,
+    { origin, dir: options.cwd ?? process.cwd() },
+    workspaceDir,
+  );
   return repo ? { workspaceDir, config, repo } : null;
 }
 
@@ -114,13 +178,28 @@ export async function findWorkspaceRepoForCheckout(
  * worker-subprocess marker is removed so the run keeps manual semantics
  * (interactive prompts, telemetry, the checkout's own git state).
  */
-export function applyManualWorkspaceRun(run: ManualWorkspaceRun): void {
+export function applyManualWorkspaceRun(
+  run: ManualWorkspaceRun,
+  options: {
+    /**
+     * Apply only the runtime and pipeline keys, never the env layers. Set
+     * with `--env-file`, which must stay the only source of credentials and
+     * tracker settings for the run.
+     */
+    runtimeOnly?: boolean;
+  } = {},
+): void {
   const pipelineDefaultFile = run.config.defaults.pipelineFile
     ? resolveWorkspacePipelinePath(run.workspaceDir, run.config.defaults.pipelineFile)
     : undefined;
   const env = buildRepoEnv(run.repo, run.workspaceDir, { pipelineDefaultFile });
   delete env[WORKER_SUBPROCESS_ENV];
-  for (const [key, value] of Object.entries(env)) {
+  // An explicit WEBHOOK_QUEUE_DB is a documented override; only worker tasks
+  // are forced onto the workspace DB.
+  if (process.env.WEBHOOK_QUEUE_DB) env.WEBHOOK_QUEUE_DB = process.env.WEBHOOK_QUEUE_DB;
+  const keys = options.runtimeOnly ? RUNTIME_KEYS : Object.keys(env);
+  for (const key of keys) {
+    const value = env[key];
     if (value === undefined) delete process.env[key];
     else process.env[key] = value;
   }
