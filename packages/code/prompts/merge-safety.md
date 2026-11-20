@@ -46,7 +46,7 @@ The repository is checked out at the PR's head in your working directory. Read s
 
 ## Instructions
 1. Decide, citing concrete evidence from the diff or the code around it.
-2. End your response with exactly one JSON object on its own line, and nothing after it:
+2. End your response with exactly one JSON object on its own line, with no code fence around it and nothing after it:
 
 {"safe": false, "reason": "One or two sentences a maintainer can verify."}
 
