@@ -13,6 +13,21 @@ DevIntern PM reads per-project settings from `.devintern-pm/.env`. Run `devpm in
 
 devpm looks for `.devintern-pm/.env` in the current directory and its parents, up to the nearest `.git` directory or your home directory, so you can run it from any subdirectory. DevIntern PM is free under the FSL license and needs no license key.
 
+## Where Settings Come From
+
+Each setting is taken from the first place that defines it:
+
+1. The nearest `.devintern-pm/.env`.
+2. The nearest plain project `.env`.
+3. The DevIntern workspace `.env` (`$DEVINTERN_WORKSPACE_DIR/.env`, default `~/.devintern/.env`).
+4. Your shell environment.
+
+So a project file only needs what is specific to that project; tracker credentials can come from your workspace. `.devintern-code/.env` is not read at runtime (only `devpm init` may reuse it).
+
+- **Repo-scoped values are never taken from the workspace `.env`:** `JIRA_DEFAULT_PROJECT_KEY`, `LINEAR_DEFAULT_TEAM_KEY`, `GITHUB_REPO`, `GITHUB_OWNER`, `GITLAB_PROJECT`, `AZURE_DEVOPS_PROJECT`, `TRELLO_DEFAULT_BOARD_ID`, `TRELLO_DEFAULT_LIST_NAME`, `ASANA_DEFAULT_PROJECT_GID`, and `MARKDOWN_TASKS_DIR`. Set them in the project file. If they are missing, Jira, GitHub, GitLab, and Azure DevOps report an error, and Linear, Trello, and Asana use the account's first team, board, or project.
+- **`workspace.toml` picks the tracker:** when it exists, the `[[teams]]` entry matching the checkout's git origin wins, then `[defaults].tracker`, then the first team's tracker. A `TASK_TRACKER` in the workspace `.env` is ignored; one in a project file or your shell still wins. Projects set up by an older `devpm init` have an active `TASK_TRACKER` in `.devintern-pm/.env`; comment it out or rerun `devpm init` to let the workspace choose.
+- **Tasks run by the DevIntern worker** read no env files: the worker passes the repo's and team's settings directly. The desktop app still reads the project's `.devintern-pm/.env`.
+
 ## Select a Backend
 
 Set `TASK_TRACKER` (default `jira`) and the variables for that tracker only; other trackers' variables are ignored.

@@ -38,9 +38,9 @@ From your project directory:
 devpm init
 ```
 
-The wizard asks which tracker you use, links to its token page, validates the connection, and writes `.devintern-pm/.env` (adding it to `.gitignore`). If the project already has a DevIntern Code config (`.devintern-code/.env`), it offers to reuse those tracker credentials.
+The wizard asks which tracker you use, links to its token page, validates the connection, and writes `.devintern-pm/.env` (adding it to `.gitignore`). If the project already has a DevIntern Code config (`.devintern-code/.env`), it offers to reuse those tracker credentials. Otherwise it can reuse credentials from your DevIntern workspace `.env` (`~/.devintern/.env` by default). Project-specific values (project key, repository, board, team key, task directory) are always asked for in the current project.
 
-To set up credentials by hand, follow your tracker's guide: [Jira](./jira-integration.md), [Linear](./linear-integration.md), [Trello](./trello-integration.md), [Asana](./asana-integration.md), [Azure DevOps](./azure-devops-integration.md), [GitHub Issues](./github-integration.md), or [GitLab](./gitlab-integration.md). For scripts or CI, `devpm init --yes` writes a template (and still migrates matching values from `.devintern-code/.env`).
+To set up credentials by hand, follow your tracker's guide: [Jira](./jira-integration.md), [Linear](./linear-integration.md), [Trello](./trello-integration.md), [Asana](./asana-integration.md), [Azure DevOps](./azure-devops-integration.md), [GitHub Issues](./github-integration.md), or [GitLab](./gitlab-integration.md). For scripts or CI, `devpm init --yes` writes a template. It takes the tracker from `.devintern-code/.env` or your workspace (`workspace.toml` first), and leaves `TASK_TRACKER` commented out when it can't tell, so a workspace you set up later still applies.
 
 ## First Run
 

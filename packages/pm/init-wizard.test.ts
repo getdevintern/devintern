@@ -17,12 +17,20 @@ import {
 } from "./lib/init-wizard";
 
 let tempDir: string;
+let workspaceDir: string;
+let originalWorkspaceDir: string | undefined;
 
 beforeEach(() => {
+  originalWorkspaceDir = process.env.DEVINTERN_WORKSPACE_DIR;
   tempDir = mkdtempSync(join(tmpdir(), "pm-init-wizard-test-"));
+  workspaceDir = join(tempDir, "workspace");
+  mkdirSync(workspaceDir, { recursive: true });
+  process.env.DEVINTERN_WORKSPACE_DIR = workspaceDir;
 });
 
 afterEach(() => {
+  if (originalWorkspaceDir === undefined) delete process.env.DEVINTERN_WORKSPACE_DIR;
+  else process.env.DEVINTERN_WORKSPACE_DIR = originalWorkspaceDir;
   rmSync(tempDir, { recursive: true, force: true });
 });
 
@@ -145,6 +153,96 @@ describe("writePmProjectConfig / probePmConnection (programmatic init)", () => {
     expect(ctx.configExists).toBe(false);
     expect(ctx.reusableFromCode?.trackerId).toBe("github");
     expect(ctx.reusableFromCode?.values.GITHUB_TOKEN).toBe("ghp_x");
+  });
+
+  test("inspectPmInitContext finds reusable workspace credentials", async () => {
+    writeFileSync(
+      join(workspaceDir, ".env"),
+      "TASK_TRACKER=linear\nLINEAR_API_KEY=lin_api_ws\n",
+      "utf8",
+    );
+
+    const ctx = await inspectPmInitContext(tempDir, { includeWorkspace: true });
+    expect(ctx.reusableFromCode).toBeNull();
+    expect(ctx.reusableFromWorkspace?.trackerId).toBe("linear");
+    expect(ctx.reusableFromWorkspace?.values.LINEAR_API_KEY).toBe("lin_api_ws");
+    expect(ctx.workspaceEnvPath).toBe(join(workspaceDir, ".env"));
+  });
+
+  test("inspectPmInitContext treats unreadable optional env files as absent", async () => {
+    mkdirSync(join(tempDir, ".devintern-code", ".env"), { recursive: true });
+    mkdirSync(join(workspaceDir, ".env"), { recursive: true });
+
+    const ctx = await inspectPmInitContext(tempDir, { includeWorkspace: true });
+    expect(ctx.reusableFromCode).toBeNull();
+    expect(ctx.reusableFromWorkspace).toBeNull();
+  });
+
+  test("inspectPmInitContext skips the workspace unless opted in", async () => {
+    writeFileSync(
+      join(workspaceDir, ".env"),
+      "TASK_TRACKER=linear\nLINEAR_API_KEY=lin_api_ws\n",
+      "utf8",
+    );
+
+    const ctx = await inspectPmInitContext(tempDir);
+    expect(ctx.reusableFromWorkspace).toBeUndefined();
+    expect(ctx.workspaceEnvPath).toBeUndefined();
+  });
+
+  test("inspectPmInitContext strips repo-scoped workspace values", async () => {
+    writeFileSync(
+      join(workspaceDir, ".env"),
+      [
+        "TASK_TRACKER=jira",
+        "JIRA_BASE_URL=https://workspace.atlassian.net",
+        "JIRA_EMAIL=workspace@acme.com",
+        "JIRA_API_TOKEN=workspace-token",
+        "JIRA_DEFAULT_PROJECT_KEY=REPO_A",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const ctx = await inspectPmInitContext(tempDir, { includeWorkspace: true });
+    expect(ctx.reusableFromWorkspace?.values.JIRA_API_TOKEN).toBe("workspace-token");
+    expect(ctx.reusableFromWorkspace?.values.JIRA_DEFAULT_PROJECT_KEY).toBeUndefined();
+  });
+
+  test("inspectPmInitContext prefers workspace.toml tracker over a stale workspace .env tracker", async () => {
+    writeFileSync(
+      join(workspaceDir, ".env"),
+      [
+        "TASK_TRACKER=jira",
+        "JIRA_BASE_URL=https://stale.atlassian.net",
+        "JIRA_EMAIL=stale@acme.com",
+        "JIRA_API_TOKEN=stale-token",
+        "LINEAR_API_KEY=lin_api_ws",
+      ].join("\n"),
+      "utf8",
+    );
+    writeFileSync(join(workspaceDir, "workspace.toml"), '[defaults]\ntracker = "linear"\n', "utf8");
+
+    const ctx = await inspectPmInitContext(tempDir, { includeWorkspace: true });
+    expect(ctx.reusableFromWorkspace?.trackerId).toBe("linear");
+    expect(ctx.reusableFromWorkspace?.values.LINEAR_API_KEY).toBe("lin_api_ws");
+  });
+
+  test("inspectPmInitContext keeps code and workspace credentials separate", async () => {
+    mkdirSync(join(tempDir, ".devintern-code"), { recursive: true });
+    writeFileSync(
+      join(tempDir, ".devintern-code", ".env"),
+      "TASK_TRACKER=github\nGITHUB_TOKEN=ghp_code\nGITHUB_REPO=acme/app\n",
+      "utf8",
+    );
+    writeFileSync(
+      join(workspaceDir, ".env"),
+      "TASK_TRACKER=linear\nLINEAR_API_KEY=lin_api_ws\n",
+      "utf8",
+    );
+
+    const ctx = await inspectPmInitContext(tempDir, { includeWorkspace: true });
+    expect(ctx.reusableFromCode?.trackerId).toBe("github");
+    expect(ctx.reusableFromWorkspace?.trackerId).toBe("linear");
   });
 
   test("probePmConnection surfaces probe failures", async () => {
@@ -304,6 +402,140 @@ describe("runPmInitWizard", () => {
     expect(env).toContain("JIRA_BASE_URL=https://acme.atlassian.net");
     expect(env).toContain("JIRA_API_TOKEN=secret-token");
     expect(env).toContain("JIRA_DEFAULT_PROJECT_KEY=PROJ");
+  });
+
+  test("fast track: reuses workspace credentials but asks for the repo-scoped project key", async () => {
+    const workspaceEnv = [
+      "TASK_TRACKER=jira",
+      "JIRA_BASE_URL=https://workspace.atlassian.net",
+      "JIRA_EMAIL=workspace@acme.com",
+      "JIRA_API_TOKEN=workspace-token",
+      "JIRA_DEFAULT_PROJECT_KEY=REPO_A",
+    ].join("\n");
+    writeFileSync(join(workspaceDir, ".env"), workspaceEnv, "utf8");
+
+    const logs: string[] = [];
+    const { prompt, asked } = promptQueue([
+      "", // accept reuse (default Y)
+      "REPO_B", // repo-scoped key must not be inherited from the workspace
+    ]);
+    await runPmInitWizard({
+      prompt,
+      probe: okProbe,
+      cwd: tempDir,
+      log: (m) => logs.push(m),
+    });
+
+    expect(asked.some((q) => q.includes("Enter a number"))).toBe(false);
+    expect(asked.some((q) => q.includes("Default Jira project key"))).toBe(true);
+    expect(logs.join("\n")).toContain("DevIntern workspace (");
+    const env = readEnv();
+    expect(env).toContain("TASK_TRACKER=jira");
+    expect(env).toContain("JIRA_API_TOKEN=workspace-token");
+    expect(env).toContain("JIRA_DEFAULT_PROJECT_KEY=REPO_B");
+    expect(env).not.toContain("JIRA_DEFAULT_PROJECT_KEY=REPO_A");
+    // The workspace file is read-only input; never rewritten by init.
+    expect(readFileSync(join(workspaceDir, ".env"), "utf8")).toBe(workspaceEnv);
+  });
+
+  test("fast track: workspace tracker comes from workspace.toml when .env omits TASK_TRACKER", async () => {
+    writeFileSync(
+      join(workspaceDir, ".env"),
+      "LINEAR_API_KEY=lin_api_workspace\nLINEAR_DEFAULT_TEAM_KEY=WS\n",
+      "utf8",
+    );
+    writeFileSync(join(workspaceDir, "workspace.toml"), '[defaults]\ntracker = "linear"\n', "utf8");
+
+    const { prompt, asked } = promptQueue([
+      "", // accept reuse
+      "GROW", // repo-scoped team key must be asked for, not inherited
+    ]);
+    await runPmInitWizard({ prompt, probe: okProbe, cwd: tempDir, log: silentLog });
+
+    expect(asked.some((q) => q.includes("Enter a number"))).toBe(false);
+    expect(asked.some((q) => q.includes("Default Linear team key"))).toBe(true);
+    expect(readEnv()).toContain("TASK_TRACKER=linear");
+    expect(readEnv()).toContain("LINEAR_API_KEY=lin_api_workspace");
+    expect(readEnv()).toContain("LINEAR_DEFAULT_TEAM_KEY=GROW");
+    expect(readEnv()).not.toContain("LINEAR_DEFAULT_TEAM_KEY=WS");
+  });
+
+  test("fast track: workspace Trello reuse asks for the board and list instead of inheriting", async () => {
+    const workspaceEnv = [
+      "TASK_TRACKER=trello",
+      "TRELLO_API_TOKEN=trello-token",
+      "TRELLO_DEFAULT_BOARD_ID=board-a",
+      "TRELLO_DEFAULT_LIST_NAME=Doing",
+    ].join("\n");
+    writeFileSync(join(workspaceDir, ".env"), workspaceEnv, "utf8");
+
+    const { prompt, asked } = promptQueue([
+      "", // accept reuse
+      "board-b", // repo-scoped board must be asked for
+      "To Do", // repo-scoped list must be asked for
+    ]);
+    await runPmInitWizard({ prompt, probe: okProbe, cwd: tempDir, log: silentLog });
+
+    expect(asked.some((q) => q.includes("Default Trello board ID"))).toBe(true);
+    expect(asked.some((q) => q.includes("Default Trello list name"))).toBe(true);
+
+    const env = readEnv();
+    expect(env).toContain("TASK_TRACKER=trello");
+    expect(env).toContain("TRELLO_API_TOKEN=trello-token");
+    expect(env).toContain("TRELLO_DEFAULT_BOARD_ID=board-b");
+    expect(env).toContain("TRELLO_DEFAULT_LIST_NAME=To Do");
+    expect(env).not.toContain("TRELLO_DEFAULT_BOARD_ID=board-a");
+    expect(readFileSync(join(workspaceDir, ".env"), "utf8")).toBe(workspaceEnv);
+  });
+
+  test("fast track: project reuse does not force optional repo-scoped prompts", async () => {
+    mkdirSync(join(tempDir, ".devintern-code"), { recursive: true });
+    writeFileSync(
+      join(tempDir, ".devintern-code", ".env"),
+      "TASK_TRACKER=linear\nLINEAR_API_KEY=lin_api_code\n",
+      "utf8",
+    );
+
+    const { prompt, asked } = promptQueue([
+      "", // accept reuse (default Y)
+    ]);
+    await runPmInitWizard({ prompt, probe: okProbe, cwd: tempDir, log: silentLog });
+
+    expect(asked.some((q) => q.includes("Default Linear team key"))).toBe(false);
+    const env = readEnv();
+    expect(env).toContain("LINEAR_API_KEY=lin_api_code");
+    expect(env).toContain("# LINEAR_DEFAULT_TEAM_KEY=ENG");
+  });
+
+  test("fast track: project .devintern-code config wins over workspace credentials", async () => {
+    mkdirSync(join(tempDir, ".devintern-code"), { recursive: true });
+    writeFileSync(
+      join(tempDir, ".devintern-code", ".env"),
+      "TASK_TRACKER=github\nGITHUB_TOKEN=ghp_code\nGITHUB_REPO=acme/app\n",
+      "utf8",
+    );
+    writeFileSync(
+      join(workspaceDir, ".env"),
+      "TASK_TRACKER=linear\nLINEAR_API_KEY=lin_api_workspace\n",
+      "utf8",
+    );
+
+    const logs: string[] = [];
+    const { prompt } = promptQueue([
+      "", // accept reuse (default Y)
+    ]);
+    await runPmInitWizard({
+      prompt,
+      probe: okProbe,
+      cwd: tempDir,
+      log: (m) => logs.push(m),
+    });
+
+    expect(logs.join("\n")).toContain(".devintern-code");
+    const env = readEnv();
+    expect(env).toContain("TASK_TRACKER=github");
+    expect(env).toContain("GITHUB_TOKEN=ghp_code");
+    expect(env).not.toContain("lin_api_workspace");
   });
 
   test("fast track: declining reuse falls back to the normal flow", async () => {

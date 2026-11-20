@@ -49,6 +49,34 @@ describe("findEnvFile", () => {
     expect(result).toBe(configEnvPath);
   });
 
+  test("includePlainEnv false ignores plain .env files", () => {
+    const childDir = join(tempRoot, "src");
+    mkdirSync(childDir, { recursive: true });
+    writeFileSync(join(tempRoot, ".env"), "KEY=plain\n");
+
+    const result = findEnvFile({
+      startDir: childDir,
+      configDirName: ".devintern-test",
+      includePlainEnv: false,
+    });
+    expect(result).toBeNull();
+  });
+
+  test("includePlainEnv false still finds config dir .env", () => {
+    const configDir = join(tempRoot, ".devintern-test");
+    mkdirSync(configDir, { recursive: true });
+    const configEnvPath = join(configDir, ".env");
+    writeFileSync(configEnvPath, "KEY=config\n");
+    writeFileSync(join(tempRoot, ".env"), "KEY=plain\n");
+
+    const result = findEnvFile({
+      startDir: tempRoot,
+      configDirName: ".devintern-test",
+      includePlainEnv: false,
+    });
+    expect(result).toBe(configEnvPath);
+  });
+
   test("finds .env in parent directory", () => {
     const childDir = join(tempRoot, "src", "components");
     mkdirSync(childDir, { recursive: true });
