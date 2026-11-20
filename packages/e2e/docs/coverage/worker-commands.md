@@ -1,6 +1,6 @@
 # `devintern worker` subcommand e2e coverage
 
-Scope: worker setup and control subcommands: `worker init`, `login`, `scaffold`, `add-repo`, `add`, `connect` (validation and Sentry), and `run-now`. Relay `connect` targets live in [relay.md](relay.md).
+Scope: worker setup and control subcommands: `worker init`, `login`, `scaffold`, `add-repo`, `add` (including `--after` dependencies), `cancel`, `connect` (validation and Sentry), and `run-now`. Relay `connect` targets live in [relay.md](relay.md).
 
 Status values are defined in the [coverage index](../coverage-matrix.md#status-legend).
 
@@ -86,6 +86,30 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 - Missing: Additional scheduling scenarios.
 - Last reviewed: 2026-11-17
 
+### `worker add --after` and `Depends on:`: dependent waits, then runs after its dependency succeeds
+
+- Surface: `devintern worker` surface
+- Status: `default`
+- Evidence: `tests/local/worker-add-dependencies.test.ts`: `--after` and `**Depends on**:` both store the dependency in `merged` mode; `worker queue --json` shows the dependents `waiting` on the running dependency; their runs start no earlier than its `finishedAt`; unknown and cross-repo `--after` keys exit non-zero and enqueue nothing; a stray `Depends on:` key warns and enqueues without a dependency (`bun run --filter @devintern/e2e test`)
+- Missing: Stacked mode, `--stack`/`--wait-merge`, and merge waits against a real code host; dependency cycles.
+- Last reviewed: 2026-11-21
+
+### Ad-hoc dependent of a failed dependency is blocked, and `--resume` releases it
+
+- Surface: `devintern worker` surface
+- Status: `default`
+- Evidence: `tests/local/worker-add-dependencies.test.ts`: a dependency failed through `E2E_FAIL_PROMPT_MARKER` leaves its `--after` dependent `blocked` (reason names it) with no run while a later task completes; `worker add --resume` on the dependency, once it succeeds, starts the dependent (`bun run --filter @devintern/e2e test`)
+- Missing: Escalated, abandoned, and PR-closed dependencies.
+- Last reviewed: 2026-11-21
+
+### `worker cancel`: withdraw a pending ad-hoc task
+
+- Surface: `devintern worker` surface
+- Status: `default`
+- Evidence: `tests/local/worker-cancel.test.ts`: `cancelled`, `already_cancelled` (first reason kept), and `not_found` outcomes and exit codes; the task moves to `cancelled` in `worker queue --json` and never runs; a background `worker add --wait --json` exits 3 with `status: "cancelled"`; a running task returns `already_started`, exit 1, and completes; an `--after` dependent of a cancelled task is `blocked` (`bun run --filter @devintern/e2e test`)
+- Missing: Dashboard **Cancel task** action; `--resume` refusal for a cancelled task.
+- Last reviewed: 2026-11-21
+
 ## Backlog
 
 Priority numbers are the global ranking from the
@@ -163,3 +187,45 @@ loopback recorder, and every case asserts it received zero requests.
 PTY cases skip with a logged reason only where Bun has no pseudo-terminal
 support (Windows). Relay targets need a signed-in relay session and stay out of
 this offline suite.
+
+### Worker ad-hoc task dependencies (`--after`, `Depends on:`)
+
+`tests/local/worker-add-dependencies.test.ts` runs the built worker daemon
+against a local bare remote with the deterministic fake agent. The workspace
+omits `--create-pr`, so a dependency that succeeds without a PR satisfies
+`merged` mode, the default for a repo without a code-host platform. State is
+read only through `worker queue --json`, `worker runs --task-key … --json`, and
+`worker runs show <id> --json`.
+
+- A chain proves that `--after` and a `**Depends on**:` body line both hold a
+  dependent `waiting` while its dependency runs (`E2E_AGENT_DELAY_MS` slows the
+  agent), and that each dependent's run starts no earlier than the
+  dependency's `finishedAt`.
+- Validation, with no daemon: an unknown `--after` key and a key from another
+  `[[repos]]` entry exit non-zero and leave the queue unchanged; a
+  `Depends on:` line naming no ad-hoc task prints the `Ignoring 'Depends on:'`
+  warning and enqueues without a dependency.
+- A dependency failed with `E2E_FAIL_PROMPT_MARKER` blocks its dependent, which
+  has no run while a later task completes. After the marker is removed,
+  `worker add --resume` on the dependency succeeds and the dependent runs.
+
+### Worker `worker cancel`
+
+`tests/local/worker-cancel.test.ts` cancels a pending task with no worker
+running, re-cancels it, cancels an unknown key, and checks that an `--after`
+dependent of the cancelled task is `blocked`. With the daemon running a slow
+task in the only slot, it cancels a second task that a background
+`worker add --wait --json` is waiting on (the waiter exits 3 with
+`status: "cancelled"`), confirms cancelling the running task exits 1 and that
+task still succeeds, and runs a later task to completion to show no cancelled
+or blocked task ever started.
+
+Prerequisites: the built CLI only (no tracker, code host, network, or
+credentials). Each test uses its own temporary HOME, workspace, and queue
+database, and stops the worker and any background `--wait` process in
+`finally`.
+
+```sh
+bun run --filter @getdevintern/code build
+bun run --filter @devintern/e2e test
+```
