@@ -378,8 +378,8 @@ export class RepoManager {
       throw new Error(`Failed to add worktree at ${path} (${ref}): ${result.error}`);
     }
     await Utils.isolateWorktreeHooks(path);
-    // Exclude only runtime artifacts: new settings.json, .env.example and
-    // automations.toml must remain eligible for a worker-generated PR.
+    // Exclude only runtime artifacts: new settings.json and .env.example
+    // must remain eligible for a worker-generated PR.
     excludeWorkerRuntimeFiles(path);
   }
 
