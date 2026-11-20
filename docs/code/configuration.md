@@ -13,6 +13,16 @@ DevIntern Code keeps its settings in `~/.devintern`, outside your repositories. 
 
 In a terminal, the wizard asks which tracker you use, links to the provider's token page, checks the credentials, and writes the file. With `--yes` (or `--no-interactive`), or when stdin is not a terminal, it writes a commented template for you to fill in instead. Run `devintern init` again in the repository to update the file.
 
+### Moving from `.devintern-code/`
+
+Older releases kept settings in the repository's `.devintern-code/` folder. The first time this release runs in such a repository (any `devintern` task run or `devintern init`), it moves them automatically when the repository has a GitHub, GitLab, or Bitbucket `origin`:
+
+- `.devintern-code/.env` becomes `~/.devintern/env/<repo>.env`, and the repository is registered as a `manual_only` repo.
+- Your sign-in moves to `~/.devintern/state/code/`.
+- Status names from `.devintern-code/settings.json` are copied to `[trackers]` in `~/.devintern/workspace.toml`. The worker does the same for the repositories it runs when it starts.
+
+Committed files (`settings.json`, `.env.example`) are left in place; delete them from the repository once everyone has upgraded. Past manual run history is not carried over.
+
 More settings:
 
 - [Agent Harness](./agent-harness.md): which AI agent runs, models, reasoning effort, failover, per-task overrides.
