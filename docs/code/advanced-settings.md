@@ -119,7 +119,7 @@ pr_status = "In Review"
 
 Trackers are `jira`, `linear`, `trello`, `azure-devops`, `asana`, `github`, `gitlab`, and `markdown`. Each uses its own project key (Jira project, Linear team key, Trello board ID, `owner/repo` for GitHub, and so on); see that tracker's integration guide. Quote keys that contain spaces or slashes, for example `[trackers.github.projects."acme/web"]`. Only the section for the active `TASK_TRACKER` is used.
 
-A project without a workspace can still use `.devintern-code/settings.json`, which uses the same fields in camelCase (`prStatus`, `inProgressStatus`, `todoStatus`, `storyPointsField`), grouped as `{ "jira": { "projects": { "PROJ": { ... } } } }`. That file is deprecated and prints a warning; when both exist, the workspace value wins for a project key.
+A repository's `.devintern-code/settings.json` is no longer read. Its tracker sections are copied to `[trackers]` automatically the first time DevIntern runs there (or when the worker starts).
 
 To add verification or custom steps, use a workspace `pipeline_file`; see [Customizing the Task Pipeline](./pipelines.md).
 

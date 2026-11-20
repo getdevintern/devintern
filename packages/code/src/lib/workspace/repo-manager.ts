@@ -28,6 +28,7 @@ import { excludeWorkerRuntimeFiles } from "../utils/git-exclude";
 import { withRepoGitLock } from "../utils/repo-git-lock";
 import type { RepoConfig } from "./config";
 import { reposDir, resolveWorkspaceDir, worktreesDir } from "./paths";
+import { migrateCommittedTrackerSettings } from "./migrate-checkout";
 
 /** Name of the persistent per-repo worktree used for review/mention runs. */
 export const BASE_WORKTREE_NAME = "base";
@@ -381,6 +382,9 @@ export class RepoManager {
     // Exclude only runtime artifacts: new settings.json and .env.example
     // must remain eligible for a worker-generated PR.
     excludeWorkerRuntimeFiles(path);
+    // Repos that still commit `.devintern-code/settings.json` keep their
+    // status names: copy new tracker keys into workspace.toml [trackers].
+    migrateCommittedTrackerSettings(this.workspaceDir, path);
   }
 
   /**

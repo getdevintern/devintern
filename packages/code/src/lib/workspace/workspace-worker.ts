@@ -15,11 +15,7 @@ import { randomUUID } from "crypto";
 import { parseEnvInteger } from "../config/env-integer";
 import { createPickupGate } from "../worker/schedule";
 import type { PickupGate, ScheduleSnapshot } from "../worker/schedule";
-import {
-  loadProjectSettingsFrom,
-  recoverOrphanedTaskRuns,
-  resolveStatusName,
-} from "../worker/orphan-recovery";
+import { recoverOrphanedTaskRuns, resolveStatusName } from "../worker/orphan-recovery";
 import { RunStore } from "../state/run-recorder";
 import type { RunRecord } from "../state/run-recorder";
 import { readImplementationReport } from "../state/session-pickup";
@@ -42,7 +38,7 @@ import {
 } from "./schedule-context";
 import type { RepoConfig, WorkspaceConfig } from "./config";
 import { workspaceHasConfiguredWork, workspaceHasStartupWork } from "./startup-work";
-import { migrateTrackerSettings, readLegacySettings } from "./migrate-checkout";
+import { migrateCommittedTrackerSettings } from "./migrate-checkout";
 import { loadWorkspaceTrackerSettings } from "./tracker-settings";
 import { applyWorkspaceProcessEnv, buildErrorMonitorEnv, buildTeamEnv } from "./env";
 import {
@@ -244,9 +240,9 @@ export async function recoverOrphanedWorkspaceRuns(options: {
       );
     }
 
-    // Fleet tasks run in per-repo worktrees, so their status names come from
-    // each repo's checked-in settings; the base worktrees hold a checked-out
-    // copy. Never triggers git work here — only existing directories are read.
+    // Status names come from workspace.toml [trackers]. Repos that still check
+    // in a settings.json are migrated from their base worktrees (no git work:
+    // only existing directories are read).
     const settingsDirs = [
       ...config.repos
         .map((repo) => join(worktreesDir(workspaceDir), repo.name, BASE_WORKTREE_NAME))
@@ -256,25 +252,9 @@ export async function recoverOrphanedWorkspaceRuns(options: {
     // One-time migration: copy committed settings.json tracker sections into
     // workspace.toml [trackers] (new keys only), so they no longer depend on
     // what each repo checks in.
-    for (const dir of settingsDirs) {
-      try {
-        const added = migrateTrackerSettings(
-          workspaceDir,
-          readLegacySettings(join(dir, ".devintern-code")),
-        );
-        if (added.length > 0) {
-          console.log(`📦 Copied tracker status names into workspace.toml: ${added.join(", ")}`);
-        }
-      } catch (error) {
-        console.warn(
-          `⚠️  Could not copy tracker settings from ${dir}: ${(error as Error).message}`,
-        );
-      }
-    }
-    const settings = loadProjectSettingsFrom(
-      settingsDirs,
-      loadWorkspaceTrackerSettings(workspaceDir) ?? config.trackerSettings ?? null,
-    );
+    for (const dir of settingsDirs) migrateCommittedTrackerSettings(workspaceDir, dir);
+
+    const settings = loadWorkspaceTrackerSettings(workspaceDir) ?? config.trackerSettings ?? null;
     const trackerType = config.defaults.tracker || "multi-team";
     retryStore = new RetryStateStore(dbPath);
 

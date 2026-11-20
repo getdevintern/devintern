@@ -36,9 +36,6 @@
  * reap-only behavior with a warning, never a startup failure.
  */
 
-import { existsSync, readFileSync } from "fs";
-import { join } from "path";
-
 import { isMarkdownFilePath } from "@devintern/task-trackers";
 
 import type { ProjectSettings } from "../../types/settings";
@@ -305,67 +302,9 @@ export function defaultProjectKeyFor(taskKey: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Settings resolution for status names.
-//
-// Fleet tasks run as CLI subprocesses in per-repo worktrees, so the pipeline
-// reads each repo's `.devintern-code/settings.json` relative to its cwd. The
-// recovery path runs in the worker process before any worktree exists for the
-// orphaned run, so it reads settings from the repos' persistent base
-// worktrees instead (first configured repo wins per project key).
+// Settings resolution for status names: the workspace's `[trackers]` table,
+// loaded by the caller (see `loadWorkspaceTrackerSettings`).
 // ---------------------------------------------------------------------------
-
-const TRACKER_SECTION_KEYS = [
-  "jira",
-  "linear",
-  "trello",
-  "azure-devops",
-  "asana",
-  "github",
-  "gitlab",
-  "markdown",
-] as const;
-
-/**
- * Merge workspace `[trackers]` settings and the legacy
- * `.devintern-code/settings.json` of the given directories into one settings
- * view (workspace first, then earlier directories win per project key).
- * Returns null when no source has any settings.
- */
-export function loadProjectSettingsFrom(
-  dirs: string[],
-  workspaceSettings: ProjectSettings | null = null,
-): ProjectSettings | null {
-  let merged: ProjectSettings | null = workspaceSettings ? { ...workspaceSettings } : null;
-  for (const dir of dirs) {
-    const settingsPath = join(dir, ".devintern-code", "settings.json");
-    if (!existsSync(settingsPath)) {
-      continue;
-    }
-    try {
-      const settings = JSON.parse(readFileSync(settingsPath, "utf8")) as ProjectSettings;
-      merged = merged ?? {};
-      mergeSettingsInto(merged, settings);
-    } catch {
-      // Unreadable settings degrade to "no status names configured".
-    }
-  }
-  return merged;
-}
-
-/** First-wins merge of tracker project sections and the legacy top-level map. */
-function mergeSettingsInto(target: ProjectSettings, source: ProjectSettings): void {
-  for (const key of TRACKER_SECTION_KEYS) {
-    const projects = source[key]?.projects;
-    if (!projects) {
-      continue;
-    }
-    const existing = target[key]?.projects ?? {};
-    target[key] = { projects: { ...projects, ...existing } };
-  }
-  if (source.projects) {
-    target.projects = { ...source.projects, ...target.projects };
-  }
-}
 
 /**
  * Resolve a status name (`inProgressStatus` / `todoStatus` / `prStatus`) for

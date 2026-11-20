@@ -18,7 +18,7 @@
  * working unchanged.
  */
 
-import { existsSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, readFileSync, renameSync, writeFileSync } from "fs";
 
 import type { BaseProjectConfig, ProjectSettings } from "../../types/settings";
 import { asTable } from "./config-readers";
@@ -206,6 +206,10 @@ export function appendTrackerSettings(
   if (!block) return [];
   const updated = `${text.endsWith("\n") ? text : `${text}\n`}${block}`;
   validate(updated);
-  writeFileSync(configPath, updated);
+  // Atomic replace: concurrent writers never leave a half-written file, and
+  // each writes a complete, validated document.
+  const temp = `${configPath}.${process.pid}.${Date.now()}.tmp`;
+  writeFileSync(temp, updated);
+  renameSync(temp, configPath);
   return added;
 }
