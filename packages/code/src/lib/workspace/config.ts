@@ -12,6 +12,7 @@ import { parseWorkerScheduleSection } from "../worker/schedule";
 import { parseEstimationEntries } from "../automation/estimation-config";
 import type { EstimationConfig } from "../automation/estimation-config";
 import { parseToml } from "./toml";
+import { parseTrackerSettings } from "./tracker-settings";
 import { DEPENDENCY_MODES, isDependencyMode } from "../dependencies/gate";
 import type { DependencyMode } from "../dependencies/gate";
 import { parseAgentSelection } from "../agent/selection";
@@ -187,6 +188,8 @@ export function parseWorkspaceConfig(
 
   const dashboard = parseDashboardSection(document, errors);
 
+  const trackerSettings = parseTrackerSettings(document.trackers, errors);
+
   if (errors.length > 0) {
     throw new WorkspaceConfigError(`Invalid ${sourceLabel}:\n- ${errors.join("\n- ")}`, errors);
   }
@@ -202,6 +205,7 @@ export function parseWorkspaceConfig(
     routing,
     automations: automationResult.automations,
     estimations,
+    trackerSettings,
   };
 }
 

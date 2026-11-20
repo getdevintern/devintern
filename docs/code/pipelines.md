@@ -20,14 +20,14 @@ implement → commit → auto-review → finalize
 - `auto-review` reviews the committed diff and applies fixes (only with `--auto-review`).
 - `finalize` pushes the branch, posts the summary to the task, and opens the pull request (only with `--create-pr`).
 
-Branch preparation, the feasibility check, and the In Progress transition happen before the pipeline. To change it, add a `pipeline` section to the repository's `.devintern-code/settings.json`, or point a workspace at a standalone pipeline file. To write your own TypeScript steps, see [Writing pipeline plugin steps](./pipeline-plugins.md).
+Branch preparation, the feasibility check, and the In Progress transition happen before the pipeline. To change it, point a workspace at a standalone pipeline file (`pipeline_file`). To write your own TypeScript steps, see [Writing pipeline plugin steps](./pipeline-plugins.md).
 
 ## Where a task gets its pipeline
 
 Exactly one complete definition runs. Step lists are never merged across scopes. From highest to lowest precedence:
 
 1. `pipeline_file` on a `[[repos]]` entry in `workspace.toml`.
-2. The `pipeline` block in the repository's committed `.devintern-code/settings.json`.
+2. The `pipeline` block in the repository's committed `.devintern-code/settings.json`. Deprecated: worker runs ignore it (so a pull request cannot change the steps the worker runs), and manual runs print a warning. Use a `pipeline_file` instead.
 3. `pipeline_file` on `[defaults]` in `workspace.toml`.
 4. The built-in default: `implement → commit → auto-review → finalize`.
 

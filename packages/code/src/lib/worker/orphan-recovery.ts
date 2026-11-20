@@ -326,12 +326,16 @@ const TRACKER_SECTION_KEYS = [
 ] as const;
 
 /**
- * Merge the `.devintern-code/settings.json` of the given directories into one
- * settings view (earlier directories win per project key). Returns null when
- * none of the directories has a readable settings file.
+ * Merge workspace `[trackers]` settings and the legacy
+ * `.devintern-code/settings.json` of the given directories into one settings
+ * view (workspace first, then earlier directories win per project key).
+ * Returns null when no source has any settings.
  */
-export function loadProjectSettingsFrom(dirs: string[]): ProjectSettings | null {
-  let merged: ProjectSettings | null = null;
+export function loadProjectSettingsFrom(
+  dirs: string[],
+  workspaceSettings: ProjectSettings | null = null,
+): ProjectSettings | null {
+  let merged: ProjectSettings | null = workspaceSettings ? { ...workspaceSettings } : null;
   for (const dir of dirs) {
     const settingsPath = join(dir, ".devintern-code", "settings.json");
     if (!existsSync(settingsPath)) {
