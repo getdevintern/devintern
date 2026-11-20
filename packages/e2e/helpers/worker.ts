@@ -688,6 +688,17 @@ export class WorkerFixture {
     )[0];
   }
 
+  /**
+   * Deferral bookkeeping of one injected row: the consecutive-deferral count
+   * (the attempt budget a deferral consumes) and the earliest claim time.
+   */
+  injectedDeferral(id: number): { defer_count: number; not_before: number | null } | undefined {
+    return this.query<{ defer_count: number; not_before: number | null }>(
+      "SELECT defer_count, not_before FROM injected_tasks WHERE id = ?",
+      [id],
+    )[0];
+  }
+
   /** Read run records, optionally scoped to one task key. */
   runRecords(taskKey?: string): WorkerRunRecord[] {
     const columns =

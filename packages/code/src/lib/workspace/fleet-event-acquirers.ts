@@ -94,6 +94,28 @@ export function fleetGitHubTokenForRepo(
   return buildFleetEventEnv(config, repo, workspaceDir).GITHUB_TOKEN;
 }
 
+/**
+ * Whether the workspace's GitHub events arrive through the hosted relay App.
+ * Relay-hosted workspaces authenticate follow-up GitHub calls `token-only`;
+ * everything else stays `app-first`. Every fleet GitHub client builder calls
+ * this directly so the choice never depends on which builder ran first.
+ */
+export async function resolveFleetGitHubHosting(workspaceDir: string): Promise<{
+  relayState: import("../relay/connect").RelayConnectState | null;
+  relayUrl: string;
+  usesHostedApp: boolean;
+}> {
+  const { hasGitHubRelayRouting, loadRelayState } = await import("../relay/connect");
+  const relayState = loadRelayState(workspaceDir);
+  const relayUrl =
+    process.env.WORKER_RELAY_URL?.replace(/\/+$/, "") || (relayState?.relayUrl ?? "");
+  // Accept a live legacy repo registration at runtime as well as the newer
+  // verified-id marker. The latter remains required when establishing a new
+  // pairing, but upgrading must not disable an already-delivering relay.
+  const usesHostedApp = Boolean(relayUrl && hasGitHubRelayRouting(relayState));
+  return { relayState, relayUrl, usesHostedApp };
+}
+
 export function createFleetGitHubClientResolver(
   config: WorkspaceConfig,
   workspaceDir: string,
@@ -370,16 +392,9 @@ export async function buildFleetEventAcquirers(options: {
     fleetGitHubSlugs,
   } = await import("./fleet-events");
 
-  const { hasGitHubRelayRouting, loadRelayState, RELAY_BOT_LOGIN } =
-    await import("../relay/connect");
-  const relayState = loadRelayState(workspaceDir);
+  const { RELAY_BOT_LOGIN } = await import("../relay/connect");
+  const { relayState, relayUrl, usesHostedApp } = await resolveFleetGitHubHosting(workspaceDir);
   const relayToken = relayState?.relayToken;
-  const relayUrl =
-    process.env.WORKER_RELAY_URL?.replace(/\/+$/, "") || (relayState?.relayUrl ?? "");
-  // Accept a live legacy repo registration at runtime as well as the newer
-  // verified-id marker. The latter remains required when establishing a new
-  // pairing, but upgrading must not disable an already-delivering relay.
-  const usesHostedApp = Boolean(relayUrl && hasGitHubRelayRouting(relayState));
   const relayEnabled = Boolean(relayToken && relayUrl);
   let relayLastSuccessAt = 0;
   const relayHealthGraceMs = Math.max(90, intervalSeconds * 2) * 1000;

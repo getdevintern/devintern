@@ -271,6 +271,15 @@ export class FakeLinearTracker implements TrackerFixture {
     return this.requireIssue(ticketKey).updatedAt;
   }
 
+  /**
+   * Move the fixed clock (epoch ms), e.g. to create an issue "now" for the
+   * estimation < 24h skip. Later writes keep advancing one second each.
+   */
+  setNow(epochMs: number): void {
+    if (!Number.isFinite(epochMs)) throw new Error(`Invalid fake Linear clock: ${epochMs}`);
+    this.now = epochMs;
+  }
+
   async deleteComment(commentId: string): Promise<void> {
     for (const issue of this.issues.values()) {
       const index = issue.comments.findIndex((comment) => comment.id === commentId);

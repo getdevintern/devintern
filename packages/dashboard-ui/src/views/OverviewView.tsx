@@ -2,7 +2,7 @@ import { EmptyState } from "@/components/shared";
 import { overviewAlerts } from "@/components/overview/overview-model";
 import { useOverviewPoll } from "@/components/overview/overview-store";
 import { useNow } from "@/components/overview/use-now";
-import { usePoll } from "@/lib/api";
+import { QUEUE_CHANGED_EVENT, usePoll } from "@/lib/api";
 import type {
   QueuedWorkResponse,
   RunRecord,
@@ -127,11 +127,16 @@ function OverviewSkeleton() {
 export function OverviewView() {
   // Shared with the status strip's harness pill: one request, one truth.
   const { data, error } = useOverviewPoll();
-  const { data: workerInfo } = usePoll<WorkerResponse>("/api/worker");
+  const { data: workerInfo } = usePoll<WorkerResponse>("/api/worker", 5000, {
+    refreshOn: QUEUE_CHANGED_EVENT,
+  });
   // Row detail, waiting and finished tasks; the in-progress set stays the overview's.
   const { data: activity } = usePoll<TaskActivityResponse>("/api/task-activity");
-  // Pending work the worker has accepted but not started.
-  const { data: queuedWork } = usePoll<QueuedWorkResponse>("/api/queue");
+  // Pending work the worker has accepted but not started. Both polls re-fetch
+  // at once when a cancel changes the queue.
+  const { data: queuedWork } = usePoll<QueuedWorkResponse>("/api/queue", 5000, {
+    refreshOn: QUEUE_CHANGED_EVENT,
+  });
   // Elapsed times and countdowns tick between polls.
   const now = useNow(5_000);
   if (!data) {

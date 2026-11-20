@@ -37,7 +37,7 @@
     },
     "packages/code": {
       "name": "@getdevintern/code",
-      "version": "2.26.0",
+      "version": "2.27.0",
       "bin": {
         "devintern": "dist/index.js",
       },
@@ -89,6 +89,7 @@
         "@types/react": "^19.2.0",
         "@types/react-dom": "^19.2.0",
         "@vitejs/plugin-react": "^5.0.0",
+        "happy-dom": "^21.0.4",
         "tailwindcss": "^4.2.4",
         "typescript": "^5.9.2",
         "vite": "^7.0.0",

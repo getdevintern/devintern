@@ -66,7 +66,14 @@ export function resolveDependencyMode(input: {
  * Where a dependency's own work item stands. `open` is a tracker blocker this
  * worker never handled that the tracker does not report done yet.
  */
-export type DependencyWorkState = "missing" | "queued" | "running" | "done" | "failed" | "open";
+export type DependencyWorkState =
+  | "missing"
+  | "queued"
+  | "running"
+  | "done"
+  | "failed"
+  | "cancelled"
+  | "open";
 
 /** A dependency's PR as far as the gate needs it. */
 export interface DependencyPr {
@@ -248,6 +255,7 @@ export function classifyDependency(facts: DependencyFacts): DependencyStatus {
   if (work === "queued") return { key, state: "pending", reason: `${key} not started` };
   if (work === "running") return { key, state: "pending", reason: `${key} running` };
   if (work === "failed") return { key, state: "blocked", reason: `${key} failed` };
+  if (work === "cancelled") return { key, state: "blocked", reason: `${key} was cancelled` };
   if (work === "open") {
     const status = facts.trackerStatus ? ` (${facts.trackerStatus})` : "";
     return { key, state: "pending", reason: `${key} not done${status}` };

@@ -53,6 +53,8 @@ function workState(status: unknown): DependencyWorkState {
       return "done";
     case "failed":
       return "failed";
+    case "cancelled":
+      return "cancelled";
     default:
       return "missing";
   }

@@ -169,6 +169,12 @@ export class FakeJiraTracker implements TrackerFixture {
    */
   readonly searches: string[] = [];
 
+  /**
+   * Accepted `POST /issue/:key/transitions` calls, in arrival order, so a test
+   * can count how many times a run moved a ticket (not only its final status).
+   */
+  readonly transitions: Array<{ key: string; status: string }> = [];
+
   private readonly server: ReturnType<typeof Bun.serve>;
   private readonly baseUrl: string;
   private readonly issues = new Map<string, FakeJiraIssue>();
@@ -581,6 +587,7 @@ export class FakeJiraTracker implements TrackerFixture {
     }
     issue.status = target;
     issue.updated = this.timestamp();
+    this.transitions.push({ key: issue.key, status: target });
     return new Response(null, { status: 204 });
   }
 

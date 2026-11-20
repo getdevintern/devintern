@@ -46,6 +46,12 @@ describe("git-hook-fixer", () => {
     writeFileSync(join(repoDir, "change.txt"), "pending change\n", "utf8");
     expect(await isCommitAlreadyComplete(repoDir)).toBe(false);
   });
+
+  test("isCommitAlreadyComplete ignores untracked sandbox placeholders", async () => {
+    execSync("mkfifo .gitconfig", { cwd: repoDir });
+    writeFileSync(join(repoDir, ".bashrc"), "");
+    expect(await isCommitAlreadyComplete(repoDir)).toBe(true);
+  });
 });
 
 describe("verifyPushHookFix", () => {
@@ -139,6 +145,34 @@ describe("verifyPushHookFix", () => {
     expect(await Utils.hasUncommittedChanges(repoDir)).toBe(false);
     expect(existsSync(join(repoDir, "fix.txt"))).toBe(true);
     expect(git(repoDir, "log -1 --pretty=%s")).toBe("Initial commit");
+  });
+
+  test("amends leftover changes without staging sandbox placeholders", async () => {
+    git(repoDir, "checkout -b feature/unpushed");
+    execSync("mkfifo .gitconfig", { cwd: repoDir });
+    writeFileSync(join(repoDir, ".bashrc"), "");
+    writeFileSync(join(repoDir, "fix.txt"), "hook fix leftover\n", "utf8");
+
+    const result = await verifyPushHookFix({ cwd: repoDir, expectedBranch: "feature/unpushed" });
+
+    expect(result.success).toBe(true);
+    expect(result.amended).toBe(true);
+    expect(git(repoDir, "show --name-only --format= HEAD").split("\n").sort()).toEqual([
+      "README.md",
+      "fix.txt",
+    ]);
+  });
+
+  test("does not amend when only sandbox placeholders are present", async () => {
+    git(repoDir, "checkout -b feature/unpushed");
+    execSync("mkfifo .gitconfig", { cwd: repoDir });
+    writeFileSync(join(repoDir, ".bashrc"), "");
+    const head = git(repoDir, "rev-parse HEAD");
+
+    const result = await verifyPushHookFix({ cwd: repoDir, expectedBranch: "feature/unpushed" });
+
+    expect(result.amended).toBe(false);
+    expect(git(repoDir, "rev-parse HEAD")).toBe(head);
   });
 
   test("pushCurrentBranch skips git push when origin already has HEAD", async () => {

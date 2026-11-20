@@ -35,8 +35,16 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 - Surface: External dependency: task trackers
 - Status: `default`
 - Evidence: `tests/local/tracker-linear-estimation.test.ts`, `bun run --filter @devintern/e2e test`
-- Missing: Live Linear estimation (team estimate scales, real `IssueUpdateInput`/`CommentUpdateInput` validation); worker `[[estimations]]` schedule against the fake Linear server (gap `e2e-tracker-linear-scheduled-estimation`, not started).
-- Last reviewed: 2026-11-18
+- Missing: Live Linear estimation (team estimate scales, real `IssueUpdateInput`/`CommentUpdateInput` validation); the worker `[[estimations]]` schedule is covered by [Linear: scheduled `[[estimations]]` sweep](#linear-scheduled-estimations-sweep-gap-e2e-tracker-linear-scheduled-estimation).
+- Last reviewed: 2026-11-20
+
+### Linear: scheduled `[[estimations]]` sweep (gap `e2e-tracker-linear-scheduled-estimation`)
+
+- Surface: `devintern worker` surface
+- Status: `default`
+- Evidence: `tests/local/worker-linear-scheduled-estimation.test.ts`, `bun run --filter @devintern/e2e test`
+- Missing: Live Linear estimation (team estimate scales, real `IssueFilter` and `IssueUpdateInput.estimate` validation); cron-expression schedules for a Linear entry (interval only).
+- Last reviewed: 2026-11-20
 
 ## Tracker plan status
 
@@ -44,8 +52,8 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 
 - Default `test`: yes (offline fake)
 - Opt-in suite: none
-- Notes: Fake lifecycle: key/`--query`, workflow state, comment, decoy isolation. Worker polling, relay `task.changed` delivery, and CLI `--estimate` are offline too. Live Layer 2 team/project lifecycle, live estimation, scheduled `[[estimations]]` for Linear, and attachments remain future work.
-- Last reviewed: 2026-11-18
+- Notes: Fake lifecycle: key/`--query`, workflow state, comment, decoy isolation. Worker polling, relay `task.changed` delivery, CLI `--estimate`, and the scheduled `[[estimations]]` sweep are offline too. Live Layer 2 team/project lifecycle, live estimation, and attachments remain future work.
+- Last reviewed: 2026-11-20
 
 ## Layer 3 fake (implemented)
 
@@ -181,3 +189,34 @@ answered `operations`), not CLI stdout. It asserts:
 No prerequisites beyond the built CLI; the test skips only when
 `packages/code/dist/index.js` is absent. Run it alone with
 `bun test tests/local/tracker-linear-estimation.test.ts` from `packages/e2e`.
+
+### Linear scheduled `[[estimations]]` sweep
+
+`tests/local/worker-linear-scheduled-estimation.test.ts` runs the built
+`devintern worker` daemon with `tracker = "linear"`, the deterministic agent
+in `estimate` mode, a local bare remote, and one `[[estimations]]` entry
+(`interval = "15m"`, `query` = a JSON IssueFilter on a per-run title marker)
+against the in-process Linear fake. Instead of waiting out the interval, the
+test stops the worker, moves the durable `estimation:<id>` schedule row into
+the past, and starts it again. It asserts:
+
+- the first start only registers the schedule (`interval:15m`, no run, no
+  Linear request);
+- a due sweep sends one `SearchIssues` with the configured filter, sets the
+  native `estimate` and posts exactly one estimation comment on each of the two
+  matching issues, records one `estimate`-origin run per issue attributed to
+  the estimation id (no branch, repo, or PR), and advances the schedule
+  cursor; a decoy with the marker only in its description is never selected,
+  and a matching issue created "now" (fake `setNow`) is skipped as `< 24h`;
+- a second due sweep with unchanged issues re-queries Linear but spawns no
+  agent, writes nothing, and keeps each comment id;
+- after a human edit to one issue, a third sweep re-estimates only that issue
+  (one `IssueUpdate`, one `CommentUpdate` rewriting the same comment with the
+  new points) and skips the other;
+- the bare remote and seed checkout stay at the fixture commit, no task
+  worktree is left behind, and no unexpected GraphQL operation is recorded.
+
+No prerequisites beyond the built CLI; the test skips only when
+`packages/code/dist/index.js` is absent. Run it alone with
+`bun test tests/local/worker-linear-scheduled-estimation.test.ts` from
+`packages/e2e`.

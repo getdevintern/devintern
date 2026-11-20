@@ -162,10 +162,7 @@ export interface DashboardDataOptions {
   maxLogBytesPerFile?: number;
   /** Sources the running config polls; defaults to the workspace.toml list. */
   configuredSources?: () => ConfiguredSource[];
-  /**
-   * Jobs waiting in the worker's in-process supervisor (embedded dashboard
-   * only); queued PR jobs show under Queued with their PR label.
-   */
+  /** Jobs waiting in the worker's supervisor (embedded dashboard only), shown under Queued. */
   supervisorQueuedJobs?: () => QueuedJobSnapshot[];
 }
 
@@ -803,6 +800,12 @@ function resolveRetryEligibility(data: DashboardData, run: RunRecord): RetryElig
       reason: `ad-hoc task ${run.taskKey} is already ${task.status} (task #${task.id})`,
     };
   }
+  if (task.status === "cancelled") {
+    return {
+      eligible: false,
+      reason: `ad-hoc task ${run.taskKey} was cancelled; a cancelled task cannot be re-queued, enqueue it again instead`,
+    };
+  }
   return eligibility;
 }
 
@@ -1001,6 +1004,11 @@ function retryInjectedRun(
   }
   if (task.status === "pending" || task.status === "running") {
     return conflict(`ad-hoc task ${taskKey} is already ${task.status} (task #${task.id})`);
+  }
+  if (task.status === "cancelled") {
+    return conflict(
+      `ad-hoc task ${taskKey} was cancelled; a cancelled task cannot be re-queued, enqueue it again instead`,
+    );
   }
   // Re-queueing force-removes the worktree the surviving child is working in.
   if (interruptedChildStillRunning(task)) {
