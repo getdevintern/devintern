@@ -141,6 +141,68 @@ describe("parseMergeSafetyVerdict", () => {
     expect(parseMergeSafetyVerdict('{"safe": true, "reason": "x"} — done')).toBeNull();
   });
 
+  test("reads the verdict from a ```json fence that ends the output", () => {
+    const output = [
+      "The diff changes credential precedence.",
+      "```json",
+      '{"safe": false, "reason": "changes credential precedence"}',
+      "```",
+    ].join("\n");
+    expect(parseMergeSafetyVerdict(output)).toEqual({
+      safe: false,
+      reason: "changes credential precedence",
+    });
+  });
+
+  test("accepts a bare ``` fence and trailing whitespace or ANSI codes after it", () => {
+    const bare = 'Analysis.\n```\n{"safe": true, "reason": "docs only"}\n```';
+    expect(parseMergeSafetyVerdict(bare)).toEqual({ safe: true, reason: "docs only" });
+    const noisy =
+      'Analysis.\r\n\x1b[2m```json\x1b[0m\r\n  {"safe": false, "reason": "x"}  \r\n```\x1b[0m\n \n\x1b[0m\n';
+    expect(parseMergeSafetyVerdict(noisy)).toEqual({ safe: false, reason: "x" });
+  });
+
+  test("prose after a fenced verdict is no verdict", () => {
+    const output = [
+      "```json",
+      '{"safe": true, "reason": "tests only"}',
+      "```",
+      "Actually, this touches auth; do not merge.",
+    ].join("\n");
+    expect(parseMergeSafetyVerdict(output)).toBeNull();
+  });
+
+  test("a fence holding more than one line is no verdict", () => {
+    const twoObjects = [
+      "```json",
+      '{"safe": false, "reason": "a"}',
+      '{"safe": true, "reason": "b"}',
+      "```",
+    ].join("\n");
+    expect(parseMergeSafetyVerdict(twoObjects)).toBeNull();
+    const multiLine = ["```json", "{", '  "safe": true,', '  "reason": "x"', "}", "```"].join("\n");
+    expect(parseMergeSafetyVerdict(multiLine)).toBeNull();
+  });
+
+  test("an earlier fenced approving block followed by a prose last line is no verdict", () => {
+    const output = [
+      "Example:",
+      "```json",
+      '{"safe": true, "reason": "example"}',
+      "```",
+      "I would not merge this unattended.",
+    ].join("\n");
+    expect(parseMergeSafetyVerdict(output)).toBeNull();
+  });
+
+  test("a fence with malformed JSON, a non-boolean safe, or another language is no verdict", () => {
+    expect(parseMergeSafetyVerdict('```json\n{"safe": true, "reason": "x"\n```')).toBeNull();
+    expect(parseMergeSafetyVerdict('```json\n{"safe": "true", "reason": "x"}\n```')).toBeNull();
+    expect(parseMergeSafetyVerdict('```ts\n{"safe": true, "reason": "x"}\n```')).toBeNull();
+    expect(parseMergeSafetyVerdict('{"safe": true, "reason": "x"}\n```')).toBeNull();
+    expect(parseMergeSafetyVerdict("```json\n```")).toBeNull();
+  });
+
   test("fills a missing reason", () => {
     expect(parseMergeSafetyVerdict('{"safe": true}')).toEqual({
       safe: true,
