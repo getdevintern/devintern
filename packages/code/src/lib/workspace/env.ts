@@ -514,10 +514,11 @@ export function buildTeamTaskEnv(
  * one team's credentials.
  *
  * Without `team` this is exactly {@link buildRepoEnv}. With `team` the team's
- * `env_file` and inline `[teams.env]` layer over the repo env, as for a task
- * the team polled:
+ * namespaced workspace values, `env_file`, and inline `[teams.env]` layer over
+ * the repo env, as for a task the team polled:
  *
  * process env < workspace `.env` < repo `env_file` < `[repos.env]` <
+ * namespaced workspace team values (`<TRACKER>_<TEAM>_<SETTING>`) <
  * team `env_file` < team inline < worker runtime paths.
  *
  * Unlike {@link buildTeamTaskEnv}, the run keeps the repo env's tracker
@@ -543,7 +544,10 @@ export function buildRepoRunEnv(
   );
   if (!team) return env;
   const kept = { TASK_TRACKER: env.TASK_TRACKER, GITHUB_REPO: env.GITHUB_REPO };
-  const teamEnv = teamLayerEnv(team, workspaceDir);
+  // Same team overlay as buildTeamTaskEnv, so an ad-hoc run or automation
+  // borrowing a team's credentials resolves the same tracker project and
+  // tokens as the tasks that team polls.
+  const teamEnv = teamOverlayEnv(parseEnvFile(workspaceEnvPath(workspaceDir)), team, workspaceDir);
   Object.assign(env, teamEnv);
   for (const [key, value] of Object.entries(kept)) {
     if (value === undefined) delete env[key];

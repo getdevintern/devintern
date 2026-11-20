@@ -170,9 +170,9 @@ Secrets live in one owner-only `~/.devintern/.env`: tracker credentials, `GITHUB
 1. Shared workspace `.env`
 2. The repo's `env_file`
 3. Inline `[repos.env]` values
-4. For team tasks: the team's `env_file`, then `[teams.env]`
+4. For team tasks: the team's `<TRACKER>_<TEAM>_<SETTING>` values from the shared `.env`, then its `env_file`, then `[teams.env]`
 
-Ad-hoc tasks (`devintern worker add`) and scheduled automations on a repo also get layer 4 when exactly one team is fixed to that repo with `repo = "<name>"`. `worker add --team <name>` picks the team explicitly, and is required when several teams are fixed to the repo. These runs keep the repo's `TASK_TRACKER` and `GITHUB_REPO`, so only the team's credentials apply. An automation on a repo with several fixed teams uses layers 1-3 and logs a warning; set `env_file` on the `[[repos]]` entry to choose its credentials.
+Ad-hoc tasks (`devintern worker add`) and scheduled automations on a repo also get layer 4 when exactly one team is fixed to that repo with `repo = "<name>"`. `worker add --team <name>` picks the team explicitly, and is required when several teams are fixed to the repo. These runs keep the repo's `TASK_TRACKER` and `GITHUB_REPO`, so only the team's credentials apply. Because layer 4 sits above the repo layers, a namespaced team value such as `GITHUB_PLATFORM_TOKEN` replaces a `GITHUB_TOKEN` set in the repo's `env_file` or `[repos.env]` for that team's runs. An automation on a repo with several fixed teams uses layers 1-3 and logs a warning; set `env_file` on the `[[repos]]` entry to choose its credentials.
 
 For GitHub remotes, `GITHUB_REPO` is filled in from the remote URL. For GitLab remotes on your tracker instance, `GITLAB_PROJECT` is filled in with the project path (`group/sub/repo`): `gitlab.com` remotes while `GITLAB_BASE_URL` is unset or `gitlab.com`, and self-managed remotes when their host (or a `GITLAB_CODE_HOST_ALIASES` alias) matches `GITLAB_BASE_URL`. A `GITHUB_REPO` or `GITLAB_PROJECT` you set in any layer, including a team's, wins over the derived value. Polling and issue search still use the workspace or team `GITLAB_PROJECT`, so keep a centralized tracker project in the shared `.env`.
 

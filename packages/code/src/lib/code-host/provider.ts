@@ -166,6 +166,23 @@ function remoteMatchesInstance(
     : httpHostMatchesInstance(remote.hostname, remote.httpHost, configured, requireHttpPort);
 }
 
+/**
+ * Whether a merge-request web URL belongs to the configured instance.
+ *
+ * Hostnames must match. Ports only disqualify the URL when both sides name an
+ * explicit, different port (`:9443` vs `:8443`): a reverse proxy commonly
+ * serves `web_url` on the default port while `GITLAB_BASE_URL` keeps the
+ * instance's own port, and those follow-ups must still resolve.
+ */
+function changeUrlMatchesInstance(
+  url: URL,
+  configured: { hostname: string; host: string },
+): boolean {
+  if (url.hostname.toLowerCase() !== configured.hostname) return false;
+  const configuredPort = configured.host.slice(configured.hostname.length + 1);
+  return !url.port || !configuredPort || url.port === configuredPort;
+}
+
 /** Whether the remote is gitlab.com, honoring the optional port requirement. */
 function remoteIsGitLabCom(remote: RemoteParts, requireHttpPort: boolean): boolean {
   return requireHttpPort && remote.httpHost !== null
@@ -281,10 +298,7 @@ export function parseChangeRequestUrl(
   const configured = configuredGitLab(options);
   const httpHost = url.host.toLowerCase();
   const isGitLabCom = httpHost === "gitlab.com";
-  if (
-    !isGitLabCom &&
-    !(configured && httpHostMatchesInstance(hostname, httpHost, configured, true))
-  ) {
+  if (!isGitLabCom && !(configured && changeUrlMatchesInstance(url, configured))) {
     return null;
   }
 

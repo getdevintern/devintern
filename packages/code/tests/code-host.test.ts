@@ -189,6 +189,26 @@ describe("parseChangeRequestUrl", () => {
     });
   });
 
+  test("accepts a merge-request URL served on the default port behind a proxy", () => {
+    // GitLab's `web_url` follows `external_url`, which a reverse proxy often
+    // serves without the port `GITLAB_BASE_URL` names.
+    expect(
+      parseChangeRequestUrl("https://git.example.test/gitlab/acme/widgets/-/merge_requests/7", {
+        gitlabBaseUrl: "https://git.example.test:8443/gitlab",
+      }),
+    ).toMatchObject({
+      instanceUrl: "https://git.example.test:8443/gitlab",
+      projectPath: "acme/widgets",
+      number: 7,
+    });
+    expect(
+      parseChangeRequestUrl(
+        "https://git.example.test:8443/gitlab/acme/widgets/-/merge_requests/7",
+        { gitlabBaseUrl: "https://git.example.test/gitlab" },
+      ),
+    ).toMatchObject({ projectPath: "acme/widgets", number: 7 });
+  });
+
   test("rejects issue and unknown-host URLs", () => {
     expect(parseChangeRequestUrl("https://github.com/acme/widgets/issues/1")).toBeNull();
     expect(
