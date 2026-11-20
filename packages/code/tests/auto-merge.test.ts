@@ -246,6 +246,21 @@ describe("autoMergePr", () => {
     expect(github.comments[0]).toContain("kept failing");
   });
 
+  test("with once, the final failure still says new commits re-check the PR", async () => {
+    const github = fakeGitHub([file("src/x.ts")]);
+    await autoMergePr(
+      URL,
+      options(github, {
+        verdict: "no json",
+        lastAttempt: true,
+        policy: { ...basePolicy, once: true },
+      }),
+    );
+    expect(github.comments[0]).toContain("kept failing");
+    expect(github.comments[0]).toContain("checks again after new commits");
+    expect(github.comments[0]).not.toContain("does not check again after new commits");
+  });
+
   test("a usage limit during review propagates (the worker defers) and posts nothing", async () => {
     const { UsageLimitError } = await import("@devintern/agent-harness");
     const github = fakeGitHub([file("src/x.ts")]);

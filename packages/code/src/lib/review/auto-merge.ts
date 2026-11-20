@@ -44,6 +44,12 @@ export interface AutoMergePolicy extends MergePathPolicy {
    * merges them. Unset or empty disables labeling.
    */
   reviewLabel?: string;
+  /**
+   * The worker checks each PR only once (`auto_merge_once`), so a PR left
+   * open is not re-checked after new commits. Only changes the status
+   * comment's wording.
+   */
+  once?: boolean;
 }
 
 /**
@@ -440,7 +446,12 @@ export async function autoMergePr(
       ? { outcome: decision.outcome, message: decision.message, reviewed: decision.reviewed }
       : { ...(await mergeAtHead(ctx, decision)), reviewed: decision.reviewed };
   if (decision.kind === "stop" && decision.leftOpen) {
-    await postStatus(ctx, { kind: "left-open", headSha: pr.head.sha, reason: decision.leftOpen });
+    await postStatus(ctx, {
+      kind: "left-open",
+      headSha: pr.head.sha,
+      reason: decision.leftOpen,
+      ...(options.policy.once ? { once: true } : {}),
+    });
   } else if (result.outcome === "failed" && options.lastAttempt) {
     // The worker stops retrying this head after this attempt.
     await postStatus(ctx, {
@@ -450,6 +461,8 @@ export async function autoMergePr(
         kind: "not-evaluable",
         detail: `the automatic check kept failing (${result.message})`,
       },
+      // No `once` footer: the worker gives up on this head only, so new
+      // commits are checked again even with `auto_merge_once`.
     });
   }
   return result;

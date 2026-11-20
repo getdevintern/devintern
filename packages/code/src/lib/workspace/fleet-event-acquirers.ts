@@ -279,6 +279,7 @@ async function buildAutoMergeWatcher(params: {
           parseHarnessList(process.env.AGENT_HARNESS)[0])
         : undefined,
     policyFingerprint: (slug) => fleetAutoMergePolicyFingerprint(config, slug),
+    once: () => config.workspace.autoMerge.once,
     isStackedBase: params.isStackedBase,
     quietSeconds: parseEnvInteger(
       "WORKER_AUTO_MERGE_QUIET_SECONDS",

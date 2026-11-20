@@ -230,6 +230,8 @@ export async function runAutoMergeCommand(args: string[]): Promise<void> {
   let dryRun = false;
   let lastAttempt = false;
   let review = true;
+  // Worker-internal: the PR is not re-checked after new commits (status comment wording).
+  const once = args.includes("--once");
   let verbose = false;
   let method: Method = "squash";
   let reviewLabel = DEFAULT_AUTO_MERGE_REVIEW_LABEL;
@@ -323,7 +325,7 @@ export async function runAutoMergeCommand(args: string[]): Promise<void> {
     await loadReviewEnvironment(prUrl);
     const { autoMergePr } = await import("./auto-merge");
     const result = await autoMergePr(prUrl, {
-      policy: { safePaths, denyPaths, review, method, reviewLabel },
+      policy: { safePaths, denyPaths, review, method, reviewLabel, once },
       expectedHeadSha,
       dryRun,
       lastAttempt,

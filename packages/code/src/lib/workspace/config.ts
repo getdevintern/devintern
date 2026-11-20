@@ -360,6 +360,7 @@ function parseAutoMergePolicy(
     safePaths: readGlobList(workspaceTable, "auto_merge_safe_paths", label, errors),
     denyPaths: readGlobList(workspaceTable, "auto_merge_deny_paths", label, errors),
     reviewLabel: readReviewLabel(workspaceTable, label, errors),
+    once: readOptionalBoolean(workspaceTable, "auto_merge_once", label, errors) ?? true,
     ...(Object.keys(agent).length > 0 ? { agent } : {}),
   };
 }
