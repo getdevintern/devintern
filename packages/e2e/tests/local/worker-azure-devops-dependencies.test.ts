@@ -175,9 +175,15 @@ test.skipIf(!existsSync(cliPath))(
   "a Predecessor link holds a polled Azure DevOps work item until the predecessor is done",
   async () => {
     const marker = `E2EAZDEP${crypto.randomUUID().replace(/-/g, "")}`;
-    // Agile states: New → Active → Closed. One state for in-progress and
-    // post-PR: the local bare remote is not a supported code host.
-    const tracker = new FakeAzureDevOpsTracker({ statuses: { pr: "Active" }, realClock: true });
+    // New → Active → Shipped. One state for in-progress and post-PR: the
+    // local bare remote is not a supported code host. The done state is a
+    // custom name outside the product's process-default fallback names
+    // (done/closed/completed/removed), so only its Completed state category
+    // from the work-item-type states read can release DEP.
+    const tracker = new FakeAzureDevOpsTracker({
+      statuses: { pr: "Active", done: "Shipped" },
+      realClock: true,
+    });
     const { todo, inProgress, done } = tracker.statuses;
     const pat = tracker.environment().AZURE_DEVOPS_PAT ?? "";
     const { worker, prepare, trackerQueue } = await setUp(
@@ -283,6 +289,13 @@ test.skipIf(!existsSync(cliPath))(
       expect(await worker.branchFile(`feature/${dep.key.toLowerCase()}`, "src/greeting.ts")).toBe(
         'export const greeting = "Hello, world!";',
       );
+      // The release came from the state category: the states read succeeded.
+      expect(
+        tracker.blockerRequests.some(
+          (request) => request.kind === "states" && request.status === 200,
+        ),
+        diagnostics(),
+      ).toBe(true);
       // OTHER is still open: Successor and Hierarchy links did not hold DEP.
       expect(await tracker.getStatus(other.key)).toBe(inProgress);
 

@@ -36,10 +36,12 @@ export const RELATION_NAMES: Record<string, string> = {
 export interface FakeAzureDevOpsBlockerRequest {
   /**
    * `relations`: `GET …/workitems/{id}?$expand=relations`; `batch`: the
-   * `GET …/workitems?ids=…&errorPolicy=omit` predecessor-state read.
+   * `GET …/workitems?ids=…&errorPolicy=omit` predecessor-state read;
+   * `states`: the `GET {project}/_apis/wit/workitemtypes/{type}/states`
+   * state-category read.
    */
-  kind: "relations" | "batch";
-  /** Requested work-item ids (one for `relations`). */
+  kind: "relations" | "batch" | "states";
+  /** Requested work-item ids (one for `relations`, none for `states`). */
   ids: number[];
   /** HTTP status the fake answered with. */
   status: number;

@@ -651,9 +651,9 @@ export class FakeAzureDevOpsTracker implements TrackerFixture {
 
     const statesProject = workItemTypeStatesProject(method, scopedPath);
     if (statesProject !== undefined) {
-      return statesProject === this.project
-        ? json(workItemTypeStates(this.statuses))
-        : this.unmatched(method, path);
+      if (statesProject !== this.project) return this.unmatched(method, path);
+      this.blockerRequests.push({ kind: "states", ids: [], status: 200, at: Date.now() });
+      return json(workItemTypeStates(this.statuses));
     }
 
     const detailMatch = scopedPath.match(/^\/_apis\/wit\/workitems\/(\d+)$/i);
