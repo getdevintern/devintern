@@ -3,6 +3,8 @@ import { Utils } from "../../utils";
 import { PRClient } from "../base-client";
 import { normalizeCodeHostUrl } from "../provider";
 import { VALIDATED_GITLAB_VERSION } from "../shared";
+import { GitLabApi } from "./api";
+import { upsertArtifactNote } from "./artifact-note";
 import type { PRInfo, PRResult } from "../shared";
 
 interface GitLabProject {
@@ -32,6 +34,7 @@ export class GitLabMRClient extends PRClient {
   private apiUrl: string;
   private ca?: string;
   private proxy?: string;
+  private caFile?: string;
 
   constructor(
     token: string,
@@ -42,6 +45,7 @@ export class GitLabMRClient extends PRClient {
     super(token, normalized);
     this.apiUrl = `${normalized}/api/v4`;
     this.proxy = options.proxy;
+    this.caFile = options.caFile;
     if (options.caFile) {
       this.ca = readFileSync(options.caFile, "utf8");
     }
@@ -87,7 +91,10 @@ export class GitLabMRClient extends PRClient {
           );
           if (existing) {
             await this.addLabels(project.id, existing, labels, warnings);
-            return this.successResult(project, existing, true, warnings);
+            return {
+              ...this.successResult(project, existing, true, warnings),
+              ...(await this.publishArtifacts(prInfo, project, existing, warnings)),
+            };
           }
         }
         return {
@@ -98,7 +105,10 @@ export class GitLabMRClient extends PRClient {
       }
 
       const mergeRequest = (await response.json()) as GitLabMergeRequest;
-      return this.successResult(project, mergeRequest, false, warnings);
+      return {
+        ...this.successResult(project, mergeRequest, false, warnings),
+        ...(await this.publishArtifacts(prInfo, project, mergeRequest, warnings)),
+      };
     } catch (error) {
       return {
         success: false,
@@ -106,6 +116,31 @@ export class GitLabMRClient extends PRClient {
         warnings,
       };
     }
+  }
+
+  /** Managed artifact note; failures stay advisory and never undo MR creation. */
+  private async publishArtifacts(
+    prInfo: PRInfo,
+    project: GitLabProject,
+    mergeRequest: GitLabMergeRequest,
+    warnings: string[],
+  ): Promise<Partial<PRResult>> {
+    if (!prInfo.artifactComment) return {};
+    const artifactPublication = await upsertArtifactNote({
+      api: new GitLabApi({
+        token: this.token,
+        instanceUrl: this.baseUrl,
+        caFile: this.caFile,
+        proxy: this.proxy,
+      }),
+      projectId: project.id,
+      mergeRequestIid: mergeRequest.iid,
+      webUrl: mergeRequest.web_url,
+      body: prInfo.artifactComment,
+    });
+    if (artifactPublication.status === "failed")
+      this.warn(warnings, artifactPublication.message ?? "Artifact publication failed");
+    return { artifactPublication };
   }
 
   private async request(path: string, init: RequestInit = {}): Promise<Response> {

@@ -17,6 +17,22 @@ import type {
   TaskTrackerCommentContent,
 } from "../../types/task-tracker";
 
+/** A ticket that blocks another one, as the tracker natively models it. */
+export interface TaskBlocker {
+  /** Tracker task key of the blocking ticket (same shape as `Task.key`). */
+  key: string;
+  /**
+   * Whether the tracker reports the blocker finished (Jira status category
+   * `done`, Linear `completed`/`canceled`, a closed GitHub or GitLab issue, an
+   * Azure DevOps `Completed`/`Removed` state, a completed Asana task, an
+   * archived or Done-list Trello card, a done markdown task). `undefined`
+   * when the tracker did not say (for example the blocker was not found).
+   */
+  done?: boolean;
+  /** Tracker status name, for wait reasons (`In Progress`). */
+  status?: string;
+}
+
 export interface TaskTrackerClient {
   // ------------------------------------------------------------------
   // Core task operations
@@ -60,6 +76,16 @@ export interface TaskTrackerClient {
 
   /** Fetch and format detailed related work items for a task. */
   getRelatedWorkItems(task: Task): Promise<DetailedRelatedIssue[]>;
+
+  /**
+   * Tickets that block this one ("is blocked by"), natively or from a
+   * `Depends on:` description line (Trello, markdown), with their done state.
+   * Only trackers whose capability declares `dependencies` implement it. A
+   * tracker plan or account without the feature (GitLab Free, Asana without
+   * dependencies, GitHub without issue dependencies) returns `[]` instead of
+   * throwing; other failures throw.
+   */
+  getBlockers?(taskKey: string): Promise<TaskBlocker[]>;
 
   /** Assemble a normalized {@link FormattedTaskDetails} from raw task data. */
   formatTaskDetails(

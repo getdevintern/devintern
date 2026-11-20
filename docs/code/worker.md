@@ -18,7 +18,7 @@ dateModified: 2026-11-18
 - **Follow-up on pull requests**: review feedback, merge conflicts, CI failures, auto-merge, and `@mentions`. See [PR Follow-up](./pr-follow-up.md).
 - **Scheduled story-point estimation**. See [Story Points Estimation](./story-points-estimation.md#scheduled-estimation-with-the-worker).
 - **Production errors** from Sentry. See [Sentry Auto-fixes](./sentry-integration.md).
-- **Ad-hoc tasks** you enqueue with `devintern worker add`. See [Delegate Tasks to the Worker](./delegation.md).
+- **Ad-hoc tasks** you enqueue with `devintern worker add`. See [Delegate Tasks to the Worker](./delegation.md). Withdraw one that has not started with `devintern worker cancel <taskKey>` (see [Cancel a pending task](./delegation.md#cancel-a-pending-task)).
 
 When something does not get picked up, see [Worker Troubleshooting](./worker-troubleshooting.md).
 
@@ -65,6 +65,37 @@ Polling works with all trackers. Some need one extra setting:
 A folder of markdown tasks is the quickest way to try the worker without a tracker account. With several boards or tracker accounts, use [teams](./workspaces.md#multiple-teams-and-tracker-boards).
 
 Each task runs through the normal pipeline with `[defaults].worker_task_args` (default `--create-pr`). After a PR is created the ticket is recorded as actioned and is not re-implemented until it changes; see [Tickets already actioned after a PR](./worker-troubleshooting.md#tickets-already-actioned-after-a-pr).
+
+### Ticket dependencies
+
+The worker picks up polled tickets in dependency order. Trackers with their own "blocked by" links need nothing turned on; Trello and markdown tasks list their blockers on a `Depends on:` line in the description:
+
+| Tracker        | Blockers it reads                                                                                                              | Blocker counts as done                          |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------- |
+| Jira           | "Blocks" issue links where the ticket "is blocked by" another issue                                                            | "Done" status category                          |
+| Linear         | "Blocked by" relations                                                                                                         | Completed or canceled                           |
+| GitHub Issues  | Issue dependencies ("Blocked by"). If the repository or account does not have them, tickets run as before                     | Closed                                          |
+| GitLab Issues  | "Is blocked by" linked items. These need GitLab Premium or Ultimate; on Free, tickets run as before                           | Closed                                          |
+| Azure DevOps   | Predecessor links                                                                                                              | A state in the Completed or Removed category    |
+| Asana          | Task dependencies ("Blocked by"). If the workspace plan does not have them, tasks run as before                               | Marked complete                                 |
+| Trello         | `Depends on:` line in the card description, listing card links or short links (`Depends on: https://trello.com/c/Ab12Cd34`) | Archived, or in a list named Done, Complete(d), Closed, or Cancel(l)ed |
+| Markdown files | `Depends on:` line in the task body, listing task keys (file names without `.md`, such as `Depends on: api-schema, task-12`)  | `status:` is done, complete(d), closed, or cancel(l)ed |
+
+On Trello and markdown, separate keys with commas or spaces. Text after a dash or parenthesis is ignored, and words that are not shaped like a key are skipped: a Trello short link needs a digit (write a short link without one as a card URL), and a markdown key needs a hyphen or digit. A Trello key that matches no card keeps the ticket waiting with `not found` as the reason, and the worker logs a warning. On markdown, a word with no task file is ignored unless it looks like a ticket key (`local-add-login`, `task-12`), which waits as `not found`.
+
+A blocked ticket is held back without being started, transitioned, or commented on. The worker checks it again on the next poll, then less often while it keeps waiting (up to every 15 minutes). Editing the ticket triggers a check right away:
+
+- **A blocker the worker implemented** follows the same rules as [dependent ad-hoc tasks](./delegation.md#modes-merged-and-stacked). In `merged` mode (the default) the ticket waits until the blocker's PR merges. In `stacked` mode it starts on the blocker's branch once the blocker's run succeeded, and its PR targets that branch.
+- **A blocker the worker never handled** counts only once the tracker marks it done (see the table above).
+- **A blocker whose run failed, or whose PR was closed without merging,** keeps the ticket blocked. Marking the blocker done in the tracker, or re-running it, releases the ticket.
+
+GitHub and GitLab issue numbers and markdown keys belong to one team's repository, project, or tasks folder, so only that team's runs count as the worker having handled the blocker.
+
+Set the mode with `[defaults].dependency_mode`, or per team with `dependency_mode` in a [`[[teams]]`](./workspaces.md#multiple-teams-and-tracker-boards) entry. A blocker can only be stacked on within the same repository; a blocker in another repo is waited on until its PR merges.
+
+`devintern worker queue` and the dashboard's Queued list show each held-back ticket with its reason, for example `waiting: PROJ-12 not done (In Progress)` or `waiting: PROJ-12 PR #7 not merged`.
+
+A dashboard retry follows the same rules. A stacked ticket is retried on its blocker's branch. Retrying a ticket that is still held back does not start it: the retry is marked failed with the reason, and the worker starts the ticket once its blockers are satisfied.
 
 ## Agent failover and sandboxing
 

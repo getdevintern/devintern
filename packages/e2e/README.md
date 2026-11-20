@@ -93,9 +93,15 @@ behind. Runs that bypass Turbo — a direct `bun test tests/local` or
 `bun run --filter @devintern/e2e test` — must build the CLI first (the GitHub E2E
 workflow does); otherwise the smoke tests skip when
 `packages/code/dist/index.js` is absent. The task itself stays uncached so a
-stale result is never replayed locally. Live tests require the explicit
+stale result is never replayed locally. The `test` script runs files with
+`bun test --parallel` (one worker process per CPU core), so every test must keep
+its own temp directories, ports, and environment; a direct `bun test tests/local`
+runs the same files serially. Live tests require the explicit
 `test:e2e` command and fail if configuration is missing; direct `bun test` skips
 the live suite.
+The local suite does not run on pull requests or pushes to `main`. The
+**e2e-local** workflow runs it before every `@getdevintern/code` release (the npm
+release waits for it) and on demand from the Actions tab on any branch.
 Keep live tests in a trusted, uncached CI job with dedicated secrets, initially
 manual or scheduled. The included **GitHub E2E** workflow is manual
 (`workflow_dispatch`): configure the repository variable `E2E_GITHUB_REPOSITORY`

@@ -336,21 +336,33 @@ await withRepoGitLock(process.argv[2]!, async () => {
     const script = join(testDir, "pr-job.ts");
     writeFileSync(
       script,
-      `import { existsSync, writeFileSync } from "fs";
+      `import { existsSync, readdirSync, writeFileSync } from "fs";
 import { join } from "path";
 import { Utils } from ${JSON.stringify(join(import.meta.dir, "../src/lib/utils"))};
-const [branch, cwd, out] = process.argv.slice(2) as [string, string, string];
+const [branch, cwd, out, barrierDir, jobCount] = process.argv.slice(2) as [string, string, string, string, string];
 const result = await Utils.prepareReviewWorktree(branch, { cwd });
 if (!result.success || !result.path) {
   console.error(result.error);
   process.exit(1);
 }
 const startedAt = Date.now();
-let present = true;
-for (let i = 0; i < 8; i++) {
-  await Bun.sleep(50);
+// Hold the worktree until every job has prepared its own, so the holds
+// overlap regardless of how slowly the serialized setup steps run.
+writeFileSync(join(barrierDir, \`ready-\${branch.replaceAll("/", "_")}\`), "");
+const readyCount = () => readdirSync(barrierDir).filter((name) => name.startsWith("ready-")).length;
+const deadline = Date.now() + 20_000;
+let present = existsSync(join(result.path, "README.md"));
+while (readyCount() < Number(jobCount)) {
+  if (Date.now() > deadline) {
+    console.error("timed out waiting for the other jobs to prepare their worktrees");
+    process.exit(1);
+  }
+  await Bun.sleep(25);
   present &&= existsSync(join(result.path, "README.md"));
 }
+// Keep holding briefly past the barrier, so every hold ends after the last one began.
+await Bun.sleep(100);
+present &&= existsSync(join(result.path, "README.md"));
 Utils.releaseReviewWorktree(result.path);
 writeFileSync(out, JSON.stringify({ startedAt, finishedAt: Date.now(), present, path: result.path }));
 `,
@@ -359,8 +371,12 @@ writeFileSync(out, JSON.stringify({ startedAt, finishedAt: Date.now(), present, 
     // Three PR jobs in CLI subprocesses plus two task worktrees from the
     // worker's RepoManager, all touching web.git at the same time.
     const prBranches = BRANCHES.slice(0, 3);
+    const barrierDir = join(testDir, "barrier");
+    mkdirSync(barrierDir);
     const jobs = prBranches.map((branch, index) => {
-      const child = Bun.spawn(["bun", script, branch, base, join(testDir, `job-${index}.json`)], {
+      const outFile = join(testDir, `job-${index}.json`);
+      const args = [script, branch, base, outFile, barrierDir, String(prBranches.length)];
+      const child = Bun.spawn(["bun", ...args], {
         env: process.env,
         stdout: "pipe",
         stderr: "pipe",

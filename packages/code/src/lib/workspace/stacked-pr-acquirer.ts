@@ -19,7 +19,10 @@ import type { Acquirer } from "../../worker";
 import type { WorkspaceConfig } from "./config";
 import { repoGitHubSlug } from "./env";
 import { workspaceDbPath } from "./paths";
-import { createFleetGitHubClientResolver } from "./fleet-event-acquirers";
+import {
+  createFleetGitHubClientResolver,
+  resolveFleetGitHubHosting,
+} from "./fleet-event-acquirers";
 import type { RepoManager } from "./repo-manager";
 
 type GitHubClient = import("../code-host/github/reviews").GitHubReviewsClient;
@@ -221,6 +224,22 @@ export class StackedPrAcquirer implements Acquirer {
   }
 }
 
+/**
+ * GitHub client resolver for stacked-PR maintenance. Resolves the relay
+ * hosting itself (`token-only` when the relay hosts the App, else
+ * `app-first`) instead of reading the env override, which the fleet event
+ * wiring only sets after this acquirer is built.
+ */
+export async function createStackedPrGitHubResolver(
+  config: WorkspaceConfig,
+  workspaceDir: string,
+  Client?: typeof import("../code-host/github/reviews").GitHubReviewsClient,
+): Promise<(slug: string) => GitHubClient> {
+  const { usesHostedApp } = await resolveFleetGitHubHosting(workspaceDir);
+  const ClientClass = Client ?? (await import("../code-host/github/reviews")).GitHubReviewsClient;
+  return createFleetGitHubClientResolver(config, workspaceDir, usesHostedApp, ClientClass);
+}
+
 /** Build the fleet stacked-PR acquirer. */
 export async function buildStackedPrAcquirer(options: {
   config: WorkspaceConfig;
@@ -232,13 +251,7 @@ export async function buildStackedPrAcquirer(options: {
 }): Promise<StackedPrAcquirer> {
   const { config, workspaceDir, store, repoManager } = options;
   const runStore = options.runStore ?? new RunStore(workspaceDbPath(workspaceDir));
-  const { GITHUB_AUTH_MODE_ENV, GitHubReviewsClient } = await import("../code-host/github/reviews");
-  const gh = createFleetGitHubClientResolver(
-    config,
-    workspaceDir,
-    process.env[GITHUB_AUTH_MODE_ENV] === "token-only",
-    GitHubReviewsClient,
-  );
+  const gh = await createStackedPrGitHubResolver(config, workspaceDir);
   const maintainer = new StackMaintainer({
     store,
     host: createGitHubStackHost(config, gh),

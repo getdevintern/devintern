@@ -8,7 +8,8 @@
  * so `[[routing.rules]]` are not consulted.
  *
  * Non-interactive by default: returns after enqueue. `--wait` blocks until
- * the run settles and exits with its success/failure status; `--json` emits a
+ * the run settles and exits with its success/failure status (or
+ * {@link WAIT_CANCELLED_EXIT_CODE} when the row is cancelled first); `--json` emits a
  * single machine-readable object on stdout (human diagnostics go to stderr).
  */
 
@@ -24,7 +25,7 @@ import { readWorkerHarnessPause } from "../observability/harness-pause";
 import type { WorkerHarnessPause } from "../observability/harness-pause";
 import { loadSupabaseConfig } from "../cli/bootstrap";
 import type { RepoConfig, WorkspaceConfig } from "./config";
-import { loadWorkspaceConfig } from "./config";
+import { loadWorkspaceConfig, resolveCredentialTeam } from "./config";
 import { InjectedTaskStore } from "../state/injected-tasks";
 import type { InjectedTask } from "../state/injected-tasks";
 import { applyWorkspaceProcessEnv, repoGitHubSlug } from "./env";
@@ -35,6 +36,7 @@ import {
 } from "./injected-enqueue";
 import { resolveDependencyMode } from "../dependencies/gate";
 import type { DependencyMode } from "../dependencies/gate";
+import { describeCancellation } from "./injected-cancel";
 import {
   injectedChildStillRunningMessage,
   interruptedChildStillRunning,
@@ -55,6 +57,12 @@ import type { AddOptions } from "./add-args";
 
 export { parseWorkerAddArgs } from "./add-args";
 export type { AddOptions, ParsedAddArgs } from "./add-args";
+
+/**
+ * Exit code of `worker add --wait` when the task was cancelled before it ran
+ * (`worker cancel` or the dashboard), distinct from a pipeline failure (1).
+ */
+export const WAIT_CANCELLED_EXIT_CODE = 3;
 
 /** How often `--wait` re-reads the task row. */
 const WAIT_POLL_INTERVAL_MS = 1_000;
@@ -96,6 +104,10 @@ export interface WorkerAddOptions {
   restartGraceMs?: number;
   /** Override how often `--wait` re-reads the task row; injectable for tests. */
   waitPollIntervalMs?: number;
+}
+
+function capitalize(text: string): string {
+  return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
 function displayPath(path: string): string {
@@ -240,14 +252,29 @@ export async function runWorkerAdd(
 
   // `--resume` re-queues an existing row, so title/body/repo resolution (and
   // their validation) apply only to a new enqueue.
-  let target: { repo: RepoConfig; body: string } | null = null;
+  let target: { repo: RepoConfig; body: string; credentialTeam?: string } | null = null;
   if (!add.resume) {
     const repoResult = resolveTargetRepo(config, add.repo, error);
     if (!repoResult.ok) return repoResult.code;
 
+    // Validated now so a typo or an ambiguous fixed-team setup fails here, not
+    // later in the worker after the task was queued.
+    const teamResult = resolveCredentialTeam(config, repoResult.repo.name, add.team);
+    if (!teamResult.ok) {
+      error(`❌ ${capitalize(teamResult.error)}.`);
+      if (teamResult.reason === "ambiguous") {
+        error("   Pick whose credentials the task uses with --team <name>.");
+      }
+      return 1;
+    }
+
     const bodyResult = resolveInjectedBody(add, options, error);
     if (!bodyResult.ok) return 1;
-    target = { repo: repoResult.repo, body: bodyResult.body };
+    target = {
+      repo: repoResult.repo,
+      body: bodyResult.body,
+      ...(teamResult.team ? { credentialTeam: teamResult.team.name } : {}),
+    };
   }
 
   if (!(await checkAutomationAccess(selectedDir, status, error))) return 1;
@@ -287,7 +314,7 @@ export async function runWorkerAdd(
     }
     // `await` is load-bearing: without it the surrounding `finally` would
     // `store.close()` while `reportTask`/`waitForTask` is still polling.
-    return await enqueueNewTask(add, target.body, target.repo, context);
+    return await enqueueNewTask(add, target, context);
   } catch (enqueueError) {
     // Filesystem/DB failures (including a sandbox denying writes to the
     // workspace state) must not escape as a minified stack trace: agents parse
@@ -354,10 +381,10 @@ interface TaskContext {
 /** Create the markdown file + durable row, then optionally wait. */
 async function enqueueNewTask(
   add: AddOptions,
-  body: string,
-  repo: RepoConfig,
+  target: { repo: RepoConfig; body: string; credentialTeam?: string },
   ctx: TaskContext & { workerRunning: PidLiveness },
 ): Promise<number> {
+  const { repo, body } = target;
   const { store, selectedDir, workerRunning, log, status } = ctx;
   // Only an active (pending/running) task dedupes; a settled one under the
   // same key is history and a new occurrence is enqueued.
@@ -365,6 +392,7 @@ async function enqueueNewTask(
   try {
     enqueued = enqueueInjectedTask(store, selectedDir, {
       repo: repo.name,
+      ...(add.team ? { team: add.team } : {}),
       title: add.title,
       body,
       idempotencyKey: add.idempotencyKey,
@@ -402,6 +430,9 @@ async function enqueueNewTask(
   const pause = readHarnessPause(selectedDir);
   if (!add.json) {
     status(`✅ Enqueued ${task.taskKey} for repo "${task.repo}" (task #${task.id}).`);
+    if (target.credentialTeam) {
+      status(`   Credentials: team "${target.credentialTeam}" (env_file and [teams.env]).`);
+    }
     if (task.dependsOn.length > 0) {
       status(
         `   Depends on ${task.dependsOn.join(", ")} (${task.dependencyMode ?? "merged"} mode)` +
@@ -524,10 +555,21 @@ function warnHarnessPause(
  * otherwise a human success/failure line. Returns the process exit code.
  */
 function emitSettled(
-  task: Pick<InjectedTask, "id" | "taskKey" | "repo" | "status" | "message">,
+  task: Pick<InjectedTask, "id" | "taskKey" | "repo" | "status" | "message"> &
+    Partial<Pick<InjectedTask, "cancelledBy" | "cancelReason" | "finishedAt">>,
   deduplicated: boolean,
   ctx: TaskContext,
 ): number {
+  if (task.status === "cancelled") {
+    const detail = describeCancellation(task);
+    const message = `${task.taskKey} was cancelled${detail ? ` ${detail}` : ""} before it ran`;
+    if (ctx.json) {
+      ctx.log(JSON.stringify({ ...serialize(task), deduplicated, message }));
+    } else {
+      ctx.error(`⛔ ${message}`);
+    }
+    return WAIT_CANCELLED_EXIT_CODE;
+  }
   if (ctx.json) {
     ctx.log(
       JSON.stringify({
@@ -560,7 +602,7 @@ async function reportTask(task: InjectedTask, ctx: TaskContext): Promise<number>
     if (ctx.json) ctx.log(JSON.stringify({ ...serialize(task), deduplicated: true, ...paused }));
     return 0;
   }
-  if (task.status === "done" || task.status === "failed") {
+  if (task.status === "done" || task.status === "failed" || task.status === "cancelled") {
     return emitSettled(task, true, ctx);
   }
   return await waitForTask(
@@ -598,6 +640,15 @@ async function resumeTask(
       return 0;
     }
     return await waitForTask(task.id, { ...ctx, ...paused, deduplicated: true, taskKey }, task);
+  }
+  // A cancelled row was withdrawn on purpose; restarting it is not supported.
+  if (task.status === "cancelled") {
+    const detail = describeCancellation(task);
+    ctx.error(
+      `❌ ${taskKey} was cancelled${detail ? ` ${detail}` : ""}; a cancelled task cannot be resumed.`,
+    );
+    ctx.error("   Enqueue it again with `devintern worker add --title ...`.");
+    return 1;
   }
 
   // A hard-killed worker's detached child may still be running this attempt in
@@ -716,7 +767,7 @@ async function waitForTask(
     if (!task) {
       return reportPrunedTask(id, ctx, initialTask.repo);
     }
-    if (task.status === "done" || task.status === "failed") {
+    if (task.status === "done" || task.status === "failed" || task.status === "cancelled") {
       return emitSettled(task, ctx.deduplicated, ctx);
     }
     if (Date.now() >= deadline) {

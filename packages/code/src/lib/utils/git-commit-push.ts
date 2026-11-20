@@ -1,4 +1,5 @@
 import { executeGitCommandWithConfigLockRetry, hasConfigLockError } from "./git-exec";
+import { hasUncommittedWork, stageWorkTreeChanges } from "./git-stage";
 import { Utils } from "./registry";
 
 /**
@@ -95,26 +96,30 @@ export async function commitChanges(
       };
     }
 
-    // Check if there are any changes to commit
-    if (!(await Utils.hasUncommittedChanges(cwd))) {
+    // Check if there are any changes to commit. Untracked sandbox
+    // placeholders (`/dev/null` mounts, or the empty files they leave behind)
+    // are not changes: `git status --porcelain` would count them.
+    const workDir = cwd ?? process.cwd();
+    const work = hasUncommittedWork(workDir);
+    if (!work.success) {
+      return { success: false, message: `Failed to check for changes: ${work.error}` };
+    }
+    if (!work.dirty) {
       return {
         success: false,
         message: "No changes to commit",
       };
     }
 
-    // Add all changes. `-A` without a pathspec stages the entire working
-    // tree even when git runs from a subdirectory (e.g. a monorepo
-    // package), whereas `git add .` silently limits staging to the cwd and
-    // produces a partial commit.
-    const addResult = await Utils.executeGitCommand(["add", "-A"], {
-      verbose,
-      cwd,
-    });
-    if (!addResult.success) {
+    // Stage the entire working tree (from its top level even when git runs
+    // from a monorepo package subdirectory) except sandbox placeholders.
+    // `git add -A` would fail fatally on a `/dev/null` mount or commit the
+    // empty file a mount point leaves behind.
+    const staged = stageWorkTreeChanges(workDir);
+    if (!staged.success) {
       return {
         success: false,
-        message: `Failed to stage changes: ${addResult.error}`,
+        message: `Failed to stage changes: ${staged.error}`,
       };
     }
 
@@ -143,16 +148,17 @@ export async function commitChanges(
       // during the commit). Sweep the remainder into the same commit once;
       // if the tree still isn't clean, fail loudly so callers don't push an
       // incomplete commit or open an incomplete PR.
-      if (await Utils.hasUncommittedChanges(cwd)) {
-        const amendAdd = await Utils.executeGitCommand(["add", "-A"], { verbose, cwd });
+      if (hasUncommittedWork(workDir).dirty) {
+        const restaged = stageWorkTreeChanges(workDir);
         const amendArgs = author
           ? ["-c", `user.name=${author.name}`, "-c", `user.email=${author.email}`]
           : [];
         amendArgs.push("commit", "--amend", "--no-edit");
-        const amendResult = amendAdd.success
+        const amendResult = restaged.success
           ? await Utils.executeGitCommand(amendArgs, { verbose, cwd })
-          : amendAdd;
-        if (!amendResult.success || (await Utils.hasUncommittedChanges(cwd))) {
+          : restaged;
+        const after = hasUncommittedWork(workDir);
+        if (!amendResult.success || !after.success || after.dirty) {
           return {
             success: false,
             message: `Commit for ${taskKey} was created but the working tree still has uncommitted changes; refusing to continue with a partial commit. Please review and commit the remaining changes manually.`,

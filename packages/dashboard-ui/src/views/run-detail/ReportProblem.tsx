@@ -534,9 +534,11 @@ export function ReportProblem({ run }: { run: RunRecord }) {
         variant={failed ? "outline" : "ghost"}
         onClick={() => setOpen(true)}
         title={failed ? undefined : "Report incorrect behavior in this run"}
+        aria-label="Report a problem"
+        className="max-sm:px-2.5"
       >
         <Bug />
-        Report a problem
+        <span className="max-sm:sr-only">Report a problem</span>
       </Button>
       <Dialog open={open} onOpenChange={setOpen}>
         {open ? <ReportSession run={run} onClose={() => setOpen(false)} /> : null}

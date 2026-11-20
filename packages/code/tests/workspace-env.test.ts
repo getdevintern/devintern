@@ -11,6 +11,7 @@ import {
   buildTeamEnv,
   buildTeamTaskEnv,
   gitHubSlugFromRemote,
+  gitLabProjectFromRemote,
   parseEnvFile,
 } from "../src/lib/workspace/env";
 
@@ -28,8 +29,105 @@ describe("gitHubSlugFromRemote", () => {
   });
 });
 
+describe("gitLabProjectFromRemote", () => {
+  test("parses gitlab.com https, ssh, and scp remotes", () => {
+    expect(gitLabProjectFromRemote("https://gitlab.com/group/sub/repo.git")).toBe("group/sub/repo");
+    expect(gitLabProjectFromRemote("https://gitlab.com/group/sub/repo/")).toBe("group/sub/repo");
+    expect(gitLabProjectFromRemote("git@gitlab.com:group/sub/repo.git")).toBe("group/sub/repo");
+    expect(gitLabProjectFromRemote("ssh://git@gitlab.com/group/sub/repo.git")).toBe(
+      "group/sub/repo",
+    );
+  });
+
+  test("parses self-managed remotes matching GITLAB_BASE_URL", () => {
+    expect(
+      gitLabProjectFromRemote(
+        "https://git.example.com/group/sub/repo.git",
+        "https://git.example.com",
+      ),
+    ).toBe("group/sub/repo");
+    expect(
+      gitLabProjectFromRemote("git@git.example.com:group/sub/repo.git", "git.example.com/"),
+    ).toBe("group/sub/repo");
+    expect(
+      gitLabProjectFromRemote(
+        "ssh://git@git.example.com/group/sub/repo.git",
+        "https://git.example.com/",
+      ),
+    ).toBe("group/sub/repo");
+    expect(
+      gitLabProjectFromRemote(
+        "https://git.example.com/gitlab/group/sub/repo.git",
+        "https://git.example.com/gitlab/",
+      ),
+    ).toBe("group/sub/repo");
+  });
+
+  test("rejects a remote whose port differs from the tracker instance", () => {
+    expect(
+      gitLabProjectFromRemote(
+        "https://git.example.com:9443/group/sub/repo.git",
+        "https://git.example.com:8443",
+      ),
+    ).toBeNull();
+    expect(
+      gitLabProjectFromRemote(
+        "https://git.example.com:8443/group/sub/repo.git",
+        "https://git.example.com:8443",
+      ),
+    ).toBe("group/sub/repo");
+  });
+
+  test("returns null for non-GitLab remotes and unmatched self-managed hosts", () => {
+    expect(gitLabProjectFromRemote("git@github.com:acme/backend.git")).toBeNull();
+    expect(
+      gitLabProjectFromRemote("https://bitbucket.org/acme/backend.git", "https://gitlab.com"),
+    ).toBeNull();
+    expect(gitLabProjectFromRemote("https://git.example.com/group/sub/repo.git")).toBeNull();
+    expect(
+      gitLabProjectFromRemote(
+        "git@git.example.com:group/sub/repo.git",
+        "https://gitlab.example.com",
+      ),
+    ).toBeNull();
+  });
+
+  test("ignores gitlab.com remotes when GITLAB_BASE_URL is self-managed", () => {
+    expect(
+      gitLabProjectFromRemote("git@gitlab.com:mirror/backend.git", "https://gitlab.example.com"),
+    ).toBeNull();
+    expect(gitLabProjectFromRemote("git@gitlab.com:mirror/backend.git", "https://gitlab.com")).toBe(
+      "mirror/backend",
+    );
+  });
+
+  test("matches the canonical code-host parser (aliases, decoding, validation)", () => {
+    expect(
+      gitLabProjectFromRemote("git@gitlab-alias:group/sub/repo.git", "https://gitlab.example.com", [
+        "gitlab-alias",
+      ]),
+    ).toBe("group/sub/repo");
+    // A relative installation path applies to alias remotes too; keeping the
+    // prefix would pin `gitlab/group/sub/repo` instead of the real project.
+    expect(
+      gitLabProjectFromRemote(
+        "https://gitlab-alias/gitlab/group/sub/repo.git",
+        "https://gitlab.example.com/gitlab",
+        ["gitlab-alias"],
+      ),
+    ).toBe("group/sub/repo");
+    expect(gitLabProjectFromRemote("https://gitlab.com/group%20name/repo.git")).toBe(
+      "group name/repo",
+    );
+    // A single-segment path is not a project path; pinning it would make the
+    // tracker reject the derived GITLAB_PROJECT at construction.
+    expect(gitLabProjectFromRemote("git@gitlab.com:repo.git")).toBeNull();
+  });
+});
+
 describe("buildRepoEnv", () => {
   let workspaceDir: string;
+  const savedGitLabEnv = new Map<string, string | undefined>();
 
   const repo = (overrides: Partial<RepoConfig> = {}): RepoConfig => ({
     name: "backend",
@@ -41,11 +139,25 @@ describe("buildRepoEnv", () => {
   beforeEach(() => {
     workspaceDir = join(tmpdir(), `ws-env-${Date.now()}-${Math.random().toString(36).slice(2)}`);
     mkdirSync(workspaceDir, { recursive: true });
+    for (const key of [
+      "GITLAB_PROJECT",
+      "GITLAB_BASE_URL",
+      "GITLAB_CODE_HOST_URL",
+      "GITLAB_CODE_HOST_ALIASES",
+    ]) {
+      savedGitLabEnv.set(key, process.env[key]);
+      delete process.env[key];
+    }
   });
 
   afterEach(() => {
     rmSync(workspaceDir, { recursive: true, force: true });
     delete process.env.WS_ENV_PROCESS_MARKER;
+    for (const [key, value] of savedGitLabEnv) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    savedGitLabEnv.clear();
   });
 
   test("layers workspace .env, repo env_file, and inline env in precedence order", () => {
@@ -97,6 +209,239 @@ describe("buildRepoEnv", () => {
       workspaceDir,
     );
     expect(nonGitHub.GITHUB_REPO).toBe(process.env.GITHUB_REPO);
+  });
+
+  test("an explicit repo env_file GITHUB_REPO wins over the remote", () => {
+    mkdirSync(join(workspaceDir, "env"), { recursive: true });
+    writeFileSync(join(workspaceDir, "env", "github.env"), "GITHUB_REPO=acme/file-fork\n");
+
+    const env = buildRepoEnv(repo({ envFile: "env/github.env" }), workspaceDir);
+    expect(env.GITHUB_REPO).toBe("acme/file-fork");
+  });
+
+  test("injects GITLAB_PROJECT from a GitLab remote unless overridden", () => {
+    const remote = "git@gitlab.com:group/sub/repo.git";
+    expect(buildRepoEnv(repo({ remote }), workspaceDir).GITLAB_PROJECT).toBe("group/sub/repo");
+
+    const overridden = buildRepoEnv(
+      repo({ remote, env: { GITLAB_PROJECT: "group/fork" } }),
+      workspaceDir,
+    );
+    expect(overridden.GITLAB_PROJECT).toBe("group/fork");
+
+    mkdirSync(join(workspaceDir, "env"), { recursive: true });
+    writeFileSync(join(workspaceDir, "env", "gitlab.env"), "GITLAB_PROJECT=group/from-file\n");
+    const fromFile = buildRepoEnv(repo({ remote, envFile: "env/gitlab.env" }), workspaceDir);
+    expect(fromFile.GITLAB_PROJECT).toBe("group/from-file");
+  });
+
+  test("keeps a workspace-wide GITLAB_PROJECT instead of deriving the code project", () => {
+    writeFileSync(join(workspaceDir, ".env"), "GITLAB_PROJECT=workspace/project\n");
+
+    const env = buildRepoEnv(
+      repo({ remote: "https://gitlab.com/group/sub/repo.git" }),
+      workspaceDir,
+    );
+    // GitLab iids are per-project, so switching the tracker to the code project
+    // would resolve the same task key against an unrelated issue.
+    expect(env.GITLAB_PROJECT).toBe("workspace/project");
+  });
+
+  test("keeps a self-managed tracker project for a gitlab.com code mirror", () => {
+    writeFileSync(
+      join(workspaceDir, ".env"),
+      "GITLAB_BASE_URL=https://gitlab.example.com\nGITLAB_PROJECT=onprem/issues\n",
+    );
+
+    const env = buildRepoEnv(repo({ remote: "git@gitlab.com:mirror/backend.git" }), workspaceDir);
+    expect(env.GITLAB_PROJECT).toBe("onprem/issues");
+  });
+
+  test("pins GITLAB_PROJECT for a self-managed remote matching GITLAB_BASE_URL", () => {
+    writeFileSync(join(workspaceDir, ".env"), "GITLAB_BASE_URL=git.example.com/\n");
+
+    const env = buildRepoEnv(
+      repo({ remote: "ssh://git@git.example.com/group/sub/repo.git" }),
+      workspaceDir,
+    );
+    expect(env.GITLAB_PROJECT).toBe("group/sub/repo");
+  });
+
+  test("uses SSH aliases only when the code host matches the tracker instance", () => {
+    writeFileSync(
+      join(workspaceDir, ".env"),
+      "GITLAB_BASE_URL=https://gitlab.example.com/gitlab\n" +
+        "GITLAB_CODE_HOST_URL=https://gitlab.example.com/gitlab\n" +
+        "GITLAB_CODE_HOST_ALIASES=gitlab-alias\n",
+    );
+
+    const matched = buildRepoEnv(
+      repo({ remote: "https://gitlab-alias/gitlab/group/sub/repo.git" }),
+      workspaceDir,
+    );
+    expect(matched.GITLAB_PROJECT).toBe("group/sub/repo");
+
+    // The alias belongs to a different code host than the tracker; pairing its
+    // project path with GITLAB_BASE_URL would target another host's project.
+    writeFileSync(
+      join(workspaceDir, ".env"),
+      "GITLAB_BASE_URL=https://gitlab.onprem.example.com\n" +
+        "GITLAB_CODE_HOST_URL=https://gitlab.com\n" +
+        "GITLAB_CODE_HOST_ALIASES=corp-git\n",
+    );
+    const crossHost = buildRepoEnv(repo({ remote: "git@corp-git:group/repo.git" }), workspaceDir);
+    expect(crossHost.GITLAB_PROJECT).toBeUndefined();
+  });
+
+  test("does not infer GITLAB_PROJECT for non-GitLab or unmatched self-managed remotes", () => {
+    const github = buildRepoEnv(repo(), workspaceDir);
+    expect(github.GITLAB_PROJECT).toBeUndefined();
+
+    const bitbucket = buildRepoEnv(
+      repo({ remote: "https://bitbucket.org/acme/backend.git" }),
+      workspaceDir,
+    );
+    expect(bitbucket.GITLAB_PROJECT).toBeUndefined();
+
+    const unmatched = buildRepoEnv(
+      repo({ remote: "https://git.example.com/group/sub/repo.git" }),
+      workspaceDir,
+    );
+    expect(unmatched.GITLAB_PROJECT).toBeUndefined();
+
+    writeFileSync(join(workspaceDir, ".env"), "GITLAB_BASE_URL=https://other.example.com\n");
+    const mismatched = buildRepoEnv(
+      repo({ remote: "https://git.example.com/group/sub/repo.git" }),
+      workspaceDir,
+    );
+    expect(mismatched.GITLAB_PROJECT).toBeUndefined();
+  });
+
+  test("re-derives GITLAB_PROJECT against the team instance", () => {
+    mkdirSync(join(workspaceDir, "env"), { recursive: true });
+    writeFileSync(
+      join(workspaceDir, "env", "onprem.env"),
+      "GITLAB_BASE_URL=https://gitlab.onprem.example.com\n",
+    );
+    const team: TeamConfig = {
+      name: "platform",
+      tracker: "gitlab",
+      taskQuery: "label:devintern",
+      envFile: "env/onprem.env",
+      env: {},
+    };
+
+    const matched = buildTeamTaskEnv(
+      repo({ remote: "https://gitlab.onprem.example.com/group/sub/repo.git" }),
+      team,
+      workspaceDir,
+    );
+    expect(matched.GITLAB_PROJECT).toBe("group/sub/repo");
+
+    // The repo remote belongs to gitlab.com, so the team's on-prem project must
+    // not be paired with the pin derived at the repo layer.
+    const mirrored = buildTeamTaskEnv(
+      repo({ remote: "git@gitlab.com:group/sub/repo.git" }),
+      team,
+      workspaceDir,
+    );
+    expect(mirrored.GITLAB_PROJECT).toBeUndefined();
+  });
+
+  test("keeps an explicit team GITLAB_PROJECT for a non-GitLab code repo", () => {
+    const team: TeamConfig = {
+      name: "platform",
+      tracker: "gitlab",
+      taskQuery: "label:devintern",
+      env: { GITLAB_PROJECT: "onprem/issues" },
+    };
+
+    const env = buildTeamTaskEnv(repo(), team, workspaceDir);
+    expect(env.GITLAB_PROJECT).toBe("onprem/issues");
+  });
+
+  test("keeps a namespaced team project for the subprocess and the worker", () => {
+    writeFileSync(
+      join(workspaceDir, ".env"),
+      "GITLAB_BASE_URL=https://gitlab.com\n" +
+        "GITLAB_TOKEN=shared-token\n" +
+        "GITLAB_PLATFORM_PROJECT=onprem/issues\n",
+    );
+    const team: TeamConfig = {
+      name: "platform",
+      tracker: "gitlab",
+      taskQuery: "label:devintern",
+      env: {},
+    };
+    // The worker validates and polls with buildTeamEnv; the subprocess must
+    // resolve the same project, or it acts on a same-IID issue in the code repo.
+    expect(buildTeamEnv(team, workspaceDir).GITLAB_PROJECT).toBe("onprem/issues");
+    const env = buildTeamTaskEnv(
+      repo({ remote: "git@gitlab.com:group/backend.git" }),
+      team,
+      workspaceDir,
+    );
+    expect(env.GITLAB_PROJECT).toBe("onprem/issues");
+    expect(env.TASK_TRACKER).toBe("gitlab");
+  });
+
+  test("namespaced team credentials override repo env_file layers for subprocesses", () => {
+    writeFileSync(join(workspaceDir, ".env"), "GITHUB_PLATFORM_TOKEN=team-token\n");
+    mkdirSync(join(workspaceDir, "env"), { recursive: true });
+    writeFileSync(join(workspaceDir, "env", "github.env"), "GITHUB_TOKEN=repo-token\n");
+    const team: TeamConfig = {
+      name: "platform",
+      tracker: "github",
+      taskQuery: "label:devintern",
+      env: {},
+    };
+
+    // The worker resolves and validates with buildTeamEnv, so the subprocess
+    // must push/comment with the same namespaced token rather than the repo's.
+    expect(buildTeamEnv(team, workspaceDir).GITHUB_TOKEN).toBe("team-token");
+    const env = buildTeamTaskEnv(repo({ envFile: "env/github.env" }), team, workspaceDir);
+    expect(env.GITHUB_TOKEN).toBe("team-token");
+  });
+
+  test("keeps an explicit repo GITLAB_PROJECT when the team adds a base URL", () => {
+    mkdirSync(join(workspaceDir, "env"), { recursive: true });
+    writeFileSync(join(workspaceDir, "env", "onprem.env"), "GITLAB_BASE_URL=https://onprem.test\n");
+    const team: TeamConfig = {
+      name: "platform",
+      tracker: "gitlab",
+      taskQuery: "label:devintern",
+      envFile: "env/onprem.env",
+      env: {},
+    };
+
+    const env = buildTeamTaskEnv(
+      repo({
+        remote: "git@gitlab.com:group/sub/repo.git",
+        env: { GITLAB_PROJECT: "onprem/issues" },
+      }),
+      team,
+      workspaceDir,
+    );
+    expect(env.GITLAB_PROJECT).toBe("onprem/issues");
+  });
+
+  test("keeps per-repo tracker project-key overrides from [repos.env]", () => {
+    writeFileSync(
+      join(workspaceDir, ".env"),
+      "JIRA_DEFAULT_PROJECT_KEY=WORKSPACE\nLINEAR_DEFAULT_TEAM_KEY=WORKSPACE\n",
+    );
+
+    const env = buildRepoEnv(
+      repo({
+        env: {
+          JIRA_DEFAULT_PROJECT_KEY: "BACKEND",
+          LINEAR_DEFAULT_TEAM_KEY: "BACKEND-TEAM",
+        },
+      }),
+      workspaceDir,
+    );
+    expect(env.JIRA_DEFAULT_PROJECT_KEY).toBe("BACKEND");
+    expect(env.LINEAR_DEFAULT_TEAM_KEY).toBe("BACKEND-TEAM");
   });
 
   test("injects PR_LABELS from repo pr_labels", () => {

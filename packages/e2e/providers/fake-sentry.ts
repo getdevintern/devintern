@@ -21,6 +21,13 @@
  * in memory only so a test can ask `receivedBearer(token)`. They are never
  * logged or included in diagnostics, so a failing assertion cannot print a
  * credential.
+ *
+ * Comment writes can be rejected with a chosen status (`rejectCommentsWith`
+ * for every issue, `commentRejections` per issue, or {@link
+ * FakeSentryServer.setCommentRejection} mid-test) to model a token without
+ * `event:write`, a revoked token, or a Sentry outage. Every comment attempt,
+ * accepted or rejected, is counted in {@link FakeSentryServer.commentAttempts};
+ * only accepted bodies reach {@link FakeSentryServer.commentBodies}.
  */
 
 /** Issue fields the product reads from a Sentry issue-list row. */
@@ -62,6 +69,14 @@ export interface FakeSentryOptions {
    * anything else gets a 401 like Sentry's invalid-token response.
    */
   expectedToken?: string;
+  /**
+   * Reject every issue-comment write with this HTTP status (for example 401,
+   * 403, 500, or 503) instead of storing it. Change it later with
+   * {@link FakeSentryServer.setCommentRejection}.
+   */
+  rejectCommentsWith?: number;
+  /** Per-issue comment rejection status; takes precedence over `rejectCommentsWith`. */
+  commentRejections?: Record<string, number>;
 }
 
 /** One captured issue-list request, for assertions about the query the client sends. */
@@ -73,6 +88,15 @@ export interface FakeSentryListRequest {
   statsPeriod: string | null;
   perPage: string | null;
   /** `Date.now()` when the fake accepted the read; orders reads against run records. */
+  receivedAt: number;
+}
+
+/** One issue-comment request as the fake answered it, accepted or rejected. */
+export interface FakeSentryCommentAttempt {
+  issueId: string;
+  /** HTTP status the fake returned. */
+  status: number;
+  /** `Date.now()` when the fake answered; orders attempts against polls and runs. */
   receivedAt: number;
 }
 
@@ -116,6 +140,10 @@ export class FakeSentryServer {
   private readonly authorizationHeaders: Array<string | null> = [];
   private rejectedAuth = 0;
   private readonly comments: FakeSentryComment[] = [];
+  private readonly attempts: FakeSentryCommentAttempt[] = [];
+  private readonly commentAuthorizationHeaders: Array<string | null> = [];
+  private commentRejection: number | undefined;
+  private readonly commentRejectionsByIssue: Map<string, number>;
   private readCount = 0;
   private readonly server: ReturnType<typeof Bun.serve>;
   private readonly baseUrl: string;
@@ -131,6 +159,13 @@ export class FakeSentryServer {
       throw new Error("FakeSentryServer issue ids must be unique");
     }
     this.expectedToken = options.expectedToken;
+    this.commentRejection = validRejection(options.rejectCommentsWith);
+    this.commentRejectionsByIssue = new Map(
+      Object.entries(options.commentRejections ?? {}).map(([id, status]) => [
+        id,
+        validRejection(status) as number,
+      ]),
+    );
     this.server = Bun.serve({
       hostname: "127.0.0.1",
       port: 0,
@@ -196,6 +231,28 @@ export class FakeSentryServer {
    */
   receivedBearer(token: string): boolean {
     return this.authorizationHeaders.includes(`Bearer ${token}`);
+  }
+
+  /**
+   * Reject later comment writes for every issue without a per-issue override
+   * with `status`, or accept them again with `undefined` (Sentry "recovers").
+   */
+  setCommentRejection(status: number | undefined): void {
+    this.commentRejection = validRejection(status);
+    this.commentRejectionsByIssue.clear();
+  }
+
+  /** Every comment request the fake answered, oldest first, with the status it returned. */
+  get commentAttempts(): FakeSentryCommentAttempt[] {
+    return this.attempts.map((attempt) => ({ ...attempt }));
+  }
+
+  /**
+   * Whether any comment request carried `Authorization: Bearer <token>`.
+   * Returns a boolean so assertions never echo the header value.
+   */
+  commentReceivedBearer(token: string): boolean {
+    return this.commentAuthorizationHeaders.includes(`Bearer ${token}`);
   }
 
   /** Captured comment bodies, in the order the worker posted them. */
@@ -296,6 +353,15 @@ export class FakeSentryServer {
       );
     }
 
+    this.commentAuthorizationHeaders.push(request.headers.get("authorization"));
+    const rejection = this.commentRejectionsByIssue.get(issueId) ?? this.commentRejection;
+    if (rejection !== undefined) {
+      // Drain the body so the connection is reusable, then answer like Sentry.
+      await request.arrayBuffer().catch(() => undefined);
+      this.attempts.push({ issueId, status: rejection, receivedAt: Date.now() });
+      return json({ detail: rejectionDetail(rejection) }, rejection);
+    }
+
     const body = await readJson(request);
     if (!body.ok) return body.response;
     const text = asRecord(body.value)?.text;
@@ -305,6 +371,7 @@ export class FakeSentryServer {
     }
 
     this.comments.push({ issueId, text });
+    this.attempts.push({ issueId, status: 201, receivedAt: Date.now() });
     // Sentry's comment endpoint answers with a comment payload; the client
     // only checks the status, so an empty successful response is sufficient.
     return new Response(null, { status: 201 });
@@ -341,6 +408,23 @@ function issuePayload(issue: FakeSentryIssue): Record<string, unknown> {
       name: issue.projectSlug,
     },
   };
+}
+
+/** Only error statuses make sense as a rejection; anything else is a test bug. */
+function validRejection(status: number | undefined): number | undefined {
+  if (status === undefined) return undefined;
+  if (!Number.isInteger(status) || status < 400 || status > 599) {
+    throw new Error(`FakeSentryServer comment rejection must be a 4xx/5xx status, got ${status}`);
+  }
+  return status;
+}
+
+/** Sentry-like error detail for a rejected comment; never echoes request data. */
+function rejectionDetail(status: number): string {
+  if (status === 401) return "Invalid token";
+  if (status === 403) return "You do not have permission to perform this action.";
+  if (status === 429) return "Rate limit exceeded";
+  return "Internal Error";
 }
 
 function json(value: unknown, status = 200): Response {

@@ -93,7 +93,7 @@ describe("waiting automations in the queued work list", () => {
           throw new Error("scheduler unavailable");
         },
       });
-      expect(body).toEqual({ items: [], total: 0 });
+      expect(body).toEqual({ items: [], total: 0, cancelled: [] });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

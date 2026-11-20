@@ -28,7 +28,7 @@ import { evaluateDependencyGate } from "../dependencies/gate";
 import { applyStackBase } from "../dependencies/stacked-base";
 import { getWorkerFailover } from "../worker/failover";
 import { rewriteInjectedTaskFile } from "./injected-enqueue";
-import { queueFailureReason } from "./queue-failure-reason";
+import { cleanExitFailureReason, queueFailureReason } from "./queue-failure-reason";
 
 /**
  * Minimum time between code-host lookups for one dependency PR the gate is
@@ -564,7 +564,15 @@ export class InjectedTaskAcquirer implements Acquirer {
         return;
       }
       if (result === true) {
-        store.finish(task.id, "done");
+        // The pipeline exits cleanly after recording a delivery failure it
+        // reports on the run (pushed, but no PR), so the run record decides.
+        const failure = cleanExitFailureReason(this.options.runDbPath, queueClaim);
+        if (failure === undefined) {
+          store.finish(task.id, "done");
+        } else {
+          store.finish(task.id, "failed", failure);
+          console.error(`❌ [${this.name}] ${task.taskKey} failed: ${failure}`);
+        }
       } else if (result === "skipped") {
         // Defensive: a skip means the ticket was left untouched, which is a
         // settled row rather than a failure.

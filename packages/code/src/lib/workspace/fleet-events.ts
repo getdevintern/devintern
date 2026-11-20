@@ -26,9 +26,9 @@ import type { AutomaticResolveResult } from "../acquirers/review-polling";
 import type { TaskExecutionResult } from "../acquirers/task-polling";
 import { autoMergePathsFor } from "./config";
 import type { RepoConfig, WorkspaceConfig } from "./config";
-import { buildRepoEnv, gitHubSlugFromRemote } from "./env";
+import { buildFleetEventEnv, gitHubSlugFromRemote } from "./env";
 import { toRoutableTask } from "./router";
-import type { createFleetTaskExecutor, FleetTask, RepoManagerLike } from "./fleet-executor";
+import type { createGatedFleetTaskExecutor, FleetTask, RepoManagerLike } from "./fleet-executor";
 import { JobNotStartedError } from "../worker/supervisor";
 import type { TaskSupervisor } from "../worker/supervisor";
 import { MAX_CONCURRENCY_PER_REPO_ENV } from "../utils/review-worktree";
@@ -214,7 +214,7 @@ export function createFleetAddressPr(deps: FleetEventDeps): AddressPr {
       const base = await preparePrJobRepo(repoManager, repo);
       return runReview(slug, prNumber, {
         cwd: base,
-        env: prJobEnv(config, buildRepoEnv(repo, workspaceDir)),
+        env: prJobEnv(config, buildFleetEventEnv(config, repo, workspaceDir)),
         signal,
       });
     };
@@ -260,7 +260,7 @@ export function createFleetResolveConflicts(
       const agentSelection = config.workspace.conflictAgent;
       return runResolve(slug, prNumber, {
         cwd: base,
-        env: prJobEnv(config, buildRepoEnv(repo, workspaceDir, { agentSelection })),
+        env: prJobEnv(config, buildFleetEventEnv(config, repo, workspaceDir, { agentSelection })),
         harnessPin: agentSelection?.harness,
         expectedHeadSha: expected.headSha,
         expectedBaseSha: expected.baseSha,
@@ -347,7 +347,7 @@ export function createFleetAutoMerge(
         lastAttempt: options?.lastAttempt ?? false,
         ...(options?.runId !== undefined ? { runId: options.runId } : {}),
         cwd: base,
-        env: prJobEnv(config, buildRepoEnv(repo, workspaceDir, { agentSelection })),
+        env: prJobEnv(config, buildFleetEventEnv(config, repo, workspaceDir, { agentSelection })),
         harnessPin: agentSelection?.harness,
         signal,
       });
@@ -395,7 +395,7 @@ export function createFleetCiFix(
       const base = await preparePrJobRepo(deps.repoManager, repo);
       return runCiFix(slug, prNumber, feedbackPath, {
         cwd: base,
-        env: prJobEnv(deps.config, buildRepoEnv(repo, deps.workspaceDir)),
+        env: prJobEnv(deps.config, buildFleetEventEnv(deps.config, repo, deps.workspaceDir)),
         ...(expectedHeadSha ? { expectedHeadSha } : {}),
         signal,
       });
@@ -471,7 +471,7 @@ export function createFleetMentionHandler(
 export function createFleetTaskEvaluator(options: {
   query: string | (() => string | undefined);
   searchTasks: (query: string) => Promise<{ tasks: FleetTask[] }>;
-  execute: ReturnType<typeof createFleetTaskExecutor>;
+  execute: ReturnType<typeof createGatedFleetTaskExecutor>;
   /**
    * Actioned gate mirroring the polling acquirer: `true` when a task already
    * produced a PR and has not changed since. A relayed `task.changed` can be
@@ -506,6 +506,8 @@ export function createFleetTaskEvaluator(options: {
       return true;
     }
     console.log(`📌 [fleet] relay task ${taskKey} is ready`);
+    // A ticket its blockers hold back ("waiting") is left to the poller, which
+    // re-checks it every tick.
     await options.execute(
       taskKey,
       toRoutableTask({

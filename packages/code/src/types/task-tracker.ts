@@ -99,6 +99,12 @@ export interface FormattedTaskDetails {
     author: string;
     content: string;
   }>;
+  /**
+   * Worker-generated "Stacked on" section for a tracker ticket whose run is
+   * stacked on an unmerged blocker's branch (see `lib/dependencies/stacked-base.ts`).
+   * Trusted text: the worker wrote it, not the ticket author.
+   */
+  stackedOnSection?: string;
 }
 
 export interface TaskTrackerCommentContent {

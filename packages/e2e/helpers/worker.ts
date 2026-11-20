@@ -688,6 +688,17 @@ export class WorkerFixture {
     )[0];
   }
 
+  /**
+   * Deferral bookkeeping of one injected row: the consecutive-deferral count
+   * (the attempt budget a deferral consumes) and the earliest claim time.
+   */
+  injectedDeferral(id: number): { defer_count: number; not_before: number | null } | undefined {
+    return this.query<{ defer_count: number; not_before: number | null }>(
+      "SELECT defer_count, not_before FROM injected_tasks WHERE id = ?",
+      [id],
+    )[0];
+  }
+
   /** Read run records, optionally scoped to one task key. */
   runRecords(taskKey?: string): WorkerRunRecord[] {
     const columns =
@@ -756,11 +767,21 @@ export class WorkerFixture {
    * Missed windows still coalesce to one run; this only chooses when that
    * single occurrence is due.
    *
+   * `whileRunning` allows the write against a live daemon. Its armed timer
+   * still points at the old cursor, so the caller must make the daemon re-read
+   * it: a live workspace.toml reload re-arms the timer from the durable rows
+   * (an unchanged schedule spec keeps the moved cursor).
+   *
    * @param scheduleId - Durable `automation_schedules.automation_id`
    * @param nextDueAt - Epoch milliseconds stored in `next_due_at`
+   * @param options - `whileRunning` skips the stopped-worker guard
    */
-  setScheduleNextDue(scheduleId: string, nextDueAt: number): void {
-    if (this.running) {
+  setScheduleNextDue(
+    scheduleId: string,
+    nextDueAt: number,
+    options: { whileRunning?: boolean } = {},
+  ): void {
+    if (this.running && !options.whileRunning) {
       throw new Error(
         `Cannot move schedule "${scheduleId}" while the worker is running; stop it first`,
       );

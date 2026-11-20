@@ -2318,3 +2318,109 @@ describe("worker add harness usage-limit warning", () => {
     });
   });
 });
+
+describe("worker add --team", () => {
+  const TEAMS_TOML = `[defaults]
+tracker = "markdown"
+task_query = "is:open"
+
+[[teams]]
+name = "personal"
+tracker = "github"
+repo = "backend"
+
+[[teams]]
+name = "web-a"
+tracker = "github"
+repo = "web"
+
+[[teams]]
+name = "web-b"
+tracker = "github"
+repo = "web"
+
+[[repos]]
+name = "backend"
+remote = "git@github.com:acme/backend.git"
+
+[[repos]]
+name = "web"
+remote = "git@github.com:acme/web.git"
+`;
+  let dir: string;
+  let configPath: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "worker-add-team-"));
+    configPath = join(dir, "workspace.toml");
+    writeFileSync(configPath, TEAMS_TOML);
+    process.env.DEVINTERN_SKIP_LICENSE_CHECK = "1";
+  });
+
+  afterEach(() => {
+    delete process.env.DEVINTERN_SKIP_LICENSE_CHECK;
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  async function add(args: string[]) {
+    const out: string[] = [];
+    const err: string[] = [];
+    const code = await runWorkerAdd(["--workspace", configPath, "--title", "Task", ...args], {
+      log: (message) => out.push(message),
+      error: (message) => err.push(message),
+    });
+    return { code, out, err };
+  }
+
+  function storedTeam(): string | undefined {
+    const store = new InjectedTaskStore(workspaceDbPath(dir));
+    try {
+      return store.getByTaskKey("local-task")?.team;
+    } finally {
+      store.close();
+    }
+  }
+
+  test("parses --team and rejects it alongside --resume", () => {
+    expect(parseWorkerAddArgs(["--title", "x", "--team", "web-a"])).toMatchObject({
+      kind: "ok",
+      options: { team: "web-a" },
+    });
+    expect(parseWorkerAddArgs(["--resume", "local-x", "--team", "web-a"]).kind).toBe("error");
+  });
+
+  test("--help lists --team", async () => {
+    const out: string[] = [];
+    await runWorkerAdd(["--help"], { log: (message) => out.push(message) });
+    expect(out.join("\n")).toContain("--team <name>");
+  });
+
+  test("one fixed team: enqueues without --team and names the team's credentials", async () => {
+    const result = await add(["--repo", "backend"]);
+    expect(result.code).toBe(0);
+    expect(result.out.join("\n")).toContain('Credentials: team "personal"');
+    // Resolved by the worker per run, so nothing is pinned on the row.
+    expect(storedTeam()).toBeUndefined();
+  });
+
+  test("two fixed teams without --team fail at enqueue with the team names", async () => {
+    const result = await add(["--repo", "web"]);
+    expect(result.code).toBe(1);
+    const message = result.err.join("\n");
+    expect(message).toContain('Repo "web" is the fixed repo of several teams (web-a, web-b)');
+    expect(message).toContain("--team <name>");
+    expect(existsSync(workspaceDbPath(dir))).toBe(false);
+  });
+
+  test("--team picks one of several fixed teams and is stored on the task", async () => {
+    const result = await add(["--repo", "web", "--team", "web-b"]);
+    expect(result.code).toBe(0);
+    expect(storedTeam()).toBe("web-b");
+  });
+
+  test("an unknown --team fails at enqueue", async () => {
+    const result = await add(["--repo", "backend", "--team", "nope"]);
+    expect(result.code).toBe(1);
+    expect(result.err.join("\n")).toContain('Unknown team "nope"; valid teams: personal');
+  });
+});

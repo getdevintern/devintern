@@ -185,9 +185,9 @@ test.skipIf(!existsSync(cliPath))(
       for (const id of attributed)
         expect(configured.has(id), `unexpected automation ${id}`).toBe(true);
 
-      // Live reload: append an automation and wait for the next occurrence.
-      // This is the one real "* * * * *" boundary in the suite: it keeps the
-      // live timer (not the startup tick) covered end to end.
+      // Live reload: append an automation and let the live timer (not the
+      // startup tick) run its occurrence, so the reload → register → arm timer
+      // → claim path stays covered end to end without a restart.
       const reloaded: WorkerAutomation = {
         id: "hot-reload",
         prompt: noChangePrompt,
@@ -200,12 +200,36 @@ test.skipIf(!existsSync(cliPath))(
         20_000,
         "the workspace config reloader to reconcile the added automation",
       );
-      await worker.waitFor("the added automation to register its schedule", () =>
-        worker.automationSchedules().some((row) => row.automation_id === reloaded.id)
-          ? true
-          : undefined,
+      const registered = await worker.waitFor("the added automation to register its schedule", () =>
+        worker.automationSchedules().find((row) => row.automation_id === reloaded.id),
       );
-      const reloadedRun = await worker.waitForAutomationRun(reloaded.id, 90_000);
+      // The reload computed the real "* * * * *" cursor: the next minute
+      // boundary, at most one minute out.
+      expect(registered.schedule_spec).toBe("cron:* * * * *");
+      expect(registered.last_scheduled_at).toBeNull();
+      expect(registered.next_due_at % 60_000).toBe(0);
+      expect(registered.next_due_at).toBeLessThanOrEqual(Date.now() + 60_000);
+      // Waiting out that boundary costs up to a minute. When it is still a
+      // few seconds away, pull the cursor in to just ahead of now and nudge a
+      // second reload (a disabled entry, so nothing else is scheduled): the
+      // reload keeps the moved cursor because the spec is unchanged and
+      // re-arms the live timer from it. A boundary already this close is
+      // simply left to fire, so the two can never both claim an occurrence.
+      if (registered.next_due_at - Date.now() > 5_000) {
+        worker.setScheduleNextDue(reloaded.id, Date.now() + 1_500, { whileRunning: true });
+        worker.appendAutomation({
+          id: "reload-nudge",
+          enabled: false,
+          cron: NEVER_CRON,
+          prompt: noChangePrompt,
+        });
+        await worker.waitForOutput(
+          /6 automation\(s\)/,
+          20_000,
+          "the workspace config reloader to re-arm the schedule timer",
+        );
+      }
+      const reloadedRun = await worker.waitForAutomationRun(reloaded.id, 45_000);
       expect(reloadedRun.origin).toBe("scheduled");
       expect(reloadedRun.automation_id).toBe(reloaded.id);
       expect(reloadedRun.status).toBe("succeeded");
@@ -218,8 +242,8 @@ test.skipIf(!existsSync(cliPath))(
       await worker.dispose();
     }
   },
-  // One restart for the fast-forwarded occurrences, one real boundary for the
-  // reloaded automation, plus fixture preparation and graceful shutdown.
+  // One restart for the fast-forwarded occurrences, one live-timer occurrence
+  // for the reloaded automation, plus fixture preparation and graceful shutdown.
   150_000,
 );
 

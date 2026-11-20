@@ -13,7 +13,7 @@ import { transitionIssueStatus } from "../shared/issue-status-policy";
  */
 
 import { GitLabClient, sanitizeGitlabBaseUrl } from "@devintern/task-trackers";
-import type { GitLabIssue } from "@devintern/task-trackers";
+import type { GitLabIssue, GitLabLinkedIssue } from "@devintern/task-trackers";
 import type {
   Comment,
   DetailedRelatedIssue,
@@ -23,7 +23,7 @@ import type {
   TaskTrackerCommentContent,
 } from "../../../types/task-tracker";
 import { TaskTrackerError } from "../../../types/task-tracker";
-import type { TaskTrackerClient } from "../client";
+import type { TaskBlocker, TaskTrackerClient } from "../client";
 import {
   ESTIMATION_COMMENT_MARKER,
   formatAssessmentFailureMarkdown,
@@ -78,6 +78,8 @@ export class GitLabTaskTrackerClient implements TaskTrackerClient {
   private baseUrl: string;
   /** Mutually exclusive status label names swapped on transition. */
   private statusLabels: string[];
+  /** Configured project path (`group/sub/repo`) or numeric id. */
+  private projectPath: string;
 
   constructor(
     token: string,
@@ -86,6 +88,7 @@ export class GitLabTaskTrackerClient implements TaskTrackerClient {
   ) {
     this.token = token;
     this.baseUrl = sanitizeGitlabBaseUrl(options?.baseUrl);
+    this.projectPath = projectPath;
     this.gitlabClient = new GitLabClient({ token, projectPath, baseUrl: this.baseUrl });
     this.statusLabels = options?.statusLabels ?? [];
   }
@@ -105,6 +108,22 @@ export class GitLabTaskTrackerClient implements TaskTrackerClient {
       tasks: result.issues.map((issue) => this.normalizeIssue(issue)),
       total: result.total,
     };
+  }
+
+  /**
+   * Linked issues the ticket "is blocked by". Blocking links need GitLab
+   * Premium; on Free every link is `relates_to`, so the ticket reports no
+   * blockers. A blocker in this project is keyed by its iid, like polled
+   * tasks; one in another project is keyed `group/project#iid`.
+   */
+  async getBlockers(taskKey: string): Promise<TaskBlocker[]> {
+    const links = await this.gitlabClient.listIssueLinks(this.toIssueIid(taskKey));
+    return links
+      .filter((link) => link.link_type === "is_blocked_by")
+      .map((link) => ({
+        key: this.blockerKey(link),
+        ...(link.state ? { done: link.state === "closed", status: link.state } : {}),
+      }));
   }
 
   async getComments(taskKey: string): Promise<Comment[]> {
@@ -376,6 +395,29 @@ export class GitLabTaskTrackerClient implements TaskTrackerClient {
       );
     }
     return issueIid;
+  }
+
+  /** Task key of a linked issue: its iid in this project, else `path#iid`. */
+  private blockerKey(link: GitLabLinkedIssue): string {
+    const path = this.linkedProjectPath(link);
+    if (/^\d+$/.test(this.projectPath)) {
+      if (link.project_id === Number(this.projectPath)) return String(link.iid);
+    } else if (!path || path.toLowerCase() === this.projectPath.toLowerCase()) {
+      return String(link.iid);
+    }
+    return `${path ?? link.project_id}#${link.iid}`;
+  }
+
+  /** Project path of a linked issue, from its full reference or web URL. */
+  private linkedProjectPath(link: GitLabLinkedIssue): string | undefined {
+    const reference = link.references?.full?.match(/^(.+)#\d+$/);
+    if (reference) return reference[1];
+    const prefix = `${this.baseUrl}/`;
+    if (!link.web_url?.startsWith(prefix)) return undefined;
+    const match = link.web_url
+      .slice(prefix.length)
+      .match(/^(.+?)\/(?:-\/)?(?:issues|work_items)\/\d+/);
+    return match?.[1];
   }
 
   private normalizeIssue(issue: GitLabIssue): Task {

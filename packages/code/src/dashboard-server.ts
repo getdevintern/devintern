@@ -33,7 +33,7 @@ import {
 import { handleOverview } from "./lib/observability/dashboard-overview";
 import { handleSources } from "./lib/observability/dashboard-sources";
 import { handleQueuedWork } from "./lib/observability/queued-work";
-import { handleCreateTask } from "./lib/observability/dashboard-tasks";
+import { handleCancelTask, handleCreateTask } from "./lib/observability/dashboard-tasks";
 import { DashboardReports } from "./lib/observability/dashboard-report";
 import type { DashboardReportDeps } from "./lib/observability/dashboard-report";
 import { handleWorkspace } from "./lib/observability/dashboard-workspace";
@@ -340,6 +340,7 @@ export function startDashboardServer(
   const runRetryPattern = /^\/api\/runs\/([^/]+)\/retry$/;
   const runReportPreviewPattern = /^\/api\/runs\/([^/]+)\/report\/preview$/;
   const automationRunPattern = /^\/api\/automations\/([^/]+)\/run$/;
+  const taskCancelPattern = /^\/api\/tasks\/([^/]+)\/cancel$/;
 
   const envOrigins = parseDashboardAllowedOriginsEnv(process.env.DASHBOARD_ALLOWED_ORIGINS);
   if (envOrigins.errors.length > 0) {
@@ -376,6 +377,10 @@ export function startDashboardServer(
     }
     if (pathname === "/api/tasks") {
       return createTaskFromRequest(data, request);
+    }
+    const taskCancel = pathname.match(taskCancelPattern);
+    if (taskCancel) {
+      return handleCancelTask(data, taskCancel[1], await readJsonBody(request));
     }
     const reportPreview = pathname.match(runReportPreviewPattern);
     if (reportPreview) {

@@ -12,6 +12,7 @@
  * recording must never fail or slow a run.
  */
 
+import { redactText } from "@devintern/utils";
 import { Database } from "bun:sqlite";
 import { computeRunActivity, hostTimeZone } from "./run-activity";
 import type { RunActivity } from "./run-activity";
@@ -100,16 +101,18 @@ export interface RunRecord extends RunMeta {
    * evidence that no duplicate crash comment is needed.
    */
   cleanStop?: boolean;
+  /**
+   * Why the run's requested PR/MR creation failed, when it did. Positive
+   * evidence that a `succeeded` run left a branch the PR step meant to open a
+   * PR from; a run that never requested a PR leaves this unset. Set for any
+   * failure, permanent or retryable: a `succeeded` run with this set did not
+   * deliver its work to the default branch, even though it has no PR.
+   */
+  prFailure?: string;
   /** Explicit current/last step; never inferred from completed stage records. */
   step?: string;
   stepStartedAt?: number;
   stepActive?: boolean;
-  /**
-   * Set when the run pushed its branch but could not open the PR (any
-   * failure, permanent or retryable). A `succeeded` run with this set did not
-   * deliver its work to the default branch, even though it has no PR.
-   */
-  prFailure?: string;
 }
 
 export interface RunStageRecord {
@@ -239,7 +242,8 @@ export class RunStore {
         ticket_url TEXT,
         task_description TEXT,
         queue_claim TEXT,
-        clean_stop INTEGER NOT NULL DEFAULT 0
+        clean_stop INTEGER NOT NULL DEFAULT 0,
+        pr_failure TEXT
       )
     `);
 
@@ -452,13 +456,17 @@ export class RunStore {
   }
 
   /**
-   * Record that a run pushed its branch but PR creation failed.
+   * Record that the run's PR/MR creation was attempted and failed (e.g. the
+   * branch was pushed but PR creation failed).
    *
    * @param runId - Run id
-   * @param message - Failure message (already user-facing)
+   * @param message - Failure message (redacted before persisting)
    */
   setRunPrFailure(runId: number, message: string): void {
-    this.db.run(`UPDATE runs SET pr_failure = ? WHERE id = ?`, [message.slice(0, 2000), runId]);
+    this.db.run(`UPDATE runs SET pr_failure = ? WHERE id = ?`, [
+      redactText(message).slice(0, 2_000),
+      runId,
+    ]);
   }
 
   /**
@@ -589,6 +597,40 @@ export class RunStore {
       );
       this.replaceOutcomeStage(runId, status, reason);
     })();
+  }
+
+  /**
+   * Settle a task's latest run as `abandoned` when it is still `deferred`.
+   *
+   * A deferred run promises an automatic retry. When the operator cancels the
+   * task before that retry, nothing else ever settles the run, so it would keep
+   * showing as "waiting to retry". The read and the conditional update share
+   * one immediate transaction, so a run that moved on (or a newer run) is left
+   * alone, and repeated calls are no-ops.
+   *
+   * @param taskKey - Task key whose latest run to settle
+   * @param reason - Outcome reason recorded on the run
+   * @returns The settled run id, or `null` when the latest run is not deferred
+   */
+  abandonDeferredRun(taskKey: string, reason: string): number | null {
+    return this.db
+      .transaction((): number | null => {
+        const latest = this.db
+          .query(
+            `SELECT id, status FROM runs WHERE task_key = ?
+             ORDER BY started_at DESC, id DESC LIMIT 1`,
+          )
+          .get(taskKey) as { id: number; status: string } | null;
+        if (!latest || latest.status !== "deferred") return null;
+        this.db.run(
+          `UPDATE runs SET status = 'abandoned', outcome_reason = ?, finished_at = ?, step_active = 0
+           WHERE id = ? AND status = 'deferred'`,
+          [reason, Date.now(), latest.id],
+        );
+        this.replaceOutcomeStage(latest.id, "abandoned", reason);
+        return latest.id;
+      })
+      .immediate();
   }
 
   /**

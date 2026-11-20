@@ -117,6 +117,27 @@ Refactor the auth middleware.
     }
   });
 
+  test("writeAgentPrompt places a retry section between the task and the instructions", async () => {
+    const testDir = makeTestDir();
+    const mdFile = join(testDir, "spec.md");
+    writeFileSync(mdFile, "Ship dark mode toggle in settings.\n");
+    const outputFile = join(testDir, "task-details.md");
+
+    try {
+      const client = new MarkdownTaskTrackerClient({ cwd: testDir });
+      const task = await client.getTask(mdFile);
+      client.writeAgentPrompt(outputFile, task, "\n## Previous Attempt\n\nResume branch x.\n");
+
+      const prompt = readFileSync(outputFile, "utf8");
+      const endMarker = "<!-- END UNTRUSTED EXTERNAL CONTENT: local task file -->";
+      const retryAt = prompt.indexOf("## Previous Attempt");
+      expect(retryAt).toBeGreaterThan(prompt.indexOf(endMarker));
+      expect(retryAt).toBeLessThan(prompt.indexOf("## Implementation Instructions"));
+    } finally {
+      cleanup(testDir);
+    }
+  });
+
   test("frames a body that contains the implementation-instructions heading", async () => {
     const testDir = makeTestDir();
     const mdFile = join(testDir, "tricky.md");
