@@ -11,12 +11,14 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 
+import { findProjectRoot } from "@devintern/utils";
+
 import { parseGitLabHostAliases, parseGitRemoteUrl } from "../code-host";
 import { Utils } from "../utils";
 import { loadWorkspaceConfig, parseWorkspaceConfig } from "./config";
 import { deriveRepoName, ensureWorkspaceScaffold, tomlString } from "./init";
 import type { WorkspaceLogFn } from "./init";
-import { findRepoForOrigin } from "./manual-run";
+import { findRepoForCheckout } from "./manual-run";
 import { workspaceConfigPath } from "./paths";
 
 /** Workspace-relative directory holding per-repo env files written by init. */
@@ -43,7 +45,7 @@ export async function readOriginRemote(cwd: string): Promise<string | null> {
  *
  * Only such remotes can be matched back to a `[[repos]]` entry on later runs
  * (`findRepoForOrigin`), so only they are registered. A local-path or unknown
- * remote returns null and the checkout keeps the legacy `.devintern-code/`.
+ * remote returns null, and the checkout is registered by its directory instead.
  */
 export async function readRegistrableOrigin(cwd: string): Promise<string | null> {
   const remote = await readOriginRemote(cwd);
@@ -58,9 +60,11 @@ export async function readRegistrableOrigin(cwd: string): Promise<string | null>
 /**
  * Add the checkout at `cwd` to the workspace with `envContent` as its env.
  *
- * Creates the workspace when missing. Refuses when the checkout's `origin` is
- * already registered (re-running init edits that repo's env instead) or when
- * the target env file already exists.
+ * The entry is keyed by the checkout's `origin` when it is a recognised
+ * code-host remote, otherwise by the checkout directory (`path`), so a fresh
+ * `git init` or a non-git folder can be registered too. Creates the workspace
+ * when missing. Refuses when the checkout is already registered (re-running
+ * init edits that repo's env instead) or when the target env file exists.
  *
  * @param cwd - Repository checkout
  * @param envContent - Full env file content the wizard (or template) produced
@@ -72,25 +76,20 @@ export async function registerManualCheckout(
   log: WorkspaceLogFn = console.log,
 ): Promise<RegisterCheckoutResult> {
   const remote = await readRegistrableOrigin(cwd);
-  if (!remote) {
-    return {
-      ok: false,
-      error: "This checkout has no GitHub, GitLab, or Bitbucket origin remote to register.",
-    };
-  }
+  const checkoutDir = findProjectRoot({ startDir: cwd });
 
   const { workspaceDir, configPath, created } = ensureWorkspaceScaffold(log);
   const text = readFileSync(configPath, "utf8");
   const config = parseWorkspaceConfig(text, configPath);
-  const existing = findRepoForOrigin(config, remote, workspaceDir);
+  const existing = findRepoForCheckout(config, { origin: remote, dir: checkoutDir }, workspaceDir);
   if (existing) {
     return {
       ok: false,
-      error: `${remote} is already registered in ${configPath} as "${existing.name}".`,
+      error: `${remote ?? checkoutDir} is already registered in ${configPath} as "${existing.name}".`,
     };
   }
 
-  const repoName = deriveRepoName(remote, config.repos);
+  const repoName = deriveRepoName(remote ?? checkoutDir, config.repos);
   const envFile = `${REPO_ENV_DIR}/${repoName}.env`;
   const envPath = join(workspaceDir, envFile);
   if (existsSync(envPath)) {
@@ -98,7 +97,8 @@ export async function registerManualCheckout(
   }
 
   const block =
-    `\n[[repos]]\nname = ${tomlString(repoName)}\nremote = ${tomlString(remote)}\n` +
+    `\n[[repos]]\nname = ${tomlString(repoName)}\n` +
+    (remote ? `remote = ${tomlString(remote)}\n` : `path = ${tomlString(checkoutDir)}\n`) +
     `# Run by hand from your checkout only; the worker skips this repo.\n` +
     `manual_only = true\nenv_file = ${tomlString(envFile)}\n`;
   const updated = text.endsWith("\n") ? text + block : `${text}\n${block}`;
@@ -111,7 +111,7 @@ export async function registerManualCheckout(
   writeFileSync(configPath, updated);
   loadWorkspaceConfig(workspaceConfigPath(workspaceDir));
 
-  log(`✅ Registered ${remote} as "${repoName}" in ${configPath}`);
+  log(`✅ Registered ${remote ?? checkoutDir} as "${repoName}" in ${configPath}`);
   log(`   Settings for this repo: ${envPath}`);
   return { ok: true, workspaceDir, repoName, envPath, created };
 }

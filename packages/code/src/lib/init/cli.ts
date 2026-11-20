@@ -7,8 +7,8 @@ import { findWorkspaceRepoForCheckout } from "../workspace/manual-run";
 import { migrateLegacyCheckout } from "../workspace/migrate-checkout";
 import type { ManualWorkspaceRun } from "../workspace/manual-run";
 import { workspaceConfigPath, workspaceEnvPath } from "../workspace/paths";
-import { readRegistrableOrigin, registerManualCheckout } from "../workspace/register-checkout";
-import { buildEnvExample, scaffoldProject } from "./scaffold";
+import { registerManualCheckout } from "../workspace/register-checkout";
+import { buildEnvExample } from "./scaffold";
 import { isInteractive, runInitUpgrade, runInitWizard } from "./wizard";
 
 const INIT_USAGE = [
@@ -31,23 +31,15 @@ const INIT_USAGE = [
  * entries (non-interactive fallback for `init --yes` / piped stdin).
  */
 async function initializeProject(): Promise<void> {
-  const configDir = resolve(process.cwd(), ".devintern-code");
-  let envFile = join(configDir, ".env");
-  let settingsHint = `Edit ${join(configDir, "settings.json")} (optional)`;
-
   console.log("🚀 Initializing @devintern/code for this project...");
 
-  if (await readRegistrableOrigin(process.cwd())) {
-    const registered = await registerManualCheckout(process.cwd(), buildEnvExample());
-    if (!registered.ok) {
-      console.error(`❌ ${registered.error}`);
-      return;
-    }
-    envFile = registered.envPath;
-    settingsHint = `Add [trackers] status names to ${join(registered.workspaceDir, "workspace.toml")} (optional)`;
-  } else if (!scaffoldProject()) {
+  const registered = await registerManualCheckout(process.cwd(), buildEnvExample());
+  if (!registered.ok) {
+    console.error(`❌ ${registered.error}`);
     return;
   }
+  const envFile = registered.envPath;
+  const settingsHint = `Add [trackers] status names to ${join(registered.workspaceDir, "workspace.toml")} (optional)`;
   // Non-interactive setup still counts toward the activation funnel; the
   // wizard records its own started/completed pair when prompts are available.
   trackSetupStarted("init");
@@ -75,10 +67,7 @@ async function initializeProject(): Promise<void> {
   console.log(`   1. Edit ${envFile}`);
   console.log("      - Add your task tracker credentials (Jira, Linear, etc.)");
   console.log(`   2. ${settingsHint}`);
-  console.log("      - Configure per-project status transitions for your tracker");
-  console.log(
-    "      - The file includes examples for Jira, Linear, Trello, GitHub, Azure DevOps, and Asana",
-  );
+  console.log("      - Status names per tracker project, e.g. [trackers.jira.projects.PROJ]");
   console.log("   3. Run 'devintern <TASK-KEY>' to start working on tasks");
 
   trackSetupCompleted({ signedIn: "skipped" });

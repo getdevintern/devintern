@@ -524,6 +524,7 @@ function parseReposSection(
     const label = `[[repos]][${index}]`;
     const name = readString(table, "name", label, errors);
     const remote = readString(table, "remote", label, errors);
+    const path = readString(table, "path", label, errors);
     if (!name) {
       errors.push(`${label}.name is required.`);
     } else if (!REPO_NAME_PATTERN.test(name)) {
@@ -535,10 +536,16 @@ function parseReposSection(
     } else {
       repoNames.add(name);
     }
-    if (!remote) {
+    const manualOnlyFlag = table.manual_only === true;
+    if (path !== undefined && (!isAbsolute(path) || !manualOnlyFlag || remote)) {
+      errors.push(
+        `${label}.path must be an absolute directory and is only for manual_only repos without a remote.`,
+      );
+    }
+    if (!remote && path === undefined) {
       errors.push(`${label}.remote is required (git URL).`);
     }
-    if (!name || !remote) {
+    if (!name || (!remote && path === undefined)) {
       continue;
     }
     const env = readEnvTable(table, label, errors);
@@ -547,7 +554,7 @@ function parseReposSection(
     // Team-PR discovery uses GitHub's open-PR list and author_association;
     // there is no GitLab/Bitbucket equivalent wired, so reject instead of
     // silently doing nothing.
-    if (syncTeamPrs === true && !(env.GITHUB_REPO ?? gitHubSlugFromRemote(remote))) {
+    if (syncTeamPrs === true && !(env.GITHUB_REPO ?? gitHubSlugFromRemote(remote ?? ""))) {
       errors.push(
         `${label}.sync_team_prs is GitHub-only; "${name}" does not use a github.com remote ` +
           "(or an inline GITHUB_REPO).",
@@ -555,7 +562,8 @@ function parseReposSection(
     }
     repos.push({
       name,
-      remote,
+      remote: remote ?? "",
+      ...(path === undefined ? {} : { path }),
       defaultBranch: readString(table, "default_branch", label, errors),
       prLabels:
         table.pr_labels === undefined
