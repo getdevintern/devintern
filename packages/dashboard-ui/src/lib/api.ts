@@ -675,6 +675,9 @@ export interface QueuedWorkItem {
   notBefore?: number;
   deferCount?: number;
   message?: string;
+  /** Ad-hoc prompt body, clipped server-side. */
+  body?: string;
+  bodyTruncated?: boolean;
   /** Retry: the run being retried. */
   runId?: number;
   eventType?: string;

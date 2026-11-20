@@ -3,8 +3,7 @@
  * started (ad-hoc tasks, dashboard retries, webhook deliveries, automations
  * waiting for a free slot, and PR jobs waiting for a slot or for their PR). Closed by
  * default so active work keeps the panel; each row opens in place to show
- * what will run, for which repo, and why it may be held back (never the
- * prompt body). A pending
+ * what will run, for which repo, and why it may be held back. A pending
  * ad-hoc task can be cancelled from its row before the worker claims it.
  */
 
@@ -13,6 +12,7 @@ import { useState } from "react";
 import type { ReactNode } from "react";
 
 import { formatIn } from "@/components/overview/overview-model";
+import { TaskDescription } from "@/components/TaskDescription";
 import { TicketKey } from "@/components/TicketKey";
 import { Button } from "@/components/ui/button";
 import { cancelTask, notifyQueueChanged } from "@/lib/api";
@@ -191,7 +191,17 @@ function QueuedDetails({
           <ArrowRight className="size-3.5" aria-hidden="true" />
         </a>
       ) : null}
-      {item.kind === "ad-hoc" ? <CancelTaskControl item={item} onCancelled={onCancelled} /> : null}
+      {item.kind === "ad-hoc" ? (
+        <>
+          <div className="aq-prompt">
+            <TaskDescription description={item.body} title={item.title} />
+            {item.bodyTruncated ? (
+              <p className="mt-2 text-xs text-subtle-foreground">Prompt shortened for display.</p>
+            ) : null}
+          </div>
+          <CancelTaskControl item={item} onCancelled={onCancelled} />
+        </>
+      ) : null}
     </div>
   );
 }

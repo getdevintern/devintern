@@ -407,6 +407,15 @@
   text-decoration: underline;
 }
 
+.aq-prompt {
+  max-height: 20rem;
+  overflow: auto;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--background);
+}
+
 .aq-more {
   padding: 10px 16px;
   color: var(--subtle-foreground);

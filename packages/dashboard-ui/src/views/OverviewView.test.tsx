@@ -487,6 +487,7 @@ test("queued work sits in a closed disclosure with per-item details", () => {
             repo: "acme/web",
             actor: "local:add",
             createdAt: NOW - 5 * MINUTE,
+            body: "Use the **system** preference.",
           },
           {
             id: "retry:4",
@@ -508,8 +509,7 @@ test("queued work sits in a closed disclosure with per-item details", () => {
   expect(html).toContain("next: Add dark mode");
   expect(html).toContain("Ad-hoc task");
   expect(html).toContain("Queued by local:add");
-  // The pending list never shows the prompt body.
-  expect(html).not.toContain('class="aq-prompt"');
+  expect(html).toContain(">system</strong>");
   expect(html).toContain("Backing off · deferred 2×");
   expect(html).toContain("in 10m");
   expect(html).toContain('href="#/runs/31"');

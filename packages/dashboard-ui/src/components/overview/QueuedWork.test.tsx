@@ -45,6 +45,16 @@ test("offers Cancel only on pending ad-hoc rows and shows the deferred time", ()
   expect(html).toContain("Eligible");
 });
 
+test("shows the ad-hoc prompt above the Cancel control", () => {
+  const html = render({
+    items: [{ ...adHoc, body: "Retry the **checkout** step.", bodyTruncated: true }],
+  });
+  expect(html).toContain('class="aq-prompt"');
+  expect(html).toContain(">checkout</strong>");
+  expect(html).toContain("Prompt shortened for display.");
+  expect(html.indexOf("aq-prompt")).toBeLessThan(html.indexOf("Cancel task"));
+});
+
 test("renders nothing, and no Cancel control, when nothing is queued or cancelled", () => {
   expect(render({ items: [] })).toBe("");
 });
