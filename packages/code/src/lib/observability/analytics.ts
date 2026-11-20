@@ -4,7 +4,7 @@
  * Fire-and-forget events with flush-on-exit. Never sends task keys, prompts,
  * repo names, paths, or credentials — only allowlisted enum/bool/number props
  * (see ALLOWED_PROP_KEYS). Opt out via DEVINTERN_TELEMETRY_DISABLED=1 or
- * `analytics.enabled: false` in .devintern-code/settings.json; the settings
+ * `analytics.enabled: false` in ~/.devintern/settings.json; the settings
  * opt-out is reported once as an anonymous `analytics_opt_out` event so the
  * funnel can exclude it going forward. The env kill-switch suppresses even
  * that acknowledgement, guaranteeing zero outbound analytics traffic.

@@ -31,15 +31,9 @@ export async function stashWorkingDirectory(
       "--include-untracked",
       "-m",
       message,
-      // Repo-wide (the cleanup that follows resets the whole tree), minus the
-      // tool's own state directory — stashing it away would delete the live
-      // SQLite database just as surely as `git clean` would.
+      // Repo-wide: the cleanup that follows resets the whole tree.
       "--",
       ":/",
-      // `top` anchors the exclusion at the repo root; without it the pattern
-      // is relative to the cwd and a run started from a subdirectory would
-      // still stash away the project's state directory.
-      ":(top,exclude,glob)**/.devintern-code/**",
     ],
     options,
   );

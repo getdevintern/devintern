@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, writeFileSync } from "fs";
-import { dirname, isAbsolute, join, resolve } from "path";
+import { dirname, isAbsolute, join } from "path";
 import { detectSandboxProviders } from "@devintern/agent-harness";
 import { hasHelpArg } from "../cli/help";
 import { flushAnalytics, trackSetupCompleted, trackSetupStarted } from "../observability/analytics";
@@ -87,11 +87,7 @@ export async function runInitCommand(): Promise<never> {
   if (registered) {
     process.exitCode = await updateRegisteredCheckout(registered);
   } else if (isInteractive(process.argv, process.stdin)) {
-    if (existsSync(resolve(process.cwd(), ".devintern-code", ".env"))) {
-      await runInitUpgrade();
-    } else {
-      await runInitWizard();
-    }
+    await runInitWizard();
   } else {
     await initializeProject();
   }

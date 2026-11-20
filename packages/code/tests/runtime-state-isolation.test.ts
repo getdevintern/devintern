@@ -16,17 +16,8 @@ import {
   WORKER_SUBPROCESS_ENV,
 } from "../src/lib/config/config-dir";
 import { loadSupabaseConfig } from "../src/lib/cli/bootstrap";
-import { excludeWorkerRuntimeFiles } from "../src/lib/utils/git-exclude";
 import { buildRepoEnv, buildWorkspaceContextEnv } from "../src/lib/workspace/env";
 import { ensureWorkspaceCodeState } from "../src/lib/workspace/paths";
-
-function git(cwd: string, args: string[]): string {
-  const result = spawnSync("git", args, { cwd, encoding: "utf8" });
-  if (result.status !== 0) {
-    throw new Error(`git ${args.join(" ")} failed: ${result.stderr || result.stdout}`);
-  }
-  return result.stdout;
-}
 
 describe("fleet config-dir isolation (DEV-126)", () => {
   let root: string;
@@ -200,47 +191,5 @@ describe("worker daemon auth/license state (DEV-126)", () => {
     expect(existsSync(join(legacy, "relay.json"))).toBe(false);
     expect(readFileSync(join(legacy, "queue.db"), "utf8")).toBe("not empty");
     expect(readFileSync(join(legacy, "notes.txt"), "utf8")).toBe("mine");
-  });
-});
-
-describe("defensive .git/info/exclude for .devintern-code (DEV-126)", () => {
-  let repo: string;
-
-  beforeEach(() => {
-    repo = mkdtempSync(join(tmpdir(), "runtime-exclude-"));
-    git(repo, ["init", "-q"]);
-    git(repo, ["config", "user.email", "test@example.com"]);
-    git(repo, ["config", "user.name", "Test"]);
-    writeFileSync(join(repo, "app.ts"), "export const x = 1;\n");
-    git(repo, ["add", "-A"]);
-    git(repo, ["commit", "-qm", "init"]);
-  });
-
-  afterEach(() => {
-    rmSync(repo, { recursive: true, force: true });
-  });
-
-  test("runtime files stay out of git while new project config remains stageable", () => {
-    mkdirSync(join(repo, ".devintern-code"), { recursive: true });
-    writeFileSync(
-      join(repo, ".gitignore"),
-      ".devintern-code/*\n!.devintern-code/settings.json\n!.devintern-code/.env.example\n",
-    );
-    excludeWorkerRuntimeFiles(repo);
-    excludeWorkerRuntimeFiles(repo);
-
-    // Runtime artifacts appearing in the checkout stay out of the index...
-    writeFileSync(join(repo, ".devintern-code", ".pid.lock"), "{}");
-    writeFileSync(join(repo, ".devintern-code", "license-cache.json"), "{}");
-    writeFileSync(join(repo, ".devintern-code", "queue.db-wal"), "{}");
-    writeFileSync(join(repo, ".devintern-code", "settings.json"), "{}\n");
-    writeFileSync(join(repo, ".devintern-code", ".env.example"), "EXAMPLE=1\n");
-    git(repo, ["add", "-A"]);
-    const staged = git(repo, ["diff", "--cached", "--name-only"]);
-    expect(staged).not.toContain(".pid.lock");
-    expect(staged).not.toContain("license-cache.json");
-    expect(staged).not.toContain("queue.db-wal");
-    expect(staged).toContain(".devintern-code/settings.json");
-    expect(staged).toContain(".devintern-code/.env.example");
   });
 });

@@ -49,8 +49,8 @@ export interface AutomationRunContext {
   env: Record<string, string | undefined>;
   repo?: string;
   /**
-   * Explicit directory for occurrence task files. When omitted, files go
-   * under the nearest `.devintern-code` found above {@linkcode cwd}.
+   * Explicit directory for occurrence task files. When omitted, files go to
+   * the workspace `automations/` directory.
    */
   taskFileDir?: string;
   release(): void | Promise<void>;

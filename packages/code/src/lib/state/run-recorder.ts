@@ -2,7 +2,7 @@
  * Run Records
  *
  * Structured, queryable record of how each ticket (or PR mention) was
- * handled, persisted in the shared `.devintern-code/queue.db`. One `runs`
+ * handled, persisted in the shared workspace `queue.db`. One `runs`
  * row per attempt; one `run_stages` row per pipeline stage. Captured from
  * day one because run history cannot be backfilled — today's artifacts are
  * loose files under the output directory.

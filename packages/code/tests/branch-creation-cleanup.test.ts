@@ -167,31 +167,6 @@ describe("Branch Creation Cleanup", () => {
     expect(result.branchName).toBe("feature/test-456-attempt-2");
   });
 
-  test("keeps the .devintern-code state directory", async () => {
-    // The SQLite database is open while the branch is created; deleting it
-    // breaks every later write with "disk I/O error".
-    mkdirSync(join(repoDir, ".devintern-code"), { recursive: true });
-    writeFileSync(join(repoDir, ".devintern-code", "queue.db"), "state\n", "utf8");
-
-    const result = await Utils.createFeatureBranch("TEST-STATE", undefined, { cwd: repoDir });
-
-    expect(result.success).toBe(true);
-    expect(existsSync(join(repoDir, ".devintern-code", "queue.db"))).toBe(true);
-  });
-
-  test("keeps a nested .devintern-code directory when run from a subdirectory", async () => {
-    const nestedDir = join(repoDir, "packages", "app", ".devintern-code");
-    mkdirSync(nestedDir, { recursive: true });
-    writeFileSync(join(nestedDir, "queue.db"), "state\n", "utf8");
-
-    const result = await Utils.createFeatureBranch("TEST-NESTED", undefined, {
-      cwd: join(repoDir, "packages", "app"),
-    });
-
-    expect(result.success).toBe(true);
-    expect(existsSync(join(nestedDir, "queue.db"))).toBe(true);
-  });
-
   test("backs up discarded work to a recoverable stash entry", async () => {
     writeFileSync(join(repoDir, "README.md"), "# Modified README\n", "utf8");
     writeFileSync(join(repoDir, "untracked.txt"), "untracked\n", "utf8");

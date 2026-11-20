@@ -180,7 +180,7 @@ test.skipIf(skip)(
 
       expect(result.exitCode).toBe(1);
       expect(text).toContain("❌ Task tracker — markdown: missing MARKDOWN_TASKS_DIR");
-      expect(text).toContain("💡 Run 'devintern init' or edit .devintern-code/.env");
+      expect(text).toContain("💡 Run 'devintern init' or edit ~/.devintern/env/<repo>.env");
       expect(text).toContain("❌ Not ready — fix the failed checks above.");
     });
   },

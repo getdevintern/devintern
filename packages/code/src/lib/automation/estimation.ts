@@ -293,7 +293,7 @@ export async function runEstimation(
           } else {
             console.log("⚠️  No story points field found — skipping field update");
             console.log(
-              '   Configure storyPointsField in .devintern-code/settings.json or ensure your tracker has a "Story Points" field',
+              '   Set story_points_field under [trackers] in ~/.devintern/workspace.toml or ensure your tracker has a "Story Points" field',
             );
           }
 

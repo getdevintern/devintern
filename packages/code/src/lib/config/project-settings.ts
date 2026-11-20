@@ -56,7 +56,7 @@ export function resolveProjectKey(taskKey: string, task?: { raw: unknown }): str
 export function printMissingEnvHelp(): void {
   console.error("\nPlease ensure you have a .env file in one of these locations:");
   console.error(
-    `   - Project-specific: ${resolve(process.cwd(), ".devintern-code", ".env")} (or in any parent directory)`,
+    "   - This repository's settings: ~/.devintern/env/<repo>.env (run 'devintern init')",
   );
   console.error(
     `   - Current directory: ${resolve(process.cwd(), ".env")} (or in any parent directory)`,
