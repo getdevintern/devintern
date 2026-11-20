@@ -23,3 +23,4 @@ export { MUSE_MIN_VERSION, MUSE_READONLY_PROFILE, MuseHarness } from "./muse.js"
 export { OpencodeHarness } from "./opencode.js";
 export { PiHarness } from "./pi.js";
 export { QwenCodeHarness } from "./qwen.js";
+export { ReasonixHarness } from "./reasonix.js";

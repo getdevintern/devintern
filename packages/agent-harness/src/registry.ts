@@ -19,6 +19,7 @@ import {
   OpencodeHarness,
   PiHarness,
   QwenCodeHarness,
+  ReasonixHarness,
 } from "./harnesses/index.js";
 
 const registry = new Map<string, AgentHarness>();
@@ -41,6 +42,8 @@ export const HARNESS_ALIASES: Readonly<
   claude: { target: "claude-code" },
   /** Product name users may type instead of the binary name. */
   "muse-code": { target: "muse" },
+  /** Official DeepSeek Harness CLI name (`dsh`) → canonical harness id. */
+  dsh: { target: "deepseek" },
   /**
    * Google retired consumer Gemini CLI (2026-06-18) in favor of Antigravity CLI.
    * Keep accepting the old id so existing .env files keep working.
@@ -106,3 +109,4 @@ registerHarness(new MuseHarness());
 registerHarness(new OpencodeHarness());
 registerHarness(new PiHarness());
 registerHarness(new QwenCodeHarness());
+registerHarness(new ReasonixHarness());

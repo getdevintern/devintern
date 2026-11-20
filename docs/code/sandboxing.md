@@ -24,13 +24,13 @@ A one-shot run picks up a changed `AGENT_SANDBOX` immediately. A running `devint
 
 ## Providers
 
-| `AGENT_SANDBOX` | What it is                                                                                                                                | Works with                                             |
-| --------------- | ----------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
-| `none`          | No sandbox (default)                                                                                                                      | all harnesses                                          |
-| `auto`          | Best option per harness: `native` first, then `nono`. Runs unsandboxed with a warning if neither is available. Never picks `docker`        | depends on pick                                        |
-| `native`        | The harness's built-in sandbox, configured by DevIntern. Nothing to install                                                               | `claude-code`, `codex`                                 |
-| `nono`          | Kernel-enforced isolation of the whole agent process (Landlock on Linux, Seatbelt on macOS). See [nono.sh](https://nono.sh)               | all harnesses                                          |
-| `docker`        | A [Docker Sandboxes](https://www.docker.com/products/docker-sandboxes) microVM, run through the `sbx` CLI                                  | `claude-code`, `codex`, `cursor`, `gemini`, `opencode` |
+| `AGENT_SANDBOX` | What it is                                                                                                                          | Works with                                             |
+| --------------- | ----------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
+| `none`          | No sandbox (default)                                                                                                                | all harnesses                                          |
+| `auto`          | Best option per harness: `native` first, then `nono`. Runs unsandboxed with a warning if neither is available. Never picks `docker` | depends on pick                                        |
+| `native`        | The harness's built-in sandbox, configured by DevIntern. Nothing to install                                                         | `claude-code`, `codex`                                 |
+| `nono`          | Kernel-enforced isolation of the whole agent process (Landlock on Linux, Seatbelt on macOS). See [nono.sh](https://nono.sh)         | all harnesses                                          |
+| `docker`        | A [Docker Sandboxes](https://www.docker.com/products/docker-sandboxes) microVM, run through the `sbx` CLI                           | `claude-code`, `codex`, `cursor`, `gemini`, `opencode` |
 
 If you name a provider that isn't installed or doesn't support your harness, the run fails with an error instead of running unsandboxed. In a failover chain, worker runs skip any fallback entry the provider can't wrap. Interactive and PR-review runs use only the first entry, so that one must work.
 
@@ -38,11 +38,11 @@ If DevIntern is already running inside a kernel sandbox (a `nono` shell, or laun
 
 ### Setup at a glance
 
-| Provider | Install                                                                                                                  | Agent login inside the sandbox                                                     | One-time setup                                                                    |
-| -------- | ------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
-| `native` | Nothing                                                                                                                  | Your existing login                                                                | None                                                                              |
-| `nono`   | macOS: `brew install nono`; Linux: `curl -fsSL https://nono.sh/install.sh \| sh`                                         | Your existing login                                                                | `nono pull nolabs-ai/<agent>` for each agent that has a pack ([nono profiles](#nono-profiles)) |
-| `docker` | macOS: `brew install docker/tap/sbx`; Windows: `winget install Docker.sbx`; Linux: `docker-sbx` (Docker's apt repo or the AUR) | An API key stored with `sbx secret set -g anthropic` (or `openai`, `google`, `github`, …). Host logins aren't visible inside the VM | `sbx login` (Docker Desktop only), then `sbx policy init balanced`                 |
+| Provider | Install                                                                                                                        | Agent login inside the sandbox                                                                                                      | One-time setup                                                                                 |
+| -------- | ------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `native` | Nothing                                                                                                                        | Your existing login                                                                                                                 | None                                                                                           |
+| `nono`   | macOS: `brew install nono`; Linux: `curl -fsSL https://nono.sh/install.sh \| sh`                                               | Your existing login                                                                                                                 | `nono pull nolabs-ai/<agent>` for each agent that has a pack ([nono profiles](#nono-profiles)) |
+| `docker` | macOS: `brew install docker/tap/sbx`; Windows: `winget install Docker.sbx`; Linux: `docker-sbx` (Docker's apt repo or the AUR) | An API key stored with `sbx secret set -g anthropic` (or `openai`, `google`, `github`, …). Host logins aren't visible inside the VM | `sbx login` (Docker Desktop only), then `sbx policy init balanced`                             |
 
 ## What the sandbox allows
 
@@ -55,11 +55,11 @@ By default the agent can **write** to:
 
 The rest of your home directory stays readable but not writable. Network access is open, so agents can reach model APIs, git remotes, and package registries.
 
-| Variable                         | Effect                                                                                                         |
-| -------------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| `AGENT_SANDBOX_WRITABLE_PATHS`   | More writable paths, colon-separated (`/data/scratch:/var/cache/myapp`)                                        |
-| `AGENT_SANDBOX_ALLOWED_DOMAINS`  | Limit network access to these domains, comma-separated (`api.anthropic.com,github.com`). Enforced by `nono`, `docker`, and Claude Code `native` |
-| `AGENT_SANDBOX_NONO_PROFILE`     | Use your own nono profile, by name or absolute path, instead of the default                                     |
+| Variable                        | Effect                                                                                                                                          |
+| ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `AGENT_SANDBOX_WRITABLE_PATHS`  | More writable paths, colon-separated (`/data/scratch:/var/cache/myapp`)                                                                         |
+| `AGENT_SANDBOX_ALLOWED_DOMAINS` | Limit network access to these domains, comma-separated (`api.anthropic.com,github.com`). Enforced by `nono`, `docker`, and Claude Code `native` |
+| `AGENT_SANDBOX_NONO_PROFILE`    | Use your own nono profile, by name or absolute path, instead of the default                                                                     |
 
 Narrowing `AGENT_SANDBOX_ALLOWED_DOMAINS` to your model API, package registries, and git host is the biggest single hardening step. Expect the first few runs to fail until the list is complete.
 
@@ -77,11 +77,11 @@ GROK_CLI_PATH=/home/you/.grok/bin/grok
 
 Under `nono`, each run uses a **profile** plus the write permissions listed above.
 
-| Case                 | Profile                                                                                         | Applies to                                                                      |
-| -------------------- | ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
-| Pack profile         | The harness's official pack, installed with `nono pull nolabs-ai/<agent>`                       | `claude-code`, `codex`, `opencode`, `goose`, `pi`, `antigravity`                |
-| Generic fallback     | `linux-host-compat` on Linux, nono's default on macOS                                           | Every other harness (`grok`, `cline`, `qwen`, `kimi`, `muse`, `cursor`, …)      |
-| Your own profile     | The profile named by `AGENT_SANDBOX_NONO_PROFILE`, used as-is                                   | Whenever you set it                                                             |
+| Case             | Profile                                                                   | Applies to                                                                                         |
+| ---------------- | ------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| Pack profile     | The harness's official pack, installed with `nono pull nolabs-ai/<agent>` | `claude-code`, `codex`, `opencode`, `goose`, `pi`, `antigravity`                                   |
+| Generic fallback | `linux-host-compat` on Linux, nono's default on macOS                     | Every other harness (`grok`, `cline`, `qwen`, `kimi`, `muse`, `cursor`, `deepseek`, `reasonix`, …) |
+| Your own profile | The profile named by `AGENT_SANDBOX_NONO_PROFILE`, used as-is             | Whenever you set it                                                                                |
 
 Install the pack for every harness that has one. Packs grant access that plain flags can't, such as the macOS Keychain. Without the claude pack, `claude-code` under nono reports "Not logged in" on macOS. When no pack exists, DevIntern uses the generic fallback, says so once per run, and `devintern sandbox` lists it for each entry. Browse packs at [registry.nono.sh](https://registry.nono.sh).
 
@@ -123,7 +123,10 @@ DevIntern's write permissions (working directory, output directory, state direct
 ```json
 {
   "extends": "claude-code",
-  "meta": { "name": "claude-code-browser", "description": "claude-code pack + Chromium launch support" },
+  "meta": {
+    "name": "claude-code-browser",
+    "description": "claude-code pack + Chromium launch support"
+  },
   "unsafe_macos_seatbelt_rules": [
     "(allow iokit-open (iokit-user-client-class \"RootDomainUserClient\") (iokit-user-client-class \"IOSurfaceRootUserClient\"))",
     "(allow iokit-get-properties)",
@@ -136,17 +139,17 @@ DevIntern's write permissions (working directory, output directory, state direct
 
 With `AGENT_SANDBOX=native` and `AGENT_HARNESS=claude-code`, DevIntern generates a settings file for each run and passes it with `--settings`:
 
-| Setting                             | Value                                                         | Why                                                                                        |
-| ----------------------------------- | ------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
-| `sandbox.enabled`                   | `true`                                                        | Turns on the Bash-tool sandbox                                                             |
-| `sandbox.autoAllowBashIfSandboxed`  | `true`                                                        | The sandbox takes the place of permission prompts                                          |
-| `sandbox.allowUnsandboxedCommands`  | `false`                                                       | Stops blocked commands from being retried outside the sandbox                              |
-| `sandbox.failIfUnavailable`         | `true`                                                        | If the sandbox can't start (for example, `bubblewrap` is missing on Linux), the run fails instead of running unsandboxed |
-| `sandbox.filesystem.allowWrite`     | Working, output, and temp directories; browser caches         | What a task needs to write                                                                 |
-| `sandbox.network.allowedDomains`    | `["*"]` or your `AGENT_SANDBOX_ALLOWED_DOMAINS`               | Nobody is there to approve new domains during a headless run                               |
-| `sandbox.network.allowLocalBinding` | `true`                                                        | Dev servers and browser automation need localhost                                          |
-| `sandbox.network.allowUnixSockets`  | Your `SSH_AUTH_SOCK`, if set                                  | `git push` over SSH                                                                        |
-| `sandbox.excludedCommands`          | `["docker *", "gh *"]`                                        | `docker` doesn't work in the sandbox, and `gh` fails TLS checks on macOS; both run outside it as they would without a sandbox |
+| Setting                             | Value                                                 | Why                                                                                                                           |
+| ----------------------------------- | ----------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `sandbox.enabled`                   | `true`                                                | Turns on the Bash-tool sandbox                                                                                                |
+| `sandbox.autoAllowBashIfSandboxed`  | `true`                                                | The sandbox takes the place of permission prompts                                                                             |
+| `sandbox.allowUnsandboxedCommands`  | `false`                                               | Stops blocked commands from being retried outside the sandbox                                                                 |
+| `sandbox.failIfUnavailable`         | `true`                                                | If the sandbox can't start (for example, `bubblewrap` is missing on Linux), the run fails instead of running unsandboxed      |
+| `sandbox.filesystem.allowWrite`     | Working, output, and temp directories; browser caches | What a task needs to write                                                                                                    |
+| `sandbox.network.allowedDomains`    | `["*"]` or your `AGENT_SANDBOX_ALLOWED_DOMAINS`       | Nobody is there to approve new domains during a headless run                                                                  |
+| `sandbox.network.allowLocalBinding` | `true`                                                | Dev servers and browser automation need localhost                                                                             |
+| `sandbox.network.allowUnixSockets`  | Your `SSH_AUTH_SOCK`, if set                          | `git push` over SSH                                                                                                           |
+| `sandbox.excludedCommands`          | `["docker *", "gh *"]`                                | `docker` doesn't work in the sandbox, and `gh` fails TLS checks on macOS; both run outside it as they would without a sandbox |
 
 If you don't want the `docker` and `gh` exceptions, use `nono`. Claude Code merges array settings from all scopes, so your project or user `.claude/settings.json` can add to the generated policy. Settings worth considering:
 

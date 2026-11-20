@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   ClaudeCodeHarness,
   CodexHarness,
+  DeepSeekHarness,
   GrokHarness,
   KimiHarness,
   OpencodeHarness,
@@ -68,6 +69,46 @@ describe("buildHeadlessAgentInvocation", () => {
       runOptions,
     );
     expect(args.slice(-2)).toEqual(["--", frontmatter]);
+  });
+
+  test("official DeepSeek Harness warns that AGENT_EFFORT is ignored on the Code path", async () => {
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message: string) => {
+      warnings.push(message);
+    };
+    try {
+      const { args } = await buildHeadlessAgentInvocation(
+        new DeepSeekHarness(),
+        "/nonexistent/dsh",
+        "implement it",
+        { ...runOptions, effort: "high", maxTurns: 500 },
+      );
+      expect(args).toEqual(["headless", "implement it"]);
+    } finally {
+      console.warn = originalWarn;
+    }
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("does not support reasoning effort");
+    expect(warnings[0]).toContain('ignoring effort "high"');
+    expect(warnings[0]).toContain("$DSH_HOME/profiles/headless/cordis.patch.yml");
+  });
+
+  test("official DeepSeek Harness receives its unattended permission mode", async () => {
+    const originalMode = process.env.DSH_PERMISSION_MODE;
+    delete process.env.DSH_PERMISSION_MODE;
+    try {
+      const { env } = await buildHeadlessAgentInvocation(
+        new DeepSeekHarness(),
+        "/nonexistent/dsh",
+        "implement it",
+        runOptions,
+      );
+      expect(env).toEqual({ DSH_PERMISSION_MODE: "danger-full-access" });
+    } finally {
+      if (originalMode === undefined) delete process.env.DSH_PERMISSION_MODE;
+      else process.env.DSH_PERMISSION_MODE = originalMode;
+    }
   });
 
   test("headless stdio ignores stdin so TUI CLIs cannot attach a TTY", () => {

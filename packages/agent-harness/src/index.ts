@@ -24,6 +24,9 @@ export type {
   StructuredOutputResult,
 } from "./types.js";
 
+// Shared errors
+export { HarnessUnavailableError } from "./errors.js";
+
 // Run modes (plan / readonly) and capability checks
 export {
   UnsupportedAgentModeError,
@@ -115,7 +118,11 @@ export { ClaudeCodeHarness } from "./harnesses/claude-code.js";
 export { ClineHarness } from "./harnesses/cline.js";
 export { CodexHarness } from "./harnesses/codex.js";
 export { CursorHarness } from "./harnesses/cursor.js";
-export { DeepSeekHarness } from "./harnesses/deepseek.js";
+export {
+  DeepSeekHarness,
+  DEEPSEEK_HEADLESS_PROFILE_PATH,
+  DEEPSEEK_TESTED_VERSION,
+} from "./harnesses/deepseek.js";
 /** @deprecated Use {@link AntigravityHarness}. Re-exports AntigravityHarness. */
 export { GeminiHarness } from "./harnesses/gemini.js";
 export { GooseHarness } from "./harnesses/goose.js";
@@ -126,6 +133,7 @@ export { MUSE_MIN_VERSION, MUSE_READONLY_PROFILE, MuseHarness } from "./harnesse
 export { OpencodeHarness } from "./harnesses/opencode.js";
 export { PiHarness } from "./harnesses/pi.js";
 export { QwenCodeHarness } from "./harnesses/qwen.js";
+export { ReasonixHarness } from "./harnesses/reasonix.js";
 
 // Runners
 export { runAgentBun } from "./runners/bun.js";
@@ -193,6 +201,7 @@ export {
 } from "./sandbox/providers/nono.js";
 export {
   defaultMuseCredentialPath,
+  harnessStateAbsolutePaths,
   harnessStatePaths,
   museCredentialPath,
   resolveHomeDir,

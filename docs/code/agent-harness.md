@@ -22,23 +22,26 @@ Usually `AGENT_HARNESS` is all you need. DevIntern finds the harness's standard 
 
 ## Supported harnesses
 
-| `AGENT_HARNESS`                  | CLI binary     | Notes                                                                                                   |
-| -------------------------------- | -------------- | ------------------------------------------------------------------------------------------------------- |
-| `claude-code` (alias `claude`)   | `claude`       | Default                                                                                                  |
-| `codex`                          | `codex`        |                                                                                                          |
-| `opencode`                       | `opencode`     |                                                                                                          |
-| `cursor`                         | `cursor-agent` | Enable the CLI in Cursor's settings. `--max-turns` has no effect                                         |
-| `grok`                           | `grok`         | Grok Build, from [x.ai/cli](https://x.ai/cli). Log in through the browser or set `XAI_API_KEY`. `--max-turns` has no effect |
-| `deepseek`                       | `reasonix`     | `npm i -g reasonix`, then set `DEEPSEEK_API_KEY` or run `reasonix setup`. `--max-turns` has no effect      |
-| `antigravity` (alias `agy`)      | `agy`          | Replaces the retired Gemini CLI. Log in through the browser or set `ANTIGRAVITY_TOKEN` for CI. Models come from `agy models` |
-| `muse` (alias `muse-code`)       | `muse`         | Requires Muse Code 1.4.9+. See [Muse Code](#muse-code)                                                  |
-| `cline`                          | `cline`        |                                                                                                          |
-| `goose`                          | `goose`        |                                                                                                          |
-| `kilo-code`                      | `kilo`         |                                                                                                          |
-| `kimi`                           | `kimi`         |                                                                                                          |
-| `qwen`                           | `qwen`         | Set the model with `AGENT_MODEL` (for example `qwen3-coder-plus`) or in `~/.qwen/settings.json`          |
+| `AGENT_HARNESS`                | CLI binary     | Notes                                                                                                                        |
+| ------------------------------ | -------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `claude-code` (alias `claude`) | `claude`       | Default                                                                                                                      |
+| `codex`                        | `codex`        |                                                                                                                              |
+| `opencode`                     | `opencode`     |                                                                                                                              |
+| `cursor`                       | `cursor-agent` | Enable the CLI in Cursor's settings. `--max-turns` has no effect                                                             |
+| `grok`                         | `grok`         | Grok Build, from [x.ai/cli](https://x.ai/cli). Log in through the browser or set `XAI_API_KEY`. `--max-turns` has no effect  |
+| `deepseek` (alias `dsh`)       | `dsh`          | Experimental: DeepSeek's official DeepSeek Harness. See [DeepSeek Harness](#deepseek-harness)                                |
+| `reasonix`                     | `reasonix`     | `npm i -g reasonix`, then set `DEEPSEEK_API_KEY` or run `reasonix setup`. `--max-turns` has no effect                        |
+| `antigravity` (alias `agy`)    | `agy`          | Replaces the retired Gemini CLI. Log in through the browser or set `ANTIGRAVITY_TOKEN` for CI. Models come from `agy models` |
+| `muse` (alias `muse-code`)     | `muse`         | Requires Muse Code 1.4.9+. See [Muse Code](#muse-code)                                                                       |
+| `cline`                        | `cline`        |                                                                                                                              |
+| `goose`                        | `goose`        |                                                                                                                              |
+| `kilo-code`                    | `kilo`         |                                                                                                                              |
+| `kimi`                         | `kimi`         |                                                                                                                              |
+| `qwen`                         | `qwen`         | Set the model with `AGENT_MODEL` (for example `qwen3-coder-plus`) or in `~/.qwen/settings.json`                              |
 
 `AGENT_HARNESS=gemini` still works but routes to Antigravity and prints a deprecation warning. DevIntern never starts the retired `gemini` binary.
+
+`AGENT_HARNESS=deepseek` used to select Reasonix. It now selects the official DeepSeek Harness, so existing Reasonix setups must switch to `AGENT_HARNESS=reasonix`. DevIntern prints this hint when `dsh` is missing or a `*_CLI_PATH` still points at `reasonix`.
 
 ### Muse Code
 
@@ -46,11 +49,26 @@ Install Muse Code with `curl -fsSL https://dev.meta.ai/install.sh | sh` and chec
 
 DevIntern runs `muse exec` so that it never stops to ask a question. Muse's own sandbox stays on, and its network is opened because nobody is there to approve requests (any outer sandbox's domain allowlist still applies). DevIntern never trusts the workspace for you, so a project's `AGENTS.md`, skills, and hooks load only after you trust that checkout yourself. Don't trust checkouts from untrusted PRs or forks. On macOS under `nono`, Muse requires `META_API_KEY`. An exit code of `0` means the turn finished, not that the task or your tests passed. See Meta's [authentication](https://dev.meta.ai/docs/muse-code/auth) and [permissions](https://dev.meta.ai/docs/muse-code/permissions) docs.
 
+### DeepSeek Harness
+
+The `deepseek` harness runs DeepSeek's [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`). It is a developer preview, and upstream expects breaking changes. DevIntern was verified against `@deepseek-ai/dsh` 0.2.1-rc.2 and warns once when a different version is installed.
+
+1. Install Node.js and the CLI: `npm i -g @deepseek-ai/dsh` (or point `DEEPSEEK_CLI_PATH` at a wrapper). An unrelated `dsh`, such as Debian's distributed shell, is refused.
+2. Set `DEEPSEEK_API_KEY` in `.devintern-code/.env` or `$DSH_HOME/.env`. Headless mode ignores credentials saved by the dsh GUI; to reuse them, see the [headless bundle docs](https://github.com/deepseek-ai/deepseek-harness/tree/master/packages/bundle/headless#credentials).
+3. Set `AGENT_HARNESS=deepseek`.
+
+| Setting               | Behavior                                                                                                                                                                                                                                   |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Model and effort      | Set in the dsh profile (`agent-default-model` in `$DSH_HOME/profiles/headless/cordis.patch.yml`; default `deepseek-flash`). `AGENT_MODEL` and `AGENT_EFFORT` are ignored with a warning                                                    |
+| `--max-turns`         | No headless equivalent. A non-default value prints a warning                                                                                                                                                                               |
+| `DSH_PERMISSION_MODE` | Unattended runs default to `danger-full-access`, because headless dsh can't answer approval prompts. Set `workspace-write` to keep dsh's own sandbox; work that needs escalation is then rejected                                          |
+| `DSH_HOME`            | Honored from the environment or `.devintern-code/.env`. Under nono, only a `~/.dsh*` directory or one inside the workspace is granted; set `DEVINTERN_SANDBOX_ALLOW_CUSTOM_DSH_HOME=1` in the launch environment to trust another location |
+
 ## CLI path
 
 Set `AGENT_CLI_PATH` only when the CLI isn't on your `PATH` or has a non-standard name. It accepts a bare command or a full path. Don't commit an absolute path to a shared `.env`, because paths differ between machines. If the command can't be found, DevIntern exits at startup with an error.
 
-To pin a specific harness, use `<HARNESS>_CLI_PATH`: the harness id in upper case, with dashes turned into underscores. Examples are `CLAUDE_CODE_CLI_PATH` (legacy name: `CLAUDE_CLI_PATH`), `CODEX_CLI_PATH`, `OPENCODE_CLI_PATH`, `GROK_CLI_PATH`, `MUSE_CLI_PATH`, `KILO_CODE_CLI_PATH`, `ANTIGRAVITY_CLI_PATH`, and `AGY_CLI_PATH` (`GEMINI_CLI_PATH` is legacy). Under a sandbox, point this at the real binary rather than a mise shim; see [Pinning the agent CLI](./sandboxing.md#pinning-the-agent-cli).
+To pin a specific harness, use `<HARNESS>_CLI_PATH`: the harness id in upper case, with dashes turned into underscores. Examples are `CLAUDE_CODE_CLI_PATH` (legacy name: `CLAUDE_CLI_PATH`), `CODEX_CLI_PATH`, `OPENCODE_CLI_PATH`, `GROK_CLI_PATH`, `MUSE_CLI_PATH`, `DEEPSEEK_CLI_PATH`, `REASONIX_CLI_PATH`, `KILO_CODE_CLI_PATH`, `ANTIGRAVITY_CLI_PATH`, and `AGY_CLI_PATH` (`GEMINI_CLI_PATH` is legacy). Under a sandbox, point this at the real binary rather than a mise shim; see [Pinning the agent CLI](./sandboxing.md#pinning-the-agent-cli).
 
 ## Models
 
@@ -66,7 +84,7 @@ DevIntern picks the model for each run in this order:
 
 `AGENT_EFFORT=low|medium|high` controls how hard the agent thinks on each run. Any other value is an error. Leave it unset to keep the harness default.
 
-Claude Code, Codex, Grok, Antigravity, DeepSeek, Muse, Cline, OpenCode, and Kilo Code each map it to their own flag. Other harnesses ignore it and print a warning. pi and OpenCode v2 build the effort into the model string, so on those it only takes effect when a model is configured.
+Claude Code, Codex, Grok, Antigravity, Reasonix, Muse, Cline, OpenCode, and Kilo Code each map it to their own flag. Other harnesses ignore it and print a warning (the `deepseek` harness names its profile file instead). pi and OpenCode v2 build the effort into the model string, so on those it only takes effect when a model is configured.
 
 ## Failover across multiple harnesses
 
@@ -92,6 +110,7 @@ A task description can choose the harness, model, and effort for that one task:
 
 ```markdown
 ## Execution preferences
+
 Harness: codex
 Model: gpt-5.2
 Effort: high
