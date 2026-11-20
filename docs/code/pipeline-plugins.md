@@ -37,19 +37,17 @@ const definition: StepDefinition = {
 export default definition;
 ```
 
-Register it in `pipeline.plugins` and place it in `pipeline.steps`:
+Register it in the pipeline file's `plugins` and place it in `steps`:
 
 ```json
 {
-  "pipeline": {
-    "plugins": ["./steps/check-policy.ts"],
-    "steps": [
-      { "use": "implement" },
-      { "use": "commit" },
-      { "use": "check-policy", "dryRun": false },
-      { "use": "finalize" }
-    ]
-  }
+  "plugins": ["./steps/check-policy.ts"],
+  "steps": [
+    { "use": "implement" },
+    { "use": "commit" },
+    { "use": "check-policy", "dryRun": false },
+    { "use": "finalize" }
+  ]
 }
 ```
 
@@ -139,7 +137,7 @@ A failing check is not a transient error. Return `halt` (or `repeat`) for a fail
 
 ## Loading plugins and resolving paths
 
-`pipeline.plugins` accepts module paths and package names. Where they resolve depends on where the pipeline is declared:
+`plugins` accepts module paths and package names. Where they resolve depends on where the pipeline is declared:
 
 | Declared in               | Relative paths and package names resolve from |
 | ------------------------- | --------------------------------------------- |
@@ -150,7 +148,7 @@ Install a shared plugin's dependencies next to the file that declares it. For a 
 A plugin published to npm is referenced by package name; its entry module must default-export a `StepDefinition`:
 
 ```json
-{ "pipeline": { "plugins": ["@acme/devintern-steps"], "steps": [] } }
+{ "plugins": ["@acme/devintern-steps"], "steps": [] }
 ```
 
 ## Examples

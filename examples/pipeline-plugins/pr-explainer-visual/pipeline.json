@@ -1,0 +1,21 @@
+{
+  "artifacts": {
+    "publish": {
+      "destination": "pr-comment",
+      "select": [{ "key": "explanation-visual", "presentation": "collapsed" }]
+    }
+  },
+  "plugins": ["./steps/pr-explainer-visual.ts"],
+  "steps": [
+    { "use": "implement" },
+    { "use": "commit" },
+    { "use": "verify", "onFail": "loopback" },
+    { "use": "auto-review" },
+    {
+      "use": "pr-explainer-visual",
+      "promptFile": "/home/you/.devintern/pipelines/prompts/pr-explainer-visual.md",
+      "outputName": "pr-explanation.md"
+    },
+    { "use": "finalize" }
+  ]
+}

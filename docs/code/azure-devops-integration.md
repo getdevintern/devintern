@@ -20,7 +20,7 @@ DevIntern Code reads an Azure DevOps work item (description, tags, attachments, 
 
 ## Setup
 
-Set in `.devintern-code/.env`:
+Set in this repository's env file (`~/.devintern/env/<repo>.env`, created by `devintern init`):
 
 | Variable               | Required | Description                                             |
 | ---------------------- | -------- | ------------------------------------------------------- |
@@ -46,31 +46,24 @@ devintern --query "SELECT [System.Id] FROM WorkItems WHERE [System.State] = 'New
 
 Use `--skip-clarity-check` to skip the feasibility check and `--skip-comments` to skip comments and state changes.
 
-`--estimate` writes `Microsoft.VSTS.Scheduling.StoryPoints` (Agile template default). For another field, such as `Effort` in Scrum, set `storyPointsField` for the project. See [Story Points Estimation](./story-points-estimation.md).
+`--estimate` writes `Microsoft.VSTS.Scheduling.StoryPoints` (Agile template default). For another field, such as `Effort` in Scrum, set `story_points_field` for the project. See [Story Points Estimation](./story-points-estimation.md).
 
 ## Status mapping
 
-Configure states in `.devintern-code/settings.json`, keyed by the project name. Names must match the states of your work item types (for example `New`, `Active`, `Resolved`, `Closed` in the Agile template).
+Configure states under `[trackers]` in `~/.devintern/workspace.toml`, keyed by the project name. Names must match the states of your work item types (for example `New`, `Active`, `Resolved`, `Closed` in the Agile template).
 
-```json
-{
-  "azure-devops": {
-    "projects": {
-      "YourProject": {
-        "inProgressStatus": "Active",
-        "todoStatus": "New",
-        "prStatus": "Resolved"
-      }
-    }
-  }
-}
+```toml
+[trackers.azure-devops.projects.YourProject]
+in_progress_status = "Active"
+todo_status = "New"
+pr_status = "Resolved"
 ```
 
 | Field              | When it is applied                                   |
 | ------------------ | ---------------------------------------------------- |
-| `inProgressStatus` | Implementation starts (after the feasibility check)  |
-| `prStatus`         | A pull request is created                            |
-| `todoStatus`       | The run is incomplete, fails, or hits the turn limit |
+| `in_progress_status` | Implementation starts (after the feasibility check)  |
+| `pr_status`         | A pull request is created                            |
+| `todo_status`       | The run is incomplete, fails, or hits the turn limit |
 
 ## Worker notes
 
@@ -82,5 +75,5 @@ Configure states in `.devintern-code/settings.json`, keyed by the project name. 
 | Symptom                                               | Fix                                                                                     |
 | ----------------------------------------------------- | --------------------------------------------------------------------------------------- |
 | `Missing required Azure DevOps environment variables` | Set `AZURE_DEVOPS_ORG`, `AZURE_DEVOPS_PAT`, and `AZURE_DEVOPS_PROJECT`.                  |
-| `Failed to move work item ... to state`               | States differ per process template and work item type; match them exactly in `settings.json`. |
+| `Failed to move work item ... to state`               | States differ per process template and work item type; match them exactly in `[trackers]`. |
 | 401 or 403 errors                                     | The PAT expired or lacks the Work Items (Read and write) scope for this organization.    |

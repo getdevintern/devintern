@@ -12,7 +12,7 @@ dateModified: 2026-11-18
 Agents run with their own permission prompts turned off (like `--dangerously-skip-permissions`), so by default they can do anything your user account can. A sandbox confines each agent run at the OS level. This matters most for unattended worker runs.
 
 ```bash
-# Workspace .env (~/.devintern/.env) or .devintern-code/.env
+# ~/.devintern/.env (every repo) or ~/.devintern/env/<repo>.env (one repo)
 AGENT_SANDBOX=auto
 ```
 

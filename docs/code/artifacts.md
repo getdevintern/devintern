@@ -35,7 +35,7 @@ Open a run in the [dashboard](./dashboard.md). Run details list the artifacts re
 
 ## Choose what appears on the PR
 
-Publication is off by default. Add an `artifacts` block next to `steps` and `plugins` in the pipeline definition (inside `pipeline` in your workspace `pipeline_file`):
+Publication is off by default. Add an `artifacts` block next to `steps` and `plugins` in your workspace `pipeline_file`:
 
 ```json
 {

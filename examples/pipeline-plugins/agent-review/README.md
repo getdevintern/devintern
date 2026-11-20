@@ -17,7 +17,7 @@ recommitted before the diff is checked again.
 | -------------------------------------- | ----------------------------------------------------- |
 | `plugin.ts`                            | The step definition.                                  |
 | `prompts/review.md`                    | Editable review instructions.                         |
-| `settings.json`                        | Pipeline registration.                                |
+| `pipeline.json`                        | Workspace pipeline file.                              |
 | `fixtures/sample.diff`                 | The diff under review.                                |
 | `fixtures/blocking-verdict.json`       | A verdict with a high-severity finding.               |
 | `fixtures/approved-verdict.json`       | A clean, approving verdict.                           |
@@ -25,16 +25,22 @@ recommitted before the diff is checked again.
 
 ## Setup
 
-1. Copy the plugin and prompt into your repository:
+1. Copy the plugin, prompt, and pipeline file into your workspace:
 
    ```bash
-   mkdir -p .devintern-code/steps .devintern-code/prompts
-   cp examples/pipeline-plugins/agent-review/plugin.ts .devintern-code/steps/agent-review.ts
-   cp examples/pipeline-plugins/agent-review/prompts/review.md .devintern-code/prompts/agent-review.md
-   bun add -d @getdevintern/code
+   mkdir -p ~/.devintern/pipelines/steps ~/.devintern/pipelines/prompts
+   cp examples/pipeline-plugins/agent-review/plugin.ts ~/.devintern/pipelines/steps/agent-review.ts
+   cp examples/pipeline-plugins/agent-review/prompts/review.md ~/.devintern/pipelines/prompts/agent-review.md
+   cp examples/pipeline-plugins/agent-review/pipeline.json ~/.devintern/pipelines/backend.json
+   cd ~/.devintern/pipelines && bun add @getdevintern/code
    ```
 
-2. Merge the `pipeline` block from `settings.json`.
+2. Set `pipeline_file = "pipelines/backend.json"` on the repository's
+   `[[repos]]` entry in `~/.devintern/workspace.toml` (see
+   [Install and copy a plugin](../README.md#install-and-copy-a-plugin)).
+
+`promptFile` is read relative to the task checkout, so the pipeline file
+gives it as an absolute path: replace `/home/you` with your home directory.
 
 ## Options
 

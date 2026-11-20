@@ -84,22 +84,17 @@ Notes:
 
 ## Story points field (Jira)
 
-DevIntern finds the field by common names such as `Story Points` and `Story Point Estimate`. If yours has another name, set it in `.devintern-code/settings.json`:
+DevIntern finds the field by common names such as `Story Points` and `Story Point Estimate`. If yours has another name, set it under `[trackers]` in `~/.devintern/workspace.toml`:
 
-```json
-{
-  "projects": {
-    "PROJ": {
-      "storyPointsField": "customfield_10016"
-    }
-  }
-}
+```toml
+[trackers.jira.projects.PROJ]
+story_points_field = "customfield_10016"
 ```
 
 ## Troubleshooting
 
 | Problem                                   | Fix                                                                                       |
 | ----------------------------------------- | ----------------------------------------------------------------------------------------- |
-| `Story points field not found`            | Set `storyPointsField` in `.devintern-code/settings.json`.                                |
+| `Story points field not found`            | Set `story_points_field` under `[trackers]` in `~/.devintern/workspace.toml`.                                |
 | `Failed to parse estimation response`     | The agent returned non-JSON output. Run with `--verbose` and check that the agent CLI works. |
 | Low-confidence estimates                  | The comment asks for more detail. Refine the task description; the next run re-estimates it. |

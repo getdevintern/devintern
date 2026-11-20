@@ -89,7 +89,7 @@ The relay never receives diffs, file contents, ticket bodies, comment text, CI l
 - **GitLab** hooks are created with your local token, which stays on your machine. Self-Managed instances need only outbound HTTPS to `relay.devintern.com`.
 - **Linear** and **Asana** deliveries are signature-verified. **Trello**, **Azure DevOps**, and **Jira** deliveries are authenticated by the unguessable ingest URL, so keep it secret.
 
-Pairing state is stored in owner-only `.devintern-code/relay.json` under the workspace home.
+Pairing state is stored in owner-only `~/.devintern/state/code/relay.json`.
 
 ## How events are handled
 
