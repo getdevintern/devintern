@@ -32,6 +32,7 @@ import { validateReviewFeedback, validateReviewFeedbackStructure } from "./feedb
 import { DEFAULT_AUTO_REVIEW_ITERATIONS } from "./auto-review-config";
 import { agentSandboxPolicy, getSandbox } from "../agent/sandbox";
 import { createHarnessLogSink } from "../observability/harness-logs";
+import { hasStagedChanges, stageWorkTreeChanges } from "../utils/git-stage";
 import type {
   AutoReviewLoopOptions,
   AutoReviewLoopResult,
@@ -446,24 +447,26 @@ export function filterByPriority(
 }
 
 /**
- * Stage all changes and check whether anything is ready to commit.
+ * Stage tracked changes and new files (skipping sandbox placeholders) and
+ * check whether anything is ready to commit.
  *
  * @param workingDir - Git working directory
  * @returns `true` when staged changes exist
  */
 function stageChanges(workingDir: string): boolean {
-  execSync("git add -A", {
-    cwd: workingDir,
-    maxBuffer: 10 * 1024 * 1024,
-  });
+  const staged = stageWorkTreeChanges(workingDir);
+  if (!staged.success) {
+    throw new Error(`git staging failed: ${staged.error ?? "unknown error"}`);
+  }
 
-  const status = execSync("git status --porcelain", {
-    cwd: workingDir,
-    encoding: "utf-8",
-    maxBuffer: 10 * 1024 * 1024,
-  });
-
-  return status.trim() !== "";
+  // Check the index, not `git status`: skipped placeholders stay untracked,
+  // and an empty index would make `commit` fail and `commit --amend` rewrite
+  // the previous commit with no code change.
+  const check = hasStagedChanges(workingDir);
+  if (!check.success) {
+    throw new Error(`git diff --cached failed: ${check.error ?? "unknown error"}`);
+  }
+  return check.staged;
 }
 
 /**
@@ -473,7 +476,7 @@ function stageChanges(workingDir: string): boolean {
  * @param workingDir - Git working directory
  * @throws When `git commit` fails
  */
-function commitChanges(message: string, workingDir: string): void {
+export function commitChanges(message: string, workingDir: string): void {
   try {
     if (!stageChanges(workingDir)) {
       console.log("No changes to commit");
@@ -498,7 +501,7 @@ function commitChanges(message: string, workingDir: string): void {
  * @param workingDir - Git working directory
  * @throws When `git commit --amend` fails
  */
-function amendCommit(additionalMessage: string, workingDir: string): void {
+export function amendCommit(additionalMessage: string, workingDir: string): void {
   try {
     if (!stageChanges(workingDir)) {
       console.log("No changes to amend");
