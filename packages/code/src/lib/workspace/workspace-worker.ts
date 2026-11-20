@@ -33,7 +33,7 @@ import {
   findRepo,
   findTeam,
   harnessPinnedJobs,
-  loadWorkspaceConfig,
+  loadWorkerWorkspaceConfig,
   requireInjectedTaskTeam,
 } from "./config";
 import {
@@ -887,11 +887,12 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
     : workspaceConfigPath(resolveWorkspaceDir());
   const workspaceDir = options.workspacePath ? dirname(configPath) : resolveWorkspaceDir();
   writeWorkerStartMarker(workspaceDir);
-  const config = loadWorkspaceConfig(configPath);
+  const config = loadWorkerWorkspaceConfig(configPath);
   if (config.repos.length === 0) {
     console.error(
-      `❌ No repos configured in ${configPath}.\n` +
-        "   Add [[repos]] entries (or run `devintern worker add-repo` inside an existing repo).",
+      `❌ No repos configured for the worker in ${configPath}.\n` +
+        "   Add [[repos]] entries without manual_only = true " +
+        "(or run `devintern worker add-repo` inside an existing repo).",
     );
     process.exit(1);
   }
@@ -1261,6 +1262,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   const reloader = new WorkspaceConfigReloader({
     configPath,
     current: config,
+    load: loadWorkerWorkspaceConfig,
     validate: (next, active) =>
       validateReloadedWorkspaceConfig(next, active, {
         multiTeam,

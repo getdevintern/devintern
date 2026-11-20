@@ -13,6 +13,7 @@ import { parseEstimationEntries } from "../automation/estimation-config";
 import type { EstimationConfig } from "../automation/estimation-config";
 import { parseToml } from "./toml";
 import { parseTrackerSettings } from "./tracker-settings";
+import { validateManualOnlyReferences, workerWorkspaceView } from "./manual-only";
 import { DEPENDENCY_MODES, isDependencyMode } from "../dependencies/gate";
 import type { DependencyMode } from "../dependencies/gate";
 import { parseAgentSelection } from "../agent/selection";
@@ -133,18 +134,6 @@ export function parseWorkspaceConfig(
 
   const { teams, teamNames } = parseTeamsSection(document, errors);
 
-  // Single-defaults mode requires a fleet tracker; with [[teams]] every team
-  // brings its own (a [defaults].tracker alongside teams is still honored
-  // for any team that omits one).
-  if (!tracker && teams.length === 0 && errorMonitorTables.length === 0) {
-    errors.push('[defaults].tracker is required (e.g. tracker = "jira").');
-  }
-  if (tracker && !supportsPolling(tracker)) {
-    errors.push(
-      `[defaults].tracker "${tracker}" does not support polling. ` +
-        `Pollable trackers: ${trackersSupportingPolling().join(", ")}.`,
-    );
-  }
   if (defaultsTable.estimate_query !== undefined) {
     errors.push(
       "[defaults].estimate_query is not supported; scheduled estimation queries belong in [[estimations]].",
@@ -160,6 +149,24 @@ export function parseWorkspaceConfig(
   applyTeamDefaults(teams, defaults, errors);
 
   const { repos, repoNames } = parseReposSection(document, defaults.prLabels, errors);
+
+  // Only the worker polls. A workspace whose repos are all manual-only (used
+  // for local CLI runs) needs no pollable fleet tracker. Single-defaults mode
+  // requires one; with [[teams]] every team brings its own (a
+  // [defaults].tracker alongside teams is still honored for any team that
+  // omits one).
+  const hasWorkerRepos = repos.length === 0 || repos.some((repo) => !repo.manualOnly);
+  if (hasWorkerRepos) {
+    if (!tracker && teams.length === 0 && errorMonitorTables.length === 0) {
+      errors.push('[defaults].tracker is required (e.g. tracker = "jira").');
+    }
+    if (tracker && !supportsPolling(tracker)) {
+      errors.push(
+        `[defaults].tracker "${tracker}" does not support polling. ` +
+          `Pollable trackers: ${trackersSupportingPolling().join(", ")}.`,
+      );
+    }
+  }
 
   validateTeamRepos(teams, repoNames, errors);
 
@@ -187,6 +194,17 @@ export function parseWorkspaceConfig(
   const estimations = parseEstimationsSection(document, tracker, teams, errors);
 
   const dashboard = parseDashboardSection(document, errors);
+
+  validateManualOnlyReferences(
+    repos,
+    {
+      teams,
+      errorMonitors,
+      routing,
+      automations: automationResult.automations,
+    },
+    errors,
+  );
 
   const trackerSettings = parseTrackerSettings(document.trackers, errors);
 
@@ -525,6 +543,7 @@ function parseReposSection(
     }
     const env = readEnvTable(table, label, errors);
     const syncTeamPrs = readOptionalBoolean(table, "sync_team_prs", label, errors);
+    const manualOnly = readOptionalBoolean(table, "manual_only", label, errors);
     // Team-PR discovery uses GitHub's open-PR list and author_association;
     // there is no GitLab/Bitbucket equivalent wired, so reject instead of
     // silently doing nothing.
@@ -551,10 +570,16 @@ function parseReposSection(
         : { autoMergeDenyPaths: readGlobList(table, "auto_merge_deny_paths", label, errors) }),
       envFile: readString(table, "env_file", label, errors),
       ...(syncTeamPrs === undefined ? {} : { syncTeamPrs }),
+      ...(manualOnly === true ? { manualOnly } : {}),
       env,
     });
   }
   return { repos, repoNames };
+}
+
+/** {@link loadWorkspaceConfig} filtered to what the worker runs. */
+export function loadWorkerWorkspaceConfig(path: string): WorkspaceConfig {
+  return workerWorkspaceView(loadWorkspaceConfig(path));
 }
 
 /** Report teams whose fixed `repo` does not match a `[[repos]]` name. */

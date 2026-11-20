@@ -65,6 +65,8 @@ repo = "frontend"
 labels = ["frontend"]
 ```
 
+Set `manual_only = true` on a `[[repos]]` entry for a repository you only run by hand from your own checkout. The worker skips it: no clone, no polling, no routing, automations, or `worker add` tasks. A workspace whose repos are all manual-only does not need `[defaults].tracker`.
+
 Keys not shown here are documented on the page for their feature:
 
 | Keys                                                                                                     | Page                                                                               |

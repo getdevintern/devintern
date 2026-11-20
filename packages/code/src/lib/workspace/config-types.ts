@@ -172,6 +172,12 @@ export interface RepoConfig {
   syncTeamPrs?: boolean;
   /** Inline env overrides (highest precedence). */
   env: Record<string, string>;
+  /**
+   * `manual_only`: the repo is registered for manual CLI runs from a local
+   * checkout only. The worker never clones, polls, routes to, or schedules
+   * work for it.
+   */
+  manualOnly?: boolean;
 }
 
 /** Provider-neutral base configuration for one error-monitoring project. */
