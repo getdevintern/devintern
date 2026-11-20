@@ -24,7 +24,8 @@ import {
   trackersSupportingEstimate,
   trackersSupportingQuery,
 } from "./lib/trackers/capabilities";
-import { LockManager } from "./lib/lock-manager";
+import { acquireRunLocks } from "./lib/cli/run-locks";
+import { applyManualWorkspaceRun, findWorkspaceRepoForCheckout } from "./lib/workspace/manual-run";
 import { Utils } from "./lib/utils";
 import { isAutomatedEnvironment } from "./lib/config/env-detector";
 import {
@@ -144,7 +145,13 @@ if (process.argv[2] === "init") {
   // implicit project `.env` first would leave its values in place for every
   // key the explicit file omits (for example, a project-controlled
   // JIRA_BASE_URL paired with the user's real token).
-  loadEnvironment(findEnvFileArg(process.argv));
+  // A checkout of a registered workspace repo takes its env, state, and
+  // prompts from the workspace; its own `.devintern-code/.env` is skipped.
+  runContext.manualWorkspace = await findWorkspaceRepoForCheckout();
+  if (runContext.manualWorkspace) applyManualWorkspaceRun(runContext.manualWorkspace);
+  loadEnvironment(findEnvFileArg(process.argv), {
+    skipProjectEnv: Boolean(runContext.manualWorkspace),
+  });
 }
 
 /**
@@ -227,18 +234,8 @@ async function main(): Promise<void> {
   try {
     initSentryOnce(`code@${VERSION}`);
 
-    // Acquire lock to prevent multiple instances
-    runContext.lockManager = new LockManager();
-    const lockResult = runContext.lockManager.acquire();
-
-    if (!lockResult.success) {
-      console.error(`❌ ${lockResult.message}`);
-      console.error("   Please wait for the other instance to complete or stop it manually.");
-      if (lockResult.pid) {
-        console.error(`   You can stop the other instance with: kill ${lockResult.pid}`);
-      }
-      process.exit(1);
-    }
+    // Checkout lock plus per-ticket locks shared with the worker.
+    runContext.lockManager = acquireRunLocks(taskKeys, runContext.manualWorkspace);
 
     // Check for flags that require specific tracker support before env validation
     const activeTrackerType = (process.env.TASK_TRACKER || "jira").toLowerCase();

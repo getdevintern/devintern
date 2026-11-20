@@ -1,6 +1,7 @@
 import type { ResolvedHarness } from "@devintern/agent-harness";
 import { RUN_ORIGIN_ENV } from "../observability/analytics";
-import type { LockManager } from "../lock-manager";
+import type { HeldLocks } from "../task/ticket-lock";
+import type { ManualWorkspaceRun } from "../workspace/manual-run";
 import type { TaskTrackerClient } from "../trackers/client";
 import type { ProgramOptions } from "./program";
 
@@ -40,7 +41,10 @@ export const runContext = {
   options: undefined as unknown as ProgramOptions,
   resolvedAgent: undefined as unknown as ResolvedHarness,
   autoReviewIterationCap: undefined as number | undefined,
-  lockManager: null as LockManager | null,
+  /** Checkout and per-ticket locks, released together on exit. */
+  lockManager: null as HeldLocks | null,
+  /** Workspace repo this manual run resolved from the checkout's `origin`. */
+  manualWorkspace: null as ManualWorkspaceRun | null,
   activeTaskContext: null as ActiveTaskContext | null,
 };
 

@@ -8,7 +8,7 @@ import {
   WorktreeBusyError,
 } from "../worker/usage-limit-protocol";
 import { workspaceCredentialsForChange } from "../workspace/manual-credentials";
-import { ensureWorkspaceCodeState, resolveWorkspaceDir } from "../workspace/paths";
+import { ensureWorkspaceCodeState, resolveWorkspaceDir, workspaceDbPath } from "../workspace/paths";
 
 /** Use a registered repo's workspace layers for manual PR commands. */
 async function loadReviewEnvironment(changeUrl: string): Promise<void> {
@@ -18,6 +18,9 @@ async function loadReviewEnvironment(changeUrl: string): Promise<void> {
     ensureWorkspaceCodeState(workspaceDir);
     setManualWorkspaceStateDir(workspaceDir);
     Object.assign(process.env, credentials);
+    // Run records and addressed-feedback state go to the workspace DB, not a
+    // `.devintern-code/queue.db` inside the checkout.
+    process.env.WEBHOOK_QUEUE_DB ||= workspaceDbPath(workspaceDir);
   }
   loadEnvironment(undefined, { skipProjectEnv: Boolean(credentials) });
 }
