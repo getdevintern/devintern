@@ -36,7 +36,7 @@ In your project directory:
 devintern init
 ```
 
-The wizard asks for your tracker, links to the page where you create its token, and validates the connection. It also detects installed agent CLIs and ends with a readiness checklist. Your answers go to `.devintern-code/.env`, which is added to `.gitignore`.
+The wizard asks for your tracker, links to the page where you create its token, and validates the connection. It also detects installed agent CLIs and ends with a readiness checklist. Your answers go to `~/.devintern/env/<repo>.env`, outside the repository, and the repository is registered in `~/.devintern/workspace.toml`; nothing is written into your checkout.
 
 No tracker account yet? Choose **Markdown files**. Tasks are read from `./tasks` and need no credentials. See [Markdown File Tasks](./markdown-tasks.md).
 

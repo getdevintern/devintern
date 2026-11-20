@@ -62,7 +62,7 @@ The agent harness, model, and reasoning effort are set in your environment, not 
 
 | Command                                  | Use it to                                                                     |
 | ---------------------------------------- | ----------------------------------------------------------------------------- |
-| `devintern init`                         | Create `.devintern-code/` configuration with the setup wizard (`--yes` for a template). |
+| `devintern init`                         | Register this repository in `~/.devintern` with the setup wizard (`--yes` for a template). |
 | `devintern doctor`                       | Check runtime, git, agent CLI, tracker credentials, sign-in, and license.     |
 | `devintern worker`                       | Run the workspace worker. See [Worker](./worker.md).                          |
 | `devintern dashboard`                    | Open run history without the worker. See [Dashboard](./dashboard.md).          |
