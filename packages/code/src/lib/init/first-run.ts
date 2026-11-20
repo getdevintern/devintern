@@ -28,7 +28,7 @@ export interface FirstRunDeps {
   /** Runs the interactive init wizard; defaults to the real one. */
   runWizard?: () => Promise<void>;
   /** Reloads tracker credentials after the wizard wrote config. */
-  reloadEnv?: () => void;
+  reloadEnv?: () => void | Promise<void>;
   log?: LogFn;
 }
 
@@ -95,7 +95,7 @@ export async function ensureTrackerEnvConfigured(
     });
   await runWizard();
 
-  deps.reloadEnv?.();
+  await deps.reloadEnv?.();
   // In production `env` is `process.env` by reference, so the reload above
   // (dotenv merge) is visible here; tests mutate their snapshot instead.
   missing = missingTrackerEnv(env);

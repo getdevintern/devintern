@@ -275,8 +275,13 @@ async function main(): Promise<void> {
     if (needsTrackerEnv) {
       const firstRun = await ensureTrackerEnvConfigured({
         automated: isAutomatedEnvironment(),
-        reloadEnv: () => {
-          loadEnvironment(options.envFile);
+        reloadEnv: async () => {
+          // The wizard may have just registered this checkout in the workspace.
+          runContext.manualWorkspace ??= await findWorkspaceRepoForCheckout();
+          if (runContext.manualWorkspace) applyManualWorkspaceRun(runContext.manualWorkspace);
+          loadEnvironment(options.envFile, {
+            skipProjectEnv: Boolean(runContext.manualWorkspace),
+          });
         },
       });
       if (firstRun === "failed") {

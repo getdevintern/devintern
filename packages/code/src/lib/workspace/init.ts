@@ -153,7 +153,7 @@ const ENV_TEMPLATE = `# Shared workspace environment: tracker credentials, GITHU
 /** Values that should never be copied into the shared workspace env. */
 const ENV_SHARED_SKIP = new Set(["WEBHOOK_QUEUE_DB"]);
 
-function tomlString(value: string): string {
+export function tomlString(value: string): string {
   return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
 
@@ -497,14 +497,7 @@ export async function runWorkerAddRepo(
     return 0;
   }
 
-  // Derive a unique, filesystem-safe name from the remote.
-  const rawName = basename(remote.replace(/\.git\/?$/, "")).replace(/[^A-Za-z0-9._-]+/g, "-");
-  let name = rawName || "repo";
-  let suffix = 2;
-  const taken = new Set(config.repos.map((repo) => repo.name));
-  while (taken.has(name)) {
-    name = `${rawName}-${suffix++}`;
-  }
+  const name = deriveRepoName(remote, config.repos);
 
   // Merge the repo's env: missing keys go to the shared .env; conflicting
   // values are demoted to this repo's inline [repos.env].
@@ -554,6 +547,23 @@ export async function runWorkerAddRepo(
   }
   log("   Note: .devintern-code/settings.json travels with the repo; nothing to migrate.");
   return 0;
+}
+
+/**
+ * Derive a unique, filesystem-safe `[[repos]]` name from a remote URL.
+ *
+ * @param remote - Git remote URL
+ * @param repos - Existing entries whose names are taken
+ */
+export function deriveRepoName(remote: string, repos: Array<{ name: string }>): string {
+  const rawName = basename(remote.replace(/\.git\/?$/, "")).replace(/[^A-Za-z0-9._-]+/g, "-");
+  let name = rawName || "repo";
+  let suffix = 2;
+  const taken = new Set(repos.map((repo) => repo.name));
+  while (taken.has(name)) {
+    name = `${rawName || "repo"}-${suffix++}`;
+  }
+  return name;
 }
 
 /**
