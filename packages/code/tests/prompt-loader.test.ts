@@ -10,6 +10,7 @@ import {
   loadPrompt,
   renderPrompt,
   resolvePromptPath,
+  workspacePromptsDir,
 } from "../src/lib/prompts/loader";
 import { formatLintIssues, lintPrompts } from "../src/lib/prompts/lint";
 
@@ -23,8 +24,8 @@ function makeTempDir(): string {
 }
 
 beforeEach(() => {
-  // Ambient overrides would otherwise let a developer's DEVINTERN_PROMPTS_DIR or
-  // a stray `.devintern-code/prompts/` in an ancestor change these results.
+  // Ambient overrides would otherwise let a developer's DEVINTERN_PROMPTS_DIR
+  // change these results (the runner pins DEVINTERN_WORKSPACE_DIR to a temp dir).
   delete process.env.DEVINTERN_PROMPTS_DIR;
 });
 
@@ -280,6 +281,60 @@ describe("loadPrompt - overrides", () => {
     });
 
     expect(prompt).toContain("Task Clarity Assessment");
+  });
+});
+
+describe("loadPrompt - workspace overrides", () => {
+  const savedWorkspace = process.env.DEVINTERN_WORKSPACE_DIR;
+  const savedRepo = process.env.DEVINTERN_WORKSPACE_REPO;
+  let workspace: string;
+
+  beforeEach(() => {
+    workspace = makeTempDir();
+    process.env.DEVINTERN_WORKSPACE_DIR = workspace;
+    delete process.env.DEVINTERN_WORKSPACE_REPO;
+  });
+
+  afterEach(() => {
+    if (savedWorkspace === undefined) delete process.env.DEVINTERN_WORKSPACE_DIR;
+    else process.env.DEVINTERN_WORKSPACE_DIR = savedWorkspace;
+    if (savedRepo === undefined) delete process.env.DEVINTERN_WORKSPACE_REPO;
+    else process.env.DEVINTERN_WORKSPACE_REPO = savedRepo;
+  });
+
+  function writeClarity(dir: string): void {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "clarity.md"), "---\nname: clarity\n---\nx\n");
+  }
+
+  test("prefers the repo folder, then the workspace folder, then the bundled prompt", () => {
+    const shared = workspacePromptsDir(workspace);
+    const repoDir = join(shared, "api");
+    expect(resolvePromptPath("clarity")).toBe(join(defaultPromptsDir(), "clarity.md"));
+
+    writeClarity(shared);
+    expect(resolvePromptPath("clarity")).toBe(join(shared, "clarity.md"));
+
+    writeClarity(repoDir);
+    expect(resolvePromptPath("clarity")).toBe(join(shared, "clarity.md"));
+    process.env.DEVINTERN_WORKSPACE_REPO = "api";
+    expect(resolvePromptPath("clarity")).toBe(join(repoDir, "clarity.md"));
+  });
+
+  test("ignores a repo name that is not a single path segment", () => {
+    const shared = workspacePromptsDir(workspace);
+    writeClarity(shared);
+    writeClarity(join(workspace, "escape"));
+    process.env.DEVINTERN_WORKSPACE_REPO = "../escape";
+    expect(resolvePromptPath("clarity")).toBe(join(shared, "clarity.md"));
+  });
+
+  test("DEVINTERN_PROMPTS_DIR wins over the workspace folder", () => {
+    writeClarity(workspacePromptsDir(workspace));
+    const envDir = makeTempDir();
+    writeClarity(envDir);
+    process.env.DEVINTERN_PROMPTS_DIR = envDir;
+    expect(resolvePromptPath("clarity")).toBe(join(envDir, "clarity.md"));
   });
 });
 
