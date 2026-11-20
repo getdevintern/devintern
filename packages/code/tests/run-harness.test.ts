@@ -14,6 +14,10 @@
 import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { EventEmitter } from "node:events";
 import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import {
+  WORKSPACE_PIPELINE_DEFAULT_ENV,
+  WORKSPACE_PIPELINE_REPO_ENV,
+} from "../src/lib/workspace/env";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -193,8 +197,31 @@ mock.module("../src/lib/code-host", () => ({
 }));
 
 mock.module("../src/lib/config/output-dir", () => ({ resolveOutputDir: () => outDir }));
+// Pipelines come only from the workspace. A test's `pipelineConfig` stands in
+// for a selected workspace pipeline; tests that pin a real workspace file
+// through the env keep exercising the real selection.
+const realPipelineSelection = { ...(await import("../src/lib/task/pipeline-selection")) };
+mock.module("../src/lib/task/pipeline-selection", () => ({
+  ...realPipelineSelection,
+  selectPipelineConfig: (input: { cwd: string; env?: NodeJS.ProcessEnv }) => {
+    const env = input.env ?? process.env;
+    if (
+      env[WORKSPACE_PIPELINE_REPO_ENV] ||
+      env[WORKSPACE_PIPELINE_DEFAULT_ENV] ||
+      !pipelineConfig
+    ) {
+      return realPipelineSelection.selectPipelineConfig(input);
+    }
+    return {
+      config: pipelineConfig,
+      scope: "workspace-repo" as const,
+      sourcePath: join(input.cwd, "pipeline.json"),
+      baseDir: input.cwd,
+    };
+  },
+}));
 mock.module("../src/lib/config/project-settings", () => ({
-  loadProjectSettings: () => ({ pipeline: pipelineConfig }),
+  loadProjectSettings: () => ({}),
   getTodoStatusForProject: () => "To Do",
   getPrStatusForProject: () => "In Review",
   resolveProjectKey: () => "PROJ",
@@ -1080,7 +1107,7 @@ describe("runAgentHarness git delivery", () => {
     expect(commitCalls).toBe(0);
   });
 
-  test("workspace per-repository pipeline overrides repository settings", async () => {
+  test("selects the workspace per-repository pipeline file", async () => {
     scenario.stdout = "done";
     pipelineConfig = { steps: [{ use: "implement" }, { use: "verify" }] };
     const file = join(outDir, "backend-pipeline.json");

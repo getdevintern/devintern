@@ -27,9 +27,10 @@ Branch preparation, the feasibility check, and the In Progress transition happen
 Exactly one complete definition runs. Step lists are never merged across scopes. From highest to lowest precedence:
 
 1. `pipeline_file` on a `[[repos]]` entry in `workspace.toml`.
-2. The `pipeline` block in the repository's committed `.devintern-code/settings.json`. Deprecated: worker runs ignore it (so a pull request cannot change the steps the worker runs), and manual runs print a warning. Use a `pipeline_file` instead.
-3. `pipeline_file` on `[defaults]` in `workspace.toml`.
-4. The built-in default: `implement → commit → auto-review → finalize`.
+2. `pipeline_file` on `[defaults]` in `workspace.toml`.
+3. The built-in default: `implement → commit → auto-review → finalize`.
+
+Pipelines live only in the workspace, so a pull request cannot change the steps or plugin code a run executes. A `pipeline` block in a repository's `.devintern-code/settings.json` is no longer read; DevIntern prints a warning when it finds one.
 
 If a referenced workspace file is missing or invalid, the run fails and names the repository and file; it does not fall back. See [Workspaces → Pipelines for the fleet and per repository](./workspaces.md#pipelines-for-the-fleet-and-per-repository) for the `workspace.toml` reference.
 
@@ -103,14 +104,14 @@ The prompt sent and the parsed verdict are saved as `verify-prompt.txt` and `ver
 
 ## Different pipelines per repository
 
-Each managed repository can run its own pipeline. Commit the configuration (and any plugin or prompt files) to the repository so the worker picks it up.
+Each repository can run its own pipeline: point its `[[repos]]` entry at a pipeline file in the workspace and keep the plugin and prompt files next to it.
 
-`backend/.devintern-code/settings.json`:
+`~/.devintern/pipelines/backend.json`, referenced by `pipeline_file = "pipelines/backend.json"` on the backend repo:
 
 ```json
 {
   "pipeline": {
-    "plugins": ["./.devintern-code/steps/run-tests.ts"],
+    "plugins": ["./steps/run-tests.ts"],
     "steps": [
       { "use": "implement" },
       { "use": "commit" },
@@ -122,9 +123,7 @@ Each managed repository can run its own pipeline. Commit the configuration (and 
 }
 ```
 
-`frontend/.devintern-code/settings.json` could instead use `check-policy` and `auto-review`.
-
-The worker runs each task in its own worktree checked out from the remote, so edits in a personal checkout (for example `~/code/backend`) do not affect managed runs. A `[[repos]].pipeline_file` overrides the repository's committed settings; a `[defaults].pipeline_file` applies only when the repository declares neither. See [Workspaces](./workspaces.md#pipelines-for-the-fleet-and-per-repository) for details.
+A `pipelines/frontend.json` for the frontend repo could instead use `check-policy` and `auto-review`. A `[defaults].pipeline_file` applies to every repo without its own. See [Workspaces](./workspaces.md#pipelines-for-the-fleet-and-per-repository) for details.
 
 ## Related
 

@@ -31,7 +31,7 @@ More settings:
 
 ## Environment file locations
 
-In a repository registered in `~/.devintern/workspace.toml`, settings come from the workspace: the shared `~/.devintern/.env`, then the repo's `env_file` and `[repos.env]` (see [Workspaces](./workspaces.md)); `--env-file` still applies on top. Otherwise DevIntern looks for `.env` in this order and uses the first match: `--env-file <path>`, then `.devintern-code/.env` or `.env` in the current directory and each parent up to the git root, then `~/.env`, then the tool's install directory. This means you can run `devintern` from any subdirectory of the project. With `--env-file`, only that file is loaded. Values in the file override variables already set in your shell.
+In a repository registered in `~/.devintern/workspace.toml`, settings come from the workspace: the shared `~/.devintern/.env`, then the repo's `env_file` and `[repos.env]` (see [Workspaces](./workspaces.md)); `--env-file` still applies on top. Otherwise DevIntern looks for `.env` in this order and uses the first match: `--env-file <path>`, then `.env` in the current directory and each parent up to the git root, then `~/.env`, then the tool's install directory. This means you can run `devintern` from any subdirectory of the project. With `--env-file`, only that file is loaded. Values in the file override variables already set in your shell.
 
 ## Choosing a task tracker
 
