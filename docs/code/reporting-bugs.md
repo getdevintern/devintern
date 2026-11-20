@@ -74,7 +74,7 @@ devintern report list
 devintern report show 8f2a1c
 ```
 
-Every report is saved to `.devintern-code/reports/` before sending. If sending fails, the command prints the `--from` path to retry. Sent reports are kept locally for 30 days.
+Every report is saved to `~/.devintern/state/code/reports/` before sending. If sending fails, the command prints the `--from` path to retry. Sent reports are kept locally for 30 days.
 
 ## What is sent
 

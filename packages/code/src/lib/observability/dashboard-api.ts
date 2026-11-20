@@ -279,11 +279,8 @@ export class DashboardData {
   constructor(options: DashboardDataOptions = {}) {
     this.workingDir = options.workingDir ?? process.cwd();
     this.workspaceDir = options.workspaceDir ?? resolveWorkspaceDir();
-    this.dbPath = options.dbPath ?? resolveDashboardHistoryDbPath(this.workingDir);
-    this.queueDbPath =
-      options.queueDbPath ??
-      options.dbPath ??
-      resolveDashboardQueueDbPath(undefined, this.workingDir);
+    this.dbPath = options.dbPath ?? resolveDashboardHistoryDbPath();
+    this.queueDbPath = options.queueDbPath ?? options.dbPath ?? resolveDashboardQueueDbPath();
     this.scheduleSnapshot = options.scheduleSnapshot ?? (() => null);
     this.retryMode = options.retryMode ?? "spawn";
     this.inflightRetryTtlMs = options.inflightRetryTtlMs ?? INFLIGHT_RETRY_TTL_MS;
