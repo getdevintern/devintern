@@ -16,6 +16,10 @@
  * them newest first with Trello's `since`, `filter`, and `limit` semantics so
  * the worker's board-actions change detector runs against a real feed.
  *
+ * `GET /1/cards/:id?…&list=true` (the dependency gate's blocker status read)
+ * answers the card's `closed` flag and nested `list` name, is recorded in
+ * `blockerStatusRequests`, and can be switched to an HTTP error.
+ *
  * The server binds `127.0.0.1:0`, accepts any query `key`/`token` credentials,
  * never logs them (requests record only whether the fake credentials matched),
  * and never makes outbound requests.
@@ -193,6 +197,14 @@ export class FakeTrelloTracker implements TrackerFixture {
   readonly requests: FakeTrelloRequest[] = [];
   /** `since`/`filter`/`limit` received by each board actions request, in order. */
   readonly boardActionRequests: FakeTrelloBoardActionsRequest[] = [];
+  /**
+   * Card id or short link of every blocker status read (`GET /1/cards/:id`
+   * with `list=true`), in order, including reads answered with a failure.
+   */
+  readonly blockerStatusRequests: string[] = [];
+
+  /** HTTP status blocker status reads answer with while set; see {@link failBlockerStatusReads}. */
+  private blockerStatusFailure: number | undefined;
 
   private readonly server: ReturnType<typeof Bun.serve>;
   private readonly baseUrl: string;
@@ -376,6 +388,24 @@ export class FakeTrelloTracker implements TrackerFixture {
     return this.actions.at(-1)?.id;
   }
 
+  /**
+   * Make every blocker status read answer `status` (default 500) until
+   * {@link restoreBlockerStatusReads}. Only the `list=true` card read fails; the card detail
+   * read the worker uses to load the dependent's description still answers.
+   * Trello has no native dependencies, so the blockers themselves are fixture
+   * state already: a `Depends on:` line in the dependent's description
+   * ({@link createTicket} / {@link updateTicket}), and the blocker's list
+   * ({@link updateTicket} `listName`) or archived flag ({@link closeTicket}).
+   */
+  failBlockerStatusReads(status = 500): void {
+    this.blockerStatusFailure = status;
+  }
+
+  /** Answer blocker status reads normally again. */
+  restoreBlockerStatusReads(): void {
+    this.blockerStatusFailure = undefined;
+  }
+
   /** Number of `GET /1/search` requests (the worker's evaluate step). */
   get searchCount(): number {
     return this.requests.filter((request) => request.method === "GET" && request.path === "/search")
@@ -456,7 +486,11 @@ export class FakeTrelloTracker implements TrackerFixture {
     if (attachmentsMatch?.[1]) return this.getCardAttachments(attachmentsMatch[1]);
 
     const cardMatch = path.match(/^\/cards\/([^/]+)$/);
-    if (cardMatch?.[1]) return this.getCard(cardMatch[1]);
+    if (cardMatch?.[1]) {
+      return url.searchParams.get("list") === "true"
+        ? this.getCardStatus(cardMatch[1], url)
+        : this.getCard(cardMatch[1]);
+    }
 
     return undefined;
   }
@@ -599,6 +633,49 @@ export class FakeTrelloTracker implements TrackerFixture {
     const card = this.findCard(cardId);
     if (!card) return cardNotFound(cardId);
     return json(this.cardDetail(card));
+  }
+
+  /**
+   * `GET /1/cards/:id?fields=…&list=true&list_fields=name`: the blocker status
+   * read of `TrelloClient.getCardStatus` (packages/task-trackers/src/clients/trello.ts).
+   * Trello answers the requested card fields plus a nested `list` object
+   * (always with its `id`, then the `list_fields`); an unknown short link is a
+   * 404, which the client maps to "card does not exist".
+   */
+  private getCardStatus(cardId: string, url: URL): Response {
+    this.blockerStatusRequests.push(cardId);
+    if (this.blockerStatusFailure !== undefined) {
+      return json(
+        { error: "Fake Trello injected blocker read failure" },
+        this.blockerStatusFailure,
+      );
+    }
+    const card = this.findCard(cardId);
+    if (!card) return cardNotFound(cardId);
+    const detail: Record<string, unknown> = {
+      id: card.id,
+      shortLink: card.shortLink,
+      closed: card.archived,
+      name: card.name,
+      desc: card.desc,
+      idList: card.listId,
+      dateLastActivity: card.dateLastActivity,
+    };
+    const fields = url.searchParams.get("fields");
+    const payload: Record<string, unknown> = {};
+    for (const field of fields ? fields.split(",") : Object.keys(detail)) {
+      if (field in detail) payload[field] = detail[field];
+    }
+    payload.id = card.id;
+    const list = this.lists.find((candidate) => candidate.id === card.listId);
+    if (list) {
+      const listFields = (url.searchParams.get("list_fields") ?? "name").split(",");
+      payload.list = {
+        id: list.id,
+        ...(listFields.includes("name") ? { name: list.name } : {}),
+      };
+    }
+    return json(payload);
   }
 
   private async updateCard(cardId: string, request: Request): Promise<Response> {
