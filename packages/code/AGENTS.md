@@ -1,6 +1,6 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code when working with this repository.
+Guidance for coding agents working on `@getdevintern/code`. Repo-wide rules (Bun-only tooling, lint, format, docs) are in the root [AGENTS.md](../../AGENTS.md).
 
 ## Project Overview
 
@@ -24,7 +24,7 @@ This file provides guidance to Claude Code when working with this repository.
 
 ### Module layout (`src/lib`)
 
-Organize **context-first, provider-second**: top-level folders name a bounded context (what the capability *is*), and provider folders appear inside a context only where that provider genuinely multiplies.
+Organize **context-first, provider-second**: top-level folders name a bounded context (what the capability _is_), and provider folders appear inside a context only where that provider genuinely multiplies.
 
 This repo has two independent provider axes — task trackers and code hosts — and two change vectors: capability work and provider work. A single-axis tree always fails one of them. The commit history is provider-divergent and GitLab-heavy, so provider code should be co-located at the leaf, while neutral contracts stay discoverable at the context root.
 
