@@ -9,9 +9,8 @@
  * are all unreachable and nothing leaves the machine. Only fake credentials
  * are used, and the tests assert none of them is echoed.
  *
- * Session files live where the CLI reads them: `<project>/.devintern-code/`
- * for a task run and `<workspace>/state/code/` for the worker
- * (`loadSupabaseConfig`, packages/code/src/lib/cli/bootstrap.ts).
+ * Session files live where the CLI reads them: `<workspace>/state/code/` for
+ * every command (`loadSupabaseConfig`, packages/code/src/lib/cli/bootstrap.ts).
  */
 
 import { expect, test } from "bun:test";
@@ -211,7 +210,7 @@ test.skipIf(skip)(
     await withGatedTaskRun(async (run, proxy) => {
       // Expired token: supabase-js retries the refresh with backoff before
       // giving up; the preload skips the sleeps, not the attempts.
-      const accessToken = writeFakeSession(join(run.cwd, ".devintern-code/.auth-session.json"), {
+      const accessToken = writeFakeSession(workspaceSessionPath(run.env), {
         expired: true,
       });
       const result = await run.runTask({ bunArgs: FAST_AUTH_BACKOFF });
@@ -308,6 +307,13 @@ test.skipIf(skip)(
   60_000,
 );
 
+/** Sign-in session path for the run's workspace (created on demand). */
+function workspaceSessionPath(env: Record<string, string | undefined>): string {
+  const dir = join(env.DEVINTERN_WORKSPACE_DIR!, "state", "code");
+  mkdirSync(dir, { recursive: true });
+  return join(dir, ".auth-session.json");
+}
+
 /** Account commands in a bare temp project, with Supabase refused by the proxy. */
 async function withAccountProject(
   body: (run: (args: string[]) => Promise<CommandResult>, sessionPath: string) => Promise<void>,
@@ -318,12 +324,12 @@ async function withAccountProject(
   const root = mkdtempSync(join(tmpdir(), "devintern-e2e-account-"));
   try {
     const cwd = join(root, "project");
-    mkdirSync(join(cwd, ".devintern-code"), { recursive: true });
+    mkdirSync(cwd, { recursive: true });
     const env = { ...isolatedEnvironment(root), ...proxyEnvironment(proxy.url) };
     delete (env as Record<string, string>).DEVINTERN_SKIP_LICENSE_CHECK;
     await body(
       (args) => command([process.execPath, ...bunArgs, cliPath, ...args], cwd, env, 90_000),
-      join(cwd, ".devintern-code/.auth-session.json"),
+      workspaceSessionPath(env),
     );
     proxyCheck(proxy);
   } finally {

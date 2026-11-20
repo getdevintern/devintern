@@ -8,11 +8,10 @@
 
 import { Database } from "bun:sqlite";
 import { copyFileSync, existsSync, mkdirSync } from "fs";
-import { dirname, join } from "path";
+import { dirname } from "path";
 
-import { findConfigDir } from "@devintern/utils";
 import { ensureGitInfoExcluded } from "../utils/git-exclude";
-import { hasWorkspace, workspaceDbPath } from "../workspace/paths";
+import { resolveWorkspaceDir, workspaceDbPath } from "../workspace/paths";
 import { configureSqliteConnection } from "./sqlite";
 import {
   RowParseError,
@@ -108,29 +107,13 @@ const BASE_SYNC_EVENT_STATUSES = [
 ] as const satisfies readonly BaseSyncEventStatus[];
 
 /**
- * Resolve the queue database path: `WEBHOOK_QUEUE_DB` env override, otherwise
- * the workspace DB when run from a workspace home, otherwise
- * `queue.db` inside the nearest `.devintern-code` directory so queue state,
- * cursors, and run records persist across reboots.
- *
- * The config directory is searched upwards from `projectDir` (same traversal
- * as `.env` resolution), so running from a subdirectory of the project reuses
- * the project's database instead of creating a stray one next to the cwd.
- *
- * @param projectDir - Directory to search from (defaults to the current working directory)
+ * Resolve the queue database path: the `WEBHOOK_QUEUE_DB` override, otherwise
+ * the workspace DB (`~/.devintern/state/queue.db`). Every run, manual or
+ * worker, in any checkout, records into the one workspace database; nothing
+ * is written into repository checkouts.
  */
-export function resolveQueueDbPath(projectDir: string = process.cwd()): string {
-  if (process.env.WEBHOOK_QUEUE_DB) {
-    return process.env.WEBHOOK_QUEUE_DB;
-  }
-
-  const configDir =
-    findConfigDir({ configDirName: ".devintern-code", startDir: projectDir }) ??
-    join(projectDir, ".devintern-code");
-  // From the workspace home itself, use the workspace DB rather than creating
-  // a stray `<workspace>/.devintern-code/queue.db`.
-  const owner = dirname(configDir);
-  return hasWorkspace(owner) ? workspaceDbPath(owner) : join(configDir, "queue.db");
+export function resolveQueueDbPath(): string {
+  return process.env.WEBHOOK_QUEUE_DB || workspaceDbPath(resolveWorkspaceDir());
 }
 
 /** Local ignore pattern for the state database, at any depth. */

@@ -36,7 +36,7 @@ The worker waits until the PR head has been quiet for a short period before acti
 devintern resolve-conflicts <pr-url>
 ```
 
-Run from a checkout of a workspace repository, `resolve-conflicts` and `address-review` use the workspace and repo credentials and the worker's sign-in. In other checkouts they use that project's own `.devintern-code` configuration.
+Run from a checkout of a workspace repository, `resolve-conflicts` and `address-review` use the workspace and repo credentials and the worker's sign-in. In other checkouts they use that project's own settings and the shared sign-in in `~/.devintern/state/code/`.
 
 On GitLab, conflict resolution supports `auto` mode and the manual command. `scheduled` mode does not process GitLab MRs yet; see [GitLab integration](./gitlab-integration.md).
 
