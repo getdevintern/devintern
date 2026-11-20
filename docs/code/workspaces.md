@@ -65,6 +65,10 @@ repo = "frontend"
 labels = ["frontend"]
 ```
 
+Set `manual_only = true` on a `[[repos]]` entry for a repository you only run by hand from your own checkout. The worker skips it: no clone, no polling, no routing, automations, or `worker add` tasks. A workspace whose repos are all manual-only does not need `[defaults].tracker`.
+
+Running `devintern <TASK>` inside a checkout whose `origin` matches a `[[repos]]` entry (manual-only or not) uses that workspace: the shared `.env`, the repo's `env_file` and `[repos.env]`, `[trackers]` settings, pipelines, prompt overrides, sign-in, and run history. The checkout's own `.devintern-code/.env` is not read. A ticket being worked on by the worker cannot be started by hand at the same time (and the reverse); the worker retries its run later.
+
 Keys not shown here are documented on the page for their feature:
 
 | Keys                                                                                                     | Page                                                                               |
@@ -76,6 +80,7 @@ Keys not shown here are documented on the page for their feature:
 | `[worker.schedule]`, `[worker].auto_update`, `[workspace].dashboard_port`                                | [Worker Daemon](./worker.md)                                                       |
 | `[dashboard].allowed_origins`, `tailscale_autodetect`                                                    | [Dashboard](./dashboard.md#allowed-origins)                                        |
 | `[defaults].dependency_mode`                                                                             | [Delegation: Dependent tasks](./delegation.md#dependent-tasks---after)             |
+| `[[teams]].dependency_mode`                                                                              | [Worker Daemon: Ticket dependencies](./worker.md#ticket-dependencies)              |
 | `pipeline_file`                                                                                          | [below](#pipelines-for-the-fleet-and-per-repository)                               |
 
 Notes on the keys above:
@@ -143,7 +148,7 @@ remote = "git@github.com:acme/backend.git"
 pipeline_file = "pipelines/backend.json"   # this repo only
 ```
 
-Exactly one pipeline runs per task, chosen in this order: the repo's `pipeline_file`, the repository's checked-in `.devintern-code/settings.json` pipeline, `[defaults].pipeline_file`, then the built-in default. Relative plugin and prompt paths in a `pipeline_file` resolve against that file's directory, so install plugin dependencies there. An invalid pipeline fails the run with the file named. See [Customizing the Task Pipeline](./pipelines.md) for steps and plugins.
+Exactly one pipeline runs per task, chosen in this order: the repo's `pipeline_file`, `[defaults].pipeline_file`, then the built-in default. The worker ignores a `pipeline` block in a repository's `.devintern-code/settings.json`. Relative plugin and prompt paths in a `pipeline_file` resolve against that file's directory, so install plugin dependencies there. An invalid pipeline fails the run with the file named. See [Customizing the Task Pipeline](./pipelines.md) for steps and plugins.
 
 ## Bounded host concurrency
 
@@ -169,11 +174,15 @@ Secrets live in one owner-only `~/.devintern/.env`: tracker credentials, `GITHUB
 1. Shared workspace `.env`
 2. The repo's `env_file`
 3. Inline `[repos.env]` values
-4. For team tasks: the team's `env_file`, then `[teams.env]`
+4. For team tasks: the team's `<TRACKER>_<TEAM>_<SETTING>` values from the shared `.env`, then its `env_file`, then `[teams.env]`
 
-Ad-hoc tasks (`devintern worker add`) and scheduled automations on a repo also get layer 4 when exactly one team is fixed to that repo with `repo = "<name>"`. `worker add --team <name>` picks the team explicitly, and is required when several teams are fixed to the repo. These runs keep the repo's `TASK_TRACKER` and `GITHUB_REPO`, so only the team's credentials apply. An automation on a repo with several fixed teams uses layers 1-3 and logs a warning; set `env_file` on the `[[repos]]` entry to choose its credentials.
+Ad-hoc tasks (`devintern worker add`) and scheduled automations on a repo also get layer 4 when exactly one team is fixed to that repo with `repo = "<name>"`. `worker add --team <name>` picks the team explicitly, and is required when several teams are fixed to the repo. These runs keep the repo's `TASK_TRACKER` and `GITHUB_REPO`, so only the team's credentials apply. Because layer 4 sits above the repo layers, a namespaced team value such as `GITHUB_PLATFORM_TOKEN` replaces a `GITHUB_TOKEN` set in the repo's `env_file` or `[repos.env]` for that team's runs. An automation on a repo with several fixed teams uses layers 1-3 and logs a warning; set `env_file` on the `[[repos]]` entry to choose its credentials.
 
-For GitHub remotes, `GITHUB_REPO` is filled in from the remote URL. GitHub and GitLab API calls for a repo, and the follow-up runs on its PRs (review feedback, conflict resolution, CI fixes, auto-merge), pick the team the same way, so they use the account that opened the PR. If several teams are fixed to the repo, they use the one with `tracker = "github"`; with none or several such teams, they use layers 1-3. Artifact upload settings (`DEVINTERN_ARTIFACT_*`) use the same layers; see [upload configuration](./artifacts.md#files-sdk-uploader).
+For GitHub remotes, `GITHUB_REPO` is filled in from the remote URL. For GitLab remotes on your tracker instance, `GITLAB_PROJECT` is filled in with the project path (`group/sub/repo`): `gitlab.com` remotes while `GITLAB_BASE_URL` is unset or `gitlab.com`, and self-managed remotes when their host (or a `GITLAB_CODE_HOST_ALIASES` alias) matches `GITLAB_BASE_URL`. A `GITHUB_REPO` or `GITLAB_PROJECT` you set in any layer, including a team's, wins over the derived value. Polling and issue search still use the workspace or team `GITLAB_PROJECT`, so keep a centralized tracker project in the shared `.env`.
+
+GitHub and GitLab API calls for a repo, and the follow-up runs on its PRs (review feedback, conflict resolution, CI fixes, auto-merge), pick the team the same way, so they use the account that opened the PR. If several teams are fixed to the repo, they use the one with `tracker = "github"`; with none or several such teams, they use layers 1-3. Artifact upload settings (`DEVINTERN_ARTIFACT_*`) use the same layers; see [upload configuration](./artifacts.md#files-sdk-uploader).
+
+Other trackers have no repo-to-project mapping, so set per-repo keys such as `JIRA_DEFAULT_PROJECT_KEY`, `LINEAR_DEFAULT_TEAM_KEY`, `ASANA_DEFAULT_PROJECT_GID`, `AZURE_DEVOPS_PROJECT`, or `TRELLO_DEFAULT_BOARD_ID` in the repo's `env_file` or `[repos.env]`.
 
 ## Editing the config while running
 

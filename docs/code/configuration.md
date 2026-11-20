@@ -17,7 +17,7 @@ More settings:
 
 - [Agent Harness](./agent-harness.md): which AI agent runs, models, reasoning effort, failover, per-task overrides.
 - [Sandboxing the Agent](./sandboxing.md): confining agent runs with `native`, `nono`, or Docker Sandboxes.
-- [Advanced Settings](./advanced-settings.md): timeouts, auto-review, logging, telemetry, output directory, prompt overrides, `settings.json`, and `devintern doctor`.
+- [Advanced Settings](./advanced-settings.md): timeouts, auto-review, logging, telemetry, output directory, prompt overrides, tracker status settings, and `devintern doctor`.
 
 ## Environment file locations
 
@@ -45,7 +45,7 @@ JIRA_EMAIL=you@company.com
 JIRA_API_TOKEN=your-api-token
 ```
 
-Status transitions and story-point fields go in `.devintern-code/settings.json`; see [Per-project settings](./advanced-settings.md#per-project-settingsjson).
+Status transitions and story-point fields go in `[trackers]` in `workspace.toml`; see [Tracker status settings](./advanced-settings.md#tracker-status-settings).
 
 ## GitHub authentication
 

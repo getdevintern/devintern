@@ -1,6 +1,17 @@
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  rmdirSync,
+  statSync,
+  writeFileSync,
+} from "fs";
 import { homedir } from "os";
-import { join } from "path";
+import { join, resolve } from "path";
 
 import { readOwnPidNamespace } from "../lock-manager.ts";
 
@@ -46,18 +57,92 @@ export function workspaceCodeStateDir(workspaceDir: string = resolveWorkspaceDir
   return join(workspaceStateDir(workspaceDir), "code");
 }
 
-/** Preserve worker credentials and relay pairing from the old workspace path. */
+/**
+ * Per-user files older releases kept in `<workspace>/.devintern-code/` and that
+ * now live in {@linkcode workspaceCodeStateDir}.
+ */
+const LEGACY_WORKSPACE_STATE_FILES = [
+  ".auth-session.json",
+  "relay.json",
+  "github-app.json",
+  "license-cache.json",
+] as const;
+
+/** Legacy `<workspace>/.devintern-code/` directory, emptied by {@linkcode ensureWorkspaceCodeState}. */
+export function legacyWorkspaceConfigDir(workspaceDir: string = resolveWorkspaceDir()): string {
+  return join(workspaceDir, ".devintern-code");
+}
+
+/** Move one legacy file into place, falling back to copy + delete across devices. */
+function moveFile(source: string, target: string): void {
+  try {
+    renameSync(source, target);
+  } catch {
+    copyFileSync(source, target);
+    rmSync(source, { force: true });
+  }
+  chmodSync(target, 0o600);
+}
+
+/** Whether a SQLite file family (`db`, `-wal`, `-shm`) holds no data at all. */
+function isEmptySqliteFamily(dbPath: string): boolean {
+  return [dbPath, `${dbPath}-wal`, `${dbPath}-shm`].every((path) => {
+    try {
+      return statSync(path).size === 0;
+    } catch {
+      return true;
+    }
+  });
+}
+
+/**
+ * Move worker credentials and pairing records out of the legacy
+ * `<workspace>/.devintern-code/` layer into `state/code/`, then remove it.
+ *
+ * A file already present in `state/code/` wins and the legacy copy is
+ * discarded as superseded. An empty `queue.db` (created by older lookups that
+ * resolved the legacy directory) is deleted; a non-empty one, or any file
+ * this function does not know, keeps the directory in place.
+ */
 export function ensureWorkspaceCodeState(workspaceDir: string): void {
   const targetDir = workspaceCodeStateDir(workspaceDir);
   mkdirSync(targetDir, { recursive: true, mode: 0o700 });
-  const legacyDir = join(workspaceDir, ".devintern-code");
-  for (const name of [".auth-session.json", "relay.json"]) {
+  const legacyDir = legacyWorkspaceConfigDir(workspaceDir);
+  if (!existsSync(legacyDir)) return;
+  for (const name of LEGACY_WORKSPACE_STATE_FILES) {
     const source = join(legacyDir, name);
+    if (!existsSync(source)) continue;
     const target = join(targetDir, name);
-    if (!existsSync(source) || existsSync(target)) continue;
-    copyFileSync(source, target);
-    chmodSync(target, 0o600);
+    if (existsSync(target)) rmSync(source, { force: true });
+    else moveFile(source, target);
   }
+  const strayDb = join(legacyDir, "queue.db");
+  if (existsSync(strayDb) && isEmptySqliteFamily(strayDb)) {
+    for (const path of [strayDb, `${strayDb}-wal`, `${strayDb}-shm`]) rmSync(path, { force: true });
+  }
+  try {
+    rmdirSync(legacyDir);
+  } catch {
+    // Not empty: leave unknown files for the user to inspect.
+  }
+}
+
+/**
+ * Whether `dir` is a workspace home: it has a `workspace.toml`, or worker
+ * state from a `worker connect` that ran before the config was written.
+ */
+export function isWorkspaceHome(dir: string): boolean {
+  return existsSync(workspaceConfigPath(dir)) || existsSync(workspaceCodeStateDir(dir));
+}
+
+/**
+ * Directory holding per-user runtime state (auth session, relay and GitHub App
+ * pairing) for commands that target `workingDir`: `state/code/` for a
+ * workspace home, otherwise the project's `.devintern-code/`.
+ */
+export function codeStateDirFor(workingDir: string): string {
+  const dir = resolve(workingDir);
+  return isWorkspaceHome(dir) ? workspaceCodeStateDir(dir) : join(dir, ".devintern-code");
 }
 
 /** Path of the central workspace SQLite database. */

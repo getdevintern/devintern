@@ -31,6 +31,7 @@ import type { RunOrigin } from "../state/run-recorder";
 import { formatCiFixPrompt, formatReviewPrompt } from "./formatter";
 import type { CiFailureFeedback } from "./formatter";
 import { GIT_CLEAN_ARGS, Utils } from "../utils";
+import { hasUncommittedWork } from "../utils/git-stage";
 import { WorktreeBusyError } from "../worker/usage-limit-protocol";
 import { restoreWorktreeGitIdentity, setWorktreeGitIdentity } from "../utils/worktree-setup";
 import type { GitIdentityRestore } from "../utils/worktree-setup";
@@ -786,8 +787,10 @@ export async function addressReview(
     );
     const hasUnpushed = unpushedResult.success && unpushedResult.output.trim().length > 0;
 
-    // Check if there are uncommitted changes (fallback if Agent didn't commit)
-    const hasUncommitted = await Utils.hasUncommittedChanges(workDir);
+    // Check if there are uncommitted changes (fallback if Agent didn't commit).
+    // Untracked sandbox placeholders do not count (commitChanges skips them).
+    const work = hasUncommittedWork(workDir);
+    const hasUncommitted = work.success && work.dirty;
 
     if (stopIfNoChanges(hasUncommitted, hasUnpushed, ciFeedback, prUrl)) {
       return;

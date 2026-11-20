@@ -524,6 +524,28 @@ describe("settings resolution", () => {
     expect(resolveStatusName(settings, "linear", "LEG", "todoStatus")).toBeUndefined();
   });
 
+  test("workspace [trackers] settings win over repo settings per project key", () => {
+    writeFileSync(
+      join(dirA, ".devintern-code", "settings.json"),
+      JSON.stringify({
+        jira: { projects: { PROJ: { todoStatus: "Repo" }, OTHER: { todoStatus: "Other" } } },
+      }),
+    );
+    const settings = loadProjectSettingsFrom([dirA], {
+      jira: { projects: { PROJ: { todoStatus: "Workspace" } } },
+    });
+    expect(resolveStatusName(settings, "jira", "PROJ", "todoStatus")).toBe("Workspace");
+    expect(resolveStatusName(settings, "jira", "OTHER", "todoStatus")).toBe("Other");
+    expect(
+      resolveStatusName(
+        loadProjectSettingsFrom([dirB], { jira: { projects: { PROJ: { todoStatus: "W" } } } }),
+        "jira",
+        "PROJ",
+        "todoStatus",
+      ),
+    ).toBe("W");
+  });
+
   test("returns null when no directory has settings", () => {
     expect(loadProjectSettingsFrom([dirA, dirB])).toBeNull();
     expect(resolveStatusName(null, "jira", "PROJ", "todoStatus")).toBeUndefined();

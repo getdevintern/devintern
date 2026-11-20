@@ -463,6 +463,27 @@ describe("resolveQueueDbPath", () => {
     );
   });
 
+  test("uses the workspace database when run from the workspace home", () => {
+    delete process.env.WEBHOOK_QUEUE_DB;
+
+    const workspaceDir = join(
+      tmpdir(),
+      `queue-workspace-home-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    );
+    mkdirSync(join(workspaceDir, ".devintern-code"), { recursive: true });
+    writeFileSync(join(workspaceDir, "workspace.toml"), "", "utf8");
+
+    try {
+      // Neither the legacy directory nor its absence may yield a stray
+      // `<workspace>/.devintern-code/queue.db`.
+      expect(resolveQueueDbPath(workspaceDir)).toBe(join(workspaceDir, "state", "queue.db"));
+      rmSync(join(workspaceDir, ".devintern-code"), { recursive: true });
+      expect(resolveQueueDbPath(workspaceDir)).toBe(join(workspaceDir, "state", "queue.db"));
+    } finally {
+      rmSync(workspaceDir, { recursive: true, force: true });
+    }
+  });
+
   test("keeps the state database out of git via .git/info/exclude", () => {
     delete process.env.WEBHOOK_QUEUE_DB;
 

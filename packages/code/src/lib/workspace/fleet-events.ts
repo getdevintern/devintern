@@ -28,7 +28,7 @@ import { autoMergePathsFor } from "./config";
 import type { RepoConfig, WorkspaceConfig } from "./config";
 import { buildFleetEventEnv, gitHubSlugFromRemote } from "./env";
 import { toRoutableTask } from "./router";
-import type { createFleetTaskExecutor, FleetTask, RepoManagerLike } from "./fleet-executor";
+import type { createGatedFleetTaskExecutor, FleetTask, RepoManagerLike } from "./fleet-executor";
 import { JobNotStartedError } from "../worker/supervisor";
 import type { TaskSupervisor } from "../worker/supervisor";
 import { MAX_CONCURRENCY_PER_REPO_ENV } from "../utils/review-worktree";
@@ -471,7 +471,7 @@ export function createFleetMentionHandler(
 export function createFleetTaskEvaluator(options: {
   query: string | (() => string | undefined);
   searchTasks: (query: string) => Promise<{ tasks: FleetTask[] }>;
-  execute: ReturnType<typeof createFleetTaskExecutor>;
+  execute: ReturnType<typeof createGatedFleetTaskExecutor>;
   /**
    * Actioned gate mirroring the polling acquirer: `true` when a task already
    * produced a PR and has not changed since. A relayed `task.changed` can be
@@ -506,6 +506,8 @@ export function createFleetTaskEvaluator(options: {
       return true;
     }
     console.log(`📌 [fleet] relay task ${taskKey} is ready`);
+    // A ticket its blockers hold back ("waiting") is left to the poller, which
+    // re-checks it every tick.
     await options.execute(
       taskKey,
       toRoutableTask({

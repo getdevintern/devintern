@@ -59,6 +59,9 @@ Search the worker log for `[poll:<tracker>]` lines (for example `[poll:jira]`):
 | `⏭️ skipping KEY (already actioned; no change since the PR)`     | A PR already exists. See [Tickets already actioned after a PR](#tickets-already-actioned-after-a-pr).        |
 | `have no update stamp from the tracker`                          | The tracker's search results lack an `updated` field, so retries cannot be detected. Run `devintern KEY` by hand. |
 | No `[poll:…]` lines at all                                       | Nothing changed on the tracker since the last poll. Edit the ticket.                                         |
+| `⏳ KEY waiting: …` / `⛔ KEY blocked: …`                         | Held back by its [blockers](./worker.md#ticket-dependencies). `devintern worker queue` shows the reason.      |
+| `⏳ KEY waiting: could not read KEY's blockers from …`            | The tracker refused the blocker read. Check that the token can read issue links (Jira, GitLab), relations (Linear), work item links (Azure DevOps), dependencies (Asana), or the blocker cards (Trello). The ticket starts once the read succeeds. |
+| `GitHub token cannot read issue dependencies … (403)`            | The `GITHUB_TOKEN` cannot read issue dependencies, so issues run without waiting on blockers. Grant the token read access to issues in that repository. |
 
 An edit made while the ticket's run is in progress is remembered and picked up after the run ends.
 

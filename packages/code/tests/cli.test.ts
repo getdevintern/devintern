@@ -68,6 +68,11 @@ async function runCLI(
     const env = options.rawEnv
       ? { ...process.env, ...options.env }
       : cliTrackerTestEnv(options.env);
+    // Concurrent runs reuse ticket keys (TEST-123); a workspace per run keeps
+    // their per-ticket locks apart, as the per-run cwd does for checkout locks.
+    if (!options.env?.DEVINTERN_WORKSPACE_DIR) {
+      env.DEVINTERN_WORKSPACE_DIR = join(testDir, ".workspace");
+    }
     const signal = AbortSignal.timeout(CLI_SPAWN_TIMEOUT_MS);
     const proc = Bun.spawn({
       cmd: ["bun", CLI_PATH, ...args, ...extraArgs],

@@ -106,6 +106,78 @@ export class GitHub {
     throw new Error(`No PR appeared for ${head}`);
   }
 
+  /**
+   * Preflight: fail with setup instructions unless the token can push to the
+   * fixture repository. GitHub answers 404 (not 403) for a private repository
+   * the identity cannot see, so both cases name the variables to set.
+   */
+  async assertWritable(): Promise<void> {
+    let repo: { permissions?: { push?: boolean } };
+    try {
+      repo = await this.request("");
+    } catch (error) {
+      throw new Error(
+        `Cannot read the GitHub fixture repository ${this.repository}. Set ` +
+          "E2E_GITHUB_REPOSITORY=owner/repo to a dedicated test repository and " +
+          "E2E_GITHUB_TOKEN (or `gh auth login`) to an identity with access to it " +
+          "(see packages/e2e/README.md).",
+        { cause: error },
+      );
+    }
+    if (repo.permissions?.push !== true) {
+      throw new Error(
+        `The GitHub token cannot push to ${this.repository}; grant Contents, Pull requests ` +
+          "and Commit statuses write access or set E2E_GITHUB_TOKEN to an identity that has it.",
+      );
+    }
+  }
+
+  /** Login of the identity behind the token (the worker's own identity here). */
+  async login(): Promise<string> {
+    const user = await this.performFetch<{ login: string }>(
+      "https://api.github.com/user",
+      "/user",
+      "GET",
+    );
+    return user.login;
+  }
+
+  /**
+   * Publish a classic commit status. Statuses cannot be deleted, so callers
+   * scope them by a unique branch head and a unique context.
+   */
+  createCommitStatus(
+    sha: string,
+    input: { state: "failure" | "error" | "pending" | "success"; context: string },
+  ): Promise<unknown> {
+    return this.request(`/statuses/${sha}`, "POST", {
+      state: input.state,
+      context: input.context,
+      description: "DevIntern E2E synthetic CI result",
+    });
+  }
+
+  /** Conversation comments on a pull request (newest last). */
+  issueComments(number: number): Promise<Array<{ body: string; user: { login: string } }>> {
+    return this.request(`/issues/${number}/comments?per_page=100`);
+  }
+
+  /** Head SHA of a branch, or undefined when it does not exist. */
+  async branchSha(branch: string): Promise<string | undefined> {
+    const refs = await this.request<Array<{ ref: string; object: { sha: string } }>>(
+      `/git/matching-refs/heads/${encodeURIComponent(branch)}`,
+    );
+    return refs.find((ref) => ref.ref === `refs/heads/${branch}`)?.object.sha;
+  }
+
+  /** Decoded file contents on a ref. */
+  async fileContents(path: string, ref: string): Promise<string> {
+    const file = await this.request<{ content: string }>(
+      `/contents/${path.split("/").map(encodeURIComponent).join("/")}?ref=${encodeURIComponent(ref)}`,
+    );
+    return Buffer.from(file.content.replace(/\s+/g, ""), "base64").toString();
+  }
+
   async deleteBranch(branch: string): Promise<void> {
     // Every caller supplies the exact unique ref it created; never sweep a prefix.
     try {

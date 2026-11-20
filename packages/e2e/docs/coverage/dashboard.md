@@ -10,9 +10,9 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 
 - Surface: External dependency: relay, auth, licensing, and observability services
 - Status: `default`
-- Evidence: `tests/local/dashboard-api.test.ts` (read API and a worker-consumed ad-hoc retry); `tests/local/dashboard-embedded.test.ts` (Host/Origin guard with `--allow-origin` and `DASHBOARD_ALLOWED_ORIGINS`); `tests/local/dashboard-standalone-run-now.test.ts` (automation run-now through the spawn path: claim, spawned run in history with the automation id, concurrent and repeated triggers refused) (`bun run --filter @devintern/e2e test`)
-- Missing: Retrying a failed automation run through the standalone dashboard (`retryAutomationRun`), and run-now for an automation with `open_pr = true`.
-- Last reviewed: 2026-11-19
+- Evidence: `tests/local/dashboard-api.test.ts` (read API and a worker-consumed ad-hoc retry); `tests/local/dashboard-embedded.test.ts` (Host/Origin guard with `--allow-origin` and `DASHBOARD_ALLOWED_ORIGINS`) (`bun run --filter @devintern/e2e test`)
+- Missing: Run-now or retry for an automation with `open_pr = true` (a bare local remote has no code host to open the PR on).
+- Last reviewed: 2026-11-20
 
 ### Worker/dashboard logs and artifacts
 
@@ -26,7 +26,7 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 
 - Surface: `devintern` command surface
 - Status: `default`
-- Evidence: `tests/local/dashboard-api.test.ts`, `tests/local/dashboard-embedded.test.ts`, `tests/local/dashboard-standalone-run-now.test.ts` (`bun run --filter @devintern/e2e test`)
+- Evidence: `tests/local/dashboard-api.test.ts`, `tests/local/dashboard-embedded.test.ts` (`bun run --filter @devintern/e2e test`)
 - Missing: `--workspace` mode's read-only workspace automation catalog.
 - Last reviewed: 2026-11-19
 
@@ -34,9 +34,9 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 
 - Surface: `devintern worker` surface
 - Status: `default`
-- Evidence: `tests/local/dashboard-embedded.test.ts`; `tests/local/dashboard-embedded-retry.test.ts` (ad-hoc retry re-queued through the worker's own queue, concurrent double-POST, Host/Origin guard on the retry route, audit and eligibility) (`bun run --filter @devintern/e2e test`)
-- Missing: A tracker-task retry in schedule mode (the `scheduled_retries` row the worker drains); the ad-hoc retry uses the same `injected_tasks` re-queue in both modes.
-- Last reviewed: 2026-11-19
+- Evidence: `tests/local/dashboard-embedded.test.ts`; `tests/local/dashboard-embedded-retry.test.ts` (ad-hoc retry re-queued through the worker's own queue, concurrent double-POST, Host/Origin guard on the retry route, audit and eligibility); `tests/local/dashboard-schedule-mode-tracker-retry.test.ts` (a failed polled offline-Jira run retried in schedule mode: one `scheduled_retries` row drained by the worker's retry queue, one re-run, one transition and comment per attempt, no extra run on later poll ticks) (`bun run --filter @devintern/e2e test`)
+- Missing: A schedule-mode retry for a multi-team workspace (the persisted `team` pin) and a retry the drain defers because the repo is busy.
+- Last reviewed: 2026-11-20
 
 ### GET /api/workspace redacted workspace view
 
@@ -51,7 +51,7 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 Priority numbers are the global ranking from the
 [index](../coverage-matrix.md#priority-backlog); lower runs first.
 
-- ~~Priority 10: Retry through the worker-embedded dashboard and standalone automation run-now. Embedded mode, embedded run-now, the Host/Origin guard, and log redaction are covered by `tests/local/dashboard-embedded.test.ts`; the standalone server, its read API, and a successful ad-hoc retry by `tests/local/dashboard-api.test.ts`.~~ Done: `tests/local/dashboard-embedded-retry.test.ts` and `tests/local/dashboard-standalone-run-now.test.ts`.
+- ~~Priority 10: Retry through the worker-embedded dashboard. Embedded mode, embedded run-now, the Host/Origin guard, and log redaction are covered by `tests/local/dashboard-embedded.test.ts`; the standalone server, its read API, and a successful ad-hoc retry by `tests/local/dashboard-api.test.ts`.~~ Done: `tests/local/dashboard-embedded-retry.test.ts`.
 
 ## Test notes
 
@@ -187,30 +187,35 @@ dashboard port, with no standalone `devintern dashboard`. It asserts:
 - `GET /api/runs/:id` afterwards reports the success as not retriable ("this
   run already succeeded") and keeps the single audit entry on the failed run.
 
-### Standalone automation run-now
+### Schedule-mode tracker retry through the embedded dashboard
 
-`tests/local/dashboard-standalone-run-now.test.ts` runs in the default offline
-suite. It writes one automation (January 1st cron, `open_pr = false`) to the
-seed checkout's `.devintern-code/automations.toml` and starts the standalone
-`devintern dashboard` there without `--workspace`, so it serves that file
-through the spawn path. No worker daemon runs. It asserts:
+`tests/local/dashboard-schedule-mode-tracker-retry.test.ts` runs in the default
+offline suite. It starts a `WorkerFixture` with the embedded dashboard,
+`tracker = "jira"` against the offline fake Jira, a `task_query`, 1 s polling,
+and `WORKER_RETRY_INTERVAL_SECONDS=1`. The deterministic agent fails the first
+run once (`E2E_FAIL_ONCE_FILE`). It asserts:
 
-- `/api/automations` lists the entry with no last run, and a run-now POST
-  without an Origin returns 403 and starts nothing;
-- two concurrent run-now POSTs: one returns 202 `{ status: "triggered",
-automationId }`, the other 409 (`a manual run of "<id>" was just triggered
-and is starting`, or the in-progress refusal if the spawned CLI already
-  opened its run row);
-- the spawned CLI records one `manual` run with the automation id that
-  succeeds, with one agent invocation, the edit applied in the checkout, one
-  occurrence file, and no pushed branch. The run shows in
-  `/api/runs?automationId=…` and as the automation's `lastRun`;
-- a third trigger after the run finished still returns the claim refusal,
-  because the in-flight claim outlives the run until its TTL.
+- the polled run is `failed`; the ticket was moved to In Progress and back to
+  To Do, has one failure comment, and three more poll ticks start no run;
+- two concurrent retries through the worker's dashboard: one returns 202
+  `{ status: "scheduled", runId, taskKey }`, the other 409 (`a retry of <key> is
+already scheduled or running`, or the in-progress refusal if the drain
+  already started). One audit row (`scheduled`, `local-dashboard`, `queued for
+the worker`) and one `scheduled_retries` row;
+- the worker's retry queue logs one `re-running <key>`, settles the row
+  `done`, and records attempt 2 `succeeded` on `feature/<key>-attempt-2` with
+  the greeting edit on the remote;
+- three later poll ticks skip the ticket as already actioned. The fake Jira
+  saw exactly three transitions (In Progress, To Do, In Progress), one failure
+  comment and one implementation comment, and no unexpected request;
+- retrying the succeeded run returns 409 "this run already succeeded".
+
+The fake Jira records accepted transitions (`FakeJiraTracker.transitions`)
+so the test counts them instead of reading only the final status.
 
 ```sh
 bun run --filter @getdevintern/code build
-cd packages/e2e && bun test tests/local/dashboard-embedded-retry.test.ts tests/local/dashboard-standalone-run-now.test.ts
+cd packages/e2e && bun test tests/local/dashboard-schedule-mode-tracker-retry.test.ts
 ```
 
 ### Run artifact and harness-log readback, and the redacted workspace view

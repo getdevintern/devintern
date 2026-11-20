@@ -430,7 +430,7 @@ describe("dashboard API", () => {
   });
 
   test("queued work is empty, and creates nothing, without a database", () => {
-    expect(handleQueuedWork(data).body).toEqual({ items: [], total: 0 });
+    expect(handleQueuedWork(data).body).toEqual({ items: [], total: 0, cancelled: [] });
     expect(existsSync(dbPath)).toBe(false);
   });
 

@@ -602,6 +602,40 @@ export class RunStore {
   }
 
   /**
+   * Settle a task's latest run as `abandoned` when it is still `deferred`.
+   *
+   * A deferred run promises an automatic retry. When the operator cancels the
+   * task before that retry, nothing else ever settles the run, so it would keep
+   * showing as "waiting to retry". The read and the conditional update share
+   * one immediate transaction, so a run that moved on (or a newer run) is left
+   * alone, and repeated calls are no-ops.
+   *
+   * @param taskKey - Task key whose latest run to settle
+   * @param reason - Outcome reason recorded on the run
+   * @returns The settled run id, or `null` when the latest run is not deferred
+   */
+  abandonDeferredRun(taskKey: string, reason: string): number | null {
+    return this.db
+      .transaction((): number | null => {
+        const latest = this.db
+          .query(
+            `SELECT id, status FROM runs WHERE task_key = ?
+             ORDER BY started_at DESC, id DESC LIMIT 1`,
+          )
+          .get(taskKey) as { id: number; status: string } | null;
+        if (!latest || latest.status !== "deferred") return null;
+        this.db.run(
+          `UPDATE runs SET status = 'abandoned', outcome_reason = ?, finished_at = ?, step_active = 0
+           WHERE id = ? AND status = 'deferred'`,
+          [reason, Date.now(), latest.id],
+        );
+        this.replaceOutcomeStage(latest.id, "abandoned", reason);
+        return latest.id;
+      })
+      .immediate();
+  }
+
+  /**
    * Fail every `in_progress` run left over from a previous worker process.
    *
    * Only one worker owns a queue database, so any run still `in_progress`

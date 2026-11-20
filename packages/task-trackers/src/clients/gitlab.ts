@@ -12,6 +12,7 @@
  * - List project issues: https://docs.gitlab.com/ee/api/issues.html#list-project-issues
  * - Comments (notes): https://docs.gitlab.com/ee/api/notes.html#list-project-issue-notes
  * - Labels: https://docs.gitlab.com/ee/api/labels.html#list-labels
+ * - Issue links: https://docs.gitlab.com/ee/api/issue_links.html#list-issue-relations
  */
 
 /** Default instance used when `GITLAB_BASE_URL` is unset. */
@@ -34,6 +35,21 @@ export interface GitLabIssue {
   updated_at?: string;
   web_url: string;
   references?: { full: string };
+}
+
+/**
+ * An issue linked to another one (`GET /issues/:iid/links`). The link type is
+ * relative to the queried issue: `is_blocked_by` means the linked issue blocks
+ * it. GitLab Free has only `relates_to` links.
+ */
+export interface GitLabLinkedIssue {
+  iid: number;
+  project_id: number;
+  /** `opened` or `closed`. */
+  state?: string;
+  web_url?: string;
+  link_type: string;
+  references?: { full?: string };
 }
 
 export interface GitLabIssueComment {
@@ -401,6 +417,26 @@ export class GitLabClient {
     }
 
     return comments;
+  }
+
+  /**
+   * List the issues linked to an issue (all link types; GitLab does not
+   * paginate this endpoint).
+   *
+   * @param issueIid - Target issue iid.
+   * @returns Linked issues with their link type relative to `issueIid`.
+   * @throws When the GitLab API request fails.
+   */
+  async listIssueLinks(issueIid: number): Promise<GitLabLinkedIssue[]> {
+    const links = await this.request<unknown>(`${this.projectEndpoint}/issues/${issueIid}/links`);
+    if (!Array.isArray(links)) return [];
+    return links.filter(
+      (link): link is GitLabLinkedIssue =>
+        typeof link === "object" &&
+        link !== null &&
+        typeof (link as GitLabLinkedIssue).iid === "number" &&
+        typeof (link as GitLabLinkedIssue).link_type === "string",
+    );
   }
 
   /**

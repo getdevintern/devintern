@@ -43,6 +43,7 @@ import { parseChangeRequestUrl } from "../code-host/index";
 import type { PullRequestInfo } from "../code-host/github/reviews-types";
 import { untrustedContentBlock } from "../prompts/untrusted-content";
 import { isDependencyFile, Utils } from "../utils";
+import { hasStagedChanges, hasUncommittedWork, stageWorkTreeChanges } from "../utils/git-stage";
 
 export interface ResolveConflictsOptions {
   verbose?: boolean;
@@ -131,8 +132,14 @@ Instructions:
    (renamed functions, changed signatures, moved files). Check call sites of
    anything the base renamed or removed.
 3. Run the project's typecheck and affected tests if available to verify the result.${dependencyStep}
-${commitStep}. Stage everything and complete the merge commit with:
-   git add -A && git commit --no-edit
+${commitStep}. Stage only real work, then complete the merge commit:
+   git add -u
+   git add <path>   # for each new file you intentionally created (e.g. a split-out module)
+   git commit --no-edit
+   \`git add -u\` marks every resolved conflict and records deletions. Never stage the
+   whole tree or every untracked entry in bulk: the sandbox mounts placeholder entries
+   (\`.bashrc\`, \`.profile\`, \`.gitconfig\`, \`.claude/…\`, …) into the worktree root;
+   git cannot stage them, and they must never be committed.
 ${finalStep}. Do NOT push. Do NOT amend or rebase existing commits. Do NOT abort the merge.
 
 When you are done, every conflict must be resolved and the merge commit created.`;
@@ -166,7 +173,11 @@ ${untrustedContentBlock(
 Instructions:
 1. Reproduce the failing checks with the project's own scripts (lint, format,
    typecheck, tests) and fix the underlying issues. Change as little as possible.
-2. Stage everything with \`git add -A\`.
+2. Stage only real work: \`git add -u\` for changed and deleted tracked files, plus
+   \`git add <path>\` for each new file you intentionally created. Never stage the
+   whole tree or every untracked entry in bulk: the sandbox mounts placeholder entries
+   (\`.bashrc\`, \`.profile\`, \`.gitconfig\`, \`.claude/…\`, …) into the worktree root;
+   git cannot stage them, and they must never be committed.
 3. Fold the fixes into the existing commit with \`git commit --amend --no-edit\`
    (only if there is anything to fold in — the commit is a merge commit and must
    keep both parents).
@@ -184,11 +195,19 @@ must be clean.`;
  * @returns `true` when changes were found and successfully amended in.
  */
 async function amendHookFixIntoMergeCommit(workDir: string): Promise<boolean> {
-  const status = await Utils.executeGitCommand(["status", "--porcelain"], { cwd: workDir });
-  if (!status.success || status.output.trim() === "") {
+  const work = hasUncommittedWork(workDir);
+  if (!work.success || !work.dirty) {
     return false;
   }
-  await Utils.executeGitCommand(["add", "-A"], { cwd: workDir });
+  const staged = stageWorkTreeChanges(workDir);
+  if (!staged.success) {
+    console.warn(`⚠️  Could not stage hook-fix changes: ${staged.error}`);
+    return false;
+  }
+  // Only sandbox placeholders changed: nothing to amend into the merge commit.
+  if (!hasStagedChanges(workDir).staged) {
+    return false;
+  }
   const amend = await Utils.executeGitCommand(["commit", "--amend", "--no-edit"], {
     cwd: workDir,
   });
@@ -565,7 +584,11 @@ async function attemptMerge(params: {
       return { kind: "aborted", message: `merge failed: ${merge.error}` };
     }
     console.log(`♻️  Conflicts auto-resolved from a previous identical merge; committing`);
-    await Utils.executeGitCommand(["add", "-A"], { cwd: params.workDir });
+    const staged = stageWorkTreeChanges(params.workDir);
+    if (!staged.success) {
+      await Utils.executeGitCommand(["merge", "--abort"], { cwd: params.workDir });
+      return { kind: "aborted", message: `staging failed: ${staged.error}` };
+    }
     // The commit below runs pre-commit hooks: install the merged lockfile first.
     const changed = await dependencyChanges();
     if (needsInstall(changed)) {
@@ -678,7 +701,11 @@ async function attemptMerge(params: {
     // Agent resolved but did not commit; finish the merge. The commit below
     // runs pre-commit hooks, so install the resolved dependencies first (the
     // agent may have skipped the install the prompt asked for).
-    await Utils.executeGitCommand(["add", "-A"], { cwd: params.workDir });
+    const staged = stageWorkTreeChanges(params.workDir);
+    if (!staged.success) {
+      await Utils.executeGitCommand(["merge", "--abort"], { cwd: params.workDir });
+      return { kind: "aborted", message: `staging failed: ${staged.error}` };
+    }
     const resolvedChanges = await dependencyChanges();
     if (await installIsStale(resolvedChanges, stagedBlobIds)) {
       const install = await reinstallMergedDependencies({

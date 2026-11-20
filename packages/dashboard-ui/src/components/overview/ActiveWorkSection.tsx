@@ -45,6 +45,15 @@ function idleNext({
     : "new work starts when a task is queued";
 }
 
+/** `/api/queue` fields for the Queued list; empty until the queue loads. */
+function queuedWorkProps(queuedWork: QueuedWorkResponse | null) {
+  return {
+    items: queuedWork?.items ?? [],
+    total: queuedWork?.total ?? 0,
+    cancelled: queuedWork?.cancelled ?? [],
+  };
+}
+
 export function ActiveWorkSection({
   capacity,
   activityRuns,
@@ -157,7 +166,7 @@ export function ActiveWorkSection({
           />
         ) : null}
         <WaitingRows entries={work.waiting} now={now} onOpen={openRun} />
-        <QueuedWork items={queuedWork?.items ?? []} total={queuedWork?.total ?? 0} now={now} />
+        <QueuedWork {...queuedWorkProps(queuedWork)} now={now} />
         <RecentlyFinished
           entries={work.finished}
           hidden={work.finishedHidden}

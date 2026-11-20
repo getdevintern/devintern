@@ -1,25 +1,14 @@
 import { resolveConfigDir } from "@devintern/utils";
-import { resolveWorkspaceDir, workspaceCodeStateDir } from "../workspace/paths";
+import { dirname } from "path";
+
+import { hasWorkspace, resolveWorkspaceDir, workspaceCodeStateDir } from "../workspace/paths";
 
 /** Marks a task subprocess launched by the workspace supervisor. */
 export const WORKER_SUBPROCESS_ENV = "DEVINTERN_WORKER_SUBPROCESS";
-/**
- * Narrow marker for a subprocess that must skip the checkout's
- * `.devintern-code/.env` without being treated as a worker subprocess (so its
- * runtime state and license/auth session keep resolving to the project config
- * dir). Used by the standalone dashboard's manual automation spawn, whose
- * composed entry selection must not be re-populated by dotenv.
- */
-export const SKIP_PROJECT_ENV_ENV = "DEVINTERN_SKIP_PROJECT_ENV";
 let manualWorkspaceStateDir: string | null = null;
 
 export function isWorkerSubprocess(): boolean {
   return process.env[WORKER_SUBPROCESS_ENV] === "1";
-}
-
-/** Whether this process must not load the checkout's local `.env`. */
-export function shouldSkipProjectEnv(): boolean {
-  return isWorkerSubprocess() || process.env[SKIP_PROJECT_ENV_ENV] === "1";
 }
 
 /** Resolve the normal project config directory, independent of worker state. */
@@ -32,11 +21,17 @@ export function setManualWorkspaceStateDir(workspaceDir: string | null): void {
   manualWorkspaceStateDir = workspaceDir;
 }
 
-/** Worker task subprocesses share the workspace session and license cache. */
+/**
+ * Directory holding the auth session and license cache.
+ *
+ * Worker task subprocesses share the workspace session and license cache. A
+ * command run from the workspace home itself (whose nearest config dir would
+ * be the legacy `<workspace>/.devintern-code/`) uses the same `state/code/`.
+ */
 export function resolveRuntimeStateDir(startDir: string = process.cwd()): string {
-  return isWorkerSubprocess()
-    ? workspaceCodeStateDir(resolveWorkspaceDir())
-    : manualWorkspaceStateDir
-      ? workspaceCodeStateDir(manualWorkspaceStateDir)
-      : resolveProjectConfigDir(startDir);
+  if (isWorkerSubprocess()) return workspaceCodeStateDir(resolveWorkspaceDir());
+  if (manualWorkspaceStateDir) return workspaceCodeStateDir(manualWorkspaceStateDir);
+  const projectConfigDir = resolveProjectConfigDir(startDir);
+  const owner = dirname(projectConfigDir);
+  return hasWorkspace(owner) ? workspaceCodeStateDir(owner) : projectConfigDir;
 }

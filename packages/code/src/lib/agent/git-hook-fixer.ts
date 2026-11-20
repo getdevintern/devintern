@@ -18,16 +18,19 @@ import { resolveAgentEffort, resolveAgentModel } from "./model";
 import { agentSandboxPolicy, getSandbox } from "./sandbox";
 import { createHarnessLogSink } from "../observability/harness-logs";
 import { Utils } from "../utils";
+import { hasUncommittedWork, stageWorkTreeChanges } from "../utils/git-stage";
 import { resolveOutputDir } from "../config/output-dir";
 
 /**
  * Check whether the working tree is clean after a hook-fix attempt.
+ * Untracked sandbox placeholders do not count as uncommitted changes.
  *
  * @param cwd - Optional git working directory
  * @returns `true` when no uncommitted changes remain (commit likely complete)
  */
 export async function isCommitAlreadyComplete(cwd?: string): Promise<boolean> {
-  return !(await Utils.hasUncommittedChanges(cwd));
+  const work = hasUncommittedWork(cwd ?? process.cwd());
+  return work.success && !work.dirty;
 }
 
 /** Result of verifying a pre-push hook-fix attempt. */
@@ -66,8 +69,10 @@ export async function verifyPushHookFix(options?: {
   const targetBranch = options?.expectedBranch ?? currentBranch ?? undefined;
   let amended = false;
 
-  if (await Utils.hasUncommittedChanges(cwd)) {
-    const stageResult = await Utils.executeGitCommand(["add", "-A"], { cwd });
+  const workDir = cwd ?? process.cwd();
+  if (hasUncommittedWork(workDir).dirty) {
+    // Skips sandbox placeholders; `git add -A` fails on `/dev/null` mounts.
+    const stageResult = stageWorkTreeChanges(workDir);
     if (!stageResult.success) {
       return {
         success: false,
@@ -360,26 +365,27 @@ ${hookType === "push" ? "- Make sure to amend the commit (git commit --amend --n
           // For push: agent should have amended the commit, so we just verify nothing is staged
           // For commit: agent should have completed the commit, so we verify a clean state
           try {
-            const statusResult = await Utils.executeGitCommand(["status", "--porcelain"], { cwd });
-
             if (hookType === "commit") {
-              // For commit fix: verify nothing is staged/modified (commit succeeded)
-              if (statusResult.success && statusResult.output.trim() === "") {
+              // For commit fix: verify nothing is staged/modified (commit
+              // succeeded). Untracked sandbox placeholders do not count.
+              const work = hasUncommittedWork(workingDir);
+              if (work.success && !work.dirty) {
                 console.log("✅ Verification successful - commit completed successfully!");
                 resolve(true);
               } else {
                 console.log(
                   `⚠️  ${harness.displayName} fixed the code but didn't commit - staging the fix for a hooked retry...`,
                 );
+                const statusResult = await Utils.executeGitCommand(["status", "--porcelain"], {
+                  cwd,
+                });
                 console.log(`   Changes: ${statusResult.output}`);
 
                 // Stage the repair and let the caller retry its own commit.
                 // That commit runs the hooks again (so an unrepaired failure
                 // counts against --hook-retries instead of being bypassed with
                 // --no-verify) and keeps the caller's message and author.
-                const stageResult = await Utils.executeGitCommand(["add", "-A"], {
-                  cwd,
-                });
+                const stageResult = stageWorkTreeChanges(workingDir);
                 if (!stageResult.success) {
                   console.log("❌ Failed to stage changes:");
                   console.log(`   ${stageResult.error}`);

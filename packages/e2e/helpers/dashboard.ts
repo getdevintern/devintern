@@ -10,13 +10,11 @@
  */
 
 import { Database } from "bun:sqlite";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync } from "node:fs";
 import { cliPath } from "./fixture-workspace";
 import { ensureLoopbackBypassesProxy } from "./loopback-proxy";
 import { freePort } from "./webhook-server";
-import { automationTable } from "./worker";
-import type { WorkerAutomation, WorkerFixture } from "./worker";
+import type { WorkerFixture } from "./worker";
 
 const HEALTH_TIMEOUT_MS = 30_000;
 const HEALTH_POLL_INTERVAL_MS = 50;
@@ -93,25 +91,6 @@ export async function waitForDashboardHealth(
     `dashboard did not become healthy at ${baseUrl}` +
       (options.describe ? `\n${options.describe()}` : ""),
   );
-}
-
-/**
- * Write a project's `.devintern-code/automations.toml`, the catalog a
- * standalone `devintern dashboard` started without `--workspace` serves and
- * triggers through its spawn path. Returns the file path.
- */
-export function writeProjectAutomations(
-  projectDir: string,
-  automations: WorkerAutomation[],
-): string {
-  const dir = join(projectDir, ".devintern-code");
-  mkdirSync(dir, { recursive: true });
-  const path = join(dir, "automations.toml");
-  writeFileSync(
-    path,
-    `${automations.map((item) => automationTable(item).join("\n")).join("\n\n")}\n`,
-  );
-  return path;
 }
 
 /** One stored `run_retry_audit` row, as the dashboard's retry handler wrote it. */

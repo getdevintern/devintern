@@ -1,11 +1,9 @@
 /**
  * Read-only workspace automation catalog for a standalone dashboard
  *
- * `devintern dashboard --workspace <path>` runs without the worker, so it has
- * no in-process scheduler. Without this, the standalone server fell back to the
- * project-scoped `.devintern-code/automations.toml` of whatever directory it was
- * started in and showed an empty Automations page for a workspace that has
- * `[[automations]]` configured.
+ * `devintern dashboard` runs without the worker, so it has no in-process
+ * scheduler. It still lists the workspace's `[[automations]]` (the explicit
+ * `--workspace`, else the default workspace when one exists).
  *
  * This lists the workspace's automations (with the durable next-due cursor the
  * worker keeps in the workspace DB) but refuses "Run now": workspace runs go

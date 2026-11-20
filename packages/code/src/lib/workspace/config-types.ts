@@ -134,6 +134,11 @@ export interface TeamConfig {
   envFile?: string;
   /** Inline env overrides (highest precedence within the team). */
   env: Record<string, string>;
+  /**
+   * `dependency_mode` for this team's tracker tickets that have native
+   * blockers; falls back to `[defaults].dependency_mode`.
+   */
+  dependencyMode?: DependencyMode;
 }
 
 /** One managed repository from a `[[repos]]` entry. */
@@ -167,6 +172,12 @@ export interface RepoConfig {
   syncTeamPrs?: boolean;
   /** Inline env overrides (highest precedence). */
   env: Record<string, string>;
+  /**
+   * `manual_only`: the repo is registered for manual CLI runs from a local
+   * checkout only. The worker never clones, polls, routes to, or schedules
+   * work for it.
+   */
+  manualOnly?: boolean;
 }
 
 /** Provider-neutral base configuration for one error-monitoring project. */
@@ -248,4 +259,9 @@ export interface WorkspaceConfig {
   routing: RoutingRule[];
   automations: AutomationConfig[];
   estimations: EstimationConfig[];
+  /**
+   * Tracker project settings from `[trackers.<tracker>.projects.<key>]`
+   * (status names, story-points field), in the `settings.json` shape.
+   */
+  trackerSettings?: import("../../types/settings").ProjectSettings;
 }

@@ -52,7 +52,7 @@ For dependent work, enqueue every step immediately: dispatch the first task, the
 
 Wait only when completion is needed for the caller's next step. Append `--wait --wait-timeout 600` for a bounded ten-minute wait, choosing a limit appropriate to the task. The CLI default is six hours; `0` disables the timeout. With `--wait --json`, stdout still contains one final object. Exit `0` indicates success and `1` indicates failure to complete the wait successfully.
 
-A timeout, worker stop, or inconclusive wait can produce a `status: "failed"` result with an `error` even though the task itself has not failed or been cancelled. Inspect the error and existing run before considering another enqueue: `devintern worker runs --task-key <taskKey> --json` and `devintern worker runs show <id> --json` read the run history without the dashboard (they also work inside a sandbox), and `devintern worker logs --level warn` shows recent worker output. Do not edit the queue database or managed prompt files to retry or cancel work.
+A timeout, worker stop, or inconclusive wait can produce a `status: "failed"` result with an `error` even though the task itself has not failed or been cancelled. Inspect the error and existing run before considering another enqueue: `devintern worker runs --task-key <taskKey> --json` and `devintern worker runs show <id> --json` read the run history without the dashboard (they also work inside a sandbox), and `devintern worker logs --level warn` shows recent worker output. Do not edit the queue database or managed prompt files to retry or cancel work; withdraw a task that has not started with `devintern worker cancel <taskKey>` (a `--wait` caller then exits `3` with `status: "cancelled"`).
 
 ## Report the outcome
 

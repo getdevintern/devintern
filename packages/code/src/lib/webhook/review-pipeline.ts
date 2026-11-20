@@ -6,6 +6,7 @@ import { beginRun, endRun } from "../state/run-recorder";
 import { WorkerState } from "../state/worker-state";
 import { formatReviewPrompt } from "../review/formatter";
 import { Utils } from "../utils";
+import { hasUncommittedWork } from "../utils/git-stage";
 import { WorktreeBusyError } from "../worker/usage-limit-protocol";
 import {
   processReviewComment,
@@ -370,6 +371,12 @@ function releaseLeasedWorktree(worktreePath: string | null): void {
   if (worktreePath) Utils.releaseReviewWorktree(worktreePath);
 }
 
+/** Real uncommitted work (sandbox placeholders excluded); `false` when git fails. */
+function hasLeftoverWork(worktreePath: string): boolean {
+  const work = hasUncommittedWork(worktreePath);
+  return work.success && work.dirty;
+}
+
 /**
  * Process a `changes_requested` review: worktree, agent, commit, push, reactions.
  *
@@ -578,8 +585,10 @@ async function processReviewAsync(
       return;
     }
 
-    // Check for uncommitted changes (indicates Agent didn't commit or hook failed)
-    const hasUncommitted = await Utils.hasUncommittedChanges(worktreePath);
+    // Check for uncommitted changes (indicates Agent didn't commit or hook failed).
+    // Untracked sandbox placeholders do not count: commitChanges would skip them
+    // and report "No changes to commit", failing a run whose fix is committed.
+    const hasUncommitted = hasLeftoverWork(worktreePath);
 
     // Check if there are commits to push
     const commitsAhead = await countCommitsAhead(worktreePath, branch);

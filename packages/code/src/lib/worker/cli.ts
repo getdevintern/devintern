@@ -127,6 +127,12 @@ async function runWorkerAddSubcommand(args: string[]): Promise<never> {
   process.exit(await runWorkerAdd(args));
 }
 
+/** `devintern worker cancel <taskKey>` — withdraw a pending ad-hoc task. */
+async function runWorkerCancelSubcommand(args: string[]): Promise<never> {
+  const { runWorkerCancel } = await import("../workspace/cancel-command");
+  process.exit(runWorkerCancel(args));
+}
+
 /**
  * `devintern worker run-now` — ask a running workspace worker for one immediate
  * drain, bypassing working windows without editing them.
@@ -285,7 +291,7 @@ async function runWorkerDaemon(args: string[]): Promise<void> {
       verbose = true;
     } else if (arg === "--help" || arg === "-h") {
       console.log(
-        "Usage: devintern worker [init|login|scaffold|add-repo|add|run-now|doctor] [options]",
+        "Usage: devintern worker [init|login|scaffold|add-repo|add|cancel|run-now|doctor] [options]",
       );
       console.log("       devintern worker connect [target] [--workspace <path>]");
       console.log(
@@ -312,6 +318,7 @@ async function runWorkerDaemon(args: string[]): Promise<void> {
       console.log("  scaffold            Create workspace.toml and the shared .env only");
       console.log("  add-repo            Add the current repository to the worker workspace");
       console.log("  add                 Enqueue a one-off task for a workspace repo");
+      console.log("  cancel              Cancel a pending ad-hoc task before it starts");
       console.log("  connect             Configure relay integrations or Sentry auto-fixes");
       console.log("  run-now             One immediate drain, ignoring working windows");
       console.log("  doctor              Check workspace readiness without starting the worker");
@@ -409,6 +416,7 @@ export async function runWorkerCli(args: string[]): Promise<void> {
   if (subcommand === "scaffold") return runWorkerScaffoldSubcommand(rest);
   if (subcommand === "add-repo") return runWorkerAddRepoSubcommand(rest);
   if (subcommand === "add") return runWorkerAddSubcommand(rest);
+  if (subcommand === "cancel") return runWorkerCancelSubcommand(rest);
   if (subcommand === "run-now") return runWorkerRunNowSubcommand(rest);
   if (subcommand === "init") return runWorkerInitSubcommand(rest);
   if (subcommand === "login") return runWorkerLoginSubcommand(rest);
