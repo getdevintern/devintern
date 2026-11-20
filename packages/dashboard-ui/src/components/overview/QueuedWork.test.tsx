@@ -77,7 +77,7 @@ test("lists recently cancelled tasks with actor and reason, without Cancel contr
   });
   expect(html).toContain("Nothing queued.");
   expect(html).toContain("Recently cancelled");
-  expect(html).toContain("Cancelled by dashboard");
+  expect(html).toContain("Cancelled from the dashboard");
   expect(html).toContain("duplicate");
   expect(html).not.toContain("Cancel task");
 });

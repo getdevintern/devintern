@@ -1,6 +1,6 @@
 /**
  * Click-through tests for the Queued list's Cancel action in a real DOM:
- * confirm → POST → the row disappears and the count drops, or the
+ * confirm inline → POST → the row disappears and the count drops, or the
  * "already started" notice shows and every queue poll is told to refresh.
  */
 
@@ -20,8 +20,6 @@ const realFetch = globalThis.fetch;
 let domWindow: Window;
 let root: Root;
 let container: HTMLElement;
-let confirmAnswer = true;
-let confirmCalls = 0;
 let fetchCalls: Array<{ url: string; method?: string }> = [];
 let queueChangedEvents = 0;
 
@@ -66,6 +64,30 @@ function count(): string | null | undefined {
   return container.querySelector(".aw-count")?.textContent;
 }
 
+async function click(element: Element | null | undefined): Promise<void> {
+  expect(element).toBeTruthy();
+  await act(async () => {
+    element!.dispatchEvent(
+      new domWindow.MouseEvent("click", { bubbles: true }) as unknown as Event,
+    );
+    await flush();
+  });
+}
+
+function confirmation(): Element | null {
+  return container.querySelector(".aq-confirm");
+}
+
+/** Answer the inline confirmation: confirm the cancel, or keep the task. */
+async function answerConfirmation(confirm: boolean): Promise<void> {
+  const box = confirmation();
+  expect(box?.textContent).toContain("Cancel this task?");
+  const button = confirm
+    ? box?.querySelector("[data-confirm-cancel]")
+    : [...(box?.querySelectorAll("button") ?? [])].find((el) => el.textContent === "Keep task");
+  await click(button as Element | undefined);
+}
+
 async function clickCancel(taskTitle: string): Promise<void> {
   const row = [...container.querySelectorAll(".aq-item")].find((el) =>
     el.querySelector(".aq-title")?.textContent?.includes(taskTitle),
@@ -85,14 +107,8 @@ beforeEach(() => {
   globalThis.document = domWindow.document as unknown as Document;
   globalThis.window = domWindow as unknown as Window & typeof globalThis.window;
   (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
-  confirmAnswer = true;
-  confirmCalls = 0;
   fetchCalls = [];
   queueChangedEvents = 0;
-  (domWindow as unknown as { confirm: () => boolean }).confirm = () => {
-    confirmCalls += 1;
-    return confirmAnswer;
-  };
   domWindow.addEventListener(QUEUE_CHANGED_EVENT, () => {
     queueChangedEvents += 1;
   });
@@ -125,8 +141,11 @@ test("confirmed cancel removes the row, drops the count, and refreshes the queue
   expect(count()).toBe("2");
 
   await clickCancel("First task");
+  expect(confirmation()?.textContent).toContain('"First task" (local-first) will not run');
+  expect(fetchCalls).toEqual([]);
+  await answerConfirmation(true);
 
-  expect(confirmCalls).toBe(1);
+  expect(confirmation()).toBeNull();
   expect(fetchCalls).toEqual([{ url: "/api/tasks/local-first/cancel", method: "POST" }]);
   expect(rows()).toEqual(["Second task"]);
   expect(count()).toBe("1");
@@ -142,6 +161,7 @@ test("a task the worker already started shows the notice, stays listed, and refr
   await renderQueue([first, second]);
 
   await clickCancel("First task");
+  await answerConfirmation(true);
 
   expect(container.querySelector('[role="alert"]')?.textContent).toContain("already started");
   expect(rows()).toEqual(["First task", "Second task"]);
@@ -149,14 +169,14 @@ test("a task the worker already started shows the notice, stays listed, and refr
   expect(queueChangedEvents).toBe(1);
 });
 
-test("declining the confirmation sends nothing", async () => {
-  confirmAnswer = false;
+test("keeping the task in the confirmation sends nothing", async () => {
   stubFetch(200, {});
   await renderQueue([first]);
 
   await clickCancel("First task");
+  await answerConfirmation(false);
 
-  expect(confirmCalls).toBe(1);
+  expect(confirmation()).toBeNull();
   expect(fetchCalls).toEqual([]);
   expect(rows()).toEqual(["First task"]);
   expect(queueChangedEvents).toBe(0);

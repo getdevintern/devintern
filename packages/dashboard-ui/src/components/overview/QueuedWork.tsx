@@ -66,7 +66,7 @@ function Fact({ label, children }: { label: string; children: ReactNode }) {
 
 /** Confirmation shown before a pending ad-hoc task is withdrawn. */
 export function cancelConfirmText(item: Pick<QueuedWorkItem, "taskKey" | "title">): string {
-  return `Cancel ${item.taskKey}? "${item.title}" will not run, and no branch or PR is created.`;
+  return `"${item.title}" (${item.taskKey}) will not run, and no branch or PR is created.`;
 }
 
 /**
@@ -81,11 +81,12 @@ function CancelTaskControl({
   onCancelled: (id: string) => void;
 }) {
   const [busy, setBusy] = useState(false);
+  const [confirming, setConfirming] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const taskKey = item.taskKey;
   if (!taskKey) return null;
   const cancel = async () => {
-    if (!window.confirm(cancelConfirmText(item))) return;
+    setConfirming(false);
     setBusy(true);
     setNotice(null);
     const result = await cancelTask(taskKey);
@@ -98,6 +99,30 @@ function CancelTaskControl({
     // Either outcome changed what the queue shows; refresh every count now.
     notifyQueueChanged();
   };
+  if (confirming) {
+    return (
+      <div className="aq-confirm" role="group" aria-labelledby={`aq-confirm-${item.id}`}>
+        <p id={`aq-confirm-${item.id}`} className="aq-confirm-title">
+          Cancel this task?
+        </p>
+        <p className="aq-confirm-text">{cancelConfirmText(item)}</p>
+        <div className="aq-actions">
+          <Button
+            type="button"
+            variant="destructive"
+            size="sm"
+            data-confirm-cancel=""
+            onClick={() => void cancel()}
+          >
+            Cancel task
+          </Button>
+          <Button type="button" variant="outline" size="sm" onClick={() => setConfirming(false)}>
+            Keep task
+          </Button>
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="aq-actions">
       <Button
@@ -106,7 +131,7 @@ function CancelTaskControl({
         size="sm"
         aria-busy={busy || undefined}
         disabled={busy}
-        onClick={() => void cancel()}
+        onClick={() => setConfirming(true)}
       >
         {busy ? "Cancelling…" : "Cancel task"}
       </Button>
@@ -269,9 +294,14 @@ function QueuedRow({
   );
 }
 
-/** Who cancelled a task and when, e.g. `cancelled by dashboard 5m ago`. */
+const CANCEL_SOURCE_LABELS: Record<NonNullable<CancelledTaskItem["cancelledBy"]>, string> = {
+  cli: "the CLI",
+  dashboard: "the dashboard",
+};
+
+/** Where a task was cancelled from and when, e.g. `Cancelled from the dashboard 5m ago`. */
 function cancelledLine(item: CancelledTaskItem, now: number): string {
-  const by = item.cancelledBy ? ` by ${item.cancelledBy}` : "";
+  const by = item.cancelledBy ? ` from ${CANCEL_SOURCE_LABELS[item.cancelledBy]}` : "";
   const when = item.cancelledAt !== undefined ? ` ${formatPastTime(item.cancelledAt, now)}` : "";
   return `Cancelled${by}${when}`;
 }
