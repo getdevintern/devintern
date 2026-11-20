@@ -480,7 +480,7 @@ export function AutomationsView({ onOpenRun }: { onOpenRun: (id: number) => void
       {data && data.automations.length === 0 ? (
         <EmptyState
           title="No scheduled jobs configured"
-          body='Add [[automations]] entries (a schedule plus a prompt) or [[estimations]] sweeps to workspace.toml — or .devintern-code/automations.toml for a single repo — or set conflict_resolution = "scheduled". The worker reloads workspace changes automatically; "Run now" then appears here for instant validation.'
+          body='Add [[automations]] entries (a schedule plus a prompt) or [[estimations]] sweeps to workspace.toml, or set conflict_resolution = "scheduled". The worker reloads workspace changes automatically; "Run now" then appears here for instant validation.'
         />
       ) : null}
 

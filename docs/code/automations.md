@@ -48,7 +48,7 @@ under ~/Documents/Tweets/."""
 | `allow_no_changes` | Treat a run that changes nothing as a success. Default `false`.                                   |
 | `harness`, `model`, `effort` | Agent for this schedule. See [Choosing the agent per schedule](#choosing-the-agent-per-schedule). |
 
-A worker with at least one automation runs even without a task query. Edits to `workspace.toml` apply without a restart; an invalid entry is logged and the last valid config keeps running. Single-repo projects can use the same schema in `.devintern-code/automations.toml`.
+A worker with at least one automation runs even without a task query. Edits to `workspace.toml` apply without a restart; an invalid entry is logged and the last valid config keeps running.
 
 To try an entry without waiting for its schedule, use **Run now** in the [dashboard](./dashboard.md#run-an-automation-now). It runs the same pipeline with the same `open_pr` setting.
 

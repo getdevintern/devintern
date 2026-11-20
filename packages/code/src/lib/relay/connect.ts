@@ -12,13 +12,13 @@
 
 import { createDefaultSupabaseAuthConfig, requireAuthenticatedUser } from "@devintern/auth";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
-import { dirname, join, resolve } from "path";
+import { dirname, join } from "path";
 
 import { saveGitHubAppRecord } from "../code-host/github/app-setup";
 import { GitLabWebhookAdminClient } from "../code-host/gitlab/webhook-admin";
 import type { GitLabProjectHook, GitLabWebhookProject } from "../code-host/gitlab/webhook-admin";
 import { resolveGitLabCodeHostConfig } from "../code-host/index";
-import { workspaceCodeStateDir, workspaceConfigPath } from "../workspace/paths";
+import { codeStateDirFor, isWorkspaceHome } from "../workspace/paths";
 
 export const DEFAULT_RELAY_URL = "https://relay.devintern.com";
 
@@ -188,13 +188,7 @@ export function resolveRelayUrl(): string {
 }
 
 function relayConfigDir(workingDir: string): string {
-  if (
-    existsSync(workspaceConfigPath(workingDir)) ||
-    existsSync(workspaceCodeStateDir(workingDir))
-  ) {
-    return workspaceCodeStateDir(workingDir);
-  }
-  return resolve(workingDir, ".devintern-code");
+  return codeStateDirFor(workingDir);
 }
 
 function relayStatePath(workingDir: string): string {
@@ -314,8 +308,7 @@ async function resolveAccessToken(deps: RelayConnectDeps = {}): Promise<string> 
     return deps.getAccessToken();
   }
   const primaryDir = deps.workingDir ?? process.cwd();
-  const isWorkspace =
-    existsSync(workspaceConfigPath(primaryDir)) || existsSync(workspaceCodeStateDir(primaryDir));
+  const isWorkspace = isWorkspaceHome(primaryDir);
   const workingDirs = isWorkspace ? [primaryDir] : [...new Set([primaryDir, process.cwd()])];
   let lastError: unknown;
   for (const workingDir of workingDirs) {

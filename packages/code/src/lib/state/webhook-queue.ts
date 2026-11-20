@@ -12,6 +12,7 @@ import { dirname, join } from "path";
 
 import { findConfigDir } from "@devintern/utils";
 import { ensureGitInfoExcluded } from "../utils/git-exclude";
+import { hasWorkspace, workspaceDbPath } from "../workspace/paths";
 import { configureSqliteConnection } from "./sqlite";
 import {
   RowParseError,
@@ -108,6 +109,7 @@ const BASE_SYNC_EVENT_STATUSES = [
 
 /**
  * Resolve the queue database path: `WEBHOOK_QUEUE_DB` env override, otherwise
+ * the workspace DB when run from a workspace home, otherwise
  * `queue.db` inside the nearest `.devintern-code` directory so queue state,
  * cursors, and run records persist across reboots.
  *
@@ -122,8 +124,13 @@ export function resolveQueueDbPath(projectDir: string = process.cwd()): string {
     return process.env.WEBHOOK_QUEUE_DB;
   }
 
-  const configDir = findConfigDir({ configDirName: ".devintern-code", startDir: projectDir });
-  return join(configDir ?? join(projectDir, ".devintern-code"), "queue.db");
+  const configDir =
+    findConfigDir({ configDirName: ".devintern-code", startDir: projectDir }) ??
+    join(projectDir, ".devintern-code");
+  // From the workspace home itself, use the workspace DB rather than creating
+  // a stray `<workspace>/.devintern-code/queue.db`.
+  const owner = dirname(configDir);
+  return hasWorkspace(owner) ? workspaceDbPath(owner) : join(configDir, "queue.db");
 }
 
 /** Local ignore pattern for the state database, at any depth. */

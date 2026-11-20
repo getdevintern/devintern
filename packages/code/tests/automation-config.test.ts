@@ -1,13 +1,46 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
 
 import {
   automationTaskArgs,
   nextScheduleOccurrence,
-  parseAutomationConfig,
+  parseAutomationEntries,
   parseAutomationInterval,
   parseCronOrIntervalSchedule,
+  warnIgnoredProjectAutomations,
 } from "../src/lib/automation/config";
 import { parseWorkspaceConfig } from "../src/lib/workspace/config";
+import { parseToml } from "../src/lib/workspace/toml";
+
+/** Parse `[[automations]]` from TOML text, throwing on any validation error. */
+function parseAutomationConfig(text: string) {
+  const result = parseAutomationEntries(parseToml(text).automations, {
+    sourceLabel: "automations",
+  });
+  if (result.errors.length > 0) {
+    throw new Error(`Invalid automations:\n- ${result.errors.join("\n- ")}`);
+  }
+  return result.automations;
+}
+
+describe("project automations.toml", () => {
+  test("warns that the file is ignored", () => {
+    const dir = mkdtempSync(join(tmpdir(), "automations-toml-"));
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(warnIgnoredProjectAutomations(dir)).toBe(false);
+      mkdirSync(join(dir, ".devintern-code"));
+      writeFileSync(join(dir, ".devintern-code", "automations.toml"), "");
+      expect(warnIgnoredProjectAutomations(dir)).toBe(true);
+      expect(String(warn.mock.calls[1]?.[0])).toContain("workspace.toml");
+    } finally {
+      warn.mockRestore();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("automation configuration", () => {
   test("parses cron and interval entries including multiline prompts", () => {
