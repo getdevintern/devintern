@@ -23,7 +23,7 @@ GitLab works in two independent roles, on GitLab.com or GitLab Self-Managed:
 
 ## Setup (issue tracker)
 
-Set in `.devintern-code/.env`:
+Set in this repository's env file (`~/.devintern/env/<repo>.env`, created by `devintern init`):
 
 | Variable               | Required | Description                                                                                   |
 | ---------------------- | -------- | --------------------------------------------------------------------------------------------- |
@@ -52,27 +52,20 @@ Files embedded in the issue (`/uploads/...`) are downloaded for the agent. Use `
 
 ## Status mapping
 
-Statuses map to labels. Create the labels in the project, then configure them in `.devintern-code/settings.json`, keyed by the project path. A status of `closed` or `done` closes the issue; moving back to an open status reopens it.
+Statuses map to labels. Create the labels in the project, then configure them under `[trackers]` in `~/.devintern/workspace.toml`, keyed by the project path. A status of `closed` or `done` closes the issue; moving back to an open status reopens it.
 
-```json
-{
-  "gitlab": {
-    "projects": {
-      "acme/team/webapp": {
-        "inProgressStatus": "In Progress",
-        "todoStatus": "To Do",
-        "prStatus": "In Review"
-      }
-    }
-  }
-}
+```toml
+[trackers.gitlab.projects."acme/team/webapp"]
+in_progress_status = "In Progress"
+todo_status = "To Do"
+pr_status = "In Review"
 ```
 
 | Field              | When it is applied                                   |
 | ------------------ | ---------------------------------------------------- |
-| `inProgressStatus` | Implementation starts (after the feasibility check)  |
-| `prStatus`         | A pull or merge request is created                   |
-| `todoStatus`       | The run is incomplete, fails, or hits the turn limit |
+| `in_progress_status` | Implementation starts (after the feasibility check)  |
+| `pr_status`         | A pull or merge request is created                   |
+| `todo_status`       | The run is incomplete, fails, or hits the turn limit |
 
 ## Worker notes
 
@@ -82,7 +75,7 @@ Statuses map to labels. Create the labels in the project, then configure them in
 
 ## Advanced: merge requests and webhooks
 
-GitLab code-host support is **experimental**. Enable it with a separate code-host profile in `.devintern-code/.env`:
+GitLab code-host support is **experimental**. Enable it with a separate code-host profile in this repository's env file (`~/.devintern/env/<repo>.env`, created by `devintern init`):
 
 | Variable                                  | Description                                                                                       |
 | ----------------------------------------- | ------------------------------------------------------------------------------------------------- |
@@ -135,6 +128,6 @@ Point the project webhook at `https://your-host.example/webhooks/gitlab` with th
 | --------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
 | `Missing required GitLab credentials`         | Set `GITLAB_TOKEN` and `GITLAB_PROJECT`.                                                              |
 | `GitLab API error (401)`                      | The token is from another instance than `GITLAB_BASE_URL`, has expired, or lacks the `api` scope.     |
-| `Label "In Progress" not found in the project` | Create the label (Issues → Labels) or change the names in `settings.json`; the error lists existing labels. |
+| `Label "In Progress" not found in the project` | Create the label (Issues → Labels) or change the names in `[trackers]`; the error lists existing labels. |
 | Old status labels pile up                     | Set `GITLAB_STATUS_LABELS` to the full list of status labels.                                          |
 | Relay hook setup fails                        | The token needs Maintainer or Owner access; polling keeps working meanwhile.                           |

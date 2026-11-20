@@ -78,7 +78,7 @@ After=network.target
 WorkingDirectory=/path/to/your/project
 # devintern runs on bun; pin PATH so it resolves (check: dirname "$(which bun)")
 Environment=PATH=/home/you/.bun/bin:/usr/local/bin:/usr/bin
-EnvironmentFile=/path/to/your/project/.devintern-code/.env
+EnvironmentFile=/home/you/.devintern/env/<repo>.env
 ExecStart=/home/you/.bun/bin/devintern webhook serve --port 3000
 Restart=always
 RestartSec=10

@@ -20,7 +20,7 @@ DevIntern Code reads an Asana task (notes, tags, attachments, comments), checks 
 
 ## Setup
 
-Set in `.devintern-code/.env`:
+Set in this repository's env file (`~/.devintern/env/<repo>.env`, created by `devintern init`):
 
 | Variable                    | Required    | Description                                                                                       |
 | --------------------------- | ----------- | ------------------------------------------------------------------------------------------------- |
@@ -51,27 +51,20 @@ Use `--skip-clarity-check` to skip the feasibility check and `--skip-comments` t
 
 ## Status mapping
 
-Asana has no workflow states, so statuses map to project sections. Configure them in `.devintern-code/settings.json`, keyed by the project GID. Section names are matched case-insensitively; a status of `done`, `completed`, or `closed` marks the task complete instead.
+Asana has no workflow states, so statuses map to project sections. Configure them under `[trackers]` in `~/.devintern/workspace.toml`, keyed by the project GID. Section names are matched case-insensitively; a status of `done`, `completed`, or `closed` marks the task complete instead.
 
-```json
-{
-  "asana": {
-    "projects": {
-      "1200000000000000": {
-        "inProgressStatus": "In Progress",
-        "todoStatus": "To Do",
-        "prStatus": "In Review"
-      }
-    }
-  }
-}
+```toml
+[trackers.asana.projects.1200000000000000]
+in_progress_status = "In Progress"
+todo_status = "To Do"
+pr_status = "In Review"
 ```
 
 | Field              | When it is applied                                   |
 | ------------------ | ---------------------------------------------------- |
-| `inProgressStatus` | Implementation starts (after the feasibility check)  |
-| `prStatus`         | A pull request is created                            |
-| `todoStatus`       | The run is incomplete, fails, or hits the turn limit |
+| `in_progress_status` | Implementation starts (after the feasibility check)  |
+| `pr_status`         | A pull request is created                            |
+| `todo_status`       | The run is incomplete, fails, or hits the turn limit |
 
 ## Worker notes
 

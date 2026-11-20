@@ -25,7 +25,7 @@ To redo a run that completed, move the ticket back to your to-do status, optiona
 
 ## Tickets already actioned after a PR
 
-Once the worker opens a PR for a ticket, it records the ticket as **actioned** and skips it, even if it still matches `task_query`. This stops label-based trackers (GitHub, GitLab) from re-implementing an open issue in a loop. If `prStatus` is set in `.devintern-code/settings.json`, the ticket is also moved to that status. The record is kept even if that move fails.
+Once the worker opens a PR for a ticket, it records the ticket as **actioned** and skips it, even if it still matches `task_query`. This stops label-based trackers (GitHub, GitLab) from re-implementing an open issue in a loop. If `pr_status` is set under `[trackers]` in `workspace.toml`, the ticket is also moved to that status. The record is kept even if that move fails.
 
 A ticket re-arms when you:
 

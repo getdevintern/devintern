@@ -36,7 +36,7 @@ If a referenced workspace file is missing or invalid, the run fails and names th
 
 ## Required ordering
 
-`pipeline.steps` is validated before the agent starts:
+`steps` is validated before the agent starts:
 
 - `clarity` may appear once, first, before `implement`.
 - `implement` must appear once, before every delivery step.
@@ -66,16 +66,14 @@ There is no `--verify` flag. Turn verification on by adding `{ "use": "verify" }
 
 ```json
 {
-  "pipeline": {
-    "steps": [
-      { "use": "implement" },
-      { "use": "commit" },
-      { "use": "verify", "prompt": "./prompts/verify.md", "onFail": "loopback", "maxIterations": 2 },
-      { "use": "verify", "prompt": "Only flag security regressions; ignore style.", "onFail": "warn", "minSeverity": "critical" },
-      { "use": "auto-review" },
-      { "use": "finalize" }
-    ]
-  }
+  "steps": [
+    { "use": "implement" },
+    { "use": "commit" },
+    { "use": "verify", "prompt": "./prompts/verify.md", "onFail": "loopback", "maxIterations": 2 },
+    { "use": "verify", "prompt": "Only flag security regressions; ignore style.", "onFail": "warn", "minSeverity": "critical" },
+    { "use": "auto-review" },
+    { "use": "finalize" }
+  ]
 }
 ```
 
@@ -110,16 +108,14 @@ Each repository can run its own pipeline: point its `[[repos]]` entry at a pipel
 
 ```json
 {
-  "pipeline": {
-    "plugins": ["./steps/run-tests.ts"],
-    "steps": [
-      { "use": "implement" },
-      { "use": "commit" },
-      { "use": "run-tests", "args": ["test", "--filter", "unit"] },
-      { "use": "verify" },
-      { "use": "finalize" }
-    ]
-  }
+  "plugins": ["./steps/run-tests.ts"],
+  "steps": [
+    { "use": "implement" },
+    { "use": "commit" },
+    { "use": "run-tests", "args": ["test", "--filter", "unit"] },
+    { "use": "verify" },
+    { "use": "finalize" }
+  ]
 }
 ```
 

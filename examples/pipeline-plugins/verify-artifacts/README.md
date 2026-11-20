@@ -15,22 +15,24 @@ without re-reading the file.
 | File                                    | Purpose                                            |
 | --------------------------------------- | -------------------------------------------------- |
 | `plugin.ts`                             | The step definition.                               |
-| `settings.json`                         | Pipeline registration.                             |
+| `pipeline.json`                         | Workspace pipeline file. |
 | `fixtures/generate.ts`                  | Tiny generator that writes a valid or invalid report. |
 | `tests/verify-artifacts.test.ts`        | Valid, missing, invalid-field, and malformed paths.|
 
 ## Setup
 
-1. Copy the plugin into your repository:
+1. Copy the plugin and its pipeline file into your workspace:
 
    ```bash
-   mkdir -p .devintern-code/steps
-   cp examples/pipeline-plugins/verify-artifacts/plugin.ts .devintern-code/steps/verify-artifacts.ts
-   bun add -d @getdevintern/code
+   mkdir -p ~/.devintern/pipelines/steps
+   cp examples/pipeline-plugins/verify-artifacts/plugin.ts ~/.devintern/pipelines/steps/verify-artifacts.ts
+   cp examples/pipeline-plugins/verify-artifacts/pipeline.json ~/.devintern/pipelines/backend.json
+   cd ~/.devintern/pipelines && bun add @getdevintern/code
    ```
 
-2. Merge the `pipeline` block from `settings.json` into
-   `.devintern-code/settings.json`.
+2. Set `pipeline_file = "pipelines/backend.json"` on the repository's
+   `[[repos]]` entry in `~/.devintern/workspace.toml` (see
+   [Install and copy a plugin](../README.md#install-and-copy-a-plugin)).
 
 3. Produce the artifact before this step runs (in your build, or a preceding
    `run-tests` step):
