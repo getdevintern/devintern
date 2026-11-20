@@ -44,7 +44,7 @@ ci_failure_fix = false
 # Merge the agent's own PRs once they are green and safe (off by default).
 # PRs touching only auto_merge_safe_paths merge with no agent run; others
 # merge only if the agent's merge-safety review says so (auto_merge_review).
-# Deny paths (plus built-ins: .github/**, CODEOWNERS, .devintern-code/**)
+# Deny paths (plus built-ins: .github/**, CODEOWNERS)
 # never auto-merge. Changes apply without a restart.
 # auto_merge = true
 # auto_merge_safe_paths = ["**/*.md", "docs/**"]
@@ -545,7 +545,6 @@ export async function runWorkerAddRepo(
   } else {
     log("   Add a [[routing.rules]] entry so tasks route to this repo.");
   }
-  log("   Note: .devintern-code/settings.json travels with the repo; nothing to migrate.");
   return 0;
 }
 

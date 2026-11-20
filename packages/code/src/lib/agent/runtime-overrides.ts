@@ -2,7 +2,7 @@
  * Per-task agent runtime overrides.
  *
  * The agent harness, model, and effort are normally read from the environment
- * (`.devintern-code/.env` / `--harness` flags) and resolved once per process.
+ * (workspace env files / `--harness` flags) and resolved once per process.
  * A task description can request different values for a single task; the
  * pipeline records those here for the duration of that task so the deeper
  * spawn sites (implementation, clarity check, auto-review, hook fixes) all

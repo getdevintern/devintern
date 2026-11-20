@@ -2,7 +2,7 @@
  * Retry state
  *
  * Durable record of "this task's last attempt was reported incomplete",
- * persisted in the shared `.devintern-code/queue.db` (previously a loose
+ * persisted in the shared workspace `queue.db` (previously a loose
  * `incomplete-task-description.txt` under the output directory, which was
  * per-machine and wiped with /tmp).
  *

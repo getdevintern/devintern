@@ -16,7 +16,11 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, join, resolve } from "path";
 
-import { codeStateDirFor, legacyWorkspaceConfigDir } from "../../workspace/paths";
+import {
+  codeStateDirFor,
+  legacyWorkspaceConfigDir,
+  resolveWorkspaceDir,
+} from "../../workspace/paths";
 
 /** Hosted DevIntern AI GitHub App (same install target as `worker connect`). */
 export const GITHUB_APP_INSTALL_URL = "https://github.com/apps/devintern-ai/installations/new";
@@ -66,7 +70,9 @@ function parseGitHubAppRecord(record: Partial<GitHubAppRecord>): GitHubAppRecord
 }
 
 /** Load all persisted pairings, migrating the original single-record shape on read. */
-export function loadGitHubAppRecords(workingDir: string = process.cwd()): GitHubAppRecord[] {
+export function loadGitHubAppRecords(
+  workingDir: string = resolveWorkspaceDir(),
+): GitHubAppRecord[] {
   const path = readableGitHubAppRecordPath(workingDir);
   if (!existsSync(path)) return [];
   try {
@@ -86,7 +92,7 @@ export function loadGitHubAppRecords(workingDir: string = process.cwd()): GitHub
 
 /** Load one persisted pairing, optionally selecting it by repository slug. */
 export function loadGitHubAppRecord(
-  workingDir: string = process.cwd(),
+  workingDir: string = resolveWorkspaceDir(),
   repo?: string,
 ): GitHubAppRecord | null {
   const records = loadGitHubAppRecords(workingDir);
@@ -98,7 +104,7 @@ export function loadGitHubAppRecord(
 /** Persist or replace one repository pairing in the workspace's `state/code/`. */
 export function saveGitHubAppRecord(
   record: GitHubAppRecord,
-  workingDir: string = process.cwd(),
+  workingDir: string = resolveWorkspaceDir(),
 ): void {
   const path = githubAppRecordPath(workingDir);
   mkdirSync(dirname(path), { recursive: true });

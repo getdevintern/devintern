@@ -89,7 +89,7 @@ Examples:
   devintern report --last --log ./run.log
   devintern report --title "Worker stops" --body-file ./notes.md --yes
   devintern report --last --print
-  devintern report --from .devintern-code/reports/report-....json
+  devintern report --from ~/.devintern/state/code/reports/report-....json
 `;
 }
 

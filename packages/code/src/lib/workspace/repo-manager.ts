@@ -24,7 +24,6 @@ import { join } from "path";
 import { randomUUID } from "crypto";
 
 import { Utils } from "../utils";
-import { excludeWorkerRuntimeFiles } from "../utils/git-exclude";
 import { withRepoGitLock } from "../utils/repo-git-lock";
 import type { RepoConfig } from "./config";
 import { reposDir, resolveWorkspaceDir, worktreesDir } from "./paths";
@@ -234,9 +233,8 @@ export class RepoManager {
    * default branch.
    *
    * PR jobs (reviews, CI fixes, base syncs) run their CLI subprocess from
-   * here: it reads the project's tracked `.devintern-code/settings.json` from
-   * its cwd, so that must be the default branch, not whatever an automation
-   * left in the base checkout. The agents themselves work in branch-scoped
+   * here, so it must be the default branch, not whatever an automation left
+   * in the base checkout. The agents themselves work in branch-scoped
    * PR worktrees. Several PR jobs share this checkout, so it is only moved
    * when it lags `origin/<branch>`, and a failed move (another job's git
    * command holding its index) keeps the previous default-branch commit
@@ -379,9 +377,6 @@ export class RepoManager {
       throw new Error(`Failed to add worktree at ${path} (${ref}): ${result.error}`);
     }
     await Utils.isolateWorktreeHooks(path);
-    // Exclude only runtime artifacts: new settings.json and .env.example
-    // must remain eligible for a worker-generated PR.
-    excludeWorkerRuntimeFiles(path);
     // Repos that still commit `.devintern-code/settings.json` keep their
     // status names: copy new tracker keys into workspace.toml [trackers].
     migrateCommittedTrackerSettings(this.workspaceDir, path);

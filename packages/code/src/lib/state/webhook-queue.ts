@@ -10,7 +10,6 @@ import { Database } from "bun:sqlite";
 import { copyFileSync, existsSync, mkdirSync } from "fs";
 import { dirname } from "path";
 
-import { ensureGitInfoExcluded } from "../utils/git-exclude";
 import { resolveWorkspaceDir, workspaceDbPath } from "../workspace/paths";
 import { configureSqliteConnection } from "./sqlite";
 import {
@@ -116,25 +115,9 @@ export function resolveQueueDbPath(): string {
   return process.env.WEBHOOK_QUEUE_DB || workspaceDbPath(resolveWorkspaceDir());
 }
 
-/** Local ignore pattern for the state database, at any depth. */
-const QUEUE_DB_IGNORE_PATTERN = "**/.devintern-code/queue.db*";
-
 /**
- * Keep the state database out of git without touching the project's committed
- * `.gitignore`, using the per-clone `.git/info/exclude`.
- *
- * Projects initialised before `.devintern-code/*` was ignored wholesale leave
- * `queue.db` untracked-but-visible, where `git add -A` sweeps it into the
- * implementation commit and `git clean` deletes it mid-run. Best-effort: any
- * failure (not a repo, read-only .git) is ignored.
- */
-function ensureDbIgnored(dbPath: string): void {
-  ensureGitInfoExcluded(dirname(dbPath), QUEUE_DB_IGNORE_PATTERN, dbPath);
-}
-
-/**
- * Create the state database's directory and keep the database itself out of
- * git. Shared by every store that opens `queue.db` for writing.
+ * Create the state database's directory. Shared by every store that opens
+ * `queue.db` for writing.
  *
  * @param dbPath - Path of the database file about to be opened
  */
@@ -143,7 +126,6 @@ export function prepareQueueDbDirectory(dbPath: string): void {
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true });
   }
-  ensureDbIgnored(dbPath);
 }
 
 /**
