@@ -1,10 +1,11 @@
 import { existsSync } from "fs";
 
-import { parseChangeRequestUrl, parseGitLabHostAliases, parseGitRemoteUrl } from "../code-host";
+import { parseChangeRequestUrl, parseGitRemoteUrl } from "../code-host";
 import { isWorkerSubprocess } from "../config/config-dir";
 import { Utils } from "../utils";
 import { loadWorkspaceConfig } from "./config";
 import { buildRepoCredentialEnv } from "./env";
+import { remoteParseOptions, sameRemoteProject } from "./manual-run";
 import { resolveWorkspaceDir, workspaceConfigPath } from "./paths";
 
 /** Worker-owned runtime paths must not move a manual command's local state. */
@@ -39,29 +40,12 @@ export async function workspaceCredentialsForChange(
   const config = loadWorkspaceConfig(configPath);
   for (const repo of config.repos) {
     const credentials = buildRepoCredentialEnv(repo, workspaceDir);
-    const gitlabBaseUrl = credentials.GITLAB_CODE_HOST_URL ?? process.env.GITLAB_CODE_HOST_URL;
-    const parseOptions = {
-      gitlabBaseUrl,
-      gitlabHostAliases: parseGitLabHostAliases(
-        credentials.GITLAB_CODE_HOST_ALIASES ?? process.env.GITLAB_CODE_HOST_ALIASES,
-      ),
-    };
+    const parseOptions = remoteParseOptions(repo, workspaceDir);
     const current = parseGitRemoteUrl(originResult.output.trim(), parseOptions);
     const registered = parseGitRemoteUrl(repo.remote, parseOptions);
-    const change = parseChangeRequestUrl(changeUrl, { gitlabBaseUrl });
+    const change = parseChangeRequestUrl(changeUrl, { gitlabBaseUrl: parseOptions.gitlabBaseUrl });
     if (!current || !registered || !change) continue;
-    const projectPath = (path: string) =>
-      change.provider === "github" ? path.toLowerCase() : path;
-    if (
-      current.provider !== change.provider ||
-      registered.provider !== change.provider ||
-      current.instanceUrl !== change.instanceUrl ||
-      registered.instanceUrl !== change.instanceUrl ||
-      projectPath(current.projectPath) !== projectPath(change.projectPath) ||
-      projectPath(registered.projectPath) !== projectPath(change.projectPath)
-    ) {
-      continue;
-    }
+    if (!sameRemoteProject(current, change) || !sameRemoteProject(registered, change)) continue;
 
     for (const key of WORKER_RUNTIME_KEYS) delete credentials[key];
     return credentials;

@@ -67,6 +67,8 @@ labels = ["frontend"]
 
 Set `manual_only = true` on a `[[repos]]` entry for a repository you only run by hand from your own checkout. The worker skips it: no clone, no polling, no routing, automations, or `worker add` tasks. A workspace whose repos are all manual-only does not need `[defaults].tracker`.
 
+Running `devintern <TASK>` inside a checkout whose `origin` matches a `[[repos]]` entry (manual-only or not) uses that workspace: the shared `.env`, the repo's `env_file` and `[repos.env]`, `[trackers]` settings, pipelines, prompt overrides, sign-in, and run history. The checkout's own `.devintern-code/.env` is not read. A ticket being worked on by the worker cannot be started by hand at the same time (and the reverse); the worker retries its run later.
+
 Keys not shown here are documented on the page for their feature:
 
 | Keys                                                                                                     | Page                                                                               |
