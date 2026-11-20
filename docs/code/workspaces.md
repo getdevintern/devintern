@@ -144,7 +144,7 @@ remote = "git@github.com:acme/backend.git"
 pipeline_file = "pipelines/backend.json"   # this repo only
 ```
 
-Exactly one pipeline runs per task, chosen in this order: the running automation's `[[automations]].pipeline_file`, the repo's `pipeline_file`, the repository's checked-in `.devintern-code/settings.json` pipeline, `[defaults].pipeline_file`, then the built-in default. Relative plugin and prompt paths in a `pipeline_file` resolve against that file's directory, so install plugin dependencies there. An invalid pipeline fails the run with the file named. See [Customizing the Task Pipeline](./pipelines.md) for steps and plugins.
+Exactly one pipeline runs per task, chosen in this order: the running automation's `[[automations]].pipeline_file`, the repo's `pipeline_file`, `[defaults].pipeline_file`, then the built-in default. The worker ignores a `pipeline` block in a repository's `.devintern-code/settings.json`. Relative plugin and prompt paths in a `pipeline_file` resolve against that file's directory, so install plugin dependencies there. An invalid pipeline fails the run with the file named. See [Customizing the Task Pipeline](./pipelines.md) for steps and plugins.
 
 ## Bounded host concurrency
 

@@ -36,8 +36,7 @@ process.on("exit", () => {
 });
 
 // Ambient prompt overrides make prompt-rendering tests non-hermetic: a
-// developer's DEVINTERN_PROMPTS_DIR (or an ancestor `.devintern-code/prompts/`)
-// would silently change their results. The same applies to the rest of the
+// developer's DEVINTERN_PROMPTS_DIR would silently change their results. The same applies to the rest of the
 // worker-injected environment when an agent runs the suite from inside a
 // worker task subprocess, so strip the whole set from the child environment
 // and let the per-file guard handle in-process code.

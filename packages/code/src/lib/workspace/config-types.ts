@@ -253,4 +253,9 @@ export interface WorkspaceConfig {
   routing: RoutingRule[];
   automations: AutomationConfig[];
   estimations: EstimationConfig[];
+  /**
+   * Tracker project settings from `[trackers.<tracker>.projects.<key>]`
+   * (status names, story-points field), in the `settings.json` shape.
+   */
+  trackerSettings?: import("../../types/settings").ProjectSettings;
 }

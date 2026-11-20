@@ -251,7 +251,7 @@ export async function recoverOrphanedWorkspaceRuns(options: {
         .filter(existsSync),
       workspaceDir,
     ];
-    const settings = loadProjectSettingsFrom(settingsDirs);
+    const settings = loadProjectSettingsFrom(settingsDirs, config.trackerSettings ?? null);
     const trackerType = config.defaults.tracker || "multi-team";
     retryStore = new RetryStateStore(dbPath);
 
