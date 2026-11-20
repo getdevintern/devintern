@@ -143,7 +143,7 @@ Changes apply to the next occurrence; a run in progress keeps its agent.
 - Changing an entry's schedule resets it: the next run is the next scheduled time.
 - Occurrences skip the clarity (feasibility) check.
 
-In a multi-repo workspace an occurrence runs in the repository's persistent base checkout (`~/.devintern/worktrees/<repo>/base`), reset to the default branch first, with the same environment layers as the repo's tasks: shared `.env`, then the repo's `env_file`, then `[repos.env]`. It takes the per-repo lock, so it never runs at the same time as a task in that repo.
+In a multi-repo workspace an occurrence runs in the repository's persistent base checkout (`~/.devintern/worktrees/<repo>/base`), reset to the default branch first, with the same environment layers as the repo's tasks: shared `.env`, then the repo's `env_file`, then `[repos.env]`. That includes the auto-filled `GITHUB_REPO` / `GITLAB_PROJECT` described in [Workspaces → Environment](./workspaces.md#environment). It takes the per-repo lock, so it never runs at the same time as a task in that repo.
 
 Each occurrence writes its prompt to `~/.devintern/automations/<id>/<timestamp>.md`. To rerun one by hand:
 

@@ -125,6 +125,43 @@ describe("buildRepoRunEnv", () => {
     );
   });
 
+  test("a team's namespaced workspace values apply, matching polled team tasks", () => {
+    writeFileSync(
+      join(workspaceDir, ".env"),
+      "GITHUB_TOKEN=shared-org-token\nGITHUB_ROUTED_TOKEN=namespaced-token\n",
+    );
+    const repo = findRepo(CONFIG, "plain")!;
+    const resolved = resolveCredentialTeam(CONFIG, repo.name, "routed");
+    const env = buildRepoRunEnv(repo, resolved.ok ? resolved.team : undefined, workspaceDir);
+    // The inline team value still wins over the namespaced form.
+    expect(env.GITHUB_TOKEN).toBe("routed-token");
+
+    const noInline = parseWorkspaceConfig(`
+[defaults]
+tracker = "markdown"
+task_query = "is:open label:devintern"
+
+[[teams]]
+name = "platform"
+tracker = "gitlab"
+
+[[repos]]
+name = "plain"
+remote = "git@github.com:acme/plain.git"
+`);
+    writeFileSync(
+      join(workspaceDir, ".env"),
+      "GITLAB_PROJECT=shared/issues\nGITLAB_PLATFORM_PROJECT=platform/issues\n",
+    );
+    const platform = resolveCredentialTeam(noInline, "plain", "platform");
+    const platformEnv = buildRepoRunEnv(
+      findRepo(noInline, "plain")!,
+      platform.ok ? platform.team : undefined,
+      workspaceDir,
+    );
+    expect(platformEnv.GITLAB_PROJECT).toBe("platform/issues");
+  });
+
   test("a fixed team's env_file and inline env layer over the shared workspace .env", () => {
     const repo = findRepo(CONFIG, "x-rep")!;
     const resolved = resolveCredentialTeam(CONFIG, repo.name);
