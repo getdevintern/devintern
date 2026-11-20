@@ -26,23 +26,40 @@ import type { DependencyFacts, DependencyMode } from "../dependencies/gate";
 import { isDependencyMode } from "../dependencies/gate";
 import { orderStackLinks } from "../dependencies/stack-maintainer";
 import type { StackLink } from "../dependencies/stack-maintainer";
+import { initInjectedTaskSchema } from "./injected-tasks-schema";
 import { prepareQueueDbDirectory } from "./webhook-queue";
 import { configureSqliteConnection } from "./sqlite";
 import type { RunRecord } from "./run-recorder";
-import {
-  addAutoResumeColumn,
-  addChildPidColumn,
-  addChildStartedAtColumn,
-  addColumnIfMissing,
-} from "./injected-tasks-migrations";
-
 export {
   addAutoResumeColumn,
   addChildPidColumn,
   addChildStartedAtColumn,
 } from "./injected-tasks-migrations";
 
-export type InjectedTaskStatus = "pending" | "running" | "done" | "failed";
+export type InjectedTaskStatus = "pending" | "running" | "done" | "failed" | "cancelled";
+
+/** Terminal statuses: the row will not run again without an explicit re-queue. */
+export type SettledInjectedTaskStatus = "done" | "failed" | "cancelled";
+
+/** Who withdrew a pending row (`worker cancel` or the dashboard Cancel action). */
+export type InjectedCancelActor = "cli" | "dashboard";
+
+/**
+ * Result of {@link InjectedTaskStore.cancel}. Only `cancelled` changed the row;
+ * every other outcome left it exactly as it was.
+ */
+export type InjectedCancelOutcome =
+  | "cancelled"
+  | "already_cancelled"
+  | "already_started"
+  | "already_finished"
+  | "not_found";
+
+export interface InjectedCancelResult {
+  outcome: InjectedCancelOutcome;
+  /** The row after the attempt; unset for `not_found`. */
+  task?: InjectedTask;
+}
 
 /**
  * Why a pending task with dependencies cannot be claimed yet: `waiting` for a
@@ -128,7 +145,12 @@ export interface InjectedTask {
   dependencyReason?: string;
   createdAt: number;
   startedAt?: number;
+  /** When the row settled; for a `cancelled` row, the cancel time. */
   finishedAt?: number;
+  /** Who cancelled the row (set only when `status` is `cancelled`). */
+  cancelledBy?: InjectedCancelActor;
+  /** Optional operator reason given with the cancel. */
+  cancelReason?: string;
 }
 
 interface InjectedTaskRow {
@@ -152,6 +174,8 @@ interface InjectedTaskRow {
   dependency_mode?: string | null;
   dependency_state?: string | null;
   dependency_reason?: string | null;
+  cancelled_by?: string | null;
+  cancel_reason?: string | null;
   created_at: number;
   started_at: number | null;
   finished_at: number | null;
@@ -198,6 +222,9 @@ function rowToInjectedTask(row: InjectedTaskRow): InjectedTask {
     createdAt: row.created_at,
     startedAt: row.started_at ?? undefined,
     finishedAt: row.finished_at ?? undefined,
+    cancelledBy:
+      row.cancelled_by === "cli" || row.cancelled_by === "dashboard" ? row.cancelled_by : undefined,
+    cancelReason: row.cancel_reason ?? undefined,
   };
 }
 
@@ -254,6 +281,11 @@ export class InjectedTaskStore {
     private options: { readonly?: boolean } = {},
   ) {}
 
+  /** Database file holding `injected_tasks` (the workspace queue DB, shared with run records). */
+  get path(): string {
+    return this.dbPath;
+  }
+
   /** Whether `close()` has released this store's connection. */
   isClosed(): boolean {
     return this.closed;
@@ -284,105 +316,7 @@ export class InjectedTaskStore {
     prepareQueueDbDirectory(this.dbPath);
     this.db = new Database(this.dbPath);
     configureSqliteConnection(this.db);
-    this.db.run(`
-      CREATE TABLE IF NOT EXISTS injected_tasks (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        task_key TEXT NOT NULL,
-        repo TEXT NOT NULL,
-        title TEXT NOT NULL,
-        body TEXT NOT NULL DEFAULT '',
-        task_file TEXT NOT NULL,
-        idempotency_key TEXT,
-        actor TEXT NOT NULL,
-        status TEXT NOT NULL DEFAULT 'pending',
-        message TEXT,
-        auto_resume_count INTEGER NOT NULL DEFAULT 0,
-        child_pid INTEGER,
-        child_started_at INTEGER,
-        defer_count INTEGER NOT NULL DEFAULT 0,
-        not_before INTEGER,
-        depends_on TEXT,
-        dependency_mode TEXT,
-        dependency_state TEXT,
-        dependency_reason TEXT,
-        stacked_on TEXT,
-        stack_base_sha TEXT,
-        stack_notice TEXT,
-        created_at INTEGER NOT NULL,
-        started_at INTEGER,
-        finished_at INTEGER,
-        team TEXT
-      )
-    `);
-    this.db.run(`
-      CREATE TABLE IF NOT EXISTS pruned_injected_task_outcomes (
-        task_id INTEGER PRIMARY KEY,
-        repo TEXT NOT NULL,
-        status TEXT NOT NULL,
-        message TEXT,
-        archived_at INTEGER NOT NULL
-      )
-    `);
-    // Older databases predate the durable auto-resume budget; add the column
-    // in place instead of requiring a migration step.
-    const columns = this.db.query("PRAGMA table_info(injected_tasks)").all() as Array<{
-      name: string;
-    }>;
-    if (!columns.some((column) => column.name === "auto_resume_count")) {
-      addAutoResumeColumn(this.db);
-    }
-    if (!columns.some((column) => column.name === "child_pid")) {
-      addChildPidColumn(this.db);
-    }
-    if (!columns.some((column) => column.name === "child_started_at")) {
-      addChildStartedAtColumn(this.db);
-    }
-    if (!columns.some((column) => column.name === "defer_count")) {
-      addColumnIfMissing(this.db, "defer_count INTEGER NOT NULL DEFAULT 0");
-    }
-    if (!columns.some((column) => column.name === "not_before")) {
-      addColumnIfMissing(this.db, "not_before INTEGER");
-    }
-    if (!columns.some((column) => column.name === "team")) {
-      addColumnIfMissing(this.db, "team TEXT");
-    }
-    for (const name of [
-      "depends_on",
-      "dependency_mode",
-      "dependency_state",
-      "dependency_reason",
-      "stacked_on",
-      "stack_base_sha",
-      "stack_notice",
-    ]) {
-      if (!columns.some((column) => column.name === name)) {
-        addColumnIfMissing(this.db, `${name} TEXT`);
-      }
-    }
-    this.db.run("CREATE INDEX IF NOT EXISTS idx_injected_tasks_status ON injected_tasks(status)");
-    this.db.run(
-      "CREATE INDEX IF NOT EXISTS idx_injected_tasks_finished_at ON injected_tasks(finished_at)",
-    );
-    // `task_key` names the worktree/branch, so two rows sharing one key would
-    // race the same checkout. Enforce uniqueness; `enqueueNewTask` re-derives a
-    // suffixed key when a concurrent caller claims the key first.
-    try {
-      this.db.run(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_injected_tasks_task_key ON injected_tasks(task_key)",
-      );
-    } catch {
-      // A DB written before the constraint existed may already hold duplicate
-      // keys; keep the store open (with a plain index) rather than fail closed.
-      this.db.run(
-        "CREATE INDEX IF NOT EXISTS idx_injected_tasks_task_key ON injected_tasks(task_key)",
-      );
-    }
-    // A partial unique index lets any number of tasks run without an
-    // idempotency key while still deduping the ones that carry one.
-    this.db.run(
-      `CREATE UNIQUE INDEX IF NOT EXISTS idx_injected_tasks_idempotency
-       ON injected_tasks(idempotency_key) WHERE idempotency_key IS NOT NULL`,
-    );
+    initInjectedTaskSchema(this.db);
     return this.db;
   }
 
@@ -392,7 +326,7 @@ export class InjectedTaskStore {
    *
    * When `idempotencyKey` matches a `pending`/`running` task, that row is
    * returned and nothing is inserted, so a retried automation cannot create a
-   * duplicate. A settled (`done`/`failed`) row only retains the key as history;
+   * duplicate. A settled (`done`/`failed`/`cancelled`) row only retains the key as history;
    * it is released so the key can drive a new occurrence (e.g. a nightly job
    * that must run every night even though the key is fixed).
    */
@@ -410,7 +344,7 @@ export class InjectedTaskStore {
         // admits this new occurrence. A still-active row was handled above.
         db.run(
           `UPDATE injected_tasks SET idempotency_key = NULL
-           WHERE idempotency_key = ? AND status IN ('done', 'failed')`,
+           WHERE idempotency_key = ? AND status IN ('done', 'failed', 'cancelled')`,
           [input.idempotencyKey],
         );
       }
@@ -482,7 +416,7 @@ export class InjectedTaskStore {
   /** The exact settled outcome retained when a queue row is pruned. */
   getPrunedOutcome(
     id: number,
-  ): { repo: string; status: "done" | "failed"; message?: string } | null {
+  ): { repo: string; status: SettledInjectedTaskStatus; message?: string } | null {
     const db = this.ensureDb();
     const table = db
       .query("SELECT 1 FROM sqlite_master WHERE name = 'pruned_injected_task_outcomes'")
@@ -490,7 +424,11 @@ export class InjectedTaskStore {
     if (!table) return null;
     const row = db
       .query("SELECT repo, status, message FROM pruned_injected_task_outcomes WHERE task_id = ?")
-      .get(id) as { repo: string; status: "done" | "failed"; message: string | null } | null;
+      .get(id) as {
+      repo: string;
+      status: SettledInjectedTaskStatus;
+      message: string | null;
+    } | null;
     return row ? { repo: row.repo, status: row.status, message: row.message ?? undefined } : null;
   }
 
@@ -531,6 +469,57 @@ export class InjectedTaskStore {
       )
       .get(...params) as InjectedTaskRow | null;
     return row ? rowToInjectedTask(row) : null;
+  }
+
+  /**
+   * Withdraw a `pending` row before the worker claims it.
+   *
+   * One guarded `UPDATE … WHERE status = 'pending'`, so it composes with
+   * {@link claimNext}: whichever statement commits first wins, and the loser
+   * matches no row. A cancelled row is terminal; it is never claimed, and
+   * {@link requeueSettled} refuses it. A repeated cancel keeps the first cancel
+   * time, actor, and reason. The prompt file stays until {@link pruneSettled}.
+   *
+   * @param taskKey - Ad-hoc key (`local-…`) naming the row
+   * @param options - Audit actor, optional free-text reason, and clock (tests)
+   */
+  cancel(
+    taskKey: string,
+    options: { actor: InjectedCancelActor; reason?: string; now?: number },
+  ): InjectedCancelResult {
+    const db = this.ensureDb();
+    const reason = options.reason?.trim() ? options.reason.trim() : null;
+    // `.immediate()` takes the write lock at BEGIN, so no claim, requeue, or
+    // recovery in another process can change the row between the guarded
+    // UPDATE and the read that explains why it did not match. A row read back
+    // as `pending` is therefore impossible, and the outcome is never wrong.
+    return db
+      .transaction((): InjectedCancelResult => {
+        const cancelled = db
+          .query(
+            `UPDATE injected_tasks
+             SET status = 'cancelled', finished_at = ?, cancelled_by = ?, cancel_reason = ?,
+                 child_pid = NULL, child_started_at = NULL
+             WHERE task_key = ? AND status = 'pending'
+             RETURNING *`,
+          )
+          .get(options.now ?? Date.now(), options.actor, reason, taskKey) as InjectedTaskRow | null;
+        if (cancelled) return { outcome: "cancelled", task: rowToInjectedTask(cancelled) };
+        const current = this.getByTaskKey(taskKey);
+        if (!current) return { outcome: "not_found" };
+        switch (current.status) {
+          case "cancelled":
+            return { outcome: "already_cancelled", task: current };
+          case "pending":
+          case "running":
+            // `pending` cannot be read here (see above); treat it like a claim
+            // rather than report a cancel that did not happen.
+            return { outcome: "already_started", task: current };
+          default:
+            return { outcome: "already_finished", task: current };
+        }
+      })
+      .immediate();
   }
 
   /**
@@ -870,6 +859,21 @@ export class InjectedTaskStore {
     return rows.map(rowToInjectedTask);
   }
 
+  /**
+   * Most recently cancelled rows (dashboard and `worker queue` audit view).
+   *
+   * @param limit - Maximum rows to return
+   */
+  listRecentlyCancelled(limit = 10): InjectedTask[] {
+    const rows = this.ensureDb()
+      .query(
+        `SELECT * FROM injected_tasks WHERE status = 'cancelled'
+         ORDER BY COALESCE(finished_at, created_at) DESC, id DESC LIMIT ?`,
+      )
+      .all(limit) as InjectedTaskRow[];
+    return rows.map(rowToInjectedTask);
+  }
+
   /** Whether any pending task exists (worker startup diagnostics). */
   hasPending(): boolean {
     const row = this.ensureDb()
@@ -879,7 +883,7 @@ export class InjectedTaskStore {
   }
 
   /**
-   * Delete settled (`done`/`failed`) rows older than `olderThanMs` so a
+   * Delete settled (`done`/`failed`/`cancelled`) rows older than `olderThanMs` so a
    * long-lived worker's `injected_tasks` table cannot grow without bound.
    * Runs still in flight are never touched.
    *
@@ -903,8 +907,9 @@ export class InjectedTaskStore {
     const { settled, result } = db.transaction(() => {
       const settled = db
         .query(
-          `SELECT id, repo, status, message, task_file FROM injected_tasks
-           WHERE status IN ('done', 'failed')
+          `SELECT id, repo, status, COALESCE(message, cancel_reason) AS message, task_file
+           FROM injected_tasks
+           WHERE status IN ('done', 'failed', 'cancelled')
              AND COALESCE(finished_at, created_at) < ?`,
         )
         .all(cutoff) as Array<{
@@ -923,7 +928,7 @@ export class InjectedTaskStore {
       for (const row of settled) save.run(row.id, row.repo, row.status, row.message, now);
       const result = db.run(
         `DELETE FROM injected_tasks
-         WHERE status IN ('done', 'failed')
+         WHERE status IN ('done', 'failed', 'cancelled')
            AND COALESCE(finished_at, created_at) < ?`,
         [cutoff],
       );

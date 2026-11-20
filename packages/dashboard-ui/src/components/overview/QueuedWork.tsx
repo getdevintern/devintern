@@ -3,16 +3,20 @@
  * started (ad-hoc tasks, dashboard retries, webhook deliveries, automations
  * waiting for a free slot, and PR jobs waiting for a slot or for their PR). Closed by
  * default so active work keeps the panel; each row opens in place to show
- * what will run, for which repo, and why it may be held back.
+ * what will run, for which repo, and why it may be held back. A pending
+ * ad-hoc task can be cancelled from its row before the worker claims it.
  */
 
 import { ArrowRight, ChevronRight } from "lucide-react";
+import { useState } from "react";
 import type { ReactNode } from "react";
 
 import { formatIn } from "@/components/overview/overview-model";
 import { TaskDescription } from "@/components/TaskDescription";
 import { TicketKey } from "@/components/TicketKey";
-import type { QueuedWorkItem, QueuedWorkKind } from "@/lib/api";
+import { Button } from "@/components/ui/button";
+import { cancelTask, notifyQueueChanged } from "@/lib/api";
+import type { CancelledTaskItem, QueuedWorkItem, QueuedWorkKind } from "@/lib/api";
 import { automationHash, runHash } from "@/lib/routes";
 import { formatPastTime, formatTime } from "@/lib/utils";
 
@@ -60,7 +64,95 @@ function Fact({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
-function QueuedDetails({ item, now }: { item: QueuedWorkItem; now: number }) {
+/** Confirmation shown before a pending ad-hoc task is withdrawn. */
+export function cancelConfirmText(item: Pick<QueuedWorkItem, "taskKey" | "title">): string {
+  return `"${item.title}" (${item.taskKey}) will not run, and no branch or PR is created.`;
+}
+
+/**
+ * Cancel action for one pending ad-hoc row. A row the worker claimed after
+ * the list loaded reports "already started" and stays as it is.
+ */
+function CancelTaskControl({
+  item,
+  onCancelled,
+}: {
+  item: QueuedWorkItem;
+  onCancelled: (id: string) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const taskKey = item.taskKey;
+  if (!taskKey) return null;
+  const cancel = async () => {
+    setConfirming(false);
+    setBusy(true);
+    setNotice(null);
+    const result = await cancelTask(taskKey);
+    setBusy(false);
+    if (result.ok) {
+      onCancelled(item.id);
+    } else {
+      setNotice(result.error);
+    }
+    // Either outcome changed what the queue shows; refresh every count now.
+    notifyQueueChanged();
+  };
+  if (confirming) {
+    return (
+      <div className="aq-confirm" role="group" aria-labelledby={`aq-confirm-${item.id}`}>
+        <p id={`aq-confirm-${item.id}`} className="aq-confirm-title">
+          Cancel this task?
+        </p>
+        <p className="aq-confirm-text">{cancelConfirmText(item)}</p>
+        <div className="aq-actions">
+          <Button
+            type="button"
+            variant="destructive"
+            size="sm"
+            data-confirm-cancel=""
+            onClick={() => void cancel()}
+          >
+            Cancel task
+          </Button>
+          <Button type="button" variant="outline" size="sm" onClick={() => setConfirming(false)}>
+            Keep task
+          </Button>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className="aq-actions">
+      <Button
+        type="button"
+        variant="destructive"
+        size="sm"
+        aria-busy={busy || undefined}
+        disabled={busy}
+        onClick={() => setConfirming(true)}
+      >
+        {busy ? "Cancelling…" : "Cancel task"}
+      </Button>
+      {notice ? (
+        <p className="text-xs text-danger" role="alert">
+          {notice}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+function QueuedDetails({
+  item,
+  now,
+  onCancelled,
+}: {
+  item: QueuedWorkItem;
+  now: number;
+  onCancelled: (id: string) => void;
+}) {
   const held = heldUntil(item, now);
   return (
     <div className="aq-body">
@@ -125,18 +217,29 @@ function QueuedDetails({ item, now }: { item: QueuedWorkItem; now: number }) {
         </a>
       ) : null}
       {item.kind === "ad-hoc" ? (
-        <div className="aq-prompt">
-          <TaskDescription description={item.body} title={item.title} />
-          {item.bodyTruncated ? (
-            <p className="mt-2 text-xs text-subtle-foreground">Prompt shortened for display.</p>
-          ) : null}
-        </div>
+        <>
+          <div className="aq-prompt">
+            <TaskDescription description={item.body} title={item.title} />
+            {item.bodyTruncated ? (
+              <p className="mt-2 text-xs text-subtle-foreground">Prompt shortened for display.</p>
+            ) : null}
+          </div>
+          <CancelTaskControl item={item} onCancelled={onCancelled} />
+        </>
       ) : null}
     </div>
   );
 }
 
-function QueuedRow({ item, now }: { item: QueuedWorkItem; now: number }) {
+function QueuedRow({
+  item,
+  now,
+  onCancelled,
+}: {
+  item: QueuedWorkItem;
+  now: number;
+  onCancelled: (id: string) => void;
+}) {
   const held = heldUntil(item, now);
   const detail = statusDetail(item, now);
   const repo = item.repo?.split("/").pop();
@@ -185,37 +288,90 @@ function QueuedRow({ item, now }: { item: QueuedWorkItem; now: number }) {
             </time>
           )}
         </summary>
-        <QueuedDetails item={item} now={now} />
+        <QueuedDetails item={item} now={now} onCancelled={onCancelled} />
       </details>
     </li>
   );
 }
 
-/** A closed disclosure of pending work; renders nothing when the queue is empty. */
+const CANCEL_SOURCE_LABELS: Record<NonNullable<CancelledTaskItem["cancelledBy"]>, string> = {
+  cli: "the CLI",
+  dashboard: "the dashboard",
+};
+
+/** Where a task was cancelled from and when, e.g. `Cancelled from the dashboard 5m ago`. */
+function cancelledLine(item: CancelledTaskItem, now: number): string {
+  const by = item.cancelledBy ? ` from ${CANCEL_SOURCE_LABELS[item.cancelledBy]}` : "";
+  const when = item.cancelledAt !== undefined ? ` ${formatPastTime(item.cancelledAt, now)}` : "";
+  return `Cancelled${by}${when}`;
+}
+
+/** Recently cancelled ad-hoc tasks: the audit trail of what will not run. */
+function CancelledList({ items, now }: { items: CancelledTaskItem[]; now: number }) {
+  if (items.length === 0) return null;
+  return (
+    <div className="aq-cancelled">
+      <p className="aq-cancelled-title">Recently cancelled</p>
+      <ul aria-label="Recently cancelled tasks">
+        {items.map((item) => (
+          <li key={item.id} className="aq-cancelled-row">
+            <span className="aq-title" title={item.title}>
+              {item.title}
+            </span>
+            <span
+              className="text-subtle-foreground"
+              title={item.cancelledAt !== undefined ? formatTime(item.cancelledAt) : undefined}
+            >
+              {item.taskKey} · {item.repo.split("/").pop()} · {cancelledLine(item, now)}
+              {item.cancelReason ? ` · ${item.cancelReason}` : ""}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/**
+ * A closed disclosure of pending work; renders nothing when nothing is queued
+ * and nothing was cancelled recently.
+ */
 export function QueuedWork({
   items,
   total,
+  cancelled = [],
   now,
 }: {
   items: QueuedWorkItem[];
   /** Every pending item, including any beyond `items`. */
   total: number;
+  /** Recently cancelled ad-hoc tasks, newest first. */
+  cancelled?: CancelledTaskItem[];
   now: number;
 }) {
-  if (items.length === 0) return null;
-  const hidden = Math.max(0, total - items.length);
+  // Rows cancelled here disappear at once, before the next poll confirms it.
+  const [withdrawn, setWithdrawn] = useState<ReadonlySet<string>>(() => new Set());
+  const visible = items.filter((item) => !withdrawn.has(item.id));
+  const shownTotal = Math.max(visible.length, total - (items.length - visible.length));
+  const onCancelled = (id: string) => setWithdrawn((current) => new Set(current).add(id));
+  if (visible.length === 0 && cancelled.length === 0 && withdrawn.size === 0) return null;
+  const hidden = Math.max(0, shownTotal - visible.length);
+  const next = visible[0];
   return (
     <details className="aw-finished aw-queued">
       <summary>
         <ChevronRight className="size-4" aria-hidden="true" />
-        Queued <span className="aw-count">{total}</span>
-        <span className="aq-next" title={items[0]!.title}>
-          next: {items[0]!.title}
-        </span>
+        Queued <span className="aw-count">{shownTotal}</span>
+        {next ? (
+          <span className="aq-next" title={next.title}>
+            next: {next.title}
+          </span>
+        ) : null}
       </summary>
+      {visible.length === 0 ? <p className="aq-more">Nothing queued.</p> : null}
       <ul className="aw-list" aria-label="Queued work">
-        {items.map((item) => (
-          <QueuedRow key={item.id} item={item} now={now} />
+        {visible.map((item) => (
+          <QueuedRow key={item.id} item={item} now={now} onCancelled={onCancelled} />
         ))}
         {hidden > 0 ? (
           <li className="aq-more">
@@ -223,6 +379,7 @@ export function QueuedWork({
           </li>
         ) : null}
       </ul>
+      <CancelledList items={cancelled} now={now} />
     </details>
   );
 }

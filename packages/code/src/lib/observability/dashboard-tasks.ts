@@ -20,6 +20,8 @@ import {
   InjectedTaskDependencyError,
   MAX_INJECTED_BODY_CHARS,
 } from "../workspace/injected-enqueue";
+import { cancelInjectedTask, cancelSucceeded } from "../workspace/injected-cancel";
+import type { InjectedCancelOutcome } from "../state/injected-tasks";
 import { resolveDependencyMode } from "../dependencies/gate";
 import { repoGitHubSlug } from "../workspace/env";
 import { workspaceConfigPath } from "../workspace/paths";
@@ -195,5 +197,75 @@ export function handleCreateTask(data: DashboardData, raw: unknown): ApiResponse
     }
     const message = error instanceof Error ? error.message : String(error);
     return { status: 500, body: { error: `could not enqueue the task: ${message}` } };
+  }
+}
+
+/** `POST /api/tasks/:id/cancel` body (same shape as `worker cancel --json`). */
+export interface DashboardCancelTaskResponse {
+  taskKey: string;
+  outcome: InjectedCancelOutcome;
+  message: string;
+}
+
+/** Upper bound on a dashboard cancel reason (matches `worker cancel --reason`). */
+const MAX_CANCEL_REASON_CHARS = 500;
+
+const CANCEL_STATUS: Record<InjectedCancelOutcome, number> = {
+  cancelled: 200,
+  already_cancelled: 200,
+  already_started: 409,
+  already_finished: 409,
+  not_found: 404,
+};
+
+/**
+ * Cancel a pending ad-hoc task (`POST /api/tasks/:id/cancel`).
+ *
+ * `:id` is the task key (`local-…`) or the numeric queue row id. The guarded
+ * store transition only changes a still-pending row, so a row the worker
+ * claimed after the list loaded reports `already_started` (409) unchanged.
+ * The Origin/Content-Type write guard already ran in the server.
+ *
+ * @param data - Dashboard data source (owns the writable queue store)
+ * @param rawId - Path segment naming the task
+ * @param raw - Decoded JSON body (`{ reason?: string }`), or undefined
+ */
+export function handleCancelTask(data: DashboardData, rawId: string, raw: unknown): ApiResponse {
+  let id: string;
+  try {
+    id = decodeURIComponent(rawId).trim();
+  } catch {
+    return { status: 400, body: { error: "invalid task id" } };
+  }
+  if (!id) return { status: 400, body: { error: "task id is required" } };
+  let reason: string | undefined;
+  if (isRecord(raw) && raw.reason !== undefined && raw.reason !== null) {
+    if (typeof raw.reason !== "string") {
+      return { status: 400, body: { error: "reason must be a string" } };
+    }
+    if (raw.reason.length > MAX_CANCEL_REASON_CHARS) {
+      return {
+        status: 400,
+        body: { error: `reason is too long (maximum ${MAX_CANCEL_REASON_CHARS} chars)` },
+      };
+    }
+    reason = raw.reason;
+  }
+  try {
+    const store = data.getInjectedTaskStore();
+    const taskKey = /^[1-9][0-9]*$/.test(id) ? (store.getById(Number(id))?.taskKey ?? id) : id;
+    const report = cancelInjectedTask(store, taskKey, { actor: "dashboard", reason });
+    const body: DashboardCancelTaskResponse = {
+      taskKey: report.taskKey,
+      outcome: report.outcome,
+      message: report.message,
+    };
+    return {
+      status: cancelSucceeded(report.outcome) ? 200 : CANCEL_STATUS[report.outcome],
+      body,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { status: 500, body: { error: `could not cancel the task: ${message}` } };
   }
 }

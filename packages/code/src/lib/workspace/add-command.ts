@@ -8,7 +8,8 @@
  * so `[[routing.rules]]` are not consulted.
  *
  * Non-interactive by default: returns after enqueue. `--wait` blocks until
- * the run settles and exits with its success/failure status; `--json` emits a
+ * the run settles and exits with its success/failure status (or
+ * {@link WAIT_CANCELLED_EXIT_CODE} when the row is cancelled first); `--json` emits a
  * single machine-readable object on stdout (human diagnostics go to stderr).
  */
 
@@ -35,6 +36,7 @@ import {
 } from "./injected-enqueue";
 import { resolveDependencyMode } from "../dependencies/gate";
 import type { DependencyMode } from "../dependencies/gate";
+import { describeCancellation } from "./injected-cancel";
 import {
   injectedChildStillRunningMessage,
   interruptedChildStillRunning,
@@ -55,6 +57,12 @@ import type { AddOptions } from "./add-args";
 
 export { parseWorkerAddArgs } from "./add-args";
 export type { AddOptions, ParsedAddArgs } from "./add-args";
+
+/**
+ * Exit code of `worker add --wait` when the task was cancelled before it ran
+ * (`worker cancel` or the dashboard), distinct from a pipeline failure (1).
+ */
+export const WAIT_CANCELLED_EXIT_CODE = 3;
 
 /** How often `--wait` re-reads the task row. */
 const WAIT_POLL_INTERVAL_MS = 1_000;
@@ -547,10 +555,21 @@ function warnHarnessPause(
  * otherwise a human success/failure line. Returns the process exit code.
  */
 function emitSettled(
-  task: Pick<InjectedTask, "id" | "taskKey" | "repo" | "status" | "message">,
+  task: Pick<InjectedTask, "id" | "taskKey" | "repo" | "status" | "message"> &
+    Partial<Pick<InjectedTask, "cancelledBy" | "cancelReason" | "finishedAt">>,
   deduplicated: boolean,
   ctx: TaskContext,
 ): number {
+  if (task.status === "cancelled") {
+    const detail = describeCancellation(task);
+    const message = `${task.taskKey} was cancelled${detail ? ` ${detail}` : ""} before it ran`;
+    if (ctx.json) {
+      ctx.log(JSON.stringify({ ...serialize(task), deduplicated, message }));
+    } else {
+      ctx.error(`⛔ ${message}`);
+    }
+    return WAIT_CANCELLED_EXIT_CODE;
+  }
   if (ctx.json) {
     ctx.log(
       JSON.stringify({
@@ -583,7 +602,7 @@ async function reportTask(task: InjectedTask, ctx: TaskContext): Promise<number>
     if (ctx.json) ctx.log(JSON.stringify({ ...serialize(task), deduplicated: true, ...paused }));
     return 0;
   }
-  if (task.status === "done" || task.status === "failed") {
+  if (task.status === "done" || task.status === "failed" || task.status === "cancelled") {
     return emitSettled(task, true, ctx);
   }
   return await waitForTask(
@@ -621,6 +640,15 @@ async function resumeTask(
       return 0;
     }
     return await waitForTask(task.id, { ...ctx, ...paused, deduplicated: true, taskKey }, task);
+  }
+  // A cancelled row was withdrawn on purpose; restarting it is not supported.
+  if (task.status === "cancelled") {
+    const detail = describeCancellation(task);
+    ctx.error(
+      `❌ ${taskKey} was cancelled${detail ? ` ${detail}` : ""}; a cancelled task cannot be resumed.`,
+    );
+    ctx.error("   Enqueue it again with `devintern worker add --title ...`.");
+    return 1;
   }
 
   // A hard-killed worker's detached child may still be running this attempt in
@@ -739,7 +767,7 @@ async function waitForTask(
     if (!task) {
       return reportPrunedTask(id, ctx, initialTask.repo);
     }
-    if (task.status === "done" || task.status === "failed") {
+    if (task.status === "done" || task.status === "failed" || task.status === "cancelled") {
       return emitSettled(task, ctx.deduplicated, ctx);
     }
     if (Date.now() >= deadline) {

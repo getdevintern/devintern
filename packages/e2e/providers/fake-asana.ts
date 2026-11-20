@@ -22,6 +22,7 @@
 
 import type { TrackerComment, TrackerFixture, TrackerTicket, TrackerTicketState } from "./tracker";
 import { parseOptFields, projectTaskPayload } from "./fake-asana-fields";
+import { asRecord, json, readJson } from "./fake-asana-http";
 
 /** Task statuses are project sections in Asana. */
 export interface FakeAsanaStatuses {
@@ -917,27 +918,4 @@ export class FakeAsanaTracker implements TrackerFixture {
     this.now += 1000;
     return new Date(this.now).toISOString();
   }
-}
-
-function json(value: unknown, status = 200): Response {
-  return new Response(JSON.stringify(value), {
-    status,
-    headers: { "content-type": "application/json; charset=utf-8" },
-  });
-}
-
-async function readJson(
-  request: Request,
-): Promise<{ ok: true; value: unknown } | { ok: false; message: string }> {
-  try {
-    return { ok: true, value: await request.json() };
-  } catch {
-    return { ok: false, message: "Invalid JSON request body" };
-  }
-}
-
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-  return value !== null && typeof value === "object"
-    ? (value as Record<string, unknown>)
-    : undefined;
 }

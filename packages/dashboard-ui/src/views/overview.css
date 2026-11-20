@@ -319,7 +319,9 @@
   border-bottom: 0;
 }
 
+/* Queued status is short ("Ad-hoc task", "Queued by …"); give the title the room. */
 .aq-item > details > summary.aw-row {
+  grid-template-columns: minmax(0, 1fr) minmax(8rem, 11rem) 5.5rem;
   border-bottom: 0;
   list-style: none;
   cursor: pointer;
@@ -365,6 +367,11 @@
 
 .aq-item .aw-meta {
   padding-left: 18px;
+}
+
+/* The task key gives way first; the short repo name stays readable. */
+.aq-item .aw-meta > :last-child:not(:first-child) {
+  flex: none;
 }
 
 .aq-body {
@@ -597,4 +604,62 @@
   .aq-title > svg {
     transition: none;
   }
+}
+
+.aq-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Inline cancel confirmation, next to the prompt it is about. */
+.aq-confirm {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--danger-border);
+  border-radius: 6px;
+  background: var(--danger-subtle);
+}
+
+.aq-confirm-title {
+  margin: 0;
+  color: var(--foreground);
+  font-size: 0.8125rem;
+  font-weight: 500;
+}
+
+.aq-confirm-text {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 0.75rem;
+}
+
+.aq-cancelled {
+  display: grid;
+  gap: 6px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--border);
+  font-size: 0.75rem;
+}
+
+.aq-cancelled-title {
+  margin: 0;
+  color: var(--subtle-foreground);
+  font-weight: 500;
+}
+
+.aq-cancelled ul {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.aq-cancelled-row {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
 }
