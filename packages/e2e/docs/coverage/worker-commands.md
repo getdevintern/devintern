@@ -107,8 +107,24 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 - Surface: `devintern worker` surface
 - Status: `default`
 - Evidence: `tests/local/worker-cancel.test.ts`: `cancelled`, `already_cancelled` (first reason kept), and `not_found` outcomes and exit codes; the task moves to `cancelled` in `worker queue --json` and never runs; a background `worker add --wait --json` exits 3 with `status: "cancelled"`; a running task returns `already_started`, exit 1, and completes; an `--after` dependent of a cancelled task is `blocked` (`bun run --filter @devintern/e2e test`)
-- Missing: Dashboard **Cancel task** action; `--resume` refusal for a cancelled task.
-- Last reviewed: 2026-11-21
+- Missing: — (the dashboard **Cancel task** action and the `--resume` refusal have their own rows below).
+- Last reviewed: 2026-11-22
+
+### Dashboard Cancel task (`POST /api/tasks/:id/cancel`): withdraw a pending ad-hoc task
+
+- Surface: `devintern worker` surface
+- Status: `default`
+- Evidence: `tests/local/worker-cancel.test.ts` ("dashboard Cancel task …"), against a standalone `devintern dashboard` on the same workspace: by task key with `{ "reason": "e2e" }`, 200 `cancelled`, a background `worker add --wait --json` exits 3 with `status: "cancelled"`, and `worker queue --json` lists it as cancelled by `dashboard` with the reason; by numeric row id, 200 with the task key; a repeat returns 200 `already_cancelled`, an unknown key 404 `not_found`, a running task 409 `already_started` (it still succeeds), and a finished task 409 `already_finished`; a POST without the Origin/Content-Type guard headers (403), a numeric reason, and a 501-character reason (400) leave the row pending; after a later task completes, the cancelled tasks have no run and no branch on the bare remote (`bun run --filter @devintern/e2e test`)
+- Missing: The dashboard UI button itself (the test calls the API the button uses); an empty-body or malformed-JSON POST.
+- Last reviewed: 2026-11-22
+
+### `worker add --resume` refuses a cancelled task
+
+- Surface: `devintern worker` surface
+- Status: `default`
+- Evidence: `tests/local/worker-cancel.test.ts` ("dashboard Cancel task …"): `worker add --resume <key> --json` on each dashboard-cancelled task exits non-zero, prints nothing on stdout, and names the task with "a cancelled task cannot be resumed" on stderr; `worker queue --json` gains no pending row and still lists the task as cancelled with its original actor and reason (`bun run --filter @devintern/e2e test`)
+- Missing: `--resume --wait` on a cancelled task; a task cancelled through the CLI (the refusal does not depend on the actor).
+- Last reviewed: 2026-11-22
 
 ## Backlog
 
@@ -220,10 +236,25 @@ task in the only slot, it cancels a second task that a background
 task still succeeds, and runs a later task to completion to show no cancelled
 or blocked task ever started.
 
+A second test in the same file drives the dashboard **Cancel task** API
+(`POST /api/tasks/:id/cancel`) on a standalone `devintern dashboard` bound to an
+ephemeral loopback port against the same workspace. With no worker running, it
+checks that a POST without the write-guard headers, a numeric reason, and a
+501-character reason are rejected without changing the row, then cancels that
+task by its numeric row id. With a slow task in the only slot, it gets 409
+`already_started` for the running task, cancels a task a background
+`worker add --wait --json` is waiting on (exit 3, `status: "cancelled"`), and
+checks `already_cancelled`, `not_found`, and, once the slow task succeeds,
+`already_finished`. `worker add --resume` on each cancelled task exits non-zero
+with "a cancelled task cannot be resumed" and enqueues nothing. A later task
+then completes, and the cancelled tasks have no run and no branch on the bare
+remote. This test keeps the default `--create-pr` task args, so runs push to the
+bare remote.
+
 Prerequisites: the built CLI only (no tracker, code host, network, or
 credentials). Each test uses its own temporary HOME, workspace, and queue
-database, and stops the worker and any background `--wait` process in
-`finally`.
+database, and stops the dashboard, the worker, and any background `--wait`
+process in `finally`.
 
 ```sh
 bun run --filter @getdevintern/code build
