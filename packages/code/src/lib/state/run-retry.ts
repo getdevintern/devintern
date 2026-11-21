@@ -410,6 +410,24 @@ export class ScheduledRetryStore {
   }
 
   /**
+   * Task keys with a pending or running retry for one source's team, so the
+   * poller can keep its hands off tickets the retry drain owns. A read
+   * failure returns an empty set (polling must never break on it).
+   */
+  activeTaskKeys(team?: string): Set<string> {
+    try {
+      const rows = this.ensureDb()
+        .query(
+          "SELECT DISTINCT task_key FROM scheduled_retries WHERE COALESCE(team, '') = ? AND status IN ('pending', 'running')",
+        )
+        .all(team ?? "") as Array<{ task_key: string }>;
+      return new Set(rows.map((row) => row.task_key));
+    } catch {
+      return new Set();
+    }
+  }
+
+  /**
    * Claim the oldest pending retry atomically (safe against concurrent
    * claimers): the subquery only matches a still-pending row.
    */
