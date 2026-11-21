@@ -26,8 +26,10 @@ function fakeSandbox(
   return { provider, detection: { available: true }, harnessName };
 }
 
-function waitForExit(child: { on: (event: string, cb: (code: number) => void) => unknown }) {
-  return new Promise<number>((resolve) => child.on("exit", (code) => resolve(code)));
+// Resolve on "close", not "exit": "exit" can fire before the child's stdio
+// streams are drained, so stdout collected via "data" may still be empty.
+function waitForClose(child: { on: (event: string, cb: (code: number) => void) => unknown }) {
+  return new Promise<number>((resolve) => child.on("close", (code) => resolve(code)));
 }
 
 describe("buildDefaultSandboxPolicy", () => {
@@ -128,7 +130,7 @@ describe("spawnAgent", () => {
     });
     let out = "";
     child.stdout?.on("data", (chunk) => (out += chunk));
-    const code = await waitForExit(child);
+    const code = await waitForClose(child);
     expect(code).toBe(0);
     expect(out.trim()).toBe("direct");
     await cleanup(); // no-op
@@ -154,7 +156,7 @@ describe("spawnAgent", () => {
     });
     let out = "";
     child.stdout?.on("data", (chunk) => (out += chunk));
-    const code = await waitForExit(child);
+    const code = await waitForClose(child);
     expect(code).toBe(0);
     expect(out.trim()).toBe("wrapped:on:/usr/bin/agent:-p task");
     // Default policy merged with the caller's extras
@@ -180,7 +182,7 @@ describe("spawnAgent", () => {
       spawnOptions: { stdio: ["ignore", "ignore", "ignore"] },
       sandbox,
     });
-    await waitForExit(child);
+    await waitForClose(child);
     expect(cleaned).toBe(false);
     await cleanup();
     expect(cleaned).toBe(true);
@@ -214,7 +216,7 @@ describe("spawnAgent Muse credential guard", () => {
       },
       sandbox,
     });
-    await waitForExit(child);
+    await waitForClose(child);
     await cleanup();
 
     expect(seenPolicy?.harnessName).toBe("muse");
@@ -273,7 +275,7 @@ describe("spawnAgent Muse credential guard", () => {
       },
       sandbox,
     });
-    await waitForExit(child);
+    await waitForClose(child);
     await cleanup();
 
     expect(seenPolicy?.denyReadPaths ?? []).toEqual([]);
