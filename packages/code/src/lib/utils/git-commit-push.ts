@@ -94,10 +94,12 @@ function sanitizeBackupRefLabel(label: string): string {
 /**
  * Store the stash entry just created by {@link stashWorkingDirectory} under a
  * DevIntern-owned ref and drop it from `refs/stash`, which every worktree of
- * the repository shares. Only the entry carrying this run's message is moved,
- * and it is dropped by index after re-checking its SHA, so a concurrent stash
- * from a sibling worktree is never touched. On any failure the stash entry is
- * left in place.
+ * the repository shares. Only the entry carrying this run's message is moved.
+ * git drops by index only, so the SHA is re-checked before the drop and the
+ * dropped SHA is checked after it: if a sibling worktree pushed in between and
+ * a different entry was dropped, that entry is stored back on the stack (on
+ * top, with its original message). On any failure the stash entry is left in
+ * place.
  *
  * @param label - Task label used for the ref name
  * @param message - Exact stash message passed to `git stash push`
@@ -148,13 +150,41 @@ async function moveStashToBackupRef(
     return { ok: true, ref, sha };
   }
 
-  const drop = await Utils.executeGitCommand(["stash", "drop", "--quiet", stashRef], options);
+  // git can only drop by index, so a sibling push between the check above and
+  // this drop shifts the stack and the wrong entry goes. The "Dropped
+  // stash@{N} (<sha>)" line tells us which commit actually left.
+  const drop = await Utils.executeGitCommand(["stash", "drop", stashRef], options);
   if (!drop.success) {
     console.warn(
       `⚠️  Backup saved to ${ref}, but its stash entry could not be dropped: ${drop.error}`,
     );
+    return { ok: true, ref, sha };
+  }
+  const droppedSha = /\(([0-9a-f]{40,64})\)/.exec(drop.output)?.[1];
+  if (droppedSha && droppedSha !== sha) {
+    await restoreDroppedStash(droppedSha, options);
   }
   return { ok: true, ref, sha };
+}
+
+/**
+ * Put a stash entry dropped by mistake back on `refs/stash`. It lands on top
+ * of the stack under its original message, so lookups by message still work.
+ *
+ * @param droppedSha - Commit that `git stash drop` removed
+ * @param options - Optional git working directory
+ */
+async function restoreDroppedStash(droppedSha: string, options?: { cwd?: string }): Promise<void> {
+  const subject = await Utils.executeGitCommand(["log", "-1", "--format=%s", droppedSha], options);
+  const store = await Utils.executeGitCommand(
+    ["stash", "store", "-m", subject.success ? subject.output : "restored stash", droppedSha],
+    options,
+  );
+  if (!store.success) {
+    console.warn(
+      `⚠️  A concurrent stash entry was dropped by mistake; recover it with: git stash store ${droppedSha}`,
+    );
+  }
 }
 
 /**

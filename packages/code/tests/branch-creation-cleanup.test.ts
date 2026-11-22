@@ -258,6 +258,72 @@ describe("Branch Creation Cleanup", () => {
     expect(stashList).toContain("devintern-code: pre-branch backup for TEST-FAIL");
   });
 
+  test("restores a sibling stash dropped when the stack shifts before the drop", async () => {
+    writeFileSync(join(repoDir, "untracked.txt"), "untracked\n", "utf8");
+
+    // Push a sibling entry between the SHA re-check and `stash drop`, so the
+    // index-based drop removes the sibling entry instead of ours.
+    const siblingDir = join(testDir, "sibling");
+    execSync(`git worktree add -q --detach ${siblingDir}`, { cwd: repoDir });
+    let siblingSha = "";
+    const executeGitCommand = Utils.executeGitCommand;
+    const gitCommands = spyOn(Utils, "executeGitCommand").mockImplementation((args, options) => {
+      if (args[0] === "stash" && args[1] === "drop" && !siblingSha) {
+        writeFileSync(join(siblingDir, "sibling.txt"), "sibling\n", "utf8");
+        execSync("git stash push -u -q -m 'sibling work'", { cwd: siblingDir });
+        siblingSha = execSync("git rev-parse stash@{0}", { cwd: siblingDir }).toString().trim();
+      }
+      return executeGitCommand(args, options);
+    });
+    try {
+      const result = await Utils.createFeatureBranch("TEST-RACE", undefined, { cwd: repoDir });
+      expect(result.success).toBe(true);
+    } finally {
+      gitCommands.mockRestore();
+    }
+
+    expect(siblingSha).not.toBe("");
+    const list = execSync("git stash list --format=%H%x09%gs", { cwd: repoDir }).toString();
+    expect(list).toContain(`${siblingSha}\t`);
+    expect(list).toContain("sibling work");
+  });
+
+  test("prunes backup refs older than 30 days and keeps newer ones", async () => {
+    const makeBackupCommit = (date: string): string => {
+      writeFileSync(join(repoDir, "scratch.txt"), `${date}\n`, "utf8");
+      execSync("git stash push -u -q -m scratch", {
+        cwd: repoDir,
+        env: { ...process.env, GIT_COMMITTER_DATE: date },
+      });
+      const sha = execSync("git rev-parse stash@{0}", { cwd: repoDir }).toString().trim();
+      execSync("git stash drop -q", { cwd: repoDir });
+      return sha;
+    };
+    const day = 24 * 60 * 60;
+    const now = Math.floor(Date.now() / 1000);
+    const oldSha = makeBackupCommit(`@${now - 31 * day} +0000`);
+    const recentSha = makeBackupCommit(`@${now - 29 * day} +0000`);
+    execSync(`git update-ref refs/devintern/backups/old-x ${oldSha}`, { cwd: repoDir });
+    execSync(`git update-ref refs/devintern/backups/recent-x ${recentSha}`, { cwd: repoDir });
+    // Same old commit outside the backup namespace must survive pruning.
+    execSync(`git update-ref refs/devintern/other/old-x ${oldSha}`, { cwd: repoDir });
+
+    writeFileSync(join(repoDir, "untracked.txt"), "untracked\n", "utf8");
+    const result = await Utils.createFeatureBranch("TEST-PRUNE", undefined, { cwd: repoDir });
+    expect(result.success).toBe(true);
+
+    const refs = execSync("git for-each-ref --format='%(refname)' refs/devintern/", {
+      cwd: repoDir,
+    })
+      .toString()
+      .trim()
+      .split("\n");
+    expect(refs).not.toContain("refs/devintern/backups/old-x");
+    expect(refs).toContain("refs/devintern/backups/recent-x");
+    expect(refs).toContain("refs/devintern/other/old-x");
+    expect(refs.some((r) => /^refs\/devintern\/backups\/TEST-PRUNE-/.test(r))).toBe(true);
+  });
+
   test("suffixes attempt-2 when the branch exists only on the remote", async () => {
     // Simulate a fresh clone where a previous attempt's branch lives only as
     // a remote-tracking ref.
