@@ -42,9 +42,17 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 
 - Surface: External dependency: relay, auth, licensing, and observability services
 - Status: `default`
-- Evidence: `tests/local/dashboard-artifacts.test.ts` (`bun run --filter @devintern/e2e test`)
-- Missing: Teams, error monitors (`base_url` userinfo), and the `configSync`/`appliedConfig` state against a running worker.
-- Last reviewed: 2026-11-18
+- Evidence: `tests/local/dashboard-artifacts.test.ts` (repos, shared `.env`, syntax/validation/missing states); `tests/local/dashboard-workspace-sync.test.ts` (teams with inline env and `env_file`, `[[error_monitors]]` with `base_url` userinfo, `[error_monitors.env]` and `env_file`, a masked TOML syntax error) (`bun run --filter @devintern/e2e test`)
+- Missing: Validation-error `problems` quote the offending value verbatim (for example `[[automations]][N].repo "<value>" does not match any [[repos]] name.`); only TOML syntax errors and `appliedConfig.rejectedReason` mask quoted fragments. The tests do not assert this as desired behavior and exclude `problems` from the secret scan for that one step.
+- Last reviewed: 2026-11-23
+
+### GET /api/workspace configSync against a running worker
+
+- Surface: `devintern worker` surface
+- Status: `default`
+- Evidence: `tests/local/dashboard-workspace-sync.test.ts` (worker-embedded dashboard: `applied` at startup, `applied` with a newer `appliedAt` after a hot reload, `rejected` for a startup-only `[[error_monitors]]` addition and for an invalid edit quoting a secret, with `rejectedReason` masked) (`bun run --filter @devintern/e2e test`)
+- Missing: The `unconfirmed` state (needs a worker without an applied-config record) and asserting a transient `pending` (timing-dependent, deliberately not asserted).
+- Last reviewed: 2026-11-23
 
 ## Backlog
 
@@ -269,4 +277,52 @@ bun run --filter @getdevintern/code build
 bun run --filter @devintern/e2e test
 # or just this file
 cd packages/e2e && bun test tests/local/dashboard-artifacts.test.ts
+```
+
+### Teams and error-monitor redaction, and configSync against a running worker
+
+`tests/local/dashboard-workspace-sync.test.ts` runs in the default offline
+suite and needs only the built CLI (the `dist/` skip guard is the only skip).
+Every credential is a random fake per run, checked in raw, URL-encoded, and
+base64 form (and base64 `user:password`, as a Basic auth header would carry
+it); failure messages name the secret's index, never its value.
+
+The first case starts the standalone `devintern dashboard` against a
+hand-written `workspace.toml` (the worker is never started): two `[[teams]]`
+(`alpha` with an inline `[teams.env]` token, `beta` with an `env_file`), a repo
+with a `[repos.env]` token and an `https://user:<fake>@…` remote, and an
+`[[error_monitors]]` Sentry entry whose `base_url` embeds `user:<fake>@` on an
+unused loopback port (the standalone dashboard never polls monitors) plus
+`[error_monitors.env]` and an `env_file`. `GET /api/workspace` returns
+`status: "ok"`, no `configSync` (no running worker), teams and the monitor
+with their names, trackers, queries and sorted env key names, the repo remote
+and monitor `baseUrl` without userinfo but with scheme, host, port and path,
+and no env value or userinfo name anywhere. A TOML syntax error with an
+unquoted token in `[teams.env]` then returns 200 `status: "invalid"`,
+`Failed to parse …`, with the token masked.
+
+The second case starts a `WorkerFixture` with the embedded dashboard and one
+never-due automation, and polls the worker's own `/api/workspace` (100 ms
+interval, bounded deadline; no fixed sleeps):
+
+- startup: `configSync: "applied"` with `appliedConfig.appliedAt`;
+- appending an automation (hot-reloadable): `applied` again with a newer
+  `appliedAt`, and the new automation in the view;
+- adding a credentialed `[[error_monitors]]` (startup-only): `rejected` with
+  `rejectedReason` "[[error_monitors]] is startup-only; …", the config view
+  still `ok` with the monitor's `baseUrl` stripped, and no monitor secret
+  anywhere in the body;
+- an automation whose `repo` is a token-shaped value: `rejected` with
+  `rejectedReason` containing `.repo "…" does not match any [[repos]] name.`
+  while the worker's own stderr carries the raw value. The applied file version
+  is unchanged and `/api/automations` still lists only the applied entries.
+  This step's secret scan skips the validation `problems` list, which echoes
+  the value (see Missing above).
+
+The fixture's temporary root (HOME, workspace, queue database, bare remote) is
+removed in `finally`, and the daemon is stopped there too.
+
+```sh
+bun run --filter @getdevintern/code build
+cd packages/e2e && bun test tests/local/dashboard-workspace-sync.test.ts
 ```
