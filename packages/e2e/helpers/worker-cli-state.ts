@@ -122,3 +122,138 @@ export function waitForSettledRun(
     timeoutMs,
   );
 }
+
+/**
+ * Run a read-only `devintern worker <args...> --json` command and parse its
+ * body without typing it, for byte-level parity checks against the matching
+ * dashboard route. Typed readers below wrap this for field assertions.
+ */
+export function cliReadJson(
+  worker: WorkerFixture,
+  args: string[],
+  env?: Record<string, string>,
+): Promise<unknown> {
+  return worker.runCli(["worker", ...args, "--json"], { env }).then((result) => {
+    if (result.exitCode !== 0) {
+      throw new Error(
+        `devintern worker ${args.join(" ")} --json exited ${result.exitCode}:\n${result.stderr}`,
+      );
+    }
+    return singleJson<unknown>(result);
+  });
+}
+
+/** Worker liveness as `worker status`/`worker overview` report it. */
+export interface CliWorkerLiveness {
+  status: string;
+  pid?: number;
+  startedAt?: string;
+  lockFile?: string;
+}
+
+/** `worker status --json` (`GET /api/worker`), the fields tests assert on. */
+export interface CliStatus {
+  worker: CliWorkerLiveness;
+  queue: {
+    pending: number;
+    processing: number;
+    failed: number;
+    injected: { pending: number; running: number };
+    retries: { pending: number; running: number };
+  };
+  agentPrs: { open: number; closed: number };
+  dbPath: string;
+  dbMissing: boolean;
+}
+
+/** `worker overview --json` (`GET /api/overview`). */
+export interface CliOverview {
+  generatedAt: number;
+  worker: CliWorkerLiveness;
+  config: { status: string; path: string; error?: string };
+  capacity: { running: number; maxConcurrency: number };
+}
+
+/** `worker stats --json` (`GET /api/stats`). */
+export interface CliStats {
+  window: string;
+  stats: {
+    totals: { runs: number; byStatus: Record<string, number> };
+    byOrigin: Record<string, number>;
+  } | null;
+}
+
+/** One automation from `worker automations --json` (`GET /api/automations`). */
+export interface CliAutomation {
+  id: string;
+  kind: string;
+  enabled: boolean;
+  schedule?: string;
+  nextDueAt?: number;
+}
+
+/** `worker prs --json` (`GET /api/agent-prs`). */
+export interface CliPrs {
+  prs: Array<{ repo: string; prNumber: number; prUrl: string; taskKey?: string }>;
+}
+
+/** `worker logs --json` (`GET /api/logs`). */
+export interface CliLogs {
+  available: boolean;
+  entries: Array<{ index: number; timestamp: number; level: string; message: string }>;
+}
+
+/** `worker runs show <id> --json` (`GET /api/runs/:id`). */
+export interface CliRunDetail {
+  run: CliRun;
+  stages: Array<{ stage: string; status: string }>;
+  retry: { eligible: boolean; reason?: string };
+  harnessLogs: Array<{ name: string; runId?: number }>;
+  artifacts: Array<{ id: string; name: string }>;
+}
+
+/** `worker runs --json` (`GET /api/runs`), unfiltered. */
+export function cliRunList(worker: WorkerFixture): Promise<{ runs: CliRun[]; total: number }> {
+  return readJson(worker, ["worker", "runs", "--json"]);
+}
+
+/** `worker runs show <id> --json` with stages, retry info, logs, and artifacts. */
+export function cliRunDetail(worker: WorkerFixture, id: number): Promise<CliRunDetail> {
+  return readJson(worker, ["worker", "runs", "show", String(id), "--json"]);
+}
+
+/** `worker status --json`. */
+export function cliStatus(worker: WorkerFixture): Promise<CliStatus> {
+  return readJson(worker, ["worker", "status", "--json"]);
+}
+
+/** `worker overview --json`. */
+export function cliOverview(worker: WorkerFixture): Promise<CliOverview> {
+  return readJson(worker, ["worker", "overview", "--json"]);
+}
+
+/** `worker stats --window <window> --json`. */
+export function cliStats(worker: WorkerFixture, window: string): Promise<CliStats> {
+  return readJson(worker, ["worker", "stats", "--window", window, "--json"]);
+}
+
+/** `worker automations --json`. */
+export async function cliAutomations(worker: WorkerFixture): Promise<CliAutomation[]> {
+  return (
+    await readJson<{ automations: CliAutomation[] }>(worker, ["worker", "automations", "--json"])
+  ).automations;
+}
+
+/** `worker prs [--state <state>] --json`. */
+export function cliPrs(worker: WorkerFixture, state?: "open" | "merged"): Promise<CliPrs> {
+  return readJson(worker, ["worker", "prs", ...(state ? ["--state", state] : []), "--json"]);
+}
+
+/** `worker logs --lines <n> --level <level> --json`. */
+export function cliLogs(
+  worker: WorkerFixture,
+  lines: number,
+  level: "all" | "info" | "warn" | "error" = "all",
+): Promise<CliLogs> {
+  return readJson(worker, ["worker", "logs", "--lines", String(lines), "--level", level, "--json"]);
+}
