@@ -155,10 +155,11 @@ test.skipIf(!builtCli)(
         `❌ Repository access — [[repos]] "fixture" (${goneRemote}): git ls-remote exited 128`,
         'Check the remote URL for "fixture" and that GITHUB_TOKEN (or your git credentials) can read it',
       );
-      // Observed: the detail keeps only git's last stderr line ("Please make sure
-      // you have the correct access rights\nand the repository exists."), so the
-      // cause line ("'…' does not appear to be a git repository") is not shown.
-      expect(noRemote.stdout).toContain("git ls-remote exited 128: and the repository exists.");
+      // The detail names git's real cause, not its trailing access-rights advice.
+      expect(noRemote.stdout).toContain(
+        `git ls-remote exited 128: fatal: '${goneRemote}' does not appear to be a git repository`,
+      );
+      expect(noRemote.stdout).not.toContain("and the repository exists.");
 
       // An unparseable workspace.toml names the problem.
       writeFileSync(configPath, "[workspace\n");
