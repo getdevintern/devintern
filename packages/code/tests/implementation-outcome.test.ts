@@ -5,6 +5,8 @@ import { join } from "path";
 
 import {
   deliveryRunDisposition,
+  isBlockedOutcomeReason,
+  isPreExistingOnBaseReason,
   OUTCOME_REASON_MAX_LENGTH,
   outcomeRunDisposition,
   parseImplementationOutcome,
@@ -134,6 +136,40 @@ describe("outcomeRunDisposition", () => {
     });
   });
 
+  test("a pre-existing-on-base partial gets one canonical, auditable prefix", () => {
+    for (const reason of [
+      "pre-existing on base: lint max-lines in foo.ts",
+      "Pre-existing on base:lint max-lines in foo.ts",
+      "PRE-EXISTING ON BASE :  lint max-lines in foo.ts",
+    ]) {
+      const disposition = outcomeRunDisposition({ status: "partial", reason });
+      expect(disposition).toEqual({
+        status: "succeeded",
+        reason: "partial: pre-existing on base: lint max-lines in foo.ts",
+      });
+      expect(isPreExistingOnBaseReason(disposition.reason)).toBe(true);
+      expect(isBlockedOutcomeReason(disposition.reason)).toBe(false);
+    }
+    expect(outcomeRunDisposition({ status: "partial", reason: "pre-existing on base:" })).toEqual({
+      status: "succeeded",
+      reason: "partial: pre-existing on base: gate failure",
+    });
+  });
+
+  test("other partial and blocked reasons are not marked pre-existing on base", () => {
+    expect(
+      isPreExistingOnBaseReason(
+        outcomeRunDisposition({ status: "partial", reason: "half" }).reason,
+      ),
+    ).toBe(false);
+    expect(
+      isPreExistingOnBaseReason(
+        outcomeRunDisposition({ status: "blocked", reason: "pre-existing on base: lint" }).reason,
+      ),
+    ).toBe(false);
+    expect(isPreExistingOnBaseReason(undefined)).toBe(false);
+  });
+
   test("no marker, done and noop are plain successes", () => {
     expect(outcomeRunDisposition(undefined)).toEqual({ status: "succeeded" });
     expect(outcomeRunDisposition({ status: "done" })).toEqual({ status: "succeeded" });
@@ -232,8 +268,10 @@ describe("prompt instruction", () => {
   test("a gate failure pre-existing on the base is partial unless fixing it is the goal", () => {
     const prompt = withImplementationSummary("Do the task.");
     expect(prompt).toContain("pre-existing on the base commit is not blocked");
-    expect(prompt).toContain("reproduce unchanged on the base");
-    expect(prompt).toContain("use status=partial with a reason like\npre-existing on base:");
+    expect(prompt).toContain("re-running\nthe failing gate on the base revision");
+    expect(prompt).toContain("enough only for a per-file rule such as a lint max-lines limit");
+    expect(prompt).toContain("type errors, import cycles,\nbuild and test failures");
+    expect(prompt).toContain("reason that starts with pre-existing on base:");
     expect(prompt).toContain(
       "Use status=blocked if you cannot confirm this, or if the task's goal is to make that gate pass.",
     );

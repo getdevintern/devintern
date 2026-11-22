@@ -147,6 +147,22 @@ export function isBlockedOutcomeReason(reason: string | undefined): boolean {
   return reason?.startsWith(BLOCKED_OUTCOME_REASON_PREFIX) ?? false;
 }
 
+/**
+ * Prefix of the `outcome_reason` recorded for a `partial` run whose agent
+ * reported a gate failure as pre-existing on the base commit. That judgment is
+ * the agent's own and nothing re-checks it, so these runs keep one stable,
+ * queryable prefix (`outcome_reason LIKE 'partial: pre-existing on base:%'`)
+ * for auditing, however the agent cased or spaced its reason.
+ */
+export const PRE_EXISTING_ON_BASE_REASON_PREFIX = "partial: pre-existing on base: ";
+
+const PRE_EXISTING_ON_BASE_PATTERN = /^pre-existing on base\s*:\s*/i;
+
+/** Whether a recorded `outcome_reason` marks a gate failure reported as pre-existing on base. */
+export function isPreExistingOnBaseReason(reason: string | undefined): boolean {
+  return reason?.startsWith(PRE_EXISTING_ON_BASE_REASON_PREFIX) === true;
+}
+
 /** Run status and recorded reason implied by a reported outcome. */
 export interface OutcomeRunDisposition {
   status: "succeeded" | "escalated" | "failed";
@@ -171,6 +187,11 @@ export function outcomeRunDisposition(
     };
   }
   if (outcome?.status === "partial") {
+    const preExisting = outcome.reason?.match(PRE_EXISTING_ON_BASE_PATTERN);
+    if (outcome.reason && preExisting) {
+      const detail = outcome.reason.slice(preExisting[0].length) || "gate failure";
+      return { status: "succeeded", reason: `${PRE_EXISTING_ON_BASE_REASON_PREFIX}${detail}` };
+    }
     return {
       status: "succeeded",
       reason: `partial: ${outcome.reason ?? "the agent reported that the goal was only partly met"}`,
@@ -224,11 +245,15 @@ Use status=blocked when a required gate failed (tests, lint, a build or release 
 a required step was refused (a push, a merge, a permission), or a dependency or data
 source you needed was unavailable, so the goal was not met.
 Use status=partial when you met only part of the goal, and say what is missing.
-A gate failure that is pre-existing on the base commit is not blocked: if the gate fails only
-in ways that reproduce unchanged on the base (the same error in a file you did not modify, or
-the gate re-run on the base revision), your change does not contribute, and making that gate
-pass is not the task's goal, use status=partial with a reason like
-pre-existing on base: bun run lint max-lines in foo.ts; task work complete.
+A gate failure that is pre-existing on the base commit is not blocked. Confirm it by re-running
+the failing gate on the base revision (for example in a temporary git worktree) and checking
+that it fails with the same errors. Seeing the same error in a file you did not modify is
+enough only for a per-file rule such as a lint max-lines limit; type errors, import cycles,
+build and test failures can come from your change in files you never touched, so re-run those.
+If every failure reproduces unchanged on the base and making that gate pass is not the task's
+goal, use status=partial with a reason that starts with pre-existing on base: and says how you
+confirmed it, like
+pre-existing on base: bun run lint max-lines in foo.ts, same error on base; task work complete.
 Use status=blocked if you cannot confirm this, or if the task's goal is to make that gate pass.
 Finding nothing to do is not blocked: if the work was already done or there was nothing
 to change, either omit the line or use status=noop. Omit the line when you met the goal.
