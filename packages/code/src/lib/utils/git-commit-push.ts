@@ -95,11 +95,9 @@ function sanitizeBackupRefLabel(label: string): string {
  * Store the stash entry just created by {@link stashWorkingDirectory} under a
  * DevIntern-owned ref and drop it from `refs/stash`, which every worktree of
  * the repository shares. Only the entry carrying this run's message is moved.
- * git drops by index only, so the SHA is re-checked before the drop and the
- * dropped SHA is checked after it: if a sibling worktree pushed in between and
- * a different entry was dropped, that entry is stored back on the stack (on
- * top, with its original message). On any failure the stash entry is left in
- * place.
+ * The drop itself is done by {@link dropOwnStashEntry}, which guards against
+ * a sibling worktree shifting the stack. If the ref cannot be written, the
+ * stash entry is left in place.
  *
  * @param label - Task label used for the ref name
  * @param message - Exact stash message passed to `git stash push`
@@ -140,31 +138,59 @@ async function moveStashToBackupRef(
     return { ok: false, reason: update.error ?? "git update-ref failed", sha };
   }
 
-  const stashRef = `stash@{${index}}`;
-  const current = await Utils.executeGitCommand(
-    ["rev-parse", "--verify", "--quiet", stashRef],
-    options,
-  );
-  if (!current.success || current.output !== sha) {
-    // The stack moved under us; the backup is safe under `ref`, leave the stash alone.
-    return { ok: true, ref, sha };
-  }
+  await dropOwnStashEntry(sha, ref, options);
+  return { ok: true, ref, sha };
+}
 
-  // git can only drop by index, so a sibling push between the check above and
-  // this drop shifts the stack and the wrong entry goes. The "Dropped
-  // stash@{N} (<sha>)" line tells us which commit actually left.
-  const drop = await Utils.executeGitCommand(["stash", "drop", stashRef], options);
-  if (!drop.success) {
-    console.warn(
-      `⚠️  Backup saved to ${ref}, but its stash entry could not be dropped: ${drop.error}`,
+const STASH_DROP_ATTEMPTS = 3;
+
+/**
+ * Drop the stash entry whose commit is `sha`. git drops by index only, so each
+ * attempt looks the SHA up, verifies `stash@{N}` still resolves to it, drops,
+ * and reads the "Dropped stash@{N} (<sha>)" line to learn which commit left.
+ * If a sibling worktree pushed in between and a different entry went, that
+ * entry is stored back and the lookup repeats at the entry's new index.
+ * Best-effort: when the entry cannot be dropped safely, warns that it remains
+ * on the stack (the backup is already safe under `ref`).
+ *
+ * @param sha - Commit of this run's stash entry
+ * @param ref - Backup ref that already points at `sha`
+ * @param options - Optional git working directory
+ */
+async function dropOwnStashEntry(
+  sha: string,
+  ref: string,
+  options?: { cwd?: string },
+): Promise<void> {
+  let reason = "the stash stack kept changing";
+  for (let attempt = 0; attempt < STASH_DROP_ATTEMPTS; attempt++) {
+    const list = await Utils.executeGitCommand(["stash", "list", "--format=%H"], options);
+    if (!list.success) {
+      reason = list.error ?? "git stash list failed";
+      break;
+    }
+    const index = list.output.split("\n").indexOf(sha);
+    if (index === -1) return; // Already gone from the stack.
+
+    const stashRef = `stash@{${index}}`;
+    const current = await Utils.executeGitCommand(
+      ["rev-parse", "--verify", "--quiet", stashRef],
+      options,
     );
-    return { ok: true, ref, sha };
-  }
-  const droppedSha = /\(([0-9a-f]{40,64})\)/.exec(drop.output)?.[1];
-  if (droppedSha && droppedSha !== sha) {
+    if (!current.success || current.output !== sha) continue; // Stack moved; look again.
+
+    const drop = await Utils.executeGitCommand(["stash", "drop", stashRef], options);
+    if (!drop.success) {
+      reason = drop.error ?? "git stash drop failed";
+      break;
+    }
+    const droppedSha = /\(([0-9a-f]{40,64})\)/.exec(drop.output)?.[1];
+    if (!droppedSha || droppedSha === sha) return;
     await restoreDroppedStash(droppedSha, options);
   }
-  return { ok: true, ref, sha };
+  console.warn(
+    `⚠️  Backup saved to ${ref}, but its entry remains on the git stash stack (${reason}); its commit is ${sha}`,
+  );
 }
 
 /**

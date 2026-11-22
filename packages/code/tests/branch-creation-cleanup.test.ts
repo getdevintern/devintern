@@ -286,6 +286,41 @@ describe("Branch Creation Cleanup", () => {
     const list = execSync("git stash list --format=%H%x09%gs", { cwd: repoDir }).toString();
     expect(list).toContain(`${siblingSha}\t`);
     expect(list).toContain("sibling work");
+    expect(list).not.toContain("pre-branch backup for TEST-RACE");
+  });
+
+  test("warns and keeps every entry when a sibling push races each drop", async () => {
+    writeFileSync(join(repoDir, "untracked.txt"), "untracked\n", "utf8");
+
+    const siblingDir = join(testDir, "sibling");
+    execSync(`git worktree add -q --detach ${siblingDir}`, { cwd: repoDir });
+    let pushes = 0;
+    const executeGitCommand = Utils.executeGitCommand;
+    const gitCommands = spyOn(Utils, "executeGitCommand").mockImplementation((args, options) => {
+      if (args[0] === "stash" && args[1] === "drop") {
+        pushes++;
+        writeFileSync(join(siblingDir, "sibling.txt"), `sibling ${pushes}\n`, "utf8");
+        execSync(`git stash push -u -q -m 'sibling work ${pushes}'`, { cwd: siblingDir });
+      }
+      return executeGitCommand(args, options);
+    });
+    const warnings: string[] = [];
+    const warnSpy = spyOn(console, "warn").mockImplementation((...args: unknown[]) => {
+      warnings.push(args.join(" "));
+    });
+    try {
+      const result = await Utils.createFeatureBranch("TEST-RACE2", undefined, { cwd: repoDir });
+      expect(result.success).toBe(true);
+    } finally {
+      gitCommands.mockRestore();
+      warnSpy.mockRestore();
+    }
+
+    expect(pushes).toBe(3);
+    expect(warnings.some((w) => w.includes("remains on the git stash stack"))).toBe(true);
+    const list = execSync("git stash list --format=%gs", { cwd: repoDir }).toString();
+    for (let i = 1; i <= pushes; i++) expect(list).toContain(`sibling work ${i}`);
+    expect(list).toContain("pre-branch backup for TEST-RACE2");
   });
 
   test("prunes backup refs older than 30 days and keeps newer ones", async () => {
@@ -321,7 +356,7 @@ describe("Branch Creation Cleanup", () => {
     expect(refs).not.toContain("refs/devintern/backups/old-x");
     expect(refs).toContain("refs/devintern/backups/recent-x");
     expect(refs).toContain("refs/devintern/other/old-x");
-    expect(refs.some((r) => /^refs\/devintern\/backups\/TEST-PRUNE-/.test(r))).toBe(true);
+    expect(refs.some((r) => r.startsWith("refs/devintern/backups/TEST-PRUNE-"))).toBe(true);
   });
 
   test("suffixes attempt-2 when the branch exists only on the remote", async () => {
