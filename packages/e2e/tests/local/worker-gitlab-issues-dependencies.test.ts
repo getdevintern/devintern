@@ -480,3 +480,74 @@ test.skipIf(!existsSync(cliPath))(
   },
   240_000,
 );
+
+test.skipIf(!existsSync(cliPath))(
+  "a failing GitLab blocker read (HTTP 503) holds the polled issue fail-closed until the links endpoint recovers",
+  async () => {
+    const marker = uniqueMarker();
+    const { tracker, worker, diagnostics } = setUp("devintern-e2e-worker-gitlab-linkfail-", marker);
+    let failure: unknown;
+    try {
+      const ready = tracker.createIssue({
+        title: "Expand the greeting",
+        description: description("Expand the greeting", marker),
+        labels: [STATUS.todo, KEEP],
+      });
+      tracker.failLinks(ready.iid, 503);
+      const heldLabels = tracker.labelsOf(ready.iid);
+      const stamp = tracker.issue(ready.iid).updated_at;
+
+      await startWorker(worker, tracker);
+
+      // 1. Every blocker read fails: the issue waits instead of starting.
+      const held = await waitForQueueItem(
+        worker,
+        ready.key,
+        "the issue to wait on its unreadable blockers",
+        (item) => item.dependencyState === "waiting",
+        diagnostics,
+      );
+      await worker.waitFor(
+        `${HELD_CHECKS} failed link reads of #${ready.iid}`,
+        () => (tracker.linkReads(ready.iid).length >= HELD_CHECKS ? true : undefined),
+        30_000,
+      );
+      let detail = diagnostics("held by a failing blocker read");
+      expect(held.tracker, detail).toBe("gitlab");
+      expect(held.dependsOn ?? [], detail).toEqual([]);
+      // Pinned from the product's output: the gate names the read failure.
+      expect(held.dependencyReason ?? "", detail).toContain(
+        `could not read ${ready.key}'s blockers from gitlab: GitLab API error (503)`,
+      );
+      expect(
+        tracker.linkReads(ready.iid).every((read) => read.status === 503),
+        detail,
+      ).toBe(true);
+      expect(worker.logs, detail).toContain(`${ready.key} waiting: could not read`);
+      expect(worker.agentInvocations(), detail).toEqual([]);
+      await assertUntouched(worker, tracker, ready.iid, heldLabels, stamp, detail);
+      // The fault never leaks the token into the worker log.
+      expect(worker.logs.includes(tracker.token), detail).toBe(false);
+
+      // 2. The endpoint recovers: the next evaluation reads no blockers and runs it once.
+      tracker.clearLinkFault(ready.iid);
+      tracker.touch(ready.iid);
+      await assertRanOnce(worker, tracker, ready.iid, marker, diagnostics);
+
+      detail = diagnostics("final");
+      expect(
+        tracker.linkReads(ready.iid).some((read) => read.status === 200),
+        detail,
+      ).toBe(true);
+      expect(tracker.unexpectedRequests, detail).toEqual([]);
+      expect(worker.running, detail).toBe(true);
+    } catch (error) {
+      failure = error;
+    } finally {
+      const residue = await cleanUp(worker, tracker);
+      failure ??= residue;
+    }
+    if (failure) throw failure;
+  },
+  180_000,
+);
