@@ -428,6 +428,7 @@ remote = "git@github.com:acme/backend.git"
           dirs.push(dir);
           return { status: "running", pid: 1234, startedAt: "2026-11-22T10:00:00.000Z" };
         },
+        dashboardServerPid: async () => 1234,
       }),
     );
     expect(dirs).toEqual([workspaceDir]);
@@ -445,6 +446,75 @@ remote = "git@github.com:acme/backend.git"
     expect(closing).toContain("hot-reload");
     expect(closing).not.toContain("start it with");
     expect(closing).not.toContain("start the worker");
+  });
+
+  test.each([
+    ["another process's dashboard", async () => 999],
+    ["a non-dashboard listener", async () => undefined],
+    [
+      "a failing probe",
+      async () => {
+        throw new Error("boom");
+      },
+    ],
+  ])("a running worker does not own a busy port held by %s", async (_name, dashboardServerPid) => {
+    // Worker started on 4400; operator then edited dashboard_port (startup-only).
+    const workspacePath = writeWorkspace(
+      `[workspace]\ndashboard_port = 4555\n${TEAMS_CONFIG}`,
+      JIRA_ENV,
+    );
+    const probed: number[] = [];
+    const checks = await collectWorkerDoctorChecks(
+      { workspacePath },
+      passingDeps({
+        isPortInUse: async () => true,
+        workerStatus: () => ({ status: "running", pid: 1234 }),
+        dashboardServerPid: async (port) => {
+          probed.push(port);
+          return dashboardServerPid();
+        },
+      }),
+    );
+    expect(probed).toEqual([4555]);
+    const [port] = byId(checks, "dashboard-port");
+    expect(port?.status).toBe("warn");
+    expect(port?.detail).toContain("not the running worker (pid 1234)");
+    expect(port?.hint).toContain("restart the worker");
+    expect(renderReadinessReport(checks).hasWarnings).toBe(true);
+  });
+
+  test("the default ownership probe reads serverPid from a real dashboard", async () => {
+    const { startDashboardServer } = await import("../src/dashboard-server");
+    const server = startDashboardServer({
+      port: 0,
+      dbPath: join(workspaceDir, "queue.db"),
+      workingDir: workspaceDir,
+      workspaceDir,
+      logDirs: [],
+    });
+    try {
+      const run = (pid: number) =>
+        collectWorkerDoctorChecks(
+          {
+            workspacePath: writeWorkspace(
+              `[workspace]\ndashboard_port = ${server.port}\n${TEAMS_CONFIG}`,
+              JIRA_ENV,
+            ),
+          },
+          {
+            ...passingDeps({ workerStatus: () => ({ status: "running", pid }) }),
+            isPortInUse: undefined,
+          },
+        );
+      // In-process dashboard: its pid is the worker's.
+      const [owned] = byId(await run(process.pid), "dashboard-port");
+      expect(owned?.status).toBe("ok");
+      expect(owned?.detail).toContain("in use by the running worker");
+      const [foreign] = byId(await run(process.pid + 1), "dashboard-port");
+      expect(foreign?.status).toBe("warn");
+    } finally {
+      server.stop(true);
+    }
   });
 
   test("an unverifiable worker (other PID namespace) warns and keeps the port row", async () => {

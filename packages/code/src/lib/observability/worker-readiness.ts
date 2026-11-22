@@ -87,6 +87,29 @@ export interface WorkerDoctorDeps {
   probeTimeoutMs?: number;
   /** Liveness of a worker already running on this workspace (lock file, local only). */
   workerStatus?: (workspaceDir: string) => WorkerStatusView;
+  /**
+   * Pid of the process serving a DevIntern dashboard on `port` (from
+   * `GET /api/worker`); `undefined` when nothing answers like a dashboard.
+   */
+  dashboardServerPid?: (port: number) => Promise<number | undefined>;
+}
+
+/** Timeout for asking a busy dashboard port who owns it. */
+const DASHBOARD_PROBE_TIMEOUT_MS = 2_000;
+
+/** Default ownership probe: `serverPid` from the loopback dashboard's `/api/worker`. */
+async function defaultDashboardServerPid(port: number): Promise<number | undefined> {
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/api/worker`, {
+      signal: AbortSignal.timeout(DASHBOARD_PROBE_TIMEOUT_MS),
+    });
+    if (!response.ok) return undefined;
+    const body: unknown = await response.json();
+    if (typeof body !== "object" || body === null || !("serverPid" in body)) return undefined;
+    return typeof body.serverPid === "number" ? body.serverPid : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Default liveness: the same lock lookup `devintern worker status` uses. */
@@ -664,8 +687,8 @@ async function collectConfigScopedChecks(
 }
 
 /**
- * Dashboard port row. A busy port next to a live worker is that worker's own
- * dashboard, so it is reported ok instead of as a conflict.
+ * Dashboard port row. A busy port is reported ok only when the dashboard on it
+ * says it is served by the live worker's own process; anything else warns.
  */
 async function dashboardPortCheck(
   config: WorkspaceConfig,
@@ -687,8 +710,23 @@ async function dashboardPortCheck(
     busy = false;
   }
   if (!busy) return { ...base, status: "ok", detail: `127.0.0.1:${port} free` };
-  if (worker.status === "running") {
-    return { ...base, status: "ok", detail: `127.0.0.1:${port} in use by the running worker` };
+  if (worker.status === "running" && worker.pid !== undefined) {
+    // The port may not be the worker's: dashboard settings are startup-only, so
+    // an edited port, or a dashboard that failed to bind, leaves someone else on it.
+    const serverPid = await (deps.dashboardServerPid ?? defaultDashboardServerPid)(port).catch(
+      () => undefined,
+    );
+    if (serverPid === worker.pid) {
+      return { ...base, status: "ok", detail: `127.0.0.1:${port} in use by the running worker` };
+    }
+    return {
+      ...base,
+      status: "warn",
+      detail: `127.0.0.1:${port} is in use by another process, not the running worker (pid ${worker.pid})`,
+      hint:
+        "Dashboard settings take effect only at worker start: stop the process holding the port " +
+        "or pick another [workspace].dashboard_port, then restart the worker",
+    };
   }
   return {
     ...base,

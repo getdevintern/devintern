@@ -1429,6 +1429,9 @@ export function handleWorkerStatus(data: DashboardData): ApiResponse {
     status: 200,
     body: {
       worker: resolveWorkerStatus(data.workingDir, data.workspaceDir),
+      // Additive: pid of the process serving this dashboard. Equals `worker.pid`
+      // only for the worker's in-process dashboard (`worker doctor` relies on it).
+      serverPid: process.pid,
       queue: data.getQueueStats(),
       agentPrs: data.getAgentPrCounts(),
       schedule: data.getScheduleSnapshot(),
