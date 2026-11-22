@@ -101,7 +101,7 @@ An agent that stops cleanly has not necessarily succeeded. Every implementation 
 | `noop` or `done` | Nothing to do, or the goal was met.                                    | `succeeded`                          |
 | no marker        | —                                                                      | `succeeded`                          |
 
-"Nothing to do" is not blocked: a `main-red-fixer` that finds main green should omit the marker or use `status=noop`. Prompts can rely on the built-in instruction or name which failures count as blocked ("if the test gate fails, report the run as blocked").
+"Nothing to do" is not blocked: a `main-red-fixer` that finds main green should omit the marker or use `status=noop`. A gate that already fails the same way on the base commit, in a way the change did not cause, is reported as `partial` with a reason starting `pre-existing on base:`, unless making that gate pass is the task's goal. Prompts can rely on the built-in instruction or name which failures count as blocked ("if the test gate fails, report the run as blocked").
 
 Escalated runs appear in the dashboard, the stats escalation rate, and `devintern report --last`. The next attempt is the next occurrence, **Run now**, or a dashboard retry. For tracker tasks, a blocked outcome changes only the run record: a PR the run already opened stays open, and a markdown task is not marked `Done`. Only a whole line in the final report counts; the reason is truncated to 300 characters.
 

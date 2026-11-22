@@ -224,6 +224,12 @@ Use status=blocked when a required gate failed (tests, lint, a build or release 
 a required step was refused (a push, a merge, a permission), or a dependency or data
 source you needed was unavailable, so the goal was not met.
 Use status=partial when you met only part of the goal, and say what is missing.
+A gate failure that is pre-existing on the base commit is not blocked: if the gate fails only
+in ways that reproduce unchanged on the base (the same error in a file you did not modify, or
+the gate re-run on the base revision), your change does not contribute, and making that gate
+pass is not the task's goal, use status=partial with a reason like
+pre-existing on base: bun run lint max-lines in foo.ts; task work complete.
+Use status=blocked if you cannot confirm this, or if the task's goal is to make that gate pass.
 Finding nothing to do is not blocked: if the work was already done or there was nothing
 to change, either omit the line or use status=noop. Omit the line when you met the goal.
 Keep the reason on one line, under ${OUTCOME_REASON_MAX_LENGTH} characters, without double quotes.`;

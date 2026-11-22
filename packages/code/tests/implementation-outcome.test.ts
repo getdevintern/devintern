@@ -229,6 +229,16 @@ describe("prompt instruction", () => {
     );
   });
 
+  test("a gate failure pre-existing on the base is partial unless fixing it is the goal", () => {
+    const prompt = withImplementationSummary("Do the task.");
+    expect(prompt).toContain("pre-existing on the base commit is not blocked");
+    expect(prompt).toContain("reproduce unchanged on the base");
+    expect(prompt).toContain("use status=partial with a reason like\npre-existing on base:");
+    expect(prompt).toContain(
+      "Use status=blocked if you cannot confirm this, or if the task's goal is to make that gate pass.",
+    );
+  });
+
   test("the example marker in the prompt parses as blocked", () => {
     const prompt = withImplementationSummary("Do the task.");
     const example = prompt.split("\n").find((line) => line.startsWith("<!-- devintern:outcome"));
