@@ -43,7 +43,6 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 - Surface: External dependency: relay, auth, licensing, and observability services
 - Status: `default`
 - Evidence: `tests/local/dashboard-artifacts.test.ts` (repos, shared `.env`, syntax/validation/missing states); `tests/local/dashboard-workspace-sync.test.ts` (teams with inline env and `env_file`, `[[error_monitors]]` with `base_url` userinfo, `[error_monitors.env]` and `env_file`, a masked TOML syntax error) (`bun run --filter @devintern/e2e test`)
-- Missing: Validation-error `problems` quote the offending value verbatim (for example `[[automations]][N].repo "<value>" does not match any [[repos]] name.`); only TOML syntax errors and `appliedConfig.rejectedReason` mask quoted fragments. The tests do not assert this as desired behavior and exclude `problems` from the secret scan for that one step.
 - Last reviewed: 2026-11-23
 
 ### GET /api/workspace configSync against a running worker
@@ -316,8 +315,8 @@ interval, bounded deadline; no fixed sleeps):
   `rejectedReason` containing `.repo "…" does not match any [[repos]] name.`
   while the worker's own stderr carries the raw value. The applied file version
   is unchanged and `/api/automations` still lists only the applied entries.
-  This step's secret scan skips the validation `problems` list, which echoes
-  the value (see Missing above).
+  The dashboard's own `invalid` load masks the value in `problems` too, and
+  the secret scan covers the whole body.
 
 The fixture's temporary root (HOME, workspace, queue database, bare remote) is
 removed in `finally`, and the daemon is stopped there too.

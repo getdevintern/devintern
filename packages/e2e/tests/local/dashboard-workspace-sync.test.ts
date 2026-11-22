@@ -329,11 +329,8 @@ test.skipIf(!builtCli)(
         if (!worker.running)
           throw new Error(`worker exited waiting for ${label}\n${worker.tail()}`);
         const result = await getWorkspace(url);
-        // Validation `problems` echo quoted values verbatim (only TOML syntax
-        // errors are masked there); every other field must stay secret-free.
-        // The documented gap is recorded in docs/coverage/dashboard.md.
-        const scanned = JSON.stringify({ ...result.body, problems: undefined });
-        expectNoSecret(`workspace (${label})`, scanned, secrets);
+        // The whole body, validation `problems` included, stays secret-free.
+        expectNoSecret(`workspace (${label})`, JSON.stringify(result.body), secrets);
         last = result.body;
         if (accept(result.body)) return result;
         if (Date.now() >= deadline) {
@@ -463,12 +460,11 @@ test.skipIf(!builtCli)(
       expect(applied!.rejectedAt!).toBeGreaterThanOrEqual(firstRejectedAt);
       expect(applied?.rejectedReason).toContain('.repo "…" does not match any [[repos]] name.');
       // The dashboard's own load of the same file is a typed `invalid` state.
-      // Its `problems` quote the value verbatim (not asserted as desired
-      // behavior; see the Missing note in docs/coverage/dashboard.md).
+      // Its `problems` mask the quoted value too.
       expect(rejected.body.status).toBe("invalid");
       expect(rejected.body.error).toBe(`Invalid ${configPath}`);
       expect(rejected.body.problems).toContainEqual(
-        expect.stringContaining("does not match any [[repos]] name."),
+        expect.stringContaining('.repo "…" does not match any [[repos]] name.'),
       );
       expect(rejected.body.config).toBeUndefined();
 
