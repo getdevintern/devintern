@@ -2,7 +2,7 @@
  * Test to verify branch creation cleanup works correctly
  */
 
-import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach, spyOn } from "bun:test";
 import { execSync } from "child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
@@ -192,7 +192,7 @@ describe("Branch Creation Cleanup", () => {
     expect(existsSync(join(nestedDir, "queue.db"))).toBe(true);
   });
 
-  test("backs up discarded work to a recoverable stash entry", async () => {
+  test("backs up discarded work to a DevIntern ref, off the shared stash stack", async () => {
     writeFileSync(join(repoDir, "README.md"), "# Modified README\n", "utf8");
     writeFileSync(join(repoDir, "untracked.txt"), "untracked\n", "utf8");
 
@@ -201,14 +201,61 @@ describe("Branch Creation Cleanup", () => {
     expect(result.success).toBe(true);
     expect(await Utils.hasUncommittedChanges(repoDir)).toBe(false);
 
-    // The stash entry is labelled with the task key and restores both the
-    // modified and the untracked file.
-    const stashList = execSync("git stash list", { cwd: repoDir }).toString();
-    expect(stashList).toContain("devintern-code: pre-branch backup for TEST-STASH");
+    // `refs/stash` is shared by sibling worktrees, so the backup must not stay there.
+    expect(execSync("git stash list", { cwd: repoDir }).toString().trim()).toBe("");
 
-    execSync("git stash apply stash@{0}", { cwd: repoDir });
+    const refs = execSync(
+      "git for-each-ref --format='%(refname) %(objectname)' refs/devintern/backups/",
+      { cwd: repoDir },
+    )
+      .toString()
+      .trim()
+      .split("\n");
+    expect(refs).toHaveLength(1);
+    const [refName, sha] = refs[0].split(" ");
+    expect(refName).toMatch(/^refs\/devintern\/backups\/TEST-STASH-\d{8}T\d{6}Z$/);
+    expect(execSync(`git log -1 --format=%s ${sha}`, { cwd: repoDir }).toString()).toContain(
+      "devintern-code: pre-branch backup for TEST-STASH",
+    );
+
+    // The SHA restores both the modified and the untracked file.
+    execSync(`git stash apply ${sha}`, { cwd: repoDir });
     expect(readFileSync(join(repoDir, "README.md"), "utf8")).toBe("# Modified README\n");
     expect(existsSync(join(repoDir, "untracked.txt"))).toBe(true);
+  });
+
+  test("leaves a pre-existing user stash entry untouched", async () => {
+    writeFileSync(join(repoDir, "README.md"), "# User work\n", "utf8");
+    execSync("git stash push -m 'user stash'", { cwd: repoDir });
+    const userSha = execSync("git rev-parse stash@{0}", { cwd: repoDir }).toString().trim();
+
+    writeFileSync(join(repoDir, "untracked.txt"), "untracked\n", "utf8");
+    const result = await Utils.createFeatureBranch("TEST-USER", undefined, { cwd: repoDir });
+
+    expect(result.success).toBe(true);
+    const list = execSync("git stash list --format=%H", { cwd: repoDir }).toString().trim();
+    expect(list).toBe(userSha);
+  });
+
+  test("keeps the stash entry and warns when the backup ref cannot be written", async () => {
+    // A file where the ref directory should be makes `git update-ref` fail.
+    writeFileSync(join(repoDir, ".git", "refs", "devintern"), "not a directory\n", "utf8");
+    writeFileSync(join(repoDir, "untracked.txt"), "untracked\n", "utf8");
+
+    const warnings: string[] = [];
+    const warnSpy = spyOn(console, "warn").mockImplementation((...args: unknown[]) => {
+      warnings.push(args.join(" "));
+    });
+    try {
+      const result = await Utils.createFeatureBranch("TEST-FAIL", undefined, { cwd: repoDir });
+      expect(result.success).toBe(true);
+    } finally {
+      warnSpy.mockRestore();
+    }
+
+    expect(warnings.some((w) => w.includes("Could not move the backup"))).toBe(true);
+    const stashList = execSync("git stash list", { cwd: repoDir }).toString();
+    expect(stashList).toContain("devintern-code: pre-branch backup for TEST-FAIL");
   });
 
   test("suffixes attempt-2 when the branch exists only on the remote", async () => {
