@@ -126,6 +126,22 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 - Missing: `--resume --wait` on a cancelled task; a task cancelled through the CLI (the refusal does not depend on the actor).
 - Last reviewed: 2026-11-22
 
+### Read-only worker commands (status, overview, stats, prs, automations, logs, runs) and --json parity with the dashboard API
+
+- Surface: `devintern worker` surface
+- Status: `default`
+- Evidence: `tests/local/worker-read-commands.test.ts`: on a worker with the embedded dashboard, one succeeded ad-hoc run, a scheduled automation, and a `blocked` queued dependent, `--json` equals the matching route for `runs` (unfiltered and `--task-key`/`--limit`), `runs show|logs <id> [<name>]|artifacts <id>`, `stats --window all|7d`, `automations`, `prs` (open and `--state merged`), `queue`, `status`, `overview`, and `logs --lines N --level info|warn`; only `overview.generatedAt` is removed. After the worker stops, every command still exits 0 from the state database (run history kept, `status`/`overview` report `stopped`), and each human form exits 0 with output. A missing `--workspace` (all eight commands), an invalid `--window` (also 400 on `/api/stats`), an invalid `--level`, and an unknown run id exit 1 with the error on stderr. All HTTP(S) goes through a refusing recorder that sees zero requests (`bun run --filter @getdevintern/code build`, then `bun run --filter @devintern/e2e test`)
+- Missing: Non-empty `prs` bodies (needs a code host that records agent PRs); `runs artifacts <id> <artifact-id>` with a registered artifact; `--origin`/`--status`/`--automation`/`--offset` filters; `stats --tz`; a read-only (sandbox-mounted) state directory.
+- Last reviewed: 2026-11-23
+
+### worker doctor: readiness pass and fail paths
+
+- Surface: `devintern worker` surface
+- Status: `default`
+- Evidence: `tests/local/worker-doctor.test.ts`: a `WorkerFixture` workspace (local bare remote, deterministic agent, one automation) passes every check and exits 0 without creating the state database or lock; `--offline` turns the repository and license checks into warnings, exit 0; with licensing on and no `LICENSE_KEY` or session, **Automation entitlement** fails closed (exit 1, no network); a busy dashboard port is a warning; a missing `workspace.toml` (by `--workspace` and by default location), a nonexistent remote path, and unparseable TOML exit 1 with the failing check and its hint; `--json` is rejected as an unknown option (doctor has no JSON mode); a credential in the workspace `.env` never appears in output; zero requests reach the refusing proxy (`bun run --filter @getdevintern/code build`, then `bun run --filter @devintern/e2e test`)
+- Missing: Tracker credential and task-query dry-run checks (`[defaults].task_query`, `[[teams]]`); GitHub remotes checked through the API; a signed-in entitlement; harness and sandbox failures. Observed: for a missing remote the detail keeps only git's last stderr line (`git ls-remote exited 128: and the repository exists.`), not the `does not appear to be a git repository` cause.
+- Last reviewed: 2026-11-23
+
 ## Backlog
 
 Priority numbers are the global ranking from the
@@ -255,6 +271,48 @@ Prerequisites: the built CLI only (no tracker, code host, network, or
 credentials). Each test uses its own temporary HOME, workspace, and queue
 database, and stops the dashboard, the worker, and any background `--wait`
 process in `finally`.
+
+```sh
+bun run --filter @getdevintern/code build
+bun run --filter @devintern/e2e test
+```
+
+### Worker read-only commands and dashboard API parity
+
+`tests/local/worker-read-commands.test.ts` starts a `WorkerFixture` with the
+embedded dashboard on an ephemeral `127.0.0.1` port and one never-due
+`[[automations]]` entry. Before the daemon starts it enqueues one ad-hoc task
+for the deterministic agent, cancels a second task, and adds a third `--after`
+the cancelled one, so the queue keeps one `blocked` item without a slow agent.
+Once the run succeeds, each read command's `--json` body is compared with its
+`GET /api/...` route. The route is read before and after each CLI call, and the
+comparison runs only when both reads agree, so a log line the idle worker writes
+in between cannot cause a false mismatch. Only `overview.generatedAt` (the
+handler's wall-clock time) is removed before comparing.
+
+The worker is then stopped and the commands run again from the state database
+alone: exit 0, valid JSON, the run still listed, `status` and `overview`
+reporting `stopped`. Each human form exits 0 with non-empty output, and bad
+`--workspace`, `--window`, `--level`, and run-id inputs exit 1 with their error.
+The daemon and every CLI call get `HTTP(S)_PROXY` pointing at a refusing
+recorder (loopback bypassed), which must see zero requests.
+
+### Worker doctor
+
+`tests/local/worker-doctor.test.ts` runs `devintern worker doctor` against a
+prepared but never started `WorkerFixture` workspace: a local bare remote, the
+deterministic agent through `AGENT_CLI_PATH`, and one automation. It asserts
+the rendered check lines and exit codes for the ready path, `--offline`,
+licensing turned on with no key or session (fails closed in the isolated HOME
+with no request sent), a busy dashboard port, a missing `workspace.toml`, a
+nonexistent remote path, unparseable TOML, and the rejected `--json`. It
+rewrites `workspace.toml` between cases. A random fake `GITHUB_TOKEN` in the
+workspace `.env` must not appear in stdout or stderr, raw or URL-encoded.
+
+Prerequisites for both: the built CLI only (no tracker, code host, network, or
+credentials). Each test owns one temporary root (HOME, workspace, state
+database, bare remote) and removes it in `finally` together with the daemon,
+the recording proxy, and any listener it bound.
 
 ```sh
 bun run --filter @getdevintern/code build
