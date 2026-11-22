@@ -140,17 +140,24 @@ const GIT_BOILERPLATE_LINE =
   /could not read from remote repository|make sure you have the correct access rights|and the repository exists/i;
 
 /**
+ * Decoration lines with no content, such as GitLab's `remote: ` /
+ * `remote: =====` banner around the real `remote: ERROR: …` line.
+ */
+const GIT_BANNER_LINE = /^(remote:)?[\s=*_-]*$/i;
+
+/**
  * Pick the most specific cause from `git ls-remote` stderr. Git prints the
  * real error first and generic access-rights advice last, so the first
  * `fatal:`/`error:`/`ssh:`/`Permission denied` line that is not boilerplate
- * wins; otherwise the first non-empty line. URL userinfo is stripped and the
+ * wins; otherwise the first non-empty line. Banner lines that are only a
+ * `remote:` prefix or a `=`/`-` rule are skipped. URL userinfo is stripped and the
  * result is one bounded line. Exported for tests.
  */
 export function gitFailureCause(stderr: string): string | undefined {
   const lines = stderr
     .split(/\r?\n/)
     .map((line) => line.trim())
-    .filter(Boolean);
+    .filter((line) => line && !GIT_BANNER_LINE.test(line));
   const chosen =
     lines.find((line) => GIT_CAUSE_LINE.test(line) && !GIT_BOILERPLATE_LINE.test(line)) ?? lines[0];
   if (!chosen) return undefined;

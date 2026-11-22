@@ -554,6 +554,16 @@ describe("gitFailureCause", () => {
     expect(gitFailureCause(" \n\n")).toBeUndefined();
   });
 
+  test("skips GitLab's empty remote: banner lines for the ERROR line", () => {
+    const gitlab =
+      "remote: \nremote: ========================================================================\nremote: \nremote: ERROR: The project you were looking for could not be found or you don't have permission to view it.\nremote: \nremote: ========================================================================\nremote: \n" +
+      boilerplate;
+    expect(gitFailureCause(gitlab)).toBe(
+      "remote: ERROR: The project you were looking for could not be found or you don't have permission to view it.",
+    );
+    expect(gitFailureCause("remote: \nremote: -----\n")).toBeUndefined();
+  });
+
   test("keeps the detail bounded", () => {
     const cause = gitFailureCause(`fatal: ${"x".repeat(500)}`);
     expect(cause?.length).toBeLessThanOrEqual(200);
