@@ -21,6 +21,7 @@ import {
   defaultCheckSandbox,
   gitLsRemote,
   gitProbeEnv,
+  workerDoctorClosingLine,
 } from "../src/lib/observability/worker-readiness";
 import type { WorkerDoctorDeps } from "../src/lib/observability/worker-readiness";
 
@@ -80,6 +81,7 @@ function passingDeps(overrides: Partial<WorkerDoctorDeps> = {}): WorkerDoctorDep
     checkHarness: async () => ok("harness"),
     checkSandbox: async () => ok("sandbox"),
     isPortInUse: async () => false,
+    workerStatus: () => ({ status: "stopped" }),
     ...overrides,
   };
 }
@@ -414,6 +416,89 @@ remote = "git@github.com:acme/backend.git"
       expect(renderReadinessReport(checks).hasFailures).toBe(true);
     },
   );
+
+  test("a running worker owns the busy dashboard port and gets an ok Worker row", async () => {
+    const workspacePath = writeWorkspace(TEAMS_CONFIG, JIRA_ENV);
+    const dirs: string[] = [];
+    const checks = await collectWorkerDoctorChecks(
+      { workspacePath },
+      passingDeps({
+        isPortInUse: async () => true,
+        workerStatus: (dir) => {
+          dirs.push(dir);
+          return { status: "running", pid: 1234, startedAt: "2026-11-22T10:00:00.000Z" };
+        },
+      }),
+    );
+    expect(dirs).toEqual([workspaceDir]);
+    const [worker] = byId(checks, "worker");
+    expect(worker?.status).toBe("ok");
+    expect(worker?.detail).toBe("running (pid 1234, since 2026-11-22T10:00:00.000Z)");
+    const [port] = byId(checks, "dashboard-port");
+    expect(port?.status).toBe("ok");
+    expect(port?.detail).toBe("127.0.0.1:4400 in use by the running worker");
+    const report = renderReadinessReport(checks);
+    expect(report.hasFailures).toBe(false);
+    expect(report.hasWarnings).toBe(false);
+    const closing = workerDoctorClosingLine(checks, report);
+    expect(closing).toContain("already running");
+    expect(closing).toContain("hot-reload");
+    expect(closing).not.toContain("start it with");
+    expect(closing).not.toContain("start the worker");
+  });
+
+  test("an unverifiable worker (other PID namespace) warns and keeps the port row", async () => {
+    const workspacePath = writeWorkspace(TEAMS_CONFIG, JIRA_ENV);
+    const checks = await collectWorkerDoctorChecks(
+      { workspacePath, offline: true },
+      passingDeps({
+        isPortInUse: async () => true,
+        workerStatus: () => ({ status: "unknown", pid: 7, reason: "pid-namespace" }),
+      }),
+    );
+    const [worker] = byId(checks, "worker");
+    expect(worker?.status).toBe("warn");
+    expect(worker?.detail).toBe("unknown (cannot verify from this sandbox)");
+    expect(worker?.hint).toContain("devintern worker status");
+    const [port] = byId(checks, "dashboard-port");
+    expect(port?.status).toBe("warn");
+    expect(port?.detail).toContain("already in use");
+    expectHintsOnProblems(checks);
+    const report = renderReadinessReport(checks);
+    expect(report.hasFailures).toBe(false);
+    const closing = workerDoctorClosingLine(checks, report);
+    expect(closing).toContain("could not tell whether a worker is already running");
+    expect(closing).not.toContain("start it with");
+    expect(closing).not.toContain("start the worker");
+    expect(closing).not.toContain("stopped");
+  });
+
+  test.each([
+    ["stopped", { status: "stopped" as const, pid: 99 }],
+    ["no lock", { status: "unknown" as const }],
+  ])("a %s worker adds no row and keeps the closing line", async (_name, status) => {
+    const workspacePath = writeWorkspace(TEAMS_CONFIG, JIRA_ENV);
+    const checks = await collectWorkerDoctorChecks(
+      { workspacePath },
+      passingDeps({ workerStatus: () => status }),
+    );
+    expect(byId(checks, "worker")).toHaveLength(0);
+    expect(workerDoctorClosingLine(checks, renderReadinessReport(checks))).toBe(
+      "✅ Everything looks good — start the worker with `devintern worker`.",
+    );
+    const warned = [...checks, { id: "x", label: "x", status: "warn" as const, hint: "h" }];
+    expect(workerDoctorClosingLine(warned, renderReadinessReport(warned))).toBe(
+      "✅ Ready to run (with the warnings above) — start it with `devintern worker`.",
+    );
+  });
+
+  test("a failing check wins over a running worker in the closing line", () => {
+    const checks: ReadinessCheck[] = [
+      { id: "worker", label: "Worker", status: "ok", detail: "running (pid 1)" },
+      { id: "entitlement", label: "e", status: "fail", hint: "h" },
+    ];
+    expect(workerDoctorClosingLine(checks, renderReadinessReport(checks))).toContain("Not ready");
+  });
 
   test("a busy dashboard port is a warning only", async () => {
     const workspacePath = writeWorkspace(

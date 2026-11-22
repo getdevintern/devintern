@@ -47,7 +47,7 @@ An idle healthy worker and an idle misconfigured one look the same. Run the doct
 devintern worker doctor [--workspace <path>] [--offline]
 ```
 
-It checks that `workspace.toml` parses, that there is something to acquire, tracker credentials per team, a dry run of each `task_query` (with match counts), access to each repository, your automation license, the agent harness and sandbox, and whether the dashboard port is free. Every failing row includes a fix hint. It exits 1 if any check fails. `--offline` skips network checks. The doctor never edits config or starts the worker.
+It checks that `workspace.toml` parses, that there is something to acquire, tracker credentials per team, a dry run of each `task_query` (with match counts), access to each repository, your automation license, the agent harness and sandbox, and whether the dashboard port is free. Every failing row includes a fix hint. It exits 1 if any check fails. `--offline` skips network checks. The doctor never edits config or starts the worker. It is safe to run while the worker is up: it reports the running worker, and its dashboard on the port is not flagged as a conflict.
 
 ## Polling mode
 
