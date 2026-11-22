@@ -13,6 +13,11 @@
  * - `GET|POST /projects/:id/issues/:iid/notes`, `PUT …/notes/:note_id`
  * - `GET  /projects/:id/issues/:iid/links` (`link_type` relative to `:iid`)
  *
+ * Tests can backdate an issue's `created_at` (one-shot `--estimate` skips
+ * issues younger than 24 hours) and make one issue's links read answer an
+ * HTTP error ({@link FakeGitLabIssues.failLinks}) to exercise the dependency
+ * gate's fail-closed path.
+ *
  * It shares no code with the product client, so a regression in a path,
  * payload, or header fails instead of being mirrored. Routing is strict: any
  * other route, or another project, answers 404 and is recorded in
@@ -114,6 +119,8 @@ export class FakeGitLabIssues {
   private readonly log: FakeGitLabRequest[] = [];
   private readonly searches: FakeGitLabSearch[] = [];
   private readonly unexpected: FakeGitLabRequest[] = [];
+  /** Per-issue HTTP status the links endpoint answers instead of the links. */
+  private readonly linkFaults = new Map<number, number>();
   private nextIid = 1;
   private nextNoteId = 1000;
   private nextLinkId = 1;
@@ -154,9 +161,14 @@ export class FakeGitLabIssues {
     description: string;
     labels?: string[];
     state?: "opened" | "closed";
+    /** ISO `created_at` override (e.g. two days ago); `updated_at` stays now. */
+    createdAt?: string;
   }): { iid: number; key: string } {
     const iid = this.nextIid++;
     const stamp = this.stamp();
+    if (input.createdAt !== undefined && Number.isNaN(Date.parse(input.createdAt))) {
+      throw new Error(`Invalid fake GitLab createdAt: ${input.createdAt}`);
+    }
     this.issues.set(iid, {
       id: 90_000 + iid,
       iid,
@@ -164,7 +176,7 @@ export class FakeGitLabIssues {
       description: input.description,
       state: input.state ?? "opened",
       labels: [...(input.labels ?? [])],
-      created_at: stamp,
+      created_at: input.createdAt ?? stamp,
       updated_at: stamp,
       notes: [],
     });
@@ -185,6 +197,21 @@ export class FakeGitLabIssues {
     this.require(from);
     if (typeof to === "number") this.require(to);
     this.links.push({ id: this.nextLinkId++, from, to, type });
+  }
+
+  /**
+   * Make `GET …/issues/:iid/links` of one issue answer `status` (a 5xx by
+   * default) until {@link clearLinkFault}. Other issues and routes are
+   * unaffected.
+   */
+  failLinks(iid: number, status = 503): void {
+    this.require(iid);
+    if (status < 400 || status > 599) throw new Error(`Not an HTTP error status: ${status}`);
+    this.linkFaults.set(iid, status);
+  }
+
+  clearLinkFault(iid: number): void {
+    this.linkFaults.delete(iid);
   }
 
   closeIssue(iid: number): void {
@@ -298,7 +325,11 @@ export class FakeGitLabIssues {
       if (method === "PUT") return json(this.render(this.update(issue, await readBody(request))));
       return undefined;
     }
-    if (sub === "/links" && method === "GET") return json(this.renderLinks(issue.iid));
+    if (sub === "/links" && method === "GET") {
+      const fault = this.linkFaults.get(issue.iid);
+      if (fault !== undefined) return json({ message: `${fault} Injected fault` }, fault);
+      return json(this.renderLinks(issue.iid));
+    }
     if (sub === "/notes") {
       if (method === "GET") return json(issue.notes.map((note) => ({ ...note, author: USER })));
       if (method === "POST") {
