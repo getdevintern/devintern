@@ -52,6 +52,11 @@ ci_failure_fix = false
 # auto_merge_review = true
 # auto_merge_method = "squash"                # merge | squash | rebase
 # auto_merge_review_label = "needs-human-review"  # label PRs left open; "" disables
+# Review strictness: "strict" (default) holds any runtime behavior change;
+# "standard" merges tested behavior changes but still holds high-risk ones
+# (auth, CI/release, dependencies, destructive changes, ...).
+# auto_merge_policy = "standard"               # strict | standard
+# auto_merge_review_instructions = "Changes under billing/ always need a human."
 
 # Optional bounded host concurrency. This is throughput, not VM isolation:
 # concurrent jobs share ports, processes, Docker, caches, and linked Git data.

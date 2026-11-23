@@ -12,6 +12,8 @@ import {
   createFleetMentionHandler,
   createFleetResolveConflicts,
   createFleetTaskEvaluator,
+  createFleetAutoMerge,
+  fleetAutoMergePolicyFingerprint,
   fleetGitHubSlugs,
   repoBySlug,
 } from "../src/lib/workspace/fleet-events";
@@ -407,6 +409,65 @@ describe("fleet event handlers", () => {
       "GitHub API 502",
     );
     expect(reviews).toHaveLength(0);
+  });
+});
+
+describe("fleet auto-merge review policy", () => {
+  const workspace = (extra: string, repoExtra = "") =>
+    parseWorkspaceConfig(`
+[workspace]
+auto_merge = true
+${extra}
+
+[defaults]
+tracker = "markdown"
+
+[[repos]]
+name = "backend"
+remote = "git@github.com:acme/backend.git"
+${repoExtra}
+`);
+
+  test("the fingerprint ignores the default policy but changes with policy or instructions", () => {
+    const fingerprint = (extra: string, repoExtra?: string) =>
+      fleetAutoMergePolicyFingerprint(workspace(extra, repoExtra), "acme/backend");
+    const base = fingerprint("");
+    expect(fingerprint('auto_merge_policy = "strict"')).toBe(base);
+    const standard = fingerprint('auto_merge_policy = "standard"');
+    expect(standard).not.toBe(base);
+    expect(fingerprint("", 'auto_merge_policy = "standard"')).toBe(standard);
+    expect(fingerprint('auto_merge_review_instructions = "keep billing/ manual"')).not.toBe(base);
+  });
+
+  test("the runner passes the repo's live policy and instructions to the CLI", async () => {
+    const root = join(tmpdir(), `fleet-auto-merge-${process.pid}-${Date.now()}`);
+    mkdirSync(root, { recursive: true });
+    const config = workspace(
+      'auto_merge_policy = "standard"\nauto_merge_review_instructions = "workspace rule"',
+      'auto_merge_review_instructions = "repo rule"',
+    );
+    const policies: unknown[] = [];
+    const run = createFleetAutoMerge({
+      config,
+      workspaceDir: root,
+      repoManager: new FakeRepoManager(root),
+      userHasPushAccess: async () => true,
+      runAutoMerge: async (_slug, _pr, opts) => {
+        policies.push(opts.policy);
+        return { outcome: "waiting", message: "stub", reviewed: false };
+      },
+    });
+    await run("acme/backend", 1, "a".repeat(40));
+    // Hot reload: the runner reads the live config on every run.
+    config.workspace = workspace('auto_merge_policy = "strict"').workspace;
+    config.repos = workspace("").repos;
+    await run("acme/backend", 1, "a".repeat(40));
+    expect(policies).toMatchObject([
+      { reviewPolicy: "standard", reviewInstructions: "repo rule" },
+      { reviewPolicy: "strict" },
+    ]);
+    expect(policies[1]).not.toHaveProperty("reviewInstructions");
+    rmSync(root, { recursive: true, force: true });
   });
 });
 

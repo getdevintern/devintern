@@ -124,6 +124,7 @@ describe("auto-merge job", () => {
     safePaths: ["docs/**"],
     denyPaths: ["**/prompts/**"],
     reviewLabel: "needs-human-review",
+    policy: "strict" as const,
     agent: { model: "sonnet" },
   };
 

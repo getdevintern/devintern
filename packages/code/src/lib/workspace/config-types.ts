@@ -4,7 +4,7 @@ import type { AutomationConfig, CronOrIntervalSchedule } from "../automation/con
 import type { WorkerScheduleConfig } from "../worker/schedule";
 import type { EstimationConfig } from "../automation/estimation-config";
 import type { AgentSelection } from "../agent/selection";
-import type { AutoMergeMethod } from "../review/merge-gate";
+import type { AutoMergeMethod, MergeSafetyPolicy } from "../review/merge-gate";
 import type { DashboardAllowedOrigin } from "../observability/dashboard-origins";
 import type { DependencyMode } from "../dependencies/gate";
 
@@ -84,6 +84,13 @@ export interface AutoMergeSettings {
    * (`auto_merge_review_label`, default `needs-human-review`; `""` disables).
    */
   reviewLabel: string;
+  /** Merge-safety review strictness (`auto_merge_policy`, default `strict`). */
+  policy: MergeSafetyPolicy;
+  /**
+   * Operator rules appended to the merge-safety prompt
+   * (`auto_merge_review_instructions`). Omitted when unset or empty.
+   */
+  reviewInstructions?: string;
   /** Agent for the merge-safety review (`auto_merge_harness` / `_model` / `_effort`). */
   agent?: AgentSelection;
 }
@@ -161,6 +168,13 @@ export interface RepoConfig {
   autoMergeSafePaths?: string[];
   /** Per-repo `auto_merge_deny_paths`; replaces the workspace list when set. */
   autoMergeDenyPaths?: string[];
+  /** Per-repo `auto_merge_policy`; replaces the workspace policy when set. */
+  autoMergePolicy?: MergeSafetyPolicy;
+  /**
+   * Per-repo `auto_merge_review_instructions`; replaces the workspace text
+   * when set (`""` clears it for this repo).
+   */
+  autoMergeReviewInstructions?: string;
   /** Optional env file path, relative to the workspace directory. */
   envFile?: string;
   /**

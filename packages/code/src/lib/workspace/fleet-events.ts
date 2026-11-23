@@ -24,7 +24,8 @@ import { randomUUID } from "crypto";
 import type { CiFixResult } from "../acquirers/ci-failure-watcher";
 import type { AutomaticResolveResult } from "../acquirers/review-polling";
 import type { TaskExecutionResult } from "../acquirers/task-polling";
-import { autoMergePathsFor } from "./config";
+import { DEFAULT_MERGE_SAFETY_POLICY } from "../review/merge-gate";
+import { autoMergePathsFor, autoMergeReviewFor } from "./config";
 import type { RepoConfig, WorkspaceConfig } from "./config";
 import { buildFleetEventEnv, gitHubSlugFromRemote } from "./env";
 import { toRoutableTask } from "./router";
@@ -291,8 +292,9 @@ export function createFleetResolveConflicts(
 }
 
 /**
- * Fingerprint of the auto-merge policy that decides a repo's PRs (paths and
- * review switch; not the merge method or review label, which don't change
+ * Fingerprint of the auto-merge policy that decides a repo's PRs (paths,
+ * review switch, review policy and operator instructions; not the merge
+ * method or review label, which don't change
  * the decision, so renaming the label doesn't re-evaluate every PR).
  * Changing it re-evaluates PRs that were decided under the previous policy.
  */
@@ -302,7 +304,19 @@ export function fleetAutoMergePolicyFingerprint(config: WorkspaceConfig, slug: s
   const paths = repo
     ? autoMergePathsFor(settings, repo)
     : { safePaths: settings.safePaths, denyPaths: settings.denyPaths };
-  const material = JSON.stringify({ ...paths, review: settings.review });
+  const review = repo
+    ? autoMergeReviewFor(settings, repo)
+    : { reviewPolicy: settings.policy, reviewInstructions: settings.reviewInstructions };
+  // The default policy without instructions hashes as before, so upgrading
+  // does not re-evaluate every PR.
+  const material = JSON.stringify({
+    ...paths,
+    review: settings.review,
+    ...(review.reviewPolicy === DEFAULT_MERGE_SAFETY_POLICY
+      ? {}
+      : { reviewPolicy: review.reviewPolicy }),
+    ...(review.reviewInstructions ? { reviewInstructions: review.reviewInstructions } : {}),
+  });
   return Bun.hash(material).toString(16);
 }
 
@@ -339,6 +353,7 @@ export function createFleetAutoMerge(
       return runAutoMerge(slug, prNumber, {
         policy: {
           ...autoMergePathsFor(settings, repo),
+          ...autoMergeReviewFor(settings, repo),
           review: settings.review,
           method: settings.method,
           reviewLabel: settings.reviewLabel,
