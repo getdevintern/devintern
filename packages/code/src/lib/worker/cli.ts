@@ -183,7 +183,8 @@ async function runWorkerDoctorSubcommand(args: string[]): Promise<never> {
     }
   }
 
-  const { collectWorkerDoctorChecks } = await import("../observability/worker-readiness");
+  const { collectWorkerDoctorChecks, workerDoctorClosingLine } =
+    await import("../observability/worker-readiness");
   const { renderReadinessReport } = await import("../observability/readiness");
   const workspaceDir = workspacePath ? dirname(resolve(workspacePath)) : resolveWorkspaceDir();
   // Mirror the daemon: shared workspace values (AGENT_HARNESS, AGENT_CLI_PATH,
@@ -198,13 +199,7 @@ async function runWorkerDoctorSubcommand(args: string[]): Promise<never> {
   const report = renderReadinessReport(checks);
   console.log(`🩺 devintern worker readiness${offline ? " (offline)" : ""}:\n`);
   console.log(report.lines.join("\n"));
-  if (report.hasFailures) {
-    console.log("\n❌ Not ready — the worker would sit idle or fail. Fix the checks above.");
-  } else if (report.hasWarnings) {
-    console.log("\n✅ Ready to run (with the warnings above) — start it with `devintern worker`.");
-  } else {
-    console.log("\n✅ Everything looks good — start the worker with `devintern worker`.");
-  }
+  console.log(`\n${workerDoctorClosingLine(checks, report)}`);
   process.exit(report.hasFailures ? 1 : 0);
 }
 
