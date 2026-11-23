@@ -1419,16 +1419,20 @@ export function resolveWorkerStatus(
  * and automation source health.
  *
  * @param data - Dashboard data source
+ * @param serverPid - Pid of the process serving this dashboard over HTTP.
+ *   Only the HTTP route passes it; the `worker status` CLI runs this handler
+ *   in its own process, where no dashboard server pid exists, so it omits it.
  */
-export function handleWorkerStatus(data: DashboardData): ApiResponse {
+export function handleWorkerStatus(data: DashboardData, serverPid?: number): ApiResponse {
   const sources = data.getSources();
   return {
     status: 200,
     body: {
       worker: resolveWorkerStatus(data.workingDir, data.workspaceDir),
-      // Additive: pid of the process serving this dashboard. Equals `worker.pid`
-      // only for the worker's in-process dashboard (`worker doctor` relies on it).
-      serverPid: process.pid,
+      // Additive, HTTP route only: pid of the process serving this dashboard.
+      // Equals `worker.pid` only for the worker's in-process dashboard
+      // (`worker doctor` relies on it).
+      ...(serverPid !== undefined ? { serverPid } : {}),
       queue: data.getQueueStats(),
       agentPrs: data.getAgentPrCounts(),
       schedule: data.getScheduleSnapshot(),

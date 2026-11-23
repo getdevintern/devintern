@@ -55,13 +55,36 @@ const TIME_VARYING_FIELDS: Record<string, string[]> = {
   "/api/overview": ["generatedAt"],
 };
 
-function normalize(route: string, body: unknown): unknown {
-  const fields = TIME_VARYING_FIELDS[route.split("?")[0]!] ?? [];
-  if (fields.length === 0 || typeof body !== "object" || body === null) return body;
+/**
+ * Fields only the HTTP route returns, by route; the CLI must omit them.
+ *
+ * - `/api/worker` `serverPid`: pid of the process serving the dashboard. The
+ *   CLI serves no dashboard, so it has no such pid. The route's value is
+ *   asserted to be the daemon pid separately.
+ */
+const ROUTE_ONLY_FIELDS: Record<string, string[]> = {
+  "/api/worker": ["serverPid"],
+};
+
+function normalize(route: string, body: unknown, surface: "route" | "cli"): unknown {
+  const path = route.split("?")[0]!;
+  const fields = TIME_VARYING_FIELDS[path] ?? [];
+  const routeOnly = ROUTE_ONLY_FIELDS[path] ?? [];
+  if (fields.length + routeOnly.length === 0 || typeof body !== "object" || body === null) {
+    return body;
+  }
   const copy = { ...(body as Record<string, unknown>) };
   for (const field of fields) {
     expect(copy).toHaveProperty(field);
     delete copy[field];
+  }
+  for (const field of routeOnly) {
+    if (surface === "cli") {
+      expect(copy).not.toHaveProperty(field);
+    } else {
+      expect(copy).toHaveProperty(field);
+      delete copy[field];
+    }
   }
   return copy;
 }
@@ -88,9 +111,9 @@ async function expectParity(
   route: string,
 ): Promise<unknown> {
   for (let attempt = 0; attempt < 10; attempt++) {
-    const before = normalize(route, await getRoute(baseUrl, route));
-    const cli = normalize(route, await cliReadJson(worker, args));
-    const after = normalize(route, await getRoute(baseUrl, route));
+    const before = normalize(route, await getRoute(baseUrl, route), "route");
+    const cli = normalize(route, await cliReadJson(worker, args), "cli");
+    const after = normalize(route, await getRoute(baseUrl, route), "route");
     if (Bun.deepEquals(before, after, true)) {
       expect({ command: args.join(" "), body: cli }).toEqual({
         command: args.join(" "),
@@ -195,6 +218,10 @@ test.skipIf(!builtCli)(
       const live = await cliStatus(worker);
       expect(live.worker.status).toBe("running");
       expect(live.worker.pid).toBe(worker.daemonPid());
+      // The route reports the daemon as its server; `worker doctor` relies on it.
+      expect(((await getRoute(baseUrl, "/api/worker")) as { serverPid?: number }).serverPid).toBe(
+        worker.daemonPid(),
+      );
       expect(live.queue.injected.pending).toBe(1);
       expect((await cliOverview(worker)).worker.status).toBe("running");
       const stats = await cliStats(worker, "all");
