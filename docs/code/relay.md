@@ -23,6 +23,8 @@ devintern worker           # starts the relay connection alongside polling
 
 `devintern worker init` offers the same pairing during setup. Authorize any GitHub App URL the CLI prints. GitLab hooks are created and tested automatically when the token has Maintainer or Owner access. Run `worker connect` again after adding repositories, or to repair or rotate a registration.
 
+If you gave the DevIntern AI App access to **All repositories**, GitHub repositories you add to `workspace.toml` later, including newly created ones, are verified automatically when the worker starts or reloads its config, and `devintern worker connect github` finishes without opening the browser. A repository under a different GitHub account or organization still needs one more `devintern worker connect github` to authorize the App there.
+
 For trackers, set the tracker credentials (see the table below), then run `devintern worker connect <tracker>`.
 
 ## Commands
@@ -45,7 +47,7 @@ For trackers, set the tracker credentials (see the table below), then run `devin
 
 | Variable              | Required | Description                                                                    |
 | --------------------- | -------- | ------------------------------------------------------------------------------ |
-| (signed-in session)   | Connect  | Run `devintern login` first; stored in `.devintern-code/.auth-session.json`    |
+| (signed-in session)   | Connect  | Run `devintern login` first; stored in `~/.devintern/state/code/.auth-session.json`    |
 | `LICENSE_KEY`         | Worker   | Automation license for unattended `devintern worker` runs                      |
 | `WORKER_RELAY_URL`    | No       | Relay base URL (default `https://relay.devintern.com`)                         |
 | `DEVINTERN_AUTH_CALLBACK_PORT` | No | Fixed OAuth callback port for remote sign-in (default `17865`)              |
@@ -104,7 +106,7 @@ Browser sign-in redirects to `127.0.0.1` on the machine running the CLI. On a re
 
 ```bash
 devintern login   # on your laptop
-scp .devintern-code/.auth-session.json user@host:/path/to/project/.devintern-code/
+scp ~/.devintern/state/code/.auth-session.json user@host:~/.devintern/state/code/
 ```
 
 or forward the callback port over SSH (mosh cannot forward ports) and open the printed URL locally:

@@ -1,6 +1,11 @@
 /** Typed field readers for raw `workspace.toml` tables; each collects errors instead of throwing. */
 
-import { DEFAULT_AUTO_MERGE_REVIEW_LABEL } from "../review/merge-gate";
+import {
+  DEFAULT_AUTO_MERGE_REVIEW_LABEL,
+  MAX_AUTO_MERGE_RULES_CHARS,
+  MERGE_SAFETY_POLICIES,
+} from "../review/merge-gate";
+import type { MergeSafetyPolicy } from "../review/merge-gate";
 
 export function asTable(value: unknown, label: string, errors: string[]): Record<string, unknown> {
   if (value === undefined || value === null) {
@@ -154,4 +159,73 @@ export function readReviewLabel(
     return DEFAULT_AUTO_MERGE_REVIEW_LABEL;
   }
   return value.trim();
+}
+
+/** `auto_merge_policy`: `undefined` when unset; unknown values are an error. */
+export function readMergeSafetyPolicy(
+  table: Record<string, unknown>,
+  label: string,
+  errors: string[],
+): MergeSafetyPolicy | undefined {
+  const value = table.auto_merge_policy;
+  if (value === undefined || value === null) return undefined;
+  if (typeof value === "string" && (MERGE_SAFETY_POLICIES as readonly string[]).includes(value)) {
+    return value as MergeSafetyPolicy;
+  }
+  errors.push(`${label}.auto_merge_policy must be one of: ${MERGE_SAFETY_POLICIES.join(", ")}.`);
+  return undefined;
+}
+
+/**
+ * `auto_merge_review_instructions`: trimmed text, `undefined` when unset.
+ * `""` is kept so a repo can clear the workspace's instructions.
+ */
+export function readReviewInstructions(
+  table: Record<string, unknown>,
+  label: string,
+  errors: string[],
+): string | undefined {
+  const value = table.auto_merge_review_instructions;
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string") {
+    errors.push(`${label}.auto_merge_review_instructions must be a string.`);
+    return undefined;
+  }
+  return value.trim();
+}
+
+/**
+ * `auto_merge_rules` (inline `custom` rubric) and `auto_merge_rules_file`
+ * (its path, unresolved): trimmed, `undefined` when unset. Empty values and
+ * inline text over the size cap are errors.
+ */
+export function readAutoMergeRules(
+  table: Record<string, unknown>,
+  label: string,
+  errors: string[],
+): { rules?: string; rulesFile?: string } {
+  const read = (key: "auto_merge_rules" | "auto_merge_rules_file"): string | undefined => {
+    const value = table[key];
+    if (value === undefined || value === null) return undefined;
+    if (typeof value !== "string" || !value.trim()) {
+      errors.push(`${label}.${key} must be a non-empty string.`);
+      return undefined;
+    }
+    return value.trim();
+  };
+  const rules = read("auto_merge_rules");
+  const rulesFile = read("auto_merge_rules_file");
+  if (rules !== undefined && rules.length > MAX_AUTO_MERGE_RULES_CHARS) {
+    errors.push(
+      `${label}.auto_merge_rules is ${rules.length} characters; the limit is ` +
+        `${MAX_AUTO_MERGE_RULES_CHARS}.`,
+    );
+  }
+  if (rules !== undefined && rulesFile !== undefined) {
+    errors.push(`${label}: set only one of auto_merge_rules and auto_merge_rules_file.`);
+  }
+  return {
+    ...(rules === undefined ? {} : { rules }),
+    ...(rulesFile === undefined ? {} : { rulesFile }),
+  };
 }

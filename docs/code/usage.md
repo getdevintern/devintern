@@ -62,7 +62,7 @@ The agent harness, model, and reasoning effort are set in your environment, not 
 
 | Command                                  | Use it to                                                                     |
 | ---------------------------------------- | ----------------------------------------------------------------------------- |
-| `devintern init`                         | Create `.devintern-code/` configuration with the setup wizard (`--yes` for a template). |
+| `devintern init`                         | Register this repository in `~/.devintern` with the setup wizard (`--yes` for a template). |
 | `devintern doctor`                       | Check runtime, git, agent CLI, tracker credentials, sign-in, and license.     |
 | `devintern worker`                       | Run the workspace worker. See [Worker](./worker.md).                          |
 | `devintern dashboard`                    | Open run history without the worker. See [Dashboard](./dashboard.md).          |
@@ -145,6 +145,8 @@ The effective harness, model, and effort are printed before the run and saved in
 ## Troubleshooting
 
 **"There are uncommitted changes"**: commit or stash your changes, or pass `--no-git` to skip branch creation.
+
+**Recovering work discarded before a branch was created**: uncommitted changes in the checkout are backed up before the feature branch is created, under `refs/devintern/backups/<task>-<timestamp>` rather than on your `git stash` list. List them with `git for-each-ref refs/devintern/backups/` and restore one with `git stash apply <ref-or-sha>`. Backups older than 30 days are deleted.
 
 **"Agent reached maximum turns limit"**: raise `--max-turns` (for example `1000`) or split the task into smaller ones.
 

@@ -16,6 +16,17 @@
  */
 
 import type { TrackerComment, TrackerFixture, TrackerTicket, TrackerTicketState } from "./tracker";
+import {
+  RELATION_NAMES,
+  workItemTypeStates,
+  workItemTypeStatesProject,
+} from "./fake-azure-devops-links";
+import type {
+  FakeAzureDevOpsBlockerRequest,
+  FakeAzureDevOpsRelation,
+} from "./fake-azure-devops-links";
+
+export type { FakeAzureDevOpsBlockerRequest } from "./fake-azure-devops-links";
 
 interface FakeAzureDevOpsComment {
   id: number;
@@ -29,6 +40,8 @@ interface FakeAzureDevOpsWorkItem {
   id: number;
   fields: Record<string, unknown>;
   comments: FakeAzureDevOpsComment[];
+  /** Work-item links, returned only under `$expand=relations` / `$expand=all`. */
+  relations: FakeAzureDevOpsRelation[];
 }
 
 /** Workflow states the fake stores on seeded work items. */
@@ -334,6 +347,14 @@ export class FakeAzureDevOpsTracker implements TrackerFixture {
   /** Every WIQL request received, in arrival order (CLI, worker, and fixture). */
   readonly wiqlRequests: FakeAzureDevOpsWiqlRequest[] = [];
 
+  /** Every relations / predecessor-batch read, in arrival order. */
+  readonly blockerRequests: FakeAzureDevOpsBlockerRequest[] = [];
+
+  /** Work items whose `$expand=relations` read answers HTTP 500. */
+  private readonly failingRelationReads = new Set<number>();
+  /** Work items an `errorPolicy=omit` batch read returns as `null`. */
+  private readonly unreadableWorkItems = new Set<number>();
+
   private readonly server: ReturnType<typeof Bun.serve>;
   private readonly workItems = new Map<number, FakeAzureDevOpsWorkItem>();
   private nextWorkItemId = 100;
@@ -401,6 +422,7 @@ export class FakeAzureDevOpsTracker implements TrackerFixture {
         "System.Tags": serializeTags(input.labels ?? []),
       },
       comments: [],
+      relations: [],
     };
     this.workItems.set(workItem.id, workItem);
     return { key: String(workItem.id), url: this.editUrl(workItem.id) };
@@ -431,6 +453,54 @@ export class FakeAzureDevOpsTracker implements TrackerFixture {
     const workItem = this.requireWorkItem(ticketKey);
     workItem.fields["System.State"] = state;
     workItem.fields["System.ChangedDate"] = this.timestamp();
+  }
+
+  /**
+   * Add a work-item link from `ticketKey` to `targetKey`, as the board's
+   * "Add link" does. The predecessor link of a successor is
+   * `System.LinkTypes.Dependency-Reverse`. Does not bump `System.ChangedDate`,
+   * so seeding links before the worker starts leaves no extra change.
+   *
+   * @param ticketKey - Work item that owns the link
+   * @param rel - Link type reference name (`System.LinkTypes.*`)
+   * @param targetKey - Linked work item
+   */
+  addRelation(ticketKey: string, rel: string, targetKey: string): void {
+    const workItem = this.requireWorkItem(ticketKey);
+    const target = this.requireWorkItem(targetKey);
+    workItem.relations.push({
+      rel,
+      url: `${this.baseUrl}/_apis/wit/workItems/${target.id}`,
+      attributes: { isLocked: false, name: RELATION_NAMES[rel] ?? rel },
+    });
+  }
+
+  /**
+   * Make the `$expand=relations` read of one work item answer HTTP 500 (or
+   * recover with `false`). Other reads of the item are unaffected.
+   */
+  failRelationReads(ticketKey: string, fail = true): void {
+    const id = this.requireWorkItem(ticketKey).id;
+    if (fail) this.failingRelationReads.add(id);
+    else this.failingRelationReads.delete(id);
+  }
+
+  /**
+   * Treat a work item as deleted or unreadable for `errorPolicy=omit` batch
+   * reads: the real service returns a `null` entry in `value` for it.
+   */
+  setUnreadable(ticketKey: string, unreadable = true): void {
+    const id = this.requireWorkItem(ticketKey).id;
+    if (unreadable) this.unreadableWorkItems.add(id);
+    else this.unreadableWorkItems.delete(id);
+  }
+
+  /** Relations reads of one work item (`$expand=relations`), in arrival order. */
+  relationReads(ticketKey: string): FakeAzureDevOpsBlockerRequest[] {
+    const id = Number(ticketKey);
+    return this.blockerRequests.filter(
+      (request) => request.kind === "relations" && request.ids[0] === id,
+    );
   }
 
   /**
@@ -579,9 +649,16 @@ export class FakeAzureDevOpsTracker implements TrackerFixture {
       return this.getWorkItems(url);
     }
 
+    const statesProject = workItemTypeStatesProject(method, scopedPath);
+    if (statesProject !== undefined) {
+      if (statesProject !== this.project) return this.unmatched(method, path);
+      this.blockerRequests.push({ kind: "states", ids: [], status: 200, at: Date.now() });
+      return json(workItemTypeStates(this.statuses));
+    }
+
     const detailMatch = scopedPath.match(/^\/_apis\/wit\/workitems\/(\d+)$/i);
     if (detailMatch?.[1] && method === "GET") {
-      return this.getWorkItem(Number(detailMatch[1]));
+      return this.getWorkItem(Number(detailMatch[1]), url);
     }
     if (detailMatch?.[1] && method === "PATCH") {
       return this.patchWorkItem(Number(detailMatch[1]), request);
@@ -663,26 +740,69 @@ export class FakeAzureDevOpsTracker implements TrackerFixture {
       this.unexpectedRequests.push(diagnostic);
       return json({ message: diagnostic }, 400);
     }
+    // Like the real service, return only the requested `fields` (the WIQL
+    // change detector asks for Id, Title, and ChangedDate; the predecessor
+    // read in `AzureDevOpsClient.listPredecessors` for State, WorkItemType,
+    // and TeamProject).
+    const requested = (
+      url.searchParams.get("fields") ?? "System.Id,System.Title,System.ChangedDate"
+    )
+      .split(",")
+      .map((field) => field.trim())
+      .filter(Boolean);
+    const project = (workItem: FakeAzureDevOpsWorkItem) => ({
+      id: workItem.id,
+      fields: Object.fromEntries(
+        requested.map((field) => [field, this.batchFieldValue(workItem, field)]),
+      ),
+    });
+    // `errorPolicy=omit` answers a deleted or unreadable id with a `null`
+    // entry in place, instead of failing the whole batch.
+    const omit = (url.searchParams.get("errorPolicy") ?? "").toLowerCase() === "omit";
+    if (omit) {
+      const value = ids.map((id) => {
+        const workItem = this.workItems.get(id);
+        return workItem && !this.unreadableWorkItems.has(id) ? project(workItem) : null;
+      });
+      this.blockerRequests.push({ kind: "batch", ids, status: 200, at: Date.now() });
+      return json({ count: value.length, value });
+    }
     return json({
       count: ids.length,
       value: ids
         .map((id) => this.workItems.get(id))
         .filter((workItem): workItem is FakeAzureDevOpsWorkItem => Boolean(workItem))
-        .map((workItem) => ({
-          id: workItem.id,
-          fields: {
-            "System.Id": workItem.id,
-            "System.Title": workItem.fields["System.Title"],
-            "System.ChangedDate": workItem.fields["System.ChangedDate"],
-          },
-        })),
+        .map(project),
     });
   }
 
-  private getWorkItem(id: number): Response {
+  private batchFieldValue(workItem: FakeAzureDevOpsWorkItem, field: string): unknown {
+    if (field === "System.Id") return workItem.id;
+    if (field === "System.TeamProject") return this.project;
+    return workItem.fields[field];
+  }
+
+  private getWorkItem(id: number, url: URL): Response {
+    const expand = (url.searchParams.get("$expand") ?? "").toLowerCase();
+    const withRelations = expand === "relations" || expand === "all";
+    if (expand === "relations") {
+      const failing = this.failingRelationReads.has(id);
+      this.blockerRequests.push({
+        kind: "relations",
+        ids: [id],
+        status: failing ? 500 : this.workItems.has(id) ? 200 : 404,
+        at: Date.now(),
+      });
+      if (failing) {
+        return json(
+          { message: "Fake Azure DevOps injected relations failure", typeKey: "InternalError" },
+          500,
+        );
+      }
+    }
     const workItem = this.workItems.get(id);
     if (!workItem) return workItemNotFound(id);
-    return json(this.workItemPayload(workItem));
+    return json(this.workItemPayload(workItem, withRelations));
   }
 
   private async patchWorkItem(id: number, request: Request): Promise<Response> {
@@ -724,7 +844,7 @@ export class FakeAzureDevOpsTracker implements TrackerFixture {
       workItem.fields[field] = record?.value;
     }
     workItem.fields["System.ChangedDate"] = this.timestamp();
-    return json(this.workItemPayload(workItem));
+    return json(this.workItemPayload(workItem, false));
   }
 
   private getComments(id: number): Response {
@@ -791,12 +911,18 @@ export class FakeAzureDevOpsTracker implements TrackerFixture {
     return json(this.commentPayload(comment));
   }
 
-  private workItemPayload(workItem: FakeAzureDevOpsWorkItem): Record<string, unknown> {
+  /** Work-item body; `relations` is present only when expanded, as in the real API. */
+  private workItemPayload(
+    workItem: FakeAzureDevOpsWorkItem,
+    withRelations: boolean,
+  ): Record<string, unknown> {
     return {
       id: workItem.id,
       rev: 1,
       fields: { ...workItem.fields },
-      relations: [],
+      ...(withRelations
+        ? { relations: workItem.relations.map((relation) => ({ ...relation })) }
+        : {}),
       _links: { html: { href: this.editUrl(workItem.id) } },
       url: `${this.baseUrl}/_apis/wit/workItems/${workItem.id}`,
     };

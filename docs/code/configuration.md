@@ -9,9 +9,19 @@ dateModified: 2026-11-18
 
 # DevIntern Code Configuration
 
-DevIntern Code reads its settings from `.devintern-code/.env` in your project. Each project has its own file, so several projects can use different trackers and credentials.
+DevIntern Code keeps its settings in `~/.devintern`, outside your repositories. `devintern init` registers the current repository in `~/.devintern/workspace.toml` (as a `manual_only` repo, which the [worker](./worker.md) skips) and writes its settings to `~/.devintern/env/<repo>.env`. Each repository has its own file, so several projects can use different trackers and credentials. A repository without a GitHub, GitLab, or Bitbucket `origin` (for example a fresh `git init`) is registered by its directory instead.
 
-Create it with `devintern init`. In a terminal, the wizard asks which tracker you use, links to the provider's token page, checks the credentials, and writes `.env`. With `--yes` (or `--no-interactive`), or when stdin is not a terminal, it writes a commented template for you to fill in instead.
+In a terminal, the wizard asks which tracker you use, links to the provider's token page, checks the credentials, and writes the file. With `--yes` (or `--no-interactive`), or when stdin is not a terminal, it writes a commented template for you to fill in instead. Run `devintern init` again in the repository to update the file.
+
+### Moving from `.devintern-code/`
+
+Older releases kept settings in the repository's `.devintern-code/` folder. The first time this release runs in such a repository (any `devintern` task run or `devintern init`), it moves them automatically:
+
+- `.devintern-code/.env` becomes `~/.devintern/env/<repo>.env`, and the repository is registered as a `manual_only` repo.
+- Your sign-in moves to `~/.devintern/state/code/`.
+- Status names from `.devintern-code/settings.json` are copied to `[trackers]` in `~/.devintern/workspace.toml`. The worker does the same for the repositories it runs when it starts.
+
+Committed files (`settings.json`, `.env.example`) are left in place; delete them from the repository once everyone has upgraded. Past manual run history is not carried over.
 
 More settings:
 
@@ -21,7 +31,7 @@ More settings:
 
 ## Environment file locations
 
-DevIntern looks for `.env` in this order and uses the first match: `--env-file <path>`, then `.devintern-code/.env` or `.env` in the current directory and each parent up to the git root, then `~/.env`, then the tool's install directory. This means you can run `devintern` from any subdirectory of the project. With `--env-file`, only that file is loaded. Values in the file override variables already set in your shell.
+In a repository registered in `~/.devintern/workspace.toml`, settings come from the workspace: the shared `~/.devintern/.env`, then the repo's `env_file` and `[repos.env]` (see [Workspaces](./workspaces.md)); `--env-file` still applies on top. Otherwise DevIntern looks for `.env` in this order and uses the first match: `--env-file <path>`, then `.env` in the current directory and each parent up to the git root, then `~/.env`, then the tool's install directory. This means you can run `devintern` from any subdirectory of the project. With `--env-file`, only that file is loaded. Values in the file override variables already set in your shell.
 
 ## Choosing a task tracker
 
@@ -116,7 +126,7 @@ Only global npm or bun installs are updated. To upgrade now, run `bun install -g
 
 Run `devintern doctor` first: it checks the runtime, agent CLI, tracker credentials, sign-in, and license, and gives a fix for each failure ([details](./advanced-settings.md#readiness-check)).
 
-- **"Missing required environment variables"**: make sure `.devintern-code/.env` exists and the variable names are spelled exactly right (they are case-sensitive).
+- **"Missing required environment variables"**: make sure `~/.devintern/env/<repo>.env` (or `.devintern-code/.env` for an unregistered project) exists and the variable names are spelled exactly right (they are case-sensitive).
 - **"Not in a git repository"**: run `git init`, or pass `--no-git`.
 - **`<Harness> CLI not found`**: install the agent CLI and put it on your `PATH`, or set `AGENT_CLI_PATH` / `--agent-path`.
 - **"Unknown agent harness"**: check how `AGENT_HARNESS` is spelled (kebab-case, for example `claude-code`). The error message lists every valid name.

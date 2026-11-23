@@ -72,8 +72,8 @@ if (!gitCeilings.includes(tempRoot)) {
       "  bun run test                          # full suite\n" +
       "  bun run test ./<file>.test.ts         # single file, path relative to tests/\n" +
       "  bun run test <filter>                 # files whose path contains <filter>\n" +
-      "e.g. `bun run test ./lock-manager.test.ts`. Do not pass a `tests/` prefix " +
-      "(the runner's cwd is tests/), and do not hand-set GIT_CEILING_DIRECTORIES: " +
+      "e.g. `bun run test ./lock-manager.test.ts` (`tests/lock-manager.test.ts` works too), " +
+      "and do not hand-set GIT_CEILING_DIRECTORIES: " +
       "that skips the runner's other pins (WEBHOOK_QUEUE_DB, DEVINTERN_WORKSPACE_DIR, " +
       "SENTRY_DISABLED, DASHBOARD_TAILSCALE_AUTODETECT, worker-env stripping).",
   );

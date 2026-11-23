@@ -15,7 +15,7 @@
 
 import { randomBytes } from "crypto";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
-import { join, resolve } from "path";
+import { dirname, join, resolve } from "path";
 
 import {
   createDefaultSupabaseAuthConfig,
@@ -58,8 +58,10 @@ import type { WorkspaceConfig } from "../workspace/config";
 import { gitHubSlugFromRemote } from "../workspace/env";
 import {
   ensureWorkspaceCodeState,
+  resolveWorkspaceDir,
   workspaceCodeStateDir,
   workspaceConfigPath,
+  workspaceEnvPath,
 } from "../workspace/paths";
 import { workspaceGitLabRelayProjects } from "./worker-connect";
 import { runWorkerSentrySetup } from "./worker-sentry-setup";
@@ -416,20 +418,61 @@ async function defaultEnsureTracker(
   prompt: PromptFn,
   log: LogFn,
 ): Promise<string | null> {
+  // A legacy checkout `.env` is reused once; `add-repo` merges it into the
+  // workspace env in the next step.
   const projectRoot = findProjectRoot({ startDir: cwd });
-  const envPath = resolve(projectRoot, ".devintern-code", ".env");
-  if (existsSync(envPath)) {
-    const env = applyEnvFile(envPath);
+  const legacyEnvPath = resolve(projectRoot, ".devintern-code", ".env");
+  if (existsSync(legacyEnvPath)) {
+    const env = applyEnvFile(legacyEnvPath);
     return (env.TASK_TRACKER || process.env.TASK_TRACKER || "jira").toLowerCase();
   }
 
-  log("   No tracker config in this repo — running that subset of `devintern init`.");
-  const result = await runTrackerSetup(prompt, log, defaultProbe, cwd);
+  // An existing workspace that already names a tracker needs no setup.
+  const sharedEnvPath = workspaceEnvPath(resolveWorkspaceDir());
+  const shared = applyEnvFile(sharedEnvPath);
+  if (shared.TASK_TRACKER) return shared.TASK_TRACKER.toLowerCase();
+
+  log("   No tracker config yet — running that subset of `devintern init`.");
+  const result = await runTrackerSetup(prompt, log, defaultProbe, cwd, {
+    writeEnv: async (envContent) => {
+      mergeIntoSharedEnv(sharedEnvPath, envContent, log);
+      return sharedEnvPath;
+    },
+  });
   if (!result) {
     return null;
   }
-  applyEnvFile(envPath);
+  applyEnvFile(sharedEnvPath);
   return result.trackerId;
+}
+
+/**
+ * Merge wizard output into the workspace's shared `.env`: keys it lacks are
+ * appended; keys it already has are kept (other repos rely on them) and a
+ * differing value is reported instead of overwritten.
+ */
+function mergeIntoSharedEnv(envPath: string, envContent: string, log: LogFn): void {
+  const incoming = parseEnvContent(envContent);
+  const existingText = existsSync(envPath) ? readFileSync(envPath, "utf8") : "";
+  const existing = parseEnvContent(existingText);
+  const additions: string[] = [];
+  const differing: string[] = [];
+  for (const [key, value] of Object.entries(incoming)) {
+    if (!(key in existing)) additions.push(`${key}=${value}`);
+    else if (existing[key] !== value) differing.push(key);
+  }
+  mkdirSync(dirname(envPath), { recursive: true, mode: 0o700 });
+  const separator = existingText === "" || existingText.endsWith("\n") ? "" : "\n";
+  writeFileSync(envPath, existingText + separator + additions.map((line) => `${line}\n`).join(""), {
+    mode: 0o600,
+  });
+  chmodSync(envPath, 0o600);
+  log(`   Saved tracker settings to ${envPath}`);
+  if (differing.length > 0) {
+    log(
+      `   ⚠️  Kept the existing values for: ${differing.join(", ")} (edit ${envPath} to change them).`,
+    );
+  }
 }
 
 /**

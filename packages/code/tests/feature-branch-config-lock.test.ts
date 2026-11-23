@@ -14,11 +14,23 @@ import { Utils } from "../src/lib/utils";
 import {
   describeConfigLockPlaceholder,
   executeGitCommandWithConfigLockRetry,
+  setConfigLockRetryDelaysForTests,
 } from "../src/lib/utils/git-exec";
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8", stdio: "pipe" }).trim();
 }
+
+/**
+ * Make a never-clearing config lock fail at once. Git itself waits about a
+ * second for a held config lock (`core.configLockTimeout`) on every attempt,
+ * which only adds wall time when the lock is a permanent placeholder.
+ */
+const FAST_CONFIG_LOCK_ENV = {
+  GIT_CONFIG_COUNT: "1",
+  GIT_CONFIG_KEY_0: "core.configLockTimeout",
+  GIT_CONFIG_VALUE_0: "0",
+};
 
 /** Tracking entries git recorded for `branch` in the shared config. */
 function trackingConfig(commonDir: string, branch: string): string {
@@ -36,6 +48,7 @@ describe("feature branch creation under config lock contention", () => {
   let worktree: string;
   let lockPath: string;
   let savedReviewWorktreeBase: string | undefined;
+  let savedGitConfigEnv: Record<string, string | undefined> = {};
 
   beforeEach(() => {
     root = mkdtempSync(join(tmpdir(), "feature-branch-config-lock-"));
@@ -71,6 +84,12 @@ describe("feature branch creation under config lock contention", () => {
   afterEach(() => {
     if (savedReviewWorktreeBase === undefined) delete process.env.DEVINTERN_REVIEW_WORKTREE_PATH;
     else process.env.DEVINTERN_REVIEW_WORKTREE_PATH = savedReviewWorktreeBase;
+    setConfigLockRetryDelaysForTests();
+    for (const [key, value] of Object.entries(savedGitConfigEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    savedGitConfigEnv = {};
     rmSync(lockPath, { force: true });
     rmSync(root, { recursive: true, force: true });
   });
@@ -204,7 +223,17 @@ describe("feature branch creation under config lock contention", () => {
     }
   });
 
+  function useFastPermanentLock(): void {
+    setConfigLockRetryDelaysForTests([1, 1, 1, 1, 1, 1]);
+    savedGitConfigEnv = Object.fromEntries(
+      Object.keys(FAST_CONFIG_LOCK_ENV).map((key) => [key, process.env[key]]),
+    );
+    Object.assign(process.env, FAST_CONFIG_LOCK_ENV);
+  }
+
   test("prepares a review worktree while a sandbox placeholder holds config.lock", async () => {
+    // The placeholder never clears, so waiting out the backoff only adds wall time.
+    useFastPermanentLock();
     // What a bubblewrap sandbox leaves as the mount point for masking config.lock.
     writeFileSync(lockPath, "");
     chmodSync(lockPath, 0o444);
@@ -240,6 +269,7 @@ describe("feature branch creation under config lock contention", () => {
   });
 
   test("names a sandbox placeholder lock in the failure", async () => {
+    useFastPermanentLock();
     writeFileSync(lockPath, "");
     chmodSync(lockPath, 0o444);
 

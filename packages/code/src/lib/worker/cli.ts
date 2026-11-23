@@ -183,7 +183,8 @@ async function runWorkerDoctorSubcommand(args: string[]): Promise<never> {
     }
   }
 
-  const { collectWorkerDoctorChecks } = await import("../observability/worker-readiness");
+  const { collectWorkerDoctorChecks, workerDoctorClosingLine } =
+    await import("../observability/worker-readiness");
   const { renderReadinessReport } = await import("../observability/readiness");
   const workspaceDir = workspacePath ? dirname(resolve(workspacePath)) : resolveWorkspaceDir();
   // Mirror the daemon: shared workspace values (AGENT_HARNESS, AGENT_CLI_PATH,
@@ -198,13 +199,7 @@ async function runWorkerDoctorSubcommand(args: string[]): Promise<never> {
   const report = renderReadinessReport(checks);
   console.log(`🩺 devintern worker readiness${offline ? " (offline)" : ""}:\n`);
   console.log(report.lines.join("\n"));
-  if (report.hasFailures) {
-    console.log("\n❌ Not ready — the worker would sit idle or fail. Fix the checks above.");
-  } else if (report.hasWarnings) {
-    console.log("\n✅ Ready to run (with the warnings above) — start it with `devintern worker`.");
-  } else {
-    console.log("\n✅ Everything looks good — start the worker with `devintern worker`.");
-  }
+  console.log(`\n${workerDoctorClosingLine(checks, report)}`);
   process.exit(report.hasFailures ? 1 : 0);
 }
 
@@ -227,7 +222,8 @@ async function runWorkerInitSubcommand(args: string[]): Promise<never> {
   if (!isInteractive(args, process.stdin)) {
     console.log("❌ 'devintern worker init' is interactive; run it in a terminal.");
     console.log("   Non-interactive setup: `devintern worker scaffold` + `worker add-repo`,");
-    console.log("   set [defaults].task_query in workspace.toml, then `devintern worker`.");
+    console.log("   set [defaults].tracker and task_query in workspace.toml,");
+    console.log("   check readiness with `devintern worker doctor`, then run `devintern worker`.");
     process.exit(1);
   }
   const trackerManager = new TaskTrackerManager();

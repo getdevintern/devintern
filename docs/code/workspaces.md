@@ -65,6 +65,10 @@ repo = "frontend"
 labels = ["frontend"]
 ```
 
+Set `manual_only = true` on a `[[repos]]` entry for a repository you only run by hand from your own checkout. The worker skips it: no clone, no polling, no routing, automations, or `worker add` tasks. A workspace whose repos are all manual-only does not need `[defaults].tracker`. A manual-only repo without a hosted remote can set `path = "/absolute/checkout/dir"` instead of `remote`; runs in that directory or below it use the entry. `devintern init` writes these entries for you.
+
+Running `devintern <TASK>` inside a checkout whose `origin` matches a `[[repos]]` entry (manual-only or not) uses that workspace: the shared `.env`, the repo's `env_file` and `[repos.env]`, `[trackers]` settings, pipelines, prompt overrides, sign-in, and run history. The checkout's own `.devintern-code/.env` is not read. A ticket being worked on by the worker cannot be started by hand at the same time (and the reverse); the worker retries its run later.
+
 Keys not shown here are documented on the page for their feature:
 
 | Keys                                                                                                     | Page                                                                               |
@@ -72,7 +76,7 @@ Keys not shown here are documented on the page for their feature:
 | `[[automations]]`                                                                                        | [Recurring Automations](./automations.md)                                          |
 | `[[estimations]]`                                                                                        | [Story Points Estimation](./story-points-estimation.md#scheduled-estimation-with-the-worker) |
 | `[[error_monitors]]`                                                                                     | [Sentry Auto-fixes](./sentry-integration.md)                                       |
-| `[workspace].conflict_resolution*`, `auto_merge*`, `ci_failure_fix`; `[[repos]].sync_team_prs`, `auto_merge_safe_paths`, `auto_merge_deny_paths` | [PR Follow-up](./pr-follow-up.md)                     |
+| `[workspace].conflict_resolution*`, `auto_merge*`, `ci_failure_fix`; `[[repos]].sync_team_prs`, `auto_merge_safe_paths`, `auto_merge_deny_paths`, `auto_merge_review_paths` | [PR Follow-up](./pr-follow-up.md) |
 | `[worker.schedule]`, `[worker].auto_update`, `[workspace].dashboard_port`                                | [Worker Daemon](./worker.md)                                                       |
 | `[dashboard].allowed_origins`, `tailscale_autodetect`                                                    | [Dashboard](./dashboard.md#allowed-origins)                                        |
 | `[defaults].dependency_mode`                                                                             | [Delegation: Dependent tasks](./delegation.md#dependent-tasks---after)             |
@@ -144,7 +148,7 @@ remote = "git@github.com:acme/backend.git"
 pipeline_file = "pipelines/backend.json"   # this repo only
 ```
 
-Exactly one pipeline runs per task, chosen in this order: the running automation's `[[automations]].pipeline_file`, the repo's `pipeline_file`, `[defaults].pipeline_file`, then the built-in default. The worker ignores a `pipeline` block in a repository's `.devintern-code/settings.json`. Relative plugin and prompt paths in a `pipeline_file` resolve against that file's directory, so install plugin dependencies there. An invalid pipeline fails the run with the file named. See [Customizing the Task Pipeline](./pipelines.md) for steps and plugins.
+Exactly one pipeline runs per task, chosen in this order: the running automation's `[[automations]].pipeline_file`, the repo's `pipeline_file`, `[defaults].pipeline_file`, then the built-in default. A `pipeline` block in a repository's `.devintern-code/settings.json` is not read. Relative plugin and prompt paths in a `pipeline_file` resolve against that file's directory, so install plugin dependencies there. An invalid pipeline fails the run with the file named. See [Customizing the Task Pipeline](./pipelines.md) for steps and plugins.
 
 ## Bounded host concurrency
 

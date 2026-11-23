@@ -50,7 +50,8 @@ async function runCLI(args: string[]): Promise<{
     const proc = Bun.spawn({
       cmd: ["bun", CLI_PATH, ...args],
       cwd: testDir,
-      env: cliTrackerTestEnv(),
+      // A workspace per run keeps concurrent runs' per-ticket locks apart.
+      env: { ...cliTrackerTestEnv(), DEVINTERN_WORKSPACE_DIR: join(testDir, ".workspace") },
       stdout: "pipe",
       stderr: "pipe",
     });

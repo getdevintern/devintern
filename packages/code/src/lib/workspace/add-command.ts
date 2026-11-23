@@ -25,7 +25,7 @@ import { readWorkerHarnessPause } from "../observability/harness-pause";
 import type { WorkerHarnessPause } from "../observability/harness-pause";
 import { loadSupabaseConfig } from "../cli/bootstrap";
 import type { RepoConfig, WorkspaceConfig } from "./config";
-import { loadWorkspaceConfig, resolveCredentialTeam } from "./config";
+import { loadWorkerWorkspaceConfig, resolveCredentialTeam } from "./config";
 import { InjectedTaskStore } from "../state/injected-tasks";
 import type { InjectedTask } from "../state/injected-tasks";
 import { applyWorkspaceProcessEnv, repoGitHubSlug } from "./env";
@@ -239,13 +239,16 @@ export async function runWorkerAdd(
 
   let config: WorkspaceConfig;
   try {
-    config = loadWorkspaceConfig(configPath);
+    // Ad-hoc tasks run in the worker, so manual_only repos are not targets.
+    config = loadWorkerWorkspaceConfig(configPath);
   } catch (loadError) {
     error(`❌ Could not read ${configPath}: ${(loadError as Error).message}`);
     return 1;
   }
   if (config.repos.length === 0) {
-    error(`❌ No repos configured in ${configPath}.`);
+    error(
+      `❌ No repos configured for the worker in ${configPath} (manual_only repos are skipped).`,
+    );
     error("   Run `devintern worker add-repo` inside a checkout first.");
     return 1;
   }

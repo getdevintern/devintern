@@ -159,7 +159,6 @@ remote = "git@github.com:acme/frontend.git"
     const defaultPath = join(workspaceDir, "pipelines", "default.json");
     writeFileSync(defaultPath, JSON.stringify({ steps: [{ use: "commit" }] }));
     const selected = selectPipelineConfig({
-      settings: null,
       cwd: workspaceDir,
       env: {
         [WORKSPACE_PIPELINE_AUTOMATION_ENV]: pipelinePath,

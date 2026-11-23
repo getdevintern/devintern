@@ -115,6 +115,12 @@ export interface WorkspaceTaskAcquirerDeps {
    */
   isTaskActionedUnchanged?: (taskKey: string, updated?: string) => Promise<boolean>;
   /**
+   * Keys of this source's tickets a scheduled dashboard retry owns (pending
+   * or running); the poller never starts them. See `heldTaskKeys` on
+   * {@link TaskPollingAcquirer}.
+   */
+  heldTaskKeys?: () => ReadonlySet<string>;
+  /**
    * Explicit actioned-ticket source key pinned into each task subprocess (see
    * `ACTIONED_SOURCE_ENV`), so the recorder and gate can never disagree.
    */
@@ -279,6 +285,7 @@ export function createWorkspaceTaskAcquirer(deps: WorkspaceTaskAcquirerDeps): Ta
     isTaskActionedUnchanged: deps.isTaskActionedUnchanged
       ? (task) => deps.isTaskActionedUnchanged!(task.key, task.updated)
       : undefined,
+    heldTaskKeys: deps.heldTaskKeys,
   });
 }
 

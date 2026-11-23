@@ -45,13 +45,24 @@ ci_failure_fix = false
 # PRs touching only auto_merge_safe_paths merge with no agent run; others
 # merge only if the agent's merge-safety review says so (auto_merge_review).
 # Deny paths (plus built-ins: .github/**, CODEOWNERS, .devintern-code/**)
-# never auto-merge. Changes apply without a restart.
+# never auto-merge. Review paths always go to the agent review, even when
+# they also match a safe path. Changes apply without a restart.
 # auto_merge = true
 # auto_merge_safe_paths = ["**/*.md", "docs/**"]
 # auto_merge_deny_paths = ["**/migrations/**"]
+# auto_merge_review_paths = ["**/AGENTS.md", "**/CLAUDE.md", "**/skills/**"]
 # auto_merge_review = true
 # auto_merge_method = "squash"                # merge | squash | rebase
 # auto_merge_review_label = "needs-human-review"  # label PRs left open; "" disables
+# Review rubric, strictest first: "strict" (default) holds any runtime
+# behavior change; "standard" merges tested behavior changes but holds
+# high-risk ones (auth, CI/release, dependencies, destructive changes, ...);
+# "relaxed" also merges dependency upgrades and non-destructive migrations;
+# "custom" uses your own rules from auto_merge_rules or auto_merge_rules_file.
+# auto_merge_policy = "standard"               # strict | standard | relaxed | custom
+# auto_merge_rules_file = "merge-rules.md"     # custom only; relative to ~/.devintern
+# auto_merge_rules = "Anything under billing/ is unsafe."  # custom only; or inline
+# auto_merge_review_instructions = "Changes under billing/ always need a human."
 
 # Optional bounded host concurrency. This is throughput, not VM isolation:
 # concurrent jobs share ports, processes, Docker, caches, and linked Git data.
@@ -154,7 +165,7 @@ const ENV_TEMPLATE = `# Shared workspace environment: tracker credentials, GITHU
 /** Values that should never be copied into the shared workspace env. */
 const ENV_SHARED_SKIP = new Set(["WEBHOOK_QUEUE_DB"]);
 
-function tomlString(value: string): string {
+export function tomlString(value: string): string {
   return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
 
@@ -442,19 +453,27 @@ export function ensureWorkspaceScaffold(log: WorkspaceLogFn = console.log): {
  * @returns Process exit code (0 on success).
  */
 export function runWorkerScaffold(): number {
-  const { created, configPath } = ensureWorkspaceScaffold();
+  const { created, configPath, workspaceDir } = ensureWorkspaceScaffold();
   if (!created) {
     console.error(`❌ ${configPath} already exists; refusing to overwrite.`);
     console.error("   Edit it directly, or run `devintern worker add-repo` inside a repo.");
     return 1;
   }
 
+  const envPath = workspaceEnvPath(workspaceDir);
   console.log("");
   console.log("Next steps:");
-  console.log("  1. Put shared credentials in the workspace .env");
-  console.log("  2. Run `devintern worker add-repo` inside each repo");
-  console.log("  3. Set each team repo or add [[routing.rules]] for multi-repo routing");
-  console.log("  4. Start the fleet: devintern worker");
+  console.log("  1. Run `devintern worker add-repo` inside each repo");
+  console.log(
+    "  2. In workspace.toml, set [defaults].tracker and task_query (the ready-tasks query);",
+  );
+  console.log('     no account? use tracker = "markdown" with MARKDOWN_TASKS_DIR in the .env');
+  console.log(`  3. Put that tracker's credentials (and GITHUB_TOKEN for PRs) in ${envPath}`);
+  console.log("  4. Check readiness: devintern worker doctor");
+  console.log("  5. Start the worker: devintern worker");
+  console.log(
+    "  Multiple repos? Add [[routing.rules]]; see https://devintern.com/docs/code/workspaces",
+  );
   return 0;
 }
 
@@ -503,14 +522,7 @@ export async function runWorkerAddRepo(
     return 0;
   }
 
-  // Derive a unique, filesystem-safe name from the remote.
-  const rawName = basename(remote.replace(/\.git\/?$/, "")).replace(/[^A-Za-z0-9._-]+/g, "-");
-  let name = rawName || "repo";
-  let suffix = 2;
-  const taken = new Set(config.repos.map((repo) => repo.name));
-  while (taken.has(name)) {
-    name = `${rawName}-${suffix++}`;
-  }
+  const name = deriveRepoName(remote, config.repos);
 
   // Merge the repo's env: missing keys go to the shared .env; conflicting
   // values are demoted to this repo's inline [repos.env].
@@ -560,6 +572,23 @@ export async function runWorkerAddRepo(
   }
   log("   Note: .devintern-code/settings.json travels with the repo; nothing to migrate.");
   return 0;
+}
+
+/**
+ * Derive a unique, filesystem-safe `[[repos]]` name from a remote URL.
+ *
+ * @param remote - Git remote URL
+ * @param repos - Existing entries whose names are taken
+ */
+export function deriveRepoName(remote: string, repos: Array<{ name: string }>): string {
+  const rawName = basename(remote.replace(/\.git\/?$/, "")).replace(/[^A-Za-z0-9._-]+/g, "-");
+  let name = rawName || "repo";
+  let suffix = 2;
+  const taken = new Set(repos.map((repo) => repo.name));
+  while (taken.has(name)) {
+    name = `${rawName || "repo"}-${suffix++}`;
+  }
+  return name;
 }
 
 /**

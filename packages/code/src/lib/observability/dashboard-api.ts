@@ -279,11 +279,8 @@ export class DashboardData {
   constructor(options: DashboardDataOptions = {}) {
     this.workingDir = options.workingDir ?? process.cwd();
     this.workspaceDir = options.workspaceDir ?? resolveWorkspaceDir();
-    this.dbPath = options.dbPath ?? resolveDashboardHistoryDbPath(this.workingDir);
-    this.queueDbPath =
-      options.queueDbPath ??
-      options.dbPath ??
-      resolveDashboardQueueDbPath(undefined, this.workingDir);
+    this.dbPath = options.dbPath ?? resolveDashboardHistoryDbPath();
+    this.queueDbPath = options.queueDbPath ?? options.dbPath ?? resolveDashboardQueueDbPath();
     this.scheduleSnapshot = options.scheduleSnapshot ?? (() => null);
     this.retryMode = options.retryMode ?? "spawn";
     this.inflightRetryTtlMs = options.inflightRetryTtlMs ?? INFLIGHT_RETRY_TTL_MS;
@@ -1429,6 +1426,9 @@ export function handleWorkerStatus(data: DashboardData): ApiResponse {
     status: 200,
     body: {
       worker: resolveWorkerStatus(data.workingDir, data.workspaceDir),
+      // Additive: pid of the process serving this dashboard. Equals `worker.pid`
+      // only for the worker's in-process dashboard (`worker doctor` relies on it).
+      serverPid: process.pid,
       queue: data.getQueueStats(),
       agentPrs: data.getAgentPrCounts(),
       schedule: data.getScheduleSnapshot(),

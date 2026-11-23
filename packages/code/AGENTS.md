@@ -1,6 +1,6 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code when working with this repository.
+Guidance for coding agents working on `@getdevintern/code`. Repo-wide rules (Bun-only tooling, lint, format, docs) are in the root [AGENTS.md](../../AGENTS.md).
 
 ## Project Overview
 
@@ -24,7 +24,7 @@ This file provides guidance to Claude Code when working with this repository.
 
 ### Module layout (`src/lib`)
 
-Organize **context-first, provider-second**: top-level folders name a bounded context (what the capability *is*), and provider folders appear inside a context only where that provider genuinely multiplies.
+Organize **context-first, provider-second**: top-level folders name a bounded context (what the capability _is_), and provider folders appear inside a context only where that provider genuinely multiplies.
 
 This repo has two independent provider axes — task trackers and code hosts — and two change vectors: capability work and provider work. A single-axis tree always fails one of them. The commit history is provider-divergent and GitLab-heavy, so provider code should be co-located at the leaf, while neutral contracts stay discoverable at the context root.
 
@@ -140,12 +140,13 @@ Always run tests through `bun run test` from `packages/code`. The script runs `t
 
 ```bash
 bun run test                           # full suite
-bun run test ./lock-manager.test.ts    # one file; path is relative to tests/ (the runner's cwd)
+bun run test tests/lock-manager.test.ts   # one file; package-relative, ./tests/…, and absolute paths work
+bun run test ./lock-manager.test.ts    # one file; path relative to tests/ (the runner's cwd) also works
 bun run test lock-manager              # filter: every test file whose path contains "lock-manager"
 bun run test ./lock-manager.test.ts -t "acquire"   # other bun test flags pass through too
 ```
 
-Do not prefix paths with `tests/` (`bun run test tests/lock-manager.test.ts` matches nothing, because the runner's cwd is already `tests/`). Bare `bun test` is refused by `tests/setup/guard-git-state.ts`. Do not work around that by hand-setting `GIT_CEILING_DIRECTORIES`: doing so skips the runner's other pins and guard preloads.
+`tests/run-tests.ts` rewrites path arguments that exist relative to `packages/code` (or the repo root, e.g. `packages/code/tests/foo.test.ts`) into `tests/`-relative ones (`normalizeTestArgs` in `tests/setup/test-args.ts`); flag values, name filters, and paths that already resolve under `tests/` pass through unchanged. Bare `bun test` is refused by `tests/setup/guard-git-state.ts`. Do not work around that by hand-setting `GIT_CEILING_DIRECTORIES`: doing so skips the runner's other pins and guard preloads.
 
 ## Testing: state database isolation
 

@@ -55,7 +55,7 @@ Then under **Webhooks**, set the URL to `https://<your-host>/webhooks/github`, t
 | `AUTO_REVIEW_ITERATIONS`                                          | `2`                         | Max review-fix cycles for the self-review loop                    |
 | `WEBHOOK_MAX_RETRIES`                                             | `3`                         | Retries per failed webhook job                                    |
 | `WEBHOOK_VALIDATE_IP`                                             | `false`                     | Reject requests outside GitHub's published hook IP ranges         |
-| `WEBHOOK_QUEUE_DB`                                                | `.devintern-code/queue.db`  | Persistent job queue path                                         |
+| `WEBHOOK_QUEUE_DB`                                                | `~/.devintern/state/queue.db` | Persistent job queue path                                         |
 | `WEBHOOK_DEBUG`                                                   | `false`                     | Verbose request and processing logs                               |
 
 Unlike the CLI, the server is App-first: when App credentials are present they are used even if `GITHUB_TOKEN` is also set.

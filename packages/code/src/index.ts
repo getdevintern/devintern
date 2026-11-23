@@ -24,7 +24,9 @@ import {
   trackersSupportingEstimate,
   trackersSupportingQuery,
 } from "./lib/trackers/capabilities";
-import { LockManager } from "./lib/lock-manager";
+import { acquireRunLocks } from "./lib/cli/run-locks";
+import { applyManualWorkspaceRun, findWorkspaceRepoForCheckout } from "./lib/workspace/manual-run";
+import { migrateLegacyCheckout, moveLegacyCheckoutState } from "./lib/workspace/migrate-checkout";
 import { Utils } from "./lib/utils";
 import { isAutomatedEnvironment } from "./lib/config/env-detector";
 import {
@@ -93,6 +95,7 @@ function buildCliRunProps(tracker: string): Record<string, AnalyticsPropValue | 
 
 // Migrate legacy config directory on startup
 migrateLegacyConfigDir();
+moveLegacyCheckoutState();
 
 // Check npm for a newer global install before any real work. Local/monorepo
 // runs and --help/--version/--no-update are no-ops inside maybeOfferCliUpdate.
@@ -147,7 +150,18 @@ if (process.argv[2] === "init") {
   // implicit project `.env` first would leave its values in place for every
   // key the explicit file omits (for example, a project-controlled
   // JIRA_BASE_URL paired with the user's real token).
-  loadEnvironment(findEnvFileArg(process.argv));
+  // A checkout of a registered workspace repo takes its env, state, and
+  // prompts from the workspace; its own `.devintern-code/.env` is skipped.
+  // First run of this release in a legacy checkout: move its settings first.
+  await migrateLegacyCheckout();
+  runContext.manualWorkspace = await findWorkspaceRepoForCheckout();
+  const envFileArg = findEnvFileArg(process.argv);
+  if (runContext.manualWorkspace) {
+    applyManualWorkspaceRun(runContext.manualWorkspace, { runtimeOnly: Boolean(envFileArg) });
+  }
+  loadEnvironment(envFileArg, {
+    skipProjectEnv: Boolean(runContext.manualWorkspace),
+  });
 }
 
 /**
@@ -218,8 +232,17 @@ runContext.autoReviewIterationCap = (() => {
   }
 })();
 
-// Resolve the final agent harness
-const resolvedAgent = resolveAgentHarness(options.agentPath || options.claudePath);
+// Resolve the final agent harness. A missing or invalid agent CLI is a setup
+// problem, not a crash: print the resolver's message without a stack trace.
+const resolvedAgent = (() => {
+  try {
+    return resolveAgentHarness(options.agentPath || options.claudePath);
+  } catch (error) {
+    console.error(`❌ ${error instanceof Error ? error.message : String(error)}`);
+    console.error("   Run `devintern doctor` to check your setup.");
+    process.exit(1);
+  }
+})();
 runContext.resolvedAgent = resolvedAgent;
 if (options.verbose) {
   console.log(`🤖 ${resolvedAgent.harness.displayName} resolved to: ${resolvedAgent.path}`);
@@ -230,18 +253,8 @@ async function main(): Promise<void> {
   try {
     initSentryOnce(`code@${VERSION}`);
 
-    // Acquire lock to prevent multiple instances
-    runContext.lockManager = new LockManager();
-    const lockResult = runContext.lockManager.acquire();
-
-    if (!lockResult.success) {
-      console.error(`❌ ${lockResult.message}`);
-      console.error("   Please wait for the other instance to complete or stop it manually.");
-      if (lockResult.pid) {
-        console.error(`   You can stop the other instance with: kill ${lockResult.pid}`);
-      }
-      process.exit(1);
-    }
+    // Checkout lock plus per-ticket locks shared with the worker.
+    runContext.lockManager = acquireRunLocks(taskKeys, runContext.manualWorkspace);
 
     // Check for flags that require specific tracker support before env validation
     const activeTrackerType = (process.env.TASK_TRACKER || "jira").toLowerCase();
@@ -281,8 +294,17 @@ async function main(): Promise<void> {
     if (needsTrackerEnv) {
       const firstRun = await ensureTrackerEnvConfigured({
         automated: isAutomatedEnvironment(),
-        reloadEnv: () => {
-          loadEnvironment(options.envFile);
+        reloadEnv: async () => {
+          // The wizard may have just registered this checkout in the workspace.
+          runContext.manualWorkspace ??= await findWorkspaceRepoForCheckout();
+          if (runContext.manualWorkspace) {
+            applyManualWorkspaceRun(runContext.manualWorkspace, {
+              runtimeOnly: Boolean(options.envFile),
+            });
+          }
+          loadEnvironment(options.envFile, {
+            skipProjectEnv: Boolean(runContext.manualWorkspace),
+          });
         },
       });
       if (firstRun === "failed") {

@@ -46,6 +46,22 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 - Missing: `storyPointsField` from `.devintern-code/settings.json` for Asana (the product looks it up by the task GID's prefix, not the project GID); live Asana custom fields API.
 - Last reviewed: 2026-11-19
 
+### Asana worker dependency gate: task dependencies hold a polled task until the blocker is completed (gap `e2e-tracker-asana-dependency-gate`)
+
+- Surface: External dependency: Asana dependency links
+- Status: `default`
+- Evidence: `tests/local/worker-asana-dependencies.test.ts` (`bun run --filter @getdevintern/code build`, then `bun run --filter @devintern/e2e test`)
+- Missing: Live Asana dependencies API; a blocker the worker implemented itself (merged/stacked modes); `blocked` verdicts; multi-team Asana sources; the dashboard Queued list.
+- Last reviewed: 2026-11-21
+
+### Asana dependencies endpoint: 402 (no premium) means no blockers; other errors fail closed (gap `e2e-tracker-asana-dependencies-402-and-fail-closed`)
+
+- Surface: External dependency: Asana dependency links
+- Status: `default`
+- Evidence: `tests/local/worker-asana-dependencies.test.ts` (`bun run --filter @getdevintern/code build`, then `bun run --filter @devintern/e2e test`)
+- Missing: Live Asana workspace without premium; other failure modes than HTTP 500 (timeouts, 401/403, malformed bodies); a 402 or 500 on a later page.
+- Last reviewed: 2026-11-21
+
 ## Tracker plan status
 
 ### Asana
@@ -115,6 +131,21 @@ The fake accepts `customFields` on `createTicket` and exposes `customField(key, 
 - First due sweep (cursor moved into the past while the worker is stopped): one scheduled run, one `GET /projects/{gid}/tasks` listing, and two run records (one per old task) with origin `estimate`, the estimation id, `succeeded`, and no branch, repo, or PR. The deterministic agent runs twice in `estimate` mode. Each old task gets exactly one estimation story and an `estimation-result.json`, and the only tracker writes are those two story posts. The new task is selected and skipped (`< 24h`), and the decoy is never touched.
 - Second due sweep: Asana is listed again, both old tasks are skipped as `already estimated and not updated since`, and there are no new agent calls, run records, or tracker writes.
 - Every phase: the bare remote and seed checkout stay at the fixture commit, no task worktree exists, and the fake saw no unexpected route.
+
+```sh
+bun run --filter @getdevintern/code build
+bun run --filter @devintern/e2e test
+```
+
+### Worker Asana dependency gate
+
+`tests/local/worker-asana-dependencies.test.ts` starts the built `devintern worker` with `tracker = "asana"`, a `section:"To Do" <selector>` `task_query`, `poll_interval = 1`, and tracker writes enabled. The fake's `GET /api/1.0/tasks/{gid}/dependencies` serves per-task fixtures (`setDependencies`) as compact task records that honor `opt_fields`, pages them with Asana's `next_page` object and opaque `offset` (`setDependencyPageSize`), can answer every request with an injected 402 or 500 using Asana's `{"errors":[…]}` body (`failDependencies`), and records each request in `dependencyRequests`.
+
+- Gate: the dependent task has a completed dependency on page one and an open blocker on page two. Over several gate evaluations the worker follows the offset, never starts the task (no run, agent call, section move, story, or `modified_at` change), and `worker queue --json` lists it as a `tracker` item, `waiting`, with the blocker in `dependsOn` and the reason. Completing the blocker and editing the task runs it exactly once, with the In Progress move and one implementation story, and the queue item is gone.
+- 402: the dependencies endpoint answers 402, the task runs once, and nothing is queued.
+- 500: the task waits with `could not read <gid>'s blockers from asana: …` in the queue reason and is not touched. Once the endpoint recovers, the backoff re-check runs it once without an edit.
+
+Prerequisites: none beyond the built CLI; the only skip is the built-CLI guard.
 
 ```sh
 bun run --filter @getdevintern/code build
