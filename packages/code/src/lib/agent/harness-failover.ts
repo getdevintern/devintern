@@ -127,11 +127,13 @@ export class HarnessFailover {
    * and a fallback from before the restart is kept when it is the best
    * available entry.
    *
-   * When the persisted active name has left the chain (edited or shortened
-   * `AGENT_HARNESS`), the entry selected here is written back through
-   * {@link HarnessFailoverOptions.persistActive} so later restarts do not
-   * keep seeing the removed name (the warning is one-time). A name that is
-   * still in the chain is honored without rewriting it.
+   * When the selected entry differs from the persisted active name, it is
+   * written back through {@link HarnessFailoverOptions.persistActive}: a name
+   * that left the chain (edited or shortened `AGENT_HARNESS`) is not seen
+   * again on later restarts (the warning is one-time), and a fallback whose
+   * higher-priority entry recovered while the worker was down does not stay
+   * recorded as active (the dashboard reads that row). A persisted name that
+   * matches the selection is left as is.
    *
    * @param windows - Persisted harness → limit-until (epoch ms) map
    * @param activeName - Persisted active harness name, when known
@@ -173,10 +175,12 @@ export class HarnessFailover {
       this.activeIndex = 0;
     }
 
-    if (savedLeftChain) {
-      // The saved name is gone; store the entry we actually landed on (the
-      // best available one, or the parked primary when everything is
-      // limited) so the next restart does not repeat the stale warning.
+    if (activeName && activeName !== this.activeName) {
+      // Store the entry we actually landed on (the best available one, or the
+      // parked primary when everything is limited). Otherwise a saved name
+      // that left the chain repeats the stale warning on every restart, and a
+      // saved fallback stays recorded as active while the worker runs on the
+      // recovered primary.
       this.persistActive?.(this.activeName);
     }
 
