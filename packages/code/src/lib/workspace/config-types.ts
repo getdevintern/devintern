@@ -91,6 +91,13 @@ export interface AutoMergeSettings {
    * (`auto_merge_review_instructions`). Omitted when unset or empty.
    */
   reviewInstructions?: string;
+  /** `custom` policy rubric text (`auto_merge_rules`). */
+  rules?: string;
+  /**
+   * `custom` policy rubric file (`auto_merge_rules_file`) as written:
+   * relative to the workspace home, `~` allowed. Read on every review.
+   */
+  rulesFile?: string;
   /** Agent for the merge-safety review (`auto_merge_harness` / `_model` / `_effort`). */
   agent?: AgentSelection;
 }
@@ -175,6 +182,13 @@ export interface RepoConfig {
    * when set (`""` clears it for this repo).
    */
   autoMergeReviewInstructions?: string;
+  /**
+   * Per-repo `auto_merge_rules`; with `autoMergeRulesFile`, the repo's rules
+   * source replaces the workspace's when either is set.
+   */
+  autoMergeRules?: string;
+  /** Per-repo `auto_merge_rules_file` (unresolved, like the workspace key). */
+  autoMergeRulesFile?: string;
   /** Optional env file path, relative to the workspace directory. */
   envFile?: string;
   /**

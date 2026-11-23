@@ -41,3 +41,44 @@ describe("parseAutoMergeArgs --review-instructions", () => {
     }
   });
 });
+
+describe("parseAutoMergeArgs custom rules", () => {
+  afterEach(() => {
+    process.exitCode = 0;
+  });
+
+  test("--rules-file resolves against the workspace home, not the cwd", () => {
+    const parsed = parseAutoMergeArgs(
+      [URL, "--policy", "custom", "--rules-file", "rules.md"],
+      gate,
+      "/home/me/.devintern",
+    );
+    expect(parsed?.policy).toMatchObject({
+      reviewPolicy: "custom",
+      rulesFile: "/home/me/.devintern/rules.md",
+    });
+  });
+
+  test("--rules= keeps text with a leading dash", () => {
+    const parsed = parseAutoMergeArgs([URL, "--policy", "custom", "--rules=- docs only"], gate);
+    expect(parsed?.policy.rules).toBe("- docs only");
+  });
+
+  test("custom needs exactly one source, and rules need custom", () => {
+    const error = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      for (const args of [
+        ["--policy", "custom"],
+        ["--policy", "custom", "--rules=x", "--rules-file", "/r.md"],
+        ["--rules=x"],
+        ["--policy", "relaxed", "--rules-file", "/r.md"],
+      ]) {
+        process.exitCode = 0;
+        expect(parseAutoMergeArgs([URL, ...args], gate)).toBeUndefined();
+        expect(process.exitCode).toBe(1);
+      }
+    } finally {
+      error.mockRestore();
+    }
+  });
+});

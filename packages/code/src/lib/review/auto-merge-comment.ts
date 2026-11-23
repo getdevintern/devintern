@@ -5,7 +5,7 @@
  * comment per push.
  */
 
-import type { AutoMergeMethod, MergeSafetyPolicy } from "./merge-gate";
+import type { AutoMergeMethod } from "./merge-gate";
 
 /** Hidden first line identifying the managed comment. */
 export const AUTO_MERGE_COMMENT_MARKER = "<!-- devintern:auto-merge-status -->";
@@ -17,7 +17,10 @@ const MAX_LISTED_PATHS = 10;
 export type LeftOpenReason =
   | { kind: "outside-safe-paths"; paths: string[] }
   | { kind: "denied"; path: string; pattern: string }
-  | { kind: "agent-unsafe"; reason: string; policy: MergeSafetyPolicy }
+  /** `policy` is the policy label (`strict`, ..., `custom: rules.md`). */
+  | { kind: "agent-unsafe"; reason: string; policy: string }
+  /** A `custom` policy's rules could not be loaded, so no review ran. */
+  | { kind: "rules-unavailable"; policy: string; problem: string }
   | { kind: "not-evaluable"; detail: string };
 
 export type AutoMergeCommentStatus =
@@ -58,10 +61,18 @@ function leftOpenBody(reason: LeftOpenReason): string[] {
       ];
     case "agent-unsafe":
       return [
-        `The merge-safety review (\`${reason.policy}\` policy) found: ` +
+        `The merge-safety review (${codePath(reason.policy)} policy) found: ` +
           sanitizeCommentText(reason.reason),
         "",
         "Review and merge it yourself if you disagree.",
+      ];
+    case "rules-unavailable":
+      return [
+        `The merge-safety review (${codePath(reason.policy)} policy) could not run: ` +
+          `${sanitizeCommentText(reason.problem)}.`,
+        "",
+        "Fix the workspace's `auto_merge_rules_file` (or `auto_merge_rules`), or review and " +
+          "merge it yourself.",
       ];
     case "not-evaluable":
       return [

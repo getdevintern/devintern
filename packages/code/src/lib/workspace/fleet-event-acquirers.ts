@@ -229,6 +229,7 @@ function buildFleetCiProvider(
  */
 async function buildAutoMergeWatcher(params: {
   config: WorkspaceConfig;
+  workspaceDir: string;
   workerState: WorkerState;
   queue: WebhookQueue;
   gh: (slug: string) => FleetGitHubClient;
@@ -238,7 +239,7 @@ async function buildAutoMergeWatcher(params: {
   verbose: boolean | undefined;
   isStackedBase?: AutoMergeWatcherOptions["isStackedBase"];
 }): Promise<AutoMergeWatcherAcquirer> {
-  const { config, gh } = params;
+  const { config, gh, workspaceDir } = params;
   const { AutoMergeWatcherAcquirer: Watcher, DEFAULT_AUTO_MERGE_QUIET_SECONDS } =
     await import("../acquirers/auto-merge-watcher");
   const { parseHarnessList } = await import("@devintern/agent-harness");
@@ -278,7 +279,7 @@ async function buildAutoMergeWatcher(params: {
         ? (config.workspace.autoMerge.agent?.harness ??
           parseHarnessList(process.env.AGENT_HARNESS)[0])
         : undefined,
-    policyFingerprint: (slug) => fleetAutoMergePolicyFingerprint(config, slug),
+    policyFingerprint: (slug) => fleetAutoMergePolicyFingerprint(config, slug, workspaceDir),
     isStackedBase: params.isStackedBase,
     quietSeconds: parseEnvInteger(
       "WORKER_AUTO_MERGE_QUIET_SECONDS",
@@ -563,6 +564,7 @@ export async function buildFleetEventAcquirers(options: {
 
     const autoMergeWatcher = await buildAutoMergeWatcher({
       config,
+      workspaceDir,
       workerState: state.workerState,
       queue: state.queue,
       gh,
