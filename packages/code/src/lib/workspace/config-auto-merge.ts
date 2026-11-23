@@ -41,6 +41,7 @@ export function parseAutoMergeSettings(
     review: readOptionalBoolean(workspaceTable, "auto_merge_review", label, errors) ?? true,
     safePaths: readGlobList(workspaceTable, "auto_merge_safe_paths", label, errors),
     denyPaths: readGlobList(workspaceTable, "auto_merge_deny_paths", label, errors),
+    reviewPaths: readGlobList(workspaceTable, "auto_merge_review_paths", label, errors),
     reviewLabel: readReviewLabel(workspaceTable, label, errors),
     policy: readMergeSafetyPolicy(workspaceTable, label, errors) ?? DEFAULT_MERGE_SAFETY_POLICY,
     ...(reviewInstructions ? { reviewInstructions } : {}),
@@ -162,10 +163,11 @@ export function autoMergeReviewFor(
 /** Effective auto-merge path policy for one repository (repo lists replace workspace lists). */
 export function autoMergePathsFor(
   settings: AutoMergeSettings,
-  repo: Pick<RepoConfig, "autoMergeSafePaths" | "autoMergeDenyPaths">,
-): { safePaths: string[]; denyPaths: string[] } {
+  repo: Pick<RepoConfig, "autoMergeSafePaths" | "autoMergeDenyPaths" | "autoMergeReviewPaths">,
+): { safePaths: string[]; denyPaths: string[]; reviewPaths: string[] } {
   return {
     safePaths: repo.autoMergeSafePaths ?? settings.safePaths,
     denyPaths: repo.autoMergeDenyPaths ?? settings.denyPaths,
+    reviewPaths: repo.autoMergeReviewPaths ?? settings.reviewPaths,
   };
 }

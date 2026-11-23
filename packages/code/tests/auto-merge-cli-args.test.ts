@@ -42,6 +42,37 @@ describe("parseAutoMergeArgs --review-instructions", () => {
   });
 });
 
+describe("parseAutoMergeArgs --review-path", () => {
+  afterEach(() => {
+    process.exitCode = 0;
+  });
+
+  test("is repeatable and round-trips through the worker's CLI args", async () => {
+    const parsed = parseAutoMergeArgs(
+      [URL, "--review-path", "**/AGENTS.md", "--safe-path", "**/*.md", "--review-path", "skills/"],
+      gate,
+    );
+    expect(parsed?.policy.reviewPaths).toEqual(["**/AGENTS.md", "skills/"]);
+    expect(parsed?.policy.safePaths).toEqual(["**/*.md"]);
+    const { autoMergeCliArgs } = await import("../src/lib/acquirers/auto-merge-cli");
+    const args = autoMergeCliArgs(parsed!.policy, "a".repeat(40));
+    expect(parseAutoMergeArgs([URL, ...args], gate)?.policy.reviewPaths).toEqual([
+      "**/AGENTS.md",
+      "skills/",
+    ]);
+  });
+
+  test("a missing value is a usage error", () => {
+    const err = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      expect(parseAutoMergeArgs([URL, "--review-path"], gate)).toBeUndefined();
+      expect(process.exitCode).toBe(1);
+    } finally {
+      err.mockRestore();
+    }
+  });
+});
+
 describe("parseAutoMergeArgs custom rules", () => {
   afterEach(() => {
     process.exitCode = 0;

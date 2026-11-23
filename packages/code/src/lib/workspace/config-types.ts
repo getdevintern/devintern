@@ -80,6 +80,11 @@ export interface AutoMergeSettings {
   /** Globs that block auto-merge entirely (`auto_merge_deny_paths`). */
   denyPaths: string[];
   /**
+   * Globs whose changes always go to the agent review, even when they also
+   * match a safe glob (`auto_merge_review_paths`).
+   */
+  reviewPaths: string[];
+  /**
    * Label for PRs left open for a human, removed on merge
    * (`auto_merge_review_label`, default `needs-human-review`; `""` disables).
    */
@@ -175,6 +180,8 @@ export interface RepoConfig {
   autoMergeSafePaths?: string[];
   /** Per-repo `auto_merge_deny_paths`; replaces the workspace list when set. */
   autoMergeDenyPaths?: string[];
+  /** Per-repo `auto_merge_review_paths`; replaces the workspace list when set. */
+  autoMergeReviewPaths?: string[];
   /** Per-repo `auto_merge_policy`; replaces the workspace policy when set. */
   autoMergePolicy?: MergeSafetyPolicy;
   /**

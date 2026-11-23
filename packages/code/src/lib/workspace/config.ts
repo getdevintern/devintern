@@ -547,6 +547,11 @@ function parseReposSection(
       ...(table.auto_merge_deny_paths === undefined
         ? {}
         : { autoMergeDenyPaths: readGlobList(table, "auto_merge_deny_paths", label, errors) }),
+      ...(table.auto_merge_review_paths === undefined
+        ? {}
+        : {
+            autoMergeReviewPaths: readGlobList(table, "auto_merge_review_paths", label, errors),
+          }),
       ...repoAutoMergeReview(table, label, errors),
       envFile: readString(table, "env_file", label, errors),
       ...(syncTeamPrs === undefined ? {} : { syncTeamPrs }),

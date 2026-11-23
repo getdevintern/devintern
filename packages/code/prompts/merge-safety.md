@@ -7,6 +7,7 @@ placeholders:
   - prNumber
   - prTitle
   - reviewPaths
+  - alwaysReviewPaths
   - rubric
   - operatorSection
   - prDiff
@@ -30,9 +31,13 @@ The rubric under "What Makes a Merge Unsafe" comes from the merge-safety policy 
 
 {{prTitle}}
 
-These changed paths fall outside the repository's pre-approved safe paths, so they are why you are being asked:
+These changed paths are why you are being asked. Changed paths outside the repository's pre-approved safe paths:
 
 {{reviewPaths}}
+
+Changed paths the operator always sends to review, even when they also match a safe path:
+
+{{alwaysReviewPaths}}
 
 ## What Makes a Merge Unsafe
 {{rubric}}

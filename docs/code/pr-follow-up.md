@@ -109,6 +109,7 @@ Set `auto_merge = true` to have the worker merge its own PRs once they are green
 auto_merge = true
 auto_merge_safe_paths = ["**/*.md", "docs/**", "packages/*/tests/e2e/**"]
 auto_merge_deny_paths = ["**/migrations/**", "**/package.json", "bun.lock"]
+auto_merge_review_paths = ["**/AGENTS.md", "**/CLAUDE.md", "**/skills/**"]  # always reviewed
 auto_merge_review = true                         # agent reviews PRs outside the safe paths
 auto_merge_method = "squash"                     # merge | squash | rebase
 auto_merge_review_label = "needs-human-review"   # label for PRs left open; "" disables
@@ -126,10 +127,25 @@ Each PR passes these gates in order. Any "no" leaves it open for a human:
 
 1. **Ready.** Open, not a draft, not from a fork, checks passing, no conflicts, and no outstanding "changes requested" review. Branch protection still applies. The head commit must be unchanged for 5 minutes (`WORKER_AUTO_MERGE_QUIET_SECONDS`).
 2. **Deny paths.** A changed file matching `auto_merge_deny_paths` or a built-in deny path (`.github/**`, `**/CODEOWNERS`, `.devintern-code/**`) blocks the merge.
-3. **Safe paths.** If every changed file matches `auto_merge_safe_paths`, the PR merges with no agent run.
-4. **Agent review.** Otherwise, with `auto_merge_review = true` (the default), the agent reviews the diff and the PR merges only on an explicit "safe" verdict.
+3. **Safe paths.** If every changed file matches `auto_merge_safe_paths` and none matches `auto_merge_review_paths`, the PR merges with no agent run.
+4. **Agent review.** Otherwise, with `auto_merge_review = true` (the default), the agent reviews the diff and the PR merges only on an explicit "safe" verdict. With `auto_merge_review = false`, the PR stays open.
 
-Globs are repo-relative; `docs/` means `docs/**`. A rename counts both paths. Per-repo `auto_merge_safe_paths`, `auto_merge_deny_paths`, `auto_merge_policy`, `auto_merge_rules` / `auto_merge_rules_file`, and `auto_merge_review_instructions` replace the workspace values. The merge is pinned to the commit that passed the gates. A PR left open is checked again after new commits or a policy change.
+Globs are repo-relative; `docs/` means `docs/**`. A rename counts both paths. Per-repo `auto_merge_safe_paths`, `auto_merge_deny_paths`, `auto_merge_review_paths`, `auto_merge_policy`, `auto_merge_rules` / `auto_merge_rules_file`, and `auto_merge_review_instructions` replace the workspace values. The merge is pinned to the commit that passed the gates. A PR left open is checked again after new commits or a policy change.
+
+### Review paths
+
+Use `auto_merge_review_paths` for files that should always get the agent review but should not block a PR the way a deny path does. A matching file never counts as safe, even when it also matches a safe path, so a PR that only edits `AGENTS.md` is reviewed instead of merging unreviewed. A feature PR that also updates `AGENTS.md` or a skill to describe the change can still merge on a "safe" verdict. Deny paths still win over review paths.
+
+If you put agent instructions on the deny list so Markdown safe paths would not merge them unreviewed, move them to review paths:
+
+```toml
+[workspace]
+auto_merge_safe_paths = ["**/*.md", "docs/**"]
+auto_merge_deny_paths = ["**/migrations/**"]                                  # was also AGENTS.md, CLAUDE.md, skills
+auto_merge_review_paths = ["**/AGENTS.md", "**/CLAUDE.md", "**/skills/**"]
+```
+
+The agent is told which changed files matched a review path, and the status comment of a PR left open names them.
 
 ### Review policy
 
@@ -144,6 +160,7 @@ Globs are repo-relative; `docs/` means `docs/**`. A rename counts both paths. Pe
 
 | Setting                          | Default  | What it does                                                                                                                                                                                                                       |
 | -------------------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `auto_merge_review_paths`        | none     | Globs that always go to the agent review, even when they also match a safe path. See [Review paths](#review-paths).                                                                                                               |
 | `auto_merge_policy`              | `strict` | `strict`, `standard`, `relaxed`, or `custom`.                                                                                                                                                                                      |
 | `auto_merge_rules`               | none     | The rubric for `custom`, inline. Up to 20,000 characters.                                                                                                                                                                         |
 | `auto_merge_rules_file`          | none     | The rubric for `custom`, in a file. Relative paths are taken from the workspace home (`~/.devintern`); `~` is expanded. The file is read on every review, so edits apply right away and re-check PRs it left open. Up to 20,000 characters. |
@@ -162,7 +179,7 @@ Answer "safe": false for any change to billing/, payments/, or database migratio
 Tested changes elsewhere may merge. Documentation and test-only changes are safe.
 ```
 
-Changing the policy, the rules, or the instructions re-checks PRs that were left open. All of these keys apply on reload, without a restart.
+Changing the policy, the rules, the instructions, or the review paths re-checks PRs that were left open. All of these keys apply on reload, without a restart.
 
 The worker explains each decision in one status comment on the PR, edited in place (an agent hold names the policy it ran under, such as `standard` or `custom: merge-rules.md`), and labels PRs left open with `auto_merge_review_label`. If the agent is usage-limited, the check waits for the quota to reset, and that wait does not count as a failed attempt. A check that fails (for example, the agent returns no verdict) is retried after 5 and then 10 minutes. After the third failure on the same commit, the status comment says the check kept failing, and the PR waits for new commits or a policy change. The dashboard's **Automations** page lists an **Auto-merge** entry; its **Run now** checks every open PR immediately.
 
@@ -172,7 +189,7 @@ The GitHub credential needs `Pull requests: Read and write` and `Contents: Read 
 devintern auto-merge <pr-url> --safe-path '**/*.md' --dry-run
 ```
 
-Other flags: `--deny-path` (repeatable), `--no-review`, `--method`, `--policy <strict|standard|relaxed|custom>`, `--rules=<text>`, `--rules-file <path>`, `--review-instructions=<text>`, `--review-label <name>`, `--no-review-label`.
+Other flags: `--deny-path` and `--review-path` (repeatable), `--no-review`, `--method`, `--policy <strict|standard|relaxed|custom>`, `--rules=<text>`, `--rules-file <path>`, `--review-instructions=<text>`, `--review-label <name>`, `--no-review-label`.
 
 ## CI failures on the agent's PRs
 

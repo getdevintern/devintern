@@ -69,6 +69,7 @@ export function autoMergeCliArgs(
     ...(policy.rules && !policy.rulesFile ? [`--rules=${policy.rules}`] : []),
     ...policy.safePaths.flatMap((glob) => ["--safe-path", glob]),
     ...policy.denyPaths.flatMap((glob) => ["--deny-path", glob]),
+    ...(policy.reviewPaths ?? []).flatMap((glob) => ["--review-path", glob]),
     // Unset keeps the CLI default label; empty disables labeling.
     ...(policy.reviewLabel === undefined
       ? []

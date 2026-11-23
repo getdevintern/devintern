@@ -28,7 +28,7 @@ describe("classifyChangedPaths", () => {
         [{ path: "README.md" }, { path: "src/index.ts" }, { path: "src/index.ts" }],
         policy,
       ),
-    ).toEqual({ kind: "needs-review", outside: ["src/index.ts"] });
+    ).toEqual({ kind: "needs-review", outside: ["src/index.ts"], reviewMatches: [] });
   });
 
   test("deny globs win over safe globs", () => {
@@ -61,7 +61,7 @@ describe("classifyChangedPaths", () => {
     // Moving a source file into docs/ must not look docs-only.
     expect(
       classifyChangedPaths([{ path: "docs/notes.md", previousPath: "src/auth.ts" }], policy),
-    ).toEqual({ kind: "needs-review", outside: ["src/auth.ts"] });
+    ).toEqual({ kind: "needs-review", outside: ["src/auth.ts"], reviewMatches: [] });
     // Moving a workflow out of .github/ still hits the deny list.
     expect(
       classifyChangedPaths(
@@ -79,8 +79,80 @@ describe("classifyChangedPaths", () => {
 
   test("no safe paths sends everything to review", () => {
     expect(classifyChangedPaths([{ path: "README.md" }], { safePaths: [], denyPaths: [] })).toEqual(
-      { kind: "needs-review", outside: ["README.md"] },
+      { kind: "needs-review", outside: ["README.md"], reviewMatches: [] },
     );
+  });
+
+  describe("review paths", () => {
+    const withReview = {
+      safePaths: ["**/*.md", "docs/**"],
+      denyPaths: ["**/migrations/**"],
+      reviewPaths: ["**/AGENTS.md", "**/CLAUDE.md", "**/skills/**"],
+    };
+
+    test("a review-path file that also matches a safe glob → needs-review", () => {
+      expect(
+        classifyChangedPaths(
+          [{ path: "README.md" }, { path: "packages/code/AGENTS.md" }],
+          withReview,
+        ),
+      ).toEqual({
+        kind: "needs-review",
+        outside: ["packages/code/AGENTS.md"],
+        reviewMatches: ["packages/code/AGENTS.md"],
+      });
+    });
+
+    test("deny still beats review", () => {
+      expect(
+        classifyChangedPaths(
+          [{ path: "AGENTS.md" }, { path: "db/migrations/001.sql" }],
+          withReview,
+        ),
+      ).toEqual({ kind: "denied", path: "db/migrations/001.sql", pattern: "**/migrations/**" });
+      expect(
+        classifyChangedPaths([{ path: "skills/x.md" }], {
+          ...withReview,
+          denyPaths: ["skills/**"],
+        }).kind,
+      ).toBe("denied");
+    });
+
+    test("a rename counts both sides", () => {
+      // Renaming a skill out of skills/ into docs/ still goes to review.
+      expect(
+        classifyChangedPaths(
+          [{ path: "docs/old-skill.md", previousPath: "agent/skills/deploy/SKILL.md" }],
+          withReview,
+        ),
+      ).toEqual({
+        kind: "needs-review",
+        outside: ["agent/skills/deploy/SKILL.md"],
+        reviewMatches: ["agent/skills/deploy/SKILL.md"],
+      });
+      // Renaming into a review path, too.
+      expect(
+        classifyChangedPaths([{ path: "CLAUDE.md", previousPath: "docs/notes.md" }], withReview),
+      ).toEqual({ kind: "needs-review", outside: ["CLAUDE.md"], reviewMatches: ["CLAUDE.md"] });
+    });
+
+    test("a PR with only safe files is unaffected", () => {
+      expect(
+        classifyChangedPaths([{ path: "README.md" }, { path: "docs/guide.md" }], withReview),
+      ).toEqual({ kind: "safe" });
+    });
+
+    test("review paths with no safe overlap behave like any other outside path", () => {
+      const result = classifyChangedPaths(
+        [{ path: "src/index.ts" }, { path: "tools/skills/run.ts" }, { path: "src/index.ts" }],
+        withReview,
+      );
+      expect(result).toEqual({
+        kind: "needs-review",
+        outside: ["src/index.ts", "tools/skills/run.ts"],
+        reviewMatches: ["tools/skills/run.ts"],
+      });
+    });
   });
 
   test("trailing-slash globs mean everything below", () => {

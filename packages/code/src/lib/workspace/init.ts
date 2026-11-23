@@ -45,10 +45,12 @@ ci_failure_fix = false
 # PRs touching only auto_merge_safe_paths merge with no agent run; others
 # merge only if the agent's merge-safety review says so (auto_merge_review).
 # Deny paths (plus built-ins: .github/**, CODEOWNERS, .devintern-code/**)
-# never auto-merge. Changes apply without a restart.
+# never auto-merge. Review paths always go to the agent review, even when
+# they also match a safe path. Changes apply without a restart.
 # auto_merge = true
 # auto_merge_safe_paths = ["**/*.md", "docs/**"]
 # auto_merge_deny_paths = ["**/migrations/**"]
+# auto_merge_review_paths = ["**/AGENTS.md", "**/CLAUDE.md", "**/skills/**"]
 # auto_merge_review = true
 # auto_merge_method = "squash"                # merge | squash | rebase
 # auto_merge_review_label = "needs-human-review"  # label PRs left open; "" disables
