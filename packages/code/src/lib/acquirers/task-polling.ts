@@ -109,6 +109,15 @@ export interface TaskPollingAcquirerOptions {
    */
   isTaskActionedUnchanged?: (task: ReadyTask) => Promise<boolean>;
   /**
+   * Keys another acquirer currently owns (a pending or running dashboard
+   * retry in `scheduled_retries`). The poller never starts a held key: its
+   * own `inFlightKeys` cannot see a run the retry drain started, and that
+   * run's transition and comment bump the ticket's stamp mid-run. A held key
+   * is remembered like an in-flight edit and re-evaluated once the hold
+   * clears, when the actioned gate sees the settled run's marker.
+   */
+  heldTaskKeys?: () => ReadonlySet<string>;
+  /**
    * Working-window gate (quiet hours). When closed, ticks start no new
    * detection/evaluation/execution; already-running executions finish
    * naturally. Manual overrides and startup catch-up are the gate's decisions
@@ -132,6 +141,8 @@ export interface TaskPollingAcquirerOptions {
   now?: () => number;
   verbose?: boolean;
 }
+
+const EMPTY_KEYS: ReadonlySet<string> = new Set();
 
 /** Longest gap between re-checks of a ticket its blockers keep holding back. */
 export const WAITING_RECHECK_MAX_MS = 15 * 60_000;
@@ -379,28 +390,45 @@ export class TaskPollingAcquirer implements Acquirer {
       // A task edited mid-run or deferred keeps a pending stamp. Re-evaluate
       // once its run has settled — not on every tick — so the cursor can
       // advance while the potentially many-minute agent run is still in flight.
+      const heldAtStart = this.heldKeys();
       const hasReadyPending = [...this.pendingRescans.keys()].some((key) =>
-        this.pendingReady(key, this.now()),
+        this.pendingReady(key, this.now(), heldAtStart),
       );
 
       if (detection.changed || hasReadyPending) {
         const { tasks } = await searchTasks(query);
         const skipped: string[] = [];
         const actionedSkips: string[] = [];
+        const heldSkips: string[] = [];
         const missingStamp: string[] = [];
         /** Held-back keys whose backoff has not elapsed: kept pending, not re-gated. */
         const backedOff = new Set<string>();
         let pickedUp = 0;
 
+        // Snapshot the held keys before the actioned gate and again after it.
+        // A held run records its actioned marker before its hold clears, so a
+        // key that was held when the gate began may have been judged against
+        // the pre-run marker; skipping it is the only safe answer. A hold that
+        // starts while the gate is reading is caught by the second snapshot.
+        const heldBefore = this.heldKeys();
         // Resolve the actioned gate for every candidate before claiming any:
         // batching keeps the async tracker reads out of the per-task claim loop
         // so releasing the busy gate is not delayed by an in-flight execution
         // starting mid-loop (see the pending-rescan timing the tests pin).
         const actionedKeys = await this.resolveActionedKeys(tasks);
+        const held = new Set([...heldBefore, ...this.heldKeys()]);
 
         for (const task of tasks) {
           if (!hasUpdateStamp(task)) {
             missingStamp.push(task.key);
+          }
+          if (held.has(task.key)) {
+            // Another acquirer (a scheduled dashboard retry) owns the ticket.
+            // Keep the stamp pending so a genuine edit made meanwhile is
+            // re-evaluated once the hold clears, instead of being dropped.
+            heldSkips.push(task.key);
+            this.rememberPendingRescan(detector.source, task.key, processedTaskId(task));
+            continue;
           }
           // Already actioned (a PR exists) and unchanged: keep it out of the
           // sweep even though the query still matches, until a human changes it.
@@ -485,7 +513,12 @@ export class TaskPollingAcquirer implements Acquirer {
           );
         }
 
-        this.logEvaluate(tasks.length, skipped, actionedSkips, missingStamp, pickedUp, verbose);
+        this.logEvaluate(
+          tasks.length,
+          { skipped, actionedSkips, heldSkips, missingStamp },
+          pickedUp,
+          verbose,
+        );
         // Remember that a drain ran so working-window catch-up can tell an
         // elapsed-but-idle window apart from one that was already served.
         this.scheduleGuard(
@@ -498,7 +531,7 @@ export class TaskPollingAcquirer implements Acquirer {
         // re-evaluations forever.
         let droppedPending = false;
         for (const key of Array.from(this.pendingRescans.keys())) {
-          if (!this.inFlightKeys.has(key) && !backedOff.has(key)) {
+          if (!this.keepPending(key, backedOff, held)) {
             this.pendingRescans.delete(key);
             droppedPending = true;
           }
@@ -645,14 +678,32 @@ export class TaskPollingAcquirer implements Acquirer {
     return false;
   }
 
+  /** Keys another acquirer owns right now; a lookup failure holds nothing. */
+  private heldKeys(): ReadonlySet<string> {
+    const resolve = this.options.heldTaskKeys;
+    if (!resolve) return EMPTY_KEYS;
+    return this.scheduleGuard(resolve, EMPTY_KEYS);
+  }
+
   /** Clock for the waiting re-check backoff. */
   private now(): number {
     return (this.options.now ?? Date.now)();
   }
 
   /** A pending re-admission is ready once its run settled and any wait backoff elapsed. */
-  private pendingReady(key: string, now: number): boolean {
-    return !this.inFlightKeys.has(key) && !this.waitingNotDue(key, undefined, now);
+  private pendingReady(key: string, now: number, held: ReadonlySet<string>): boolean {
+    return (
+      !this.inFlightKeys.has(key) && !held.has(key) && !this.waitingNotDue(key, undefined, now)
+    );
+  }
+
+  /** Whether a pending re-admission must survive this tick's prune. */
+  private keepPending(
+    key: string,
+    backedOff: ReadonlySet<string>,
+    held: ReadonlySet<string>,
+  ): boolean {
+    return this.inFlightKeys.has(key) || backedOff.has(key) || held.has(key);
   }
 
   /** Record a pickup's gate outcome for the waiting re-check backoff. */
@@ -774,12 +825,16 @@ export class TaskPollingAcquirer implements Acquirer {
    */
   private logEvaluate(
     matched: number,
-    skipped: string[],
-    actionedSkips: string[],
-    missingStamp: string[],
+    skips: {
+      skipped: string[];
+      actionedSkips: string[];
+      heldSkips: string[];
+      missingStamp: string[];
+    },
     pickedUp: number,
     verbose?: boolean,
   ): void {
+    const { skipped, actionedSkips, heldSkips, missingStamp } = skips;
     if (verbose) {
       const skipNote = skipped.length > 0 ? ` (${skipped.length} already processed)` : "";
       console.log(`   [${this.name}] change detected; ${matched} task(s) match query${skipNote}`);
@@ -798,6 +853,14 @@ export class TaskPollingAcquirer implements Acquirer {
     if (actionedSkips.length > 0) {
       console.log(
         `⏭️  [${this.name}] skipping ${actionedSkips.join(", ")} (already actioned; no change since the PR)`,
+      );
+    }
+
+    // A held ticket is owned by a scheduled dashboard retry; starting it here
+    // would be a duplicate run of the same ticket.
+    if (heldSkips.length > 0) {
+      console.log(
+        `⏭️  [${this.name}] skipping ${heldSkips.join(", ")} (a scheduled retry owns it; re-checking once it settles)`,
       );
     }
 
