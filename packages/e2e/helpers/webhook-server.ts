@@ -38,6 +38,22 @@ export interface WebhookServerFixtureOptions {
    * assert the in-progress dedupe branch deterministically and offline.
    */
   pauseReviewQueue?: boolean;
+  /**
+   * Temporary root to use instead of creating one. The fixture takes
+   * ownership: `dispose` (and a failed start) removes it. Lets a caller seed a
+   * checkout, bare remote, or fake agent under the same root first.
+   */
+  root?: string;
+  /**
+   * Extra environment applied after the isolated environment and the inert
+   * agent stub, e.g. a fake code host or a deterministic `AGENT_CLI_PATH`.
+   */
+  env?: Record<string, string>;
+  /**
+   * Server working directory (default: the root). The review pipeline runs
+   * `address-review` and friends in this directory, so it must be a checkout.
+   */
+  cwd?: string;
 }
 
 /**
@@ -198,12 +214,13 @@ export class WebhookServerFixture {
   static async start(options: WebhookServerFixtureOptions = {}): Promise<WebhookServerFixture> {
     // Keep the in-process health poll off any ambient proxy (see loopback-proxy).
     ensureLoopbackBypassesProxy();
-    const root = mkdtempSync(join(tmpdir(), "devintern-e2e-webhook-"));
+    const root = options.root ?? mkdtempSync(join(tmpdir(), "devintern-e2e-webhook-"));
     const env = isolatedEnvironment(root);
     // The CLI resolves its agent harness at startup even for `webhook serve`,
     // so pin the same inert stub the other e2e fixtures use instead of
     // depending on whatever agent CLI the host (or CI runner) happens to have.
     env.AGENT_CLI_PATH = writeAgentStub(root);
+    Object.assign(env, options.env);
     if (options.webhookSecret !== undefined) env.WEBHOOK_SECRET = options.webhookSecret;
     if (options.gitlabWebhookSecret !== undefined) {
       env.GITLAB_WEBHOOK_SECRET = options.gitlabWebhookSecret;
@@ -235,7 +252,7 @@ export class WebhookServerFixture {
         String(port),
       ],
       {
-        cwd: root,
+        cwd: options.cwd ?? root,
         env,
         stdin: "ignore",
         stdout: "pipe",

@@ -251,6 +251,10 @@ if (failPromptMarker) {
     );
   }
   if (agentInput.includes(failPromptMarker)) {
+    // Stdout marks this as agent work, as in the one-shot failure below: a
+    // worker defers a fast non-zero exit with empty stdout as a harness that
+    // could not start, instead of recording a failed run.
+    console.log("E2E deliberate prompt-marker failure");
     console.error("E2E deliberate prompt-marker failure");
     process.exit(18);
   }

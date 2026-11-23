@@ -46,14 +46,30 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 - Missing: Live project; the worker `[[estimations]]` sweep with an override (the CLI path is covered).
 - Last reviewed: 2026-11-19
 
+### Azure DevOps worker dependency gate: Predecessor links hold a polled work item until the predecessor is done
+
+- Surface: External dependency: Azure DevOps dependency links
+- Status: `default`
+- Evidence: `tests/local/worker-azure-devops-dependencies.test.ts` ("a Predecessor link holds a polled Azure DevOps work item until the predecessor is done"; gap `e2e-tracker-azure-devops-dependency-gate`, `bun run --filter @devintern/e2e test`). DEP carries a `System.LinkTypes.Dependency-Reverse` relation to an `Active` BLK plus Successor and Hierarchy relations to another open item. Across three gate checks DEP has no run, agent call, state change, or comment, and `worker queue --json` lists it as a `tracker` item, `dependencyState: "waiting"`, `dependsOn: [BLK]` (the Successor/Hierarchy target is not listed), reason naming BLK and its state. After BLK moves to `Shipped`, a custom state outside the process-default done names that the fake's work-item-type states read puts in the Completed category, and DEP is edited, DEP runs exactly once while the Successor/Hierarchy target is still open.
+- Missing: Live project; `merged`/`stacked` modes for a predecessor the worker implemented itself; the state-name fallback when the work-item type states cannot be read (the fake serves the states endpoint); `blocked` state.
+- Last reviewed: 2026-11-21
+
+### Azure DevOps predecessor read failure fails closed, and an unreadable predecessor is not treated as done
+
+- Surface: External dependency: Azure DevOps dependency links
+- Status: `default`
+- Evidence: `tests/local/worker-azure-devops-dependencies.test.ts` ("an Azure DevOps predecessor read failure fails closed, and an unreadable predecessor is not done"; gap `e2e-tracker-azure-devops-blocker-read-fail-closed`, `bun run --filter @devintern/e2e test`). (a) The `$expand=relations` read answers HTTP 500: the item waits with reason `could not read <key>'s blockers from azure-devops: …`, `dependsOn: []`, is not started, and runs once after the read recovers and the item is edited. (b) The `errorPolicy=omit` batch returns a `null` entry for a predecessor that is `Closed` in the fake: the item waits with `dependsOn: [<predecessor>]` and the reason `<predecessor> not done`, and stays held after a fresh check.
+- Missing: Live project; a failure of the batch request itself (only the relations read is injected); a predecessor id that does not exist at all.
+- Last reviewed: 2026-11-21
+
 ## Tracker plan status
 
 ### Azure DevOps
 
 - Default `test`: yes (offline fake)
 - Opt-in suite: none
-- Notes: Fake lifecycle: key/`--query`, state transition, comment, decoy isolation. Worker polling (WIQL `ChangedDate` delta, dedupe, re-arm, cursor restart) is offline. CLI `--estimate` (story points field, HTML estimation comment, in-place re-estimation, <24h skip, `--skip-comments`) is offline. Worker `[[estimations]]` sweep over a WIQL query is offline. The `storyPointsField` project override is offline.
-- Last reviewed: 2026-11-19
+- Notes: Fake lifecycle: key/`--query`, state transition, comment, decoy isolation. Worker polling (WIQL `ChangedDate` delta, dedupe, re-arm, cursor restart) is offline. CLI `--estimate` (story points field, HTML estimation comment, in-place re-estimation, <24h skip, `--skip-comments`) is offline. Worker `[[estimations]]` sweep over a WIQL query is offline. The `storyPointsField` project override is offline. The worker dependency gate on Predecessor links (including fail-closed reads) is offline.
+- Last reviewed: 2026-11-21
 
 ## Layer 3 fake (implemented)
 
@@ -80,10 +96,16 @@ updates (including `System.State` and
 `Microsoft.VSTS.Scheduling.StoryPoints`), and work-item comments:
 
 - `POST /{org}/{project}/_apis/wit/wiql`
-- `GET /{org}/_apis/wit/workitems?ids=…` and `GET /{org}/_apis/wit/workitems/{id}`
+- `GET /{org}/_apis/wit/workitems?ids=…` and `GET /{org}/_apis/wit/workitems/{id}`:
+  the batch read returns only the requested `fields`, and with
+  `errorPolicy=omit` answers a missing or unreadable id with a `null` entry;
+  the single read includes `relations` only under `$expand=relations` or `all`
 - `PATCH /{org}/_apis/wit/workitems/{id}`: requires
   `Content-Type: application/json-patch+json` (415 otherwise) and an array of
   `add`/`replace` operations on `/fields/<reference name>`
+- `GET /{org}/{project}/_apis/wit/workitemtypes/{type}/states`: the fake's
+  configured states with their process category (`Proposed`, `InProgress`,
+  `Resolved`, `Completed`, plus `Removed`)
 - `GET`/`POST /{org}/{project}/_apis/wit/workItems/{id}/comments`
 - `PATCH /{org}/{project}/_apis/wit/workItems/{id}/comments/{commentId}`:
   edits the comment in place (same id and `createdDate`, new `text` and
@@ -195,4 +217,28 @@ no credentials are needed.
 ```sh
 # from packages/e2e
 bun test tests/local/worker-azure-devops-scheduled-estimation.test.ts
+```
+
+### Worker Azure DevOps dependencies
+
+`tests/local/worker-azure-devops-dependencies.test.ts` starts the built worker
+with `tracker = "azure-devops"`, a ready-state WIQL `task_query`,
+`poll_interval = 1`, the deterministic agent, and a local bare remote against
+the fake (`realClock: true`). The fake stores work-item relations
+(`addRelation`, in the `{ rel, url: …/workItems/<id>, attributes }` shape
+`AzureDevOpsClient.listPredecessors` parses), can fail one item's
+`$expand=relations` read with HTTP 500 (`failRelationReads`), can make an
+`errorPolicy=omit` batch return `null` for an item (`setUnreadable`), and
+records every relations and predecessor batch read (`blockerRequests`). It
+proves that a Predecessor link to an open item holds the dependent (no run,
+agent call, transition, or comment; a `waiting` `tracker` item in
+`worker queue --json`), that Successor and Hierarchy links do not hold it, that
+it runs exactly once after the predecessor is closed and the dependent is
+edited, that a failed relations read fails closed and recovers, and that an
+unreadable predecessor is not treated as done. The prerequisite is the built
+CLI (`bun run --filter @getdevintern/code build`); no credentials are needed.
+
+```sh
+# from packages/e2e
+bun test tests/local/worker-azure-devops-dependencies.test.ts
 ```
