@@ -112,7 +112,7 @@ auto_merge_deny_paths = ["**/migrations/**", "**/package.json", "bun.lock"]
 auto_merge_review = true                         # agent reviews PRs outside the safe paths
 auto_merge_method = "squash"                     # merge | squash | rebase
 auto_merge_review_label = "needs-human-review"   # label for PRs left open; "" disables
-auto_merge_policy = "standard"                   # strict (default) | standard
+auto_merge_policy = "standard"                   # strict (default) | standard | relaxed | custom
 # auto_merge_model = "sonnet"                    # also auto_merge_harness / auto_merge_effort
 
 [[repos]]
@@ -129,20 +129,42 @@ Each PR passes these gates in order. Any "no" leaves it open for a human:
 3. **Safe paths.** If every changed file matches `auto_merge_safe_paths`, the PR merges with no agent run.
 4. **Agent review.** Otherwise, with `auto_merge_review = true` (the default), the agent reviews the diff and the PR merges only on an explicit "safe" verdict.
 
-Globs are repo-relative; `docs/` means `docs/**`. A rename counts both paths. Per-repo `auto_merge_safe_paths`, `auto_merge_deny_paths`, `auto_merge_policy`, and `auto_merge_review_instructions` replace the workspace values. The merge is pinned to the commit that passed the gates. A PR left open is checked again after new commits or a policy change.
+Globs are repo-relative; `docs/` means `docs/**`. A rename counts both paths. Per-repo `auto_merge_safe_paths`, `auto_merge_deny_paths`, `auto_merge_policy`, `auto_merge_rules` / `auto_merge_rules_file`, and `auto_merge_review_instructions` replace the workspace values. The merge is pinned to the commit that passed the gates. A PR left open is checked again after new commits or a policy change.
 
 ### Review policy
 
-`auto_merge_policy` sets how strict the agent review in gate 4 is:
+`auto_merge_policy` picks the rubric the agent review in gate 4 judges PRs by. Whatever the policy, the review never merges a PR it is unsure about, a diff it cannot read in full (truncated, generated, binary, or over 150,000 characters), or a PR whose text tells it to approve.
 
-| Setting                          | Default  | What it does                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| -------------------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `auto_merge_policy`              | `strict` | `strict` leaves open any PR that changes runtime behavior, so in practice only docs, test, and provably behavior-preserving PRs merge. `standard` also merges tested feature and bug-fix PRs, as long as the behavior change comes with tests that exercise it.                                                                                                                                                                 |
-| `auto_merge_review_instructions` | none     | Extra repository-specific rules added to the review, for example paths or kinds of change that always need a human. They can only make the review stricter. Set `""` in a `[[repos]]` entry to drop the workspace text for that repo.                                                                                                                                                                                         |
+| Policy               | Leaves open for a human                                                                                                                                                                                                                                                                                                                  | Use when                                                                           |
+| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| `strict` (default)   | Any runtime behavior change, security surface, irreversible effect, or weakened test or check. In practice only docs, tests, and provably behavior-preserving refactors merge.                                                                                                                                                           | You are starting out, or every behavior change should get a human look.            |
+| `standard`           | Changes to auto-merge itself; CI, build, release, version bumps, and published manifest fields; weakened tests or checks; auth, credentials, redaction, webhook signatures, fail-open changes; sandbox or agent permissions; destructive data changes; default flips without opt-in; new or major-upgraded dependencies; untested behavior changes. | Tested feature and bug-fix PRs should merge, but risky categories need a human.   |
+| `relaxed`            | Changes to auto-merge itself; CI, release, and publishing; weakened tests; auth, credentials, fail-open changes; sandbox or agent permissions; deleting data the PR did not create; behavior changes with no test covering them.                                                                                                         | A well-tested repo where dependency upgrades, migrations, and documented default changes may merge too. |
+| `custom`             | Whatever your own rules say (`auto_merge_rules` or `auto_merge_rules_file`).                                                                                                                                                                                                                                                             | None of the presets fits your repository.                                          |
 
-Even under `standard`, these always stay open for a human: changes to auto-merge itself; CI, build, release, and publishing configuration, version bumps, and published package manifest fields; deleted, skipped, or loosened tests and disabled lint or type checks; authentication, credentials, secret redaction, webhook signature checks, and checks that move from fail-closed to fail-open; sandbox or agent permissions; destructive changes to user data (deleting branches, files, or rows, changing what gets committed or force-pushed, schema changes beyond new tables or nullable columns); default changes that affect existing users without opt-in; new dependencies, major upgrades, and lockfile changes that add packages; and anything the agent cannot understand, including diffs over 150,000 characters. Changing the policy or the instructions re-checks PRs that were left open.
+| Setting                          | Default  | What it does                                                                                                                                                                                                                       |
+| -------------------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `auto_merge_policy`              | `strict` | `strict`, `standard`, `relaxed`, or `custom`.                                                                                                                                                                                      |
+| `auto_merge_rules`               | none     | The rubric for `custom`, inline. Up to 20,000 characters.                                                                                                                                                                         |
+| `auto_merge_rules_file`          | none     | The rubric for `custom`, in a file. Relative paths are taken from the workspace home (`~/.devintern`); `~` is expanded. The file is read on every review, so edits apply right away and re-check PRs it left open. Up to 20,000 characters. |
+| `auto_merge_review_instructions` | none     | Extra rules added after the rubric for any policy, including `custom`, for example paths that always need a human. They can only make the review stricter. Set `""` in a `[[repos]]` entry to drop the workspace text for that repo. |
 
-The worker explains each decision in one status comment on the PR, edited in place (an agent hold names the policy it ran under), and labels PRs left open with `auto_merge_review_label`. If the agent is usage-limited, the check waits for the quota to reset, and that wait does not count as a failed attempt. A check that fails (for example, the agent returns no verdict) is retried after 5 and then 10 minutes. After the third failure on the same commit, the status comment says the check kept failing, and the PR waits for new commits or a policy change. The dashboard's **Automations** page lists an **Auto-merge** entry; its **Run now** checks every open PR immediately.
+`custom` needs exactly one of `auto_merge_rules` and `auto_merge_rules_file`, and those keys are rejected under any other policy. A `[[repos]]` entry that sets either key replaces the workspace's rules for that repo. Rules come only from `workspace.toml` or the file it names, never from the repository being reviewed. If the rules file is missing, empty, unreadable, or too long, the review does not run: the PR stays open, and the status comment names the problem.
+
+```toml
+[workspace]
+auto_merge_policy = "custom"
+auto_merge_rules_file = "merge-rules.md"   # ~/.devintern/merge-rules.md
+```
+
+```markdown
+Answer "safe": false for any change to billing/, payments/, or database migrations.
+Tested changes elsewhere may merge. Documentation and test-only changes are safe.
+```
+
+Changing the policy, the rules, or the instructions re-checks PRs that were left open. All of these keys apply on reload, without a restart.
+
+The worker explains each decision in one status comment on the PR, edited in place (an agent hold names the policy it ran under, such as `standard` or `custom: merge-rules.md`), and labels PRs left open with `auto_merge_review_label`. If the agent is usage-limited, the check waits for the quota to reset, and that wait does not count as a failed attempt. A check that fails (for example, the agent returns no verdict) is retried after 5 and then 10 minutes. After the third failure on the same commit, the status comment says the check kept failing, and the PR waits for new commits or a policy change. The dashboard's **Automations** page lists an **Auto-merge** entry; its **Run now** checks every open PR immediately.
 
 The GitHub credential needs `Pull requests: Read and write` and `Contents: Read and write`. To test the gates on one PR without merging:
 
@@ -150,7 +172,7 @@ The GitHub credential needs `Pull requests: Read and write` and `Contents: Read 
 devintern auto-merge <pr-url> --safe-path '**/*.md' --dry-run
 ```
 
-Other flags: `--deny-path` (repeatable), `--no-review`, `--method`, `--policy <strict|standard>`, `--review-instructions=<text>`, `--review-label <name>`, `--no-review-label`.
+Other flags: `--deny-path` (repeatable), `--no-review`, `--method`, `--policy <strict|standard|relaxed|custom>`, `--rules=<text>`, `--rules-file <path>`, `--review-instructions=<text>`, `--review-label <name>`, `--no-review-label`.
 
 ## CI failures on the agent's PRs
 

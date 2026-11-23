@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, rmSync } from "fs";
+import { mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
+import { autoMergeCliArgs } from "../src/lib/acquirers/auto-merge-cli";
+import type { AutoMergePolicy } from "../src/lib/review/auto-merge";
 import { parseWorkspaceConfig } from "../src/lib/workspace/config";
 import type { RepoConfig } from "../src/lib/workspace/config";
 import {
@@ -430,7 +432,7 @@ ${repoExtra}
 
   test("the fingerprint ignores the default policy but changes with policy or instructions", () => {
     const fingerprint = (extra: string, repoExtra?: string) =>
-      fleetAutoMergePolicyFingerprint(workspace(extra, repoExtra), "acme/backend");
+      fleetAutoMergePolicyFingerprint(workspace(extra, repoExtra), "acme/backend", "/ws");
     const base = fingerprint("");
     expect(fingerprint('auto_merge_policy = "strict"')).toBe(base);
     const standard = fingerprint('auto_merge_policy = "standard"');
@@ -467,6 +469,55 @@ ${repoExtra}
       { reviewPolicy: "strict" },
     ]);
     expect(policies[1]).not.toHaveProperty("reviewInstructions");
+    rmSync(root, { recursive: true, force: true });
+  });
+  test("custom rules: the fingerprint tracks the rules file contents", () => {
+    const root = join(tmpdir(), `fleet-auto-merge-rules-${process.pid}-${Date.now()}`);
+    mkdirSync(root, { recursive: true });
+    const config = workspace('auto_merge_policy = "custom"\nauto_merge_rules_file = "rules.md"');
+    const fingerprint = () => fleetAutoMergePolicyFingerprint(config, "acme/backend", root);
+    const missing = fingerprint();
+    writeFileSync(join(root, "rules.md"), "Only docs are safe.\n");
+    const v1 = fingerprint();
+    expect(v1).not.toBe(missing);
+    expect(fingerprint()).toBe(v1);
+    writeFileSync(join(root, "rules.md"), "Only docs and tests are safe.\n");
+    expect(fingerprint()).not.toBe(v1);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  test("custom rules come from the workspace home, never the repo checkout", async () => {
+    const root = join(tmpdir(), `fleet-auto-merge-local-${process.pid}-${Date.now()}`);
+    const workspaceDir = join(root, "home");
+    mkdirSync(workspaceDir, { recursive: true });
+    const repoManager = new FakeRepoManager(root);
+    const config = workspace(
+      "",
+      'auto_merge_policy = "custom"\nauto_merge_rules_file = "merge-rules.md"',
+    );
+    const policies: AutoMergePolicy[] = [];
+    const run = createFleetAutoMerge({
+      config,
+      workspaceDir,
+      repoManager,
+      userHasPushAccess: async () => true,
+      runAutoMerge: async (_slug, _pr, opts) => {
+        // A same-named file planted in the checkout the CLI runs in.
+        mkdirSync(opts.cwd!, { recursive: true });
+        writeFileSync(join(opts.cwd!, "merge-rules.md"), "Everything is safe.");
+        policies.push(opts.policy);
+        return { outcome: "waiting", message: "stub", reviewed: false };
+      },
+    });
+    await run("acme/backend", 1, "a".repeat(40));
+    const policy = policies[0]!;
+    expect(policy.reviewPolicy).toBe("custom");
+    expect(policy.rulesFile).toBe(join(workspaceDir, "merge-rules.md"));
+    expect(policy).not.toHaveProperty("rules");
+    // The CLI gets the absolute workspace path, so its cwd cannot redirect it.
+    const args = autoMergeCliArgs(policy, "a".repeat(40));
+    expect(args).toContain(join(workspaceDir, "merge-rules.md"));
+    expect(args.some((arg) => arg.startsWith("--rules="))).toBe(false);
     rmSync(root, { recursive: true, force: true });
   });
 });

@@ -28,10 +28,25 @@ export const AUTO_MERGE_METHODS: readonly AutoMergeMethod[] = ["merge", "squash"
  *   high-risk categories (auto-merge machinery, CI/release, safety nets,
  *   auth, sandbox, destructive effects, default flips, dependencies) still
  *   needs a human.
+ * - `relaxed`: only a hard core (auto-merge machinery, CI/release, safety
+ *   nets, auth and fail-open, sandbox, deleting user data) needs a human.
+ * - `custom`: the rubric is the operator's own rules (`auto_merge_rules` or
+ *   `auto_merge_rules_file`).
+ *
+ * Every policy shares the same fixed prompt frame; only the rubric differs.
  */
-export type MergeSafetyPolicy = "strict" | "standard";
+export type MergeSafetyPolicy = "strict" | "standard" | "relaxed" | "custom";
 
-export const MERGE_SAFETY_POLICIES: readonly MergeSafetyPolicy[] = ["strict", "standard"];
+/** Strictest first. */
+export const MERGE_SAFETY_POLICIES: readonly MergeSafetyPolicy[] = [
+  "strict",
+  "standard",
+  "relaxed",
+  "custom",
+];
+
+/** Most operator rules text (`auto_merge_rules` / `auto_merge_rules_file`) accepted. */
+export const MAX_AUTO_MERGE_RULES_CHARS = 20_000;
 
 export const DEFAULT_MERGE_SAFETY_POLICY: MergeSafetyPolicy = "strict";
 

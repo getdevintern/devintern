@@ -25,6 +25,7 @@ import type { CiFixResult } from "../acquirers/ci-failure-watcher";
 import type { AutomaticResolveResult } from "../acquirers/review-polling";
 import type { TaskExecutionResult } from "../acquirers/task-polling";
 import { DEFAULT_MERGE_SAFETY_POLICY } from "../review/merge-gate";
+import { readRulesFile } from "../review/merge-safety-rules";
 import { autoMergePathsFor, autoMergeReviewFor } from "./config";
 import type { RepoConfig, WorkspaceConfig } from "./config";
 import { buildFleetEventEnv, gitHubSlugFromRemote } from "./env";
@@ -293,20 +294,29 @@ export function createFleetResolveConflicts(
 
 /**
  * Fingerprint of the auto-merge policy that decides a repo's PRs (paths,
- * review switch, review policy and operator instructions; not the merge
- * method or review label, which don't change
- * the decision, so renaming the label doesn't re-evaluate every PR).
- * Changing it re-evaluates PRs that were decided under the previous policy.
+ * review switch, review policy, operator instructions, and `custom` rules,
+ * including the current contents of a rules file; not the merge method or
+ * review label, which don't change the decision, so renaming the label
+ * doesn't re-evaluate every PR). Changing it re-evaluates PRs that were
+ * decided under the previous policy, so editing or fixing a rules file
+ * re-checks the PRs it held.
  */
-export function fleetAutoMergePolicyFingerprint(config: WorkspaceConfig, slug: string): string {
+export function fleetAutoMergePolicyFingerprint(
+  config: WorkspaceConfig,
+  slug: string,
+  workspaceDir: string,
+): string {
   const settings = config.workspace.autoMerge;
   const repo = repoBySlug(config, slug);
   const paths = repo
     ? autoMergePathsFor(settings, repo)
     : { safePaths: settings.safePaths, denyPaths: settings.denyPaths };
-  const review = repo
-    ? autoMergeReviewFor(settings, repo)
-    : { reviewPolicy: settings.policy, reviewInstructions: settings.reviewInstructions };
+  const review = autoMergeReviewFor(settings, repo ?? {}, workspaceDir);
+  let rules: string | undefined = review.rules;
+  if (review.rulesFile) {
+    const loaded = readRulesFile(review.rulesFile);
+    rules = `${review.rulesFile}\n${loaded.ok ? loaded.text : `unavailable: ${loaded.problem}`}`;
+  }
   // The default policy without instructions hashes as before, so upgrading
   // does not re-evaluate every PR.
   const material = JSON.stringify({
@@ -316,6 +326,7 @@ export function fleetAutoMergePolicyFingerprint(config: WorkspaceConfig, slug: s
       ? {}
       : { reviewPolicy: review.reviewPolicy }),
     ...(review.reviewInstructions ? { reviewInstructions: review.reviewInstructions } : {}),
+    ...(rules === undefined ? {} : { rules }),
   });
   return Bun.hash(material).toString(16);
 }
@@ -353,7 +364,7 @@ export function createFleetAutoMerge(
       return runAutoMerge(slug, prNumber, {
         policy: {
           ...autoMergePathsFor(settings, repo),
-          ...autoMergeReviewFor(settings, repo),
+          ...autoMergeReviewFor(settings, repo, workspaceDir),
           review: settings.review,
           method: settings.method,
           reviewLabel: settings.reviewLabel,

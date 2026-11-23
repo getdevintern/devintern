@@ -9,6 +9,7 @@ import {
 } from "../worker/usage-limit-protocol";
 import { workspaceCredentialsForChange } from "../workspace/manual-credentials";
 import { ensureWorkspaceCodeState, resolveWorkspaceDir, workspaceDbPath } from "../workspace/paths";
+import { resolveRulesFilePath } from "./merge-safety-rules";
 
 /** Use a registered repo's workspace layers for manual PR commands. */
 async function loadReviewEnvironment(changeUrl: string): Promise<void> {
@@ -242,7 +243,13 @@ function printAutoMergeHelp(defaultLabel: string): void {
   console.log("  --deny-path <glob>     Never-merge glob (repeatable)");
   console.log("  --no-review            Skip the agent review; only safe-path PRs merge");
   console.log("  --method <m>           merge | squash | rebase (default: squash)");
-  console.log("  --policy <p>           Review strictness: strict | standard (default: strict)");
+  console.log(
+    "  --policy <p>           Review rubric: strict | standard | relaxed | custom (default: strict)",
+  );
+  console.log("  --rules=<text>         custom policy: the rubric text");
+  console.log(
+    "  --rules-file <path>    custom policy: rubric file, read on each review (relative to the workspace home)",
+  );
   console.log("  --review-instructions <text>  Extra repo-specific rules for the review");
   console.log(
     `  --review-label <name>  Label for PRs left open for a human (default: ${defaultLabel})`,
@@ -283,6 +290,33 @@ function takeFlagValue<T extends string>(
 export function parseAutoMergeArgs(
   args: string[],
   gate: MergeGateModule,
+  workspaceDir: string = resolveWorkspaceDir(),
+): AutoMergeCommandArgs | undefined {
+  const parsed = parseAutoMergeFlags(args, gate, workspaceDir);
+  return parsed && checkCustomRulesUsage(parsed);
+}
+
+/** `--flag=<text>` options; `=` form because the text may start with "-". */
+const AUTO_MERGE_TEXT_FLAGS = [
+  ["--review-instructions=", "reviewInstructions"],
+  ["--rules=", "rules"],
+] as const;
+
+/** Apply a `--flag=<text>` option; `false` when `arg` is not one. Empty text adds nothing. */
+function applyTextFlag(arg: string, policy: AutoMergeCommandArgs["policy"]): boolean {
+  for (const [prefix, key] of AUTO_MERGE_TEXT_FLAGS) {
+    if (arg.startsWith(prefix)) {
+      policy[key] = arg.slice(prefix.length);
+      return true;
+    }
+  }
+  return false;
+}
+
+function parseAutoMergeFlags(
+  args: string[],
+  gate: MergeGateModule,
+  workspaceDir: string,
 ): AutoMergeCommandArgs | undefined {
   const parsed: AutoMergeCommandArgs = {
     dryRun: false,
@@ -320,9 +354,8 @@ export function parseAutoMergeArgs(
       const value = takeFlagValue(arg, args[++i], gate.MERGE_SAFETY_POLICIES);
       if (value === undefined) return undefined;
       policy.reviewPolicy = value;
-    } else if (arg.startsWith("--review-instructions=")) {
-      // `=` form only: the text may start with "-". Empty text adds nothing.
-      policy.reviewInstructions = arg.slice("--review-instructions=".length);
+    } else if (applyTextFlag(arg, policy)) {
+      // Handled.
     } else if (arg === "--review-instructions") {
       // Space form: the next token is the text. One starting with "-" is
       // ambiguous with a flag, so it must use the `=` form instead.
@@ -335,6 +368,11 @@ export function parseAutoMergeArgs(
         return undefined;
       }
       policy.reviewInstructions = value;
+    } else if (arg === "--rules-file") {
+      const value = takeFlagValue(arg, args[++i]);
+      if (value === undefined) return undefined;
+      // Relative to the workspace home, never the current (repo) directory.
+      policy.rulesFile = resolveRulesFilePath(value, workspaceDir);
     } else if (arg === "--no-review") {
       policy.review = false;
     } else if (arg === "--no-review-label") {
@@ -354,6 +392,30 @@ export function parseAutoMergeArgs(
     }
   }
   return parsed;
+}
+
+/** `parsed`, or `undefined` (exit code set) when the custom-rules flags conflict. */
+function checkCustomRulesUsage(parsed: AutoMergeCommandArgs): AutoMergeCommandArgs | undefined {
+  const usageError = customRulesUsageError(parsed.policy);
+  if (!usageError) return parsed;
+  console.error(`Error: ${usageError}`);
+  process.exitCode = 1;
+  return undefined;
+}
+
+/** `--policy custom` needs exactly one rules source; rules need `--policy custom`. */
+function customRulesUsageError(policy: AutoMergeCommandArgs["policy"]): string | undefined {
+  const sources = [policy.rules?.trim(), policy.rulesFile].filter(Boolean).length;
+  if (policy.reviewPolicy === "custom") {
+    if (sources === 1) return undefined;
+    return sources === 0
+      ? "--policy custom requires --rules=<text> or --rules-file <path>"
+      : "use only one of --rules and --rules-file";
+  }
+  if (policy.rules !== undefined || policy.rulesFile !== undefined) {
+    return "--rules and --rules-file require --policy custom";
+  }
+  return undefined;
 }
 
 /**
