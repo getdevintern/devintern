@@ -142,6 +142,23 @@ describe("HarnessFailover", () => {
     expect(h.state.active).toBeNull();
   });
 
+  test("restore persists the recovered primary over a saved fallback", () => {
+    // Saved "codex" from before the restart; the primary's window elapsed
+    // while the worker was down, so selection lands on the primary.
+    const h = makeFailover(["claude-code", "codex"]);
+    const warnings = h.failover.restore({ "claude-code": 500 }, "codex");
+    expect(warnings).toEqual([]);
+    expect(h.failover.activeName).toBe("claude-code");
+    expect(h.state.active).toBe("claude-code");
+  });
+
+  test("restore leaves a persisted active that matches the selection untouched", () => {
+    const h = makeFailover(["claude-code", "codex"]);
+    expect(h.failover.restore({}, "claude-code")).toEqual([]);
+    expect(h.failover.activeName).toBe("claude-code");
+    expect(h.state.active).toBeNull();
+  });
+
   test("restore warns and persists the fallback when the persisted active left the chain", () => {
     const h = makeFailover(["claude-code", "codex"]);
     const warnings = h.failover.restore({}, "grok");
