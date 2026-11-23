@@ -18,7 +18,7 @@ import type {
   TaskTrackerCommentContent,
 } from "../../../types/task-tracker";
 import { TaskNotFoundError, TaskTrackerError } from "../../../types/task-tracker";
-import type { TaskTrackerClient } from "../client";
+import type { TaskBlocker, TaskTrackerClient } from "../client";
 import {
   ESTIMATION_COMMENT_MARKER,
   formatAssessmentFailureMarkdown,
@@ -99,6 +99,16 @@ export class LinearTaskTrackerClient implements TaskTrackerClient {
       body: c.body,
       created: c.createdAt,
       updated: c.updatedAt,
+    }));
+  }
+
+  /** Inverse `blocks` relations; each carries the blocker's workflow state. */
+  async getBlockers(taskKey: string): Promise<TaskBlocker[]> {
+    const blockers = await this.linearClient.getIssueBlockers(taskKey);
+    return blockers.map(({ identifier, done, status }) => ({
+      key: identifier,
+      ...(done !== undefined ? { done } : {}),
+      ...(status ? { status } : {}),
     }));
   }
 

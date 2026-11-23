@@ -21,7 +21,7 @@ import type {
   TaskTrackerCommentContent,
 } from "../../../types/task-tracker";
 import { TaskTrackerError } from "../../../types/task-tracker";
-import type { TaskTrackerClient } from "../client";
+import type { TaskBlocker, TaskTrackerClient } from "../client";
 import {
   ESTIMATION_COMMENT_MARKER,
   formatAssessmentFailureMarkdown,
@@ -38,6 +38,15 @@ import type {
 } from "../shared/markdown-comment-formatter";
 import { mkdirSync, writeFileSync } from "fs";
 import path from "path";
+
+/** State categories that mean a predecessor no longer blocks. */
+const FINISHED_STATE_CATEGORIES = new Set(["completed", "removed"]);
+
+/**
+ * Process-default finished state names, used only when the work item type's
+ * state categories could not be read.
+ */
+const FINISHED_STATE_NAMES = new Set(["done", "closed", "completed", "removed"]);
 
 /** Default story points field for Agile/Scrum process templates. */
 const DEFAULT_STORY_POINTS_FIELD = "Microsoft.VSTS.Scheduling.StoryPoints";
@@ -216,6 +225,22 @@ export class AzureDevOpsTaskTrackerClient implements TaskTrackerClient {
     }
 
     return resources;
+  }
+
+  /**
+   * Predecessor links (`System.LinkTypes.Dependency-Reverse`). A predecessor
+   * is done once its state is in the `Completed` or `Removed` category of its
+   * process (`Done`, `Closed`, `Removed` in the default processes).
+   */
+  async getBlockers(taskKey: string): Promise<TaskBlocker[]> {
+    const predecessors = await this.azureClient.listPredecessors(this.toWorkItemId(taskKey));
+    return predecessors.map(({ id, state, stateCategory }) => {
+      if (!state) return { key: String(id) };
+      const done = stateCategory
+        ? FINISHED_STATE_CATEGORIES.has(stateCategory.toLowerCase())
+        : FINISHED_STATE_NAMES.has(state.toLowerCase());
+      return { key: String(id), done, status: state };
+    });
   }
 
   async getRelatedWorkItems(task: Task): Promise<DetailedRelatedIssue[]> {

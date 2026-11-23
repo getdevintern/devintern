@@ -800,7 +800,8 @@ function renderMergedPrs(body: { prs: AgentPrView[] }): string {
 }
 
 function renderQueue(body: QueuedWorkResponse): string {
-  if (body.items.length === 0) return "Nothing queued.";
+  const cancelled = renderCancelled(body);
+  if (body.items.length === 0) return ["Nothing queued.", ...cancelled].join("\n");
   return [
     table(
       ["KIND", "SUBJECT", "REPO", "QUEUED", "TITLE", "DEPENDENCIES"],
@@ -815,7 +816,29 @@ function renderQueue(body: QueuedWorkResponse): string {
     ),
     "",
     `${body.items.length} shown, ${body.total} queued in total.`,
+    ...cancelled,
   ].join("\n");
+}
+
+/** Recently cancelled ad-hoc tasks (audit trail), or nothing when there are none. */
+function renderCancelled(body: QueuedWorkResponse): string[] {
+  const cancelled = body.cancelled ?? [];
+  if (cancelled.length === 0) return [];
+  return [
+    "",
+    "Recently cancelled:",
+    table(
+      ["TASK", "REPO", "CANCELLED", "BY", "TITLE", "REASON"],
+      cancelled.map((item) => [
+        item.taskKey,
+        item.repo,
+        item.cancelledAt !== undefined ? formatTime(item.cancelledAt) : "-",
+        item.cancelledBy ?? "-",
+        item.title,
+        item.cancelReason ?? "-",
+      ]),
+    ),
+  ];
 }
 
 function workerLine(worker: WorkerStatusView): string {

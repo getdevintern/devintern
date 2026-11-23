@@ -59,6 +59,19 @@ let client: AnalyticsCapture | null | undefined;
 let installIdCache: string | undefined;
 /** Test override: `null` forces disabled capture; `undefined` uses real/lazy client. */
 let captureForTests: AnalyticsCapture | null | undefined;
+/** In-flight `track` calls, so tests can drain fire-and-forget captures before teardown. */
+const pendingTracks = new Set<Promise<void>>();
+
+/**
+ * @internal Await every in-flight `track` call. Callers fire `void track(...)`,
+ * so without this a capture can outlive its test and write `installId` into
+ * whichever settings dir the next test installed.
+ */
+export async function flushAnalyticsForTests(): Promise<void> {
+  while (pendingTracks.size > 0) {
+    await Promise.allSettled(pendingTracks);
+  }
+}
 
 /** @internal */
 export function setAnalyticsCaptureForTests(value: AnalyticsCapture | null | undefined): void {
@@ -130,9 +143,19 @@ async function getOrCreateInstallId(): Promise<string> {
 /**
  * Capture a product event. Never throws — analytics must not break IPC/UI.
  */
-export async function track(
+export function track(
   event: AnalyticsEvent,
   props?: Record<string, AnalyticsPropValue | undefined>,
+): Promise<void> {
+  const pending = captureEvent(event, props);
+  pendingTracks.add(pending);
+  void pending.finally(() => pendingTracks.delete(pending));
+  return pending;
+}
+
+async function captureEvent(
+  event: AnalyticsEvent,
+  props: Record<string, AnalyticsPropValue | undefined> | undefined,
 ): Promise<void> {
   try {
     const settings = await readSettings();

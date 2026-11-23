@@ -177,6 +177,47 @@ describe("worker daemon auth/license state (DEV-126)", () => {
     ensureWorkspaceCodeState(workspace);
     expect(readFileSync(join(current, ".auth-session.json"), "utf8")).toBe("new-session");
     expect(readFileSync(join(current, "relay.json"), "utf8")).toBe("old-relay");
+    // Moved and superseded files are gone, so the legacy layer disappears.
+    expect(existsSync(legacy)).toBe(false);
+  });
+
+  test("moves GitHub App pairing and license cache, dropping an empty stray queue.db", () => {
+    const workspace = join(root, "workspace");
+    const legacy = join(workspace, ".devintern-code");
+    const current = join(workspace, "state", "code");
+    mkdirSync(legacy, { recursive: true });
+    writeFileSync(join(legacy, "github-app.json"), '{"repositories":[]}\n');
+    writeFileSync(join(legacy, "license-cache.json"), "{}");
+    writeFileSync(join(legacy, "queue.db"), "");
+    ensureWorkspaceCodeState(workspace);
+    expect(readFileSync(join(current, "github-app.json"), "utf8")).toBe('{"repositories":[]}\n');
+    expect(readFileSync(join(current, "license-cache.json"), "utf8")).toBe("{}");
+    expect(existsSync(legacy)).toBe(false);
+  });
+
+  test("keeps the legacy directory when it holds data it does not own", () => {
+    const workspace = join(root, "workspace");
+    const legacy = join(workspace, ".devintern-code");
+    mkdirSync(legacy, { recursive: true });
+    writeFileSync(join(legacy, "relay.json"), "old-relay");
+    writeFileSync(join(legacy, "queue.db"), "not empty");
+    writeFileSync(join(legacy, "notes.txt"), "mine");
+    ensureWorkspaceCodeState(workspace);
+    expect(existsSync(join(legacy, "relay.json"))).toBe(false);
+    expect(readFileSync(join(legacy, "queue.db"), "utf8")).toBe("not empty");
+    expect(readFileSync(join(legacy, "notes.txt"), "utf8")).toBe("mine");
+  });
+
+  test("a command run from the workspace home uses the workspace runtime state", () => {
+    delete process.env[WORKER_SUBPROCESS_ENV];
+    const workspace = join(root, "workspace");
+    mkdirSync(join(workspace, ".devintern-code"), { recursive: true });
+    writeFileSync(join(workspace, "workspace.toml"), "");
+    expect(resolveRuntimeStateDir(workspace)).toBe(join(workspace, "state", "code"));
+
+    const project = join(root, "project");
+    mkdirSync(join(project, ".devintern-code"), { recursive: true });
+    expect(resolveRuntimeStateDir(project)).toBe(join(project, ".devintern-code"));
   });
 });
 
@@ -201,7 +242,7 @@ describe("defensive .git/info/exclude for .devintern-code (DEV-126)", () => {
     mkdirSync(join(repo, ".devintern-code"), { recursive: true });
     writeFileSync(
       join(repo, ".gitignore"),
-      ".devintern-code/*\n!.devintern-code/settings.json\n!.devintern-code/.env.example\n!.devintern-code/automations.toml\n",
+      ".devintern-code/*\n!.devintern-code/settings.json\n!.devintern-code/.env.example\n",
     );
     excludeWorkerRuntimeFiles(repo);
     excludeWorkerRuntimeFiles(repo);
@@ -212,7 +253,6 @@ describe("defensive .git/info/exclude for .devintern-code (DEV-126)", () => {
     writeFileSync(join(repo, ".devintern-code", "queue.db-wal"), "{}");
     writeFileSync(join(repo, ".devintern-code", "settings.json"), "{}\n");
     writeFileSync(join(repo, ".devintern-code", ".env.example"), "EXAMPLE=1\n");
-    writeFileSync(join(repo, ".devintern-code", "automations.toml"), "# schedules\n");
     git(repo, ["add", "-A"]);
     const staged = git(repo, ["diff", "--cached", "--name-only"]);
     expect(staged).not.toContain(".pid.lock");
@@ -220,6 +260,5 @@ describe("defensive .git/info/exclude for .devintern-code (DEV-126)", () => {
     expect(staged).not.toContain("queue.db-wal");
     expect(staged).toContain(".devintern-code/settings.json");
     expect(staged).toContain(".devintern-code/.env.example");
-    expect(staged).toContain(".devintern-code/automations.toml");
   });
 });

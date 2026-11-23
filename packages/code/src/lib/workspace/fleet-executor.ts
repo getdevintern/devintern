@@ -2,7 +2,7 @@ import { randomUUID } from "crypto";
 import { existsSync, readFileSync } from "fs";
 
 import { TaskPollingAcquirer, runTaskViaCli, workerTaskArgs } from "../acquirers/task-polling";
-import type { TaskExecutionResult } from "../acquirers/task-polling";
+import type { TaskExecutionResult, TaskPollOutcome } from "../acquirers/task-polling";
 import type { ChangeDetector } from "../acquirers/change-detector";
 import type { PickupGate } from "../worker/schedule";
 import type { WebhookQueue } from "../state/webhook-queue";
@@ -13,17 +13,20 @@ import { createTaskSupervisor, JobNotStartedError } from "../worker/supervisor";
 import type { TaskSupervisor } from "../worker/supervisor";
 import { findRepo, findTeam, resolveWorkspacePipelinePath } from "./config";
 import type { RepoConfig, TeamConfig, WorkspaceConfig } from "./config";
-import { buildRepoEnv, buildTeamTaskEnv } from "./env";
+import { buildRepoRunEnv, buildTeamTaskEnv } from "./env";
 import { effectiveRoutingRules, routeTask, routeTaskWithRules, toRoutableTask } from "./router";
 import type { RoutableTask } from "./router";
 import { RUN_ORIGIN_ENV } from "../observability/analytics";
 import { AUTOMATION_ID_ENV } from "../automation/acquirer";
-import { PICKUP_RUN_ID_ENV } from "../state/session-pickup";
+import { INJECTED_CREATED_AT_ENV, PICKUP_RUN_ID_ENV } from "../state/session-pickup";
 import { actionedSourceKey } from "../task/actioned-state";
 import { QUEUE_CLAIM_ENV } from "./queue-failure-reason";
 import { workspaceDbPath } from "./paths";
 import { RunStore } from "../state/run-recorder";
 import { resolveRunIdentity } from "../task/run-identity";
+import type { StackBase } from "../dependencies/gate";
+import { encodeStackBaseEnv, STACKED_ON_ENV } from "../dependencies/stacked-base";
+import type { TrackerDependencyGate } from "./tracker-dependency-gate";
 
 /** Cap the description snapshot read from an ad-hoc task file. */
 const MAX_SETUP_FAILURE_DESCRIPTION = 20_000;
@@ -89,8 +92,9 @@ export interface FleetTask {
 /** Structural slice of {@link RepoManager} the acquirer uses (injectable). */
 export interface RepoManagerLike {
   ensureBareClone(repo: RepoConfig): Promise<string>;
-  fetch(repoName: string): Promise<void>;
+  fetch(repoName: string, options?: { timeoutMs?: number }): Promise<void>;
   ensureBaseWorktree(repo: RepoConfig): Promise<string>;
+  ensurePrJobWorktree(repo: RepoConfig): Promise<string>;
   createTaskWorktree(repo: RepoConfig, taskKey: string): Promise<string>;
   removeTaskWorktree(repoName: string, worktreePath: string): Promise<void>;
   sweepStaleWorktrees(repoName: string, ttlDays: number): Promise<string[]>;
@@ -110,6 +114,12 @@ export interface WorkspaceTaskAcquirerDeps {
    * changed since. Built by the workspace wiring with tracker access.
    */
   isTaskActionedUnchanged?: (taskKey: string, updated?: string) => Promise<boolean>;
+  /**
+   * Keys of this source's tickets a scheduled dashboard retry owns (pending
+   * or running); the poller never starts them. See `heldTaskKeys` on
+   * {@link TaskPollingAcquirer}.
+   */
+  heldTaskKeys?: () => ReadonlySet<string>;
   /**
    * Explicit actioned-ticket source key pinned into each task subprocess (see
    * `ACTIONED_SOURCE_ENV`), so the recorder and gate can never disagree.
@@ -146,6 +156,14 @@ export interface WorkspaceTaskAcquirerDeps {
    * Injected for tests; defaults to the worker's failover controller.
    */
   harnessBlockedUntil?: () => number | undefined;
+  /**
+   * Native-blocker gate for this source's tickets (trackers whose capability
+   * declares `dependencies`). A held-back ticket is reported `"waiting"` and
+   * re-evaluated on the next poll.
+   */
+  dependencyGate?: TrackerDependencyGate;
+  /** Called with the keys each poll search returned (clears stale waits). */
+  onPolledTasks?: (keys: ReadonlySet<string>) => void;
 }
 
 /** Per-task CLI args from `[defaults].worker_task_args`, else `--create-pr`. */
@@ -209,15 +227,16 @@ export function createWorkspaceTaskAcquirer(deps: WorkspaceTaskAcquirerDeps): Ta
     team,
     verbose,
   } = deps;
-  const execute = createFleetTaskExecutor(deps, {
+  const execute = createGatedFleetTaskExecutor(deps, {
     source: team ? `poll:${team.tracker}:${team.name}` : `poll:${config.defaults.tracker}`,
+    dependencyGate: deps.dependencyGate,
   });
 
   // The acquirer's executeTask only receives the task key; remember each
   // task's routing fields from the evaluate step of the same tick.
   const routables = new Map<string, RoutableTask>();
 
-  const executeTask = (taskKey: string): Promise<TaskExecutionResult> =>
+  const executeTask = (taskKey: string): Promise<TaskPollOutcome> =>
     execute(
       taskKey,
       routables.get(taskKey) ?? toRoutableTask({ key: taskKey, labels: [], components: [] }),
@@ -241,6 +260,11 @@ export function createWorkspaceTaskAcquirer(deps: WorkspaceTaskAcquirerDeps): Ta
     gate: deps.gate,
     searchTasks: async (q) => {
       const { tasks } = await searchTasks(q);
+      try {
+        deps.onPolledTasks?.(new Set(tasks.map((task) => task.key)));
+      } catch (error) {
+        console.warn(`⚠️  could not refresh dependency waits: ${(error as Error).message}`);
+      }
       routables.clear();
       for (const task of tasks) {
         routables.set(
@@ -261,6 +285,7 @@ export function createWorkspaceTaskAcquirer(deps: WorkspaceTaskAcquirerDeps): Ta
     isTaskActionedUnchanged: deps.isTaskActionedUnchanged
       ? (task) => deps.isTaskActionedUnchanged!(task.key, task.updated)
       : undefined,
+    heldTaskKeys: deps.heldTaskKeys,
   });
 }
 
@@ -278,6 +303,52 @@ export type FleetExecutorDeps = Pick<
   | "isHarnessExhausted"
 >;
 
+/** Options for {@link createFleetTaskExecutor} / {@link createGatedFleetTaskExecutor}. */
+export type FleetExecutorOptions = {
+  extraArgs?: string[] | (() => string[]);
+  repo?: string;
+  runOrigin?: "worker" | "error_monitor" | "local";
+  source?: string;
+  /**
+   * Task reference passed to the CLI subprocess when it differs from the
+   * task key (e.g. an injected task's markdown file path). The key still
+   * names the worktree and supervisor label.
+   */
+  taskRef?: string;
+  /**
+   * Run a retry targets (persisted on the scheduled-retry row). Threaded to
+   * the task subprocess as `DEVINTERN_PICKUP_RUN_ID` so session pickup
+   * resolves from that specific run.
+   */
+  pickupRunId?: number;
+  /**
+   * Enqueue time (epoch ms) of the injected row this run serves. Threaded to
+   * the task subprocess as `DEVINTERN_INJECTED_CREATED_AT` so session pickup
+   * only reopens a succeeded run of that same row.
+   */
+  injectedCreatedAt?: number;
+  /** Unique queue execution whose run record should receive this outcome. */
+  queueClaim?: string;
+  /**
+   * Team whose credentials a run without an acquiring team borrows (an
+   * ad-hoc task for a repo with a fixed team, or `worker add --team`). Only
+   * the credential layers apply; see {@link buildRepoRunEnv}. Ignored when
+   * `deps.team` is set.
+   */
+  credentialTeam?: TeamConfig;
+  /**
+   * Called with the task child pid after it spawns. Used by the injected-task
+   * queue to persist the pid for interrupt recovery.
+   */
+  onChildSpawn?: (pid: number) => void;
+  /**
+   * Native-blocker gate, run after routing and before any git or tracker
+   * side effect. A ticket it holds back returns `"waiting"`; a stacked
+   * verdict hands its base to the task subprocess via `STACKED_ON_ENV`.
+   */
+  dependencyGate?: TrackerDependencyGate;
+};
+
 /**
  * Build the fleet execute step: route a task to its repo and run it in a
  * disposable worktree. Shared by the polling acquirer, the relay's task
@@ -294,32 +365,25 @@ export type FleetExecutorDeps = Pick<
  */
 export function createFleetTaskExecutor(
   deps: FleetExecutorDeps,
-  options: {
-    extraArgs?: string[] | (() => string[]);
-    repo?: string;
-    runOrigin?: "worker" | "error_monitor" | "local";
-    source?: string;
-    /**
-     * Task reference passed to the CLI subprocess when it differs from the
-     * task key (e.g. an injected task's markdown file path). The key still
-     * names the worktree and supervisor label.
-     */
-    taskRef?: string;
-    /**
-     * Run a retry targets (persisted on the scheduled-retry row). Threaded to
-     * the task subprocess as `DEVINTERN_PICKUP_RUN_ID` so session pickup
-     * resolves from that specific run.
-     */
-    pickupRunId?: number;
-    /** Unique queue execution whose run record should receive this outcome. */
-    queueClaim?: string;
-    /**
-     * Called with the task child pid after it spawns. Used by the injected-task
-     * queue to persist the pid for interrupt recovery.
-     */
-    onChildSpawn?: (pid: number) => void;
-  } = {},
+  options: Omit<FleetExecutorOptions, "dependencyGate"> = {},
 ): (taskKey: string, routable: RoutableTask) => Promise<TaskExecutionResult> {
+  const execute = createGatedFleetTaskExecutor(deps, options);
+  return async (taskKey, routable) => {
+    const result = await execute(taskKey, routable);
+    // Only a dependency gate produces "waiting"; never report work that did
+    // not start as done.
+    return result === "waiting" ? "deferred" : result;
+  };
+}
+
+/**
+ * {@link createFleetTaskExecutor} with an optional native-blocker gate
+ * (`options.dependencyGate`): a held-back ticket resolves to `"waiting"`.
+ */
+export function createGatedFleetTaskExecutor(
+  deps: FleetExecutorDeps,
+  options: FleetExecutorOptions = {},
+): (taskKey: string, routable: RoutableTask) => Promise<TaskPollOutcome> {
   const { config, workspaceDir, skips, repoManager } = deps;
   const runTask = deps.runTask ?? runTaskViaCli;
   const isHarnessExhausted =
@@ -383,6 +447,13 @@ export function createFleetTaskExecutor(
       return "deferred";
     }
 
+    let stackedOn: StackBase | undefined;
+    if (options.dependencyGate) {
+      const gate = await options.dependencyGate(taskKey, repo.name);
+      if (gate.kind !== "ready") return "waiting";
+      stackedOn = gate.stackedOn;
+    }
+
     try {
       return await supervisor.schedule({
         id: randomUUID(),
@@ -403,7 +474,7 @@ export function createFleetTaskExecutor(
                 actionedSource: deps.actionedSource,
                 pipelineDefaultFile,
               })
-            : buildRepoEnv(repo, workspaceDir, {
+            : buildRepoRunEnv(repo, options.credentialTeam, workspaceDir, {
                 actionedSource: deps.actionedSource,
                 pipelineDefaultFile,
               });
@@ -418,8 +489,14 @@ export function createFleetTaskExecutor(
             ...env,
             [RUN_ORIGIN_ENV]: options.runOrigin ?? "worker",
             [QUEUE_CLAIM_ENV]: options.queueClaim,
+            // Always set (possibly to undefined) so a value never leaks from
+            // the worker's own environment into an unstacked run.
+            [STACKED_ON_ENV]: stackedOn ? encodeStackBaseEnv(stackedOn) : undefined,
             ...(options.pickupRunId !== undefined
               ? { [PICKUP_RUN_ID_ENV]: String(options.pickupRunId) }
+              : {}),
+            ...(options.injectedCreatedAt !== undefined
+              ? { [INJECTED_CREATED_AT_ENV]: String(options.injectedCreatedAt) }
               : {}),
           };
 

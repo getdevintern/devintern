@@ -20,6 +20,7 @@ Use `devintern worker add` to hand work to an existing workspace worker. It runs
 
 - Check `devintern worker add --help` before dispatching. This command was introduced by [PR #278](https://github.com/getdevintern/devintern/pull/278); older installations do not support it. If unavailable, report the missing capability rather than silently switching to a foreground implementation run or installing an unreleased build.
 - Read the selected workspace's `[[repos]]` names and remotes. The default file is `~/.devintern/workspace.toml`; honor an explicit workspace path or `DEVINTERN_WORKSPACE_DIR` override. Match the intended repository by remote, then use its registered name for `--repo`. Do not guess from the current directory's basename. Multiple repos require an explicit destination.
+- A repo fixed to one `[[teams]]` entry (`repo = "<name>"`) runs ad-hoc tasks with that team's credentials automatically. If enqueueing fails because several teams are fixed to the repo, ask the user which team's credentials to use and pass it with `--team <name>`; do not pick one yourself.
 - Enqueue only work covered by the user's request. Prefer independent tasks that can be reviewed separately. Coordinate overlapping changes or dependencies before dispatching several tasks. A worker agent should not delegate its own assigned implementation back into the worker unless explicitly asked to orchestrate further work.
 - Missing workspace configuration, credentials, or automation access are setup issues. Report the specific blocker; do not change worker policy just to make enqueueing succeed.
 
@@ -51,7 +52,7 @@ For dependent work, enqueue every step immediately: dispatch the first task, the
 
 Wait only when completion is needed for the caller's next step. Append `--wait --wait-timeout 600` for a bounded ten-minute wait, choosing a limit appropriate to the task. The CLI default is six hours; `0` disables the timeout. With `--wait --json`, stdout still contains one final object. Exit `0` indicates success and `1` indicates failure to complete the wait successfully.
 
-A timeout, worker stop, or inconclusive wait can produce a `status: "failed"` result with an `error` even though the task itself has not failed or been cancelled. Inspect the error and existing run before considering another enqueue: `devintern worker runs --task-key <taskKey> --json` and `devintern worker runs show <id> --json` read the run history without the dashboard (they also work inside a sandbox), and `devintern worker logs --level warn` shows recent worker output. Do not edit the queue database or managed prompt files to retry or cancel work.
+A timeout, worker stop, or inconclusive wait can produce a `status: "failed"` result with an `error` even though the task itself has not failed or been cancelled. Inspect the error and existing run before considering another enqueue: `devintern worker runs --task-key <taskKey> --json` and `devintern worker runs show <id> --json` read the run history without the dashboard (they also work inside a sandbox), and `devintern worker logs --level warn` shows recent worker output. Do not edit the queue database or managed prompt files to retry or cancel work; withdraw a task that has not started with `devintern worker cancel <taskKey>` (a `--wait` caller then exits `3` with `status: "cancelled"`).
 
 ## Report the outcome
 

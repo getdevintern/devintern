@@ -25,11 +25,27 @@ import { randomUUID } from "crypto";
 
 import { Utils } from "../utils";
 import { excludeWorkerRuntimeFiles } from "../utils/git-exclude";
+import { withRepoGitLock } from "../utils/repo-git-lock";
 import type { RepoConfig } from "./config";
 import { reposDir, resolveWorkspaceDir, worktreesDir } from "./paths";
 
 /** Name of the persistent per-repo worktree used for review/mention runs. */
 export const BASE_WORKTREE_NAME = "base";
+
+/**
+ * Name of the persistent per-repo checkout PR jobs start from. Separate from
+ * the base checkout, which an automation may hold on its own branch.
+ */
+export const PR_JOB_WORKTREE_NAME = "pr-jobs";
+
+/** Fetch attempts when another process's fetch holds a ref lock. */
+const FETCH_LOCK_ATTEMPTS = 3;
+const FETCH_LOCK_RETRY_MS = 500;
+
+/** Git's lock-contention failures (another fetch is updating the same refs). */
+function isRefLockError(message: string | undefined): boolean {
+  return /cannot lock ref|unable to (create|lock)|\.lock'?: File exists/i.test(message ?? "");
+}
 
 export class RepoManager {
   private workspaceDir: string;
@@ -52,6 +68,11 @@ export class RepoManager {
   /** Absolute path of a repo's persistent base worktree. */
   baseWorktreePath(repoName: string): string {
     return join(this.repoWorktreesDir(repoName), BASE_WORKTREE_NAME);
+  }
+
+  /** Absolute path of a repo's persistent PR-job checkout. */
+  prJobWorktreePath(repoName: string): string {
+    return join(this.repoWorktreesDir(repoName), PR_JOB_WORKTREE_NAME);
   }
 
   /**
@@ -137,24 +158,35 @@ export class RepoManager {
   /**
    * Update `refs/remotes/origin/*` from the remote.
    *
+   * Queued behind this process's other admin operations on the repo, but
+   * never under the cross-process git metadata lock: a fetch is network-bound
+   * and can take minutes, and PR job subprocesses must not time out waiting
+   * on it. Git locks each ref it updates itself; a fetch that loses a ref
+   * lock to a concurrent fetch in another process is retried.
+   *
    * @param repoName - Configured repository name
-   * @param options.timeoutMs - Bound the network operation (used by startup
-   *   probes that must not block on an unreachable remote)
-   * @throws When the fetch fails (network, auth, missing clone).
+   * @param options.timeoutMs - Bound the network operation (startup probes
+   *   that must not block on an unreachable remote, and PR jobs)
+   * @throws When the fetch fails (network, auth, missing clone, timeout).
    */
   async fetch(repoName: string, options?: { timeoutMs?: number }): Promise<void> {
-    await this.withAdminLock(repoName, () => this.fetchUnlocked(repoName, options));
+    await this.withAdminLock(repoName, () => this.fetchUnlocked(repoName, options), {
+      crossProcess: false,
+    });
   }
 
   private async fetchUnlocked(repoName: string, options?: { timeoutMs?: number }): Promise<void> {
-    const result = await Utils.executeGitCommand(
-      ["fetch", "--prune", "origin"],
-      options?.timeoutMs
-        ? { cwd: this.bareClonePath(repoName), timeoutMs: options.timeoutMs }
-        : { cwd: this.bareClonePath(repoName) },
-    );
-    if (!result.success) {
-      throw new Error(`Failed to fetch repo "${repoName}": ${result.error}`);
+    const gitOptions = options?.timeoutMs
+      ? { cwd: this.bareClonePath(repoName), timeoutMs: options.timeoutMs }
+      : { cwd: this.bareClonePath(repoName) };
+    for (let attempt = 1; ; attempt++) {
+      const result = await Utils.executeGitCommand(["fetch", "--prune", "origin"], gitOptions);
+      if (result.success) return;
+      const message = result.error || result.output;
+      if (attempt >= FETCH_LOCK_ATTEMPTS || !isRefLockError(message)) {
+        throw new Error(`Failed to fetch repo "${repoName}": ${result.error}`);
+      }
+      await Bun.sleep(FETCH_LOCK_RETRY_MS * attempt);
     }
   }
 
@@ -178,10 +210,10 @@ export class RepoManager {
    * creation; task subprocesses install dependencies after preparing their
    * final branch, including every reuse by an automation.
    *
-   * A reused checkout is reset to the fetched default branch. It is shared by
-   * automations and review jobs, and a previous run can leave it on its own
-   * feature branch at an old commit; without the reset the next automation
-   * would start from that stale head instead of the default branch.
+   * A reused checkout is reset to the fetched default branch. A previous
+   * automation can leave it on its own feature branch at an old commit;
+   * without the reset the next automation would start from that stale head
+   * instead of the default branch.
    */
   async ensureBaseWorktree(repo: RepoConfig): Promise<string> {
     return this.withAdminLock(repo.name, async () => {
@@ -192,6 +224,43 @@ export class RepoManager {
         return path;
       }
       await this.syncBaseWorktreeUnlocked(path, branch);
+      return path;
+    });
+  }
+
+  /**
+   * Ensure the persistent PR-job checkout exists, detached at the fetched
+   * default branch.
+   *
+   * PR jobs (reviews, CI fixes, base syncs) run their CLI subprocess from
+   * here: it reads the project's tracked `.devintern-code/settings.json` from
+   * its cwd, so that must be the default branch, not whatever an automation
+   * left in the base checkout. The agents themselves work in branch-scoped
+   * PR worktrees. Several PR jobs share this checkout, so it is only moved
+   * when it lags `origin/<branch>`, and a failed move (another job's git
+   * command holding its index) keeps the previous default-branch commit
+   * instead of failing the job.
+   */
+  async ensurePrJobWorktree(repo: RepoConfig): Promise<string> {
+    return this.withAdminLock(repo.name, async () => {
+      const path = this.prJobWorktreePath(repo.name);
+      const branch = await this.resolveDefaultBranch(repo);
+      if (!existsSync(path)) {
+        await this.addWorktreeUnlocked(repo.name, path, `origin/${branch}`);
+        return path;
+      }
+      const [head, target] = await Promise.all([
+        Utils.executeGitCommand(["rev-parse", "HEAD"], { cwd: path }),
+        Utils.executeGitCommand(["rev-parse", `origin/${branch}`], { cwd: path }),
+      ]);
+      if (head.success && target.success && head.output.trim() === target.output.trim()) {
+        return path;
+      }
+      try {
+        await this.syncBaseWorktreeUnlocked(path, branch);
+      } catch (error) {
+        console.warn(`⚠️  [fleet] ${(error as Error).message}; using the checkout as is`);
+      }
       return path;
     });
   }
@@ -259,7 +328,7 @@ export class RepoManager {
   /**
    * Remove leftover task worktrees older than the TTL.
    *
-   * Runs on worker start. The base worktree is never swept.
+   * Runs on worker start. The base and PR-job worktrees are never swept.
    *
    * @returns Paths that were removed.
    */
@@ -271,7 +340,7 @@ export class RepoManager {
     const cutoff = Date.now() - ttlDays * 24 * 60 * 60 * 1000;
     const removed: string[] = [];
     for (const entry of readdirSync(dir)) {
-      if (entry === BASE_WORKTREE_NAME) {
+      if (entry === BASE_WORKTREE_NAME || entry === PR_JOB_WORKTREE_NAME) {
         continue;
       }
       const path = join(dir, entry);
@@ -309,13 +378,26 @@ export class RepoManager {
       throw new Error(`Failed to add worktree at ${path} (${ref}): ${result.error}`);
     }
     await Utils.isolateWorktreeHooks(path);
-    // Exclude only runtime artifacts: new settings.json, .env.example and
-    // automations.toml must remain eligible for a worker-generated PR.
+    // Exclude only runtime artifacts: new settings.json and .env.example
+    // must remain eligible for a worker-generated PR.
     excludeWorkerRuntimeFiles(path);
   }
 
-  /** Serialize compound Git administration without nesting public locks. */
-  private async withAdminLock<T>(repoName: string, operation: () => Promise<T>): Promise<T> {
+  /**
+   * Serialize compound Git administration without nesting public locks.
+   *
+   * Within this process the calls queue per repo; across processes (PR job
+   * CLI subprocesses preparing review worktrees from the same bare clone)
+   * the repository's git metadata lock is held around the operation, unless
+   * `crossProcess` is false (network fetches). The first clone runs without
+   * it: the bare clone directory, which holds the lock file, does not exist
+   * yet.
+   */
+  private async withAdminLock<T>(
+    repoName: string,
+    operation: () => Promise<T>,
+    options: { crossProcess?: boolean } = {},
+  ): Promise<T> {
     const previous = this.adminTails.get(repoName) ?? Promise.resolve();
     let release!: () => void;
     const turn = new Promise<void>((resolve) => {
@@ -325,7 +407,10 @@ export class RepoManager {
     this.adminTails.set(repoName, tail);
     await previous;
     try {
-      return await operation();
+      const clonePath = this.bareClonePath(repoName);
+      return options.crossProcess !== false && existsSync(clonePath)
+        ? await withRepoGitLock(clonePath, operation)
+        : await operation();
     } finally {
       release();
       if (this.adminTails.get(repoName) === tail) {

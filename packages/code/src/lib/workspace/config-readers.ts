@@ -1,6 +1,7 @@
 /** Typed field readers for raw `workspace.toml` tables; each collects errors instead of throwing. */
 
-import { DEFAULT_AUTO_MERGE_REVIEW_LABEL } from "../review/merge-gate";
+import { DEFAULT_AUTO_MERGE_REVIEW_LABEL, MERGE_SAFETY_POLICIES } from "../review/merge-gate";
+import type { MergeSafetyPolicy } from "../review/merge-gate";
 
 export function asTable(value: unknown, label: string, errors: string[]): Record<string, unknown> {
   if (value === undefined || value === null) {
@@ -152,6 +153,39 @@ export function readReviewLabel(
   if (typeof value !== "string") {
     errors.push(`${label}.auto_merge_review_label must be a string ("" disables labeling).`);
     return DEFAULT_AUTO_MERGE_REVIEW_LABEL;
+  }
+  return value.trim();
+}
+
+/** `auto_merge_policy`: `undefined` when unset; unknown values are an error. */
+export function readMergeSafetyPolicy(
+  table: Record<string, unknown>,
+  label: string,
+  errors: string[],
+): MergeSafetyPolicy | undefined {
+  const value = table.auto_merge_policy;
+  if (value === undefined || value === null) return undefined;
+  if (typeof value === "string" && (MERGE_SAFETY_POLICIES as readonly string[]).includes(value)) {
+    return value as MergeSafetyPolicy;
+  }
+  errors.push(`${label}.auto_merge_policy must be one of: ${MERGE_SAFETY_POLICIES.join(", ")}.`);
+  return undefined;
+}
+
+/**
+ * `auto_merge_review_instructions`: trimmed text, `undefined` when unset.
+ * `""` is kept so a repo can clear the workspace's instructions.
+ */
+export function readReviewInstructions(
+  table: Record<string, unknown>,
+  label: string,
+  errors: string[],
+): string | undefined {
+  const value = table.auto_merge_review_instructions;
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string") {
+    errors.push(`${label}.auto_merge_review_instructions must be a string.`);
+    return undefined;
   }
   return value.trim();
 }

@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { execSync } from "child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
@@ -12,6 +12,7 @@ import {
 } from "../src/lib/review/conflict-resolver";
 import { UNTRUSTED_CONTENT_NOTICE } from "../src/lib/prompts/untrusted-content";
 import { Utils } from "../src/lib/utils";
+import { reviewWorktreeLeasePath } from "../src/lib/utils/review-worktree-lease";
 import type { PullRequestInfo } from "../src/lib/code-host/github/reviews-types";
 
 const PR_URL = "https://github.com/acme/widgets/pull/7";
@@ -41,6 +42,27 @@ describe("buildConflictPrompt", () => {
     });
     expect(prompt).toContain(UNTRUSTED_CONTENT_NOTICE);
     expect(prompt).toContain("<!-- BEGIN UNTRUSTED EXTERNAL CONTENT: conflicted files -->");
+  });
+
+  test("stages real work without bulk-staging sandbox placeholders", () => {
+    const prompts = [
+      buildConflictPrompt({ baseRef: "main", branch: "feature/x", conflictedFiles: ["a.ts"] }),
+      buildConflictPrompt({
+        baseRef: "main",
+        branch: "feature/x",
+        conflictedFiles: ["bun.lock"],
+        conflictedDependencyFiles: ["bun.lock"],
+      }),
+      buildHookFixPrompt({ branch: "feature/x", hookError: "lint failed" }),
+    ];
+    for (const prompt of prompts) {
+      expect(prompt).not.toContain("git add -A");
+      expect(prompt).not.toContain("git add .");
+      expect(prompt).toContain("git add -u");
+      // New files the agent creates must still be staged explicitly.
+      expect(prompt).toContain("git add <path>");
+    }
+    expect(prompts[0]).toContain("git commit --no-edit");
   });
 
   test("frames pre-push hook output as untrusted", () => {
@@ -285,6 +307,38 @@ describe("resolveConflictsOnPr", () => {
     expect(result.outcome).toBe("resolved");
     expect(usedWorkDir).toBeDefined();
     expect(existsSync(usedWorkDir!)).toBe(false);
+  });
+
+  test("defers without a PR comment when another job holds the branch worktree", async () => {
+    // Another live job (a sleeping child stands in) leases this branch's worktree.
+    const holder = Bun.spawn(["sleep", "30"]);
+    try {
+      const path = Utils.getReviewWorktreePath("feature/change", join(repoDir, ".git"));
+      const lease = reviewWorktreeLeasePath(path);
+      mkdirSync(join(lease, ".."), { recursive: true });
+      const now = Date.now();
+      writeFileSync(lease, JSON.stringify({ pid: holder.pid, startedAt: now, heartbeatAt: now }));
+
+      const comments: string[] = [];
+      let agentRan = false;
+      const result = await resolveConflictsOnPr(PR_URL, {
+        cwd: repoDir,
+        fetchPr: async () => prInfo(),
+        prCommenter: async (body) => {
+          comments.push(body);
+        },
+        agentRunner: async () => {
+          agentRan = true;
+          return { success: true, output: "" };
+        },
+      });
+      expect(result.outcome).toBe("deferred");
+      expect(result.message).toContain("in use by another job");
+      expect(comments).toHaveLength(0);
+      expect(agentRan).toBe(false);
+    } finally {
+      holder.kill();
+    }
   });
 
   test("removes the review worktree after a failed run", async () => {
@@ -604,6 +658,42 @@ describe("resolveConflictsOnPr", () => {
 
     // Origin's feature branch never received the merge.
     expect(git(seedDir, "rev-parse origin/feature/change").trim()).toBe(untouchedHead);
+  });
+
+  test("does not amend the merge commit when the hook fix leaves only sandbox placeholders", async () => {
+    const hookPath = join(repoDir, ".git", "hooks", "pre-push");
+    const marker = join(testDir, "hook-failed-once");
+    writeFileSync(
+      hookPath,
+      `#!/bin/sh\nif [ ! -f "${marker}" ]; then touch "${marker}"; echo 'lint failed' >&2; exit 1; fi\n`,
+      { mode: 0o755 },
+    );
+
+    let mergeSha = "";
+    const result = await resolveConflictsOnPr(PR_URL, {
+      cwd: repoDir,
+      noComment: true,
+      fetchPr: async () => prInfo(),
+      agentRunner: async (prompt, workDir) => {
+        if (prompt.includes("Fix Pre-Push Hook Failures")) {
+          // Only the sandbox's leftover empty mount point remains.
+          writeFileSync(join(workDir, ".bashrc"), "");
+          // Cross a second boundary so a no-op amend would get a new SHA.
+          await Bun.sleep(1100);
+          return { success: true, output: "nothing to fix" };
+        }
+        writeFileSync(join(workDir, "greeting.txt"), "resolved\n");
+        git(workDir, "add -A");
+        git(workDir, "commit --no-edit");
+        mergeSha = git(workDir, "rev-parse HEAD").trim();
+        return { success: true, output: "done" };
+      },
+    });
+
+    expect(result.outcome).toBe("resolved");
+    expect(git(testDir, `--git-dir=${originDir} rev-parse refs/heads/feature/change`).trim()).toBe(
+      mergeSha,
+    );
   });
 
   test("redacts credentials and local paths from the public failure comment", async () => {
@@ -1120,6 +1210,66 @@ git --git-dir="${originDir}" update-ref refs/heads/feature/change "${competingTi
     execSync(`git clone -b feature/change ${originDir} ${shipped}/clone`, { stdio: "ignore" });
     expect(existsSync(join(shipped, "clone", "hook-fix.txt"))).toBe(true);
     rmSync(shipped, { recursive: true, force: true });
+  });
+
+  test("finishing an uncommitted merge stages new files but not sandbox placeholders", async () => {
+    const result = await resolveConflictsOnPr(PR_URL, {
+      cwd: repoDir,
+      noComment: true,
+      fetchPr: async () => prInfo(),
+      agentRunner: async (_prompt, workDir) => {
+        // Resolve and mark the conflict, split out a new module without
+        // staging it, and leave the merge uncommitted.
+        writeFileSync(join(workDir, "greeting.txt"), "hello from main and the branch\n");
+        git(workDir, "add -u");
+        mkdirSync(join(workDir, "src"), { recursive: true });
+        writeFileSync(join(workDir, "src", "split-out.ts"), "export const x = 1;\n");
+        // Debris a sandbox leaves behind at its mount points.
+        writeFileSync(join(workDir, ".bashrc"), "");
+        mkdirSync(join(workDir, ".claude"), { recursive: true });
+        writeFileSync(join(workDir, ".claude", "settings.json"), "");
+        execSync("mkfifo .zshrc", { cwd: workDir });
+        return { success: true, output: "done" };
+      },
+    });
+
+    expect(result.outcome).toBe("resolved");
+    const files = git(
+      testDir,
+      `--git-dir=${originDir} ls-tree -r --name-only refs/heads/feature/change`,
+    )
+      .trim()
+      .split("\n");
+    expect(files).toContain("src/split-out.ts");
+    expect(files).not.toContain(".bashrc");
+    expect(files).not.toContain(".zshrc");
+    expect(files).not.toContain(".claude/settings.json");
+  });
+
+  test("a staging failure aborts the merge instead of committing a partial tree", async () => {
+    const before = git(
+      testDir,
+      `--git-dir=${originDir} rev-parse refs/heads/feature/change`,
+    ).trim();
+    const result = await resolveConflictsOnPr(PR_URL, {
+      cwd: repoDir,
+      noComment: true,
+      fetchPr: async () => prInfo(),
+      agentRunner: async (_prompt, workDir) => {
+        writeFileSync(join(workDir, "greeting.txt"), "hello from main and the branch\n");
+        git(workDir, "add -u");
+        writeFileSync(join(workDir, "new.ts"), "export {};\n");
+        // A tracked path replaced by a FIFO makes `git add -u` fail.
+        rmSync(join(workDir, "greeting.txt"));
+        execSync("mkfifo greeting.txt", { cwd: workDir });
+        return { success: true, output: "done" };
+      },
+    });
+
+    expect(result.outcome).not.toBe("resolved");
+    expect(git(testDir, `--git-dir=${originDir} rev-parse refs/heads/feature/change`).trim()).toBe(
+      before,
+    );
   });
 
   test("an already-up-to-date branch stays quiet and posts nothing", async () => {

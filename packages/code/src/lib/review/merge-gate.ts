@@ -9,7 +9,8 @@
  *    agent tokens.
  * 3. Otherwise → `needs-review`. Merged only if the agent review says so.
  *    The verdict is read only from the agent's stdout, and only from its
- *    last non-empty line (see `parseMergeSafetyVerdict`).
+ *    last non-empty line or a single fenced block that ends the output
+ *    (see `parseMergeSafetyVerdict`).
  *
  * Fails closed: an empty file list, a truncated file list, or a path that is
  * not a normalized repo-relative path is never classified `safe`.
@@ -19,6 +20,20 @@
 export type AutoMergeMethod = "merge" | "squash" | "rebase";
 
 export const AUTO_MERGE_METHODS: readonly AutoMergeMethod[] = ["merge", "squash", "rebase"];
+
+/**
+ * How strict the merge-safety agent review is (`auto_merge_policy`):
+ * - `strict` (default): any runtime behavior change is unsafe.
+ * - `standard`: tested behavior changes may merge; a fixed keep-list of
+ *   high-risk categories (auto-merge machinery, CI/release, safety nets,
+ *   auth, sandbox, destructive effects, default flips, dependencies) still
+ *   needs a human.
+ */
+export type MergeSafetyPolicy = "strict" | "standard";
+
+export const MERGE_SAFETY_POLICIES: readonly MergeSafetyPolicy[] = ["strict", "standard"];
+
+export const DEFAULT_MERGE_SAFETY_POLICY: MergeSafetyPolicy = "strict";
 
 /** Default label for PRs auto-merge leaves open (`auto_merge_review_label`). */
 export const DEFAULT_AUTO_MERGE_REVIEW_LABEL = "needs-human-review";
@@ -131,30 +146,40 @@ export interface MergeSafetyVerdict {
 // oxlint-disable-next-line no-control-regex -- matching terminal escape codes is the point
 const ANSI_PATTERN = /\x1B\[[0-9;?]*[A-Za-z]|\x1B\][^\x07\x1B]*(?:\x07|\x1B\\)/g;
 
+/** An opening Markdown fence line: ``` or ```json (case-insensitive). */
+const OPENING_FENCE = /^```(?:json)?$/i;
+const CLOSING_FENCE = "```";
+
 /**
  * Extract the agent's verdict from its **stdout** only (never stderr, which
  * carries transcripts that echo the prompt and PR diff). After stripping ANSI
  * codes and trailing whitespace, the LAST non-empty line must be a JSON object
- * with a boolean `safe`. Anything else (prose last, JSON only earlier in the
- * output, malformed JSON, `safe` not a boolean) is `null`, which callers treat
+ * with a boolean `safe`. The one other accepted shape is a single fenced block
+ * that ends the output: an opening ``` or ```json line, exactly one non-empty
+ * line holding the JSON object, then a closing ``` line. Anything else (prose
+ * last, prose after the fence, JSON only earlier in the output, multi-line
+ * JSON, malformed JSON, `safe` not a boolean) is `null`, which callers treat
  * as "not safe" — the agent can only ever veto by omission, never approve by
  * accident. No trailing text is skipped, so a harness that prints anything
  * after the final answer fails closed.
  */
 export function parseMergeSafetyVerdict(stdout: string): MergeSafetyVerdict | null {
-  const lines = stdout.replace(ANSI_PATTERN, "").replace(/\r/g, "").split("\n");
-  let last: string | undefined;
-  for (let index = lines.length - 1; index >= 0; index--) {
-    const line = (lines[index] as string).trim();
-    if (line) {
-      last = line;
-      break;
-    }
+  const lines = stdout
+    .replace(ANSI_PATTERN, "")
+    .replace(/\r/g, "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  let candidate = lines.at(-1);
+  if (candidate === CLOSING_FENCE) {
+    // Blank lines are dropped above, so the fence must be exactly these three.
+    const opening = lines.at(-3);
+    candidate = opening !== undefined && OPENING_FENCE.test(opening) ? lines.at(-2) : undefined;
   }
-  if (!last?.startsWith("{")) return null;
+  if (!candidate?.startsWith("{")) return null;
   let parsed: unknown;
   try {
-    parsed = JSON.parse(last);
+    parsed = JSON.parse(candidate);
   } catch {
     return null;
   }

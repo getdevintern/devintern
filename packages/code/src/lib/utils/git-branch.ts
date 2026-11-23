@@ -194,7 +194,7 @@ export async function pullLatestChanges(
       return {
         success: false,
         message:
-          "There are uncommitted changes — skipping the pull. They are backed up to a git stash when the feature branch is created.",
+          "There are uncommitted changes — skipping the pull. They are backed up under refs/devintern/backups/ when the feature branch is created.",
       };
     }
 

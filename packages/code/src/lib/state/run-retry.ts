@@ -48,6 +48,8 @@ export interface RetryEligibility {
  * `kind: "injected"`: their task key names no tracker ticket either, so the
  * handler re-queues the durable injected row instead of forcing the CLI. The
  * row keeps its key, so the retried run resumes the recorded branch and report.
+ * A `succeeded` ad-hoc run that recorded a branch, no PR, and a PR creation
+ * failure is also re-queueable, so the PR can be opened from that branch.
  */
 export type RetryKind = "task" | "automation" | "injected";
 
@@ -59,7 +61,8 @@ export interface RetryEligibility {
 }
 
 export function isRunRetriable(
-  run: Pick<RunRecord, "status" | "taskKey" | "automationId"> & { origin?: RunRecord["origin"] },
+  run: Pick<RunRecord, "status" | "taskKey" | "automationId"> &
+    Partial<Pick<RunRecord, "origin" | "branch" | "prUrl" | "prFailure">>,
 ): RetryEligibility {
   if (run.origin === "local" && run.taskKey) {
     // Ad-hoc work: the retry re-queues the durable injected row under the same
@@ -67,6 +70,14 @@ export function isRunRetriable(
     // session pickup can inherit the interrupted attempt. The row itself is
     // resolved by the handler (it may already be gone or still active).
     if (RETRIABLE_RUN_STATUSES.includes(run.status)) {
+      return { eligible: true, kind: "injected" };
+    }
+    // A run whose PR step failed (bad credentials, say) still finishes
+    // `succeeded`, leaving a branch with no PR. Re-queueing it lets session
+    // pickup continue that branch and open the PR from it. Only a recorded PR
+    // failure counts: PR creation is opt-in, so a missing PR alone may just
+    // mean the run never asked for one.
+    if (run.status === "succeeded" && run.branch?.trim() && !run.prUrl && run.prFailure) {
       return { eligible: true, kind: "injected" };
     }
     return notRetriableByStatus(run.status);
@@ -395,6 +406,24 @@ export class ScheduledRetryStore {
       return row !== null;
     } catch {
       return false;
+    }
+  }
+
+  /**
+   * Task keys with a pending or running retry for one source's team, so the
+   * poller can keep its hands off tickets the retry drain owns. A read
+   * failure returns an empty set (polling must never break on it).
+   */
+  activeTaskKeys(team?: string): Set<string> {
+    try {
+      const rows = this.ensureDb()
+        .query(
+          "SELECT DISTINCT task_key FROM scheduled_retries WHERE COALESCE(team, '') = ? AND status IN ('pending', 'running')",
+        )
+        .all(team ?? "") as Array<{ task_key: string }>;
+      return new Set(rows.map((row) => row.task_key));
+    } catch {
+      return new Set();
     }
   }
 

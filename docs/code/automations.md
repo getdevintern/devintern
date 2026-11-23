@@ -48,7 +48,7 @@ under ~/Documents/Tweets/."""
 | `allow_no_changes` | Treat a run that changes nothing as a success. Default `false`.                                   |
 | `harness`, `model`, `effort` | Agent for this schedule. See [Choosing the agent per schedule](#choosing-the-agent-per-schedule). |
 
-A worker with at least one automation runs even without a task query. Edits to `workspace.toml` apply without a restart; an invalid entry is logged and the last valid config keeps running. Single-repo projects can use the same schema in `.devintern-code/automations.toml`.
+A worker with at least one automation runs even without a task query. Edits to `workspace.toml` apply without a restart; an invalid entry is logged and the last valid config keeps running.
 
 To try an entry without waiting for its schedule, use **Run now** in the [dashboard](./dashboard.md#run-an-automation-now). It runs the same pipeline with the same `open_pr` setting.
 
@@ -101,7 +101,7 @@ An agent that stops cleanly has not necessarily succeeded. Every implementation 
 | `noop` or `done` | Nothing to do, or the goal was met.                                    | `succeeded`                          |
 | no marker        | —                                                                      | `succeeded`                          |
 
-"Nothing to do" is not blocked: a `main-red-fixer` that finds main green should omit the marker or use `status=noop`. Prompts can rely on the built-in instruction or name which failures count as blocked ("if the test gate fails, report the run as blocked").
+"Nothing to do" is not blocked: a `main-red-fixer` that finds main green should omit the marker or use `status=noop`. A gate that already fails the same way on the base commit, in a way the change did not cause, is reported as `partial` unless making that gate pass is the task's goal. The agent confirms this by re-running the gate on the base revision. The run is recorded `succeeded` with a reason starting `partial: pre-existing on base:`, so you can find and review these runs. Prompts can rely on the built-in instruction or name which failures count as blocked ("if the test gate fails, report the run as blocked").
 
 Escalated runs appear in the dashboard, the stats escalation rate, and `devintern report --last`. The next attempt is the next occurrence, **Run now**, or a dashboard retry. For tracker tasks, a blocked outcome changes only the run record: a PR the run already opened stays open, and a markdown task is not marked `Done`. Only a whole line in the final report counts; the reason is truncated to 300 characters.
 
@@ -143,7 +143,7 @@ Changes apply to the next occurrence; a run in progress keeps its agent.
 - Changing an entry's schedule resets it: the next run is the next scheduled time.
 - Occurrences skip the clarity (feasibility) check.
 
-In a multi-repo workspace an occurrence runs in the repository's persistent base checkout (`~/.devintern/worktrees/<repo>/base`), reset to the default branch first, with the same environment layers as the repo's tasks: shared `.env`, then the repo's `env_file`, then `[repos.env]`. It takes the per-repo lock, so it never runs at the same time as a task in that repo.
+In a multi-repo workspace an occurrence runs in the repository's persistent base checkout (`~/.devintern/worktrees/<repo>/base`), reset to the default branch first, with the same environment layers as the repo's tasks: shared `.env`, then the repo's `env_file`, then `[repos.env]`. That includes the auto-filled `GITHUB_REPO` / `GITLAB_PROJECT` described in [Workspaces → Environment](./workspaces.md#environment). It takes the per-repo lock, so it never runs at the same time as a task in that repo.
 
 Each occurrence writes its prompt to `~/.devintern/automations/<id>/<timestamp>.md`. To rerun one by hand:
 

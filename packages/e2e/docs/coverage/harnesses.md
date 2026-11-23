@@ -26,24 +26,24 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 
 - Surface: External dependency: agent harnesses and failover
 - Status: `default`
-- Evidence: `tests/local/worker-harness-failover.test.ts` (injected tasks) and `tests/local/worker-conflict-failover.test.ts` (worker conflict-resolution failover: quota-then-success and all-harness deferral). `bun run build`, then `bun run --filter @devintern/e2e test`.
-- Missing: Real harness limit text drift, failback after the reset window.
-- Last reviewed: 2026-11-17
+- Evidence: `tests/local/worker-harness-failover.test.ts` (injected tasks), `tests/local/worker-harness-failback.test.ts` (failback after the reset window, restart-time restore), and `tests/local/worker-conflict-failover.test.ts` (worker conflict-resolution failover: quota-then-success and all-harness deferral). `bun run build`, then `bun run --filter @devintern/e2e test`.
+- Missing: Real harness limit text drift.
+- Last reviewed: 2026-11-19
 
 ### Harness failover
 
 - Surface: `devintern worker` surface
 - Status: `default`
-- Evidence: `tests/local/worker-harness-failover.test.ts`
-- Missing: Failback after the reset window and restart-time restore of the persisted chain.
-- Last reviewed: 2026-11-17
+- Evidence: `tests/local/worker-harness-failover.test.ts` (failover, all-limited defer), `tests/local/worker-harness-failback.test.ts` (`e2e-harnesses-failback`: the worker's own timer fails back to the primary after a short real reset window and the next task runs there; `e2e-harnesses-restart-restore`: a restart inside the window runs the next task directly on the persisted fallback, and a restart after the chain is edited drops the removed active name and reselects by priority; `e2e-harnesses-failback-midrun`: the primary's window elapses while a task is held on the fallback, that run finishes on the fallback, and the next task runs on the primary), and `tests/local/worker-harness-start-paused.test.ts` (`e2e-harnesses-start-paused`: a restart with every entry still limited starts paused, spawns nothing, keeps queued tasks pending without charging their deferral budget, reports `harnessPausedUntil` from `worker add --json`, then runs the new task once on the primary when its window ends). `bun run --filter @getdevintern/code build`, then `bun run --filter @devintern/e2e test`.
+- Missing: Observed (unconfirmed intent): after a start-paused restart resumes, the task runs on the primary but `failover:active_harness` keeps the pre-restart fallback name (`codex`) until another switch, so the dashboard's active harness can lag the harness actually used. A task deferred before the restart stays on its own one-minute deferral backoff; the test does not wait for it.
+- Last reviewed: 2026-11-20
 
 ## Backlog
 
 Priority numbers are the global ranking from the
 [index](../coverage-matrix.md#priority-backlog); lower runs first.
 
-- Priority 14: ~~Harness failover with stub harnesses~~ (injected tasks in `tests/local/worker-harness-failover.test.ts`; worker conflict-resolution failover in `tests/local/worker-conflict-failover.test.ts`). Failback after the reset window is still open.
+- Priority 14: ~~Harness failover with stub harnesses~~ (injected tasks in `tests/local/worker-harness-failover.test.ts`; worker conflict-resolution failover in `tests/local/worker-conflict-failover.test.ts`). ~~Failback after the reset window and restart-time restore~~ (`tests/local/worker-harness-failback.test.ts`). ~~Failback while a task runs on the fallback~~ (`tests/local/worker-harness-failback.test.ts`). ~~Restart with every entry still limited (start paused)~~ (`tests/local/worker-harness-start-paused.test.ts`).
 
 ## Test notes
 
@@ -99,13 +99,76 @@ fresh-attempt naming. The second scenario makes both stubs limit and asserts the
 row is requeued `pending` with two `deferred` runs, no branch on the bare
 remote, both persisted windows, and a worker that stays alive.
 
-Failback after the primary's reset window elapses is not covered: the stub
-windows are one hour, and the process-scoped resume timer is out of scope for
-this offline suite.
+Failback and restart-time restore are covered separately (see below). The
+stub helpers are shared through `helpers/harness-stubs.ts`.
 
 ```sh
 bun run --filter @getdevintern/code build
 bun run --filter @devintern/e2e test
+```
+
+### Worker harness failback and restart restore
+
+`tests/local/worker-harness-failback.test.ts` uses the same stub chain
+(`helpers/harness-stubs.ts`) and the deterministic fake agent. No agent CLI,
+account, model call, or network access is used.
+
+- **Failback after the reset window.** The primary stub prints the limit pair
+  with `resets in 4 seconds` on its first spawn only and delegates to the fake
+  agent afterwards. The first task is deferred on the primary and succeeds on
+  codex. The test waits (bounded) for the worker's own
+  `failing back to primary harness claude-code` log, then for
+  `failover:active_harness=claude-code` with the `rate_limit:claude-code` row
+  cleared. A second task added while the worker runs succeeds in one attempt on
+  the primary: the primary stub count grows to 2 and codex stays at 1.
+- **Restart inside the window.** After a failover with a one-hour window, the
+  worker is stopped, a task is enqueued, and the worker is started on the same
+  workspace and queue DB. The task succeeds in one attempt on codex, the primary
+  stub is not spawned again, no new usage limit is logged, the persisted window
+  is unchanged, and codex stays the active harness.
+- **Restart after the chain is edited.** Same failover, then the worker
+  restarts with `AGENT_HARNESS=claude-code,antigravity`. The worker warns that
+  the persisted active harness `codex` is not in the chain, runs the next task
+  on antigravity (the primary's window is still open), and persists
+  `antigravity` as active. Neither claude-code nor codex runs again.
+
+- **Failback while a task runs on the fallback.** The primary limits once with
+  `resets in 4 seconds`; the codex stub records its spawn and then waits for a
+  release file the test controls, so the task stays running on codex while the
+  window elapses. After the worker logs the failback and persists
+  `claude-code` as active, the task is still `running` and neither stub was
+  spawned again. Once released, the task settles `done` with one `deferred`
+  and one `succeeded` run, one codex spawn, one fake-agent run, and one
+  failover log line (no switch mid-run). The next task succeeds on the primary.
+
+Each test takes a few seconds. The chain-edit test uses antigravity rather than
+opencode because the opencode harness probes `--version` through the stub.
+
+```sh
+bun run --filter @getdevintern/code build
+bun run --filter @devintern/e2e test worker-harness-failback
+```
+
+### Worker start paused (every harness limited across a restart)
+
+`tests/local/worker-harness-start-paused.test.ts` uses the same stub chain. The
+primary limits once with `resets in 15 seconds` (then delegates to the fake
+agent); codex limits with a one-hour window. The first task exhausts the chain
+and is requeued `pending` with two `deferred` runs. The worker is stopped and a
+second task is added with `worker add --json`, which reports
+`harnessPausedUntil` equal to the primary's window and warns on stderr.
+
+The restarted worker logs `Deferring new agent work until <primary window>`
+and, until just before that window ends, spawns no harness, claims no task,
+records no run, and leaves both tasks' deferral counts unchanged; it records no
+new limit. When the window ends the worker logs that it is resuming, and the
+second task succeeds in one attempt on the primary (primary stub count 2, codex
+1). Codex's window stays persisted, and the first task keeps its own deferral
+backoff. The test takes about 20 seconds because it waits out the real window.
+
+```sh
+bun run --filter @getdevintern/code build
+bun run --filter @devintern/e2e test worker-harness-start-paused
 ```
 
 ### Worker conflict-resolution failover

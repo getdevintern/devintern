@@ -47,10 +47,17 @@ import {
   replaceRunStage,
 } from "../state/run-recorder";
 import { pickupSelection, resolveSessionPickup } from "../state/session-pickup";
-import type { SessionPickupDecision } from "../state/session-pickup";
+import type { SessionPickupDecision, SessionPickupOptions } from "../state/session-pickup";
 import { finishTaskRun } from "../state/task-run";
-import { outcomeRunDisposition } from "../agent/implementation-outcome";
+import { deliveryRunDisposition, outcomeRunDisposition } from "../agent/implementation-outcome";
 import { TaskFormatter } from "../task/formatter";
+import {
+  renderStackedOnSection,
+  stackBaseFromEnv,
+  takeStackBaseFromEnv,
+} from "../dependencies/stacked-base";
+import { dropUnusedStackBase, recordConfirmedStackBase } from "./stack-base-run";
+import { reopenSucceededPickupOption } from "./reopen-pickup";
 import type { RetryPromptContext } from "../task/formatter";
 import { buildTicketUrl } from "../task/ticket-url";
 import type { TaskTrackerClient } from "../trackers/client";
@@ -345,11 +352,42 @@ async function runImplementation(input: ImplementationInput): Promise<void> {
     },
   );
 
+  await settleImplementationRun({
+    tracker,
+    task,
+    workflowKey,
+    taskDir,
+    incomplete: implementationIncomplete,
+    outcome,
+  });
+}
+
+/**
+ * Finish the run record after the agent session and clear the active task
+ * context: mark a markdown task Done only on success, record the ticket as
+ * actioned, and end the run with the disposition from the agent's outcome
+ * marker and any PR delivery failure the harness left on
+ * `runContext.activeTaskContext`. Exported for pipeline-level tests.
+ */
+export async function settleImplementationRun(input: {
+  tracker: TaskTrackerClient;
+  task: ImplementationInput["task"];
+  workflowKey: string;
+  taskDir: string;
+  incomplete: boolean;
+  outcome: ReturnType<typeof readImplementationReport>["outcome"];
+}): Promise<void> {
+  const { tracker, task, workflowKey, taskDir, outcome } = input;
+  const implementationIncomplete = input.incomplete;
   // The agent's own outcome marker decides between success and escalation
-  // for a clean run. Resolve it before any tracker transition so a blocked
-  // markdown task is not written as Done while its run is escalated.
-  const disposition = outcomeRunDisposition(outcome);
-  if (isMarkdownTaskTracker(tracker) && disposition.status !== "escalated") {
+  // for a clean run, and a requested PR that failed after the push turns it
+  // into a failure. Resolve it before any tracker transition so a blocked or
+  // undelivered markdown task is not written as Done.
+  const disposition = deliveryRunDisposition(
+    outcomeRunDisposition(outcome),
+    runContext.activeTaskContext?.prDeliveryFailure?.message,
+  );
+  if (isMarkdownTaskTracker(tracker) && disposition.status === "succeeded") {
     await tracker.markDoneIfSuccessful(workflowKey, taskDir);
   }
   if (implementationIncomplete) {
@@ -384,6 +422,8 @@ async function runImplementation(input: ImplementationInput): Promise<void> {
     // it; a markdown task stays out of Done so the file still shows it open.
     if (disposition.status === "escalated") {
       console.log(`\n🛑 Agent reported the goal as not met (${disposition.reason})`);
+    } else if (disposition.status === "failed") {
+      console.log(`\n❌ Run not delivered: ${disposition.reason}`);
     } else if (disposition.reason) {
       console.log(`\nℹ️  Agent reported the goal as ${disposition.reason}`);
     }
@@ -649,6 +689,21 @@ async function prepareTask(input: {
     throw formatError;
   }
 
+  // A tracker ticket the worker stacked on an unmerged blocker's branch: the
+  // worker passes the base via env because the ticket's own description lives
+  // in the tracker.
+  if (!markdownInput) {
+    const stackedOn = takeStackBaseFromEnv(descriptionText, (message) =>
+      console.warn(`⚠️  ${message}`),
+    );
+    if (stackedOn) {
+      taskDetails.stackedOnSection = renderStackedOnSection(stackedOn);
+      console.log(
+        `🧱 Stacked on ${stackedOn.taskKey} PR #${stackedOn.prNumber} (${stackedOn.branch})`,
+      );
+    }
+  }
+
   // Snapshot the ticket's description as markdown for the run record so the
   // dashboard shows what was asked even if the ticket changes or is deleted.
   recordRunTicket({
@@ -791,6 +846,7 @@ function displayTaskSummary(input: {
  */
 export async function resolveEffectiveTargetBranch(
   descriptionText: string | undefined,
+  stackedBranch?: string,
 ): Promise<string> {
   const options = runContext.options;
 
@@ -798,10 +854,14 @@ export async function resolveEffectiveTargetBranch(
   // This allows per-task branch targeting via patterns like "Target branch: develop"
   // Falls back to --pr-target-branch CLI option (default: main)
   let effectiveTargetBranch = options.prTargetBranch;
-  const extractedBranch = Utils.extractTargetBranch(descriptionText);
+  const extractedBranch = Utils.extractTargetBranch(descriptionText) ?? stackedBranch ?? null;
 
   if (extractedBranch) {
-    console.log(`   🎯 Detected target branch from description: ${extractedBranch}`);
+    console.log(
+      Utils.extractTargetBranch(descriptionText)
+        ? `   🎯 Detected target branch from description: ${extractedBranch}`
+        : `   🎯 Using stacked base branch: ${extractedBranch}`,
+    );
     if (options.verbose) {
       // Show context around the match for debugging
       const lines = descriptionText?.split("\n") || [];
@@ -957,37 +1017,42 @@ async function materializeTaskPrompt(input: {
     console.log(`✅ Downloaded ${attachmentMap.size} total attachments to: ${attachmentDir}`);
   }
 
+  // On a retry, tell the agent it is a retry, why the last attempt
+  // stopped, and which comments arrived since. When the prior attempt left
+  // resumable state (a branch and its own report), session pickup hands that
+  // to the agent so it continues instead of re-deriving it.
+  let retryContext: RetryPromptContext | undefined;
+  if (priorRetryState || pickup.kind === "resume") {
+    let lastFailureSummary: string | undefined;
+    if (pickup.kind !== "resume") {
+      try {
+        const lastRun = new RunStore()
+          .listRuns({ taskKey: workflowKey, limit: 10 })
+          .find((run) => run.status === "escalated" || run.status === "failed");
+        lastFailureSummary = lastRun?.outcomeReason;
+      } catch {
+        // Prompt context only — proceed without it.
+      }
+    }
+    retryContext = buildRetryPromptContext({
+      pickup,
+      priorRetryState,
+      gitEnabled: Boolean(runContext.options.git),
+      lastFailureSummary,
+    });
+  }
+
   if (isMarkdownTaskTracker(tracker)) {
-    tracker.writeAgentPrompt(outputFile, task);
+    // Local task files (including `worker add` ad-hoc tasks) get the same
+    // resume guidance, so a re-queued task continues its inherited branch.
+    tracker.writeAgentPrompt(
+      outputFile,
+      task,
+      retryContext ? TaskFormatter.formatRetrySection(retryContext) : undefined,
+    );
     console.log(`\n💾 Saved task details to: ${outputFile}`);
   } else {
     console.log(`\n💾 Saving formatted task details to: ${outputFile}`);
-
-    // On a retry, tell the agent it is a retry, why the last attempt
-    // stopped, and which comments arrived since. When the prior attempt left
-    // resumable state (a branch and its own report), session pickup hands that
-    // to the agent so it continues instead of re-deriving it.
-    let retryContext: RetryPromptContext | undefined;
-    if (priorRetryState || pickup.kind === "resume") {
-      let lastFailureSummary: string | undefined;
-      if (pickup.kind !== "resume") {
-        try {
-          const lastRun = new RunStore()
-            .listRuns({ taskKey: workflowKey, limit: 10 })
-            .find((run) => run.status === "escalated" || run.status === "failed");
-          lastFailureSummary = lastRun?.outcomeReason;
-        } catch {
-          // Prompt context only — proceed without it.
-        }
-      }
-      retryContext = buildRetryPromptContext({
-        pickup,
-        priorRetryState,
-        gitEnabled: Boolean(runContext.options.git),
-        lastFailureSummary,
-      });
-    }
-
     TaskFormatter.saveFormattedTask(
       taskDetails,
       outputFile,
@@ -1266,7 +1331,15 @@ export async function processSingleTask(
 
     displayTaskSummary({ taskDetails, tracker, linkedResources, relatedIssues, comments });
 
-    const effectiveTargetBranch = await resolveEffectiveTargetBranch(descriptionText);
+    // Set only for a tracker ticket the worker stacked (see prepareTask).
+    const stackBase = stackBaseFromEnv();
+    const effectiveTargetBranch = await resolveEffectiveTargetBranch(
+      descriptionText,
+      stackBase?.branch,
+    );
+    recordConfirmedStackBase(taskKey, stackBase, effectiveTargetBranch);
+    // Before the prompt and PR body are built, so neither claims a dropped stack.
+    dropUnusedStackBase(stackBase, effectiveTargetBranch, taskDetails);
 
     // Per-task execution preferences (harness / model / effort), parsed from
     // an explicit `Execution preferences` section or `devintern` HTML comment
@@ -1308,18 +1381,28 @@ export async function processSingleTask(
     };
     let pickup: SessionPickupDecision;
     try {
+      const scope: NonNullable<SessionPickupOptions["scope"]> =
+        currentRunId !== undefined
+          ? (pickupStore.getRun(currentRunId) ?? {})
+          : {
+              tracker: process.env.TASK_TRACKER || "jira",
+              team: process.env.DEVINTERN_WORKSPACE_TEAM,
+              repo: process.env.DEVINTERN_WORKSPACE_REPO,
+            };
       pickup = await resolveSessionPickup({
         runStore: pickupStore,
         taskKey: workflowKey,
-        scope:
-          currentRunId !== undefined
-            ? (pickupStore.getRun(currentRunId) ?? {})
-            : {
-                tracker: process.env.TASK_TRACKER || "jira",
-                team: process.env.DEVINTERN_WORKSPACE_TEAM,
-                repo: process.env.DEVINTERN_WORKSPACE_REPO,
-              },
+        scope,
         ...pickupSelection(currentRunId),
+        // A re-queued ad-hoc task (`worker add --resume`, dashboard re-queue,
+        // startup auto-resume) whose prior run of the same queue row succeeded
+        // but never opened its PR, or whose PR is still open, continues on
+        // that branch instead of cutting `-attempt-N`. A first run has no
+        // earlier run of its row, so it never reopens one.
+        ...reopenSucceededPickupOption({
+          origin: scope.origin,
+          gitEnabled: Boolean(runContext.options.git),
+        }),
         branchExists: async (branch) =>
           (await Utils.gitRefExists(`refs/heads/${branch}`)) ||
           (await Utils.gitRefExists(`refs/remotes/origin/${branch}`)),

@@ -12,6 +12,8 @@ import {
   createFleetMentionHandler,
   createFleetResolveConflicts,
   createFleetTaskEvaluator,
+  createFleetAutoMerge,
+  fleetAutoMergePolicyFingerprint,
   fleetGitHubSlugs,
   repoBySlug,
 } from "../src/lib/workspace/fleet-events";
@@ -62,7 +64,15 @@ class FakeRepoManager implements RepoManagerLike {
   }
 
   async ensureBaseWorktree(repo: RepoConfig): Promise<string> {
+    this.calls.push(`base:${repo.name}`);
     const path = join(this.root, "worktrees", repo.name, "base");
+    mkdirSync(path, { recursive: true });
+    return path;
+  }
+
+  async ensurePrJobWorktree(repo: RepoConfig): Promise<string> {
+    this.calls.push(`pr-jobs:${repo.name}`);
+    const path = join(this.root, "worktrees", repo.name, "pr-jobs");
     mkdirSync(path, { recursive: true });
     return path;
   }
@@ -185,13 +195,13 @@ describe("fleet event handlers", () => {
     rmSync(workspaceDir, { recursive: true, force: true });
   });
 
-  test("addressPr runs the review from the repo's base worktree with its env", async () => {
+  test("addressPr runs the review from the repo's PR-job checkout with its env", async () => {
     const addressPr = createFleetAddressPr(deps());
     const ok = await addressPr("acme/backend", 42);
 
     expect(ok).toBe(true);
     expect(reviews).toHaveLength(1);
-    expect(reviews[0].cwd).toBe(join(workspaceDir, "worktrees", "backend", "base"));
+    expect(reviews[0].cwd).toBe(join(workspaceDir, "worktrees", "backend", "pr-jobs"));
     expect(reviews[0].env.GITHUB_REPO).toBe("acme/backend");
     expect(repoManager.calls).toContain("fetch:backend");
   });
@@ -202,15 +212,19 @@ describe("fleet event handlers", () => {
     expect(reviews).toHaveLength(0);
   });
 
-  test("shared-base reviews serialize while a task worktree can overlap", async () => {
+  test("reviews of different PRs share the per-repo budget with task worktrees", async () => {
     const supervisor = createTaskSupervisor({ maxConcurrency: 3, maxConcurrencyPerRepo: 2 });
     let releaseFirst!: () => void;
     const firstGate = new Promise<void>((resolve) => {
       releaseFirst = resolve;
     });
-    let markFirstStarted!: () => void;
-    const firstStarted = new Promise<void>((resolve) => {
-      markFirstStarted = resolve;
+    let releaseSecond!: () => void;
+    const secondGate = new Promise<void>((resolve) => {
+      releaseSecond = resolve;
+    });
+    let bothStarted!: () => void;
+    const bothRunning = new Promise<void>((resolve) => {
+      bothStarted = resolve;
     });
     const started: string[] = [];
     const addressPr = createFleetAddressPr({
@@ -218,16 +232,15 @@ describe("fleet event handlers", () => {
       supervisor,
       runReview: async (_slug, prNumber) => {
         started.push(`review-${prNumber}`);
-        if (prNumber === 1) {
-          markFirstStarted();
-          await firstGate;
-        }
+        if (started.length === 2) bothStarted();
+        await (prNumber === 1 ? firstGate : secondGate);
         return true;
       },
     });
 
     const first = addressPr("acme/backend", 1);
     const second = addressPr("acme/backend", 2);
+    await bothRunning;
     const task = supervisor.schedule({
       id: "task",
       source: "test",
@@ -236,25 +249,72 @@ describe("fleet event handlers", () => {
       checkoutClass: "task_worktree",
       run: async () => started.push("task"),
     });
-
-    await Promise.all([task, firstStarted]);
-    expect(started).toContain("review-1");
-    expect(started).toContain("task");
-    expect(started).not.toContain("review-2");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    // Two PR jobs fill max_concurrency_per_repo = 2; the task waits.
+    expect(started).toEqual(["review-1", "review-2"]);
+    expect(supervisor.queuedJobs?.()).toMatchObject([{ id: "task", waitingOn: "repo" }]);
     releaseFirst();
+    await task;
+    expect(started).toEqual(["review-1", "review-2", "task"]);
+    releaseSecond();
     await Promise.all([first, second]);
-    expect(started.at(-1)).toBe("review-2");
   });
 
-  test("CI fixes run from the matching repo base worktree", async () => {
+  test("two jobs on the same PR run one after another without holding a slot", async () => {
+    const supervisor = createTaskSupervisor({ maxConcurrency: 3, maxConcurrencyPerRepo: 2 });
+    let releaseReview!: () => void;
+    const reviewGate = new Promise<void>((resolve) => {
+      releaseReview = resolve;
+    });
+    let reviewStarted!: () => void;
+    const reviewRunning = new Promise<void>((resolve) => {
+      reviewStarted = resolve;
+    });
+    const started: string[] = [];
+    const addressPr = createFleetAddressPr({
+      ...deps(),
+      supervisor,
+      runReview: async () => {
+        started.push("review");
+        reviewStarted();
+        await reviewGate;
+        return true;
+      },
+    });
+    const fix = createFleetCiFix({
+      ...deps(),
+      supervisor,
+      runCiFix: async () => {
+        started.push("ci-fix");
+        return true;
+      },
+    });
+    const review = addressPr("acme/backend", 7);
+    await reviewRunning;
+    const ciFix = fix("acme/backend", 7, "/tmp/ci-feedback.json");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(started).toEqual(["review"]);
+    expect(supervisor.inFlightCount()).toBe(1);
+    expect(supervisor.queuedJobs?.()).toMatchObject([
+      { label: "acme/backend#7", exclusiveKey: "acme/backend#7", waitingOn: "exclusive" },
+    ]);
+    releaseReview();
+    await Promise.all([review, ciFix]);
+    expect(started).toEqual(["review", "ci-fix"]);
+  });
+
+  test("CI fixes run from the matching repo's PR-job checkout", async () => {
     const fix = createFleetCiFix(deps());
     expect(await fix("acme/backend", 42, "/tmp/ci-feedback.json")).toBe(true);
+    // PR jobs never touch the base checkout an automation may be using.
+    expect(repoManager.calls).toContain("pr-jobs:backend");
+    expect(repoManager.calls.some((call) => call.startsWith("base:"))).toBe(false);
     expect(ciFixes).toEqual([
       {
         slug: "acme/backend",
         prNumber: 42,
         feedbackPath: "/tmp/ci-feedback.json",
-        cwd: join(workspaceDir, "worktrees", "backend", "base"),
+        cwd: join(workspaceDir, "worktrees", "backend", "pr-jobs"),
       },
     ]);
   });
@@ -302,7 +362,7 @@ describe("fleet event handlers", () => {
       {
         slug: "acme/backend",
         prNumber: 42,
-        cwd: join(workspaceDir, "worktrees", "backend", "base"),
+        cwd: join(workspaceDir, "worktrees", "backend", "pr-jobs"),
         expectedHeadSha: "head1",
         expectedBaseSha: "base1",
       },
@@ -349,6 +409,65 @@ describe("fleet event handlers", () => {
       "GitHub API 502",
     );
     expect(reviews).toHaveLength(0);
+  });
+});
+
+describe("fleet auto-merge review policy", () => {
+  const workspace = (extra: string, repoExtra = "") =>
+    parseWorkspaceConfig(`
+[workspace]
+auto_merge = true
+${extra}
+
+[defaults]
+tracker = "markdown"
+
+[[repos]]
+name = "backend"
+remote = "git@github.com:acme/backend.git"
+${repoExtra}
+`);
+
+  test("the fingerprint ignores the default policy but changes with policy or instructions", () => {
+    const fingerprint = (extra: string, repoExtra?: string) =>
+      fleetAutoMergePolicyFingerprint(workspace(extra, repoExtra), "acme/backend");
+    const base = fingerprint("");
+    expect(fingerprint('auto_merge_policy = "strict"')).toBe(base);
+    const standard = fingerprint('auto_merge_policy = "standard"');
+    expect(standard).not.toBe(base);
+    expect(fingerprint("", 'auto_merge_policy = "standard"')).toBe(standard);
+    expect(fingerprint('auto_merge_review_instructions = "keep billing/ manual"')).not.toBe(base);
+  });
+
+  test("the runner passes the repo's live policy and instructions to the CLI", async () => {
+    const root = join(tmpdir(), `fleet-auto-merge-${process.pid}-${Date.now()}`);
+    mkdirSync(root, { recursive: true });
+    const config = workspace(
+      'auto_merge_policy = "standard"\nauto_merge_review_instructions = "workspace rule"',
+      'auto_merge_review_instructions = "repo rule"',
+    );
+    const policies: unknown[] = [];
+    const run = createFleetAutoMerge({
+      config,
+      workspaceDir: root,
+      repoManager: new FakeRepoManager(root),
+      userHasPushAccess: async () => true,
+      runAutoMerge: async (_slug, _pr, opts) => {
+        policies.push(opts.policy);
+        return { outcome: "waiting", message: "stub", reviewed: false };
+      },
+    });
+    await run("acme/backend", 1, "a".repeat(40));
+    // Hot reload: the runner reads the live config on every run.
+    config.workspace = workspace('auto_merge_policy = "strict"').workspace;
+    config.repos = workspace("").repos;
+    await run("acme/backend", 1, "a".repeat(40));
+    expect(policies).toMatchObject([
+      { reviewPolicy: "standard", reviewInstructions: "repo rule" },
+      { reviewPolicy: "strict" },
+    ]);
+    expect(policies[1]).not.toHaveProperty("reviewInstructions");
+    rmSync(root, { recursive: true, force: true });
   });
 });
 

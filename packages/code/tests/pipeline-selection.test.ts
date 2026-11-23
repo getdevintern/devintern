@@ -8,6 +8,7 @@ import {
   WORKSPACE_PIPELINE_DEFAULT_ENV,
   WORKSPACE_PIPELINE_REPO_ENV,
 } from "../src/lib/workspace/env";
+import { WORKER_SUBPROCESS_ENV } from "../src/lib/config/config-dir";
 import { resolvePipelineSteps } from "../src/lib/task/pipeline-config";
 import {
   describePipelineSelection,
@@ -80,6 +81,22 @@ describe("selectPipelineConfig precedence", () => {
     expect(selection.scope).toBe("repository");
     expect(selection.sourcePath).toBe(join(repoDir, ".devintern-code", "settings.json"));
     expect(selection.baseDir).toBe(repoDir);
+  });
+
+  test("worker task runs ignore the repository settings.json pipeline", () => {
+    const file = writePipeline(workspaceDir, "default.json", {
+      steps: [{ use: "implement" }, { use: "commit" }, { use: "finalize" }],
+    });
+    const settings = { pipeline: { steps: [{ use: "implement" }, { use: "finalize" }] } };
+    const worker = selectPipelineConfig({
+      settings,
+      cwd: repoDir,
+      env: { [WORKSPACE_PIPELINE_DEFAULT_ENV]: file, [WORKER_SUBPROCESS_ENV]: "1" },
+    });
+    expect(worker.scope).toBe("workspace-default");
+    expect(
+      selectPipelineConfig({ settings, cwd: repoDir, env: { [WORKER_SUBPROCESS_ENV]: "1" } }).scope,
+    ).toBe("built-in");
   });
 
   test("workspace per-repository override wins over repository settings", () => {

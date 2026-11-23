@@ -44,6 +44,19 @@ export interface LinearAttachment {
   url: string;
 }
 
+/** An issue that blocks another, from Linear's `blocks` issue relations. */
+export interface LinearIssueBlocker {
+  /** Human-readable identifier (`ENG-42`). */
+  identifier: string;
+  /** Workflow state type is `completed` or `canceled`, when returned. */
+  done?: boolean;
+  /** Workflow state name (`In Progress`), when returned. */
+  status?: string;
+}
+
+/** Workflow state types that no longer block dependents. */
+const LINEAR_DONE_STATE_TYPES = new Set(["completed", "canceled"]);
+
 export interface LinearIssueDetail extends LinearIssue {
   title: string;
   /** Issue body in markdown. */
@@ -433,6 +446,40 @@ export class LinearClient {
     const issue = this.normalizeIssueDetail(node);
     this.cacheIssueId(issue.identifier, issue.id);
     return issue;
+  }
+
+  /**
+   * Issues that block this one: its inverse relations of type `blocks` (a
+   * `blocks` relation points from the blocker to the blocked issue).
+   *
+   * @param identifier - Human-readable issue ID or UUID.
+   * @returns Blockers with their workflow state; `[]` when the issue is missing.
+   * @throws When the GraphQL request fails.
+   */
+  async getIssueBlockers(identifier: string): Promise<LinearIssueBlocker[]> {
+    const issue = await this.fetchIssueById<{
+      inverseRelations?: {
+        nodes?: Array<{
+          type?: string;
+          issue?: { identifier?: string; state?: { name?: string; type?: string } | null } | null;
+        }>;
+      };
+    }>(
+      identifier,
+      "inverseRelations(first: 100) { nodes { type issue { identifier state { name type } } } }",
+    );
+    const blockers = new Map<string, LinearIssueBlocker>();
+    for (const relation of issue?.inverseRelations?.nodes ?? []) {
+      const blocker = relation.issue;
+      if (relation.type !== "blocks" || !blocker?.identifier) continue;
+      const state = blocker.state;
+      blockers.set(blocker.identifier, {
+        identifier: blocker.identifier,
+        ...(state?.type ? { done: LINEAR_DONE_STATE_TYPES.has(state.type) } : {}),
+        ...(state?.name ? { status: state.name } : {}),
+      });
+    }
+    return [...blockers.values()];
   }
 
   /**

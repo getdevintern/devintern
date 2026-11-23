@@ -26,8 +26,10 @@ function fakeSandbox(
   return { provider, detection: { available: true }, harnessName };
 }
 
-function waitForExit(child: { on: (event: string, cb: (code: number) => void) => unknown }) {
-  return new Promise<number>((resolve) => child.on("exit", (code) => resolve(code)));
+// Resolve on "close", not "exit": "exit" can fire before the child's stdio
+// streams are drained, so stdout collected via "data" may still be empty.
+function waitForClose(child: { on: (event: string, cb: (code: number) => void) => unknown }) {
+  return new Promise<number>((resolve) => child.on("close", (code) => resolve(code)));
 }
 
 describe("buildDefaultSandboxPolicy", () => {
@@ -84,12 +86,24 @@ describe("buildDefaultSandboxPolicy", () => {
       git("-C", repo, "worktree", "add", "-q", worktree, "-b", "feature");
 
       const commonDir = join(repo, ".git");
-      expect(gitAdminPaths(worktree)).toContain(commonDir);
+      // A global `rerere.enabled` creates rr-cache; drop it to exercise a missing subdir.
+      rmSync(join(commonDir, "rr-cache"), { recursive: true, force: true });
+      const paths = gitAdminPaths(worktree);
+      // The per-worktree git dir (index, HEAD) and the shared dirs a commit writes.
+      expect(paths).toContain(join(commonDir, "worktrees", "wt"));
+      expect(paths).toContain(join(commonDir, "objects"));
+      expect(paths).toContain(join(commonDir, "refs"));
+      expect(paths).toContain(join(commonDir, "logs"));
+      // Never the shared common dir itself: a sandbox would mask its config.lock
+      // with a placeholder file that blocks every other worktree's config writes.
+      expect(paths).not.toContain(commonDir);
+      // Missing subdirs are skipped so no sandbox has to create them.
+      expect(paths).not.toContain(join(commonDir, "rr-cache"));
 
       const policy = buildDefaultSandboxPolicy(worktree);
-      expect(policy.writablePaths).toContain(commonDir);
-      // The index itself lives inside the common dir, so committing there is writable.
+      expect(policy.writablePaths).not.toContain(commonDir);
       expect(policy.writablePaths).toContain(join(commonDir, "worktrees", "wt"));
+      expect(policy.writablePaths).toContain(join(commonDir, "objects"));
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -116,7 +130,7 @@ describe("spawnAgent", () => {
     });
     let out = "";
     child.stdout?.on("data", (chunk) => (out += chunk));
-    const code = await waitForExit(child);
+    const code = await waitForClose(child);
     expect(code).toBe(0);
     expect(out.trim()).toBe("direct");
     await cleanup(); // no-op
@@ -142,7 +156,7 @@ describe("spawnAgent", () => {
     });
     let out = "";
     child.stdout?.on("data", (chunk) => (out += chunk));
-    const code = await waitForExit(child);
+    const code = await waitForClose(child);
     expect(code).toBe(0);
     expect(out.trim()).toBe("wrapped:on:/usr/bin/agent:-p task");
     // Default policy merged with the caller's extras
@@ -168,7 +182,7 @@ describe("spawnAgent", () => {
       spawnOptions: { stdio: ["ignore", "ignore", "ignore"] },
       sandbox,
     });
-    await waitForExit(child);
+    await waitForClose(child);
     expect(cleaned).toBe(false);
     await cleanup();
     expect(cleaned).toBe(true);
@@ -202,7 +216,7 @@ describe("spawnAgent Muse credential guard", () => {
       },
       sandbox,
     });
-    await waitForExit(child);
+    await waitForClose(child);
     await cleanup();
 
     expect(seenPolicy?.harnessName).toBe("muse");
@@ -261,7 +275,7 @@ describe("spawnAgent Muse credential guard", () => {
       },
       sandbox,
     });
-    await waitForExit(child);
+    await waitForClose(child);
     await cleanup();
 
     expect(seenPolicy?.denyReadPaths ?? []).toEqual([]);

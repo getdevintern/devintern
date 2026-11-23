@@ -1,15 +1,23 @@
-import { existsSync } from "fs";
-import { join, resolve } from "path";
+import { existsSync, mkdirSync, writeFileSync } from "fs";
+import { dirname, isAbsolute, join, resolve } from "path";
 import { detectSandboxProviders } from "@devintern/agent-harness";
 import { hasHelpArg } from "../cli/help";
 import { flushAnalytics, trackSetupCompleted, trackSetupStarted } from "../observability/analytics";
-import { scaffoldProject } from "./scaffold";
+import { findWorkspaceRepoForCheckout } from "../workspace/manual-run";
+import { migrateLegacyCheckout } from "../workspace/migrate-checkout";
+import type { ManualWorkspaceRun } from "../workspace/manual-run";
+import { workspaceConfigPath, workspaceEnvPath } from "../workspace/paths";
+import { readRegistrableOrigin, registerManualCheckout } from "../workspace/register-checkout";
+import { buildEnvExample, scaffoldProject } from "./scaffold";
 import { isInteractive, runInitUpgrade, runInitWizard } from "./wizard";
 
 const INIT_USAGE = [
   "Usage: devintern init [options]",
   "",
-  "Initialize .devintern-code configuration in the current directory.",
+  "Set up DevIntern for the repository in the current directory.",
+  "A checkout with an origin remote is registered in ~/.devintern/workspace.toml",
+  "as a manual-only repo, with its settings in ~/.devintern/env/<repo>.env.",
+  "Re-running init in a registered checkout updates that file.",
   "In a terminal this opens the interactive setup wizard; --yes, --no-interactive,",
   "or piped stdin writes the configuration templates without prompts.",
   "",
@@ -24,12 +32,20 @@ const INIT_USAGE = [
  */
 async function initializeProject(): Promise<void> {
   const configDir = resolve(process.cwd(), ".devintern-code");
-  const envFile = join(configDir, ".env");
-  const settingsFile = join(configDir, "settings.json");
+  let envFile = join(configDir, ".env");
+  let settingsHint = `Edit ${join(configDir, "settings.json")} (optional)`;
 
   console.log("🚀 Initializing @devintern/code for this project...");
 
-  if (!scaffoldProject()) {
+  if (await readRegistrableOrigin(process.cwd())) {
+    const registered = await registerManualCheckout(process.cwd(), buildEnvExample());
+    if (!registered.ok) {
+      console.error(`❌ ${registered.error}`);
+      return;
+    }
+    envFile = registered.envPath;
+    settingsHint = `Add [trackers] status names to ${join(registered.workspaceDir, "workspace.toml")} (optional)`;
+  } else if (!scaffoldProject()) {
     return;
   }
   // Non-interactive setup still counts toward the activation funnel; the
@@ -45,7 +61,7 @@ async function initializeProject(): Promise<void> {
         .map((d) => `${d.provider.name}${d.detection.version ? ` (${d.detection.version})` : ""}`)
         .join(", ");
       console.log(`\n🔒 Sandbox providers detected: ${names}`);
-      console.log("   Set AGENT_SANDBOX=auto in .devintern-code/.env to run agents isolated.");
+      console.log(`   Set AGENT_SANDBOX=auto in ${envFile} to run agents isolated.`);
     } else {
       console.log("\n🔓 No sandbox provider detected — agents will run unsandboxed.");
       console.log("   Run 'devintern sandbox' for install options.");
@@ -58,7 +74,7 @@ async function initializeProject(): Promise<void> {
   console.log("\n📝 Next steps:");
   console.log(`   1. Edit ${envFile}`);
   console.log("      - Add your task tracker credentials (Jira, Linear, etc.)");
-  console.log(`   2. Edit ${settingsFile} (optional)`);
+  console.log(`   2. ${settingsHint}`);
   console.log("      - Configure per-project status transitions for your tracker");
   console.log(
     "      - The file includes examples for Jira, Linear, Trello, GitHub, Azure DevOps, and Asana",
@@ -77,7 +93,11 @@ export async function runInitCommand(): Promise<never> {
     console.log(INIT_USAGE);
     process.exit(0);
   }
-  if (isInteractive(process.argv, process.stdin)) {
+  await migrateLegacyCheckout();
+  const registered = await findWorkspaceRepoForCheckout();
+  if (registered) {
+    process.exitCode = await updateRegisteredCheckout(registered);
+  } else if (isInteractive(process.argv, process.stdin)) {
     if (existsSync(resolve(process.cwd(), ".devintern-code", ".env"))) {
       await runInitUpgrade();
     } else {
@@ -87,5 +107,37 @@ export async function runInitCommand(): Promise<never> {
     await initializeProject();
   }
   await flushAnalytics();
-  process.exit(0);
+  process.exit(process.exitCode ?? 0);
+}
+
+/**
+ * Re-run init in a checkout already registered in the workspace: update its
+ * env file. Repos managed by the worker (no `env_file`) are left to the
+ * workspace files, so init never edits the shared `.env` worker repos use.
+ *
+ * @returns Process exit code
+ */
+async function updateRegisteredCheckout(run: ManualWorkspaceRun): Promise<number> {
+  const configPath = workspaceConfigPath(run.workspaceDir);
+  if (!run.repo.envFile) {
+    console.log(`ℹ️  This checkout is registered in ${configPath} as "${run.repo.name}".`);
+    console.log(
+      `   Its settings come from ${workspaceEnvPath(run.workspaceDir)} and [repos.env]; edit those directly.`,
+    );
+    return 0;
+  }
+  const envPath = isAbsolute(run.repo.envFile)
+    ? run.repo.envFile
+    : join(run.workspaceDir, run.repo.envFile);
+  if (!isInteractive(process.argv, process.stdin)) {
+    console.log(`ℹ️  This checkout is registered in ${configPath} as "${run.repo.name}".`);
+    console.log(`   Edit ${envPath} to change its settings.`);
+    return 0;
+  }
+  if (!existsSync(envPath)) {
+    mkdirSync(dirname(envPath), { recursive: true, mode: 0o700 });
+    writeFileSync(envPath, "", { mode: 0o600 });
+  }
+  await runInitUpgrade({ envPath });
+  return 0;
 }

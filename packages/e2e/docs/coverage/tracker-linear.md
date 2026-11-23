@@ -35,8 +35,32 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 - Surface: External dependency: task trackers
 - Status: `default`
 - Evidence: `tests/local/tracker-linear-estimation.test.ts`, `bun run --filter @devintern/e2e test`
-- Missing: Live Linear estimation (team estimate scales, real `IssueUpdateInput`/`CommentUpdateInput` validation); worker `[[estimations]]` schedule against the fake Linear server (gap `e2e-tracker-linear-scheduled-estimation`, not started).
-- Last reviewed: 2026-11-18
+- Missing: Live Linear estimation (team estimate scales, real `IssueUpdateInput`/`CommentUpdateInput` validation); the worker `[[estimations]]` schedule is covered by [Linear: scheduled `[[estimations]]` sweep](#linear-scheduled-estimations-sweep-gap-e2e-tracker-linear-scheduled-estimation).
+- Last reviewed: 2026-11-20
+
+### Linear: scheduled `[[estimations]]` sweep (gap `e2e-tracker-linear-scheduled-estimation`)
+
+- Surface: `devintern worker` surface
+- Status: `default`
+- Evidence: `tests/local/worker-linear-scheduled-estimation.test.ts`, `bun run --filter @devintern/e2e test`
+- Missing: Live Linear estimation (team estimate scales, real `IssueFilter` and `IssueUpdateInput.estimate` validation); cron-expression schedules for a Linear entry (interval only).
+- Last reviewed: 2026-11-20
+
+### Linear worker dependency gate: "blocks" relations hold a polled issue until the blocker is completed or canceled (gap `e2e-tracker-linear-dependency-gate`)
+
+- Surface: External dependency: Linear dependency links
+- Status: `default`
+- Evidence: `tests/local/worker-linear-dependencies.test.ts`, `bun run --filter @devintern/e2e test`
+- Missing: Live Linear relation payloads (the fake models `inverseRelations` as `LinearClient.getIssueBlockers` selects it); a blocker the worker implemented itself (merged/stacked rules); the `blocked` verdict; re-check backoff timing (every release is followed by an edit); more than 100 relations (the client reads `first: 100`).
+- Last reviewed: 2026-11-21
+
+### Linear blocker read failure fails closed (gap `e2e-tracker-linear-blocker-read-fail-closed`)
+
+- Surface: External dependency: Linear dependency links
+- Status: `default`
+- Evidence: `tests/local/worker-linear-dependencies.test.ts`, `bun run --filter @devintern/e2e test`
+- Missing: Network-level failures (connection refused, timeouts); a failing gate state DB (the "could not evaluate" path).
+- Last reviewed: 2026-11-21
 
 ## Tracker plan status
 
@@ -44,8 +68,8 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 
 - Default `test`: yes (offline fake)
 - Opt-in suite: none
-- Notes: Fake lifecycle: key/`--query`, workflow state, comment, decoy isolation. Worker polling, relay `task.changed` delivery, and CLI `--estimate` are offline too. Live Layer 2 team/project lifecycle, live estimation, scheduled `[[estimations]]` for Linear, and attachments remain future work.
-- Last reviewed: 2026-11-18
+- Notes: Fake lifecycle: key/`--query`, workflow state, comment, decoy isolation. Worker polling, relay `task.changed` delivery, CLI `--estimate`, and the scheduled `[[estimations]]` sweep are offline too. Live Layer 2 team/project lifecycle, live estimation, and attachments remain future work.
+- Last reviewed: 2026-11-20
 
 ## Layer 3 fake (implemented)
 
@@ -72,6 +96,11 @@ Operations covered:
   conditions, `state.name`/`team.key` equality, `updatedAt`
   `gt`/`gte`/`lt`/`lte` date bounds, and `and`/`or`, plus plain-text title
   contains); every request is recorded in `searchRequests`
+- `IssueById` selecting `inverseRelations(first: 100) { nodes { type issue
+{ identifier state { name type } } } }` (the `getIssueBlockers` query,
+  matched exactly): answers from relation fixtures (`addRelation`), records
+  every read in `blockerRequests`, and can fail on demand
+  (`setBlockerFailure("graphql-error" | "http-500")`)
 
 `tests/local/worker-linear-polling.test.ts` drives the worker daemon against
 the same fake (with `clock: "wall"` so `updatedAt` falls inside the detector's
@@ -181,3 +210,62 @@ answered `operations`), not CLI stdout. It asserts:
 No prerequisites beyond the built CLI; the test skips only when
 `packages/code/dist/index.js` is absent. Run it alone with
 `bun test tests/local/tracker-linear-estimation.test.ts` from `packages/e2e`.
+
+### Linear scheduled `[[estimations]]` sweep
+
+`tests/local/worker-linear-scheduled-estimation.test.ts` runs the built
+`devintern worker` daemon with `tracker = "linear"`, the deterministic agent
+in `estimate` mode, a local bare remote, and one `[[estimations]]` entry
+(`interval = "15m"`, `query` = a JSON IssueFilter on a per-run title marker)
+against the in-process Linear fake. Instead of waiting out the interval, the
+test stops the worker, moves the durable `estimation:<id>` schedule row into
+the past, and starts it again. It asserts:
+
+- the first start only registers the schedule (`interval:15m`, no run, no
+  Linear request);
+- a due sweep sends one `SearchIssues` with the configured filter, sets the
+  native `estimate` and posts exactly one estimation comment on each of the two
+  matching issues, records one `estimate`-origin run per issue attributed to
+  the estimation id (no branch, repo, or PR), and advances the schedule
+  cursor; a decoy with the marker only in its description is never selected,
+  and a matching issue created "now" (fake `setNow`) is skipped as `< 24h`;
+- a second due sweep with unchanged issues re-queries Linear but spawns no
+  agent, writes nothing, and keeps each comment id;
+- after a human edit to one issue, a third sweep re-estimates only that issue
+  (one `IssueUpdate`, one `CommentUpdate` rewriting the same comment with the
+  new points) and skips the other;
+- the bare remote and seed checkout stay at the fixture commit, no task
+  worktree is left behind, and no unexpected GraphQL operation is recorded.
+
+No prerequisites beyond the built CLI; the test skips only when
+`packages/code/dist/index.js` is absent. Run it alone with
+`bun test tests/local/worker-linear-scheduled-estimation.test.ts` from
+`packages/e2e`.
+
+### Linear worker dependency gate
+
+`tests/local/worker-linear-dependencies.test.ts` runs the built
+`devintern worker` daemon with `tracker = "linear"`, a status-based
+`task_query` (team key plus `Todo`), `poll_interval = 1`, tracker writes on,
+the deterministic agent, and a local bare remote, against the in-process
+Linear fake with relation fixtures. Held-back issues are read through
+`devintern worker queue --json --workspace <path>`. It proves:
+
+- an issue with a `blocks` relation from an `In Progress` (`started`) issue is
+  held across several gate evaluations: no run record, agent call, state
+  change, comment, branch, or `updatedAt` change, and the queue lists it as a
+  `tracker` item with `dependencyState: "waiting"`, `dependsOn` equal to the
+  blocker alone, and the reason `<blocker> not done (In Progress)`;
+- open `related` and `duplicate` relations on the same issue are not
+  dependencies: they are absent from `dependsOn` and do not hold the issue;
+- moving the blocker to a `completed` state, or (second scenario) a
+  `canceled` state, then editing the dependent runs it exactly once and
+  removes it from the queue;
+- a blocker read answered with a GraphQL error (HTTP 200 with `errors`) or
+  HTTP 500 keeps the issue waiting with `could not read <key>'s blockers from
+linear: …` and never starts it; once the fake recovers, an edit runs it once.
+
+No prerequisites beyond the built CLI; the test skips only when
+`packages/code/dist/index.js` is absent. Run it with
+`bun run --filter @devintern/e2e test`, or alone with
+`bun test tests/local/worker-linear-dependencies.test.ts` from `packages/e2e`.

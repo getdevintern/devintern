@@ -77,6 +77,7 @@ Statuses map to labels. Create the labels in the project, then configure them in
 ## Worker notes
 
 - [Worker polling](./worker.md#polling-mode) needs `GITLAB_TOKEN` and `GITLAB_PROJECT`. A label query such as `is:open label:intern` keeps matching after the MR, so the worker's local actioned marker stops re-implementation. See [Tickets already actioned after a PR](./worker-troubleshooting.md#tickets-already-actioned-after-a-pr).
+- In a workspace, `GITLAB_PROJECT` also selects the issues project for task, review, CI-fix, error-monitor, and automation runs routed to a repo: issue lookup, status labels, comments, and ticket URLs all target it. When no workspace-wide `GITLAB_PROJECT` is set, the worker derives it from the repo remote if that remote is on the `GITLAB_BASE_URL` instance (see [Workspaces → Environment](./workspaces.md#environment)); explicit workspace, repo, or team values win. `GITLAB_CODE_HOST_ALIASES` count only when the code host and `GITLAB_BASE_URL` are the same instance. Polling and issue search still use the workspace or team `GITLAB_PROJECT`. If issues live in a separate project from the code, set `GITLAB_PROJECT` in the shared workspace `.env` (also used by polling), or per repo in its `env_file` / `[repos.env]` (runs only, not polling).
 - `devintern worker connect gitlab` creates and tests project hooks for instant MR events (see [Advanced](#advanced-merge-requests-and-webhooks)).
 
 ## Advanced: merge requests and webhooks

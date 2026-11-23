@@ -1,10 +1,10 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for coding agents working on `@getdevintern/pm`. Repo-wide rules (Bun-only tooling, lint, format, docs) are in the root [AGENTS.md](../../AGENTS.md).
 
 ## Project Overview
 
-This is a CLI utility built with TypeScript. It is **portable** and runs under both Bun and Node.js/Electron. Bun remains the development toolchain (package manager, task runner, test runner, and bundler), but the application code uses only Node.js built-ins so it can be packaged for end users without requiring the Bun runtime.
+This is a CLI utility built with TypeScript. Entry is `index.ts` (flat, no `src/`); the interactive UI uses `ink` (React for CLI), with TSX files in `lib/`. It is **portable** and runs under both Bun and Node.js/Electron. Bun remains the development toolchain (package manager, task runner, test runner, and bundler), but the application code uses only Node.js built-ins so it can be packaged for end users without requiring the Bun runtime.
 
 ## Runtime & Tooling
 
@@ -85,4 +85,4 @@ Use appropriate exit codes for success (0) and errors (non-zero).
 
 ## Build Output
 
-The `bun run build` command targets **Node.js** (`--target=node`) so the resulting `dist/index.js` runs under plain Node.js without Bun installed. External dependencies (`ink`, `react`, `ink-scroll-view`) are left as externals and resolved at runtime.
+`bun run build` runs `build.ts`, which bundles with `Bun.build` targeting **Node.js** (`target: "node"`) so the resulting `dist/index.js` runs under plain Node.js without Bun installed. External dependencies (`ink`, `react`, `ink-scroll-view`, and the `chat` adapters) are left as externals and resolved at runtime.

@@ -98,10 +98,11 @@ export function autoMergeDescription(settings: AutoMergeSettings | undefined): s
       "",
       `- **Safe paths:** ${globList(settings.safePaths)}`,
       `- **Deny paths:** ${globList([...settings.denyPaths, ...BUILTIN_DENY_PATHS])}`,
-      `- **Agent review** of other PRs: ${settings.review ? "on" : "off (they stay open)"}`,
+      `- **Agent review** of other PRs: ${settings.review ? `on (\`${settings.policy}\` policy)` : "off (they stay open)"}`,
       `- **Merge method:** ${settings.method}`,
       "",
-      "Per-repo `auto_merge_safe_paths` / `auto_merge_deny_paths` replace these lists.",
+      "Per-repo `auto_merge_safe_paths`, `auto_merge_deny_paths`, `auto_merge_policy`, and " +
+        "`auto_merge_review_instructions` replace these settings.",
     );
   }
   lines.push(

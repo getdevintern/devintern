@@ -27,8 +27,40 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 - Surface: CLI `--estimate` against external dependency: task trackers
 - Status: `default`
 - Evidence: `tests/local/tracker-asana-estimation.test.ts` (`bun run --filter @getdevintern/code build`, then `bun run --filter @devintern/e2e test`)
-- Missing: Numeric custom-field write when `ASANA_STORY_POINTS_FIELD`/`storyPointsField` names a number field; the 24-hour new-task skip for Asana; worker `[[estimations]]` schedule against the Asana fake (gap `e2e-tracker-asana-scheduled-estimation`, not bundled; still a gap); live Asana stories API.
-- Last reviewed: 2026-11-18
+- Missing: Live Asana stories API. The 24-hour new-task skip is covered by the scheduled sweep row below; the numeric custom-field write by the story-points row.
+- Last reviewed: 2026-11-19
+
+### Asana: scheduled `[[estimations]]` sweep (gap `e2e-tracker-asana-scheduled-estimation`)
+
+- Surface: `devintern worker` surface: `[[estimations]]` against external dependency: task trackers
+- Status: `default`
+- Evidence: `tests/local/worker-asana-scheduled-estimation.test.ts` (`bun run --filter @getdevintern/code build`, then `bun run --filter @devintern/e2e test`)
+- Missing: Live Asana project; team-scoped Asana estimations; dashboard "Run now" for an Asana estimation; re-estimation of an edited task through the worker (the CLI test covers it).
+- Last reviewed: 2026-11-19
+
+### Asana: story points to a numeric custom field (gap `e2e-tracker-asana-story-points-field`)
+
+- Surface: CLI `--estimate` against external dependency: task trackers
+- Status: `default`
+- Evidence: `tests/local/tracker-asana-estimation.test.ts` (`bun run --filter @getdevintern/code build`, then `bun run --filter @devintern/e2e test`)
+- Missing: `storyPointsField` from `.devintern-code/settings.json` for Asana (the product looks it up by the task GID's prefix, not the project GID); live Asana custom fields API.
+- Last reviewed: 2026-11-19
+
+### Asana worker dependency gate: task dependencies hold a polled task until the blocker is completed (gap `e2e-tracker-asana-dependency-gate`)
+
+- Surface: External dependency: Asana dependency links
+- Status: `default`
+- Evidence: `tests/local/worker-asana-dependencies.test.ts` (`bun run --filter @getdevintern/code build`, then `bun run --filter @devintern/e2e test`)
+- Missing: Live Asana dependencies API; a blocker the worker implemented itself (merged/stacked modes); `blocked` verdicts; multi-team Asana sources; the dashboard Queued list.
+- Last reviewed: 2026-11-21
+
+### Asana dependencies endpoint: 402 (no premium) means no blockers; other errors fail closed (gap `e2e-tracker-asana-dependencies-402-and-fail-closed`)
+
+- Surface: External dependency: Asana dependency links
+- Status: `default`
+- Evidence: `tests/local/worker-asana-dependencies.test.ts` (`bun run --filter @getdevintern/code build`, then `bun run --filter @devintern/e2e test`)
+- Missing: Live Asana workspace without premium; other failure modes than HTTP 500 (timeouts, 401/403, malformed bodies); a 402 or 500 on a later page.
+- Last reviewed: 2026-11-21
 
 ## Tracker plan status
 
@@ -36,8 +68,8 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 
 - Default `test`: yes (offline fake)
 - Opt-in suite: none
-- Notes: Fake lifecycle: key/`--query`, section transition, comment, decoy isolation. Comment-only `--estimate` with in-place story re-estimation. Worker polling through the Events API (412 handshake, sync-token rotation, expiry resync) is offline.
-- Last reviewed: 2026-11-17
+- Notes: Fake lifecycle: key/`--query`, section transition, comment, decoy isolation. Comment-only `--estimate` with in-place story re-estimation, and the number custom-field write. Worker polling through the Events API (412 handshake, sync-token rotation, expiry resync) and the scheduled `[[estimations]]` sweep are offline.
+- Last reviewed: 2026-11-19
 
 ## Layer 3 fake (implemented)
 
@@ -79,6 +111,41 @@ bun run --filter @devintern/e2e test
 - Every case: no branch, commit, or push on the local bare remote, and no unexpected fake route.
 
 The shared markdown-to-Asana HTML converter renders the `Story Points | Confidence` line as a `<pre>` block, so the story keeps literal `**` markers around `Story Points:`. The test matches the points with or without that markup. The fake already persists `text`/`html_text` on story updates, and the product reads only `created_at` as a fallback timestamp, so the fake needed no changes. Build the CLI first; the only skip is the built-CLI guard.
+
+```sh
+bun run --filter @getdevintern/code build
+bun run --filter @devintern/e2e test
+```
+
+### Asana story points custom field
+
+The third test in `tests/local/tracker-asana-estimation.test.ts` sets `ASANA_STORY_POINTS_FIELD=story points` and seeds one task with a number custom field named `Story Points` (plus an unrelated enum field), and a second task with a same-named text field. On the first task, `--estimate` writes the points with exactly one `PUT /api/1.0/tasks/{gid}` to that field's GID and posts one estimation story. An unchanged rerun is skipped even though the field write bumped `modified_at`. After a human edit the same field and the same story carry the new points. On the second task the text field is ignored: the CLI prints `No story points field found` and only posts the story.
+
+The fake accepts `customFields` on `createTicket` and exposes `customField(key, name)`. Like real Asana, it rejects with a 400 diagnostic a write to a field the task does not carry, a write to a non-number field, or a non-number value. Build the CLI first; the only skip is the built-CLI guard.
+
+### Worker Asana scheduled estimation
+
+`tests/local/worker-asana-scheduled-estimation.test.ts` starts the built `devintern worker` with `tracker = "asana"`, the fake's environment, and one enabled `[[estimations]]` entry (`interval = "15m"`, `query = 'section:"To Do" <selector>'`). The fake seeds two old tasks whose names carry the selector, a decoy in the same section that mentions the selector only in its notes (Asana's text filter matches names), and a selector task created "now" through the fake's new `setNow` clock control.
+
+- Registration: the first start records a future `estimation:<id>` cursor and makes no Asana request.
+- First due sweep (cursor moved into the past while the worker is stopped): one scheduled run, one `GET /projects/{gid}/tasks` listing, and two run records (one per old task) with origin `estimate`, the estimation id, `succeeded`, and no branch, repo, or PR. The deterministic agent runs twice in `estimate` mode. Each old task gets exactly one estimation story and an `estimation-result.json`, and the only tracker writes are those two story posts. The new task is selected and skipped (`< 24h`), and the decoy is never touched.
+- Second due sweep: Asana is listed again, both old tasks are skipped as `already estimated and not updated since`, and there are no new agent calls, run records, or tracker writes.
+- Every phase: the bare remote and seed checkout stay at the fixture commit, no task worktree exists, and the fake saw no unexpected route.
+
+```sh
+bun run --filter @getdevintern/code build
+bun run --filter @devintern/e2e test
+```
+
+### Worker Asana dependency gate
+
+`tests/local/worker-asana-dependencies.test.ts` starts the built `devintern worker` with `tracker = "asana"`, a `section:"To Do" <selector>` `task_query`, `poll_interval = 1`, and tracker writes enabled. The fake's `GET /api/1.0/tasks/{gid}/dependencies` serves per-task fixtures (`setDependencies`) as compact task records that honor `opt_fields`, pages them with Asana's `next_page` object and opaque `offset` (`setDependencyPageSize`), can answer every request with an injected 402 or 500 using Asana's `{"errors":[…]}` body (`failDependencies`), and records each request in `dependencyRequests`.
+
+- Gate: the dependent task has a completed dependency on page one and an open blocker on page two. Over several gate evaluations the worker follows the offset, never starts the task (no run, agent call, section move, story, or `modified_at` change), and `worker queue --json` lists it as a `tracker` item, `waiting`, with the blocker in `dependsOn` and the reason. Completing the blocker and editing the task runs it exactly once, with the In Progress move and one implementation story, and the queue item is gone.
+- 402: the dependencies endpoint answers 402, the task runs once, and nothing is queued.
+- 500: the task waits with `could not read <gid>'s blockers from asana: …` in the queue reason and is not touched. Once the endpoint recovers, the backoff re-check runs it once without an edit.
+
+Prerequisites: none beyond the built CLI; the only skip is the built-CLI guard.
 
 ```sh
 bun run --filter @getdevintern/code build

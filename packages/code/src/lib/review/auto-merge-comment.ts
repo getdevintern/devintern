@@ -5,7 +5,7 @@
  * comment per push.
  */
 
-import type { AutoMergeMethod } from "./merge-gate";
+import type { AutoMergeMethod, MergeSafetyPolicy } from "./merge-gate";
 
 /** Hidden first line identifying the managed comment. */
 export const AUTO_MERGE_COMMENT_MARKER = "<!-- devintern:auto-merge-status -->";
@@ -17,7 +17,7 @@ const MAX_LISTED_PATHS = 10;
 export type LeftOpenReason =
   | { kind: "outside-safe-paths"; paths: string[] }
   | { kind: "denied"; path: string; pattern: string }
-  | { kind: "agent-unsafe"; reason: string }
+  | { kind: "agent-unsafe"; reason: string; policy: MergeSafetyPolicy }
   | { kind: "not-evaluable"; detail: string };
 
 export type AutoMergeCommentStatus =
@@ -64,7 +64,8 @@ function leftOpenBody(reason: LeftOpenReason): string[] {
       ];
     case "agent-unsafe":
       return [
-        `The merge-safety review found: ${sanitizeCommentText(reason.reason)}`,
+        `The merge-safety review (\`${reason.policy}\` policy) found: ` +
+          sanitizeCommentText(reason.reason),
         "",
         "Review and merge it yourself if you disagree.",
       ];

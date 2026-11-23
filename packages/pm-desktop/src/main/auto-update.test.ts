@@ -19,7 +19,7 @@ import {
   snoozeUpdate,
 } from "./auto-update.ts";
 import type { UpdaterLike } from "./auto-update.ts";
-import { setAnalyticsCaptureForTests } from "./analytics.ts";
+import { flushAnalyticsForTests, setAnalyticsCaptureForTests } from "./analytics.ts";
 import { setUserDataDirForTests } from "./settings.ts";
 
 function createMockUpdater(overrides?: Partial<UpdaterLike>): {
@@ -128,6 +128,8 @@ describe("auto-update service", () => {
 
   afterEach(async () => {
     resetAutoUpdateForTests();
+    // Drain fire-and-forget `track` calls so none writes into a later test's settings dir.
+    await flushAnalyticsForTests();
     setAnalyticsCaptureForTests(undefined);
     setUserDataDirForTests(undefined);
     if (tempDir) {

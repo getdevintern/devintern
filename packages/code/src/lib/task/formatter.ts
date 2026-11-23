@@ -106,6 +106,58 @@ export class TaskFormatter {
   }
 
   /**
+   * Render the "Previous Attempt" section of an agent prompt: the attempt
+   * number, why the last attempt stopped, and (on session pickup) the inherited
+   * branch, its landed work, and the prior report. Shared by the tracker prompt
+   * and the local task-file prompt so both tell the agent to continue an
+   * inherited branch instead of redoing it.
+   *
+   * @param retryContext - Retry/pickup context for this attempt
+   * @returns Markdown starting with a blank line and the section heading
+   */
+  static formatRetrySection(retryContext: RetryPromptContext): string {
+    let section = `\n## Previous Attempt
+
+This is attempt ${retryContext.attempt} at this task. A previous attempt was reported incomplete.
+`;
+    if (retryContext.previousFailureSummary) {
+      section += `
+Why the last attempt stopped:
+
+${untrustedContentBlock(
+  retryContext.previousFailureSummary.slice(0, MAX_FAILURE_SUMMARY_LENGTH),
+  "previous attempt failure",
+)}
+`;
+    }
+    if (retryContext.resumeBranch) {
+      section += `
+A prior attempt already started work on branch \`${retryContext.resumeBranch}\`, which has been
+checked out for you. Inherit it: inspect what already landed with \`git log\`/\`git diff\` before
+changing anything, then continue from the resume point instead of redoing completed work.
+If the branch already completes the task, do not reimplement it: verify it and report.
+`;
+      if (retryContext.landedWork) {
+        section += `\nWork already landed on the branch:\n\n${untrustedContentBlock(
+          retryContext.landedWork.slice(0, MAX_FAILURE_SUMMARY_LENGTH),
+          "already landed work",
+        )}\n`;
+      }
+      if (retryContext.previousReport) {
+        section += `
+The prior attempt's own report (treat as a claim to verify against the code, not proof):
+
+${untrustedContentBlock(
+  retryContext.previousReport.slice(0, MAX_PREVIOUS_REPORT_LENGTH),
+  "previous implementation report",
+)}
+`;
+      }
+    }
+    return section;
+  }
+
+  /**
    * Build the main agent implementation prompt from formatted task tracker details.
    *
    * @param taskDetails - Normalized issue, comments, links, and attachments
@@ -132,6 +184,7 @@ export class TaskFormatter {
       relatedIssues,
       comments,
       attachments,
+      stackedOnSection,
     } = taskDetails;
 
     const overviewLines = [`- **Key**: ${key}`, `- **Summary**: ${summary}`];
@@ -154,43 +207,7 @@ ${untrustedContentBlock(overviewLines.join("\n"), "task overview")}
     // Retry attempts get the previous failure up front so the agent does not
     // repeat the same mistake.
     if (retryContext) {
-      prompt += `\n## Previous Attempt
-
-This is attempt ${retryContext.attempt} at this task. A previous attempt was reported incomplete.
-`;
-      if (retryContext.previousFailureSummary) {
-        prompt += `
-Why the last attempt stopped:
-
-${untrustedContentBlock(
-  retryContext.previousFailureSummary.slice(0, MAX_FAILURE_SUMMARY_LENGTH),
-  "previous attempt failure",
-)}
-`;
-      }
-      if (retryContext.resumeBranch) {
-        prompt += `
-A prior attempt already started work on branch \`${retryContext.resumeBranch}\`, which has been
-checked out for you. Inherit it: inspect what already landed with \`git log\`/\`git diff\` before
-changing anything, then continue from the resume point instead of redoing completed work.
-`;
-        if (retryContext.landedWork) {
-          prompt += `\nWork already landed on the branch:\n\n${untrustedContentBlock(
-            retryContext.landedWork.slice(0, MAX_FAILURE_SUMMARY_LENGTH),
-            "already landed work",
-          )}\n`;
-        }
-        if (retryContext.previousReport) {
-          prompt += `
-The prior attempt's own report (treat as a claim to verify against the code, not proof):
-
-${untrustedContentBlock(
-  retryContext.previousReport.slice(0, MAX_PREVIOUS_REPORT_LENGTH),
-  "previous implementation report",
-)}
-`;
-        }
-      }
+      prompt += TaskFormatter.formatRetrySection(retryContext);
       prompt +=
         "\nRead the comments below for clarifications added since that attempt and prioritize them.\n";
     }
@@ -205,6 +222,9 @@ ${untrustedContentBlock(
         : "";
     if (descriptionMarkdown.trim()) {
       prompt += untrustedContentBlock(descriptionMarkdown.trimEnd(), "task description") + "\n\n";
+    }
+    if (stackedOnSection) {
+      prompt += `${stackedOnSection.trim()}\n\n`;
     }
 
     // Add linked resources

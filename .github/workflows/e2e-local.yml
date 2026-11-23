@@ -1,0 +1,40 @@
+name: e2e-local
+
+# Offline e2e suite (packages/e2e/tests/local): local git remotes, fake
+# trackers, stub agent, no credentials. It takes several minutes, so it does
+# not run on pull requests or pushes to main. It runs:
+#   - before every @getdevintern/code release (npm-release.yml calls this
+#     workflow and the publish job waits for it), and
+#   - on demand: Actions -> e2e-local -> Run workflow (any branch).
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  e2e-local:
+    runs-on: ubuntu-latest
+    env:
+      TURBO_TELEMETRY_DISABLED: 1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          # Keep in sync with ci.yml's verify job.
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # turbo builds packages/code/dist first (e2e#test depends on
+      # code#build), so the built-CLI tests run instead of skipping.
+      - name: Local e2e suite
+        run: bun run turbo run test --filter=@devintern/e2e
+        env:
+          AGENT_CLI_PATH: bun
