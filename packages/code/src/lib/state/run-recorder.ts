@@ -178,7 +178,7 @@ export interface RunStats {
   /** Counts behind `successRate` and `escalationRate` (terminal, non-`auto_merge` runs). */
   rateBasis: { terminal: number; succeeded: number; escalated: number };
   runsPerWeek: RunStatsWeek[];
-  /** Median duration of succeeded runs with a PR; null when none. */
+  /** Median duration of succeeded non-`auto_merge` runs with a PR; null when none. */
   medianDurationMs: number | null;
   byHarness: RunStatsHarness[];
   byOrigin: Record<RunOrigin, number>;
@@ -904,12 +904,14 @@ export class RunStore {
         }
       }
 
+      // Median duration and per-harness rows describe agent work, so they skip
+      // auto-merge gate verdicts (which always carry the PR they checked).
+      if (!counted) continue;
+
       if (row.status === "succeeded" && row.finished_at !== null && row.pr_url) {
         durations.push(row.finished_at - row.started_at);
       }
 
-      // Per-harness rows describe agent work, so they skip auto-merge gate verdicts.
-      if (!counted) continue;
       const harnessKey = row.harness ?? "unknown";
       let harness = harnesses.get(harnessKey);
       if (!harness) {

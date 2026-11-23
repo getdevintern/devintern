@@ -335,10 +335,12 @@ describe("dashboard API", () => {
     );
   });
 
-  test("handleStats with only auto-merge runs has no headline rates", () => {
+  test("handleStats with only auto-merge runs has no headline rates or median", () => {
     const store = new RunStore(dbPath);
-    seedRun(store, { status: "succeeded", origin: "auto_merge" });
-    seedRun(store, { status: "escalated", origin: "auto_merge" });
+    // The auto-merge watcher always records the PR it gated.
+    const prUrl = "https://github.com/acme/repo/pull/1";
+    seedRun(store, { status: "succeeded", origin: "auto_merge", prUrl });
+    seedRun(store, { status: "escalated", origin: "auto_merge", prUrl });
     store.close();
 
     const { stats } = handleStats(data, new URLSearchParams("window=7d")).body as {
@@ -346,6 +348,7 @@ describe("dashboard API", () => {
     };
     expect(stats.successRate).toBeNull();
     expect(stats.escalationRate).toBeNull();
+    expect(stats.medianDurationMs).toBeNull();
     expect(stats.totals.runs).toBe(2);
     expect(stats.byHarness).toEqual([]);
     expect(stats.byOriginStatus.auto_merge.succeeded).toBe(1);

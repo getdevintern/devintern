@@ -717,7 +717,7 @@ export function renderStats(body: { window: string; stats: RunStats | null }): s
   const autoMerge = autoMergeLine(stats);
   if (autoMerge) lines.push(autoMerge);
   lines.push(
-    `Median duration:  ${formatDuration(stats.medianDurationMs)} (succeeded runs with a PR)`,
+    `Median duration:  ${formatDuration(stats.medianDurationMs)} (succeeded runs with a PR, excludes auto-merge)`,
   );
   if (byOrigin) lines.push(`By origin:        ${byOrigin}`);
   lines.push(...renderActivity(stats));
