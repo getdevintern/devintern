@@ -19,6 +19,7 @@ import { renderReadinessReport } from "../src/lib/observability/readiness";
 import {
   collectWorkerDoctorChecks,
   defaultCheckSandbox,
+  gitFailureCause,
   gitLsRemote,
   gitProbeEnv,
 } from "../src/lib/observability/worker-readiness";
@@ -499,6 +500,105 @@ describe("gitLsRemote SSH probe", () => {
     expect(gitProbeEnv({ GIT_SSH_COMMAND: "ssh -i key" }).GIT_SSH_COMMAND).toBe("ssh -i key");
     expect(gitProbeEnv({ GIT_SSH: "/usr/bin/plink" }).GIT_SSH_COMMAND).toBeUndefined();
     expect(gitProbeEnv({}).GIT_TERMINAL_PROMPT).toBe("0");
+  });
+});
+
+describe("gitFailureCause", () => {
+  const boilerplate =
+    "fatal: Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exists.\n";
+
+  test("names a missing local path, not the trailing advice", () => {
+    expect(
+      gitFailureCause(
+        `fatal: '/tmp/gone.git' does not appear to be a git repository\n${boilerplate}`,
+      ),
+    ).toBe("fatal: '/tmp/gone.git' does not appear to be a git repository");
+  });
+
+  test("names a GitHub repository that is not found", () => {
+    expect(
+      gitFailureCause(
+        "remote: Repository not found.\nfatal: repository 'https://github.com/acme/gone.git/' not found\n",
+      ),
+    ).toBe("remote: Repository not found.");
+  });
+
+  test("names an ssh host-resolution failure", () => {
+    expect(
+      gitFailureCause(
+        `ssh: Could not resolve hostname github.invalid: Name or service not known\n${boilerplate}`,
+      ),
+    ).toBe("ssh: Could not resolve hostname github.invalid: Name or service not known");
+  });
+
+  test("names a publickey denial", () => {
+    expect(gitFailureCause(`git@github.com: Permission denied (publickey).\n${boilerplate}`)).toBe(
+      "git@github.com: Permission denied (publickey).",
+    );
+  });
+
+  test("strips URL userinfo", () => {
+    const cause = gitFailureCause(
+      "fatal: unable to access 'https://bot:ghs_secret123@github.com/acme/repo.git/': Could not resolve host: github.com\n",
+    );
+    expect(cause).toBe(
+      "fatal: unable to access 'https://github.com/acme/repo.git/': Could not resolve host: github.com",
+    );
+    expect(cause).not.toContain("ghs_secret123");
+  });
+
+  test("falls back to the first non-empty line, and to nothing for empty stderr", () => {
+    expect(gitFailureCause(boilerplate)).toBe("fatal: Could not read from remote repository.");
+    expect(gitFailureCause("\n  something odd happened\nmore\n")).toBe("something odd happened");
+    expect(gitFailureCause("")).toBeUndefined();
+    expect(gitFailureCause(" \n\n")).toBeUndefined();
+  });
+
+  test("skips GitLab's empty remote: banner lines for the ERROR line", () => {
+    const gitlab =
+      "remote: \nremote: ========================================================================\nremote: \nremote: ERROR: The project you were looking for could not be found or you don't have permission to view it.\nremote: \nremote: ========================================================================\nremote: \n" +
+      boilerplate;
+    expect(gitFailureCause(gitlab)).toBe(
+      "remote: ERROR: The project you were looking for could not be found or you don't have permission to view it.",
+    );
+    expect(gitFailureCause("remote: \nremote: -----\n")).toBeUndefined();
+  });
+
+  test("keeps the detail bounded", () => {
+    const cause = gitFailureCause(`fatal: ${"x".repeat(500)}`);
+    expect(cause?.length).toBeLessThanOrEqual(200);
+    expect(cause?.endsWith("…")).toBe(true);
+  });
+});
+
+describe("gitLsRemote failure detail", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "worker-doctor-lsremote-"));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("a missing path remote reports the real cause", async () => {
+    const result = await gitLsRemote(join(dir, "gone.git"), { ...process.env }, 10_000);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toMatch(/^git ls-remote exited 128: /);
+    expect(result.reason).toContain("does not appear to be a git repository");
+    expect(result.reason).not.toContain("and the repository exists.");
+  });
+
+  test("a hung remote reports the timeout", async () => {
+    const fakeSsh = join(dir, "ssh-hang");
+    writeFileSync(fakeSsh, "#!/bin/sh\nexec sleep 5 </dev/null >/dev/null 2>&1\n");
+    chmodSync(fakeSsh, 0o755);
+    const result = await gitLsRemote(
+      "git@github.com:acme/backend.git",
+      { ...process.env, GIT_SSH_COMMAND: fakeSsh },
+      300,
+    );
+    expect(result).toEqual({ ok: false, reason: "git ls-remote timed out after 0.3s" });
   });
 });
 

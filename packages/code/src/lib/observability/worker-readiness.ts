@@ -35,6 +35,7 @@ import {
 } from "../workspace/env";
 import { resolveWorkspaceDir, workspaceConfigPath, workspaceEnvPath } from "../workspace/paths";
 import { createTrackerClient, trackerRequiredEnv } from "../trackers/manager";
+import { redactUrlCredentials } from "./dashboard-workspace";
 import { collectHarnessPreflight } from "../agent/sandbox";
 import type { ReadinessCheck } from "./readiness";
 
@@ -128,6 +129,44 @@ export function gitProbeEnv(env: Env): Env {
   return probeEnv;
 }
 
+/** Longest stderr excerpt kept in a repository failure detail. */
+const MAX_GIT_CAUSE_LENGTH = 200;
+
+/** Lines that name a specific failure, as opposed to git's trailing advice. */
+const GIT_CAUSE_LINE = /^(fatal:|error:|ssh:|remote:|.*Permission denied)/i;
+
+/** Git's generic follow-up after the real error ("Could not read from remote repository." …). */
+const GIT_BOILERPLATE_LINE =
+  /could not read from remote repository|make sure you have the correct access rights|and the repository exists/i;
+
+/**
+ * Decoration lines with no content, such as GitLab's `remote: ` /
+ * `remote: =====` banner around the real `remote: ERROR: …` line.
+ */
+const GIT_BANNER_LINE = /^(remote:)?[\s=*_-]*$/i;
+
+/**
+ * Pick the most specific cause from `git ls-remote` stderr. Git prints the
+ * real error first and generic access-rights advice last, so the first
+ * `fatal:`/`error:`/`ssh:`/`Permission denied` line that is not boilerplate
+ * wins; otherwise the first non-empty line. Banner lines that are only a
+ * `remote:` prefix or a `=`/`-` rule are skipped. URL userinfo is stripped and the
+ * result is one bounded line. Exported for tests.
+ */
+export function gitFailureCause(stderr: string): string | undefined {
+  const lines = stderr
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !GIT_BANNER_LINE.test(line));
+  const chosen =
+    lines.find((line) => GIT_CAUSE_LINE.test(line) && !GIT_BOILERPLATE_LINE.test(line)) ?? lines[0];
+  if (!chosen) return undefined;
+  const redacted = redactUrlCredentials(chosen).replace(/\s+/g, " ");
+  return redacted.length > MAX_GIT_CAUSE_LENGTH
+    ? `${redacted.slice(0, MAX_GIT_CAUSE_LENGTH - 1)}…`
+    : redacted;
+}
+
 /** Run `git ls-remote` without prompting for credentials. Exported for tests. */
 export function gitLsRemote(
   remote: string,
@@ -148,11 +187,14 @@ export function gitLsRemote(
           resolvePromise({ ok: true, detail: "remote reachable" });
           return;
         }
-        const last = String(stderr).trim().split("\n").filter(Boolean).pop();
+        const detail = gitFailureCause(String(stderr));
         const cause = error.killed
           ? `timed out after ${timeoutMs / 1000}s`
           : `exited ${error.code ?? "with an error"}`;
-        resolvePromise({ ok: false, reason: `git ls-remote ${cause}${last ? `: ${last}` : ""}` });
+        resolvePromise({
+          ok: false,
+          reason: `git ls-remote ${cause}${detail ? `: ${detail}` : ""}`,
+        });
       },
     );
   });
