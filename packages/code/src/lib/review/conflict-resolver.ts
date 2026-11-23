@@ -41,6 +41,7 @@ import type { ChangeRequestInfo } from "./conflict-change-adapter";
 import { runAgent } from "./address";
 import { parseChangeRequestUrl } from "../code-host/index";
 import type { PullRequestInfo } from "../code-host/github/reviews-types";
+import { stripAnsi } from "../observability/worker-logs";
 import { untrustedContentBlock } from "../prompts/untrusted-content";
 import { isDependencyFile, Utils } from "../utils";
 import { hasStagedChanges, hasUncommittedWork, stageWorkTreeChanges } from "../utils/git-stage";
@@ -186,6 +187,55 @@ Instructions:
 
 When you are done, the failing checks must pass locally and the working tree
 must be clean.`;
+}
+
+/**
+ * Build the agent prompt for a merge whose conflicts `git rerere` resolved
+ * from a recorded resolution but whose commit the pre-commit hook rejected.
+ * The recorded resolution can be stale or incomplete (e.g. captured from an
+ * earlier attempt that was interrupted before it fixed a semantic conflict),
+ * so retrying the same commit would fail the same way every time.
+ */
+export function buildReplayedResolutionFixPrompt(options: {
+  baseRef: string;
+  branch: string;
+  hookError: string;
+}): string {
+  const rawError = options.hookError.trim();
+  const excerpt =
+    rawError.length > HOOK_ERROR_PROMPT_LENGTH
+      ? `…${rawError.slice(-HOOK_ERROR_PROMPT_LENGTH)}`
+      : rawError;
+  return `# Finish a Merge Rejected by Commit Hooks
+
+A merge of \`origin/${options.baseRef}\` into \`${options.branch}\` is in progress in this
+repository. Its conflicts were resolved automatically by \`git rerere\` from a previously
+recorded resolution, but \`git commit\` was rejected by a pre-commit hook. The recorded
+resolution may be incomplete or out of date. Your job is to finish the merge.
+
+Hook error output (may be truncated):
+
+${untrustedContentBlock(
+  excerpt || "(no output captured — run the project's check scripts to reproduce)",
+  "pre-commit hook output",
+)}
+
+Instructions:
+1. Review the merge result (\`git diff --cached HEAD\`), especially the files that had
+   conflicts. Preserve the intent of BOTH sides.
+2. Watch for semantic conflicts that merge cleanly textually but break the build
+   (renamed functions, changed signatures, new required fields). Reproduce the failing
+   checks with the project's own scripts (lint, format, typecheck, tests) and fix them.
+3. Stage only real work, then complete the merge commit:
+   git add -u
+   git add <path>   # for each new file you intentionally created
+   git commit --no-edit
+   Never stage the whole tree or every untracked entry in bulk: the sandbox mounts
+   placeholder entries (\`.bashrc\`, \`.profile\`, \`.gitconfig\`, \`.claude/…\`, …) into the
+   worktree root; git cannot stage them, and they must never be committed.
+4. Do NOT push. Do NOT amend or rebase existing commits. Do NOT abort the merge.
+
+When you are done, the failing checks must pass locally and the merge commit must exist.`;
 }
 
 /**
@@ -373,6 +423,79 @@ type MergeAttempt =
   | { kind: "skipped"; message: string }
   | { kind: "aborted"; message: string };
 
+/** Hook output as plain text: hook runners (lefthook, turbo) colorize it. */
+function hookOutput(error: string | undefined): string {
+  return stripAnsi(error ?? "").trim();
+}
+
+/**
+ * Hand a `git rerere`-replayed merge whose commit failed the pre-commit hook
+ * to the agent, then make sure the merge ends up committed with nothing left
+ * unmerged. Aborts the merge on any failure.
+ */
+async function finishReplayedMergeWithAgent(params: {
+  workDir: string;
+  baseRef: string;
+  branch: string;
+  verbose: boolean;
+  agentRunner: AgentRunner;
+  hookError: string | undefined;
+}): Promise<MergeAttempt> {
+  const hookError = hookOutput(params.hookError);
+  console.log(
+    `⚠️  Commit hooks rejected the replayed resolution of origin/${params.baseRef}; handing to the agent`,
+  );
+  let agentResult: { success: boolean; output: string };
+  try {
+    agentResult = await params.agentRunner(
+      buildReplayedResolutionFixPrompt({
+        baseRef: params.baseRef,
+        branch: params.branch,
+        hookError,
+      }),
+      params.workDir,
+      params.verbose,
+    );
+  } catch (error) {
+    await Utils.executeGitCommand(["merge", "--abort"], { cwd: params.workDir });
+    throw error;
+  }
+
+  // Trust the tree, not the agent's word.
+  const unmerged = await Utils.executeGitCommand(["diff", "--name-only", "--diff-filter=U"], {
+    cwd: params.workDir,
+  });
+  if (!agentResult.success || unmerged.output.trim() !== "") {
+    await Utils.executeGitCommand(["merge", "--abort"], { cwd: params.workDir });
+    return {
+      kind: "aborted",
+      message: !agentResult.success
+        ? "agent run failed after commit hooks rejected the replayed merge resolution; merge aborted"
+        : "agent left unresolved conflicts; merge aborted",
+    };
+  }
+
+  const mergeHead = await Utils.executeGitCommand(["rev-parse", "-q", "--verify", "MERGE_HEAD"], {
+    cwd: params.workDir,
+  });
+  if (mergeHead.success) {
+    // The agent fixed the tree but did not commit; finish the merge.
+    const staged = stageWorkTreeChanges(params.workDir);
+    if (!staged.success) {
+      await Utils.executeGitCommand(["merge", "--abort"], { cwd: params.workDir });
+      return { kind: "aborted", message: `staging failed: ${staged.error}` };
+    }
+    const commit = await Utils.executeGitCommand(["commit", "--no-edit"], {
+      cwd: params.workDir,
+    });
+    if (!commit.success) {
+      await Utils.executeGitCommand(["merge", "--abort"], { cwd: params.workDir });
+      return { kind: "aborted", message: `merge commit failed: ${hookOutput(commit.error)}` };
+    }
+  }
+  return { kind: "ok", outcome: "resolved" };
+}
+
 /**
  * Dependency manifests/lockfiles whose content differs between `fromRev` and
  * the working tree (index included). `null` when git cannot tell, which
@@ -483,7 +606,8 @@ async function reinstallMergedDependencies(params: {
  *   hook), then dependencies are reinstalled before returning, i.e. before
  *   the pre-push hook and any hook-fix agent.
  * - rerere auto-resolution: reinstall before the worker's `git commit`
- *   (which runs pre-commit hooks).
+ *   (which runs pre-commit hooks). If the hooks reject the replayed
+ *   resolution, the agent gets the hook output and finishes the merge.
  * - Conflicts with no dependency file among them: the merged lockfile is
  *   already in the index, so it is installed before the agent runs; the
  *   agent and its commit hooks use the merged toolchain.
@@ -610,8 +734,17 @@ async function attemptMerge(params: {
       cwd: params.workDir,
     });
     if (!commit.success) {
-      await Utils.executeGitCommand(["merge", "--abort"], { cwd: params.workDir });
-      return { kind: "aborted", message: `merge commit failed: ${commit.error}` };
+      // The replayed resolution failed the pre-commit hook. Aborting here
+      // would loop forever: every retry replays the same recorded resolution
+      // and hits the same hook failure without the agent ever seeing it.
+      return await finishReplayedMergeWithAgent({
+        workDir: params.workDir,
+        baseRef: params.baseRef,
+        branch: params.branch,
+        verbose: params.verbose,
+        agentRunner: params.agentRunner,
+        hookError: commit.error,
+      });
     }
     return { kind: "ok", outcome: "resolved" };
   }
@@ -730,7 +863,7 @@ async function attemptMerge(params: {
     });
     if (!commit.success) {
       await Utils.executeGitCommand(["merge", "--abort"], { cwd: params.workDir });
-      return { kind: "aborted", message: `merge commit failed: ${commit.error}` };
+      return { kind: "aborted", message: `merge commit failed: ${hookOutput(commit.error)}` };
     }
   }
 

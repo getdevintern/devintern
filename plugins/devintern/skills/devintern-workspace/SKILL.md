@@ -65,7 +65,7 @@ Teams layer their tracker credentials over shared workspace credentials using te
 
 Make the requested config change without starting new automation, changing concurrency, or enabling integrations unless that behavior is part of the user's request. Shared-host concurrency is opt-in through `[workspace.execution]` and `isolation = "best_effort_host"`; worktrees still share ports, processes, Docker, and caches.
 
-Check TOML syntax and the relevant schema constraints before applying the change. Use an existing validation command if the installed CLI exposes one; do not invent `worker validate` or start the daemon merely to validate. For a source checkout, `parseWorkspaceConfig` provides schema validation without starting a worker. If no schema validator is available, state that validation covered syntax and documented constraints only.
+Check TOML syntax and the relevant schema constraints before applying the change. After editing, run `devintern worker doctor` (add `--workspace` for a nondefault workspace) when `devintern worker --help` lists it; it is read-only, treat ❌ rows as blockers and report ⚠️ rows. Otherwise use an existing validation command if the installed CLI exposes one; do not invent `worker validate` or start the daemon merely to validate. For a source checkout, `parseWorkspaceConfig` provides schema validation without starting a worker. If no schema validator is available, state that validation covered syntax and documented constraints only.
 
 For a running worker, distinguish:
 

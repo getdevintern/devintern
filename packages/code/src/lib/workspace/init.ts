@@ -45,18 +45,24 @@ ci_failure_fix = false
 # PRs touching only auto_merge_safe_paths merge with no agent run; others
 # merge only if the agent's merge-safety review says so (auto_merge_review).
 # Deny paths (plus built-ins: .github/**, CODEOWNERS, .devintern-code/**)
-# never auto-merge. Changes apply without a restart.
+# never auto-merge. Review paths always go to the agent review, even when
+# they also match a safe path. Changes apply without a restart.
 # auto_merge = true
 # auto_merge_safe_paths = ["**/*.md", "docs/**"]
 # auto_merge_deny_paths = ["**/migrations/**"]
+# auto_merge_review_paths = ["**/AGENTS.md", "**/CLAUDE.md", "**/skills/**"]
 # auto_merge_review = true
 # auto_merge_method = "squash"                # merge | squash | rebase
 # auto_merge_review_label = "needs-human-review"  # label PRs left open; "" disables
 # auto_merge_once = true                      # false: re-check after every new commit
-# Review strictness: "strict" (default) holds any runtime behavior change;
-# "standard" merges tested behavior changes but still holds high-risk ones
-# (auth, CI/release, dependencies, destructive changes, ...).
-# auto_merge_policy = "standard"               # strict | standard
+# Review rubric, strictest first: "strict" (default) holds any runtime
+# behavior change; "standard" merges tested behavior changes but holds
+# high-risk ones (auth, CI/release, dependencies, destructive changes, ...);
+# "relaxed" also merges dependency upgrades and non-destructive migrations;
+# "custom" uses your own rules from auto_merge_rules or auto_merge_rules_file.
+# auto_merge_policy = "standard"               # strict | standard | relaxed | custom
+# auto_merge_rules_file = "merge-rules.md"     # custom only; relative to ~/.devintern
+# auto_merge_rules = "Anything under billing/ is unsafe."  # custom only; or inline
 # auto_merge_review_instructions = "Changes under billing/ always need a human."
 
 # Optional bounded host concurrency. This is throughput, not VM isolation:

@@ -7,9 +7,10 @@
  *    it mergeable with passing checks (`mergeable_state` `clean`/`has_hooks`),
  *    and no reviewer's latest review requests changes.
  * 1. Path policy (deterministic, `merge-gate.ts`): a deny-glob hit blocks the
- *    merge outright; a PR touching only safe globs merges with no agent run.
- * 2. Agent review (optional): PRs that touch anything outside the safe globs
- *    merge only on an explicit `"safe": true` verdict. A missing, malformed,
+ *    merge outright; a PR touching only safe globs (and no review glob)
+ *    merges with no agent run.
+ * 2. Agent review (optional): PRs that touch anything outside the safe globs,
+ *    or any review glob, merge only on an explicit `"safe": true` verdict. A missing, malformed,
  *    or negative verdict never merges.
  *
  * The merge call is pinned to the evaluated head SHA, and the PR is
@@ -26,7 +27,7 @@ import type {
   PullRequestInfo,
   PullRequestMergeResult,
 } from "../code-host/github/reviews-types";
-import { loadPrompt } from "../prompts/loader";
+import { loadPrompt, loadPromptTemplate, renderPrompt } from "../prompts/loader";
 import { untrustedContentBlock } from "../prompts/untrusted-content";
 import { Utils } from "../utils";
 import { AUTO_MERGE_COMMENT_MARKER, buildAutoMergeStatusComment } from "./auto-merge-comment";
@@ -37,6 +38,7 @@ import {
   parseMergeSafetyVerdict,
 } from "./merge-gate";
 import type { AutoMergeMethod, MergePathPolicy, MergeSafetyPolicy } from "./merge-gate";
+import { loadMergeSafetyRules, mergeSafetyPolicyLabel } from "./merge-safety-rules";
 
 /** Full auto-merge policy for one repository. */
 export interface AutoMergePolicy extends MergePathPolicy {
@@ -61,6 +63,13 @@ export interface AutoMergePolicy extends MergePathPolicy {
    * appended in a marked section that can only add restrictions.
    */
   reviewInstructions?: string;
+  /** `custom` policy: inline rubric text (`auto_merge_rules`). */
+  rules?: string;
+  /**
+   * `custom` policy: absolute path of the rubric file
+   * (`auto_merge_rules_file`), read on every review.
+   */
+  rulesFile?: string;
 }
 
 /**
@@ -199,11 +208,60 @@ function gitHubErrorStatus(error: unknown): number | undefined {
   return match ? Number(match[1]) : undefined;
 }
 
-/** Bundled merge-safety template per policy. */
-const MERGE_SAFETY_PROMPTS: Record<MergeSafetyPolicy, string> = {
-  strict: "merge-safety",
-  standard: "merge-safety-standard",
+/** Bundled prompt holding the fixed frame shared by every policy. */
+const MERGE_SAFETY_FRAME_PROMPT = "merge-safety";
+
+/** Bundled rubric per preset (`custom` uses the operator's rules instead). */
+const MERGE_SAFETY_RUBRIC_PROMPTS: Record<Exclude<MergeSafetyPolicy, "custom">, string> = {
+  strict: "merge-safety-rubric-strict",
+  standard: "merge-safety-rubric-standard",
+  relaxed: "merge-safety-rubric-relaxed",
 };
+
+/** Role-statement sentence for the `custom` policy (presets carry their own). */
+const CUSTOM_POLICY_SUMMARY = "A PR with clumsy code can be safe to merge.";
+
+/** Delimiters around operator-owned `custom` rules in the prompt. */
+export const OPERATOR_RULES_BEGIN = "--- BEGIN OPERATOR RULES ---";
+export const OPERATOR_RULES_END = "--- END OPERATOR RULES ---";
+
+/** The `custom` rubric: the operator's rules in a delimited section. */
+function operatorRulesRubric(rules: string): string {
+  return [
+    "This repository uses a **custom** merge-safety policy: the workspace operator wrote the " +
+      "rules below, and they decide which kinds of change need a human. Answer " +
+      '`"safe": false` if the change plausibly falls under anything the rules mark unsafe. ' +
+      "When the rules do not settle whether a change is safe, it is not safe.",
+    "",
+    "### Operator Rules",
+    OPERATOR_RULES_BEGIN,
+    rules.trim(),
+    OPERATOR_RULES_END,
+  ].join("\n");
+}
+
+/** Policy summary sentence and rubric text for one policy. */
+function mergeSafetyRubric(
+  policy: MergeSafetyPolicy,
+  rules: string | undefined,
+): { summary: string; rubric: string } {
+  if (policy === "custom") {
+    if (!rules?.trim()) throw new Error("The custom merge-safety policy needs operator rules");
+    return { summary: CUSTOM_POLICY_SUMMARY, rubric: operatorRulesRubric(rules) };
+  }
+  // Bundled only, like the frame (see buildMergeSafetyPrompt).
+  const template = loadPromptTemplate(MERGE_SAFETY_RUBRIC_PROMPTS[policy], {
+    useAmbientOverrides: false,
+  });
+  const summary = template.attributes?.summary;
+  if (typeof summary !== "string" || !summary) {
+    throw new Error(`Prompt '${template.name}' is missing its summary frontmatter`);
+  }
+  return {
+    summary,
+    rubric: renderPrompt(template, { maxDiffChars: String(MAX_REVIEW_DIFF_CHARS) }),
+  };
+}
 
 /** Heading of the operator section appended to the merge-safety prompt. */
 export const OPERATOR_SECTION_HEADING = "## Operator Instructions";
@@ -233,33 +291,47 @@ export function operatorInstructionsSection(instructions: string | undefined): s
   ].join("\n");
 }
 
-/** Build the agent's merge-safety prompt (bundled template only). */
+/** A framed list of changed paths, or `(none)` when empty. */
+function changedPathsBlock(paths: readonly string[]): string {
+  if (paths.length === 0) return "(none)";
+  return untrustedContentBlock(paths.map((path) => `- ${path}`).join("\n"), "changed paths");
+}
+
+/**
+ * Build the agent's merge-safety prompt: the fixed bundled frame around the
+ * policy's rubric (a bundled preset, or the operator's `custom` rules).
+ */
 export function buildMergeSafetyPrompt(options: {
   repository: string;
   prNumber: number;
   title: string;
+  /** Changed paths outside the safe globs. */
   reviewPaths: string[];
+  /** Changed paths matching `auto_merge_review_paths` (always reviewed). */
+  alwaysReviewPaths?: string[];
   diff: string;
   /** Review strictness; defaults to `strict`. */
   policy?: MergeSafetyPolicy;
   /** Operator-written rules appended in the operator section. */
   instructions?: string;
+  /** The `custom` policy's rubric text (required for `custom`, ignored otherwise). */
+  rules?: string;
 }): string {
   // Trust boundary: the verdict gates merges, and an unsandboxed agent could
-  // write a `~/.devintern/prompts/` override forcing `"safe": true`. Pin it to
-  // the bundled catalog.
+  // write a `~/.devintern/prompts/` override forcing `"safe": true`. Pin the
+  // frame and the preset rubrics to the bundled catalog.
   const policy = options.policy ?? DEFAULT_MERGE_SAFETY_POLICY;
+  const { summary, rubric } = mergeSafetyRubric(policy, options.rules);
   return loadPrompt(
-    MERGE_SAFETY_PROMPTS[policy],
+    MERGE_SAFETY_FRAME_PROMPT,
     {
+      policySummary: summary,
+      rubric,
       repository: options.repository,
       prNumber: String(options.prNumber),
       prTitle: untrustedContentBlock(options.title, "pull request title"),
-      reviewPaths: untrustedContentBlock(
-        options.reviewPaths.map((path) => `- ${path}`).join("\n"),
-        "changed paths",
-      ),
-      maxDiffChars: String(MAX_REVIEW_DIFF_CHARS),
+      reviewPaths: changedPathsBlock(options.reviewPaths),
+      alwaysReviewPaths: changedPathsBlock(options.alwaysReviewPaths ?? []),
       prDiff: untrustedContentBlock(`\`\`\`diff\n${options.diff}\n\`\`\``, "pull request diff"),
       operatorSection: operatorInstructionsSection(options.instructions),
     },
@@ -368,23 +440,42 @@ async function decideMerge(ctx: GateContext): Promise<MergeDecision> {
     console.log(`✅ ${baseRepo}#${prNumber}: ${reason}; no agent review needed`);
     return { kind: "merge", reason, viaReview: false, reviewed: false };
   }
+  const { outside, reviewMatches } = classification;
+  // A review-path match goes to its own prompt list, even if it is also outside the safe paths.
+  const outsideSafe = outside.filter((path) => !reviewMatches.includes(path));
   if (!policy.review) {
     return leaveOpen(
-      `${classification.outside.length} changed path(s) outside the safe paths ` +
-        `(e.g. ${classification.outside[0]}) and agent review is disabled`,
-      { kind: "outside-safe-paths", paths: classification.outside },
+      `${outside.length} changed path(s) need review (e.g. ${outside[0]}) ` +
+        "and agent review is disabled",
+      { kind: "outside-safe-paths", paths: outsideSafe, reviewPathMatches: reviewMatches },
     );
   }
 
   const reviewPolicy = policy.reviewPolicy ?? DEFAULT_MERGE_SAFETY_POLICY;
+  const policyLabel = mergeSafetyPolicyLabel(reviewPolicy, policy);
+  // Custom rules are read now, not at config load, so file edits apply to
+  // the next review. Unusable rules fail closed: the PR stays open.
+  let rules: string | undefined;
+  if (reviewPolicy === "custom") {
+    const loaded = loadMergeSafetyRules(policy);
+    if (!loaded.ok) {
+      const where = policy.rulesFile ? ` (${policy.rulesFile})` : "";
+      return leaveOpen(`merge-safety rules unavailable: ${loaded.problem}${where}`, {
+        kind: "rules-unavailable",
+        policy: policyLabel,
+        problem: loaded.problem,
+      });
+    }
+    rules = loaded.text;
+  }
   const diff = await github.getDiff();
   if (diff.length > MAX_REVIEW_DIFF_CHARS) {
     const detail = `the diff is ${diff.length} characters, above the ${MAX_REVIEW_DIFF_CHARS}-character review limit`;
     return leaveOpen(detail, { kind: "not-evaluable", detail });
   }
   console.log(
-    `🔎 ${baseRepo}#${prNumber}: ${classification.outside.length} path(s) outside the safe ` +
-      "paths; asking the agent",
+    `🔎 ${baseRepo}#${prNumber}: ${outsideSafe.length} path(s) outside the safe paths, ` +
+      `${reviewMatches.length} matching review paths; asking the agent`,
   );
   const verdict = await reviewWithAgent({
     options,
@@ -394,17 +485,24 @@ async function decideMerge(ctx: GateContext): Promise<MergeDecision> {
       repository: baseRepo,
       prNumber,
       title: pr.title,
-      reviewPaths: classification.outside,
+      reviewPaths: outsideSafe,
+      alwaysReviewPaths: reviewMatches,
       diff,
       policy: reviewPolicy,
       instructions: policy.reviewInstructions,
+      rules,
     }),
   });
   if (verdict.kind !== "verdict") return stop(verdict.kind, verdict.message, verdict.ran);
   if (!verdict.safe) {
     return leaveOpen(
       `agent review: ${verdict.reason}`,
-      { kind: "agent-unsafe", reason: verdict.reason, policy: reviewPolicy },
+      {
+        kind: "agent-unsafe",
+        reason: verdict.reason,
+        policy: policyLabel,
+        ...(reviewMatches.length > 0 ? { reviewPathMatches: reviewMatches } : {}),
+      },
       true,
     );
   }

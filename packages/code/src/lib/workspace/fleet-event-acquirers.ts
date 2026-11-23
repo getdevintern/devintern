@@ -229,6 +229,7 @@ function buildFleetCiProvider(
  */
 async function buildAutoMergeWatcher(params: {
   config: WorkspaceConfig;
+  workspaceDir: string;
   workerState: WorkerState;
   queue: WebhookQueue;
   gh: (slug: string) => FleetGitHubClient;
@@ -238,7 +239,7 @@ async function buildAutoMergeWatcher(params: {
   verbose: boolean | undefined;
   isStackedBase?: AutoMergeWatcherOptions["isStackedBase"];
 }): Promise<AutoMergeWatcherAcquirer> {
-  const { config, gh } = params;
+  const { config, gh, workspaceDir } = params;
   const { AutoMergeWatcherAcquirer: Watcher, DEFAULT_AUTO_MERGE_QUIET_SECONDS } =
     await import("../acquirers/auto-merge-watcher");
   const { parseHarnessList } = await import("@devintern/agent-harness");
@@ -278,7 +279,7 @@ async function buildAutoMergeWatcher(params: {
         ? (config.workspace.autoMerge.agent?.harness ??
           parseHarnessList(process.env.AGENT_HARNESS)[0])
         : undefined,
-    policyFingerprint: (slug) => fleetAutoMergePolicyFingerprint(config, slug),
+    policyFingerprint: (slug) => fleetAutoMergePolicyFingerprint(config, slug, workspaceDir),
     once: () => config.workspace.autoMerge.once,
     isStackedBase: params.isStackedBase,
     quietSeconds: parseEnvInteger(
@@ -324,16 +325,31 @@ function parseRefSha(data: unknown): string | null {
 }
 
 /**
- * Wire the fleet's event acquirers: review polling on the agent's own PRs,
- * a mention sweep per GitHub repo, and the relay when configured.
- *
- * Runs are CLI subprocesses in each repo's base worktree; mention-driven
- * runs are permission-gated here (see `fleet-events.ts`). Relay in fleet
- * mode uses connect state under the workspace home (or `WORKER_RELAY_URL`
- * plus a stored `drt_…` token); per-repo `worker connect` state alone is
- * not enough for the fleet daemon.
+ * Verify GitHub repos added after the first pairing without a browser (they
+ * verify when they fall under an installation this customer already paired),
+ * and publish the verifier for config reloads. Fire-and-forget so a slow or
+ * failing relay never blocks worker startup.
  */
-export async function buildFleetEventAcquirers(options: {
+async function startRelayAutoVerify(
+  options: FleetEventAcquirerOptions,
+  relayUrl: string,
+  relayToken: string,
+): Promise<void> {
+  const { createRelayAutoVerifier } = await import("../relay/auto-verify");
+  const verifyRelayRepos = createRelayAutoVerifier({
+    config: options.config,
+    workspaceDir: options.workspaceDir,
+    relayUrl,
+    relayToken,
+    fetchImpl: options.relayFetchImpl,
+    verbose: options.verbose,
+  });
+  if (options.reloadHooksOut) options.reloadHooksOut.verifyRelayRepos = verifyRelayRepos;
+  void verifyRelayRepos();
+}
+
+/** Inputs for {@link buildFleetEventAcquirers}. */
+export interface FleetEventAcquirerOptions {
   config: WorkspaceConfig;
   workspaceDir: string;
   state: ReturnType<typeof openWorkspaceState>;
@@ -348,12 +364,32 @@ export async function buildFleetEventAcquirers(options: {
   /** Collectors of cadence changes, applied on live config reloads. */
   intervalUpdaters?: Array<(seconds: number) => void>;
   /** Published once event acquirers are wired (mention-sweep reconcile). */
-  reloadHooksOut?: { hooks?: FleetEventReloadHooks };
+  reloadHooksOut?: {
+    hooks?: FleetEventReloadHooks;
+    /** Browser-free relay verification of unverified GitHub repos; never throws. */
+    verifyRelayRepos?: () => Promise<void>;
+  };
+  /** Injectable relay fetch for tests. */
+  relayFetchImpl?: typeof fetch;
   /** Stacked-base lookup for the auto-merge guard (see `stacked-pr-acquirer.ts`). */
   isStackedBase?: (slug: string, baseRef: string) => boolean;
   /** Shared admission supervisor for every fleet execution path. */
   supervisor?: TaskSupervisor;
-}): Promise<import("../../worker").Acquirer[]> {
+}
+
+/**
+ * Wire the fleet's event acquirers: review polling on the agent's own PRs,
+ * a mention sweep per GitHub repo, and the relay when configured.
+ *
+ * Runs are CLI subprocesses in each repo's base worktree; mention-driven
+ * runs are permission-gated here (see `fleet-events.ts`). Relay in fleet
+ * mode uses connect state under the workspace home (or `WORKER_RELAY_URL`
+ * plus a stored `drt_…` token); per-repo `worker connect` state alone is
+ * not enough for the fleet daemon.
+ */
+export async function buildFleetEventAcquirers(
+  options: FleetEventAcquirerOptions,
+): Promise<import("../../worker").Acquirer[]> {
   const { config, workspaceDir, state, repoManager, intervalSeconds, verbose } = options;
   const taskSources: Array<
     Pick<
@@ -564,6 +600,7 @@ export async function buildFleetEventAcquirers(options: {
 
     const autoMergeWatcher = await buildAutoMergeWatcher({
       config,
+      workspaceDir,
       workerState: state.workerState,
       queue: state.queue,
       gh,
@@ -719,6 +756,7 @@ export async function buildFleetEventAcquirers(options: {
         "⚠️  Relay is configured but no relay token is stored in the workspace — re-run `devintern worker init`. Polling continues.",
       );
     } else if (relayUrl) {
+      await startRelayAutoVerify(options, relayUrl, relayToken);
       const { RelayAcquirer } = await import("../relay/acquirer");
       const { botMentionCandidates, mentionsAnyBot } = await import("../acquirers/mention-sweep");
       const relayTaskSources = taskSources.map((source) => {

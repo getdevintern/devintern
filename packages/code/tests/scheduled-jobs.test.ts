@@ -123,6 +123,7 @@ describe("auto-merge job", () => {
     review: false,
     safePaths: ["docs/**"],
     denyPaths: ["**/prompts/**"],
+    reviewPaths: ["**/AGENTS.md"],
     reviewLabel: "needs-human-review",
     once: true,
     policy: "strict" as const,
@@ -174,6 +175,7 @@ describe("auto-merge job", () => {
     expect(text).toContain("`docs/**`");
     expect(text).toContain("`**/prompts/**`");
     expect(text).toContain("`.github/**`");
+    expect(text).toContain("**Review paths** (always sent to the agent review): `**/AGENTS.md`");
     expect(text).toContain("off (they stay open)");
   });
 });

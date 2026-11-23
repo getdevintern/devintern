@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
-import { tmpdir } from "os";
+import { homedir, tmpdir } from "os";
 
 import {
   DEFAULT_DASHBOARD,
@@ -1134,6 +1134,7 @@ remote = "git@github.com:acme/api.git"
       review: true,
       safePaths: [],
       denyPaths: [],
+      reviewPaths: [],
       reviewLabel: "needs-human-review",
       once: true,
       policy: "strict",
@@ -1191,6 +1192,7 @@ remote = "git@github.com:acme/web.git"
       review: false,
       safePaths: ["**/*.md", "docs/"],
       denyPaths: ["db/migrations/**"],
+      reviewPaths: [],
       reviewLabel: "needs-human-review",
       once: false,
       policy: "strict",
@@ -1200,11 +1202,61 @@ remote = "git@github.com:acme/web.git"
     expect(autoMergePathsFor(config.workspace.autoMerge, api!)).toEqual({
       safePaths: ["e2e/**"],
       denyPaths: ["db/migrations/**"],
+      reviewPaths: [],
     });
     expect(autoMergePathsFor(config.workspace.autoMerge, web!)).toEqual({
       safePaths: ["**/*.md", "docs/"],
       denyPaths: ["db/migrations/**"],
+      reviewPaths: [],
     });
+  });
+
+  test("auto_merge_review_paths: workspace list, per-repo replacement, and validation", () => {
+    const config = parseWorkspaceConfig(`
+[workspace]
+auto_merge_safe_paths = ["**/*.md"]
+auto_merge_review_paths = ["**/AGENTS.md", "**/skills/**"]
+
+[defaults]
+tracker = "jira"
+
+[[repos]]
+name = "api"
+remote = "git@github.com:acme/api.git"
+auto_merge_review_paths = ["prompts/"]
+
+[[repos]]
+name = "web"
+remote = "git@github.com:acme/web.git"
+
+[[repos]]
+name = "docs"
+remote = "git@github.com:acme/docs.git"
+auto_merge_review_paths = []
+`);
+    const settings = config.workspace.autoMerge;
+    expect(settings.reviewPaths).toEqual(["**/AGENTS.md", "**/skills/**"]);
+    const [api, web, docs] = config.repos;
+    expect(api?.autoMergeReviewPaths).toEqual(["prompts/"]);
+    expect(web).not.toHaveProperty("autoMergeReviewPaths");
+    // Per-repo lists replace the workspace list; they are not merged.
+    expect(autoMergePathsFor(settings, api!).reviewPaths).toEqual(["prompts/"]);
+    expect(autoMergePathsFor(settings, web!).reviewPaths).toEqual(["**/AGENTS.md", "**/skills/**"]);
+    expect(autoMergePathsFor(settings, docs!).reviewPaths).toEqual([]);
+
+    const invalid = (snippet: string) => () => parseWorkspaceConfig(`${snippet}\n${base}`);
+    expect(invalid('[workspace]\nauto_merge_review_paths = "AGENTS.md"')).toThrow(
+      /auto_merge_review_paths/,
+    );
+    expect(invalid("[workspace]\nauto_merge_review_paths = [1]")).toThrow(
+      /auto_merge_review_paths/,
+    );
+    expect(invalid('[workspace]\nauto_merge_review_paths = ["../x/**"]')).toThrow(
+      /auto_merge_review_paths entry "..\/x\/\*\*" must be a repo-relative glob/,
+    );
+    expect(() => parseWorkspaceConfig(`${base}auto_merge_review_paths = "AGENTS.md"\n`)).toThrow(
+      /\[\[repos\]\]\[0\]\.auto_merge_review_paths must be an array/,
+    );
   });
 
   test("auto_merge_policy and review instructions: workspace values with per-repo overrides", () => {
@@ -1241,26 +1293,26 @@ auto_merge_review_instructions = ""
       autoMergePolicy: "strict",
       autoMergeReviewInstructions: "Never merge schema changes.",
     });
-    expect(autoMergeReviewFor(settings, api!)).toEqual({
+    expect(autoMergeReviewFor(settings, api!, "/ws")).toEqual({
       reviewPolicy: "strict",
       reviewInstructions: "Never merge schema changes.",
     });
     expect(web).not.toHaveProperty("autoMergePolicy");
-    expect(autoMergeReviewFor(settings, web!)).toEqual({
+    expect(autoMergeReviewFor(settings, web!, "/ws")).toEqual({
       reviewPolicy: "standard",
       reviewInstructions: "- Changes under billing/ always need a human.",
     });
     // An empty per-repo string clears the workspace instructions.
-    expect(autoMergeReviewFor(settings, docs!)).toEqual({ reviewPolicy: "standard" });
+    expect(autoMergeReviewFor(settings, docs!, "/ws")).toEqual({ reviewPolicy: "standard" });
   });
 
   test("rejects unknown auto_merge_policy values and non-string instructions", () => {
     expect(() =>
       parseWorkspaceConfig(`
 [workspace]
-auto_merge_policy = "relaxed"
+auto_merge_policy = "lenient"
 ${base}`),
-    ).toThrow(/\[workspace\]\.auto_merge_policy must be one of: strict, standard/);
+    ).toThrow(/\[workspace\]\.auto_merge_policy must be one of: strict, standard, relaxed, custom/);
     expect(() =>
       parseWorkspaceConfig(`${base}auto_merge_policy = "lenient"
 `),
@@ -1271,6 +1323,180 @@ ${base}`),
 auto_merge_review_instructions = ["no"]
 ${base}`),
     ).toThrow(/auto_merge_review_instructions must be a string/);
+  });
+
+  test("parses every preset", () => {
+    for (const policy of ["strict", "standard", "relaxed"] as const) {
+      const config = parseWorkspaceConfig(`
+[workspace]
+auto_merge_policy = "${policy}"
+${base}`);
+      expect(config.workspace.autoMerge.policy).toBe(policy);
+      expect(autoMergeReviewFor(config.workspace.autoMerge, config.repos[0]!, "/ws")).toEqual({
+        reviewPolicy: policy,
+      });
+    }
+  });
+
+  test("custom with inline rules", () => {
+    const config = parseWorkspaceConfig(`
+[workspace]
+auto_merge_policy = "custom"
+auto_merge_rules = """
+- Anything under billing/ is unsafe.
+"""
+auto_merge_review_instructions = "Also hold schema changes."
+${base}`);
+    const settings = config.workspace.autoMerge;
+    expect(settings).toMatchObject({
+      policy: "custom",
+      rules: "- Anything under billing/ is unsafe.",
+    });
+    expect(settings).not.toHaveProperty("rulesFile");
+    expect(autoMergeReviewFor(settings, config.repos[0]!, "/ws")).toEqual({
+      reviewPolicy: "custom",
+      rules: "- Anything under billing/ is unsafe.",
+      reviewInstructions: "Also hold schema changes.",
+    });
+  });
+
+  test("custom with a rules file resolves against the workspace home, with ~ expanded", () => {
+    const config = parseWorkspaceConfig(`
+[workspace]
+auto_merge_policy = "custom"
+auto_merge_rules_file = "merge-rules.md"
+
+[defaults]
+tracker = "jira"
+
+[[repos]]
+name = "api"
+remote = "git@github.com:acme/api.git"
+
+[[repos]]
+name = "web"
+remote = "git@github.com:acme/web.git"
+auto_merge_rules_file = "~/rules/web.md"
+
+[[repos]]
+name = "abs"
+remote = "git@github.com:acme/abs.git"
+auto_merge_rules_file = "/etc/devintern/abs.md"
+`);
+    const settings = config.workspace.autoMerge;
+    expect(settings.rulesFile).toBe("merge-rules.md");
+    const [api, web, abs] = config.repos;
+    // Never relative to the process cwd (the repo checkout auto-merge runs in).
+    expect(autoMergeReviewFor(settings, api!, "/home/me/.devintern")).toEqual({
+      reviewPolicy: "custom",
+      rulesFile: "/home/me/.devintern/merge-rules.md",
+    });
+    expect(autoMergeReviewFor(settings, web!, "/ws").rulesFile).toBe(
+      join(homedir(), "rules/web.md"),
+    );
+    expect(autoMergeReviewFor(settings, abs!, "/ws").rulesFile).toBe("/etc/devintern/abs.md");
+  });
+
+  test("per-repo rules and policy replace the workspace's", () => {
+    const config = parseWorkspaceConfig(`
+[workspace]
+auto_merge_policy = "custom"
+auto_merge_rules_file = "rules.md"
+
+[defaults]
+tracker = "jira"
+
+[[repos]]
+name = "api"
+remote = "git@github.com:acme/api.git"
+auto_merge_rules = "Only docs are safe."
+
+[[repos]]
+name = "web"
+remote = "git@github.com:acme/web.git"
+auto_merge_policy = "relaxed"
+
+[[repos]]
+name = "cli"
+remote = "git@github.com:acme/cli.git"
+auto_merge_policy = "custom"
+`);
+    const settings = config.workspace.autoMerge;
+    const [api, web, cli] = config.repos;
+    expect(api).toMatchObject({ autoMergeRules: "Only docs are safe." });
+    // The repo's inline rules replace the workspace file; they do not merge.
+    expect(autoMergeReviewFor(settings, api!, "/ws")).toEqual({
+      reviewPolicy: "custom",
+      rules: "Only docs are safe.",
+    });
+    expect(autoMergeReviewFor(settings, web!, "/ws")).toEqual({ reviewPolicy: "relaxed" });
+    expect(autoMergeReviewFor(settings, cli!, "/ws")).toEqual({
+      reviewPolicy: "custom",
+      rulesFile: "/ws/rules.md",
+    });
+  });
+
+  test("rejects invalid custom-rule combinations", () => {
+    const repo = (extra: string) => `
+[defaults]
+tracker = "jira"
+
+[[repos]]
+name = "api"
+remote = "git@github.com:acme/api.git"
+${extra}
+`;
+    expect(() =>
+      parseWorkspaceConfig(`
+[workspace]
+auto_merge_policy = "custom"
+${base}`),
+    ).toThrow(/\[workspace\]\.auto_merge_policy = "custom" needs auto_merge_rules or/);
+    expect(() =>
+      parseWorkspaceConfig(`
+[workspace]
+auto_merge_policy = "custom"
+auto_merge_rules = "x"
+auto_merge_rules_file = "rules.md"
+${base}`),
+    ).toThrow(/set only one of auto_merge_rules and auto_merge_rules_file/);
+    expect(() =>
+      parseWorkspaceConfig(`
+[workspace]
+auto_merge_rules = "x"
+${base}`),
+    ).toThrow(/apply only with auto_merge_policy = "custom" \(the policy here is "strict"\)/);
+    expect(() =>
+      parseWorkspaceConfig(`
+[workspace]
+auto_merge_policy = "standard"
+${repo('auto_merge_rules_file = "rules.md"')}`),
+    ).toThrow(/\[\[repos\]\] "api"\.auto_merge_rules and auto_merge_rules_file apply only/);
+    expect(() => parseWorkspaceConfig(repo('auto_merge_policy = "custom"'))).toThrow(
+      /\[\[repos\]\] "api"\.auto_merge_policy = "custom" needs/,
+    );
+    expect(() =>
+      parseWorkspaceConfig(`
+[workspace]
+auto_merge_policy = "custom"
+auto_merge_rules = "  "
+${base}`),
+    ).toThrow(/auto_merge_rules must be a non-empty string/);
+    // A repo can opt into custom with its own rules under a strict workspace.
+    const ok = parseWorkspaceConfig(repo('auto_merge_policy = "custom"\nauto_merge_rules = "x"'));
+    expect(ok.repos[0]).toMatchObject({ autoMergePolicy: "custom", autoMergeRules: "x" });
+  });
+
+  test("caps inline rules at 20,000 characters", () => {
+    const rules = (n: number) => `
+[workspace]
+auto_merge_policy = "custom"
+auto_merge_rules = "${"a".repeat(n)}"
+${base}`;
+    expect(parseWorkspaceConfig(rules(20_000)).workspace.autoMerge.rules).toHaveLength(20_000);
+    expect(() => parseWorkspaceConfig(rules(20_001))).toThrow(
+      /auto_merge_rules is 20001 characters; the limit is 20000/,
+    );
   });
 
   test("rejects unknown merge methods and non-relative globs", () => {
