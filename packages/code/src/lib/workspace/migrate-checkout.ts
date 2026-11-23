@@ -29,7 +29,7 @@ import type { WorkspaceLogFn } from "./init";
 import { findWorkspaceRepoForCheckout } from "./manual-run";
 import { resolveWorkspaceDir, workspaceCodeStateDir, workspaceConfigPath } from "./paths";
 import { registerManualCheckout } from "./register-checkout";
-import { appendTrackerSettings } from "./tracker-settings";
+import { appendTrackerSettings, TRACKER_SETTINGS_NAMES } from "./tracker-settings";
 
 /** Local, gitignored state files moved into `state/code/`. */
 const MOVED_STATE_FILES = [".auth-session.json", "license-cache.json"] as const;
@@ -79,6 +79,52 @@ export function moveLegacyCheckoutState(cwd: string = process.cwd()): void {
   }
 }
 
+const warnedPipelineFiles = new Set<string>();
+
+/**
+ * Copy a checkout's committed `.devintern-code/settings.json` tracker
+ * sections into `[trackers]` (new keys only) and warn, once per file, about a
+ * pipeline that is no longer read. Used by the worker for every worktree it
+ * prepares, so repos that still commit the file keep their status names.
+ * Never throws.
+ *
+ * @returns `tracker/KEY` labels added
+ */
+export function migrateCommittedTrackerSettings(
+  workspaceDir: string,
+  checkoutDir: string,
+  log: WorkspaceLogFn = console.log,
+): string[] {
+  const settingsPath = join(checkoutDir, ".devintern-code", "settings.json");
+  try {
+    const legacy = readLegacySettings(join(checkoutDir, ".devintern-code"));
+    if (legacy?.pipeline && !warnedPipelineFiles.has(settingsPath)) {
+      warnedPipelineFiles.add(settingsPath);
+      log(
+        `⚠️  ${settingsPath} defines a pipeline, which is not read; ` +
+          "set pipeline_file on the repo's [[repos]] entry instead.",
+      );
+    }
+    const added = migrateTrackerSettings(workspaceDir, legacy);
+    if (added.length > 0) {
+      log(`📦 Copied tracker status names into workspace.toml: ${added.join(", ")}`);
+    }
+    return added;
+  } catch (error) {
+    log(`⚠️  Could not copy tracker settings from ${settingsPath}: ${(error as Error).message}`);
+    return [];
+  }
+}
+
+/** Whether legacy settings carry tracker project sections (or the Jira map). */
+function hasTrackerSections(settings: ProjectSettings | null): boolean {
+  if (!settings) return false;
+  return (
+    Boolean(settings.projects) ||
+    TRACKER_SETTINGS_NAMES.some((name) => Object.keys(settings[name]?.projects ?? {}).length > 0)
+  );
+}
+
 /** Read `settings.json`, or null when missing or unreadable. */
 export function readLegacySettings(configDir: string): ProjectSettings | null {
   const path = join(configDir, "settings.json");
@@ -126,14 +172,20 @@ export async function migrateLegacyCheckout(
   const legacyEnv = join(legacyDir, ".env");
   // Sign-in and license cache move even for a checkout that is not registered.
   moveLegacyStateFiles(legacyDir, resolveWorkspaceDir());
-  if (!existsSync(legacyEnv)) return { migrated: false };
+  const legacySettings = readLegacySettings(legacyDir);
+  const hasEnv = existsSync(legacyEnv);
+  // Committed tracker settings alone also register the checkout, so their
+  // status names are not lost now that settings.json is no longer read.
+  if (!hasEnv && !hasTrackerSections(legacySettings)) return { migrated: false };
   if (await findWorkspaceRepoForCheckout({ cwd: projectRoot })) return { migrated: false };
 
-  let envContent: string;
-  try {
-    envContent = readFileSync(legacyEnv, "utf8");
-  } catch {
-    return { migrated: false };
+  let envContent = "";
+  if (hasEnv) {
+    try {
+      envContent = readFileSync(legacyEnv, "utf8");
+    } catch {
+      return { migrated: false };
+    }
   }
 
   const quiet: WorkspaceLogFn = () => {};
@@ -153,9 +205,16 @@ export async function migrateLegacyCheckout(
 
   let trackers: string[] = [];
   try {
-    trackers = migrateTrackerSettings(registered.workspaceDir, readLegacySettings(legacyDir));
+    trackers = migrateTrackerSettings(registered.workspaceDir, legacySettings);
   } catch (error) {
     log(`⚠️  Could not copy tracker settings into workspace.toml: ${(error as Error).message}`);
+  }
+
+  if (legacySettings?.pipeline) {
+    log(
+      `⚠️  ${join(legacyDir, "settings.json")} defines a pipeline, which is no longer read. ` +
+        "Move it to a workspace pipeline_file (see the pipelines docs).",
+    );
   }
 
   // The env content now lives in the workspace; the local copy is unused.

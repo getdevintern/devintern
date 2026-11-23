@@ -7,6 +7,7 @@ import { join } from "path";
 import { WORKER_SUBPROCESS_ENV } from "../src/lib/config/config-dir";
 import { loadWorkspaceConfig, parseWorkspaceConfig } from "../src/lib/workspace/config";
 import {
+  migrateCommittedTrackerSettings,
   migrateLegacyCheckout,
   moveLegacyCheckoutState,
 } from "../src/lib/workspace/migrate-checkout";
@@ -84,17 +85,26 @@ describe("migrateLegacyCheckout", () => {
     expect((await migrateLegacyCheckout(checkout, silent)).migrated).toBe(false);
   });
 
-  test("does not register worker subprocesses or checkouts without a local .env", async () => {
+  test("does not register worker subprocesses or checkouts with neither a .env nor tracker settings", async () => {
     process.env[WORKER_SUBPROCESS_ENV] = "1";
     expect((await migrateLegacyCheckout(checkout, silent)).migrated).toBe(false);
     delete process.env[WORKER_SUBPROCESS_ENV];
 
     rmSync(join(checkout, ".devintern-code", ".env"));
+    rmSync(join(checkout, ".devintern-code", "settings.json"));
     expect((await migrateLegacyCheckout(checkout, silent)).migrated).toBe(false);
     // Nothing is registered, but the sign-in still moves to the workspace.
     expect(existsSync(join(workspace, "workspace.toml"))).toBe(false);
     expect(existsSync(join(workspace, "state", "code", ".auth-session.json"))).toBe(true);
     expect(existsSync(join(checkout, ".devintern-code", ".auth-session.json"))).toBe(false);
+  });
+
+  test("committed tracker settings alone register the checkout with an empty env", async () => {
+    rmSync(join(checkout, ".devintern-code", ".env"));
+    const result = await migrateLegacyCheckout(checkout, silent);
+    if (!result.migrated) throw new Error("expected a migration");
+    expect(readFileSync(result.envPath, "utf8")).toBe("");
+    expect(result.trackers).toContain("jira/DEV");
   });
 
   test("registers a checkout with a local-path remote by its directory", async () => {
@@ -119,6 +129,30 @@ describe("moveLegacyCheckoutState", () => {
     writeFileSync(join(checkout, ".devintern-code", ".auth-session.json"), "stale");
     moveLegacyCheckoutState(checkout);
     expect(readFileSync(target, "utf8")).toBe("{}");
+  });
+});
+
+describe("migrateCommittedTrackerSettings", () => {
+  test("copies a worktree's committed tracker settings once and warns about its pipeline", () => {
+    mkdirSync(workspace, { recursive: true });
+    writeFileSync(join(workspace, "workspace.toml"), '[defaults]\ntracker = "jira"\n');
+    const logs: string[] = [];
+    const log = (message: string) => void logs.push(message);
+    expect(migrateCommittedTrackerSettings(workspace, checkout, log).sort()).toEqual([
+      "github/acme/web",
+      "jira/DEV",
+      "jira/LEG",
+    ]);
+    expect(migrateCommittedTrackerSettings(workspace, checkout, log)).toEqual([]);
+    expect(logs.filter((line) => line.includes("defines a pipeline"))).toHaveLength(1);
+    expect(loadWorkspaceTrackerSettings(workspace)?.jira?.projects?.DEV?.prStatus).toBe(
+      "In Review",
+    );
+  });
+
+  test("never throws for a missing workspace or unreadable settings", () => {
+    writeFileSync(join(checkout, ".devintern-code", "settings.json"), "{not json");
+    expect(migrateCommittedTrackerSettings(workspace, checkout, silent)).toEqual([]);
   });
 });
 

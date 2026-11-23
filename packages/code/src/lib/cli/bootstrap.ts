@@ -70,9 +70,11 @@ export function findEnvFileArg(argv: readonly string[]): string | undefined {
 /**
  * Load environment variables from standard locations or a custom file.
  *
- * Searches upward from the current working directory for the nearest
- * `.devintern-code/.env`, then plain `.env`. Falls back to home directory
- * and package directory if no project config is found.
+ * Searches upward from the current working directory for the nearest plain
+ * `.env`, then falls back to the home and package directories. A checkout's
+ * legacy `.devintern-code/.env` is not read: it is moved into the workspace
+ * on first run (`migrateLegacyCheckout`), and registered checkouts take
+ * their settings from the workspace.
  *
  * @param envFile - Optional explicit `.env` path (exits on missing file)
  * @returns Path to the loaded .env file, or `null` if none was found
@@ -111,7 +113,7 @@ function loadEnvironmentInner(envFile: string | undefined, skipProjectEnv: boole
   if (isWorkerSubprocess() || skipProjectEnv) return null;
 
   // Otherwise, search upward from cwd for the nearest .env file
-  const envPath = findEnvFile({ configDirName: ".devintern-code" });
+  const envPath = findEnvFile();
 
   if (envPath) {
     config({ path: envPath });

@@ -641,7 +641,7 @@ export async function runAgentHarness(input: RunAgentHarnessOptions): Promise<vo
   let artifactUploader: LoadedArtifactUploader | undefined;
   let pipelineSteps: Awaited<ReturnType<typeof resolvePipelineSteps>>;
   try {
-    selection = selectPipelineConfig({ settings: loadProjectSettings(), cwd: process.cwd() });
+    selection = selectPipelineConfig({ cwd: process.cwd() });
     configuredPipeline = selection.config ?? verifyFallback;
     pipelineSteps = await resolvePipelineSteps(configuredPipeline, selection.baseDir);
     artifactUploader = await loadArtifactUploader(configuredPipeline?.artifacts, selection.baseDir);
