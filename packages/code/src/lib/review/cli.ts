@@ -243,7 +243,7 @@ function printAutoMergeHelp(defaultLabel: string): void {
   console.log("  --no-review            Skip the agent review; only safe-path PRs merge");
   console.log("  --method <m>           merge | squash | rebase (default: squash)");
   console.log("  --policy <p>           Review strictness: strict | standard (default: strict)");
-  console.log("  --review-instructions=<text>  Extra repo-specific rules for the review");
+  console.log("  --review-instructions <text>  Extra repo-specific rules for the review");
   console.log(
     `  --review-label <name>  Label for PRs left open for a human (default: ${defaultLabel})`,
   );
@@ -279,8 +279,8 @@ function takeFlagValue<T extends string>(
   return value as T;
 }
 
-/** Parse `devintern auto-merge` flags; `undefined` on a usage error (exit code set). */
-function parseAutoMergeArgs(
+/** Parse `devintern auto-merge` flags; `undefined` on a usage error (exit code set). Exported for tests. */
+export function parseAutoMergeArgs(
   args: string[],
   gate: MergeGateModule,
 ): AutoMergeCommandArgs | undefined {
@@ -323,6 +323,18 @@ function parseAutoMergeArgs(
     } else if (arg.startsWith("--review-instructions=")) {
       // `=` form only: the text may start with "-". Empty text adds nothing.
       policy.reviewInstructions = arg.slice("--review-instructions=".length);
+    } else if (arg === "--review-instructions") {
+      // Space form: the next token is the text. One starting with "-" is
+      // ambiguous with a flag, so it must use the `=` form instead.
+      const value = args[++i];
+      if (!value || value.startsWith("-")) {
+        console.error(
+          "Error: --review-instructions requires a value (use --review-instructions=<text> for text starting with '-')",
+        );
+        process.exitCode = 1;
+        return undefined;
+      }
+      policy.reviewInstructions = value;
     } else if (arg === "--no-review") {
       policy.review = false;
     } else if (arg === "--no-review-label") {
