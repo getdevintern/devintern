@@ -225,8 +225,17 @@ runContext.autoReviewIterationCap = (() => {
   }
 })();
 
-// Resolve the final agent harness
-const resolvedAgent = resolveAgentHarness(options.agentPath || options.claudePath);
+// Resolve the final agent harness. A missing or invalid agent CLI is a setup
+// problem, not a crash: print the resolver's message without a stack trace.
+const resolvedAgent = (() => {
+  try {
+    return resolveAgentHarness(options.agentPath || options.claudePath);
+  } catch (error) {
+    console.error(`❌ ${error instanceof Error ? error.message : String(error)}`);
+    console.error("   Run `devintern doctor` to check your setup.");
+    process.exit(1);
+  }
+})();
 runContext.resolvedAgent = resolvedAgent;
 if (options.verbose) {
   console.log(`🤖 ${resolvedAgent.harness.displayName} resolved to: ${resolvedAgent.path}`);

@@ -904,6 +904,16 @@ async function startLoggedWorkerFailover(
   });
 }
 
+function assertWorkerHasRepos(config: WorkspaceConfig, configPath: string): void {
+  if (config.repos.length > 0) return;
+  console.error(
+    `❌ No repos configured for the worker in ${configPath}.\n` +
+      "   Add [[repos]] entries without manual_only = true " +
+      "(or run `devintern worker add-repo` inside an existing repo).",
+  );
+  process.exit(1);
+}
+
 /** Reload hooks published by buildFleetEventAcquirers into the worker loop. */
 type WorkerEventReloadHooks = {
   hooks?: FleetEventReloadHooks;
@@ -917,14 +927,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   const workspaceDir = options.workspacePath ? dirname(configPath) : resolveWorkspaceDir();
   writeWorkerStartMarker(workspaceDir);
   const config = loadWorkerWorkspaceConfig(configPath);
-  if (config.repos.length === 0) {
-    console.error(
-      `❌ No repos configured for the worker in ${configPath}.\n` +
-        "   Add [[repos]] entries without manual_only = true " +
-        "(or run `devintern worker add-repo` inside an existing repo).",
-    );
-    process.exit(1);
-  }
+  assertWorkerHasRepos(config, configPath);
 
   const { multiTeam, initialQuery, intervalSeconds } = applyWorkspaceEnv(config, workspaceDir);
   const initialFleetAutomations = resolveFleetAutomations(config);
