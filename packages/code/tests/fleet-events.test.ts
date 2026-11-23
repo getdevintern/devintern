@@ -439,6 +439,40 @@ ${repoExtra}
     expect(standard).not.toBe(base);
     expect(fingerprint("", 'auto_merge_policy = "standard"')).toBe(standard);
     expect(fingerprint('auto_merge_review_instructions = "keep billing/ manual"')).not.toBe(base);
+    // Review paths re-check held PRs, and an empty list hashes like none at all.
+    expect(fingerprint("auto_merge_review_paths = []")).toBe(base);
+    const review = fingerprint('auto_merge_review_paths = ["**/AGENTS.md"]');
+    expect(review).not.toBe(base);
+    expect(fingerprint("", 'auto_merge_review_paths = ["**/AGENTS.md"]')).toBe(review);
+  });
+
+  test("the runner passes the repo's review paths to the CLI", async () => {
+    const root = join(tmpdir(), `fleet-auto-merge-review-${process.pid}-${Date.now()}`);
+    mkdirSync(root, { recursive: true });
+    const config = workspace(
+      'auto_merge_review_paths = ["**/AGENTS.md"]',
+      'auto_merge_review_paths = ["**/skills/**"]',
+    );
+    const policies: unknown[] = [];
+    const run = createFleetAutoMerge({
+      config,
+      workspaceDir: root,
+      repoManager: new FakeRepoManager(root),
+      userHasPushAccess: async () => true,
+      runAutoMerge: async (_slug, _pr, opts) => {
+        policies.push(opts.policy);
+        return { outcome: "waiting", message: "stub", reviewed: false };
+      },
+    });
+    await run("acme/backend", 1, "a".repeat(40));
+    // Hot reload picks up the workspace list once the repo override is gone.
+    config.repos = workspace("").repos;
+    await run("acme/backend", 1, "a".repeat(40));
+    expect(policies).toMatchObject([
+      { reviewPaths: ["**/skills/**"] },
+      { reviewPaths: ["**/AGENTS.md"] },
+    ]);
+    rmSync(root, { recursive: true, force: true });
   });
 
   test("the runner passes the repo's live policy and instructions to the CLI", async () => {

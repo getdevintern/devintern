@@ -236,11 +236,13 @@ function printAutoMergeHelp(defaultLabel: string): void {
   console.log("Merge a GitHub pull request when it is green, conflict-free, and safe:");
   console.log("PRs that only touch --safe-path globs merge without an agent run; other");
   console.log("PRs merge only when the agent's merge-safety review says so. A");
-  console.log("--deny-path hit (or a built-in one such as .github/**) never merges.");
+  console.log("--deny-path hit (or a built-in one such as .github/**) never merges, and a");
+  console.log("--review-path hit always goes to the review, even if it is also a safe path.");
   console.log("");
   console.log("Options:");
   console.log("  --safe-path <glob>     Safe-to-merge glob (repeatable), e.g. 'docs/**'");
   console.log("  --deny-path <glob>     Never-merge glob (repeatable)");
+  console.log("  --review-path <glob>   Always-review glob, never safe (repeatable)");
   console.log("  --no-review            Skip the agent review; only safe-path PRs merge");
   console.log("  --method <m>           merge | squash | rebase (default: squash)");
   console.log(
@@ -313,6 +315,14 @@ function applyTextFlag(arg: string, policy: AutoMergeCommandArgs["policy"]): boo
   return false;
 }
 
+/** The list a repeatable `--safe-path` / `--deny-path` / `--review-path` flag appends to. */
+function pathListFlag(arg: string, policy: AutoMergeCommandArgs["policy"]): string[] | undefined {
+  if (arg === "--safe-path") return policy.safePaths;
+  if (arg === "--deny-path") return policy.denyPaths;
+  if (arg === "--review-path") return (policy.reviewPaths ??= []);
+  return undefined;
+}
+
 function parseAutoMergeFlags(
   args: string[],
   gate: MergeGateModule,
@@ -325,6 +335,7 @@ function parseAutoMergeFlags(
     policy: {
       safePaths: [],
       denyPaths: [],
+      reviewPaths: [],
       review: true,
       method: "squash",
       reviewLabel: gate.DEFAULT_AUTO_MERGE_REVIEW_LABEL,
@@ -334,17 +345,15 @@ function parseAutoMergeFlags(
   const { policy } = parsed;
   for (let i = 0; i < args.length; i++) {
     const arg = args[i] as string;
-    if (
-      arg === "--safe-path" ||
-      arg === "--deny-path" ||
-      arg === "--expected-head" ||
-      arg === "--review-label"
-    ) {
+    const pathList = pathListFlag(arg, policy);
+    if (pathList) {
       const value = takeFlagValue(arg, args[++i]);
       if (value === undefined) return undefined;
-      if (arg === "--safe-path") policy.safePaths.push(value);
-      else if (arg === "--deny-path") policy.denyPaths.push(value);
-      else if (arg === "--review-label") policy.reviewLabel = value;
+      pathList.push(value);
+    } else if (arg === "--expected-head" || arg === "--review-label") {
+      const value = takeFlagValue(arg, args[++i]);
+      if (value === undefined) return undefined;
+      if (arg === "--review-label") policy.reviewLabel = value;
       else parsed.expectedHeadSha = value;
     } else if (arg === "--method") {
       const value = takeFlagValue(arg, args[++i], gate.AUTO_MERGE_METHODS);

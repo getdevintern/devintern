@@ -375,6 +375,45 @@ describe("autoMergePr", () => {
     expect(github.comments[0]).toContain("`auto_merge_review`");
   });
 
+  test("review disabled leaves a review-path PR open, naming the review paths", async () => {
+    const github = fakeGitHub([file("README.md"), file("AGENTS.md")]);
+    const opts = options(github, {
+      policy: { ...basePolicy, review: false, reviewPaths: ["**/AGENTS.md"] },
+    });
+    const result = await autoMergePr(URL, opts);
+    expect(result).toMatchObject({ outcome: "rejected", reviewed: false });
+    expect(github.merges).toHaveLength(0);
+    expect(opts.agentCalls).toHaveLength(0);
+    expect(github.comments[0]).toContain("match `auto_merge_review_paths`");
+    expect(github.comments[0]).toContain("- `AGENTS.md`");
+    expect(github.comments[0]).not.toContain("outside the workspace's safe paths");
+    expect(github.labels).toEqual(["+needs-human-review"]);
+  });
+
+  test("a review-path file that also matches a safe path goes to the agent", async () => {
+    const policy = { ...basePolicy, reviewPaths: ["**/AGENTS.md"] };
+    const merged = fakeGitHub([file("README.md"), file("pkg/AGENTS.md"), file("src/x.ts")]);
+    const opts = options(merged, { policy });
+    expect(await autoMergePr(URL, opts)).toMatchObject({ outcome: "merged", reviewed: true });
+    expect(opts.agentCalls).toHaveLength(1);
+    const prompt = opts.agentCalls[0] as string;
+    const [outsidePart, alwaysPart] = prompt.split("the operator always sends to review");
+    expect(outsidePart).toContain("- src/x.ts");
+    expect(outsidePart).not.toContain("- pkg/AGENTS.md");
+    expect(alwaysPart).toContain("- pkg/AGENTS.md");
+    expect(prompt).not.toContain("- README.md");
+
+    const held = fakeGitHub([file("pkg/AGENTS.md")]);
+    await autoMergePr(
+      URL,
+      options(held, { policy, verdict: '{"safe": false, "reason": "changes agent rules"}' }),
+    );
+    expect(held.merges).toHaveLength(0);
+    expect(held.comments[0]).toContain("changes agent rules");
+    expect(held.comments[0]).toContain("match `auto_merge_review_paths`");
+    expect(held.comments[0]).toContain("- `pkg/AGENTS.md`");
+  });
+
   test("a deny-path hit rejects even when the agent would approve", async () => {
     const github = fakeGitHub([file("src/x.ts"), file("db/migrations/001.sql")]);
     const opts = options(github, { policy: { ...basePolicy, denyPaths: ["db/migrations/**"] } });

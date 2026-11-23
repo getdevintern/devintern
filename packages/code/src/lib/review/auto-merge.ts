@@ -7,9 +7,10 @@
  *    it mergeable with passing checks (`mergeable_state` `clean`/`has_hooks`),
  *    and no reviewer's latest review requests changes.
  * 1. Path policy (deterministic, `merge-gate.ts`): a deny-glob hit blocks the
- *    merge outright; a PR touching only safe globs merges with no agent run.
- * 2. Agent review (optional): PRs that touch anything outside the safe globs
- *    merge only on an explicit `"safe": true` verdict. A missing, malformed,
+ *    merge outright; a PR touching only safe globs (and no review glob)
+ *    merges with no agent run.
+ * 2. Agent review (optional): PRs that touch anything outside the safe globs,
+ *    or any review glob, merge only on an explicit `"safe": true` verdict. A missing, malformed,
  *    or negative verdict never merges.
  *
  * The merge call is pinned to the evaluated head SHA, and the PR is
@@ -284,6 +285,12 @@ export function operatorInstructionsSection(instructions: string | undefined): s
   ].join("\n");
 }
 
+/** A framed list of changed paths, or `(none)` when empty. */
+function changedPathsBlock(paths: readonly string[]): string {
+  if (paths.length === 0) return "(none)";
+  return untrustedContentBlock(paths.map((path) => `- ${path}`).join("\n"), "changed paths");
+}
+
 /**
  * Build the agent's merge-safety prompt: the fixed bundled frame around the
  * policy's rubric (a bundled preset, or the operator's `custom` rules).
@@ -292,7 +299,10 @@ export function buildMergeSafetyPrompt(options: {
   repository: string;
   prNumber: number;
   title: string;
+  /** Changed paths outside the safe globs. */
   reviewPaths: string[];
+  /** Changed paths matching `auto_merge_review_paths` (always reviewed). */
+  alwaysReviewPaths?: string[];
   diff: string;
   /** Review strictness; defaults to `strict`. */
   policy?: MergeSafetyPolicy;
@@ -314,10 +324,8 @@ export function buildMergeSafetyPrompt(options: {
       repository: options.repository,
       prNumber: String(options.prNumber),
       prTitle: untrustedContentBlock(options.title, "pull request title"),
-      reviewPaths: untrustedContentBlock(
-        options.reviewPaths.map((path) => `- ${path}`).join("\n"),
-        "changed paths",
-      ),
+      reviewPaths: changedPathsBlock(options.reviewPaths),
+      alwaysReviewPaths: changedPathsBlock(options.alwaysReviewPaths ?? []),
       prDiff: untrustedContentBlock(`\`\`\`diff\n${options.diff}\n\`\`\``, "pull request diff"),
       operatorSection: operatorInstructionsSection(options.instructions),
     },
@@ -426,11 +434,14 @@ async function decideMerge(ctx: GateContext): Promise<MergeDecision> {
     console.log(`✅ ${baseRepo}#${prNumber}: ${reason}; no agent review needed`);
     return { kind: "merge", reason, viaReview: false, reviewed: false };
   }
+  const { outside, reviewMatches } = classification;
+  // A review-path match goes to its own prompt list, even if it is also outside the safe paths.
+  const outsideSafe = outside.filter((path) => !reviewMatches.includes(path));
   if (!policy.review) {
     return leaveOpen(
-      `${classification.outside.length} changed path(s) outside the safe paths ` +
-        `(e.g. ${classification.outside[0]}) and agent review is disabled`,
-      { kind: "outside-safe-paths", paths: classification.outside },
+      `${outside.length} changed path(s) need review (e.g. ${outside[0]}) ` +
+        "and agent review is disabled",
+      { kind: "outside-safe-paths", paths: outsideSafe, reviewPathMatches: reviewMatches },
     );
   }
 
@@ -457,8 +468,8 @@ async function decideMerge(ctx: GateContext): Promise<MergeDecision> {
     return leaveOpen(detail, { kind: "not-evaluable", detail });
   }
   console.log(
-    `🔎 ${baseRepo}#${prNumber}: ${classification.outside.length} path(s) outside the safe ` +
-      "paths; asking the agent",
+    `🔎 ${baseRepo}#${prNumber}: ${outsideSafe.length} path(s) outside the safe paths, ` +
+      `${reviewMatches.length} matching review paths; asking the agent`,
   );
   const verdict = await reviewWithAgent({
     options,
@@ -468,7 +479,8 @@ async function decideMerge(ctx: GateContext): Promise<MergeDecision> {
       repository: baseRepo,
       prNumber,
       title: pr.title,
-      reviewPaths: classification.outside,
+      reviewPaths: outsideSafe,
+      alwaysReviewPaths: reviewMatches,
       diff,
       policy: reviewPolicy,
       instructions: policy.reviewInstructions,
@@ -479,7 +491,12 @@ async function decideMerge(ctx: GateContext): Promise<MergeDecision> {
   if (!verdict.safe) {
     return leaveOpen(
       `agent review: ${verdict.reason}`,
-      { kind: "agent-unsafe", reason: verdict.reason, policy: policyLabel },
+      {
+        kind: "agent-unsafe",
+        reason: verdict.reason,
+        policy: policyLabel,
+        ...(reviewMatches.length > 0 ? { reviewPathMatches: reviewMatches } : {}),
+      },
       true,
     );
   }

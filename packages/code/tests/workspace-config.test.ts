@@ -1134,6 +1134,7 @@ remote = "git@github.com:acme/api.git"
       review: true,
       safePaths: [],
       denyPaths: [],
+      reviewPaths: [],
       reviewLabel: "needs-human-review",
       policy: "strict",
     });
@@ -1178,6 +1179,7 @@ remote = "git@github.com:acme/web.git"
       review: false,
       safePaths: ["**/*.md", "docs/"],
       denyPaths: ["db/migrations/**"],
+      reviewPaths: [],
       reviewLabel: "needs-human-review",
       policy: "strict",
       agent: { model: "sonnet" },
@@ -1186,11 +1188,61 @@ remote = "git@github.com:acme/web.git"
     expect(autoMergePathsFor(config.workspace.autoMerge, api!)).toEqual({
       safePaths: ["e2e/**"],
       denyPaths: ["db/migrations/**"],
+      reviewPaths: [],
     });
     expect(autoMergePathsFor(config.workspace.autoMerge, web!)).toEqual({
       safePaths: ["**/*.md", "docs/"],
       denyPaths: ["db/migrations/**"],
+      reviewPaths: [],
     });
+  });
+
+  test("auto_merge_review_paths: workspace list, per-repo replacement, and validation", () => {
+    const config = parseWorkspaceConfig(`
+[workspace]
+auto_merge_safe_paths = ["**/*.md"]
+auto_merge_review_paths = ["**/AGENTS.md", "**/skills/**"]
+
+[defaults]
+tracker = "jira"
+
+[[repos]]
+name = "api"
+remote = "git@github.com:acme/api.git"
+auto_merge_review_paths = ["prompts/"]
+
+[[repos]]
+name = "web"
+remote = "git@github.com:acme/web.git"
+
+[[repos]]
+name = "docs"
+remote = "git@github.com:acme/docs.git"
+auto_merge_review_paths = []
+`);
+    const settings = config.workspace.autoMerge;
+    expect(settings.reviewPaths).toEqual(["**/AGENTS.md", "**/skills/**"]);
+    const [api, web, docs] = config.repos;
+    expect(api?.autoMergeReviewPaths).toEqual(["prompts/"]);
+    expect(web).not.toHaveProperty("autoMergeReviewPaths");
+    // Per-repo lists replace the workspace list; they are not merged.
+    expect(autoMergePathsFor(settings, api!).reviewPaths).toEqual(["prompts/"]);
+    expect(autoMergePathsFor(settings, web!).reviewPaths).toEqual(["**/AGENTS.md", "**/skills/**"]);
+    expect(autoMergePathsFor(settings, docs!).reviewPaths).toEqual([]);
+
+    const invalid = (snippet: string) => () => parseWorkspaceConfig(`${snippet}\n${base}`);
+    expect(invalid('[workspace]\nauto_merge_review_paths = "AGENTS.md"')).toThrow(
+      /auto_merge_review_paths/,
+    );
+    expect(invalid("[workspace]\nauto_merge_review_paths = [1]")).toThrow(
+      /auto_merge_review_paths/,
+    );
+    expect(invalid('[workspace]\nauto_merge_review_paths = ["../x/**"]')).toThrow(
+      /auto_merge_review_paths entry "..\/x\/\*\*" must be a repo-relative glob/,
+    );
+    expect(() => parseWorkspaceConfig(`${base}auto_merge_review_paths = "AGENTS.md"\n`)).toThrow(
+      /\[\[repos\]\]\[0\]\.auto_merge_review_paths must be an array/,
+    );
   });
 
   test("auto_merge_policy and review instructions: workspace values with per-repo overrides", () => {

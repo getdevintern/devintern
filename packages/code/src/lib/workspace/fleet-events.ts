@@ -293,7 +293,8 @@ export function createFleetResolveConflicts(
 }
 
 /**
- * Fingerprint of the auto-merge policy that decides a repo's PRs (paths,
+ * Fingerprint of the auto-merge policy that decides a repo's PRs (safe, deny,
+ * and review paths,
  * review switch, review policy, operator instructions, and `custom` rules,
  * including the current contents of a rules file; not the merge method or
  * review label, which don't change the decision, so renaming the label
@@ -308,9 +309,13 @@ export function fleetAutoMergePolicyFingerprint(
 ): string {
   const settings = config.workspace.autoMerge;
   const repo = repoBySlug(config, slug);
-  const paths = repo
+  const { reviewPaths, ...paths } = repo
     ? autoMergePathsFor(settings, repo)
-    : { safePaths: settings.safePaths, denyPaths: settings.denyPaths };
+    : {
+        safePaths: settings.safePaths,
+        denyPaths: settings.denyPaths,
+        reviewPaths: settings.reviewPaths,
+      };
   const review = autoMergeReviewFor(settings, repo ?? {}, workspaceDir);
   let rules: string | undefined = review.rules;
   if (review.rulesFile) {
@@ -321,6 +326,8 @@ export function fleetAutoMergePolicyFingerprint(
   // does not re-evaluate every PR.
   const material = JSON.stringify({
     ...paths,
+    // Only when set, so workspaces without review paths hash as before.
+    ...(reviewPaths.length > 0 ? { reviewPaths } : {}),
     review: settings.review,
     ...(review.reviewPolicy === DEFAULT_MERGE_SAFETY_POLICY
       ? {}
