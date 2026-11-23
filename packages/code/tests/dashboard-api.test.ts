@@ -115,7 +115,7 @@ describe("dashboard API", () => {
     store: RunStore,
     options: {
       taskKey?: string;
-      origin?: "task" | "pr_mention" | "scheduled";
+      origin?: "task" | "pr_mention" | "scheduled" | "auto_merge" | "conflict_resolution";
       automationId?: string;
       harness?: string;
       status?: "succeeded" | "failed" | "escalated" | "abandoned" | "deferred";
@@ -279,6 +279,77 @@ describe("dashboard API", () => {
     expect(harness?.succeeded).toBe(2);
     expect(harness?.failed).toBe(1);
     expect(harness?.escalated).toBe(1);
+  });
+
+  test("handleStats keeps auto-merge gate verdicts out of the headline and harness rows", () => {
+    const store = new RunStore(dbPath);
+    seedRun(store, { status: "succeeded", prUrl: "https://github.com/a/b/pull/1" });
+    seedRun(store, { status: "succeeded" });
+    seedRun(store, { status: "succeeded", origin: "conflict_resolution" });
+    seedRun(store, { status: "escalated" });
+    seedRun(store, { status: "failed", origin: "pr_mention" });
+    seedRun(store, { status: "succeeded", origin: "auto_merge" });
+    seedRun(store, { status: "escalated", origin: "auto_merge" });
+    seedRun(store, { status: "escalated", origin: "auto_merge" });
+    seedRun(store, { status: "escalated", origin: "auto_merge" });
+    seedRun(store, { status: "failed", origin: "auto_merge" });
+    seedRun(store, { status: "deferred", origin: "auto_merge" });
+    store.close();
+
+    const { stats } = handleStats(data, new URLSearchParams("window=7d")).body as {
+      stats: RunStats;
+    };
+    // Totals and byOrigin still count every run.
+    expect(stats.totals.runs).toBe(11);
+    expect(stats.totals.byStatus.escalated).toBe(4);
+    expect(stats.totals.byStatus.succeeded).toBe(4);
+    expect(stats.byOrigin.auto_merge).toBe(6);
+    expect(stats.byOrigin.task).toBe(3);
+    // Headline rates: 5 non-auto-merge terminal runs, 3 succeeded, 1 escalated.
+    expect(stats.rateBasis).toEqual({ terminal: 5, succeeded: 3, escalated: 1 });
+    expect(stats.successRate).toBeCloseTo(3 / 5);
+    expect(stats.escalationRate).toBeCloseTo(1 / 5);
+    expect(stats.byOriginStatus.auto_merge).toEqual({
+      succeeded: 1,
+      failed: 1,
+      escalated: 3,
+      abandoned: 0,
+    });
+    expect(stats.byOriginStatus.task).toEqual({
+      succeeded: 2,
+      failed: 0,
+      escalated: 1,
+      abandoned: 0,
+    });
+    expect(stats.byOriginStatus.pr_mention.failed).toBe(1);
+    expect(stats.byOriginStatus.scheduled).toEqual({
+      succeeded: 0,
+      failed: 0,
+      escalated: 0,
+      abandoned: 0,
+    });
+
+    const harness = stats.byHarness.find((h) => h.harness === "claude-code");
+    expect(harness).toEqual(
+      expect.objectContaining({ runs: 5, succeeded: 3, failed: 1, escalated: 1 }),
+    );
+  });
+
+  test("handleStats with only auto-merge runs has no headline rates", () => {
+    const store = new RunStore(dbPath);
+    seedRun(store, { status: "succeeded", origin: "auto_merge" });
+    seedRun(store, { status: "escalated", origin: "auto_merge" });
+    store.close();
+
+    const { stats } = handleStats(data, new URLSearchParams("window=7d")).body as {
+      stats: RunStats;
+    };
+    expect(stats.successRate).toBeNull();
+    expect(stats.escalationRate).toBeNull();
+    expect(stats.totals.runs).toBe(2);
+    expect(stats.byHarness).toEqual([]);
+    expect(stats.byOriginStatus.auto_merge.succeeded).toBe(1);
+    expect(stats.byOriginStatus.auto_merge.escalated).toBe(1);
   });
 
   test("handleStats respects the window and rejects invalid ones", () => {
