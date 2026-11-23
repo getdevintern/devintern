@@ -222,7 +222,8 @@ async function runWorkerInitSubcommand(args: string[]): Promise<never> {
   if (!isInteractive(args, process.stdin)) {
     console.log("❌ 'devintern worker init' is interactive; run it in a terminal.");
     console.log("   Non-interactive setup: `devintern worker scaffold` + `worker add-repo`,");
-    console.log("   set [defaults].task_query in workspace.toml, then `devintern worker`.");
+    console.log("   set [defaults].tracker and task_query in workspace.toml,");
+    console.log("   check readiness with `devintern worker doctor`, then run `devintern worker`.");
     process.exit(1);
   }
   const trackerManager = new TaskTrackerManager();

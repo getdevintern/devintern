@@ -904,6 +904,12 @@ async function startLoggedWorkerFailover(
   });
 }
 
+/** Hooks published by buildFleetEventAcquirers and invoked on config reload. */
+type EventReloadHooksSlot = {
+  hooks?: FleetEventReloadHooks;
+  verifyRelayRepos?: () => Promise<void>;
+};
+
 export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Promise<void> {
   const configPath = options.workspacePath
     ? resolve(options.workspacePath)
@@ -1031,10 +1037,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   // Cadence reconciliation: applied on successful reloads of poll_interval.
   const intervalUpdaters: Array<(seconds: number) => void> = [];
   // Reload hooks published by buildFleetEventAcquirers (mention sweeps).
-  const eventReloadHooks: {
-    hooks?: FleetEventReloadHooks;
-    verifyRelayRepos?: () => Promise<void>;
-  } = {};
+  const eventReloadHooks: EventReloadHooksSlot = {};
   let pollIntervalSeconds = config.defaults.pollIntervalSeconds;
 
   // Always assemble the estimation scheduler so entries can be added to an
