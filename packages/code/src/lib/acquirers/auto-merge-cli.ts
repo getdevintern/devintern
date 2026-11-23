@@ -61,6 +61,9 @@ export function autoMergeCliArgs(
     "--method",
     policy.method,
     ...(policy.review ? [] : ["--no-review"]),
+    ...(policy.reviewPolicy ? ["--policy", policy.reviewPolicy] : []),
+    // `=` form: the text may start with "-" (a bullet list).
+    ...(policy.reviewInstructions ? [`--review-instructions=${policy.reviewInstructions}`] : []),
     ...policy.safePaths.flatMap((glob) => ["--safe-path", glob]),
     ...policy.denyPaths.flatMap((glob) => ["--deny-path", glob]),
     // Unset keeps the CLI default label; empty disables labeling.

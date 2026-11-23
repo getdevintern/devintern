@@ -21,6 +21,20 @@ export type AutoMergeMethod = "merge" | "squash" | "rebase";
 
 export const AUTO_MERGE_METHODS: readonly AutoMergeMethod[] = ["merge", "squash", "rebase"];
 
+/**
+ * How strict the merge-safety agent review is (`auto_merge_policy`):
+ * - `strict` (default): any runtime behavior change is unsafe.
+ * - `standard`: tested behavior changes may merge; a fixed keep-list of
+ *   high-risk categories (auto-merge machinery, CI/release, safety nets,
+ *   auth, sandbox, destructive effects, default flips, dependencies) still
+ *   needs a human.
+ */
+export type MergeSafetyPolicy = "strict" | "standard";
+
+export const MERGE_SAFETY_POLICIES: readonly MergeSafetyPolicy[] = ["strict", "standard"];
+
+export const DEFAULT_MERGE_SAFETY_POLICY: MergeSafetyPolicy = "strict";
+
 /** Default label for PRs auto-merge leaves open (`auto_merge_review_label`). */
 export const DEFAULT_AUTO_MERGE_REVIEW_LABEL = "needs-human-review";
 

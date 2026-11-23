@@ -19,8 +19,8 @@ import type { DependencyMode } from "../dependencies/gate";
 import { parseAgentSelection } from "../agent/selection";
 import type { HarnessPinnedEntry } from "../agent/selection";
 import { parseDashboardAllowedOriginList } from "../observability/dashboard-origins";
-import { AUTO_MERGE_METHODS } from "../review/merge-gate";
-import type { AutoMergeMethod } from "../review/merge-gate";
+import { AUTO_MERGE_METHODS, DEFAULT_MERGE_SAFETY_POLICY } from "../review/merge-gate";
+import type { AutoMergeMethod, MergeSafetyPolicy } from "../review/merge-gate";
 import type {
   ConflictResolutionMode,
   WorkspaceExecutionIsolation,
@@ -44,6 +44,8 @@ import {
   readEnvTable,
   readGlobList,
   readReviewLabel,
+  readMergeSafetyPolicy,
+  readReviewInstructions,
 } from "./config-readers";
 
 export type {
@@ -353,6 +355,7 @@ function parseAutoMergePolicy(
     }
   }
   const agent = parseAgentSelection(workspaceTable, { label, keyPrefix: "auto_merge_" }, errors);
+  const reviewInstructions = readReviewInstructions(workspaceTable, label, errors);
   return {
     enabled,
     method,
@@ -360,6 +363,8 @@ function parseAutoMergePolicy(
     safePaths: readGlobList(workspaceTable, "auto_merge_safe_paths", label, errors),
     denyPaths: readGlobList(workspaceTable, "auto_merge_deny_paths", label, errors),
     reviewLabel: readReviewLabel(workspaceTable, label, errors),
+    policy: readMergeSafetyPolicy(workspaceTable, label, errors) ?? DEFAULT_MERGE_SAFETY_POLICY,
+    ...(reviewInstructions ? { reviewInstructions } : {}),
     ...(Object.keys(agent).length > 0 ? { agent } : {}),
   };
 }
@@ -568,6 +573,8 @@ function parseReposSection(
       ...(table.auto_merge_deny_paths === undefined
         ? {}
         : { autoMergeDenyPaths: readGlobList(table, "auto_merge_deny_paths", label, errors) }),
+      ...optionalEntry("autoMergePolicy", readMergeSafetyPolicy(table, label, errors)),
+      ...optionalEntry("autoMergeReviewInstructions", readReviewInstructions(table, label, errors)),
       envFile: readString(table, "env_file", label, errors),
       ...(syncTeamPrs === undefined ? {} : { syncTeamPrs }),
       ...(manualOnly === true ? { manualOnly } : {}),
@@ -955,6 +962,23 @@ export function harnessPinnedJobs(config: WorkspaceConfig): HarnessPinnedEntry[]
     { id: "conflict resolution", harness: config.workspace.conflictAgent?.harness },
     { id: "auto-merge review", harness: config.workspace.autoMerge.agent?.harness },
   ];
+}
+
+/** `{ [key]: value }`, or `{}` when the value is unset. */
+function optionalEntry<K extends string, V>(key: K, value: V | undefined): Partial<Record<K, V>> {
+  return value === undefined ? {} : ({ [key]: value } as Record<K, V>);
+}
+
+/** Effective merge-safety review settings for one repository (repo values replace workspace ones). */
+export function autoMergeReviewFor(
+  settings: AutoMergeSettings,
+  repo: Pick<RepoConfig, "autoMergePolicy" | "autoMergeReviewInstructions">,
+): { reviewPolicy: MergeSafetyPolicy; reviewInstructions?: string } {
+  const instructions = repo.autoMergeReviewInstructions ?? settings.reviewInstructions;
+  return {
+    reviewPolicy: repo.autoMergePolicy ?? settings.policy,
+    ...(instructions ? { reviewInstructions: instructions } : {}),
+  };
 }
 
 /** Effective auto-merge path policy for one repository (repo lists replace workspace lists). */

@@ -217,34 +217,87 @@ export async function runResolveConflictsCommand(args: string[]): Promise<void> 
   }
 }
 
-/**
- * `devintern auto-merge <pr-url>` — merge a PR when it passes the auto-merge
- * gates (preconditions, path policy, optional agent review). Also invoked by
- * the worker for its own PRs with the workspace's policy as flags.
- */
-export async function runAutoMergeCommand(args: string[]): Promise<void> {
-  const { AUTO_MERGE_METHODS, DEFAULT_AUTO_MERGE_REVIEW_LABEL } = await import("./merge-gate");
-  type Method = (typeof AUTO_MERGE_METHODS)[number];
-  let prUrl: string | undefined;
-  let expectedHeadSha: string | undefined;
-  let dryRun = false;
-  let lastAttempt = false;
-  let review = true;
-  let verbose = false;
-  let method: Method = "squash";
-  let reviewLabel = DEFAULT_AUTO_MERGE_REVIEW_LABEL;
-  const safePaths: string[] = [];
-  const denyPaths: string[] = [];
+type MergeGateModule = typeof import("./merge-gate");
 
-  const takeValue = (flag: string, value: string | undefined): string | undefined => {
-    if (!value || value.startsWith("-")) {
-      console.error(`Error: ${flag} requires a value`);
-      process.exitCode = 1;
-      return undefined;
-    }
-    return value;
+/** Flags of `devintern auto-merge`, parsed. */
+interface AutoMergeCommandArgs {
+  prUrl?: string;
+  expectedHeadSha?: string;
+  dryRun: boolean;
+  lastAttempt: boolean;
+  verbose: boolean;
+  policy: import("./auto-merge").AutoMergePolicy;
+}
+
+function printAutoMergeHelp(defaultLabel: string): void {
+  console.log("Usage: devintern auto-merge <pr-url> [options]");
+  console.log("");
+  console.log("Merge a GitHub pull request when it is green, conflict-free, and safe:");
+  console.log("PRs that only touch --safe-path globs merge without an agent run; other");
+  console.log("PRs merge only when the agent's merge-safety review says so. A");
+  console.log("--deny-path hit (or a built-in one such as .github/**) never merges.");
+  console.log("");
+  console.log("Options:");
+  console.log("  --safe-path <glob>     Safe-to-merge glob (repeatable), e.g. 'docs/**'");
+  console.log("  --deny-path <glob>     Never-merge glob (repeatable)");
+  console.log("  --no-review            Skip the agent review; only safe-path PRs merge");
+  console.log("  --method <m>           merge | squash | rebase (default: squash)");
+  console.log("  --policy <p>           Review strictness: strict | standard (default: strict)");
+  console.log("  --review-instructions <text>  Extra repo-specific rules for the review");
+  console.log(
+    `  --review-label <name>  Label for PRs left open for a human (default: ${defaultLabel})`,
+  );
+  console.log("  --no-review-label      Don't label PRs left open");
+  console.log(
+    "  --dry-run              Evaluate every gate, including the review, but don't merge",
+  );
+  console.log("  -v, --verbose          Enable verbose logging");
+  console.log("  -h, --help             Display this help message");
+  console.log("");
+  console.log("Examples:");
+  console.log(
+    "  devintern auto-merge https://github.com/owner/repo/pull/123 --safe-path '**/*.md' --dry-run",
+  );
+}
+
+/** A flag's value; `undefined` (with exit code 1) when missing or not a valid choice. */
+function takeFlagValue<T extends string>(
+  flag: string,
+  value: string | undefined,
+  choices?: readonly T[],
+): T | undefined {
+  if (!value || value.startsWith("-")) {
+    console.error(`Error: ${flag} requires a value`);
+    process.exitCode = 1;
+    return undefined;
+  }
+  if (choices && !(choices as readonly string[]).includes(value)) {
+    console.error(`Error: ${flag} must be one of ${choices.join(", ")}`);
+    process.exitCode = 1;
+    return undefined;
+  }
+  return value as T;
+}
+
+/** Parse `devintern auto-merge` flags; `undefined` on a usage error (exit code set). Exported for tests. */
+export function parseAutoMergeArgs(
+  args: string[],
+  gate: MergeGateModule,
+): AutoMergeCommandArgs | undefined {
+  const parsed: AutoMergeCommandArgs = {
+    dryRun: false,
+    lastAttempt: false,
+    verbose: false,
+    policy: {
+      safePaths: [],
+      denyPaths: [],
+      review: true,
+      method: "squash",
+      reviewLabel: gate.DEFAULT_AUTO_MERGE_REVIEW_LABEL,
+      reviewPolicy: gate.DEFAULT_MERGE_SAFETY_POLICY,
+    },
   };
-
+  const { policy } = parsed;
   for (let i = 0; i < args.length; i++) {
     const arg = args[i] as string;
     if (
@@ -253,64 +306,65 @@ export async function runAutoMergeCommand(args: string[]): Promise<void> {
       arg === "--expected-head" ||
       arg === "--review-label"
     ) {
-      const value = takeValue(arg, args[++i]);
-      if (value === undefined) return;
-      if (arg === "--safe-path") safePaths.push(value);
-      else if (arg === "--deny-path") denyPaths.push(value);
-      else if (arg === "--review-label") reviewLabel = value;
-      else expectedHeadSha = value;
+      const value = takeFlagValue(arg, args[++i]);
+      if (value === undefined) return undefined;
+      if (arg === "--safe-path") policy.safePaths.push(value);
+      else if (arg === "--deny-path") policy.denyPaths.push(value);
+      else if (arg === "--review-label") policy.reviewLabel = value;
+      else parsed.expectedHeadSha = value;
     } else if (arg === "--method") {
-      const value = takeValue(arg, args[++i]);
-      if (value === undefined) return;
-      if (!(AUTO_MERGE_METHODS as readonly string[]).includes(value)) {
-        console.error(`Error: --method must be one of ${AUTO_MERGE_METHODS.join(", ")}`);
+      const value = takeFlagValue(arg, args[++i], gate.AUTO_MERGE_METHODS);
+      if (value === undefined) return undefined;
+      policy.method = value;
+    } else if (arg === "--policy") {
+      const value = takeFlagValue(arg, args[++i], gate.MERGE_SAFETY_POLICIES);
+      if (value === undefined) return undefined;
+      policy.reviewPolicy = value;
+    } else if (arg.startsWith("--review-instructions=")) {
+      // `=` form only: the text may start with "-". Empty text adds nothing.
+      policy.reviewInstructions = arg.slice("--review-instructions=".length);
+    } else if (arg === "--review-instructions") {
+      // Space form: the next token is the text. One starting with "-" is
+      // ambiguous with a flag, so it must use the `=` form instead.
+      const value = args[++i];
+      if (!value || value.startsWith("-")) {
+        console.error(
+          "Error: --review-instructions requires a value (use --review-instructions=<text> for text starting with '-')",
+        );
         process.exitCode = 1;
-        return;
+        return undefined;
       }
-      method = value as Method;
+      policy.reviewInstructions = value;
     } else if (arg === "--no-review") {
-      review = false;
+      policy.review = false;
     } else if (arg === "--no-review-label") {
-      reviewLabel = "";
+      policy.reviewLabel = "";
     } else if (arg === "--dry-run") {
-      dryRun = true;
+      parsed.dryRun = true;
     } else if (arg === "--last-attempt") {
       // Worker-internal: a failure on this attempt is stated on the PR.
-      lastAttempt = true;
+      parsed.lastAttempt = true;
     } else if (arg === "-v" || arg === "--verbose") {
-      verbose = true;
+      parsed.verbose = true;
     } else if (arg === "--help" || arg === "-h") {
-      console.log("Usage: devintern auto-merge <pr-url> [options]");
-      console.log("");
-      console.log("Merge a GitHub pull request when it is green, conflict-free, and safe:");
-      console.log("PRs that only touch --safe-path globs merge without an agent run; other");
-      console.log("PRs merge only when the agent's merge-safety review says so. A");
-      console.log("--deny-path hit (or a built-in one such as .github/**) never merges.");
-      console.log("");
-      console.log("Options:");
-      console.log("  --safe-path <glob>     Safe-to-merge glob (repeatable), e.g. 'docs/**'");
-      console.log("  --deny-path <glob>     Never-merge glob (repeatable)");
-      console.log("  --no-review            Skip the agent review; only safe-path PRs merge");
-      console.log("  --method <m>           merge | squash | rebase (default: squash)");
-      console.log(
-        `  --review-label <name>  Label for PRs left open for a human (default: ${DEFAULT_AUTO_MERGE_REVIEW_LABEL})`,
-      );
-      console.log("  --no-review-label      Don't label PRs left open");
-      console.log(
-        "  --dry-run              Evaluate every gate, including the review, but don't merge",
-      );
-      console.log("  -v, --verbose          Enable verbose logging");
-      console.log("  -h, --help             Display this help message");
-      console.log("");
-      console.log("Examples:");
-      console.log(
-        "  devintern auto-merge https://github.com/owner/repo/pull/123 --safe-path '**/*.md' --dry-run",
-      );
+      printAutoMergeHelp(gate.DEFAULT_AUTO_MERGE_REVIEW_LABEL);
       process.exit(0);
     } else if (!arg.startsWith("-")) {
-      prUrl = arg;
+      parsed.prUrl = arg;
     }
   }
+  return parsed;
+}
+
+/**
+ * `devintern auto-merge <pr-url>` — merge a PR when it passes the auto-merge
+ * gates (preconditions, path policy, optional agent review). Also invoked by
+ * the worker for its own PRs with the workspace's policy as flags.
+ */
+export async function runAutoMergeCommand(args: string[]): Promise<void> {
+  const parsed = parseAutoMergeArgs(args, await import("./merge-gate"));
+  if (!parsed) return;
+  const { prUrl, expectedHeadSha, dryRun, lastAttempt, verbose, policy } = parsed;
 
   if (!prUrl) {
     console.error("❌ Error: PR URL is required");
@@ -323,7 +377,7 @@ export async function runAutoMergeCommand(args: string[]): Promise<void> {
     await loadReviewEnvironment(prUrl);
     const { autoMergePr } = await import("./auto-merge");
     const result = await autoMergePr(prUrl, {
-      policy: { safePaths, denyPaths, review, method, reviewLabel },
+      policy,
       expectedHeadSha,
       dryRun,
       lastAttempt,

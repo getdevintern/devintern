@@ -11,6 +11,7 @@ import {
   DEFAULT_POLL_INTERVAL_SECONDS,
   DEFAULT_WORKTREES_TTL_DAYS,
   autoMergePathsFor,
+  autoMergeReviewFor,
   findRepo,
   loadWorkspaceConfig,
   parseWorkspaceConfig,
@@ -1134,6 +1135,7 @@ remote = "git@github.com:acme/api.git"
       safePaths: [],
       denyPaths: [],
       reviewLabel: "needs-human-review",
+      policy: "strict",
     });
   });
 
@@ -1177,6 +1179,7 @@ remote = "git@github.com:acme/web.git"
       safePaths: ["**/*.md", "docs/"],
       denyPaths: ["db/migrations/**"],
       reviewLabel: "needs-human-review",
+      policy: "strict",
       agent: { model: "sonnet" },
     });
     const [api, web] = config.repos;
@@ -1188,6 +1191,72 @@ remote = "git@github.com:acme/web.git"
       safePaths: ["**/*.md", "docs/"],
       denyPaths: ["db/migrations/**"],
     });
+  });
+
+  test("auto_merge_policy and review instructions: workspace values with per-repo overrides", () => {
+    const config = parseWorkspaceConfig(`
+[workspace]
+auto_merge_policy = "standard"
+auto_merge_review_instructions = """
+- Changes under billing/ always need a human.
+"""
+
+[defaults]
+tracker = "jira"
+
+[[repos]]
+name = "api"
+remote = "git@github.com:acme/api.git"
+auto_merge_policy = "strict"
+auto_merge_review_instructions = "Never merge schema changes."
+
+[[repos]]
+name = "web"
+remote = "git@github.com:acme/web.git"
+
+[[repos]]
+name = "docs"
+remote = "git@github.com:acme/docs.git"
+auto_merge_review_instructions = ""
+`);
+    const settings = config.workspace.autoMerge;
+    expect(settings.policy).toBe("standard");
+    expect(settings.reviewInstructions).toBe("- Changes under billing/ always need a human.");
+    const [api, web, docs] = config.repos;
+    expect(api).toMatchObject({
+      autoMergePolicy: "strict",
+      autoMergeReviewInstructions: "Never merge schema changes.",
+    });
+    expect(autoMergeReviewFor(settings, api!)).toEqual({
+      reviewPolicy: "strict",
+      reviewInstructions: "Never merge schema changes.",
+    });
+    expect(web).not.toHaveProperty("autoMergePolicy");
+    expect(autoMergeReviewFor(settings, web!)).toEqual({
+      reviewPolicy: "standard",
+      reviewInstructions: "- Changes under billing/ always need a human.",
+    });
+    // An empty per-repo string clears the workspace instructions.
+    expect(autoMergeReviewFor(settings, docs!)).toEqual({ reviewPolicy: "standard" });
+  });
+
+  test("rejects unknown auto_merge_policy values and non-string instructions", () => {
+    expect(() =>
+      parseWorkspaceConfig(`
+[workspace]
+auto_merge_policy = "relaxed"
+${base}`),
+    ).toThrow(/\[workspace\]\.auto_merge_policy must be one of: strict, standard/);
+    expect(() =>
+      parseWorkspaceConfig(`${base}auto_merge_policy = "lenient"
+`),
+    ).toThrow(/auto_merge_policy must be one of: strict, standard/);
+    expect(() =>
+      parseWorkspaceConfig(`
+[workspace]
+auto_merge_review_instructions = ["no"]
+${base}`),
+    ).toThrow(/auto_merge_review_instructions must be a string/);
   });
 
   test("rejects unknown merge methods and non-relative globs", () => {

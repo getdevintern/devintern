@@ -7,6 +7,7 @@ placeholders:
   - prTitle
   - reviewPaths
   - prDiff
+  - operatorSection
 requiredSections:
   - "## PR Information"
   - "## What Makes a Merge Unsafe"
@@ -39,7 +40,7 @@ Answer `"safe": false` if ANY of these is plausibly true:
 
 Changes that are typically safe: documentation, comments, test-only additions that do not weaken existing tests, and refactors you can prove are behavior-preserving by reading the surrounding code.
 
-The repository is checked out at the PR's head in your working directory. Read surrounding code to verify your claims instead of guessing from the diff alone. Do not modify any files.
+The repository is checked out at the PR's head in your working directory. Read surrounding code to verify your claims instead of guessing from the diff alone. Do not modify any files.{{operatorSection}}
 
 ## PR Diff
 {{prDiff}}

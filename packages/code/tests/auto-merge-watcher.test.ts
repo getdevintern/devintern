@@ -485,6 +485,18 @@ process.exit(75);
     expect(autoMergeCliArgs(policy, HEAD)).not.toContain("--review-label");
   });
 
+  test("review policy and instructions map to --policy and --review-instructions=", () => {
+    const policy = { safePaths: [], denyPaths: [], review: true, method: "squash" as const };
+    expect(autoMergeCliArgs(policy, HEAD)).not.toContain("--policy");
+    const args = autoMergeCliArgs(
+      { ...policy, reviewPolicy: "standard", reviewInstructions: "- keep billing/ manual" },
+      HEAD,
+    );
+    expect(args).toContain("--policy");
+    expect(args[args.indexOf("--policy") + 1]).toBe("standard");
+    expect(args).toContain("--review-instructions=- keep billing/ manual");
+  });
+
   test("parses the last valid result record", () => {
     expect(
       parseAutoMergeResultLine(
