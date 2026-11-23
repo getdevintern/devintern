@@ -667,7 +667,11 @@ describe("recoverOrphanedWorkspaceRuns", () => {
     injected.finish(claimedId, "done", `run #${oldRunId} already succeeded`);
 
     expect(injected.requeueSettled("local-requeued")?.status).toBe("pending");
-    expect(injected.claimNext()?.id).toBe(claimedId);
+    // Claim strictly after the old run started. With the default clock both
+    // can land in the same millisecond, and a run starting at the claim time
+    // counts as covering it, which would settle the row `done`.
+    const reclaimAt = store.getRun(oldRunId)!.startedAt + 1;
+    expect(injected.claimNext([], reclaimAt)?.id).toBe(claimedId);
 
     await recoverOrphanedInjectedTasks(injected, {
       runStore: store,

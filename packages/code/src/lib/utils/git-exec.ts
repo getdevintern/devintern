@@ -199,7 +199,18 @@ export async function remoteBranchExists(
 export const CONFIG_LOCK_ERROR = /could not lock config file/i;
 
 /** Delays between retries of a git command that lost the config lock race. */
-const CONFIG_LOCK_RETRY_DELAYS_MS = [50, 100, 200, 400, 800, 1600];
+const DEFAULT_CONFIG_LOCK_RETRY_DELAYS_MS = [50, 100, 200, 400, 800, 1600];
+let configLockRetryDelaysMs = DEFAULT_CONFIG_LOCK_RETRY_DELAYS_MS;
+
+/**
+ * Override the config-lock retry delays (same retry count, shorter waits) so
+ * tests of a lock that never clears do not wait out the production backoff.
+ *
+ * @param delaysMs - Replacement delays, or undefined to restore the defaults
+ */
+export function setConfigLockRetryDelaysForTests(delaysMs?: number[]): void {
+  configLockRetryDelaysMs = delaysMs ?? DEFAULT_CONFIG_LOCK_RETRY_DELAYS_MS;
+}
 
 /** Whether a git result reports a failed config lock (on stderr or stdout). */
 export function hasConfigLockError(result: { output?: string; error?: string }): boolean {
@@ -270,7 +281,7 @@ export async function executeGitCommandWithConfigLockRetry(
   },
 ): Promise<{ success: boolean; output: string; error?: string }> {
   let result = await Utils.executeGitCommand(args, options);
-  for (const delayMs of CONFIG_LOCK_RETRY_DELAYS_MS) {
+  for (const delayMs of configLockRetryDelaysMs) {
     if (result.success || !hasConfigLockError(result)) {
       return result;
     }

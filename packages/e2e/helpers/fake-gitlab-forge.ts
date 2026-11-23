@@ -8,6 +8,10 @@
  * target tip: a clean result is `mergeable`, and a conflicted result is
  * `conflict`. A git failure is thrown so the handler returns 500 instead of
  * a false conflict. No token, header, or body is written to the request log.
+ *
+ * With the optional `review` discussion the same MR also serves the
+ * address-review path: one unresolved reviewer discussion, plus replies posted
+ * to it. Requests no route serves get a 404 and are recorded in `unexpected`.
  */
 
 import { spawnSync } from "node:child_process";
@@ -17,10 +21,29 @@ export const FAKE_GITLAB_TOKEN = "e2e-local-forge-token";
 const PROJECT_ID = 1;
 const PROJECT_PATH = "fixture/repo";
 const USER_ID = 7;
+const REVIEWER_ID = 42;
 
 export interface ForgeRequest {
   method: string;
   path: string;
+}
+
+/** One unresolved reviewer discussion served on MR !1 (address-review path). */
+export interface FakeGitlabReviewDiscussion {
+  /** GitLab discussion id (an opaque hex string upstream). */
+  discussionId: string;
+  /** Note id of the reviewer's comment. */
+  noteId: number;
+  /** Reviewer comment body that should reach the agent prompt. */
+  body: string;
+  /** Reviewer username; never the forge's own bot user. */
+  reviewer: string;
+}
+
+/** A reply the review run posted to a served discussion. */
+export interface FakeGitlabDiscussionReply {
+  discussionId: string;
+  body: string;
 }
 
 export interface FakeGitlabForgeOptions {
@@ -34,6 +57,11 @@ export interface FakeGitlabForgeOptions {
   targetBranch: string;
   /** Expected `PRIVATE-TOKEN`. A mismatch is recorded without the value. */
   token?: string;
+  /**
+   * Serve this unresolved discussion from `merge_requests/1/discussions` and
+   * accept replies to it. Without it the MR has no discussions (conflict path).
+   */
+  review?: FakeGitlabReviewDiscussion;
 }
 
 /** Minimal local GitLab API bound to `127.0.0.1`. */
@@ -41,6 +69,10 @@ export class FakeGitlabForge {
   readonly requests: ForgeRequest[] = [];
   readonly notes: string[] = [];
   readonly authFailures: string[] = [];
+  /** Replies posted to the `review` discussion, in order. */
+  readonly discussionReplies: FakeGitlabDiscussionReply[] = [];
+  /** Requests that matched no served route (answered 404). */
+  readonly unexpected: ForgeRequest[] = [];
   readonly baseUrl: string;
   readonly mergeRequestUrl: string;
   private readonly server: ReturnType<typeof Bun.serve>;
@@ -88,7 +120,7 @@ export class FakeGitlabForge {
     }
 
     const routed = routeProject(url.pathname);
-    if (!routed) return json({ message: "not found" }, 404);
+    if (!routed) return this.notFound(request.method, path);
     try {
       return await this.routeProject(request, routed.rest);
     } catch {
@@ -103,9 +135,19 @@ export class FakeGitlabForge {
 
     const mr = rest.match(/^\/merge_requests\/1(?:\/(discussions|notes|merge))?$/);
     if (mr && request.method === "GET" && !mr[1]) return json(this.mergeRequest());
-    if (mr?.[1] === "discussions" && request.method === "GET") return json([]);
+    if (mr?.[1] === "discussions" && request.method === "GET") return json(this.discussions());
     if (mr?.[1] === "notes" && request.method === "POST") return this.postNote(request);
     if (mr?.[1] === "merge") return json({ message: "not found" }, 404);
+
+    const reply = rest.match(/^\/merge_requests\/1\/discussions\/([^/]+)\/notes$/);
+    const discussionId = reply?.[1] ? decodeURIComponent(reply[1]) : undefined;
+    if (
+      discussionId !== undefined &&
+      discussionId === this.options.review?.discussionId &&
+      request.method === "POST"
+    ) {
+      return this.postDiscussionReply(request, discussionId);
+    }
 
     const branch = rest.match(/^\/repository\/branches\/(.+)$/);
     if (branch?.[1] && request.method === "GET") {
@@ -114,7 +156,61 @@ export class FakeGitlabForge {
       return json({ name, can_push: true });
     }
 
+    const url = new URL(request.url);
+    return this.notFound(request.method, `${url.pathname}${url.search}`);
+  }
+
+  /** Strict routing: answer 404 and remember the request (method and path only). */
+  private notFound(method: string, path: string): Response {
+    this.unexpected.push({ method, path });
     return json({ message: "not found" }, 404);
+  }
+
+  private discussions(): unknown[] {
+    const review = this.options.review;
+    if (!review) return [];
+    return [
+      {
+        id: review.discussionId,
+        individual_note: false,
+        notes: [
+          {
+            id: review.noteId,
+            body: review.body,
+            author: { id: REVIEWER_ID, username: review.reviewer, state: "active" },
+            created_at: "2026-01-01T00:00:00.000Z",
+            system: false,
+            resolvable: true,
+            resolved: false,
+            position: null,
+          },
+          // Replies come from the forge's own user, which the product skips
+          // as non-human feedback.
+          ...this.discussionReplies.map((entry, index) => ({
+            id: review.noteId + index + 1,
+            body: entry.body,
+            author: { id: USER_ID, username: "e2e-bot", state: "active" },
+            created_at: "2026-01-01T00:00:01.000Z",
+            system: false,
+            resolvable: true,
+            resolved: false,
+            position: null,
+          })),
+        ],
+      },
+    ];
+  }
+
+  private async postDiscussionReply(request: Request, discussionId: string): Promise<Response> {
+    let body = "";
+    try {
+      const parsed = (await request.json()) as { body?: unknown };
+      body = typeof parsed.body === "string" ? parsed.body : "";
+    } catch {
+      body = "";
+    }
+    this.discussionReplies.push({ discussionId, body });
+    return json({ id: (this.options.review?.noteId ?? 0) + this.discussionReplies.length, body });
   }
 
   private async postNote(request: Request): Promise<Response> {

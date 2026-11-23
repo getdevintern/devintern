@@ -580,6 +580,33 @@ export class WorkerFixture {
     return { exitCode, stdout, stderr };
   }
 
+  /**
+   * Start the built CLI in the background (e.g. `worker add --wait`).
+   *
+   * `result` resolves when the process exits; `kill` force-stops it and is
+   * safe to call after exit, so tests call it in `finally`.
+   */
+  spawnCli(args: string[]): { result: Promise<WorkerAddResult>; kill: () => void } {
+    const child = Bun.spawn([process.execPath, cliPath, ...args], {
+      cwd: this.workspaceDir,
+      env: this.env,
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const result = Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]).then(([stdout, stderr, exitCode]) => ({ exitCode, stdout, stderr }));
+    return {
+      result,
+      kill: () => {
+        if (child.exitCode === null) child.kill("SIGKILL");
+      },
+    };
+  }
+
   /** Run the built CLI's `worker add` with arbitrary options. */
   runAdd(
     args: string[],
