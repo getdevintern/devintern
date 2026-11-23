@@ -1202,6 +1202,10 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       detector: source.detector,
       searchTasks: source.searchTasks,
       isTaskActionedUnchanged: (taskKey, updated) => actionedGate(taskKey, updated),
+      // A ticket the dashboard retry drain owns is never started by the poller:
+      // the retry's own transition bumps the stamp mid-run, and the actioned
+      // marker only lands as that run finishes.
+      heldTaskKeys: () => retryQueue.activeTaskKeys(source.team?.name),
       actionedSource,
       query: source.query,
       intervalSeconds,
