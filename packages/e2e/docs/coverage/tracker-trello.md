@@ -30,6 +30,22 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 - Missing: The post-PR actioned gate on Trello (the bare remote creates no PR); live board and real action-feed pagination.
 - Last reviewed: 2026-11-17
 
+### Trello worker dependency gate: a `Depends on:` card-description line holds a polled card until the blocker is archived or in a Done list
+
+- Surface: External dependency: Trello dependency links
+- Status: `default`
+- Evidence: `tests/local/worker-trello-dependencies.test.ts` (`bun run --filter @getdevintern/code build`, then `bun run --filter @devintern/e2e test`)
+- Missing: Live Trello card reads; several blockers on one line; other `Depends on:` markdown forms (headings, bold, tables), which are unit-tested only; worker-implemented blockers (merged/stacked modes) on Trello.
+- Last reviewed: 2026-11-21
+
+### Trello `Depends on:` unknown card waits as `not found`; blocker read failure fails closed
+
+- Surface: External dependency: Trello dependency links
+- Status: `default`
+- Evidence: `tests/local/worker-trello-dependencies.test.ts` (`bun run --filter @getdevintern/code build`, then `bun run --filter @devintern/e2e test`)
+- Missing: A failure on the dependent's own card read (only the blocker status read is failed); Trello's real 400 `invalid id` answer for a malformed id; retries under the default `fetchWithRetry` budget (the test sets `DEVINTERN_FETCH_MAX_RETRIES=0`).
+- Last reviewed: 2026-11-21
+
 ## Tracker plan status
 
 ### Trello
@@ -91,6 +107,8 @@ Endpoints covered:
 - `GET /boards/{id}/labels`
 - `GET` / `POST /cards`
 - `GET` / `PUT /cards/{id}` (card detail, list moves, label replacement)
+- `GET /cards/{id}?fields=…&list=true&list_fields=name` (blocker status: `closed`
+  and the nested list name; recorded per request, and switchable to an HTTP error)
 - `GET /cards/{id}/actions?filter=commentCard`
 - `POST /cards/{id}/actions/comments`
 - `GET /cards/{id}/checklists`, `POST /checklists`, `POST /checklists/{id}/checkItems`
@@ -153,4 +171,32 @@ bun run --filter @getdevintern/code build
 bun run --filter @devintern/e2e test
 # or only this suite, from packages/e2e:
 bun test tests/local/worker-trello-polling.test.ts
+```
+
+### Worker Trello dependency gate (`Depends on:`)
+
+`tests/local/worker-trello-dependencies.test.ts` starts the real `devintern worker`
+against the Trello fake with a one-second `poll_interval` and a `task_query` that
+matches only the dependent card (DEP). DEP's description names the blocker card
+(BLK) on a `Depends on:` line. The suite proves that:
+
+- While BLK sits in an open list, DEP is held over several ticks: no run record,
+  no fake-agent call, no list move, no comment. `worker queue --json` lists it as
+  a `tracker` item, `waiting`, with `dependsOn: [BLK]` and the reason
+  `BLK not done (Doing)`.
+- Moving BLK to `Done` (card URL form) or archiving it (bare short link form),
+  then editing DEP, runs DEP exactly once, and it leaves the queue.
+- A short link that matches no card waits with `not found` and logs the
+  "names blockers trello cannot find" warning.
+- When the blocker status read returns HTTP 500, DEP waits with
+  `could not read DEP's blockers from trello: …` and runs once reads recover.
+
+Prerequisites: none beyond the built CLI. No Trello account or network access is
+needed. The tests skip only when `packages/code/dist` is absent.
+
+```bash
+bun run --filter @getdevintern/code build
+bun run --filter @devintern/e2e test
+# or only this suite, from packages/e2e:
+bun test tests/local/worker-trello-dependencies.test.ts
 ```

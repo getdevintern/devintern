@@ -203,6 +203,33 @@ describe("GET /api/workspace", () => {
     expect(JSON.stringify(body)).not.toContain("ghp_unquotedsecret");
   });
 
+  test("validation errors do not echo a quoted value", () => {
+    writeFileSync(
+      join(workspaceDir, "workspace.toml"),
+      [
+        "[defaults]",
+        'tracker = "jira"',
+        "[[repos]]",
+        'name = "web"',
+        'remote = "git@github.com:acme/web.git"',
+        "[[automations]]",
+        'id = "leaky"',
+        "enabled = true",
+        'cron = "0 0 1 1 *"',
+        'prompt = "never"',
+        'repo = "ghp_pastedintowrongfield"',
+        "",
+      ].join("\n"),
+    );
+    const body = buildWorkspaceResponse(data);
+    expect(body.status).toBe("invalid");
+    if (body.status !== "invalid") return;
+    expect(body.problems).toContainEqual(
+      expect.stringContaining('.repo "…" does not match any [[repos]] name.'),
+    );
+    expect(JSON.stringify(body)).not.toContain("ghp_pastedintowrongfield");
+  });
+
   test("flags a config edited after the running worker started", () => {
     writeWorkspace();
     const startedAt = new Date(Date.now() - 60_000);

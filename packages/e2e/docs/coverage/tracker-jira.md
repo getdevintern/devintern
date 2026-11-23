@@ -46,6 +46,30 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 - Missing: PR-created actioned marker and post-PR transition on a real code host (bare remote exposes no platform); live Jira `updated` semantics.
 - Last reviewed: 2026-11-17
 
+### Jira worker dependency gate: "is blocked by" links hold a polled ticket until the blocker is done
+
+- Surface: External dependency: Jira dependency links
+- Status: `default`
+- Evidence: `tests/local/worker-jira-dependencies.test.ts` (`bun run --filter @devintern/e2e test`)
+- Missing: Live Jira `issuelinks` payloads and custom link types. Only the built-in "Blocks" and "Relates" types are modelled. The re-check backoff past the first few waits (up to 15 minutes) is not observed, because the test edits the dependent to re-check it.
+- Last reviewed: 2026-11-21
+
+### Jira blocker read failure fails closed
+
+- Surface: External dependency: Jira dependency links
+- Status: `default`
+- Evidence: `tests/local/worker-jira-dependencies.test.ts` (`bun run --filter @devintern/e2e test`)
+- Missing: Failures other than HTTP 500, such as timeouts, 401/403, or a malformed body. The test sets `DEVINTERN_FETCH_MAX_RETRIES=0`, so the retry path before the gate fails closed is not exercised.
+- Last reviewed: 2026-11-21
+
+### Jira blocker implemented by this worker releases its dependent
+
+- Surface: External dependency: Jira dependency links
+- Status: `default`
+- Evidence: `tests/local/worker-jira-dependencies.test.ts` (`bun run --filter @devintern/e2e test`)
+- Missing: Merged and stacked modes with a real PR (the bare remote has no code host, so the blocker is satisfied as `no-pr`). The failing blocker is an `escalated` run (`E2E_INCOMPLETE_PROMPT_MARKER`). Under the worker, `E2E_FAIL_PROMPT_MARKER` exits before any output, which counts as a harness that could not start: the ticket is deferred and retried every 60s and never settles a failed run, so a `failed` blocker status is not covered.
+- Last reviewed: 2026-11-21
+
 ## Tracker plan status
 
 ### Jira
@@ -224,6 +248,40 @@ In one workflow it proves:
 5. Cursor persistence. After a graceful stop and restart on the same
    workspace, the first search is the detector window from the persisted
    cursor, and nothing already processed runs again.
+
+```bash
+bun run --filter @getdevintern/code build
+bun run --filter @devintern/e2e test
+```
+
+### Worker Jira dependency gate
+
+`tests/local/worker-jira-dependencies.test.ts` starts a real `devintern worker`
+against the in-process Jira fake (`wallClock: true`, `poll_interval = 1`). The
+fake returns `fields.issuelinks` in Jira Cloud's shape: each link names the
+other issue as `inwardIssue` or `outwardIssue`, and that issue carries its
+status and status category. `linkIssues` creates links,
+`failBlockerReads` makes `GET /issue/{key}?fields=issuelinks` return HTTP 500,
+and `blockerReads` records each gate read. The test reads held-back tickets
+through `devintern worker queue --json --workspace <path>`. Three tests:
+
+1. Dependency gate. DEP is blocked by BLK, an open issue outside the query.
+   DEP is listed as a `tracker` item with `dependencyState: "waiting"`,
+   `dependsOn` containing BLK, and a reason naming BLK. Over several gate
+   evaluations it gets no run, agent call, transition, comment, or branch.
+   A ticket with only a "Relates" link and an outward "blocks" link to the
+   same open BLK runs normally. Moving BLK to Done and editing DEP runs DEP
+   exactly once.
+2. Fail closed. While blocker reads return 500, DEP waits with
+   `could not read <key>'s blockers from jira: …` and is not started. Once
+   reads recover and DEP is edited, it runs once.
+3. Blocker implemented here. BLK and DEP both match the query. BLK runs first
+   and succeeds without a PR, and DEP starts after BLK's run finished
+   (`started_at >= finished_at`) while Jira still reports BLK In Progress. A
+   second blocker that reports incomplete (`escalated`) leaves its dependent
+   `blocked` and never started.
+
+Prerequisites: none beyond the built CLI.
 
 ```bash
 bun run --filter @getdevintern/code build
