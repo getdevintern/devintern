@@ -447,19 +447,27 @@ export function ensureWorkspaceScaffold(log: WorkspaceLogFn = console.log): {
  * @returns Process exit code (0 on success).
  */
 export function runWorkerScaffold(): number {
-  const { created, configPath } = ensureWorkspaceScaffold();
+  const { created, configPath, workspaceDir } = ensureWorkspaceScaffold();
   if (!created) {
     console.error(`❌ ${configPath} already exists; refusing to overwrite.`);
     console.error("   Edit it directly, or run `devintern worker add-repo` inside a repo.");
     return 1;
   }
 
+  const envPath = workspaceEnvPath(workspaceDir);
   console.log("");
   console.log("Next steps:");
-  console.log("  1. Put shared credentials in the workspace .env");
-  console.log("  2. Run `devintern worker add-repo` inside each repo");
-  console.log("  3. Set each team repo or add [[routing.rules]] for multi-repo routing");
-  console.log("  4. Start the fleet: devintern worker");
+  console.log("  1. Run `devintern worker add-repo` inside each repo");
+  console.log(
+    "  2. In workspace.toml, set [defaults].tracker and task_query (the ready-tasks query);",
+  );
+  console.log('     no account? use tracker = "markdown" with MARKDOWN_TASKS_DIR in the .env');
+  console.log(`  3. Put that tracker's credentials (and GITHUB_TOKEN for PRs) in ${envPath}`);
+  console.log("  4. Check readiness: devintern worker doctor");
+  console.log("  5. Start the worker: devintern worker");
+  console.log(
+    "  Multiple repos? Add [[routing.rules]]; see https://devintern.com/docs/code/workspaces",
+  );
   return 0;
 }
 
