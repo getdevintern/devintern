@@ -81,19 +81,23 @@ describe("migrateLegacyCheckout", () => {
     expect((await migrateLegacyCheckout(checkout, silent)).migrated).toBe(false);
   });
 
-  test("skips worker subprocesses, unrecognised remotes, and checkouts without a local .env", async () => {
+  test("skips worker subprocesses and checkouts without a local .env", async () => {
     process.env[WORKER_SUBPROCESS_ENV] = "1";
     expect((await migrateLegacyCheckout(checkout, silent)).migrated).toBe(false);
     delete process.env[WORKER_SUBPROCESS_ENV];
 
-    git(checkout, ["remote", "set-url", "origin", join(root, "origin.git")]);
-    expect((await migrateLegacyCheckout(checkout, silent)).migrated).toBe(false);
-    expect(existsSync(join(checkout, ".devintern-code", ".env"))).toBe(true);
-    expect(existsSync(workspace)).toBe(false);
-
-    git(checkout, ["remote", "set-url", "origin", "git@github.com:acme/web.git"]);
     rmSync(join(checkout, ".devintern-code", ".env"));
     expect((await migrateLegacyCheckout(checkout, silent)).migrated).toBe(false);
+    expect(existsSync(workspace)).toBe(false);
+  });
+
+  test("registers a checkout with a local-path remote by its directory", async () => {
+    git(checkout, ["remote", "set-url", "origin", join(root, "origin.git")]);
+    const result = await migrateLegacyCheckout(checkout, silent);
+    expect(result.migrated).toBe(true);
+    const repo = loadWorkspaceConfig(join(workspace, "workspace.toml")).repos[0];
+    expect(repo?.path).toBe(checkout);
+    expect(existsSync(join(checkout, ".devintern-code", ".env"))).toBe(false);
   });
 });
 

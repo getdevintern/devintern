@@ -164,8 +164,17 @@ export interface TeamConfig {
 export interface RepoConfig {
   /** Unique name; also the directory name under `repos/` and `worktrees/`. */
   name: string;
-  /** Git remote URL the bare clone tracks. */
+  /**
+   * Git remote URL the bare clone tracks. Empty for a `manual_only` repo
+   * registered by {@link RepoConfig.path} instead.
+   */
   remote: string;
+  /**
+   * Absolute local checkout directory of a `manual_only` repo without a
+   * recognised remote (for example a fresh `git init`). Manual runs started
+   * in this directory, or below it, use this entry.
+   */
+  path?: string;
   /** Default branch task worktrees start from; falls back to `origin/HEAD`. */
   defaultBranch?: string;
   /** Labels applied to PRs created for this repo; falls back to `defaults.pr_labels`. */

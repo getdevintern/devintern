@@ -9,13 +9,13 @@ dateModified: 2026-11-18
 
 # DevIntern Code Configuration
 
-DevIntern Code keeps its settings in `~/.devintern`, outside your repositories. `devintern init` registers the current repository in `~/.devintern/workspace.toml` (as a `manual_only` repo, which the [worker](./worker.md) skips) and writes its settings to `~/.devintern/env/<repo>.env`. Each repository has its own file, so several projects can use different trackers and credentials. A repository without an `origin` remote gets `.devintern-code/.env` in the project instead.
+DevIntern Code keeps its settings in `~/.devintern`, outside your repositories. `devintern init` registers the current repository in `~/.devintern/workspace.toml` (as a `manual_only` repo, which the [worker](./worker.md) skips) and writes its settings to `~/.devintern/env/<repo>.env`. Each repository has its own file, so several projects can use different trackers and credentials. A repository without a GitHub, GitLab, or Bitbucket `origin` (for example a fresh `git init`) is registered by its directory instead.
 
 In a terminal, the wizard asks which tracker you use, links to the provider's token page, checks the credentials, and writes the file. With `--yes` (or `--no-interactive`), or when stdin is not a terminal, it writes a commented template for you to fill in instead. Run `devintern init` again in the repository to update the file.
 
 ### Moving from `.devintern-code/`
 
-Older releases kept settings in the repository's `.devintern-code/` folder. The first time this release runs in such a repository (any `devintern` task run or `devintern init`), it moves them automatically when the repository has a GitHub, GitLab, or Bitbucket `origin`:
+Older releases kept settings in the repository's `.devintern-code/` folder. The first time this release runs in such a repository (any `devintern` task run or `devintern init`), it moves them automatically:
 
 - `.devintern-code/.env` becomes `~/.devintern/env/<repo>.env`, and the repository is registered as a `manual_only` repo.
 - Your sign-in moves to `~/.devintern/state/code/`.

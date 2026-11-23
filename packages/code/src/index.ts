@@ -151,8 +151,11 @@ if (process.argv[2] === "init") {
   // First run of this release in a legacy checkout: move its settings first.
   await migrateLegacyCheckout();
   runContext.manualWorkspace = await findWorkspaceRepoForCheckout();
-  if (runContext.manualWorkspace) applyManualWorkspaceRun(runContext.manualWorkspace);
-  loadEnvironment(findEnvFileArg(process.argv), {
+  const envFileArg = findEnvFileArg(process.argv);
+  if (runContext.manualWorkspace) {
+    applyManualWorkspaceRun(runContext.manualWorkspace, { runtimeOnly: Boolean(envFileArg) });
+  }
+  loadEnvironment(envFileArg, {
     skipProjectEnv: Boolean(runContext.manualWorkspace),
   });
 }
@@ -290,7 +293,11 @@ async function main(): Promise<void> {
         reloadEnv: async () => {
           // The wizard may have just registered this checkout in the workspace.
           runContext.manualWorkspace ??= await findWorkspaceRepoForCheckout();
-          if (runContext.manualWorkspace) applyManualWorkspaceRun(runContext.manualWorkspace);
+          if (runContext.manualWorkspace) {
+            applyManualWorkspaceRun(runContext.manualWorkspace, {
+              runtimeOnly: Boolean(options.envFile),
+            });
+          }
           loadEnvironment(options.envFile, {
             skipProjectEnv: Boolean(runContext.manualWorkspace),
           });

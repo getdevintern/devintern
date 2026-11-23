@@ -26,6 +26,7 @@ import {
   sandboxInheritsEnclosingSandbox,
 } from "@devintern/agent-harness";
 import { WorkspaceConfigError, parseWorkspaceConfig } from "../workspace/config";
+import { workerWorkspaceView } from "../workspace/manual-only";
 import type { RepoConfig, TeamConfig, WorkspaceConfig } from "../workspace/config";
 import {
   buildRepoCredentialEnv,
@@ -509,7 +510,8 @@ function loadWorkspace(
         `${plural(config.repos.length, "repo")}, ${plural(config.teams.length, "team")}, ` +
         `${plural(config.automations.length, "automation")} (${configPath})`,
     });
-    return { workspaceDir, configPath, config };
+    // The doctor checks what the worker runs; manual-only repos are skipped.
+    return { workspaceDir, configPath, config: workerWorkspaceView(config) };
   } catch (error) {
     const problems = error instanceof WorkspaceConfigError ? error.problems : [errorMessage(error)];
     for (const problem of problems) {

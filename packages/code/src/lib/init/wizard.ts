@@ -51,7 +51,7 @@ import { collectReadinessChecks, renderReadinessReport } from "../observability/
 import type { ReadinessCheck } from "../observability/readiness";
 import { TRACKER_CAPABILITIES } from "../trackers/capabilities";
 import { workspaceCodeStateDir } from "../workspace/paths";
-import { readRegistrableOrigin, registerManualCheckout } from "../workspace/register-checkout";
+import { registerManualCheckout } from "../workspace/register-checkout";
 
 export { isInteractive };
 
@@ -224,21 +224,18 @@ export async function runInitWizard(deps: InitWizardDeps = {}): Promise<void> {
     prompt = (question: string) => rl!.question(question);
   }
 
-  // A checkout with an origin is registered in the workspace as a manual-only
-  // repo; without one, the legacy `.devintern-code/` scaffold is used.
-  const remote = await readRegistrableOrigin(cwd);
+  // The checkout is registered in the workspace as a manual-only repo (by its
+  // origin, or by its directory when it has no recognised remote).
   let workspaceDir: string | undefined;
-  const writeEnv = remote
-    ? async (envContent: string): Promise<string | null> => {
-        const registered = await registerManualCheckout(cwd, envContent, log);
-        if (!registered.ok) {
-          log(`❌ ${registered.error}`);
-          return null;
-        }
-        workspaceDir = registered.workspaceDir;
-        return registered.envPath;
-      }
-    : undefined;
+  const writeEnv = async (envContent: string): Promise<string | null> => {
+    const registered = await registerManualCheckout(cwd, envContent, log);
+    if (!registered.ok) {
+      log(`❌ ${registered.error}`);
+      return null;
+    }
+    workspaceDir = registered.workspaceDir;
+    return registered.envPath;
+  };
 
   try {
     trackSetupStarted(deps.source ?? "init");

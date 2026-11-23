@@ -74,11 +74,14 @@ describe("registerManualCheckout", () => {
     if (!again.ok) expect(again.error).toContain("already registered");
   });
 
-  test("refuses a checkout without an origin", async () => {
+  test("registers a checkout without a recognised remote by its directory", async () => {
     git(checkout, ["remote", "remove", "origin"]);
     const result = await registerManualCheckout(checkout, "", silentLog);
-    expect(result.ok).toBe(false);
-    expect(existsSync(workspace)).toBe(false);
+    if (!result.ok) throw new Error(result.error);
+    const repo = loadWorkspaceConfig(join(workspace, "workspace.toml")).repos[0];
+    expect(repo?.path).toBe(checkout);
+    expect(repo?.remote).toBe("");
+    expect((await registerManualCheckout(join(checkout), "", silentLog)).ok).toBe(false);
   });
 });
 

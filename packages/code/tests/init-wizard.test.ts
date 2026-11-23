@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
-import { join } from "path";
+import { basename, join } from "path";
 import { BUNDLED_TRELLO_API_KEY } from "@devintern/task-trackers";
 import {
   TRACKER_SETUP,
@@ -40,6 +40,15 @@ function promptQueue(answers: string[]) {
 }
 
 const silentLog = () => {};
+
+/** Env file `devintern init` registers for the checkout at `dir`. */
+function wizardEnvPath(dir: string = tempDir): string {
+  return join(process.env.DEVINTERN_WORKSPACE_DIR!, "env", `${basename(dir)}.env`);
+}
+
+function readWizardEnv(dir: string = tempDir): string {
+  return readFileSync(wizardEnvPath(dir), "utf8");
+}
 
 /** Default deps for wizard tests: no session on disk, deterministic agents. */
 function testDeps(overrides: Record<string, unknown> = {}) {
@@ -191,14 +200,13 @@ describe("runInitWizard", () => {
 
     expect(probeCalls).toHaveLength(1);
     expect(probeCalls[0].trackerId).toBe("jira");
-    const env = readFileSync(join(tempDir, ".devintern-code", ".env"), "utf8");
+    const env = readWizardEnv();
     expect(env).toContain("TASK_TRACKER=jira");
     expect(env).toContain("JIRA_API_TOKEN=secret-token");
     expect(env).toContain("JIRA_DEFAULT_PROJECT_KEY=PROJ");
     expect(env).toContain("# GITHUB_TOKEN=");
-    // .env.example keeps the full template
-    const example = readFileSync(join(tempDir, ".devintern-code", ".env.example"), "utf8");
-    expect(example).toContain("MARKDOWN_TASKS_DIR");
+    // Nothing is written into the checkout.
+    expect(existsSync(join(tempDir, ".devintern-code"))).toBe(false);
   });
 
   test("accepts tracker id input and re-prompts on invalid menu choice", async () => {
@@ -220,7 +228,7 @@ describe("runInitWizard", () => {
       log: silentLog,
     });
 
-    const env = readFileSync(join(tempDir, ".devintern-code", ".env"), "utf8");
+    const env = readWizardEnv();
     expect(env).toContain("TASK_TRACKER=linear");
     expect(env).toContain("LINEAR_API_KEY=lin_api_123");
   });
@@ -245,7 +253,9 @@ describe("runInitWizard", () => {
       log: silentLog,
     });
 
-    expect(existsSync(join(tempDir, ".devintern-code", ".env"))).toBe(true);
+    // Registered at the repository root, not the subdirectory.
+    expect(existsSync(wizardEnvPath())).toBe(true);
+    expect(existsSync(join(tempDir, ".devintern-code"))).toBe(false);
     expect(existsSync(join(subDir, ".devintern-code"))).toBe(false);
   });
 
@@ -272,7 +282,7 @@ describe("runInitWizard", () => {
     });
 
     expect(attempts).toBe(2);
-    expect(existsSync(join(tempDir, ".devintern-code", ".env"))).toBe(true);
+    expect(existsSync(wizardEnvPath())).toBe(true);
   });
 
   test("failed probe: edit values then success", async () => {
@@ -302,7 +312,7 @@ describe("runInitWizard", () => {
     });
 
     expect(seenKeys).toEqual(["lin_wrong", "lin_right"]);
-    const env = readFileSync(join(tempDir, ".devintern-code", ".env"), "utf8");
+    const env = readWizardEnv();
     expect(env).toContain("LINEAR_API_KEY=lin_right");
   });
 
@@ -325,7 +335,7 @@ describe("runInitWizard", () => {
       log: (m) => logs.push(m),
     });
 
-    const env = readFileSync(join(tempDir, ".devintern-code", ".env"), "utf8");
+    const env = readWizardEnv();
     expect(env).toContain("ASANA_API_TOKEN=asana-token");
     const output = logs.join("\n");
     expect(output).toContain("Skipping validation");
@@ -363,7 +373,7 @@ describe("runInitWizard", () => {
 
     expect(asked.some((q) => q.includes("Enter a number"))).toBe(false);
     expect(probeEnvs[0].LINEAR_API_KEY).toBe("lin_api_shared");
-    const env = readFileSync(join(tempDir, ".devintern-code", ".env"), "utf8");
+    const env = readWizardEnv();
     expect(env).toContain("TASK_TRACKER=linear");
     expect(env).toContain("LINEAR_API_KEY=lin_api_shared");
     expect(env).toContain("LINEAR_DEFAULT_TEAM_KEY=ENG");
@@ -393,7 +403,7 @@ describe("runInitWizard", () => {
     });
 
     expect(asked.some((q) => q.includes("Enter a number"))).toBe(true);
-    const env = readFileSync(join(tempDir, ".devintern-code", ".env"), "utf8");
+    const env = readWizardEnv();
     expect(env).toContain("TASK_TRACKER=markdown");
     expect(env).not.toContain("lin_api_shared");
   });
@@ -422,7 +432,7 @@ describe("runInitWizard", () => {
 
     // Probe sees the bundled key so validation exercises real credentials
     expect(probeEnvs[0].TRELLO_API_KEY).toBe(BUNDLED_TRELLO_API_KEY);
-    const env = readFileSync(join(tempDir, ".devintern-code", ".env"), "utf8");
+    const env = readWizardEnv();
     expect(env).toContain(`TRELLO_API_KEY=${BUNDLED_TRELLO_API_KEY}`);
     expect(env).toContain("TRELLO_API_TOKEN=trello-token");
   });
@@ -449,7 +459,7 @@ describe("runInitWizard", () => {
       "1. Markdown files (markdown) — local .md task files, no account needed",
     );
     expect(output).toContain("2. JIRA (jira)");
-    const env = readFileSync(join(tempDir, ".devintern-code", ".env"), "utf8");
+    const env = readWizardEnv();
     expect(env).toContain("TASK_TRACKER=markdown");
   });
 
@@ -474,7 +484,7 @@ describe("runInitWizard", () => {
     });
 
     expect(probed).toBe(false);
-    const env = readFileSync(join(tempDir, ".devintern-code", ".env"), "utf8");
+    const env = readWizardEnv();
     expect(env).toContain("TASK_TRACKER=markdown");
     expect(env).toContain("MARKDOWN_TASKS_DIR=./tasks");
   });
@@ -497,7 +507,7 @@ describe("runInitWizard", () => {
     });
 
     expect(remaining).toHaveLength(0);
-    const env = readFileSync(join(tempDir, ".devintern-code", ".env"), "utf8");
+    const env = readWizardEnv();
     expect(env).toContain("GITHUB_TOKEN=ghp_token");
     expect(env).toContain("GITHUB_REPO=acme/widgets");
   });
@@ -519,7 +529,7 @@ describe("runInitWizard", () => {
       log: silentLog,
     });
 
-    const env = readFileSync(join(tempDir, ".devintern-code", ".env"), "utf8");
+    const env = readWizardEnv();
     expect(env).toContain("GITHUB_TOKEN=ghp_pr_token");
   });
 
@@ -548,7 +558,7 @@ describe("runInitWizard", () => {
       log: silentLog,
     });
 
-    const env = readFileSync(join(tempDir, ".devintern-code", ".env"), "utf8");
+    const env = readWizardEnv();
     expect(env).toContain("TASK_TRACKER=linear");
     expect(env).toContain("LINEAR_API_KEY=lin_api_123");
   });
@@ -863,18 +873,21 @@ describe("runInitUpgrade", () => {
 
 describe("init --yes subprocess", () => {
   // Spawns a fresh bun process; under full-suite load this exceeds bun's 5s default.
-  test("writes the template files without prompting", () => {
+  test("registers the checkout and writes the template env without prompting", () => {
     const result = Bun.spawnSync(
       ["bun", "run", join(import.meta.dir, "..", "src", "index.ts"), "init", "--yes"],
       {
         cwd: tempDir,
+        // Pass the per-file pinned workspace (children otherwise get the start env).
+        env: { ...process.env },
         stdin: "ignore",
         stdout: "pipe",
         stderr: "pipe",
       },
     );
     expect(result.exitCode).toBe(0);
-    const env = readFileSync(join(tempDir, ".devintern-code", ".env"), "utf8");
+    const env = readWizardEnv();
+    expect(existsSync(join(tempDir, ".devintern-code"))).toBe(false);
     expect(env).toContain("TASK_TRACKER=jira");
     expect(env).toContain("# LINEAR_API_KEY=");
   }, 30_000);
