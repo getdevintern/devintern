@@ -1031,7 +1031,10 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   // Cadence reconciliation: applied on successful reloads of poll_interval.
   const intervalUpdaters: Array<(seconds: number) => void> = [];
   // Reload hooks published by buildFleetEventAcquirers (mention sweeps).
-  const eventReloadHooks: { hooks?: FleetEventReloadHooks } = {};
+  const eventReloadHooks: {
+    hooks?: FleetEventReloadHooks;
+    verifyRelayRepos?: () => Promise<void>;
+  } = {};
   let pollIntervalSeconds = config.defaults.pollIntervalSeconds;
 
   // Always assemble the estimation scheduler so entries can be added to an
@@ -1276,6 +1279,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
     }
     eventReloadHooks.hooks?.reconcileMentionSweeps();
     eventReloadHooks.hooks?.reconcileConflictResolution();
+    void eventReloadHooks.verifyRelayRepos?.();
   };
 
   // Live reload keeps queries, fixed team destinations, routing, repos,
