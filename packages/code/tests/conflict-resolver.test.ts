@@ -1012,6 +1012,72 @@ git --git-dir="${originDir}" update-ref refs/heads/feature/change "${competingTi
     rmSync(shipped, { recursive: true, force: true });
   });
 
+  test("hands a rerere-replayed merge rejected by pre-commit hooks to the agent", async () => {
+    // A recorded resolution can be incomplete (e.g. captured from an attempt
+    // interrupted before it fixed a semantic conflict). When the replayed
+    // commit fails the pre-commit hook, aborting would replay the same
+    // failure on every retry; the agent must get the hook output instead.
+    git(repoDir, "config rerere.enabled true");
+    git(repoDir, "config rerere.autoUpdate true");
+
+    git(seedDir, "checkout feature/change");
+    git(seedDir, "commit --allow-empty -m 'concurrent branch update'");
+    const competingTip = git(seedDir, "rev-parse HEAD").trim();
+    git(seedDir, `push origin ${competingTip}:refs/devintern-test/competing-tip`);
+    const hooksDir = join(repoDir, ".git", "hooks");
+    writeFileSync(
+      join(hooksDir, "pre-push"),
+      `#!/bin/sh
+git --git-dir="${originDir}" update-ref refs/heads/feature/change "${competingTip}"
+`,
+      { mode: 0o755 },
+    );
+    // Stands in for a typecheck that fails until the semantic fix exists.
+    writeFileSync(
+      join(hooksDir, "pre-commit"),
+      `#!/bin/sh
+test -f semantic-fix.txt && exit 0
+printf '\\033[31merror TS2741: semantic conflict\\033[0m\\n' >&2
+exit 1
+`,
+      { mode: 0o755 },
+    );
+
+    const prompts: string[] = [];
+    const result = await resolveConflictsOnPr(PR_URL, {
+      cwd: repoDir,
+      noComment: true,
+      verifyAttempts: 1,
+      fetchPr: async () => prInfo(),
+      agentRunner: async (prompt, workDir) => {
+        prompts.push(prompt);
+        if (prompts.length === 1) {
+          // First attempt: textual resolution only, recorded by rerere.
+          writeFileSync(join(workDir, "greeting.txt"), "rerere resolved\n");
+          git(workDir, "add -A");
+          git(workDir, "commit --no-edit --no-verify");
+        } else {
+          writeFileSync(join(workDir, "semantic-fix.txt"), "fixed\n");
+          git(workDir, "add semantic-fix.txt");
+          git(workDir, "commit --no-edit");
+        }
+        return { success: true, output: "done" };
+      },
+    });
+
+    expect(result.outcome).toBe("resolved");
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).toContain("git rerere");
+    expect(prompts[1]).toContain("error TS2741: semantic conflict");
+    expect(prompts[1]).not.toContain("\x1b[");
+
+    const shipped = mkdtempSync(join(tmpdir(), "devintern-conflict-rerere-hook-"));
+    execSync(`git clone -b feature/change ${originDir} ${shipped}/clone`, { stdio: "ignore" });
+    expect(readFileSync(join(shipped, "clone", "greeting.txt"), "utf8")).toBe("rerere resolved\n");
+    expect(readFileSync(join(shipped, "clone", "semantic-fix.txt"), "utf8")).toBe("fixed\n");
+    rmSync(shipped, { recursive: true, force: true });
+  });
+
   test("verification tolerates a lagging PR read before confirming success", async () => {
     let fetches = 0;
     const result = await resolveConflictsOnPr(PR_URL, {
