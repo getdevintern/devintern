@@ -61,7 +61,7 @@ You can open a run's logs from its page in the [dashboard](./dashboard.md), or r
 DEVINTERN_OUTPUT_DIR=./devintern-output   # default: /tmp/devintern-tasks
 ```
 
-Each task gets `{output-dir}/{task-key}/` containing the formatted task (`task-details.md`), the clarity check result, the implementation summary (`implementation-summary.md`, or `implementation-summary-incomplete.md` on failure), verify and auto-review results, and any downloaded attachments. These are debug files and safe to delete. Retry state lives in `.devintern-code/queue.db` instead.
+Each task gets `{output-dir}/{task-key}/` containing the formatted task (`task-details.md`), the clarity check result, the implementation summary (`implementation-summary.md`, or `implementation-summary-incomplete.md` on failure), verify and auto-review results, and any downloaded attachments. These are debug files and safe to delete. Retry state and run history live in `~/.devintern/state/queue.db` instead.
 
 Files you want to keep and show in the dashboard are registered separately as run artifacts; see [Pipeline artifacts](./artifacts.md).
 
@@ -69,12 +69,12 @@ Files you want to keep and show in the dashboard are registered separately as ru
 
 **Error reporting.** By default, the CLI sends crashes and failed runs (agent, tracker, PR, commit, estimation, and webhook errors) to DevIntern's Sentry project. Reports include identifiers such as the task key, tracker type, and stage. They never include task content, code, `.env` contents, or credentials, and anything that looks like a token is removed. To opt out, set `SENTRY_DISABLED=1`.
 
-**Anonymous usage analytics.** The CLI sends anonymous events to PostHog: CLI version, OS, whether it runs in CI, tracker type, run mode, feature flags, and outcome categories for setup, `doctor`, login, and the worker. It never sends task content, code, repository names, file paths, or credentials. A random ID is created for each project and stored in `.devintern-code/telemetry.json`. To opt out, use either:
+**Anonymous usage analytics.** The CLI sends anonymous events to PostHog: CLI version, OS, whether it runs in CI, tracker type, run mode, feature flags, and outcome categories for setup, `doctor`, login, and the worker. It never sends task content, code, repository names, file paths, or credentials. A random ID is created once and stored in `~/.devintern/telemetry.json`. To opt out, use either:
 
 | Opt-out                                                    | What is sent                                    |
 | ---------------------------------------------------------- | ----------------------------------------------- |
 | `DEVINTERN_TELEMETRY_DISABLED=1`                           | Nothing                                         |
-| `{ "analytics": { "enabled": false } }` in `settings.json` | One anonymous `analytics_opt_out` event, then nothing |
+| `{ "analytics": { "enabled": false } }` in `~/.devintern/settings.json` | One anonymous `analytics_opt_out` event, then nothing |
 
 See [devintern.com/privacy](https://devintern.com/privacy/).
 

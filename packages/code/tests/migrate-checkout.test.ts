@@ -6,7 +6,10 @@ import { join } from "path";
 
 import { WORKER_SUBPROCESS_ENV } from "../src/lib/config/config-dir";
 import { loadWorkspaceConfig, parseWorkspaceConfig } from "../src/lib/workspace/config";
-import { migrateLegacyCheckout } from "../src/lib/workspace/migrate-checkout";
+import {
+  migrateLegacyCheckout,
+  moveLegacyCheckoutState,
+} from "../src/lib/workspace/migrate-checkout";
 import {
   appendTrackerSettings,
   loadWorkspaceTrackerSettings,
@@ -81,14 +84,17 @@ describe("migrateLegacyCheckout", () => {
     expect((await migrateLegacyCheckout(checkout, silent)).migrated).toBe(false);
   });
 
-  test("skips worker subprocesses and checkouts without a local .env", async () => {
+  test("does not register worker subprocesses or checkouts without a local .env", async () => {
     process.env[WORKER_SUBPROCESS_ENV] = "1";
     expect((await migrateLegacyCheckout(checkout, silent)).migrated).toBe(false);
     delete process.env[WORKER_SUBPROCESS_ENV];
 
     rmSync(join(checkout, ".devintern-code", ".env"));
     expect((await migrateLegacyCheckout(checkout, silent)).migrated).toBe(false);
-    expect(existsSync(workspace)).toBe(false);
+    // Nothing is registered, but the sign-in still moves to the workspace.
+    expect(existsSync(join(workspace, "workspace.toml"))).toBe(false);
+    expect(existsSync(join(workspace, "state", "code", ".auth-session.json"))).toBe(true);
+    expect(existsSync(join(checkout, ".devintern-code", ".auth-session.json"))).toBe(false);
   });
 
   test("registers a checkout with a local-path remote by its directory", async () => {
@@ -98,6 +104,21 @@ describe("migrateLegacyCheckout", () => {
     const repo = loadWorkspaceConfig(join(workspace, "workspace.toml")).repos[0];
     expect(repo?.path).toBe(checkout);
     expect(existsSync(join(checkout, ".devintern-code", ".env"))).toBe(false);
+  });
+});
+
+describe("moveLegacyCheckoutState", () => {
+  test("moves the sign-in from any depth of the checkout, keeping a workspace session", () => {
+    const sub = join(checkout, "packages", "app");
+    mkdirSync(sub, { recursive: true });
+    moveLegacyCheckoutState(sub);
+    const target = join(workspace, "state", "code", ".auth-session.json");
+    expect(readFileSync(target, "utf8")).toBe("{}");
+    expect(existsSync(join(checkout, ".devintern-code", ".auth-session.json"))).toBe(false);
+
+    writeFileSync(join(checkout, ".devintern-code", ".auth-session.json"), "stale");
+    moveLegacyCheckoutState(checkout);
+    expect(readFileSync(target, "utf8")).toBe("{}");
   });
 });
 

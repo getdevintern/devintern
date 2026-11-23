@@ -27,7 +27,7 @@ import { isWorkerSubprocess } from "../config/config-dir";
 import { parseWorkspaceConfig } from "./config";
 import type { WorkspaceLogFn } from "./init";
 import { findWorkspaceRepoForCheckout } from "./manual-run";
-import { workspaceCodeStateDir, workspaceConfigPath } from "./paths";
+import { resolveWorkspaceDir, workspaceCodeStateDir, workspaceConfigPath } from "./paths";
 import { registerManualCheckout } from "./register-checkout";
 import { appendTrackerSettings } from "./tracker-settings";
 
@@ -38,6 +38,46 @@ const MOVED_STATE_FILES = [".auth-session.json", "license-cache.json"] as const;
 export type CheckoutMigration =
   | { migrated: false }
   | { migrated: true; repoName: string; envPath: string; trackers: string[] };
+
+/**
+ * Move the checkout's sign-in session and license cache into the workspace's
+ * `state/code/`. A file the workspace already has wins; the local copy is
+ * removed either way once the workspace holds one.
+ */
+export function moveLegacyStateFiles(legacyDir: string, workspaceDir: string): void {
+  if (!MOVED_STATE_FILES.some((name) => existsSync(join(legacyDir, name)))) return;
+  const stateDir = workspaceCodeStateDir(workspaceDir);
+  mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+  for (const name of MOVED_STATE_FILES) {
+    const source = join(legacyDir, name);
+    if (!existsSync(source)) continue;
+    const target = join(stateDir, name);
+    if (!existsSync(target)) {
+      try {
+        copyFileSync(source, target);
+        chmodSync(target, 0o600);
+      } catch {
+        continue;
+      }
+    }
+    rmSync(source, { force: true });
+  }
+}
+
+/**
+ * Move a legacy checkout's sign-in and license cache into the workspace at
+ * CLI startup, so every command (including `login`, `logout`, `whoami`)
+ * sees one session. Cheap: only existence checks unless files are present.
+ */
+export function moveLegacyCheckoutState(cwd: string = process.cwd()): void {
+  if (isWorkerSubprocess()) return;
+  const legacyDir = join(findProjectRoot({ startDir: cwd }), ".devintern-code");
+  try {
+    moveLegacyStateFiles(legacyDir, resolveWorkspaceDir());
+  } catch {
+    // Best effort: the session can still be recreated with `devintern login`.
+  }
+}
 
 /** Read `settings.json`, or null when missing or unreadable. */
 export function readLegacySettings(configDir: string): ProjectSettings | null {
@@ -84,6 +124,8 @@ export async function migrateLegacyCheckout(
   const projectRoot = findProjectRoot({ startDir: cwd });
   const legacyDir = join(projectRoot, ".devintern-code");
   const legacyEnv = join(legacyDir, ".env");
+  // Sign-in and license cache move even for a checkout that is not registered.
+  moveLegacyStateFiles(legacyDir, resolveWorkspaceDir());
   if (!existsSync(legacyEnv)) return { migrated: false };
   if (await findWorkspaceRepoForCheckout({ cwd: projectRoot })) return { migrated: false };
 
@@ -107,21 +149,7 @@ export async function migrateLegacyCheckout(
     return { migrated: false };
   }
 
-  const stateDir = workspaceCodeStateDir(registered.workspaceDir);
-  mkdirSync(stateDir, { recursive: true, mode: 0o700 });
-  for (const name of MOVED_STATE_FILES) {
-    const source = join(legacyDir, name);
-    const target = join(stateDir, name);
-    if (existsSync(source) && !existsSync(target)) {
-      try {
-        copyFileSync(source, target);
-        chmodSync(target, 0o600);
-      } catch {
-        continue;
-      }
-    }
-    if (existsSync(target)) rmSync(source, { force: true });
-  }
+  moveLegacyStateFiles(legacyDir, registered.workspaceDir);
 
   let trackers: string[] = [];
   try {

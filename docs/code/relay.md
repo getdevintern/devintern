@@ -47,7 +47,7 @@ For trackers, set the tracker credentials (see the table below), then run `devin
 
 | Variable              | Required | Description                                                                    |
 | --------------------- | -------- | ------------------------------------------------------------------------------ |
-| (signed-in session)   | Connect  | Run `devintern login` first; stored in `.devintern-code/.auth-session.json`    |
+| (signed-in session)   | Connect  | Run `devintern login` first; stored in `~/.devintern/state/code/.auth-session.json`    |
 | `LICENSE_KEY`         | Worker   | Automation license for unattended `devintern worker` runs                      |
 | `WORKER_RELAY_URL`    | No       | Relay base URL (default `https://relay.devintern.com`)                         |
 | `DEVINTERN_AUTH_CALLBACK_PORT` | No | Fixed OAuth callback port for remote sign-in (default `17865`)              |
@@ -106,7 +106,7 @@ Browser sign-in redirects to `127.0.0.1` on the machine running the CLI. On a re
 
 ```bash
 devintern login   # on your laptop
-scp .devintern-code/.auth-session.json user@host:/path/to/project/.devintern-code/
+scp ~/.devintern/state/code/.auth-session.json user@host:~/.devintern/state/code/
 ```
 
 or forward the callback port over SSH (mosh cannot forward ports) and open the printed URL locally:

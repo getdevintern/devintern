@@ -179,7 +179,7 @@ export class DashboardReports {
   }
 
   private get configDir(): string {
-    return this.deps.configDir ?? resolveRuntimeStateDir(this.data.workingDir);
+    return this.deps.configDir ?? resolveRuntimeStateDir();
   }
 
   private prune(): void {

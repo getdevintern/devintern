@@ -1,7 +1,5 @@
 import { resolveConfigDir } from "@devintern/utils";
-import { dirname } from "path";
-
-import { hasWorkspace, resolveWorkspaceDir, workspaceCodeStateDir } from "../workspace/paths";
+import { resolveWorkspaceDir, workspaceCodeStateDir } from "../workspace/paths";
 
 /** Marks a task subprocess launched by the workspace supervisor. */
 export const WORKER_SUBPROCESS_ENV = "DEVINTERN_WORKER_SUBPROCESS";
@@ -22,16 +20,10 @@ export function setManualWorkspaceStateDir(workspaceDir: string | null): void {
 }
 
 /**
- * Directory holding the auth session and license cache.
- *
- * Worker task subprocesses share the workspace session and license cache. A
- * command run from the workspace home itself (whose nearest config dir would
- * be the legacy `<workspace>/.devintern-code/`) uses the same `state/code/`.
+ * Directory holding the auth session and license cache: the workspace's
+ * `state/code/`, shared by every command in every checkout (one sign-in).
+ * Manual commands on a registered repo use that repo's workspace.
  */
-export function resolveRuntimeStateDir(startDir: string = process.cwd()): string {
-  if (isWorkerSubprocess()) return workspaceCodeStateDir(resolveWorkspaceDir());
-  if (manualWorkspaceStateDir) return workspaceCodeStateDir(manualWorkspaceStateDir);
-  const projectConfigDir = resolveProjectConfigDir(startDir);
-  const owner = dirname(projectConfigDir);
-  return hasWorkspace(owner) ? workspaceCodeStateDir(owner) : projectConfigDir;
+export function resolveRuntimeStateDir(): string {
+  return workspaceCodeStateDir(manualWorkspaceStateDir ?? resolveWorkspaceDir());
 }

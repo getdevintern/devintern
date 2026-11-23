@@ -1,7 +1,7 @@
 import { ArtifactStore } from "../src/lib/artifacts/store";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
-import { join } from "path";
+import { dirname, join } from "path";
 import { tmpdir } from "os";
 
 import {
@@ -580,21 +580,19 @@ describe("dashboard API", () => {
     expect(settled.queue.retries).toEqual({ pending: 0, running: 0 });
   });
 
-  test("counts workspace queue work without moving project-scoped run history", () => {
+  test("shows manual runs and workspace queue work from the one workspace DB", () => {
     const savedQueueDb = process.env.WEBHOOK_QUEUE_DB;
     delete process.env.WEBHOOK_QUEUE_DB;
-    const projectDb = join(dir, ".devintern-code", "queue.db");
+    const workspaceDb = workspaceDbPath(workspaceDir);
     try {
-      // A direct `devintern TASK` run lands in the project DB even when the
-      // user also has a workspace worker.
-      mkdirSync(join(dir, ".devintern-code"), { recursive: true });
-      const runs = new RunStore(projectDb);
+      // A direct `devintern TASK` run records into the workspace DB too.
+      mkdirSync(dirname(workspaceDb), { recursive: true });
+      const runs = new RunStore(workspaceDb);
       const runId = runs.createRun({ origin: "task", taskKey: "PROJ-LOCAL" });
       runs.finishRun(runId, "succeeded");
       runs.close();
 
       writeFileSync(workspaceConfigPath(workspaceDir), "");
-      const workspaceDb = workspaceDbPath(workspaceDir);
       const injected = new InjectedTaskStore(workspaceDb);
       const retries = new ScheduledRetryStore(workspaceDb);
       try {
@@ -609,8 +607,7 @@ describe("dashboard API", () => {
 
         const defaulted = new DashboardData({ workingDir: dir, logDirs: [] });
         try {
-          // History stays project scoped; the local run is still visible.
-          expect(defaulted.dbPath).toBe(projectDb);
+          expect(defaulted.dbPath).toBe(workspaceDb);
           expect(defaulted.queueDbPath).toBe(workspaceDb);
           expect(
             defaulted.listRuns({ taskKey: "PROJ-LOCAL", limit: 10, offset: 0 }).runs.length,
@@ -721,24 +718,19 @@ describe("dashboard API", () => {
     expect(resolveWorkspaceArgPath(emptyDir)).toBeNull();
   });
 
-  test("keeps both databases project scoped without a workspace and follows a configured one", () => {
+  test("reads history and queue counts from the workspace DB unless WEBHOOK_QUEUE_DB pins one", () => {
     const savedQueueDb = process.env.WEBHOOK_QUEUE_DB;
     delete process.env.WEBHOOK_QUEUE_DB;
     try {
-      const projectDb = join(dir, ".devintern-code", "queue.db");
-      // No workspace: history and queue counts share the legacy project DB.
-      expect(resolveDashboardHistoryDbPath(dir)).toBe(projectDb);
-      expect(resolveDashboardQueueDbPath(workspaceDir, dir)).toBe(projectDb);
-      // Once a workspace is configured, only the queue DB follows it; run
-      // history remains the same project-scoped DB as a direct CLI run.
-      writeFileSync(workspaceConfigPath(workspaceDir), "");
-      expect(resolveDashboardHistoryDbPath(dir)).toBe(projectDb);
-      expect(resolveDashboardQueueDbPath(workspaceDir, dir)).toBe(workspaceDbPath(workspaceDir));
+      const defaultDb = workspaceDbPath(process.env.DEVINTERN_WORKSPACE_DIR!);
+      expect(resolveDashboardHistoryDbPath()).toBe(defaultDb);
+      expect(resolveDashboardQueueDbPath()).toBe(defaultDb);
+      expect(resolveDashboardQueueDbPath(workspaceDir)).toBe(workspaceDbPath(workspaceDir));
       // An explicit env pin (worker-embedded dashboard) always wins.
       const pinned = join(dir, "pinned.db");
       process.env.WEBHOOK_QUEUE_DB = pinned;
-      expect(resolveDashboardHistoryDbPath(dir)).toBe(pinned);
-      expect(resolveDashboardQueueDbPath(workspaceDir, dir)).toBe(pinned);
+      expect(resolveDashboardHistoryDbPath()).toBe(pinned);
+      expect(resolveDashboardQueueDbPath(workspaceDir)).toBe(pinned);
     } finally {
       if (savedQueueDb === undefined) {
         delete process.env.WEBHOOK_QUEUE_DB;
@@ -756,7 +748,7 @@ describe("dashboard API", () => {
       mkdirSync(customWorkspace, { recursive: true });
       writeFileSync(workspaceConfigPath(customWorkspace), "");
       const customDb = workspaceDbPath(customWorkspace);
-      expect(resolveDashboardQueueDbPath(customWorkspace, dir)).toBe(customDb);
+      expect(resolveDashboardQueueDbPath(customWorkspace)).toBe(customDb);
 
       const injected = new InjectedTaskStore(customDb);
       injected.enqueue({
@@ -779,7 +771,7 @@ describe("dashboard API", () => {
         port: 0,
         workingDir: dir,
         workspaceDir: customWorkspace,
-        queueDbPath: resolveDashboardQueueDbPath(customWorkspace, dir),
+        queueDbPath: resolveDashboardQueueDbPath(customWorkspace),
         logDirs: [],
       });
       try {

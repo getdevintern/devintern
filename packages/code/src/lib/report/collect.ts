@@ -18,7 +18,7 @@ import { Database } from "bun:sqlite";
 import { isAutomatedEnvironment } from "../config/env-detector";
 import { readWorkerLogs } from "../observability/worker-logs";
 import { resolveWorkspaceDir } from "../workspace/paths";
-import { resolveReportConfigDir } from "./paths";
+import { reportWorkspaceDir } from "./paths";
 import { detectRepoSlug, redactReportText, safeSourceLabel } from "./redact";
 import type {
   ReportContext,
@@ -209,7 +209,7 @@ function resolveRunDbPath(cwd: string, explicit?: string): string {
   if (explicit?.trim()) return resolve(explicit.trim());
   const override = process.env.WEBHOOK_QUEUE_DB?.trim();
   if (override) return override;
-  return join(resolveReportConfigDir(undefined, cwd), "queue.db");
+  return join(reportWorkspaceDir(), "state", "queue.db");
 }
 
 /** Open the run database read-only, or return null when it does not exist. */

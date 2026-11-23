@@ -26,7 +26,7 @@ import {
 } from "./lib/trackers/capabilities";
 import { acquireRunLocks } from "./lib/cli/run-locks";
 import { applyManualWorkspaceRun, findWorkspaceRepoForCheckout } from "./lib/workspace/manual-run";
-import { migrateLegacyCheckout } from "./lib/workspace/migrate-checkout";
+import { migrateLegacyCheckout, moveLegacyCheckoutState } from "./lib/workspace/migrate-checkout";
 import { Utils } from "./lib/utils";
 import { isAutomatedEnvironment } from "./lib/config/env-detector";
 import {
@@ -94,6 +94,7 @@ function buildCliRunProps(tracker: string): Record<string, AnalyticsPropValue | 
 
 // Migrate legacy config directory on startup
 migrateLegacyConfigDir();
+moveLegacyCheckoutState();
 
 // Check npm for a newer global install before any real work. Local/monorepo
 // runs and --help/--version/--no-update are no-ops inside maybeOfferCliUpdate.
