@@ -146,6 +146,8 @@ The effective harness, model, and effort are printed before the run and saved in
 
 **"There are uncommitted changes"**: commit or stash your changes, or pass `--no-git` to skip branch creation.
 
+**Recovering work discarded before a branch was created**: uncommitted changes in the checkout are backed up before the feature branch is created, under `refs/devintern/backups/<task>-<timestamp>` rather than on your `git stash` list. List them with `git for-each-ref refs/devintern/backups/` and restore one with `git stash apply <ref-or-sha>`. Backups older than 30 days are deleted.
+
 **"Agent reached maximum turns limit"**: raise `--max-turns` (for example `1000`) or split the task into smaller ones.
 
 **"PR creation failed"**: check that your GitHub or Bitbucket token (or GitHub App installation) has access to the repository, then run again with `--verbose`. The branch is already pushed and a `Pull request could not be created` comment is posted on the ticket. Fix the cause and re-run with `--create-pr`.
