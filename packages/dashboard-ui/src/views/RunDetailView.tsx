@@ -20,6 +20,7 @@ import type { StatusTone } from "@/components/shared";
 import { TicketKey } from "@/components/TicketKey";
 import { Button } from "@/components/ui/button";
 import { triggerRunRetry, usePoll } from "@/lib/api";
+import { isDemoMode } from "@/lib/demo";
 import { Markdown } from "@/lib/markdown";
 import { automationHash } from "@/lib/routes";
 import { dropHeadline, runReport } from "@/lib/run-report";
@@ -435,7 +436,7 @@ function RunHeader({
           ) : null}
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          {data.retry.eligible && !confirming ? (
+          {data.retry.eligible && !confirming && !isDemoMode() ? (
             <Button
               onClick={() => {
                 setFeedback(null);
@@ -466,7 +467,7 @@ function RunHeader({
               </a>
             </Button>
           ) : null}
-          <ReportProblem run={run} />
+          {isDemoMode() ? null : <ReportProblem run={run} />}
         </div>
       </div>
 

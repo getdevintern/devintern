@@ -23,6 +23,7 @@ import { AutomationDetailView } from "@/views/AutomationDetailView";
 import { StatsView } from "@/views/StatsView";
 import { OverviewView } from "@/views/OverviewView";
 import { WorkspaceView } from "@/views/WorkspaceView";
+import { isDemoMode } from "@/lib/demo";
 import { parseHash, redirectHash, RUNS_HASH, runHash } from "@/lib/routes";
 import type { Route } from "@/lib/routes";
 import { cn } from "@/lib/utils";
@@ -142,11 +143,22 @@ export function App() {
             )}
           </h1>
           <StatusStrip />
-          <Button size="sm" className="dashboard-new-task" onClick={() => setNewTaskOpen(true)}>
-            <Plus aria-hidden="true" />
-            New task
-          </Button>
-          <NewTaskDialog open={newTaskOpen} onOpenChange={setNewTaskOpen} />
+          {isDemoMode() ? (
+            <span
+              className="dashboard-demo-badge"
+              title="Recorded from a sample workspace. Actions are disabled."
+            >
+              Read-only demo
+            </span>
+          ) : (
+            <>
+              <Button size="sm" className="dashboard-new-task" onClick={() => setNewTaskOpen(true)}>
+                <Plus aria-hidden="true" />
+                New task
+              </Button>
+              <NewTaskDialog open={newTaskOpen} onOpenChange={setNewTaskOpen} />
+            </>
+          )}
         </header>
 
         <main className="dashboard-content">
