@@ -20,7 +20,7 @@ DevIntern Code reads a Linear issue (description, labels, attachments, comments)
 
 ## Setup
 
-Create the key at [Linear API settings](https://linear.app/settings/api) under **Personal API keys**. It starts with `lin_api_` and is shown only once. Then set in `.devintern-code/.env`:
+Create the key at [Linear API settings](https://linear.app/settings/api) under **Personal API keys**. It starts with `lin_api_` and is shown only once. Then set in this repository's env file (`~/.devintern/env/<repo>.env`, created by `devintern init`):
 
 | Variable                  | Required | Description                                                                          |
 | ------------------------- | -------- | ------------------------------------------------------------------------------------ |
@@ -51,27 +51,20 @@ Files on `uploads.linear.app` are downloaded for the agent; other links (Figma, 
 
 ## Status mapping
 
-Configure states in `.devintern-code/settings.json`, keyed by the team key (`ENG` in `ENG-42`). Names are matched case-insensitively against the team's workflow states.
+Configure states under `[trackers]` in `~/.devintern/workspace.toml`, keyed by the team key (`ENG` in `ENG-42`). Names are matched case-insensitively against the team's workflow states.
 
-```json
-{
-  "linear": {
-    "projects": {
-      "ENG": {
-        "inProgressStatus": "In Progress",
-        "todoStatus": "Backlog",
-        "prStatus": "In Review"
-      }
-    }
-  }
-}
+```toml
+[trackers.linear.projects.ENG]
+in_progress_status = "In Progress"
+todo_status = "Backlog"
+pr_status = "In Review"
 ```
 
 | Field              | When it is applied                                   |
 | ------------------ | ---------------------------------------------------- |
-| `inProgressStatus` | Implementation starts (after the feasibility check)  |
-| `prStatus`         | A pull request is created                            |
-| `todoStatus`       | The run is incomplete, fails, or hits the turn limit |
+| `in_progress_status` | Implementation starts (after the feasibility check)  |
+| `pr_status`         | A pull request is created                            |
+| `todo_status`       | The run is incomplete, fails, or hits the turn limit |
 
 ## Worker notes
 
@@ -82,7 +75,7 @@ Configure states in `.devintern-code/settings.json`, keyed by the team key (`ENG
 
 | Symptom                                           | Fix                                                                                                     |
 | ------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| `Missing required Linear environment variables`   | Set `LINEAR_API_KEY` in `.devintern-code/.env`.                                                          |
-| Issue does not change state                       | Check the state names, and that the `settings.json` key is the team key from the identifier.            |
+| `Missing required Linear environment variables`   | Set `LINEAR_API_KEY` in `~/.devintern/env/<repo>.env`.                                                          |
+| Issue does not change state                       | Check the state names, and that the `[trackers]` key is the team key from the identifier.            |
 | `Workflow state "In Progress" not found for team` | Fix the spelling; the error lists the team's available states.                                           |
 | `Invalid Linear IssueFilter JSON`                 | Wrap the JSON in single quotes and validate it in the [Linear GraphQL explorer](https://studio.linear.app/graphql). |

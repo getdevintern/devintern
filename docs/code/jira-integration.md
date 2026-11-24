@@ -21,7 +21,7 @@ DevIntern Code reads a Jira issue (description, human comments, attachments), ch
 
 ## Setup
 
-Run `devintern init` in the repository root, then set these in `.devintern-code/.env` (kept out of Git by `devintern init`):
+Run `devintern init` in the repository root, then set these in this repository's env file (`~/.devintern/env/<repo>.env`, created by `devintern init`):
 
 | Variable                   | Required | Description                                                                                  |
 | -------------------------- | -------- | -------------------------------------------------------------------------------------------- |
@@ -41,48 +41,40 @@ devintern --query "project = PROJ AND status = 'To Do'" --create-pr   # JQL batc
 
 `--jql` is a deprecated alias for `--query`. Use `--skip-clarity-check` to skip the feasibility check and `--skip-comments` to skip all comments and status transitions for a run.
 
-DevIntern posts a comment for the feasibility assessment, a completed or incomplete implementation, and story-point estimates. For AI estimation (`--estimate`, `storyPointsField`), see [Story Points Estimation](./story-points-estimation.md).
+DevIntern posts a comment for the feasibility assessment, a completed or incomplete implementation, and story-point estimates. For AI estimation (`--estimate`, `story_points_field`), see [Story Points Estimation](./story-points-estimation.md).
 
 ## Status mapping
 
-Configure transitions in `.devintern-code/settings.json`, keyed by the project key (`PROJ` in `PROJ-123`). Status names must match your workflow exactly; omit a field to skip that transition.
+Configure transitions under `[trackers]` in `~/.devintern/workspace.toml`, keyed by the project key (`PROJ` in `PROJ-123`). Status names must match your workflow exactly; omit a field to skip that transition.
 
-```json
-{
-  "jira": {
-    "projects": {
-      "PROJ": {
-        "inProgressStatus": "In Progress",
-        "todoStatus": "To Do",
-        "prStatus": "In Review",
-        "storyPointsField": "customfield_10016"
-      }
-    }
-  }
-}
+```toml
+[trackers.jira.projects.PROJ]
+in_progress_status = "In Progress"
+todo_status = "To Do"
+pr_status = "In Review"
+story_points_field = "customfield_10016"
 ```
 
 | Field              | When it is applied                                     |
 | ------------------ | ------------------------------------------------------ |
-| `inProgressStatus` | Implementation starts (after the feasibility check)    |
-| `prStatus`         | A pull request is created                              |
-| `todoStatus`       | The run is incomplete, fails, or hits the turn limit   |
+| `in_progress_status` | Implementation starts (after the feasibility check)    |
+| `pr_status`         | A pull request is created                              |
+| `todo_status`       | The run is incomplete, fails, or hits the turn limit   |
 
-The legacy top-level `projects` key (without `jira`) still works.
 
 ## Worker notes
 
-- The [worker](./worker.md#polling-mode) uses your JQL as `[defaults].task_query`. Moving issues to `prStatus` removes them from a `status = 'To Do'` query; the worker also marks PR'd issues as actioned so they are not re-implemented. See [Tickets already actioned after a PR](./worker-troubleshooting.md#tickets-already-actioned-after-a-pr).
+- The [worker](./worker.md#polling-mode) uses your JQL as `[defaults].task_query`. Moving issues to `pr_status` removes them from a `status = 'To Do'` query; the worker also marks PR'd issues as actioned so they are not re-implemented. See [Tickets already actioned after a PR](./worker-troubleshooting.md#tickets-already-actioned-after-a-pr).
 - For instant pickup, run `devintern worker connect jira` and paste the printed ingest URL into a Jira admin webhook. See [Relay](./relay.md).
 
 ## Troubleshooting
 
 | Symptom                                      | Fix                                                                                                                  |
 | -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| `Missing required JIRA environment variables` | Set `JIRA_BASE_URL`, `JIRA_EMAIL`, and `JIRA_API_TOKEN` in `.devintern-code/.env`.                                    |
+| `Missing required JIRA environment variables` | Set `JIRA_BASE_URL`, `JIRA_EMAIL`, and `JIRA_API_TOKEN` in `~/.devintern/env/<repo>.env`.                                    |
 | `Issue not found`                            | Check the key, that `JIRA_BASE_URL` is your Cloud site, and that `JIRA_EMAIL` owns the token.                         |
 | 401 error                                    | The token is invalid or revoked, or `JIRA_EMAIL` is not the token owner. Create a new token.                          |
 | 403 error                                    | Your account lacks permission on the project; ask a Jira admin for browse, comment, or transition rights.            |
-| Status transition failed (warning)           | The name in `settings.json` does not match your workflow, or the transition is not allowed from the current status. The run continues. |
+| Status transition failed (warning)           | The name in `[trackers]` does not match your workflow, or the transition is not allowed from the current status. The run continues. |
 | JQL returns no issues                        | Test the query in Jira's issue search; quote values with spaces (`project = "My Project"`).                           |
 | Description formatting looks wrong           | Jira's rich text (ADF) is converted to Markdown; simplify unusual formatting in the issue.                            |

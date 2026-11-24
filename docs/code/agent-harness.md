@@ -9,7 +9,7 @@ dateModified: 2026-11-18
 
 # Agent Harness Configuration
 
-The **harness** is the AI agent CLI that DevIntern Code runs to do the work. Set it in `.devintern-code/.env` (or the workspace `.env` for a worker):
+The **harness** is the AI agent CLI that DevIntern Code runs to do the work. Set it in the repository's env file `~/.devintern/env/<repo>.env` (or the workspace `.env` for every repo):
 
 ```bash
 AGENT_HARNESS=claude-code        # default

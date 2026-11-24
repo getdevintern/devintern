@@ -23,7 +23,7 @@ DevIntern Code reads a Trello card (description, labels, comments), checks that 
 2. **Token:** open this URL with your key, click **Allow**, and copy the token:
    `https://trello.com/1/authorize?expiration=never&scope=read,write&response_type=token&name=DevIntern&key=YOUR_API_KEY`
 
-Then set in `.devintern-code/.env`:
+Then set in this repository's env file (`~/.devintern/env/<repo>.env`, created by `devintern init`):
 
 | Variable                  | Required    | Description                                                                                    |
 | ------------------------- | ----------- | ---------------------------------------------------------------------------------------------- |
@@ -51,27 +51,20 @@ Use `--skip-clarity-check` to skip the feasibility check. `--skip-comments` skip
 
 ## Status mapping
 
-Configure lists in `.devintern-code/settings.json`, keyed by the board short ID (from the board URL, not the 24-character internal ID). List names are matched case-insensitively.
+Configure lists under `[trackers]` in `~/.devintern/workspace.toml`, keyed by the board short ID (from the board URL, not the 24-character internal ID). List names are matched case-insensitively.
 
-```json
-{
-  "trello": {
-    "projects": {
-      "abc123": {
-        "inProgressStatus": "Doing",
-        "todoStatus": "To Do",
-        "prStatus": "Review"
-      }
-    }
-  }
-}
+```toml
+[trackers.trello.projects.abc123]
+in_progress_status = "Doing"
+todo_status = "To Do"
+pr_status = "Review"
 ```
 
 | Field              | When it is applied                                   |
 | ------------------ | ---------------------------------------------------- |
-| `inProgressStatus` | Implementation starts (after the feasibility check)  |
-| `prStatus`         | A pull request is created                            |
-| `todoStatus`       | The run is incomplete, fails, or hits the turn limit |
+| `in_progress_status` | Implementation starts (after the feasibility check)  |
+| `pr_status`         | A pull request is created                            |
+| `todo_status`       | The run is incomplete, fails, or hits the turn limit |
 
 ## Worker notes
 
@@ -83,6 +76,6 @@ Configure lists in `.devintern-code/settings.json`, keyed by the board short ID 
 | Symptom                                         | Fix                                                                                                    |
 | ----------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
 | `Missing required Trello environment variables` | Set `TRELLO_API_KEY` and `TRELLO_API_TOKEN`.                                                            |
-| Card does not move between lists                | Check list names and that the `settings.json` key is the board short ID. Do not pass `--skip-comments`. |
+| Card does not move between lists                | Check list names and that the `[trackers]` key is the board short ID. Do not pass `--skip-comments`. |
 | `List "Doing" not found on board`               | Fix the spelling; the error lists the board's lists.                                                    |
 | `Could not initialize the trello change detector` | Set `TRELLO_DEFAULT_BOARD_ID` for the worker.                                                        |

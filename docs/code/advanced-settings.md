@@ -9,7 +9,7 @@ dateModified: 2026-11-18
 
 # Advanced Settings
 
-Unless noted otherwise, set these in `.devintern-code/.env`, the workspace `.env`, or your shell. Every one is optional.
+Unless noted otherwise, set these in the repository's env file (`~/.devintern/env/<repo>.env`), the workspace `.env`, or your shell. Every one is optional.
 
 ## Execution limits
 

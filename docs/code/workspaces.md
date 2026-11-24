@@ -19,7 +19,7 @@ cd ~/code/backend && devintern worker add-repo
 cd ~/code/frontend && devintern worker add-repo
 ```
 
-`worker add-repo` adds a `[[repos]]` entry from the checkout's `origin` remote, merges new keys from its `.devintern-code/.env` into the shared `.env` (conflicting values go to that repo's `[repos.env]`), and seeds a routing rule for a Jira or Linear project key. Running it again is a no-op, and comments in `workspace.toml` are preserved. The repo's `.devintern-code/settings.json` needs no changes.
+`worker add-repo` adds a `[[repos]]` entry from the checkout's `origin` remote, merges new keys from a legacy `.devintern-code/.env` (if the checkout still has one) into the shared `.env` (conflicting values go to that repo's `[repos.env]`), and seeds a routing rule for a Jira or Linear project key. Running it again is a no-op, and comments in `workspace.toml` are preserved. The repo's `.devintern-code/settings.json` needs no changes.
 
 ## How it works
 
@@ -67,7 +67,7 @@ labels = ["frontend"]
 
 Set `manual_only = true` on a `[[repos]]` entry for a repository you only run by hand from your own checkout. The worker skips it: no clone, no polling, no routing, automations, or `worker add` tasks. A workspace whose repos are all manual-only does not need `[defaults].tracker`. A manual-only repo without a hosted remote can set `path = "/absolute/checkout/dir"` instead of `remote`; runs in that directory or below it use the entry. `devintern init` writes these entries for you.
 
-Running `devintern <TASK>` inside a checkout whose `origin` matches a `[[repos]]` entry (manual-only or not) uses that workspace: the shared `.env`, the repo's `env_file` and `[repos.env]`, `[trackers]` settings, pipelines, prompt overrides, sign-in, and run history. The checkout's own `.devintern-code/.env` is not read. A ticket being worked on by the worker cannot be started by hand at the same time (and the reverse); the worker retries its run later.
+Running `devintern <TASK>` inside a checkout whose `origin` matches a `[[repos]]` entry (manual-only or not) uses that workspace: the shared `.env`, the repo's `env_file` and `[repos.env]`, `[trackers]` settings, pipelines, prompt overrides, sign-in, and run history. A ticket being worked on by the worker cannot be started by hand at the same time (and the reverse); the worker retries its run later.
 
 Keys not shown here are documented on the page for their feature:
 
@@ -86,7 +86,7 @@ Keys not shown here are documented on the page for their feature:
 Notes on the keys above:
 
 - `[defaults].tracker` can be any tracker with polling support.
-- A repo's `pr_labels` replaces `[defaults].pr_labels`. Outside a workspace, set `PR_LABELS` (comma-separated) in `.devintern-code/.env`.
+- A repo's `pr_labels` replaces `[defaults].pr_labels`. For a manual-only repo, set `PR_LABELS` (comma-separated) in its env file.
 - Repo names must be unique and filesystem-safe; they become directory names.
 
 ## Routing tasks to repositories
@@ -136,7 +136,7 @@ labels = ["web"]
 
 ## Pipelines for the fleet and per repository
 
-Set `pipeline_file` to a JSON pipeline definition (same schema as the `pipeline` block in `settings.json`) for the whole fleet in `[defaults]`, or for one repo in `[[repos]]`. Paths resolve against `~/.devintern`.
+Set `pipeline_file` to a JSON pipeline definition (`steps`, `plugins`, and `artifacts` at the top level; see [Customizing the Task Pipeline](./pipelines.md)) for the whole fleet in `[defaults]`, or for one repo in `[[repos]]`. Paths resolve against `~/.devintern`.
 
 ```toml
 [defaults]
@@ -169,7 +169,7 @@ The worker keeps idle PR worktrees for reuse, at most `max_concurrency_per_repo`
 
 ## Environment
 
-Secrets live in one owner-only `~/.devintern/.env`: tracker credentials, `GITHUB_TOKEN`, and agent settings. The worker does not read a checkout's `.devintern-code/.env`. Each repository can layer more on top, highest last:
+Secrets live in one owner-only `~/.devintern/.env`: tracker credentials, `GITHUB_TOKEN`, and agent settings. Each repository can layer more on top, highest last:
 
 1. Shared workspace `.env`
 2. The repo's `env_file`

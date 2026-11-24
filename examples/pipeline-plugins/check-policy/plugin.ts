@@ -3,8 +3,8 @@
  * paths. It inspects the runtime-provided diff against the PR target
  * (`context.getDiff()`), so it works with any code host and never shells out.
  *
- * Copy this file to `.devintern-code/steps/check-policy.ts` and register it in
- * `.devintern-code/settings.json` (see settings.json here).
+ * Copy this file to `~/.devintern/pipelines/steps/check-policy.ts` and register
+ * it in a workspace pipeline file (see pipeline.json here).
  */
 
 import type { PipelineContext, StepDefinition, TaskStepResult } from "@getdevintern/code/pipeline";

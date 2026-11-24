@@ -22,7 +22,7 @@ For PR review automation, use the [worker](./worker.md) with the [relay](./relay
 
 ## Setup
 
-Set in `.devintern-code/.env`:
+Set in this repository's env file (`~/.devintern/env/<repo>.env`, created by `devintern init`):
 
 | Variable               | Required | Description                                                                         |
 | ---------------------- | -------- | ----------------------------------------------------------------------------------- |
@@ -52,27 +52,20 @@ Use `--skip-clarity-check` to skip the feasibility check and `--skip-comments` t
 
 ## Status mapping
 
-GitHub has no workflow states, so statuses map to labels. Create the labels in the repository, then configure them in `.devintern-code/settings.json`, keyed by `owner/repo`. A status of `closed` or `done` closes the issue instead.
+GitHub has no workflow states, so statuses map to labels. Create the labels in the repository, then configure them under `[trackers]` in `~/.devintern/workspace.toml`, keyed by `owner/repo`. A status of `closed` or `done` closes the issue instead.
 
-```json
-{
-  "github": {
-    "projects": {
-      "acme/webapp": {
-        "inProgressStatus": "In Progress",
-        "todoStatus": "To Do",
-        "prStatus": "In Review"
-      }
-    }
-  }
-}
+```toml
+[trackers.github.projects."acme/webapp"]
+in_progress_status = "In Progress"
+todo_status = "To Do"
+pr_status = "In Review"
 ```
 
 | Field              | When it is applied                                   |
 | ------------------ | ---------------------------------------------------- |
-| `inProgressStatus` | Implementation starts (after the feasibility check)  |
-| `prStatus`         | A pull request is created                            |
-| `todoStatus`       | The run is incomplete, fails, or hits the turn limit |
+| `in_progress_status` | Implementation starts (after the feasibility check)  |
+| `pr_status`         | A pull request is created                            |
+| `todo_status`       | The run is incomplete, fails, or hits the turn limit |
 
 ## Worker notes
 
@@ -84,5 +77,5 @@ GitHub has no workflow states, so statuses map to labels. Create the labels in t
 | Symptom                                          | Fix                                                                                     |
 | ------------------------------------------------ | --------------------------------------------------------------------------------------- |
 | `Missing required GitHub environment variables`  | Set `GITHUB_TOKEN` and `GITHUB_REPO`. An App ID and key are not enough.                  |
-| `Label "In Progress" not found in the repository` | Create the label (Issues → Labels) or change the names in `settings.json`; the error lists existing labels. |
+| `Label "In Progress" not found in the repository` | Create the label (Issues → Labels) or change the names in `[trackers]`; the error lists existing labels. |
 | Old status labels pile up                        | Set `GITHUB_STATUS_LABELS` to the full list of status labels.                            |

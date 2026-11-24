@@ -1,0 +1,21 @@
+{
+  "artifacts": {
+    "publish": {
+      "destination": "pr-comment",
+      "uploader": "files-sdk",
+      "select": [{ "key": "explanation-image", "presentation": "embed" }]
+    }
+  },
+  "plugins": ["./steps/pr-explainer-image.ts"],
+  "steps": [
+    { "use": "implement" },
+    { "use": "commit" },
+    { "use": "verify", "onFail": "loopback" },
+    { "use": "auto-review" },
+    {
+      "use": "pr-explainer-image",
+      "promptFile": "/home/you/.devintern/pipelines/prompts/pr-explainer-image.md"
+    },
+    { "use": "finalize" }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "plugins": ["./steps/check-policy.ts"],
+  "steps": [
+    { "use": "implement" },
+    { "use": "commit" },
+    {
+      "use": "check-policy",
+      "forbiddenPaths": ["secrets/", "credentials/", ".env"],
+      "onFail": "halt"
+    },
+    { "use": "finalize" }
+  ]
+}

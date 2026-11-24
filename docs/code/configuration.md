@@ -126,7 +126,7 @@ Only global npm or bun installs are updated. To upgrade now, run `bun install -g
 
 Run `devintern doctor` first: it checks the runtime, agent CLI, tracker credentials, sign-in, and license, and gives a fix for each failure ([details](./advanced-settings.md#readiness-check)).
 
-- **"Missing required environment variables"**: make sure `~/.devintern/env/<repo>.env` (or `.devintern-code/.env` for an unregistered project) exists and the variable names are spelled exactly right (they are case-sensitive).
+- **"Missing required environment variables"**: make sure `~/.devintern/env/<repo>.env` exists (run `devintern init` in the repository) and the variable names are spelled exactly right (they are case-sensitive).
 - **"Not in a git repository"**: run `git init`, or pass `--no-git`.
 - **`<Harness> CLI not found`**: install the agent CLI and put it on your `PATH`, or set `AGENT_CLI_PATH` / `--agent-path`.
 - **"Unknown agent harness"**: check how `AGENT_HARNESS` is spelled (kebab-case, for example `claude-code`). The error message lists every valid name.
