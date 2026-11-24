@@ -152,6 +152,7 @@ describe("Review Formatter", () => {
       expect(prompt).toContain("Instructions");
       expect(prompt).toContain("commit them with a descriptive message");
       expect(prompt).toContain("Do NOT push to the remote");
+      expect(prompt).not.toMatch(/git add (\.|-A|--all)/);
     });
 
     test("should format review state correctly", () => {
@@ -262,6 +263,27 @@ describe("Review Formatter", () => {
       const prompt = formatSingleCommentPrompt(comment, "owner/repo", "main");
 
       expect(prompt).not.toContain("Line:");
+    });
+
+    test("tells the agent to stage only real work, never the whole tree", () => {
+      const comment: ProcessedReviewComment = {
+        id: 1,
+        path: "src/utils.ts",
+        line: 1,
+        side: "RIGHT",
+        diffHunk: "@@",
+        body: "Rename this",
+        reviewer: "reviewer",
+        isReply: false,
+      };
+
+      const prompt = formatSingleCommentPrompt(comment, "owner/repo", "feature-branch");
+
+      expect(prompt).toContain("`git add -u`");
+      expect(prompt).toContain("`git add <path>` for each new file you intentionally created");
+      expect(prompt).toContain("Never stage the whole tree");
+      expect(prompt).not.toMatch(/git add (\.|-A|--all)/);
+      expect(prompt).toContain("Commit with message: `fix: address PR review feedback`");
     });
   });
 

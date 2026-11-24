@@ -31,6 +31,7 @@ import type {
 import { pickAgentSelection } from "../agent/selection";
 import type { AgentSelection } from "../agent/selection";
 import { BUILTIN_DENY_PATHS } from "../review/merge-gate";
+import { mergeSafetyPolicyLabel } from "../review/merge-safety-rules";
 import type { AutoMergeSettings } from "../workspace/config";
 
 /** Dashboard id prefix for scheduled estimation sweeps. */
@@ -98,10 +99,14 @@ export function autoMergeDescription(settings: AutoMergeSettings | undefined): s
       "",
       `- **Safe paths:** ${globList(settings.safePaths)}`,
       `- **Deny paths:** ${globList([...settings.denyPaths, ...BUILTIN_DENY_PATHS])}`,
-      `- **Agent review** of other PRs: ${settings.review ? "on" : "off (they stay open)"}`,
+      `- **Review paths** (always sent to the agent review): ${globList(settings.reviewPaths)}`,
+      `- **Agent review** of other PRs: ${settings.review ? `on (\`${mergeSafetyPolicyLabel(settings.policy, settings)}\` policy)` : "off (they stay open)"}`,
       `- **Merge method:** ${settings.method}`,
       "",
-      "Per-repo `auto_merge_safe_paths` / `auto_merge_deny_paths` replace these lists.",
+      "Per-repo `auto_merge_safe_paths`, `auto_merge_deny_paths`, `auto_merge_review_paths`, " +
+        "`auto_merge_policy`, " +
+        "`auto_merge_rules` / `auto_merge_rules_file`, and `auto_merge_review_instructions` " +
+        "replace these settings.",
     );
   }
   lines.push(

@@ -563,8 +563,12 @@ export interface StatsResponse {
   hostTimeZone?: string;
   stats: {
     totals: { runs: number; byStatus: Record<RunStatus, number> };
+    /** Excludes `auto_merge` runs (gate verdicts); see `byOriginStatus.auto_merge`. */
     successRate: number | null;
+    /** Excludes `auto_merge` runs (gate verdicts); see `byOriginStatus.auto_merge`. */
     escalationRate: number | null;
+    /** Counts behind the rates. Absent from older workers. */
+    rateBasis?: { terminal: number; succeeded: number; escalated: number };
     runsPerWeek: { weekStart: string; count: number }[];
     medianDurationMs: number | null;
     byHarness: {
@@ -576,6 +580,11 @@ export interface StatsResponse {
       medianDurationMs: number | null;
     }[];
     byOrigin: Record<RunOrigin, number>;
+    /** Terminal-status counts per origin. Absent from older workers. */
+    byOriginStatus?: Record<
+      RunOrigin,
+      { succeeded: number; failed: number; escalated: number; abandoned: number }
+    >;
     /** Absent from workers older than the activity heatmap. */
     activity?: RunActivity;
   } | null;

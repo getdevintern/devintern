@@ -340,7 +340,9 @@ export function formatSingleCommentPrompt(
   lines.push("## Instructions");
   lines.push("");
   lines.push("1. Make the minimal change needed to address this feedback");
-  lines.push("2. Stage your changes with `git add .`");
+  lines.push(
+    "2. Stage only real work: `git add -u` for changed and deleted tracked files, plus `git add <path>` for each new file you intentionally created. Never stage the whole tree or every untracked entry in bulk: the sandbox mounts placeholder entries (`.bashrc`, `.profile`, `.gitconfig`, `.claude/…`, …) into the worktree root; git cannot stage them, and they must never be committed.",
+  );
   lines.push("3. Commit with message: `fix: address PR review feedback`");
 
   return lines.join("\n");

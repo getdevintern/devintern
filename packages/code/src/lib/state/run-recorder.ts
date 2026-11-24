@@ -141,8 +141,19 @@ export interface RunStatsWeek {
   count: number;
 }
 
+/** Terminal-status counts for one run origin. */
+export type RunStatsOutcomeCounts = Record<TerminalRunStatus, number>;
+
+/**
+ * Run origin left out of the headline rates and the per-harness table. An
+ * `auto_merge` run records the merge gate's verdict (escalated = PR left open
+ * for a human), not agent quality; see `byOriginStatus.auto_merge`.
+ */
+export const STATS_EXCLUDED_ORIGIN: RunOrigin = "auto_merge";
+
 export interface RunStatsHarness {
   harness: string;
+  /** Runs of every origin except `auto_merge`. */
   runs: number;
   succeeded: number;
   failed: number;
@@ -153,21 +164,37 @@ export interface RunStatsHarness {
 
 export interface RunStats {
   totals: { runs: number; byStatus: Record<RunStatus, number> };
-  /** Fraction of terminal runs that succeeded; null when no terminal runs. */
+  /**
+   * Fraction of terminal runs that succeeded, counting every origin except
+   * `auto_merge` (gate verdicts, reported in `byOriginStatus.auto_merge`);
+   * null when there are no such terminal runs.
+   */
   successRate: number | null;
-  /** Fraction of terminal runs that escalated; null when no terminal runs. */
+  /**
+   * Fraction of terminal runs that escalated, counting every origin except
+   * `auto_merge`; null when there are no such terminal runs.
+   */
   escalationRate: number | null;
+  /** Counts behind `successRate` and `escalationRate` (terminal, non-`auto_merge` runs). */
+  rateBasis: { terminal: number; succeeded: number; escalated: number };
   runsPerWeek: RunStatsWeek[];
-  /** Median duration of succeeded runs with a PR; null when none. */
+  /** Median duration of succeeded non-`auto_merge` runs with a PR; null when none. */
   medianDurationMs: number | null;
   byHarness: RunStatsHarness[];
   byOrigin: Record<RunOrigin, number>;
+  /** Terminal-status counts per origin (all origins, including `auto_merge`). */
+  byOriginStatus: Record<RunOrigin, RunStatsOutcomeCounts>;
   /** When runs happen: local weekday × hour buckets (starts and busy time) per origin. */
   activity: RunActivity<RunOrigin>;
 }
 
 /** Statuses that no longer change (excluded: in_progress and deferred-for-retry). */
-const TERMINAL_STATUSES: RunStatus[] = ["succeeded", "failed", "escalated", "abandoned"];
+const TERMINAL_STATUSES = ["succeeded", "failed", "escalated", "abandoned"] as const;
+type TerminalRunStatus = (typeof TERMINAL_STATUSES)[number];
+
+function isTerminalStatus(status: RunStatus): status is TerminalRunStatus {
+  return (TERMINAL_STATUSES as readonly RunStatus[]).includes(status);
+}
 
 /** ISO date (UTC) of the Monday starting the week that contains `epochMs`. */
 function weekStartIso(epochMs: number): string {
@@ -845,6 +872,13 @@ export class RunStore {
       manual: 0,
       local: 0,
     };
+    const byOriginStatus = Object.fromEntries(
+      Object.keys(byOrigin).map((origin) => [
+        origin,
+        { succeeded: 0, failed: 0, escalated: 0, abandoned: 0 },
+      ]),
+    ) as Record<RunOrigin, RunStatsOutcomeCounts>;
+    const rateBasis = { terminal: 0, succeeded: 0, escalated: 0 };
     const weekCounts = new Map<string, number>();
     const harnesses = new Map<
       string,
@@ -859,6 +893,25 @@ export class RunStore {
       const week = weekStartIso(row.started_at);
       weekCounts.set(week, (weekCounts.get(week) ?? 0) + 1);
 
+      const counted = row.origin !== STATS_EXCLUDED_ORIGIN;
+      if (isTerminalStatus(row.status)) {
+        byOriginStatus[row.origin] ??= { succeeded: 0, failed: 0, escalated: 0, abandoned: 0 };
+        byOriginStatus[row.origin][row.status] += 1;
+        if (counted) {
+          rateBasis.terminal += 1;
+          if (row.status === "succeeded") rateBasis.succeeded += 1;
+          if (row.status === "escalated") rateBasis.escalated += 1;
+        }
+      }
+
+      // Median duration and per-harness rows describe agent work, so they skip
+      // auto-merge gate verdicts (which always carry the PR they checked).
+      if (!counted) continue;
+
+      if (row.status === "succeeded" && row.finished_at !== null && row.pr_url) {
+        durations.push(row.finished_at - row.started_at);
+      }
+
       const harnessKey = row.harness ?? "unknown";
       let harness = harnesses.get(harnessKey);
       if (!harness) {
@@ -869,20 +922,17 @@ export class RunStore {
       harness.byStatus.set(row.status, (harness.byStatus.get(row.status) ?? 0) + 1);
 
       if (row.status === "succeeded" && row.finished_at !== null) {
-        const duration = row.finished_at - row.started_at;
-        harness.durations.push(duration);
-        if (row.pr_url) {
-          durations.push(duration);
-        }
+        harness.durations.push(row.finished_at - row.started_at);
       }
     }
 
-    const terminal = TERMINAL_STATUSES.reduce((sum, status) => sum + byStatus[status], 0);
+    const { terminal } = rateBasis;
 
     return {
       totals: { runs: rows.length, byStatus },
-      successRate: terminal > 0 ? byStatus.succeeded / terminal : null,
-      escalationRate: terminal > 0 ? byStatus.escalated / terminal : null,
+      successRate: terminal > 0 ? rateBasis.succeeded / terminal : null,
+      escalationRate: terminal > 0 ? rateBasis.escalated / terminal : null,
+      rateBasis,
       runsPerWeek: [...weekCounts.entries()]
         .sort(([a], [b]) => a.localeCompare(b))
         .map(([weekStart, count]) => ({ weekStart, count })),
@@ -898,6 +948,7 @@ export class RunStore {
           medianDurationMs: median(data.durations),
         })),
       byOrigin,
+      byOriginStatus,
       activity: computeRunActivity(rows, timeZone, since, now),
     };
   }

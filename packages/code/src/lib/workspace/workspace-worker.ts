@@ -884,6 +884,22 @@ async function startLoggedWorkerFailover(
   });
 }
 
+function assertWorkerHasRepos(config: WorkspaceConfig, configPath: string): void {
+  if (config.repos.length > 0) return;
+  console.error(
+    `❌ No repos configured for the worker in ${configPath}.\n` +
+      "   Add [[repos]] entries without manual_only = true " +
+      "(or run `devintern worker add-repo` inside an existing repo).",
+  );
+  process.exit(1);
+}
+
+/** Reload hooks published by buildFleetEventAcquirers into the worker loop. */
+type WorkerEventReloadHooks = {
+  hooks?: FleetEventReloadHooks;
+  verifyRelayRepos?: () => Promise<void>;
+};
+
 export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Promise<void> {
   const configPath = options.workspacePath
     ? resolve(options.workspacePath)
@@ -891,14 +907,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   const workspaceDir = options.workspacePath ? dirname(configPath) : resolveWorkspaceDir();
   writeWorkerStartMarker(workspaceDir);
   const config = loadWorkerWorkspaceConfig(configPath);
-  if (config.repos.length === 0) {
-    console.error(
-      `❌ No repos configured for the worker in ${configPath}.\n` +
-        "   Add [[repos]] entries without manual_only = true " +
-        "(or run `devintern worker add-repo` inside an existing repo).",
-    );
-    process.exit(1);
-  }
+  assertWorkerHasRepos(config, configPath);
 
   const { multiTeam, initialQuery, intervalSeconds } = applyWorkspaceEnv(config, workspaceDir);
   const initialFleetAutomations = resolveFleetAutomations(config);
@@ -1011,7 +1020,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   // Cadence reconciliation: applied on successful reloads of poll_interval.
   const intervalUpdaters: Array<(seconds: number) => void> = [];
   // Reload hooks published by buildFleetEventAcquirers (mention sweeps).
-  const eventReloadHooks: { hooks?: FleetEventReloadHooks } = {};
+  const eventReloadHooks: WorkerEventReloadHooks = {};
   let pollIntervalSeconds = config.defaults.pollIntervalSeconds;
 
   // Always assemble the estimation scheduler so entries can be added to an
@@ -1256,6 +1265,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
     }
     eventReloadHooks.hooks?.reconcileMentionSweeps();
     eventReloadHooks.hooks?.reconcileConflictResolution();
+    void eventReloadHooks.verifyRelayRepos?.();
   };
 
   // Live reload keeps queries, fixed team destinations, routing, repos,
