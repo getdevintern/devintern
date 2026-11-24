@@ -35,8 +35,32 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 - Surface: `devintern worker` surface
 - Status: `default`
 - Evidence: `tests/local/worker-relay-gitlab-events.test.ts` (loopback relay + fake GitLab forge + local bare remote; `bun run --filter @getdevintern/code build`, then `bun run --filter @devintern/e2e test`)
-- Missing: `ci.changed` (the fake forge serves no pipeline/job routes yet); `ref.headSha`-only envelopes; a relay hint that arrives while a poll tick is running (the reconcile is skipped by the poller's busy guard); real GitLab project hooks into the hosted relay (live suite only).
-- Last reviewed: 2026-11-24
+- Missing: a relay hint that arrives while a poll tick is running (the reconcile is skipped by the poller's busy guard); real GitLab project hooks into the hosted relay (live suite only).
+- Last reviewed: 2026-11-25
+
+### Relay v2 GitLab `ci.changed` (offline): a failed pipeline on a registered MR's head runs CI repair once
+
+- Surface: `devintern worker` surface
+- Status: `default`
+- Evidence: `tests/local/worker-relay-gitlab-events.test.ts` ("relayed v2 GitLab ci.changed runs CI repair once on a failed head; …"), same fixture as the row above with `[workspace].ci_failure_fix = true` and a `FakeGitlabCiFailure` on the MR head
+- Missing: a pipeline with several failed jobs or `allow_failure` jobs; CI-repair retry budget and escalation after a failed repair; real GitLab pipeline hooks into the hosted relay (live suite only).
+- Last reviewed: 2026-11-25
+
+### Relay v2 GitLab `ci.changed` (offline): passing pipeline, stale head SHA, and redelivered `deliveryId` run nothing
+
+- Surface: `devintern worker` surface
+- Status: `default`
+- Evidence: `tests/local/worker-relay-gitlab-events.test.ts` (same test as the row above: a `success` pipeline, then a `ci.changed` for the pre-repair SHA, then a replay of the failed envelope's `deliveryId`)
+- Missing: a `running` pipeline (served by `FakeGitlabForge.setCiStatus` but not exercised); a stale SHA that still has a failed pipeline of its own. Note that the stale case passes because the worker always reads the MR's current head, not because it compares `ref.headSha`.
+- Last reviewed: 2026-11-25
+
+### Relay v2 GitLab `ref.headSha`-only envelopes (offline): `ci.changed` with no `change` or `branch` still runs CI repair
+
+- Surface: `devintern worker` surface
+- Status: `partial`
+- Evidence: `tests/local/worker-relay-gitlab-events.test.ts` ("relayed v2 GitLab ci.changed identified only by ref.headSha …"): an envelope carrying only the MR's current head SHA resolves registered MR !1 and runs one CI repair
+- Missing: Observed (unconfirmed intent), from `packages/code/src/lib/workspace/gitlab-fleet-events.ts` and not asserted: the relay matcher filters registered MRs by `change` and `branch` only and never compares `ref.headSha`, so a `headSha`-only envelope reconciles every open registered MR in the project, whatever SHA it names. `change.changed` with `headSha` only is not covered.
+- Last reviewed: 2026-11-25
 
 ### Relay tracker `task.changed` delivery: query gate, cursor resume, `deliveryId` dedupe, outage backoff, bearer auth
 
@@ -119,6 +143,17 @@ tick, so only a relay envelope can start a job. The test proves:
   `[workspace].conflict_resolution = "auto"`) runs conflict resolution once:
   one push of the merged branch, after which it merges cleanly into the
   unchanged target. A second `change.changed` runs nothing;
+- with `[workspace].ci_failure_fix = true` and the forge serving one pipeline
+  and job for the MR head (`FakeGitlabCiFailure`), `ci.changed` (published
+  with `FakeRelay.publishCiChanged`) while the pipeline passes reads the
+  pipeline but no trace and runs nothing. After `FakeGitlabForge.setCiStatus`
+  flips it to failed, the next `ci.changed` runs exactly one CI-repair agent
+  whose prompt has the failed job name and trace, pushes one commit on top of
+  the old head, and records a `ci_fix` run. A `ci.changed` for the pre-repair
+  SHA reads only the new head's pipelines and runs nothing, and a replay of
+  the failed envelope's `deliveryId` makes no forge request;
+- a `ci.changed` that names the MR only by `ref.headSha` runs the same single
+  CI repair;
 - neither the relay token nor the forge token (raw or URL-encoded) appears in
   worker output or in any file under the fixture root.
 

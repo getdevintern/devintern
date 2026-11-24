@@ -176,6 +176,26 @@ export class FakeRelay {
     return envelope;
   }
 
+  /**
+   * Buffer one v2 `ci.changed` envelope for `codeHost`, with `source` set to
+   * its provider (the only shape the acquirer acts on).
+   *
+   * @returns The published envelope, with its assigned `seq`
+   */
+  publishCiChanged(input: {
+    codeHost: FakeRelayCodeHostIdentity;
+    ref: FakeRelayCodeHostEventInput["ref"];
+    deliveryId: string;
+  }): FakeRelayEnvelope {
+    return this.publishCodeHostEvent({
+      eventType: "ci.changed",
+      source: input.codeHost.provider,
+      codeHost: input.codeHost,
+      ref: input.ref,
+      deliveryId: input.deliveryId,
+    });
+  }
+
   /** Answer the next `count` polls with `status` (default 503) instead of events. */
   failNext(count: number, status = 503): void {
     this.failuresRemaining = count;
