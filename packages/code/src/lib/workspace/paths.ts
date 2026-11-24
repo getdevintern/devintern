@@ -137,12 +137,11 @@ export function isWorkspaceHome(dir: string): boolean {
 
 /**
  * Directory holding per-user runtime state (auth session, relay and GitHub App
- * pairing) for commands that target `workingDir`: `state/code/` for a
- * workspace home, otherwise the project's `.devintern-code/`.
+ * pairing) for the workspace at `workspaceDir`: its `state/code/`, also
+ * before the workspace is fully set up.
  */
-export function codeStateDirFor(workingDir: string): string {
-  const dir = resolve(workingDir);
-  return isWorkspaceHome(dir) ? workspaceCodeStateDir(dir) : join(dir, ".devintern-code");
+export function codeStateDirFor(workspaceDir: string): string {
+  return workspaceCodeStateDir(resolve(workspaceDir));
 }
 
 /** Path of the central workspace SQLite database. */

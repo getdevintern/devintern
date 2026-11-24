@@ -3,13 +3,9 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "os";
 import { basename, join } from "path";
 import { BUNDLED_TRELLO_API_KEY } from "@devintern/task-trackers";
-import {
-  TRACKER_SETUP,
-  buildEnvExample,
-  renderEnvFile,
-  scaffoldProject,
-} from "../src/lib/init/scaffold";
+import { TRACKER_SETUP, buildEnvExample, renderEnvFile } from "../src/lib/init/scaffold";
 import { isInteractive, runInitUpgrade, runInitWizard } from "../src/lib/init/wizard";
+import { registerManualCheckout } from "../src/lib/workspace/register-checkout";
 import {
   ANALYTICS_CONFIG_DIR_ENV,
   setAnalyticsCaptureForTests,
@@ -40,6 +36,11 @@ function promptQueue(answers: string[]) {
 }
 
 const silentLog = () => {};
+
+/** Env file the upgrade tests seed and update. */
+function upgradeEnvPath(): string {
+  return join(tempDir, ".devintern-code", ".env");
+}
 
 /** Env file `devintern init` registers for the checkout at `dir`. */
 function wizardEnvPath(dir: string = tempDir): string {
@@ -129,48 +130,6 @@ describe("renderEnvFile", () => {
     expect(env).toContain("TASK_TRACKER=linear");
     expect(env).toContain("LINEAR_API_KEY=lin_api_123");
     expect(env).toContain("# Pull Request integration\nGITHUB_TOKEN=ghp_abc");
-  });
-});
-
-describe("scaffoldProject", () => {
-  test("writes env files, settings.json, and .gitignore entries", () => {
-    expect(scaffoldProject({ cwd: tempDir })).toBe(true);
-    const configDir = join(tempDir, ".devintern-code");
-    expect(readFileSync(join(configDir, ".env"), "utf8")).toBe(
-      readFileSync(join(configDir, ".env.example"), "utf8"),
-    );
-    const settings = JSON.parse(readFileSync(join(configDir, "settings.json"), "utf8"));
-    expect(Object.keys(settings)).toContain("azure-devops");
-    expect(readFileSync(join(tempDir, ".gitignore"), "utf8")).toContain(".devintern-code/.env");
-  });
-
-  test("refuses to touch an existing config dir", () => {
-    expect(scaffoldProject({ cwd: tempDir })).toBe(true);
-    expect(scaffoldProject({ cwd: tempDir, envContent: "OVERWRITTEN" })).toBe(false);
-    expect(readFileSync(join(tempDir, ".devintern-code", ".env"), "utf8")).not.toContain(
-      "OVERWRITTEN",
-    );
-  });
-
-  test("scaffolds at the repository root when run from a subdirectory", () => {
-    mkdirSync(join(tempDir, ".git"), { recursive: true });
-    const subDir = join(tempDir, "packages", "app");
-    mkdirSync(subDir, { recursive: true });
-
-    expect(scaffoldProject({ cwd: subDir })).toBe(true);
-    expect(existsSync(join(tempDir, ".devintern-code", ".env"))).toBe(true);
-    expect(existsSync(join(subDir, ".devintern-code"))).toBe(false);
-    expect(readFileSync(join(tempDir, ".gitignore"), "utf8")).toContain(".devintern-code/.env");
-  });
-
-  test("completes an existing config dir that has no .env, keeping other files", () => {
-    const configDir = join(tempDir, ".devintern-code");
-    mkdirSync(configDir, { recursive: true });
-    writeFileSync(join(configDir, "settings.json"), '{"custom":true}', "utf8");
-
-    expect(scaffoldProject({ cwd: tempDir })).toBe(true);
-    expect(readFileSync(join(configDir, ".env"), "utf8")).toContain("TASK_TRACKER=jira");
-    expect(readFileSync(join(configDir, "settings.json"), "utf8")).toBe('{"custom":true}');
   });
 });
 
@@ -533,13 +492,6 @@ describe("runInitWizard", () => {
     expect(env).toContain("GITHUB_TOKEN=ghp_pr_token");
   });
 
-  test("refuses when .devintern-code already exists without prompting", async () => {
-    scaffoldProject({ cwd: tempDir });
-    const { prompt, asked } = promptQueue([]);
-    await runInitWizard({ prompt, probe: () => Promise.resolve(), cwd: tempDir, log: silentLog });
-    expect(asked).toHaveLength(0);
-  });
-
   test("keeps guiding when the config folder exists but .env is missing", async () => {
     mkdirSync(join(tempDir, ".devintern-code"), { recursive: true });
     const { prompt } = promptQueue([
@@ -748,8 +700,8 @@ describe("runInitWizard analytics", () => {
     expect(recorded[0]?.properties).toMatchObject({ source: "rescue" });
   });
 
-  test("an existing configuration never starts the funnel", async () => {
-    scaffoldProject({ cwd: tempDir });
+  test("an existing registration never starts the funnel", async () => {
+    await registerManualCheckout(tempDir, "", silentLog);
     const recorded = stubAnalytics();
     const { prompt, asked } = promptQueue([]);
 
@@ -793,6 +745,7 @@ describe("runInitUpgrade", () => {
     ]);
     let probed: Record<string, string> | undefined;
     await runInitUpgrade({
+      envPath: upgradeEnvPath(),
       prompt,
       probe: (_, env) => {
         probed = env;
@@ -820,6 +773,7 @@ describe("runInitUpgrade", () => {
       "ghp_rotated",
     ]);
     await runInitUpgrade({
+      envPath: upgradeEnvPath(),
       prompt,
       probe: () => Promise.resolve(),
       cwd: tempDir,
@@ -842,6 +796,7 @@ describe("runInitUpgrade", () => {
       "PROJ", // default project key
     ]);
     await runInitUpgrade({
+      envPath: upgradeEnvPath(),
       prompt,
       probe: () => Promise.resolve(),
       cwd: tempDir,
@@ -859,14 +814,26 @@ describe("runInitUpgrade", () => {
     seedExistingConfig();
     const before = readFileSync(join(tempDir, ".devintern-code", ".env"), "utf8");
     const { prompt } = promptQueue(["3"]);
-    await runInitUpgrade({ prompt, probe: () => Promise.resolve(), cwd: tempDir, log: silentLog });
+    await runInitUpgrade({
+      envPath: upgradeEnvPath(),
+      prompt,
+      probe: () => Promise.resolve(),
+      cwd: tempDir,
+      log: silentLog,
+    });
     expect(readFileSync(join(tempDir, ".devintern-code", ".env"), "utf8")).toBe(before);
   });
 
-  test("missing .env falls back to scaffold guidance without prompting", async () => {
+  test("a missing env file is reported without prompting", async () => {
     mkdirSync(join(tempDir, ".devintern-code"), { recursive: true });
     const { prompt, asked } = promptQueue([]);
-    await runInitUpgrade({ prompt, probe: () => Promise.resolve(), cwd: tempDir, log: silentLog });
+    await runInitUpgrade({
+      envPath: upgradeEnvPath(),
+      prompt,
+      probe: () => Promise.resolve(),
+      cwd: tempDir,
+      log: silentLog,
+    });
     expect(asked).toHaveLength(0);
   });
 });

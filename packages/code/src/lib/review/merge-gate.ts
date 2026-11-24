@@ -57,15 +57,10 @@ export const DEFAULT_AUTO_MERGE_REVIEW_LABEL = "needs-human-review";
 
 /**
  * Paths that are never auto-merged, regardless of configuration: CI
- * workflows can exfiltrate secrets or weaken checks, CODEOWNERS controls who
- * must review, and `.devintern-code/` holds the agent's own settings and
- * prompt overrides.
+ * workflows can exfiltrate secrets or weaken checks, and CODEOWNERS controls
+ * who must review.
  */
-export const BUILTIN_DENY_PATHS: readonly string[] = [
-  ".github/**",
-  "**/CODEOWNERS",
-  ".devintern-code/**",
-];
+export const BUILTIN_DENY_PATHS: readonly string[] = [".github/**", "**/CODEOWNERS"];
 
 /** Resolved auto-merge path policy for one repository. */
 export interface MergePathPolicy {

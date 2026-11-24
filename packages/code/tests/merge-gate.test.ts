@@ -49,12 +49,6 @@ describe("classifyChangedPaths", () => {
     expect(
       classifyChangedPaths([{ path: "CODEOWNERS" }], { safePaths: ["**"], denyPaths: [] }).kind,
     ).toBe("denied");
-    expect(
-      classifyChangedPaths([{ path: ".devintern-code/prompts/review.md" }], {
-        safePaths: ["**"],
-        denyPaths: [],
-      }).kind,
-    ).toBe("denied");
   });
 
   test("a rename is judged on both its old and new path", () => {

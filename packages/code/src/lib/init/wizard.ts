@@ -1,7 +1,7 @@
 /**
  * Interactive `devintern init` wizard: pick a tracker, paste tokens with a
  * deep link to each provider's token-creation page, validate the connection,
- * then write `.devintern-code/` via the shared scaffold.
+ * then register the checkout in `~/.devintern` with its own env file.
  *
  * Prompt-loop mechanics and credential probes live in
  * `@devintern/task-trackers` (shared with `devpm init`); this module wires
@@ -45,12 +45,12 @@ import {
   TRACKER_DOCS,
   TRACKER_SETUP,
   renderEnvFile,
-  scaffoldProject,
 } from "./scaffold";
 import { collectReadinessChecks, renderReadinessReport } from "../observability/readiness";
 import type { ReadinessCheck } from "../observability/readiness";
 import { TRACKER_CAPABILITIES } from "../trackers/capabilities";
 import { workspaceCodeStateDir } from "../workspace/paths";
+import { findWorkspaceRepoForCheckout } from "../workspace/manual-run";
 import { registerManualCheckout } from "../workspace/register-checkout";
 
 export { isInteractive };
@@ -206,13 +206,12 @@ export async function runInitWizard(deps: InitWizardDeps = {}): Promise<void> {
 
   log("🚀 Initializing @devintern/code for this project...");
 
-  const projectRoot = findProjectRoot({ startDir: cwd });
-  const configDir = resolve(projectRoot, ".devintern-code");
-  // A config folder without .env is an incomplete setup: keep guiding. Only
-  // refuse when credentials already exist (the scaffold never overwrites).
-  if (existsSync(join(configDir, ".env"))) {
-    // Delegate to the scaffold's refusal message (it never overwrites).
-    scaffoldProject({ cwd });
+  // Re-running init on a registered checkout edits its env file instead
+  // (`devintern init` routes there); never prompt for a second registration.
+  const registered = await findWorkspaceRepoForCheckout({ cwd });
+  if (registered) {
+    log(`ℹ️  This checkout is already registered as "${registered.repo.name}".`);
+    log("   Run `devintern init` in a terminal to update its settings.");
     return;
   }
 
@@ -226,7 +225,7 @@ export async function runInitWizard(deps: InitWizardDeps = {}): Promise<void> {
 
   // The checkout is registered in the workspace as a manual-only repo (by its
   // origin, or by its directory when it has no recognised remote).
-  let workspaceDir: string | undefined;
+  let workspaceDir = "";
   const writeEnv = async (envContent: string): Promise<string | null> => {
     const registered = await registerManualCheckout(cwd, envContent, log);
     if (!registered.ok) {
@@ -262,9 +261,7 @@ export async function runInitWizard(deps: InitWizardDeps = {}): Promise<void> {
     } else {
       log(`   1. Review ${target.envPath} (credentials were written there)`);
       log(
-        workspaceDir
-          ? `   2. Optionally add [trackers] status names to ${join(workspaceDir, "workspace.toml")}`
-          : `   2. Optionally edit ${join(configDir, "settings.json")} for per-project status transitions`,
+        `   2. Optionally add [trackers] status names to ${join(workspaceDir, "workspace.toml")}`,
       );
       log("   3. Run 'devintern <TASK-KEY>' to start working on tasks");
     }
@@ -286,12 +283,9 @@ export async function runTrackerSetup(
   probe: ProbeFn,
   cwd: string,
   options: {
-    /**
-     * Write the collected env content somewhere other than the checkout's
-     * `.devintern-code/.env`; returns the written path, or null to refuse.
-     */
-    writeEnv?: (envContent: string) => Promise<string | null>;
-  } = {},
+    /** Write the collected env content; returns the written path, or null to refuse. */
+    writeEnv: (envContent: string) => Promise<string | null>;
+  },
 ): Promise<{ trackerId: string; values: Record<string, string>; envPath: string } | null> {
   const projectRoot = findProjectRoot({ startDir: cwd });
   const values: Record<string, string> = {};
@@ -351,7 +345,7 @@ export async function runTrackerSetup(
       values,
       steps,
       { prompt, probe, log },
-      options.writeEnv ? "this repo's env file in ~/.devintern/env/" : ".devintern-code/.env",
+      "this repo's env file in ~/.devintern/",
     );
   }
 
@@ -365,23 +359,8 @@ export async function runTrackerSetup(
   }
 
   const envContent = renderEnvFile(trackerId, values);
-  if (options.writeEnv) {
-    const envPath = await options.writeEnv(envContent);
-    return envPath ? { trackerId, values, envPath } : null;
-  }
-  if (!scaffoldProject({ cwd, envContent })) {
-    return null;
-  }
-  return { trackerId, values, envPath: join(projectRoot, ".devintern-code", ".env") };
-}
-
-/** Env file an init upgrade edits, plus how to name it in messages. */
-function upgradeEnvTarget(cwd: string, envPath?: string): { envPath: string; envLabel: string } {
-  if (envPath) return { envPath, envLabel: envPath };
-  return {
-    envPath: resolve(cwd, ".devintern-code", ".env"),
-    envLabel: join(".devintern-code", ".env"),
-  };
+  const envPath = await options.writeEnv(envContent);
+  return envPath ? { trackerId, values, envPath } : null;
 }
 
 /**
@@ -394,20 +373,17 @@ function upgradeEnvTarget(cwd: string, envPath?: string): { envPath: string; env
  */
 export async function runInitUpgrade(
   deps: InitWizardDeps & {
-    /** Env file to update; defaults to the checkout's `.devintern-code/.env`. */
-    envPath?: string;
-  } = {},
+    /** Env file to update (the repo's `env_file` in the workspace). */
+    envPath: string;
+  },
 ): Promise<void> {
-  const cwd = deps.cwd ?? process.cwd();
   const log = deps.log ?? console.log;
   const probe = deps.probe ?? defaultProbe;
-  const { envPath, envLabel } = upgradeEnvTarget(cwd, deps.envPath);
+  const envPath = deps.envPath;
+  const envLabel = envPath;
 
   if (!existsSync(envPath)) {
-    // Config dir exists but no .env: keep the scaffold's guidance (it never
-    // overwrites) rather than guessing at a half-written setup.
     log(`⚠️  ${envPath} not found — nothing to upgrade.`);
-    scaffoldProject({ cwd });
     return;
   }
 

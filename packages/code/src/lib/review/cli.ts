@@ -19,8 +19,7 @@ async function loadReviewEnvironment(changeUrl: string): Promise<void> {
     ensureWorkspaceCodeState(workspaceDir);
     setManualWorkspaceStateDir(workspaceDir);
     Object.assign(process.env, credentials);
-    // Run records and addressed-feedback state go to the workspace DB, not a
-    // `.devintern-code/queue.db` inside the checkout.
+    // Run records and addressed-feedback state go to this workspace's DB.
     process.env.WEBHOOK_QUEUE_DB ||= workspaceDbPath(workspaceDir);
   }
   loadEnvironment(undefined, { skipProjectEnv: Boolean(credentials) });

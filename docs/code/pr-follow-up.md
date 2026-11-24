@@ -126,7 +126,7 @@ auto_merge_review_instructions = "Changes under billing/ always need a human."
 Each PR passes these gates in order. Any "no" leaves it open for a human:
 
 1. **Ready.** Open, not a draft, not from a fork, checks passing, no conflicts, and no outstanding "changes requested" review. Branch protection still applies. The head commit must be unchanged for 5 minutes (`WORKER_AUTO_MERGE_QUIET_SECONDS`).
-2. **Deny paths.** A changed file matching `auto_merge_deny_paths` or a built-in deny path (`.github/**`, `**/CODEOWNERS`, `.devintern-code/**`) blocks the merge.
+2. **Deny paths.** A changed file matching `auto_merge_deny_paths` or a built-in deny path (`.github/**`, `**/CODEOWNERS`) blocks the merge.
 3. **Safe paths.** If every changed file matches `auto_merge_safe_paths` and none matches `auto_merge_review_paths`, the PR merges with no agent run.
 4. **Agent review.** Otherwise, with `auto_merge_review = true` (the default), the agent reviews the diff and the PR merges only on an explicit "safe" verdict. With `auto_merge_review = false`, the PR stays open.
 

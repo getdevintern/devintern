@@ -272,7 +272,7 @@ async function main(): Promise<void> {
 
     // Anonymous usage analytics (PostHog). Fire-and-forget; never blocks or
     // fails the run. Opt out via DEVINTERN_TELEMETRY_DISABLED=1 or
-    // analytics.enabled: false in .devintern-code/settings.json.
+    // analytics.enabled: false in ~/.devintern/settings.json.
     if (!isWorkerTaskProcess()) {
       const firstTelemetryRun = isAnonymousIdNewlyCreated();
       void track("cli_run", buildCliRunProps(activeTrackerType));

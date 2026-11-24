@@ -1,15 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { existsSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
-import { execSync, spawnSync } from "child_process";
-
-import {
-  WebhookQueue,
-  prepareQueueDbDirectory,
-  resolveQueueDbPath,
-} from "../src/lib/state/webhook-queue";
+import { WebhookQueue, resolveQueueDbPath } from "../src/lib/state/webhook-queue";
 import { RowParseError } from "../src/lib/state/row-parse";
 
 /** Insert a row directly, bypassing the queue, to simulate corrupted state. */
@@ -460,55 +454,5 @@ describe("resolveQueueDbPath", () => {
     delete process.env.WEBHOOK_QUEUE_DB;
     const workspaceDir = process.env.DEVINTERN_WORKSPACE_DIR!;
     expect(resolveQueueDbPath()).toBe(join(workspaceDir, "state", "queue.db"));
-  });
-
-  test("keeps the state database out of git via .git/info/exclude", () => {
-    delete process.env.WEBHOOK_QUEUE_DB;
-
-    const projectDir = join(
-      tmpdir(),
-      `queue-ignore-test-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-    );
-    mkdirSync(projectDir, { recursive: true });
-    execSync("git init -q .", { cwd: projectDir });
-
-    try {
-      const dbPath = join(projectDir, ".devintern-code", "queue.db");
-      prepareQueueDbDirectory(dbPath);
-      writeFileSync(dbPath, "state\n", "utf8");
-
-      // Untracked-but-ignored: `git add -A` cannot sweep it into a commit and
-      // `git clean` cannot delete it.
-      expect(execSync("git status --porcelain", { cwd: projectDir }).toString()).toBe("");
-      expect(spawnSync("git", ["check-ignore", "-q", dbPath], { cwd: projectDir }).status).toBe(0);
-    } finally {
-      rmSync(projectDir, { recursive: true, force: true });
-    }
-  });
-
-  test("does not write info/exclude when .gitignore already covers the database", () => {
-    delete process.env.WEBHOOK_QUEUE_DB;
-
-    const projectDir = join(
-      tmpdir(),
-      `queue-ignore-existing-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-    );
-    mkdirSync(projectDir, { recursive: true });
-    execSync("git init -q .", { cwd: projectDir });
-    writeFileSync(join(projectDir, ".gitignore"), ".devintern-code/\n", "utf8");
-
-    try {
-      const dbPath = join(projectDir, ".devintern-code", "queue.db");
-      prepareQueueDbDirectory(dbPath);
-      writeFileSync(dbPath, "state\n", "utf8");
-
-      // The project's own ignore rules already hide the file, so the
-      // redundant pattern is not appended to the local exclude.
-      const exclude = readFileSync(join(projectDir, ".git", "info", "exclude"), "utf8");
-      expect(exclude).not.toContain("queue.db");
-      expect(spawnSync("git", ["check-ignore", "-q", dbPath], { cwd: projectDir }).status).toBe(0);
-    } finally {
-      rmSync(projectDir, { recursive: true, force: true });
-    }
   });
 });
