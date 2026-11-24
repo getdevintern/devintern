@@ -38,7 +38,7 @@ Schedules use the worker host's timezone. The CI-based packs read run history th
 
 | Option | Effect |
 | --- | --- |
-| `--repo <name>` | Target `[[repos]]` name. Required when the workspace has more than one repository. |
+| `--repo <name>` | Target `[[repos]]` name. Required when the workspace has more than one worker repository; `manual_only` repos can't be targets. |
 | `--id <id>` | Install under another automation id, for example to run the same pack on two repositories. |
 | `--disabled` | Write `enabled = false` so the entry is validated but not scheduled. |
 | `--workspace <path>` | Path to `workspace.toml`. Default `~/.devintern/workspace.toml`, or the `DEVINTERN_WORKSPACE_DIR` home. |
@@ -68,6 +68,7 @@ Running `add` again for an unchanged entry does nothing. If the entry was edited
 | Problem | Fix |
 | --- | --- |
 | `This workspace has multiple repositories` | Pass `--repo <name>` with one of the listed `[[repos]]` names. |
+| `is manual_only` or `No repos configured for the worker` | The worker doesn't run automations on `manual_only` repos. Target a worker repo, or add one with `devintern worker add-repo` inside its checkout. |
 | `already exists with different settings` | Pick another `--id`, or remove or edit the existing entry. |
 | Every run fails with a `gh` or `glab` error | Install and sign in to the CLI for your code host on the worker host. |
 | `devintern doctor` reports the automation catalog as broken | Reinstall `@getdevintern/code`; the bundled catalog files are missing or damaged. |

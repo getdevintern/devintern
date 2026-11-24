@@ -10,6 +10,7 @@
 import { existsSync, readFileSync, writeFileSync } from "fs";
 
 import { parseWorkspaceConfig } from "../workspace/config";
+import { workerWorkspaceView } from "../workspace/manual-only";
 import { workspaceConfigPath } from "../workspace/paths";
 import type { CatalogPack } from "./catalog";
 
@@ -23,7 +24,10 @@ export interface InstallCatalogPackOptions {
    */
   configPath?: string;
   pack: CatalogPack;
-  /** Required when the workspace has more than one `[[repos]]` entry. */
+  /**
+   * Required when the workspace has more than one worker repo (`manual_only`
+   * repos are not targets).
+   */
   repo?: string;
   /** Override the installed automation id (defaults to the pack id). */
   id?: string;
@@ -82,8 +86,9 @@ function schedulesEqual(a: CatalogPack["schedule"], b: CatalogPack["schedule"]):
  * Install one catalog pack into `workspace.toml`.
  *
  * @throws When the id is taken by a different automation, the pack needs a
- *         `repo` in a multi-repo workspace, `repo` does not match a configured
- *         repository, or the resulting config is invalid.
+ *         `repo` in a workspace with several worker repos, `repo` is unknown
+ *         or `manual_only`, every configured repo is `manual_only`, or the
+ *         resulting config is invalid.
  */
 export function installCatalogPack(options: InstallCatalogPackOptions): InstallCatalogPackResult {
   const { workspaceDir, pack } = options;
@@ -125,18 +130,37 @@ export function installCatalogPack(options: InstallCatalogPackOptions): InstallC
     );
   }
 
-  const repos = config.repos.map((entry) => entry.name);
+  // The worker never runs automations on manual_only repos (validation
+  // rejects them), so only worker repos are install targets, like `worker add`.
+  const workerRepos = workerWorkspaceView(config).repos.map((entry) => entry.name);
+  const manualRepos = config.repos.filter((entry) => entry.manualOnly).map((entry) => entry.name);
+  if (manualRepos.length > 0 && workerRepos.length === 0) {
+    throw new Error(
+      `No repos configured for the worker in ${configPath} (manual_only repos are skipped). ` +
+        "Run `devintern worker add-repo` inside a checkout first.",
+    );
+  }
   let repo = options.repo;
   if (repo) {
-    if (!repos.includes(repo)) {
+    if (manualRepos.includes(repo)) {
       throw new Error(
-        `Repo "${repo}" does not match any [[repos]] name (${repos.join(", ") || "none"}).`,
+        `Repo "${repo}" is manual_only; the worker does not run automations there. ` +
+          `Worker repos: ${workerRepos.join(", ")}.`,
       );
     }
-  } else if (repos.length > 1) {
+    if (!workerRepos.includes(repo)) {
+      throw new Error(
+        `Repo "${repo}" does not match any [[repos]] name (${workerRepos.join(", ") || "none"}).`,
+      );
+    }
+  } else if (workerRepos.length > 1) {
     throw new Error(
-      `This workspace has multiple repositories; pass --repo <name> (${repos.join(", ")}).`,
+      `This workspace has multiple repositories; pass --repo <name> (${workerRepos.join(", ")}).`,
     );
+  } else if (manualRepos.length > 0) {
+    // Pin the single worker repo so the entry cannot be read as aimed at a
+    // manual-only checkout.
+    repo = workerRepos[0];
   }
 
   const lines = [

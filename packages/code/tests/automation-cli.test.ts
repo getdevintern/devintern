@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
@@ -123,6 +123,25 @@ describe("devintern automations CLI", () => {
     expect(stderr).toContain("Unknown option");
     const config = loadWorkspaceConfig(configPath);
     expect(config.automations).toEqual([]);
+  });
+
+  test("add refuses a workspace whose repos are all manual_only", async () => {
+    const { dir, configPath } = makeWorkspace();
+    const content = `[[repos]]
+name = "laptop-app"
+remote = "git@github.com:acme/laptop-app.git"
+manual_only = true
+`;
+    writeFileSync(configPath, content);
+    const { stdout, stderr, exitCode } = await runCli(
+      ["automations", "add", "docs-drift", "--workspace", configPath],
+      dir,
+    );
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain("No repos configured for the worker");
+    expect(stderr).toContain("devintern worker add-repo");
+    expect(stdout).not.toContain("Installed");
+    expect(readFileSync(configPath, "utf8")).toBe(content);
   });
 
   test("add fails clearly for an unknown pack", async () => {

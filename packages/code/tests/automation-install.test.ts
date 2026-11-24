@@ -161,6 +161,70 @@ remote = "git@github.com:acme/frontend.git"
     expect(config.automations[0]?.repo).toBe("backend");
   });
 
+  describe("manual_only repos", () => {
+    const writeRepos = (repos: { name: string; manualOnly?: boolean }[]): string => {
+      const content = [
+        "[defaults]",
+        'tracker = "jira"',
+        ...repos.flatMap((entry) => [
+          "",
+          "[[repos]]",
+          `name = "${entry.name}"`,
+          `remote = "git@github.com:acme/${entry.name}.git"`,
+          ...(entry.manualOnly ? ["manual_only = true"] : []),
+        ]),
+        "",
+      ].join("\n");
+      writeFileSync(workspaceConfigPath(workspaceDir), content);
+      return content;
+    };
+    const readConfigFile = (): string => readFileSync(workspaceConfigPath(workspaceDir), "utf8");
+
+    test("targets the single worker repo without --repo", () => {
+      writeRepos([{ name: "web" }, { name: "laptop-app", manualOnly: true }]);
+      const result = installCatalogPack({ workspaceDir, pack: fakePack() });
+      expect(result).toMatchObject({ added: true, repo: "web" });
+      const config = loadWorkspaceConfig(workspaceConfigPath(workspaceDir));
+      expect(config.automations[0]?.repo).toBe("web");
+      // Re-running the same install stays idempotent.
+      expect(installCatalogPack({ workspaceDir, pack: fakePack() }).added).toBe(false);
+    });
+
+    test("lists only worker repos when several need --repo", () => {
+      const before = writeRepos([
+        { name: "web" },
+        { name: "api" },
+        { name: "laptop-app", manualOnly: true },
+      ]);
+      expect(() => installCatalogPack({ workspaceDir, pack: fakePack() })).toThrow(
+        "This workspace has multiple repositories; pass --repo <name> (web, api).",
+      );
+      expect(readConfigFile()).toBe(before);
+    });
+
+    test("rejects --repo naming a manual_only repo before writing", () => {
+      const before = writeRepos([{ name: "web" }, { name: "laptop-app", manualOnly: true }]);
+      expect(() =>
+        installCatalogPack({ workspaceDir, pack: fakePack(), repo: "laptop-app" }),
+      ).toThrow(
+        'Repo "laptop-app" is manual_only; the worker does not run automations there. Worker repos: web.',
+      );
+      expect(readConfigFile()).toBe(before);
+      expect(() => installCatalogPack({ workspaceDir, pack: fakePack(), repo: "nope" })).toThrow(
+        /does not match any \[\[repos\]\] name \(web\)/,
+      );
+      expect(readConfigFile()).toBe(before);
+    });
+
+    test("refuses to install when every repo is manual_only", () => {
+      const before = writeRepos([{ name: "laptop-app", manualOnly: true }]);
+      expect(() => installCatalogPack({ workspaceDir, pack: fakePack() })).toThrow(
+        /No repos configured for the worker .*\(manual_only repos are skipped\).*devintern worker add-repo/,
+      );
+      expect(readConfigFile()).toBe(before);
+    });
+  });
+
   test("rejects an unsafe id override before writing", () => {
     expect(() => installCatalogPack({ workspaceDir, pack: fakePack(), id: "../escape" })).toThrow(
       /Invalid automation id/,
