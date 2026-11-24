@@ -12,7 +12,8 @@
 #       A real workspace, reduced to the allowlisted repositories
 #       (copy-workspace.ts) and recorded with scrubbing (snapshot.ts --scrub).
 #       Every other repository the workspace knows is denied automatically;
-#       env files under <workspace>/env are always treated as secrets, and
+#       <workspace>/.env and env files under <workspace>/env are always
+#       treated as secrets, and
 #       debug artifacts (raw agent dumps) are left out. Writes
 #       <output-dir>.report.json listing what was dropped; review it and the
 #       output before publishing. Exits non-zero if scrubbing left a leak.
@@ -64,7 +65,7 @@ if [ -n "$FROM" ]; then
   while IFS= read -r name; do
     [ -n "$name" ] && SNAPSHOT_ARGS+=(--deny "$name")
   done <"$DATA/demo-deny.txt"
-  for env in "$FROM"/env/*.env; do
+  for env in "$FROM"/.env "$FROM"/env/*.env; do
     [ -f "$env" ] && SNAPSHOT_ARGS+=(--secrets-from "$env")
   done
   SNAPSHOT_ARGS+=(--scrub --skip-artifact-kind debug --report "$OUT.report.json")
