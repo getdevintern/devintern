@@ -17,6 +17,7 @@ import { TicketKey } from "@/components/TicketKey";
 import { Button } from "@/components/ui/button";
 import { cancelTask, notifyQueueChanged } from "@/lib/api";
 import type { CancelledTaskItem, QueuedWorkItem, QueuedWorkKind } from "@/lib/api";
+import { isDemoMode } from "@/lib/demo";
 import { automationHash, runHash } from "@/lib/routes";
 import { formatPastTime, formatTime } from "@/lib/utils";
 
@@ -84,7 +85,7 @@ function CancelTaskControl({
   const [confirming, setConfirming] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const taskKey = item.taskKey;
-  if (!taskKey) return null;
+  if (!taskKey || isDemoMode()) return null;
   const cancel = async () => {
     setConfirming(false);
     setBusy(true);
