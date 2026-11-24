@@ -234,6 +234,7 @@ export class FakeJiraTracker implements TrackerFixture {
   private nextLinkId = 20_000;
   private readonly links: FakeJiraIssueLink[] = [];
   private failBlockerReadsValue = false;
+  private readonly rejectedSearches: Array<{ fragment: string; message: string }> = [];
   private now = Date.parse("2026-01-01T00:00:00.000Z");
   private readonly wallClock: boolean;
 
@@ -464,6 +465,10 @@ export class FakeJiraTracker implements TrackerFixture {
   private search(url: URL): Response {
     const jql = url.searchParams.get("jql") ?? "";
     this.searches.push(jql);
+    const rejection = this.rejectedSearches.find((rule) => jql.includes(rule.fragment));
+    if (rejection) {
+      return json({ errorMessages: [rejection.message], warningMessages: [] }, 400);
+    }
     const startAt = Number(url.searchParams.get("startAt") ?? 0);
     const maxResults = Number(url.searchParams.get("maxResults") ?? 50);
     const matches = this.matchingIssues(jql);
@@ -555,6 +560,17 @@ export class FakeJiraTracker implements TrackerFixture {
     }
     issue.status = status;
     issue.updated = this.timestamp();
+  }
+
+  /**
+   * Reject every later `GET /rest/api/3/search/jql` whose JQL contains
+   * `fragment` with HTTP 400 and a Jira-style `errorMessages` body, the way
+   * Jira answers a query naming an unknown status or field. Rejected searches
+   * are still recorded in {@link FakeJiraTracker.searches}; other queries are
+   * unaffected.
+   */
+  rejectSearchesContaining(fragment: string, message: string): void {
+    this.rejectedSearches.push({ fragment, message });
   }
 
   /**

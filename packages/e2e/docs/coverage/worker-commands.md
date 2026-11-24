@@ -139,8 +139,16 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 - Surface: `devintern worker` surface
 - Status: `default`
 - Evidence: `tests/local/worker-doctor.test.ts`: a `WorkerFixture` workspace (local bare remote, deterministic agent, one automation) passes every check and exits 0 without creating the state database or lock; `--offline` turns the repository and license checks into warnings, exit 0; with licensing on and no `LICENSE_KEY` or session, **Automation entitlement** fails closed (exit 1, no network); a busy dashboard port is a warning; a missing `workspace.toml` (by `--workspace` and by default location), a nonexistent remote path (detail names git's `does not appear to be a git repository` cause), and unparseable TOML exit 1 with the failing check and its hint; `--json` is rejected as an unknown option (doctor has no JSON mode); a credential in the workspace `.env` never appears in output; zero requests reach the refusing proxy (`bun run --filter @getdevintern/code build`, then `bun run --filter @devintern/e2e test`)
-- Missing: Tracker credential and task-query dry-run checks (`[defaults].task_query`, `[[teams]]`); GitHub remotes checked through the API; a signed-in entitlement; harness and sandbox failures.
-- Last reviewed: 2026-11-23
+- Missing: GitHub remotes checked through the API; a signed-in entitlement; harness and sandbox failures. (Tracker credential and task-query checks have their own row below.)
+- Last reviewed: 2026-11-25
+
+### worker doctor: tracker credentials and task-query dry run (`[defaults]`, `[[teams]]`)
+
+- Surface: `devintern worker` surface
+- Status: `default`
+- Evidence: `tests/local/worker-doctor-trackers.test.ts` against `providers/fake-jira.ts`. `[defaults]` (Jira, credentials in the workspace `.env`): **Tracker credentials** passes and **Task query** reports `2 tasks match`, the fake records exactly the configured JQL once, exit 0. A query the fake rejects with 400 and Jira-style `errorMessages` exits 1 with the Jira error and the `Fix [defaults].task_query in workspace.toml` hint, after exactly one search. With `JIRA_API_TOKEN` absent, the credential row names the variable and the `.env` path, the dry run is `not run (missing tracker credentials)`, and no request reaches the fake. `[[teams]]`: two Jira teams on separate fakes (one via `env_file`, one via `[teams.env]`) both pass with their own JQL. A missing token or a rejected query fails only that team, labelled `jira (team "<name>")`, with the team hint (naming `env/alpha.env` when set). `--offline` still runs the local credential check (a missing token still exits 1) and turns each dry run into a `skipped (--offline)` warning with no fake request. Tokens never appear raw or URL-encoded in output; no state database or lock is created; the refusing proxy sees zero requests (`bun run --filter @getdevintern/code build`, then `bun run --filter @devintern/e2e test`)
+- Missing: Trackers other than Jira; a dry-run timeout; namespaced team values in the workspace `.env` (`JIRA_<TEAM>_*`); live Jira `/search/jql` drift. Observed (unconfirmed intent): the **Work sources** detail pluralizes as `2 tracker querys` (not asserted).
+- Last reviewed: 2026-11-25
 
 ## Backlog
 
@@ -309,10 +317,32 @@ nonexistent remote path, unparseable TOML, and the rejected `--json`. It
 rewrites `workspace.toml` between cases. A random fake `GITHUB_TOKEN` in the
 workspace `.env` must not appear in stdout or stderr, raw or URL-encoded.
 
-Prerequisites for both: the built CLI only (no tracker, code host, network, or
-credentials). Each test owns one temporary root (HOME, workspace, state
-database, bare remote) and removes it in `finally` together with the daemon,
-the recording proxy, and any listener it bound.
+### Worker doctor tracker checks
+
+`tests/local/worker-doctor-trackers.test.ts` runs `devintern worker doctor`
+against a prepared, never started `WorkerFixture` workspace with
+`[defaults].tracker = "jira"` and in-process `FakeJiraTracker` servers on
+loopback. Jira credentials live only in the workspace `.env`, a team
+`env_file`, or `[teams.env]`, with random fake tokens; the child environment
+carries none.
+
+- `[defaults].task_query`: the ready path reports the dry-run match count and
+  the fake's `searches` equal the configured JQL. A query rejected through
+  `FakeJiraTracker.rejectSearchesContaining` (400 with `errorMessages`, as Jira
+  answers an unknown status) fails with the `[defaults].task_query` hint. A
+  `.env` without `JIRA_API_TOKEN` fails the credential row, the dry run is not
+  run, and the fake records no search.
+- `[[teams]]`: two teams on two fakes pass independently. Breaking one team's
+  credentials (in `[teams.env]`, then in its `env_file`) or query fails only
+  that team, and the other team's dry run still runs.
+- `--offline` keeps the local credential check and skips every dry run as a
+  warning with no request.
+
+Prerequisites for all three: the built CLI only (no real tracker, code host,
+network, or credentials; the tracker suite uses loopback fake Jira servers).
+Each test owns one temporary root (HOME, workspace, state database, bare
+remote) and removes it in `finally` together with the daemon, the recording
+proxy, the fake trackers, and any listener it bound.
 
 ```sh
 bun run --filter @getdevintern/code build
