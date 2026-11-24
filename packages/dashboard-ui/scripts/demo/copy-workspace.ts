@@ -13,7 +13,9 @@
  * (default: error_monitor, whose issues can carry end-user data) drops runs
  * by origin; `--exclude-automation <id>` drops an automation's runs and its
  * config entry (e.g. `security-review`, whose reports can describe unfixed
- * vulnerabilities). `--db-path-as` is the path the server will open the copied
+ * vulnerabilities). `--exclude-status <status>` drops runs by status (e.g.
+ * `failed`), except the runs named with `--keep-run <id>`: curated examples
+ * of the guardrails at work rather than bugs. `--db-path-as` is the path the server will open the copied
  * database at, since artifact files are stored under a hash of that path
  * (default: <to>/state/queue.db).
  *
@@ -39,6 +41,8 @@ const { values: flags } = parseArgs({
     repo: { type: "string", multiple: true, default: [] },
     "exclude-origin": { type: "string", multiple: true, default: ["error_monitor"] },
     "exclude-automation": { type: "string", multiple: true, default: [] },
+    "exclude-status": { type: "string", multiple: true, default: [] },
+    "keep-run": { type: "string", multiple: true, default: [] },
     "db-path-as": { type: "string" },
   },
 });
@@ -166,6 +170,15 @@ if (excludedAutomations.length > 0) {
   db.run(
     `DELETE FROM runs WHERE automation_id IN (${placeholders(excludedAutomations)})`,
     excludedAutomations,
+  );
+}
+const excludedStatuses = flags["exclude-status"];
+if (excludedStatuses.length > 0) {
+  const keptRuns = flags["keep-run"].map(Number).filter(Number.isInteger);
+  db.run(
+    `DELETE FROM runs WHERE status IN (${placeholders(excludedStatuses)})` +
+      (keptRuns.length > 0 ? ` AND id NOT IN (${keptRuns.map(() => "?").join(", ")})` : ""),
+    [...excludedStatuses, ...keptRuns],
   );
 }
 db.run("DELETE FROM run_stages WHERE run_id NOT IN (SELECT id FROM runs)");

@@ -7,7 +7,8 @@
 #
 #   bash scripts/demo/build-demo.sh <output-dir> --from-workspace ~/.devintern \
 #       --repo devintern --repo getdevintern/devintern \
-#       [--exclude-automation <id>]... [--secrets-from <dotenv>]... [--deny <name>]...
+#       [--exclude-automation <id>]... [--exclude-status <status>]... [--keep-run <id>]...
+#       [--secrets-from <dotenv>]... [--deny <name>]...
 #       A real workspace, reduced to the allowlisted repositories
 #       (copy-workspace.ts) and recorded with scrubbing (snapshot.ts --scrub).
 #       Every other repository the workspace knows is denied automatically;
@@ -38,6 +39,8 @@ while [ $# -gt 0 ]; do
     --from-workspace) FROM="$(realpath "$2")"; shift 2 ;;
     --repo) REPOS+=(--repo "$2"); shift 2 ;;
     --exclude-automation) REPOS+=(--exclude-automation "$2"); shift 2 ;;
+    --exclude-status) REPOS+=(--exclude-status "$2"); shift 2 ;;
+    --keep-run) REPOS+=(--keep-run "$2"); shift 2 ;;
     --secrets-from) SNAPSHOT_ARGS+=(--secrets-from "$(realpath "$2")"); shift 2 ;;
     --deny) SNAPSHOT_ARGS+=(--deny "$2"); shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 1 ;;
