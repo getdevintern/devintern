@@ -44,6 +44,26 @@ export const HARNESS_UNAVAILABLE_EXIT_CODE = 78;
  */
 export const TASK_SKIP_EXIT_CODE = 3;
 
+/**
+ * App-specific exit code (not sysexits): the PR job never started because
+ * another live job holds its review worktree (two open PRs from one head
+ * branch in one repository run in parallel). Parents map it to `"deferred"`
+ * so the job retries on a later pass without consuming a failure attempt.
+ */
+export const WORKTREE_BUSY_EXIT_CODE = 4;
+
+/**
+ * Raised by a PR job when its review worktree is leased by another live job.
+ * The CLI entrypoint exits with {@link WORKTREE_BUSY_EXIT_CODE} instead of
+ * recording a failed run or reporting the error.
+ */
+export class WorktreeBusyError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "WorktreeBusyError";
+  }
+}
+
 /** Set to `"1"` on CLI subprocesses the worker will fail over for. */
 export const WORKER_CHILD_ENV = "DEVINTERN_WORKER_CHILD";
 

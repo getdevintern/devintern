@@ -8,10 +8,9 @@
 
 import { Database } from "bun:sqlite";
 import { copyFileSync, existsSync, mkdirSync } from "fs";
-import { dirname, join } from "path";
+import { dirname } from "path";
 
-import { findConfigDir } from "@devintern/utils";
-import { ensureGitInfoExcluded } from "../utils/git-exclude";
+import { resolveWorkspaceDir, workspaceDbPath } from "../workspace/paths";
 import { configureSqliteConnection } from "./sqlite";
 import {
   RowParseError,
@@ -85,6 +84,13 @@ export interface BaseSyncEvent {
    * backoff.
    */
   updatedAt: number;
+  /** Times this event was revived after exhausting, because its base branch moved. */
+  revivals: number;
+  /**
+   * Base branch tip last recorded for an exhausted event (when first seen
+   * exhausted, then at each revival); a different tip means the base moved.
+   */
+  reviveBaseTip?: string;
 }
 
 const WEBHOOK_EVENT_STATUSES = [
@@ -100,44 +106,18 @@ const BASE_SYNC_EVENT_STATUSES = [
 ] as const satisfies readonly BaseSyncEventStatus[];
 
 /**
- * Resolve the queue database path: `WEBHOOK_QUEUE_DB` env override, otherwise
- * `queue.db` inside the nearest `.devintern-code` directory so queue state,
- * cursors, and run records persist across reboots.
- *
- * The config directory is searched upwards from `projectDir` (same traversal
- * as `.env` resolution), so running from a subdirectory of the project reuses
- * the project's database instead of creating a stray one next to the cwd.
- *
- * @param projectDir - Directory to search from (defaults to the current working directory)
+ * Resolve the queue database path: the `WEBHOOK_QUEUE_DB` override, otherwise
+ * the workspace DB (`~/.devintern/state/queue.db`). Every run, manual or
+ * worker, in any checkout, records into the one workspace database; nothing
+ * is written into repository checkouts.
  */
-export function resolveQueueDbPath(projectDir: string = process.cwd()): string {
-  if (process.env.WEBHOOK_QUEUE_DB) {
-    return process.env.WEBHOOK_QUEUE_DB;
-  }
-
-  const configDir = findConfigDir({ configDirName: ".devintern-code", startDir: projectDir });
-  return join(configDir ?? join(projectDir, ".devintern-code"), "queue.db");
-}
-
-/** Local ignore pattern for the state database, at any depth. */
-const QUEUE_DB_IGNORE_PATTERN = "**/.devintern-code/queue.db*";
-
-/**
- * Keep the state database out of git without touching the project's committed
- * `.gitignore`, using the per-clone `.git/info/exclude`.
- *
- * Projects initialised before `.devintern-code/*` was ignored wholesale leave
- * `queue.db` untracked-but-visible, where `git add -A` sweeps it into the
- * implementation commit and `git clean` deletes it mid-run. Best-effort: any
- * failure (not a repo, read-only .git) is ignored.
- */
-function ensureDbIgnored(dbPath: string): void {
-  ensureGitInfoExcluded(dirname(dbPath), QUEUE_DB_IGNORE_PATTERN, dbPath);
+export function resolveQueueDbPath(): string {
+  return process.env.WEBHOOK_QUEUE_DB || workspaceDbPath(resolveWorkspaceDir());
 }
 
 /**
- * Create the state database's directory and keep the database itself out of
- * git. Shared by every store that opens `queue.db` for writing.
+ * Create the state database's directory. Shared by every store that opens
+ * `queue.db` for writing.
  *
  * @param dbPath - Path of the database file about to be opened
  */
@@ -146,7 +126,6 @@ export function prepareQueueDbDirectory(dbPath: string): void {
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true });
   }
-  ensureDbIgnored(dbPath);
 }
 
 /**
@@ -285,6 +264,22 @@ export class WebhookQueue {
         updated_at INTEGER NOT NULL
       )
     `);
+    // Columns added after the table shipped (base-sync revival).
+    const columnsContext = "PRAGMA table_info(base_sync_events)";
+    const baseSyncColumns = new Set(
+      this.db
+        .query(columnsContext)
+        .all()
+        .map((column) =>
+          requireString(parseRowObject(column, columnsContext), "name", columnsContext),
+        ),
+    );
+    if (!baseSyncColumns.has("revivals")) {
+      this.db.run("ALTER TABLE base_sync_events ADD COLUMN revivals INTEGER NOT NULL DEFAULT 0");
+    }
+    if (!baseSyncColumns.has("revive_base_tip")) {
+      this.db.run("ALTER TABLE base_sync_events ADD COLUMN revive_base_tip TEXT");
+    }
 
     if (this.verbose) {
       console.log("[WebhookQueue] Database initialized");
@@ -707,6 +702,37 @@ export class WebhookQueue {
     })();
   }
 
+  /** Record the base branch tip seen for an exhausted event that has none yet. */
+  noteBaseSyncBaseTip(externalId: string, baseTip: string): void {
+    this.db.run(
+      `UPDATE base_sync_events SET revive_base_tip = ?
+       WHERE external_id = ? AND status = 'failed' AND revive_base_tip IS NULL`,
+      [baseTip, externalId],
+    );
+  }
+
+  /**
+   * Give an exhausted event one more attempt because its base branch moved to
+   * `baseTip`: back to pending with a single attempt left, so one more failure
+   * exhausts it again. `updated_at` is left alone (the last failure stays the
+   * backoff and cooldown anchor), and the dedupe key is withdrawn.
+   */
+  reviveBaseSyncEvent(source: string, externalId: string, baseTip: string): void {
+    this.db.transaction(() => {
+      this.db.run(
+        `UPDATE base_sync_events
+         SET status = 'pending', attempts = ?, last_error = NULL,
+             revivals = revivals + 1, revive_base_tip = ?
+         WHERE external_id = ? AND status = 'failed'`,
+        [Math.max(0, this.maxRetries - 1), baseTip, externalId],
+      );
+      this.db.run(`DELETE FROM processed_events WHERE source = ? AND external_id = ?`, [
+        source,
+        externalId,
+      ]);
+    })();
+  }
+
   /** Explicit operator retry for an exhausted base-SHA event. */
   resetBaseSyncEvent(source: string, externalId: string): void {
     this.db.transaction(() => {
@@ -1045,6 +1071,11 @@ function parseBaseSyncEventRow(row: unknown): BaseSyncEvent {
     status: requireEnum(BASE_SYNC_EVENT_STATUSES, record.status, "status", "base_sync_events row"),
     lastError: optionalString(record, "last_error", "base_sync_events row"),
     updatedAt: requireNumber(record, "updated_at", "base_sync_events row"),
+    revivals:
+      record.revivals === undefined || record.revivals === null
+        ? 0
+        : requireNonNegativeInteger(record, "revivals", "base_sync_events row"),
+    reviveBaseTip: optionalString(record, "revive_base_tip", "base_sync_events row"),
   };
 }
 

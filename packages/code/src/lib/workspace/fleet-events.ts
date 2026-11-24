@@ -3,8 +3,13 @@
  * every repo in the workspace.
  *
  * The workspace worker has no ambient checkout, so every event run is a CLI
- * subprocess in the repo's persistent base worktree with that repo's composed
- * environment. The permission gate for mention-driven runs
+ * subprocess started from the repo's persistent PR-job checkout (default
+ * branch) with that repo's composed environment. The subprocess does its work
+ * in a branch-scoped PR worktree and never uses the base checkout, so PR jobs
+ * are admitted as `pr_worktree`: jobs for different PRs on one repository run
+ * in parallel (bounded by `max_concurrency_per_repo`) and alongside an
+ * automation in the base checkout, while jobs on one PR stay serialized by
+ * their exclusive key. The permission gate for mention-driven runs
  * (write/maintain/admin; a confirmed denial skips, an API error propagates so
 the caller retries) therefore lives HERE, before the
  * subprocess: `devintern address-review` is a manual command and performs no
@@ -19,13 +24,58 @@ import { randomUUID } from "crypto";
 import type { CiFixResult } from "../acquirers/ci-failure-watcher";
 import type { AutomaticResolveResult } from "../acquirers/review-polling";
 import type { TaskExecutionResult } from "../acquirers/task-polling";
-import { autoMergePathsFor } from "./config";
+import { DEFAULT_MERGE_SAFETY_POLICY } from "../review/merge-gate";
+import { readRulesFile } from "../review/merge-safety-rules";
+import { autoMergePathsFor, autoMergeReviewFor } from "./config";
 import type { RepoConfig, WorkspaceConfig } from "./config";
-import { buildRepoEnv, gitHubSlugFromRemote } from "./env";
+import { buildFleetEventEnv, gitHubSlugFromRemote } from "./env";
 import { toRoutableTask } from "./router";
-import type { createFleetTaskExecutor, FleetTask, RepoManagerLike } from "./fleet-executor";
+import type { createGatedFleetTaskExecutor, FleetTask, RepoManagerLike } from "./fleet-executor";
 import { JobNotStartedError } from "../worker/supervisor";
 import type { TaskSupervisor } from "../worker/supervisor";
+import { MAX_CONCURRENCY_PER_REPO_ENV } from "../utils/review-worktree";
+
+/**
+ * Supervisor exclusive key for one GitHub PR (`owner/repo#123`, lowercased
+ * like `serializePrRun`), so jobs on the same PR never run at once.
+ */
+export function prExclusiveKey(slug: string, prNumber: number): string {
+  return `${slug.toLowerCase()}#${prNumber}`;
+}
+
+/**
+ * Upper bound on the repository fetch before a PR job. A hung remote fails
+ * the job (retried like any other failure) instead of holding its slot.
+ */
+export const PR_JOB_FETCH_TIMEOUT_MS = 5 * 60_000;
+
+/**
+ * Environment for a PR job subprocess: the repo env plus the per-repo limit,
+ * which sizes how many idle review worktrees the job's cleanup keeps.
+ */
+export function prJobEnv(
+  config: WorkspaceConfig,
+  env: Record<string, string | undefined>,
+): Record<string, string | undefined> {
+  return {
+    ...env,
+    [MAX_CONCURRENCY_PER_REPO_ENV]: String(config.workspace.execution.maxConcurrencyPerRepo),
+  };
+}
+
+/**
+ * Prepare a repo for a PR job: clone/fetch the bare repository and return the
+ * PR-job checkout (default branch). PR jobs run their agents in their own
+ * branch-scoped worktrees (`pr_worktree`), possibly while an automation is
+ * working in the base checkout, so they never touch the base checkout; the CLI
+ * starts from the PR-job checkout, which supplies the default branch's project
+ * settings and the repository to create the PR worktree from.
+ */
+async function preparePrJobRepo(repoManager: RepoManagerLike, repo: RepoConfig): Promise<string> {
+  await repoManager.ensureBareClone(repo);
+  await repoManager.fetch(repo.name, { timeoutMs: PR_JOB_FETCH_TIMEOUT_MS });
+  return repoManager.ensurePrJobWorktree(repo);
+}
 
 export interface FleetEventDeps {
   config: WorkspaceConfig;
@@ -58,7 +108,7 @@ export interface FleetEventDeps {
       expectedHeadSha?: string;
       signal?: AbortSignal;
     },
-  ) => Promise<boolean>;
+  ) => Promise<CiFixResult>;
   /** Base-sync runner (injected for tests; defaults to the CLI subprocess). */
   runResolve?: typeof runResolveConflictsViaCli;
   /** Auto-merge runner (injected for tests; defaults to the CLI subprocess). */
@@ -163,12 +213,10 @@ export function createFleetAddressPr(deps: FleetEventDeps): AddressPr {
       return false;
     }
     const invoke = async (signal?: AbortSignal) => {
-      await repoManager.ensureBareClone(repo);
-      await repoManager.fetch(repo.name);
-      const base = await repoManager.ensureBaseWorktree(repo);
+      const base = await preparePrJobRepo(repoManager, repo);
       return runReview(slug, prNumber, {
         cwd: base,
-        env: buildRepoEnv(repo, workspaceDir),
+        env: prJobEnv(config, buildFleetEventEnv(config, repo, workspaceDir)),
         signal,
       });
     };
@@ -180,7 +228,8 @@ export function createFleetAddressPr(deps: FleetEventDeps): AddressPr {
           repo: repo.name,
           kind: "review",
           label: `${slug}#${prNumber}`,
-          checkoutClass: "shared_base",
+          checkoutClass: "pr_worktree",
+          exclusiveKey: prExclusiveKey(slug, prNumber),
           run: invoke,
         });
       }
@@ -208,14 +257,12 @@ export function createFleetResolveConflicts(
       return { outcome: "skipped", message: "repository is not configured in this workspace" };
     }
     const invoke = async (signal?: AbortSignal) => {
-      await repoManager.ensureBareClone(repo);
-      await repoManager.fetch(repo.name);
-      const base = await repoManager.ensureBaseWorktree(repo);
+      const base = await preparePrJobRepo(repoManager, repo);
       // Read at run time so a live reload of the conflict agent applies.
       const agentSelection = config.workspace.conflictAgent;
       return runResolve(slug, prNumber, {
         cwd: base,
-        env: buildRepoEnv(repo, workspaceDir, { agentSelection }),
+        env: prJobEnv(config, buildFleetEventEnv(config, repo, workspaceDir, { agentSelection })),
         harnessPin: agentSelection?.harness,
         expectedHeadSha: expected.headSha,
         expectedBaseSha: expected.baseSha,
@@ -230,7 +277,8 @@ export function createFleetResolveConflicts(
           repo: repo.name,
           kind: "conflict",
           label: `${slug}#${prNumber}`,
-          checkoutClass: "shared_base",
+          checkoutClass: "pr_worktree",
+          exclusiveKey: prExclusiveKey(slug, prNumber),
           run: invoke,
         });
       }
@@ -245,18 +293,48 @@ export function createFleetResolveConflicts(
 }
 
 /**
- * Fingerprint of the auto-merge policy that decides a repo's PRs (paths and
- * review switch; not the merge method or review label, which don't change
- * the decision, so renaming the label doesn't re-evaluate every PR).
- * Changing it re-evaluates PRs that were decided under the previous policy.
+ * Fingerprint of the auto-merge policy that decides a repo's PRs (safe, deny,
+ * and review paths,
+ * review switch, review policy, operator instructions, and `custom` rules,
+ * including the current contents of a rules file; not the merge method or
+ * review label, which don't change the decision, so renaming the label
+ * doesn't re-evaluate every PR). Changing it re-evaluates PRs that were
+ * decided under the previous policy, so editing or fixing a rules file
+ * re-checks the PRs it held.
  */
-export function fleetAutoMergePolicyFingerprint(config: WorkspaceConfig, slug: string): string {
+export function fleetAutoMergePolicyFingerprint(
+  config: WorkspaceConfig,
+  slug: string,
+  workspaceDir: string,
+): string {
   const settings = config.workspace.autoMerge;
   const repo = repoBySlug(config, slug);
-  const paths = repo
+  const { reviewPaths, ...paths } = repo
     ? autoMergePathsFor(settings, repo)
-    : { safePaths: settings.safePaths, denyPaths: settings.denyPaths };
-  const material = JSON.stringify({ ...paths, review: settings.review });
+    : {
+        safePaths: settings.safePaths,
+        denyPaths: settings.denyPaths,
+        reviewPaths: settings.reviewPaths,
+      };
+  const review = autoMergeReviewFor(settings, repo ?? {}, workspaceDir);
+  let rules: string | undefined = review.rules;
+  if (review.rulesFile) {
+    const loaded = readRulesFile(review.rulesFile);
+    rules = `${review.rulesFile}\n${loaded.ok ? loaded.text : `unavailable: ${loaded.problem}`}`;
+  }
+  // The default policy without instructions hashes as before, so upgrading
+  // does not re-evaluate every PR.
+  const material = JSON.stringify({
+    ...paths,
+    // Only when set, so workspaces without review paths hash as before.
+    ...(reviewPaths.length > 0 ? { reviewPaths } : {}),
+    review: settings.review,
+    ...(review.reviewPolicy === DEFAULT_MERGE_SAFETY_POLICY
+      ? {}
+      : { reviewPolicy: review.reviewPolicy }),
+    ...(review.reviewInstructions ? { reviewInstructions: review.reviewInstructions } : {}),
+    ...(rules === undefined ? {} : { rules }),
+  });
   return Bun.hash(material).toString(16);
 }
 
@@ -286,15 +364,14 @@ export function createFleetAutoMerge(
     const invoke = async (signal?: AbortSignal) => {
       // Admitted: the repo's slot is ours, so the check is no longer waiting.
       options?.onStart?.();
-      await repoManager.ensureBareClone(repo);
-      await repoManager.fetch(repo.name);
-      const base = await repoManager.ensureBaseWorktree(repo);
+      const base = await preparePrJobRepo(repoManager, repo);
       // Read at run time so live reloads of the policy and agent apply.
       const settings = config.workspace.autoMerge;
       const agentSelection = settings.agent;
       return runAutoMerge(slug, prNumber, {
         policy: {
           ...autoMergePathsFor(settings, repo),
+          ...autoMergeReviewFor(settings, repo, workspaceDir),
           review: settings.review,
           method: settings.method,
           reviewLabel: settings.reviewLabel,
@@ -303,7 +380,7 @@ export function createFleetAutoMerge(
         lastAttempt: options?.lastAttempt ?? false,
         ...(options?.runId !== undefined ? { runId: options.runId } : {}),
         cwd: base,
-        env: buildRepoEnv(repo, workspaceDir, { agentSelection }),
+        env: prJobEnv(config, buildFleetEventEnv(config, repo, workspaceDir, { agentSelection })),
         harnessPin: agentSelection?.harness,
         signal,
       });
@@ -316,7 +393,8 @@ export function createFleetAutoMerge(
           repo: repo.name,
           kind: "auto_merge",
           label: `${slug}#${prNumber}`,
-          checkoutClass: "shared_base",
+          checkoutClass: "pr_worktree",
+          exclusiveKey: prExclusiveKey(slug, prNumber),
           run: invoke,
         });
       }
@@ -347,12 +425,10 @@ export function createFleetCiFix(
       return false;
     }
     const invoke = async (signal?: AbortSignal) => {
-      await deps.repoManager.ensureBareClone(repo);
-      await deps.repoManager.fetch(repo.name);
-      const base = await deps.repoManager.ensureBaseWorktree(repo);
+      const base = await preparePrJobRepo(deps.repoManager, repo);
       return runCiFix(slug, prNumber, feedbackPath, {
         cwd: base,
-        env: buildRepoEnv(repo, deps.workspaceDir),
+        env: prJobEnv(deps.config, buildFleetEventEnv(deps.config, repo, deps.workspaceDir)),
         ...(expectedHeadSha ? { expectedHeadSha } : {}),
         signal,
       });
@@ -365,7 +441,8 @@ export function createFleetCiFix(
           repo: repo.name,
           kind: "ci_fix",
           label: `${slug}#${prNumber}`,
-          checkoutClass: "shared_base",
+          checkoutClass: "pr_worktree",
+          exclusiveKey: prExclusiveKey(slug, prNumber),
           run: invoke,
         });
       } catch (error) {
@@ -427,7 +504,7 @@ export function createFleetMentionHandler(
 export function createFleetTaskEvaluator(options: {
   query: string | (() => string | undefined);
   searchTasks: (query: string) => Promise<{ tasks: FleetTask[] }>;
-  execute: ReturnType<typeof createFleetTaskExecutor>;
+  execute: ReturnType<typeof createGatedFleetTaskExecutor>;
   /**
    * Actioned gate mirroring the polling acquirer: `true` when a task already
    * produced a PR and has not changed since. A relayed `task.changed` can be
@@ -462,6 +539,8 @@ export function createFleetTaskEvaluator(options: {
       return true;
     }
     console.log(`📌 [fleet] relay task ${taskKey} is ready`);
+    // A ticket its blockers hold back ("waiting") is left to the poller, which
+    // re-checks it every tick.
     await options.execute(
       taskKey,
       toRoutableTask({

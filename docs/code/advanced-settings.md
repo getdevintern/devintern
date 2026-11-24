@@ -1,7 +1,7 @@
 ---
 title: "Advanced Settings"
 sidebarLabel: "Advanced Settings"
-description: "Use when tuning DevIntern Code run limits, the auto-review loop, logging, telemetry, the output directory, prompt overrides, per-project settings.json, or checking setup with devintern doctor."
+description: "Use when tuning DevIntern Code run limits, the auto-review loop, logging, telemetry, the output directory, prompt overrides, tracker status settings, or checking setup with devintern doctor."
 section: "Automation Reference"
 order: 0.3
 dateModified: 2026-11-18
@@ -9,7 +9,7 @@ dateModified: 2026-11-18
 
 # Advanced Settings
 
-Unless noted otherwise, set these in `.devintern-code/.env`, the workspace `.env`, or your shell. Every one is optional.
+Unless noted otherwise, set these in the repository's env file (`~/.devintern/env/<repo>.env`), the workspace `.env`, or your shell. Every one is optional.
 
 ## Execution limits
 
@@ -61,7 +61,7 @@ You can open a run's logs from its page in the [dashboard](./dashboard.md), or r
 DEVINTERN_OUTPUT_DIR=./devintern-output   # default: /tmp/devintern-tasks
 ```
 
-Each task gets `{output-dir}/{task-key}/` containing the formatted task (`task-details.md`), the clarity check result, the implementation summary (`implementation-summary.md`, or `implementation-summary-incomplete.md` on failure), verify and auto-review results, and any downloaded attachments. These are debug files and safe to delete. Retry state lives in `.devintern-code/queue.db` instead.
+Each task gets `{output-dir}/{task-key}/` containing the formatted task (`task-details.md`), the clarity check result, the implementation summary (`implementation-summary.md`, or `implementation-summary-incomplete.md` on failure), verify and auto-review results, and any downloaded attachments. These are debug files and safe to delete. Retry state and run history live in `~/.devintern/state/queue.db` instead.
 
 Files you want to keep and show in the dashboard are registered separately as run artifacts; see [Pipeline artifacts](./artifacts.md).
 
@@ -69,12 +69,12 @@ Files you want to keep and show in the dashboard are registered separately as ru
 
 **Error reporting.** By default, the CLI sends crashes and failed runs (agent, tracker, PR, commit, estimation, and webhook errors) to DevIntern's Sentry project. Reports include identifiers such as the task key, tracker type, and stage. They never include task content, code, `.env` contents, or credentials, and anything that looks like a token is removed. To opt out, set `SENTRY_DISABLED=1`.
 
-**Anonymous usage analytics.** The CLI sends anonymous events to PostHog: CLI version, OS, whether it runs in CI, tracker type, run mode, feature flags, and outcome categories for setup, `doctor`, login, and the worker. It never sends task content, code, repository names, file paths, or credentials. A random ID is created for each project and stored in `.devintern-code/telemetry.json`. To opt out, use either:
+**Anonymous usage analytics.** The CLI sends anonymous events to PostHog: CLI version, OS, whether it runs in CI, tracker type, run mode, feature flags, and outcome categories for setup, `doctor`, login, and the worker. It never sends task content, code, repository names, file paths, or credentials. A random ID is created once and stored in `~/.devintern/telemetry.json`. To opt out, use either:
 
 | Opt-out                                                    | What is sent                                    |
 | ---------------------------------------------------------- | ----------------------------------------------- |
 | `DEVINTERN_TELEMETRY_DISABLED=1`                           | Nothing                                         |
-| `{ "analytics": { "enabled": false } }` in `settings.json` | One anonymous `analytics_opt_out` event, then nothing |
+| `{ "analytics": { "enabled": false } }` in `~/.devintern/settings.json` | One anonymous `analytics_opt_out` event, then nothing |
 
 See [devintern.com/privacy](https://devintern.com/privacy/).
 
@@ -89,40 +89,39 @@ The prompts DevIntern sends to the agent are Markdown files bundled with the CLI
 | `review.md`     | Auto-review of the PR                       |
 | `fix.md`        | Addressing review feedback                  |
 
-To override `clarity.md` or `estimation.md`, put a file with the same name in `.devintern-code/prompts/`, or in a directory named by `DEVINTERN_PROMPTS_DIR`, which takes precedence. Keep the frontmatter (`name`, `description`, `placeholders`, `requiredSections`) and the `{{placeholder}}` tokens from the bundled file; a placeholder with no value fails the run.
+To override `clarity.md` or `estimation.md`, put a file with the same name in `~/.devintern/prompts/`. To override it for one repository only, use `~/.devintern/prompts/<repo>/`, where `<repo>` is the `name` of its `[[repos]]` entry in `workspace.toml`. A directory named by `DEVINTERN_PROMPTS_DIR` takes precedence over both. Keep the frontmatter (`name`, `description`, `placeholders`, `requiredSections`) and the `{{placeholder}}` tokens from the bundled file; a placeholder with no value fails the run.
 
-`review.md` and `fix.md` always come from the bundled copy. They run against the PR's own checkout, so a PR must not be able to rewrite its reviewer's instructions.
+`review.md` and `fix.md` always come from the bundled copy, because their verdicts decide whether a PR is approved.
 
-## Per-project settings.json
+Overrides in a project's `.devintern-code/prompts/` are no longer read; DevIntern prints a warning when it finds one. Move the files to `~/.devintern/prompts/`.
 
-`.devintern-code/settings.json` holds per-project status mappings, grouped by tracker. `devintern init` creates it with examples. Only the section for the active `TASK_TRACKER` is used.
+## Tracker status settings
 
-```json
-{
-  "jira": {
-    "projects": {
-      "PROJ": {
-        "prStatus": "In Review",
-        "inProgressStatus": "In Progress",
-        "todoStatus": "To Do",
-        "storyPointsField": "customfield_10016"
-      }
-    }
-  },
-  "linear": { "projects": { "ENG": { "prStatus": "In Review" } } }
-}
+Status mappings and the story-points field are set per tracker project. With a workspace, put them in `~/.devintern/workspace.toml`:
+
+```toml
+[trackers.jira.projects.PROJ]
+pr_status = "In Review"
+in_progress_status = "In Progress"
+todo_status = "To Do"
+story_points_field = "customfield_10016"
+
+[trackers.linear.projects.ENG]
+pr_status = "In Review"
 ```
 
-| Field              | Effect                                                                                                              |
-| ------------------ | ------------------------------------------------------------------------------------------------------------------- |
-| `prStatus`         | Status, state, or label to set after the PR is created. This also moves the ticket out of sweep queries ([details](./worker.md#tickets-already-actioned-after-a-pr)) |
-| `inProgressStatus` | Status to set when work starts                                                                                      |
-| `todoStatus`       | Status to restore if implementation fails                                                                           |
-| `storyPointsField` | Custom field for story points. Found automatically if omitted                                                        |
+| Key                  | Effect                                                                                                              |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `pr_status`          | Status, state, or label to set after the PR is created. This also moves the ticket out of sweep queries ([details](./worker-troubleshooting.md#tickets-already-actioned-after-a-pr)) |
+| `in_progress_status` | Status to set when work starts                                                                                      |
+| `todo_status`        | Status to restore if implementation fails                                                                           |
+| `story_points_field` | Custom field for story points. Found automatically if omitted                                                        |
 
-Each tracker uses its own project key (Jira project, Linear team key, Trello board ID, `owner/repo` for GitHub, and so on); see that tracker's integration guide. Older Jira-only files with a top-level `projects` key still work.
+Trackers are `jira`, `linear`, `trello`, `azure-devops`, `asana`, `github`, `gitlab`, and `markdown`. Each uses its own project key (Jira project, Linear team key, Trello board ID, `owner/repo` for GitHub, and so on); see that tracker's integration guide. Quote keys that contain spaces or slashes, for example `[trackers.github.projects."acme/web"]`. Only the section for the active `TASK_TRACKER` is used.
 
-To add verification or custom steps, use the same file's `pipeline` section; see [Customizing the Task Pipeline](./pipelines.md).
+A repository's `.devintern-code/settings.json` is no longer read. Its tracker sections are copied to `[trackers]` automatically the first time DevIntern runs there (or when the worker starts).
+
+To add verification or custom steps, use a workspace `pipeline_file`; see [Customizing the Task Pipeline](./pipelines.md).
 
 ## Readiness check
 
@@ -141,4 +140,4 @@ Every failure comes with a suggested fix. The probes only run `<cli> --version` 
 | `1`       | Not ready: a check failed, for example no harness in the chain can run or the primary can't start |
 | `2`       | Only with `--strict`: warnings but no failures, for CI that requires a fully ready setup       |
 
-`devintern init` runs some of these checks at the end. For the unattended worker, use [`devintern worker doctor`](./worker.md#checking-worker-readiness-worker-doctor). If a failure looks like a DevIntern bug, run `devintern report` ([Reporting bugs](./reporting-bugs.md)).
+`devintern init` runs some of these checks at the end. For the unattended worker, use [`devintern worker doctor`](./worker.md#checking-readiness-worker-doctor). If a failure looks like a DevIntern bug, run `devintern report` ([Reporting bugs](./reporting-bugs.md)).

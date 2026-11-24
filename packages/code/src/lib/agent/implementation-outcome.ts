@@ -147,9 +147,25 @@ export function isBlockedOutcomeReason(reason: string | undefined): boolean {
   return reason?.startsWith(BLOCKED_OUTCOME_REASON_PREFIX) ?? false;
 }
 
+/**
+ * Prefix of the `outcome_reason` recorded for a `partial` run whose agent
+ * reported a gate failure as pre-existing on the base commit. That judgment is
+ * the agent's own and nothing re-checks it, so these runs keep one stable,
+ * queryable prefix (`outcome_reason LIKE 'partial: pre-existing on base:%'`)
+ * for auditing, however the agent cased or spaced its reason.
+ */
+export const PRE_EXISTING_ON_BASE_REASON_PREFIX = "partial: pre-existing on base: ";
+
+const PRE_EXISTING_ON_BASE_PATTERN = /^pre-existing on base\s*:\s*/i;
+
+/** Whether a recorded `outcome_reason` marks a gate failure reported as pre-existing on base. */
+export function isPreExistingOnBaseReason(reason: string | undefined): boolean {
+  return reason?.startsWith(PRE_EXISTING_ON_BASE_REASON_PREFIX) === true;
+}
+
 /** Run status and recorded reason implied by a reported outcome. */
 export interface OutcomeRunDisposition {
-  status: "succeeded" | "escalated";
+  status: "succeeded" | "escalated" | "failed";
   reason?: string;
 }
 
@@ -171,12 +187,52 @@ export function outcomeRunDisposition(
     };
   }
   if (outcome?.status === "partial") {
+    const preExisting = outcome.reason?.match(PRE_EXISTING_ON_BASE_PATTERN);
+    if (outcome.reason && preExisting) {
+      const detail = outcome.reason.slice(preExisting[0].length) || "gate failure";
+      return { status: "succeeded", reason: `${PRE_EXISTING_ON_BASE_REASON_PREFIX}${detail}` };
+    }
     return {
       status: "succeeded",
       reason: `partial: ${outcome.reason ?? "the agent reported that the goal was only partly met"}`,
     };
   }
   return { status: "succeeded" };
+}
+
+/** Prefix of the `outcome_reason` recorded for a run whose PR could not be created. */
+export const PR_DELIVERY_FAILED_REASON_PREFIX = "pushed but PR creation failed: ";
+
+/** Whether a recorded `outcome_reason` marks a run whose PR could not be created. */
+export function isPrDeliveryFailedReason(reason: string | undefined): boolean {
+  return reason?.startsWith(PR_DELIVERY_FAILED_REASON_PREFIX) === true;
+}
+
+/**
+ * Apply a PR delivery failure to the disposition implied by the agent's outcome.
+ *
+ * A run that was asked to open a PR, pushed its branch, and then failed to
+ * create the PR delivered nothing reviewable, so it must not count as a
+ * success. It is recorded `failed`, like the other delivery halts (commit,
+ * push), whichever way the agent reported its goal. An agent-reported
+ * `blocked` outcome stays `escalated` (a human must act either way, and
+ * session pickup keys off that reason) with the PR failure appended to its
+ * reason. Retry policy is unchanged: it lives in the worker's actioned
+ * bookkeeping, not in this status.
+ *
+ * @param disposition - Disposition from {@link outcomeRunDisposition}
+ * @param prFailure - Message of the PR creation failure, when one happened
+ */
+export function deliveryRunDisposition(
+  disposition: OutcomeRunDisposition,
+  prFailure: string | undefined,
+): OutcomeRunDisposition {
+  if (prFailure === undefined) return disposition;
+  const prReason = `${PR_DELIVERY_FAILED_REASON_PREFIX}${prFailure}`;
+  if (disposition.status === "escalated") {
+    return { status: "escalated", reason: `${disposition.reason}; ${prReason}` };
+  }
+  return { status: "failed", reason: prReason };
 }
 
 /** Prompt instruction describing the marker; appended to the summary request. */
@@ -189,6 +245,16 @@ Use status=blocked when a required gate failed (tests, lint, a build or release 
 a required step was refused (a push, a merge, a permission), or a dependency or data
 source you needed was unavailable, so the goal was not met.
 Use status=partial when you met only part of the goal, and say what is missing.
+A gate failure that is pre-existing on the base commit is not blocked. Confirm it by re-running
+the failing gate on the base revision (for example in a temporary git worktree) and checking
+that it fails with the same errors. Seeing the same error in a file you did not modify is
+enough only for a per-file rule such as a lint max-lines limit; type errors, import cycles,
+build and test failures can come from your change in files you never touched, so re-run those.
+If every failure reproduces unchanged on the base and making that gate pass is not the task's
+goal, use status=partial with a reason that starts with pre-existing on base: and says how you
+confirmed it, like
+pre-existing on base: bun run lint max-lines in foo.ts, same error on base; task work complete.
+Use status=blocked if you cannot confirm this, or if the task's goal is to make that gate pass.
 Finding nothing to do is not blocked: if the work was already done or there was nothing
 to change, either omit the line or use status=noop. Omit the line when you met the goal.
 Keep the reason on one line, under ${OUTCOME_REASON_MAX_LENGTH} characters, without double quotes.`;

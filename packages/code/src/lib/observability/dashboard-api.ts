@@ -21,8 +21,6 @@ import type {
   DashboardAutomationActions,
   ManualTriggerOutcome,
 } from "../automation/acquirer";
-import { loadStandaloneAutomationActions } from "../automation/manual";
-import type { CodeHostProvider } from "../code-host/index";
 import { RunStore } from "../state/run-recorder";
 import { hostTimeZone, isValidTimeZone } from "../state/run-activity";
 import type {
@@ -35,6 +33,7 @@ import type {
 import { InjectedTaskStore } from "../state/injected-tasks";
 import type { InjectedTask } from "../state/injected-tasks";
 import type { ScheduleSnapshot } from "../worker/schedule";
+import type { QueuedJobSnapshot } from "../worker/supervisor";
 import {
   isRunRetriable,
   RunRetryAuditStore,
@@ -68,6 +67,8 @@ import {
 } from "./dashboard-db";
 import { WorkerState } from "../state/worker-state";
 import type { Cursor } from "../state/worker-state";
+import { DEFAULT_MERGED_PR_LIMIT, parseAgentPrsQuery, toAgentPrView } from "./dashboard-agent-prs";
+import type { AgentPrView } from "./dashboard-agent-prs";
 import { deriveTaskTitle } from "./task-title";
 import {
   createCachedWorkspaceSourcesLoader,
@@ -132,10 +133,7 @@ export interface DashboardDataOptions {
    * same workspace as the queue counts.
    */
   workspaceDir?: string;
-  /**
-   * Live working-window snapshot from the worker process (embedded
-   * dashboard only; standalone servers return null).
-   */
+  /** Live working-window snapshot from the worker (embedded only; standalone returns null). */
   scheduleSnapshot?: () => ScheduleSnapshot | null;
   /**
    * How a retry is executed. `spawn` (default) starts a detached CLI
@@ -146,21 +144,15 @@ export interface DashboardDataOptions {
    * alongside the fleet worker.
    */
   retryMode?: "spawn" | "schedule";
-  /**
-   * How long a triggered retry blocks further retries of its task
-   * (tests); defaults to {@link INFLIGHT_RETRY_TTL_MS}.
-   */
+  /** How long a triggered retry blocks retries of its task; defaults to INFLIGHT_RETRY_TTL_MS. */
   inflightRetryTtlMs?: number;
-  /**
-   * How long a triggered manual automation run blocks further triggers of
-   * the automation; defaults to {@link INFLIGHT_RETRY_TTL_MS}.
-   */
+  /** How long a manual automation run blocks re-triggers; defaults to INFLIGHT_RETRY_TTL_MS. */
   inflightAutomationTtlMs?: number;
   /**
    * Automation listing/triggering overrides. The workspace worker passes its
-   * in-process scheduler so manual runs ride the exact scheduled pipeline;
-   * when omitted, a standalone dashboard falls back to the project's own
-   * `.devintern-code/automations.toml` (spawn path).
+   * in-process scheduler so manual runs ride the exact scheduled pipeline; a
+   * standalone dashboard passes the workspace's read-only catalog. When
+   * omitted, no automations are listed.
    */
   automationActions?: DashboardAutomationActions;
   /** Directories to search for worker capture files (primary first). */
@@ -169,6 +161,8 @@ export interface DashboardDataOptions {
   maxLogBytesPerFile?: number;
   /** Sources the running config polls; defaults to the workspace.toml list. */
   configuredSources?: () => ConfiguredSource[];
+  /** Jobs waiting in the worker's supervisor (embedded dashboard only), shown under Queued. */
+  supervisorQueuedJobs?: () => QueuedJobSnapshot[];
 }
 
 interface Stores {
@@ -235,22 +229,7 @@ export interface WorkerStatusView {
   reason?: "pid-namespace"; // `unknown` because the lock owner is in another PID namespace
 }
 
-/** One open agent PR as served by `GET /api/agent-prs`. */
-export interface OpenAgentPrView {
-  provider: CodeHostProvider;
-  instanceUrl: string;
-  projectId?: string;
-  projectPath: string;
-  repo: string;
-  prNumber: number;
-  prUrl: string;
-  branch?: string;
-  taskKey?: string;
-  ticketUrl?: string;
-  createdAt: number;
-  updatedAt: number;
-}
-
+export type { AgentPrView, OpenAgentPrView } from "./dashboard-agent-prs";
 export type { DashboardAutomationView } from "./dashboard-automation-view";
 
 /**
@@ -294,21 +273,20 @@ export class DashboardData {
   /** Automation listing/triggering; lazily defaults to the standalone spawn path. */
   private automationActions: DashboardAutomationActions | null = null;
   private automationActionsOverride?: DashboardAutomationActions;
+  private readonly supervisorQueuedJobs: () => QueuedJobSnapshot[];
   private readonly configuredSources: () => ConfiguredSource[];
 
   constructor(options: DashboardDataOptions = {}) {
     this.workingDir = options.workingDir ?? process.cwd();
     this.workspaceDir = options.workspaceDir ?? resolveWorkspaceDir();
-    this.dbPath = options.dbPath ?? resolveDashboardHistoryDbPath(this.workingDir);
-    this.queueDbPath =
-      options.queueDbPath ??
-      options.dbPath ??
-      resolveDashboardQueueDbPath(undefined, this.workingDir);
+    this.dbPath = options.dbPath ?? resolveDashboardHistoryDbPath();
+    this.queueDbPath = options.queueDbPath ?? options.dbPath ?? resolveDashboardQueueDbPath();
     this.scheduleSnapshot = options.scheduleSnapshot ?? (() => null);
     this.retryMode = options.retryMode ?? "spawn";
     this.inflightRetryTtlMs = options.inflightRetryTtlMs ?? INFLIGHT_RETRY_TTL_MS;
     this.inflightAutomationTtlMs = options.inflightAutomationTtlMs ?? INFLIGHT_RETRY_TTL_MS;
     this.automationActionsOverride = options.automationActions;
+    this.supervisorQueuedJobs = options.supervisorQueuedJobs ?? (() => []);
     this.configuredSources =
       options.configuredSources ?? createCachedWorkspaceSourcesLoader(this.workspaceDir);
     if (options.logDirs !== undefined) {
@@ -563,15 +541,10 @@ export class DashboardData {
   /** Automation listing/triggering, defaulting to the standalone spawn path. */
   getAutomationActions(): DashboardAutomationActions {
     if (!this.automationActions) {
-      // Standalone dashboards (spawn mode) read the project's own automation
-      // config; a worker-embedded dashboard without an in-process scheduler
-      // has none to offer (workspace [[automations]] would need the fleet
-      // pipeline), so it serves an empty catalog rather than a wrong one.
-      this.automationActions =
-        this.automationActionsOverride ??
-        (this.retryMode === "spawn"
-          ? loadStandaloneAutomationActions(this.workingDir)
-          : EMPTY_AUTOMATION_ACTIONS);
+      // Automations live in workspace.toml and run through the fleet pipeline:
+      // the worker passes its scheduler, a standalone dashboard a read-only
+      // workspace catalog. Without either there is nothing to serve.
+      this.automationActions = this.automationActionsOverride ?? EMPTY_AUTOMATION_ACTIONS;
     }
     return this.automationActions;
   }
@@ -594,11 +567,19 @@ export class DashboardData {
     });
   }
 
+  /** Jobs waiting in the worker's supervisor; empty for a standalone dashboard. */
+  getSupervisorQueuedJobs(): QueuedJobSnapshot[] {
+    try {
+      return this.supervisorQueuedJobs();
+    } catch {
+      return [];
+    }
+  }
+
   /** Health of each configured automation source; never throws. */
   getSources(): DashboardSourcesResult {
-    // The worker records source health in the workspace (or fleet) database,
-    // the same one worker liveness and the durable queue are read from; the
-    // run-history database differs for a standalone `devintern dashboard`.
+    // Source health lives in the workspace (or fleet) database with liveness and
+    // the queue; a standalone `devintern dashboard` uses a different run-history db.
     return readConfiguredSourceHealth(this.queueDbPath, this.configuredSources);
   }
 
@@ -646,22 +627,22 @@ export class DashboardData {
    * switches and stay correct even when this dashboard process runs
    * without tracker configuration.
    */
-  getOpenAgentPrs(): OpenAgentPrView[] {
+  getOpenAgentPrs(): AgentPrView[] {
     return this.read([], (stores) =>
-      stores.state.listOpenAgentChangeRequests().map((pr) => ({
-        provider: pr.provider,
-        instanceUrl: pr.instanceUrl,
-        projectId: pr.projectId,
-        projectPath: pr.projectPath,
-        repo: pr.repo,
-        prNumber: pr.prNumber,
-        prUrl: pr.webUrl,
-        branch: pr.branch,
-        taskKey: pr.taskKey,
-        ticketUrl: pr.ticketUrl,
-        createdAt: pr.createdAt,
-        updatedAt: pr.updatedAt,
-      })),
+      stores.state.listOpenAgentChangeRequests().map((pr) => toAgentPrView(pr)),
+    );
+  }
+
+  /**
+   * Agent-created PRs the worker saw merged, most recently merged first
+   * (`GET /api/agent-prs?state=merged`). Only merges observed after the
+   * registry started recording them are listed.
+   *
+   * @param limit - Maximum PRs returned
+   */
+  getMergedAgentPrs(limit: number = DEFAULT_MERGED_PR_LIMIT): AgentPrView[] {
+    return this.read([], (stores) =>
+      stores.state.listMergedAgentChangeRequests(limit).map((pr) => toAgentPrView(pr)),
     );
   }
 
@@ -752,7 +733,7 @@ function conflict(message: string): ApiResponse {
   return { status: 409, body: { error: message } };
 }
 
-/** No-automation bridge for worker-embedded dashboards whose worker runs none. */
+/** No-automation bridge for dashboards without a workspace automation catalog. */
 const EMPTY_AUTOMATION_ACTIONS: DashboardAutomationActions = {
   list: () => [],
   trigger: async () => ({ ok: false, reason: "no automations are configured" }),
@@ -809,6 +790,12 @@ function resolveRetryEligibility(data: DashboardData, run: RunRecord): RetryElig
     return {
       eligible: false,
       reason: `ad-hoc task ${run.taskKey} is already ${task.status} (task #${task.id})`,
+    };
+  }
+  if (task.status === "cancelled") {
+    return {
+      eligible: false,
+      reason: `ad-hoc task ${run.taskKey} was cancelled; a cancelled task cannot be re-queued, enqueue it again instead`,
     };
   }
   return eligibility;
@@ -878,8 +865,7 @@ export async function handleRetryRun(
   }
   const taskKey = run.taskKey;
 
-  // A live run for the task blocks every kind of retry: the worker records one
-  // as soon as it picks the ticket (or the re-queued ad-hoc row) up.
+  // A live run blocks every kind of retry (recorded once the worker picks it up).
   const activeRun = data
     .listRuns({ taskKey, limit: MAX_LIMIT, offset: 0 })
     .runs.find(
@@ -901,8 +887,7 @@ export async function handleRetryRun(
     return retryInjectedRun(data, id, taskKey, actorLabel);
   }
 
-  // Concurrent retries: another dashboard retry for this task, or a live run
-  // for the task (the worker records one as soon as it picks the ticket up).
+  // Concurrent retries: another dashboard retry for this task.
   if (data.retryMode === "schedule") {
     if (data.getScheduledRetryStore().hasActive(taskKey, run.team)) {
       return conflict(`a retry of ${taskKey} is already scheduled or running`);
@@ -1011,6 +996,11 @@ function retryInjectedRun(
   }
   if (task.status === "pending" || task.status === "running") {
     return conflict(`ad-hoc task ${taskKey} is already ${task.status} (task #${task.id})`);
+  }
+  if (task.status === "cancelled") {
+    return conflict(
+      `ad-hoc task ${taskKey} was cancelled; a cancelled task cannot be re-queued, enqueue it again instead`,
+    );
   }
   // Re-queueing force-removes the worktree the surviving child is working in.
   if (interruptedChildStillRunning(task)) {
@@ -1182,9 +1172,8 @@ export async function handleRunAutomation(
     );
   }
 
-  // Standalone spawn mode: the spawned CLI needs a moment to create its run
-  // row, so rapid repeat triggers are debounced until the TTL lapses. The
-  // worker-embedded dashboard relies on the automation's schedule lease.
+  // Spawn mode debounces repeat triggers until the TTL lapses (the CLI needs a
+  // moment to create its run row); embedded dashboards use the schedule lease.
   if (data.retryMode === "spawn" && !data.claimAutomationRun(automationId)) {
     return conflict(`a manual run of "${automationId}" was just triggered and is starting`);
   }
@@ -1430,13 +1419,20 @@ export function resolveWorkerStatus(
  * and automation source health.
  *
  * @param data - Dashboard data source
+ * @param serverPid - Pid of the process serving this dashboard over HTTP.
+ *   Only the HTTP route passes it; the `worker status` CLI runs this handler
+ *   in its own process, where no dashboard server pid exists, so it omits it.
  */
-export function handleWorkerStatus(data: DashboardData): ApiResponse {
+export function handleWorkerStatus(data: DashboardData, serverPid?: number): ApiResponse {
   const sources = data.getSources();
   return {
     status: 200,
     body: {
       worker: resolveWorkerStatus(data.workingDir, data.workspaceDir),
+      // Additive, HTTP route only: pid of the process serving this dashboard.
+      // Equals `worker.pid` only for the worker's in-process dashboard
+      // (`worker doctor` relies on it).
+      ...(serverPid !== undefined ? { serverPid } : {}),
       queue: data.getQueueStats(),
       agentPrs: data.getAgentPrCounts(),
       schedule: data.getScheduleSnapshot(),
@@ -1457,15 +1453,25 @@ export function handleWorkerStatus(data: DashboardData): ApiResponse {
 }
 
 /**
- * `GET /api/agent-prs` — open agent-created PRs with GitHub links.
+ * `GET /api/agent-prs` — agent-created PRs with GitHub links.
  *
- * The registry is reconciled with GitHub by the worker's review polling, so
- * PRs merged or closed outside the worker drop out within one poll cycle.
+ * Default (`state=open`): open PRs. The registry is reconciled with GitHub by
+ * the worker's review polling, so PRs merged or closed outside the worker drop
+ * out within one poll cycle. `state=merged`: PRs the worker saw merged, most
+ * recently merged first, bounded by `limit`.
  *
  * @param data - Dashboard data source
+ * @param params - Query params: `state` (open | merged, default open) and
+ *                 `limit` (merged only, 1..500, default 50)
  */
-export function handleAgentPrs(data: DashboardData): ApiResponse {
-  return { status: 200, body: { prs: data.getOpenAgentPrs() } };
+export function handleAgentPrs(
+  data: DashboardData,
+  params: URLSearchParams = new URLSearchParams(),
+): ApiResponse {
+  const query = parseAgentPrsQuery(params);
+  if ("error" in query) return badRequest(query.error);
+  const prs = query.state === "open" ? data.getOpenAgentPrs() : data.getMergedAgentPrs(query.limit);
+  return { status: 200, body: { prs } };
 }
 
 /**

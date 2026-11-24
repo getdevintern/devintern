@@ -1,9 +1,10 @@
-import { existsSync, readFileSync } from "fs";
+import { existsSync } from "fs";
 import { join } from "path";
 
 import { CronExpressionParser } from "cron-parser";
 
-import { parseToml } from "../workspace/toml";
+import { resolveProjectConfigDir } from "../config/config-dir";
+
 import { parseAgentSelection } from "../agent/selection";
 import type { AgentSelection } from "../agent/selection";
 
@@ -35,7 +36,6 @@ export interface CronOrIntervalSchedule {
   intervalMs?: number;
 }
 
-export const SINGLE_REPO_AUTOMATIONS_PATH = ".devintern-code/automations.toml";
 const AUTOMATION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const DURATION_PATTERN = /^(\d+)([mhd])$/;
 const MAX_DATE_MS = 8_640_000_000_000_000;
@@ -219,27 +219,6 @@ export function parseAutomationEntries(
   return { automations, errors };
 }
 
-/** Parse the single-repository automation TOML file. */
-export function parseAutomationConfig(text: string, sourceLabel = SINGLE_REPO_AUTOMATIONS_PATH) {
-  let document: Record<string, unknown>;
-  try {
-    document = parseToml(text);
-  } catch (error) {
-    throw new Error(`Failed to parse ${sourceLabel}: ${(error as Error).message}`);
-  }
-  const result = parseAutomationEntries(document.automations, { sourceLabel });
-  if (result.errors.length > 0) {
-    throw new Error(`Invalid ${sourceLabel}:\n- ${result.errors.join("\n- ")}`);
-  }
-  return result.automations;
-}
-
-/** Load single-repository automations, returning an empty list when absent. */
-export function loadSingleRepoAutomations(baseDir = process.cwd()): AutomationConfig[] {
-  const path = join(baseDir, SINGLE_REPO_AUTOMATIONS_PATH);
-  return existsSync(path) ? parseAutomationConfig(readFileSync(path, "utf8"), path) : [];
-}
-
 /** Value-taking review flag; its separate value is the next token. */
 const PR_FLAGS_WITH_VALUE = new Set(["--auto-review-iterations"]);
 /** PR/review flags in every form the CLI accepts, bare or `--flag=value`. */
@@ -303,4 +282,21 @@ export function automationTaskArgs(
   }
   if (!args.includes("--skip-clarity-check")) args.push("--skip-clarity-check");
   return args;
+}
+
+/**
+ * Warn when the project still has a `.devintern-code/automations.toml`.
+ *
+ * That file is no longer read: automations are configured as
+ * `[[automations]]` in the workspace's `workspace.toml`.
+ *
+ * @param startDir - Directory to search for the project config from
+ * @returns Whether a warning was printed
+ */
+export function warnIgnoredProjectAutomations(startDir: string = process.cwd()): boolean {
+  const path = join(resolveProjectConfigDir(startDir), "automations.toml");
+  if (!existsSync(path)) return false;
+  console.warn(`⚠️  Ignoring ${path}: automations are no longer read from the project.`);
+  console.warn("   Move its [[automations]] entries to ~/.devintern/workspace.toml.");
+  return true;
 }

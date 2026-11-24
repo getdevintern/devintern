@@ -21,6 +21,10 @@
  */
 
 import type { TrackerComment, TrackerFixture, TrackerTicket, TrackerTicketState } from "./tracker";
+import { FakeAsanaDependencies } from "./fake-asana-dependencies";
+import type { FakeAsanaDependencyRequest } from "./fake-asana-dependencies";
+import { parseOptFields, projectTaskPayload } from "./fake-asana-fields";
+import { asRecord, json, readJson } from "./fake-asana-http";
 
 /** Task statuses are project sections in Asana. */
 export interface FakeAsanaStatuses {
@@ -68,7 +72,7 @@ interface FakeAsanaTag {
   name: string;
 }
 
-interface FakeAsanaCustomField {
+export interface FakeAsanaCustomField {
   gid: string;
   name: string;
   type: string;
@@ -255,6 +259,7 @@ export class FakeAsanaTracker implements TrackerFixture {
   readonly projectTaskListings: string[] = [];
 
   private readonly tasks = new Map<string, FakeAsanaTask>();
+  private readonly dependencies = new FakeAsanaDependencies();
   /** Append-only Events API log for the watched project. */
   private readonly events: FakeAsanaEvent[] = [];
   /** Live sync tokens mapped to the event-log position they were issued at. */
@@ -262,6 +267,7 @@ export class FakeAsanaTracker implements TrackerFixture {
   private nextTaskGid = 1_200_000_000_000_100;
   private nextStoryGid = 1_400_000_000_000_000;
   private nextTagGid = 1_500_000_000_000_000;
+  private nextCustomFieldGid = 1_600_000_000_000_000;
   private now = Date.parse("2026-01-01T00:00:00.000Z");
 
   constructor(options: FakeAsanaOptions = {}) {
@@ -313,6 +319,8 @@ export class FakeAsanaTracker implements TrackerFixture {
     title: string;
     body: string;
     labels?: string[];
+    /** Project custom fields the task carries; only `number` fields take values. */
+    customFields?: Array<{ name: string; type: "number" | "text" | "enum" }>;
   }): Promise<TrackerTicket> {
     const gid = String(this.nextTaskGid++);
     const timestamp = this.timestamp();
@@ -328,7 +336,11 @@ export class FakeAsanaTracker implements TrackerFixture {
       assignee: null,
       created_by: { name: FAKE_ACCOUNT.name },
       tags: (input.labels ?? []).map((name) => ({ gid: String(this.nextTagGid++), name })),
-      custom_fields: [],
+      custom_fields: (input.customFields ?? []).map((field) => ({
+        ...field,
+        gid: String(this.nextCustomFieldGid++),
+        number_value: null,
+      })),
       project_gid: this.projectGidValue,
       section_gid: this.sectionGid(this.statuses.todo),
       stories: [],
@@ -369,6 +381,52 @@ export class FakeAsanaTracker implements TrackerFixture {
       this.recordEvent({ type: "task", action: "changed", gid: task.gid, field: "notes" });
     }
     task.modified_at = this.timestamp();
+  }
+
+  /**
+   * Set the tasks blocking `ticketKey` (Asana "Blocked by" dependencies), in
+   * the order the dependencies endpoint pages them. Each blocker must be a
+   * fixture task; its `completed` flag is read live, so {@link closeTicket}
+   * on a blocker releases it.
+   */
+  setDependencies(ticketKey: string, blockerKeys: readonly string[]): void {
+    this.requireTask(ticketKey);
+    for (const key of blockerKeys) this.requireTask(key);
+    this.dependencies.set(ticketKey, blockerKeys);
+  }
+
+  /**
+   * Cap dependencies pages at `size` records, so a fixture with more blockers
+   * than that is split across `next_page.offset` pages even though the
+   * product asks for `limit=100`.
+   */
+  setDependencyPageSize(size: number): void {
+    this.dependencies.setPageSize(size);
+  }
+
+  /**
+   * Make every dependencies request fail with `status` (402 or 500 use
+   * Asana's real error bodies), or pass `null` to serve pages again.
+   */
+  failDependencies(status: number | null): void {
+    this.dependencies.fail(status);
+  }
+
+  /** Every `GET /tasks/{gid}/dependencies` call, oldest first. */
+  get dependencyRequests(): readonly FakeAsanaDependencyRequest[] {
+    return this.dependencies.requests;
+  }
+
+  /** Move the fake clock (epoch ms), e.g. to create a task "now" for the estimation <24h skip. */
+  setNow(epochMs: number): void {
+    if (!Number.isFinite(epochMs)) throw new Error(`Invalid fake Asana clock: ${epochMs}`);
+    this.now = epochMs;
+  }
+
+  /** Seeded custom field on a task by name, or `undefined` when the task has none. */
+  customField(ticketKey: string, name: string): FakeAsanaCustomField | undefined {
+    const field = this.requireTask(ticketKey).custom_fields.find((entry) => entry.name === name);
+    return field && { ...field };
   }
 
   /** Raw `modified_at` stamp, which the product uses as the task's `updated`. */
@@ -497,6 +555,11 @@ export class FakeAsanaTracker implements TrackerFixture {
       return this.postStory(storiesMatch[1], request);
     }
 
+    const dependenciesMatch = path.match(/^\/api\/1\.0\/tasks\/([^/]+)\/dependencies$/);
+    if (dependenciesMatch?.[1] && method === "GET") {
+      return this.getDependencies(dependenciesMatch[1], url);
+    }
+
     const taskMatch = path.match(/^\/api\/1\.0\/tasks\/([^/]+)$/);
     if (taskMatch?.[1] && method === "GET") {
       return this.getTask(taskMatch[1], parseOptFields(url.searchParams.get("opt_fields")));
@@ -583,6 +646,18 @@ export class FakeAsanaTracker implements TrackerFixture {
     return json({ data: stories.map((story) => this.storyPayload(story)) });
   }
 
+  /** `GET /tasks/{gid}/dependencies`; see `fake-asana-dependencies.ts`. */
+  private getDependencies(taskGid: string, url: URL): Response {
+    if (!this.tasks.has(taskGid)) return this.diagnostic(`Unknown fake Asana task: ${taskGid}`);
+    return this.dependencies.serve(
+      taskGid,
+      url,
+      this.apiBaseUrl,
+      (gid) => this.requireTask(gid),
+      (message) => this.reject(message),
+    );
+  }
+
   private async postStory(taskGid: string, request: Request): Promise<Response> {
     const task = this.tasks.get(taskGid);
     if (!task) return this.diagnostic(`Unknown fake Asana task: ${taskGid}`);
@@ -623,6 +698,15 @@ export class FakeAsanaTracker implements TrackerFixture {
     const data = asRecord(asRecord(body.value)?.data);
     if (!data) return this.reject("Task update requires a data object");
 
+    // Like Asana, reject a missing or non-number field or a non-number value before mutating.
+    const fieldWrites: Array<[FakeAsanaCustomField, number | null]> = [];
+    for (const [fieldGid, value] of Object.entries(asRecord(data.custom_fields) ?? {})) {
+      const field = task.custom_fields.find((entry) => entry.gid === fieldGid);
+      if (field?.type !== "number" || (value !== null && typeof value !== "number")) {
+        return this.reject(`Invalid number custom field write ${fieldGid} on task ${task.gid}`);
+      }
+      fieldWrites.push([field, value]);
+    }
     if (typeof data.completed === "boolean") {
       task.completed = data.completed;
     }
@@ -635,23 +719,7 @@ export class FakeAsanaTracker implements TrackerFixture {
     if (typeof data.html_notes === "string") {
       task.html_notes = data.html_notes;
     }
-    const customFields = asRecord(data.custom_fields);
-    if (customFields) {
-      for (const [fieldGid, value] of Object.entries(customFields)) {
-        const existing = task.custom_fields.find((field) => field.gid === fieldGid);
-        const numberValue = typeof value === "number" ? value : null;
-        if (existing) {
-          existing.number_value = numberValue;
-        } else {
-          task.custom_fields.push({
-            gid: fieldGid,
-            name: fieldGid,
-            type: "number",
-            number_value: numberValue,
-          });
-        }
-      }
-    }
+    for (const [field, value] of fieldWrites) field.number_value = value;
     task.modified_at = this.timestamp();
     for (const field of Object.keys(data)) {
       this.recordEvent({ type: "task", action: "changed", gid: task.gid, field });
@@ -893,96 +961,4 @@ export class FakeAsanaTracker implements TrackerFixture {
     this.now += 1000;
     return new Date(this.now).toISOString();
   }
-}
-
-function json(value: unknown, status = 200): Response {
-  return new Response(JSON.stringify(value), {
-    status,
-    headers: { "content-type": "application/json; charset=utf-8" },
-  });
-}
-
-async function readJson(
-  request: Request,
-): Promise<{ ok: true; value: unknown } | { ok: false; message: string }> {
-  try {
-    return { ok: true, value: await request.json() };
-  } catch {
-    return { ok: false, message: "Invalid JSON request body" };
-  }
-}
-
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-  return value !== null && typeof value === "object"
-    ? (value as Record<string, unknown>)
-    : undefined;
-}
-
-/** Fields Asana returns even when `opt_fields` does not name them. */
-const ALWAYS_RETURNED_TASK_FIELDS = ["gid"] as const;
-
-/** Task fields in Asana's compact representation, used without `opt_fields`. */
-const COMPACT_TASK_FIELDS = ["gid", "name"] as const;
-
-/** Nested tree of requested field names. */
-type FieldSelection = Map<string, FieldSelection>;
-
-/** Parse a comma-separated `opt_fields` selector. */
-function parseOptFields(raw: string | null): string[] | undefined {
-  const fields = raw
-    ?.split(",")
-    .map((field) => field.trim())
-    .filter(Boolean);
-  return fields && fields.length > 0 ? fields : undefined;
-}
-
-/** Build a field tree from dotted selectors such as `memberships.section.name`. */
-function buildFieldSelection(fields: readonly string[]): FieldSelection {
-  const selection: FieldSelection = new Map();
-  for (const field of fields) {
-    let node = selection;
-    for (const segment of field.split(".")) {
-      let child = node.get(segment);
-      if (!child) {
-        child = new Map();
-        node.set(segment, child);
-      }
-      node = child;
-    }
-  }
-  return selection;
-}
-
-/** Keep only selected fields, recursing into nested objects and arrays. */
-function selectFields(value: unknown, selection: FieldSelection): unknown {
-  if (value === null || value === undefined) return value;
-  if (Array.isArray(value)) return value.map((entry) => selectFields(entry, selection));
-  if (typeof value !== "object") return value;
-
-  const record = value as Record<string, unknown>;
-  const selected: Record<string, unknown> = {};
-  for (const [field, children] of selection) {
-    if (!(field in record)) continue;
-    selected[field] = children.size === 0 ? record[field] : selectFields(record[field], children);
-  }
-  return selected;
-}
-
-/**
- * Project a full task payload onto the request's `opt_fields`.
- *
- * Real Asana always returns `gid` and otherwise includes only the requested
- * fields; omitting the selector returns the compact task. Keeping that behavior
- * means a client that drops a required field from its `opt_fields` loses the
- * field here instead of passing against an unrealistically complete payload.
- */
-function projectTaskPayload(
-  payload: Record<string, unknown>,
-  optFields: string[] | undefined,
-): Record<string, unknown> {
-  const selection = buildFieldSelection(optFields ?? COMPACT_TASK_FIELDS);
-  for (const field of ALWAYS_RETURNED_TASK_FIELDS) {
-    selection.set(field, new Map());
-  }
-  return selectFields(payload, selection) as Record<string, unknown>;
 }

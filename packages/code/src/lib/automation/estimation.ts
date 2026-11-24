@@ -17,7 +17,7 @@ import { agentSandboxPolicy, getSandbox } from "../agent/sandbox";
 import { harnessSpawnEnv } from "../agent/spawn";
 import { createHarnessLogSink } from "../observability/harness-logs";
 import { resolveOutputDir } from "../config/output-dir";
-import { getStoryPointsFieldForProject } from "../config/project-settings";
+import { getStoryPointsFieldForProject, resolveProjectKey } from "../config/project-settings";
 import type { TaskTrackerClient } from "../trackers/client";
 import type { ProjectSettings } from "../../types/settings";
 
@@ -85,6 +85,8 @@ export interface RunEstimationOptions {
   harness: AgentHarness;
   executablePath: string;
   taskKey: string;
+  /** Fetched task; lets project-key resolution read tracker-specific fields (Trello board, Asana project). */
+  task?: { raw: unknown };
   tracker: TaskTrackerClient;
   settings: ProjectSettings | null;
   skipComments: boolean;
@@ -108,6 +110,7 @@ export async function runEstimation(
     harness,
     executablePath,
     taskKey,
+    task,
     tracker,
     settings,
     skipComments,
@@ -267,7 +270,9 @@ export async function runEstimation(
           }
 
           // Discover or use configured estimation field
-          const projectKey = taskKey.split("-")[0];
+          // Same resolver as the rest of the pipeline: Azure DevOps keys are
+          // numeric IDs, so the project comes from AZURE_DEVOPS_PROJECT.
+          const projectKey = resolveProjectKey(taskKey, task);
           const configuredField = getStoryPointsFieldForProject(projectKey, settings);
           if (configuredField) {
             console.log(`📊 Using configured story points field: ${configuredField}`);
@@ -288,7 +293,7 @@ export async function runEstimation(
           } else {
             console.log("⚠️  No story points field found — skipping field update");
             console.log(
-              '   Configure storyPointsField in .devintern-code/settings.json or ensure your tracker has a "Story Points" field',
+              '   Set story_points_field under [trackers] in ~/.devintern/workspace.toml or ensure your tracker has a "Story Points" field',
             );
           }
 

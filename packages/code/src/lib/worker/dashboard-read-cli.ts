@@ -40,7 +40,7 @@ import type {
   ApiResponse,
   DashboardAutomationView,
   EnrichedLogEntry,
-  OpenAgentPrView,
+  AgentPrView,
   RunHarnessLogFile,
   RunRetryInfo,
   WorkerQueueStats,
@@ -49,7 +49,7 @@ import type {
 import { resolveWorkspaceArgPath } from "../observability/dashboard-db";
 import { handleOverview } from "../observability/dashboard-overview";
 import type { OverviewResponse } from "../observability/dashboard-overview";
-import { handleQueuedWork } from "../observability/queued-work";
+import { handleQueuedWork, queuedDependencyStatus } from "../observability/queued-work";
 import type { QueuedWorkResponse } from "../observability/queued-work";
 import type { TaskArtifactContent, TaskArtifactFile } from "../observability/task-artifacts";
 import type { HarnessLogContent } from "../observability/harness-logs";
@@ -249,13 +249,19 @@ const SPECS: Record<string, CommandSpec> = {
     run: (data) => ({ response: handleAutomations(data), render: renderAutomations }),
   },
   prs: {
-    usage: "prs",
+    usage: "prs [--state open|merged] [--limit N]",
     route: "GET /api/agent-prs",
-    description: "Open pull/merge requests created by the agent.",
-    options: {},
-    optionHelp: [],
+    description: "Pull/merge requests created by the agent: open ones, or recently merged.",
+    options: { state: { type: "string" }, limit: { type: "string" } },
+    optionHelp: [
+      "  --state <state>     open | merged (default open)",
+      "  --limit N           Merged PRs to return, 1..500 (default 50)",
+    ],
     positionals: { min: 0, max: 0 },
-    run: (data) => ({ response: handleAgentPrs(data), render: renderPrs }),
+    run: (data, values) => ({
+      response: handleAgentPrs(data, queryParams(values, { state: "state", limit: "limit" })),
+      render: values.state === "merged" ? renderMergedPrs : renderPrs,
+    }),
   },
   queue: {
     usage: "queue",
@@ -680,7 +686,18 @@ function renderArtifact(body: TaskArtifactContent): string {
   return `${note}${body.content}`;
 }
 
-function renderStats(body: { window: string; stats: RunStats | null }): string {
+/** Auto-merge gate outcomes in operator terms; null when the window has no auto-merge runs. */
+function autoMergeLine(stats: RunStats): string | null {
+  if ((stats.byOrigin.auto_merge ?? 0) === 0) return null;
+  const counts = stats.byOriginStatus?.auto_merge;
+  if (!counts) return null;
+  const parts = [`${counts.succeeded} merged`, `${counts.escalated} left for review`];
+  if (counts.failed > 0) parts.push(`${counts.failed} failed`);
+  if (counts.abandoned > 0) parts.push(`${counts.abandoned} abandoned`);
+  return `Auto-merge:       ${parts.join(", ")}`;
+}
+
+export function renderStats(body: { window: string; stats: RunStats | null }): string {
   const { stats } = body;
   if (!stats) return `No run statistics (window ${body.window}).`;
   const byStatus = Object.entries(stats.totals.byStatus)
@@ -694,10 +711,14 @@ function renderStats(body: { window: string; stats: RunStats | null }): string {
   const lines = [
     `Window:           ${body.window}`,
     `Runs:             ${stats.totals.runs}${byStatus ? ` (${byStatus})` : ""}`,
-    `Success rate:     ${formatPercent(stats.successRate)}`,
-    `Escalation rate:  ${formatPercent(stats.escalationRate)}`,
-    `Median duration:  ${formatDuration(stats.medianDurationMs)} (succeeded runs with a PR)`,
+    `Success rate:     ${formatPercent(stats.successRate)} (excludes auto-merge)`,
+    `Escalation rate:  ${formatPercent(stats.escalationRate)} (excludes auto-merge)`,
   ];
+  const autoMerge = autoMergeLine(stats);
+  if (autoMerge) lines.push(autoMerge);
+  lines.push(
+    `Median duration:  ${formatDuration(stats.medianDurationMs)} (succeeded runs with a PR, excludes auto-merge)`,
+  );
   if (byOrigin) lines.push(`By origin:        ${byOrigin}`);
   lines.push(...renderActivity(stats));
   if (stats.byHarness.length > 0) {
@@ -765,7 +786,7 @@ function renderAutomations(body: { automations: DashboardAutomationView[] }): st
   );
 }
 
-function renderPrs(body: { prs: OpenAgentPrView[] }): string {
+function renderPrs(body: { prs: AgentPrView[] }): string {
   if (body.prs.length === 0) return "No open agent PRs.";
   return table(
     ["REPO", "PR", "TASK", "UPDATED", "URL"],
@@ -779,22 +800,60 @@ function renderPrs(body: { prs: OpenAgentPrView[] }): string {
   );
 }
 
+function renderMergedPrs(body: { prs: AgentPrView[] }): string {
+  if (body.prs.length === 0) return "No merged agent PRs recorded.";
+  return table(
+    ["REPO", "PR", "TASK", "MERGED", "URL"],
+    body.prs.map((pr) => [
+      pr.repo,
+      `#${pr.prNumber}`,
+      pr.taskKey ?? "-",
+      pr.mergedAt !== undefined ? formatTime(pr.mergedAt) : "-",
+      pr.prUrl,
+    ]),
+  );
+}
+
 function renderQueue(body: QueuedWorkResponse): string {
-  if (body.items.length === 0) return "Nothing queued.";
+  const cancelled = renderCancelled(body);
+  if (body.items.length === 0) return ["Nothing queued.", ...cancelled].join("\n");
   return [
     table(
-      ["KIND", "SUBJECT", "REPO", "QUEUED", "TITLE"],
+      ["KIND", "SUBJECT", "REPO", "QUEUED", "TITLE", "DEPENDENCIES"],
       body.items.map((item) => [
         item.kind,
         item.taskKey ?? item.automationId ?? (item.prNumber ? `PR #${item.prNumber}` : "-"),
         item.repo ?? "-",
         formatTime(item.createdAt),
         item.title,
+        queuedDependencyStatus(item) ?? "-",
       ]),
     ),
     "",
     `${body.items.length} shown, ${body.total} queued in total.`,
+    ...cancelled,
   ].join("\n");
+}
+
+/** Recently cancelled ad-hoc tasks (audit trail), or nothing when there are none. */
+function renderCancelled(body: QueuedWorkResponse): string[] {
+  const cancelled = body.cancelled ?? [];
+  if (cancelled.length === 0) return [];
+  return [
+    "",
+    "Recently cancelled:",
+    table(
+      ["TASK", "REPO", "CANCELLED", "BY", "TITLE", "REASON"],
+      cancelled.map((item) => [
+        item.taskKey,
+        item.repo,
+        item.cancelledAt !== undefined ? formatTime(item.cancelledAt) : "-",
+        item.cancelledBy ?? "-",
+        item.title,
+        item.cancelReason ?? "-",
+      ]),
+    ),
+  ];
 }
 
 function workerLine(worker: WorkerStatusView): string {

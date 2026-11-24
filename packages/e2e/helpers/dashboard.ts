@@ -9,6 +9,8 @@
  * never removes files.
  */
 
+import { Database } from "bun:sqlite";
+import { existsSync } from "node:fs";
 import { cliPath } from "./fixture-workspace";
 import { ensureLoopbackBypassesProxy } from "./loopback-proxy";
 import { freePort } from "./webhook-server";
@@ -88,6 +90,95 @@ export async function waitForDashboardHealth(
   throw new Error(
     `dashboard did not become healthy at ${baseUrl}` +
       (options.describe ? `\n${options.describe()}` : ""),
+  );
+}
+
+/** One stored `run_retry_audit` row, as the dashboard's retry handler wrote it. */
+export interface StoredRetryAudit {
+  run_id: number;
+  task_key: string | null;
+  actor: string;
+  action: string;
+  message: string | null;
+}
+
+/** Read committed queue rows. A missing database or table is empty, not a failed open. */
+export function readQueueRows<T>(dbPath: string, table: string, sql: string): T[] {
+  if (!/^[A-Za-z0-9_]+$/.test(table)) {
+    throw new Error(`refusing to query unexpected table ${table}`);
+  }
+  if (!existsSync(dbPath)) return [];
+  const db = new Database(dbPath, { readonly: true });
+  try {
+    db.run("PRAGMA busy_timeout = 5000");
+    const known = db
+      .query("SELECT 1 AS one FROM sqlite_master WHERE type = 'table' AND name = ?")
+      .get(table) as { one: number } | null;
+    if (!known) return [];
+    return db.query(sql).all() as T[];
+  } finally {
+    db.close();
+  }
+}
+
+/** Every stored retry audit row, oldest first. */
+export function readRetryAudit(dbPath: string): StoredRetryAudit[] {
+  return readQueueRows<StoredRetryAudit>(
+    dbPath,
+    "run_retry_audit",
+    "SELECT run_id, task_key, actor, action, message FROM run_retry_audit ORDER BY id",
+  );
+}
+
+/**
+ * Second POST while an ad-hoc retry is queued or starting.
+ *
+ * The handler rejects that overlap: the row is already pending/running, the
+ * re-queue update lost the race, or the worker has already opened a run.
+ *
+ * Pending/running may omit the "not retriable:" prefix. Eligibility adds it
+ * (`resolveRetryEligibility` → `conflict`), and a loser that already passed
+ * that read gets the same sentence bare from `retryInjectedRun`. "Moved on"
+ * and "in progress" stay exact.
+ */
+export function isDuplicateRetryRejection(taskKey: string, error: string): boolean {
+  const task = taskKey.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return (
+    error === `ad-hoc task ${taskKey} moved on; reload the run and try again` ||
+    new RegExp(
+      `^(?:not retriable: )?ad-hoc task ${task} is already (?:pending|running) \\(task #\\d+\\)$`,
+    ).test(error) ||
+    new RegExp(
+      `^${task} already has a run in progress \\(run \\d+\\); wait for it to finish$`,
+    ).test(error)
+  );
+}
+
+/** Status and parsed JSON body of one dashboard response. */
+export interface DashboardWriteResult<T = unknown> {
+  status: number;
+  body: T;
+}
+
+/**
+ * Send the same guarded write `count` times at once and collect every
+ * status/body pair in request order, for one-accepted/one-refused races.
+ */
+export async function concurrentDashboardWrites<T = unknown>(
+  baseUrl: string,
+  path: string,
+  count = 2,
+): Promise<Array<DashboardWriteResult<T>>> {
+  const responses = await Promise.all(
+    Array.from({ length: count }, () =>
+      fetch(`${baseUrl}${path}`, { method: "POST", headers: dashboardWriteHeaders(baseUrl) }),
+    ),
+  );
+  return await Promise.all(
+    responses.map(async (response) => ({
+      status: response.status,
+      body: (await response.json()) as T,
+    })),
   );
 }
 

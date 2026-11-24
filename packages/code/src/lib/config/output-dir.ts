@@ -5,7 +5,7 @@ import { join } from "path";
  * assessments, summaries, attachments). Overridable via DEVINTERN_OUTPUT_DIR.
  *
  * Everything under this directory is a write-only artifact; retry bookkeeping
- * lives in `.devintern-code/queue.db` (see lib/retry-state.ts).
+ * lives in `~/.devintern/state/queue.db` (see lib/retry-state.ts).
  */
 export function resolveOutputDir(): string {
   return process.env.DEVINTERN_OUTPUT_DIR || "/tmp/devintern-tasks";

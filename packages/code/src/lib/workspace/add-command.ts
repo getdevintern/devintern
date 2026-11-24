@@ -8,7 +8,8 @@
  * so `[[routing.rules]]` are not consulted.
  *
  * Non-interactive by default: returns after enqueue. `--wait` blocks until
- * the run settles and exits with its success/failure status; `--json` emits a
+ * the run settles and exits with its success/failure status (or
+ * {@link WAIT_CANCELLED_EXIT_CODE} when the row is cancelled first); `--json` emits a
  * single machine-readable object on stdout (human diagnostics go to stderr).
  */
 
@@ -24,11 +25,18 @@ import { readWorkerHarnessPause } from "../observability/harness-pause";
 import type { WorkerHarnessPause } from "../observability/harness-pause";
 import { loadSupabaseConfig } from "../cli/bootstrap";
 import type { RepoConfig, WorkspaceConfig } from "./config";
-import { loadWorkspaceConfig } from "./config";
+import { loadWorkerWorkspaceConfig, resolveCredentialTeam } from "./config";
 import { InjectedTaskStore } from "../state/injected-tasks";
 import type { InjectedTask } from "../state/injected-tasks";
-import { applyWorkspaceProcessEnv } from "./env";
-import { enqueueInjectedTask, MAX_INJECTED_BODY_CHARS } from "./injected-enqueue";
+import { applyWorkspaceProcessEnv, repoGitHubSlug } from "./env";
+import {
+  enqueueInjectedTask,
+  InjectedTaskDependencyError,
+  MAX_INJECTED_BODY_CHARS,
+} from "./injected-enqueue";
+import { resolveDependencyMode } from "../dependencies/gate";
+import type { DependencyMode } from "../dependencies/gate";
+import { describeCancellation } from "./injected-cancel";
 import {
   injectedChildStillRunningMessage,
   interruptedChildStillRunning,
@@ -44,6 +52,17 @@ import {
   readWorkerStartMarker,
 } from "./paths";
 import type { WorkerStartMarker } from "./paths";
+import { parseWorkerAddArgs, workerAddUsage } from "./add-args";
+import type { AddOptions } from "./add-args";
+
+export { parseWorkerAddArgs } from "./add-args";
+export type { AddOptions, ParsedAddArgs } from "./add-args";
+
+/**
+ * Exit code of `worker add --wait` when the task was cancelled before it ran
+ * (`worker cancel` or the dashboard), distinct from a pipeline failure (1).
+ */
+export const WAIT_CANCELLED_EXIT_CODE = 3;
 
 /** How often `--wait` re-reads the task row. */
 const WAIT_POLL_INTERVAL_MS = 1_000;
@@ -87,170 +106,8 @@ export interface WorkerAddOptions {
   waitPollIntervalMs?: number;
 }
 
-export interface AddOptions {
-  workspacePath?: string;
-  repo?: string;
-  title: string;
-  body?: string;
-  bodyFile?: string;
-  idempotencyKey?: string;
-  /** Re-queue this settled ad-hoc task instead of enqueuing a new one. */
-  resume?: string;
-  wait: boolean;
-  json: boolean;
-  /** `--wait` deadline in seconds; `0` waits without a limit (default 6h). */
-  waitTimeoutSeconds?: number;
-}
-
-export type ParsedAddArgs =
-  | { kind: "help" }
-  | { kind: "error"; message: string }
-  | { kind: "ok"; options: AddOptions };
-
-function usage(): string {
-  return [
-    "Usage: devintern worker add (--title <text> | --resume <taskKey>) [options]",
-    "",
-    "Enqueue a one-off task against a workspace repo without a tracker ticket.",
-    "The running worker runs it through the normal pipeline (checkout, agent,",
-    "PR) on its next poll.",
-    "",
-    "Options:",
-    "  --title <text>            Task title (required unless --resume)",
-    "  --repo <name>             [[repos]] name to target (default: the only repo)",
-    "  --body <text>             Task description",
-    "  --body-file <path>        Read the description from a file ('-' for stdin)",
-    "  --idempotency-key <key>   Dedupe key; a retry reuses the existing task",
-    "  --resume <taskKey>        Re-queue a settled ad-hoc task (resumes its branch)",
-    "  --wait                    Block until the run finishes; exit with its status",
-    "  --wait-timeout <seconds>  Give up waiting after this long (0 = no limit; default 21600)",
-    "  --json                    Emit a machine-readable result on stdout",
-    "  --workspace <path>        Use this workspace.toml (default: ~/.devintern/)",
-    "  -h, --help                Show this help",
-  ].join("\n");
-}
-
-/** Flag names that require a following value. */
-const VALUE_FLAGS = new Set([
-  "--workspace",
-  "--repo",
-  "--title",
-  "--body",
-  "--body-file",
-  "--idempotency-key",
-  "--resume",
-  "--wait-timeout",
-]);
-
-/**
- * Validate the `--resume` form.
- *
- * The row already holds its title, body, repo, and idempotency key; passing
- * them again would silently disagree with what the worker will run.
- *
- * @returns An error message, or null when the arguments are acceptable
- */
-function validateResumeArgs(options: AddOptions): string | null {
-  if (options.resume === undefined) return null;
-  if (!options.resume.trim()) {
-    return "--resume requires a task key.";
-  }
-  const conflicting = [
-    options.title.trim() ? "--title" : undefined,
-    options.body !== undefined ? "--body" : undefined,
-    options.bodyFile !== undefined ? "--body-file" : undefined,
-    options.repo !== undefined ? "--repo" : undefined,
-    options.idempotencyKey !== undefined ? "--idempotency-key" : undefined,
-  ].filter((flag): flag is string => flag !== undefined);
-  if (conflicting.length > 0) {
-    return `--resume re-queues the existing task; drop ${conflicting.join(", ")}.`;
-  }
-  return null;
-}
-
-/**
- * Parse `worker add` arguments. Kept separate from execution so help and arg
- * errors are testable without touching a workspace.
- */
-export function parseWorkerAddArgs(args: string[]): ParsedAddArgs {
-  const options: AddOptions = { title: "", wait: false, json: false };
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
-    if (arg === undefined) continue;
-    if (arg === "--help" || arg === "-h") return { kind: "help" };
-    if (arg === "--wait") {
-      options.wait = true;
-      continue;
-    }
-    if (arg === "--json") {
-      options.json = true;
-      continue;
-    }
-    if (VALUE_FLAGS.has(arg)) {
-      const value = args[i + 1];
-      // `--body-file -` is the documented stdin sentinel; other flags reject
-      // a leading dash so a forgotten value cannot swallow the next flag.
-      const allowDash = arg === "--body-file";
-      if (value === undefined || (!allowDash && value.startsWith("-"))) {
-        return { kind: "error", message: `${arg} requires a value.` };
-      }
-      i++;
-      switch (arg) {
-        case "--workspace":
-          options.workspacePath = value;
-          break;
-        case "--repo":
-          options.repo = value;
-          break;
-        case "--title":
-          options.title = value;
-          break;
-        case "--body":
-          options.body = value;
-          break;
-        case "--body-file":
-          options.bodyFile = value;
-          break;
-        case "--idempotency-key":
-          options.idempotencyKey = value;
-          break;
-        case "--resume":
-          options.resume = value;
-          break;
-        case "--wait-timeout": {
-          const seconds = Number(value);
-          if (!Number.isInteger(seconds) || seconds < 0) {
-            return {
-              kind: "error",
-              message: "--wait-timeout requires a non-negative integer number of seconds.",
-            };
-          }
-          options.waitTimeoutSeconds = seconds;
-          break;
-        }
-      }
-      continue;
-    }
-    return { kind: "error", message: `Unknown option: ${arg}` };
-  }
-
-  const resumeError = validateResumeArgs(options);
-  if (resumeError) {
-    return { kind: "error", message: resumeError };
-  }
-  if (options.resume !== undefined) {
-    return { kind: "ok", options };
-  }
-  if (!options.title.trim()) {
-    return { kind: "error", message: "--title is required and cannot be empty." };
-  }
-  if (options.body !== undefined && options.bodyFile !== undefined) {
-    return { kind: "error", message: "--body and --body-file are mutually exclusive." };
-  }
-  if (options.idempotencyKey !== undefined && !options.idempotencyKey.trim()) {
-    return { kind: "error", message: "--idempotency-key cannot be empty." };
-  }
-  return { kind: "ok", options };
+function capitalize(text: string): string {
+  return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
 function displayPath(path: string): string {
@@ -353,7 +210,7 @@ export async function runWorkerAdd(
 
   const parsed = parseWorkerAddArgs(args);
   if (parsed.kind === "help") {
-    log(usage());
+    log(workerAddUsage());
     return 0;
   }
   if (parsed.kind === "error") {
@@ -382,27 +239,45 @@ export async function runWorkerAdd(
 
   let config: WorkspaceConfig;
   try {
-    config = loadWorkspaceConfig(configPath);
+    // Ad-hoc tasks run in the worker, so manual_only repos are not targets.
+    config = loadWorkerWorkspaceConfig(configPath);
   } catch (loadError) {
     error(`❌ Could not read ${configPath}: ${(loadError as Error).message}`);
     return 1;
   }
   if (config.repos.length === 0) {
-    error(`❌ No repos configured in ${configPath}.`);
+    error(
+      `❌ No repos configured for the worker in ${configPath} (manual_only repos are skipped).`,
+    );
     error("   Run `devintern worker add-repo` inside a checkout first.");
     return 1;
   }
 
   // `--resume` re-queues an existing row, so title/body/repo resolution (and
   // their validation) apply only to a new enqueue.
-  let target: { repo: RepoConfig; body: string } | null = null;
+  let target: { repo: RepoConfig; body: string; credentialTeam?: string } | null = null;
   if (!add.resume) {
     const repoResult = resolveTargetRepo(config, add.repo, error);
     if (!repoResult.ok) return repoResult.code;
 
+    // Validated now so a typo or an ambiguous fixed-team setup fails here, not
+    // later in the worker after the task was queued.
+    const teamResult = resolveCredentialTeam(config, repoResult.repo.name, add.team);
+    if (!teamResult.ok) {
+      error(`❌ ${capitalize(teamResult.error)}.`);
+      if (teamResult.reason === "ambiguous") {
+        error("   Pick whose credentials the task uses with --team <name>.");
+      }
+      return 1;
+    }
+
     const bodyResult = resolveInjectedBody(add, options, error);
     if (!bodyResult.ok) return 1;
-    target = { repo: repoResult.repo, body: bodyResult.body };
+    target = {
+      repo: repoResult.repo,
+      body: bodyResult.body,
+      ...(teamResult.team ? { credentialTeam: teamResult.team.name } : {}),
+    };
   }
 
   if (!(await checkAutomationAccess(selectedDir, status, error))) return 1;
@@ -431,6 +306,7 @@ export async function runWorkerAdd(
       waitTimeoutSeconds: add.waitTimeoutSeconds,
       restartGraceMs: options.restartGraceMs,
       waitPollIntervalMs: options.waitPollIntervalMs,
+      dependencyModeDefault: config.defaults.dependencyMode,
     };
     if (add.resume) {
       return await resumeTask(add.resume, context);
@@ -441,7 +317,7 @@ export async function runWorkerAdd(
     }
     // `await` is load-bearing: without it the surrounding `finally` would
     // `store.close()` while `reportTask`/`waitForTask` is still polling.
-    return await enqueueNewTask(add, target.body, target.repo, context);
+    return await enqueueNewTask(add, target, context);
   } catch (enqueueError) {
     // Filesystem/DB failures (including a sandbox denying writes to the
     // workspace state) must not escape as a minified stack trace: agents parse
@@ -496,6 +372,8 @@ interface TaskContext {
   waitPollIntervalMs?: number;
   store: InjectedTaskStore;
   selectedDir: string;
+  /** `[defaults].dependency_mode` of the selected workspace. */
+  dependencyModeDefault?: DependencyMode;
   /**
    * ISO-8601 end of the earliest usage-limit window when every harness in the
    * worker's chain is limited (set once the task row is known to be pending).
@@ -506,27 +384,64 @@ interface TaskContext {
 /** Create the markdown file + durable row, then optionally wait. */
 async function enqueueNewTask(
   add: AddOptions,
-  body: string,
-  repo: RepoConfig,
+  target: { repo: RepoConfig; body: string; credentialTeam?: string },
   ctx: TaskContext & { workerRunning: PidLiveness },
 ): Promise<number> {
+  const { repo, body } = target;
   const { store, selectedDir, workerRunning, log, status } = ctx;
   // Only an active (pending/running) task dedupes; a settled one under the
   // same key is history and a new occurrence is enqueued.
-  const { task, deduplicated } = enqueueInjectedTask(store, selectedDir, {
-    repo: repo.name,
-    title: add.title,
-    body,
-    idempotencyKey: add.idempotencyKey,
-    actor: "local:add",
-  });
+  let enqueued: ReturnType<typeof enqueueInjectedTask>;
+  try {
+    enqueued = enqueueInjectedTask(store, selectedDir, {
+      repo: repo.name,
+      ...(add.team ? { team: add.team } : {}),
+      title: add.title,
+      body,
+      idempotencyKey: add.idempotencyKey,
+      actor: "local:add",
+      after: add.after,
+      dependencyMode: resolveDependencyMode({
+        override: add.dependencyMode,
+        configured: ctx.dependencyModeDefault,
+        stackMaintained: repoGitHubSlug(repo) !== undefined,
+      }),
+    });
+  } catch (dependencyError) {
+    if (!(dependencyError instanceof InjectedTaskDependencyError)) throw dependencyError;
+    ctx.error(`❌ ${dependencyError.message}`);
+    ctx.error("   No task was enqueued.");
+    return 1;
+  }
+  const { task, deduplicated, ignoredDependencies } = enqueued;
   if (deduplicated) {
     return await reportTask(task, ctx);
+  }
+  if (ignoredDependencies.length > 0) {
+    status(
+      `⚠️  Ignoring 'Depends on:' ${ignoredDependencies.join(", ")}: no ad-hoc task with that key ` +
+        "in this workspace (use --after to require one).",
+    );
+  }
+  if (task.dependsOn.length === 0 && add.dependencyMode !== undefined) {
+    status(
+      `⚠️  ${add.dependencyMode === "stacked" ? "--stack" : "--wait-merge"} has no effect ` +
+        "without --after or a 'Depends on:' line.",
+    );
   }
 
   const pause = readHarnessPause(selectedDir);
   if (!add.json) {
     status(`✅ Enqueued ${task.taskKey} for repo "${task.repo}" (task #${task.id}).`);
+    if (target.credentialTeam) {
+      status(`   Credentials: team "${target.credentialTeam}" (env_file and [teams.env]).`);
+    }
+    if (task.dependsOn.length > 0) {
+      status(
+        `   Depends on ${task.dependsOn.join(", ")} (${task.dependencyMode ?? "merged"} mode)` +
+          (task.dependencyState ? `; ${task.dependencyState}: ${task.dependencyReason}` : ""),
+      );
+    }
     if (workerRunning === "unknown") {
       status(`ℹ️  ${UNVERIFIED_WORKER_NOTICE}`);
     } else if (!workerRunning) {
@@ -549,13 +464,37 @@ async function enqueueNewTask(
   );
 }
 
-function serialize(task: Pick<InjectedTask, "id" | "taskKey" | "repo" | "status">): {
+function serialize(
+  task: Pick<InjectedTask, "id" | "taskKey" | "repo" | "status"> &
+    Partial<
+      Pick<InjectedTask, "dependsOn" | "dependencyMode" | "dependencyState" | "dependencyReason">
+    >,
+): {
   id: number;
   taskKey: string;
   repo: string;
   status: string;
+  dependsOn?: string[];
+  dependencyMode?: DependencyMode;
+  dependencyState?: string;
+  dependencyReason?: string;
 } {
-  return { id: task.id, taskKey: task.taskKey, repo: task.repo, status: task.status };
+  const dependent = task.dependsOn !== undefined && task.dependsOn.length > 0;
+  return {
+    id: task.id,
+    taskKey: task.taskKey,
+    repo: task.repo,
+    status: task.status,
+    ...(dependent
+      ? {
+          dependsOn: task.dependsOn,
+          dependencyMode: task.dependencyMode ?? "merged",
+          ...(task.status === "pending" && task.dependencyState
+            ? { dependencyState: task.dependencyState, dependencyReason: task.dependencyReason }
+            : {}),
+        }
+      : {}),
+  };
 }
 
 /** Best-effort read of the worker's harness-chain pause; never throws. */
@@ -619,10 +558,21 @@ function warnHarnessPause(
  * otherwise a human success/failure line. Returns the process exit code.
  */
 function emitSettled(
-  task: Pick<InjectedTask, "id" | "taskKey" | "repo" | "status" | "message">,
+  task: Pick<InjectedTask, "id" | "taskKey" | "repo" | "status" | "message"> &
+    Partial<Pick<InjectedTask, "cancelledBy" | "cancelReason" | "finishedAt">>,
   deduplicated: boolean,
   ctx: TaskContext,
 ): number {
+  if (task.status === "cancelled") {
+    const detail = describeCancellation(task);
+    const message = `${task.taskKey} was cancelled${detail ? ` ${detail}` : ""} before it ran`;
+    if (ctx.json) {
+      ctx.log(JSON.stringify({ ...serialize(task), deduplicated, message }));
+    } else {
+      ctx.error(`⛔ ${message}`);
+    }
+    return WAIT_CANCELLED_EXIT_CODE;
+  }
   if (ctx.json) {
     ctx.log(
       JSON.stringify({
@@ -655,7 +605,7 @@ async function reportTask(task: InjectedTask, ctx: TaskContext): Promise<number>
     if (ctx.json) ctx.log(JSON.stringify({ ...serialize(task), deduplicated: true, ...paused }));
     return 0;
   }
-  if (task.status === "done" || task.status === "failed") {
+  if (task.status === "done" || task.status === "failed" || task.status === "cancelled") {
     return emitSettled(task, true, ctx);
   }
   return await waitForTask(
@@ -693,6 +643,15 @@ async function resumeTask(
       return 0;
     }
     return await waitForTask(task.id, { ...ctx, ...paused, deduplicated: true, taskKey }, task);
+  }
+  // A cancelled row was withdrawn on purpose; restarting it is not supported.
+  if (task.status === "cancelled") {
+    const detail = describeCancellation(task);
+    ctx.error(
+      `❌ ${taskKey} was cancelled${detail ? ` ${detail}` : ""}; a cancelled task cannot be resumed.`,
+    );
+    ctx.error("   Enqueue it again with `devintern worker add --title ...`.");
+    return 1;
   }
 
   // A hard-killed worker's detached child may still be running this attempt in
@@ -811,7 +770,7 @@ async function waitForTask(
     if (!task) {
       return reportPrunedTask(id, ctx, initialTask.repo);
     }
-    if (task.status === "done" || task.status === "failed") {
+    if (task.status === "done" || task.status === "failed" || task.status === "cancelled") {
       return emitSettled(task, ctx.deduplicated, ctx);
     }
     if (Date.now() >= deadline) {

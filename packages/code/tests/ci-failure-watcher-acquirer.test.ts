@@ -282,7 +282,7 @@ describe("CiFailureWatcherAcquirer", () => {
       expect(warns[0]).toContain("403");
       expect(warns[0]).toContain("Actions: Read");
       expect(warns[0]).toContain("Commit statuses: Read");
-      expect(warns[0]).toContain("docs/code/worker.md");
+      expect(warns[0]).toContain("docs/code/pr-follow-up.md#ci-failures-on-the-agents-prs");
 
       now += 60_000;
       await acquirer.tick();
@@ -679,6 +679,55 @@ describe("CiFailureWatcherAcquirer", () => {
     await acquirer.tick();
     expect(fixed).toEqual([]);
     expect(workerState.listOpenAgentPrs()).toHaveLength(0);
+  });
+
+  test("a GitHub PR merged (state closed + merged) is unwatched and recorded as merged", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const mergedAt = "2026-11-16T08:30:00Z";
+    const base = makeGithub({ prState: "closed", workflowRuns: [] });
+    const acquirer = new CiFailureWatcherAcquirer({
+      intervalSeconds: 60,
+      workerState,
+      queue,
+      provider: createGitHubCiProvider({
+        ...base,
+        fetchPr: async () => ({
+          data: { state: "closed", merged: true, merged_at: mergedAt, head: { sha: sha1 } },
+          etag: 'W/"merged"',
+          notModified: false,
+        }),
+      }),
+      fixPr: async () => true,
+    });
+
+    await acquirer.tick();
+    expect(workerState.listOpenAgentPrs()).toHaveLength(0);
+    const merged = workerState.listMergedAgentChangeRequests(10);
+    expect(merged.map((pr) => pr.prNumber)).toEqual([42]);
+    expect(merged[0]?.mergedAt).toBe(Date.parse(mergedAt));
+  });
+
+  test("a GitHub PR closed without merging is not recorded as merged", async () => {
+    workerState.recordAgentPr({ repo: "acme/widgets", prNumber: 42 });
+    const base = makeGithub({ prState: "closed", workflowRuns: [] });
+    const acquirer = new CiFailureWatcherAcquirer({
+      intervalSeconds: 60,
+      workerState,
+      queue,
+      provider: createGitHubCiProvider({
+        ...base,
+        fetchPr: async () => ({
+          data: { state: "closed", merged: false, merged_at: null, head: { sha: sha1 } },
+          etag: 'W/"closed"',
+          notModified: false,
+        }),
+      }),
+      fixPr: async () => true,
+    });
+
+    await acquirer.tick();
+    expect(workerState.listOpenAgentPrs()).toHaveLength(0);
+    expect(workerState.listMergedAgentChangeRequests(10)).toEqual([]);
   });
 
   test("closing a PR drops exactly its per-PR poll cursors", async () => {

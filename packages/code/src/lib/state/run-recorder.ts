@@ -2,7 +2,7 @@
  * Run Records
  *
  * Structured, queryable record of how each ticket (or PR mention) was
- * handled, persisted in the shared `.devintern-code/queue.db`. One `runs`
+ * handled, persisted in the shared workspace `queue.db`. One `runs`
  * row per attempt; one `run_stages` row per pipeline stage. Captured from
  * day one because run history cannot be backfilled — today's artifacts are
  * loose files under the output directory.
@@ -12,6 +12,7 @@
  * recording must never fail or slow a run.
  */
 
+import { redactText } from "@devintern/utils";
 import { Database } from "bun:sqlite";
 import { computeRunActivity, hostTimeZone } from "./run-activity";
 import type { RunActivity } from "./run-activity";
@@ -100,6 +101,14 @@ export interface RunRecord extends RunMeta {
    * evidence that no duplicate crash comment is needed.
    */
   cleanStop?: boolean;
+  /**
+   * Why the run's requested PR/MR creation failed, when it did. Positive
+   * evidence that a `succeeded` run left a branch the PR step meant to open a
+   * PR from; a run that never requested a PR leaves this unset. Set for any
+   * failure, permanent or retryable: a `succeeded` run with this set did not
+   * deliver its work to the default branch, even though it has no PR.
+   */
+  prFailure?: string;
   /** Explicit current/last step; never inferred from completed stage records. */
   step?: string;
   stepStartedAt?: number;
@@ -132,8 +141,19 @@ export interface RunStatsWeek {
   count: number;
 }
 
+/** Terminal-status counts for one run origin. */
+export type RunStatsOutcomeCounts = Record<TerminalRunStatus, number>;
+
+/**
+ * Run origin left out of the headline rates and the per-harness table. An
+ * `auto_merge` run records the merge gate's verdict (escalated = PR left open
+ * for a human), not agent quality; see `byOriginStatus.auto_merge`.
+ */
+export const STATS_EXCLUDED_ORIGIN: RunOrigin = "auto_merge";
+
 export interface RunStatsHarness {
   harness: string;
+  /** Runs of every origin except `auto_merge`. */
   runs: number;
   succeeded: number;
   failed: number;
@@ -144,21 +164,37 @@ export interface RunStatsHarness {
 
 export interface RunStats {
   totals: { runs: number; byStatus: Record<RunStatus, number> };
-  /** Fraction of terminal runs that succeeded; null when no terminal runs. */
+  /**
+   * Fraction of terminal runs that succeeded, counting every origin except
+   * `auto_merge` (gate verdicts, reported in `byOriginStatus.auto_merge`);
+   * null when there are no such terminal runs.
+   */
   successRate: number | null;
-  /** Fraction of terminal runs that escalated; null when no terminal runs. */
+  /**
+   * Fraction of terminal runs that escalated, counting every origin except
+   * `auto_merge`; null when there are no such terminal runs.
+   */
   escalationRate: number | null;
+  /** Counts behind `successRate` and `escalationRate` (terminal, non-`auto_merge` runs). */
+  rateBasis: { terminal: number; succeeded: number; escalated: number };
   runsPerWeek: RunStatsWeek[];
-  /** Median duration of succeeded runs with a PR; null when none. */
+  /** Median duration of succeeded non-`auto_merge` runs with a PR; null when none. */
   medianDurationMs: number | null;
   byHarness: RunStatsHarness[];
   byOrigin: Record<RunOrigin, number>;
+  /** Terminal-status counts per origin (all origins, including `auto_merge`). */
+  byOriginStatus: Record<RunOrigin, RunStatsOutcomeCounts>;
   /** When runs happen: local weekday × hour buckets (starts and busy time) per origin. */
   activity: RunActivity<RunOrigin>;
 }
 
 /** Statuses that no longer change (excluded: in_progress and deferred-for-retry). */
-const TERMINAL_STATUSES: RunStatus[] = ["succeeded", "failed", "escalated", "abandoned"];
+const TERMINAL_STATUSES = ["succeeded", "failed", "escalated", "abandoned"] as const;
+type TerminalRunStatus = (typeof TERMINAL_STATUSES)[number];
+
+function isTerminalStatus(status: RunStatus): status is TerminalRunStatus {
+  return (TERMINAL_STATUSES as readonly RunStatus[]).includes(status);
+}
 
 /** ISO date (UTC) of the Monday starting the week that contains `epochMs`. */
 function weekStartIso(epochMs: number): string {
@@ -233,7 +269,8 @@ export class RunStore {
         ticket_url TEXT,
         task_description TEXT,
         queue_claim TEXT,
-        clean_stop INTEGER NOT NULL DEFAULT 0
+        clean_stop INTEGER NOT NULL DEFAULT 0,
+        pr_failure TEXT
       )
     `);
 
@@ -271,6 +308,9 @@ export class RunStore {
     }
     if (!columns.some((c) => c.name === "queue_claim")) {
       this.db.run("ALTER TABLE runs ADD COLUMN queue_claim TEXT");
+    }
+    if (!columns.some((c) => c.name === "pr_failure")) {
+      this.db.run("ALTER TABLE runs ADD COLUMN pr_failure TEXT");
     }
     // Not unique: one queue claim can produce several runs when the worker changes harnesses.
     this.db.run("CREATE INDEX IF NOT EXISTS idx_runs_queue_claim ON runs(queue_claim)");
@@ -443,6 +483,20 @@ export class RunStore {
   }
 
   /**
+   * Record that the run's PR/MR creation was attempted and failed (e.g. the
+   * branch was pushed but PR creation failed).
+   *
+   * @param runId - Run id
+   * @param message - Failure message (redacted before persisting)
+   */
+  setRunPrFailure(runId: number, message: string): void {
+    this.db.run(`UPDATE runs SET pr_failure = ? WHERE id = ?`, [
+      redactText(message).slice(0, 2_000),
+      runId,
+    ]);
+  }
+
+  /**
    * Attach the working branch to a run.
    *
    * The branch is recorded once the pipeline has created (or resumed) it,
@@ -570,6 +624,40 @@ export class RunStore {
       );
       this.replaceOutcomeStage(runId, status, reason);
     })();
+  }
+
+  /**
+   * Settle a task's latest run as `abandoned` when it is still `deferred`.
+   *
+   * A deferred run promises an automatic retry. When the operator cancels the
+   * task before that retry, nothing else ever settles the run, so it would keep
+   * showing as "waiting to retry". The read and the conditional update share
+   * one immediate transaction, so a run that moved on (or a newer run) is left
+   * alone, and repeated calls are no-ops.
+   *
+   * @param taskKey - Task key whose latest run to settle
+   * @param reason - Outcome reason recorded on the run
+   * @returns The settled run id, or `null` when the latest run is not deferred
+   */
+  abandonDeferredRun(taskKey: string, reason: string): number | null {
+    return this.db
+      .transaction((): number | null => {
+        const latest = this.db
+          .query(
+            `SELECT id, status FROM runs WHERE task_key = ?
+             ORDER BY started_at DESC, id DESC LIMIT 1`,
+          )
+          .get(taskKey) as { id: number; status: string } | null;
+        if (!latest || latest.status !== "deferred") return null;
+        this.db.run(
+          `UPDATE runs SET status = 'abandoned', outcome_reason = ?, finished_at = ?, step_active = 0
+           WHERE id = ? AND status = 'deferred'`,
+          [reason, Date.now(), latest.id],
+        );
+        this.replaceOutcomeStage(latest.id, "abandoned", reason);
+        return latest.id;
+      })
+      .immediate();
   }
 
   /**
@@ -784,6 +872,13 @@ export class RunStore {
       manual: 0,
       local: 0,
     };
+    const byOriginStatus = Object.fromEntries(
+      Object.keys(byOrigin).map((origin) => [
+        origin,
+        { succeeded: 0, failed: 0, escalated: 0, abandoned: 0 },
+      ]),
+    ) as Record<RunOrigin, RunStatsOutcomeCounts>;
+    const rateBasis = { terminal: 0, succeeded: 0, escalated: 0 };
     const weekCounts = new Map<string, number>();
     const harnesses = new Map<
       string,
@@ -798,6 +893,25 @@ export class RunStore {
       const week = weekStartIso(row.started_at);
       weekCounts.set(week, (weekCounts.get(week) ?? 0) + 1);
 
+      const counted = row.origin !== STATS_EXCLUDED_ORIGIN;
+      if (isTerminalStatus(row.status)) {
+        byOriginStatus[row.origin] ??= { succeeded: 0, failed: 0, escalated: 0, abandoned: 0 };
+        byOriginStatus[row.origin][row.status] += 1;
+        if (counted) {
+          rateBasis.terminal += 1;
+          if (row.status === "succeeded") rateBasis.succeeded += 1;
+          if (row.status === "escalated") rateBasis.escalated += 1;
+        }
+      }
+
+      // Median duration and per-harness rows describe agent work, so they skip
+      // auto-merge gate verdicts (which always carry the PR they checked).
+      if (!counted) continue;
+
+      if (row.status === "succeeded" && row.finished_at !== null && row.pr_url) {
+        durations.push(row.finished_at - row.started_at);
+      }
+
       const harnessKey = row.harness ?? "unknown";
       let harness = harnesses.get(harnessKey);
       if (!harness) {
@@ -808,20 +922,17 @@ export class RunStore {
       harness.byStatus.set(row.status, (harness.byStatus.get(row.status) ?? 0) + 1);
 
       if (row.status === "succeeded" && row.finished_at !== null) {
-        const duration = row.finished_at - row.started_at;
-        harness.durations.push(duration);
-        if (row.pr_url) {
-          durations.push(duration);
-        }
+        harness.durations.push(row.finished_at - row.started_at);
       }
     }
 
-    const terminal = TERMINAL_STATUSES.reduce((sum, status) => sum + byStatus[status], 0);
+    const { terminal } = rateBasis;
 
     return {
       totals: { runs: rows.length, byStatus },
-      successRate: terminal > 0 ? byStatus.succeeded / terminal : null,
-      escalationRate: terminal > 0 ? byStatus.escalated / terminal : null,
+      successRate: terminal > 0 ? rateBasis.succeeded / terminal : null,
+      escalationRate: terminal > 0 ? rateBasis.escalated / terminal : null,
+      rateBasis,
       runsPerWeek: [...weekCounts.entries()]
         .sort(([a], [b]) => a.localeCompare(b))
         .map(([weekStart, count]) => ({ weekStart, count })),
@@ -837,6 +948,7 @@ export class RunStore {
           medianDurationMs: median(data.durations),
         })),
       byOrigin,
+      byOriginStatus,
       activity: computeRunActivity(rows, timeZone, since, now),
     };
   }
@@ -888,6 +1000,7 @@ export class RunStore {
       stepStartedAt: typeof row.step_started_at === "number" ? row.step_started_at : undefined,
       stepActive: row.status === "in_progress" && row.step_active === 1,
       cleanStop: (row.clean_stop as number | null) === 1 ? true : undefined,
+      prFailure: typeof row.pr_failure === "string" ? row.pr_failure : undefined,
     };
   }
 
@@ -1081,6 +1194,24 @@ export function recordRunPr(pr: { repo?: string; prNumber?: number; url?: string
     currentStore.setRunPr(currentRunId, pr);
   } catch (error) {
     warnOnce("pr", error);
+  }
+}
+
+/**
+ * Record on the current run that PR creation failed after the push (no-op
+ * when no run is active). The dependency gate reads it so a dependent task
+ * does not start from a default branch that lacks this run's work.
+ *
+ * @param message - Failure message
+ */
+export function recordRunPrFailure(message: string): void {
+  if (currentStore === null || currentRunId === null) {
+    return;
+  }
+  try {
+    currentStore.setRunPrFailure(currentRunId, message);
+  } catch (error) {
+    warnOnce("pr-failure", error);
   }
 }
 

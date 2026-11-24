@@ -2,7 +2,7 @@ import { describe, expect, setDefaultTimeout, test } from "bun:test";
 import { spawnSync } from "child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
-import { join } from "path";
+import { basename, join } from "path";
 
 // Fresh bun subprocesses for each case; under full-suite load they routinely
 // exceed bun's 5s default.
@@ -73,6 +73,11 @@ async function runCLI(
     const env = options.rawEnv
       ? { ...process.env, ...options.env }
       : cliTrackerTestEnv(options.env);
+    // Concurrent runs reuse ticket keys (TEST-123); a workspace per run keeps
+    // their per-ticket locks apart, as the per-run cwd does for checkout locks.
+    if (!options.env?.DEVINTERN_WORKSPACE_DIR) {
+      env.DEVINTERN_WORKSPACE_DIR = join(testDir, ".workspace");
+    }
     const signal = AbortSignal.timeout(CLI_SPAWN_TIMEOUT_MS);
     const proc = Bun.spawn({
       cmd: ["bun", CLI_PATH, ...args, ...extraArgs],
@@ -592,23 +597,20 @@ describe.concurrent("CLI Init Command", () => {
   test("init should work without other arguments", async () => {
     const result = await runCLI(["init"]);
     // Check for either success message or "already exists" message
-    const hasInitOutput =
-      result.stdout.includes("Created configuration folder") ||
-      result.stdout.includes("Configuration folder already exists");
-    expect(hasInitOutput).toBe(true);
+    expect(result.stdout).toContain("Registered");
     expect(result.exitCode).toBe(0);
   });
 
-  test("init should add review worktree and other entries to .gitignore", async () => {
+  test("init writes nothing into the checkout", async () => {
     // Create unique temp directory for this test
     const testDir = join(
       tmpdir(),
       `cli-init-test-${Date.now()}-${Math.random().toString(36).substring(7)}`,
     );
+    const workspaceDir = join(testDir, "..", `${basename(testDir)}-home`);
     mkdirSync(testDir, { recursive: true });
 
     try {
-      // Run init command in the test directory
       const result = spawnSync("bun", [CLI_PATH, "init"], {
         encoding: "utf8",
         timeout: CLI_SPAWN_TIMEOUT_MS,
@@ -616,38 +618,21 @@ describe.concurrent("CLI Init Command", () => {
         env: {
           ...process.env,
           DEVINTERN_NO_UPDATE: "1",
+          DEVINTERN_WORKSPACE_DIR: workspaceDir,
         },
       });
 
       expect(result.status).toBe(0);
-
-      // Check that .gitignore was created or updated
-      const gitignorePath = join(testDir, ".gitignore");
-      expect(existsSync(gitignorePath)).toBe(true);
-
-      // Read .gitignore and verify all entries are present
-      const gitignoreContent = readFileSync(gitignorePath, "utf8");
-
-      // Everything under .devintern-code/ is ignored (credentials, lock file,
-      // and the queue.db state database that `git clean` must not delete)…
-      expect(gitignoreContent).toContain(".devintern-code/*");
-      // …except the two files worth committing, whitelisted after the wildcard
-      expect(gitignoreContent.indexOf("!.devintern-code/settings.json")).toBeGreaterThan(
-        gitignoreContent.indexOf(".devintern-code/*"),
-      );
-      expect(gitignoreContent).toContain("!.devintern-code/.env.example");
-
-      // Should have the comment header
-      expect(gitignoreContent).toContain(
-        "@devintern/code - Keep credentials and local state out of git",
-      );
+      // No config folder or .gitignore block in the project...
+      expect(existsSync(join(testDir, ".devintern-code"))).toBe(false);
+      expect(existsSync(join(testDir, ".gitignore"))).toBe(false);
+      // ...the checkout is registered in the workspace instead.
+      const toml = readFileSync(join(workspaceDir, "workspace.toml"), "utf8");
+      expect(toml).toContain("manual_only = true");
+      expect(toml).toContain(`path = ${JSON.stringify(testDir)}`);
     } finally {
-      // Clean up temp directory
-      try {
-        rmSync(testDir, { recursive: true, force: true });
-      } catch {
-        // Ignore cleanup errors
-      }
+      rmSync(testDir, { recursive: true, force: true });
+      rmSync(workspaceDir, { recursive: true, force: true });
     }
   });
 });

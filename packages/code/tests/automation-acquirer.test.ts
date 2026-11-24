@@ -242,7 +242,9 @@ describe("AutomationAcquirer", () => {
       context,
     );
 
-    expect(filePath).toContain(join(".devintern-code", "automations", "dependency-health"));
+    expect(filePath).toContain(
+      join(process.env.DEVINTERN_WORKSPACE_DIR!, "automations", "dependency-health"),
+    );
     expect(filePath.endsWith(".md")).toBe(true);
     const content = readFileSync(filePath, "utf8");
     expect(content).toContain("# dependency-health");
@@ -250,34 +252,9 @@ describe("AutomationAcquirer", () => {
     rmSync(baseDir, { recursive: true, force: true });
   });
 
-  test("writes task files into the project config dir when launched from a subfolder", () => {
-    const project = join(tmpdir(), `acquirer-sub-${Date.now()}-${Math.random()}`);
-    const subfolder = join(project, "packages", "app");
-    mkdirSync(join(project, ".devintern-code"), { recursive: true });
-    mkdirSync(subfolder, { recursive: true });
-
-    const filePath = writeAutomationTaskFile(
-      {
-        id: "sub-folder",
-        enabled: true,
-        prompt: "work",
-        interval: "1d",
-        intervalMs: 86_400_000,
-      },
-      { cwd: subfolder, env: {}, release() {} },
-    );
-
-    expect(filePath.startsWith(join(project, ".devintern-code", "automations"))).toBe(true);
-    rmSync(project, { recursive: true, force: true });
-  });
-
-  test("falls back to the run cwd's config dir when no parent config exists", () => {
+  test("defaults to the workspace automations dir, never the run cwd", () => {
     const worktree = join(tmpdir(), `acquirer-fallback-${Date.now()}-${Math.random()}`);
-    mkdirSync(worktree, { recursive: true });
-    // A real worktree carries a .git entry; without it the config-dir lookup
-    // would walk past tmpdir and bind to any ambient ancestor config
-    // (e.g. /tmp/.devintern-code) instead of exercising the fallback.
-    mkdirSync(join(worktree, ".git"), { recursive: true });
+    mkdirSync(join(worktree, ".devintern-code"), { recursive: true });
 
     const filePath = writeAutomationTaskFile(
       {
@@ -290,7 +267,10 @@ describe("AutomationAcquirer", () => {
       { cwd: worktree, env: {}, release() {} },
     );
 
-    expect(filePath.startsWith(join(worktree, ".devintern-code", "automations"))).toBe(true);
+    expect(filePath.startsWith(join(process.env.DEVINTERN_WORKSPACE_DIR!, "automations"))).toBe(
+      true,
+    );
+    expect(filePath.startsWith(worktree)).toBe(false);
     rmSync(worktree, { recursive: true, force: true });
   });
 
@@ -376,6 +356,17 @@ describe("AutomationAcquirer", () => {
 
     expect(await run.completion).toBe(true);
     expect(run.outcome?.()).toBeUndefined();
+  });
+
+  test("logs a clean exit recorded as failed as a failure, not as completed", () => {
+    expect(
+      automationCompletionMessage("automation:release", true, {
+        status: "failed",
+        reason: "pushed but PR creation failed: GitHub PR creation failed: Not Found",
+      }),
+    ).toBe(
+      "❌ [automation:release] failed: pushed but PR creation failed: GitHub PR creation failed: Not Found",
+    );
   });
 
   test("logs an escalated clean exit with the escalation wording, not as completed", () => {

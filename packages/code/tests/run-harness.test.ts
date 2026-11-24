@@ -14,6 +14,10 @@
 import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { EventEmitter } from "node:events";
 import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import {
+  WORKSPACE_PIPELINE_DEFAULT_ENV,
+  WORKSPACE_PIPELINE_REPO_ENV,
+} from "../src/lib/workspace/env";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -97,6 +101,7 @@ let prResult: {
 let prCreateOptions: { artifactComment?: string } | undefined;
 let postImplementationCommentMock: ReturnType<typeof mock>;
 let recordedStages: Array<{ stage: string; data: unknown }>;
+let recordedPrFailures: string[] = [];
 let autoReviewError: Error | undefined;
 
 const HEAD_BEFORE = "1111111111111111111111111111111111111111";
@@ -192,8 +197,31 @@ mock.module("../src/lib/code-host", () => ({
 }));
 
 mock.module("../src/lib/config/output-dir", () => ({ resolveOutputDir: () => outDir }));
+// Pipelines come only from the workspace. A test's `pipelineConfig` stands in
+// for a selected workspace pipeline; tests that pin a real workspace file
+// through the env keep exercising the real selection.
+const realPipelineSelection = { ...(await import("../src/lib/task/pipeline-selection")) };
+mock.module("../src/lib/task/pipeline-selection", () => ({
+  ...realPipelineSelection,
+  selectPipelineConfig: (input: { cwd: string; env?: NodeJS.ProcessEnv }) => {
+    const env = input.env ?? process.env;
+    if (
+      env[WORKSPACE_PIPELINE_REPO_ENV] ||
+      env[WORKSPACE_PIPELINE_DEFAULT_ENV] ||
+      !pipelineConfig
+    ) {
+      return realPipelineSelection.selectPipelineConfig(input);
+    }
+    return {
+      config: pipelineConfig,
+      scope: "workspace-repo" as const,
+      sourcePath: join(input.cwd, "pipeline.json"),
+      baseDir: input.cwd,
+    };
+  },
+}));
 mock.module("../src/lib/config/project-settings", () => ({
-  loadProjectSettings: () => ({ pipeline: pipelineConfig }),
+  loadProjectSettings: () => ({}),
   getTodoStatusForProject: () => "To Do",
   getPrStatusForProject: () => "In Review",
   resolveProjectKey: () => "PROJ",
@@ -219,6 +247,9 @@ mock.module("../src/lib/review/auto-review-loop", () => ({
 mock.module("../src/lib/state/retry-state", () => ({ recordIncompleteAttempt: () => {} }));
 mock.module("../src/lib/state/run-recorder", () => ({
   recordRunPr: () => {},
+  recordRunPrFailure: (message: string) => {
+    recordedPrFailures.push(message);
+  },
   recordRunStage: (stage: string, data: unknown) => {
     recordedStages.push({ stage, data });
   },
@@ -310,6 +341,7 @@ beforeEach(() => {
   agentPrompts = [];
   autoReviewOptions = [];
   recordedStages = [];
+  recordedPrFailures = [];
   autoReviewError = undefined;
   pipelineConfig = undefined;
   prResult = { success: true, url: "https://github.com/o/r/pull/1", warnings: [] };
@@ -655,6 +687,8 @@ describe("runAgentHarness git delivery", () => {
 
     expect(postImplementationCommentMock).toHaveBeenCalledTimes(1);
     expect(tracker.transitionStatus).not.toHaveBeenCalled();
+    // No PR requested → no PR failure recorded, so the run is not re-queueable.
+    expect(recordedPrFailures).toEqual([]);
   });
 
   test("creates a PR and transitions the task to the PR status", async () => {
@@ -664,6 +698,7 @@ describe("runAgentHarness git delivery", () => {
 
     expect(postImplementationCommentMock).toHaveBeenCalledTimes(1);
     expect(tracker.transitionStatus).toHaveBeenCalledWith("TASK-1", "In Review");
+    expect(recordedPrFailures).toEqual([]);
   });
 
   test("flags a retryable PR failure and tells the tracker the ticket is stuck", async () => {
@@ -692,6 +727,8 @@ describe("runAgentHarness git delivery", () => {
     }
 
     expect(runContext.activeTaskContext?.prCreationFailure).toBe("GitHub API 502 Bad Gateway");
+    // The run itself records the failed attempt (dashboard re-queue evidence).
+    expect(recordedPrFailures).toEqual(["GitHub API 502 Bad Gateway"]);
     expect(tracker.postComment).toHaveBeenCalledTimes(1);
     const [key, content] = (tracker.postComment as ReturnType<typeof mock>).mock.calls[0] as [
       string,
@@ -791,6 +828,7 @@ describe("runAgentHarness git delivery", () => {
     await runAgentHarness({ ...baseInput(), createPr: true });
 
     expect(runContext.activeTaskContext?.prCreationFailure).toBeUndefined();
+    expect(runContext.activeTaskContext?.prDeliveryFailure).toBeUndefined();
     expect(tracker.postComment).not.toHaveBeenCalled();
   });
 
@@ -812,6 +850,14 @@ describe("runAgentHarness git delivery", () => {
     await runAgentHarness({ ...baseInput(), createPr: true });
 
     expect(runContext.activeTaskContext?.prCreationFailure).toBeUndefined();
+    expect(runContext.activeTaskContext?.prDeliveryFailure).toEqual({
+      message: "GitHub client not configured. Please set GITHUB_TOKEN",
+      permanent: true,
+    });
+    // Still recorded on the run (a failed attempt, even though the worker will
+    // not re-run it), so a dependent task's gate does not read this
+    // pushed-but-PR-less success as "nothing to deliver".
+    expect(recordedPrFailures).toEqual(["GitHub client not configured. Please set GITHUB_TOKEN"]);
     expect(tracker.postComment).toHaveBeenCalledTimes(1);
     const [, content] = (tracker.postComment as ReturnType<typeof mock>).mock.calls[0] as [
       string,
@@ -833,6 +879,11 @@ describe("runAgentHarness git delivery", () => {
     await runAgentHarness({ ...baseInput(), createPr: true, skipComments: true });
 
     expect(runContext.activeTaskContext?.prCreationFailure).toBe("rate limited");
+    expect(runContext.activeTaskContext?.prDeliveryFailure).toEqual({
+      message: "rate limited",
+      permanent: false,
+    });
+    expect(recordedPrFailures).toEqual(["rate limited"]);
     expect(tracker.postComment).not.toHaveBeenCalled();
   });
 
@@ -1056,7 +1107,7 @@ describe("runAgentHarness git delivery", () => {
     expect(commitCalls).toBe(0);
   });
 
-  test("workspace per-repository pipeline overrides repository settings", async () => {
+  test("selects the workspace per-repository pipeline file", async () => {
     scenario.stdout = "done";
     pipelineConfig = { steps: [{ use: "implement" }, { use: "verify" }] };
     const file = join(outDir, "backend-pipeline.json");

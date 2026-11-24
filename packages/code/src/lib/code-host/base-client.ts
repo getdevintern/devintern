@@ -1,6 +1,6 @@
 import type { AtlassianDocument, JiraIssue } from "../../types/jira";
 import type { Task } from "../../types/task-tracker";
-import { buildPrBody } from "./pr-body";
+import { buildPrBody, stackedOnFromDescription } from "./pr-body";
 import type { PRInfo, PRResult } from "./shared";
 
 export abstract class PRClient {
@@ -69,6 +69,11 @@ export abstract class PRClient {
     const key = (task as Task).key || (task as JiraIssue).key;
     const summary = (task as Task).summary || (task as JiraIssue).fields?.summary || "Unknown";
 
-    return buildPrBody({ taskKey: key, taskSummary: summary, implementationSummary });
+    return buildPrBody({
+      taskKey: key,
+      taskSummary: summary,
+      implementationSummary,
+      stackedOn: stackedOnFromDescription((task as Task).description),
+    });
   }
 }

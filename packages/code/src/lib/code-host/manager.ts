@@ -4,7 +4,7 @@ import { GitHubAppAuth } from "./github/app-auth";
 import { BitbucketPRClient } from "./bitbucket/pr-client";
 import { GitHubPRClient } from "./github/pr-client";
 import { GitLabMRClient } from "./gitlab/mr-client";
-import { buildPrBody } from "./pr-body";
+import { buildPrBody, stackedOnFromDescription } from "./pr-body";
 import { parseGitLabHostAliases, parseGitRemoteUrl } from "./provider";
 import type { ChangeRequestIdentity, CodeHostRepository } from "./provider";
 import { isTransientPrFailure, parsePrLabels, resolveGitLabCodeHostConfig } from "./shared";
@@ -135,7 +135,7 @@ export class PRManager {
     };
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       result = await this.dispatchCreatePullRequest(prInfo, repoInfo);
-      if (result.success && options.artifactComment && repoInfo.platform !== "github") {
+      if (result.success && options.artifactComment && repoInfo.platform === "bitbucket") {
         result.artifactPublication = {
           status: "skipped",
           message: `Artifact comments are not supported for ${repoInfo.platform} yet`,
@@ -174,6 +174,31 @@ export class PRManager {
     const client = await this.githubClientFor(repoInfo.repository);
     if (!client) return undefined;
     return client.findOpenChangeRequest(repoInfo.repository, sourceBranch);
+  }
+
+  /**
+   * State of the change request(s) for a branch.
+   *
+   * @param sourceBranch - Head/feature branch name
+   * @returns `"open"`, `"closed"` (closed or merged), `"none"` (the branch has
+   *   no PR), or `undefined` when the state cannot be checked: unsupported
+   *   platform, no credentials, or a failed lookup
+   */
+  async getChangeRequestState(
+    sourceBranch: string,
+  ): Promise<"open" | "closed" | "none" | undefined> {
+    const repoInfo = await this.detectRepository();
+    if (repoInfo.platform !== "github") return undefined;
+    const client = await this.githubClientFor(repoInfo.repository);
+    if (!client) return undefined;
+    try {
+      return await client.getChangeRequestState(repoInfo.repository, sourceBranch);
+    } catch (error) {
+      console.warn(
+        `⚠️  Could not check the PR state of '${sourceBranch}': ${(error as Error).message}`,
+      );
+      return undefined;
+    }
   }
 
   /**
@@ -324,6 +349,11 @@ export class PRManager {
     const key = (task as Task).key || (task as JiraIssue).key;
     const summary = (task as Task).summary || (task as JiraIssue).fields?.summary || "Unknown";
 
-    return buildPrBody({ taskKey: key, taskSummary: summary, implementationSummary });
+    return buildPrBody({
+      taskKey: key,
+      taskSummary: summary,
+      implementationSummary,
+      stackedOn: stackedOnFromDescription((task as Task).description),
+    });
   }
 }

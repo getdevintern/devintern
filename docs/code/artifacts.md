@@ -35,7 +35,7 @@ Open a run in the [dashboard](./dashboard.md). Run details list the artifacts re
 
 ## Choose what appears on the PR
 
-Publication is off by default. Add an `artifacts` block next to `steps` and `plugins` in the pipeline definition (inside `pipeline` in `.devintern-code/settings.json`):
+Publication is off by default. Add an `artifacts` block next to `steps` and `plugins` in your workspace `pipeline_file`:
 
 ```json
 {
@@ -59,7 +59,9 @@ Publication is off by default. Add an `artifacts` block next to `steps` and `plu
 | `embed`      | An image from its uploaded URL.                             | Yes               |
 | `link`       | A link to the uploaded file.                                | Yes               |
 
-`finalize` posts the latest snapshot of each selected key to one managed **Artifacts & verification** comment on the GitHub PR and updates it on later runs. It never edits human comments or the PR description. Long comments drop whole sections rather than cutting them mid-way, and missing artifacts or upload URLs are noted in the comment. Publication problems are warnings and do not fail the run. GitLab and Bitbucket comment publication is not supported yet; artifacts are still captured and visible in the dashboard.
+Add `"optional": true` to a selection when its step captures only on some runs, such as screenshots taken only for UI changes. If nothing was captured under that key, its section is left out of the comment instead of reading "Not captured."
+
+`finalize` posts the latest snapshot of each selected key to one managed **Artifacts & verification** comment (a note on GitLab merge requests) and updates it on later runs, including on PRs and MRs that already existed. It only updates a marked comment written by the same account, and never edits human comments or the PR/MR description. Long comments drop whole sections rather than cutting them mid-way, and missing artifacts, missing upload URLs, and upload failures are noted in the comment. Publication problems are warnings and do not fail the run. Bitbucket comment publication is not supported yet; artifacts are still captured and visible in the dashboard.
 
 ### Reference artifacts from Markdown
 
@@ -74,7 +76,61 @@ The dashboard links these to its local copies. On the PR they become uploaded UR
 
 ## Upload files
 
-`embed` and `link` need the file hosted somewhere reviewers can reach. Set `uploader` to the built-in `"files-sdk"` uploader, or to your own module. Only artifacts selected as `embed` or `link` are uploaded, uploaded URLs are reused on later publications, and upload failures never block PR creation.
+`embed` and `link` need the file hosted somewhere reviewers can reach. Set `uploader` to a built-in uploader or to your own module:
+
+| `uploader`  | Hosts files on                                           | Setup                                  |
+| ----------- | -------------------------------------------------------- | -------------------------------------- |
+| `code-host` | GitHub or GitLab, whichever the `origin` remote points to | Existing code-host credentials         |
+| `github`    | GitHub native attachments (github.com only)              | `GITHUB_TOKEN`                         |
+| `gitlab`    | GitLab project uploads                                   | Existing GitLab code-host settings     |
+| `files-sdk` | Your Cloudflare R2 or AWS S3 bucket                      | [Storage settings](#files-sdk-uploader) |
+| a module    | Anything                                                 | [Custom uploader](#custom-uploader)    |
+
+Only artifacts selected as `embed` or `link` are uploaded. Uploaded URLs are reused on later publications to the same destination; changing the repository, instance, or storage target uploads again. Upload failures never block PR creation, and DevIntern never falls back to a different uploader or credential.
+
+### Native GitHub and GitLab uploads
+
+Use the code host itself when you don't want to set up storage:
+
+```json
+{
+  "artifacts": {
+    "publish": {
+      "destination": "pr-comment",
+      "uploader": "code-host",
+      "select": [{ "key": "screenshot", "presentation": "embed" }]
+    }
+  }
+}
+```
+
+The destination is the repository from the checkout's `origin` remote. Uploads use the same credentials DevIntern uses to open PRs and MRs: `GITHUB_TOKEN` for GitHub, and `GITLAB_CODE_HOST_TOKEN` for GitLab, which falls back to `GITLAB_TOKEN` only when `TASK_TRACKER=gitlab` and `GITLAB_BASE_URL` is the same instance (see [GitLab integration](./gitlab-integration.md)). Uploading doesn't create comments, commits, or branches.
+
+**GitHub** uses the attachment endpoint the GitHub CLI uses for file attachments. GitHub doesn't document this endpoint as part of its public REST API, so it may change. If an upload fails, the comment says so and the PR is still created.
+
+| Setting      | Supported                                                                                                       |
+| ------------ | --------------------------------------------------------------------------------------------------------------- |
+| Host         | github.com. GitHub Enterprise Server is not supported.                                                          |
+| `GITHUB_TOKEN` | OAuth (`gho_`), classic (`ghp_`) and fine-grained (`github_pat_`) personal tokens, GitHub App user tokens (`ghu_`) |
+| Not supported | GitHub App installation tokens (`ghs_`), including App-only setups without `GITHUB_TOKEN`. Use `files-sdk` or a custom uploader instead. |
+| Permission   | Write access to the repository                                                                                 |
+| Files        | PNG, GIF, JPEG, SVG, and MP4/MOV/WebM up to 10 MB; text, Markdown, CSV, JSON, logs/patches, PDF, ZIP, and gzip up to 25 MB |
+
+Convert other formats, such as WebP, to PNG before you register them. Attachment URLs follow the repository's visibility: images from private repositories are visible only to people who can read the repository.
+
+**GitLab** uploads files to the project with `POST /projects/:id/uploads`. It works on GitLab.com and on the Self-Managed instance set in `GITLAB_CODE_HOST_URL`, including installations under a path such as `https://git.example.com/gitlab`. It honors `GITLAB_CODE_HOST_CA_FILE` and `GITLAB_CODE_HOST_PROXY`. See [GitLab integration](./gitlab-integration.md#advanced-merge-requests-and-webhooks) for those settings. The size limit is the instance's maximum attachment size (100 MB by default).
+
+Who can open an uploaded file depends on the project:
+
+| Project                                                       | Uploaded files                                       |
+| ------------------------------------------------------------- | ---------------------------------------------------- |
+| Public                                                        | Anyone can open them                                 |
+| Private or internal (the default)                             | Anyone with the link can open them                   |
+| Private or internal with **Require authentication to view media files** | Only signed-in users with project access can open them |
+
+DevIntern never changes project visibility or media settings. The MR comment notes under each uploaded file who can open it, the run log warns when files from a private or internal project are viewable by anyone with the link, and run details in the dashboard show the same. To require sign-in, enable **Settings → General → Visibility, project features, permissions → Require authentication to view media files**.
+
+If native uploads are unavailable, for example because of an unsupported token, read-only access, an unsupported file type, an oversized file, or an API error, the PR comment and the dashboard both show the reason. The run and the PR still succeed, and the local copy stays in the dashboard.
 
 ### Files SDK uploader
 
@@ -113,7 +169,7 @@ DEVINTERN_ARTIFACT_PUBLIC_BASE_URL=https://artifacts.example.com/
 
 Use credentials created for this bucket; for R2 that means R2 S3 API keys, not a Cloudflare API token. Ambient AWS credentials are never used. Create the bucket and make `DEVINTERN_ARTIFACT_PUBLIC_BASE_URL` (for R2, a public custom domain) readable by reviewers yourself; DevIntern does not change bucket visibility or create signed links. Missing or invalid settings fail the run before implementation starts.
 
-Workspace values apply to every repository; a repository's `env_file` or `[repos.env]` can override them. Worker tasks do not read a checkout's `.devintern-code/.env`, but direct CLI runs do. Keep these files out of git.
+Workspace values apply to every repository; a repository's `env_file` or `[repos.env]` can override them. These values live in `~/.devintern`, outside your repositories.
 
 The [PNG explainer example](https://github.com/getdevintern/devintern/tree/main/examples/pipeline-plugins/pr-explainer-image) shows generation, capture, upload, and the PR comment end to end.
 

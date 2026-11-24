@@ -40,7 +40,7 @@ afterEach(() => {
 
 describe("selectPipelineConfig precedence", () => {
   test("falls back to the built-in default with no references", () => {
-    const selection = selectPipelineConfig({ settings: null, cwd: repoDir, env: {} });
+    const selection = selectPipelineConfig({ cwd: repoDir, env: {} });
     expect(selection.scope).toBe("built-in");
     expect(selection.config).toBeUndefined();
     expect(selection.sourcePath).toBeNull();
@@ -52,7 +52,6 @@ describe("selectPipelineConfig precedence", () => {
       steps: [{ use: "implement" }, { use: "commit" }, { use: "finalize" }],
     });
     const selection = selectPipelineConfig({
-      settings: {},
       cwd: repoDir,
       env: { [WORKSPACE_PIPELINE_DEFAULT_ENV]: file },
     });
@@ -66,46 +65,17 @@ describe("selectPipelineConfig precedence", () => {
     ]);
   });
 
-  test("repository settings.json wins over the workspace default", () => {
-    const file = writePipeline(workspaceDir, "default.json", {
-      steps: [{ use: "implement" }, { use: "commit" }, { use: "finalize" }],
-    });
-    const selection = selectPipelineConfig({
-      settings: {
-        pipeline: { steps: [{ use: "implement" }, { use: "commit" }, { use: "finalize" }] },
-      },
-      cwd: repoDir,
-      env: { [WORKSPACE_PIPELINE_DEFAULT_ENV]: file },
-    });
-    expect(selection.scope).toBe("repository");
-    expect(selection.sourcePath).toBe(join(repoDir, ".devintern-code", "settings.json"));
-    expect(selection.baseDir).toBe(repoDir);
-  });
-
-  test("workspace per-repository override wins over repository settings", () => {
+  test("workspace per-repository override wins over the workspace default", () => {
     const file = writePipeline(workspaceDir, "backend.json", {
       steps: [{ use: "implement" }, { use: "commit" }, { use: "finalize" }],
     });
     const selection = selectPipelineConfig({
-      settings: { pipeline: { steps: [{ use: "clarity" }, { use: "implement" }] } },
       cwd: repoDir,
       env: { [WORKSPACE_PIPELINE_REPO_ENV]: file, [WORKSPACE_PIPELINE_DEFAULT_ENV]: "/def.json" },
     });
     expect(selection.scope).toBe("workspace-repo");
     expect(selection.sourcePath).toBe(file);
     expect(selection.baseDir).toBe(workspaceDir);
-  });
-
-  test("does not merge steps across scopes", () => {
-    const file = writePipeline(workspaceDir, "backend.json", {
-      steps: [{ use: "implement" }, { use: "commit" }, { use: "finalize" }],
-    });
-    const selection = selectPipelineConfig({
-      settings: { pipeline: { steps: [{ use: "clarity" }] } },
-      cwd: repoDir,
-      env: { [WORKSPACE_PIPELINE_REPO_ENV]: file },
-    });
-    expect(selection.config?.steps).toHaveLength(3);
   });
 
   test("re-reads the referenced file so edits apply to subsequent runs", () => {
@@ -115,7 +85,7 @@ describe("selectPipelineConfig precedence", () => {
       JSON.stringify({ steps: [{ use: "implement" }, { use: "commit" }, { use: "finalize" }] }),
     );
     const env = { [WORKSPACE_PIPELINE_REPO_ENV]: file };
-    const first = selectPipelineConfig({ settings: null, cwd: repoDir, env });
+    const first = selectPipelineConfig({ cwd: repoDir, env });
     writeFileSync(
       file,
       JSON.stringify({
@@ -127,7 +97,7 @@ describe("selectPipelineConfig precedence", () => {
         ],
       }),
     );
-    const second = selectPipelineConfig({ settings: null, cwd: repoDir, env });
+    const second = selectPipelineConfig({ cwd: repoDir, env });
     expect(first.config?.steps?.map((step) => step.use)).toEqual([
       "implement",
       "commit",
@@ -170,7 +140,6 @@ describe("loadPipelineConfigFile", () => {
   test("a missing selected file fails selection instead of falling back", () => {
     expect(() =>
       selectPipelineConfig({
-        settings: null,
         cwd: repoDir,
         env: { [WORKSPACE_PIPELINE_REPO_ENV]: join(workspaceDir, "missing.json") },
       }),
@@ -205,15 +174,6 @@ describe("resolveWorkspaceRelativePaths", () => {
     expect(config.steps?.[0]?.prompt).toBe("Verify the login flow");
   });
 
-  test("keeps repository-relative resolution for a repository settings config", () => {
-    const selection = selectPipelineConfig({
-      settings: { pipeline: { plugins: ["./local-step.ts"] } },
-      cwd: repoDir,
-      env: {},
-    });
-    expect(selection.config?.plugins).toEqual(["./local-step.ts"]);
-  });
-
   test("passes non-string plugin entries through so validation can report them", () => {
     const config = resolveWorkspaceRelativePaths(
       { plugins: [123 as unknown as string], steps: [] },
@@ -237,7 +197,6 @@ describe("describePipelineSelection", () => {
       steps: [{ use: "implement" }, { use: "commit" }, { use: "finalize" }],
     });
     const selection = selectPipelineConfig({
-      settings: null,
       cwd: repoDir,
       env: { [WORKSPACE_PIPELINE_REPO_ENV]: file },
     });
@@ -247,7 +206,7 @@ describe("describePipelineSelection", () => {
   });
 
   test("labels the built-in default", () => {
-    const selection = selectPipelineConfig({ settings: null, cwd: repoDir, env: {} });
+    const selection = selectPipelineConfig({ cwd: repoDir, env: {} });
     expect(describePipelineSelection(selection, undefined)).toBe(
       "built-in default: implement → commit → auto-review → finalize",
     );
@@ -266,7 +225,6 @@ describe("workspace pipeline plugin resolution", () => {
       steps: [{ use: "implement" }, { use: "commit" }, { use: stepName }, { use: "finalize" }],
     });
     const selection = selectPipelineConfig({
-      settings: null,
       cwd: repoDir,
       env: { [WORKSPACE_PIPELINE_REPO_ENV]: file },
     });
@@ -292,7 +250,6 @@ describe("workspace pipeline plugin resolution", () => {
       steps: [{ use: "implement" }, { use: "commit" }, { use: packageName }, { use: "finalize" }],
     });
     const selection = selectPipelineConfig({
-      settings: null,
       cwd: repoDir,
       env: { [WORKSPACE_PIPELINE_REPO_ENV]: file },
     });
@@ -313,7 +270,6 @@ describe("workspace pipeline plugin resolution", () => {
       steps: [{ use: "implement" }, { use: "commit" }, { use: stepName }, { use: "finalize" }],
     });
     const selection = selectPipelineConfig({
-      settings: null,
       cwd: repoDir,
       env: { [WORKSPACE_PIPELINE_REPO_ENV]: file },
     });
@@ -334,7 +290,6 @@ describe("workspace pipeline plugin resolution", () => {
       steps: [{ use: "implement" }, { use: "commit" }, { use: "finalize" }],
     });
     const selection = selectPipelineConfig({
-      settings: null,
       cwd: repoDir,
       env: { [WORKSPACE_PIPELINE_REPO_ENV]: file },
     });
@@ -356,7 +311,6 @@ describe("workspace pipeline plugin resolution", () => {
       ],
     });
     const selection = selectPipelineConfig({
-      settings: null,
       cwd: repoDir,
       env: { [WORKSPACE_PIPELINE_REPO_ENV]: file },
     });

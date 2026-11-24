@@ -15,25 +15,31 @@ import { randomUUID } from "crypto";
 import { parseEnvInteger } from "../config/env-integer";
 import { createPickupGate } from "../worker/schedule";
 import type { PickupGate, ScheduleSnapshot } from "../worker/schedule";
-import {
-  loadProjectSettingsFrom,
-  recoverOrphanedTaskRuns,
-  resolveStatusName,
-} from "../worker/orphan-recovery";
+import { recoverOrphanedTaskRuns, resolveStatusName } from "../worker/orphan-recovery";
 import { RunStore } from "../state/run-recorder";
 import type { RunRecord } from "../state/run-recorder";
 import { readImplementationReport } from "../state/session-pickup";
 import { RetryStateStore } from "../state/retry-state";
 import { ScheduledRetryStore } from "../state/run-retry";
 import { InjectedTaskStore } from "../state/injected-tasks";
+import type { WorkerState } from "../state/worker-state";
 import { createTaskActionedGate } from "../task/actioned-state";
 import type { TaskTrackerClient } from "../trackers/client";
-import { findRepo, findTeam, harnessPinnedJobs, loadWorkspaceConfig } from "./config";
+import {
+  findRepo,
+  findTeam,
+  harnessPinnedJobs,
+  loadWorkerWorkspaceConfig,
+  requireInjectedTaskTeam,
+} from "./config";
 import {
   resolveWorkspaceAutomationContext,
   resolveWorkspaceEstimationContext,
 } from "./schedule-context";
 import type { RepoConfig, WorkspaceConfig } from "./config";
+import { workspaceHasConfiguredWork, workspaceHasStartupWork } from "./startup-work";
+import { migrateCommittedTrackerSettings } from "./migrate-checkout";
+import { loadWorkspaceTrackerSettings } from "./tracker-settings";
 import { applyWorkspaceProcessEnv, buildErrorMonitorEnv, buildTeamEnv } from "./env";
 import {
   automationsDir,
@@ -47,7 +53,6 @@ import {
 } from "./paths";
 import { appliedConfigRecorder, WorkspaceConfigReloader } from "./config-reload";
 import { createWorkspaceLock, openWorkspaceState } from "./state";
-import type { WorkerState } from "../state/worker-state";
 import { BASE_WORKTREE_NAME, RepoManager } from "./repo-manager";
 import { Utils } from "../utils";
 import { probePushAccess } from "../code-host/github/push-probe";
@@ -64,11 +69,18 @@ import type { TaskSupervisor } from "../worker/supervisor";
 import type { AutomationRunContext } from "../automation/acquirer";
 import { flushAnalytics, trackWorkerStarted } from "../observability/analytics";
 import { startWorkerFailover, getWorkerFailover } from "../worker/failover";
-import { RetryQueueAcquirer } from "./retry-acquirer";
+import { buildRetryQueueAcquirer } from "./retry-queue-builder";
 import { InjectedTaskAcquirer, INJECTED_TASK_SOURCE } from "./injected-acquirer";
+import {
+  buildStackedPrAcquirer,
+  createStackedBaseChecker,
+  remoteHead,
+} from "./stacked-pr-acquirer";
 import { createInjectedStartupRecovery } from "./injected-recovery";
 import { toRoutableTask } from "./router";
 import { createIdleWorkerAutoUpdater } from "./worker-auto-update";
+import { trackerDependencyDeps } from "./tracker-dependency-gate";
+import type { TrackerDependencyGate } from "./tracker-dependency-gate";
 import {
   createFleetTaskExecutor,
   createWorkspaceTaskAcquirer,
@@ -77,7 +89,10 @@ import {
   resolveActionedSource,
 } from "./fleet-executor";
 import type { FleetExecutorDeps, RepoManagerLike } from "./fleet-executor";
-import { buildFleetEventAcquirers } from "./fleet-event-acquirers";
+import {
+  buildFleetEventAcquirers,
+  createDependencyMergeStateResolver,
+} from "./fleet-event-acquirers";
 import { assertTeamPrSyncSandbox } from "./team-pr-sync";
 import type { FleetEventReloadHooks, FleetSourceRuntime } from "./fleet-event-acquirers";
 
@@ -225,16 +240,21 @@ export async function recoverOrphanedWorkspaceRuns(options: {
       );
     }
 
-    // Fleet tasks run in per-repo worktrees, so their status names come from
-    // each repo's checked-in settings; the base worktrees hold a checked-out
-    // copy. Never triggers git work here — only existing directories are read.
+    // Status names come from workspace.toml [trackers]. Repos that still check
+    // in a settings.json are migrated from their base worktrees (no git work:
+    // only existing directories are read).
     const settingsDirs = [
       ...config.repos
         .map((repo) => join(worktreesDir(workspaceDir), repo.name, BASE_WORKTREE_NAME))
         .filter(existsSync),
       workspaceDir,
     ];
-    const settings = loadProjectSettingsFrom(settingsDirs);
+    // One-time migration: copy committed settings.json tracker sections into
+    // workspace.toml [trackers] (new keys only), so they no longer depend on
+    // what each repo checks in.
+    for (const dir of settingsDirs) migrateCommittedTrackerSettings(workspaceDir, dir);
+
+    const settings = loadWorkspaceTrackerSettings(workspaceDir) ?? config.trackerSettings ?? null;
     const trackerType = config.defaults.tracker || "multi-team";
     retryStore = new RetryStateStore(dbPath);
 
@@ -528,74 +548,54 @@ export function isHarnessChainPaused(): boolean {
 
 /**
  * Build the `worker add` drain acquirer: claims durable injected rows and runs
- * each through the fleet executor, pinned to the repo the row names.
+ * each through the fleet executor, pinned to the repo the row names. Ad-hoc
+ * tasks drain on the same short interval as retries and run through the normal
+ * pipeline (which inherits `[defaults].worker_task_args`, e.g. `--create-pr`).
+ *
+ * @param workerState - PR registry; when given, the dependency gate can ask
+ *   GitHub whether a closed dependency PR merged and record the answer there
  */
 export function buildInjectedTaskAcquirer(
   deps: FleetExecutorDeps,
   store: InjectedTaskStore,
   verbose?: boolean,
+  workerState?: Pick<WorkerState, "markAgentPrClosed">,
 ): InjectedTaskAcquirer {
   return new InjectedTaskAcquirer({
     store,
+    resolveMergeState: workerState
+      ? createDependencyMergeStateResolver({
+          config: deps.config,
+          workspaceDir: deps.workspaceDir,
+          workerState,
+        })
+      : undefined,
     runDbPath: workspaceDbPath(deps.workspaceDir),
-    execute: (task, queueClaim) =>
-      createFleetTaskExecutor(deps, {
+    resolveBranchHead: (repo, branch) => remoteHead(deps.config, deps.repoManager, repo, branch),
+    execute: async (task, queueClaim) => {
+      // Async so a team the live config no longer resolves rejects the run.
+      const credentialTeam = requireInjectedTaskTeam(deps.config, task.repo, task.team);
+      return createFleetTaskExecutor(deps, {
         extraArgs: () => fleetTaskArgs(deps.config),
         repo: task.repo,
+        ...(credentialTeam ? { credentialTeam } : {}),
         source: INJECTED_TASK_SOURCE,
         runOrigin: "local",
         queueClaim,
+        // Session pickup only reopens a succeeded run of this same row.
+        injectedCreatedAt: task.createdAt,
         // The CLI resolves the local markdown file; the key still names the worktree.
         taskRef: task.taskFile,
         // Persist the detached child pid for hard-kill startup recovery.
         onChildSpawn: (pid) => {
           if (!store.isClosed()) store.setChildPid(task.id, pid);
         },
-      })(task.taskKey, toRoutableTask({ key: task.taskKey, labels: [], components: [] })),
+      })(task.taskKey, toRoutableTask({ key: task.taskKey, labels: [], components: [] }));
+    },
     intervalSeconds: parseEnvInteger("WORKER_INJECTED_INTERVAL_SECONDS", 5, { min: 1 }),
     maxConcurrency: deps.config.workspace.execution.maxConcurrency,
     maxConcurrencyPerRepo: deps.config.workspace.execution.maxConcurrencyPerRepo,
     isDraining: () => deps.supervisor?.isDraining() ?? false,
-    isPaused: isHarnessChainPaused,
-    verbose,
-  });
-}
-
-/**
- * Build the dashboard retry drain acquirer: claims durable retry rows and runs
- * each through the fleet executor with the persisted repo/team pinned and
- * `--force` prepended.
- */
-export function buildRetryQueueAcquirer(
-  deps: FleetExecutorDeps,
-  store: ScheduledRetryStore,
-  verbose?: boolean,
-): RetryQueueAcquirer {
-  return new RetryQueueAcquirer({
-    store,
-    runDbPath: workspaceDbPath(deps.workspaceDir),
-    execute: (taskKey, routable, retry, queueClaim) => {
-      const retryTeam = retry.team ? findTeam(deps.config, retry.team) : undefined;
-      return createFleetTaskExecutor(
-        {
-          ...deps,
-          ...(retryTeam ? { team: retryTeam } : {}),
-          actionedSource: resolveActionedSource(deps.config, retryTeam),
-        },
-        // The persisted repo/team make retries deterministic even when
-        // task keys overlap or the original route depended on labels.
-        {
-          extraArgs: () => ["--force", ...fleetTaskArgs(deps.config)],
-          repo: retry.repo,
-          queueClaim,
-          source: "retry",
-          // Pin the run this retry targets so session pickup resumes its
-          // branch and prior report instead of the just-opened run.
-          pickupRunId: retry.runId,
-        },
-      )(taskKey, routable);
-    },
-    intervalSeconds: parseEnvInteger("WORKER_RETRY_INTERVAL_SECONDS", 5, { min: 1 }),
     isPaused: isHarnessChainPaused,
     verbose,
   });
@@ -884,20 +884,30 @@ async function startLoggedWorkerFailover(
   });
 }
 
+function assertWorkerHasRepos(config: WorkspaceConfig, configPath: string): void {
+  if (config.repos.length > 0) return;
+  console.error(
+    `❌ No repos configured for the worker in ${configPath}.\n` +
+      "   Add [[repos]] entries without manual_only = true " +
+      "(or run `devintern worker add-repo` inside an existing repo).",
+  );
+  process.exit(1);
+}
+
+/** Reload hooks published by buildFleetEventAcquirers into the worker loop. */
+type WorkerEventReloadHooks = {
+  hooks?: FleetEventReloadHooks;
+  verifyRelayRepos?: () => Promise<void>;
+};
+
 export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Promise<void> {
   const configPath = options.workspacePath
     ? resolve(options.workspacePath)
     : workspaceConfigPath(resolveWorkspaceDir());
   const workspaceDir = options.workspacePath ? dirname(configPath) : resolveWorkspaceDir();
   writeWorkerStartMarker(workspaceDir);
-  const config = loadWorkspaceConfig(configPath);
-  if (config.repos.length === 0) {
-    console.error(
-      `❌ No repos configured in ${configPath}.\n` +
-        "   Add [[repos]] entries (or run `devintern worker add-repo` inside an existing repo).",
-    );
-    process.exit(1);
-  }
+  const config = loadWorkerWorkspaceConfig(configPath);
+  assertWorkerHasRepos(config, configPath);
 
   const { multiTeam, initialQuery, intervalSeconds } = applyWorkspaceEnv(config, workspaceDir);
   const initialFleetAutomations = resolveFleetAutomations(config);
@@ -950,6 +960,9 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   await warnOnPushAuthIssues(config, repoManager);
 
   const acquirers: import("../../worker").Acquirer[] = [];
+  // Native-blocker gate per polled source (keyed by team name; `undefined`
+  // for a single-source workspace), filled as the sources are built below.
+  const dependencyGates = new Map<string | undefined, TrackerDependencyGate>();
 
   // First in the list and on a short interval: a dashboard-scheduled retry
   // gets picked up ahead of the slower pollers.
@@ -958,18 +971,19 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       { config, workspaceDir, skips: state.skips, repoManager, supervisor },
       retryQueue,
       options.verbose,
+      (team) => dependencyGates.get(team),
     ),
   );
 
-  // Ad-hoc `worker add` tasks: drained on the same short interval as retries,
-  // pinned to their explicit repo, and run through the normal pipeline (which
-  // inherits `[defaults].worker_task_args`, e.g. `--create-pr`).
   acquirers.push(
     buildInjectedTaskAcquirer(
       { config, workspaceDir, skips: state.skips, repoManager, supervisor },
       injectedTasks,
       options.verbose,
+      state.workerState,
     ),
+    // Keep stacked PRs on their base: restack, retarget after a merge.
+    await buildStackedPrAcquirer({ config, workspaceDir, store: injectedTasks, repoManager }),
   );
 
   // Always assembled (even with no automations yet): a live reload can add
@@ -1006,7 +1020,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   // Cadence reconciliation: applied on successful reloads of poll_interval.
   const intervalUpdaters: Array<(seconds: number) => void> = [];
   // Reload hooks published by buildFleetEventAcquirers (mention sweeps).
-  const eventReloadHooks: { hooks?: FleetEventReloadHooks } = {};
+  const eventReloadHooks: WorkerEventReloadHooks = {};
   let pollIntervalSeconds = config.defaults.pollIntervalSeconds;
 
   // Always assemble the estimation scheduler so entries can be added to an
@@ -1175,6 +1189,18 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
     // Share the gate with the relay task evaluator so a relayed change caused
     // by the worker's own post-PR transition is not re-implemented either.
     source.isTaskActionedUnchanged = actionedGate;
+    const dependencyDeps = trackerDependencyDeps({
+      config,
+      workspaceDir,
+      state,
+      tracker: source.tracker,
+      teamName: source.team?.name,
+      getTracker: source.client ? () => source.client! : () => singleTrackerManager!.getClient(),
+    });
+    source.dependencyGate = dependencyDeps.dependencyGate;
+    if (dependencyDeps.dependencyGate) {
+      dependencyGates.set(source.team?.name, dependencyDeps.dependencyGate);
+    }
     const taskAcquirer = createWorkspaceTaskAcquirer({
       config,
       workspaceDir,
@@ -1185,6 +1211,10 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       detector: source.detector,
       searchTasks: source.searchTasks,
       isTaskActionedUnchanged: (taskKey, updated) => actionedGate(taskKey, updated),
+      // A ticket the dashboard retry drain owns is never started by the poller:
+      // the retry's own transition bumps the stamp mid-run, and the actioned
+      // marker only lands as that run finishes.
+      heldTaskKeys: () => retryQueue.activeTaskKeys(source.team?.name),
       actionedSource,
       query: source.query,
       intervalSeconds,
@@ -1192,6 +1222,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       team: source.team,
       verbose: options.verbose,
       supervisor,
+      ...dependencyDeps,
     });
     intervalUpdaters.push((seconds) => taskAcquirer.updateInterval(seconds));
     acquirers.push(taskAcquirer);
@@ -1209,6 +1240,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       intervalUpdaters,
       reloadHooksOut: eventReloadHooks,
       supervisor,
+      isStackedBase: createStackedBaseChecker(config, injectedTasks),
     })),
   );
 
@@ -1233,6 +1265,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
     }
     eventReloadHooks.hooks?.reconcileMentionSweeps();
     eventReloadHooks.hooks?.reconcileConflictResolution();
+    void eventReloadHooks.verifyRelayRepos?.();
   };
 
   // Live reload keeps queries, fixed team destinations, routing, repos,
@@ -1246,6 +1279,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   const reloader = new WorkspaceConfigReloader({
     configPath,
     current: config,
+    load: loadWorkerWorkspaceConfig,
     validate: (next, active) =>
       validateReloadedWorkspaceConfig(next, active, {
         multiTeam,
@@ -1264,9 +1298,8 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   if (config.workspace.dashboard) {
     try {
       const { startDashboardServer } = await import("../../dashboard-server");
-      // `schedule`: retries are drained by this worker's retry-queue acquirer
-      // through the normal pipeline (never spawned from the workspace home);
-      // automation "Run now" triggers go through the in-process scheduler.
+      // `schedule`: retries drain through this worker's retry-queue acquirer
+      // (never spawned from the workspace home); "Run now" uses the scheduler.
       dashboardServer = startDashboardServer({
         port: config.workspace.dashboardPort,
         allowedOrigins: config.dashboard.allowedOrigins,
@@ -1274,6 +1307,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
         retryMode: "schedule",
         automationActions,
         scheduleSnapshot: () => (pickupGate.enabled ? pickupGate.snapshot() : null),
+        supervisorQueuedJobs: () => supervisor.queuedJobs?.() ?? [],
         // `[[error_monitors]]` is startup-only, so the polled set is fixed.
         configuredSources: () => configuredSourcesOf(config),
       });
@@ -1397,45 +1431,6 @@ function applyWorkspaceEnv(
   };
 }
 
-/** Whether the workspace config itself contains ongoing work. */
-export function workspaceHasConfiguredWork(
-  config: WorkspaceConfig,
-  multiTeam: boolean,
-  initialQuery: string | undefined,
-): boolean {
-  return (
-    multiTeam ||
-    Boolean(initialQuery) ||
-    config.automations.length > 0 ||
-    config.estimations.length > 0 ||
-    config.errorMonitors.some((source) => source.enabled)
-  );
-}
-
-/**
- * Whether startup has any work to keep the worker alive.
- *
- * Scheduled dashboard retries and queued/in-flight injected tasks are the
- * exceptions to the task-query requirement: the worker can still run to drain
- * them (and to recover an interrupted injected row under the post-lock hook).
- * A `running` injected row counts here because only that hook can resume or
- * fail it.
- */
-export function workspaceHasStartupWork(
-  config: WorkspaceConfig,
-  retryQueue: Pick<ScheduledRetryStore, "hasPending">,
-  injectedTasks: Pick<InjectedTaskStore, "hasPending" | "listRunning">,
-  multiTeam: boolean,
-  initialQuery: string | undefined,
-): boolean {
-  return (
-    workspaceHasConfiguredWork(config, multiTeam, initialQuery) ||
-    retryQueue.hasPending() ||
-    injectedTasks.hasPending() ||
-    injectedTasks.listRunning().length > 0
-  );
-}
-
 /**
  * Exit when workspace mode has no work configured.
  *
@@ -1463,6 +1458,8 @@ function assertWorkspaceHasWork(
   );
 }
 
+export { buildRetryQueueAcquirer };
+export { workspaceHasConfiguredWork, workspaceHasStartupWork } from "./startup-work";
 export {
   createFleetTaskExecutor,
   createWorkspaceTaskAcquirer,

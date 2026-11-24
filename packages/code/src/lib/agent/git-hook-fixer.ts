@@ -18,16 +18,19 @@ import { resolveAgentEffort, resolveAgentModel } from "./model";
 import { agentSandboxPolicy, getSandbox } from "./sandbox";
 import { createHarnessLogSink } from "../observability/harness-logs";
 import { Utils } from "../utils";
+import { hasUncommittedWork, stageWorkTreeChanges } from "../utils/git-stage";
 import { resolveOutputDir } from "../config/output-dir";
 
 /**
  * Check whether the working tree is clean after a hook-fix attempt.
+ * Untracked sandbox placeholders do not count as uncommitted changes.
  *
  * @param cwd - Optional git working directory
  * @returns `true` when no uncommitted changes remain (commit likely complete)
  */
 export async function isCommitAlreadyComplete(cwd?: string): Promise<boolean> {
-  return !(await Utils.hasUncommittedChanges(cwd));
+  const work = hasUncommittedWork(cwd ?? process.cwd());
+  return work.success && !work.dirty;
 }
 
 /** Result of verifying a pre-push hook-fix attempt. */
@@ -66,8 +69,10 @@ export async function verifyPushHookFix(options?: {
   const targetBranch = options?.expectedBranch ?? currentBranch ?? undefined;
   let amended = false;
 
-  if (await Utils.hasUncommittedChanges(cwd)) {
-    const stageResult = await Utils.executeGitCommand(["add", "-A"], { cwd });
+  const workDir = cwd ?? process.cwd();
+  if (hasUncommittedWork(workDir).dirty) {
+    // Skips sandbox placeholders; `git add -A` fails on `/dev/null` mounts.
+    const stageResult = stageWorkTreeChanges(workDir);
     if (!stageResult.success) {
       return {
         success: false,
@@ -122,6 +127,70 @@ export async function verifyPushHookFix(options?: {
     amended,
     message: detail || "push dry-run failed",
   };
+}
+
+/**
+ * Builds the agent prompt for fixing a failed git hook.
+ *
+ * @param hookType - Which hook failed: pre-commit or pre-push
+ * @param gitHookErrorLog - Glob path to previous hook error logs
+ * @returns The prompt handed to the agent harness
+ */
+export function buildGitHookFixPrompt(
+  hookType: "commit" | "push",
+  gitHookErrorLog: string,
+): string {
+  // Concise prompt asking the agent to re-run the git command; avoids context
+  // length issues from including full error output.
+  const gitCommand = hookType === "commit" ? "git commit" : "git push origin HEAD";
+
+  return `# Git Hook Error - Fix Required
+
+The git ${hookType} operation has failed, likely due to pre-${hookType} hooks checking code quality.
+
+## Your Task
+
+1. **Review recent hook errors** (optional but helpful):
+   \`\`\`bash
+   tail -n 100 ${gitHookErrorLog}
+   \`\`\`
+   This shows the last 100 lines of previous hook errors to understand patterns.
+
+2. **Run the git command** to see what failed:
+   \`\`\`bash
+   ${gitCommand}
+   \`\`\`
+
+3. **Analyze the error output** and fix all issues. Common problems include:
+   - **Linting errors**: Fix code style, formatting, or linting issues
+   - **Test failures**: Fix failing tests or update test expectations
+   - **Type errors**: Resolve TypeScript or type-checking issues
+   - **Formatting issues**: Run formatters or fix code formatting
+   - **Security issues**: Address security vulnerabilities or dependency issues
+
+4. **Stage only real work**:
+   \`\`\`bash
+   git add -u
+   git add <path>   # for each new file you intentionally created
+   \`\`\`
+   \`git add -u\` stages changed and deleted tracked files. Never stage the whole tree or
+   every untracked entry in bulk: the sandbox mounts placeholder entries (\`.bashrc\`,
+   \`.profile\`, \`.gitconfig\`, \`.claude/…\`, …) into the worktree root; git cannot stage
+   them, and they must never be committed.
+
+5. ${
+    hookType === "commit"
+      ? '**Retry the commit** with an explicit message (never omit `-m` — unattended runs have no editor):\n   ```bash\n   git commit -m "fix: resolve pre-commit hook failures"\n   ```'
+      : "**Amend the existing commit** with your fixes:\n   ```bash\n   git commit --amend --no-edit\n   ```\n\n6. **Verify the fix** by running the push command again to ensure it succeeds."
+  }
+
+**Important**:
+- Only fix the issues mentioned in the error output
+- Do not modify unrelated code
+- Ensure all tests pass if the hook runs tests
+- Follow the project's coding standards and conventions
+${hookType === "push" ? "- Make sure to amend the commit (git commit --amend --no-edit) so the fixes are included in the push" : ""}
+`;
 }
 
 /**
@@ -193,56 +262,9 @@ export async function runAgentHarnessToFixGitHook(
     (async () => {
       console.log(`\n🔧 Attempting to fix git hook errors with ${harness.displayName}...`);
 
-      // Create a concise prompt that asks the agent to re-run the git command
-      // This avoids context length issues from including full error output
-      const gitCommand = hookType === "commit" ? "git commit" : "git push origin HEAD";
-
       // Get the path to the git-hook-errors.log file
-      const baseOutputDir = resolveOutputDir();
-      const gitHookErrorLog = `${baseOutputDir}/*/git-hook-errors.log`;
-
-      const fixPrompt = `# Git Hook Error - Fix Required
-
-The git ${hookType} operation has failed, likely due to pre-${hookType} hooks checking code quality.
-
-## Your Task
-
-1. **Review recent hook errors** (optional but helpful):
-   \`\`\`bash
-   tail -n 100 ${gitHookErrorLog}
-   \`\`\`
-   This shows the last 100 lines of previous hook errors to understand patterns.
-
-2. **Run the git command** to see what failed:
-   \`\`\`bash
-   ${gitCommand}
-   \`\`\`
-
-3. **Analyze the error output** and fix all issues. Common problems include:
-   - **Linting errors**: Fix code style, formatting, or linting issues
-   - **Test failures**: Fix failing tests or update test expectations
-   - **Type errors**: Resolve TypeScript or type-checking issues
-   - **Formatting issues**: Run formatters or fix code formatting
-   - **Security issues**: Address security vulnerabilities or dependency issues
-
-4. **Stage your changes** with:
-   \`\`\`bash
-   git add .
-   \`\`\`
-
-5. ${
-        hookType === "commit"
-          ? '**Retry the commit** with an explicit message (never omit `-m` — unattended runs have no editor):\n   ```bash\n   git commit -m "fix: resolve pre-commit hook failures"\n   ```'
-          : "**Amend the existing commit** with your fixes:\n   ```bash\n   git commit --amend --no-edit\n   ```\n\n6. **Verify the fix** by running the push command again to ensure it succeeds."
-      }
-
-**Important**:
-- Only fix the issues mentioned in the error output
-- Do not modify unrelated code
-- Ensure all tests pass if the hook runs tests
-- Follow the project's coding standards and conventions
-${hookType === "push" ? "- Make sure to amend the commit (git commit --amend --no-edit) so the fixes are included in the push" : ""}
-`;
+      const gitHookErrorLog = `${resolveOutputDir()}/*/git-hook-errors.log`;
+      const fixPrompt = buildGitHookFixPrompt(hookType, gitHookErrorLog);
 
       const timeoutMinutes = parseInt(process.env.AGENT_HARNESS_TIMEOUT_MINUTES || "60", 10);
       let stdoutOutput = "";
@@ -360,26 +382,27 @@ ${hookType === "push" ? "- Make sure to amend the commit (git commit --amend --n
           // For push: agent should have amended the commit, so we just verify nothing is staged
           // For commit: agent should have completed the commit, so we verify a clean state
           try {
-            const statusResult = await Utils.executeGitCommand(["status", "--porcelain"], { cwd });
-
             if (hookType === "commit") {
-              // For commit fix: verify nothing is staged/modified (commit succeeded)
-              if (statusResult.success && statusResult.output.trim() === "") {
+              // For commit fix: verify nothing is staged/modified (commit
+              // succeeded). Untracked sandbox placeholders do not count.
+              const work = hasUncommittedWork(workingDir);
+              if (work.success && !work.dirty) {
                 console.log("✅ Verification successful - commit completed successfully!");
                 resolve(true);
               } else {
                 console.log(
                   `⚠️  ${harness.displayName} fixed the code but didn't commit - staging the fix for a hooked retry...`,
                 );
+                const statusResult = await Utils.executeGitCommand(["status", "--porcelain"], {
+                  cwd,
+                });
                 console.log(`   Changes: ${statusResult.output}`);
 
                 // Stage the repair and let the caller retry its own commit.
                 // That commit runs the hooks again (so an unrepaired failure
                 // counts against --hook-retries instead of being bypassed with
                 // --no-verify) and keeps the caller's message and author.
-                const stageResult = await Utils.executeGitCommand(["add", "-A"], {
-                  cwd,
-                });
+                const stageResult = stageWorkTreeChanges(workingDir);
                 if (!stageResult.success) {
                   console.log("❌ Failed to stage changes:");
                   console.log(`   ${stageResult.error}`);

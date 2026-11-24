@@ -156,7 +156,7 @@ export interface TaskArtifactFile {
     commentUrl?: string;
     message?: string;
   };
-  upload?: { status: "uploaded" | "failed"; message?: string };
+  upload?: { status: "uploaded" | "failed"; message?: string; notice?: string };
 }
 
 export interface TaskArtifactContent {
@@ -417,6 +417,8 @@ export const TASKS_URL = "/api/tasks";
 /** `POST /api/tasks` body: an ad-hoc task (equivalent of `devintern worker add`). */
 export interface CreateTaskInput {
   repo: string;
+  /** `[[teams]]` entry whose credentials the run uses; required when the repo is fixed to several. */
+  team?: string;
   title: string;
   body: string;
   /** Dedupes a resubmission while the first task is pending/running. */
@@ -484,6 +486,60 @@ export async function createTask(input: CreateTaskInput): Promise<CreateTaskResu
   return task ? { ok: true, task } : { ok: false, error: "unexpected response from the server" };
 }
 
+/** Outcome of `POST /api/tasks/:id/cancel` (same values as `worker cancel --json`). */
+export type CancelTaskOutcome =
+  | "cancelled"
+  | "already_cancelled"
+  | "already_started"
+  | "already_finished"
+  | "not_found";
+
+const CANCEL_OUTCOMES: readonly CancelTaskOutcome[] = [
+  "cancelled",
+  "already_cancelled",
+  "already_started",
+  "already_finished",
+  "not_found",
+];
+
+export type CancelTaskResult =
+  | { ok: true; outcome: CancelTaskOutcome; message: string }
+  | { ok: false; outcome?: CancelTaskOutcome; error: string };
+
+/** URL of the cancel action for one ad-hoc task key. */
+export function cancelTaskUrl(taskKey: string): string {
+  return `${TASKS_URL}/${encodeURIComponent(taskKey)}/cancel`;
+}
+
+/**
+ * Cancel a pending ad-hoc task. Same-origin JSON POST, so it passes the
+ * dashboard's Origin/Content-Type write guard. `ok` is true only when the
+ * task ends up cancelled (now or earlier).
+ */
+export async function cancelTask(taskKey: string): Promise<CancelTaskResult> {
+  let response: Response;
+  try {
+    response = await fetch(cancelTaskUrl(taskKey), {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+  } catch (cause) {
+    return { ok: false, error: cause instanceof Error ? cause.message : String(cause) };
+  }
+  const body: unknown = await response.json().catch(() => null);
+  const record = typeof body === "object" && body !== null ? (body as Record<string, unknown>) : {};
+  const outcome = CANCEL_OUTCOMES.find((value) => value === record.outcome);
+  const message = typeof record.message === "string" ? record.message : undefined;
+  if (response.ok && outcome) {
+    return { ok: true, outcome, message: message ?? `Cancelled ${taskKey}` };
+  }
+  const error =
+    message ?? (typeof record.error === "string" ? record.error : `HTTP ${response.status}`);
+  return { ok: false, outcome, error };
+}
+
 /** One non-empty local weekday × hour bucket for one origin. */
 export interface RunActivityCell {
   origin: RunOrigin;
@@ -507,8 +563,12 @@ export interface StatsResponse {
   hostTimeZone?: string;
   stats: {
     totals: { runs: number; byStatus: Record<RunStatus, number> };
+    /** Excludes `auto_merge` runs (gate verdicts); see `byOriginStatus.auto_merge`. */
     successRate: number | null;
+    /** Excludes `auto_merge` runs (gate verdicts); see `byOriginStatus.auto_merge`. */
     escalationRate: number | null;
+    /** Counts behind the rates. Absent from older workers. */
+    rateBasis?: { terminal: number; succeeded: number; escalated: number };
     runsPerWeek: { weekStart: string; count: number }[];
     medianDurationMs: number | null;
     byHarness: {
@@ -520,6 +580,11 @@ export interface StatsResponse {
       medianDurationMs: number | null;
     }[];
     byOrigin: Record<RunOrigin, number>;
+    /** Terminal-status counts per origin. Absent from older workers. */
+    byOriginStatus?: Record<
+      RunOrigin,
+      { succeeded: number; failed: number; escalated: number; abandoned: number }
+    >;
     /** Absent from workers older than the activity heatmap. */
     activity?: RunActivity;
   } | null;
@@ -603,7 +668,7 @@ export interface SourcesResponse {
 }
 
 /** Where a queued item came from. */
-export type QueuedWorkKind = "ad-hoc" | "retry" | "webhook" | "automation";
+export type QueuedWorkKind = "ad-hoc" | "retry" | "webhook" | "automation" | "pr-job" | "tracker";
 
 /** One pending item from `GET /api/queue`; running rows are active work instead. */
 export interface QueuedWorkItem {
@@ -631,6 +696,35 @@ export interface QueuedWorkItem {
   lastError?: string;
   /** Automation: the scheduled job waiting for a slot. */
   automationId?: string;
+  /** PR job: worker job kind (`conflict`, `auto_merge`, `review`, `ci_fix`). */
+  jobKind?: string;
+  /** PR job: blocked by another job on the same PR, the per-repo limit, or the global limit. */
+  waitingOn?: "exclusive" | "repo" | "global";
+  /** Ad-hoc / tracker: task keys this task depends on (tracker: its native blockers). */
+  dependsOn?: string[];
+  /** Ad-hoc / tracker: `merged` (wait for merges) or `stacked` (branch from one unmerged dependency). */
+  dependencyMode?: "merged" | "stacked";
+  /** Ad-hoc / tracker: `waiting` or `blocked` on a dependency; unset once claimable. */
+  dependencyState?: "waiting" | "blocked";
+  /** Ad-hoc / tracker: why, naming the dependency. */
+  dependencyReason?: string;
+  /** Tracker: the tracker the ticket was polled from. */
+  tracker?: string;
+  /** Tracker: the team that polled it. */
+  team?: string;
+}
+
+/** A recently cancelled ad-hoc task (audit trail; it will not run). */
+export interface CancelledTaskItem {
+  id: string;
+  taskKey: string;
+  title: string;
+  repo: string;
+  createdAt: number;
+  cancelledAt?: number;
+  /** `cli` (`devintern worker cancel`) or `dashboard`. */
+  cancelledBy?: "cli" | "dashboard";
+  cancelReason?: string;
 }
 
 export interface QueuedWorkResponse {
@@ -638,16 +732,21 @@ export interface QueuedWorkResponse {
   items: QueuedWorkItem[];
   /** Every pending item, including any beyond the listed ones. */
   total: number;
+  /** Most recently cancelled ad-hoc tasks, newest first (absent on older servers). */
+  cancelled?: CancelledTaskItem[];
 }
 
-/** One open agent-created PR (registry rows reconciled with GitHub by the worker). */
+/** One agent-created PR (registry rows reconciled with GitHub by the worker). */
 export interface AgentPrRecord {
+  provider?: string;
   repo: string;
   prNumber: number;
   prUrl: string;
   branch?: string;
   taskKey?: string;
   ticketUrl?: string;
+  /** When the worker saw the PR merged (epoch ms); only in the merged list. */
+  mergedAt?: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -700,10 +799,33 @@ export interface PollState<T> {
 }
 
 /**
+ * Window event fired after the queue changed from this tab (a cancel), so
+ * every poll that shows queue contents or counts re-fetches at once instead
+ * of waiting for its next interval.
+ */
+export const QUEUE_CHANGED_EVENT = "devintern:queue-changed";
+
+/** Tell every listening poll that the queue changed. */
+export function notifyQueueChanged(): void {
+  // `window.Event`, not the global, so the event belongs to the same realm as `window`.
+  if (typeof window !== "undefined") window.dispatchEvent(new window.Event(QUEUE_CHANGED_EVENT));
+}
+
+export interface PollOptions {
+  /** Window event that triggers an immediate re-fetch. */
+  refreshOn?: string;
+}
+
+/**
  * Fetch a JSON endpoint now and on an interval, pausing while the tab is
  * hidden. Stale responses (superseded by a newer request) are discarded.
  */
-export function usePoll<T>(url: string, intervalMs = 5000): PollState<T> {
+export function usePoll<T>(
+  url: string,
+  intervalMs = 5000,
+  options: PollOptions = {},
+): PollState<T> {
+  const { refreshOn } = options;
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -745,12 +867,18 @@ export function usePoll<T>(url: string, intervalMs = 5000): PollState<T> {
         controller = load();
       }
     }, intervalMs);
+    const onRefresh = () => {
+      controller.abort();
+      controller = load();
+    };
+    if (refreshOn) window.addEventListener(refreshOn, onRefresh);
     return () => {
       clearInterval(timer);
+      if (refreshOn) window.removeEventListener(refreshOn, onRefresh);
       controller.abort();
       requestSeq.current += 1; // invalidate in-flight handlers
     };
-  }, [load, intervalMs]);
+  }, [load, intervalMs, refreshOn]);
 
   return { data, error, loading, refresh: () => void load() };
 }

@@ -9,9 +9,8 @@
  * are all unreachable and nothing leaves the machine. Only fake credentials
  * are used, and the tests assert none of them is echoed.
  *
- * Session files live where the CLI reads them: `<project>/.devintern-code/`
- * for a task run and `<workspace>/state/code/` for the worker
- * (`loadSupabaseConfig`, packages/code/src/lib/cli/bootstrap.ts).
+ * Session files live where the CLI reads them: `<workspace>/state/code/` for
+ * every command (`loadSupabaseConfig`, packages/code/src/lib/cli/bootstrap.ts).
  */
 
 import { expect, test } from "bun:test";
@@ -89,6 +88,16 @@ function expectOnlyHosts(proxy: RecordingProxy, allowed: string[]): string[] {
 
 /** Preload that pins the CLI's `/proc/self/cgroup` view (helpers/fake-cgroup-preload.cjs). */
 const FAKE_CGROUP_PRELOAD = join(import.meta.dir, "../../helpers/fake-cgroup-preload.cjs");
+
+/**
+ * Bun args that skip supabase-js's ~25 s refresh backoff while every refresh
+ * attempt still runs against the refusing proxy
+ * (helpers/fast-auth-backoff-preload.cjs).
+ */
+const FAST_AUTH_BACKOFF = [
+  "--preload",
+  join(import.meta.dir, "../../helpers/fast-auth-backoff-preload.cjs"),
+];
 
 /**
  * Runs the task with `CI` unset and the CLI seeing `cgroup` as its
@@ -199,11 +208,12 @@ test.skipIf(skip)(
   "an unrefreshable session with Supabase unreachable resolves to signed out and fails closed",
   async () => {
     await withGatedTaskRun(async (run, proxy) => {
-      // Expired token: supabase-js retries the refresh for ~25 s before giving up.
-      const accessToken = writeFakeSession(join(run.cwd, ".devintern-code/.auth-session.json"), {
+      // Expired token: supabase-js retries the refresh with backoff before
+      // giving up; the preload skips the sleeps, not the attempts.
+      const accessToken = writeFakeSession(workspaceSessionPath(run.env), {
         expired: true,
       });
-      const result = await run.runTask();
+      const result = await run.runTask({ bunArgs: FAST_AUTH_BACKOFF });
       expect(result.exitCode).toBe(AUTOMATION_ACCESS_EXIT_CODE);
       expect(result.stderr).toContain(AUTOMATION_DENIAL);
       // The user resolved to null: the signed-out hint is shown and the
@@ -211,12 +221,13 @@ test.skipIf(skip)(
       expect(result.stderr).toContain(SIGN_IN_ALTERNATIVE);
       expect(result.stderr).not.toContain("License entitlement check failed");
       expectNoSecrets(result, accessToken);
-      expect(proxy.requestsTo(SUPABASE_HOST).length).toBeGreaterThan(0);
+      // More than one attempt: the refresh really retried before giving up.
+      expect(proxy.requestsTo(SUPABASE_HOST).length).toBeGreaterThan(1);
       expectOnlyHosts(proxy, [SUPABASE_HOST]);
       await expectNoWork(run);
     });
   },
-  90_000,
+  60_000,
 );
 
 test.skipIf(skip)(
@@ -296,21 +307,29 @@ test.skipIf(skip)(
   60_000,
 );
 
+/** Sign-in session path for the run's workspace (created on demand). */
+function workspaceSessionPath(env: Record<string, string | undefined>): string {
+  const dir = join(env.DEVINTERN_WORKSPACE_DIR!, "state", "code");
+  mkdirSync(dir, { recursive: true });
+  return join(dir, ".auth-session.json");
+}
+
 /** Account commands in a bare temp project, with Supabase refused by the proxy. */
 async function withAccountProject(
   body: (run: (args: string[]) => Promise<CommandResult>, sessionPath: string) => Promise<void>,
   proxyCheck: (proxy: RecordingProxy) => void,
+  bunArgs: string[] = [],
 ): Promise<void> {
   const proxy = await startRecordingProxy();
   const root = mkdtempSync(join(tmpdir(), "devintern-e2e-account-"));
   try {
     const cwd = join(root, "project");
-    mkdirSync(join(cwd, ".devintern-code"), { recursive: true });
+    mkdirSync(cwd, { recursive: true });
     const env = { ...isolatedEnvironment(root), ...proxyEnvironment(proxy.url) };
     delete (env as Record<string, string>).DEVINTERN_SKIP_LICENSE_CHECK;
     await body(
-      (args) => command([process.execPath, cliPath, ...args], cwd, env, 90_000),
-      join(cwd, ".devintern-code/.auth-session.json"),
+      (args) => command([process.execPath, ...bunArgs, cliPath, ...args], cwd, env, 90_000),
+      workspaceSessionPath(env),
     );
     proxyCheck(proxy);
   } finally {
@@ -366,8 +385,9 @@ test.skipIf(skip)(
   async () => {
     await withAccountProject(
       async (run, sessionPath) => {
-        // Expired token: the refresh retries for ~25 s, then logout must still
-        // clear the local session so a user can sign out offline.
+        // Expired token: the refresh retries with backoff (sleeps skipped by
+        // the preload), then logout must still clear the local session so a
+        // user can sign out offline.
         const accessToken = writeFakeSession(sessionPath, { expired: true });
         const result = await run(["logout"]);
         expect(result.exitCode).toBe(0);
@@ -378,10 +398,12 @@ test.skipIf(skip)(
         expect(whoami.stdout.trim()).toBe(NOT_SIGNED_IN);
       },
       (proxy) => {
-        expect(proxy.requestsTo(SUPABASE_HOST).length).toBeGreaterThan(0);
+        // More than one attempt: the refresh really retried before giving up.
+        expect(proxy.requestsTo(SUPABASE_HOST).length).toBeGreaterThan(1);
         expectOnlyHosts(proxy, [SUPABASE_HOST]);
       },
+      FAST_AUTH_BACKOFF,
     );
   },
-  90_000,
+  60_000,
 );

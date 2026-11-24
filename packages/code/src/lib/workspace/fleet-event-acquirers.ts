@@ -1,6 +1,7 @@
 import { createGitHubCiProvider } from "../code-host/github/ci-provider";
 import { parseEnvInteger } from "../config/env-integer";
 import { RunStore } from "../state/run-recorder";
+import type { MergeStateAnswer } from "../dependencies/gate";
 import type { TaskExecutionResult } from "../acquirers/task-polling";
 import type {
   ConflictWindowStatus,
@@ -8,8 +9,9 @@ import type {
 } from "../acquirers/review-polling";
 import type { ChangeDetector } from "../acquirers/change-detector";
 import type { TeamConfig, WorkspaceConfig } from "./config";
-import { buildRepoEnv, buildTeamTaskEnv, gitHubSlugFromRemote } from "./env";
-import { createFleetTaskExecutor, resolveActionedSource } from "./fleet-executor";
+import { buildFleetEventEnv, gitHubSlugFromRemote } from "./env";
+import { createGatedFleetTaskExecutor, resolveActionedSource } from "./fleet-executor";
+import type { TrackerDependencyGate } from "./tracker-dependency-gate";
 import { assertTeamPrSyncSandbox, teamPrSyncSlugs } from "./team-pr-sync";
 import type { FleetTask, RepoManagerLike } from "./fleet-executor";
 import type { openWorkspaceState } from "./state";
@@ -64,9 +66,20 @@ export interface FleetSourceRuntime {
    * focused-test paths.
    */
   isTaskActionedUnchanged?: (taskKey: string, updated?: string) => Promise<boolean>;
+  /**
+   * Native-blocker gate shared with the polling acquirer, so a relayed
+   * `task.changed` cannot start a ticket its blockers still hold back.
+   */
+  dependencyGate?: TrackerDependencyGate;
 }
 
-/** Resolve the GitHub credential used for events in one workspace repository. */
+/**
+ * Resolve the GitHub credential used for events in one workspace repository.
+ *
+ * Uses the same credentials as the follow-up runs that push to the PR
+ * ({@link buildFleetEventEnv}), so API calls read PRs with the account that
+ * pushed them.
+ */
 export function fleetGitHubTokenForRepo(
   config: WorkspaceConfig,
   workspaceDir: string,
@@ -78,14 +91,32 @@ export function fleetGitHubTokenForRepo(
       slug.toLowerCase(),
   );
   if (!repo) return process.env.GITHUB_TOKEN;
-  const team = config.teams.find(
-    (candidate) => candidate.tracker === "github" && candidate.repo === repo.name,
-  );
-  return (team ? buildTeamTaskEnv(repo, team, workspaceDir) : buildRepoEnv(repo, workspaceDir))
-    .GITHUB_TOKEN;
+  return buildFleetEventEnv(config, repo, workspaceDir).GITHUB_TOKEN;
 }
 
-function createFleetGitHubClientResolver(
+/**
+ * Whether the workspace's GitHub events arrive through the hosted relay App.
+ * Relay-hosted workspaces authenticate follow-up GitHub calls `token-only`;
+ * everything else stays `app-first`. Every fleet GitHub client builder calls
+ * this directly so the choice never depends on which builder ran first.
+ */
+export async function resolveFleetGitHubHosting(workspaceDir: string): Promise<{
+  relayState: import("../relay/connect").RelayConnectState | null;
+  relayUrl: string;
+  usesHostedApp: boolean;
+}> {
+  const { hasGitHubRelayRouting, loadRelayState } = await import("../relay/connect");
+  const relayState = loadRelayState(workspaceDir);
+  const relayUrl =
+    process.env.WORKER_RELAY_URL?.replace(/\/+$/, "") || (relayState?.relayUrl ?? "");
+  // Accept a live legacy repo registration at runtime as well as the newer
+  // verified-id marker. The latter remains required when establishing a new
+  // pairing, but upgrading must not disable an already-delivering relay.
+  const usesHostedApp = Boolean(relayUrl && hasGitHubRelayRouting(relayState));
+  return { relayState, relayUrl, usesHostedApp };
+}
+
+export function createFleetGitHubClientResolver(
   config: WorkspaceConfig,
   workspaceDir: string,
   usesHostedApp: boolean,
@@ -198,6 +229,7 @@ function buildFleetCiProvider(
  */
 async function buildAutoMergeWatcher(params: {
   config: WorkspaceConfig;
+  workspaceDir: string;
   workerState: WorkerState;
   queue: WebhookQueue;
   gh: (slug: string) => FleetGitHubClient;
@@ -205,8 +237,9 @@ async function buildAutoMergeWatcher(params: {
   runStore: RunStore;
   intervalSeconds: number;
   verbose: boolean | undefined;
+  isStackedBase?: AutoMergeWatcherOptions["isStackedBase"];
 }): Promise<AutoMergeWatcherAcquirer> {
-  const { config, gh } = params;
+  const { config, gh, workspaceDir } = params;
   const { AutoMergeWatcherAcquirer: Watcher, DEFAULT_AUTO_MERGE_QUIET_SECONDS } =
     await import("../acquirers/auto-merge-watcher");
   const { parseHarnessList } = await import("@devintern/agent-harness");
@@ -246,7 +279,8 @@ async function buildAutoMergeWatcher(params: {
         ? (config.workspace.autoMerge.agent?.harness ??
           parseHarnessList(process.env.AGENT_HARNESS)[0])
         : undefined,
-    policyFingerprint: (slug) => fleetAutoMergePolicyFingerprint(config, slug),
+    policyFingerprint: (slug) => fleetAutoMergePolicyFingerprint(config, slug, workspaceDir),
+    isStackedBase: params.isStackedBase,
     quietSeconds: parseEnvInteger(
       "WORKER_AUTO_MERGE_QUIET_SECONDS",
       DEFAULT_AUTO_MERGE_QUIET_SECONDS,
@@ -257,16 +291,64 @@ async function buildAutoMergeWatcher(params: {
 }
 
 /**
- * Wire the fleet's event acquirers: review polling on the agent's own PRs,
- * a mention sweep per GitHub repo, and the relay when configured.
- *
- * Runs are CLI subprocesses in each repo's base worktree; mention-driven
- * runs are permission-gated here (see `fleet-events.ts`). Relay in fleet
- * mode uses connect state under the workspace home (or `WORKER_RELAY_URL`
- * plus a stored `drt_…` token); per-repo `worker connect` state alone is
- * not enough for the fleet daemon.
+ * Read a branch's tip SHA through the repo's GitHub client; null when the
+ * branch (or repo access) is missing or the response has another shape.
  */
-export async function buildFleetEventAcquirers(options: {
+function branchHeadShaFetcher(
+  gh: (slug: string) => FleetGitHubClient,
+  isNotFound: (error: unknown) => boolean,
+): (repo: string, branch: string) => Promise<string | null> {
+  return async (repo, branch) => {
+    const [owner = "", name = ""] = repo.split("/");
+    const path = branch.split("/").map(encodeURIComponent).join("/");
+    try {
+      const result = await gh(repo).conditionalGet<unknown>(
+        `/repos/${repo}/git/ref/heads/${path}`,
+        owner,
+        name,
+      );
+      return parseRefSha(result.data);
+    } catch (error) {
+      if (isNotFound(error)) return null;
+      throw error;
+    }
+  };
+}
+
+/** Commit SHA from a GitHub `git/ref` response; null for any other shape. */
+function parseRefSha(data: unknown): string | null {
+  if (typeof data !== "object" || data === null || !("object" in data)) return null;
+  const target = data.object;
+  if (typeof target !== "object" || target === null || !("sha" in target)) return null;
+  return typeof target.sha === "string" && target.sha ? target.sha : null;
+}
+
+/**
+ * Verify GitHub repos added after the first pairing without a browser (they
+ * verify when they fall under an installation this customer already paired),
+ * and publish the verifier for config reloads. Fire-and-forget so a slow or
+ * failing relay never blocks worker startup.
+ */
+async function startRelayAutoVerify(
+  options: FleetEventAcquirerOptions,
+  relayUrl: string,
+  relayToken: string,
+): Promise<void> {
+  const { createRelayAutoVerifier } = await import("../relay/auto-verify");
+  const verifyRelayRepos = createRelayAutoVerifier({
+    config: options.config,
+    workspaceDir: options.workspaceDir,
+    relayUrl,
+    relayToken,
+    fetchImpl: options.relayFetchImpl,
+    verbose: options.verbose,
+  });
+  if (options.reloadHooksOut) options.reloadHooksOut.verifyRelayRepos = verifyRelayRepos;
+  void verifyRelayRepos();
+}
+
+/** Inputs for {@link buildFleetEventAcquirers}. */
+export interface FleetEventAcquirerOptions {
   config: WorkspaceConfig;
   workspaceDir: string;
   state: ReturnType<typeof openWorkspaceState>;
@@ -281,15 +363,37 @@ export async function buildFleetEventAcquirers(options: {
   /** Collectors of cadence changes, applied on live config reloads. */
   intervalUpdaters?: Array<(seconds: number) => void>;
   /** Published once event acquirers are wired (mention-sweep reconcile). */
-  reloadHooksOut?: { hooks?: FleetEventReloadHooks };
+  reloadHooksOut?: {
+    hooks?: FleetEventReloadHooks;
+    /** Browser-free relay verification of unverified GitHub repos; never throws. */
+    verifyRelayRepos?: () => Promise<void>;
+  };
+  /** Injectable relay fetch for tests. */
+  relayFetchImpl?: typeof fetch;
+  /** Stacked-base lookup for the auto-merge guard (see `stacked-pr-acquirer.ts`). */
+  isStackedBase?: (slug: string, baseRef: string) => boolean;
   /** Shared admission supervisor for every fleet execution path. */
   supervisor?: TaskSupervisor;
-}): Promise<import("../../worker").Acquirer[]> {
+}
+
+/**
+ * Wire the fleet's event acquirers: review polling on the agent's own PRs,
+ * a mention sweep per GitHub repo, and the relay when configured.
+ *
+ * Runs are CLI subprocesses in each repo's base worktree; mention-driven
+ * runs are permission-gated here (see `fleet-events.ts`). Relay in fleet
+ * mode uses connect state under the workspace home (or `WORKER_RELAY_URL`
+ * plus a stored `drt_…` token); per-repo `worker connect` state alone is
+ * not enough for the fleet daemon.
+ */
+export async function buildFleetEventAcquirers(
+  options: FleetEventAcquirerOptions,
+): Promise<import("../../worker").Acquirer[]> {
   const { config, workspaceDir, state, repoManager, intervalSeconds, verbose } = options;
   const taskSources: Array<
     Pick<
       FleetSourceRuntime,
-      "tracker" | "team" | "query" | "searchTasks" | "isTaskActionedUnchanged"
+      "tracker" | "team" | "query" | "searchTasks" | "isTaskActionedUnchanged" | "dependencyGate"
     >
   > =
     options.sources ??
@@ -324,16 +428,9 @@ export async function buildFleetEventAcquirers(options: {
     fleetGitHubSlugs,
   } = await import("./fleet-events");
 
-  const { hasGitHubRelayRouting, loadRelayState, RELAY_BOT_LOGIN } =
-    await import("../relay/connect");
-  const relayState = loadRelayState(workspaceDir);
+  const { RELAY_BOT_LOGIN } = await import("../relay/connect");
+  const { relayState, relayUrl, usesHostedApp } = await resolveFleetGitHubHosting(workspaceDir);
   const relayToken = relayState?.relayToken;
-  const relayUrl =
-    process.env.WORKER_RELAY_URL?.replace(/\/+$/, "") || (relayState?.relayUrl ?? "");
-  // Accept a live legacy repo registration at runtime as well as the newer
-  // verified-id marker. The latter remains required when establishing a new
-  // pairing, but upgrading must not disable an already-delivering relay.
-  const usesHostedApp = Boolean(relayUrl && hasGitHubRelayRouting(relayState));
   const relayEnabled = Boolean(relayToken && relayUrl);
   let relayLastSuccessAt = 0;
   const relayHealthGraceMs = Math.max(90, intervalSeconds * 2) * 1000;
@@ -448,6 +545,7 @@ export async function buildFleetEventAcquirers(options: {
           );
           return result.data ?? [];
         },
+        fetchBranchHeadSha: branchHeadShaFetcher(gh, isGitHubNotFound),
         listOpenPullRequests: async (repo, etag) => {
           try {
             return await gh(repo).conditionalGet(
@@ -467,6 +565,11 @@ export async function buildFleetEventAcquirers(options: {
       conflictSchedule: config.workspace.conflictSchedule,
       conflictResolution: config.workspace.conflictResolution,
       quietPeriodSeconds: parseEnvInteger("WORKER_BASE_SYNC_QUIET_SECONDS", 30, { min: 0 }),
+      // Syncs run in the background; the supervisor admits them as
+      // `pr_worktree` jobs (per-repo limit, one job per PR). Without a
+      // supervisor nothing else bounds them, so keep them one at a time.
+      maxConcurrentBaseSyncs: () =>
+        options.supervisor ? config.workspace.execution.maxConcurrency : 1,
       runStore,
       // Factory form: repos added at runtime become watchable without a
       // restart (a static list would pin the startup slug set).
@@ -496,6 +599,7 @@ export async function buildFleetEventAcquirers(options: {
 
     const autoMergeWatcher = await buildAutoMergeWatcher({
       config,
+      workspaceDir,
       workerState: state.workerState,
       queue: state.queue,
       gh,
@@ -503,6 +607,7 @@ export async function buildFleetEventAcquirers(options: {
       runStore,
       intervalSeconds,
       verbose,
+      isStackedBase: options.isStackedBase,
     });
     acquirers.push(autoMergeWatcher);
     intervalUpdaters.push((seconds) => autoMergeWatcher.updateInterval(seconds));
@@ -650,10 +755,11 @@ export async function buildFleetEventAcquirers(options: {
         "⚠️  Relay is configured but no relay token is stored in the workspace — re-run `devintern worker init`. Polling continues.",
       );
     } else if (relayUrl) {
+      await startRelayAutoVerify(options, relayUrl, relayToken);
       const { RelayAcquirer } = await import("../relay/acquirer");
       const { botMentionCandidates, mentionsAnyBot } = await import("../acquirers/mention-sweep");
       const relayTaskSources = taskSources.map((source) => {
-        const execute = createFleetTaskExecutor(
+        const execute = createGatedFleetTaskExecutor(
           {
             config,
             workspaceDir,
@@ -667,6 +773,7 @@ export async function buildFleetEventAcquirers(options: {
             source: source.team
               ? `relay:${source.tracker}:${source.team.name}`
               : `relay:${source.tracker}`,
+            dependencyGate: source.dependencyGate,
           },
         );
         return {
@@ -755,4 +862,54 @@ export async function buildFleetEventAcquirers(options: {
   }
 
   return acquirers;
+}
+
+/**
+ * Build the injected-task acquirer's merge-state lookup: ask GitHub whether a
+ * dependency PR the gate waits on (closed with an unknown reason, or still
+ * `open` in the registry, or merged without a host merge time the gate needs
+ * to order stacked merges) merged or closed, and record the answer (with
+ * GitHub's `merged_at` and base ref for a merge) in `agent_prs`, so the
+ * dependency gate (and later readers) never ask again.
+ * The open case covers workspaces where no review poller watches the PR
+ * (e.g. no fleet GitHub credentials). An open PR returns `null`.
+ *
+ * Only GitHub repos are looked up; GitLab pollers record the outcome when they
+ * observe the close, and anything unresolvable (e.g. Bitbucket) stays unknown
+ * (the dependent keeps waiting). Auth follows the mode the event wiring chose
+ * (`token-only` for relay-hosted workspaces, else `app-first`).
+ */
+export function createDependencyMergeStateResolver(options: {
+  config: WorkspaceConfig;
+  workspaceDir: string;
+  workerState: Pick<WorkerState, "markAgentPrClosed">;
+}): (lookup: { repo: string; pr: { number: number } }) => Promise<MergeStateAnswer | null> {
+  const { config, workspaceDir, workerState } = options;
+  let resolver: ((slug: string) => FleetGitHubClient) | undefined;
+  return async ({ repo, pr }) => {
+    const repoConfig = config.repos.find((candidate) => candidate.name === repo);
+    const slug = repoConfig
+      ? (repoConfig.env.GITHUB_REPO ?? gitHubSlugFromRemote(repoConfig.remote))
+      : undefined;
+    if (!slug) return null;
+    const { GITHUB_AUTH_MODE_ENV, GitHubReviewsClient } =
+      await import("../code-host/github/reviews");
+    const { closeReasonFromPr, mergeDetailsFromPr } = await import("../review/agent-pr-reconciler");
+    resolver ??= createFleetGitHubClientResolver(
+      config,
+      workspaceDir,
+      process.env[GITHUB_AUTH_MODE_ENV] === "token-only",
+      GitHubReviewsClient,
+    );
+    const [owner = "", name = ""] = slug.split("/");
+    const result = await resolver(slug).conditionalGet<
+      import("../review/agent-pr-reconciler").PolledPr
+    >(`/repos/${slug}/pulls/${pr.number}`, owner, name);
+    if (!result.data) return null;
+    const reason = closeReasonFromPr("closed", result.data);
+    if (!reason || result.data.state === "open") return null;
+    const merge = reason === "merged" ? mergeDetailsFromPr(result.data) : undefined;
+    workerState.markAgentPrClosed(slug, pr.number, reason, merge);
+    return { state: reason, ...merge };
+  };
 }

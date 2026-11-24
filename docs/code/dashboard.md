@@ -16,8 +16,9 @@ The dashboard shows what the worker has been doing: current and past runs, agent
 | **Overview**    | Worker health, active and queued work, recently finished tasks. The landing page.                              |
 | **Runs**        | Full run history. Open a run to follow its stages, read each agent transcript, open the task or PR, retry, or report a problem. |
 | **Automations** | Recurring automations, estimations, and scheduled jobs, with **Run now**.                                      |
+| **Pull requests** | The agent's PRs, switchable between **Open** (awaiting review, oldest first) and **Merged** (up to the 50 most recently merged, newest first), each linked to its ticket. Merges are recorded when the worker sees them, so PRs merged before this feature and PRs closed without merging are not listed. |
 | **Workspace**   | A read-only view of `workspace.toml`: routing, repositories, automations, credentials (key names only), and policy. |
-| **Stats**       | Success rates, durations, and **When runs happen**, a weekday × hour heatmap. Use it to move automations into quiet hours. |
+| **Stats**       | Success rates, durations, and **When runs happen**, a weekday × hour heatmap. Use it to move automations into quiet hours. Success and escalation rates and the median duration exclude auto-merge decisions, which are shown on their own line. |
 
 ## Check worker health
 
@@ -38,14 +39,14 @@ Each **Active work** row shows the task, repository, harness, attempt, current p
 Below the running rows:
 
 - **Waiting to retry**: tasks deferred in the last 48 hours, for example after a usage limit, with the reason.
-- **Queued**: accepted work that has not started, such as ad-hoc tasks, dashboard retries, PR events, and automations waiting for their repository's checkout. Expand a row for its details.
+- **Queued**: accepted work that has not started, such as ad-hoc tasks, dashboard retries, PR events, automations waiting for their repository's checkout, and PR jobs (shown as `owner/repo#N`) waiting for a free slot or for another job on the same PR. Expand a row for its details: task key, repository, who queued it, when, why it may be held back, and for ad-hoc tasks the prompt. Expanding a pending ad-hoc task shows **Cancel task**: confirm it and the task is withdrawn before the worker starts it. If the worker started it in the meantime, the dashboard says it already started and changes nothing. Recently cancelled tasks are listed below the queue with who cancelled them and when. See [Cancel a pending task](delegation.md#cancel-a-pending-task).
 - **Recently finished**: the last five finished tasks with outcome and PR. **View all runs** opens **Runs**.
 
 ## Retry a failed run
 
 Fix the cause first (missing credentials, unclear task details, a temporary agent failure), then open the run and choose **Retry**. The worker queues a fresh attempt with the same routing and checks for queued retries every 5 seconds (`WORKER_RETRY_INTERVAL_SECONDS`). A run that already has an attempt queued or running cannot be retried again.
 
-Ad-hoc tasks from `devintern worker add` show **Re-queue task** instead. It resumes the interrupted attempt on its existing branch rather than opening a second PR. The worker also resumes an interrupted ad-hoc task once on its own at startup when there is work to resume. If a task cannot be re-queued, for example because its queue entry expired after 30 days, the run explains why; use `devintern worker add` to submit it again.
+Ad-hoc tasks from `devintern worker add` show **Re-queue task** instead. It resumes the prior attempt on its existing branch rather than opening a second PR. It is also offered on a successful run that pushed its branch but failed to open the PR (for example on bad credentials); the re-queued run opens the PR from that branch. A fresh branch is used only when the old branch is gone or its PR was merged or closed. The worker also resumes an interrupted ad-hoc task once on its own at startup when there is work to resume. If a task cannot be re-queued, for example because its queue entry expired after 30 days, the run explains why; use `devintern worker add` to submit it again.
 
 ## Report a problem with a run
 
@@ -69,7 +70,7 @@ An automation runs in its repository's base checkout, which only one job uses at
 
 ## Delegate a task
 
-Choose **New task** in the header to hand the worker a one-off task, the dashboard equivalent of [`devintern worker add`](delegation.md). Pick a registered repository, give it a title, and describe the work in Markdown (up to 20,000 characters). The worker sees only this text, so [write a self-contained brief](delegation.md#write-a-self-contained-brief). Press <kbd>Ctrl</kbd>+<kbd>Enter</kbd> (<kbd>⌘</kbd>+<kbd>Enter</kbd> on macOS) to submit.
+Choose **New task** in the header to hand the worker a one-off task, the dashboard equivalent of [`devintern worker add`](delegation.md). Pick a registered repository (and, when several teams are fixed to it, the team whose credentials the run uses, like `--team`), give it a title, and describe the work in Markdown (up to 20,000 characters). The worker sees only this text, so [write a self-contained brief](delegation.md#write-a-self-contained-brief). Press <kbd>Ctrl</kbd>+<kbd>Enter</kbd> (<kbd>⌘</kbd>+<kbd>Enter</kbd> on macOS) to submit.
 
 The task is queued and the running worker picks it up on its next poll. Ad-hoc tasks ignore [working windows](worker.md#working-windows-quiet-hours) and use `[defaults].worker_task_args` (default `--create-pr`). The dialog shows the task key (`local-<slug>`) and links to the run once it starts. Submitting twice returns the task that is already queued instead of creating a duplicate.
 
@@ -92,7 +93,7 @@ The response matches `devintern worker add --json`: `{ id, taskKey, repo, status
 devintern dashboard
 ```
 
-This shows existing run history while the worker is stopped. Only explicit actions such as **Retry** and **New task** write anything.
+This shows existing run history while the worker is stopped. Only explicit actions such as **Retry**, **New task**, and **Cancel task** write anything.
 
 | Option                      | Default     | Effect                                                                                     |
 | --------------------------- | ----------- | ------------------------------------------------------------------------------------------ |
@@ -114,9 +115,9 @@ Every read-only dashboard view is also a `devintern worker` subcommand. These co
 | `devintern worker runs show <id>`         | One run with its stages, retry status, harness logs, and artifacts    |
 | `devintern worker runs logs <id> [name]`  | A run's agent transcripts, or the redacted tail of one                |
 | `devintern worker runs artifacts <id> [artifact-id]` | A run's artifacts, or one artifact's content               |
-| `devintern worker stats`                  | Success rates, durations, and activity by hour (`--window 7d\|30d\|90d\|all`, default `30d`; `--tz <zone>`) |
+| `devintern worker stats`                  | Success rates, durations, and activity by hour (`--window 7d\|30d\|90d\|all`, default `30d`; `--tz <zone>`). Rates and the median duration exclude auto-merge decisions, which are shown on their own line |
 | `devintern worker automations`            | Automations with next and last run                                    |
-| `devintern worker prs`                    | Open PRs and MRs opened by the agent                                  |
+| `devintern worker prs`                    | PRs and MRs opened by the agent: open (default) or recently merged (`--state open\|merged`; `--limit N`, 1..500, default 50) |
 | `devintern worker queue`                  | Queued work that has not started                                      |
 | `devintern worker status`                 | Worker liveness, queue counts, poll cursors                           |
 | `devintern worker overview`               | Capacity, harness health, tracker freshness                           |
@@ -132,7 +133,7 @@ The commands use the workspace from `--workspace`, then `DEVINTERN_WORKSPACE_DIR
 
 ## Local by design
 
-The dashboard listens only on a loopback address and cannot be bound to another one. It has no login of its own, and its actions retry runs, trigger automations, enqueue tasks, and send bug reports with your credentials.
+The dashboard listens only on a loopback address and cannot be bound to another one. It has no login of its own, and its actions retry runs, trigger automations, enqueue and cancel tasks, and send bug reports with your credentials.
 
 To protect it from other websites open in your browser, the API accepts requests only for `localhost`, `127.0.0.1`, `[::1]` (any port), or an [allowed origin](#allowed-origins). Actions must come from the same origin as the dashboard page and send `Content-Type: application/json`.
 

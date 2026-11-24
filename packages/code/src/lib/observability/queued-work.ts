@@ -1,8 +1,11 @@
 /**
  * Queued (not yet started) work for the dashboard's Overview: ad-hoc tasks
  * from `devintern worker add`, dashboard-scheduled retries, webhook
- * deliveries the worker has persisted but not picked up, and automation
- * occurrences waiting for a free slot (they have no run row until admitted).
+ * deliveries the worker has persisted but not picked up, automation
+ * occurrences waiting for a free slot (they have no run row until admitted),
+ * PR jobs (review replies, conflict resolution, CI fixes, auto-merge
+ * checks) waiting in the worker's supervisor for a slot or for their PR,
+ * and polled tracker tickets held back by their native blockers.
  *
  * Rows that are already running are deliberately left out: they own a run
  * row and show up under "Active work" instead. Every reader here follows the
@@ -15,16 +18,19 @@ import { existsSync } from "fs";
 import { resolve } from "path";
 
 import type { InjectedTask } from "../state/injected-tasks";
+import { readTrackerDependencyWaits } from "../state/tracker-dependencies";
+import type { TrackerDependencyWait } from "../state/tracker-dependencies";
 import type { RunRecord } from "../state/run-recorder";
 import { configureSqliteConnection } from "../state/sqlite";
 import { WebhookQueue } from "../state/webhook-queue";
 import type { WebhookEvent } from "../state/webhook-queue";
 import type { ApiResponse, DashboardData } from "./dashboard-api";
 import type { DashboardAutomationView } from "./dashboard-automation-view";
+import type { JobKind, QueuedJobSnapshot, QueuedJobWaitReason } from "../worker/supervisor";
 import { deriveTaskTitle } from "./task-title";
 
 /** Where a queued item came from. */
-export type QueuedWorkKind = "ad-hoc" | "retry" | "webhook" | "automation";
+export type QueuedWorkKind = "ad-hoc" | "retry" | "webhook" | "automation" | "pr-job" | "tracker";
 
 /** One queued item as served by `GET /api/queue`. */
 export interface QueuedWorkItem {
@@ -60,16 +66,69 @@ export interface QueuedWorkItem {
   lastError?: string;
   /** Automation: the scheduled job waiting for a slot (its dashboard id). */
   automationId?: string;
+  /** PR job: the worker job kind (`conflict`, `auto_merge`, `review`, `ci_fix`). */
+  jobKind?: JobKind;
+  /**
+   * PR job: what it waits on — `exclusive` (another job on the same PR is
+   * running), `repo` (the repository's per-repo limit), or `global`.
+   */
+  waitingOn?: QueuedJobWaitReason;
+  /** Ad-hoc / tracker: task keys this task depends on (tracker: its native blockers). */
+  dependsOn?: string[];
+  /** Ad-hoc / tracker: how it waits on {@link dependsOn} (`merged` or `stacked`). */
+  dependencyMode?: "merged" | "stacked";
+  /** Ad-hoc / tracker: `waiting` or `blocked` on a dependency; unset once claimable. */
+  dependencyState?: "waiting" | "blocked";
+  /** Ad-hoc / tracker: why, naming the dependency (`local-foo PR #12 not merged`). */
+  dependencyReason?: string;
+  /** Tracker: the tracker the ticket was polled from (`jira`). */
+  tracker?: string;
+  /** Tracker: the team that polled it (multi-team workspaces). */
+  team?: string;
+}
+
+/** A recently cancelled ad-hoc task (audit trail; it will not run). */
+export interface CancelledTaskItem {
+  /** Stable across polls: `ad-hoc:<row id>`. */
+  id: string;
+  taskKey: string;
+  title: string;
+  repo: string;
+  createdAt: number;
+  /** When it was cancelled (epoch ms). */
+  cancelledAt?: number;
+  /** `cli` (`worker cancel`) or `dashboard`. */
+  cancelledBy?: "cli" | "dashboard";
+  cancelReason?: string;
 }
 
 export interface QueuedWorkResponse {
   items: QueuedWorkItem[];
   /** Every pending item, including those beyond the per-source limit. */
   total: number;
+  /** Most recently cancelled ad-hoc tasks, newest first. */
+  cancelled: CancelledTaskItem[];
 }
 
 /** Characters of an ad-hoc prompt served to the Overview. */
 export const QUEUED_BODY_LIMIT = 4_000;
+
+/** Recently cancelled ad-hoc tasks served next to the queue. */
+export const CANCELLED_TASK_LIMIT = 10;
+
+/** Map a cancelled ad-hoc row to its audit item. */
+export function injectedTaskToCancelledItem(task: InjectedTask): CancelledTaskItem {
+  return {
+    id: `ad-hoc:${task.id}`,
+    taskKey: task.taskKey,
+    title: task.title,
+    repo: task.repo,
+    createdAt: task.createdAt,
+    cancelledAt: task.finishedAt,
+    cancelledBy: task.cancelledBy,
+    cancelReason: task.cancelReason,
+  };
+}
 
 /** Rows read per source; the Overview shows a short list, not the whole backlog. */
 export const QUEUED_SOURCE_LIMIT = 50;
@@ -90,7 +149,43 @@ export function injectedTaskToQueuedItem(task: InjectedTask): QueuedWorkItem {
     message: task.message,
     body: task.body.trim() ? task.body.slice(0, QUEUED_BODY_LIMIT) : undefined,
     bodyTruncated: truncated || undefined,
+    ...(task.dependsOn.length > 0
+      ? {
+          dependsOn: task.dependsOn,
+          dependencyMode: task.dependencyMode ?? "merged",
+          dependencyState: task.dependencyState,
+          dependencyReason: task.dependencyReason,
+        }
+      : {}),
   };
+}
+
+/** Map a tracker ticket held back by its blockers to its queued item. */
+export function trackerWaitToQueuedItem(wait: TrackerDependencyWait): QueuedWorkItem {
+  return {
+    id: `tracker:${wait.team ?? ""}:${wait.taskKey}`,
+    kind: "tracker",
+    title: wait.taskKey,
+    taskKey: wait.taskKey,
+    repo: wait.repo,
+    actor: wait.team ? `poll:${wait.tracker}:${wait.team}` : `poll:${wait.tracker}`,
+    createdAt: wait.since,
+    tracker: wait.tracker,
+    team: wait.team,
+    dependsOn: wait.dependsOn,
+    dependencyMode: wait.dependencyMode,
+    dependencyState: wait.state,
+    dependencyReason: wait.reason,
+  };
+}
+
+/** One-line dependency status of a queued item (`waiting: local-foo PR #12 not merged`). */
+export function queuedDependencyStatus(item: QueuedWorkItem): string | undefined {
+  if (!item.dependsOn?.length) return undefined;
+  if (item.dependencyState && item.dependencyReason) {
+    return `${item.dependencyState}: ${item.dependencyReason}`;
+  }
+  return `dependencies satisfied (${item.dependsOn.join(", ")})`;
 }
 
 /** A pending `scheduled_retries` row, as far as the Overview needs it. */
@@ -288,6 +383,53 @@ export interface QueuedWorkSources {
   pendingTotal: number;
   /** Scheduled jobs on this worker, for occurrences still waiting for a slot. */
   listAutomations?: () => DashboardAutomationView[];
+  /** Recently cancelled ad-hoc rows, newest first; may throw when the DB is missing. */
+  listCancelled?: (limit: number) => InjectedTask[];
+  /** Jobs waiting in the worker's in-process supervisor (embedded dashboard only). */
+  listSupervisorJobs?: () => QueuedJobSnapshot[];
+}
+
+const PR_JOB_TITLES: Partial<Record<JobKind, string>> = {
+  review: "Review feedback",
+  conflict: "Conflict resolution",
+  ci_fix: "CI fix",
+  auto_merge: "Auto-merge check",
+};
+
+/** Human wait reason for a queued PR job. */
+export function prJobWaitMessage(waitingOn: QueuedJobWaitReason): string {
+  switch (waitingOn) {
+    case "exclusive":
+      return "Waiting for another job on this pull request to finish";
+    case "repo":
+      return "Waiting for a free slot on this repository (max_concurrency_per_repo)";
+    case "global":
+      return "Waiting for a free worker slot (max_concurrency)";
+  }
+}
+
+/**
+ * Map a supervisor job still waiting to start to a queued item when it is PR
+ * work (a `pr_worktree` job, or any job held back by an exclusive key);
+ * `null` for anything else (tasks and automations have their own rows).
+ */
+export function supervisorJobToQueuedItem(job: QueuedJobSnapshot): QueuedWorkItem | null {
+  if (job.checkoutClass !== "pr_worktree" && job.exclusiveKey === undefined) return null;
+  const what = PR_JOB_TITLES[job.kind] ?? job.kind.replaceAll("_", " ");
+  const target = job.label ?? job.exclusiveKey;
+  const prNumber = target ? Number(/[#!](\d+)$/.exec(target)?.[1]) : Number.NaN;
+  return {
+    id: `pr-job:${job.id}`,
+    kind: "pr-job",
+    title: target ? `${what} on ${target}` : what,
+    repo: job.repo,
+    actor: job.source,
+    createdAt: job.enqueuedAt,
+    ...(Number.isFinite(prNumber) ? { prNumber } : {}),
+    message: prJobWaitMessage(job.waitingOn),
+    jobKind: job.kind,
+    waitingOn: job.waitingOn,
+  };
 }
 
 /**
@@ -362,18 +504,43 @@ export function collectQueuedWork(sources: QueuedWorkSources): QueuedWorkRespons
   } catch {
     // The scheduler catalog is best-effort here: the queue still lists the rest.
   }
-  const items = [...adHoc, ...retries, ...webhooks, ...automations].sort(
+  let prJobs: QueuedWorkItem[] = [];
+  try {
+    prJobs = (sources.listSupervisorJobs?.() ?? [])
+      .map(supervisorJobToQueuedItem)
+      .filter((item): item is QueuedWorkItem => item !== null);
+  } catch {
+    // Best-effort like the automation catalog.
+  }
+  const tracker = readTrackerDependencyWaits(sources.queueDbPath, QUEUED_SOURCE_LIMIT).map(
+    trackerWaitToQueuedItem,
+  );
+  const items = [...adHoc, ...retries, ...webhooks, ...automations, ...prJobs, ...tracker].sort(
     (a, b) => queuedEligibleAt(a) - queuedEligibleAt(b),
   );
-  // Waiting automations are not counted by the durable queues behind pendingTotal.
+  let cancelled: CancelledTaskItem[] = [];
+  try {
+    cancelled = (sources.listCancelled?.(CANCELLED_TASK_LIMIT) ?? []).map(
+      injectedTaskToCancelledItem,
+    );
+  } catch {
+    // Missing DB or table: nothing cancelled yet.
+  }
+  // Waiting automations, supervisor jobs, and held-back tracker tickets are not
+  // counted by the durable queues behind pendingTotal.
   return {
     items,
-    total: Math.max(items.length, sources.pendingTotal + automations.length),
+    total: Math.max(
+      items.length,
+      sources.pendingTotal + automations.length + prJobs.length + tracker.length,
+    ),
+    cancelled,
   };
 }
 
 /**
- * `GET /api/queue` — pending ad-hoc tasks, retries, and webhook deliveries.
+ * `GET /api/queue` — pending ad-hoc tasks, retries, webhook deliveries,
+ * waiting automations, and tracker tickets held back by their blockers.
  *
  * @param data - Dashboard data source
  */
@@ -386,6 +553,8 @@ export function handleQueuedWork(data: DashboardData): ApiResponse {
     lookupRun: (id) => data.getRunDetail(id)?.run ?? null,
     pendingTotal: stats.pending + stats.injected.pending + stats.retries.pending,
     listAutomations: () => data.getAutomations(),
+    listCancelled: (limit) => data.getInjectedTaskReadStore().listRecentlyCancelled(limit),
+    listSupervisorJobs: () => data.getSupervisorQueuedJobs(),
   });
   return { status: 200, body };
 }

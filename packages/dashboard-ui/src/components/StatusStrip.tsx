@@ -19,7 +19,7 @@ import {
 import type { HarnessAlert } from "@/components/overview/overview-model";
 import { useNow } from "@/components/overview/use-now";
 import { useOverviewPoll } from "@/components/overview/overview-store";
-import { usePoll } from "@/lib/api";
+import { QUEUE_CHANGED_EVENT, usePoll } from "@/lib/api";
 import type { ScheduleSnapshot, SourceHealth, WorkerResponse, WorkerStatus } from "@/lib/api";
 import { parseHash } from "@/lib/routes";
 import {
@@ -335,7 +335,10 @@ function useStripFit(ref: React.RefObject<HTMLDivElement | null>, ready: boolean
 
 /** Header strip: worker liveness, queue counts, open agent PRs, and polling state. */
 export function StatusStrip() {
-  const { data, error } = usePoll<WorkerResponse>("/api/worker");
+  // Re-fetch at once after a cancel so the pending count drops without waiting a poll.
+  const { data, error } = usePoll<WorkerResponse>("/api/worker", 5000, {
+    refreshOn: QUEUE_CHANGED_EVENT,
+  });
   const stripRef = useRef<HTMLDivElement>(null);
   useStripFit(stripRef, data !== null);
   if (!data) {

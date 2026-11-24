@@ -437,7 +437,11 @@ async function runStatusConnectTarget(
     console.log("   All workspace GitHub repositories are verified.");
   } else {
     console.log(`   Unverified workspace repositories: ${missing.join(", ")}`);
-    console.log("   Run: devintern worker connect github");
+    console.log(
+      '   Repositories under an already-paired installation with "All repositories" access ' +
+        "verify automatically when the worker starts or reloads its config.",
+    );
+    console.log("   Otherwise run: devintern worker connect github");
   }
   const relayState = loadRelayState(workspaceDir);
   const gitlabProjects = workspaceGitLabRelayProjects(config, workspaceDir);

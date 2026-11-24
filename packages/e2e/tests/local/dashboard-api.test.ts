@@ -1,9 +1,14 @@
-import { Database } from "bun:sqlite";
 import { expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DashboardFixture, dashboardWriteHeaders } from "../../helpers/dashboard";
+import {
+  DashboardFixture,
+  dashboardWriteHeaders,
+  isDuplicateRetryRejection,
+  readQueueRows,
+} from "../../helpers/dashboard";
+import type { StoredRetryAudit } from "../../helpers/dashboard";
 import { isolatedEnvironment } from "../../helpers/environment";
 import { checkedCommand, command } from "../../helpers/process";
 import { freePort } from "../../helpers/webhook-server";
@@ -100,57 +105,6 @@ async function readJson<T>(response: Response): Promise<T> {
 
 async function workerStatus(baseUrl: string): Promise<WorkerResponse> {
   return await readJson<WorkerResponse>(await fetch(`${baseUrl}/api/worker`));
-}
-
-interface StoredRetryAudit {
-  run_id: number;
-  task_key: string | null;
-  actor: string;
-  action: string;
-  message: string | null;
-}
-
-/** Read committed queue rows. A missing table is empty, not a failed open. */
-function readQueueRows<T>(dbPath: string, table: string, sql: string): T[] {
-  if (!/^[A-Za-z0-9_]+$/.test(table)) {
-    throw new Error(`refusing to query unexpected table ${table}`);
-  }
-  if (!existsSync(dbPath)) return [];
-  const db = new Database(dbPath, { readonly: true });
-  try {
-    db.run("PRAGMA busy_timeout = 5000");
-    const known = db
-      .query("SELECT 1 AS one FROM sqlite_master WHERE type = 'table' AND name = ?")
-      .get(table) as { one: number } | null;
-    if (!known) return [];
-    return db.query(sql).all() as T[];
-  } finally {
-    db.close();
-  }
-}
-
-/**
- * Second POST while an ad-hoc retry is queued or starting.
- *
- * The handler rejects that overlap: the row is already pending/running, the
- * re-queue update lost the race, or the worker has already opened a run.
- *
- * Pending/running may omit the "not retriable:" prefix. Eligibility adds it
- * (`resolveRetryEligibility` → `conflict`), and a loser that already passed
- * that read gets the same sentence bare from `retryInjectedRun`. "Moved on"
- * and "in progress" stay exact.
- */
-function isDuplicateRetryRejection(taskKey: string, error: string): boolean {
-  const task = taskKey.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return (
-    error === `ad-hoc task ${taskKey} moved on; reload the run and try again` ||
-    new RegExp(
-      `^(?:not retriable: )?ad-hoc task ${task} is already (?:pending|running) \\(task #\\d+\\)$`,
-    ).test(error) ||
-    new RegExp(
-      `^${task} already has a run in progress \\(run \\d+\\); wait for it to finish$`,
-    ).test(error)
-  );
 }
 
 /** Whether this host can bind IPv6 loopback, so the `::1` case is not flaky. */

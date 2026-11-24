@@ -1,27 +1,17 @@
-import { existsSync, readFileSync } from "fs";
 import { resolve } from "path";
 import type { BaseProjectConfig, ProjectSettings, TrackerSection } from "../../types/settings";
+import { loadWorkspaceTrackerSettings } from "../workspace/tracker-settings";
 
 /**
- * Load per-project workflow settings from `.devintern-code/settings.json`.
+ * Load workflow settings for the current run: tracker project settings from
+ * `[trackers]` in the workspace's `workspace.toml`. A repository's
+ * `.devintern-code/settings.json` is no longer read; its tracker sections are
+ * copied into the workspace by the automatic migration.
  *
- * @returns Parsed settings, or `null` when missing or invalid
+ * @returns Settings, or `null` when the workspace defines none
  */
 export function loadProjectSettings(): ProjectSettings | null {
-  const settingsPath = resolve(process.cwd(), ".devintern-code", "settings.json");
-
-  if (!existsSync(settingsPath)) {
-    return null;
-  }
-
-  try {
-    const settingsContent = readFileSync(settingsPath, "utf8");
-    const settings = JSON.parse(settingsContent) as ProjectSettings;
-    return settings;
-  } catch (error) {
-    console.warn(`⚠️  Failed to parse settings.json: ${error}`);
-    return null;
-  }
+  return loadWorkspaceTrackerSettings();
 }
 
 /** Resolve the active tracker type from environment. */
@@ -66,7 +56,7 @@ export function resolveProjectKey(taskKey: string, task?: { raw: unknown }): str
 export function printMissingEnvHelp(): void {
   console.error("\nPlease ensure you have a .env file in one of these locations:");
   console.error(
-    `   - Project-specific: ${resolve(process.cwd(), ".devintern-code", ".env")} (or in any parent directory)`,
+    "   - This repository's settings: ~/.devintern/env/<repo>.env (run 'devintern init')",
   );
   console.error(
     `   - Current directory: ${resolve(process.cwd(), ".env")} (or in any parent directory)`,

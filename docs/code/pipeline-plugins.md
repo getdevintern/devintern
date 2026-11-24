@@ -37,19 +37,17 @@ const definition: StepDefinition = {
 export default definition;
 ```
 
-Register it in `pipeline.plugins` and place it in `pipeline.steps`:
+Register it in the pipeline file's `plugins` and place it in `steps`:
 
 ```json
 {
-  "pipeline": {
-    "plugins": ["./.devintern-code/steps/check-policy.ts"],
-    "steps": [
-      { "use": "implement" },
-      { "use": "commit" },
-      { "use": "check-policy", "dryRun": false },
-      { "use": "finalize" }
-    ]
-  }
+  "plugins": ["./steps/check-policy.ts"],
+  "steps": [
+    { "use": "implement" },
+    { "use": "commit" },
+    { "use": "check-policy", "dryRun": false },
+    { "use": "finalize" }
+  ]
 }
 ```
 
@@ -67,7 +65,7 @@ The same `context` object is passed to every step.
 | Field                                                  | Meaning                                                                    |
 | ------------------------------------------------------ | -------------------------------------------------------------------------- |
 | `taskKey`, `taskSummary`, `task`, `tracker`            | Task identity and tracker client (may be undefined for Markdown tasks).    |
-| `projectSettings`                                      | Parsed `.devintern-code/settings.json`, or `null`.                         |
+| `projectSettings`                                      | Tracker settings from `[trackers]` in `workspace.toml`, or `null`.         |
 | `taskContent`, `taskFile`                              | The formatted task prompt and the path to its file.                        |
 | `workingDir`                                           | The repository worktree the task runs in.                                  |
 | `outputDir`                                            | The task output directory.                                                 |
@@ -139,19 +137,18 @@ A failing check is not a transient error. Return `halt` (or `repeat`) for a fail
 
 ## Loading plugins and resolving paths
 
-`pipeline.plugins` accepts module paths and package names. Where they resolve depends on where the pipeline is declared:
+`plugins` accepts module paths and package names. Where they resolve depends on where the pipeline is declared:
 
-| Declared in                    | Relative paths and package names resolve from |
-| ------------------------------ | --------------------------------------------- |
-| `.devintern-code/settings.json` | The repository root.                          |
-| Workspace `pipeline_file`       | The directory containing the pipeline file (this also applies to `verify` prompt paths). |
+| Declared in               | Relative paths and package names resolve from |
+| ------------------------- | --------------------------------------------- |
+| Workspace `pipeline_file` | The directory containing the pipeline file (this also applies to `verify` prompt paths). |
 
 Install a shared plugin's dependencies next to the file that declares it. For a workspace file at `~/.devintern/pipelines/backend.json`, run `cd ~/.devintern/pipelines && bun add <package>` and keep relative modules such as `./steps/check-policy.ts` there.
 
 A plugin published to npm is referenced by package name; its entry module must default-export a `StepDefinition`:
 
 ```json
-{ "pipeline": { "plugins": ["@acme/devintern-steps"], "steps": [] } }
+{ "plugins": ["@acme/devintern-steps"], "steps": [] }
 ```
 
 ## Examples

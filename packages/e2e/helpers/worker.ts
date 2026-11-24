@@ -78,7 +78,7 @@ const INJECTED_COLUMNS = [
 ].join(", ");
 
 /** Serialize one scheduled automation as a TOML `[[automations]]` table. */
-function automationTable(automation: WorkerAutomation): string[] {
+export function automationTable(automation: WorkerAutomation): string[] {
   const lines = [
     "[[automations]]",
     `id = ${JSON.stringify(automation.id)}`,
@@ -580,6 +580,33 @@ export class WorkerFixture {
     return { exitCode, stdout, stderr };
   }
 
+  /**
+   * Start the built CLI in the background (e.g. `worker add --wait`).
+   *
+   * `result` resolves when the process exits; `kill` force-stops it and is
+   * safe to call after exit, so tests call it in `finally`.
+   */
+  spawnCli(args: string[]): { result: Promise<WorkerAddResult>; kill: () => void } {
+    const child = Bun.spawn([process.execPath, cliPath, ...args], {
+      cwd: this.workspaceDir,
+      env: this.env,
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const result = Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]).then(([stdout, stderr, exitCode]) => ({ exitCode, stdout, stderr }));
+    return {
+      result,
+      kill: () => {
+        if (child.exitCode === null) child.kill("SIGKILL");
+      },
+    };
+  }
+
   /** Run the built CLI's `worker add` with arbitrary options. */
   runAdd(
     args: string[],
@@ -688,6 +715,17 @@ export class WorkerFixture {
     )[0];
   }
 
+  /**
+   * Deferral bookkeeping of one injected row: the consecutive-deferral count
+   * (the attempt budget a deferral consumes) and the earliest claim time.
+   */
+  injectedDeferral(id: number): { defer_count: number; not_before: number | null } | undefined {
+    return this.query<{ defer_count: number; not_before: number | null }>(
+      "SELECT defer_count, not_before FROM injected_tasks WHERE id = ?",
+      [id],
+    )[0];
+  }
+
   /** Read run records, optionally scoped to one task key. */
   runRecords(taskKey?: string): WorkerRunRecord[] {
     const columns =
@@ -756,11 +794,21 @@ export class WorkerFixture {
    * Missed windows still coalesce to one run; this only chooses when that
    * single occurrence is due.
    *
+   * `whileRunning` allows the write against a live daemon. Its armed timer
+   * still points at the old cursor, so the caller must make the daemon re-read
+   * it: a live workspace.toml reload re-arms the timer from the durable rows
+   * (an unchanged schedule spec keeps the moved cursor).
+   *
    * @param scheduleId - Durable `automation_schedules.automation_id`
    * @param nextDueAt - Epoch milliseconds stored in `next_due_at`
+   * @param options - `whileRunning` skips the stopped-worker guard
    */
-  setScheduleNextDue(scheduleId: string, nextDueAt: number): void {
-    if (this.running) {
+  setScheduleNextDue(
+    scheduleId: string,
+    nextDueAt: number,
+    options: { whileRunning?: boolean } = {},
+  ): void {
+    if (this.running && !options.whileRunning) {
       throw new Error(
         `Cannot move schedule "${scheduleId}" while the worker is running; stop it first`,
       );

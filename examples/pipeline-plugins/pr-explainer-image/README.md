@@ -9,6 +9,13 @@ The step generates the image; `finalize` uploads and publishes the registered
 artifact through the normal pipeline. Generation, capture, upload, and comment
 failures remain advisory. No asset branch or extra repository commit is needed.
 
+No bucket? Set `"uploader": "code-host"` in `pipeline.json` instead of
+`"files-sdk"` to host the PNG as a native GitHub attachment or GitLab project
+upload with the PR's existing code-host credentials. The storage setup below and
+the upload probe are then unnecessary. See
+[native uploads](../../../docs/code/artifacts.md#native-github-and-gitlab-uploads)
+for the supported tokens, hosts, and size limits.
+
 ## Requirements
 
 - A DevIntern build with `createFilesArtifactUploader` in its public pipeline API.
@@ -23,20 +30,26 @@ failures remain advisory. No asset branch or extra repository commit is needed.
 ## Setup
 
 ```bash
-mkdir -p .devintern-code/steps .devintern-code/prompts .devintern-code/adapters
-cp examples/pipeline-plugins/pr-explainer-image/plugin.ts .devintern-code/steps/pr-explainer-image.ts
-cp examples/pipeline-plugins/pr-explainer-image/prompts/image.md .devintern-code/prompts/pr-explainer-image.md
-cp examples/pipeline-plugins/pr-explainer-image/artifact-storage.ts .devintern-code/adapters/artifact-storage.ts
-cp examples/pipeline-plugins/pr-explainer-image/check-upload.ts .devintern-code/adapters/check-upload.ts
-bun add -d @getdevintern/code
+mkdir -p ~/.devintern/pipelines/steps ~/.devintern/pipelines/prompts ~/.devintern/pipelines/adapters
+cp examples/pipeline-plugins/pr-explainer-image/plugin.ts ~/.devintern/pipelines/steps/pr-explainer-image.ts
+cp examples/pipeline-plugins/pr-explainer-image/prompts/image.md ~/.devintern/pipelines/prompts/pr-explainer-image.md
+cp examples/pipeline-plugins/pr-explainer-image/artifact-storage.ts ~/.devintern/pipelines/adapters/artifact-storage.ts
+cp examples/pipeline-plugins/pr-explainer-image/check-upload.ts ~/.devintern/pipelines/adapters/check-upload.ts
+cp examples/pipeline-plugins/pr-explainer-image/pipeline.json ~/.devintern/pipelines/backend.json
+cd ~/.devintern/pipelines && bun add @getdevintern/code
 ```
+
+Set `pipeline_file = "pipelines/backend.json"` on the repository's
+`[[repos]]` entry in `~/.devintern/workspace.toml` (see
+[Install and copy a plugin](../README.md#install-and-copy-a-plugin)).
+`promptFile` is read relative to the task checkout, so the pipeline file
+gives it as an absolute path: replace `/home/you` with your home directory.
 
 The pipeline uses the built-in `"uploader": "files-sdk"` target. The two files
 copied into `adapters/` are only for the manual upload probe, not plugin loading.
 Files SDK ships with DevIntern; R2/S3 use requires no extra package install.
 
-Set the following in the worker environment, then merge `settings.json`'s
-`pipeline` block into the repository's settings:
+Set the following in the worker environment:
 
 ```dotenv
 DEVINTERN_ARTIFACT_BUCKET=review-artifacts
@@ -63,15 +76,14 @@ environment-configured target selected by the pipeline. Built-in providers are
   `[[repos]]` entry. This path is relative to the workspace home; those values
   override shared workspace values. Inline `[repos.env]` overrides the file,
   but keep secret keys in the uncommitted environment file.
-- **Direct repository CLI:** use `.devintern-code/.env` in the checkout or
-  exported shell variables. Workspace worker runs do **not** load that file.
+- **Direct CLI runs:** a repository registered by `devintern init` reads
+  `~/.devintern/env/<repo>.env`; exported shell variables also work.
 - **Manual probe:** use the same environment file explicitly, for example
-  `bun --env-file=$HOME/.devintern/.env .devintern-code/adapters/check-upload.ts`.
+  `bun --env-file=$HOME/.devintern/.env ~/.devintern/pipelines/adapters/check-upload.ts`.
 
-Keep credentials out of `settings.json`, plugin source, and committed TOML.
-Use file mode `0600` on environment files. The non-secret pipeline selection
-(`"uploader": "files-sdk"`) can be committed in repository settings, or set in
-the workspace pipeline file. See [workspace environment layers](../../../docs/code/workspaces.md#environment).
+Keep credentials out of the pipeline file, plugin source, and committed TOML.
+Use file mode `0600` on environment files. The non-secret uploader selection
+(`"uploader": "files-sdk"`) belongs in the pipeline file. See [workspace environment layers](../../../docs/code/workspaces.md#environment).
 
 ### Example: configure Cloudflare R2
 
@@ -101,7 +113,7 @@ the workspace pipeline file. See [workspace environment layers](../../../docs/co
 5. Check the target before enabling unattended publication:
 
    ```bash
-   bun .devintern-code/adapters/check-upload.ts
+   bun ~/.devintern/pipelines/adapters/check-upload.ts
    ```
 
    The probe writes one tiny `upload-check.txt` object and fetches its returned
@@ -157,7 +169,7 @@ local snapshot available and PR delivery continues.
 
 ## Files and validation
 
-- `plugin.ts`, `prompts/image.md`, `settings.json`: generation and registration.
+- `plugin.ts`, `prompts/image.md`, `pipeline.json`: generation and registration.
 - `artifact-storage.ts`: copyable Files SDK storage configuration.
 - `fixtures/`: a synthetic diff and tiny PNG encoded as base64.
 - `tests/`: real step-runner, snapshot, stale-file, and advisory-failure checks.

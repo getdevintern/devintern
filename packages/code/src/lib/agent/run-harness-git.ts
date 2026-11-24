@@ -5,7 +5,7 @@ import { PRManager } from "../code-host";
 import { isFinalPrDeliveryAttempt, MAX_PR_DELIVERY_ATTEMPTS } from "../task/actioned-without-pr";
 import { loadProjectSettings } from "../config/project-settings";
 import { applyActionedTransition } from "../task/actioned-transition";
-import { recordRunPr } from "../state/run-recorder";
+import { recordRunPr, recordRunPrFailure } from "../state/run-recorder";
 import { parseGitHubPrUrl, recordAgentPrFromUrl } from "../state/worker-state";
 import type { TaskTrackerClient } from "../trackers/client";
 import type { Task } from "../../types/task-tracker";
@@ -204,8 +204,17 @@ export function createGitHelpers(ctx: FinalizeContext) {
     message: string,
     options: { branch?: string; permanent?: boolean } = {},
   ) => {
-    if (runContext.activeTaskContext && !options.permanent) {
-      runContext.activeTaskContext.prCreationFailure = message;
+    // Always on the run record (permanent or not): positive evidence for the
+    // dashboard that this run asked for a PR and did not get one (so its branch
+    // is worth re-queueing), and a succeeded run without a PR must not read as
+    // "nothing to deliver" to a dependent task's gate.
+    recordRunPrFailure(message);
+    if (runContext.activeTaskContext) {
+      runContext.activeTaskContext.prDeliveryFailure = {
+        message,
+        permanent: options.permanent === true,
+      };
+      if (!options.permanent) runContext.activeTaskContext.prCreationFailure = message;
     }
     if (!(taskKey && tracker) || skipComments) return;
     const { branch } = options;
@@ -329,9 +338,9 @@ export function createGitHelpers(ctx: FinalizeContext) {
         return prResult;
       } else {
         console.log(`⚠️  PR creation failed: ${prResult.message}`);
-        // The run "succeeds" without a PR — a silent user-visible
-        // degradation worth tracking. prResult.message can quote API
-        // errors; captureError redacts token-like substrings.
+        // The pipeline records the run as failed (pushed, no PR).
+        // prResult.message can quote API errors; captureError redacts
+        // token-like substrings.
         captureError(new Error(prResult.message || "PR creation failed"), {
           taskKey,
           stage: "create-pr",

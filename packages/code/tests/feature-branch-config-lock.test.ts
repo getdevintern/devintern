@@ -7,15 +7,30 @@
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { Utils } from "../src/lib/utils";
-import { executeGitCommandWithConfigLockRetry } from "../src/lib/utils/git-exec";
+import {
+  describeConfigLockPlaceholder,
+  executeGitCommandWithConfigLockRetry,
+  setConfigLockRetryDelaysForTests,
+} from "../src/lib/utils/git-exec";
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8", stdio: "pipe" }).trim();
 }
+
+/**
+ * Make a never-clearing config lock fail at once. Git itself waits about a
+ * second for a held config lock (`core.configLockTimeout`) on every attempt,
+ * which only adds wall time when the lock is a permanent placeholder.
+ */
+const FAST_CONFIG_LOCK_ENV = {
+  GIT_CONFIG_COUNT: "1",
+  GIT_CONFIG_KEY_0: "core.configLockTimeout",
+  GIT_CONFIG_VALUE_0: "0",
+};
 
 /** Tracking entries git recorded for `branch` in the shared config. */
 function trackingConfig(commonDir: string, branch: string): string {
@@ -32,9 +47,15 @@ describe("feature branch creation under config lock contention", () => {
   let bare: string;
   let worktree: string;
   let lockPath: string;
+  let savedReviewWorktreeBase: string | undefined;
+  let savedGitConfigEnv: Record<string, string | undefined> = {};
 
   beforeEach(() => {
     root = mkdtempSync(join(tmpdir(), "feature-branch-config-lock-"));
+    // Review worktree prep sweeps every sibling of the base path; keep it
+    // inside this test's root so it never touches a live worker's worktrees.
+    savedReviewWorktreeBase = process.env.DEVINTERN_REVIEW_WORKTREE_PATH;
+    process.env.DEVINTERN_REVIEW_WORKTREE_PATH = join(root, "review-worktree");
     upstream = join(root, "upstream");
     bare = join(root, "repo.git");
     worktree = join(root, "task-wt");
@@ -61,6 +82,14 @@ describe("feature branch creation under config lock contention", () => {
   });
 
   afterEach(() => {
+    if (savedReviewWorktreeBase === undefined) delete process.env.DEVINTERN_REVIEW_WORKTREE_PATH;
+    else process.env.DEVINTERN_REVIEW_WORKTREE_PATH = savedReviewWorktreeBase;
+    setConfigLockRetryDelaysForTests();
+    for (const [key, value] of Object.entries(savedGitConfigEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    savedGitConfigEnv = {};
     rmSync(lockPath, { force: true });
     rmSync(root, { recursive: true, force: true });
   });
@@ -192,5 +221,77 @@ describe("feature branch creation under config lock contention", () => {
     } finally {
       Utils.executeGitCommand = original;
     }
+  });
+
+  function useFastPermanentLock(): void {
+    setConfigLockRetryDelaysForTests([1, 1, 1, 1, 1, 1]);
+    savedGitConfigEnv = Object.fromEntries(
+      Object.keys(FAST_CONFIG_LOCK_ENV).map((key) => [key, process.env[key]]),
+    );
+    Object.assign(process.env, FAST_CONFIG_LOCK_ENV);
+  }
+
+  test("prepares a review worktree while a sandbox placeholder holds config.lock", async () => {
+    // The placeholder never clears, so waiting out the backoff only adds wall time.
+    useFastPermanentLock();
+    // What a bubblewrap sandbox leaves as the mount point for masking config.lock.
+    writeFileSync(lockPath, "");
+    chmodSync(lockPath, 0o444);
+    const branch = `review-lock-${process.pid}-${Date.now()}`;
+    git(upstream, "branch", branch);
+    let worktreePath: string | undefined;
+
+    try {
+      const result = await Utils.prepareReviewWorktree(branch, {
+        cwd: bare,
+        installDependencies: false,
+      });
+      worktreePath = result.path;
+
+      expect(result.error).toBeUndefined();
+      expect(result.success).toBe(true);
+      expect(await Utils.getCurrentBranch(worktreePath)).toBe(branch);
+      expect(git(worktreePath ?? "", "rev-parse", "HEAD")).toBe(git(upstream, "rev-parse", branch));
+      expect(existsSync(lockPath)).toBe(true);
+
+      // A second review of the same branch reuses (re-checks out) the worktree.
+      const reused = await Utils.prepareReviewWorktree(branch, {
+        cwd: bare,
+        installDependencies: false,
+      });
+      expect(reused.error).toBeUndefined();
+      expect(reused.success).toBe(true);
+      expect(reused.path).toBe(worktreePath);
+      expect(await Utils.getCurrentBranch(worktreePath)).toBe(branch);
+    } finally {
+      if (worktreePath) rmSync(worktreePath, { recursive: true, force: true });
+    }
+  });
+
+  test("names a sandbox placeholder lock in the failure", async () => {
+    useFastPermanentLock();
+    writeFileSync(lockPath, "");
+    chmodSync(lockPath, 0o444);
+
+    const result = await executeGitCommandWithConfigLockRetry(
+      ["config", "--file", join(bare, "config"), "devintern.test", "value"],
+      { cwd: worktree },
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain(`${lockPath} is an empty read-only file`);
+  });
+
+  test("does not mistake an ordinary held lock for a sandbox placeholder", () => {
+    writeFileSync(lockPath, "");
+    const failure = {
+      error: `error: could not lock config file ${join(bare, "config")}: File exists`,
+    };
+
+    expect(describeConfigLockPlaceholder(failure)).toBeUndefined();
+    chmodSync(lockPath, 0o444);
+    expect(describeConfigLockPlaceholder(failure)).toContain("empty read-only file");
+    rmSync(lockPath, { force: true });
+    expect(describeConfigLockPlaceholder(failure)).toBeUndefined();
   });
 });

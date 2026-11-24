@@ -46,7 +46,7 @@ import { InjectedTaskStore } from "../src/lib/state/injected-tasks";
 import { RunStore } from "../src/lib/state/run-recorder";
 import { ScheduledRetryStore } from "../src/lib/state/run-retry";
 import { WorkerState } from "../src/lib/state/worker-state";
-import { runWorkerReadCommand } from "../src/lib/worker/dashboard-read-cli";
+import { renderStats, runWorkerReadCommand } from "../src/lib/worker/dashboard-read-cli";
 import type { WorkerReadCommand } from "../src/lib/worker/dashboard-read-cli";
 import { workspaceDbPath, workspaceStateDir } from "../src/lib/workspace/paths";
 
@@ -156,6 +156,8 @@ describe("devintern worker read-only dashboard commands", () => {
       branch: "feature/proj-1",
       taskKey: "PROJ-1",
     });
+    state.recordAgentPr({ repo: "acme/web", prNumber: 6, taskKey: "PROJ-0" });
+    state.markAgentPrClosed("acme/web", 6, "merged");
     state.setCursor("markdown", "cursor-1");
     state.close();
 
@@ -215,6 +217,9 @@ describe("devintern worker read-only dashboard commands", () => {
   }
 
   test("--json prints exactly the dashboard handler body for every command", () => {
+    // Freeze the clock: the in-progress fixture run's busy time counts up to
+    // `now`, so CLI and handler output would otherwise differ by a millisecond.
+    setSystemTime(new Date());
     const data = embeddedDashboardData();
     try {
       const cases: [WorkerReadCommand, string[], () => ApiResponse][] = [
@@ -306,6 +311,7 @@ describe("devintern worker read-only dashboard commands", () => {
     } finally {
       setSystemTime();
       data.close();
+      setSystemTime();
     }
   });
 
@@ -325,6 +331,8 @@ describe("devintern worker read-only dashboard commands", () => {
       lastRun: { id: runIds.retro },
     });
     expect(JSON.parse(run("prs", ["--json"]).stdout).prs[0].prNumber).toBe(7);
+    const merged = JSON.parse(run("prs", ["--state", "merged", "--json"]).stdout).prs;
+    expect(merged.map((pr: { prNumber: number }) => pr.prNumber)).toEqual([6]);
     const queue = JSON.parse(run("queue", ["--json"]).stdout);
     expect(queue.items.map((item: { kind: string }) => item.kind).sort()).toEqual([
       "ad-hoc",
@@ -343,9 +351,15 @@ describe("devintern worker read-only dashboard commands", () => {
     const detail = run("runs", ["show", String(runIds.retro)]);
     expect(detail.stdout).toContain("implementation [succeeded] agent ran");
     expect(detail.stdout).toContain('"turns": 3');
-    expect(run("stats", ["--window", "all"]).stdout).toContain("Success rate:     50%");
+    expect(run("stats", ["--window", "all"]).stdout).toContain(
+      "Success rate:     50% (excludes auto-merge)",
+    );
     expect(run("status", []).stdout).toContain("Ad-hoc:     1 pending, 0 running");
     expect(run("logs", []).stdout).toContain("Processing PROJ-1");
+    const merged = run("prs", ["--state", "merged"]);
+    expect(merged.stdout).toContain("MERGED");
+    expect(merged.stdout).toContain("PROJ-0");
+    expect(run("prs", ["--state", "closed"]).code).not.toBe(0);
   });
 
   test("status says unknown when the worker lock is from another PID namespace", () => {
@@ -587,4 +601,57 @@ test("the worker dispatcher routes exactly the read-only command names", async (
   const names = [...listed.matchAll(/"([^"]+)"/g)].map((match) => match[1]).sort();
   const { WORKER_READ_COMMANDS } = await import("../src/lib/worker/dashboard-read-cli");
   expect(names).toEqual([...WORKER_READ_COMMANDS].sort());
+});
+
+describe("worker stats formatter", () => {
+  function statsFor(
+    runs: { origin: "task" | "auto_merge"; status: "succeeded" | "failed" | "escalated" }[],
+  ) {
+    const dir = mkdtempSync(join(tmpdir(), "stats-format-"));
+    const store = new RunStore(join(dir, "queue.db"));
+    try {
+      for (const entry of runs) {
+        const id = store.createRun({ origin: entry.origin, harness: "claude-code" });
+        store.finishRun(id, entry.status);
+      }
+      return store.getStats(null);
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  test("labels the headline scope and reports auto-merge outcomes on their own line", () => {
+    const stats = statsFor([
+      { origin: "task", status: "succeeded" },
+      { origin: "task", status: "escalated" },
+      { origin: "auto_merge", status: "succeeded" },
+      { origin: "auto_merge", status: "escalated" },
+      { origin: "auto_merge", status: "escalated" },
+      { origin: "auto_merge", status: "failed" },
+    ]);
+    const out = renderStats({ window: "all", stats });
+    expect(out).toContain("Success rate:     50% (excludes auto-merge)");
+    expect(out).toContain("Escalation rate:  50% (excludes auto-merge)");
+    expect(out).toContain("Auto-merge:       1 merged, 2 left for review, 1 failed");
+  });
+
+  test("omits the auto-merge line when the window has no auto-merge runs", () => {
+    const out = renderStats({
+      window: "all",
+      stats: statsFor([{ origin: "task", status: "succeeded" }]),
+    });
+    expect(out).toContain("Success rate:     100% (excludes auto-merge)");
+    expect(out).not.toContain("Auto-merge:");
+  });
+
+  test("shows no headline rates when only auto-merge runs finished", () => {
+    const out = renderStats({
+      window: "all",
+      stats: statsFor([{ origin: "auto_merge", status: "escalated" }]),
+    });
+    expect(out).toContain("Success rate:     - (excludes auto-merge)");
+    expect(out).toContain("Escalation rate:  - (excludes auto-merge)");
+    expect(out).toContain("Auto-merge:       0 merged, 1 left for review");
+  });
 });

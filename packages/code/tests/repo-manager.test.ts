@@ -271,4 +271,48 @@ describe("RepoManager", () => {
     expect(existsSync(fresh)).toBe(true);
     expect(existsSync(base)).toBe(true);
   });
+
+  test("ensurePrJobWorktree tracks the default branch and never moves the base checkout", async () => {
+    await manager.ensureBareClone(repo);
+    const base = await manager.ensureBaseWorktree(repo);
+    const settingsDir = ".devintern-code";
+
+    // An automation holds the base checkout on its own branch, with its own
+    // (committed and uncommitted) project settings.
+    git(base, "checkout -b automation/work");
+    mkdirSync(join(base, settingsDir), { recursive: true });
+    writeFileSync(join(base, settingsDir, "settings.json"), '{"from":"automation"}\n');
+    git(base, "add .");
+    git(
+      base,
+      '-c user.name="Fixture User" -c user.email="fixture@example.com" commit -m "automation settings"',
+    );
+    writeFileSync(join(base, settingsDir, "settings.json"), '{"from":"half-edited"}\n');
+    const baseHead = git(base, "rev-parse HEAD");
+
+    const prJobs = await manager.ensurePrJobWorktree(repo);
+    expect(prJobs).toBe(join(workspaceDir, "worktrees", "backend", "pr-jobs"));
+    expect(prJobs).not.toBe(base);
+    expect(git(prJobs, "rev-parse HEAD")).toBe(git(originDir, "rev-parse main"));
+    expect(existsSync(join(prJobs, settingsDir, "settings.json"))).toBe(false);
+
+    // Upstream moves on; the next PR job sees the new default-branch commit.
+    writeFileSync(join(originDir, "next.txt"), "next\n");
+    git(originDir, "add .");
+    git(originDir, 'commit -m "Next upstream commit"');
+    await manager.fetch(repo.name);
+    expect(await manager.ensurePrJobWorktree(repo)).toBe(prJobs);
+    expect(git(prJobs, "rev-parse HEAD")).toBe(git(originDir, "rev-parse main"));
+    expect(existsSync(join(prJobs, "next.txt"))).toBe(true);
+
+    // The automation's checkout is untouched.
+    expect(git(base, "rev-parse --abbrev-ref HEAD")).toBe("automation/work");
+    expect(git(base, "rev-parse HEAD")).toBe(baseHead);
+
+    // Never swept as a stale task worktree.
+    const oldTime = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000);
+    utimesSync(prJobs, oldTime, oldTime);
+    expect(await manager.sweepStaleWorktrees(repo.name, 7)).toEqual([]);
+    expect(existsSync(prJobs)).toBe(true);
+  });
 });

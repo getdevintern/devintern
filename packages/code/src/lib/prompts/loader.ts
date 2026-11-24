@@ -6,20 +6,27 @@
  * loads them, resolves per-repo overrides, substitutes `{{placeholder}}`
  * values, and validates that every placeholder the template uses is supplied.
  *
- * Overrides let teams tune prompts without editing TypeScript. Resolution
+ * Overrides let the worker owner tune prompts without editing TypeScript.
+ * They live in the workspace home, never in a repository checkout, so a pull
+ * request cannot rewrite the instructions its own agent receives. Resolution
  * order (first match wins):
  *
  *   1. Explicit `overrideDirs` passed by the caller (used by tests and hosts).
  *   2. `DEVINTERN_PROMPTS_DIR`, when set.
- *   3. `<project config dir>/prompts`, i.e. `.devintern-code/prompts/`.
- *   4. The bundled `prompts/` directory shipped with the package.
+ *   3. `<workspace>/prompts/<repo>/`, for the repository the run belongs to
+ *      (`DEVINTERN_WORKSPACE_REPO`).
+ *   4. `<workspace>/prompts/`, i.e. `~/.devintern/prompts/`.
+ *   5. The bundled `prompts/` directory shipped with the package.
  */
 
 import { existsSync, readFileSync } from "fs";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { parseFrontmatter } from "./frontmatter";
+import type { FrontmatterAttributes } from "./frontmatter";
 import { resolveProjectConfigDir } from "../config/config-dir";
+import { WORKSPACE_REPO_ENV } from "../workspace/env";
+import { resolveWorkspaceDir } from "../workspace/paths";
 
 /** Keys every prompt file's frontmatter must declare. */
 export const REQUIRED_FRONTMATTER_KEYS = [
@@ -46,6 +53,8 @@ export interface PromptTemplate {
   body: string;
   /** Absolute path the template was loaded from. */
   sourcePath: string;
+  /** Every frontmatter attribute, including prompt-specific extra keys. */
+  attributes?: FrontmatterAttributes;
 }
 
 /** Options controlling prompt lookup. */
@@ -56,7 +65,7 @@ export interface LoadPromptOptions {
   overrideDirs?: string[];
   /**
    * Whether to also search ambient override locations (`DEVINTERN_PROMPTS_DIR`
-   * and `<project config dir>/prompts`). Defaults to `true`. Set to `false` for
+   * and `<workspace>/prompts`). Defaults to `true`. Set to `false` for
    * hermetic lookups that must resolve only bundled prompts plus explicit
    * `overrideDirs` (used by bundled-catalog tests and deterministic lints).
    */
@@ -91,13 +100,43 @@ function overrideDirs(options: LoadPromptOptions): string[] {
   if (envDir) {
     dirs.push(envDir);
   }
-  try {
-    dirs.push(join(resolveProjectConfigDir(), "prompts"));
-  } catch {
-    // Config resolution can fail in exotic environments; the bundled default
-    // remains the safe fallback.
+  const workspacePrompts = workspacePromptsDir();
+  const repo = process.env[WORKSPACE_REPO_ENV]?.trim();
+  if (repo && isSafeRepoSegment(repo)) {
+    dirs.push(join(workspacePrompts, repo));
   }
+  dirs.push(workspacePrompts);
+  warnIgnoredProjectPrompts();
   return dirs;
+}
+
+/** Workspace prompt override directory (`~/.devintern/prompts/`). */
+export function workspacePromptsDir(workspaceDir: string = resolveWorkspaceDir()): string {
+  return join(workspaceDir, "prompts");
+}
+
+/** A repo name usable as one path segment (no separators or dot segments). */
+function isSafeRepoSegment(repo: string): boolean {
+  return !/[\\/]/.test(repo) && repo !== "." && repo !== "..";
+}
+
+let warnedProjectPromptsDir: string | null = null;
+
+/**
+ * Warn once per directory when a project still has `.devintern-code/prompts/`.
+ * Those overrides are no longer read: they moved to `~/.devintern/prompts/`.
+ */
+function warnIgnoredProjectPrompts(): void {
+  let dir: string;
+  try {
+    dir = join(resolveProjectConfigDir(), "prompts");
+  } catch {
+    return;
+  }
+  if (dir === warnedProjectPromptsDir || !existsSync(dir)) return;
+  warnedProjectPromptsDir = dir;
+  console.warn(`⚠️  Ignoring prompt overrides in ${dir}.`);
+  console.warn(`   Move them to ${workspacePromptsDir()}/ to keep using them.`);
 }
 
 /**
@@ -176,6 +215,7 @@ export function loadPromptTemplate(name: string, options: LoadPromptOptions = {}
     requiredSections: toStringList(attributes.requiredSections),
     body,
     sourcePath,
+    attributes,
   };
 }
 

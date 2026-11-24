@@ -3,7 +3,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { UsageLimitError } from "@devintern/agent-harness";
 import { WorkerState } from "../state/worker-state";
-import type { AgentPr } from "../state/worker-state";
+import type { AgentPr, AgentPrMergeDetails } from "../state/worker-state";
 import {
   gitLabWebhookDeliveryId,
   matchesRegisteredGitLabChange,
@@ -14,6 +14,7 @@ import {
 import type { GitLabWebhookEvent } from "../code-host/gitlab/webhook";
 import { normalizeCodeHostUrl, resolveGitLabCodeHostConfig } from "../code-host";
 import { GitLabReviewsClient } from "../code-host/gitlab/reviews";
+import type { GitLabCiFailure, GitLabCiSnapshot } from "../code-host/gitlab/reviews";
 import { runCiFixViaCli } from "../acquirers/ci-failure-watcher";
 import {
   runAddressReviewUrlViaCli,
@@ -190,19 +191,41 @@ export async function processGitLabWithPersistence(
   }
 }
 
+/**
+ * Merge facts from a merge-request hook payload: the target branch, and the
+ * merge time when the payload carries one. Missing fields stay `undefined`.
+ */
+function lifecycleMergeDetails(payload: Record<string, unknown>): AgentPrMergeDetails {
+  const attributes = payload.object_attributes;
+  if (typeof attributes !== "object" || attributes === null) return {};
+  const { target_branch: targetBranch, merged_at: mergedAtRaw } = attributes as Record<
+    string,
+    unknown
+  >;
+  const mergedAt = typeof mergedAtRaw === "string" ? Date.parse(mergedAtRaw) : Number.NaN;
+  return {
+    mergedAt: Number.isFinite(mergedAt) ? mergedAt : undefined,
+    mergedInto: typeof targetBranch === "string" && targetBranch !== "" ? targetBranch : undefined,
+  };
+}
+
 async function processGitLabEvent({ event, target }: QueuedGitLabWebhook): Promise<void> {
   const serializationKey = `${target.instanceUrl}:${target.projectPath}!${target.changeNumber}`;
   if (event.kind === "lifecycle") {
     const state = new WorkerState();
     try {
-      state.markAgentChangeRequestClosed({
-        provider: target.provider,
-        instanceUrl: target.instanceUrl,
-        projectId: target.projectId,
-        projectPath: target.projectPath,
-        number: target.changeNumber,
-        webUrl: target.webUrl,
-      });
+      state.markAgentChangeRequestClosed(
+        {
+          provider: target.provider,
+          instanceUrl: target.instanceUrl,
+          projectId: target.projectId,
+          projectPath: target.projectPath,
+          number: target.changeNumber,
+          webUrl: target.webUrl,
+        },
+        event.state === "closed" ? "closed" : "merged",
+        event.state === "closed" ? undefined : lifecycleMergeDetails(event.payload),
+      );
     } finally {
       state.close();
     }
@@ -243,35 +266,136 @@ async function processGitLabEvent({ event, target }: QueuedGitLabWebhook): Promi
   if (event.kind === "ci") {
     const snapshot = await client.getCiSnapshot(target.projectPath, current.head.sha);
     if (snapshot.state !== "failure" || snapshot.failures.length === 0) return;
-    const rawLogs = await client.getJobTraces(target.projectPath, snapshot.jobIds);
-    const { truncateCiLogs } = await import("../acquirers/ci-failure-watcher");
-    const feedbackDir = mkdtempSync(join(tmpdir(), "devintern-gitlab-webhook-ci-"));
-    const feedbackPath = join(feedbackDir, "ci-feedback.json");
-    writeFileSync(
-      feedbackPath,
-      JSON.stringify({
-        repository: target.projectPath,
-        prNumber: target.changeNumber,
-        branch: current.head.ref,
-        failures: snapshot.failures.map((failure) => ({
-          name: failure.name,
-          conclusion: failure.conclusion,
-          detailsUrl: failure.detailsUrl,
-        })),
-        logs: truncateCiLogs(rawLogs),
-      }),
-    );
-    try {
-      const ok = await runCiFixViaCli(target.projectPath, target.changeNumber, feedbackPath, {
-        cwd: process.cwd(),
-        env: process.env,
-        webUrl: target.webUrl,
-        serializationKey,
-        expectedHeadSha: current.head.sha,
-      });
-      if (!ok) throw new Error("GitLab CI repair did not complete");
-    } finally {
-      rmSync(feedbackDir, { recursive: true, force: true });
+    // Several deliveries can report the same failures: a branch pipeline and
+    // an MR pipeline for one push, or a Job Hook followed by its Pipeline
+    // Hook. The repair reads the whole snapshot for the head SHA, so run it
+    // once per (MR, head SHA, set of failed job names). Names, not job ids:
+    // the two pipelines run separate jobs with the same names, and the
+    // snapshot is taken at processing time, so it can already include the
+    // other pipeline's copy of a failure. Only a newly failing job name at
+    // the same SHA runs again, or a retried job that failed again (see
+    // {@link hasRetriedFailure}). Skipping while CI is still pending is not
+    // an option: only failed deliveries become `ci` events, so the last one
+    // may arrive while another pipeline is running and none would follow it.
+    const ledger = runtime.queue;
+    const baseKey = ciRepairKey(serializationKey, current.head.sha, snapshot.failures);
+    let repairKey = baseKey;
+    if (ledger?.hasProcessed(CI_REPAIR_SOURCE, baseKey)) {
+      if (!hasRetriedFailure(ledger, baseKey, snapshot.failures)) return;
+      repairKey = `${baseKey}#retry:${JSON.stringify(failedJobIds(snapshot.failures))}`;
     }
+    if (ledger) {
+      const claim = ledger.beginDelivery(CI_REPAIR_SOURCE, repairKey);
+      if (claim === "handled") return;
+      // Defensive guard only: `reviewQueue` runs one job at a time, so an
+      // earlier repair has already completed or released this claim before
+      // the next delivery is processed. If concurrency is ever raised, this
+      // keeps two repairs for one key from running at once. Throwing does not
+      // retry the delivery in this process: GitLab already got its 200, and
+      // the event row only goes back to pending for the next startup
+      // recovery. If the in-flight repair then fails, a later delivery or a
+      // restart has to start the retry.
+      if (claim === "inFlight") throw new Error("GitLab CI repair already in progress");
+    }
+    let repaired = false;
+    try {
+      await runGitLabCiRepair(client, target, serializationKey, current.head, snapshot);
+      repaired = true;
+    } finally {
+      // A failed or deferred repair stays retryable by a later delivery.
+      if (ledger && repaired) {
+        for (const jobId of failedJobIds(snapshot.failures)) {
+          ledger.markProcessed(CI_REPAIR_SOURCE, ciRepairJobKey(baseKey, jobId));
+        }
+        ledger.completeDelivery(CI_REPAIR_SOURCE, repairKey);
+      } else if (ledger) ledger.abandonDelivery(CI_REPAIR_SOURCE, repairKey);
+    }
+  }
+}
+
+/** Dedupe ledger source for webhook CI repairs, keyed by {@link ciRepairKey}. */
+export const CI_REPAIR_SOURCE = "gitlab:ci-repair";
+
+/** One CI repair per MR, head SHA, and set of distinct failed job/status names. */
+export function ciRepairKey(
+  serializationKey: string,
+  headSha: string,
+  failures: ReadonlyArray<{ name: string }>,
+): string {
+  const names = [...new Set(failures.map((failure) => failure.name))].sort();
+  return `${serializationKey}@${headSha}:${JSON.stringify(names)}`;
+}
+
+/** Ledger key recording that a completed repair for `baseKey` covered `jobId`. */
+function ciRepairJobKey(baseKey: string, jobId: number): string {
+  return `${baseKey}#job:${jobId}`;
+}
+
+function failedJobIds(failures: ReadonlyArray<GitLabCiFailure>): number[] {
+  return [
+    ...new Set(failures.flatMap((failure) => (failure.jobId === undefined ? [] : [failure.jobId]))),
+  ].sort((a, b) => a - b);
+}
+
+/**
+ * Whether a job was retried and failed again since the last completed repair
+ * for these failure names. The snapshot excludes retried jobs, so a retry
+ * replaces the covered job id with a new one: some failing name then has no
+ * job a completed repair covered. The other pipeline's copy of a failure
+ * leaves the covered job in place, so it does not count. Commit statuses
+ * carry no job id and never count as retried.
+ */
+function hasRetriedFailure(
+  ledger: { hasProcessed(source: string, externalId: string): boolean },
+  baseKey: string,
+  failures: ReadonlyArray<GitLabCiFailure>,
+): boolean {
+  const jobsByName = new Map<string, number[]>();
+  for (const failure of failures) {
+    if (failure.jobId === undefined) continue;
+    jobsByName.set(failure.name, [...(jobsByName.get(failure.name) ?? []), failure.jobId]);
+  }
+  return [...jobsByName.values()].some((jobIds) =>
+    jobIds.every((jobId) => !ledger.hasProcessed(CI_REPAIR_SOURCE, ciRepairJobKey(baseKey, jobId))),
+  );
+}
+
+async function runGitLabCiRepair(
+  client: GitLabReviewsClient,
+  target: AgentPr,
+  serializationKey: string,
+  head: { sha: string; ref: string },
+  snapshot: GitLabCiSnapshot,
+): Promise<void> {
+  const rawLogs = await client.getJobTraces(target.projectPath, snapshot.jobIds);
+  const { truncateCiLogs } = await import("../acquirers/ci-failure-watcher");
+  const feedbackDir = mkdtempSync(join(tmpdir(), "devintern-gitlab-webhook-ci-"));
+  const feedbackPath = join(feedbackDir, "ci-feedback.json");
+  writeFileSync(
+    feedbackPath,
+    JSON.stringify({
+      repository: target.projectPath,
+      prNumber: target.changeNumber,
+      branch: head.ref,
+      failures: snapshot.failures.map((failure) => ({
+        name: failure.name,
+        conclusion: failure.conclusion,
+        detailsUrl: failure.detailsUrl,
+      })),
+      logs: truncateCiLogs(rawLogs),
+    }),
+  );
+  try {
+    const ok = await runCiFixViaCli(target.projectPath, target.changeNumber, feedbackPath, {
+      cwd: process.cwd(),
+      env: process.env,
+      webUrl: target.webUrl,
+      serializationKey,
+      expectedHeadSha: head.sha,
+    });
+    if (ok === "deferred") throw new UsageLimitError();
+    if (!ok) throw new Error("GitLab CI repair did not complete");
+  } finally {
+    rmSync(feedbackDir, { recursive: true, force: true });
   }
 }

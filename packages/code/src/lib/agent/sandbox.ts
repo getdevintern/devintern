@@ -5,7 +5,7 @@
  * adds the CLI override (`--sandbox <name>`) and memoizes per process so the
  * ~7 spawn sites share one resolution (and the auto-mode warning prints once).
  *
- * Precedence: `--sandbox` flag → `AGENT_SANDBOX` env (.devintern-code/.env)
+ * Precedence: `--sandbox` flag → `AGENT_SANDBOX` env (workspace env files)
  * → "none". Note .env is loaded once at startup, so a running worker daemon
  * picks up changes on restart, same as AGENT_HARNESS.
  */
@@ -670,7 +670,7 @@ export function buildSandboxDoctorReport(
   }
 
   lines.push(
-    "\nEnable by setting AGENT_SANDBOX in .devintern-code/.env or passing --sandbox <name>." +
+    "\nEnable by setting AGENT_SANDBOX in ~/.devintern/env/<repo>.env (or ~/.devintern/.env) or passing --sandbox <name>." +
       "\nProvider setup guide: https://devintern.com/docs/code/sandboxing",
   );
   return { lines, nextRunFails };

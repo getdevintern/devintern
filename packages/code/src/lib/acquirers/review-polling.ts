@@ -133,6 +133,13 @@ export interface ReviewPollingGitHub {
     repo: string,
     etag?: string,
   ): Promise<ConditionalResult<PolledPrListItem[]>>;
+  /**
+   * Current tip SHA of a branch, or null when it cannot be read. A PR's
+   * `base.sha` lags the base branch until the PR itself changes, so this is
+   * how an exhausted base sync notices the base moved. Optional: without it,
+   * an exhausted base sync waits for a new head or a new PR-reported base.
+   */
+  fetchBranchHeadSha?(repo: string, branch: string): Promise<string | null>;
 }
 
 /**
@@ -188,6 +195,13 @@ export interface ReviewPollingAcquirerOptions {
   ) => Promise<AutomaticResolveResult>;
   /** Stable-head window before execution (default 30 seconds). */
   quietPeriodSeconds?: number;
+  /**
+   * Most base syncs this poller keeps running at once (default 1). Each sync
+   * runs in the background so one long conflict resolution does not hold up
+   * the rest of the tick; the fleet passes `[workspace.execution].max_concurrency`
+   * and the supervisor applies the per-repo limit. A factory picks up reloads.
+   */
+  maxConcurrentBaseSyncs?: number | (() => number);
   /** Best-effort automatic-attempt run recorder. */
   runStore?: Pick<RunStore, "createRun" | "finishRun">;
   harness?: string;
@@ -275,6 +289,18 @@ const CAPACITY_RETRY_FALLBACK_MS = 5 * 60_000;
 
 /** Backoff before the first retry of a failed base-sync event. */
 const RETRY_BACKOFF_BASE_MS = 30_000;
+const REVIVE_COOLDOWN_BASE_MS = 3 * 60 * 60_000;
+const REVIVE_COOLDOWN_MAX_MS = 24 * 60 * 60_000;
+
+/**
+ * Wait after an exhausted base sync's last failure before its base branch
+ * moving earns it another attempt: 3 hours, doubling per earlier revival, at
+ * most a day. A transient failure recovers within hours, while a conflict the
+ * agent cannot resolve costs about one run a day instead of one per merge.
+ */
+export function baseSyncReviveCooldownMs(revivals: number): number {
+  return Math.min(REVIVE_COOLDOWN_BASE_MS * 2 ** Math.max(0, revivals), REVIVE_COOLDOWN_MAX_MS);
+}
 
 /** Upper bound on the wait between retries of a failed base-sync event. */
 const RETRY_BACKOFF_MAX_MS = 10 * 60_000;
@@ -303,6 +329,10 @@ export class ReviewPollingAcquirer implements Acquirer {
   private deferCounts = new Map<string, number>();
   /** Base-sync events waiting for harness capacity, keyed to their retry time. */
   private capacityRetryAt = new Map<string, number>();
+  /** Base syncs running in the background, keyed by {@link agentPrKey}. */
+  private inFlightBaseSyncs = new Map<string, Promise<void>>();
+  /** Base branch tips read this tick (`repo#branch`), so each is fetched once. */
+  private branchTips = new Map<string, Promise<string | null>>();
   /** Cached scheduled-window state; `undefined` = not loaded from the cursor yet. */
   private conflictWindowState: ConflictWindowState | null | undefined;
   private lastFeedbackPollAt: number;
@@ -362,12 +392,28 @@ export class ReviewPollingAcquirer implements Acquirer {
     startFirstTickInBackground(this.name, () => this.tick());
   }
 
-  /** Stop polling (an in-flight tick finishes its current PR). */
+  /**
+   * Stop polling. An in-flight tick finishes its current PR, and base syncs
+   * already running finish in the background (see {@link waitForBaseSyncs}).
+   */
   stop(): void {
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
     }
+  }
+
+  /** Resolves once every base sync running in the background has settled. */
+  async waitForBaseSyncs(): Promise<void> {
+    while (this.inFlightBaseSyncs.size > 0) {
+      await Promise.all(this.inFlightBaseSyncs.values());
+    }
+  }
+
+  private baseSyncLimit(): number {
+    const raw = this.options.maxConcurrentBaseSyncs;
+    const limit = typeof raw === "function" ? raw() : raw;
+    return limit !== undefined && Number.isFinite(limit) && limit >= 1 ? Math.floor(limit) : 1;
   }
 
   /**
@@ -432,6 +478,7 @@ export class ReviewPollingAcquirer implements Acquirer {
     this.busy = true;
 
     try {
+      this.branchTips.clear();
       this.syncConflictWindow();
       const { workerState } = this.options;
       const allowedRepos = this.resolveAllowedRepos();
@@ -1025,6 +1072,100 @@ export class ReviewPollingAcquirer implements Acquirer {
     return exhausted;
   }
 
+  /**
+   * Run a base sync in the background: the tick goes on polling other PRs
+   * (and starting their syncs) while this resolution runs. The tick is
+   * sequential, so the caller's limit check and this registration cannot
+   * interleave.
+   */
+  private startBaseSync(syncKey: string, params: Parameters<typeof this.executeBaseSync>[0]): void {
+    const { repo, prNumber } = params;
+    const run = this.executeBaseSync(params)
+      .catch((error: unknown) => {
+        captureError(error, { acquirer: this.name, repo, prNumber, stage: "base-sync" });
+        console.warn(
+          `⚠️  [${this.name}] ${repo}#${prNumber} base sync crashed: ${(error as Error).message}`,
+        );
+      })
+      .finally(() => {
+        this.inFlightBaseSyncs.delete(syncKey);
+      });
+    this.inFlightBaseSyncs.set(syncKey, run);
+  }
+
+  /**
+   * False while the event waits for harness capacity, or while the poller is
+   * at its base-sync limit; either way the event stays pending for a later tick.
+   */
+  private canStartBaseSync(externalId: string, now: number): boolean {
+    const capacityRetryAt = this.capacityRetryAt.get(externalId);
+    if (capacityRetryAt !== undefined && now < capacityRetryAt) return false;
+    return this.inFlightBaseSyncs.size < this.baseSyncLimit();
+  }
+
+  /**
+   * Whether the event may still run: not yet processed, or exhausted but
+   * revived here because its base branch moved (see {@link reviveExhaustedBaseSync}).
+   */
+  private async baseSyncEventOpen(
+    repo: string,
+    prNumber: number,
+    baseRef: string | undefined,
+    externalId: string,
+  ): Promise<boolean> {
+    if (!this.options.queue.hasProcessed(BASE_SYNC_SOURCE, externalId)) return true;
+    return this.reviveExhaustedBaseSync(repo, prNumber, baseRef, externalId);
+  }
+
+  /**
+   * Revive an exhausted base sync for one more attempt when its base branch
+   * tip has moved since it was last recorded and the revival cooldown since
+   * the last failure has passed. The first time an exhausted event is seen,
+   * only the tip is recorded. A completed event is never revived.
+   */
+  private async reviveExhaustedBaseSync(
+    repo: string,
+    prNumber: number,
+    baseRef: string | undefined,
+    externalId: string,
+  ): Promise<boolean> {
+    const { queue } = this.options;
+    if (!baseRef || !this.options.github.fetchBranchHeadSha) return false;
+    const event = queue.getBaseSyncEvent(externalId);
+    if (event?.status !== "failed") return false;
+    const tip = await this.branchTip(repo, baseRef);
+    if (!tip) return false;
+    if (!event.reviveBaseTip) {
+      queue.noteBaseSyncBaseTip(externalId, tip);
+      return false;
+    }
+    if (tip === event.reviveBaseTip) return false;
+    if (this.now() - event.updatedAt < baseSyncReviveCooldownMs(event.revivals)) return false;
+    queue.reviveBaseSyncEvent(BASE_SYNC_SOURCE, externalId, tip);
+    console.log(
+      `🔁 [${this.name}] ${repo}#${prNumber} base sync gave up earlier, but ${baseRef} has ` +
+        `moved to ${tip.slice(0, 8)}; trying once more (revival ${event.revivals + 1})`,
+    );
+    return true;
+  }
+
+  /** Base branch tip for this tick; null when unreadable (the error is logged). */
+  private branchTip(repo: string, branch: string): Promise<string | null> {
+    const key = `${repo.toLowerCase()}#${branch}`;
+    let tip = this.branchTips.get(key);
+    if (!tip) {
+      const fetchTip = this.options.github.fetchBranchHeadSha;
+      tip = (fetchTip ? fetchTip(repo, branch) : Promise.resolve(null)).catch((error: unknown) => {
+        console.warn(
+          `⚠️  [${this.name}] reading ${repo} branch ${branch} failed: ${(error as Error).message}`,
+        );
+        return null;
+      });
+      this.branchTips.set(key, tip);
+    }
+    return tip;
+  }
+
   private async maybeSyncBase(
     repo: string,
     prNumber: number,
@@ -1034,6 +1175,10 @@ export class ReviewPollingAcquirer implements Acquirer {
     const { queue, resolveConflicts } = this.options;
     if (!resolveConflicts || this.options.conflictResolution === "disabled") return;
     if (!pr.head?.sha || !pr.base?.sha || !pr.head.ref) return;
+    // A sync already running for this PR settles its own event; a head or
+    // base that moved meanwhile is picked up on a later tick.
+    const syncKey = agentPrKey(repo, prNumber);
+    if (this.inFlightBaseSyncs.has(syncKey)) return;
 
     // The event key includes the head SHA so that new commits on the branch
     // (e.g. after a failed attempt was exhausted) open a fresh event without
@@ -1061,7 +1206,7 @@ export class ReviewPollingAcquirer implements Acquirer {
     // them forever. "unknown" just means GitHub is recomputing after a push.
     if (pr.mergeable_state !== "dirty" && pr.mergeable_state !== "behind") return;
 
-    if (queue.hasProcessed(BASE_SYNC_SOURCE, externalId)) return;
+    if (!(await this.baseSyncEventOpen(repo, prNumber, pr.base.ref, externalId))) return;
     const now = this.options.now?.() ?? Date.now();
     const event = queue.observeBaseSyncEvent({
       externalId,
@@ -1094,8 +1239,7 @@ export class ReviewPollingAcquirer implements Acquirer {
     const quietMs = (this.options.quietPeriodSeconds ?? 30) * 1000;
     if (now - event.headObservedAt < quietMs) return;
 
-    const capacityRetryAt = this.capacityRetryAt.get(externalId);
-    if (capacityRetryAt !== undefined && now < capacityRetryAt) return;
+    if (!this.canStartBaseSync(externalId, now)) return;
 
     // Re-fetch immediately before execution. Any movement leaves the current
     // event pending and consumes no retry; a new base supersedes it immediately.
@@ -1108,7 +1252,7 @@ export class ReviewPollingAcquirer implements Acquirer {
       opts.external,
     );
     if (freshState.kind === "stop") return;
-    await this.executeBaseSync({
+    this.startBaseSync(syncKey, {
       repo,
       prNumber,
       externalId,

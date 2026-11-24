@@ -1,15 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { existsSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
-import { execSync, spawnSync } from "child_process";
-
-import {
-  WebhookQueue,
-  prepareQueueDbDirectory,
-  resolveQueueDbPath,
-} from "../src/lib/state/webhook-queue";
+import { WebhookQueue, resolveQueueDbPath } from "../src/lib/state/webhook-queue";
 import { RowParseError } from "../src/lib/state/row-parse";
 
 /** Insert a row directly, bypassing the queue, to simulate corrupted state. */
@@ -176,6 +170,66 @@ describe("WebhookQueue", () => {
       expect(queue.getBaseSyncEvent("completed")).toBeNull();
       expect(queue.getBaseSyncEvent("exhausted")).toBeNull();
       expect(queue.getBaseSyncEvent("pending")?.status).toBe("pending");
+    });
+  });
+
+  describe("base-sync revival", () => {
+    test("an older database gains the revival columns and keeps its rows", () => {
+      queue.close();
+      const legacyPath = `${dbPath}-legacy`;
+      insertRawRow(
+        legacyPath,
+        `CREATE TABLE base_sync_events (
+           external_id TEXT PRIMARY KEY, repo TEXT NOT NULL, pr_number INTEGER NOT NULL,
+           base_sha TEXT NOT NULL, head_sha TEXT NOT NULL, head_observed_at INTEGER NOT NULL,
+           attempts INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'pending',
+           last_error TEXT, updated_at INTEGER NOT NULL)`,
+      );
+      insertRawRow(
+        legacyPath,
+        `INSERT INTO base_sync_events VALUES ('old', 'acme/widgets', 7, 'b', 'h', 1, 3, 'failed', 'boom', 1)`,
+      );
+      const migrated = new WebhookQueue({ dbPath: legacyPath });
+      try {
+        const event = migrated.getBaseSyncEvent("old");
+        expect(event?.status).toBe("failed");
+        expect(event?.revivals).toBe(0);
+        expect(event?.reviveBaseTip).toBeUndefined();
+      } finally {
+        migrated.close();
+        for (const suffix of ["", "-wal", "-shm"])
+          rmSync(`${legacyPath}${suffix}`, { force: true });
+      }
+      queue = new WebhookQueue({ dbPath });
+    });
+
+    test("revival leaves one attempt, records the tip, and withdraws the dedupe key", () => {
+      const input = {
+        externalId: "e",
+        repo: "acme/widgets",
+        prNumber: 7,
+        baseSha: "b",
+        headSha: "h",
+      };
+      queue.observeBaseSyncEvent(input);
+      for (let i = 0; i < 3; i++) queue.beginBaseSyncAttempt("e");
+      queue.exhaustBaseSyncEvent("github:base-sync", "e", "boom");
+
+      queue.noteBaseSyncBaseTip("e", "tipA");
+      queue.noteBaseSyncBaseTip("e", "tipB"); // only the first sighting is recorded
+      expect(queue.getBaseSyncEvent("e")?.reviveBaseTip).toBe("tipA");
+
+      queue.reviveBaseSyncEvent("github:base-sync", "e", "tipB");
+      const revived = queue.getBaseSyncEvent("e");
+      expect(revived?.status).toBe("pending");
+      expect(revived?.attempts).toBe(2);
+      expect(revived?.revivals).toBe(1);
+      expect(revived?.reviveBaseTip).toBe("tipB");
+      expect(queue.hasProcessed("github:base-sync", "e")).toBe(false);
+
+      // One more failure exhausts it again.
+      queue.beginBaseSyncAttempt("e");
+      expect(queue.failBaseSyncEvent("e", "still conflicting")).toBe(true);
     });
   });
 
@@ -393,81 +447,12 @@ describe("resolveQueueDbPath", () => {
 
   test("honors the WEBHOOK_QUEUE_DB override", () => {
     process.env.WEBHOOK_QUEUE_DB = "/custom/queue.db";
-    expect(resolveQueueDbPath("/some/project")).toBe("/custom/queue.db");
+    expect(resolveQueueDbPath()).toBe("/custom/queue.db");
   });
 
-  test("defaults to .devintern-code/queue.db under the project directory", () => {
+  test("defaults to the workspace database, wherever the run starts", () => {
     delete process.env.WEBHOOK_QUEUE_DB;
-    expect(resolveQueueDbPath("/some/project")).toBe(
-      join("/some/project", ".devintern-code", "queue.db"),
-    );
-  });
-
-  test("keeps the state database out of git via .git/info/exclude", () => {
-    delete process.env.WEBHOOK_QUEUE_DB;
-
-    const projectDir = join(
-      tmpdir(),
-      `queue-ignore-test-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-    );
-    mkdirSync(projectDir, { recursive: true });
-    execSync("git init -q .", { cwd: projectDir });
-
-    try {
-      const dbPath = resolveQueueDbPath(projectDir);
-      prepareQueueDbDirectory(dbPath);
-      writeFileSync(dbPath, "state\n", "utf8");
-
-      // Untracked-but-ignored: `git add -A` cannot sweep it into a commit and
-      // `git clean` cannot delete it.
-      expect(execSync("git status --porcelain", { cwd: projectDir }).toString()).toBe("");
-      expect(spawnSync("git", ["check-ignore", "-q", dbPath], { cwd: projectDir }).status).toBe(0);
-    } finally {
-      rmSync(projectDir, { recursive: true, force: true });
-    }
-  });
-
-  test("does not write info/exclude when .gitignore already covers the database", () => {
-    delete process.env.WEBHOOK_QUEUE_DB;
-
-    const projectDir = join(
-      tmpdir(),
-      `queue-ignore-existing-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-    );
-    mkdirSync(projectDir, { recursive: true });
-    execSync("git init -q .", { cwd: projectDir });
-    writeFileSync(join(projectDir, ".gitignore"), ".devintern-code/\n", "utf8");
-
-    try {
-      const dbPath = resolveQueueDbPath(projectDir);
-      prepareQueueDbDirectory(dbPath);
-      writeFileSync(dbPath, "state\n", "utf8");
-
-      // The project's own ignore rules already hide the file, so the
-      // redundant pattern is not appended to the local exclude.
-      const exclude = readFileSync(join(projectDir, ".git", "info", "exclude"), "utf8");
-      expect(exclude).not.toContain("queue.db");
-      expect(spawnSync("git", ["check-ignore", "-q", dbPath], { cwd: projectDir }).status).toBe(0);
-    } finally {
-      rmSync(projectDir, { recursive: true, force: true });
-    }
-  });
-
-  test("reuses the project database when run from a subdirectory", () => {
-    delete process.env.WEBHOOK_QUEUE_DB;
-
-    const projectDir = join(
-      tmpdir(),
-      `queue-path-test-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-    );
-    const subDir = join(projectDir, "packages", "app");
-    mkdirSync(join(projectDir, ".devintern-code"), { recursive: true });
-    mkdirSync(subDir, { recursive: true });
-
-    try {
-      expect(resolveQueueDbPath(subDir)).toBe(join(projectDir, ".devintern-code", "queue.db"));
-    } finally {
-      rmSync(projectDir, { recursive: true, force: true });
-    }
+    const workspaceDir = process.env.DEVINTERN_WORKSPACE_DIR!;
+    expect(resolveQueueDbPath()).toBe(join(workspaceDir, "state", "queue.db"));
   });
 });

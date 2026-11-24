@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 
 import { GUARD_FILES } from "./setup/guard-files";
+import { normalizeTestArgs } from "./setup/test-args";
 import { stripWorkerInjectedEnv } from "./setup/worker-env";
 
 const existingCeilings = process.env.GIT_CEILING_DIRECTORIES;
@@ -36,8 +37,7 @@ process.on("exit", () => {
 });
 
 // Ambient prompt overrides make prompt-rendering tests non-hermetic: a
-// developer's DEVINTERN_PROMPTS_DIR (or an ancestor `.devintern-code/prompts/`)
-// would silently change their results. The same applies to the rest of the
+// developer's DEVINTERN_PROMPTS_DIR would silently change their results. The same applies to the rest of the
 // worker-injected environment when an agent runs the suite from inside a
 // worker task subprocess, so strip the whole set from the child environment
 // and let the per-file guard handle in-process code.
@@ -109,23 +109,25 @@ const GUARD_PRELOADS = GUARD_FILES.flatMap((name) => [
   join(import.meta.dir, "setup", name),
 ]);
 
-const child = Bun.spawn(
-  ["bun", "test", "--timeout=30000", ...GUARD_PRELOADS, ...process.argv.slice(2)],
-  {
-    cwd: import.meta.dir,
-    env: {
-      ...childEnv,
-      GIT_CEILING_DIRECTORIES: gitCeilingDirectories,
-      WEBHOOK_QUEUE_DB: join(queueDbTempDir, "queue.db"),
-      DEVINTERN_WORKSPACE_DIR: join(queueDbTempDir, "workspace"),
-      SENTRY_DISABLED: "1",
-      // Test dashboards never shell out to the developer's real `tailscale`.
-      DASHBOARD_TAILSCALE_AUTODETECT: "0",
-    },
-    stdin: "inherit",
-    stdout: "inherit",
-    stderr: "inherit",
+// The inner Bun resolves path arguments against tests/, so a package-relative
+// path such as `tests/foo.test.ts` would match nothing. Rewrite paths that
+// exist relative to the invoking directory into tests/-relative ones.
+const testArgs = normalizeTestArgs(process.argv.slice(2), process.cwd(), import.meta.dir);
+
+const child = Bun.spawn(["bun", "test", "--timeout=30000", ...GUARD_PRELOADS, ...testArgs], {
+  cwd: import.meta.dir,
+  env: {
+    ...childEnv,
+    GIT_CEILING_DIRECTORIES: gitCeilingDirectories,
+    WEBHOOK_QUEUE_DB: join(queueDbTempDir, "queue.db"),
+    DEVINTERN_WORKSPACE_DIR: join(queueDbTempDir, "workspace"),
+    SENTRY_DISABLED: "1",
+    // Test dashboards never shell out to the developer's real `tailscale`.
+    DASHBOARD_TAILSCALE_AUTODETECT: "0",
   },
-);
+  stdin: "inherit",
+  stdout: "inherit",
+  stderr: "inherit",
+});
 
 process.exit(await child.exited);

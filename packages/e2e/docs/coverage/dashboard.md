@@ -11,8 +11,8 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 - Surface: External dependency: relay, auth, licensing, and observability services
 - Status: `default`
 - Evidence: `tests/local/dashboard-api.test.ts` (read API and a worker-consumed ad-hoc retry); `tests/local/dashboard-embedded.test.ts` (Host/Origin guard with `--allow-origin` and `DASHBOARD_ALLOWED_ORIGINS`) (`bun run --filter @devintern/e2e test`)
-- Missing: Automation run-now against the standalone spawn path (covered only through the worker-embedded dashboard).
-- Last reviewed: 2026-11-17
+- Missing: Run-now or retry for an automation with `open_pr = true` (a bare local remote has no code host to open the PR on).
+- Last reviewed: 2026-11-20
 
 ### Worker/dashboard logs and artifacts
 
@@ -27,31 +27,38 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 - Surface: `devintern` command surface
 - Status: `default`
 - Evidence: `tests/local/dashboard-api.test.ts`, `tests/local/dashboard-embedded.test.ts` (`bun run --filter @devintern/e2e test`)
-- Missing: Standalone automation run-now spawn path.
-- Last reviewed: 2026-11-17
+- Missing: `--workspace` mode's read-only workspace automation catalog.
+- Last reviewed: 2026-11-19
 
 ### Dashboard embedded in the worker
 
 - Surface: `devintern worker` surface
 - Status: `default`
-- Evidence: `tests/local/dashboard-embedded.test.ts` (`bun run --filter @devintern/e2e test`)
-- Missing: Retry through the embedded dashboard (`retryMode: "schedule"`).
-- Last reviewed: 2026-11-17
+- Evidence: `tests/local/dashboard-embedded.test.ts`; `tests/local/dashboard-embedded-retry.test.ts` (ad-hoc retry re-queued through the worker's own queue, concurrent double-POST, Host/Origin guard on the retry route, audit and eligibility); `tests/local/dashboard-schedule-mode-tracker-retry.test.ts` (a failed polled offline-Jira run retried in schedule mode: one `scheduled_retries` row drained by the worker's retry queue, one re-run, one transition and comment per attempt, no extra run on later poll ticks) (`bun run --filter @devintern/e2e test`)
+- Missing: A schedule-mode retry for a multi-team workspace (the persisted `team` pin) and a retry the drain defers because the repo is busy.
+- Last reviewed: 2026-11-20
 
 ### GET /api/workspace redacted workspace view
 
 - Surface: External dependency: relay, auth, licensing, and observability services
 - Status: `default`
-- Evidence: `tests/local/dashboard-artifacts.test.ts` (`bun run --filter @devintern/e2e test`)
-- Missing: Teams, error monitors (`base_url` userinfo), and the `configSync`/`appliedConfig` state against a running worker.
-- Last reviewed: 2026-11-18
+- Evidence: `tests/local/dashboard-artifacts.test.ts` (repos, shared `.env`, syntax/validation/missing states); `tests/local/dashboard-workspace-sync.test.ts` (teams with inline env and `env_file`, `[[error_monitors]]` with `base_url` userinfo, `[error_monitors.env]` and `env_file`, a masked TOML syntax error) (`bun run --filter @devintern/e2e test`)
+- Last reviewed: 2026-11-23
+
+### GET /api/workspace configSync against a running worker
+
+- Surface: `devintern worker` surface
+- Status: `default`
+- Evidence: `tests/local/dashboard-workspace-sync.test.ts` (worker-embedded dashboard: `applied` at startup, `applied` with a newer `appliedAt` after a hot reload, `rejected` for a startup-only `[[error_monitors]]` addition and for an invalid edit quoting a secret, with `rejectedReason` masked) (`bun run --filter @devintern/e2e test`)
+- Missing: The `unconfirmed` state (needs a worker without an applied-config record) and asserting a transient `pending` (timing-dependent, deliberately not asserted).
+- Last reviewed: 2026-11-23
 
 ## Backlog
 
 Priority numbers are the global ranking from the
 [index](../coverage-matrix.md#priority-backlog); lower runs first.
 
-- Priority 10: Retry through the worker-embedded dashboard and standalone automation run-now. Embedded mode, embedded run-now, the Host/Origin guard, and log redaction are covered by `tests/local/dashboard-embedded.test.ts`; the standalone server, its read API, and a successful ad-hoc retry by `tests/local/dashboard-api.test.ts`.
+- ~~Priority 10: Retry through the worker-embedded dashboard. Embedded mode, embedded run-now, the Host/Origin guard, and log redaction are covered by `tests/local/dashboard-embedded.test.ts`; the standalone server, its read API, and a successful ad-hoc retry by `tests/local/dashboard-api.test.ts`.~~ Done: `tests/local/dashboard-embedded-retry.test.ts`.
 
 ## Test notes
 
@@ -165,6 +172,59 @@ bun run --filter @devintern/e2e test
 cd packages/e2e && bun test tests/local/dashboard-embedded.test.ts
 ```
 
+### Retry through the worker-embedded dashboard
+
+`tests/local/dashboard-embedded-retry.test.ts` runs in the default offline
+suite. It starts a `WorkerFixture` with `dashboard: { port }` and one injected
+task that the deterministic agent fails once before editing
+(`E2E_FAIL_ONCE_FILE`), then drives the retry through the worker's own
+dashboard port, with no standalone `devintern dashboard`. It asserts:
+
+- the failed run is eligible (`kind: "injected"`); a retry POST with no Origin,
+  a foreign Origin, or a rebound Host returns 403, and `text/plain` returns 415.
+  None of them re-queues the row or writes an audit entry;
+- two concurrent `POST /api/runs/:id/retry` requests with the loopback Origin:
+  one returns 202 `{ status: "scheduled", runId, taskKey }` with no `pid` or
+  `command` (nothing was spawned), the other 409 with the documented in-flight
+  refusal. There is one `run_retry_audit` row (`scheduled`, actor
+  `local-dashboard`) and no `scheduled_retries` row;
+- the same daemon completes the re-queued row: attempt 2 `succeeded` on
+  `feature/<task-key>-attempt-2` with the greeting edit on the remote, nothing
+  pushed for the failed attempt, and the base branch and seed unchanged;
+- `GET /api/runs/:id` afterwards reports the success as not retriable ("this
+  run already succeeded") and keeps the single audit entry on the failed run.
+
+### Schedule-mode tracker retry through the embedded dashboard
+
+`tests/local/dashboard-schedule-mode-tracker-retry.test.ts` runs in the default
+offline suite. It starts a `WorkerFixture` with the embedded dashboard,
+`tracker = "jira"` against the offline fake Jira, a `task_query`, 1 s polling,
+and `WORKER_RETRY_INTERVAL_SECONDS=1`. The deterministic agent fails the first
+run once (`E2E_FAIL_ONCE_FILE`). It asserts:
+
+- the polled run is `failed`; the ticket was moved to In Progress and back to
+  To Do, has one failure comment, and three more poll ticks start no run;
+- two concurrent retries through the worker's dashboard: one returns 202
+  `{ status: "scheduled", runId, taskKey }`, the other 409 (`a retry of <key> is
+already scheduled or running`, or the in-progress refusal if the drain
+  already started). One audit row (`scheduled`, `local-dashboard`, `queued for
+the worker`) and one `scheduled_retries` row;
+- the worker's retry queue logs one `re-running <key>`, settles the row
+  `done`, and records attempt 2 `succeeded` on `feature/<key>-attempt-2` with
+  the greeting edit on the remote;
+- three later poll ticks skip the ticket as already actioned. The fake Jira
+  saw exactly three transitions (In Progress, To Do, In Progress), one failure
+  comment and one implementation comment, and no unexpected request;
+- retrying the succeeded run returns 409 "this run already succeeded".
+
+The fake Jira records accepted transitions (`FakeJiraTracker.transitions`)
+so the test counts them instead of reading only the final status.
+
+```sh
+bun run --filter @getdevintern/code build
+cd packages/e2e && bun test tests/local/dashboard-schedule-mode-tracker-retry.test.ts
+```
+
 ### Run artifact and harness-log readback, and the redacted workspace view
 
 `tests/local/dashboard-artifacts.test.ts` runs in the default offline suite and
@@ -216,4 +276,52 @@ bun run --filter @getdevintern/code build
 bun run --filter @devintern/e2e test
 # or just this file
 cd packages/e2e && bun test tests/local/dashboard-artifacts.test.ts
+```
+
+### Teams and error-monitor redaction, and configSync against a running worker
+
+`tests/local/dashboard-workspace-sync.test.ts` runs in the default offline
+suite and needs only the built CLI (the `dist/` skip guard is the only skip).
+Every credential is a random fake per run, checked in raw, URL-encoded, and
+base64 form (and base64 `user:password`, as a Basic auth header would carry
+it); failure messages name the secret's index, never its value.
+
+The first case starts the standalone `devintern dashboard` against a
+hand-written `workspace.toml` (the worker is never started): two `[[teams]]`
+(`alpha` with an inline `[teams.env]` token, `beta` with an `env_file`), a repo
+with a `[repos.env]` token and an `https://user:<fake>@…` remote, and an
+`[[error_monitors]]` Sentry entry whose `base_url` embeds `user:<fake>@` on an
+unused loopback port (the standalone dashboard never polls monitors) plus
+`[error_monitors.env]` and an `env_file`. `GET /api/workspace` returns
+`status: "ok"`, no `configSync` (no running worker), teams and the monitor
+with their names, trackers, queries and sorted env key names, the repo remote
+and monitor `baseUrl` without userinfo but with scheme, host, port and path,
+and no env value or userinfo name anywhere. A TOML syntax error with an
+unquoted token in `[teams.env]` then returns 200 `status: "invalid"`,
+`Failed to parse …`, with the token masked.
+
+The second case starts a `WorkerFixture` with the embedded dashboard and one
+never-due automation, and polls the worker's own `/api/workspace` (100 ms
+interval, bounded deadline; no fixed sleeps):
+
+- startup: `configSync: "applied"` with `appliedConfig.appliedAt`;
+- appending an automation (hot-reloadable): `applied` again with a newer
+  `appliedAt`, and the new automation in the view;
+- adding a credentialed `[[error_monitors]]` (startup-only): `rejected` with
+  `rejectedReason` "[[error_monitors]] is startup-only; …", the config view
+  still `ok` with the monitor's `baseUrl` stripped, and no monitor secret
+  anywhere in the body;
+- an automation whose `repo` is a token-shaped value: `rejected` with
+  `rejectedReason` containing `.repo "…" does not match any [[repos]] name.`
+  while the worker's own stderr carries the raw value. The applied file version
+  is unchanged and `/api/automations` still lists only the applied entries.
+  The dashboard's own `invalid` load masks the value in `problems` too, and
+  the secret scan covers the whole body.
+
+The fixture's temporary root (HOME, workspace, queue database, bare remote) is
+removed in `finally`, and the daemon is stopped there too.
+
+```sh
+bun run --filter @getdevintern/code build
+cd packages/e2e && bun test tests/local/dashboard-workspace-sync.test.ts
 ```

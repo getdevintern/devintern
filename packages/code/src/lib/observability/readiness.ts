@@ -310,7 +310,7 @@ export function agentChainCheck(probe: AgentChainProbeResult): ReadinessCheck {
       label: "AI agent CLI",
       status: "fail",
       detail: `${sandboxText} fails every harness in ${chainText || "AGENT_HARNESS"}: ${probe.sandboxError}`,
-      hint: "Fix AGENT_SANDBOX in .devintern-code/.env (e.g. AGENT_SANDBOX=auto, nono, or none); switching AGENT_HARNESS will not help",
+      hint: "Fix AGENT_SANDBOX in ~/.devintern/env/<repo>.env or ~/.devintern/.env (e.g. AGENT_SANDBOX=auto, nono, or none); switching AGENT_HARNESS will not help",
       items,
     };
   }
@@ -322,7 +322,7 @@ export function agentChainCheck(probe: AgentChainProbeResult): ReadinessCheck {
       status: "fail",
       detail: `no usable harness in ${chainText || "AGENT_HARNESS"} (${sandboxText})`,
       hint: other
-        ? `${other.displayName} is installed: set AGENT_HARNESS=${other.name} in .devintern-code/.env to use it`
+        ? `${other.displayName} is installed: set AGENT_HARNESS=${other.name} in ~/.devintern/env/<repo>.env to use it`
         : "Install an agent CLI (e.g. Claude Code) or set <HARNESS>_CLI_PATH to its executable",
       items,
     };
@@ -459,7 +459,7 @@ export async function collectReadinessChecks(deps: ReadinessDeps = {}): Promise<
         label: "Task tracker",
         status: "fail",
         detail: `${capabilities.displayName}: missing ${missing.join(", ")}`,
-        hint: "Run 'devintern init' or edit .devintern-code/.env",
+        hint: "Run 'devintern init' or edit ~/.devintern/env/<repo>.env",
       });
     } else {
       checks.push({

@@ -197,6 +197,42 @@ export class GitHubPRClient extends PRClient {
   }
 
   /**
+   * State of the pull request(s) whose head is `sourceBranch`.
+   *
+   * Queries every state (open, closed, merged) so a merged or closed PR is
+   * confirmed rather than inferred from "not in the open list".
+   *
+   * @param repository - `owner/repo` slug
+   * @param sourceBranch - Head/feature branch name
+   * @returns `"open"` when any PR for the branch is open, `"closed"` when PRs
+   *   exist and all are closed or merged, `"none"` when the branch has no PR
+   * @throws When the lookup fails (bad credentials, rate limit, server or
+   *   network error), so callers can tell "no PR" from "could not check"
+   */
+  async getChangeRequestState(
+    repository: string,
+    sourceBranch: string,
+  ): Promise<"open" | "closed" | "none"> {
+    const [owner, repo] = repository.split("/");
+    if (!owner || !repo) throw new Error(`invalid repository slug '${repository}'`);
+    const url = `${this.baseUrl}/repos/${owner}/${repo}/pulls?head=${owner}:${sourceBranch}&state=all&per_page=100`;
+    const response = await Utils.fetchWithRetry(url, {
+      headers: {
+        Authorization: `Bearer ${this.token}`,
+        Accept: "application/vnd.github.v3+json",
+        "User-Agent": "devintern",
+      },
+    });
+    if (!response.ok) {
+      throw new Error(`GitHub PR lookup failed: ${response.status} ${response.statusText}`);
+    }
+    const pulls = (await response.json()) as unknown;
+    if (!Array.isArray(pulls)) throw new Error("GitHub PR lookup returned an unexpected body");
+    if (pulls.length === 0) return "none";
+    return pulls.some((pr) => (pr as { state?: unknown })?.state === "open") ? "open" : "closed";
+  }
+
+  /**
    * Apply labels to an existing pull request (best-effort, like create).
    *
    * @param repository - `owner/repo` slug

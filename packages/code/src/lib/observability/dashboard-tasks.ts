@@ -14,7 +14,16 @@
  * automation license at startup, and the worker re-checks before running.
  */
 
-import { enqueueInjectedTask, MAX_INJECTED_BODY_CHARS } from "../workspace/injected-enqueue";
+import { resolveCredentialTeam } from "../workspace/config";
+import {
+  enqueueInjectedTask,
+  InjectedTaskDependencyError,
+  MAX_INJECTED_BODY_CHARS,
+} from "../workspace/injected-enqueue";
+import { cancelInjectedTask, cancelSucceeded } from "../workspace/injected-cancel";
+import type { InjectedCancelOutcome } from "../state/injected-tasks";
+import { resolveDependencyMode } from "../dependencies/gate";
+import { repoGitHubSlug } from "../workspace/env";
 import { workspaceConfigPath } from "../workspace/paths";
 import type { ApiResponse, DashboardData } from "./dashboard-api";
 import { loadDashboardWorkspaceConfig } from "./dashboard-workspace";
@@ -28,6 +37,8 @@ const MAX_IDEMPOTENCY_KEY_CHARS = 200;
 /** A validated `POST /api/tasks` body. */
 export interface DashboardTaskRequest {
   repo: string;
+  /** `[[teams]]` entry whose credentials the run uses (like `worker add --team`). */
+  team?: string;
   title: string;
   body: string;
   idempotencyKey?: string;
@@ -61,12 +72,15 @@ export function parseDashboardTaskRequest(raw: unknown): ParsedDashboardTaskRequ
   if (!isRecord(raw)) {
     return { ok: false, error: "request body must be a JSON object" };
   }
-  const { repo, title, body, idempotencyKey } = raw;
+  const { repo, team, title, body, idempotencyKey } = raw;
   if (typeof repo !== "string" || !repo.trim()) {
     return { ok: false, error: "repo is required" };
   }
   if (typeof title !== "string" || !title.trim()) {
     return { ok: false, error: "title is required and cannot be empty" };
+  }
+  if (team !== undefined && team !== null && (typeof team !== "string" || !team.trim())) {
+    return { ok: false, error: "team must be a non-empty string" };
   }
   if (body !== undefined && typeof body !== "string") {
     return { ok: false, error: "body must be a string" };
@@ -93,6 +107,7 @@ export function parseDashboardTaskRequest(raw: unknown): ParsedDashboardTaskRequ
     ok: true,
     request: {
       repo,
+      ...(typeof team === "string" ? { team } : {}),
       title,
       body: description,
       ...(typeof idempotencyKey === "string" ? { idempotencyKey } : {}),
@@ -146,11 +161,27 @@ export function handleCreateTask(data: DashboardData, raw: unknown): ApiResponse
     };
   }
 
+  // Same rule as `worker add`: an explicit team must exist, and a repo fixed
+  // to several teams needs one named so the run cannot pick the wrong account.
+  const credentials = resolveCredentialTeam(load.config, request.repo, request.team);
+  if (!credentials.ok) {
+    const hint = credentials.reason === "ambiguous" ? '; set "team" to pick one' : "";
+    return { status: 400, body: { error: `${credentials.error}${hint}` } };
+  }
+
+  const repoConfig = load.config.repos.find((repo) => repo.name === request.repo);
   try {
     const { task, deduplicated } = enqueueInjectedTask(
       data.getInjectedTaskStore(),
       data.workspaceDir,
-      { ...request, actor: DASHBOARD_TASK_ACTOR },
+      {
+        ...request,
+        actor: DASHBOARD_TASK_ACTOR,
+        dependencyMode: resolveDependencyMode({
+          configured: load.config.defaults.dependencyMode,
+          stackMaintained: repoConfig !== undefined && repoGitHubSlug(repoConfig) !== undefined,
+        }),
+      },
     );
     const body: DashboardTaskResponse = {
       id: task.id,
@@ -161,7 +192,80 @@ export function handleCreateTask(data: DashboardData, raw: unknown): ApiResponse
     };
     return { status: deduplicated ? 200 : 201, body };
   } catch (error) {
+    if (error instanceof InjectedTaskDependencyError) {
+      return { status: 400, body: { error: error.message } };
+    }
     const message = error instanceof Error ? error.message : String(error);
     return { status: 500, body: { error: `could not enqueue the task: ${message}` } };
+  }
+}
+
+/** `POST /api/tasks/:id/cancel` body (same shape as `worker cancel --json`). */
+export interface DashboardCancelTaskResponse {
+  taskKey: string;
+  outcome: InjectedCancelOutcome;
+  message: string;
+}
+
+/** Upper bound on a dashboard cancel reason (matches `worker cancel --reason`). */
+const MAX_CANCEL_REASON_CHARS = 500;
+
+const CANCEL_STATUS: Record<InjectedCancelOutcome, number> = {
+  cancelled: 200,
+  already_cancelled: 200,
+  already_started: 409,
+  already_finished: 409,
+  not_found: 404,
+};
+
+/**
+ * Cancel a pending ad-hoc task (`POST /api/tasks/:id/cancel`).
+ *
+ * `:id` is the task key (`local-…`) or the numeric queue row id. The guarded
+ * store transition only changes a still-pending row, so a row the worker
+ * claimed after the list loaded reports `already_started` (409) unchanged.
+ * The Origin/Content-Type write guard already ran in the server.
+ *
+ * @param data - Dashboard data source (owns the writable queue store)
+ * @param rawId - Path segment naming the task
+ * @param raw - Decoded JSON body (`{ reason?: string }`), or undefined
+ */
+export function handleCancelTask(data: DashboardData, rawId: string, raw: unknown): ApiResponse {
+  let id: string;
+  try {
+    id = decodeURIComponent(rawId).trim();
+  } catch {
+    return { status: 400, body: { error: "invalid task id" } };
+  }
+  if (!id) return { status: 400, body: { error: "task id is required" } };
+  let reason: string | undefined;
+  if (isRecord(raw) && raw.reason !== undefined && raw.reason !== null) {
+    if (typeof raw.reason !== "string") {
+      return { status: 400, body: { error: "reason must be a string" } };
+    }
+    if (raw.reason.length > MAX_CANCEL_REASON_CHARS) {
+      return {
+        status: 400,
+        body: { error: `reason is too long (maximum ${MAX_CANCEL_REASON_CHARS} chars)` },
+      };
+    }
+    reason = raw.reason;
+  }
+  try {
+    const store = data.getInjectedTaskStore();
+    const taskKey = /^[1-9][0-9]*$/.test(id) ? (store.getById(Number(id))?.taskKey ?? id) : id;
+    const report = cancelInjectedTask(store, taskKey, { actor: "dashboard", reason });
+    const body: DashboardCancelTaskResponse = {
+      taskKey: report.taskKey,
+      outcome: report.outcome,
+      message: report.message,
+    };
+    return {
+      status: cancelSucceeded(report.outcome) ? 200 : CANCEL_STATUS[report.outcome],
+      body,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { status: 500, body: { error: `could not cancel the task: ${message}` } };
   }
 }

@@ -33,7 +33,7 @@ import {
 import { handleOverview } from "./lib/observability/dashboard-overview";
 import { handleSources } from "./lib/observability/dashboard-sources";
 import { handleQueuedWork } from "./lib/observability/queued-work";
-import { handleCreateTask } from "./lib/observability/dashboard-tasks";
+import { handleCancelTask, handleCreateTask } from "./lib/observability/dashboard-tasks";
 import { DashboardReports } from "./lib/observability/dashboard-report";
 import type { DashboardReportDeps } from "./lib/observability/dashboard-report";
 import { handleWorkspace } from "./lib/observability/dashboard-workspace";
@@ -176,6 +176,8 @@ export interface DashboardServerOptions {
   workspaceDir?: string;
   /** Live working-window snapshot provider (embedded dashboard). */
   scheduleSnapshot?: () => import("./lib/worker/schedule").ScheduleSnapshot | null;
+  /** Jobs waiting in the worker's supervisor (embedded dashboard). */
+  supervisorQueuedJobs?: () => import("./lib/worker/supervisor").QueuedJobSnapshot[];
   /**
    * Retry execution mode (default `spawn`). The workspace worker passes
    * `schedule` so dashboard retries are drained through the fleet pipeline;
@@ -187,7 +189,7 @@ export interface DashboardServerOptions {
   /**
    * Automation listing/triggering overrides. The workspace worker passes its
    * in-process scheduler so "Run now" rides the exact scheduled pipeline;
-   * a standalone dashboard falls back to the project's automations.toml.
+   * a standalone dashboard passes the workspace's read-only catalog.
    */
   automationActions?: DashboardAutomationActions;
   /** Collaborator overrides for the manual-run action (tests). */
@@ -320,6 +322,7 @@ export function startDashboardServer(
     workingDir: options.workingDir,
     workspaceDir: options.workspaceDir,
     scheduleSnapshot: options.scheduleSnapshot,
+    supervisorQueuedJobs: options.supervisorQueuedJobs,
     retryMode: options.retryMode,
     automationActions: options.automationActions,
     logDirs: options.logDirs,
@@ -337,6 +340,7 @@ export function startDashboardServer(
   const runRetryPattern = /^\/api\/runs\/([^/]+)\/retry$/;
   const runReportPreviewPattern = /^\/api\/runs\/([^/]+)\/report\/preview$/;
   const automationRunPattern = /^\/api\/automations\/([^/]+)\/run$/;
+  const taskCancelPattern = /^\/api\/tasks\/([^/]+)\/cancel$/;
 
   const envOrigins = parseDashboardAllowedOriginsEnv(process.env.DASHBOARD_ALLOWED_ORIGINS);
   if (envOrigins.errors.length > 0) {
@@ -373,6 +377,10 @@ export function startDashboardServer(
     }
     if (pathname === "/api/tasks") {
       return createTaskFromRequest(data, request);
+    }
+    const taskCancel = pathname.match(taskCancelPattern);
+    if (taskCancel) {
+      return handleCancelTask(data, taskCancel[1], await readJsonBody(request));
     }
     const reportPreview = pathname.match(runReportPreviewPattern);
     if (reportPreview) {
@@ -450,7 +458,7 @@ export function startDashboardServer(
           return json(handleStats(data, url.searchParams));
         }
         if (pathname === "/api/worker") {
-          return json(handleWorkerStatus(data));
+          return json(handleWorkerStatus(data, process.pid));
         }
         if (pathname === "/api/sources") {
           return json(handleSources(data));
@@ -465,7 +473,7 @@ export function startDashboardServer(
           return json(handleWorkspace(data));
         }
         if (pathname === "/api/agent-prs") {
-          return json(handleAgentPrs(data));
+          return json(handleAgentPrs(data, url.searchParams));
         }
         if (pathname === "/api/logs") {
           return json(handleLogs(data, url.searchParams));

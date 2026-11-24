@@ -4,7 +4,7 @@
  * Fire-and-forget events with flush-on-exit. Never sends task keys, prompts,
  * repo names, paths, or credentials — only allowlisted enum/bool/number props
  * (see ALLOWED_PROP_KEYS). Opt out via DEVINTERN_TELEMETRY_DISABLED=1 or
- * `analytics.enabled: false` in .devintern-code/settings.json; the settings
+ * `analytics.enabled: false` in ~/.devintern/settings.json; the settings
  * opt-out is reported once as an anonymous `analytics_opt_out` event so the
  * funnel can exclude it going forward. The env kill-switch suppresses even
  * that acknowledgement, guaranteeing zero outbound analytics traffic.
@@ -14,7 +14,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { PostHog } from "posthog-node";
-import { resolveConfigDir } from "@devintern/utils";
+import { resolveWorkspaceDir } from "../workspace/paths";
 
 // Injected at build time via --define; absent when running from source,
 // which permanently disables analytics in dev builds.
@@ -22,7 +22,6 @@ declare const __POSTHOG_API_KEY__: string;
 declare const __POSTHOG_HOST__: string;
 declare const __VERSION__: string;
 
-const CONFIG_DIR_NAME = ".devintern-code";
 const DEFAULT_POSTHOG_HOST = "https://us.i.posthog.com";
 
 const CLI_VERSION = typeof __VERSION__ !== "undefined" ? __VERSION__ : "0.0.0";
@@ -191,15 +190,11 @@ interface TelemetrySettingsShape {
 }
 
 function analyticsConfigDir(configDir?: string): string {
-  return (
-    configDir ??
-    process.env[ANALYTICS_CONFIG_DIR_ENV] ??
-    resolveConfigDir({ startDir: process.cwd(), configDirName: CONFIG_DIR_NAME })
-  );
+  return configDir ?? process.env[ANALYTICS_CONFIG_DIR_ENV] ?? resolveWorkspaceDir();
 }
 
 /**
- * Reads `analytics.enabled` from .devintern-code/settings.json. Returns
+ * Reads `analytics.enabled` from `~/.devintern/settings.json`. Returns
  * `undefined` when unset or unreadable so env/config absence means opt-in.
  */
 export function readAnalyticsEnabledFromSettings(configDir?: string): boolean | undefined {

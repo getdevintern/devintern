@@ -8,6 +8,13 @@
  * target tip: a clean result is `mergeable`, and a conflicted result is
  * `conflict`. A git failure is thrown so the handler returns 500 instead of
  * a false conflict. No token, header, or body is written to the request log.
+ *
+ * With the optional `review` discussion the same MR also serves the
+ * address-review path: one unresolved reviewer discussion, plus replies posted
+ * to it. With the optional `ci` failure it also serves the CI-repair reads:
+ * one failed pipeline with one failed job for a pinned head SHA, that job's
+ * trace, and an empty commit-status list. Requests no route serves get a 404
+ * and are recorded in `unexpected`.
  */
 
 import { spawnSync } from "node:child_process";
@@ -17,10 +24,46 @@ export const FAKE_GITLAB_TOKEN = "e2e-local-forge-token";
 const PROJECT_ID = 1;
 const PROJECT_PATH = "fixture/repo";
 const USER_ID = 7;
+const REVIEWER_ID = 42;
 
 export interface ForgeRequest {
   method: string;
   path: string;
+}
+
+/** One unresolved reviewer discussion served on MR !1 (address-review path). */
+export interface FakeGitlabReviewDiscussion {
+  /** GitLab discussion id (an opaque hex string upstream). */
+  discussionId: string;
+  /** Note id of the reviewer's comment. */
+  noteId: number;
+  /** Reviewer comment body that should reach the agent prompt. */
+  body: string;
+  /** Reviewer username; never the forge's own bot user. */
+  reviewer: string;
+}
+
+/**
+ * One failed pipeline and job served for a single commit (CI-repair path).
+ *
+ * `GET pipelines?sha=<sha>` lists the pipeline only for `sha`, so a commit
+ * pushed by the repair run (or any other SHA) has no pipelines.
+ */
+export interface FakeGitlabCiFailure {
+  /** Head SHA the failed pipeline ran on. */
+  sha: string;
+  pipelineId: number;
+  jobId: number;
+  /** Failed job name that should reach the agent prompt. */
+  jobName: string;
+  /** Raw job trace served from `jobs/<jobId>/trace`. */
+  trace: string;
+}
+
+/** A reply the review run posted to a served discussion. */
+export interface FakeGitlabDiscussionReply {
+  discussionId: string;
+  body: string;
 }
 
 export interface FakeGitlabForgeOptions {
@@ -34,6 +77,16 @@ export interface FakeGitlabForgeOptions {
   targetBranch: string;
   /** Expected `PRIVATE-TOKEN`. A mismatch is recorded without the value. */
   token?: string;
+  /**
+   * Serve this unresolved discussion from `merge_requests/1/discussions` and
+   * accept replies to it. Without it the MR has no discussions (conflict path).
+   */
+  review?: FakeGitlabReviewDiscussion;
+  /**
+   * Serve one failed pipeline/job and its trace for `ci.sha`. Without it the
+   * pipeline, job, trace, and commit-status routes stay unserved (404).
+   */
+  ci?: FakeGitlabCiFailure;
 }
 
 /** Minimal local GitLab API bound to `127.0.0.1`. */
@@ -41,6 +94,10 @@ export class FakeGitlabForge {
   readonly requests: ForgeRequest[] = [];
   readonly notes: string[] = [];
   readonly authFailures: string[] = [];
+  /** Replies posted to the `review` discussion, in order. */
+  readonly discussionReplies: FakeGitlabDiscussionReply[] = [];
+  /** Requests that matched no served route (answered 404). */
+  readonly unexpected: ForgeRequest[] = [];
   readonly baseUrl: string;
   readonly mergeRequestUrl: string;
   private readonly server: ReturnType<typeof Bun.serve>;
@@ -88,7 +145,7 @@ export class FakeGitlabForge {
     }
 
     const routed = routeProject(url.pathname);
-    if (!routed) return json({ message: "not found" }, 404);
+    if (!routed) return this.notFound(request.method, path);
     try {
       return await this.routeProject(request, routed.rest);
     } catch {
@@ -103,9 +160,19 @@ export class FakeGitlabForge {
 
     const mr = rest.match(/^\/merge_requests\/1(?:\/(discussions|notes|merge))?$/);
     if (mr && request.method === "GET" && !mr[1]) return json(this.mergeRequest());
-    if (mr?.[1] === "discussions" && request.method === "GET") return json([]);
+    if (mr?.[1] === "discussions" && request.method === "GET") return json(this.discussions());
     if (mr?.[1] === "notes" && request.method === "POST") return this.postNote(request);
     if (mr?.[1] === "merge") return json({ message: "not found" }, 404);
+
+    const reply = rest.match(/^\/merge_requests\/1\/discussions\/([^/]+)\/notes$/);
+    const discussionId = reply?.[1] ? decodeURIComponent(reply[1]) : undefined;
+    if (
+      discussionId !== undefined &&
+      discussionId === this.options.review?.discussionId &&
+      request.method === "POST"
+    ) {
+      return this.postDiscussionReply(request, discussionId);
+    }
 
     const branch = rest.match(/^\/repository\/branches\/(.+)$/);
     if (branch?.[1] && request.method === "GET") {
@@ -114,7 +181,99 @@ export class FakeGitlabForge {
       return json({ name, can_push: true });
     }
 
+    const url = new URL(request.url);
+    const ci = this.options.ci;
+    if (ci && request.method === "GET") {
+      const served = this.routeCi(ci, rest, url.searchParams);
+      if (served) return served;
+    }
+    return this.notFound(request.method, `${url.pathname}${url.search}`);
+  }
+
+  /** CI-repair reads for the opt-in failed pipeline. `null` leaves the 404 path. */
+  private routeCi(ci: FakeGitlabCiFailure, rest: string, query: URLSearchParams): Response | null {
+    if (rest === "/pipelines") {
+      if (query.get("sha") !== ci.sha) return json([]);
+      return json([
+        {
+          id: ci.pipelineId,
+          sha: ci.sha,
+          ref: this.options.sourceBranch,
+          status: "failed",
+          web_url: `${this.baseUrl}/${PROJECT_PATH}/-/pipelines/${ci.pipelineId}`,
+        },
+      ]);
+    }
+    if (rest === `/pipelines/${ci.pipelineId}/jobs`) {
+      return json([
+        {
+          id: ci.jobId,
+          name: ci.jobName,
+          status: "failed",
+          allow_failure: false,
+          web_url: `${this.baseUrl}/${PROJECT_PATH}/-/jobs/${ci.jobId}`,
+        },
+      ]);
+    }
+    if (rest === `/jobs/${ci.jobId}/trace`) {
+      return new Response(ci.trace, { headers: { "content-type": "text/plain" } });
+    }
+    const statuses = rest.match(/^\/repository\/commits\/([^/]+)\/statuses$/);
+    if (statuses?.[1]) return json([]);
+    return null;
+  }
+
+  /** Strict routing: answer 404 and remember the request (method and path only). */
+  private notFound(method: string, path: string): Response {
+    this.unexpected.push({ method, path });
     return json({ message: "not found" }, 404);
+  }
+
+  private discussions(): unknown[] {
+    const review = this.options.review;
+    if (!review) return [];
+    return [
+      {
+        id: review.discussionId,
+        individual_note: false,
+        notes: [
+          {
+            id: review.noteId,
+            body: review.body,
+            author: { id: REVIEWER_ID, username: review.reviewer, state: "active" },
+            created_at: "2026-01-01T00:00:00.000Z",
+            system: false,
+            resolvable: true,
+            resolved: false,
+            position: null,
+          },
+          // Replies come from the forge's own user, which the product skips
+          // as non-human feedback.
+          ...this.discussionReplies.map((entry, index) => ({
+            id: review.noteId + index + 1,
+            body: entry.body,
+            author: { id: USER_ID, username: "e2e-bot", state: "active" },
+            created_at: "2026-01-01T00:00:01.000Z",
+            system: false,
+            resolvable: true,
+            resolved: false,
+            position: null,
+          })),
+        ],
+      },
+    ];
+  }
+
+  private async postDiscussionReply(request: Request, discussionId: string): Promise<Response> {
+    let body = "";
+    try {
+      const parsed = (await request.json()) as { body?: unknown };
+      body = typeof parsed.body === "string" ? parsed.body : "";
+    } catch {
+      body = "";
+    }
+    this.discussionReplies.push({ discussionId, body });
+    return json({ id: (this.options.review?.noteId ?? 0) + this.discussionReplies.length, body });
   }
 
   private async postNote(request: Request): Promise<Response> {

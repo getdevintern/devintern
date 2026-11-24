@@ -1,16 +1,15 @@
 import { expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { FakeRelay } from "../../helpers/fake-relay";
 import { checkedCommand } from "../../helpers/process";
+import { writeRelayState } from "../../helpers/relay-state";
 import type { FakeRelayRequest } from "../../helpers/fake-relay";
 import { IMPLEMENTATION_COMMENT_MARKER } from "../../helpers/tracker-lifecycle";
 import { buildTrackerSettings } from "../../helpers/tracker-scenario";
 import { cliPath, WorkerFixture } from "../../helpers/worker";
 import { FakeLinearTracker } from "../../providers/fake-linear";
 
-/** Fake customer id; `loadRelayState` requires one but the worker never sends it. */
-const FAKE_CUSTOMER_ID = "cus_e2e_fake";
 /** Far longer than the test, so Mode 1 polling only runs its startup tick. */
 const POLL_INTERVAL_SECONDS = 3600;
 /** The acquirer's initial backoff (`BACKOFF_INITIAL_MS`); the shortest the code allows. */
@@ -24,35 +23,6 @@ function redact(text: string, secrets: readonly string[]): string {
     redacted = redacted.replaceAll(encodeURIComponent(secret), "[redacted]");
   }
   return redacted;
-}
-
-/**
- * Seed the relay pairing `devintern worker connect` would have written.
- *
- * `loadRelayState` reads `<workspace>/state/code/relay.json` and requires
- * `relayUrl` and `customerId`; the relay acquirer additionally needs
- * `relayToken`. No real relay is contacted.
- */
-function writeRelayState(worker: WorkerFixture, relayUrl: string, relayToken: string): void {
-  const dir = join(worker.workspaceDir, "state", "code");
-  mkdirSync(dir, { recursive: true });
-  const path = join(dir, "relay.json");
-  writeFileSync(
-    path,
-    `${JSON.stringify(
-      {
-        relayUrl,
-        customerId: FAKE_CUSTOMER_ID,
-        connectedAt: new Date().toISOString(),
-        registrations: [],
-        relayToken,
-      },
-      null,
-      2,
-    )}\n`,
-    { mode: 0o600 },
-  );
-  chmodSync(path, 0o600);
 }
 
 /**
@@ -158,7 +128,7 @@ test.skipIf(!existsSync(cliPath))(
       });
 
       await daemon.prepare();
-      writeRelayState(daemon, fakeRelay.url, relayToken);
+      writeRelayState(daemon.workspaceDir, fakeRelay.url, relayToken);
       await commitLinearSettings(daemon, linear);
 
       daemon.start();

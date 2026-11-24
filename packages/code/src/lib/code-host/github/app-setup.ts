@@ -2,7 +2,7 @@
  * GitHub App pairing for the unattended worker.
  *
  * The verified `worker connect github` flow records its outcomes next to the
- * workspace's relay pairing (`<workspace-home>/.devintern-code/github-app.json`).
+ * workspace's relay pairing (`<workspace-home>/state/code/github-app.json`).
  * The records say whether GitHub App events (`@mention` handling, PR comment
  * events) were verified by the hosted relay pairing flow for each repository.
  *
@@ -15,6 +15,12 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, join, resolve } from "path";
+
+import {
+  codeStateDirFor,
+  legacyWorkspaceConfigDir,
+  resolveWorkspaceDir,
+} from "../../workspace/paths";
 
 /** Hosted DevIntern AI GitHub App (same install target as `worker connect`). */
 export const GITHUB_APP_INSTALL_URL = "https://github.com/apps/devintern-ai/installations/new";
@@ -33,8 +39,21 @@ export interface GitHubAppRecord {
   repositoryId?: number;
 }
 
+const GITHUB_APP_RECORD_FILE = "github-app.json";
+
 function githubAppRecordPath(workingDir: string): string {
-  return join(resolve(workingDir, ".devintern-code"), "github-app.json");
+  return join(codeStateDirFor(workingDir), GITHUB_APP_RECORD_FILE);
+}
+
+/**
+ * Path to read pairings from: the current location, or the legacy
+ * `<workspace>/.devintern-code/` copy until `ensureWorkspaceCodeState` moves it.
+ */
+function readableGitHubAppRecordPath(workingDir: string): string {
+  const current = githubAppRecordPath(workingDir);
+  if (existsSync(current)) return current;
+  const legacy = join(legacyWorkspaceConfigDir(resolve(workingDir)), GITHUB_APP_RECORD_FILE);
+  return existsSync(legacy) ? legacy : current;
 }
 
 function parseGitHubAppRecord(record: Partial<GitHubAppRecord>): GitHubAppRecord | null {
@@ -51,8 +70,10 @@ function parseGitHubAppRecord(record: Partial<GitHubAppRecord>): GitHubAppRecord
 }
 
 /** Load all persisted pairings, migrating the original single-record shape on read. */
-export function loadGitHubAppRecords(workingDir: string = process.cwd()): GitHubAppRecord[] {
-  const path = githubAppRecordPath(workingDir);
+export function loadGitHubAppRecords(
+  workingDir: string = resolveWorkspaceDir(),
+): GitHubAppRecord[] {
+  const path = readableGitHubAppRecordPath(workingDir);
   if (!existsSync(path)) return [];
   try {
     const data = JSON.parse(readFileSync(path, "utf8")) as
@@ -71,7 +92,7 @@ export function loadGitHubAppRecords(workingDir: string = process.cwd()): GitHub
 
 /** Load one persisted pairing, optionally selecting it by repository slug. */
 export function loadGitHubAppRecord(
-  workingDir: string = process.cwd(),
+  workingDir: string = resolveWorkspaceDir(),
   repo?: string,
 ): GitHubAppRecord | null {
   const records = loadGitHubAppRecords(workingDir);
@@ -80,10 +101,10 @@ export function loadGitHubAppRecord(
     : (records.at(-1) ?? null);
 }
 
-/** Persist or replace one repository pairing in `<workspace>/.devintern-code/`. */
+/** Persist or replace one repository pairing in the workspace's `state/code/`. */
 export function saveGitHubAppRecord(
   record: GitHubAppRecord,
-  workingDir: string = process.cwd(),
+  workingDir: string = resolveWorkspaceDir(),
 ): void {
   const path = githubAppRecordPath(workingDir);
   mkdirSync(dirname(path), { recursive: true });

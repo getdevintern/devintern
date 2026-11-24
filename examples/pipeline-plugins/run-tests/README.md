@@ -14,7 +14,7 @@ deterministic check — no agent is involved — so it is cheap and reproducible
 | File                                          | Purpose                                            |
 | --------------------------------------------- | -------------------------------------------------- |
 | `plugin.ts`                                       | The step definition.                               |
-| `settings.json`                                   | Pipeline registration for `.devintern-code/settings.json`. |
+| `pipeline.json`                                   | Workspace pipeline file. |
 | `fixtures/sample/pass.fixture.ts`, `fail.fixture.ts` | A tiny reproducible success/failure fixture.    |
 | `tests/run-tests.test.ts`                         | Automated validation of all three paths.           |
 
@@ -24,16 +24,18 @@ discovers the deliberate failure. The plugin runs them explicitly via
 
 ## Setup
 
-1. Copy the plugin into your repository:
+1. Copy the plugin and its pipeline file into your workspace:
 
    ```bash
-   mkdir -p .devintern-code/steps
-   cp examples/pipeline-plugins/run-tests/plugin.ts .devintern-code/steps/run-tests.ts
-   bun add -d @getdevintern/code   # only if it is not already installed
+   mkdir -p ~/.devintern/pipelines/steps
+   cp examples/pipeline-plugins/run-tests/plugin.ts ~/.devintern/pipelines/steps/run-tests.ts
+   cp examples/pipeline-plugins/run-tests/pipeline.json ~/.devintern/pipelines/backend.json
+   cd ~/.devintern/pipelines && bun add @getdevintern/code
    ```
 
-2. Merge the `pipeline` block from `settings.json` into
-   `.devintern-code/settings.json`.
+2. Set `pipeline_file = "pipelines/backend.json"` on the repository's
+   `[[repos]]` entry in `~/.devintern/workspace.toml` (see
+   [Install and copy a plugin](../README.md#install-and-copy-a-plugin)).
 
 3. Run a task as usual. The pipeline prints the command result and halts before
    `finalize` if the command fails.

@@ -126,6 +126,41 @@ describe("isRunRetriable", () => {
     expect(succeeded.eligible).toBe(false);
     expect(succeeded.reason).toBeString();
   });
+
+  test("a succeeded local run whose PR step failed is re-queueable", () => {
+    // Run 591: pushed its branch, then PR creation failed on credentials.
+    expect(
+      isRunRetriable({
+        status: "succeeded",
+        taskKey: "local-add-truncate-helper",
+        origin: "local",
+        branch: "feature/local-add-truncate-helper",
+        prFailure: "Bad credentials",
+      }),
+    ).toEqual({ eligible: true, kind: "injected" });
+    // PR creation is opt-in: a run that never asked for a PR (no recorded
+    // failure) did not fail its PR step, so it stays final.
+    expect(
+      isRunRetriable({
+        status: "succeeded",
+        taskKey: "local-add-truncate-helper",
+        origin: "local",
+        branch: "feature/local-add-truncate-helper",
+      }),
+    ).toEqual({ eligible: false, reason: "this run already succeeded" });
+    const delivered = isRunRetriable({
+      status: "succeeded",
+      taskKey: "local-add-truncate-helper",
+      origin: "local",
+      branch: "feature/local-add-truncate-helper",
+      prUrl: "https://github.com/owner/repo/pull/12",
+    });
+    expect(delivered).toEqual({ eligible: false, reason: "this run already succeeded" });
+    // Tracker tasks keep a succeeded run final, PR or not.
+    expect(
+      isRunRetriable({ status: "succeeded", taskKey: "PROJ-1", branch: "feature/proj-1" }).eligible,
+    ).toBe(false);
+  });
 });
 
 describe("handleRetryRun", () => {
@@ -478,6 +513,75 @@ describe("handleRetryRun (ad-hoc injected runs)", () => {
       retry: { eligible: boolean; kind?: string; audit: { action: string }[] };
     };
     expect(detail.retry.audit[0].action).toBe("scheduled");
+  });
+
+  test("does not offer re-queue for a succeeded run that never requested a PR", () => {
+    // `worker_task_args` without `--create-pr`: no PR, but no PR failure either.
+    const runs = new RunStore(dbPath);
+    const runId = runs.createRun({
+      origin: "local",
+      taskKey: TASK_KEY,
+      harness: "claude-code",
+      branch: "feature/local-fix-flaky-test",
+    });
+    runs.finishRun(runId, "succeeded");
+    expect(runs.getRun(runId)?.prFailure).toBeUndefined();
+    runs.close();
+    // A settled queue row exists, so only the PR-failure rule can refuse it.
+    const injected = new InjectedTaskStore(dbPath);
+    injected.enqueue({
+      taskKey: TASK_KEY,
+      repo: "backend",
+      title: "Fix flaky test",
+      body: "",
+      taskFile: join(dir, "injected", `${TASK_KEY}.md`),
+    });
+    injected.finish(injected.claimNext()!.id, "done");
+    injected.close();
+    const detail = handleRunDetail(data, String(runId)).body as {
+      retry: { eligible: boolean; reason?: string };
+    };
+    expect(detail.retry).toMatchObject({
+      eligible: false,
+      reason: "this run already succeeded",
+    });
+  });
+
+  test("re-queues a succeeded run that pushed its branch but opened no PR", async () => {
+    const runs = new RunStore(dbPath);
+    const runId = runs.createRun({
+      origin: "local",
+      taskKey: TASK_KEY,
+      harness: "claude-code",
+      branch: "feature/local-fix-flaky-test",
+    });
+    runs.setRunPrFailure(runId, "Bad credentials");
+    runs.finishRun(runId, "succeeded");
+    runs.close();
+    const injected = new InjectedTaskStore(dbPath);
+    injected.enqueue({
+      taskKey: TASK_KEY,
+      repo: "backend",
+      title: "Fix flaky test",
+      body: "",
+      taskFile: join(dir, "injected", `${TASK_KEY}.md`),
+    });
+    injected.finish(injected.claimNext()!.id, "done");
+    injected.close();
+
+    const detail = handleRunDetail(data, String(runId)).body as {
+      retry: { eligible: boolean; kind?: string };
+    };
+    expect(detail.retry).toMatchObject({ eligible: true, kind: "injected" });
+
+    const response = await handleRetryRun(data, String(runId), stubDeps().deps);
+    expect(response.status).toBe(202);
+    const after = new InjectedTaskStore(dbPath);
+    try {
+      expect(after.getByTaskKey(TASK_KEY)?.status).toBe("pending");
+    } finally {
+      after.close();
+    }
   });
 
   test("reports the injected kind on the run detail", async () => {

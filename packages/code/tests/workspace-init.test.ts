@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { execSync } from "child_process";
 import {
   chmodSync,
@@ -86,6 +86,28 @@ describe("worker scaffold/add-repo", () => {
     expect(config.repos).toEqual([]);
 
     expect(runWorkerScaffold()).toBe(1); // second run refuses
+  });
+
+  test("scaffold next steps name tracker, task_query, env path, and doctor", () => {
+    const lines: string[] = [];
+    const logSpy = spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+      lines.push(args.join(" "));
+    });
+    try {
+      expect(runWorkerScaffold()).toBe(0);
+    } finally {
+      logSpy.mockRestore();
+    }
+    const output = lines.join("\n");
+    const steps = output.slice(output.indexOf("Next steps:"));
+    expect(steps).toContain("[defaults].tracker and task_query");
+    expect(steps).toContain('tracker = "markdown" with MARKDOWN_TASKS_DIR');
+    expect(steps).toContain(workspaceEnvPath());
+    expect(steps).toMatch(/Multiple repos\? Add \[\[routing\.rules\]\]/);
+    const doctorAt = steps.indexOf("devintern worker doctor");
+    const startAt = steps.indexOf("Start the worker: devintern worker");
+    expect(doctorAt).toBeGreaterThan(-1);
+    expect(startAt).toBeGreaterThan(doctorAt);
   });
 
   test("scaffold has no bare # comment lines (Bun.TOML redefinition bug)", () => {

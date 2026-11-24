@@ -2,8 +2,8 @@
  * run-tests — run a deterministic command (Bun test or typecheck) after the
  * implementation is committed and halt delivery when it exits non-zero.
  *
- * Copy this file to `.devintern-code/steps/run-tests.ts` in your repository and
- * register it from `.devintern-code/settings.json` (see settings.json here).
+ * Copy this file to `~/.devintern/pipelines/steps/run-tests.ts` and register it
+ * in a workspace pipeline file (see pipeline.json here).
  */
 
 import { isAbsolute, join } from "node:path";

@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
 
@@ -20,7 +20,8 @@ describe("github-app-setup", () => {
 
   beforeEach(() => {
     tempDir = mkdtempSync(path.join(tmpdir(), "devintern-github-app-setup-"));
-    mkdirSync(path.join(tempDir, ".devintern-code"), { recursive: true });
+    // A workspace home: pairings live in its state/code/.
+    mkdirSync(path.join(tempDir, "state", "code"), { recursive: true });
   });
 
   afterEach(() => {
@@ -31,6 +32,26 @@ describe("github-app-setup", () => {
     if (savedAppEnv.keyBase64 === undefined) delete process.env.GITHUB_APP_PRIVATE_KEY_BASE64;
     else process.env.GITHUB_APP_PRIVATE_KEY_BASE64 = savedAppEnv.keyBase64;
     rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  test("stores workspace pairings in state/code and reads the legacy copy until moved", () => {
+    const workspace = path.join(tempDir, "workspace");
+    const legacy = path.join(workspace, ".devintern-code");
+    mkdirSync(legacy, { recursive: true });
+    writeFileSync(path.join(workspace, "workspace.toml"), "");
+    writeFileSync(
+      path.join(legacy, "github-app.json"),
+      JSON.stringify({ repositories: [{ repo: "acme/api", enabled: true }] }),
+    );
+    expect(loadGitHubAppRecord(workspace, "acme/api")?.enabled).toBe(true);
+
+    saveGitHubAppRecord({ repo: "acme/web", enabled: true }, workspace);
+    const current = path.join(workspace, "state", "code", "github-app.json");
+    expect(existsSync(current)).toBe(true);
+    expect(loadGitHubAppRecords(workspace).map((record) => record.repo)).toEqual([
+      "acme/api",
+      "acme/web",
+    ]);
   });
 
   test("saves and reloads an enabled pairing record", () => {
@@ -47,10 +68,10 @@ describe("github-app-setup", () => {
 
   test("returns null when missing, malformed, or shape-invalid", () => {
     expect(loadGitHubAppRecord(tempDir)).toBeNull();
-    writeFileSync(path.join(tempDir, ".devintern-code", "github-app.json"), "{not json", "utf8");
+    writeFileSync(path.join(tempDir, "state", "code", "github-app.json"), "{not json", "utf8");
     expect(loadGitHubAppRecord(tempDir)).toBeNull();
     writeFileSync(
-      path.join(tempDir, ".devintern-code", "github-app.json"),
+      path.join(tempDir, "state", "code", "github-app.json"),
       '{"enabled":true}',
       "utf8",
     );
