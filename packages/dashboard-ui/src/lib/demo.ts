@@ -25,6 +25,14 @@ export function isDemoMode(): boolean {
   return import.meta.env.VITE_DASHBOARD_DEMO === "1";
 }
 
+/**
+ * Where the demo's call to action leads: `VITE_DASHBOARD_DEMO_CTA_URL` at
+ * build time, or the DevIntern pilot page.
+ */
+export function demoCtaUrl(): string {
+  return import.meta.env.VITE_DASHBOARD_DEMO_CTA_URL || "https://devintern.com/start/";
+}
+
 /** Message returned for any request that would change state. */
 export const DEMO_READ_ONLY_MESSAGE = "This is a read-only demo; actions are disabled.";
 
