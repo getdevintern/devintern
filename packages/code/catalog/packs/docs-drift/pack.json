@@ -1,0 +1,10 @@
+{
+  "id": "docs-drift",
+  "version": 1,
+  "name": "Docs drift",
+  "description": "Find documentation that recently merged changes made false, and correct it without touching code.",
+  "schedule": { "cron": "0 7 * * 3" },
+  "openPr": true,
+  "allowNoChanges": true,
+  "prompt": "prompt.md"
+}
