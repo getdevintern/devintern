@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "packs": [
+    "ci-red-fixer",
+    "dependency-security",
+    "dependency-freshness",
+    "flaky-test-finder",
+    "slow-test-optimizer",
+    "docs-drift"
+  ]
+}

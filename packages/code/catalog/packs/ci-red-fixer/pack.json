@@ -1,0 +1,10 @@
+{
+  "id": "ci-red-fixer",
+  "version": 1,
+  "name": "CI red fixer",
+  "description": "When CI on the default branch is failing, fix or revert the cause with the smallest correct change.",
+  "schedule": { "cron": "0 7 * * *" },
+  "openPr": true,
+  "allowNoChanges": true,
+  "prompt": "prompt.md"
+}
