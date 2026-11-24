@@ -150,11 +150,15 @@ function buildGitLabWebhookBase(
   const mergeRequest = object(payload.merge_request);
   const projectId = number(project.id) ?? number(payload.project_id);
   const projectPath = string(project.path_with_namespace) ?? string(payload.project_name);
+  // A Pipeline Hook's `object_attributes.iid` is the pipeline's own iid, not
+  // the MR's: only its `merge_request` block names the MR.
   const iid =
-    number(attributes.iid) ??
-    number(attributes.noteable_iid) ??
-    number(mergeRequest.iid) ??
-    number(payload.merge_request_iid);
+    eventName === "Pipeline Hook"
+      ? number(mergeRequest.iid)
+      : (number(attributes.iid) ??
+        number(attributes.noteable_iid) ??
+        number(mergeRequest.iid) ??
+        number(payload.merge_request_iid));
   const branch =
     string(attributes.source_branch) ??
     string(attributes.ref) ??

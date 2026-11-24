@@ -11,7 +11,10 @@
  *
  * With the optional `review` discussion the same MR also serves the
  * address-review path: one unresolved reviewer discussion, plus replies posted
- * to it. Requests no route serves get a 404 and are recorded in `unexpected`.
+ * to it. With the optional `ci` failure it also serves the CI-repair reads:
+ * one failed pipeline with one failed job for a pinned head SHA, that job's
+ * trace, and an empty commit-status list. Requests no route serves get a 404
+ * and are recorded in `unexpected`.
  */
 
 import { spawnSync } from "node:child_process";
@@ -40,6 +43,23 @@ export interface FakeGitlabReviewDiscussion {
   reviewer: string;
 }
 
+/**
+ * One failed pipeline and job served for a single commit (CI-repair path).
+ *
+ * `GET pipelines?sha=<sha>` lists the pipeline only for `sha`, so a commit
+ * pushed by the repair run (or any other SHA) has no pipelines.
+ */
+export interface FakeGitlabCiFailure {
+  /** Head SHA the failed pipeline ran on. */
+  sha: string;
+  pipelineId: number;
+  jobId: number;
+  /** Failed job name that should reach the agent prompt. */
+  jobName: string;
+  /** Raw job trace served from `jobs/<jobId>/trace`. */
+  trace: string;
+}
+
 /** A reply the review run posted to a served discussion. */
 export interface FakeGitlabDiscussionReply {
   discussionId: string;
@@ -62,6 +82,11 @@ export interface FakeGitlabForgeOptions {
    * accept replies to it. Without it the MR has no discussions (conflict path).
    */
   review?: FakeGitlabReviewDiscussion;
+  /**
+   * Serve one failed pipeline/job and its trace for `ci.sha`. Without it the
+   * pipeline, job, trace, and commit-status routes stay unserved (404).
+   */
+  ci?: FakeGitlabCiFailure;
 }
 
 /** Minimal local GitLab API bound to `127.0.0.1`. */
@@ -157,7 +182,45 @@ export class FakeGitlabForge {
     }
 
     const url = new URL(request.url);
+    const ci = this.options.ci;
+    if (ci && request.method === "GET") {
+      const served = this.routeCi(ci, rest, url.searchParams);
+      if (served) return served;
+    }
     return this.notFound(request.method, `${url.pathname}${url.search}`);
+  }
+
+  /** CI-repair reads for the opt-in failed pipeline. `null` leaves the 404 path. */
+  private routeCi(ci: FakeGitlabCiFailure, rest: string, query: URLSearchParams): Response | null {
+    if (rest === "/pipelines") {
+      if (query.get("sha") !== ci.sha) return json([]);
+      return json([
+        {
+          id: ci.pipelineId,
+          sha: ci.sha,
+          ref: this.options.sourceBranch,
+          status: "failed",
+          web_url: `${this.baseUrl}/${PROJECT_PATH}/-/pipelines/${ci.pipelineId}`,
+        },
+      ]);
+    }
+    if (rest === `/pipelines/${ci.pipelineId}/jobs`) {
+      return json([
+        {
+          id: ci.jobId,
+          name: ci.jobName,
+          status: "failed",
+          allow_failure: false,
+          web_url: `${this.baseUrl}/${PROJECT_PATH}/-/jobs/${ci.jobId}`,
+        },
+      ]);
+    }
+    if (rest === `/jobs/${ci.jobId}/trace`) {
+      return new Response(ci.trace, { headers: { "content-type": "text/plain" } });
+    }
+    const statuses = rest.match(/^\/repository\/commits\/([^/]+)\/statuses$/);
+    if (statuses?.[1]) return json([]);
+    return null;
   }
 
   /** Strict routing: answer 404 and remember the request (method and path only). */
