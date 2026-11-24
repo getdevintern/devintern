@@ -130,6 +130,70 @@ export async function verifyPushHookFix(options?: {
 }
 
 /**
+ * Builds the agent prompt for fixing a failed git hook.
+ *
+ * @param hookType - Which hook failed: pre-commit or pre-push
+ * @param gitHookErrorLog - Glob path to previous hook error logs
+ * @returns The prompt handed to the agent harness
+ */
+export function buildGitHookFixPrompt(
+  hookType: "commit" | "push",
+  gitHookErrorLog: string,
+): string {
+  // Concise prompt asking the agent to re-run the git command; avoids context
+  // length issues from including full error output.
+  const gitCommand = hookType === "commit" ? "git commit" : "git push origin HEAD";
+
+  return `# Git Hook Error - Fix Required
+
+The git ${hookType} operation has failed, likely due to pre-${hookType} hooks checking code quality.
+
+## Your Task
+
+1. **Review recent hook errors** (optional but helpful):
+   \`\`\`bash
+   tail -n 100 ${gitHookErrorLog}
+   \`\`\`
+   This shows the last 100 lines of previous hook errors to understand patterns.
+
+2. **Run the git command** to see what failed:
+   \`\`\`bash
+   ${gitCommand}
+   \`\`\`
+
+3. **Analyze the error output** and fix all issues. Common problems include:
+   - **Linting errors**: Fix code style, formatting, or linting issues
+   - **Test failures**: Fix failing tests or update test expectations
+   - **Type errors**: Resolve TypeScript or type-checking issues
+   - **Formatting issues**: Run formatters or fix code formatting
+   - **Security issues**: Address security vulnerabilities or dependency issues
+
+4. **Stage only real work**:
+   \`\`\`bash
+   git add -u
+   git add <path>   # for each new file you intentionally created
+   \`\`\`
+   \`git add -u\` stages changed and deleted tracked files. Never stage the whole tree or
+   every untracked entry in bulk: the sandbox mounts placeholder entries (\`.bashrc\`,
+   \`.profile\`, \`.gitconfig\`, \`.claude/…\`, …) into the worktree root; git cannot stage
+   them, and they must never be committed.
+
+5. ${
+    hookType === "commit"
+      ? '**Retry the commit** with an explicit message (never omit `-m` — unattended runs have no editor):\n   ```bash\n   git commit -m "fix: resolve pre-commit hook failures"\n   ```'
+      : "**Amend the existing commit** with your fixes:\n   ```bash\n   git commit --amend --no-edit\n   ```\n\n6. **Verify the fix** by running the push command again to ensure it succeeds."
+  }
+
+**Important**:
+- Only fix the issues mentioned in the error output
+- Do not modify unrelated code
+- Ensure all tests pass if the hook runs tests
+- Follow the project's coding standards and conventions
+${hookType === "push" ? "- Make sure to amend the commit (git commit --amend --no-edit) so the fixes are included in the push" : ""}
+`;
+}
+
+/**
  * Run agent to fix git hook errors.
  *
  * @param hookType - Type of git hook that failed ("commit" or "push")
@@ -198,56 +262,9 @@ export async function runAgentHarnessToFixGitHook(
     (async () => {
       console.log(`\n🔧 Attempting to fix git hook errors with ${harness.displayName}...`);
 
-      // Create a concise prompt that asks the agent to re-run the git command
-      // This avoids context length issues from including full error output
-      const gitCommand = hookType === "commit" ? "git commit" : "git push origin HEAD";
-
       // Get the path to the git-hook-errors.log file
-      const baseOutputDir = resolveOutputDir();
-      const gitHookErrorLog = `${baseOutputDir}/*/git-hook-errors.log`;
-
-      const fixPrompt = `# Git Hook Error - Fix Required
-
-The git ${hookType} operation has failed, likely due to pre-${hookType} hooks checking code quality.
-
-## Your Task
-
-1. **Review recent hook errors** (optional but helpful):
-   \`\`\`bash
-   tail -n 100 ${gitHookErrorLog}
-   \`\`\`
-   This shows the last 100 lines of previous hook errors to understand patterns.
-
-2. **Run the git command** to see what failed:
-   \`\`\`bash
-   ${gitCommand}
-   \`\`\`
-
-3. **Analyze the error output** and fix all issues. Common problems include:
-   - **Linting errors**: Fix code style, formatting, or linting issues
-   - **Test failures**: Fix failing tests or update test expectations
-   - **Type errors**: Resolve TypeScript or type-checking issues
-   - **Formatting issues**: Run formatters or fix code formatting
-   - **Security issues**: Address security vulnerabilities or dependency issues
-
-4. **Stage your changes** with:
-   \`\`\`bash
-   git add .
-   \`\`\`
-
-5. ${
-        hookType === "commit"
-          ? '**Retry the commit** with an explicit message (never omit `-m` — unattended runs have no editor):\n   ```bash\n   git commit -m "fix: resolve pre-commit hook failures"\n   ```'
-          : "**Amend the existing commit** with your fixes:\n   ```bash\n   git commit --amend --no-edit\n   ```\n\n6. **Verify the fix** by running the push command again to ensure it succeeds."
-      }
-
-**Important**:
-- Only fix the issues mentioned in the error output
-- Do not modify unrelated code
-- Ensure all tests pass if the hook runs tests
-- Follow the project's coding standards and conventions
-${hookType === "push" ? "- Make sure to amend the commit (git commit --amend --no-edit) so the fixes are included in the push" : ""}
-`;
+      const gitHookErrorLog = `${resolveOutputDir()}/*/git-hook-errors.log`;
+      const fixPrompt = buildGitHookFixPrompt(hookType, gitHookErrorLog);
 
       const timeoutMinutes = parseInt(process.env.AGENT_HARNESS_TIMEOUT_MINUTES || "60", 10);
       let stdoutOutput = "";
