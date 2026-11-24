@@ -12,9 +12,9 @@
  * With the optional `review` discussion the same MR also serves the
  * address-review path: one unresolved reviewer discussion, plus replies posted
  * to it. With the optional `ci` failure it also serves the CI-repair reads:
- * one failed pipeline with one failed job for a pinned head SHA, that job's
- * trace, and an empty commit-status list. Requests no route serves get a 404
- * and are recorded in `unexpected`.
+ * one pipeline with one job (failed unless `setCiStatus` says otherwise) for a
+ * pinned head SHA, that job's trace, and an empty commit-status list. Requests
+ * no route serves get a 404 and are recorded in `unexpected`.
  */
 
 import { spawnSync } from "node:child_process";
@@ -60,6 +60,9 @@ export interface FakeGitlabCiFailure {
   trace: string;
 }
 
+/** Pipeline and job status {@link FakeGitlabForge.setCiStatus} can serve. */
+export type FakeGitlabCiStatus = "failed" | "running" | "success";
+
 /** A reply the review run posted to a served discussion. */
 export interface FakeGitlabDiscussionReply {
   discussionId: string;
@@ -103,6 +106,7 @@ export class FakeGitlabForge {
   private readonly server: ReturnType<typeof Bun.serve>;
   private readonly options: Required<Pick<FakeGitlabForgeOptions, "token">> &
     FakeGitlabForgeOptions;
+  private ciStatus: FakeGitlabCiStatus = "failed";
 
   constructor(options: FakeGitlabForgeOptions) {
     this.options = { token: FAKE_GITLAB_TOKEN, ...options };
@@ -123,6 +127,14 @@ export class FakeGitlabForge {
   /** Non-GET calls, which is where a merge, close, or note would show up. */
   mutations(): ForgeRequest[] {
     return this.requests.filter((request) => request.method !== "GET" && request.method !== "HEAD");
+  }
+
+  /**
+   * Serve the `ci` pipeline and its job with `status` from now on (default
+   * `failed`), so one run can show a passing pipeline before a failing one.
+   */
+  setCiStatus(status: FakeGitlabCiStatus): void {
+    this.ciStatus = status;
   }
 
   stop(): void {
@@ -199,7 +211,7 @@ export class FakeGitlabForge {
           id: ci.pipelineId,
           sha: ci.sha,
           ref: this.options.sourceBranch,
-          status: "failed",
+          status: this.ciStatus,
           web_url: `${this.baseUrl}/${PROJECT_PATH}/-/pipelines/${ci.pipelineId}`,
         },
       ]);
@@ -209,7 +221,7 @@ export class FakeGitlabForge {
         {
           id: ci.jobId,
           name: ci.jobName,
-          status: "failed",
+          status: this.ciStatus,
           allow_failure: false,
           web_url: `${this.baseUrl}/${PROJECT_PATH}/-/jobs/${ci.jobId}`,
         },
