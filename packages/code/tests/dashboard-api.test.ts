@@ -423,6 +423,10 @@ describe("dashboard API", () => {
     expect(body.agentPrs).toEqual({ open: 1, closed: 1 });
     expect(body.cursors.map((c) => c.source)).toEqual(["jira"]);
     expect(body.dbMissing).toBe(false);
+    // `serverPid` belongs to the HTTP route only: the CLI read path runs this
+    // handler in its own process, which serves no dashboard.
+    expect(body).not.toHaveProperty("serverPid");
+    expect(handleWorkerStatus(data, 4242).body).toMatchObject({ serverPid: 4242 });
 
     // Dead pid → stopped (a stale lock is determinable, not unknown).
     writeFileSync(
