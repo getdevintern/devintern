@@ -745,3 +745,8 @@ a.strip-link:hover .strip-item svg {
   color: var(--muted-foreground);
   white-space: nowrap;
 }
+
+.dashboard-demo-cta {
+  flex: none;
+  margin-left: 8px;
+}
