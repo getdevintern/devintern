@@ -225,7 +225,8 @@ function ArtifactItem({ runId, file }: { runId: number; file: TaskArtifactFile }
       </button>
       {open ? (
         <div className="space-y-2 border-t border-border bg-card px-3 py-2.5">
-          {file.available ? (
+          {/* The demo records text artifacts only as shown content, not as files. */}
+          {file.available && isDemoMode() && !image ? null : file.available ? (
             <a href={isDemoMode() ? fileUrl : `${fileUrl}?download=1`} className="ref-link text-xs">
               <Download className="size-3" aria-hidden="true" />
               Download {file.name}
