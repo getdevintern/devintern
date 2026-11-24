@@ -15,9 +15,16 @@ const MAX_LISTED_PATHS = 10;
 
 /** Why a PR was left open for a human. */
 export type LeftOpenReason =
-  | { kind: "outside-safe-paths"; paths: string[] }
+  /**
+   * Agent review is off. `paths` are outside the safe paths; `reviewPathMatches`
+   * match `auto_merge_review_paths` (listed separately, even if also outside).
+   */
+  | { kind: "outside-safe-paths"; paths: string[]; reviewPathMatches?: string[] }
   | { kind: "denied"; path: string; pattern: string }
-  | { kind: "agent-unsafe"; reason: string }
+  /** `policy` is the policy label (`strict`, ..., `custom: rules.md`). */
+  | { kind: "agent-unsafe"; reason: string; policy: string; reviewPathMatches?: string[] }
+  /** A `custom` policy's rules could not be loaded, so no review ran. */
+  | { kind: "rules-unavailable"; policy: string; problem: string }
   | { kind: "not-evaluable"; detail: string };
 
 export type AutoMergeCommentStatus =
@@ -35,20 +42,48 @@ function codePath(path: string): string {
   return `\`${sanitizeCommentText(path, 200).replace(/`/g, "'")}\``;
 }
 
+/** A bulleted path list, summarizing past {@link MAX_LISTED_PATHS}. */
+function pathList(paths: readonly string[]): string[] {
+  const listed = paths.slice(0, MAX_LISTED_PATHS).map((path) => `- ${codePath(path)}`);
+  const more = paths.length - listed.length;
+  return [...listed, ...(more > 0 ? [`- …and ${more} more`] : [])];
+}
+
+/** The "matches `auto_merge_review_paths`" paragraph; empty when none matched. */
+function reviewPathLines(paths: readonly string[] | undefined, lead: string): string[] {
+  if (!paths || paths.length === 0) return [];
+  return [
+    `${paths.length} changed file(s) match \`auto_merge_review_paths\`, ${lead}:`,
+    "",
+    ...pathList(paths),
+  ];
+}
+
 function leftOpenBody(reason: LeftOpenReason): string[] {
   switch (reason.kind) {
     case "outside-safe-paths": {
-      const listed = reason.paths.slice(0, MAX_LISTED_PATHS).map((path) => `- ${codePath(path)}`);
-      const more = reason.paths.length - listed.length;
+      const review = reviewPathLines(
+        reason.reviewPathMatches,
+        "which always need the agent review, and agent review is off",
+      );
+      const outside =
+        reason.paths.length > 0
+          ? [
+              `${reason.paths.length} changed file(s) are outside the workspace's safe paths, ` +
+                "and agent review is off:",
+              "",
+              ...pathList(reason.paths),
+            ]
+          : [];
       return [
-        `${reason.paths.length} changed file(s) are outside the workspace's safe paths, ` +
-          "and agent review is off:",
+        ...outside,
+        ...(outside.length > 0 && review.length > 0 ? [""] : []),
+        ...review,
         "",
-        ...listed,
-        ...(more > 0 ? [`- …and ${more} more`] : []),
-        "",
-        "To merge it: review and merge it yourself, add these paths to " +
-          "`auto_merge_safe_paths`, or enable `auto_merge_review`.",
+        review.length > 0 && outside.length === 0
+          ? "To merge it: review and merge it yourself, or enable `auto_merge_review`."
+          : "To merge it: review and merge it yourself, add these paths to " +
+            "`auto_merge_safe_paths`, or enable `auto_merge_review`.",
       ];
     }
     case "denied":
@@ -58,9 +93,20 @@ function leftOpenBody(reason: LeftOpenReason): string[] {
       ];
     case "agent-unsafe":
       return [
-        `The merge-safety review found: ${sanitizeCommentText(reason.reason)}`,
+        `The merge-safety review (${codePath(reason.policy)} policy) found: ` +
+          sanitizeCommentText(reason.reason),
         "",
+        ...reviewPathLines(reason.reviewPathMatches, "so the review ran even if they are safe"),
+        ...(reason.reviewPathMatches?.length ? [""] : []),
         "Review and merge it yourself if you disagree.",
+      ];
+    case "rules-unavailable":
+      return [
+        `The merge-safety review (${codePath(reason.policy)} policy) could not run: ` +
+          `${sanitizeCommentText(reason.problem)}.`,
+        "",
+        "Fix the workspace's `auto_merge_rules_file` (or `auto_merge_rules`), or review and " +
+          "merge it yourself.",
       ];
     case "not-evaluable":
       return [

@@ -19,13 +19,10 @@ import type { DependencyMode } from "../dependencies/gate";
 import { parseAgentSelection } from "../agent/selection";
 import type { HarnessPinnedEntry } from "../agent/selection";
 import { parseDashboardAllowedOriginList } from "../observability/dashboard-origins";
-import { AUTO_MERGE_METHODS } from "../review/merge-gate";
-import type { AutoMergeMethod } from "../review/merge-gate";
 import type {
   ConflictResolutionMode,
   WorkspaceExecutionIsolation,
   WorkspaceSettings,
-  AutoMergeSettings,
   WorkspaceDefaults,
   TeamConfig,
   RepoConfig,
@@ -43,8 +40,18 @@ import {
   readOptionalInteger,
   readEnvTable,
   readGlobList,
-  readReviewLabel,
 } from "./config-readers";
+import {
+  parseAutoMergeSettings,
+  repoAutoMergeReview,
+  validateAutoMergeRules,
+} from "./config-auto-merge";
+
+export {
+  autoMergePathsFor,
+  autoMergeReviewFor,
+  DEFAULT_AUTO_MERGE_METHOD,
+} from "./config-auto-merge";
 
 export type {
   AutoMergeSettings,
@@ -94,7 +101,6 @@ export const DEFAULT_POLL_INTERVAL_SECONDS = 60;
 export const DEFAULT_DASHBOARD = true;
 export const DEFAULT_CI_FAILURE_FIX = false;
 export const DEFAULT_CONFLICT_RESOLUTION: ConflictResolutionMode = "auto";
-export const DEFAULT_AUTO_MERGE_METHOD: AutoMergeMethod = "squash";
 export const DEFAULT_MAX_CONCURRENCY = 1;
 export const DEFAULT_MAX_CONCURRENCY_PER_REPO = 1;
 
@@ -149,6 +155,7 @@ export function parseWorkspaceConfig(
   applyTeamDefaults(teams, defaults, errors);
 
   const { repos, repoNames } = parseReposSection(document, defaults.prLabels, errors);
+  validateAutoMergeRules(workspace.autoMerge, repos, errors);
 
   // Only the worker polls. A workspace whose repos are all manual-only (used
   // for local CLI runs) needs no pollable fleet tracker. Single-defaults mode
@@ -321,7 +328,7 @@ function parseWorkspaceSettings(
     { label: "[workspace]", keyPrefix: "conflict_resolution_" },
     errors,
   );
-  const autoMerge = parseAutoMergePolicy(workspaceTable, errors);
+  const autoMerge = parseAutoMergeSettings(workspaceTable, errors);
 
   return {
     execution: { isolation, maxConcurrency, maxConcurrencyPerRepo },
@@ -333,34 +340,6 @@ function parseWorkspaceSettings(
     conflictSchedule,
     ...(Object.keys(conflictAgent).length > 0 ? { conflictAgent } : {}),
     autoMerge,
-  };
-}
-
-/** Parse the `[workspace].auto_merge*` keys. */
-function parseAutoMergePolicy(
-  workspaceTable: Record<string, unknown>,
-  errors: string[],
-): AutoMergeSettings {
-  const label = "[workspace]";
-  const enabled = readOptionalBoolean(workspaceTable, "auto_merge", label, errors) ?? false;
-  const rawMethod = readString(workspaceTable, "auto_merge_method", label, errors);
-  let method = DEFAULT_AUTO_MERGE_METHOD;
-  if (rawMethod) {
-    if ((AUTO_MERGE_METHODS as readonly string[]).includes(rawMethod)) {
-      method = rawMethod as AutoMergeMethod;
-    } else {
-      errors.push(`${label}.auto_merge_method must be one of: ${AUTO_MERGE_METHODS.join(", ")}.`);
-    }
-  }
-  const agent = parseAgentSelection(workspaceTable, { label, keyPrefix: "auto_merge_" }, errors);
-  return {
-    enabled,
-    method,
-    review: readOptionalBoolean(workspaceTable, "auto_merge_review", label, errors) ?? true,
-    safePaths: readGlobList(workspaceTable, "auto_merge_safe_paths", label, errors),
-    denyPaths: readGlobList(workspaceTable, "auto_merge_deny_paths", label, errors),
-    reviewLabel: readReviewLabel(workspaceTable, label, errors),
-    ...(Object.keys(agent).length > 0 ? { agent } : {}),
   };
 }
 
@@ -576,6 +555,12 @@ function parseReposSection(
       ...(table.auto_merge_deny_paths === undefined
         ? {}
         : { autoMergeDenyPaths: readGlobList(table, "auto_merge_deny_paths", label, errors) }),
+      ...(table.auto_merge_review_paths === undefined
+        ? {}
+        : {
+            autoMergeReviewPaths: readGlobList(table, "auto_merge_review_paths", label, errors),
+          }),
+      ...repoAutoMergeReview(table, label, errors),
       envFile: readString(table, "env_file", label, errors),
       ...(syncTeamPrs === undefined ? {} : { syncTeamPrs }),
       ...(manualOnly === true ? { manualOnly } : {}),
@@ -963,15 +948,4 @@ export function harnessPinnedJobs(config: WorkspaceConfig): HarnessPinnedEntry[]
     { id: "conflict resolution", harness: config.workspace.conflictAgent?.harness },
     { id: "auto-merge review", harness: config.workspace.autoMerge.agent?.harness },
   ];
-}
-
-/** Effective auto-merge path policy for one repository (repo lists replace workspace lists). */
-export function autoMergePathsFor(
-  settings: AutoMergeSettings,
-  repo: Pick<RepoConfig, "autoMergeSafePaths" | "autoMergeDenyPaths">,
-): { safePaths: string[]; denyPaths: string[] } {
-  return {
-    safePaths: repo.autoMergeSafePaths ?? settings.safePaths,
-    denyPaths: repo.autoMergeDenyPaths ?? settings.denyPaths,
-  };
 }

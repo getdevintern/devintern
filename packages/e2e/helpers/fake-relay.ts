@@ -25,9 +25,37 @@ export interface FakeRelayEnvelope {
   team?: string;
   eventType: string;
   repo?: string;
-  ref: { task?: string; pr?: number; commentId?: number };
+  codeHost?: FakeRelayCodeHostIdentity;
+  ref: {
+    task?: string;
+    pr?: number;
+    commentId?: number;
+    change?: number;
+    branch?: string;
+    headSha?: string;
+  };
   deliveryId: string;
   ts: string;
+}
+
+/** Code-host identity a v2 envelope carries (mirrors `RelayCodeHostIdentity`). */
+export interface FakeRelayCodeHostIdentity {
+  provider: string;
+  instanceUrl: string;
+  projectId: string;
+  projectPath: string;
+}
+
+/** Input for {@link FakeRelay.publishCodeHostEvent}. */
+export interface FakeRelayCodeHostEventInput {
+  eventType: string;
+  source: string;
+  deliveryId: string;
+  /** Envelope version; the acquirer only acts on code-host events at 2. */
+  version?: 1 | 2;
+  /** Omitted to publish an envelope without code-host identity. */
+  codeHost?: FakeRelayCodeHostIdentity;
+  ref: { change?: number; branch?: string; headSha?: string };
 }
 
 /** One received long poll. */
@@ -117,6 +145,29 @@ export class FakeRelay {
       ...(input.team ? { team: input.team } : {}),
       eventType: "task.changed",
       ref: { task: input.task },
+      deliveryId: input.deliveryId,
+      ts: new Date().toISOString(),
+    };
+    this.envelopes.push(envelope);
+    this.wakeHolds();
+    return envelope;
+  }
+
+  /**
+   * Buffer one code-host envelope (`change.feedback`, `change.changed`, …)
+   * exactly as given, so a test can publish both valid v2 envelopes and the
+   * malformed variants the acquirer must ignore. `version` defaults to 2.
+   *
+   * @returns The published envelope, with its assigned `seq`
+   */
+  publishCodeHostEvent(input: FakeRelayCodeHostEventInput): FakeRelayEnvelope {
+    const envelope: FakeRelayEnvelope = {
+      version: input.version ?? 2,
+      seq: this.nextSeq++,
+      source: input.source,
+      eventType: input.eventType,
+      ...(input.codeHost ? { codeHost: { ...input.codeHost } } : {}),
+      ref: { ...input.ref },
       deliveryId: input.deliveryId,
       ts: new Date().toISOString(),
     };

@@ -3,7 +3,11 @@ import { execSync } from "child_process";
 import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { isCommitAlreadyComplete, verifyPushHookFix } from "../src/lib/agent/git-hook-fixer";
+import {
+  buildGitHookFixPrompt,
+  isCommitAlreadyComplete,
+  verifyPushHookFix,
+} from "../src/lib/agent/git-hook-fixer";
 import { Utils } from "../src/lib/utils";
 
 describe("git-hook-fixer", () => {
@@ -250,5 +254,35 @@ describe("verifyPushHookFix", () => {
     expect(await Utils.remoteTrackingRefMatchesHead("feature/dev-74", { cwd: repoDir })).toBe(
       false,
     );
+  });
+});
+
+describe("buildGitHookFixPrompt", () => {
+  const BULK_STAGE = /git add (\.|-A|--all)/;
+
+  for (const hookType of ["commit", "push"] as const) {
+    test(`${hookType} prompt stages only real work, never the whole tree`, () => {
+      const prompt = buildGitHookFixPrompt(hookType, "/out/*/git-hook-errors.log");
+
+      expect(prompt).toContain("git add -u");
+      expect(prompt).toContain("git add <path>   # for each new file you intentionally created");
+      expect(prompt).toContain("Never stage the whole tree or");
+      expect(prompt).not.toMatch(BULK_STAGE);
+    });
+  }
+
+  test("commit prompt keeps the explicit -m retry step", () => {
+    const prompt = buildGitHookFixPrompt("commit", "/out/*/git-hook-errors.log");
+
+    expect(prompt).toContain('git commit -m "fix: resolve pre-commit hook failures"');
+    expect(prompt).toContain("tail -n 100 /out/*/git-hook-errors.log");
+  });
+
+  test("push prompt keeps the amend and verify steps", () => {
+    const prompt = buildGitHookFixPrompt("push", "/out/*/git-hook-errors.log");
+
+    expect(prompt).toContain("git push origin HEAD");
+    expect(prompt).toContain("git commit --amend --no-edit");
+    expect(prompt).toContain("**Verify the fix**");
   });
 });

@@ -200,6 +200,20 @@ describe("GitLab direct webhooks", () => {
       headSha: "abc",
       failure: { externalId: "pipeline:42:abc:80" },
     });
+    // object_attributes.iid is the pipeline's iid; the MR iid is merge_request.iid.
+    expect(
+      normalizeGitLabWebhook("Pipeline Hook", {
+        project,
+        object_attributes: { id: 82, iid: 31, status: "failed", ref: "feature/a", sha: "abc" },
+        merge_request: { iid: 7 },
+      }),
+    ).toMatchObject({ kind: "ci", iid: 7, branch: "feature/a" });
+    expect(
+      normalizeGitLabWebhook("Pipeline Hook", {
+        project,
+        object_attributes: { id: 83, iid: 31, status: "failed", ref: "feature/a", sha: "abc" },
+      })?.iid,
+    ).toBeUndefined();
     expect(
       normalizeGitLabWebhook("Job Hook", {
         project_id: 42,

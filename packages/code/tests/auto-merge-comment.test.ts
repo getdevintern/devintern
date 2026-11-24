@@ -44,9 +44,11 @@ describe("buildAutoMergeStatusComment", () => {
     const body = buildAutoMergeStatusComment({
       kind: "left-open",
       headSha: SHA,
-      reason: { kind: "agent-unsafe", reason: "ping @org/team now" },
+      reason: { kind: "agent-unsafe", reason: "ping @org/team now", policy: "standard" },
     });
     expect(body).not.toContain("@org");
+    // The hold names the policy the review ran under.
+    expect(body).toContain("The merge-safety review (`standard` policy) found:");
     const denied = buildAutoMergeStatusComment({
       kind: "left-open",
       headSha: SHA,

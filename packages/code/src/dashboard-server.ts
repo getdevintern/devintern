@@ -458,7 +458,7 @@ export function startDashboardServer(
           return json(handleStats(data, url.searchParams));
         }
         if (pathname === "/api/worker") {
-          return json(handleWorkerStatus(data));
+          return json(handleWorkerStatus(data, process.pid));
         }
         if (pathname === "/api/sources") {
           return json(handleSources(data));

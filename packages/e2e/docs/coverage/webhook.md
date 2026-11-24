@@ -27,16 +27,40 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 - Surface: External dependency: GitLab webhook payloads and MR discussions/notes REST API
 - Status: `default`
 - Evidence: `tests/local/webhook-gitlab-review.test.ts` (`bun run --filter @devintern/e2e test`)
-- Missing: A real GitLab instance (payload and API drift are pinned only by the loopback fake); positioned diff notes, multi-discussion and fork MRs; failed or usage-limited review runs; the `X-Gitlab-Token` mode on this path (signature mode only).
-- Last reviewed: 2026-11-23
+- Missing: A real GitLab instance (payload and API drift are pinned only by the loopback fake); positioned diff notes, multi-discussion and fork MRs; failed or usage-limited review runs.
+- Last reviewed: 2026-11-24
 
 ### webhook serve: GitLab MR merge/close lifecycle and unregistered-MR deliveries
 
 - Surface: External dependency: GitLab webhook payloads
 - Status: `default`
 - Evidence: `tests/local/webhook-gitlab-review.test.ts` (`bun run --filter @devintern/e2e test`)
-- Missing: Conflict (`sync`) and pipeline/job (`ci`) GitLab deliveries; `worker prs` output for webhook-closed rows (the test reads the state database).
-- Last reviewed: 2026-11-23
+- Missing: `worker prs` output for webhook-closed rows (the test reads the state database).
+- Last reviewed: 2026-11-24
+
+### webhook serve: signed GitLab Pipeline/Job failure on a registered agent MR runs CI repair
+
+- Surface: External dependency: GitLab Pipeline Hook and Job Hook payloads; MR, pipelines, pipeline jobs, commit statuses and job trace REST API
+- Status: `default`
+- Evidence: `tests/local/webhook-gitlab-ci-sync.test.ts` (`bun run --filter @devintern/e2e test`)
+- Missing: A real GitLab instance; failing external commit statuses (served empty) and `allow_failure` jobs; several failed jobs or paginated job lists; a failed or usage-limited repair run; a Job Hook for a stale SHA.
+- Last reviewed: 2026-11-24
+
+### webhook serve: signed GitLab MR conflict delivery runs conflict resolution
+
+- Surface: External dependency: GitLab Merge Request Hook `detailed_merge_status` payloads and MR mergeability REST API
+- Status: `default`
+- Evidence: `tests/local/webhook-gitlab-ci-sync.test.ts` (`bun run --filter @devintern/e2e test`)
+- Missing: A real GitLab instance; `merge_status: cannot_be_merged` without `detailed_merge_status`; a stale `last_commit` SHA; a conflict the agent cannot resolve.
+- Last reviewed: 2026-11-24
+
+### webhook serve: GitLab `X-Gitlab-Token` shared-secret mode on the review path
+
+- Surface: External dependency: GitLab webhook secret-token header
+- Status: `default`
+- Evidence: `tests/local/webhook-gitlab-ci-sync.test.ts` (`bun run --filter @devintern/e2e test`)
+- Missing: A real GitLab instance; both `GITLAB_WEBHOOK_SECRET` and `GITLAB_WEBHOOK_SIGNING_TOKEN` configured at once.
+- Last reviewed: 2026-11-24
 
 ## Backlog
 
@@ -44,8 +68,12 @@ Priority numbers are the global ranking from the
 [index](../coverage-matrix.md#priority-backlog); lower runs first.
 
 - Priority 11: `webhook serve` with signed GitHub/GitLab payloads. The GitLab half
-  (note → address-review, merge/close lifecycle, unregistered MR) is covered;
-  the GitHub review pipeline is still open.
+  is covered: note → address-review (signature and `X-Gitlab-Token` modes),
+  merge/close lifecycle, unregistered MR, failed Pipeline/Job Hook → CI repair,
+  and `conflict`/`need_rebase` Merge Request Hook → conflict resolution. The
+  GitHub review pipeline is still open: it cannot be faked offline because
+  `packages/code/src/lib/code-host/github/reviews.ts` hardcodes
+  `https://api.github.com`.
 
 ## Test notes
 
@@ -134,3 +162,44 @@ per run, and the test asserts that neither (raw or URL-encoded) appears in the
 server output. The fake forge records method and path only, rejects any other
 token, and records requests it does not serve as unexpected. Waits poll the
 delivery dedupe row, never a fixed timer.
+
+The shared setup (seeding, forge, server, signed or token deliveries, payload
+builders, state-database reads) lives in `helpers/gitlab-webhook-scenario.ts`.
+
+### GitLab CI, conflict and shared-token deliveries
+
+`tests/local/webhook-gitlab-ci-sync.test.ts` reuses that setup for the `ci`
+and `sync` delivery kinds and for the `X-Gitlab-Token` mode. It needs only the
+built CLI and runs in the default offline suite:
+
+```sh
+bun run --filter @getdevintern/code build
+bun run --filter @devintern/e2e test
+```
+
+- Pipeline Hook: the forge's opt-in `ci` option serves one failed pipeline and
+  job for the MR head, plus that job's trace. A `running` pipeline is
+  acknowledged with no forge request. A `failed` pipeline for a stale SHA reads
+  the MR but fetches no CI data and makes no agent run. A `failed` pipeline for
+  the current head makes exactly one CI-repair run whose prompt carries the job
+  name and trace markers, and pushes one commit on top of the old head. The
+  payload carries the pipeline's own `object_attributes.iid`, which must not be
+  read as the MR iid.
+- Job Hook: a `success` job is ignored. A `failed` job matches the MR by branch
+  (Job Hooks carry no MR iid) and runs the same repair.
+- Merge Request Hook `detailed_merge_status: conflict`: the target branch has
+  a conflicting commit. One conflict-resolution agent run happens, and the MR
+  branch gets a merge commit whose parents are the old head and the target tip.
+  The push is a fast-forward, not a force push. The branch now merges cleanly,
+  and the target branch and the MR merge endpoint are untouched.
+- Merge Request Hook `detailed_merge_status: need_rebase`: the target moved
+  without conflicts. The same resolve path merges it with no agent run, pushes
+  the merge commit, and posts one MR note.
+- `X-Gitlab-Token` mode (`GITLAB_WEBHOOK_SECRET`, no signing token): a wrong or
+  missing token returns 401 with no forge request, agent run or queue row. The
+  matching token runs address-review as in the signed test. A replay with the
+  same `Idempotency-Key` is a duplicate.
+
+Isolation and cleanup match the review test. The webhook secret, forge token,
+shared token and a wrong token are random per run. Tests assert that none of
+them appears in server output, raw or URL-encoded.
