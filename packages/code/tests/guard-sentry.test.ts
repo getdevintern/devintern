@@ -24,6 +24,12 @@ const EXPECTED_PRELOADS = GUARD_FILES.map((guard) =>
   join(PACKAGE_ROOT, "tests", "setup", guard),
 ).sort();
 
+/**
+ * Root-only preloads: guards owned by other packages that root-invoked runs
+ * need too, since `bun test` from the repo root skips per-package bunfig files.
+ */
+const ROOT_EXTRA_PRELOADS = [join(REPO_ROOT, "packages", "pm", "guard-run-env.ts")];
+
 const PROBE_TEST = `import { expect, test } from "bun:test";
 
 test("Sentry is disabled in a root-invoked test process", () => {
@@ -92,9 +98,13 @@ describe("test Sentry pin", () => {
   });
 
   test("both bunfig files preload the full guard chain", () => {
-    for (const [label, configPath] of [
-      ["root", join(REPO_ROOT, "bunfig.toml")],
-      ["package", join(PACKAGE_ROOT, "bunfig.toml")],
+    for (const [label, configPath, expected] of [
+      [
+        "root",
+        join(REPO_ROOT, "bunfig.toml"),
+        [...EXPECTED_PRELOADS, ...ROOT_EXTRA_PRELOADS].sort(),
+      ],
+      ["package", join(PACKAGE_ROOT, "bunfig.toml"), EXPECTED_PRELOADS],
     ] as const) {
       // Parse the TOML and inspect `test.preload` itself: comments in these
       // files mention every guard by name, so a raw text search would pass even
@@ -108,9 +118,7 @@ describe("test Sentry pin", () => {
       const actual = (preload as string[])
         .map((entry) => resolve(dirname(configPath), entry))
         .sort();
-      expect(actual, `${label} bunfig.toml must preload exactly the guard chain`).toEqual(
-        EXPECTED_PRELOADS,
-      );
+      expect(actual, `${label} bunfig.toml must preload exactly the guard chain`).toEqual(expected);
     }
   });
 
