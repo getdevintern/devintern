@@ -82,6 +82,8 @@ Use images, `.md`, `.txt`, or `.pdf`. Office files such as `.docx` are rejected 
 
 Each draft includes a user story, Given/When/Then acceptance criteria with edge cases, non-goals, success metrics, technical considerations, and design notes (Figma) or reproduction steps (bugs). Drafts describe observable behavior rather than vague words like "fast" or "intuitive". With `--decompose`, subtasks are scoped to a single responsibility, about 1–2 days each, and linked to the story. See your [tracker's guide](./configuration.md#select-a-backend) for how each item maps to tracker objects.
 
+When `devpm` runs inside a DevIntern Code agent run (for example an automation that files tickets), every ticket and subtask it creates is linked to that run and listed under **Spawned work** on the run's dashboard page. Nothing to configure: DevIntern sets `DEVINTERN_RUN_OUTPUTS` for the run. If the link can't be recorded, `devpm` prints a warning and the ticket is still created. See [Run lineage](../code/delegation.md#run-lineage).
+
 ## Chat Bot (Alpha)
 
 To draft tasks from Slack or Telegram instead, run `devpm connect slack` (or `telegram`) and then `devpm serve`. See the [Chat bot guide](./chat-bot.md).

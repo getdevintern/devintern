@@ -24,6 +24,8 @@ import type { AttachmentRef } from "../attachments.js";
 import { createBackend } from "../backends/index.js";
 import type { CreatedTask, LabelListResult, TaskBackend } from "../backends/index.js";
 import type { Config } from "../config.js";
+import { recordCreatedTicket } from "../run-outputs.js";
+import type { RecordTicketDeps } from "../run-outputs.js";
 import { extractJsonPayload } from "./json.js";
 import { defaultPromptsDir, loadPrompt } from "./prompts.js";
 import { EngineError } from "./types.js";
@@ -182,6 +184,8 @@ export interface PmEngine {
 export interface EngineDeps {
   runAgent?: typeof defaultRunAgent;
   backend?: TaskBackend;
+  /** Env and warning sink for run-output recording; defaults to the process. */
+  runOutputs?: RecordTicketDeps;
 }
 
 export interface CreateEngineOptions {
@@ -313,6 +317,14 @@ export async function createEngine(
     config.asana?.defaultProjectGid ||
     config.github?.repository ||
     config.gitlab?.projectPath;
+
+  /** Report a created ticket to the parent DevIntern run (no-op outside one). */
+  function recordCreated(task: CreatedTask, title: string): Promise<void> {
+    return recordCreatedTicket(
+      { tracker: config.backend.type, key: task.key, url: task.url, title },
+      deps.runOutputs,
+    );
+  }
 
   /** Session cache of listLabels results — avoids re-paginating on createTask. */
   const labelsByProject = new Map<string, LabelListResult>();
@@ -705,6 +717,9 @@ Return only valid JSON (no other text). Use markdown inside the description stri
         taskOptions.issueType,
         taskOptions.projectKey,
       );
+      // Report the ticket to the enclosing DevIntern run right after create so
+      // a later epic/label/attachment failure cannot drop it.
+      await recordCreated(task, draft.summary);
 
       // Link to epic if requested and the tracker can persist a real link.
       // Trackers without epic support skip this silently so we never create
@@ -744,7 +759,9 @@ Return only valid JSON (no other text). Use markdown inside the description stri
     async createSubtask(parentKey, subtask, projectKey) {
       // Ensure we have a description, use summary as fallback
       const description = subtask.description?.trim() || subtask.summary;
-      return backend.createSubtask(parentKey, subtask.summary, description, projectKey);
+      const task = await backend.createSubtask(parentKey, subtask.summary, description, projectKey);
+      await recordCreated(task, subtask.summary);
+      return task;
     },
   };
 }
