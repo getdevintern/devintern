@@ -41,6 +41,7 @@ import type { PipelineContext } from "../task/pipeline-registry";
 import { buildRepairPrompt, verifyImplementation } from "./verify";
 import type { VerifyDependencies } from "./verify";
 import { extractImplementationSummary, withImplementationSummary } from "./implementation-summary";
+import { describeMissingStackBase, ensureStackBase } from "./stack-base-guard";
 
 type GitHelpers = ReturnType<typeof createGitHelpers>;
 
@@ -55,6 +56,8 @@ export interface DeliveryState extends PipelineContext {
   implementationStepSeen: boolean;
   /** Set when `--allow-no-changes` accepted a delivery with nothing to commit. */
   noChanges: boolean;
+  /** Set when the stacked base closed unmerged mid-run (see `stack-base-guard.ts`). */
+  stackBlocked?: string;
 }
 
 /** Commit once, allowing the agent to repair pre-commit hook failures. */
@@ -621,7 +624,30 @@ function verifyDependencies(state: DeliveryState): VerifyDependencies {
   };
 }
 
+/**
+ * Re-resolve a stacked run's base before a step that reads it (a diff, the
+ * push, or the PR target), so a base that merged mid-run is followed instead
+ * of failing on its deleted branch.
+ */
+function withStackBase(step: TaskStep<DeliveryState>): TaskStep<DeliveryState> {
+  return {
+    name: step.name,
+    run: async (state) => (await ensureStackBase(state)) ?? step.run(state),
+  };
+}
+
 function deliverySteps(state: DeliveryState): readonly TaskStep<DeliveryState>[] {
+  return unguardedDeliverySteps(state).map((step) =>
+    step === implementStep ||
+    step === commitStep ||
+    step.name.startsWith("__repair-") ||
+    step.name === "repair"
+      ? step
+      : withStackBase(step),
+  );
+}
+
+function unguardedDeliverySteps(state: DeliveryState): readonly TaskStep<DeliveryState>[] {
   const configured = state.context.pipelineSteps;
   if (!configured) {
     return state.context.verify
@@ -728,7 +754,17 @@ export function finalizeAgentRun(ctx: FinalizeContext): void {
     results: [],
     runAgentPrompt: (prompt) =>
       runAgentPrompt(prompt, process.cwd(), ctx.harness, ctx.executablePath),
-    getDiff: () => getPRDiff(ctx.prTargetBranch, process.cwd()),
+    getDiff: () => {
+      try {
+        return getPRDiff(ctx.prTargetBranch, process.cwd());
+      } catch (error) {
+        const base = ctx.stackBase;
+        if (base && ctx.prTargetBranch.replace(/^origin\//, "") === base.branch) {
+          throw describeMissingStackBase(base, error as Error);
+        }
+        throw error;
+      }
+    },
     parseReviewFeedback,
     filterByPriority,
     output: ctx.stdoutOutput,
@@ -741,6 +777,13 @@ export function finalizeAgentRun(ctx: FinalizeContext): void {
   };
   runTaskSteps(deliverySteps(state), state)
     .then(async (result) => {
+      // A stacked base that closed unmerged is an escalation from any step:
+      // the work is fine, it has no base to land on.
+      if (result.kind === "halted" && state.stackBlocked) {
+        await reportPipelineHalt(state, state.stackBlocked);
+        ctx.resolve();
+        return;
+      }
       if (
         result.kind === "halted" &&
         result.haltKind !== "noop" &&

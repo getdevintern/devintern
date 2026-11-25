@@ -103,6 +103,13 @@ and exits `3`, so scripts can tell a withdrawn task from a failed run (`1`).
   expired token or a rate limit), a recorded PR starts a fresh attempt. A
   task that never started is still `pending` and needs no resume. A
   [cancelled](./delegation.md#cancel-a-pending-task) task cannot be resumed.
+- **Unfinished work is saved.** When a worker run fails or is handed back
+  (`escalated`) after the agent started implementing, uncommitted changes are
+  committed to the task branch as a `wip(<taskKey>)` commit and the branch is
+  pushed (never force-pushed), so `--resume` continues from it. The run's
+  outcome in `worker queue` and the dashboard names the branch. If the push
+  fails (for example someone else pushed to that branch), the worktree is kept
+  and the outcome shows its path instead.
 - **A graceful shutdown does not launder a real failure.** Draining the worker
   aborts running task children; the aborted run is reported as _interrupted_,
   so its row stays `running` for the successor's startup recovery. A pipeline

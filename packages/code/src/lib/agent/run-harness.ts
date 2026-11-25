@@ -1,4 +1,5 @@
 import { existsSync, readFileSync, writeFileSync } from "fs";
+import type { StackBase } from "../dependencies/gate";
 import { join } from "path";
 import {
   buildHarnessInvocation,
@@ -82,6 +83,8 @@ interface RunAgentHarnessOptions {
   verify?: VerifyConfig;
   /** Branch successfully inherited from a prior attempt. */
   resumeBranch?: string;
+  /** The PR this run is stacked on; delivery follows it if it merges mid-run. */
+  stackBase?: StackBase;
 }
 
 export type AgentSessionResult =
