@@ -440,7 +440,13 @@ describe("recoverOrphanedTaskRuns", () => {
 
     const result = await recover();
 
-    expect(result).toEqual({ reaped: 0, recovered: 0, skipped: 0, resumable: [] });
+    expect(result).toEqual({
+      reaped: 0,
+      recovered: 0,
+      skipped: 0,
+      resumable: [],
+      deferredRunIds: [],
+    });
     expect(posted).toHaveLength(0);
   });
 

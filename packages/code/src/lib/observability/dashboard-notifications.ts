@@ -168,12 +168,18 @@ export class DashboardNotifications {
   /** Run a read over a read-only connection; `fallback` when the DB or table is missing. */
   private read<T>(fallback: T, read: (db: Database) => T): T {
     if (!existsSync(this.dbPath)) return fallback;
-    const db = new Database(this.dbPath, { readonly: true });
+    let db: Database | null = null;
     try {
+      db = new Database(this.dbPath, { readonly: true });
       configureSqliteConnection(db, { readonly: true });
       return hasTable(db, "notifications") ? read(db) : fallback;
+    } catch {
+      // Missing table, locked/corrupt file, or a file removed between check and
+      // open: degrade to an empty page like the other dashboard read helpers
+      // instead of failing the whole request.
+      return fallback;
     } finally {
-      db.close();
+      db?.close();
     }
   }
 

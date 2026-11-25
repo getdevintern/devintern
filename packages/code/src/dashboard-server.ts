@@ -331,7 +331,9 @@ export function startDashboardServer(
     configuredSources: options.configuredSources,
   });
   const reports = new DashboardReports(data, options.reportDeps);
-  const notifications = new DashboardNotifications(data.dbPath);
+  // Notifications live in the durable queue DB, which is the workspace DB a
+  // `--workspace` worker writes to; run history and the queue can differ.
+  const notifications = new DashboardNotifications(data.queueDbPath);
   const uiDir = resolveUiDir();
 
   const runDetailPattern = /^\/api\/runs\/([^/]+)$/;

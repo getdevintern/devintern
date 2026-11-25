@@ -77,6 +77,12 @@ export function initNotificationSchema(db: Database): void {
     `CREATE INDEX IF NOT EXISTS idx_notifications_open_subject
      ON notifications(subject) WHERE resolved_at IS NULL`,
   );
+  // The unread-count endpoint polls this predicate; a partial index keeps it
+  // proportional to the unread rows instead of the table's lifetime size.
+  db.run(
+    `CREATE INDEX IF NOT EXISTS idx_notifications_unread
+     ON notifications(id) WHERE read_at IS NULL AND resolved_at IS NULL AND muted = 0`,
+  );
   db.run(`
     CREATE TABLE IF NOT EXISTS notification_mutes (
       group_key TEXT PRIMARY KEY,
@@ -401,7 +407,13 @@ export class NotificationStore {
     }
     if (match.runPrUrl && hasTable(this.db, "runs")) {
       ors.push("run_id IN (SELECT id FROM runs WHERE pr_url = ?)");
-      params.push(match.runPrUrl);
+      // A grouped task escalation keeps only the latest emit's run id, so its
+      // `run_id` may point at a later run without (or with another) PR. The
+      // task itself is still what the closed PR belongs to, so resolve by it.
+      ors.push(
+        "subject IN (SELECT 'task:' || task_key FROM runs WHERE pr_url = ? AND task_key IS NOT NULL)",
+      );
+      params.push(match.runPrUrl, match.runPrUrl);
     }
     if (ors.length === 0) return 0;
     const kinds = match.kinds.map(() => "?").join(", ");
@@ -512,4 +524,45 @@ export function listNotificationMutes(db: Database): NotificationMute[] {
         mutedAt: requireNumber(row, "muted_at", "notification_mutes row"),
       };
     });
+}
+
+/** Default window resolved notifications are retained before a sweep drops them. */
+export const NOTIFICATION_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+
+/**
+ * Informational kinds that are never resolved: per-day groups (`pr_opened`,
+ * `pr_auto_merged`) and delegated-work rollups (`work_spawned`). Without an
+ * age-based prune they would keep one row per repo per day for the workspace's
+ * lifetime even though nobody needs them once they are stale.
+ */
+const AGED_OUT_INFORMATIONAL_KINDS = ["pr_opened", "pr_auto_merged", "work_spawned"] as const;
+
+/**
+ * Delete notifications older than the retention window so a long-lived
+ * workspace's table (and the unread-count scan over it) stays bounded.
+ *
+ * Resolved rows age from `resolved_at`. Informational rows that no rule ever
+ * resolves age from their last update, so their per-day groups cannot grow
+ * without bound. Open rows that still need a human (escalations, retry
+ * exhaustion, broken automations, unhealthy sources) are never touched.
+ *
+ * @param db - Writable connection holding the notification tables
+ * @param olderThanMs - Retention window (default {@link NOTIFICATION_RETENTION_MS})
+ * @param now - Overridable clock (tests)
+ * @returns Rows deleted
+ */
+export function pruneNotifications(
+  db: Database,
+  olderThanMs: number = NOTIFICATION_RETENTION_MS,
+  now: number = Date.now(),
+): number {
+  if (!hasTable(db, "notifications")) return 0;
+  const cutoff = now - olderThanMs;
+  const kinds = AGED_OUT_INFORMATIONAL_KINDS.map(() => "?").join(", ");
+  return db.run(
+    `DELETE FROM notifications
+     WHERE (resolved_at IS NOT NULL AND resolved_at < ?)
+        OR (resolved_at IS NULL AND kind IN (${kinds}) AND updated_at < ?)`,
+    [cutoff, ...AGED_OUT_INFORMATIONAL_KINDS, cutoff],
+  ).changes;
 }

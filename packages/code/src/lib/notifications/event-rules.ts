@@ -87,14 +87,17 @@ export interface SourceHealthChange {
   provider: string;
   sourceId: string;
   status: string;
+  /** Generic failure count shown on the sources dashboard. */
   consecutiveFailures: number;
+  /** `unreadable` reads in a row (rate limits do not count); drives the threshold. */
+  unreadableStreak: number;
   message?: string;
-  previous?: { status: string; consecutiveFailures: number };
+  previous?: { status: string; consecutiveFailures: number; unreadableStreak: number };
 }
 
-function isUnhealthy(status: string, consecutiveFailures: number): boolean {
+function isUnhealthy(status: string, unreadableStreak: number): boolean {
   if (status === "auth-failed") return true;
-  return status === "unreadable" && consecutiveFailures >= UNREADABLE_THRESHOLD;
+  return status === "unreadable" && unreadableStreak >= UNREADABLE_THRESHOLD;
 }
 
 /**
@@ -117,9 +120,9 @@ export function notifySourceHealth(
       emitter.resolve({ kinds: ["source_unhealthy"], groupKey });
       return;
     }
-    if (!isUnhealthy(change.status, change.consecutiveFailures)) return;
+    if (!isUnhealthy(change.status, change.unreadableStreak)) return;
     const previous = change.previous;
-    if (previous && isUnhealthy(previous.status, previous.consecutiveFailures)) return;
+    if (previous && isUnhealthy(previous.status, previous.unreadableStreak)) return;
     const what = change.status === "auth-failed" ? "authentication failed" : "cannot be read";
     emitter.emit({
       kind: "source_unhealthy",

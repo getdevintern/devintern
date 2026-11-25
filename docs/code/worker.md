@@ -160,6 +160,12 @@ catch_up_missed = true     # one catch-up drain if a whole window was missed
 
 Windows may cross midnight, and several windows combine. Only new-task pickup pauses. Reviews, mentions, automations, and relay events keep running, and a task already started finishes after its window closes. `devintern worker run-now` forces one drain right away. Timezone, DST, and status details are in [Working windows](./automated-task-processing.md#working-windows-quiet-hours).
 
+## Notifications
+
+The worker records notification rows in `queue.db` for work that needs attention — a task escalated, retries ran out, an automation broke, a source stopped being readable — and for changes outside itself: PRs it opened or auto-merged, and delegated work with its child progress. Emits for the same event fold into one row, and a later success resolves the row it belongs to.
+
+Notifications are pruned after 30 days by default. A startup sweep and an hourly sweep delete resolved rows past the window, plus the informational rows that are never resolved (PRs opened or auto-merged and delegated-work rollups) once they age out, so a long-lived workspace's database stays bounded. Open rows that still need a human are kept until they are resolved. Set `WORKER_NOTIFICATION_RETENTION_DAYS` to change the window; `0` deletes aged-out rows at the next sweep.
+
 ## Options
 
 The daemon takes few flags. Durable settings live in [`workspace.toml`](./workspaces.md#the-workspace-file).

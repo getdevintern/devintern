@@ -876,6 +876,14 @@ export class WorkerState {
        WHERE state = 'open' AND provider = 'github' AND repo NOT IN (${placeholders})`,
       [Date.now(), ...allowed],
     );
+    // A closed PR resolves the escalations about it, same as markAgentPrClosed.
+    for (const pr of foreign) {
+      this.notifyClosed(
+        "SELECT web_url FROM agent_prs WHERE provider = 'github' AND repo = ? AND pr_number = ?",
+        [pr.repo, pr.prNumber],
+        `https://github.com/${pr.repo}/pull/${pr.prNumber}`,
+      );
+    }
     return foreign;
   }
 

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { existsSync, mkdtempSync, rmSync } from "fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
@@ -113,6 +113,18 @@ describe("DashboardNotifications handlers", () => {
     expect((api.list(new URLSearchParams()).body as NotificationListResponse).total).toBe(0);
   });
 
+  test("reads on an unreadable database degrade to empty instead of throwing", () => {
+    writeFileSync(dbPath, "not a sqlite database");
+    const api = new DashboardNotifications(dbPath);
+    expect(api.list(new URLSearchParams()).status).toBe(200);
+    expect((api.list(new URLSearchParams()).body as NotificationListResponse).total).toBe(0);
+    expect(api.unreadCount().body as NotificationUnreadResponse).toEqual({
+      unread: 0,
+      unreadHigh: 0,
+    });
+    expect(api.mutes().body as NotificationMutesResponse).toEqual({ mutes: [] });
+  });
+
   test("list, unread count, mark read, mark all read, resolve", () => {
     const { high, normal } = seed();
     const api = new DashboardNotifications(dbPath);
@@ -213,6 +225,64 @@ describe("dashboard server routes", () => {
         body: "{}",
       });
       expect(forged.status).toBe(403);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("notification routes use the queue DB when it differs from run history", async () => {
+    const historyDbPath = join(dir, "history.db");
+    const workspaceDbPath = join(dir, "workspace.db");
+    const writer = new Database(workspaceDbPath);
+    let id: number;
+    try {
+      id = new NotificationStore(writer).emit({
+        kind: "escalated",
+        severity: "high",
+        groupKey: "escalated:task:task:DEV-2",
+        title: "Run #2 escalated",
+        runId: 2,
+      }).notification!.id;
+    } finally {
+      writer.close();
+    }
+
+    const server = startDashboardServer({
+      port: 0,
+      dbPath: historyDbPath,
+      queueDbPath: workspaceDbPath,
+      workingDir: dir,
+      workspaceDir: dir,
+      logDirs: [],
+      tailscaleAutodetect: false,
+    });
+    try {
+      const base = `http://127.0.0.1:${server.port}`;
+      const headers = { "Content-Type": "application/json", Origin: base };
+      const listed = await fetch(`${base}/api/notifications`);
+      expect(((await listed.json()) as NotificationListResponse).total).toBe(1);
+      expect(await (await fetch(`${base}/api/notifications/unread-count`)).json()).toEqual({
+        unread: 1,
+        unreadHigh: 1,
+      });
+
+      const read = await fetch(`${base}/api/notifications/${id}/read`, {
+        method: "POST",
+        headers,
+        body: "{}",
+      });
+      expect(read.status).toBe(200);
+      const verify = new Database(workspaceDbPath, { readonly: true });
+      try {
+        const row = verify.query("SELECT read_at FROM notifications WHERE id = ?").get(id) as {
+          read_at: number | null;
+        };
+        expect(row.read_at).not.toBeNull();
+      } finally {
+        verify.close();
+      }
+      // Run history was never opened or created by the notification routes.
+      expect(existsSync(historyDbPath)).toBe(false);
     } finally {
       server.stop(true);
     }

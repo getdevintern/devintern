@@ -6,7 +6,7 @@ import { join } from "path";
 
 import { addNotificationListener, NotificationEmitter } from "../src/lib/notifications/emitter";
 import type { NotificationEvent } from "../src/lib/notifications/emitter";
-import { NotificationStore } from "../src/lib/notifications/store";
+import { NotificationStore, pruneNotifications } from "../src/lib/notifications/store";
 import type { NotificationInput } from "../src/lib/notifications/types";
 
 let dir: string;
@@ -243,6 +243,54 @@ describe("NotificationStore reads", () => {
     store.emit(input());
     db.run("UPDATE notifications SET kind = 'bogus'");
     expect(() => store.list()).toThrow(/kind/);
+  });
+
+  test("pruning drops resolved rows past the retention window and keeps open ones", () => {
+    clock = 1_000;
+    const resolved = store.emit(input({ groupKey: "old" })).notification!;
+    store.resolve(resolved.id);
+    clock = 2_000;
+    const openRow = store.emit(input({ groupKey: "open" })).notification!;
+
+    // cutoff = 2_001 - 1_000 = 1_001: the row resolved at 1_000 is dropped.
+    expect(pruneNotifications(db, 1_000, 2_001)).toBe(1);
+    expect(store.getById(resolved.id)).toBeNull();
+    expect(store.getById(openRow.id)).not.toBeNull();
+    expect(store.unreadCount().unread).toBe(1);
+  });
+
+  test("pruning drops aged-out informational rows that no rule ever resolves", () => {
+    clock = 1_000;
+    const opened = store.emit(
+      input({ kind: "pr_opened", severity: "normal", groupKey: "pr_opened:acme/web:day-1" }),
+    ).notification!;
+    const merged = store.emit(
+      input({
+        kind: "pr_auto_merged",
+        severity: "normal",
+        groupKey: "pr_auto_merged:acme/web:day-1",
+      }),
+    ).notification!;
+    const spawned = store.emit(
+      input({ kind: "work_spawned", severity: "normal", groupKey: "work_spawned:run:1" }),
+    ).notification!;
+    // A still-actionable open row is not on the never-resolved list.
+    const escalation = store.emit(input({ groupKey: "escalated:task:DEV-1" })).notification!;
+
+    clock = 50_000;
+    // cutoff = 50_001 - 1_000 = 49_001: every row above is older than that.
+    expect(pruneNotifications(db, 1_000, 50_001)).toBe(3);
+    expect(store.getById(opened.id)).toBeNull();
+    expect(store.getById(merged.id)).toBeNull();
+    expect(store.getById(spawned.id)).toBeNull();
+    expect(store.getById(escalation.id)).not.toBeNull();
+  });
+
+  test("the unread-count predicate has a partial index", () => {
+    const index = db
+      .query("SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?")
+      .get("idx_notifications_unread");
+    expect(index).not.toBeNull();
   });
 });
 

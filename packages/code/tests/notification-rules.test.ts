@@ -15,6 +15,8 @@ import { RunStore } from "../src/lib/state/run-recorder";
 import type { RunMeta } from "../src/lib/state/run-recorder";
 import { ScheduledRetryStore } from "../src/lib/state/run-retry";
 import { WorkerState } from "../src/lib/state/worker-state";
+import type { TaskTrackerClient } from "../src/lib/trackers/client";
+import { recoverOrphanedTaskRuns } from "../src/lib/worker/orphan-recovery";
 
 let dir: string;
 let dbPath: string;
@@ -90,7 +92,7 @@ describe("escalated", () => {
     expect(open("escalated")).toHaveLength(0);
   });
 
-  test("auto-merge escalations with the same cause group into one row across PRs", () => {
+  test("auto-merge escalations with the same cause stay separate per PR", () => {
     for (const [prNumber, path] of [
       [1, "packages/website/drafts/a.md"],
       [2, "packages/website/drafts/b.md"],
@@ -118,20 +120,103 @@ describe("escalated", () => {
       "CI is failing",
     );
     const rows = open("escalated");
-    expect(rows).toHaveLength(2);
-    const deny = rows.find((row) => row.groupKey.includes("deny pattern"))!;
-    expect(deny.groupKey).toBe(
-      "escalated:auto_merge:acme/web:matches deny pattern packages/website/**",
-    );
-    expect(deny.count).toBe(3);
-    expect(deny.title).toBe(
-      "Auto-merge escalated 3 times: matches deny pattern packages/website/**",
-    );
-    expect(deny.links.filter((link) => link.url).map((link) => link.url)).toEqual([
-      "https://github.com/acme/web/pull/1",
-      "https://github.com/acme/web/pull/2",
-      "https://github.com/acme/web/pull/3",
+    expect(rows).toHaveLength(4);
+    const deny = rows.filter((row) => row.title.includes("deny pattern"));
+    expect(deny).toHaveLength(3);
+    expect(deny.map((row) => row.count)).toEqual([1, 1, 1]);
+    expect(deny.map((row) => row.subject).sort()).toEqual([
+      "pr:https://github.com/acme/web/pull/1",
+      "pr:https://github.com/acme/web/pull/2",
+      "pr:https://github.com/acme/web/pull/3",
     ]);
+    expect(deny.map((row) => row.groupKey).sort()).toEqual([
+      "escalated:auto_merge:acme/web:https://github.com/acme/web/pull/1",
+      "escalated:auto_merge:acme/web:https://github.com/acme/web/pull/2",
+      "escalated:auto_merge:acme/web:https://github.com/acme/web/pull/3",
+    ]);
+    expect(deny.map((row) => row.title).sort()).toEqual([
+      "Auto-merge left acme/web#1 open: matches deny pattern packages/website/**",
+      "Auto-merge left acme/web#2 open: matches deny pattern packages/website/**",
+      "Auto-merge left acme/web#3 open: matches deny pattern packages/website/**",
+    ]);
+  });
+
+  test("re-finishing an auto-merge run with a new cause refreshes its one open row", () => {
+    const runId = finished(
+      {
+        origin: "auto_merge",
+        repo: "acme/web",
+        prNumber: 7,
+        prUrl: "https://github.com/acme/web/pull/7",
+      },
+      "escalated",
+      "checks pending",
+    );
+    expect(open("escalated")).toHaveLength(1);
+
+    // A retried base-sync or late child can finish the same run again with a
+    // different reason; that must refresh the per-PR row, not open a second one.
+    runs.finishRun(runId, "escalated", "merge conflict in src/a.ts");
+    const rows = open("escalated");
+    expect(rows).toHaveLength(1);
+    expect(rows[0].count).toBe(1);
+    expect(rows[0].title).toContain("merge conflict in <path>");
+  });
+
+  test("closing one PR resolves only that PR's escalation, not its same-cause siblings", () => {
+    const urls = [1, 2, 3].map((prNumber) => `https://github.com/acme/web/pull/${prNumber}`);
+    for (const [index, prNumber] of [1, 2, 3].entries()) {
+      finished(
+        {
+          origin: "auto_merge",
+          repo: "acme/web",
+          prNumber,
+          prUrl: urls[index],
+        },
+        "escalated",
+        `${["a", "b", "c"][index]}.md matches deny pattern packages/website/**`,
+      );
+    }
+    const state = new WorkerState(dbPath);
+    try {
+      for (const prNumber of [1, 2, 3]) state.recordAgentPr({ repo: "acme/web", prNumber });
+      // Close the earliest PR, not the most recent one of the same-cause set.
+      state.markAgentPrClosed("acme/web", 1, "closed");
+      expect(
+        open("escalated")
+          .map((row) => row.subject)
+          .sort(),
+      ).toEqual(["pr:https://github.com/acme/web/pull/2", "pr:https://github.com/acme/web/pull/3"]);
+      state.markAgentPrClosed("acme/web", 2, "closed");
+      expect(open("escalated").map((row) => row.subject)).toEqual([
+        "pr:https://github.com/acme/web/pull/3",
+      ]);
+      state.markAgentPrClosed("acme/web", 3, "merged");
+      expect(open("escalated")).toHaveLength(0);
+    } finally {
+      state.close();
+    }
+  });
+
+  test("closing a PR whose repo left the workspace resolves its escalation", () => {
+    finished(
+      {
+        origin: "auto_merge",
+        repo: "old/repo",
+        prNumber: 7,
+        prUrl: "https://github.com/old/repo/pull/7",
+      },
+      "escalated",
+      "needs review",
+    );
+    const state = new WorkerState(dbPath);
+    try {
+      state.recordAgentPr({ repo: "old/repo", prNumber: 7 });
+      expect(state.closeForeignAgentPrs(["acme/web"])).toEqual([{ repo: "old/repo", prNumber: 7 }]);
+      expect(open("escalated")).toHaveLength(0);
+    } finally {
+      state.close();
+    }
   });
 
   test("an escalation resolves when its PR is closed or merged", () => {
@@ -169,6 +254,29 @@ describe("escalated", () => {
     }
   });
 
+  test("closing the PR a grouped task escalation belongs to resolves a row whose latest run has none", () => {
+    const prUrl = "https://github.com/acme/web/pull/5";
+    finished(
+      { origin: "task", taskKey: "DEV-1", repo: "acme/web", prNumber: 5, prUrl },
+      "escalated",
+      "needs review",
+    );
+    // A later run of the same task escalates without a PR: the grouped row
+    // keeps the task subject but its run_id now points at the PR-less run.
+    finished({ origin: "task", taskKey: "DEV-1", repo: "acme/web" }, "escalated", "still blocked");
+    const [row] = open("escalated");
+    expect(row).toMatchObject({ subject: "task:DEV-1", count: 2 });
+
+    const state = new WorkerState(dbPath);
+    try {
+      state.recordAgentPr({ repo: "acme/web", prNumber: 5 });
+      state.markAgentPrClosed("acme/web", 5, "merged");
+      expect(open("escalated")).toHaveLength(0);
+    } finally {
+      state.close();
+    }
+  });
+
   test("a later auto-merge success on the same PR resolves its escalation", () => {
     const pr = {
       origin: "auto_merge" as const,
@@ -180,6 +288,49 @@ describe("escalated", () => {
     expect(open("escalated")).toHaveLength(1);
     finished(pr, "succeeded", "merged");
     expect(open("escalated")).toHaveLength(0);
+  });
+
+  test("side-work successes never resolve implementation notifications", () => {
+    const prUrl = "https://github.com/acme/web/pull/9";
+    const pr = { repo: "acme/web", prNumber: 9, prUrl };
+    finished({ origin: "auto_merge", ...pr }, "escalated", "checks pending");
+    finished({ origin: "task", taskKey: "DEV-11" }, "failed", "boom");
+
+    // An estimation success on the task, and an unrelated PR fix on the same
+    // PR, still do not mean a human fixed the implementation problem.
+    finished({ origin: "estimate", taskKey: "DEV-11" }, "succeeded");
+    for (const origin of ["ci_fix", "pr_mention", "conflict_resolution"] as const) {
+      finished({ origin, ...pr }, "succeeded");
+    }
+    expect(open("escalated")).toHaveLength(1);
+    expect(open("retries_exhausted")).toHaveLength(1);
+
+    // A real implementing success resolves the task failure; the auto-merge
+    // escalation still needs its PR to merge.
+    finished({ origin: "task", taskKey: "DEV-11" }, "succeeded");
+    expect(open("retries_exhausted")).toHaveLength(0);
+    expect(open("escalated")).toHaveLength(1);
+    finished({ origin: "auto_merge", ...pr }, "succeeded", "merged");
+    expect(open("escalated")).toHaveLength(0);
+  });
+
+  test("an auto-merge escalation cause is redacted before it reaches the title and group key", () => {
+    const token = "sk-ant-abcdefghijklmnopqrstuvwxyz123456";
+    finished(
+      {
+        origin: "auto_merge",
+        repo: "acme/web",
+        prNumber: 12,
+        prUrl: "https://github.com/acme/web/pull/12",
+      },
+      "escalated",
+      `push rejected: Authorization: Bearer ${token}`,
+    );
+    const [row] = open("escalated");
+    expect(row.title).not.toContain(token);
+    expect(row.groupKey).not.toContain(token);
+    expect(row.body).not.toContain(token);
+    expect(row.title).toContain("[redacted]");
   });
 });
 
@@ -200,6 +351,180 @@ describe("retries_exhausted", () => {
     // A retried finish of the same run does not double-count.
     runs.finishRun(runId, "failed", "tests failed");
     expect(open("retries_exhausted")[0].count).toBe(1);
+  });
+
+  test("a reap of an orphaned task run notifies like any other failed run", () => {
+    const runId = runs.createRun({ origin: "task", taskKey: "DEV-ORPHAN", repo: "acme/api" });
+    expect(runs.reapOrphanedRuns()).toBe(1);
+    const [notification] = open("retries_exhausted");
+    expect(notification).toMatchObject({
+      severity: "high",
+      runId,
+      subject: "task:DEV-ORPHAN",
+      groupKey: "retries_exhausted:task:DEV-ORPHAN",
+    });
+    expect(notification.body).toContain("orphaned");
+  });
+
+  test("reapOrphanedRunIds({ notify: false }) returns the reaped ids and defers the rules", () => {
+    const taskId = runs.createRun({ origin: "task", taskKey: "DEV-DEFER", repo: "acme/api" });
+    const localId = runs.createRun({ origin: "local", taskKey: "local-defer", repo: "acme/api" });
+
+    const ids = runs.reapOrphanedRunIds({ notify: false });
+    expect(ids).toHaveLength(2);
+    expect(ids).toContain(taskId);
+    expect(ids).toContain(localId);
+    expect(all()).toHaveLength(0);
+
+    // The caller evaluates the deferred rules itself once it knows the outcome.
+    runs.notifySettledRun(taskId);
+    const [notification] = open("retries_exhausted");
+    expect(notification).toMatchObject({ runId: taskId, subject: "task:DEV-DEFER" });
+  });
+
+  test("a clean-stop reap that recovery auto-resumes produces no notification", async () => {
+    const runId = runs.createRun({
+      origin: "task",
+      taskKey: "DEV-RESUME",
+      tracker: "jira",
+      branch: "feature/dev-resume",
+    });
+    runs.addStage(
+      runId,
+      "implementation",
+      "succeeded",
+      "implemented",
+      JSON.stringify({ report: "wrote the parser" }),
+    );
+    runs.markCleanStop(runId);
+
+    const result = await recoverOrphanedTaskRuns({
+      runStore: runs,
+      tracker: {
+        getTask: async () => ({
+          key: "DEV-RESUME",
+          summary: "Resume me",
+          issueType: "Task",
+          status: "In Progress",
+          reporter: "Alice",
+          created: "",
+          updated: "",
+          labels: [],
+          components: [],
+          fixVersions: [],
+          raw: null,
+        }),
+        postComment: async () => {},
+        transitionStatus: async () => {},
+        extractDescriptionText: () => "body",
+      } as unknown as TaskTrackerClient,
+      trackerType: "jira",
+      getInProgressStatus: () => "In Progress",
+      getTodoStatus: () => "To Do",
+      recordAttempt: () => {},
+      log: () => {},
+      warn: () => {},
+    });
+
+    expect(result.resumable.map((run) => run.id)).toEqual([runId]);
+    // Recovery is about to continue this run, so the "will not be retried"
+    // alarm would contradict what the worker does next.
+    expect(all()).toHaveLength(0);
+  });
+
+  test("recovery still notifies a reaped run it cannot resume", async () => {
+    runs.createRun({ origin: "task", taskKey: "DEV-NO-RESUME", tracker: "jira" });
+
+    await recoverOrphanedTaskRuns({
+      runStore: runs,
+      tracker: {
+        getTask: async () => ({
+          key: "DEV-NO-RESUME",
+          summary: "No resume",
+          issueType: "Task",
+          status: "In Progress",
+          reporter: "Alice",
+          created: "",
+          updated: "",
+          labels: [],
+          components: [],
+          fixVersions: [],
+          raw: null,
+        }),
+        postComment: async () => {},
+        transitionStatus: async () => {},
+        extractDescriptionText: () => "body",
+      } as unknown as TaskTrackerClient,
+      trackerType: "jira",
+      getInProgressStatus: () => "In Progress",
+      getTodoStatus: () => "To Do",
+      recordAttempt: () => {},
+      log: () => {},
+      warn: () => {},
+    });
+
+    const [notification] = open("retries_exhausted");
+    expect(notification).toMatchObject({
+      severity: "high",
+      subject: "task:DEV-NO-RESUME",
+    });
+  });
+
+  test("recovery's deliberately skipped orphans raise no retry alarm", async () => {
+    const tracker = (status: string | null): TaskTrackerClient =>
+      ({
+        getTask: async () => {
+          if (status === null) throw new Error("tracker down");
+          return {
+            key: "DEV-SKIP",
+            summary: "Skip me",
+            issueType: "Task",
+            status,
+            reporter: "Alice",
+            created: "",
+            updated: "",
+            labels: [],
+            components: [],
+            fixVersions: [],
+            raw: null,
+          };
+        },
+        postComment: async () => {},
+        transitionStatus: async () => {},
+        extractDescriptionText: () => "body",
+      }) as unknown as TaskTrackerClient;
+    const recover = (status: string | null, extra: Record<string, unknown> = {}) =>
+      recoverOrphanedTaskRuns({
+        runStore: runs,
+        tracker: tracker(status),
+        trackerType: "jira",
+        getInProgressStatus: () => "In Progress",
+        getTodoStatus: () => "To Do",
+        recordAttempt: () => {},
+        log: () => {},
+        warn: () => {},
+        ...extra,
+      });
+
+    // The ticket moved on after the crash: recovery leaves it alone.
+    runs.createRun({ origin: "task", taskKey: "DEV-SKIP", tracker: "jira" });
+    expect(await recover("Done")).toMatchObject({ reaped: 1, recovered: 0, skipped: 1 });
+
+    // The run is older than the cutoff: reaped silently.
+    runs.createRun({ origin: "task", taskKey: "DEV-SKIP", tracker: "jira" });
+    expect(await recover("In Progress", { maxAgeMs: 1, now: Date.now() + 1_000 })).toMatchObject({
+      reaped: 1,
+      recovered: 0,
+      skipped: 1,
+    });
+
+    // The tracker lookup failed, so recovery could not decide.
+    runs.createRun({ origin: "task", taskKey: "DEV-SKIP", tracker: "jira" });
+    expect(await recover(null)).toMatchObject({ reaped: 1, recovered: 0, skipped: 1 });
+
+    // The reap marked the runs failed, but recovery judged all three handled,
+    // so no "will not be retried automatically" alarm contradicts it.
+    expect(open("retries_exhausted")).toHaveLength(0);
   });
 
   test("a scheduled retry means no notification", () => {
@@ -514,13 +839,37 @@ describe("source_unhealthy", () => {
     }
   });
 
+  test("rate-limited reads do not inflate the unreadable streak", () => {
+    const store = new AutomationStateStore(dbPath);
+    try {
+      record(store, "ok");
+      record(store, "rate-limited");
+      record(store, "rate-limited");
+      // One unreadable blip after rate limits is not a "cannot be read" streak.
+      record(store, "unreadable");
+      expect(all("source_unhealthy")).toHaveLength(0);
+
+      // A rate-limited read breaks the unreadable run, so the threshold needs
+      // three fresh unreadable reads in a row.
+      record(store, "rate-limited");
+      record(store, "unreadable");
+      record(store, "unreadable");
+      expect(all("source_unhealthy")).toHaveLength(0);
+      record(store, "unreadable");
+      expect(open("source_unhealthy")).toHaveLength(1);
+    } finally {
+      store.close();
+    }
+  });
+
   test("a direct transition from unhealthy to unhealthy does not re-emit", () => {
     notifySourceHealth(reader, {
       provider: "linear",
       sourceId: "s",
       status: "auth-failed",
       consecutiveFailures: 2,
-      previous: { status: "auth-failed", consecutiveFailures: 1 },
+      unreadableStreak: 0,
+      previous: { status: "auth-failed", consecutiveFailures: 1, unreadableStreak: 0 },
     });
     expect(all("source_unhealthy")).toHaveLength(0);
   });

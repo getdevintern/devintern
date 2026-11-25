@@ -39,6 +39,21 @@ const SELF_RETRYING_ORIGINS: ReadonlySet<string> = new Set([
   "estimate",
 ]);
 
+/**
+ * Origins whose success means their subject was actually handled. The
+ * remaining origins either do side work on the same task/PR (`estimate`,
+ * `ci_fix`, `pr_mention`, `conflict_resolution`) and must not resolve an
+ * implementation notification just by finishing.
+ */
+const COMPLETING_ORIGINS: ReadonlySet<string> = new Set([
+  "task",
+  "scheduled",
+  "manual",
+  "local",
+  "error_monitor",
+  "auto_merge",
+]);
+
 /** Statuses that end a run for good (deferred runs retry; in-progress runs are live). */
 const SETTLED_STATUSES: ReadonlySet<string> = new Set([
   "succeeded",
@@ -202,10 +217,14 @@ function emitEscalated(emitter: NotificationEmitter, run: RunFacts): void {
     links: runLinks(run),
   };
   if (run.origin === "auto_merge") {
-    const cause = normalizeCause(run.outcomeReason);
+    const cause = normalizeCause(redactText(run.outcomeReason ?? ""));
+    const pr = run.prUrl ?? (run.prNumber !== undefined ? `#${run.prNumber}` : `run:${run.id}`);
     emitter.emit({
       ...base,
-      groupKey: `escalated:auto_merge:${run.repo ?? "unknown"}:${cause}`,
+      // One open row per PR: a group spanning several PRs cannot be resolved
+      // correctly when only some of them close, and a re-finished run with a
+      // new cause must refresh the same row rather than leave the old one open.
+      groupKey: `escalated:auto_merge:${run.repo ?? "unknown"}:${pr}`,
       title: `Auto-merge left ${prLabel(run)} open: ${cause}`,
       groupTitle: (count) =>
         count === 1
@@ -319,6 +338,7 @@ function emitAutoMerged(emitter: NotificationEmitter, run: RunFacts, now: number
 /** A success closes what was open about its subject. */
 function resolveOnSuccess(emitter: NotificationEmitter, run: RunFacts): void {
   if (run.status !== "succeeded") return;
+  if (!COMPLETING_ORIGINS.has(run.origin)) return;
   emitter.resolve({
     kinds: ["escalated", "retries_exhausted", "automation_broke"],
     subject: runSubject(run),
@@ -538,19 +558,37 @@ function rollUpToParent(emitter: NotificationEmitter, db: Database, child: RunFa
 // ---------------------------------------------------------------------------
 
 /**
+ * Options for {@link notifyRunFinished}.
+ */
+export interface RunFinishRuleOptions {
+  /**
+   * Skip `retries_exhausted`. Recovery sets this for a run it is about to
+   * resume, so an interruption that continues as a new run does not raise a
+   * false "will not be retried automatically" alarm.
+   */
+  skipRetriesExhausted?: boolean;
+}
+
+/**
  * Evaluate every run-finish rule for a run that just settled.
  *
  * @param db - Writable connection holding `runs` (and the notification tables)
  * @param runId - The settled run
  * @param now - Clock (tests)
+ * @param options - Rule options (recovery skips the retry-exhausted alarm)
  */
-export function notifyRunFinished(db: Database, runId: number, now: () => number = Date.now): void {
+export function notifyRunFinished(
+  db: Database,
+  runId: number,
+  now: () => number = Date.now,
+  options: RunFinishRuleOptions = {},
+): void {
   safely("run-finish", () => {
     const run = readRun(db, runId);
     if (!run || run.status === "in_progress") return;
     const emitter = new NotificationEmitter(db, now);
     if (run.status === "escalated") safely("escalated", () => emitEscalated(emitter, run));
-    if (isRetryExhausted(db, run) && run.taskKey) {
+    if (!options.skipRetriesExhausted && isRetryExhausted(db, run) && run.taskKey) {
       const taskKey = run.taskKey;
       safely("retries-exhausted", () =>
         emitRetriesExhausted(emitter, run, taskKey, run.outcomeReason),

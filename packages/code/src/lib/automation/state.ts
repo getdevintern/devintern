@@ -46,11 +46,21 @@ export class AutomationStateStore {
         checked_at INTEGER NOT NULL,
         last_success_at INTEGER,
         consecutive_failures INTEGER NOT NULL DEFAULT 0,
+        unreadable_streak INTEGER NOT NULL DEFAULT 0,
         message TEXT,
         retry_after_at INTEGER,
         PRIMARY KEY (provider, source_id)
       )
     `);
+    // Additive migration: existing databases predate the unreadable-only streak.
+    const columns = this.db.query("PRAGMA table_info(source_status)").all() as Array<{
+      name: string;
+    }>;
+    if (!columns.some((column) => column.name === "unreadable_streak")) {
+      this.db.run(
+        "ALTER TABLE source_status ADD COLUMN unreadable_streak INTEGER NOT NULL DEFAULT 0",
+      );
+    }
   }
 
   /** Create schedule state once; restarts retain the prior interval anchor. */
@@ -184,16 +194,21 @@ export class AutomationStateStore {
   recordSourceStatus(status: SourceStatusInput): void {
     const previous = this.db
       .query(
-        `SELECT status, consecutive_failures, last_success_at FROM source_status
+        `SELECT status, consecutive_failures, unreadable_streak, last_success_at FROM source_status
          WHERE provider = ? AND source_id = ?`,
       )
       .get(status.provider, status.sourceId) as {
       status: string;
       consecutive_failures: number;
+      unreadable_streak: number;
       last_success_at: number | null;
     } | null;
     const ok = status.status === "ok";
     const consecutiveFailures = ok ? 0 : (previous?.consecutive_failures ?? 0) + 1;
+    // Only `unreadable` reads count toward the "cannot be read" threshold:
+    // rate limits are expected, and a successful read starts over.
+    const unreadableStreak =
+      status.status === "unreadable" ? (previous?.unreadable_streak ?? 0) + 1 : 0;
     const lastSuccessAt = ok ? status.checkedAt : (previous?.last_success_at ?? null);
     const retryAfterAt =
       status.status === "rate-limited" && status.retryAfterMs !== undefined
@@ -202,13 +217,14 @@ export class AutomationStateStore {
     this.db.run(
       `INSERT INTO source_status
          (provider, source_id, status, checked_at, last_success_at,
-          consecutive_failures, message, retry_after_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          consecutive_failures, unreadable_streak, message, retry_after_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(provider, source_id) DO UPDATE SET
          status = excluded.status,
          checked_at = excluded.checked_at,
          last_success_at = excluded.last_success_at,
          consecutive_failures = excluded.consecutive_failures,
+         unreadable_streak = excluded.unreadable_streak,
          message = excluded.message,
          retry_after_at = excluded.retry_after_at`,
       [
@@ -218,6 +234,7 @@ export class AutomationStateStore {
         status.checkedAt,
         lastSuccessAt,
         consecutiveFailures,
+        unreadableStreak,
         status.message ?? null,
         retryAfterAt,
       ],
@@ -227,12 +244,14 @@ export class AutomationStateStore {
       sourceId: status.sourceId,
       status: status.status,
       consecutiveFailures,
+      unreadableStreak,
       ...(status.message ? { message: status.message } : {}),
       ...(previous
         ? {
             previous: {
               status: previous.status,
               consecutiveFailures: previous.consecutive_failures,
+              unreadableStreak: previous.unreadable_streak,
             },
           }
         : {}),

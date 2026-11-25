@@ -16,8 +16,10 @@ import { parseEnvInteger } from "../config/env-integer";
 import { createPickupGate } from "../worker/schedule";
 import type { PickupGate, ScheduleSnapshot } from "../worker/schedule";
 import { recoverOrphanedTaskRuns, resolveStatusName } from "../worker/orphan-recovery";
+import type { OrphanRecoveryResult } from "../worker/orphan-recovery";
 import { RunStore } from "../state/run-recorder";
 import type { RunRecord } from "../state/run-recorder";
+import { pruneResolvedNotifications, startNotificationSweeper } from "../notifications/maintenance";
 import { readImplementationReport } from "../state/session-pickup";
 import { RetryStateStore } from "../state/retry-state";
 import { ScheduledRetryStore } from "../state/run-retry";
@@ -213,10 +215,17 @@ export async function recoverOrphanedWorkspaceRuns(options: {
   config: WorkspaceConfig;
   workspaceDir: string;
   dbPath: string;
-}): Promise<void> {
+}): Promise<OrphanRecoveryResult> {
   const { config, workspaceDir, dbPath } = options;
   const runStore = new RunStore(dbPath);
   let retryStore: RetryStateStore | null = null;
+  let recovery: OrphanRecoveryResult = {
+    reaped: 0,
+    recovered: 0,
+    skipped: 0,
+    resumable: [],
+    deferredRunIds: [],
+  };
   try {
     const hasTaskOrphans =
       runStore.listRuns({ status: "in_progress", origin: "task", limit: 1 }).length > 0;
@@ -347,7 +356,7 @@ export async function recoverOrphanedWorkspaceRuns(options: {
       }),
     );
 
-    const recovery = await recoverOrphanedTaskRuns({
+    recovery = await recoverOrphanedTaskRuns({
       runStore,
       tracker,
       trackerType,
@@ -437,6 +446,7 @@ export async function recoverOrphanedWorkspaceRuns(options: {
     retryStore?.close();
     runStore.close();
   }
+  return recovery;
 }
 
 /**
@@ -931,18 +941,25 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   assertWorkspaceHasWork(config, retryQueue, injectedTasks, multiTeam, initialQuery);
 
   const state = openWorkspaceState(workspaceDir);
+  pruneResolvedNotifications(state.dbPath);
+  startNotificationSweeper(state.dbPath);
   await startLoggedWorkerFailover(state.queue);
   const repoManager = new RepoManager(workspaceDir);
   const supervisor = createTaskSupervisor({
     maxConcurrency: config.workspace.execution.maxConcurrency,
     maxConcurrencyPerRepo: config.workspace.execution.maxConcurrencyPerRepo,
   });
-  await recoverOrphanedWorkspaceRuns({ config, workspaceDir, dbPath: state.dbPath });
+  const orphanRecovery = await recoverOrphanedWorkspaceRuns({
+    config,
+    workspaceDir,
+    dbPath: state.dbPath,
+  });
   pruneClosedChangeRequestCursors(state.workerState);
   const injectedStartup = createInjectedStartupRecovery(
     injectedTasks,
     workspaceDir,
     options.beforeAcquirersStart,
+    orphanRecovery.deferredRunIds,
   );
 
   const pickupGate = startWorkspacePickupGate(config, workspaceDir);
