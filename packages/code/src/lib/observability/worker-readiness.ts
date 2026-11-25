@@ -116,7 +116,7 @@ async function defaultDashboardServerPid(port: number): Promise<number | undefin
 
 /** Default liveness: the same lock lookup `devintern worker status` uses. */
 function defaultWorkerStatus(workspaceDir: string): WorkerStatusView {
-  return resolveWorkerStatus(workspaceDir, workspaceDir);
+  return resolveWorkerStatus(workspaceDir);
 }
 
 /**

@@ -84,7 +84,7 @@ export function createWorkspaceLock(workspaceDir: string = resolveWorkspaceDir()
   if (!existsSync(workspaceDir)) {
     mkdirSync(workspaceDir, { recursive: true });
   }
-  return new LockManager(workspaceDir, ".worker.lock", { plainDir: true, reclaimForeign: true });
+  return new LockManager(workspaceDir, ".worker.lock", { reclaimForeign: true });
 }
 
 /**
@@ -101,7 +101,7 @@ export function createRepoRunLock(
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true });
   }
-  return new LockManager(dir, `${repoName}.run.lock`, { plainDir: true });
+  return new LockManager(dir, `${repoName}.run.lock`);
 }
 
 /**

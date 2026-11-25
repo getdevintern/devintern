@@ -125,8 +125,7 @@ export function runWorkerRunNow(args: string[], options: RunNowOptions = {}): nu
   // Only a verified live worker exempts the config check: an unverifiable one
   // (lock from another PID namespace, e.g. read inside a sandbox) takes the
   // stricter not-running path.
-  const workerLiveness =
-    LockManager.readLockStatus(selectedDir, ".worker.lock", { plainDir: true })?.running ?? false;
+  const workerLiveness = LockManager.readLockStatus(selectedDir, ".worker.lock")?.running ?? false;
   const workerRunning = workerLiveness === true;
 
   // An existing file is not necessarily a workspace config: `--workspace

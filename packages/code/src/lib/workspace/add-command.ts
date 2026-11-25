@@ -285,7 +285,7 @@ export async function runWorkerAdd(
   // `"unknown"`: the lock was taken in another PID namespace (this command runs
   // inside a PID-isolated sandbox), so a live worker cannot be ruled out.
   const workerRunning: PidLiveness =
-    LockManager.readLockStatus(selectedDir, ".worker.lock", { plainDir: true })?.running ?? false;
+    LockManager.readLockStatus(selectedDir, ".worker.lock")?.running ?? false;
   if (workerRunning === false && add.wait) {
     error("❌ --wait needs a running worker, but none is active for this workspace.");
     error("   Start it with `devintern worker`, or drop --wait to enqueue durably.");
@@ -793,8 +793,7 @@ async function waitForTask(
     // dead worker's lock turns `false` after LOCK_HEARTBEAT_STALE_MS, so the
     // restart-grace failure below still fires.
     const workerRunning =
-      LockManager.readLockStatus(ctx.selectedDir, ".worker.lock", { plainDir: true })?.running ??
-      false;
+      LockManager.readLockStatus(ctx.selectedDir, ".worker.lock")?.running ?? false;
     if (workerRunning !== false) {
       // A replacement worker came back within the grace: a later restart gets
       // its own grace window rather than inheriting an old one.

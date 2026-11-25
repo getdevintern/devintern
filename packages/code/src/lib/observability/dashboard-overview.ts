@@ -382,7 +382,7 @@ export function buildOverview(data: DashboardData, nowMs: number = Date.now()): 
   const activity = data.getTaskActivity().runs;
   return {
     generatedAt: nowMs,
-    worker: resolveWorkerStatus(data.workingDir, data.workspaceDir),
+    worker: resolveWorkerStatus(data.workspaceDir),
     config: {
       status: load.status,
       path: configPath,
