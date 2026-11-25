@@ -3,8 +3,10 @@ import { expect, test } from "bun:test";
 import type { RunRecord } from "@/lib/api";
 import {
   filterRecordedRuns,
+  isRunDetailUrl,
   isRunListUrl,
   parseSnapshotMeta,
+  pruneUnrecordedLineage,
   rebaseTimestamps,
   snapshotFile,
 } from "@/lib/demo-snapshot";
@@ -97,4 +99,36 @@ test("parses snapshot metadata", () => {
   expect(parseSnapshotMeta({ exportedAt: 5 })).toEqual({ exportedAt: 5 });
   expect(parseSnapshotMeta({ exportedAt: "5" })).toBeNull();
   expect(parseSnapshotMeta(null)).toBeNull();
+});
+
+test("recognizes run detail URLs", () => {
+  expect(isRunDetailUrl("/api/runs/30")).toBe(true);
+  expect(isRunDetailUrl("/api/runs/30/artifacts")).toBe(false);
+  expect(isRunDetailUrl("/api/runs")).toBe(false);
+});
+
+test("keeps recorded lineage inside the recording", () => {
+  const detail = {
+    run: { id: 2 },
+    lineage: {
+      parent: { runId: 99, origin: "scheduled", status: "succeeded", relation: "delegated" },
+      spawned: [
+        { kind: "delegated_task", id: 1, taskKey: "local-a", latestRunId: 3 },
+        { kind: "delegated_task", id: 2, taskKey: "local-b", latestRunId: 98 },
+        { kind: "tracker_issue", key: "DEV-1" },
+        { kind: "follow_up_run", runId: 97, origin: "ci_fix", status: "failed", startedAt: 1 },
+        { kind: "follow_up_run", runId: 3, origin: "ci_fix", status: "failed", startedAt: 1 },
+      ],
+    },
+  };
+  const pruned = pruneUnrecordedLineage(detail, new Set([2, 3])) as typeof detail;
+  expect(pruned.lineage.parent).toBeNull();
+  expect(JSON.parse(JSON.stringify(pruned.lineage.spawned))).toEqual([
+    { kind: "delegated_task", id: 1, taskKey: "local-a", latestRunId: 3 },
+    { kind: "delegated_task", id: 2, taskKey: "local-b" },
+    { kind: "tracker_issue", key: "DEV-1" },
+    { kind: "follow_up_run", runId: 3, origin: "ci_fix", status: "failed", startedAt: 1 },
+  ]);
+  // A detail without lineage (older recording) passes through unchanged.
+  expect(pruneUnrecordedLineage({ run: { id: 1 } }, new Set())).toEqual({ run: { id: 1 } });
 });

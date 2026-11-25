@@ -19,6 +19,7 @@ import { AutomationStateStore } from "../../../code/src/lib/automation/state";
 import { RunStore } from "../../../code/src/lib/state/run-recorder";
 import { WebhookQueue } from "../../../code/src/lib/state/webhook-queue";
 import { WorkerState } from "../../../code/src/lib/state/worker-state";
+import { DELEGATED_RUN, DELEGATING_AUTOMATION, seedLineage } from "./seed-lineage";
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -187,7 +188,7 @@ writeFileSync(join(workspaceDir, ".env"), WORKSPACE_ENV, { mode: 0o600 });
 // ---------------------------------------------------------------------------
 
 type Harness = "claude-code" | "codex";
-type Origin = "task" | "scheduled" | "pr_mention" | "ci_fix" | "error_monitor";
+type Origin = "task" | "scheduled" | "pr_mention" | "ci_fix" | "error_monitor" | "local";
 type Status = "succeeded" | "in_progress" | "escalated" | "failed";
 type Tracker = "jira" | "linear" | "github";
 type Repo = "api" | "web" | "infra" | "sdk";
@@ -677,6 +678,21 @@ for (const [id, cron] of Object.entries(CRONS)) {
   if (latest) latest.start = Math.round((now - occurrence(cron, -1)) / MIN);
 }
 
+// Run lineage (see seed-lineage.ts): a task the docs-drift automation delegated.
+const delegatingStart = RUNS.find((r) => r.automation === DELEGATING_AUTOMATION)?.start ?? 1560;
+RUNS.push({
+  start: Math.max(delegatingStart - 30, 2),
+  dur: 14,
+  origin: "local",
+  status: "succeeded",
+  repo: DELEGATED_RUN.repo,
+  harness: "claude-code",
+  key: DELEGATED_RUN.key,
+  title: DELEGATED_RUN.title,
+  pr: DELEGATED_RUN.pr,
+  open: true,
+});
+
 const DESCRIPTIONS: Record<string, string> = {
   [FEATURED]: `# Rate limit the password reset endpoint
 
@@ -714,6 +730,7 @@ const db = new Database(dbPath);
 
 const sorted = [...RUNS].sort((a, b) => b.start - a.start);
 const idByKey = new Map<string, number>();
+const idByAutomation = new Map<string, number>();
 for (const run of sorted) {
   const branch = run.key
     ? `devintern/${run.key.replace(/[^A-Za-z0-9]+/g, "-").toLowerCase()}`
@@ -733,6 +750,8 @@ for (const run of sorted) {
     attempt: 1,
   });
   if (run.key) idByKey.set(run.key, id);
+  // Oldest first, so the last write is the automation's latest run.
+  if (run.automation) idByAutomation.set(run.automation, id);
   const started = ago(run.start);
   const finished = run.dur === undefined ? null : started + run.dur * MIN;
   const prUrl = run.pr ? `https://github.com/acme/${run.repo}/pull/${run.pr}` : null;
@@ -952,6 +971,18 @@ for (const id of [
        (automation_id, schedule_spec, last_scheduled_at, next_due_at) VALUES (?, ?, ?, ?)`,
     [id, cron ? `cron:${cron}` : "interval:12h", lastAt, nextAt],
   );
+}
+
+const delegatingRunId = idByAutomation.get(DELEGATING_AUTOMATION);
+if (delegatingRunId !== undefined) {
+  seedLineage({
+    db,
+    store,
+    dbPath,
+    workspaceDir,
+    parentRunId: delegatingRunId,
+    createdAt: ago(delegatingStart - 5),
+  });
 }
 
 db.close();

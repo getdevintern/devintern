@@ -12,9 +12,11 @@
 import type { RunRecord } from "./api";
 import {
   filterRecordedRuns,
+  isRunDetailUrl,
   isRunListUrl,
   parseSnapshotMeta,
   rebaseTimestamps,
+  pruneUnrecordedLineage,
   RUNS_ALL_FILE,
   SNAPSHOT_DATA_DIR,
   snapshotFile,
@@ -123,8 +125,12 @@ export function createDemoFetch(options: DemoFetchOptions): typeof fetch {
     const file = snapshotFile(target);
     if (file === null) return jsonResponse(404, { error: "not part of this demo" });
     if (file.endsWith(".bin")) return realFetch(new URL(file, baseUrl), init);
-    const body = await load(file);
+    let body = await load(file);
     if (body === undefined) return jsonResponse(404, { error: "not part of this demo" });
+    if (isRunDetailUrl(target)) {
+      const recordedIds = new Set((await recordedRuns()).map((run) => run.id));
+      body = pruneUnrecordedLineage(body, recordedIds);
+    }
     return jsonResponse(200, rebaseTimestamps(body, delta));
   };
   return demoFetch as typeof fetch;

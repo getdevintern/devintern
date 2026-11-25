@@ -8,7 +8,7 @@
  * (writing one), so both sides agree on every file name.
  */
 
-import type { RunRecord, RunsResponse } from "./api";
+import type { RunLineage, RunRecord, RunsResponse, SpawnedWork } from "./api";
 
 /** Directory, next to `index.html`, that holds the recorded responses. */
 export const SNAPSHOT_DATA_DIR = "data";
@@ -160,4 +160,38 @@ export function parseSnapshotMeta(value: unknown): DemoSnapshotMeta | null {
   if (value === null || typeof value !== "object") return null;
   const exportedAt = (value as { exportedAt?: unknown }).exportedAt;
   return typeof exportedAt === "number" && Number.isFinite(exportedAt) ? { exportedAt } : null;
+}
+
+const RUN_DETAIL_PATTERN = /^\/api\/runs\/\d+$/;
+
+/** Whether a URL is one run's detail (`/api/runs/:id`), whose lineage links other runs. */
+export function isRunDetailUrl(apiUrl: string): boolean {
+  return RUN_DETAIL_PATTERN.test(new URL(apiUrl, "http://snapshot.invalid").pathname);
+}
+
+/**
+ * Keep a recorded run detail's lineage inside the recording: a source run that
+ * was not recorded is dropped, and links from spawned work to unrecorded runs
+ * are removed (the entry itself stays), so the demo never links to a run page
+ * it cannot show.
+ *
+ * @param detail - Recorded `/api/runs/:id` body
+ * @param recordedIds - Ids of every run in the recording
+ */
+export function pruneUnrecordedLineage(detail: unknown, recordedIds: ReadonlySet<number>): unknown {
+  if (detail === null || typeof detail !== "object") return detail;
+  const lineage = (detail as { lineage?: RunLineage }).lineage;
+  if (!lineage || typeof lineage !== "object") return detail;
+  const parent = lineage.parent && recordedIds.has(lineage.parent.runId) ? lineage.parent : null;
+  const spawned = (Array.isArray(lineage.spawned) ? lineage.spawned : []).flatMap(
+    (item): SpawnedWork[] => {
+      if (item.kind === "follow_up_run") return recordedIds.has(item.runId) ? [item] : [];
+      if (item.kind === "delegated_task" && item.latestRunId !== undefined) {
+        if (recordedIds.has(item.latestRunId)) return [item];
+        return [{ ...item, latestRunId: undefined }];
+      }
+      return [item];
+    },
+  );
+  return { ...detail, lineage: { parent, spawned } };
 }
