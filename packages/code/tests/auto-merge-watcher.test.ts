@@ -252,8 +252,8 @@ describe("AutoMergeWatcherAcquirer", () => {
   });
 
   test.each([
-    [{ mergeable_state: "dirty" }],
-    [{ mergeable_state: "behind" }],
+    [{ mergeable_state: "unstable" }],
+    [{ mergeable_state: "blocked" }],
     [{ draft: true }],
     [{ state: "closed" }],
     [{ head: { sha: HEAD, repo: { full_name: "fork/widgets" } } }],
@@ -262,15 +262,6 @@ describe("AutoMergeWatcherAcquirer", () => {
     await watcher().tick();
     expect(calls).toHaveLength(0);
   });
-
-  test.each(["unstable", "blocked"])(
-    "evaluates %s PRs so a failing or pending check is reported",
-    async (state) => {
-      pr = { ...pr, mergeable_state: state };
-      await watcher().tick();
-      expect(calls).toHaveLength(1);
-    },
-  );
 
   test("waits for the head to stay quiet", async () => {
     const w = watcher({ quietSeconds: 300 });

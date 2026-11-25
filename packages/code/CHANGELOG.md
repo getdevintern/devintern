@@ -8,7 +8,7 @@
 
 ### Added
 
-- **`auto_merge_allow_no_checks`** (default `false`, workspace-wide or per repo, repo wins) and `devintern auto-merge --allow-no-checks`: let code PRs merge without a passing CI check; failing or pending checks still block. A PR waiting on CI keeps being checked on the same commit and merges once CI passes; the reason (the failing check by name, the pending checks, or no checks) shows in the status comment, on the dashboard's Auto-merge entry, and in `--dry-run` output
+- **`auto_merge_allow_no_checks`** (default `false`, workspace-wide or per repo, repo wins) and `devintern auto-merge --allow-no-checks`: let code PRs merge without a passing CI check; failing or pending checks still block. A PR waiting on CI keeps being checked on the same commit and merges once CI passes; the no-checks reason shows in the status comment, on the dashboard's Auto-merge entry, and in `--dry-run` output, which also names failing or pending checks
 
 ## [2.29.0] - 2026-11-25
 

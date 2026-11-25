@@ -4,9 +4,8 @@
  *
  * Each tick, for every open PR in the `agent_prs` registry, a cheap in-process
  * precheck (one ETag-cached PR GET) looks for PRs that are open, not drafts,
- * not forks, reported mergeable (`clean`/`has_hooks`) or held by checks
- * (`unstable`/`blocked`, so a failing or pending check is reported on the
- * PR), and whose head has been stable for the quiet period. Only those spawn
+ * not forks, reported mergeable with passing checks (`clean`/`has_hooks`),
+ * and whose head has been stable for the quiet period. Only those spawn
  * `devintern auto-merge <pr-url> --expected-head <sha>`, which runs the real
  * gates (reviews, path policy, optional agent review) and merges.
  *
@@ -119,11 +118,13 @@ const FAILURE_BACKOFF_BASE_MS = 5 * 60_000;
 const FAILURE_BACKOFF_MAX_MS = 30 * 60_000;
 
 /**
- * `mergeable_state` values worth evaluating: mergeable (`clean`,
- * `has_hooks`), or held by checks (`unstable`, `blocked`), so a failing or
- * pending check is reported on the PR. The gates decide from there.
+ * `mergeable_state` values meaning "mergeable and checks passing". GitHub
+ * also reports `clean` when the head has no checks at all, so the CI part of
+ * the Ready gate re-reads the checks. `unstable`/`blocked` PRs are not
+ * evaluated: GitHub already holds them, and a blocked PR (often waiting on an
+ * approving review) would otherwise spawn an evaluation every backoff.
  */
-const EVALUATED_STATES = new Set(["clean", "has_hooks", "unstable", "blocked"]);
+const READY_STATES = new Set(["clean", "has_hooks"]);
 
 interface PrTracking {
   headSha: string;
@@ -332,7 +333,7 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
       return;
     }
     if (this.skipStacked(repo, prNumber, pr)) return;
-    if (!EVALUATED_STATES.has(pr.mergeable_state ?? "")) return;
+    if (!READY_STATES.has(pr.mergeable_state ?? "")) return;
     const quietMs = (this.options.quietSeconds ?? DEFAULT_AUTO_MERGE_QUIET_SECONDS) * 1000;
     if (!force && now - state.headSeenAt < quietMs) return;
     const decisionKey = autoMergeDecisionKey(

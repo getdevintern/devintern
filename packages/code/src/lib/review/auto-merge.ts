@@ -584,9 +584,9 @@ async function decideMerge(ctx: GateContext): Promise<MergeDecision> {
       detail: classification.reason,
     });
   }
-  const ciWait = await ciChecksGate(ctx, classification.kind === "safe");
-  if (ciWait) return ciWait;
   if (classification.kind === "safe") {
+    const ciWait = await ciChecksGate(ctx, true);
+    if (ciWait) return ciWait;
     const reason = "every change is inside the configured safe paths";
     console.log(`✅ ${baseRepo}#${prNumber}: ${reason}; no agent review needed`);
     return { kind: "merge", reason, viaReview: false, reviewed: false };
@@ -594,6 +594,8 @@ async function decideMerge(ctx: GateContext): Promise<MergeDecision> {
   const { outside, reviewMatches } = classification;
   // A review-path match goes to its own prompt list, even if it is also outside the safe paths.
   const outsideSafe = outside.filter((path) => !reviewMatches.includes(path));
+  // Before the CI check: with review disabled a code PR can never merge
+  // automatically, so the final rejection wins over a (retried) CI wait.
   if (!policy.review) {
     return leaveOpen(
       `${outside.length} changed path(s) need review (e.g. ${outside[0]}) ` +
@@ -601,6 +603,8 @@ async function decideMerge(ctx: GateContext): Promise<MergeDecision> {
       { kind: "outside-safe-paths", paths: outsideSafe, reviewPathMatches: reviewMatches },
     );
   }
+  const ciWait = await ciChecksGate(ctx, false);
+  if (ciWait) return ciWait;
 
   const reviewPolicy = policy.reviewPolicy ?? DEFAULT_MERGE_SAFETY_POLICY;
   const policyLabel = mergeSafetyPolicyLabel(reviewPolicy, policy);
@@ -768,7 +772,9 @@ export async function autoMergePr(
     decision.kind === "stop" && decision.ciWait && decision.message === options.ciWaitPosted;
   if (alreadyPosted) {
     // Status comment and label are already in place.
-  } else if (decision.kind === "stop" && decision.leftOpen && !finalFailure) {
+  } else if (decision.kind === "stop" && decision.leftOpen && result.outcome !== "failed") {
+    // Failures (an unreadable check status) are retried: only the final
+    // attempt below posts, like any other failure.
     await postStatus(ctx, { kind: "left-open", headSha: pr.head.sha, reason: decision.leftOpen });
   } else if (finalFailure) {
     // The worker stops retrying this head after this attempt.

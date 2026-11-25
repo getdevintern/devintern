@@ -932,7 +932,9 @@ describe("autoMergePr CI checks (Ready gate)", () => {
     expect(result.message).toContain("could not be read");
     expect(github.merges).toHaveLength(0);
     expect(opts.agentCalls).toHaveLength(0);
-    expect(github.comments[0]).toContain("The CI check status for this commit could not be read");
+    // Retryable: nothing is posted until the final attempt.
+    expect(github.comments).toHaveLength(0);
+    expect(github.labels).toHaveLength(0);
   });
 
   test("a check read that times out fails closed", async () => {
@@ -951,6 +953,27 @@ describe("autoMergePr CI checks (Ready gate)", () => {
     });
     await autoMergePr(URL, options(github, { lastAttempt: true }));
     expect(github.comments[0]).toContain("kept failing");
+    expect(github.comments[0]).toContain("The CI check status for this commit could not be read");
+    expect(github.labels).toEqual(["+needs-human-review"]);
+  });
+
+  test("review disabled rejects a code PR with zero checks instead of waiting on CI", async () => {
+    let reads = 0;
+    const github = fakeGitHub(codeFiles, {
+      checks: async () => {
+        reads++;
+        return [];
+      },
+    });
+    const result = await autoMergePr(
+      URL,
+      options(github, { policy: { ...basePolicy, review: false } }),
+    );
+    expect(result.outcome).toBe("rejected");
+    expect(result.ciWait).toBeUndefined();
+    expect(result.message).toContain("agent review is disabled");
+    expect(reads).toBe(0);
+    expect(github.merges).toHaveLength(0);
   });
 
   describe("GitHub reports the checks holding the PR (unstable / blocked)", () => {
