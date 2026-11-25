@@ -42,6 +42,8 @@ devintern worker init --non-interactive --tracker jira \
   --task-query 'project = APP AND labels = devintern' --repo-from-cwd --json
 ```
 
+Without a tracker account, point `MARKDOWN_TASKS_DIR` at an existing folder of [Markdown task files](./markdown-tasks.md): `MARKDOWN_TASKS_DIR=/abs/path/tasks devintern worker init --non-interactive --tracker markdown --task-query '<filter>' --repo-from-cwd`. A relative path is saved as an absolute path, resolved from the current directory.
+
 It writes `[defaults].tracker` and `task_query`, registers the current repository, and saves the tracker credentials to the workspace `.env`. It then checks the credentials and runs the same checks as `worker doctor`: a dry run of the query (0 matches is a warning), repository access, license, agent harness, and sandbox. It never prompts, opens a browser, pairs the relay, installs a service, or starts the worker. Those stay as next steps in the output.
 
 | Flag                | Default            | What it does                                                                                          |

@@ -272,6 +272,23 @@ repo = "backend"
     expect(renderReadinessReport(checks).hasFailures).toBe(true);
   });
 
+  test("a missing Markdown tasks folder hints to create it, not to fix task_query", async () => {
+    const tasksDir = join(workspaceDir, "missing-tasks");
+    const workspacePath = writeWorkspace(
+      '[defaults]\ntracker = "markdown"\ntask_query = "*"\n',
+      `MARKDOWN_TASKS_DIR=${tasksDir}\n`,
+    );
+    const deps = passingDeps();
+    delete deps.dryRunQuery; // the real Markdown client
+    const checks = await collectWorkerDoctorChecks({ workspacePath }, deps);
+    const [query] = byId(checks, "query");
+    expect(query?.status).toBe("fail");
+    expect(query?.detail).toContain(`Markdown tasks directory not found: ${tasksDir}`);
+    expect(query?.hint).toBe(
+      `Create the folder ${tasksDir}, or set MARKDOWN_TASKS_DIR to an existing folder that holds the task files`,
+    );
+  });
+
   test("a hung query times out as a failing check", async () => {
     const workspacePath = writeWorkspace(TEAMS_CONFIG, JIRA_ENV);
     const checks = await collectWorkerDoctorChecks(

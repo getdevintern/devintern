@@ -17,7 +17,7 @@
 import { execFile } from "child_process";
 import { createServer } from "net";
 import { dirname, resolve } from "path";
-import { readFileSync } from "fs";
+import { existsSync, readFileSync } from "fs";
 import {
   activeSandboxName,
   detectSandboxProviders,
@@ -199,6 +199,19 @@ function plural(count: number, noun: string): string {
 }
 
 /** Default dry-run: build an isolated tracker client and run the query once. */
+/**
+ * Hint for a Markdown source whose `MARKDOWN_TASKS_DIR` folder does not exist:
+ * the fix is the folder, not `task_query`. Resolved against this process's
+ * cwd, the same way the Markdown client resolves it.
+ */
+function missingMarkdownTasksDirHint(tracker: string, env: Env): string | undefined {
+  const dir = env.MARKDOWN_TASKS_DIR;
+  if (tracker !== "markdown" || !dir) return undefined;
+  const absolute = resolve(dir);
+  if (existsSync(absolute)) return undefined;
+  return `Create the folder ${absolute}, or set MARKDOWN_TASKS_DIR to an existing folder that holds the task files`;
+}
+
 async function defaultDryRunQuery(tracker: string, env: Env, query: string): Promise<number> {
   const client = createTrackerClient(tracker, env);
   const result = await client.searchTasks(query);
@@ -684,9 +697,11 @@ async function collectConfigScopedChecks(
         label: "Task query",
         status: "fail",
         detail: `${source.name}: ${errorMessage(error)}`,
-        hint: source.team
-          ? `Fix task_query for [[teams]] "${source.team.name}" in workspace.toml (renamed status, project, or field?)`
-          : "Fix [defaults].task_query in workspace.toml (renamed status, project, or field?)",
+        hint:
+          missingMarkdownTasksDirHint(source.tracker, source.env) ??
+          (source.team
+            ? `Fix task_query for [[teams]] "${source.team.name}" in workspace.toml (renamed status, project, or field?)`
+            : "Fix [defaults].task_query in workspace.toml (renamed status, project, or field?)"),
       });
     }
   }

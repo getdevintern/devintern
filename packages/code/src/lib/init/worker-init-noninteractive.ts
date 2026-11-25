@@ -19,7 +19,7 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, statSync } from "fs";
-import { resolve } from "path";
+import { isAbsolute, resolve } from "path";
 
 import { defaultProbe } from "@devintern/task-trackers";
 import { upsertEnvVars } from "@devintern/utils";
@@ -332,6 +332,8 @@ interface Plan {
   credentialEnv: Env;
   /** Keys to save to the workspace `.env`. */
   envUpdates: Record<string, string>;
+  /** One-line notes for the text output (for example a path made absolute). */
+  notes: string[];
   /** Snapshot of workspace.toml when validated (null when absent). */
   configSnapshot: string | null;
 }
@@ -457,14 +459,35 @@ async function planInit(
     credentialEnv.GITHUB_REPO = repo.slug;
   }
 
+  const notes: string[] = [];
+  if (tracker === "markdown") {
+    // The worker daemon (service cwd: the workspace) and each task run (cwd:
+    // the repo checkout) would resolve a relative folder differently, so save
+    // the folder the user means: relative to where this command runs.
+    const supplied = envFileValues.MARKDOWN_TASKS_DIR || ctx.processEnv.MARKDOWN_TASKS_DIR;
+    if (supplied && !isAbsolute(supplied)) {
+      const absolute = resolve(ctx.cwd, supplied);
+      credentialEnv.MARKDOWN_TASKS_DIR = absolute;
+      if (envFileValues.MARKDOWN_TASKS_DIR) {
+        envFileValues = { ...envFileValues, MARKDOWN_TASKS_DIR: absolute };
+      }
+      notes.push(`ℹ️  MARKDOWN_TASKS_DIR=${supplied} saved as the absolute path ${absolute}`);
+    }
+  }
+
   const missing = missingInputs(tracker, taskQuery, credentialEnv);
   if (missing.length > 0) {
+    const markdownDir =
+      tracker === "markdown" && missing.includes("MARKDOWN_TASKS_DIR")
+        ? " MARKDOWN_TASKS_DIR is the folder that holds the Markdown task files; set it to an " +
+          "absolute path, for example MARKDOWN_TASKS_DIR=$PWD/tasks."
+        : "";
     return {
       ok: false,
       tracker,
       error:
         `missing: ${missing.join(", ")}. Pass the flags, and set credentials in the ` +
-        "environment or in a file passed with --env-file <path> (mode 0600).",
+        `environment or in a file passed with --env-file <path> (mode 0600).${markdownDir}`,
     };
   }
 
@@ -490,6 +513,7 @@ async function planInit(
       repo,
       credentialEnv,
       envUpdates,
+      notes,
       configSnapshot,
     },
   };
@@ -830,6 +854,7 @@ export async function runNonInteractiveWorkerInit(
     secrets = secretValues(plan.credentialEnv);
     report.tracker = plan.tracker;
     report.taskQuery = plan.taskQuery;
+    for (const note of plan.notes) log(note);
 
     const applied = applyPlan(plan, workspaceDir);
     if (!applied.ok) return redactReport({ ...report, error: applied.error }, secrets);
