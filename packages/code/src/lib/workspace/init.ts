@@ -20,7 +20,7 @@ import { loadWorkspaceConfig, parseWorkspaceConfig } from "./config";
 import { parseEnvFile } from "./env";
 import { resolveWorkspaceDir, workspaceConfigPath, workspaceEnvPath } from "./paths";
 
-const CONFIG_TEMPLATE = `# DevIntern workspace: one worker drives every repo listed here.
+export const CONFIG_TEMPLATE = `# DevIntern workspace: one worker drives every repo listed here.
 # Docs: https://devintern.com/docs/code/workspaces
 
 [workspace]
@@ -155,7 +155,7 @@ poll_interval = 60
 # repo = "backend"            # required in a multi-repo workspace
 `;
 
-const ENV_TEMPLATE = `# Shared workspace environment: tracker credentials, GITHUB_TOKEN,
+export const ENV_TEMPLATE = `# Shared workspace environment: tracker credentials, GITHUB_TOKEN,
 # and agent settings. The hosted relay uses the central DevIntern AI App.
 # Advanced no-relay installs may add GITHUB_APP_ID + a private key here.
 # Per-repo overrides go in [repos.env] in workspace.toml.
@@ -469,6 +469,28 @@ export function runWorkerScaffold(): number {
     "  Multiple repos? Add [[routing.rules]]; see https://devintern.com/docs/code/workspaces",
   );
   return 0;
+}
+
+/**
+ * Append a `[[repos]]` entry for `remote` to workspace.toml text, unless an
+ * entry with that remote already exists. Pure: the caller validates and
+ * writes the result.
+ *
+ * @param content - Current workspace.toml text
+ * @param remote - Origin remote URL of the repository
+ * @returns Updated text, the entry's name, and whether it was added
+ */
+export function appendRepoEntry(
+  content: string,
+  remote: string,
+): { content: string; name: string; added: boolean } {
+  const config = parseWorkspaceConfig(content);
+  const existing = config.repos.find((repo) => repo.remote === remote);
+  if (existing) return { content, name: existing.name, added: false };
+  const name = deriveRepoName(remote, config.repos);
+  const block = `\n[[repos]]\nname = ${tomlString(name)}\nremote = ${tomlString(remote)}\n`;
+  const separator = content.endsWith("\n") ? "" : "\n";
+  return { content: content + separator + block, name, added: true };
 }
 
 export interface WorkerAddRepoOptions {

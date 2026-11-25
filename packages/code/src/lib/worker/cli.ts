@@ -203,48 +203,160 @@ async function runWorkerDoctorSubcommand(args: string[]): Promise<never> {
   process.exit(report.hasFailures ? 1 : 0);
 }
 
+const WORKER_INIT_USAGE = [
+  "Usage: devintern worker init [--no-service]",
+  "       devintern worker init --non-interactive --tracker <id> --task-query <query>",
+  "                             [--repo-from-cwd] [--env-file <path>] [--yes] [--json]",
+  "",
+  "Interactively configure unattended automation and a native user service.",
+  "",
+  "Options:",
+  "  --no-service        Skip the install-and-launch offer for the systemd/launchd service",
+  "",
+  "Non-interactive mode (coding agents, scripts, SSH without a TTY):",
+  "  --non-interactive   Set up from flags; never prompts, signs in, pairs, or installs",
+  "  --tracker <id>      Tracker the worker polls (jira, linear, github, ...)",
+  "  --task-query <q>    Ready-tasks query, written to [defaults].task_query",
+  "  --repo-from-cwd     Register the current Git repository (GitHub origin required)",
+  "  --env-file <path>   Read credentials from this file (mode 0600) and save them",
+  "                      to the workspace .env; otherwise they come from the environment",
+  "  --yes               Update an existing workspace.toml (other settings are kept)",
+  "  --json              Print one JSON document with checks, files, and next steps",
+  "",
+  "Secrets are never accepted as flags. See https://devintern.com/docs/code/worker#non-interactive-setup",
+].join("\n");
+
+/** `worker init --non-interactive`: flag-driven setup plus doctor checks. */
+async function runWorkerInitNonInteractive(args: string[]): Promise<never> {
+  const {
+    parseNonInteractiveInitArgs,
+    renderNonInteractiveReport,
+    runNonInteractiveWorkerInit,
+    WORKER_INIT_JSON_SCHEMA,
+    WORKER_INIT_JSON_VERSION,
+  } = await import("../init/worker-init-noninteractive");
+  const parsed = parseNonInteractiveInitArgs(args);
+  if (!parsed.ok) {
+    if (parsed.json) {
+      const doc = {
+        schema: WORKER_INIT_JSON_SCHEMA,
+        version: WORKER_INIT_JSON_VERSION,
+        result: "failure",
+        error: parsed.error,
+        workspaceDir: resolveWorkspaceDir(),
+        tracker: null,
+        taskQuery: null,
+        repo: null,
+        filesWritten: [],
+        checks: [],
+        nextSteps: [],
+      };
+      process.stdout.write(`${JSON.stringify(doc, null, 2)}\n`);
+    } else {
+      console.error(`❌ ${parsed.error}`);
+    }
+    process.exit(1);
+  }
+  const { json } = parsed.args;
+  const stdoutWrite = process.stdout.write.bind(process.stdout);
+  if (json) {
+    // stdout carries only the JSON document; route library chatter to stderr.
+    const toStderr = (...parts: unknown[]) => console.error(...parts);
+    console.log = toStderr;
+    console.info = toStderr;
+    console.warn = toStderr;
+    console.debug = toStderr;
+  }
+  loadEnvironment();
+  const { trackWorkerInitCompleted, trackWorkerInitFailed, trackWorkerInitStarted } =
+    await import("../observability/analytics");
+  trackWorkerInitStarted("non_interactive");
+  const report = await runNonInteractiveWorkerInit(parsed.args, {
+    log: json ? undefined : (message) => console.log(message),
+  });
+  if (report.error) trackWorkerInitFailed("non_interactive_input", "non_interactive");
+  else
+    trackWorkerInitCompleted({
+      tracker: report.tracker ?? "unknown",
+      relayConnect: "skipped",
+      serviceInstall: "skipped",
+      githubApp: "skipped",
+      source: "non_interactive",
+      outcome: report.result === "success" ? "succeeded" : "failed",
+    });
+  if (json) {
+    stdoutWrite(`${JSON.stringify(report, null, 2)}\n`);
+  } else {
+    const lines = renderNonInteractiveReport(report);
+    (report.error ? console.error : console.log)(lines.join("\n"));
+  }
+  await flushAnalytics();
+  process.exit(report.result === "success" ? 0 : 1);
+}
+
+/** True for the readline rejection raised when stdin hits EOF (Ctrl+D). */
+function isPromptAbort(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    (error.name === "AbortError" || (error as NodeJS.ErrnoException).code === "ABORT_ERR")
+  );
+}
+
 /** Interactively configure unattended automation and a native user service. */
 async function runWorkerInitSubcommand(args: string[]): Promise<never> {
   if (hasHelpArg(args)) {
-    console.log("Usage: devintern worker init [--no-service]");
-    console.log("");
-    console.log("Interactively configure unattended automation and a native user service.");
-    console.log("");
-    console.log("Options:");
-    console.log(
-      "  --no-service  Skip the install-and-launch offer for the systemd/launchd service",
-    );
+    console.log(WORKER_INIT_USAGE);
     process.exit(0);
+  }
+  if (args.includes("--non-interactive")) return runWorkerInitNonInteractive(args);
+  const nonInteractiveOnly = args.find((arg) =>
+    ["--tracker", "--task-query", "--repo-from-cwd", "--env-file", "--json", "--yes"].includes(
+      arg.split("=")[0],
+    ),
+  );
+  if (nonInteractiveOnly) {
+    console.error(`❌ ${nonInteractiveOnly.split("=")[0]} needs --non-interactive.`);
+    console.error("   Run `devintern worker init --help` for options.");
+    process.exit(1);
   }
   loadEnvironment();
   const { runWorkerInit } = await import("../init/worker-init");
   const { isInteractive } = await import("../init/wizard");
   if (!isInteractive(args, process.stdin)) {
-    console.log("❌ 'devintern worker init' is interactive; run it in a terminal.");
-    console.log("   Non-interactive setup: `devintern worker scaffold` + `worker add-repo`,");
-    console.log("   set [defaults].tracker and task_query in workspace.toml,");
-    console.log("   check readiness with `devintern worker doctor`, then run `devintern worker`.");
+    console.log("❌ 'devintern worker init' needs a terminal for its prompts.");
+    console.log("   Without one, use the flag-driven mode, for example:");
+    console.log(
+      '   devintern worker init --non-interactive --tracker jira --task-query "<query>" --repo-from-cwd',
+    );
+    console.log("   Run `devintern worker init --help` for every option.");
     process.exit(1);
   }
   const trackerManager = new TaskTrackerManager();
-  const result = await runWorkerInit({
-    noService: args.some((arg) => arg === "--no-service"),
-    dryRunQuery: async (query) => {
-      const result = await trackerManager.getClient().searchTasks(query);
-      return result.tasks.length;
-    },
-    checkAutomationLicense: async (workspaceDir) => {
-      const license = await checkLicense({
-        productKey: "devintern/code",
-        supabaseConfig: loadSupabaseConfig(workspaceCodeStateDir(workspaceDir)),
-        requireAutomation: true,
-        allowTrial: true,
-      });
-      return license.valid ? null : license.message;
-    },
-  });
+  let ok = false;
+  try {
+    const result = await runWorkerInit({
+      noService: args.some((arg) => arg === "--no-service"),
+      dryRunQuery: async (query) => {
+        const result = await trackerManager.getClient().searchTasks(query);
+        return result.tasks.length;
+      },
+      checkAutomationLicense: async (workspaceDir) => {
+        const license = await checkLicense({
+          productKey: "devintern/code",
+          supabaseConfig: loadSupabaseConfig(workspaceCodeStateDir(workspaceDir)),
+          requireAutomation: true,
+          allowTrial: true,
+        });
+        return license.valid ? null : license.message;
+      },
+    });
+    ok = result.ok;
+  } catch (error) {
+    if (!isPromptAbort(error)) throw error;
+    console.log("\n❌ Input closed (Ctrl+D); setup stopped. Re-run `devintern worker init`.");
+  }
   await flushAnalytics();
-  process.exit(result.ok ? 0 : 1);
+  process.exit(ok ? 0 : 1);
 }
 
 /** Parse daemon flags, load the workspace, gate on license, and run the worker. */

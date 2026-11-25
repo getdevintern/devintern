@@ -669,8 +669,14 @@ async function collectConfigScopedChecks(
       checks.push({
         id: "query",
         label: "Task query",
-        status: "ok",
+        // 0 matches is valid (nothing is ready yet), but worth a second look.
+        status: count === 0 ? "warn" : "ok",
         detail: `${source.name}: ${plural(count, "task")} match${count === 1 ? "es" : ""}`,
+        ...(count === 0
+          ? {
+              hint: "The query works but matches nothing right now; the worker keeps polling. Check it selects the tasks you expect",
+            }
+          : {}),
       });
     } catch (error) {
       checks.push({
