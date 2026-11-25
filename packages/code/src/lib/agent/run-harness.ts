@@ -23,7 +23,11 @@ import {
 import { DEFAULT_AUTO_REVIEW_ITERATIONS } from "../review/auto-review-config";
 import { createHarnessLogSink } from "../observability/harness-logs";
 import { resolvePipelineSteps } from "../task/pipeline-config";
-import { describePipelineSelection, selectPipelineConfig } from "../task/pipeline-selection";
+import {
+  describePipelineSelection,
+  pipelineDirFor,
+  selectPipelineConfig,
+} from "../task/pipeline-selection";
 import { loadArtifactUploader } from "../artifacts/upload";
 import type { LoadedArtifactUploader } from "../artifacts/upload";
 import type { PipelineConfig } from "../../types/settings";
@@ -620,10 +624,9 @@ function recordHaltedImplementation(
 
 /** Run implementation and deliver it when the agent completed meaningful work. */
 export async function runAgentHarness(input: RunAgentHarnessOptions): Promise<void> {
-  // Select exactly one pipeline: a workspace per-repo override, the repo's
-  // settings.json, the workspace default, or the built-in default. The CLI
-  // `verify` fallback only applies when no scope declared a pipeline, and is
-  // never merged into a selected one. Selection, file loading, plugin loading,
+  // Select exactly one pipeline: a workspace per-repo override, the workspace
+  // default, or the built-in default. The CLI `verify` fallback only applies
+  // when no scope declared a pipeline, and is never merged into a selected one. Selection, file loading, plugin loading,
   // and ordering validation all run before the agent starts.
   const verifyFallback: PipelineConfig | undefined = input.verify
     ? {
@@ -667,6 +670,7 @@ export async function runAgentHarness(input: RunAgentHarnessOptions): Promise<vo
       finalizeAgentRun({
         ...session.context,
         pipelineSteps,
+        pipelineDir: pipelineDirFor(selection),
         artifactPolicy: configuredPipeline?.artifacts,
         artifactUploader,
         runRepair: async (prompt) => {

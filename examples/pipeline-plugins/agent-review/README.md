@@ -30,24 +30,31 @@ recommitted before the diff is checked again.
    ```bash
    mkdir -p ~/.devintern/pipelines/steps ~/.devintern/pipelines/prompts
    cp examples/pipeline-plugins/agent-review/plugin.ts ~/.devintern/pipelines/steps/agent-review.ts
+   cp examples/pipeline-plugins/shared/prompt-path.ts ~/.devintern/pipelines/steps/prompt-path.ts
    cp examples/pipeline-plugins/agent-review/prompts/review.md ~/.devintern/pipelines/prompts/agent-review.md
    cp examples/pipeline-plugins/agent-review/pipeline.json ~/.devintern/pipelines/backend.json
    cd ~/.devintern/pipelines && bun add @getdevintern/code
    ```
 
+   In the copied `agent-review.ts`, change the `../shared/prompt-path` import to
+   `./prompt-path.ts`.
+
 2. Set `pipeline_file = "pipelines/backend.json"` on the repository's
    `[[repos]]` entry in `~/.devintern/workspace.toml` (see
    [Install and copy a plugin](../README.md#install-and-copy-a-plugin)).
 
-`promptFile` is read relative to the task checkout, so the pipeline file
-gives it as an absolute path: replace `/home/you` with your home directory.
+A relative `promptFile` such as `./prompts/agent-review.md` is read next to the
+pipeline file (`~/.devintern/pipelines/`), so the same pipeline works for
+every repository. An absolute path is used as written. Requires
+`@getdevintern/code` 2.30.0 or later; older versions read a relative path
+from the task checkout.
 
 ## Options
 
 | Option          | Default      | Meaning                                                    |
 | --------------- | ------------ | ---------------------------------------------------------- |
 | `prompt`        | —            | Inline review instructions.                                |
-| `promptFile`    | —            | Path to a prompt file relative to `context.workingDir`.    |
+| `promptFile`    | —            | Prompt file; relative paths resolve next to the pipeline file. A missing file halts the step. |
 | `minPriority`   | `"medium"`   | Lowest priority that blocks.                               |
 | `maxIterations` | `2`          | Bounded repair cycles (`maxRepeats` on the repeat).        |
 | `onBlocked`     | `"loopback"` | `halt` stops (`haltKind: "stop"`); `warn` continues.       |

@@ -136,7 +136,7 @@ labels = ["web"]
 
 ## Pipelines for the fleet and per repository
 
-Set `pipeline_file` to a JSON pipeline definition (`steps`, `plugins`, and `artifacts` at the top level; see [Customizing the Task Pipeline](./pipelines.md)) for the whole fleet in `[defaults]`, or for one repo in `[[repos]]`. Paths resolve against `~/.devintern`.
+Set `pipeline_file` to a JSON pipeline definition (`steps`, `plugins`, and `artifacts` at the top level; see [Customizing the Task Pipeline](./pipelines.md)) for the whole fleet in `[defaults]`, or for one repo in `[[repos]]`. Relative paths resolve against `~/.devintern`, and a leading `~/` expands to your home directory.
 
 ```toml
 [defaults]

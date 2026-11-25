@@ -1,5 +1,6 @@
 import { readFileSync } from "fs";
-import { isAbsolute, join } from "path";
+import { homedir } from "os";
+import { isAbsolute, join, resolve } from "path";
 import {
   supportsEstimate,
   supportsPolling,
@@ -815,14 +816,18 @@ export function loadWorkspaceConfig(path: string): WorkspaceConfig {
 /**
  * Resolve a `pipeline_file` reference against the workspace directory.
  *
- * Relative paths are workspace-relative (normally `~/.devintern`); absolute
- * paths are returned unchanged.
+ * A leading `~/` expands to the home directory, relative paths are
+ * workspace-relative (normally `~/.devintern`), and absolute paths are
+ * returned unchanged, so the result is always absolute.
  *
  * @param workspaceDir - Workspace home directory.
  * @param file - The declared `pipeline_file` value.
  */
 export function resolveWorkspacePipelinePath(workspaceDir: string, file: string): string {
-  return isAbsolute(file) ? file : join(workspaceDir, file);
+  if (file === "~" || file.startsWith("~/") || file.startsWith("~\\")) {
+    return join(homedir(), file.slice(1));
+  }
+  return isAbsolute(file) ? file : resolve(workspaceDir, file);
 }
 
 /**

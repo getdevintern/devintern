@@ -49,6 +49,8 @@ export interface FinalizeContext {
   requestedPrTargetBranch?: string;
   verify?: VerifyConfig;
   pipelineSteps?: ResolvedPipelineStep[];
+  /** Exposed to plugins as `PipelineContext.pipelineDir`; `null` for the built-in default. */
+  pipelineDir?: string | null;
   artifactPolicy?: import("../artifacts/types").ArtifactPolicy;
   artifactUploader?: import("../artifacts/upload").LoadedArtifactUploader;
   runRepair?: (

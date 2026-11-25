@@ -712,6 +712,7 @@ export function finalizeAgentRun(ctx: FinalizeContext): void {
     taskContent: ctx.taskContent,
     taskFile: ctx.taskFile,
     workingDir: process.cwd(),
+    pipelineDir: ctx.pipelineDir ?? null,
     outputDir: ctx.taskKey
       ? join(resolveOutputDir(), ctx.taskKey.toLowerCase())
       : dirname(ctx.taskFile),

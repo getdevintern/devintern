@@ -68,6 +68,7 @@ The same `context` object is passed to every step.
 | `projectSettings`                                      | Tracker settings from `[trackers]` in `workspace.toml`, or `null`.         |
 | `taskContent`, `taskFile`                              | The formatted task prompt and the path to its file.                        |
 | `workingDir`                                           | The repository worktree the task runs in.                                  |
+| `pipelineDir`                                          | Absolute directory of the `pipeline_file` that declared the pipeline, or `null` for the built-in default. |
 | `outputDir`                                            | The task output directory.                                                 |
 | `artifacts`                                            | Register and read [artifacts](#artifacts-from-steps).                      |
 | `output`                                               | The implementation output (agent stdout).                                  |
@@ -84,6 +85,18 @@ The same `context` object is passed to every step.
 | `filterByPriority(items, min)`                         | Keep findings at or above a priority.                                      |
 
 Steps pass data to each other through `data` on their result: a later step reads it from `context.results`.
+
+DevIntern resolves relative `plugins` entries next to the pipeline file but passes step options to `create(config)` as written. To keep a prompt or other config file next to the pipeline, resolve it against `pipelineDir` and fall back to `workingDir` when it is `null`:
+
+```ts
+import { isAbsolute, resolve } from "node:path";
+
+const file = isAbsolute(promptFile)
+  ? promptFile
+  : resolve(context.pipelineDir ?? context.workingDir, promptFile);
+```
+
+The example plugins `agent-review` and `pr-explainer-*` do this for `promptFile`, so `"promptFile": "./prompts/review.md"` reads `~/.devintern/pipelines/prompts/review.md` for a pipeline in `~/.devintern/pipelines/`. Before `@getdevintern/code` 2.30.0 they resolved a relative `promptFile` against the task checkout; if your pipeline file still points at a checkout file such as `./.devintern-code/prompts/review.md`, use an absolute path or move the prompt next to the pipeline file.
 
 ## Step results
 
