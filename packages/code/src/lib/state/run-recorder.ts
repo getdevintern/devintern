@@ -30,6 +30,7 @@ import {
   RUN_OUTPUTS_ENV,
 } from "./run-outputs";
 import type { RunOutputRecord, StoredRunOutput } from "./run-outputs";
+import { notifyRunFinished } from "../notifications/run-rules";
 
 export type RunOrigin =
   | "task"
@@ -647,6 +648,8 @@ export class RunStore {
       );
       this.replaceOutcomeStage(runId, status, reason);
     })();
+    // Best-effort and outside the transaction: never fails or rolls back the finish.
+    notifyRunFinished(this.db, runId);
   }
 
   /**

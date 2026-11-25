@@ -29,6 +29,7 @@ import type { StackLink } from "../dependencies/stack-maintainer";
 import { initInjectedTaskSchema } from "./injected-tasks-schema";
 import { prepareQueueDbDirectory } from "./webhook-queue";
 import { configureSqliteConnection } from "./sqlite";
+import { notifyDelegatedTaskAdded, notifyInjectedTaskExhausted } from "../notifications/run-rules";
 import type { RunRecord } from "./run-recorder";
 export {
   addAutoResumeColumn,
@@ -388,6 +389,7 @@ export class InjectedTaskStore {
     const row = db
       .query("SELECT * FROM injected_tasks WHERE id = last_insert_rowid()")
       .get() as InjectedTaskRow;
+    if (input.parentRunId !== undefined) notifyDelegatedTaskAdded(db, input.parentRunId);
     return { task: rowToInjectedTask(row), deduplicated: false };
   }
 
@@ -596,7 +598,9 @@ export class InjectedTaskStore {
            RETURNING *`,
         )
         .get(options.exhaustedMessage, now, deferCount, id) as InjectedTaskRow | null;
-      return failed ? { task: rowToInjectedTask(failed), requeued: false } : null;
+      if (!failed) return null;
+      notifyInjectedTaskExhausted(db, failed.task_key, options.exhaustedMessage);
+      return { task: rowToInjectedTask(failed), requeued: false };
     }
 
     const requeued = db

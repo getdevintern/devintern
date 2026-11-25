@@ -6,6 +6,7 @@ import type {
   SourceStatusInput,
   SourceStatusRecord,
 } from "../acquirers/source-fetch";
+import { notifySourceHealth } from "../notifications/event-rules";
 import { configureSqliteConnection } from "../state/sqlite";
 import { prepareQueueDbDirectory } from "../state/webhook-queue";
 
@@ -183,10 +184,11 @@ export class AutomationStateStore {
   recordSourceStatus(status: SourceStatusInput): void {
     const previous = this.db
       .query(
-        `SELECT consecutive_failures, last_success_at FROM source_status
+        `SELECT status, consecutive_failures, last_success_at FROM source_status
          WHERE provider = ? AND source_id = ?`,
       )
       .get(status.provider, status.sourceId) as {
+      status: string;
       consecutive_failures: number;
       last_success_at: number | null;
     } | null;
@@ -220,6 +222,21 @@ export class AutomationStateStore {
         retryAfterAt,
       ],
     );
+    notifySourceHealth(this.db, {
+      provider: status.provider,
+      sourceId: status.sourceId,
+      status: status.status,
+      consecutiveFailures,
+      ...(status.message ? { message: status.message } : {}),
+      ...(previous
+        ? {
+            previous: {
+              status: previous.status,
+              consecutiveFailures: previous.consecutive_failures,
+            },
+          }
+        : {}),
+    });
   }
 
   getSourceStatus(provider: string, sourceId: string): SourceStatusRecord | null {

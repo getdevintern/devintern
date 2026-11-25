@@ -31,6 +31,7 @@ import {
   handleWorkerStatus,
 } from "./lib/observability/dashboard-api";
 import { handleOverview } from "./lib/observability/dashboard-overview";
+import { DashboardNotifications } from "./lib/observability/dashboard-notifications";
 import { handleSources } from "./lib/observability/dashboard-sources";
 import { handleQueuedWork } from "./lib/observability/queued-work";
 import { handleCancelTask, handleCreateTask } from "./lib/observability/dashboard-tasks";
@@ -330,6 +331,7 @@ export function startDashboardServer(
     configuredSources: options.configuredSources,
   });
   const reports = new DashboardReports(data, options.reportDeps);
+  const notifications = new DashboardNotifications(data.dbPath);
   const uiDir = resolveUiDir();
 
   const runDetailPattern = /^\/api\/runs\/([^/]+)$/;
@@ -342,6 +344,8 @@ export function startDashboardServer(
   const runReportPreviewPattern = /^\/api\/runs\/([^/]+)\/report\/preview$/;
   const automationRunPattern = /^\/api\/automations\/([^/]+)\/run$/;
   const taskCancelPattern = /^\/api\/tasks\/([^/]+)\/cancel$/;
+  const notificationReadPattern = /^\/api\/notifications\/([^/]+)\/read$/;
+  const notificationResolvePattern = /^\/api\/notifications\/([^/]+)\/resolve$/;
 
   const envOrigins = parseDashboardAllowedOriginsEnv(process.env.DASHBOARD_ALLOWED_ORIGINS);
   if (envOrigins.errors.length > 0) {
@@ -392,6 +396,23 @@ export function startDashboardServer(
     }
     if (pathname === "/api/reports") {
       return reports.submit(await readJsonBody(request));
+    }
+    if (pathname === "/api/notifications/read-all") {
+      return notifications.markAllRead();
+    }
+    if (pathname === "/api/notifications/mute") {
+      return notifications.mute(await readJsonBody(request));
+    }
+    if (pathname === "/api/notifications/unmute") {
+      return notifications.unmute(await readJsonBody(request));
+    }
+    const notificationRead = pathname.match(notificationReadPattern);
+    if (notificationRead) {
+      return notifications.markRead(notificationRead[1]);
+    }
+    const notificationResolve = pathname.match(notificationResolvePattern);
+    if (notificationResolve) {
+      return notifications.resolve(notificationResolve[1]);
     }
     return { status: 405, body: { error: "method not allowed" } };
   };
@@ -478,6 +499,10 @@ export function startDashboardServer(
         }
         if (pathname === "/api/agent-prs") {
           return json(handleAgentPrs(data, url.searchParams));
+        }
+        const notificationRead = notifications.routeGet(pathname, url.searchParams);
+        if (notificationRead) {
+          return json(notificationRead);
         }
         if (pathname === "/api/logs") {
           return json(handleLogs(data, url.searchParams));
