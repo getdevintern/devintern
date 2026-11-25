@@ -1,0 +1,32 @@
+/* Unread bubble on the header bell. */
+.notification-bell-count {
+  position: absolute;
+  top: -7px;
+  right: -9px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border: 1.5px solid var(--card);
+  border-radius: 999px;
+  background: var(--primary);
+  color: var(--primary-foreground);
+  font-size: 0.625rem;
+  font-weight: 700;
+  line-height: 13px;
+  text-align: center;
+}
+
+/* High-severity unread: attention fill plus a "!" suffix in the text. */
+.notification-bell-count-high {
+  background: var(--attention);
+  color: var(--background);
+}
+
+/* Inbox rows: unread rows carry a leading rule as well as the "New" label. */
+.notification-item {
+  border-left: 2px solid transparent;
+}
+.notification-item-unread {
+  border-left-color: var(--primary);
+  background: color-mix(in oklch, var(--primary), transparent 95%);
+}

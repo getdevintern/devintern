@@ -10,6 +10,10 @@ import type {
   WorkerResponse,
 } from "@/lib/api";
 import type { OverviewResponse } from "@/lib/api-overview";
+import type { NotificationListResponse } from "@/lib/api-notifications";
+import { NOTIFICATION_POLL_MS } from "@/components/notifications/NotificationBell";
+import { NOTIFICATIONS_CHANGED_EVENT } from "@/lib/api-notifications";
+import { NeedsYouBlock, NEEDS_YOU_URL } from "@/components/overview/NeedsYouSection";
 import { queueTotal, WorkerFacts } from "@/components/overview/WorkerFacts";
 import { OverviewAlertBanner } from "@/components/overview/OverviewAlertBanner";
 import { ActiveWorkSection } from "@/components/overview/ActiveWorkSection";
@@ -25,6 +29,7 @@ export function OverviewScreen({
   workerInfo,
   activityRuns = null,
   queuedWork = null,
+  needsYou = null,
   now,
 }: {
   overview: OverviewResponse;
@@ -33,6 +38,8 @@ export function OverviewScreen({
   queuedWork?: QueuedWorkResponse | null;
   /** `/api/task-activity` runs: row detail plus the waiting and finished lists. */
   activityRuns?: RunRecord[] | null;
+  /** Unresolved high-severity notifications; the block hides when empty. */
+  needsYou?: NotificationListResponse | null;
   now: number;
 }) {
   const alerts = overviewAlerts(overview, now);
@@ -53,6 +60,8 @@ export function OverviewScreen({
           />
         ))}
       </div>
+
+      <NeedsYouBlock list={needsYou} now={now} />
 
       <WorkerFacts overview={overview} workerInfo={workerInfo} now={now} />
 
@@ -137,6 +146,11 @@ export function OverviewView() {
   const { data: queuedWork } = usePoll<QueuedWorkResponse>("/api/queue", 5000, {
     refreshOn: QUEUE_CHANGED_EVENT,
   });
+  const { data: needsYou } = usePoll<NotificationListResponse>(
+    NEEDS_YOU_URL,
+    NOTIFICATION_POLL_MS,
+    { refreshOn: NOTIFICATIONS_CHANGED_EVENT },
+  );
   // Elapsed times and countdowns tick between polls.
   const now = useNow(5_000);
   if (!data) {
@@ -152,6 +166,7 @@ export function OverviewView() {
       workerInfo={workerInfo}
       activityRuns={activity?.runs ?? null}
       queuedWork={queuedWork}
+      needsYou={needsYou}
       now={Math.max(now, data.generatedAt)}
     />
   );
