@@ -99,36 +99,57 @@ export const CREDENTIAL_PATTERNS: readonly CredentialPattern[] = [
 ];
 
 /**
- * Key names whose assigned value is treated as a credential. The bare `pat`
- * alternative requires a non-alphanumeric character after it so ordinary words
- * that merely contain it (`path`, `patch`, `compatible`) are not mistaken for a
- * personal access token key; a prefix (`clientPat`, `MYPAT`) is still allowed.
+ * Key names whose assigned value is treated as a credential, tested against
+ * the key with count words removed (see {@link isSecretAssignmentKey}).
  */
 const SECRET_ASSIGNMENT_KEY =
-  /token|secret|password|passwd|api[_-]?key|private[_-]?key|access[_-]?key|pat(?![A-Za-z0-9])/i;
+  /token|secret|password|passwd|api[_-]?key|private[_-]?key|access[_-]?key/i;
 
 /**
- * `KEY=value`, `KEY: value`, and `"KEY": "value"`. Only the key and separator
- * are matched here; the key is a whole run (anchored by lookbehind) checked
- * against {@link SECRET_ASSIGNMENT_KEY}, and the value is read only for secret
- * keys. A non-secret key therefore never swallows its value, so a secret key
- * inside it (`error: {"password": "x"}`) is still found, and a run like
- * `a:a:a:...` stays linear. Keys right after `?`/`&` are query parameters and
- * left to the query rule, which keeps the rest of the URL.
+ * Whether an assignment key names a credential. The key is split into words on
+ * `_`/`-` and camelCase humps. Words ending in `tokens` are counts
+ * (`max_tokens`, `inputTokens`), not credentials, so they are dropped before
+ * the {@link SECRET_ASSIGNMENT_KEY} test. A personal access token key must have
+ * `pat` as a whole word (`GITLAB_PAT`, `clientPat`, `pat`) or as an uppercase
+ * suffix of the last word (`MYPAT`), so `path`, `patch`, `compatible`, and
+ * `compat_mode` are not mistaken for one.
+ */
+function isSecretAssignmentKey(rawKey: string): boolean {
+  const key = rawKey.replaceAll('"', "");
+  const words = key.split(/[_-]+|(?<=[a-z0-9])(?=[A-Z])/).filter(Boolean);
+  if (words.some((word) => /^pat$/i.test(word))) return true;
+  if ((words.at(-1) ?? "").endsWith("PAT")) return true;
+  const kept = words.filter((word) => !/tokens$/i.test(word));
+  return SECRET_ASSIGNMENT_KEY.test(kept.join("_"));
+}
+
+/**
+ * `KEY=value`, `KEY: value`, `"KEY": "value"`, and `?KEY=value` query
+ * parameters. Only the key and separator are matched here; the key is a whole
+ * run (anchored by lookbehind) checked with {@link isSecretAssignmentKey}, and
+ * the value is read only for secret keys. A non-secret key therefore never
+ * swallows its value, so a secret key inside it (`error: {"password": "x"}`) is
+ * still found, and a run like `a:a:a:...` stays linear. A key right after
+ * `?`/`&` is a query parameter: its value stops at `&`, `#`, or whitespace so
+ * the rest of the URL is kept.
  */
 const ASSIGNMENT_KEY_PATTERN =
-  /(?:(?<![A-Za-z0-9_?&-])([A-Za-z0-9_-]+)|("[A-Za-z0-9_-]+"))(\s*[:=]\s*)/g;
+  /(?:(?<![A-Za-z0-9_-])([A-Za-z0-9_-]+)|("[A-Za-z0-9_-]+"))(\s*[:=]\s*)/g;
 const ASSIGNMENT_VALUE_PATTERN = /"[^"\n]*"|'[^'\n]*'|\S+/y;
+const QUERY_VALUE_PATTERN = /[^&\s#]+/y;
 
 /** Mask values assigned to secret-looking keys. */
 export function redactSecretAssignments(text: string): string {
   const keys = new RegExp(ASSIGNMENT_KEY_PATTERN.source, ASSIGNMENT_KEY_PATTERN.flags);
-  const value = new RegExp(ASSIGNMENT_VALUE_PATTERN.source, ASSIGNMENT_VALUE_PATTERN.flags);
+  const assigned = new RegExp(ASSIGNMENT_VALUE_PATTERN.source, ASSIGNMENT_VALUE_PATTERN.flags);
+  const query = new RegExp(QUERY_VALUE_PATTERN.source, QUERY_VALUE_PATTERN.flags);
   let out = "";
   let copied = 0;
   for (let match = keys.exec(text); match; match = keys.exec(text)) {
     const key = match[1] ?? match[2] ?? "";
-    if (!SECRET_ASSIGNMENT_KEY.test(key)) continue;
+    if (!isSecretAssignmentKey(key)) continue;
+    const before = match[1] === undefined ? "" : text[match.index - 1];
+    const value = before === "?" || before === "&" ? query : assigned;
     const valueStart = keys.lastIndex;
     value.lastIndex = valueStart;
     if (!value.exec(text)) continue;

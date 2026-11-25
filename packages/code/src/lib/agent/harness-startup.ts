@@ -111,11 +111,13 @@ function withoutCompilerDiagnostics(text: string): string {
  *
  * DER-encoded key bodies in base64 (PKCS#8/SPKI start with `MII`) can be
  * echoed without a `-----BEGIN ... PRIVATE KEY-----` marker, which is what the
- * shared PEM rule needs. The lookbehind anchors the match to the start of a
- * base64 run so a long run is scanned once, not from every offset.
+ * shared PEM rule needs. The match is deliberately unanchored so a body is
+ * masked even after `=` (`der=MII...`) or glued onto other base64 text. It
+ * stays linear: from any `MII` the greedy run either reaches 40 characters and
+ * consumes the rest of the run, or fails within 40 characters.
  */
 const EXTRA_AGENT_TOKEN_PATTERNS: Array<{ pattern: RegExp; replacement: string }> = [
-  { pattern: /(?<![A-Za-z0-9+/=])MII[A-Za-z0-9+/=]{40,}/g, replacement: REDACTED },
+  { pattern: /MII[A-Za-z0-9+/=]{40,}/g, replacement: REDACTED },
 ];
 
 /**

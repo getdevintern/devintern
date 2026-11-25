@@ -80,6 +80,14 @@ const SHAPES: Array<[shape: string, text: string, secret: string]> = [
   ["query token", "GET https://api.example.com/v1?token=abc123def&page=2", "abc123def"],
   ["query access_token", "https://x.test/cb?a=1&access_token=zzzTOKENzzz", "zzzTOKENzzz"],
   ["query api_key", "https://x.test/v1?api_key=keyvalue123", "keyvalue123"],
+  ["query passwd", "https://s3.example/obj?passwd=hunter2&x=1", "hunter2"],
+  ["query github_token", "https://x.test/v1?a=1&github_token=abc123secret", "abc123secret"],
+  ["query auth_token", "https://x.test/v1?auth_token=abc123secret#frag", "abc123secret"],
+  ["query access_key", "https://x.test/v1?access_key=AKVALUE99", "AKVALUE99"],
+  ["query private_key", "https://x.test/v1?private_key=zzzprivzzz", "zzzprivzzz"],
+  ["query clientPat", "https://x.test/v1?clientPat=patvalue123", "patvalue123"],
+  ["assignment pat suffix", "MYPAT=patvalue456", "patvalue456"],
+  ["assignment gitlab pat", "GITLAB_PAT: patvalue789", "patvalue789"],
   ["assignment env", "GITHUB_TOKEN=plainvalue123 done", "plainvalue123"],
   ["assignment json", '{"password": "hunter2 spaced"}', "hunter2 spaced"],
   ["assignment yaml", "client_secret: yamlsecretvalue", "yamlsecretvalue"],
@@ -98,6 +106,11 @@ const BENIGN: string[] = [
   "WORKER_POLL_INTERVAL=30",
   "risk-assessment and task-skipped are fine",
   "max_tokens_per_run is a setting name",
+  "max_tokens: 4096",
+  "maxTokens=4096",
+  "tokens: 12000 used",
+  "input_tokens=120 output_tokens=80",
+  "compat_mode: legacy",
   "Bearer tokens are documented in the README",
   "Basic usage: devintern run",
 ];
@@ -130,6 +143,27 @@ describe.each(REDACTORS)("%s", (_name, redact) => {
     for (const input of inputs) {
       const started = performance.now();
       redact(input);
+      expect(performance.now() - started).toBeLessThan(500);
+    }
+  });
+});
+
+describe("redactAgentOutput DER key bodies", () => {
+  const der = `MIIEvQIBADANBg${r("k", 40)}`;
+
+  test.each([
+    ["bare", `key ${der} end`],
+    ["after =", `der=${der}`],
+    ["after +", `x+${der}`],
+    ["glued onto base64", `x${der}`],
+  ])("masks a DER body %s", (_case, text) => {
+    expect(redactAgentOutput(text)).not.toContain(der.slice(0, 20));
+  });
+
+  test("stays linear on many short MII runs", () => {
+    for (const input of [r(`MII${r("a", 39)} `, 5_000), r("+/MII", 20_000), r("=MII", 25_000)]) {
+      const started = performance.now();
+      redactAgentOutput(input);
       expect(performance.now() - started).toBeLessThan(500);
     }
   });

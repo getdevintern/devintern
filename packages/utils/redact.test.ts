@@ -24,6 +24,13 @@ describe("redactText", () => {
     expect(redactText("https://x.test/?a=1&token=abc&b=2")).toBe(
       `https://x.test/?a=1&token=${REDACTED}&b=2`,
     );
+    // Any secret-shaped query key, not just the fixed query-rule names.
+    expect(redactText("https://s3.example/obj?passwd=hunter2&x=1#f")).toBe(
+      `https://s3.example/obj?passwd=${REDACTED}&x=1#f`,
+    );
+    expect(redactText("https://x.test/?github_token=abc&tab=files")).toBe(
+      `https://x.test/?github_token=${REDACTED}&tab=files`,
+    );
   });
 
   test("masks PEM blocks and lone headers", () => {
