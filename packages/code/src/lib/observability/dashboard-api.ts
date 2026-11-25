@@ -30,6 +30,7 @@ import type {
   RunStatus,
 } from "../state/run-recorder";
 import { InjectedTaskStore } from "../state/injected-tasks";
+import { readRunLineage } from "../state/run-lineage";
 import type { InjectedTask } from "../state/injected-tasks";
 import type { ScheduleSnapshot } from "../worker/schedule";
 import type { QueuedJobSnapshot } from "../worker/supervisor";
@@ -1268,6 +1269,7 @@ export function handleRunDetail(data: DashboardData, idParam: string): ApiRespon
       retry,
       harnessLogs: data.listRunHarnessLogs(id),
       artifacts: data.listRunArtifacts(id),
+      lineage: readRunLineage(data.dbPath, data.queueDbPath, detail.run),
     },
   };
 }

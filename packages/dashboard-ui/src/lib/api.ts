@@ -113,6 +113,63 @@ export interface RunDetailResponse {
   harnessLogs: HarnessLogFile[];
   /** Task artifacts under the run's output directory, sorted by path. */
   artifacts: TaskArtifactFile[];
+  /** Where this run came from and what it spawned (absent from older servers). */
+  lineage?: RunLineage;
+}
+
+/** How a run relates to the run it was sourced from. */
+export type LineageRelation = "delegated" | "follow_up";
+
+/** The run this run was sourced from. */
+export interface RunLineageParent {
+  runId: number;
+  origin: RunOrigin;
+  status: RunStatus;
+  relation: LineageRelation;
+  automationId?: string;
+  taskKey?: string;
+  /** PR a follow-up run acts on. */
+  prNumber?: number;
+  prUrl?: string;
+}
+
+/** An ad-hoc task the run delegated with `devintern worker add`. */
+export interface SpawnedDelegatedTask {
+  kind: "delegated_task";
+  id: number;
+  taskKey: string;
+  title?: string;
+  status?: "pending" | "running" | "done" | "failed" | "cancelled";
+  latestRunId?: number;
+  latestRunStatus?: RunStatus;
+  prNumber?: number;
+  prUrl?: string;
+}
+
+/** A tracker ticket the run filed. */
+export interface SpawnedTrackerIssue {
+  kind: "tracker_issue";
+  key: string;
+  tracker?: string;
+  url?: string;
+  title?: string;
+}
+
+/** A later run on the PR this run opened. */
+export interface SpawnedFollowUpRun {
+  kind: "follow_up_run";
+  runId: number;
+  origin: RunOrigin;
+  status: RunStatus;
+  startedAt: number;
+}
+
+export type SpawnedWork = SpawnedDelegatedTask | SpawnedTrackerIssue | SpawnedFollowUpRun;
+
+/** `lineage` of a run detail response. */
+export interface RunLineage {
+  parent: RunLineageParent | null;
+  spawned: SpawnedWork[];
 }
 
 /** One durable agent-harness execution transcript under `logs/harness/`. */

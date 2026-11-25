@@ -14,10 +14,22 @@
 
 import { redactText } from "@devintern/utils";
 import { Database } from "bun:sqlite";
+import { mkdirSync, readdirSync } from "fs";
+import { dirname, join } from "path";
 import { computeRunActivity, hostTimeZone } from "./run-activity";
 import type { RunActivity } from "./run-activity";
 import { configureSqliteConnection } from "./sqlite";
 import { prepareQueueDbDirectory, resolveQueueDbPath } from "./webhook-queue";
+import { runOutputsDir, runOutputsPath } from "../workspace/paths";
+import {
+  ingestRunOutputsFile,
+  initRunOutputsSchema,
+  insertRunOutputs,
+  listRunOutputs,
+  RUN_ID_ENV,
+  RUN_OUTPUTS_ENV,
+} from "./run-outputs";
+import type { RunOutputRecord, StoredRunOutput } from "./run-outputs";
 
 export type RunOrigin =
   | "task"
@@ -335,6 +347,17 @@ export class RunStore {
     this.db.run(`
       CREATE INDEX IF NOT EXISTS idx_run_stages_run_id ON run_stages(run_id)
     `);
+    initRunOutputsSchema(this.db);
+  }
+
+  /** Store a run's outputs records (see `run-outputs.ts`); duplicates are ignored. */
+  addRunOutputs(runId: number, records: readonly RunOutputRecord[]): number {
+    return insertRunOutputs(this.db, runId, records);
+  }
+
+  /** Outputs records stored for a run, oldest first. */
+  listRunOutputs(runId: number): StoredRunOutput[] {
+    return listRunOutputs(this.db, runId);
   }
 
   /**
@@ -682,7 +705,7 @@ export class RunStore {
   reapOrphanedRuns(): number {
     const reason = "orphaned: worker exited before the run finished";
     const now = Date.now();
-    return this.db
+    const reaped = this.db
       .transaction(() => {
         // Select inside the immediate transaction and update per id so a
         // concurrent writer (an outlived subprocess committing `finishRun`)
@@ -714,6 +737,44 @@ export class RunStore {
         return reaped;
       })
       .immediate();
+    // Reaped runs never reached `endRun`, so their outputs files are still on disk.
+    this.ingestSettledRunOutputs();
+    return reaped;
+  }
+
+  /**
+   * Ingest outputs files left in `run-outputs/` by runs that settled without
+   * `endRun` (a crashed or killed process, a reaped orphan, or a path that
+   * calls {@link finishRun} directly). Files of runs still `in_progress`, and
+   * of ids this database does not know, are left alone. Never throws.
+   *
+   * @param dir - Outputs directory (defaults to the workspace's)
+   * @returns Number of records stored
+   */
+  ingestSettledRunOutputs(dir: string = runOutputsDir()): number {
+    let names: string[];
+    try {
+      names = readdirSync(dir);
+    } catch {
+      return 0;
+    }
+    let stored = 0;
+    for (const name of names) {
+      const match = /^(\d+)\.jsonl$/.exec(name);
+      if (!match) continue;
+      const runId = Number(match[1]);
+      try {
+        const row = this.db.query(`SELECT status FROM runs WHERE id = ?`).get(runId) as {
+          status: string;
+        } | null;
+        if (!row || row.status === "in_progress") continue;
+      } catch (error) {
+        warnOnce("outputs-sweep", error);
+        return stored;
+      }
+      stored += ingestRunOutputsFile(this, runId, join(dir, name));
+    }
+    return stored;
   }
 
   /**
@@ -1066,11 +1127,50 @@ export function beginRun(meta: RunMeta): void {
     currentStore ??= new RunStore();
     currentRunId = currentStore.createRun(meta);
     currentRunMeta = meta;
+    exportRunIdentity(currentRunId);
   } catch (error) {
     currentRunId = null;
     currentRunMeta = null;
+    restoreRunIdentity();
     warnOnce("begin", error);
   }
+}
+
+/** Identity env values present before this process exported its own run's. */
+let inheritedIdentity: { runId?: string; outputs?: string } | null = null;
+
+/**
+ * Export the active run's id and outputs file into `process.env`, so every
+ * harness spawned while the run is active (they all inherit or spread
+ * `process.env`) sees `DEVINTERN_RUN_ID` / `DEVINTERN_RUN_OUTPUTS`.
+ */
+function exportRunIdentity(runId: number): void {
+  inheritedIdentity ??= {
+    runId: process.env[RUN_ID_ENV],
+    outputs: process.env[RUN_OUTPUTS_ENV],
+  };
+  const outputs = runOutputsPath(runId);
+  process.env[RUN_ID_ENV] = String(runId);
+  process.env[RUN_OUTPUTS_ENV] = outputs;
+  try {
+    // Tools may append with plain shell redirection, so the directory must exist.
+    mkdirSync(dirname(outputs), { recursive: true, mode: 0o700 });
+  } catch (error) {
+    warnOnce("outputs-dir", error);
+  }
+}
+
+/** Put back whatever identity env this process inherited from its parent. */
+function restoreRunIdentity(): void {
+  if (!inheritedIdentity) return;
+  for (const [key, value] of [
+    [RUN_ID_ENV, inheritedIdentity.runId],
+    [RUN_OUTPUTS_ENV, inheritedIdentity.outputs],
+  ] as const) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  inheritedIdentity = null;
 }
 
 /** Track step execution without allowing observability failures to stop work. */
@@ -1313,11 +1413,13 @@ export function endRun(status: Exclude<RunStatus, "in_progress">, reason?: strin
     return;
   }
   try {
+    ingestRunOutputsFile(currentStore, currentRunId, runOutputsPath(currentRunId));
     currentStore.finishRun(currentRunId, status, reason);
   } catch (error) {
     warnOnce("end", error);
   } finally {
     currentRunId = null;
     currentRunMeta = null;
+    restoreRunIdentity();
   }
 }
