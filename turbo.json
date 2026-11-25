@@ -31,6 +31,10 @@
       "dependsOn": ["^build"],
       "outputs": []
     },
+    "@devintern/workspace#build": {
+      "dependsOn": ["^build"],
+      "outputs": []
+    },
     "@getdevintern/license-policy#build": {
       "dependsOn": ["^build"],
       "outputs": []

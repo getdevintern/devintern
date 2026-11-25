@@ -17,14 +17,34 @@ import {
 } from "./lib/init-wizard";
 
 let tempDir: string;
+let workspaceDir: string;
+let previousWorkspaceDir: string | undefined;
 
 beforeEach(() => {
   tempDir = mkdtempSync(join(tmpdir(), "pm-init-wizard-test-"));
+  // Never read the real ~/.devintern.
+  workspaceDir = mkdtempSync(join(tmpdir(), "pm-init-wizard-home-"));
+  previousWorkspaceDir = process.env.DEVINTERN_WORKSPACE_DIR;
+  process.env.DEVINTERN_WORKSPACE_DIR = workspaceDir;
 });
 
 afterEach(() => {
   rmSync(tempDir, { recursive: true, force: true });
+  rmSync(workspaceDir, { recursive: true, force: true });
+  if (previousWorkspaceDir === undefined) delete process.env.DEVINTERN_WORKSPACE_DIR;
+  else process.env.DEVINTERN_WORKSPACE_DIR = previousWorkspaceDir;
 });
+
+/** Register `tempDir` in the test workspace as a path-keyed manual repo. */
+function registerInWorkspace(envFile: string, extraToml = ""): void {
+  mkdirSync(join(workspaceDir, "env"), { recursive: true });
+  writeFileSync(join(workspaceDir, "env", "app.env"), envFile, "utf8");
+  writeFileSync(
+    join(workspaceDir, "workspace.toml"),
+    `${extraToml}[[repos]]\nname = "app"\npath = ${JSON.stringify(tempDir)}\nmanual_only = true\nenv_file = "env/app.env"\n`,
+    "utf8",
+  );
+}
 
 /** Prompt stub that answers from a queue and records questions. */
 function promptQueue(answers: string[]) {
@@ -145,6 +165,29 @@ describe("writePmProjectConfig / probePmConnection (programmatic init)", () => {
     expect(ctx.configExists).toBe(false);
     expect(ctx.reusableFromCode?.trackerId).toBe("github");
     expect(ctx.reusableFromCode?.values.GITHUB_TOKEN).toBe("ghp_x");
+  });
+
+  test("inspectPmInitContext reuses the project's DevIntern workspace credentials", async () => {
+    writeFileSync(join(workspaceDir, ".env"), "LINEAR_API_KEY=shared\n", "utf8");
+    registerInWorkspace("LINEAR_TEAM_KEY=APP\n", '[defaults]\ntracker = "linear"\n\n');
+
+    const ctx = await inspectPmInitContext(tempDir);
+    expect(ctx.reusableSource).toBe('DevIntern workspace (repo "app")');
+    expect(ctx.reusableFromCode?.trackerId).toBe("linear");
+    expect(ctx.reusableFromCode?.values.LINEAR_API_KEY).toBe("shared");
+  });
+
+  test("inspectPmInitContext prefers the workspace over a legacy .devintern-code/.env", async () => {
+    registerInWorkspace("TASK_TRACKER=github\nGITHUB_TOKEN=ghp_workspace\n");
+    mkdirSync(join(tempDir, ".devintern-code"), { recursive: true });
+    writeFileSync(
+      join(tempDir, ".devintern-code", ".env"),
+      "TASK_TRACKER=github\nGITHUB_TOKEN=ghp_legacy\n",
+      "utf8",
+    );
+
+    const ctx = await inspectPmInitContext(tempDir);
+    expect(ctx.reusableFromCode?.values.GITHUB_TOKEN).toBe("ghp_workspace");
   });
 
   test("probePmConnection surfaces probe failures", async () => {

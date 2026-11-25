@@ -37,6 +37,7 @@ export default defineConfig(({ mode }) => {
             "@devintern/task-trackers",
             "@devintern/text-formatter",
             "@devintern/utils",
+            "@devintern/workspace",
           ],
         },
       },

@@ -6,12 +6,13 @@ import { join } from "node:path";
 import { readFile, writeFile, pathExists, mkdir } from "./runtime/fs.js";
 import { getModuleDir } from "./runtime/path.js";
 import { askConfirm } from "./runtime/stdin.js";
+import { findCodeCredentials } from "./code-credentials";
 
 /**
  * Initialize `.devintern-pm` configuration in the current directory.
  *
- * Creates `.devintern-pm/.env` from `.env.example`, migrates values from `.devintern-code`
- * when present, and updates `.gitignore` to exclude secret files.
+ * Creates `.devintern-pm/.env` from `.env.example`, migrates values DevIntern Code
+ * already has for the project when present, and updates `.gitignore` to exclude secret files.
  *
  * @returns Resolves when initialization completes; may exit the process if the user cancels overwrite.
  */
@@ -77,53 +78,34 @@ function emptyMigratedConfig(): MigratedPmConfig {
 }
 
 /**
- * Read JIRA_* / AGENT_* values from an existing `.devintern-code/.env`, if any.
+ * Read JIRA_* / AGENT_* values DevIntern Code already has for the project
+ * (its workspace entry, or a legacy `.devintern-code/.env`), if any.
  *
  * @param cwd - Project directory to look in.
  * @returns Migrated values, or empty strings when no config is found.
  */
 async function readDevinternCodeConfig(cwd: string): Promise<MigratedPmConfig> {
-  const envPath = join(cwd, ".devintern-code", ".env");
-  try {
-    if (!(await pathExists(envPath))) {
-      return emptyMigratedConfig();
-    }
+  const code = await findCodeCredentials(cwd);
+  if (!code) return emptyMigratedConfig();
 
-    console.log("📋 Found existing .devintern-code configuration");
-    const content = await readFile(envPath);
-    const config = emptyMigratedConfig();
+  console.log(`📋 Found existing ${code.sourceLabel}`);
+  const env = code.env;
+  const config: MigratedPmConfig = {
+    jiraBaseUrl: env.JIRA_BASE_URL ?? "",
+    jiraEmail: env.JIRA_EMAIL ?? "",
+    jiraApiToken: env.JIRA_API_TOKEN ?? "",
+    agentHarness: env.AGENT_HARNESS ?? "",
+    agentCliPath: env.AGENT_CLI_PATH || env.CLAUDE_CLI_PATH || "",
+  };
 
-    // Extract JIRA_* and agent configuration values
-    for (const line of content.split("\n")) {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith("#")) continue;
-      if (trimmed.startsWith("JIRA_BASE_URL=")) {
-        config.jiraBaseUrl = trimmed.split("=", 2)[1]?.trim() || "";
-      } else if (trimmed.startsWith("JIRA_EMAIL=")) {
-        config.jiraEmail = trimmed.split("=", 2)[1]?.trim() || "";
-      } else if (trimmed.startsWith("JIRA_API_TOKEN=")) {
-        config.jiraApiToken = trimmed.split("=", 2)[1]?.trim() || "";
-      } else if (trimmed.startsWith("AGENT_HARNESS=")) {
-        config.agentHarness = trimmed.split("=", 2)[1]?.trim() || "";
-      } else if (trimmed.startsWith("AGENT_CLI_PATH=")) {
-        config.agentCliPath = trimmed.split("=", 2)[1]?.trim() || "";
-      } else if (trimmed.startsWith("CLAUDE_CLI_PATH=")) {
-        config.agentCliPath = trimmed.split("=", 2)[1]?.trim() || "";
-      }
-    }
-
-    if (config.jiraBaseUrl || config.jiraEmail || config.jiraApiToken || config.agentCliPath) {
-      console.log("✅ Migrating configuration from .devintern-code");
-    }
-    return config;
-  } catch {
-    // No .devintern-code found, that's fine
-    return emptyMigratedConfig();
+  if (config.jiraBaseUrl || config.jiraEmail || config.jiraApiToken || config.agentCliPath) {
+    console.log(`✅ Migrating configuration from ${code.sourceLabel}`);
   }
+  return config;
 }
 
 /**
- * Apply migrated `.devintern-code` values onto the `.env.example` template.
+ * Apply migrated DevIntern Code values onto the `.env.example` template.
  *
  * @param envContent - `.env.example` template contents.
  * @param config - Migrated values to substitute.
