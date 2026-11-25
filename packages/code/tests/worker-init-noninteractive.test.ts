@@ -205,6 +205,74 @@ describe("runNonInteractiveWorkerInit", () => {
     expect(existsSync(workspaceDir)).toBe(false);
   });
 
+  test("a missing MARKDOWN_TASKS_DIR is named as the task folder with an absolute-path example", async () => {
+    const markdown = await run({ tracker: "markdown" });
+    expect(markdown.error).toBe(
+      "missing: --task-query, MARKDOWN_TASKS_DIR. Pass the flags, and set credentials in the " +
+        "environment or in a file passed with --env-file <path> (mode 0600). MARKDOWN_TASKS_DIR " +
+        "is the folder that holds the Markdown task files; set it to an absolute path, for " +
+        "example MARKDOWN_TASKS_DIR=$PWD/tasks.",
+    );
+    expect(existsSync(workspaceDir)).toBe(false);
+
+    // Other trackers keep their wording.
+    const jira = await run({ tracker: "jira", taskQuery: "project = X" });
+    expect(jira.error).toBe(
+      "missing: JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN. Pass the flags, and set credentials " +
+        "in the environment or in a file passed with --env-file <path> (mode 0600).",
+    );
+  });
+
+  test("a relative MARKDOWN_TASKS_DIR is saved as an absolute path with a note", async () => {
+    const logs: string[] = [];
+    let queriedDir: string | undefined;
+    const report = await run(
+      { tracker: "markdown", taskQuery: "*" },
+      {
+        processEnv: { MARKDOWN_TASKS_DIR: "./tasks" },
+        log: (line) => logs.push(line),
+        doctorOverrides: {
+          dryRunQuery: async (_tracker, env) => {
+            queriedDir = env.MARKDOWN_TASKS_DIR;
+            return 1;
+          },
+        },
+      },
+    );
+    const absolute = join(repoDir, "tasks");
+    expect(report.error).toBeUndefined();
+    expect(readFileSync(join(workspaceDir, ".env"), "utf8")).toContain(
+      `MARKDOWN_TASKS_DIR=${absolute}`,
+    );
+    expect(queriedDir).toBe(absolute);
+    expect(logs).toContain(`ℹ️  MARKDOWN_TASKS_DIR=./tasks saved as the absolute path ${absolute}`);
+    // The folder itself is not created.
+    expect(existsSync(absolute)).toBe(false);
+  });
+
+  test("a relative MARKDOWN_TASKS_DIR from --env-file is saved as an absolute path", async () => {
+    const envFile = join(root, "creds.env");
+    writeFileSync(envFile, "MARKDOWN_TASKS_DIR=todo\n", { mode: 0o600 });
+    const report = await run({ tracker: "markdown", taskQuery: "*", envFile });
+    expect(report.error).toBeUndefined();
+    const env = readFileSync(join(workspaceDir, ".env"), "utf8");
+    expect(env).toContain(`MARKDOWN_TASKS_DIR=${join(repoDir, "todo")}`);
+    expect(env).not.toContain("MARKDOWN_TASKS_DIR=todo");
+  });
+
+  test("an absolute MARKDOWN_TASKS_DIR is saved unchanged without a note", async () => {
+    const logs: string[] = [];
+    const absolute = join(root, "tasks");
+    await run(
+      { tracker: "markdown", taskQuery: "*" },
+      { processEnv: { MARKDOWN_TASKS_DIR: absolute }, log: (line) => logs.push(line) },
+    );
+    expect(readFileSync(join(workspaceDir, ".env"), "utf8")).toContain(
+      `MARKDOWN_TASKS_DIR=${absolute}`,
+    );
+    expect(logs.some((line) => line.includes("absolute path"))).toBe(false);
+  });
+
   test("lists supported trackers for an unsupported value", async () => {
     const report = await run({ tracker: "notion", taskQuery: "x" });
     expect(report.error).toContain('Unsupported --tracker "notion"');
