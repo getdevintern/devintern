@@ -201,6 +201,30 @@ describe("--allow-no-checks", () => {
       ),
     ).toEqual({ outcome: "waiting", message: "m", reviewed: false, ciWait: true });
   });
+
+  test("the subprocess result carries the CI problem; an unknown one is dropped", () => {
+    const record = {
+      outcome: "waiting" as const,
+      message: "m",
+      reviewed: false,
+      ciWait: true,
+      ciWaitProblem: "pending" as const,
+    };
+    expect(parseAutoMergeResultLine(JSON.stringify(record))).toEqual(record);
+    expect(parseAutoMergeResultLine(JSON.stringify({ ...record, ciWaitProblem: "bogus" }))).toEqual(
+      { outcome: "waiting", message: "m", reviewed: false, ciWait: true },
+    );
+  });
+
+  test("the subprocess result carries the unread-checks flag", () => {
+    const record = {
+      outcome: "waiting" as const,
+      message: "m",
+      reviewed: false,
+      ciChecksUnread: true,
+    };
+    expect(parseAutoMergeResultLine(JSON.stringify(record))).toEqual(record);
+  });
 });
 
 describe("commit check reads", () => {

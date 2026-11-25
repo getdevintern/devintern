@@ -15,6 +15,7 @@ import { pinnedHarnessChildEnv } from "../agent/selection";
 import { harnessLogRunEnv } from "../observability/harness-logs";
 import { AUTO_MERGE_OUTCOMES } from "../review/auto-merge";
 import type { AutoMergeOutcome, AutoMergePolicy, AutoMergeResult } from "../review/auto-merge";
+import type { CiChecksProblem } from "../review/ci-checks";
 import { getWorkerFailover, runWithFailover } from "../worker/failover";
 import {
   AUTOMATION_ACCESS_EXIT_CODE,
@@ -84,6 +85,17 @@ export function autoMergeCliArgs(
   ];
 }
 
+const CI_CHECKS_PROBLEMS: readonly CiChecksProblem[] = [
+  "no-checks",
+  "no-passing",
+  "pending",
+  "failing",
+];
+
+function isCiChecksProblem(value: unknown): value is CiChecksProblem {
+  return (CI_CHECKS_PROBLEMS as readonly unknown[]).includes(value);
+}
+
 /** Parse the subprocess result record; `null` when absent or malformed. */
 export function parseAutoMergeResultLine(output: string): AutoMergeResult | null {
   let result: AutoMergeResult | null = null;
@@ -105,6 +117,8 @@ export function parseAutoMergeResultLine(output: string): AutoMergeResult | null
         message: record.message,
         reviewed: record.reviewed === true,
         ...(record.ciWait === true ? { ciWait: true } : {}),
+        ...(isCiChecksProblem(record.ciWaitProblem) ? { ciWaitProblem: record.ciWaitProblem } : {}),
+        ...(record.ciChecksUnread === true ? { ciChecksUnread: true } : {}),
       };
     }
   }

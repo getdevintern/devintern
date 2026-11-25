@@ -36,7 +36,12 @@ export type LeftOpenReason =
 
 export type AutoMergeCommentStatus =
   | { kind: "merged"; method: AutoMergeMethod; headSha: string; agentReason?: string }
-  | { kind: "left-open"; headSha: string; reason: LeftOpenReason };
+  | { kind: "left-open"; headSha: string; reason: LeftOpenReason }
+  /**
+   * GitHub holds the PR for something other than its CI checks (they pass):
+   * replaces an earlier CI wait so the comment does not go stale.
+   */
+  | { kind: "github-hold"; headSha: string; detail: string };
 
 /** Neutralize mentions and flatten whitespace in text posted to the PR. */
 export function sanitizeCommentText(text: string, maxLength = 600): string {
@@ -163,6 +168,19 @@ export function buildAutoMergeStatusComment(status: AutoMergeCommentStatus): str
       `🤖 **Auto-merge: merged** (${status.method}) at ${sha}.`,
       "",
       why,
+    ].join("\n");
+  }
+  if (status.kind === "github-hold") {
+    return [
+      AUTO_MERGE_COMMENT_MARKER,
+      `⏳ **Auto-merge: waiting for GitHub** (checked ${sha}).`,
+      "",
+      `The CI checks on this commit no longer hold it, but GitHub does not report it ` +
+        `mergeable yet: ${sanitizeCommentText(status.detail)}.`,
+      "",
+      "It can merge once GitHub's branch protection allows it (for example, a required approval).",
+      "",
+      "<sub>devintern checks this commit again while the pull request is open.</sub>",
     ].join("\n");
   }
   if (status.reason.kind === "ci-checks") {
