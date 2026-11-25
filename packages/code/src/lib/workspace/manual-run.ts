@@ -187,6 +187,12 @@ export function applyManualWorkspaceRun(
      * tracker settings for the run.
      */
     runtimeOnly?: boolean;
+    /**
+     * Create `<workspace>/state/code/` and move legacy `.devintern-code/`
+     * state into it (default true). Read-only commands pass false so they
+     * never write to the workspace.
+     */
+    ensureState?: boolean;
   } = {},
 ): void {
   const pipelineDefaultFile = run.config.defaults.pipelineFile
@@ -204,6 +210,6 @@ export function applyManualWorkspaceRun(
     else process.env[key] = value;
   }
   delete process.env[WORKER_SUBPROCESS_ENV];
-  ensureWorkspaceCodeState(run.workspaceDir);
+  if (options.ensureState !== false) ensureWorkspaceCodeState(run.workspaceDir);
   setManualWorkspaceStateDir(run.workspaceDir);
 }

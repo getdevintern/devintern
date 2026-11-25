@@ -23,8 +23,10 @@ import { workspaceConfigPath, workspaceEnvPath } from "../workspace/paths";
  * @param options.envFile - Explicit `--env-file`; stays the only source of
  *                          credentials and tracker settings.
  * @param options.migrate - Move a legacy `.devintern-code/` checkout into the
- *                          workspace first. This writes files, so read-only
- *                          commands leave it off.
+ *                          workspace first, and create or migrate the
+ *                          workspace's `state/code/`. Both write files, so
+ *                          read-only commands (`doctor`, `sandbox`) leave it
+ *                          off and never touch the workspace.
  * @returns The workspace repo the checkout belongs to, or null when unregistered
  */
 export async function bootstrapCheckoutEnv(
@@ -32,7 +34,12 @@ export async function bootstrapCheckoutEnv(
 ): Promise<ManualWorkspaceRun | null> {
   if (options.migrate) await migrateLegacyCheckout();
   const run = await findWorkspaceRepoForCheckout();
-  if (run) applyManualWorkspaceRun(run, { runtimeOnly: Boolean(options.envFile) });
+  if (run) {
+    applyManualWorkspaceRun(run, {
+      runtimeOnly: Boolean(options.envFile),
+      ensureState: Boolean(options.migrate),
+    });
+  }
   loadEnvironment(options.envFile, { skipProjectEnv: Boolean(run) });
   return run;
 }

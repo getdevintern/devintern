@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { spawnSync } from "child_process";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
@@ -108,6 +108,21 @@ describe("devintern doctor in a registered checkout", () => {
     const output = runCli(["doctor"]);
 
     expect(output).toContain(`✅ Task tracker — markdown (${repoEnvPath})`);
+  });
+});
+
+describe("read-only commands leave the workspace untouched", () => {
+  test("doctor and sandbox create no workspace state and keep legacy state in place", () => {
+    registerCheckout("TASK_TRACKER=markdown\nMARKDOWN_TASKS_DIR=tasks\n");
+    const legacyDir = join(workspaceDir, ".devintern-code");
+    mkdirSync(legacyDir);
+    writeFileSync(join(legacyDir, "relay.json"), "{}");
+
+    runCli(["doctor"]);
+    runCli(["sandbox"]);
+
+    expect(existsSync(join(workspaceDir, "state"))).toBe(false);
+    expect(existsSync(join(legacyDir, "relay.json"))).toBe(true);
   });
 });
 
