@@ -49,6 +49,22 @@ every repository. An absolute path is used as written. Requires
 `@getdevintern/code` 2.30.0 or later; older versions read a relative path
 from the task checkout.
 
+**Upgrading from an earlier copy of this plugin:** two things change when you
+copy in the new `plugin.ts`.
+
+- A relative `promptFile` now resolves next to the pipeline file, not the task
+  checkout. If yours points into the repository (for example
+  `./.devintern-code/prompts/review.md`), move the prompt next to the pipeline
+  file or switch to an absolute path.
+- A `promptFile` that does not exist now halts the step, naming the path it
+  tried. Earlier copies fell back to the built-in instructions without telling
+  you.
+
+The explainer plugins warn and skip when their prompt is missing, but
+agent-review halts. Agent review is a gate that decides whether work ships, so
+running it with instructions other than the ones you configured is unsafe. An
+explanation is optional output, so skipping it is harmless.
+
 ## Options
 
 | Option          | Default      | Meaning                                                    |

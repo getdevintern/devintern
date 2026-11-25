@@ -49,8 +49,12 @@ export interface FinalizeContext {
   requestedPrTargetBranch?: string;
   verify?: VerifyConfig;
   pipelineSteps?: ResolvedPipelineStep[];
-  /** Exposed to plugins as `PipelineContext.pipelineDir`; `null` for the built-in default. */
-  pipelineDir?: string | null;
+  /**
+   * Exposed to plugins as `PipelineContext.pipelineDir`; `null` for the built-in
+   * default. Required so the compiler rejects a caller that forgets to wire it:
+   * an omission would silently send every plugin `null`.
+   */
+  pipelineDir: string | null;
   artifactPolicy?: import("../artifacts/types").ArtifactPolicy;
   artifactUploader?: import("../artifacts/upload").LoadedArtifactUploader;
   runRepair?: (

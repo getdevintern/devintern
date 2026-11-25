@@ -86,7 +86,7 @@ interface RunAgentHarnessOptions {
 
 export type AgentSessionResult =
   | { kind: "halted" }
-  | { kind: "complete"; context: Omit<FinalizeContext, "resolve" | "reject"> };
+  | { kind: "complete"; context: Omit<FinalizeContext, "resolve" | "reject" | "pipelineDir"> };
 
 /**
  * Run the main agent harness implementation session for a formatted task.
