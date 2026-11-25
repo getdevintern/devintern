@@ -13,6 +13,9 @@
  * Best-effort throughout: feedback must never mask the original error.
  */
 
+import { homedir } from "node:os";
+
+import { redactAgentOutput } from "../agent/harness-startup";
 import type { TaskTrackerClient } from "../trackers/client";
 import { recordIncompleteAttempt } from "../state/retry-state";
 import { formatProcessingFailureMarkdown } from "../trackers/shared/markdown-comment-formatter";
@@ -41,6 +44,32 @@ export interface FailureFeedbackDeps {
   warn?: typeof console.warn;
 }
 
+/** Longest reason posted to the tracker; a huge stderr dump is cut here. */
+export const MAX_FAILURE_REASON_LENGTH = 1000;
+
+/**
+ * Scrub a failure reason before it is posted as a tracker comment.
+ *
+ * Reasons often quote subprocess output (git, hooks, HTTP bodies), and tracker
+ * comments can be visible to far more people than the operator. This is the
+ * single sink for every processing-failure comment, so redact here even when
+ * the caller already did: credential shapes via {@link redactAgentOutput},
+ * credentials in URLs of any scheme, the local home directory (which names the
+ * OS user), then bound the length. Local logs and run records keep the raw text.
+ */
+export function redactFailureReason(reason: string, home: string = homedir()): string {
+  let out = redactAgentOutput(reason)
+    // URL credentials for any scheme (ssh://, git+https://, ...): scheme://***@host.
+    .replace(/([a-z][a-z0-9+.-]*:\/\/)[^@\s/?]+@/gi, "$1***@");
+  if (home && home !== "/") {
+    out = out.split(home).join("~");
+  }
+  if (out.length > MAX_FAILURE_REASON_LENGTH) {
+    out = `${out.slice(0, MAX_FAILURE_REASON_LENGTH)}…`;
+  }
+  return out;
+}
+
 /**
  * Post the processing-failure comment and hand the ticket back to its To Do
  * status. On successful comment delivery, also persist the attempt so the
@@ -58,7 +87,7 @@ export async function reportTaskFailure(deps: FailureFeedbackDeps): Promise<bool
     try {
       await tracker.postComment(taskKey, {
         format: "markdown",
-        body: formatProcessingFailureMarkdown(taskKey, reason),
+        body: formatProcessingFailureMarkdown(taskKey, redactFailureReason(reason)),
       });
       deps.log?.(`💬 Posted a failure comment to ${taskKey}`);
       posted = true;

@@ -1,9 +1,13 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync } from "fs";
-import { tmpdir } from "os";
+import { homedir, tmpdir } from "os";
 import path from "path";
 
-import { reportTaskFailure } from "../src/lib/task/failure-feedback";
+import { MAX_FAILURE_REASON_LENGTH, reportTaskFailure } from "../src/lib/task/failure-feedback";
+import {
+  formatRetryPickupMarkdown,
+  isProcessingFailureCommentText,
+} from "../src/lib/trackers/shared/markdown-comment-formatter";
 import { RetryStateStore, hashDescription } from "../src/lib/state/retry-state";
 import type { TaskTrackerClient } from "../src/lib/trackers/client";
 import type { Task, TaskTrackerCommentContent } from "../src/types/task-tracker";
@@ -158,5 +162,42 @@ describe("reportTaskFailure", () => {
     } as unknown as TaskTrackerClient;
 
     expect(await reportTaskFailure(deps({ tracker }))).toBe(false);
+  });
+  test("redacts credentials and the home directory from the posted reason", async () => {
+    const home = homedir();
+    const ghToken = `ghp_${"A".repeat(36)}`;
+    const envToken = "s3cr3tEnvTokenValue123";
+    const reason = [
+      `git push failed: remote rejected token ${ghToken}`,
+      `hook env: GITHUB_TOKEN=${envToken}`,
+      "fatal: unable to access 'https://alice:hunter2pass@git.example.com/org/repo.git/'",
+      `while running ${home}/projects/repo/.git/hooks/pre-push`,
+    ].join("\n");
+
+    await reportTaskFailure(deps({ reason }));
+
+    expect(posted).toHaveLength(1);
+    const body = posted[0];
+    expect(body).not.toContain(ghToken);
+    expect(body).not.toContain(envToken);
+    expect(body).not.toContain("hunter2pass");
+    expect(body).not.toContain("alice:");
+    expect(body).not.toContain(`${home}/`);
+    expect(body).toContain("~/projects/repo/.git/hooks/pre-push");
+    expect(body).toContain("git push failed");
+    expect(isProcessingFailureCommentText(body)).toBe(true);
+    expect(body).toContain(formatRetryPickupMarkdown());
+  });
+
+  test("truncates an oversized reason", async () => {
+    const reason = "x".repeat(MAX_FAILURE_REASON_LENGTH * 5);
+
+    await reportTaskFailure(deps({ reason }));
+
+    const body = posted[0];
+    expect(body).toContain(`${"x".repeat(MAX_FAILURE_REASON_LENGTH)}…`);
+    expect(body).not.toContain("x".repeat(MAX_FAILURE_REASON_LENGTH + 1));
+    expect(isProcessingFailureCommentText(body)).toBe(true);
+    expect(body).toContain(formatRetryPickupMarkdown());
   });
 });
