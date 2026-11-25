@@ -11,8 +11,6 @@
 
 import { REDACTED, redactText } from "@devintern/utils";
 
-import { redactSecrets } from "../observability/worker-logs";
-
 /** Error raised when a harness CLI cannot start (sandbox/config problem). */
 export class HarnessUnavailableError extends Error {
   readonly harnessName?: string;
@@ -109,40 +107,30 @@ function withoutCompilerDiagnostics(text: string): string {
 }
 
 /**
- * Token shapes that neither {@link redactText} nor {@link redactSecrets} covers
- * but harness CLIs commonly echo (GitLab, npm, Google API keys).
+ * Agent-specific extras on top of the shared credential shapes.
+ *
+ * DER-encoded key bodies in base64 (PKCS#8/SPKI start with `MII`) can be
+ * echoed without a `-----BEGIN ... PRIVATE KEY-----` marker, which is what the
+ * shared PEM rule needs. The lookbehind anchors the match to the start of a
+ * base64 run so a long run is scanned once, not from every offset.
  */
 const EXTRA_AGENT_TOKEN_PATTERNS: Array<{ pattern: RegExp; replacement: string }> = [
-  // `\b` does not fire between a token's final `-`/`_` and the following
-  // punctuation, so anchor with lookarounds instead: a token ending in a
-  // character from its own class must still be masked.
-  {
-    pattern: /(?<![A-Za-z0-9_-])glpat-[A-Za-z0-9_-]{20,}(?![A-Za-z0-9_-])/g,
-    replacement: REDACTED,
-  },
-  { pattern: /(?<![A-Za-z0-9_-])npm_[A-Za-z0-9]{36}(?![A-Za-z0-9_])/g, replacement: REDACTED },
-  { pattern: /(?<![A-Za-z0-9_-])AIza[0-9A-Za-z_-]{35}(?![A-Za-z0-9_-])/g, replacement: REDACTED },
-  // DER-encoded key bodies in base64 (PKCS#8/SPKI start with `MII`) can be
-  // echoed without a `-----BEGIN ... PRIVATE KEY-----` marker, which is what
-  // the PEM rule in {@link redactSecrets} needs.
-  { pattern: /MII[A-Za-z0-9+/=]{40,}/g, replacement: REDACTED },
+  { pattern: /(?<![A-Za-z0-9+/=])MII[A-Za-z0-9+/=]{40,}/g, replacement: REDACTED },
 ];
 
 /**
  * Redact agent-derived text before it leaves this process.
  *
  * Exit and startup reasons are posted verbatim as ticket-comment feedback and
- * persisted in `runs.outcome_reason`, so they get the strongest available
- * redaction rather than the Sentry-oriented {@link redactText} alone.
- * {@link redactSecrets} additionally masks AWS/Slack tokens, `KEY=value`
- * assignments, JSON password fields, and PEM blocks; the extra patterns cover
- * token shapes both shared helpers miss.
+ * persisted in `runs.outcome_reason`, so they get the shared credential
+ * redaction ({@link redactText}: secret-key assignments, token shapes, PEM
+ * blocks) plus bare DER key bodies.
  *
  * @param text - Agent or harness output that may embed credentials.
  * @returns The same text with credential-shaped substrings replaced.
  */
 export function redactAgentOutput(text: string): string {
-  let out = redactSecrets(redactText(text));
+  let out = redactText(text);
   for (const { pattern, replacement } of EXTRA_AGENT_TOKEN_PATTERNS) {
     out = out.replace(pattern, replacement);
   }

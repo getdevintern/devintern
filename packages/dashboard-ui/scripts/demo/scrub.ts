@@ -3,7 +3,8 @@
  * workspace (see `snapshot.ts --scrub`).
  *
  * Two layers:
- * - `scrub()` rewrites text: known secret formats, the literal values of the
+ * - `scrub()` rewrites text: the shared credential shapes from
+ *   `@devintern/utils` (`redactText`), the literal values of the
  *   operator's env files, the home directory, the host name, Tailscale
  *   names, and email addresses (bot noreply addresses stay), plus the
  *   names of repositories that must not appear (`deny`).
@@ -18,25 +19,9 @@
 import { readFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 
-import { redactSecrets } from "../../../code/src/lib/observability/worker-logs";
-
-/** Credential formats with a recognizable shape (scrubbed and gated). */
-const SECRET_PATTERNS: readonly [label: string, pattern: RegExp][] = [
-  ["github token", /\b(?:gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{22,})\b/g],
-  ["gitlab token", /\bgl(?:pat|dt|ptt|rt|cbt)-[A-Za-z0-9_-]{16,}\b/g],
-  ["slack token", /\bxox[abeprs]-[A-Za-z0-9-]{10,}\b/g],
-  ["aws key id", /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g],
-  ["openai/anthropic key", /\bsk-(?:ant-)?[A-Za-z0-9_-]{20,}\b/g],
-  ["stripe key", /\b[rs]k_(?:live|test)_[A-Za-z0-9]{16,}\b/g],
-  ["atlassian token", /\bATATT[A-Za-z0-9_=-]{20,}\b/g],
-  ["linear key", /\blin_(?:api|oauth)_[A-Za-z0-9]{20,}\b/g],
-  ["sentry token", /\bsntr[ysu]_[A-Za-z0-9_=+/-]{20,}/g],
-  ["polar token", /\bpolar_[a-z]{2,4}_[A-Za-z0-9]{20,}\b/g],
-  ["npm token", /\bnpm_[A-Za-z0-9]{30,}\b/g],
-  ["jwt", /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g],
-  ["private key", /-----BEGIN [A-Z0-9 ]*PRIVATE KEY[A-Z0-9 ]*-----/g],
-  ["url credentials", /\bhttps?:\/\/[^\s/:@"']+:[^\s/@"']{6,}@/g],
-];
+// Relative import: dashboard-ui does not depend on the utils workspace
+// package, and the barrel would pull in the error-tracking SDK.
+import { findCredentialShapes, redactText } from "../../../utils/src/redact";
 
 const EMAIL = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g;
 const KEPT_EMAIL =
@@ -89,8 +74,7 @@ export function createScrubber(options: ScrubOptions): Scrubber {
   const scrub = (text: string): string => {
     let out = text;
     for (const value of options.secretValues) out = out.split(value).join("[redacted]");
-    out = redactSecrets(out);
-    for (const [, pattern] of SECRET_PATTERNS) out = out.replace(pattern, "[redacted]");
+    out = redactText(out);
     if (home.length > 1) out = out.split(home).join("~");
     if (user) out = out.replace(new RegExp(`/home/${escapeRegExp(user)}\\b`, "g"), "~");
     if (host.length >= 3) {
@@ -105,10 +89,7 @@ export function createScrubber(options: ScrubOptions): Scrubber {
   const findLeaks = (text: string): string[] => {
     const found: string[] = [];
     for (const value of options.secretValues) if (text.includes(value)) found.push("env value");
-    for (const [label, pattern] of SECRET_PATTERNS) {
-      pattern.lastIndex = 0;
-      if (pattern.test(text)) found.push(label);
-    }
+    found.push(...findCredentialShapes(text));
     for (const pattern of deny) {
       pattern.lastIndex = 0;
       if (pattern.test(text)) found.push(`denied name ${pattern.source}`);
