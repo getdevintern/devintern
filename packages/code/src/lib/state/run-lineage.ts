@@ -91,6 +91,12 @@ export const FOLLOW_UP_ORIGINS: readonly RunOrigin[] = [
 
 const FOLLOW_UP_SQL = FOLLOW_UP_ORIGINS.map((origin) => `'${origin}'`).join(", ");
 const MAX_SPAWNED_PER_KIND = 100;
+/**
+ * Key prefix of ad-hoc tasks (`local-<slug>`). The outputs file is
+ * agent-writable, so an `injected_task` record is only trusted for keys of
+ * this shape: a forged record cannot claim a tracker run (`PROJ-1`).
+ */
+const AD_HOC_KEY_PREFIX = "local-";
 
 /** Handles the lineage query reads; both may be the same connection. */
 export interface LineageDatabases {
@@ -181,20 +187,34 @@ function toParent(
   };
 }
 
-/** The run that delegated this run's ad-hoc task, if any. */
-function delegatingRunId(dbs: LineageDatabases, taskKey: string): number | undefined {
-  const fromQueue = queueRead<number | undefined>(dbs, undefined, (queue) => {
+/**
+ * The run that delegated this run's ad-hoc task, if any. The queue row is
+ * authoritative, including a row with no parent (a task added outside any
+ * run); the agent-written outputs record is consulted only for an ad-hoc run
+ * (`origin: "local"`, `local-…` key) whose row is absent (pruned). This is the
+ * same rule `spawnedTasks` applies, so both sides of a link agree.
+ */
+function delegatingRunId(
+  dbs: LineageDatabases,
+  run: RunRecord,
+  taskKey: string,
+): number | undefined {
+  // `null`: the row exists without a parent. `undefined`: no row (or no queue).
+  const fromQueue = queueRead<number | null | undefined>(dbs, undefined, (queue) => {
     const row = queue
       .query("SELECT parent_run_id FROM injected_tasks WHERE task_key = ? LIMIT 1")
       .get(taskKey) as { parent_run_id: number | null } | null;
-    return row?.parent_run_id ?? undefined;
+    return row ? row.parent_run_id : undefined;
   });
-  return fromQueue ?? attempt(undefined, () => findInjectedTaskOutputParent(dbs.runs, taskKey));
+  if (fromQueue === null) return undefined;
+  if (fromQueue !== undefined) return fromQueue;
+  if (run.origin !== "local" || !taskKey.startsWith(AD_HOC_KEY_PREFIX)) return undefined;
+  return attempt(undefined, () => findInjectedTaskOutputParent(dbs.runs, taskKey));
 }
 
 function resolveParent(dbs: LineageDatabases, run: RunRecord): RunLineageParent | null {
   if (run.taskKey) {
-    const parentId = delegatingRunId(dbs, run.taskKey);
+    const parentId = delegatingRunId(dbs, run, run.taskKey);
     const parent =
       parentId !== undefined && parentId !== run.id ? getRunRow(dbs.runs, parentId) : null;
     if (parent) return toParent(parent, "delegated");
@@ -213,6 +233,10 @@ interface InjectedRow {
   task_key: string;
   title: string;
   status: string;
+}
+
+interface InjectedParentRow extends InjectedRow {
+  parent_run_id: number | null;
 }
 
 function latestRunFor(db: Database, taskKey: string): Partial<SpawnedDelegatedTask> {
@@ -261,15 +285,21 @@ function spawnedTasks(dbs: LineageDatabases, runId: number): SpawnedDelegatedTas
   for (const output of attempt([], () => listRunOutputs(dbs.runs, runId))) {
     const record = output.record;
     if (record.kind !== "injected_task" || byKey.has(record.taskKey)) continue;
+    // Agent-writable record: only ad-hoc keys, and never one the queue says
+    // another run (or no run) delegated.
+    if (!record.taskKey.startsWith(AD_HOC_KEY_PREFIX)) continue;
     if (byKey.size >= MAX_SPAWNED_PER_KIND) break;
-    const row = queueRead<InjectedRow | null>(
+    const row = queueRead<InjectedParentRow | null>(
       dbs,
       null,
       (queue) =>
         queue
-          .query("SELECT id, task_key, title, status FROM injected_tasks WHERE task_key = ?")
-          .get(record.taskKey) as InjectedRow | null,
+          .query(
+            "SELECT id, task_key, title, status, parent_run_id FROM injected_tasks WHERE task_key = ?",
+          )
+          .get(record.taskKey) as InjectedParentRow | null,
     );
+    if (row && (row.parent_run_id !== runId || row.id !== record.id)) continue;
     byKey.set(record.taskKey, {
       kind: "delegated_task",
       id: row?.id ?? record.id,

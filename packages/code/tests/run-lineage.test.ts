@@ -276,6 +276,93 @@ describe("run lineage query", () => {
     ]);
   });
 
+  test("a forged outputs record cannot claim a tracker run or another run's task", () => {
+    const owner = run({ origin: "scheduled" }, 50);
+    const { task } = queue.enqueue({
+      taskKey: "local-real",
+      repo: "api",
+      title: "Real",
+      body: "",
+      taskFile: "/t.md",
+      parentRunId: owner,
+    });
+    const forger = run({ origin: "local", taskKey: "local-forger" }, 100);
+    runs.addRunOutputs(forger, [
+      { kind: "injected_task", id: 1, taskKey: "PROJ-1" },
+      { kind: "injected_task", id: task.id, taskKey: "local-real" },
+    ]);
+    const tracker = run({ origin: "task", taskKey: "PROJ-1" }, 200);
+    // A non-ad-hoc run with a local- key (no queue row) is not trusted either.
+    runs.addRunOutputs(forger, [{ kind: "injected_task", id: 2, taskKey: "local-manual" }]);
+    const manual = run({ origin: "manual", taskKey: "local-manual" }, 300);
+
+    expect(lineageOf(tracker).parent).toBeNull();
+    expect(lineageOf(manual).parent).toBeNull();
+    // Only the unverifiable (pruned-looking) local- key survives; PROJ-1 and
+    // the queue-owned local-real are dropped.
+    expect(lineageOf(forger).spawned.map((s) => s.kind === "delegated_task" && s.taskKey)).toEqual([
+      "local-manual",
+    ]);
+    expect(lineageOf(owner).spawned.map((s) => s.kind === "delegated_task" && s.taskKey)).toEqual([
+      "local-real",
+    ]);
+  });
+
+  test("a forged outputs record cannot claim a standalone task", () => {
+    // A queue row with no parent (added outside any run) is authoritative:
+    // the forger's record must not make it the child's parent.
+    queue.enqueue({
+      taskKey: "local-standalone",
+      repo: "api",
+      title: "Standalone",
+      body: "",
+      taskFile: "/s.md",
+    });
+    const forger = run({ origin: "scheduled" }, 100);
+    runs.addRunOutputs(forger, [{ kind: "injected_task", id: 1, taskKey: "local-standalone" }]);
+    const child = run({ origin: "local", taskKey: "local-standalone" }, 200);
+
+    expect(lineageOf(child).parent).toBeNull();
+    expect(lineageOf(forger).spawned).toEqual([]);
+  });
+
+  test("reaping orphans ingests outputs files that endRun never read", () => {
+    const previousWorkspace = process.env.DEVINTERN_WORKSPACE_DIR;
+    process.env.DEVINTERN_WORKSPACE_DIR = dir;
+    try {
+      const outputsDir = join(dir, "state", "run-outputs");
+      mkdirSync(outputsDir, { recursive: true });
+      const line = `${JSON.stringify({ v: 1, kind: "tracker_issue", key: "DEV-9", tracker: "jira" })}\n`;
+      const crashed = run({ origin: "scheduled" }, 100);
+      const settled = run({ origin: "scheduled" }, 150);
+      runs.finishRun(settled, "failed", "killed"); // a path that bypasses endRun
+      for (const id of [crashed, settled, 9999]) {
+        writeFileSync(join(outputsDir, `${id}.jsonl`), line);
+      }
+
+      expect(runs.reapOrphanedRuns()).toBe(1);
+      for (const id of [crashed, settled]) {
+        expect(lineageOf(id).spawned).toEqual([
+          { kind: "tracker_issue", key: "DEV-9", tracker: "jira" },
+        ]);
+      }
+      // An id this database does not know is left alone.
+      expect(readFileSync(join(outputsDir, "9999.jsonl"), "utf8")).toBe(line);
+
+      // A run still in progress keeps its file until it settles.
+      const live = run({ origin: "scheduled" }, 300);
+      writeFileSync(join(outputsDir, `${live}.jsonl`), line);
+      expect(runs.ingestSettledRunOutputs()).toBe(0);
+      expect(readFileSync(join(outputsDir, `${live}.jsonl`), "utf8")).toBe(line);
+      runs.finishRun(live, "succeeded");
+      expect(runs.ingestSettledRunOutputs()).toBe(1);
+      expect(lineageOf(live).spawned).toHaveLength(1);
+    } finally {
+      if (previousWorkspace === undefined) delete process.env.DEVINTERN_WORKSPACE_DIR;
+      else process.env.DEVINTERN_WORKSPACE_DIR = previousWorkspace;
+    }
+  });
+
   test("follow-up runs on a PR point at the run that opened it", () => {
     const pr = { url: PR_URL, number: 260 };
     const opener = run({ origin: "task", taskKey: "PROJ-1" }, 100, pr);

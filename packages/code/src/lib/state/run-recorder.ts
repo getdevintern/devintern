@@ -14,13 +14,13 @@
 
 import { redactText } from "@devintern/utils";
 import { Database } from "bun:sqlite";
-import { mkdirSync } from "fs";
-import { dirname } from "path";
+import { mkdirSync, readdirSync } from "fs";
+import { dirname, join } from "path";
 import { computeRunActivity, hostTimeZone } from "./run-activity";
 import type { RunActivity } from "./run-activity";
 import { configureSqliteConnection } from "./sqlite";
 import { prepareQueueDbDirectory, resolveQueueDbPath } from "./webhook-queue";
-import { runOutputsPath } from "../workspace/paths";
+import { runOutputsDir, runOutputsPath } from "../workspace/paths";
 import {
   ingestRunOutputsFile,
   initRunOutputsSchema,
@@ -705,7 +705,7 @@ export class RunStore {
   reapOrphanedRuns(): number {
     const reason = "orphaned: worker exited before the run finished";
     const now = Date.now();
-    return this.db
+    const reaped = this.db
       .transaction(() => {
         // Select inside the immediate transaction and update per id so a
         // concurrent writer (an outlived subprocess committing `finishRun`)
@@ -737,6 +737,44 @@ export class RunStore {
         return reaped;
       })
       .immediate();
+    // Reaped runs never reached `endRun`, so their outputs files are still on disk.
+    this.ingestSettledRunOutputs();
+    return reaped;
+  }
+
+  /**
+   * Ingest outputs files left in `run-outputs/` by runs that settled without
+   * `endRun` (a crashed or killed process, a reaped orphan, or a path that
+   * calls {@link finishRun} directly). Files of runs still `in_progress`, and
+   * of ids this database does not know, are left alone. Never throws.
+   *
+   * @param dir - Outputs directory (defaults to the workspace's)
+   * @returns Number of records stored
+   */
+  ingestSettledRunOutputs(dir: string = runOutputsDir()): number {
+    let names: string[];
+    try {
+      names = readdirSync(dir);
+    } catch {
+      return 0;
+    }
+    let stored = 0;
+    for (const name of names) {
+      const match = /^(\d+)\.jsonl$/.exec(name);
+      if (!match) continue;
+      const runId = Number(match[1]);
+      try {
+        const row = this.db.query(`SELECT status FROM runs WHERE id = ?`).get(runId) as {
+          status: string;
+        } | null;
+        if (!row || row.status === "in_progress") continue;
+      } catch (error) {
+        warnOnce("outputs-sweep", error);
+        return stored;
+      }
+      stored += ingestRunOutputsFile(this, runId, join(dir, name));
+    }
+    return stored;
   }
 
   /**
