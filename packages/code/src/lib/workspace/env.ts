@@ -57,16 +57,21 @@ export const ACTIONED_SOURCE_ENV = "DEVINTERN_ACTIONED_SOURCE";
 
 /**
  * Parse a dotenv-style file into a record (same semantics as the tracker
- * config loader: `KEY=value`, `#` comments, optional single/double quotes).
- * Missing files yield an empty record.
+ * config loader: `KEY=value`, `#` comments, optional single/double quotes,
+ * and an optional shell `export ` prefix). Missing files yield an empty record.
  */
 export function parseEnvFile(path: string): Record<string, string> {
   if (!existsSync(path)) {
     return {};
   }
+  return parseEnvFileContent(readFileSync(path, "utf8"));
+}
+
+/** {@link parseEnvFile} over already-read text. */
+export function parseEnvFileContent(content: string): Record<string, string> {
   const env: Record<string, string> = {};
-  for (const line of readFileSync(path, "utf8").split("\n")) {
-    const trimmed = line.trim();
+  for (const line of content.split("\n")) {
+    const trimmed = line.trim().replace(/^export\s+/, "");
     if (!trimmed || trimmed.startsWith("#")) {
       continue;
     }

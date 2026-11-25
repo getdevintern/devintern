@@ -4,7 +4,7 @@ sidebarLabel: "Worker"
 description: "Use when running DevIntern as a long-running worker that picks up tracker tasks, handles PR reviews and CI failures, and runs as a service."
 section: "Automation"
 order: 2
-dateModified: 2026-11-20
+dateModified: 2026-11-25
 ---
 
 # Worker Daemon
@@ -28,9 +28,52 @@ When something does not get picked up, see [Worker Troubleshooting](./worker-tro
 devintern worker init
 ```
 
-`worker init` reuses tracker config from `devintern init` (or asks for it), writes a one-repo workspace, validates the ready-tasks query, and asks about task pickup hours, conflict handling, and CI repair. It can add a Sentry project, offers sign-in for the Worker Pilot if you have no license, pairs your repositories with the [relay](./relay.md), and offers to install the worker as a service. `--no-service` skips the service step.
+`worker init` reuses tracker config from `devintern init` (or asks for it), writes a one-repo workspace, validates the ready-tasks query, and asks about task pickup hours, conflict handling, and CI repair. It can add a Sentry project, offers sign-in for the Worker Pilot if you have no license, pairs your repositories with the [relay](./relay.md), and offers to install the worker as a service. `--no-service` skips the service step. Without a terminal (coding agents, scripts, SSH), use [non-interactive setup](#non-interactive-setup).
 
 For GitHub, install the central [DevIntern AI App](https://github.com/apps/devintern-ai/installations/new) on the workspace repositories. Its private key stays with DevIntern. Events reach your worker as reference-only envelopes, and your local `GITHUB_TOKEN` does the API work. After adding repositories, run `devintern worker connect` to pair them. Without the relay, polling still works; `@mention` handling then needs a [customer-owned GitHub App](./configuration.md#advanced-customer-owned-github-app).
+
+## Non-interactive setup
+
+Coding agents, provisioning scripts, and SSH sessions without a terminal can set up the worker with flags instead of prompts:
+
+```bash
+export JIRA_BASE_URL=https://acme.atlassian.net JIRA_EMAIL=bot@acme.com JIRA_API_TOKEN=...
+devintern worker init --non-interactive --tracker jira \
+  --task-query 'project = APP AND labels = devintern' --repo-from-cwd --json
+```
+
+It writes `[defaults].tracker` and `task_query`, registers the current repository, and saves the tracker credentials to the workspace `.env`. It then checks the credentials and runs the same checks as `worker doctor`: a dry run of the query (0 matches is a warning), repository access, license, agent harness, and sandbox. It never prompts, opens a browser, pairs the relay, installs a service, or starts the worker. Those stay as next steps in the output.
+
+| Flag                | Default            | What it does                                                                                          |
+| ------------------- | ------------------ | ----------------------------------------------------------------------------------------------------- |
+| `--non-interactive` | off                | Use flags instead of prompts                                                                           |
+| `--tracker <id>`    | existing tracker   | `jira`, `linear`, `github`, `gitlab`, `azure-devops`, `asana`, `trello`, or `markdown`. Required for a new workspace |
+| `--task-query <q>`  | existing query     | Ready-tasks query in the tracker's language. Required for a new workspace                            |
+| `--repo-from-cwd`   | off                | Register the Git repository in the current directory, using its `origin` remote (any host), the same way `worker add-repo` does: its `.devintern-code/.env` is imported and a routing rule is seeded from its default project |
+| `--env-file <path>` | none               | Read credentials from this file (must be mode `0600`) and save them to the workspace `.env`           |
+| `--yes`             | off                | Update an existing `workspace.toml`: only the tracker, query, and repository named by the flags change |
+| `--json`            | off                | Print one JSON document on stdout instead of text                                                     |
+
+**Credentials.** Set the tracker's variables (for example `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`; see the tracker's integration page) and `GITHUB_TOKEN` in the environment, or put them in a file and pass `--env-file` (`KEY=value` lines; quotes and a leading `export` are allowed). Secrets are never accepted as flags. If the file is readable by others, the command refuses it; fix it with `chmod 600 <file>`. When something is missing, the error lists every missing flag and variable.
+
+**Output.** The command exits 0 when no check fails, and 1 otherwise. With `--json`, stdout holds only this document (`version` changes only when the shape breaks):
+
+```json
+{
+  "schema": "devintern.worker-init",
+  "version": 1,
+  "result": "success",
+  "workspaceDir": "/home/me/.devintern",
+  "tracker": "jira",
+  "taskQuery": "project = APP AND labels = devintern",
+  "repo": { "name": "app", "remote": "git@github.com:acme/app.git", "added": true },
+  "filesWritten": ["/home/me/.devintern/.env", "/home/me/.devintern/workspace.toml"],
+  "checks": [{ "name": "tracker-auth", "label": "Tracker credentials", "status": "pass", "message": "JIRA accepted JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN" }],
+  "nextSteps": [{ "id": "sign-in", "message": "sign-in needed: ...", "command": "devintern worker login" }]
+}
+```
+
+Each check `status` is `pass`, `warn`, `fail`, or `skipped`, and failing checks carry a `hint`. If the command stops before the checks (bad input, or another `worker init` is changing the same workspace), `error` explains why and `checks` is empty. A missing sign-in or license is a `warn` with a `sign-in` next step, not a failure. Next-step `id`s are `sign-in`, `add-repo`, `connect`, `start`, and `service`.
 
 To start a configured workspace by hand:
 
