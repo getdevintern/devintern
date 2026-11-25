@@ -28,7 +28,12 @@ describe("AutoMergeWatcherAcquirer", () => {
   let queue: WebhookQueue;
   let now: number;
   let pr: AutoMergePolledPr;
-  let calls: Array<{ prNumber: number; sha: string; lastAttempt?: boolean }>;
+  let calls: Array<{
+    prNumber: number;
+    sha: string;
+    lastAttempt?: boolean;
+    ciWaitPosted?: string;
+  }>;
   let results: AutoMergeResult[];
   let enabled: boolean;
   let runs: Array<{ origin: string; status?: string; harness?: string } | null>;
@@ -45,8 +50,13 @@ describe("AutoMergeWatcherAcquirer", () => {
       now: () => now,
       quietSeconds: extra.quietSeconds ?? 0,
       fetchPr: async () => ({ data: pr, notModified: false }),
-      mergePr: async (_repo, prNumber, sha, { lastAttempt }) => {
-        calls.push({ prNumber, sha, ...(lastAttempt ? { lastAttempt } : {}) });
+      mergePr: async (_repo, prNumber, sha, { lastAttempt, ciWaitPosted }) => {
+        calls.push({
+          prNumber,
+          sha,
+          ...(lastAttempt ? { lastAttempt } : {}),
+          ...(ciWaitPosted !== undefined ? { ciWaitPosted } : {}),
+        });
         statusDuringMerge.push(runs.at(-1)?.status);
         return results.shift() ?? { outcome: "merged", message: "ok", reviewed: false };
       },
@@ -242,8 +252,8 @@ describe("AutoMergeWatcherAcquirer", () => {
   });
 
   test.each([
-    [{ mergeable_state: "unstable" }],
-    [{ mergeable_state: "blocked" }],
+    [{ mergeable_state: "dirty" }],
+    [{ mergeable_state: "behind" }],
     [{ draft: true }],
     [{ state: "closed" }],
     [{ head: { sha: HEAD, repo: { full_name: "fork/widgets" } } }],
@@ -252,6 +262,15 @@ describe("AutoMergeWatcherAcquirer", () => {
     await watcher().tick();
     expect(calls).toHaveLength(0);
   });
+
+  test.each(["unstable", "blocked"])(
+    "evaluates %s PRs so a failing or pending check is reported",
+    async (state) => {
+      pr = { ...pr, mergeable_state: state };
+      await watcher().tick();
+      expect(calls).toHaveLength(1);
+    },
+  );
 
   test("waits for the head to stay quiet", async () => {
     const w = watcher({ quietSeconds: 300 });
@@ -307,6 +326,12 @@ describe("AutoMergeWatcherAcquirer", () => {
     await w.tick();
     expect(calls).toHaveLength(3);
     expect(calls.every((call) => call.sha === HEAD)).toBe(true);
+    // Re-checks pass the wait the PR already shows, so it is not re-posted.
+    expect(calls.map((call) => call.ciWaitPosted)).toEqual([
+      undefined,
+      noChecks.message,
+      noChecks.message,
+    ]);
     // The first CI wait is kept with its reason; the identical repeat is discarded.
     expect(liveRuns()).toEqual([
       { origin: "auto_merge", status: "escalated" },

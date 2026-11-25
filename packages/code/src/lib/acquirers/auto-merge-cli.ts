@@ -46,18 +46,22 @@ export interface AutoMergeCliOptions {
   lastAttempt?: boolean;
   /** Worker run for this check; the child's agent transcript is filed under it. */
   runId?: number;
+  /** The CI wait the PR already shows (`--ci-wait-posted`); not re-posted. */
+  ciWaitPosted?: string;
 }
 
 /** CLI flags carrying the policy to the subprocess. */
 export function autoMergeCliArgs(
   policy: AutoMergePolicy,
   expectedHeadSha: string,
-  options: { lastAttempt?: boolean } = {},
+  options: { lastAttempt?: boolean; ciWaitPosted?: string } = {},
 ): string[] {
   return [
     "--expected-head",
     expectedHeadSha,
     ...(options.lastAttempt ? ["--last-attempt"] : []),
+    // `=` form: the message is free text.
+    ...(options.ciWaitPosted ? [`--ci-wait-posted=${options.ciWaitPosted}`] : []),
     "--method",
     policy.method,
     ...(policy.review ? [] : ["--no-review"]),
@@ -254,6 +258,7 @@ export function runAutoMergeViaCli(
   const prUrl = `https://github.com/${repo}/pull/${prNumber}`;
   const args = autoMergeCliArgs(opts.policy, opts.expectedHeadSha, {
     lastAttempt: opts.lastAttempt,
+    ciWaitPosted: opts.ciWaitPosted,
   });
   const { harnessPin } = opts;
   return serializePrRun(repo, prNumber, async () => {

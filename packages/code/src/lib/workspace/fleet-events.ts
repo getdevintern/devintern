@@ -351,7 +351,7 @@ export function createFleetAutoMerge(
   slug: string,
   prNumber: number,
   expectedHeadSha: string,
-  options?: { lastAttempt: boolean; onStart?: () => void; runId?: number },
+  options?: { lastAttempt: boolean; onStart?: () => void; runId?: number; ciWaitPosted?: string },
 ) => Promise<AutoMergeResult> {
   const { config, workspaceDir, repoManager } = deps;
   const runAutoMerge = deps.runAutoMerge ?? runAutoMergeViaCli;
@@ -383,6 +383,7 @@ export function createFleetAutoMerge(
         expectedHeadSha,
         lastAttempt: options?.lastAttempt ?? false,
         ...(options?.runId !== undefined ? { runId: options.runId } : {}),
+        ...(options?.ciWaitPosted !== undefined ? { ciWaitPosted: options.ciWaitPosted } : {}),
         cwd: base,
         env: prJobEnv(config, buildFleetEventEnv(config, repo, workspaceDir, { agentSelection })),
         harnessPin: agentSelection?.harness,

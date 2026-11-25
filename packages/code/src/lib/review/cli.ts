@@ -225,6 +225,8 @@ interface AutoMergeCommandArgs {
   expectedHeadSha?: string;
   dryRun: boolean;
   lastAttempt: boolean;
+  /** Worker-internal: the CI wait the PR already shows. */
+  ciWaitPosted?: string;
   verbose: boolean;
   policy: import("./auto-merge").AutoMergePolicy;
 }
@@ -393,6 +395,9 @@ function parseAutoMergeFlags(
       policy.reviewLabel = "";
     } else if (arg === "--dry-run") {
       parsed.dryRun = true;
+    } else if (arg.startsWith("--ci-wait-posted=")) {
+      // Worker-internal: the same CI wait is not re-posted to the PR.
+      parsed.ciWaitPosted = arg.slice("--ci-wait-posted=".length);
     } else if (arg === "--last-attempt") {
       // Worker-internal: a failure on this attempt is stated on the PR.
       parsed.lastAttempt = true;
@@ -440,7 +445,7 @@ function customRulesUsageError(policy: AutoMergeCommandArgs["policy"]): string |
 export async function runAutoMergeCommand(args: string[]): Promise<void> {
   const parsed = parseAutoMergeArgs(args, await import("./merge-gate"));
   if (!parsed) return;
-  const { prUrl, expectedHeadSha, dryRun, lastAttempt, verbose, policy } = parsed;
+  const { prUrl, expectedHeadSha, dryRun, lastAttempt, ciWaitPosted, verbose, policy } = parsed;
 
   if (!prUrl) {
     console.error("❌ Error: PR URL is required");
@@ -457,6 +462,7 @@ export async function runAutoMergeCommand(args: string[]): Promise<void> {
       expectedHeadSha,
       dryRun,
       lastAttempt,
+      ...(ciWaitPosted ? { ciWaitPosted } : {}),
       verbose,
     });
     const resultFd = Number(process.env.DEVINTERN_RESULT_FD);

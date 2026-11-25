@@ -4,8 +4,9 @@
  *
  * Each tick, for every open PR in the `agent_prs` registry, a cheap in-process
  * precheck (one ETag-cached PR GET) looks for PRs that are open, not drafts,
- * not forks, reported mergeable with passing checks (`clean`/`has_hooks`),
- * and whose head has been stable for the quiet period. Only those spawn
+ * not forks, reported mergeable (`clean`/`has_hooks`) or held by checks
+ * (`unstable`/`blocked`, so a failing or pending check is reported on the
+ * PR), and whose head has been stable for the quiet period. Only those spawn
  * `devintern auto-merge <pr-url> --expected-head <sha>`, which runs the real
  * gates (reviews, path policy, optional agent review) and merges.
  *
@@ -21,7 +22,8 @@
  * head commit's CI checks (no passing check, pending, failing) is kept as
  * `escalated` the first time each reason is seen for a head, because the
  * PR is labeled for a human and the dashboard should say why; repeats of
- * the same wait are discarded so a repo without CI does not fill the list.
+ * the same wait are discarded so a repo without CI does not fill the list,
+ * and are not re-posted to the PR (the comment and label are already there).
  *
  * Agent usage limits never drop a PR: the evaluation is `deferred` with the
  * quota's reset time, kept in the run list as **Deferred**, and the PR is
@@ -70,6 +72,8 @@ export interface AutoMergeWatcherOptions {
       onStart?: () => void;
       /** The run row opened for this check; its review transcript is attributed to it. */
       runId?: number;
+      /** The CI wait this head's PR already shows; the same wait is not re-posted. */
+      ciWaitPosted?: string;
     },
   ): Promise<AutoMergeResult>;
   runStore?: Pick<RunStore, "createRun" | "finishRun" | "discardRun"> &
@@ -114,8 +118,12 @@ const DEFERRED_BACKOFF_MS = 5 * 60_000;
 const FAILURE_BACKOFF_BASE_MS = 5 * 60_000;
 const FAILURE_BACKOFF_MAX_MS = 30 * 60_000;
 
-/** `mergeable_state` values meaning "mergeable and checks passing". */
-const READY_STATES = new Set(["clean", "has_hooks"]);
+/**
+ * `mergeable_state` values worth evaluating: mergeable (`clean`,
+ * `has_hooks`), or held by checks (`unstable`, `blocked`), so a failing or
+ * pending check is reported on the PR. The gates decide from there.
+ */
+const EVALUATED_STATES = new Set(["clean", "has_hooks", "unstable", "blocked"]);
 
 interface PrTracking {
   headSha: string;
@@ -123,7 +131,11 @@ interface PrTracking {
   headSeenAt: number;
   failures: number;
   nextAttemptAt: number;
-  /** Message of the last CI wait kept in the run list for this head. */
+  /**
+   * Message of the last CI wait for this head: already on the PR (status
+   * comment and label) and in the run list, so a repeat is neither re-posted
+   * nor recorded again.
+   */
   ciWaitRecorded?: string;
   etag?: string;
   cached?: AutoMergePolledPr;
@@ -320,7 +332,7 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
       return;
     }
     if (this.skipStacked(repo, prNumber, pr)) return;
-    if (!READY_STATES.has(pr.mergeable_state ?? "")) return;
+    if (!EVALUATED_STATES.has(pr.mergeable_state ?? "")) return;
     const quietMs = (this.options.quietSeconds ?? DEFAULT_AUTO_MERGE_QUIET_SECONDS) * 1000;
     if (!force && now - state.headSeenAt < quietMs) return;
     const decisionKey = autoMergeDecisionKey(
@@ -378,16 +390,21 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
     // grants the repo's slot it is waiting, not evaluating.
     this.recordStep(runId, AUTO_MERGE_WAITING_STEP);
     const maxAttempts = this.options.maxAttempts ?? DEFAULT_AUTO_MERGE_MAX_ATTEMPTS;
+    const previousCiWait = state.ciWaitRecorded;
     let result: AutoMergeResult;
     try {
       result = await this.options.mergePr(repo, prNumber, state.headSha, {
         lastAttempt: state.failures + 1 >= maxAttempts,
         onStart: () => this.recordStep(runId, AUTO_MERGE_CHECK_STEP),
         ...(runId !== null ? { runId } : {}),
+        ...(previousCiWait !== undefined ? { ciWaitPosted: previousCiWait } : {}),
       });
     } catch (error) {
       result = { outcome: "failed", message: (error as Error).message, reviewed: false };
     }
+    // Any other result may have changed the status comment, so the next
+    // CI wait is posted again.
+    state.ciWaitRecorded = result.ciWait ? result.message : undefined;
     const label = `${repo}#${prNumber}`;
     const finishedAt = this.now();
 
@@ -441,7 +458,7 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
     if (result.outcome !== "waiting" || this.options.verbose) {
       console.log(`${icon} [${this.name}] ${label} ${result.outcome}: ${result.message}`);
     }
-    this.endRun(runId, result, state);
+    this.endRun(runId, result, result.ciWait === true && previousCiWait === result.message);
   }
 
   /** Open an in-progress run so the dashboard shows the evaluation live. */
@@ -475,7 +492,7 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
   }
 
   /** Keep decisions in the run list; drop "not ready yet" checks. */
-  private endRun(runId: number | null, result: AutoMergeResult, state: PrTracking): void {
+  private endRun(runId: number | null, result: AutoMergeResult, repeatedCiWait: boolean): void {
     const { runStore } = this.options;
     if (!runStore || runId === null) return;
     try {
@@ -485,13 +502,11 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
         runStore.finishRun(runId, "escalated", result.message);
       } else if (result.outcome === "failed") {
         runStore.finishRun(runId, "failed", result.message);
-      } else if (
-        result.outcome === "waiting" &&
-        result.ciWait &&
-        state.ciWaitRecorded !== result.message
-      ) {
-        // Left open with a status comment and label: show why on the dashboard.
-        state.ciWaitRecorded = result.message;
+      } else if (result.outcome === "waiting" && result.ciWait && !repeatedCiWait) {
+        // Left open with a status comment and the review label: show why on
+        // the dashboard. Recorded as `escalated` ("handed to a human") like
+        // other holds, so run counts include CI waits; the same head can
+        // still merge later without new commits.
         runStore.finishRun(runId, "escalated", result.message);
       } else if (result.outcome === "deferred" && result.retryAt !== undefined) {
         // Visible as waiting on quota until the review resumes.

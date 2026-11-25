@@ -184,6 +184,16 @@ describe("--allow-no-checks", () => {
     );
   });
 
+  test("the CI wait already posted round-trips through the worker's CLI args", () => {
+    const policy = { safePaths: [], denyPaths: [], review: true, method: "squash" as const };
+    const message = "Ready gate: CI check failed: unit tests, --lint.";
+    const args = autoMergeCliArgs(policy, "a".repeat(40), { ciWaitPosted: message });
+    expect(parseAutoMergeArgs(["https://github.com/o/r/pull/1", ...args], gate)?.ciWaitPosted).toBe(
+      message,
+    );
+    expect(autoMergeCliArgs(policy, "a".repeat(40)).join(" ")).not.toContain("--ci-wait-posted");
+  });
+
   test("the subprocess result carries the CI-wait flag", () => {
     expect(
       parseAutoMergeResultLine(

@@ -42,7 +42,7 @@ import { Utils } from "../utils";
 import { AUTO_MERGE_COMMENT_MARKER, buildAutoMergeStatusComment } from "./auto-merge-comment";
 import type { AutoMergeCommentStatus, LeftOpenReason } from "./auto-merge-comment";
 import { evaluateCiChecks, normalizeCiChecks } from "./ci-checks";
-import type { CiCheck } from "./ci-checks";
+import type { CiCheck, CiChecksVerdict } from "./ci-checks";
 import {
   classifyChangedPaths,
   DEFAULT_MERGE_SAFETY_POLICY,
@@ -153,6 +153,12 @@ export interface AutoMergeOptions {
   lastAttempt?: boolean;
   /** Skip PR comments (tests). */
   noComment?: boolean;
+  /**
+   * Message of the CI wait this head's status comment and label already
+   * show (from the worker's previous check): the same wait again skips
+   * re-posting them.
+   */
+  ciWaitPosted?: string;
   /** Time limit for reading the head commit's CI checks (default {@link CI_CHECKS_TIMEOUT_MS}). */
   ciChecksTimeoutMs?: number;
   verbose?: boolean;
@@ -392,12 +398,14 @@ function defaultGitHub(owner: string, repo: string, prNumber: number): AutoMerge
   };
 }
 
-/** Gate 0 on a freshly fetched PR; `null` means ready. */
-function preconditionFailure(
+type Precondition = Pick<AutoMergeResult, "outcome" | "message">;
+
+/** Gate 0 without `mergeable_state`: open, not a fork, not a draft, head unchanged. */
+function identityFailure(
   pr: PullRequestInfo,
   baseRepo: string,
   expectedHeadSha: string | undefined,
-): Pick<AutoMergeResult, "outcome" | "message"> | null {
+): Precondition | null {
   if (pr.state !== "open") return { outcome: "skipped", message: `PR is ${pr.state}` };
   if (pr.head.repo && pr.head.repo.full_name.toLowerCase() !== baseRepo.toLowerCase()) {
     return { outcome: "skipped", message: "fork PRs are never auto-merged" };
@@ -406,11 +414,30 @@ function preconditionFailure(
   if (expectedHeadSha && pr.head.sha !== expectedHeadSha) {
     return { outcome: "waiting", message: "PR head moved since it was checked" };
   }
-  if (!MERGEABLE_STATES.has(pr.mergeable_state ?? "")) {
-    return { outcome: "waiting", message: describeMergeableState(pr.mergeable_state) };
-  }
   return null;
 }
+
+/** Gate 0's `mergeable_state` part; `null` means GitHub reports the PR mergeable. */
+function mergeableStateFailure(pr: PullRequestInfo): Precondition | null {
+  if (MERGEABLE_STATES.has(pr.mergeable_state ?? "")) return null;
+  return { outcome: "waiting", message: describeMergeableState(pr.mergeable_state) };
+}
+
+/** Gate 0 on a freshly fetched PR; `null` means ready. */
+function preconditionFailure(
+  pr: PullRequestInfo,
+  baseRepo: string,
+  expectedHeadSha: string | undefined,
+): Precondition | null {
+  return identityFailure(pr, baseRepo, expectedHeadSha) ?? mergeableStateFailure(pr);
+}
+
+/**
+ * `mergeable_state` values GitHub uses when commit checks hold the PR:
+ * `unstable` (a non-required check is failing or pending) and `blocked`
+ * (a required check has not passed, or another branch-protection rule).
+ */
+const CI_HELD_STATES = new Set(["unstable", "blocked"]);
 
 /** Context shared by the gate helpers for one evaluation. */
 interface GateContext {
@@ -471,17 +498,9 @@ async function withTimeout<T>(promise: Promise<T>, ms: number, message: string):
  * closed as a retryable failure.
  */
 async function ciChecksGate(ctx: GateContext, safeOnly: boolean): Promise<MergeDecision | null> {
-  const { options, github, pr } = ctx;
-  const timeoutMs = options.ciChecksTimeoutMs ?? CI_CHECKS_TIMEOUT_MS;
-  let checks: CiCheck[];
-  try {
-    checks = await withTimeout(
-      github.listCiChecks(pr.head.sha),
-      timeoutMs,
-      `timed out after ${Math.round(timeoutMs / 1000)}s`,
-    );
-  } catch (error) {
-    const detail = `The CI check status for this commit could not be read: ${(error as Error).message}.`;
+  const read = await readCiChecks(ctx);
+  if (!read.ok) {
+    const detail = `The CI check status for this commit could not be read: ${read.error}.`;
     return {
       kind: "stop",
       outcome: "failed",
@@ -490,10 +509,47 @@ async function ciChecksGate(ctx: GateContext, safeOnly: boolean): Promise<MergeD
       leftOpen: { kind: "ci-checks", problem: "unreadable", detail },
     };
   }
-  const verdict = evaluateCiChecks(checks, {
-    requireSuccess: !safeOnly && !options.policy.allowNoChecks,
+  const verdict = evaluateCiChecks(read.checks, {
+    requireSuccess: !safeOnly && !ctx.options.policy.allowNoChecks,
   });
-  if (verdict.ready) return null;
+  return verdict.ready ? null : ciWaitDecision(verdict);
+}
+
+/** The head commit's checks, read under the time limit. */
+async function readCiChecks(
+  ctx: GateContext,
+): Promise<{ ok: true; checks: CiCheck[] } | { ok: false; error: string }> {
+  const timeoutMs = ctx.options.ciChecksTimeoutMs ?? CI_CHECKS_TIMEOUT_MS;
+  try {
+    const checks = await withTimeout(
+      ctx.github.listCiChecks(ctx.pr.head.sha),
+      timeoutMs,
+      `timed out after ${Math.round(timeoutMs / 1000)}s`,
+    );
+    return { ok: true, checks };
+  } catch (error) {
+    return { ok: false, error: (error as Error).message };
+  }
+}
+
+/**
+ * Gate 0 when GitHub reports `unstable` or `blocked`: if a failing or
+ * pending check on the head is why, the PR waits with that reason in its
+ * status comment and label (as the CI part of the Ready gate would).
+ * `null` when the checks don't explain the state (another protection rule,
+ * or they could not be read): the plain `mergeable_state` wait applies.
+ */
+async function ciHoldFromMergeableState(ctx: GateContext): Promise<MergeDecision | null> {
+  if (!CI_HELD_STATES.has(ctx.pr.mergeable_state ?? "")) return null;
+  const read = await readCiChecks(ctx);
+  if (!read.ok) return null;
+  // Failing and pending checks are reported before the success requirement.
+  const verdict = evaluateCiChecks(read.checks, { requireSuccess: false });
+  return verdict.ready ? null : ciWaitDecision(verdict);
+}
+
+/** A wait on the head commit's CI checks (status comment, label, dashboard). */
+function ciWaitDecision(verdict: Extract<CiChecksVerdict, { ready: false }>): MergeDecision {
   return {
     kind: "stop",
     outcome: "waiting",
@@ -676,7 +732,7 @@ export async function autoMergePr(
 
   // Gate 0: preconditions.
   const pr = await github.getPullRequest();
-  const notReady = preconditionFailure(pr, baseRepo, options.expectedHeadSha);
+  const notReady = identityFailure(pr, baseRepo, options.expectedHeadSha);
   if (notReady) return { ...notReady, reviewed: false };
   const blockers = outstandingChangeRequests(await github.listReviews());
   if (blockers.length > 0) {
@@ -688,7 +744,15 @@ export async function autoMergePr(
   }
 
   const ctx: GateContext = { options, github, baseRepo, prNumber, pr };
-  const decision = await decideMerge(ctx);
+  const notMergeable = mergeableStateFailure(pr);
+  let decision: MergeDecision;
+  if (notMergeable) {
+    const ciHold = await ciHoldFromMergeableState(ctx);
+    if (!ciHold) return { ...notMergeable, reviewed: false };
+    decision = ciHold;
+  } else {
+    decision = await decideMerge(ctx);
+  }
   const result: AutoMergeResult =
     decision.kind === "stop"
       ? {
@@ -699,7 +763,12 @@ export async function autoMergePr(
         }
       : { ...(await mergeAtHead(ctx, decision)), reviewed: decision.reviewed };
   const finalFailure = result.outcome === "failed" && options.lastAttempt;
-  if (decision.kind === "stop" && decision.leftOpen && !finalFailure) {
+  // A CI wait the PR already shows (same head, same reason) is not re-posted.
+  const alreadyPosted =
+    decision.kind === "stop" && decision.ciWait && decision.message === options.ciWaitPosted;
+  if (alreadyPosted) {
+    // Status comment and label are already in place.
+  } else if (decision.kind === "stop" && decision.leftOpen && !finalFailure) {
     await postStatus(ctx, { kind: "left-open", headSha: pr.head.sha, reason: decision.leftOpen });
   } else if (finalFailure) {
     // The worker stops retrying this head after this attempt.

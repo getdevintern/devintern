@@ -135,7 +135,7 @@ Globs are repo-relative; `docs/` means `docs/**`. A rename counts both paths. Pe
 
 ### Repositories without CI
 
-A code PR that waits on CI stays open with `auto_merge_review_label`, and its status comment gives the reason, for example "No CI checks reported for this commit; auto-merge needs at least one passing check." The worker keeps checking the same commit, so the PR merges once CI reports a passing check, even if CI registers its checks late. The same reason shows on the dashboard's **Auto-merge** entry and in `devintern auto-merge <pr-url> --dry-run`. If the check status cannot be read, the PR is not merged and the check is retried like any other failure.
+A PR that waits on CI stays open with `auto_merge_review_label`, and its status comment gives the reason: the failing check by name, the checks still pending, or "No CI checks reported for this commit; auto-merge needs at least one passing check." The worker keeps checking the same commit, so the PR merges once CI reports a passing check, even if CI registers its checks late. The same reason shows on the dashboard's **Auto-merge** entry and in `devintern auto-merge <pr-url> --dry-run`. If the check status cannot be read, the PR is not merged and the check is retried like any other failure. On the dashboard's run list, a PR waiting on CI counts as escalated (handed to a human) until it merges.
 
 For a repository that has no CI, let its code PRs merge on the remaining gates (deny paths and the agent review):
 
