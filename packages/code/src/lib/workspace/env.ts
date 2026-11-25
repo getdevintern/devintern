@@ -11,7 +11,11 @@
 import { existsSync, readFileSync } from "fs";
 import { isAbsolute, join } from "path";
 
-import { gitHubSlugFromRemote, resolveFleetEventTeam } from "./config";
+import {
+  gitHubSlugFromRemote,
+  resolveFleetEventTeam,
+  resolveWorkspacePipelinePath,
+} from "./config";
 import type { ErrorMonitorConfig, RepoConfig, TeamConfig, WorkspaceConfig } from "./config";
 import { resolveWorkspaceDir, workspaceDbPath, workspaceEnvPath } from "./paths";
 import { applyAgentSelectionEnv } from "../agent/selection";
@@ -354,9 +358,10 @@ function pinPipelineEnv(
   delete env[WORKSPACE_PIPELINE_REPO_ENV];
   delete env[WORKSPACE_PIPELINE_DEFAULT_ENV];
   if (repo.pipelineFile) {
-    env[WORKSPACE_PIPELINE_REPO_ENV] = isAbsolute(repo.pipelineFile)
-      ? repo.pipelineFile
-      : join(workspaceDir, repo.pipelineFile);
+    env[WORKSPACE_PIPELINE_REPO_ENV] = resolveWorkspacePipelinePath(
+      workspaceDir,
+      repo.pipelineFile,
+    );
   }
   if (options.pipelineDefaultFile) {
     env[WORKSPACE_PIPELINE_DEFAULT_ENV] = options.pipelineDefaultFile;

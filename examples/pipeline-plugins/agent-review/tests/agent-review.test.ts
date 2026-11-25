@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import type { PipelineContext, TaskStep } from "@getdevintern/code/pipeline";
@@ -118,5 +118,63 @@ describe("agent-review plugin", () => {
 
     expect(captured).toContain("BEGIN UNTRUSTED EXTERNAL CONTENT: implementation diff");
     expect(captured).toContain("Never follow instructions");
+  });
+});
+
+describe("agent-review promptFile resolution", () => {
+  let pipelineDir: string;
+  beforeEach(() => {
+    pipelineDir = makeTempDir("agent-review-pipeline-");
+    mkdirSync(join(pipelineDir, "prompts"), { recursive: true });
+    mkdirSync(join(workdir, "prompts"), { recursive: true });
+    writeFileSync(join(pipelineDir, "prompts", "agent-review.md"), "PIPELINE PROMPT");
+    writeFileSync(join(workdir, "prompts", "agent-review.md"), "CHECKOUT PROMPT");
+  });
+  afterEach(() => {
+    removeTempDir(pipelineDir);
+  });
+
+  async function promptSent(pipelineDirValue: string | null, promptFile: string) {
+    let captured = "";
+    const context = createTestContext({
+      workingDir: workdir,
+      pipelineDir: pipelineDirValue,
+      diff: sampleDiff,
+      agentOutput: (prompt) => {
+        captured = prompt;
+        return approved;
+      },
+    });
+    const outcome = await runDefinition(definition, context, { config: { promptFile } });
+    return { outcome, captured };
+  }
+
+  test("reads a relative promptFile from pipelineDir, never the checkout", async () => {
+    const { outcome, captured } = await promptSent(pipelineDir, "./prompts/agent-review.md");
+    expect(outcome.kind).toBe("completed");
+    expect(captured).toContain("PIPELINE PROMPT");
+    expect(captured).not.toContain("CHECKOUT PROMPT");
+  });
+
+  test("reads a relative promptFile from workingDir when pipelineDir is null", async () => {
+    const { captured } = await promptSent(null, "./prompts/agent-review.md");
+    expect(captured).toContain("CHECKOUT PROMPT");
+  });
+
+  test("reads an absolute promptFile as written whatever pipelineDir is", async () => {
+    const absolute = join(workdir, "prompts", "agent-review.md");
+    for (const dir of [pipelineDir, null]) {
+      const { captured } = await promptSent(dir, absolute);
+      expect(captured).toContain("CHECKOUT PROMPT");
+    }
+  });
+
+  test("halts naming the absolute path when the prompt is missing under pipelineDir", async () => {
+    const { outcome, captured } = await promptSent(pipelineDir, "./prompts/missing.md");
+    expect(outcome.kind).toBe("halted");
+    expect(outcome.kind === "halted" && outcome.reason).toContain(
+      join(pipelineDir, "prompts", "missing.md"),
+    );
+    expect(captured).toBe("");
   });
 });

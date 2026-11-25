@@ -14,7 +14,7 @@
     { "use": "auto-review" },
     {
       "use": "pr-explainer-image",
-      "promptFile": "/home/you/.devintern/pipelines/prompts/pr-explainer-image.md"
+      "promptFile": "./prompts/pr-explainer-image.md"
     },
     { "use": "finalize" }
   ]
