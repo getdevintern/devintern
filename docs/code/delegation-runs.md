@@ -103,13 +103,28 @@ and exits `3`, so scripts can tell a withdrawn task from a failed run (`1`).
   expired token or a rate limit), a recorded PR starts a fresh attempt. A
   task that never started is still `pending` and needs no resume. A
   [cancelled](./delegation.md#cancel-a-pending-task) task cannot be resumed.
-- **Unfinished work is saved.** When a worker run fails or is handed back
+- **Unfinished work is saved.** When a worker run fails for any reason
+  (including failed verification or a crash mid-edit) or is handed back
   (`escalated`) after the agent started implementing, uncommitted changes are
   committed to the task branch as a `wip(<taskKey>)` commit and the branch is
-  pushed (never force-pushed), so `--resume` continues from it. The run's
-  outcome in `worker queue` and the dashboard names the branch. If the push
-  fails (for example someone else pushed to that branch), the worktree is kept
-  and the outcome shows its path instead.
+  pushed to `origin` (never force-pushed), so `--resume` continues from it.
+  That commit is unreviewed agent output, and everything not covered by
+  `.gitignore` goes into it except secret-looking files (`.env*` other than
+  templates such as `.env.example`, `*.pem`, `*.key`, `id_rsa`, `.npmrc`,
+  `credentials.json`), which stay uncommitted in a kept worktree; the outcome
+  lists the files that were committed. A branch that already has an open PR
+  is never pushed to, so unreviewed work does not land on the PR; the WIP
+  commit stays in a kept worktree instead. Outside GitHub, where the PR check
+  is unavailable, this applies to any branch already on `origin`. Set `DEVINTERN_PUSH_UNFINISHED_WORK=0` in the
+  worker's environment or workspace `.env` to keep such work in the local
+  worktree instead and push nothing. The run's
+  outcome in `worker queue` and the dashboard names the branch. Your Git
+  hooks (such as a secret scanner) run on that commit and push. If a hook
+  rejects them, the tree has unresolved conflicts, or the push fails (for
+  example someone else pushed to that branch), nothing is pushed: the worktree
+  is kept and the outcome shows its path instead. Kept worktrees are not
+  deleted after `worktrees_ttl_days`; remove them yourself once the work is
+  saved.
 - **A graceful shutdown does not launder a real failure.** Draining the worker
   aborts running task children; the aborted run is reported as _interrupted_,
   so its row stays `running` for the successor's startup recovery. A pipeline

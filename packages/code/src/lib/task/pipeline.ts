@@ -396,8 +396,9 @@ export async function settleImplementationRun(input: {
   if (isMarkdownTaskTracker(tracker) && disposition.status === "succeeded") {
     await tracker.markDoneIfSuccessful(workflowKey, taskDir);
   }
-  if (implementationIncomplete) {
-    const stackBlocked = runContext.activeTaskContext?.stackBlocked;
+  // A closed stacked base escalates even without the incomplete summary (skipped during shutdown).
+  const stackBlocked = runContext.activeTaskContext?.stackBlocked;
+  if (implementationIncomplete || stackBlocked) {
     await finishUnfinishedRun(
       "escalated",
       stackBlocked

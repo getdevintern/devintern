@@ -122,20 +122,54 @@ export async function rebaseOntoBase(
     if (conflicted || /CONFLICT|could not apply/i.test(output)) {
       return { kind: "conflict", detail: tail(output) };
     }
+    // An untracked file at a path `onto` adds stops git before it detaches
+    // HEAD (the autostash leaves untracked files in place), so nothing moved;
+    // only a person can decide which copy wins.
+    if (/untracked working tree files would be overwritten/i.test(output)) {
+      return {
+        kind: "conflict",
+        detail: `untracked files would be overwritten by ${onto}: ${tail(output)}`,
+      };
+    }
     throw new Error(`rebase failed: ${tail(output)}`);
   }
-  // The rebase itself applied, but re-applying the autostash conflicted: the
-  // changes are safe in the stash and in the conflicted tree.
+  // The rebase itself applied, but re-applying the autostash conflicted: git
+  // left HEAD on the new base, conflict markers in the tree, and the changes
+  // in `refs/stash`. Undo the rebase and pop the stash onto the head it was
+  // taken from (which applies cleanly), so a conflict always leaves `HEAD`
+  // and the working tree as they were.
   if (input.autostash && (await unmerged())) {
-    return {
-      kind: "conflict",
-      detail: "re-applying uncommitted changes conflicted (kept in git stash)",
-    };
+    return restoreAfterStashConflict(git, head, onto);
   }
   const rebased = await revParse(git, "HEAD");
   if (!rebased) throw new Error("rebase left no HEAD");
   if (rebased === head) return { kind: "up-to-date", baseSha: ontoSha };
   return { kind: "rebased", headSha: rebased, baseSha: ontoSha };
+}
+
+async function restoreAfterStashConflict(
+  git: Git,
+  head: string,
+  onto: string,
+): Promise<RebaseOntoResult> {
+  const stash = await revParse(git, "refs/stash");
+  await git(["reset", "--hard", "--quiet", head]);
+  const pop = await git(["stash", "pop", "--quiet"]);
+  if (pop.success && !(await git(["diff", "--name-only", "--diff-filter=U"])).output.trim()) {
+    return {
+      kind: "conflict",
+      detail: `re-applying uncommitted changes onto ${onto} conflicted; the branch was left on its original base`,
+    };
+  }
+  // Should not happen (the stash was taken from `head`); leave a clean tree
+  // so nothing commits conflict markers, and name the stash holding the work.
+  await git(["reset", "--hard", "--quiet", head]);
+  return {
+    kind: "conflict",
+    detail:
+      `re-applying uncommitted changes onto ${onto} conflicted and they could not be restored; ` +
+      `they are in git stash ${stash ? stash.slice(0, 12) : "refs/stash"} (\`git stash list\`)`,
+  };
 }
 
 /** {@link StackGit} backed by the git CLI. */

@@ -1,8 +1,8 @@
 /**
  * Delivery-side wiring of `dependencies/stack-run.ts`: before a delivery step
- * that reads the stacked base (verify, auto-review, plugins, publish), make
- * sure the base still exists, and move the run to its merge target when it
- * merged mid-run.
+ * that reads the stacked base (commit, verify, auto-review, plugins, publish),
+ * make sure the base still exists, and move the run to its merge target when
+ * it merged mid-run.
  */
 
 import { PRManager } from "../code-host/manager";

@@ -1,11 +1,16 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
 import { defaultRunStackDeps, ensureStackBase } from "../src/lib/agent/stack-base-guard";
 import type { StackGuardState } from "../src/lib/agent/stack-base-guard";
-import { createGitHelpers } from "../src/lib/agent/run-harness-git";
+import { createGitHelpers, headAdvancedDuringRun } from "../src/lib/agent/run-harness-git";
+import {
+  commitImplementation,
+  ensureStackBaseBeforeCommit,
+} from "../src/lib/agent/run-harness-finalize";
+import type { DeliveryState } from "../src/lib/agent/run-harness-finalize";
 import { runContext } from "../src/lib/cli/context";
 import type { FinalizeContext } from "../src/lib/agent/run-harness-git";
 import { stackedOnFromDescription } from "../src/lib/code-host/pr-body";
@@ -283,6 +288,209 @@ describe("stacked run whose base moves mid-run", () => {
   });
 });
 
+describe("stacked run whose agent committed its own work before the base merged", () => {
+  let fx: Fixture;
+  const originals = {
+    executeGitCommand: Utils.executeGitCommand,
+    commitChanges: Utils.commitChanges,
+    isProtectedBranch: Utils.isProtectedBranch,
+  };
+  const savedOptions = runContext.options;
+  beforeEach(() => {
+    fx = new Fixture();
+    resetStackBaseRelease();
+    // The delivery code runs git in process.cwd(); point it at the run clone.
+    Utils.executeGitCommand = (args, options) =>
+      originals.executeGitCommand(args, {
+        ...options,
+        cwd: options?.cwd ?? fx.run,
+        env: { HOME: fx.run, ...GIT_ENV, ...options?.env },
+      });
+    Utils.commitChanges = (key, summary, options) =>
+      originals.commitChanges(key, summary, { ...options, cwd: options?.cwd ?? fx.run });
+    Utils.isProtectedBranch = async (branch?: string) => branch === "main";
+    runContext.options = { verbose: false } as typeof runContext.options;
+  });
+  afterEach(() => {
+    Object.assign(Utils, originals);
+    runContext.options = savedOptions;
+    fx.cleanup();
+    resetStackBaseRelease();
+  });
+
+  function deliveryState(): DeliveryState {
+    return {
+      context: {
+        stackBase: base,
+        prTargetBranch: base.branch,
+        enableGit: true,
+        taskKey: "local-b",
+        taskSummary: "b",
+        hookRetries: 0,
+        allowNoChanges: false,
+        headBeforeRun: fx.aHead,
+      },
+      prTargetBranch: base.branch,
+      output: "",
+    } as unknown as DeliveryState;
+  }
+
+  test("a clean tree with agent commits is delivered after the pruned base merged", async () => {
+    // The agent committed everything; the tree is clean.
+    fx.commit(fx.run, "b.txt", "b1\nb2\n", "b2");
+    fx.squashMergeAndDeleteA();
+
+    // Without the guard, the commits-ahead count has no base ref to compare to.
+    expect(await commitImplementation(deliveryState())).toBe(false);
+
+    const state = deliveryState();
+    expect(
+      await ensureStackBaseBeforeCommit(state, deps(fx, basePr("merged", fx.aHead))),
+    ).toBeUndefined();
+    expect(state.context.prTargetBranch).toBe("main");
+    // The agent moved HEAD, so the pre-run baseline is left alone.
+    expect(state.context.headBeforeRun).toBe(fx.aHead);
+    expect(await commitImplementation(state)).toBe(true);
+    expect(state.committed).toBe(true);
+    expect(git(fx.run, "rev-list", "--count", "origin/main..HEAD")).toBe("2");
+    expect(git(fx.run, "diff", "--name-only", "origin/main...HEAD")).toBe("b.txt");
+  });
+
+  test("uncommitted work is committed on the merge target", async () => {
+    fx.squashMergeAndDeleteA();
+    const state = deliveryState();
+    expect(
+      await ensureStackBaseBeforeCommit(state, deps(fx, basePr("merged", fx.aHead))),
+    ).toBeUndefined();
+    expect(await commitImplementation(state)).toBe(true);
+    expect(git(fx.run, "status", "--porcelain")).toBe("");
+    expect(git(fx.run, "rev-list", "--count", "origin/main..HEAD")).toBe("2");
+    expect(git(fx.run, "diff", "--name-only", "origin/main...HEAD")).toBe("b.txt");
+  });
+
+  test("a HEAD the agent never moved stays a no-HEAD-move run after the rebase", async () => {
+    git(fx.run, "reset", "--quiet", "--hard", fx.aHead);
+    fx.squashMergeAndDeleteA();
+    const state = deliveryState();
+    expect(
+      await ensureStackBaseBeforeCommit(state, deps(fx, basePr("merged", fx.aHead))),
+    ).toBeUndefined();
+    expect(state.context.headBeforeRun).toBe(git(fx.run, "rev-parse", "origin/main"));
+    expect(await headAdvancedDuringRun(state.context)).toBe(false);
+  });
+});
+
+describe("stacked run whose branch is already on origin (resumed run)", () => {
+  let fx: Fixture;
+  beforeEach(() => {
+    fx = new Fixture();
+    resetStackBaseRelease();
+    // A preserved WIP branch (or an earlier attempt) published feature/b.
+    git(fx.run, "push", "--quiet", "origin", "feature/b");
+  });
+  afterEach(() => {
+    fx.cleanup();
+    resetStackBaseRelease();
+  });
+
+  test("the rebase is published with a lease, so publish's plain push succeeds", async () => {
+    const published = git(fx.remote, "rev-parse", "refs/heads/feature/b");
+    fx.squashMergeAndDeleteA();
+    const state = guardState();
+
+    expect(await ensureStackBase(state, deps(fx, basePr("merged", fx.aHead)))).toBeUndefined();
+    expect(state.context.prTargetBranch).toBe("main");
+    const head = git(fx.run, "rev-parse", "HEAD");
+    expect(head).not.toBe(published);
+    expect(git(fx.remote, "rev-parse", "refs/heads/feature/b")).toBe(head);
+    expect(git(fx.run, "rev-parse", "refs/remotes/origin/feature/b")).toBe(head);
+    expect(git(fx.run, "status", "--porcelain")).toBe("M b.txt");
+
+    // Publish: commit the remaining change and push without force.
+    git(fx.run, "commit", "--quiet", "-am", "b2");
+    const push = await Utils.pushCurrentBranch({ cwd: fx.run });
+    expect(push.message).not.toContain("diverged");
+    expect(push.success).toBe(true);
+    expect(git(fx.remote, "rev-parse", "refs/heads/feature/b")).toBe(
+      git(fx.run, "rev-parse", "HEAD"),
+    );
+  });
+
+  test("a remote branch with commits the run lacks blocks instead of rewriting it", async () => {
+    git(fx.work, "fetch", "--quiet", "origin");
+    git(fx.work, "checkout", "--quiet", "-b", "feature/b", "origin/feature/b");
+    fx.commit(fx.work, "other.txt", "theirs\n", "theirs");
+    git(fx.work, "push", "--quiet", "origin", "feature/b");
+    const theirs = git(fx.remote, "rev-parse", "refs/heads/feature/b");
+    fx.squashMergeAndDeleteA();
+    const head = git(fx.run, "rev-parse", "HEAD");
+    const state = guardState();
+
+    const halt = await ensureStackBase(state, deps(fx, basePr("merged", fx.aHead)));
+    expect(halt?.reason).toContain("has commits this run's checkout does not");
+    expect(state.context.prTargetBranch).toBe("feature/a");
+    expect(git(fx.run, "rev-parse", "HEAD")).toBe(head);
+    expect(git(fx.remote, "rev-parse", "refs/heads/feature/b")).toBe(theirs);
+  });
+});
+
+describe("stacked run whose uncommitted work conflicts with the merge target", () => {
+  let fx: Fixture;
+  beforeEach(() => {
+    fx = new Fixture();
+    resetStackBaseRelease();
+  });
+  afterEach(() => {
+    fx.cleanup();
+    resetStackBaseRelease();
+  });
+
+  test("HEAD and the uncommitted change are restored, and nothing commits conflict markers", async () => {
+    fx.squashMergeAndDeleteA();
+    // main changes README.md; the run has an uncommitted edit to the same line.
+    fx.commit(fx.work, "README.md", "hello from main\n", "m1");
+    git(fx.work, "push", "--quiet", "origin", "main");
+    writeFileSync(join(fx.run, "README.md"), "hello from run\n");
+    const head = git(fx.run, "rev-parse", "HEAD");
+    const state = guardState();
+
+    const halt = await ensureStackBase(state, deps(fx, basePr("merged", fx.aHead)));
+    expect(halt?.reason).toContain("re-applying uncommitted changes onto main conflicted");
+    expect(state.context.prTargetBranch).toBe("feature/a");
+    expect(git(fx.run, "rev-parse", "HEAD")).toBe(head);
+    expect(git(fx.run, "diff", "--name-only", "--diff-filter=U")).toBe("");
+    expect(git(fx.run, "diff", "--name-only")).toBe("README.md\nb.txt");
+    expect(git(fx.run, "diff", "--cached", "--name-only")).toBe("");
+    expect(git(fx.run, "show", ":README.md")).toBe("hello");
+    expect(git(fx.run, "stash", "list")).toBe("");
+
+    const preserved = await preserveUnfinishedWork({
+      taskKey: "local-b",
+      cwd: fx.run,
+      git: boundGit(fx.run),
+    });
+    expect(preserved.kind).toBe("pushed");
+    expect(git(fx.remote, "show", "refs/heads/feature/b:README.md")).toBe("hello from run");
+  });
+  test("an untracked file at a path the merge target adds blocks with the hand-off reason", async () => {
+    fx.squashMergeAndDeleteA();
+    fx.commit(fx.work, "c.txt", "from main\n", "m1");
+    git(fx.work, "push", "--quiet", "origin", "main");
+    writeFileSync(join(fx.run, "c.txt"), "from run\n");
+    const head = git(fx.run, "rev-parse", "HEAD");
+    const state = guardState();
+
+    const halt = await ensureStackBase(state, deps(fx, basePr("merged", fx.aHead)));
+    expect(halt?.reason).toContain("rebasing this run's branch onto 'main' conflicted");
+    expect(halt?.reason).toContain("untracked files would be overwritten by main");
+    expect(state.context.prTargetBranch).toBe("feature/a");
+    expect(git(fx.run, "rev-parse", "HEAD")).toBe(head);
+    expect(readFileSync(join(fx.run, "c.txt"), "utf8")).toBe("from run\n");
+    expect(git(fx.run, "diff", "--name-only")).toBe("b.txt");
+    expect(git(fx.run, "stash", "list")).toBe("");
+  });
+});
+
 describe("preserveUnfinishedWork", () => {
   let fx: Fixture;
   let dbPath: string;
@@ -354,6 +562,7 @@ describe("preserveUnfinishedWork", () => {
       taskKey: "local-b",
       cwd: fx.run,
       git: boundGit(fx.run),
+      changeRequestState: async () => "none",
     });
     expect(preserved.kind).toBe("kept");
     expect(preserved.note).toContain(fx.run);
@@ -361,6 +570,97 @@ describe("preserveUnfinishedWork", () => {
     expect(await worktreeKeepReason(fx.run)).toContain("push of 'feature/b' failed");
     // The WIP commit is still in the kept worktree.
     expect(git(fx.run, "status", "--porcelain")).toBe("");
+  });
+
+  test("a branch with an open PR (failure after publish) gets no WIP push", async () => {
+    // Publish pushed the branch and opened a PR; a later step then failed.
+    git(fx.run, "stash", "--quiet");
+    git(fx.run, "push", "--quiet", "origin", "feature/b");
+    git(fx.run, "stash", "pop", "--quiet");
+    const published = git(fx.remote, "rev-parse", "refs/heads/feature/b");
+    const asked: string[] = [];
+
+    const preserved = await preserveUnfinishedWork({
+      taskKey: "local-b",
+      cwd: fx.run,
+      git: boundGit(fx.run),
+      changeRequestState: async (branch) => {
+        asked.push(branch);
+        return "open";
+      },
+    });
+    expect(asked).toEqual(["feature/b"]);
+    expect(preserved.kind).toBe("kept");
+    expect(preserved.note).toContain("has an open pull request");
+    expect(git(fx.remote, "rev-parse", "refs/heads/feature/b")).toBe(published);
+    // The WIP is committed locally in the kept worktree.
+    expect(git(fx.run, "log", "-1", "--format=%s")).toStartWith("wip(local-b)");
+    expect(await worktreeKeepReason(fx.run)).toContain("has an open pull request");
+  });
+
+  test("a branch on origin whose PR state is unknown gets no WIP push", async () => {
+    git(fx.run, "stash", "--quiet");
+    git(fx.run, "push", "--quiet", "origin", "feature/b");
+    git(fx.run, "stash", "pop", "--quiet");
+    const published = git(fx.remote, "rev-parse", "refs/heads/feature/b");
+
+    const preserved = await preserveUnfinishedWork({
+      taskKey: "local-b",
+      cwd: fx.run,
+      git: boundGit(fx.run),
+      changeRequestState: async () => {
+        throw new Error("rate limited");
+      },
+    });
+    expect(preserved.kind).toBe("kept");
+    expect(preserved.note).toContain("could not confirm");
+    expect(git(fx.remote, "rev-parse", "refs/heads/feature/b")).toBe(published);
+  });
+
+  test("a branch on origin with no open PR (resumed run) is pushed", async () => {
+    git(fx.run, "stash", "--quiet");
+    git(fx.run, "push", "--quiet", "origin", "feature/b");
+    git(fx.run, "stash", "pop", "--quiet");
+
+    const preserved = await preserveUnfinishedWork({
+      taskKey: "local-b",
+      cwd: fx.run,
+      git: boundGit(fx.run),
+      changeRequestState: async () => "none",
+    });
+    expect(preserved.kind).toBe("pushed");
+    expect(git(fx.remote, "rev-parse", "refs/heads/feature/b")).toBe(
+      git(fx.run, "rev-parse", "HEAD"),
+    );
+  });
+
+  test("secret-like files are never committed; the rest is pushed and listed", async () => {
+    writeFileSync(join(fx.run, ".env.local"), "TOKEN=abc\n");
+    writeFileSync(join(fx.run, ".env.example"), "TOKEN=\n");
+    mkdirSync(join(fx.run, "certs"), { recursive: true });
+    writeFileSync(join(fx.run, "certs", "server.pem"), "-----BEGIN-----\n");
+    writeFileSync(join(fx.run, "new.txt"), "new\n");
+
+    const preserved = await preserveUnfinishedWork({
+      taskKey: "local-b",
+      cwd: fx.run,
+      git: boundGit(fx.run),
+    });
+    expect(preserved).toMatchObject({ kind: "pushed", committed: true });
+    const files = git(fx.remote, "ls-tree", "-r", "--name-only", "refs/heads/feature/b").split(
+      "\n",
+    );
+    expect(files).toContain("new.txt");
+    expect(files).toContain(".env.example");
+    expect(files).not.toContain(".env.local");
+    expect(files).not.toContain("certs/server.pem");
+    expect(preserved.note).toContain("committed 3 files: .env.example, b.txt, new.txt");
+    expect(preserved.note).toContain(
+      "secret-like files not committed: .env.local, certs/server.pem",
+    );
+    // Still on disk, uncommitted, in a worktree the sweep will not remove.
+    expect(git(fx.run, "status", "--porcelain")).toContain(".env.local");
+    expect(await worktreeKeepReason(fx.run)).toContain(".env.local");
   });
 
   test("does nothing when everything is already on the remote", async () => {
@@ -373,5 +673,111 @@ describe("preserveUnfinishedWork", () => {
     });
     expect(preserved.kind).toBe("none");
     expect(existsSync(fx.run)).toBe(true);
+  });
+
+  test("sandbox placeholders alone are not work: nothing is committed or pushed", async () => {
+    git(fx.run, "checkout", "--quiet", "--", "b.txt");
+    git(fx.run, "push", "--quiet", "origin", "feature/b");
+    const head = git(fx.run, "rev-parse", "HEAD");
+    writeFileSync(join(fx.run, ".bashrc"), "");
+    writeFileSync(join(fx.run, ".gitconfig"), "");
+    mkdirSync(join(fx.run, ".claude"), { recursive: true });
+    writeFileSync(join(fx.run, ".claude", "x"), "");
+
+    const preserved = await preserveUnfinishedWork({
+      taskKey: "local-b",
+      cwd: fx.run,
+      git: boundGit(fx.run),
+    });
+    expect(preserved.kind).toBe("none");
+    expect(git(fx.run, "rev-parse", "HEAD")).toBe(head);
+    expect(git(fx.remote, "rev-parse", "refs/heads/feature/b")).toBe(head);
+  });
+
+  test("real work next to sandbox placeholders is saved without them", async () => {
+    writeFileSync(join(fx.run, ".bashrc"), "");
+    mkdirSync(join(fx.run, ".claude"), { recursive: true });
+    writeFileSync(join(fx.run, ".claude", "x"), "");
+    writeFileSync(join(fx.run, "new.txt"), "new\n");
+
+    const preserved = await preserveUnfinishedWork({
+      taskKey: "local-b",
+      cwd: fx.run,
+      git: boundGit(fx.run),
+    });
+    expect(preserved).toMatchObject({ kind: "pushed", committed: true });
+    const files = git(fx.remote, "ls-tree", "-r", "--name-only", "refs/heads/feature/b").split(
+      "\n",
+    );
+    expect(files).toContain("new.txt");
+    expect(files).toContain("b.txt");
+    expect(files).not.toContain(".bashrc");
+    expect(files).not.toContain(".claude/x");
+  });
+
+  test("DEVINTERN_PUSH_UNFINISHED_WORK=0 keeps the worktree and publishes nothing", async () => {
+    const previous = process.env.DEVINTERN_PUSH_UNFINISHED_WORK;
+    process.env.DEVINTERN_PUSH_UNFINISHED_WORK = "0";
+    try {
+      const head = git(fx.run, "rev-parse", "HEAD");
+      const preserved = await preserveUnfinishedWork({
+        taskKey: "local-b",
+        cwd: fx.run,
+        git: boundGit(fx.run),
+      });
+      expect(preserved.kind).toBe("kept");
+      expect(git(fx.run, "rev-parse", "HEAD")).toBe(head);
+      expect(git(fx.run, "status", "--porcelain")).toContain("b.txt");
+      expect(git(fx.remote, "for-each-ref", "refs/heads/feature/b")).toBe("");
+      expect(await worktreeKeepReason(fx.run)).toContain("DEVINTERN_PUSH_UNFINISHED_WORK=0");
+    } finally {
+      if (previous === undefined) delete process.env.DEVINTERN_PUSH_UNFINISHED_WORK;
+      else process.env.DEVINTERN_PUSH_UNFINISHED_WORK = previous;
+    }
+  });
+
+  test("does not commit unresolved conflict markers; keeps the worktree", async () => {
+    git(fx.run, "checkout", "--quiet", "--", "b.txt");
+    git(fx.run, "checkout", "--quiet", "-b", "side", "HEAD~1");
+    fx.commit(fx.run, "b.txt", "side\n", "side");
+    git(fx.run, "checkout", "--quiet", "feature/b");
+    Bun.spawnSync(["git", "merge", "side"], { cwd: fx.run, env: { ...process.env, ...GIT_ENV } });
+    expect(git(fx.run, "diff", "--name-only", "--diff-filter=U")).toBe("b.txt");
+
+    const preserved = await preserveUnfinishedWork({
+      taskKey: "local-b",
+      cwd: fx.run,
+      git: boundGit(fx.run),
+    });
+    expect(preserved.kind).toBe("kept");
+    expect(preserved.note).toContain("unresolved conflicts in b.txt");
+    expect(git(fx.remote, "for-each-ref", "refs/heads/feature/b")).toBe("");
+  });
+
+  test("a pre-commit hook rejecting the WIP commit keeps the worktree and pushes nothing", async () => {
+    const hook = join(fx.run, ".git", "hooks", "pre-commit");
+    writeFileSync(hook, "#!/bin/sh\necho 'secret detected' >&2\nexit 1\n", { mode: 0o755 });
+
+    const preserved = await preserveUnfinishedWork({
+      taskKey: "local-b",
+      cwd: fx.run,
+      git: boundGit(fx.run),
+    });
+    expect(preserved.kind).toBe("kept");
+    expect(preserved.note).toContain("secret detected");
+    expect(git(fx.remote, "for-each-ref", "refs/heads/feature/b")).toBe("");
+  });
+
+  test("a pre-push hook rejecting the push keeps the worktree", async () => {
+    const hook = join(fx.run, ".git", "hooks", "pre-push");
+    writeFileSync(hook, "#!/bin/sh\necho 'pre-push blocked' >&2\nexit 1\n", { mode: 0o755 });
+
+    const preserved = await preserveUnfinishedWork({
+      taskKey: "local-b",
+      cwd: fx.run,
+      git: boundGit(fx.run),
+    });
+    expect(preserved.kind).toBe("kept");
+    expect(git(fx.remote, "for-each-ref", "refs/heads/feature/b")).toBe("");
   });
 });

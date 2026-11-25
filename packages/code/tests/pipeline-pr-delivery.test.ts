@@ -228,4 +228,32 @@ describe("settleImplementationRun for a stacked run whose base closed", () => {
     expect(run?.outcomeReason).toBe(`implementation handed back to a human: ${reason}`);
     expect(readHint().status).toBe("escalated");
   });
+
+  test("escalates even when no incomplete summary was written (halt during shutdown)", async () => {
+    beginRun({ origin: "task", taskKey: "PROJ-STACK2" });
+    const runId = getActiveRunContext()!.id;
+    const reason = "stacked base PROJ-A PR #601 (branch 'feature/a') was closed without merging";
+    runContext.activeTaskContext = {
+      taskKey: "PROJ-STACK2",
+      tracker: trackerStub(),
+      projectKey: "PROJ",
+      movedToInProgress: true,
+      stackBlocked: reason,
+    };
+
+    await settleImplementationRun({
+      tracker: trackerStub(),
+      task: task as never,
+      workflowKey: "PROJ-STACK2",
+      taskDir: workDir,
+      incomplete: false,
+      outcome: undefined,
+    });
+
+    const run = readRun(runId);
+    expect(run?.status).toBe("escalated");
+    expect(run?.outcomeReason).toBe(`implementation handed back to a human: ${reason}`);
+    // Not settled through the delivered path: the ticket is not marked actioned.
+    expect(workerMeta("PROJ-STACK2").actioned).toBe(false);
+  });
 });

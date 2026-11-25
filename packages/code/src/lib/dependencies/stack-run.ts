@@ -5,8 +5,8 @@
  * `stacked-base.ts`). The base PR can merge (and its branch be deleted) while
  * the run is still implementing. The stack maintainer (`stack-maintainer.ts`)
  * only follows stacked PRs that already exist, so the run checks for itself
- * before each step that reads the base (verify and auto-review diffs, push,
- * PR creation):
+ * before each step that reads the base (the commit step's commits-ahead count,
+ * verify and auto-review diffs, push, PR creation):
  *
  * - **Base open, branch present**: nothing to do.
  * - **Base merged** (or its branch is gone and the code host cannot say why):
@@ -14,7 +14,9 @@
  *   default branch) and rebase the run's branch onto it, dropping the base's
  *   original commits, as the maintainer does for an open stacked PR. After a
  *   squash merge those commits are not on the target, so without the rebase
- *   the PR would show the base's changes again.
+ *   the PR would show the base's changes again. When the run's branch is
+ *   already on origin (a resumed run), the rebase is pushed right away with a
+ *   lease on that commit; a remote branch with commits the run lacks blocks.
  * - **Base closed without merging**: blocked. The caller preserves the work
  *   and escalates with {@link stackBaseRecoveryHint}'s actions.
  */
@@ -64,6 +66,48 @@ async function remoteHasBranch(git: Git, branch: string): Promise<boolean | unde
 async function revParse(git: Git, ref: string): Promise<string | null> {
   const result = await git(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]);
   return result.success ? result.output.trim() : null;
+}
+
+function tail(text: string): string {
+  return text
+    .trim()
+    .split("\n")
+    .filter((line) => line.trim() !== "" && !/^hint:/i.test(line.trim()))
+    .slice(-3)
+    .join(" | ");
+}
+
+type PublishedHead =
+  /** The branch is not on origin (or HEAD is detached): rebase freely. */
+  | { kind: "unpublished" }
+  /** origin has `branch` at `sha`, an ancestor of HEAD: lease on it. */
+  | { kind: "published"; branch: string; sha: string }
+  /** origin's branch cannot be checked, or has commits HEAD lacks. */
+  | { kind: "blocked"; detail: string };
+
+/** Where origin has the run's own branch, relative to `head`. */
+async function publishedHead(git: Git, head: string): Promise<PublishedHead> {
+  const branch = (await git(["branch", "--show-current"])).output.trim();
+  if (!branch) return { kind: "unpublished" };
+  const remote = await git(["ls-remote", "--heads", "origin", `refs/heads/${branch}`], {
+    GIT_TERMINAL_PROMPT: "0",
+  });
+  if (!remote.success) {
+    return { kind: "blocked", detail: `origin/${branch} could not be checked` };
+  }
+  const sha = remote.output.trim().split(/\s+/, 1)[0];
+  if (!sha) return { kind: "unpublished" };
+  if (!(await revParse(git, sha))) {
+    await git(["fetch", "--quiet", "origin", `refs/heads/${branch}`]);
+  }
+  const ancestor = await git(["merge-base", "--is-ancestor", sha, head]);
+  if (!ancestor.success) {
+    return {
+      kind: "blocked",
+      detail: `origin/${branch} (${sha.slice(0, 7)}) has commits this run's checkout does not`,
+    };
+  }
+  return { kind: "published", branch, sha };
 }
 
 /**
@@ -159,6 +203,17 @@ export async function reconcileRunStackBase(
   const head = await revParse(git, "HEAD");
   if (!head) throw new Error("the run's checkout has no HEAD");
 
+  // A resumed run's branch is usually already on origin. Rebasing rewrites
+  // that history, which publish's plain push rejects as divergence, so the
+  // guard publishes the rebase itself with a lease on the commit it checked.
+  const published = await publishedHead(git, head);
+  if (published.kind === "blocked") {
+    return {
+      kind: "blocked",
+      reason: `${why}, but ${published.detail}, so this run's branch was not rebased onto '${target}'. Rebase it onto '${target}' by hand and open the PR against it, or re-run this task.`,
+    };
+  }
+
   const rebase = await rebaseOntoBase(git, {
     head,
     ontoSha,
@@ -173,6 +228,30 @@ export async function reconcileRunStackBase(
         `${why}, but rebasing this run's branch onto '${target}' conflicted (${rebase.detail}). ` +
         `Resolve the conflict on the preserved branch and open the PR against '${target}', or re-run this task.`,
     };
+  }
+  if (rebase.kind === "rebased" && published.kind === "published") {
+    const { branch, sha } = published;
+    const push = await git(
+      [
+        "push",
+        `--force-with-lease=refs/heads/${branch}:${sha}`,
+        "origin",
+        `HEAD:refs/heads/${branch}`,
+      ],
+      { GIT_TERMINAL_PROMPT: "0" },
+    );
+    if (!push.success) {
+      return {
+        kind: "blocked",
+        reason:
+          `${why}; this run's branch '${branch}' was rebased onto '${target}' locally, but ` +
+          `updating origin/${branch} (${sha.slice(0, 7)}) failed: ${tail(`${push.output}\n${push.error ?? ""}`)}. ` +
+          `Push it with \`git push --force-with-lease=${branch}:${sha}\` and open the PR against '${target}', or re-run this task.`,
+      };
+    }
+    // Keep the tracking ref in step so publish sees the branch as pushed.
+    await git(["update-ref", `refs/remotes/origin/${branch}`, rebase.headSha]);
+    log(`📤 Updated origin/${branch} to the rebased branch (lease ${sha.slice(0, 7)})`);
   }
   const summary =
     rebase.kind === "rebased"
