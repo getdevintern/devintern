@@ -49,12 +49,12 @@ It writes `[defaults].tracker` and `task_query`, registers the current repositor
 | `--non-interactive` | off                | Use flags instead of prompts                                                                           |
 | `--tracker <id>`    | existing tracker   | `jira`, `linear`, `github`, `gitlab`, `azure-devops`, `asana`, `trello`, or `markdown`. Required for a new workspace |
 | `--task-query <q>`  | existing query     | Ready-tasks query in the tracker's language. Required for a new workspace                            |
-| `--repo-from-cwd`   | off                | Register the Git repository in the current directory. Its `origin` must be on GitHub                   |
+| `--repo-from-cwd`   | off                | Register the Git repository in the current directory, using its `origin` remote (any host), the same way `worker add-repo` does: its `.devintern-code/.env` is imported and a routing rule is seeded from its default project |
 | `--env-file <path>` | none               | Read credentials from this file (must be mode `0600`) and save them to the workspace `.env`           |
 | `--yes`             | off                | Update an existing `workspace.toml`: only the tracker, query, and repository named by the flags change |
 | `--json`            | off                | Print one JSON document on stdout instead of text                                                     |
 
-**Credentials.** Set the tracker's variables (for example `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`; see the tracker's integration page) and `GITHUB_TOKEN` in the environment, or put them in a file and pass `--env-file`. Secrets are never accepted as flags. If the file is readable by others, the command refuses it; fix it with `chmod 600 <file>`. When something is missing, the error lists every missing flag and variable.
+**Credentials.** Set the tracker's variables (for example `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`; see the tracker's integration page) and `GITHUB_TOKEN` in the environment, or put them in a file and pass `--env-file` (`KEY=value` lines; quotes and a leading `export` are allowed). Secrets are never accepted as flags. If the file is readable by others, the command refuses it; fix it with `chmod 600 <file>`. When something is missing, the error lists every missing flag and variable.
 
 **Output.** The command exits 0 when no check fails, and 1 otherwise. With `--json`, stdout holds only this document (`version` changes only when the shape breaks):
 

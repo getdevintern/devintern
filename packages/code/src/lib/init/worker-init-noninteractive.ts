@@ -18,34 +18,30 @@
  *    document). Secret values are redacted from every string in the report.
  */
 
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  renameSync,
-  statSync,
-  unlinkSync,
-  writeFileSync,
-} from "fs";
-import { join, resolve } from "path";
+import { existsSync, mkdirSync, readFileSync, statSync } from "fs";
+import { resolve } from "path";
 
-import { defaultProbe, parseEnvContent } from "@devintern/task-trackers";
+import { defaultProbe } from "@devintern/task-trackers";
 import { upsertEnvVars } from "@devintern/utils";
 
 import { redactUrlCredentials } from "../observability/dashboard-workspace";
 import { collectWorkerDoctorChecks } from "../observability/worker-readiness";
+import type { LicenseCheckOptions } from "@devintern/license-check";
 import type { WorkerDoctorDeps, WorkerEntitlementLike } from "../observability/worker-readiness";
 import type { ReadinessCheck } from "../observability/readiness";
 import { hasGitHubRelayRegistration, loadRelayState } from "../relay/connect";
 import { TRACKER_CAPABILITIES, trackersSupportingPolling } from "../trackers/capabilities";
 import { trackerRequiredEnv } from "../trackers/manager";
 import { Utils } from "../utils";
-import { isProcessAlive } from "../utils/repo-git-lock";
 import { gitHubSlugFromRemote, parseWorkspaceConfig } from "../workspace/config";
+import { parseEnvFile, parseEnvFileContent } from "../workspace/env";
 import {
   CONFIG_TEMPLATE,
   ENV_TEMPLATE,
   appendRepoEntry,
+  readRepoEnv,
+  repoDefaultProjectKey,
+  splitRepoEnv,
   upsertWorkspaceDefaults,
 } from "../workspace/init";
 import {
@@ -55,6 +51,19 @@ import {
   workspaceEnvPath,
 } from "../workspace/paths";
 import { TRACKER_SETUP } from "./scaffold";
+import {
+  acquireWorkspaceInitLock,
+  condenseMessage,
+  errorMessage,
+  writeFileAtomic,
+} from "./worker-init-fs";
+
+export {
+  WORKER_INIT_LOCK_FILE,
+  acquireWorkspaceInitLock,
+  condenseMessage,
+  removeStaleLock,
+} from "./worker-init-fs";
 
 /** `schema` value of the `--json` document. Bump `version` on breaking changes. */
 export const WORKER_INIT_JSON_SCHEMA = "devintern.worker-init";
@@ -63,9 +72,6 @@ export const WORKER_INIT_JSON_VERSION = 1;
 
 /** Per-probe timeout; keeps the whole command bounded when a service hangs. */
 const DEFAULT_PROBE_TIMEOUT_MS = 20_000;
-
-/** Lock file guarding concurrent writes to one workspace. */
-export const WORKER_INIT_LOCK_FILE = ".worker-init.lock";
 
 type Env = Record<string, string | undefined>;
 
@@ -125,6 +131,8 @@ export interface NonInteractiveInitDeps {
   probe?: (trackerId: string, env: Record<string, string>) => Promise<void>;
   /** Overrides for the `worker doctor` checks (tests). */
   doctor?: WorkerDoctorDeps;
+  /** License validator behind the default entitlement check; defaults to `checkLicense` (tests). */
+  checkLicense?: (options: LicenseCheckOptions) => Promise<WorkerEntitlementLike>;
   /** Per-probe timeout. */
   probeTimeoutMs?: number;
   /** Progress messages (human mode only). */
@@ -205,28 +213,6 @@ function unknownOptionMessage(flag: string): string {
   );
 }
 
-/** Longest message kept in a check row. */
-const MAX_MESSAGE_LENGTH = 300;
-
-/**
- * One bounded line: an HTML error page body (some trackers return one for
- * 404/5xx) is dropped, whitespace collapsed, and the result truncated.
- */
-export function condenseMessage(message: string): string {
-  const html = message.search(/<(!doctype|html)\b/i);
-  const text = (
-    html >= 0 ? `${message.slice(0, html).replace(/[\s:-]+$/, "")} (HTML error page)` : message
-  )
-    .replace(/\s+/g, " ")
-    .trim();
-  return text.length > MAX_MESSAGE_LENGTH ? `${text.slice(0, MAX_MESSAGE_LENGTH - 1)}…` : text;
-}
-
-/** Error message without a stack trace, on one bounded line. */
-function errorMessage(error: unknown): string {
-  return condenseMessage(error instanceof Error ? error.message : String(error));
-}
-
 /** Reject after `ms` so one hung API call cannot stall the command. */
 async function withTimeout<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -238,82 +224,6 @@ async function withTimeout<T>(promise: Promise<T>, ms: number, what: string): Pr
   } finally {
     if (timer) clearTimeout(timer);
   }
-}
-
-/** Write `content` to `path` via a sibling temp file and rename (atomic on POSIX). */
-function writeFileAtomic(path: string, content: string, mode?: number): void {
-  const temp = `${path}.${process.pid}.${Date.now()}.tmp`;
-  try {
-    writeFileSync(temp, content, mode === undefined ? undefined : { mode });
-    renameSync(temp, path);
-  } catch (error) {
-    try {
-      unlinkSync(temp);
-    } catch {
-      // Temp file was never created or is already gone.
-    }
-    throw error;
-  }
-}
-
-/**
- * Take the workspace write lock without waiting. A lock left by a dead
- * process is taken over once.
- *
- * @returns A release function, or an error message when another run holds it
- */
-export function acquireWorkspaceInitLock(
-  workspaceDir: string,
-): { ok: true; release: () => void } | { ok: false; error: string } {
-  const lockPath = join(workspaceDir, WORKER_INIT_LOCK_FILE);
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      writeFileSync(lockPath, JSON.stringify({ pid: process.pid, acquiredAt: Date.now() }), {
-        flag: "wx",
-        mode: 0o600,
-      });
-      return {
-        ok: true,
-        release: () => {
-          try {
-            unlinkSync(lockPath);
-          } catch {
-            // Already removed.
-          }
-        },
-      };
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
-        return { ok: false, error: `Cannot create ${lockPath}: ${errorMessage(error)}` };
-      }
-      let holder: number | undefined;
-      try {
-        const parsed: unknown = JSON.parse(readFileSync(lockPath, "utf8"));
-        if (typeof parsed === "object" && parsed !== null && "pid" in parsed) {
-          holder = typeof parsed.pid === "number" ? parsed.pid : undefined;
-        }
-      } catch {
-        holder = undefined;
-      }
-      if (holder !== undefined && isProcessAlive(holder)) {
-        return {
-          ok: false,
-          error:
-            `The workspace is being modified by another \`devintern worker init\` (pid ${holder}). ` +
-            `Wait for it to finish, then re-run. Lock: ${lockPath}`,
-        };
-      }
-      try {
-        unlinkSync(lockPath);
-      } catch {
-        // Another run removed it first; retry the create.
-      }
-    }
-  }
-  return {
-    ok: false,
-    error: `The workspace is being modified by another process (lock ${lockPath}); re-run.`,
-  };
 }
 
 /** Env keys whose values are secrets and must never be printed. */
@@ -328,12 +238,15 @@ export function redactSecrets(text: string, secrets: string[]): string {
   return next;
 }
 
-function secretValues(env: Env, extraKeys: Iterable<string>): string[] {
-  const keys = new Set(extraKeys);
+/**
+ * Values of the env keys that name a secret. Only {@link SECRET_KEY} matches
+ * count: non-secret settings such as `TASK_TRACKER=jira` or `JIRA_EMAIL` would
+ * otherwise mask every occurrence of their value in the report.
+ */
+function secretValues(env: Env): string[] {
   const values = new Set<string>();
   for (const [key, value] of Object.entries(env)) {
-    if (!value) continue;
-    if (SECRET_KEY.test(key) || keys.has(key)) values.add(value);
+    if (value && SECRET_KEY.test(key)) values.add(value);
   }
   // Longest first, so a secret containing another is redacted whole.
   return [...values].sort((a, b) => b.length - a.length);
@@ -358,17 +271,21 @@ function readEnvFile(
     };
   }
   try {
-    return { ok: true, values: parseEnvContent(readFileSync(path, "utf8")) };
+    return { ok: true, values: parseEnvFileContent(readFileSync(path, "utf8")) };
   } catch (error) {
     return { ok: false, error: `Cannot read --env-file ${path}: ${errorMessage(error)}` };
   }
 }
 
-/** Resolve the current checkout's GitHub `origin` for `--repo-from-cwd`. */
+/**
+ * Resolve the current checkout's `origin` for `--repo-from-cwd`. Any remote is
+ * accepted (as in `worker add-repo`); `slug` is set only for GitHub remotes and
+ * is used solely to default `GITHUB_REPO` for the github tracker.
+ */
 async function detectCwdRepo(
   cwd: string,
 ): Promise<
-  { ok: true; root: string; remote: string; slug: string } | { ok: false; error: string }
+  { ok: true; root: string; remote: string; slug: string | null } | { ok: false; error: string }
 > {
   const top = await Utils.executeGitCommand(["rev-parse", "--show-toplevel"], { cwd });
   if (!top.success || !top.output.trim()) {
@@ -385,14 +302,7 @@ async function detectCwdRepo(
       error: `--repo-from-cwd: ${root} has no origin remote. Add one with \`git remote add origin <url>\`.`,
     };
   }
-  const slug = gitHubSlugFromRemote(remote);
-  if (!slug) {
-    return {
-      ok: false,
-      error: `--repo-from-cwd: the origin remote of ${root} (${redactUrlCredentials(remote)}) is not a GitHub repository.`,
-    };
-  }
-  return { ok: true, root, remote, slug };
+  return { ok: true, root, remote, slug: gitHubSlugFromRemote(remote) };
 }
 
 function trackerDisplayName(tracker: string): string {
@@ -406,14 +316,24 @@ interface Plan {
   /** Flags named on the command line (only these are updated in an existing workspace). */
   setTracker: boolean;
   setTaskQuery: boolean;
-  repo?: { remote: string; slug: string; root: string };
+  /**
+   * `slug` is the GitHub `owner/name`, or null for a non-GitHub remote.
+   * `conflicts`/`projectKey` come from the checkout's `.devintern-code/.env`,
+   * exactly as `worker add-repo` uses them.
+   */
+  repo?: {
+    remote: string;
+    slug: string | null;
+    root: string;
+    conflicts: Record<string, string>;
+    projectKey?: string;
+  };
   /** Composed credentials: workspace `.env` < process env < `--env-file`. */
   credentialEnv: Env;
   /** Keys to save to the workspace `.env`. */
   envUpdates: Record<string, string>;
   /** Snapshot of workspace.toml when validated (null when absent). */
   configSnapshot: string | null;
-  secretKeys: Set<string>;
 }
 
 /** Snapshot and parse an existing workspace.toml; refuses without `--yes`. */
@@ -437,7 +357,12 @@ function readExistingWorkspace(
         "task_query, and repository entries (all other settings are kept).",
     };
   }
-  const configSnapshot = readFileSync(configPath, "utf8");
+  let configSnapshot: string;
+  try {
+    configSnapshot = readFileSync(configPath, "utf8");
+  } catch (error) {
+    return { ok: false, error: `Cannot read ${configPath}: ${errorMessage(error)}` };
+  }
   try {
     return { ok: true, configSnapshot, existing: parseWorkspaceConfig(configSnapshot, configPath) };
   } catch (error) {
@@ -519,17 +444,16 @@ async function planInit(
   if (args.repoFromCwd) {
     const detected = await detectCwdRepo(ctx.cwd);
     if (!detected.ok) return detected;
-    repo = { remote: detected.remote, slug: detected.slug, root: detected.root };
+    repo = { remote: detected.remote, slug: detected.slug, root: detected.root, conflicts: {} };
   }
 
   const tracker = flagTracker ?? existing?.defaults.tracker;
   const taskQuery = args.taskQuery?.trim() || existing?.defaults.taskQuery;
   const workspaceEnvFile = workspaceEnvPath(ctx.workspaceDir);
-  const workspaceEnv = existsSync(workspaceEnvFile)
-    ? parseEnvContent(readFileSync(workspaceEnvFile, "utf8"))
-    : {};
+  // Same parser the worker and `worker doctor` use, so all three agree.
+  const workspaceEnv = parseEnvFile(workspaceEnvFile);
   const credentialEnv: Env = { ...workspaceEnv, ...ctx.processEnv, ...envFileValues };
-  if (tracker === "github" && !credentialEnv.GITHUB_REPO && repo) {
+  if (tracker === "github" && !credentialEnv.GITHUB_REPO && repo?.slug) {
     credentialEnv.GITHUB_REPO = repo.slug;
   }
 
@@ -545,6 +469,16 @@ async function planInit(
   }
 
   const envUpdates = computeEnvUpdates(tracker!, credentialEnv, workspaceEnv, envFileValues);
+  if (repo) {
+    // Same import as `worker add-repo`: the checkout's project env fills keys
+    // the workspace `.env` lacks; differing values stay repo-local. Compared
+    // after this run's credential updates, which always win.
+    const repoEnv = readRepoEnv(ctx.cwd);
+    const split = splitRepoEnv(repoEnv, { ...workspaceEnv, ...envUpdates });
+    Object.assign(envUpdates, split.additions);
+    repo.conflicts = split.conflicts;
+    repo.projectKey = repoDefaultProjectKey(repoEnv);
+  }
 
   return {
     ok: true,
@@ -557,7 +491,6 @@ async function planInit(
       credentialEnv,
       envUpdates,
       configSnapshot,
-      secretKeys: new Set(Object.keys(envFileValues)),
     },
   };
 }
@@ -567,9 +500,18 @@ function applyPlan(
   plan: Plan,
   workspaceDir: string,
 ):
-  | { ok: true; filesWritten: string[]; repo: NonInteractiveInitReport["repo"] }
+  | {
+      ok: true;
+      filesWritten: string[];
+      repo: NonInteractiveInitReport["repo"];
+      seededProject?: string;
+    }
   | { ok: false; error: string } {
-  mkdirSync(workspaceDir, { recursive: true, mode: 0o700 });
+  try {
+    mkdirSync(workspaceDir, { recursive: true, mode: 0o700 });
+  } catch (error) {
+    return { ok: false, error: `Cannot create ${workspaceDir}: ${errorMessage(error)}` };
+  }
   const lock = acquireWorkspaceInitLock(workspaceDir);
   if (!lock.ok) return lock;
   try {
@@ -587,9 +529,14 @@ function applyPlan(
       taskQuery: plan.setTaskQuery ? plan.taskQuery : undefined,
     });
     let repo: NonInteractiveInitReport["repo"] = null;
+    let seededProject: string | undefined;
     if (plan.repo) {
-      const appended = appendRepoEntry(content, plan.repo.remote);
+      const appended = appendRepoEntry(content, plan.repo.remote, {
+        conflicts: plan.repo.conflicts,
+        projectKey: plan.repo.projectKey,
+      });
       content = appended.content;
+      seededProject = appended.seededProject;
       repo = {
         name: appended.name,
         remote: redactUrlCredentials(plan.repo.remote),
@@ -620,7 +567,9 @@ function applyPlan(
       filesWritten.push(configPath);
     }
     ensureWorkspaceCodeState(workspaceDir);
-    return { ok: true, filesWritten, repo };
+    return { ok: true, filesWritten, repo, seededProject };
+  } catch (error) {
+    return { ok: false, error: `Cannot write to ${workspaceDir}: ${errorMessage(error)}` };
   } finally {
     lock.release();
   }
@@ -687,7 +636,11 @@ async function runChecks(
   let entitlement: WorkerEntitlementLike | undefined;
   const checkEntitlement = doctorDeps.checkEntitlement;
   doctorDeps.checkEntitlement = async (dir) => {
-    const run = checkEntitlement ? checkEntitlement(dir) : defaultEntitlement(dir);
+    // `worker doctor` loads the workspace .env into process.env first; this
+    // command does not, so pass the composed key (workspace .env < env < --env-file).
+    const run = checkEntitlement
+      ? checkEntitlement(dir)
+      : defaultEntitlement(dir, plan.credentialEnv.LICENSE_KEY || undefined, deps.checkLicense);
     entitlement = await withTimeout(run, timeoutMs, "license check");
     return entitlement;
   };
@@ -727,14 +680,19 @@ async function runChecks(
   return { checks, entitled: entitlement?.valid === true };
 }
 
-async function defaultEntitlement(workspaceDir: string): Promise<WorkerEntitlementLike> {
+async function defaultEntitlement(
+  workspaceDir: string,
+  licenseKey: string | undefined,
+  checkLicenseOverride?: NonInteractiveInitDeps["checkLicense"],
+): Promise<WorkerEntitlementLike> {
   const [{ checkLicense }, { loadSupabaseConfig }, { workspaceCodeStateDir }] = await Promise.all([
     import("@devintern/license-check"),
     import("../cli/bootstrap"),
     import("../workspace/paths"),
   ]);
-  return checkLicense({
+  return (checkLicenseOverride ?? checkLicense)({
     productKey: "devintern/code",
+    licenseKey,
     supabaseConfig: loadSupabaseConfig(workspaceCodeStateDir(workspaceDir)),
     requireAutomation: true,
     allowTrial: true,
@@ -804,7 +762,12 @@ function emptyReport(workspaceDir: string): NonInteractiveInitReport {
   };
 }
 
-/** Redact secrets from every string in the report. */
+/**
+ * Redact secrets from every string in the report except the structured
+ * `tracker`, `taskQuery`, and `repo` fields, which are non-secret by design
+ * (`repo.remote` already has URL credentials stripped) and which `--json`
+ * consumers parse.
+ */
 function redactReport(
   report: NonInteractiveInitReport,
   secrets: string[],
@@ -818,7 +781,23 @@ function redactReport(
     }
     return value;
   };
-  return redact(report) as NonInteractiveInitReport;
+  const redacted = redact(report) as NonInteractiveInitReport;
+  return { ...redacted, tracker: report.tracker, taskQuery: report.taskQuery, repo: report.repo };
+}
+
+/**
+ * Failure report for an error raised outside {@link runNonInteractiveWorkerInit}
+ * (for example while loading the environment), with secrets from `env` redacted.
+ */
+export function unexpectedFailureReport(
+  workspaceDir: string,
+  error: unknown,
+  env: Env = process.env,
+): NonInteractiveInitReport {
+  return redactReport(
+    { ...emptyReport(workspaceDir), error: errorMessage(error) },
+    secretValues(env),
+  );
 }
 
 /**
@@ -838,48 +817,53 @@ export async function runNonInteractiveWorkerInit(
   const report = emptyReport(workspaceDir);
   // Redact every value from the environment and --env-file that looks secret,
   // even before the plan exists (a bad input message may echo a value).
-  let secrets = secretValues(processEnv, []);
-
-  const planned = await planInit(args, { cwd, processEnv, workspaceDir });
-  if (!planned.ok) {
-    return redactReport(
-      { ...report, tracker: planned.tracker ?? null, error: planned.error },
-      secrets,
-    );
-  }
-  const { plan } = planned;
-  secrets = secretValues(plan.credentialEnv, plan.secretKeys);
-  report.tracker = plan.tracker;
-  report.taskQuery = plan.taskQuery;
-
-  const applied = applyPlan(plan, workspaceDir);
-  if (!applied.ok) return redactReport({ ...report, error: applied.error }, secrets);
-  report.filesWritten = applied.filesWritten;
-  report.repo = applied.repo;
-  for (const file of applied.filesWritten) log(`💾 Wrote ${file}`);
-  if (applied.repo) {
-    log(
-      applied.repo.added
-        ? `✅ Registered ${applied.repo.remote} as "${applied.repo.name}"`
-        : `ℹ️  ${applied.repo.remote} is already registered as "${applied.repo.name}"`,
-    );
-  }
-
-  log("🩺 Running checks...");
-  const { checks, entitled } = await runChecks(plan, workspaceDir, deps);
-  report.checks = checks;
-  let hasRepo = Boolean(applied.repo);
+  let secrets = secretValues(processEnv);
   try {
-    hasRepo =
-      hasRepo ||
-      parseWorkspaceConfig(readFileSync(workspaceConfigPath(workspaceDir), "utf8")).repos.length >
-        0;
-  } catch {
-    // The config check already reports an unreadable workspace.
+    const planned = await planInit(args, { cwd, processEnv, workspaceDir });
+    if (!planned.ok) {
+      return redactReport(
+        { ...report, tracker: planned.tracker ?? null, error: planned.error },
+        secrets,
+      );
+    }
+    const { plan } = planned;
+    secrets = secretValues(plan.credentialEnv);
+    report.tracker = plan.tracker;
+    report.taskQuery = plan.taskQuery;
+
+    const applied = applyPlan(plan, workspaceDir);
+    if (!applied.ok) return redactReport({ ...report, error: applied.error }, secrets);
+    report.filesWritten = applied.filesWritten;
+    report.repo = applied.repo;
+    for (const file of applied.filesWritten) log(`💾 Wrote ${file}`);
+    if (applied.repo) {
+      log(
+        applied.repo.added
+          ? `✅ Registered ${applied.repo.remote} as "${applied.repo.name}"`
+          : `ℹ️  ${applied.repo.remote} is already registered as "${applied.repo.name}"`,
+      );
+    }
+    if (applied.seededProject) log(`   Seeded routing rule: project = ${applied.seededProject}`);
+
+    log("🩺 Running checks...");
+    const { checks, entitled } = await runChecks(plan, workspaceDir, deps);
+    report.checks = checks;
+    let hasRepo = Boolean(applied.repo);
+    try {
+      hasRepo =
+        hasRepo ||
+        parseWorkspaceConfig(readFileSync(workspaceConfigPath(workspaceDir), "utf8")).repos.length >
+          0;
+    } catch {
+      // The config check already reports an unreadable workspace.
+    }
+    report.nextSteps = nextStepsFor({ workspaceDir, entitled, hasRepo });
+    report.result = checks.some((check) => check.status === "fail") ? "failure" : "success";
+    return redactReport(report, secrets);
+  } catch (error) {
+    // `--json` consumers need a document even when something unexpected throws.
+    return redactReport({ ...report, result: "failure", error: errorMessage(error) }, secrets);
   }
-  report.nextSteps = nextStepsFor({ workspaceDir, entitled, hasRepo });
-  report.result = checks.some((check) => check.status === "fail") ? "failure" : "success";
-  return redactReport(report, secrets);
 }
 
 const STATUS_ICON: Record<CheckStatus, string> = {

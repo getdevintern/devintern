@@ -217,7 +217,7 @@ const WORKER_INIT_USAGE = [
   "  --non-interactive   Set up from flags; never prompts, signs in, pairs, or installs",
   "  --tracker <id>      Tracker the worker polls (jira, linear, github, ...)",
   "  --task-query <q>    Ready-tasks query, written to [defaults].task_query",
-  "  --repo-from-cwd     Register the current Git repository (GitHub origin required)",
+  "  --repo-from-cwd     Register the current Git repository (uses its origin remote)",
   "  --env-file <path>   Read credentials from this file (mode 0600) and save them",
   "                      to the workspace .env; otherwise they come from the environment",
   "  --yes               Update an existing workspace.toml (other settings are kept)",
@@ -232,6 +232,7 @@ async function runWorkerInitNonInteractive(args: string[]): Promise<never> {
     parseNonInteractiveInitArgs,
     renderNonInteractiveReport,
     runNonInteractiveWorkerInit,
+    unexpectedFailureReport,
     WORKER_INIT_JSON_SCHEMA,
     WORKER_INIT_JSON_VERSION,
   } = await import("../init/worker-init-noninteractive");
@@ -267,13 +268,20 @@ async function runWorkerInitNonInteractive(args: string[]): Promise<never> {
     console.warn = toStderr;
     console.debug = toStderr;
   }
-  loadEnvironment();
   const { trackWorkerInitCompleted, trackWorkerInitFailed, trackWorkerInitStarted } =
     await import("../observability/analytics");
-  trackWorkerInitStarted("non_interactive");
-  const report = await runNonInteractiveWorkerInit(parsed.args, {
-    log: json ? undefined : (message) => console.log(message),
-  });
+  let report: Awaited<ReturnType<typeof runNonInteractiveWorkerInit>>;
+  try {
+    // Load .env before any analytics call so its telemetry opt-out applies.
+    loadEnvironment();
+    trackWorkerInitStarted("non_interactive");
+    report = await runNonInteractiveWorkerInit(parsed.args, {
+      log: json ? undefined : (message) => console.log(message),
+    });
+  } catch (error) {
+    // Still emit a (redacted) failure document so --json stdout stays parseable.
+    report = unexpectedFailureReport(resolveWorkspaceDir(), error);
+  }
   if (report.error) trackWorkerInitFailed("non_interactive_input", "non_interactive");
   else
     trackWorkerInitCompleted({

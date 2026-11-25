@@ -11,13 +11,14 @@ import {
   writeFileSync,
 } from "fs";
 import { tmpdir } from "os";
-import { join, resolve } from "path";
+import { dirname, join, resolve } from "path";
 
 import {
   WORKER_INIT_LOCK_FILE,
   acquireWorkspaceInitLock,
   condenseMessage,
   parseNonInteractiveInitArgs,
+  removeStaleLock,
   renderNonInteractiveReport,
   runNonInteractiveWorkerInit,
 } from "../src/lib/init/worker-init-noninteractive";
@@ -27,6 +28,7 @@ import type {
 } from "../src/lib/init/worker-init-noninteractive";
 import type { WorkerDoctorDeps } from "../src/lib/observability/worker-readiness";
 import { loadWorkspaceConfig } from "../src/lib/workspace/config";
+import { workspaceCodeStateDir } from "../src/lib/workspace/paths";
 
 const JIRA_ENV = {
   JIRA_BASE_URL: "https://acme.atlassian.net",
@@ -319,6 +321,75 @@ describe("runNonInteractiveWorkerInit", () => {
     expect(JSON.stringify(report)).not.toContain("ATATT-very-secret-token");
   });
 
+  test("non-secret --env-file values are not redacted from the report", async () => {
+    const envFile = join(root, "creds.env");
+    writeFileSync(
+      envFile,
+      [
+        "TASK_TRACKER=jira",
+        "GITHUB_REPO=acme/app",
+        ...Object.entries(JIRA_ENV).map(([k, v]) => `${k}=${v}`),
+      ].join("\n"),
+      { mode: 0o600 },
+    );
+    chmodSync(envFile, 0o600);
+    const report = await run({
+      tracker: "jira",
+      taskQuery: "project = APP",
+      envFile,
+      repoFromCwd: true,
+    });
+    expect(report.error).toBeUndefined();
+    expect(report.tracker).toBe("jira");
+    expect(report.repo?.remote).toBe("git@github.com:acme/app.git");
+    const json = JSON.stringify(report);
+    expect(json).not.toContain("***");
+    expect(json).not.toContain(JIRA_ENV.JIRA_API_TOKEN);
+  });
+
+  test("default entitlement check receives LICENSE_KEY from --env-file", async () => {
+    const envFile = join(root, "creds.env");
+    writeFileSync(envFile, "LICENSE_KEY=lic-from-env-file\n", { mode: 0o600 });
+    chmodSync(envFile, 0o600);
+    const seen: (string | undefined)[] = [];
+    const report = await run(
+      { tracker: "jira", taskQuery: "project = APP", envFile },
+      {
+        processEnv: { ...JIRA_ENV },
+        doctorOverrides: { checkEntitlement: undefined },
+        checkLicense: async (options) => {
+          seen.push(options.licenseKey);
+          return {
+            valid: options.licenseKey === "lic-from-env-file",
+            source: "license-key",
+            message: "ok",
+          };
+        },
+      },
+    );
+    expect(seen).toEqual(["lic-from-env-file"]);
+    expect(report.checks.find((check) => check.name === "entitlement")?.status).toBe("pass");
+    expect(report.nextSteps.some((step) => step.id === "sign-in")).toBe(false);
+  });
+
+  test("default entitlement check receives LICENSE_KEY from the workspace .env", async () => {
+    mkdirSync(workspaceDir, { recursive: true });
+    writeFileSync(join(workspaceDir, ".env"), "LICENSE_KEY=lic-from-workspace\n");
+    const seen: (string | undefined)[] = [];
+    await run(
+      { tracker: "jira", taskQuery: "project = APP" },
+      {
+        processEnv: { ...JIRA_ENV },
+        doctorOverrides: { checkEntitlement: undefined },
+        checkLicense: async (options) => {
+          seen.push(options.licenseKey);
+          return { valid: true, source: "license-key", message: "ok" };
+        },
+      },
+    );
+    expect(seen).toEqual(["lic-from-workspace"]);
+  });
+
   test("refuses an --env-file readable by group or others", async () => {
     const envFile = join(root, "creds.env");
     writeFileSync(envFile, "JIRA_API_TOKEN=x\n");
@@ -328,7 +399,7 @@ describe("runNonInteractiveWorkerInit", () => {
     expect(existsSync(workspaceDir)).toBe(false);
   });
 
-  test("--repo-from-cwd outside git or without a GitHub origin names the directory", async () => {
+  test("--repo-from-cwd outside git or without an origin names the directory", async () => {
     const plain = join(root, "plain");
     mkdirSync(plain);
     const outside = await run(
@@ -337,14 +408,40 @@ describe("runNonInteractiveWorkerInit", () => {
     );
     expect(outside.error).toContain(`${plain} is not inside a git repository`);
 
-    git(repoDir, "remote set-url origin https://gitlab.com/acme/app.git");
-    const gitlab = await run(
+    git(repoDir, "remote remove origin");
+    const noOrigin = await run(
       { tracker: "jira", taskQuery: "q", repoFromCwd: true },
       { processEnv: { ...JIRA_ENV } },
     );
-    expect(gitlab.error).toContain("is not a GitHub repository");
-    expect(gitlab.error).toContain(resolve(repoDir));
+    expect(noOrigin.error).toContain("has no origin remote");
+    expect(noOrigin.error).toContain(resolve(repoDir));
     expect(existsSync(workspaceDir)).toBe(false);
+  });
+
+  test("--repo-from-cwd registers a non-GitHub origin", async () => {
+    git(repoDir, "remote set-url origin https://gitlab.com/acme/app.git");
+    const report = await run(
+      { tracker: "jira", taskQuery: "q", repoFromCwd: true },
+      { processEnv: { ...JIRA_ENV } },
+    );
+    expect(report.error).toBeUndefined();
+    expect(report.repo).toEqual({
+      name: "app",
+      remote: "https://gitlab.com/acme/app.git",
+      added: true,
+    });
+    const config = loadWorkspaceConfig(join(workspaceDir, "workspace.toml"));
+    expect(config.repos.map((repo) => repo.remote)).toEqual(["https://gitlab.com/acme/app.git"]);
+  });
+
+  test("--repo-from-cwd with a non-GitHub origin does not invent GITHUB_REPO", async () => {
+    git(repoDir, "remote set-url origin https://gitlab.com/acme/app.git");
+    const report = await run(
+      { tracker: "github", taskQuery: "label:ai", repoFromCwd: true },
+      { processEnv: { GITHUB_TOKEN: "ghp_x" } },
+    );
+    expect(report.error).toContain("GITHUB_REPO");
+    expect(existsSync(join(workspaceDir, "workspace.toml"))).toBe(false);
   });
 
   test("an existing workspace needs --yes, and --yes keeps unrelated settings", async () => {
@@ -393,12 +490,174 @@ describe("runNonInteractiveWorkerInit", () => {
     }
   });
 
+  test("an unwritable workspace path fails with a report instead of throwing", async () => {
+    const blocker = join(root, "blocker");
+    writeFileSync(blocker, "not a directory");
+    const report = await run(
+      { tracker: "jira", taskQuery: "project = APP" },
+      { processEnv: { ...JIRA_ENV }, workspaceDir: join(blocker, "ws") },
+    );
+    expect(report.result).toBe("failure");
+    expect(report.error).toContain(`Cannot create ${join(blocker, "ws")}`);
+    expect(report.error).toContain("ENOTDIR");
+    expect(report.checks).toEqual([]);
+  });
+
+  test("a write failure under the lock is reported and releases the lock", async () => {
+    // A file where the state directory belongs makes ensureWorkspaceCodeState throw.
+    const stateParent = dirname(workspaceCodeStateDir(workspaceDir));
+    mkdirSync(dirname(stateParent), { recursive: true });
+    writeFileSync(stateParent, "x");
+    const report = await run(
+      { tracker: "jira", taskQuery: "project = APP" },
+      { processEnv: { ...JIRA_ENV } },
+    );
+    expect(report.result).toBe("failure");
+    expect(report.error).toStartWith(`Cannot write to ${workspaceDir}`);
+    expect(existsSync(join(workspaceDir, WORKER_INIT_LOCK_FILE))).toBe(false);
+  });
+
+  test("an unreadable existing workspace.toml fails with a report instead of throwing", async () => {
+    // A directory named workspace.toml makes readFileSync throw EISDIR.
+    mkdirSync(join(workspaceDir, "workspace.toml"), { recursive: true });
+    const report = await run(
+      { tracker: "jira", taskQuery: "project = APP", yes: true },
+      { processEnv: { ...JIRA_ENV } },
+    );
+    expect(report.result).toBe("failure");
+    expect(report.error).toContain(`Cannot read ${join(workspaceDir, "workspace.toml")}`);
+    expect(report.error).toContain("EISDIR");
+  });
+
+  test("an unexpected throw becomes a redacted failure report", async () => {
+    const report = await run(
+      { tracker: "jira", taskQuery: "project = APP" },
+      {
+        processEnv: { ...JIRA_ENV },
+        log: () => {
+          throw new Error(`boom ${JIRA_ENV.JIRA_API_TOKEN}`);
+        },
+      },
+    );
+    expect(report.result).toBe("failure");
+    expect(report.error).toContain("boom");
+    expect(JSON.stringify(report)).not.toContain(JIRA_ENV.JIRA_API_TOKEN);
+  });
+
   test("a lock left by a dead process is taken over", () => {
     mkdirSync(workspaceDir, { recursive: true });
     writeFileSync(join(workspaceDir, WORKER_INIT_LOCK_FILE), JSON.stringify({ pid: 2 ** 22 + 7 }));
     const lock = acquireWorkspaceInitLock(workspaceDir);
     expect(lock.ok).toBe(true);
     if (lock.ok) lock.release();
+  });
+
+  test("release leaves a lock that another run now holds", () => {
+    mkdirSync(workspaceDir, { recursive: true });
+    const lockPath = join(workspaceDir, WORKER_INIT_LOCK_FILE);
+    const lock = acquireWorkspaceInitLock(workspaceDir);
+    expect(lock.ok).toBe(true);
+    const other = JSON.stringify({ pid: 424242, acquiredAt: 1 });
+    writeFileSync(lockPath, other);
+    if (lock.ok) lock.release();
+    expect(readFileSync(lockPath, "utf8")).toBe(other);
+  });
+
+  test("a stale takeover that loses the race keeps the winner's fresh lock", () => {
+    mkdirSync(workspaceDir, { recursive: true });
+    const lockPath = join(workspaceDir, WORKER_INIT_LOCK_FILE);
+    const stale = JSON.stringify({ pid: 2 ** 22 + 7 });
+    // Run A already replaced the stale lock with its own before run B acts.
+    const winner = acquireWorkspaceInitLock(workspaceDir);
+    expect(winner.ok).toBe(true);
+    const fresh = readFileSync(lockPath, "utf8");
+    expect(removeStaleLock(lockPath, stale)).toBe(false);
+    expect(readFileSync(lockPath, "utf8")).toBe(fresh);
+    // B's next create attempt sees A's live lock.
+    expect(acquireWorkspaceInitLock(workspaceDir).ok).toBe(false);
+    if (winner.ok) winner.release();
+    expect(existsSync(lockPath)).toBe(false);
+    // Matching content is removed.
+    writeFileSync(lockPath, stale);
+    expect(removeStaleLock(lockPath, stale)).toBe(true);
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
+  test("a freshly created, still-empty lock is not taken over", () => {
+    mkdirSync(workspaceDir, { recursive: true });
+    const lockPath = join(workspaceDir, WORKER_INIT_LOCK_FILE);
+    writeFileSync(lockPath, "");
+    const lock = acquireWorkspaceInitLock(workspaceDir);
+    expect(lock.ok).toBe(false);
+    expect(existsSync(lockPath)).toBe(true);
+  });
+
+  test("--yes keeps a 0600 workspace.toml at 0600", async () => {
+    mkdirSync(workspaceDir, { recursive: true });
+    const configPath = join(workspaceDir, "workspace.toml");
+    writeFileSync(
+      configPath,
+      '[defaults]\ntracker = "linear"\n\n[[repos]]\nname = "other"\nremote = "git@github.com:acme/other.git"\n  [repos.env]\n  GITHUB_TOKEN = "ghp_secret"\n',
+    );
+    chmodSync(configPath, 0o600);
+    const report = await run(
+      { tracker: "jira", taskQuery: "project = APP", repoFromCwd: true, yes: true },
+      { processEnv: { ...JIRA_ENV } },
+    );
+    expect(report.error).toBeUndefined();
+    expect(report.filesWritten).toContain(configPath);
+    expect(statSync(configPath).mode & 0o777).toBe(0o600);
+    expect(statSync(join(workspaceDir, ".env")).mode & 0o777).toBe(0o600);
+  });
+
+  test("--env-file and the workspace .env accept quoted values and export lines", async () => {
+    const envFile = join(root, "creds.env");
+    writeFileSync(
+      envFile,
+      `export JIRA_BASE_URL=${JIRA_ENV.JIRA_BASE_URL}\nJIRA_EMAIL='${JIRA_ENV.JIRA_EMAIL}'\n`,
+    );
+    chmodSync(envFile, 0o600);
+    mkdirSync(workspaceDir, { recursive: true });
+    writeFileSync(join(workspaceDir, ".env"), `JIRA_API_TOKEN="${JIRA_ENV.JIRA_API_TOKEN}"\n`);
+    const probed: Array<Record<string, string>> = [];
+    const report = await run(
+      { tracker: "jira", taskQuery: "q", envFile },
+      {
+        probe: async (_tracker, env) => {
+          probed.push(env);
+        },
+      },
+    );
+    expect(report.error).toBeUndefined();
+    expect(probed[0]).toMatchObject(JIRA_ENV);
+    const saved = readFileSync(join(workspaceDir, ".env"), "utf8");
+    // The quoted token equals the parsed value, so it is not rewritten.
+    expect(saved).toContain(`JIRA_API_TOKEN="${JIRA_ENV.JIRA_API_TOKEN}"`);
+    expect(saved).toContain(`JIRA_EMAIL=${JIRA_ENV.JIRA_EMAIL}`);
+    expect(saved).not.toContain("export JIRA_BASE_URL");
+  });
+
+  test("--repo-from-cwd imports the checkout env and seeds routing like add-repo", async () => {
+    mkdirSync(join(repoDir, ".devintern-code"), { recursive: true });
+    writeFileSync(
+      join(repoDir, ".devintern-code", ".env"),
+      "JIRA_DEFAULT_PROJECT_KEY=APP\nAPP_ONLY=1\nJIRA_EMAIL=other@acme.test\nWEBHOOK_QUEUE_DB=/x.db\n",
+    );
+    mkdirSync(workspaceDir, { recursive: true });
+    writeFileSync(join(workspaceDir, ".env"), `JIRA_EMAIL=${JIRA_ENV.JIRA_EMAIL}\n`);
+    const report = await run(
+      { tracker: "jira", taskQuery: "q", repoFromCwd: true },
+      { processEnv: { ...JIRA_ENV } },
+    );
+    expect(report.error).toBeUndefined();
+    const config = loadWorkspaceConfig(join(workspaceDir, "workspace.toml"));
+    expect(config.repos[0].env).toEqual({ JIRA_EMAIL: "other@acme.test" });
+    expect(config.routing).toEqual([expect.objectContaining({ repo: "app", project: "APP" })]);
+    const saved = readFileSync(join(workspaceDir, ".env"), "utf8");
+    expect(saved).toContain("APP_ONLY=1");
+    expect(saved).toContain("JIRA_DEFAULT_PROJECT_KEY=APP");
+    expect(saved).not.toContain("WEBHOOK_QUEUE_DB");
+    expect(saved).not.toContain("other@acme.test");
   });
 });
 
@@ -432,5 +691,46 @@ describe("devintern worker init (CLI)", () => {
       checks: [],
     });
     expect(doc.error).toContain("Unknown option: --jira-token");
+  });
+
+  test("--json prints one failure document when the workspace cannot be created", () => {
+    const root = mkdtempSync(join(tmpdir(), "worker-init-cli-"));
+    try {
+      const blocker = join(root, "blocker");
+      writeFileSync(blocker, "not a directory");
+      const result = spawnSync(
+        process.execPath,
+        [
+          entry,
+          "worker",
+          "init",
+          "--non-interactive",
+          "--json",
+          "--tracker",
+          "linear",
+          "--task-query",
+          "q",
+        ],
+        {
+          input: "",
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            DEVINTERN_TELEMETRY_DISABLED: "1",
+            SENTRY_DISABLED: "1",
+            DEVINTERN_WORKSPACE_DIR: join(blocker, "ws"),
+            LINEAR_API_KEY: "lin_api_very_secret_key",
+          },
+          timeout: 60_000,
+        },
+      );
+      expect(result.status).toBe(1);
+      const doc = JSON.parse(result.stdout);
+      expect(doc).toMatchObject({ schema: "devintern.worker-init", result: "failure" });
+      expect(doc.error).toContain("ENOTDIR");
+      expect(result.stdout).not.toContain("lin_api_very_secret_key");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

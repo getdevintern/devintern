@@ -471,26 +471,75 @@ export function runWorkerScaffold(): number {
   return 0;
 }
 
+/** add-repo's extras for a new `[[repos]]` entry. */
+export interface RepoEntryExtras {
+  /** Values that differ from the workspace `.env`; kept in the entry's `[repos.env]`. */
+  conflicts?: Record<string, string>;
+  /** Seeds a `[[routing.rules]]` entry unless a rule already claims this project. */
+  projectKey?: string;
+}
+
 /**
  * Append a `[[repos]]` entry for `remote` to workspace.toml text, unless an
  * entry with that remote already exists. Pure: the caller validates and
- * writes the result.
+ * writes the result. Shared by `worker add-repo` and `worker init --repo-from-cwd`.
  *
  * @param content - Current workspace.toml text
  * @param remote - Origin remote URL of the repository
- * @returns Updated text, the entry's name, and whether it was added
+ * @param extras - Repo-local env conflicts and a routing project to seed
+ * @returns Updated text, the entry's name, whether it was added, and the seeded project
  */
 export function appendRepoEntry(
   content: string,
   remote: string,
-): { content: string; name: string; added: boolean } {
+  extras: RepoEntryExtras = {},
+): { content: string; name: string; added: boolean; seededProject?: string } {
   const config = parseWorkspaceConfig(content);
   const existing = config.repos.find((repo) => repo.remote === remote);
   if (existing) return { content, name: existing.name, added: false };
   const name = deriveRepoName(remote, config.repos);
-  const block = `\n[[repos]]\nname = ${tomlString(name)}\nremote = ${tomlString(remote)}\n`;
+  let block = `\n[[repos]]\nname = ${tomlString(name)}\nremote = ${tomlString(remote)}\n`;
+  const conflicts = Object.entries(extras.conflicts ?? {});
+  if (conflicts.length > 0) {
+    block += "  [repos.env]\n";
+    for (const [key, value] of conflicts) {
+      block += `  ${key} = ${tomlString(value)}\n`;
+    }
+  }
+  const { projectKey } = extras;
+  const projectTaken = config.routing.some(
+    (rule) => rule.project && projectKey && rule.project.toLowerCase() === projectKey.toLowerCase(),
+  );
+  const seededProject = projectKey && !projectTaken ? projectKey : undefined;
+  if (seededProject) {
+    block += `\n[[routing.rules]]\nrepo = ${tomlString(name)}\nproject = ${tomlString(seededProject)}\n`;
+  }
   const separator = content.endsWith("\n") ? "" : "\n";
-  return { content: content + separator + block, name, added: true };
+  return { content: content + separator + block, name, added: true, seededProject };
+}
+
+/** Tracker project/team a checkout's `.devintern-code/.env` defaults to, for routing. */
+export function repoDefaultProjectKey(repoEnv: Record<string, string>): string | undefined {
+  return repoEnv.JIRA_DEFAULT_PROJECT_KEY || repoEnv.LINEAR_DEFAULT_TEAM_KEY || undefined;
+}
+
+/**
+ * Split a checkout's project env against the workspace env: keys the
+ * workspace lacks are `additions` for the shared `.env`; differing values are
+ * `conflicts` to keep repo-local (never overwrite a shared value).
+ */
+export function splitRepoEnv(
+  repoEnv: Record<string, string>,
+  workspaceEnv: Record<string, string | undefined>,
+): { additions: Record<string, string>; conflicts: Record<string, string> } {
+  const additions: Record<string, string> = {};
+  const conflicts: Record<string, string> = {};
+  for (const [key, value] of Object.entries(repoEnv)) {
+    if (ENV_SHARED_SKIP.has(key)) continue;
+    if (workspaceEnv[key] === undefined) additions[key] = value;
+    else if (workspaceEnv[key] !== value) conflicts[key] = value;
+  }
+  return { additions, conflicts };
 }
 
 export interface WorkerAddRepoOptions {
@@ -538,32 +587,14 @@ export async function runWorkerAddRepo(
     return 0;
   }
 
-  const name = deriveRepoName(remote, config.repos);
-
   // Merge the repo's env: missing keys go to the shared .env; conflicting
-  // values are demoted to this repo's inline [repos.env].
+  // values are demoted to this repo's inline [repos.env]. A routing rule is
+  // seeded from the repo's default project key; a 1-repo workspace needs none.
   const conflicts = mergeEnv(workspaceDir, cwd, {}, log);
-
-  let block = `\n[[repos]]\nname = ${tomlString(name)}\nremote = ${tomlString(remote)}\n`;
-  if (Object.keys(conflicts).length > 0) {
-    block += "  [repos.env]\n";
-    for (const [key, value] of Object.entries(conflicts)) {
-      block += `  ${key} = ${tomlString(value)}\n`;
-    }
-  }
-
-  // Seed a routing rule from the repo's default project key, unless a rule
-  // already claims that project. A 1-repo workspace needs no rule.
-  const repoEnv = readRepoEnv(cwd);
-  const projectKey = repoEnv.JIRA_DEFAULT_PROJECT_KEY || repoEnv.LINEAR_DEFAULT_TEAM_KEY;
-  const projectTaken = config.routing.some(
-    (rule) => rule.project && projectKey && rule.project.toLowerCase() === projectKey.toLowerCase(),
-  );
-  if (projectKey && !projectTaken) {
-    block += `\n[[routing.rules]]\nrepo = ${tomlString(name)}\nproject = ${tomlString(projectKey)}\n`;
-  }
-
-  const updated = existingText.endsWith("\n") ? existingText + block : existingText + "\n" + block;
+  const projectKey = repoDefaultProjectKey(readRepoEnv(cwd));
+  const appended = appendRepoEntry(existingText, remote, { conflicts, projectKey });
+  const { name, seededProject } = appended;
+  const updated = appended.content;
 
   // Validate the result before committing it to disk.
   parseWorkspaceConfig(updated, configPath);
@@ -577,8 +608,8 @@ export async function runWorkerAddRepo(
         Object.keys(conflicts).join(", "),
     );
   }
-  if (projectKey && !projectTaken) {
-    log(`   Seeded routing rule: project = ${projectKey}`);
+  if (seededProject) {
+    log(`   Seeded routing rule: project = ${seededProject}`);
   } else if (isFirstRepo) {
     log(
       "   1-repo workspace: every ready task runs here. Add routing rules when you add another repo.",
@@ -652,7 +683,7 @@ export async function ensureWorkspaceAndAddRepo(
   return { ok: true, workspaceDir, created, repoName };
 }
 
-function readRepoEnv(cwd: string): Record<string, string> {
+export function readRepoEnv(cwd: string): Record<string, string> {
   // Same traversal as tracker setup: `worker init` / `worker add-repo` from a
   // package subdirectory must still find the repo-root `.devintern-code/.env`.
   const projectRoot = findProjectRoot({ startDir: cwd });
@@ -675,17 +706,9 @@ function mergeEnv(
   const envPath = workspaceEnvPath(workspaceDir);
   const workspaceEnv = parseEnvFile(envPath);
 
-  const additions: string[] = [];
-  for (const [key, value] of Object.entries(repoEnv)) {
-    if (ENV_SHARED_SKIP.has(key)) {
-      continue;
-    }
-    if (!(key in workspaceEnv)) {
-      additions.push(`${key}=${value}`);
-    } else if (workspaceEnv[key] !== value) {
-      conflicts[key] = value;
-    }
-  }
+  const split = splitRepoEnv(repoEnv, workspaceEnv);
+  Object.assign(conflicts, split.conflicts);
+  const additions = Object.entries(split.additions).map(([key, value]) => `${key}=${value}`);
 
   if (additions.length > 0) {
     const existing = existsSync(envPath) ? readFileSync(envPath, "utf8") : "";
