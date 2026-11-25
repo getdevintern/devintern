@@ -771,7 +771,9 @@ export async function autoMergePr(
   const alreadyPosted =
     decision.kind === "stop" && decision.ciWait && decision.message === options.ciWaitPosted;
   if (alreadyPosted) {
-    // Status comment and label are already in place.
+    // The status comment is already in place; re-add the label (idempotent)
+    // in case it was removed while the PR still waits.
+    await syncReviewLabel(ctx, true);
   } else if (decision.kind === "stop" && decision.leftOpen && result.outcome !== "failed") {
     // Failures (an unreadable check status) are retried: only the final
     // attempt below posts, like any other failure.
@@ -869,9 +871,14 @@ async function postStatus(ctx: GateContext, status: AutoMergeCommentStatus): Pro
   } catch (error) {
     console.warn(`⚠️  Failed to update the auto-merge status comment: ${(error as Error).message}`);
   }
+  await syncReviewLabel(ctx, status.kind === "left-open");
+}
+
+/** Add (left open) or remove the review label; never in dry runs; failures only warn. */
+async function syncReviewLabel(ctx: GateContext, leftOpen: boolean): Promise<void> {
+  if (ctx.options.dryRun || ctx.options.noComment) return;
   const label = ctx.options.policy.reviewLabel?.trim();
   if (!label) return;
-  const leftOpen = status.kind === "left-open";
   try {
     await (leftOpen ? ctx.github.addLabel(label) : ctx.github.removeLabel(label));
   } catch (error) {

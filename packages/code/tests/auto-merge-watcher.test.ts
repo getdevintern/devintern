@@ -252,8 +252,8 @@ describe("AutoMergeWatcherAcquirer", () => {
   });
 
   test.each([
-    [{ mergeable_state: "unstable" }],
-    [{ mergeable_state: "blocked" }],
+    [{ mergeable_state: "dirty" }],
+    [{ mergeable_state: "behind" }],
     [{ draft: true }],
     [{ state: "closed" }],
     [{ head: { sha: HEAD, repo: { full_name: "fork/widgets" } } }],
@@ -261,6 +261,48 @@ describe("AutoMergeWatcherAcquirer", () => {
     pr = { ...pr, ...overrides };
     await watcher().tick();
     expect(calls).toHaveLength(0);
+  });
+
+  test("an unstable PR with a failing check is evaluated and its CI wait recorded", async () => {
+    pr = { ...pr, mergeable_state: "unstable" };
+    const failing = {
+      outcome: "waiting" as const,
+      message: "Ready gate: CI check failing on this commit: lint (failure).",
+      reviewed: false,
+      ciWait: true,
+    };
+    results = [failing, failing];
+    const w = watcher({ quietSeconds: 300 });
+    await w.tick();
+    // The quiet window still applies to held PRs.
+    expect(calls).toHaveLength(0);
+    now += 301_000;
+    await w.tick();
+    expect(calls).toHaveLength(1);
+    expect(liveRuns()).toEqual([{ origin: "auto_merge", status: "escalated" }]);
+    // Still failing: checked again after the backoff, passing the posted wait.
+    now += 10 * 60_000 + 1;
+    await w.tick();
+    expect(calls.map((call) => call.ciWaitPosted)).toEqual([undefined, failing.message]);
+    expect(queue.hasProcessed(AUTO_MERGE_SOURCE, autoMergeDecisionKey(REPO, 7, HEAD))).toBe(false);
+  });
+
+  test("a blocked PR not held by its checks is not re-evaluated until its state changes", async () => {
+    pr = { ...pr, mergeable_state: "blocked" };
+    results = [{ outcome: "waiting", message: "blocked by branch protection", reviewed: false }];
+    const w = watcher();
+    await w.tick();
+    expect(calls).toHaveLength(1);
+    for (let i = 0; i < 3; i++) {
+      now += 10 * 60_000 + 1;
+      await w.tick();
+    }
+    expect(calls).toHaveLength(1);
+    expect(liveRuns()).toEqual([]);
+    // Approved: GitHub now reports it clean, so it is evaluated again.
+    pr = { ...pr, mergeable_state: "clean" };
+    await w.tick();
+    expect(calls).toHaveLength(2);
   });
 
   test("waits for the head to stay quiet", async () => {

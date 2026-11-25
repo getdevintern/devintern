@@ -120,11 +120,18 @@ const FAILURE_BACKOFF_MAX_MS = 30 * 60_000;
 /**
  * `mergeable_state` values meaning "mergeable and checks passing". GitHub
  * also reports `clean` when the head has no checks at all, so the CI part of
- * the Ready gate re-reads the checks. `unstable`/`blocked` PRs are not
- * evaluated: GitHub already holds them, and a blocked PR (often waiting on an
- * approving review) would otherwise spawn an evaluation every backoff.
+ * the Ready gate re-reads the checks.
  */
 const READY_STATES = new Set(["clean", "has_hooks"]);
+
+/**
+ * `mergeable_state` values GitHub uses when commit checks may hold the PR.
+ * They are evaluated so a failing or pending check gets its status comment
+ * and label; when the checks don't explain the hold (a blocked PR waiting on
+ * an approving review), the head is not evaluated again until the state
+ * changes, so it does not spawn an evaluation every backoff.
+ */
+const CI_HELD_STATES = new Set(["unstable", "blocked"]);
 
 interface PrTracking {
   headSha: string;
@@ -138,8 +145,30 @@ interface PrTracking {
    * nor recorded again.
    */
   ciWaitRecorded?: string;
+  /**
+   * `unstable`/`blocked` state this head was evaluated in without a CI
+   * reason for the hold; skipped until the state changes.
+   */
+  nonCiHold?: string;
   etag?: string;
   cached?: AutoMergePolledPr;
+}
+
+/**
+ * Whether a PR in `mergeableState` is evaluated: ready, or held by GitHub
+ * and not already found held for a non-CI reason in this state. A state
+ * change clears that finding.
+ */
+function evaluableState(state: PrTracking, mergeableState: string, force: boolean): boolean {
+  if (READY_STATES.has(mergeableState)) {
+    state.nonCiHold = undefined;
+    return true;
+  }
+  if (!CI_HELD_STATES.has(mergeableState)) return false;
+  if (state.nonCiHold !== undefined && state.nonCiHold !== mergeableState) {
+    state.nonCiHold = undefined;
+  }
+  return force || state.nonCiHold === undefined;
 }
 
 /** Durable key of one auto-merge decision. */
@@ -333,7 +362,8 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
       return;
     }
     if (this.skipStacked(repo, prNumber, pr)) return;
-    if (!READY_STATES.has(pr.mergeable_state ?? "")) return;
+    const mergeableState = pr.mergeable_state ?? "";
+    if (!evaluableState(state, mergeableState, force)) return;
     const quietMs = (this.options.quietSeconds ?? DEFAULT_AUTO_MERGE_QUIET_SECONDS) * 1000;
     if (!force && now - state.headSeenAt < quietMs) return;
     const decisionKey = autoMergeDecisionKey(
@@ -344,7 +374,7 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
     );
     if (this.options.queue.hasProcessed(AUTO_MERGE_SOURCE, decisionKey)) return;
 
-    await this.evaluate(repo, prNumber, state, decisionKey);
+    await this.evaluate(repo, prNumber, state, decisionKey, mergeableState);
   }
 
   /** Whether a stacked PR must be skipped; logs the reason once per head and base. */
@@ -385,6 +415,7 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
     prNumber: number,
     state: PrTracking,
     decisionKey: string,
+    mergeableState: string,
   ): Promise<void> {
     const runId = this.beginRun(repo, prNumber);
     // The run row exists before the check is admitted: until the supervisor
@@ -406,6 +437,12 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
     // Any other result may have changed the status comment, so the next
     // CI wait is posted again.
     state.ciWaitRecorded = result.ciWait ? result.message : undefined;
+    // GitHub holds the PR for something other than its checks: wait for the
+    // state to change instead of re-evaluating every backoff.
+    state.nonCiHold =
+      CI_HELD_STATES.has(mergeableState) && result.outcome === "waiting" && !result.ciWait
+        ? mergeableState
+        : undefined;
     const label = `${repo}#${prNumber}`;
     const finishedAt = this.now();
 

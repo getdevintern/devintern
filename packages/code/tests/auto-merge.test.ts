@@ -1061,14 +1061,15 @@ describe("autoMergePr CI checks (Ready gate)", () => {
     });
   });
 
-  test("the same CI wait already on the PR is not re-posted", async () => {
+  test("the same CI wait already on the PR is not re-posted, but its label is kept", async () => {
     const message =
       "Ready gate: No CI checks reported for this commit; auto-merge needs at least one passing check.";
     const repeat = fakeGitHub(codeFiles, { checks: [] });
     const result = await autoMergePr(URL, options(repeat, { ciWaitPosted: message }));
     expect(result).toMatchObject({ outcome: "waiting", ciWait: true, message });
     expect(repeat.comments).toHaveLength(0);
-    expect(repeat.labels).toHaveLength(0);
+    // The label is re-added (idempotent) in case a human removed it.
+    expect(repeat.labels).toEqual(["+needs-human-review"]);
 
     // A different reason (now failing) is posted.
     const changed = fakeGitHub(codeFiles, { checks: [{ name: "ci", state: "failing" }] });
