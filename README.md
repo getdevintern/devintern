@@ -28,6 +28,8 @@ Interactive runs are free with no signup. Unattended automation starts with a 14
 <p align="center">
   <a href="#set-up-your-worker"><strong>Set up your worker</strong></a>
   &nbsp;·&nbsp;
+  <a href="https://devintern.com/demo/dashboard/">Live demo</a>
+  &nbsp;·&nbsp;
   <a href="#see-it-working">Real pull requests</a>
   &nbsp;·&nbsp;
   <a href="docs/code/worker.md">Documentation</a>
@@ -96,6 +98,8 @@ Prefer guided setup through your coding agent? Use the [DevIntern setup skill](d
 ![A tour of the local dashboard: the runs list, one run's timeline from feasibility check to opened pull request, the pull requests awaiting review, scheduled automations, and work routing across repositories.](assets/readme/dashboard-tour.gif)
 
 <p align="center"><em>The worker's local dashboard: runs, one run step by step, pull requests awaiting review, automations, and work routing. Example data.</em></p>
+
+Want the real thing instead of example data? The [live dashboard demo](https://devintern.com/demo/dashboard/) is a read-only snapshot of the worker that builds DevIntern itself, refreshed weekly. Open any run to see what the agent did, step by step. Failed runs from work on the worker itself are left out.
 
 Browse the [DevIntern-authored pull requests](https://github.com/getdevintern/devintern/pulls?q=is%3Apr+label%3Adevintern-authored) to inspect changes produced by DevIntern on this repository. Start with these merged examples:
 
