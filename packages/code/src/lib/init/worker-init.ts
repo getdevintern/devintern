@@ -42,6 +42,7 @@ import { runTrackerSetup } from "./wizard";
 import { PRManager } from "../code-host/index";
 import { connectRelayTarget, hasGitHubRelayRegistration, loadRelayState } from "../relay/connect";
 import { parseCronOrIntervalSchedule } from "../automation/config";
+import { writeSecretFile } from "../utils/secret-file";
 import { isValidTimeZone, parseTimeWindowSpec } from "../worker/schedule";
 import {
   TRACKER_CAPABILITIES,
@@ -463,10 +464,10 @@ function mergeIntoSharedEnv(envPath: string, envContent: string, log: LogFn): vo
   }
   mkdirSync(dirname(envPath), { recursive: true, mode: 0o700 });
   const separator = existingText === "" || existingText.endsWith("\n") ? "" : "\n";
-  writeFileSync(envPath, existingText + separator + additions.map((line) => `${line}\n`).join(""), {
-    mode: 0o600,
-  });
-  chmodSync(envPath, 0o600);
+  writeSecretFile(
+    envPath,
+    existingText + separator + additions.map((line) => `${line}\n`).join(""),
+  );
   log(`   Saved tracker settings to ${envPath}`);
   if (differing.length > 0) {
     log(

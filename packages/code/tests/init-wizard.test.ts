@@ -1,5 +1,14 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "fs";
 import { tmpdir } from "os";
 import { basename, join } from "path";
 import { BUNDLED_TRELLO_API_KEY } from "@devintern/task-trackers";
@@ -809,6 +818,49 @@ describe("runInitUpgrade", () => {
     expect(env).toContain("GITHUB_TOKEN=ghp_shared");
     expect(env).toContain("LINEAR_API_KEY=lin_old_key");
   });
+
+  test.skipIf(process.platform === "win32")(
+    "update credentials: a group/world-readable env file ends up owner-only",
+    async () => {
+      seedExistingConfig();
+      chmodSync(upgradeEnvPath(), 0o644);
+      const { prompt } = promptQueue(["1", "lin_rotated", "", "ghp_rotated"]);
+      await runInitUpgrade({
+        envPath: upgradeEnvPath(),
+        prompt,
+        probe: () => Promise.resolve(),
+        cwd: tempDir,
+        log: silentLog,
+      });
+      expect(readFileSync(upgradeEnvPath(), "utf8")).toContain("LINEAR_API_KEY=lin_rotated");
+      expect(statSync(upgradeEnvPath()).mode & 0o777).toBe(0o600);
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "switch tracker: a group/world-readable env file ends up owner-only",
+    async () => {
+      seedExistingConfig("GITHUB_TOKEN=ghp_shared\n");
+      chmodSync(upgradeEnvPath(), 0o644);
+      const { prompt } = promptQueue([
+        "2",
+        "jira",
+        "https://acme.atlassian.net",
+        "dev@acme.com",
+        "jira-token",
+        "PROJ",
+      ]);
+      await runInitUpgrade({
+        envPath: upgradeEnvPath(),
+        prompt,
+        probe: () => Promise.resolve(),
+        cwd: tempDir,
+        log: silentLog,
+      });
+      expect(readFileSync(upgradeEnvPath(), "utf8")).toContain("TASK_TRACKER=jira");
+      expect(statSync(upgradeEnvPath()).mode & 0o777).toBe(0o600);
+    },
+  );
 
   test("exit option leaves the file untouched", async () => {
     seedExistingConfig();

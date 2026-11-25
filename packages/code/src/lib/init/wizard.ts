@@ -11,7 +11,7 @@
  * falls back to the non-interactive template scaffold.
  */
 
-import { existsSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, readFileSync } from "fs";
 import { join, resolve } from "path";
 import { listInstalledHarnesses, resolveHarness } from "@devintern/agent-harness";
 import {
@@ -52,6 +52,7 @@ import { TRACKER_CAPABILITIES } from "../trackers/capabilities";
 import { workspaceCodeStateDir } from "../workspace/paths";
 import { findWorkspaceRepoForCheckout } from "../workspace/manual-run";
 import { registerManualCheckout } from "../workspace/register-checkout";
+import { writeSecretFile } from "../utils/secret-file";
 
 export { isInteractive };
 
@@ -459,7 +460,7 @@ export async function runInitUpgrade(
         );
       }
 
-      writeFileSync(envPath, upsertEnvVars(originalContent, values), "utf8");
+      writeSecretFile(envPath, upsertEnvVars(originalContent, values));
       log(`\n✅ Updated ${envLabel}`);
       return;
     }
@@ -496,10 +497,9 @@ export async function runInitUpgrade(
       await validateConnection(trackerId, values, steps, { prompt, probe, log }, envLabel);
     }
 
-    writeFileSync(
+    writeSecretFile(
       envPath,
       upsertEnvVars(originalContent, { TASK_TRACKER: trackerId, ...values }),
-      "utf8",
     );
     log(
       `\n✅ Switched to ${
