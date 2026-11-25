@@ -3,7 +3,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import type { ReportPreview } from "@/lib/api";
-import { REPORT_DOCS_URL, ReportDialogBody } from "./ReportProblem";
+import { REPORT_DOCS_URL, ReportDialogBody, reportStepDescription } from "./ReportProblem";
 import {
   canPreview,
   canSend,
@@ -267,5 +267,17 @@ describe("report dialog", () => {
     expect(saved).toContain("devintern report --from /w/.devintern-code/reports/r.json");
     expect(saved).toContain("devintern login");
     expect(saved).toContain("Try again");
+  });
+});
+
+describe("reportStepDescription", () => {
+  test("names the run when one is attached", () => {
+    expect(reportStepDescription("compose", 42)).toContain("run #42");
+    expect(reportStepDescription("sent", 42)).toBe("Run #42");
+  });
+
+  test("a general report explains how to attach a run", () => {
+    expect(reportStepDescription("compose", null)).toContain("open it under Runs");
+    expect(reportStepDescription("saved", null)).toBe("No run attached");
   });
 });

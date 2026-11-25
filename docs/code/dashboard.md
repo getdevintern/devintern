@@ -4,7 +4,7 @@ sidebarLabel: "Dashboard"
 description: "Use when checking what the worker is doing, reading agent transcripts, diagnosing failed runs, retrying work, or delegating an ad-hoc task from the local dashboard."
 section: "Automation"
 order: 4
-dateModified: 2026-11-18
+dateModified: 2026-11-25
 ---
 
 # Worker Dashboard
@@ -53,6 +53,8 @@ Ad-hoc tasks from `devintern worker add` show **Re-queue task** instead. It resu
 When a run fails in a way the output does not explain, or completes with the wrong result, open it and choose **Report a problem**. It files the same redacted bug report as `devintern report --run <id>`; see [Reporting Bugs](reporting-bugs.md#report-from-the-dashboard).
 
 Missing credentials, usage limits, and failed verification checks are configuration issues, not DevIntern bugs. Fix those and retry.
+
+For a problem that is not tied to one run, choose **Report a bug** at the bottom of the sidebar. It sends your environment and recent worker logs, with no run attached. **Request a feature** opens a public GitHub issue form with your version filled in.
 
 ## Run an automation now
 

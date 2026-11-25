@@ -232,11 +232,15 @@ export interface ReportPayload {
   [key: string]: unknown;
 }
 
-/** `POST /api/runs/:id/report/preview` response: what will be sent. */
+/**
+ * `POST /api/runs/:id/report/preview` (or `POST /api/reports/preview` for a
+ * report with no run) response: what will be sent.
+ */
 export interface ReportPreview {
   previewId: string;
   expiresAt: number;
-  runId: number;
+  /** The attached run, or null for a general report. */
+  runId: number | null;
   signedIn: boolean;
   /** Anonymous reports need a contact email to submit. */
   contactRequired: boolean;
@@ -293,11 +297,16 @@ function errorMessage(body: unknown, fallback: string): string {
 }
 
 /**
- * Build the redacted report for a run without sending it. Throws with the
- * server's message on failure.
+ * Build the redacted report without sending it, for a run or (with a null
+ * run id) for the worker as a whole. Throws with the server's message on
+ * failure.
  */
-export async function previewRunReport(runId: number, draft: ReportDraft): Promise<ReportPreview> {
-  const response = await fetch(`/api/runs/${runId}/report/preview`, {
+export async function previewReport(
+  runId: number | null,
+  draft: ReportDraft,
+): Promise<ReportPreview> {
+  const url = runId === null ? "/api/reports/preview" : `/api/runs/${runId}/report/preview`;
+  const response = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(draft),

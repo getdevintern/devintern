@@ -1231,6 +1231,7 @@ describe("dashboard server", () => {
 
       const health = await fetch(`${base}/api/health`);
       expect(health.status).toBe(200);
+      expect(await health.json()).toMatchObject({ status: "ok", version: expect.any(String) });
 
       const runs = (await (await fetch(`${base}/api/runs`)).json()) as { total: number };
       expect(runs.total).toBe(1);

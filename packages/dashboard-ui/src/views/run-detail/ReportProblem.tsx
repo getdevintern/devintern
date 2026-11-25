@@ -22,7 +22,7 @@ import {
 } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { previewRunReport, submitReport } from "@/lib/api";
+import { previewReport, submitReport } from "@/lib/api";
 import type { ReportPreview, RunRecord, RunStatus } from "@/lib/api";
 import { formatDuration } from "@/lib/utils";
 import {
@@ -433,11 +433,27 @@ const STEP_TITLES: Record<ReportFlowState["phase"]["step"], string> = {
   saved: "Report saved locally",
 };
 
+/** The dialog's subtitle for a step, with or without an attached run. */
+export function reportStepDescription(
+  step: ReportFlowState["phase"]["step"],
+  runId: number | null,
+): string {
+  if (step === "compose") {
+    return runId === null
+      ? "File a DevIntern bug report with your environment and recent worker logs. To attach a run, open it under Runs and choose Report a problem. You will see exactly what is sent before anything leaves this machine."
+      : `File a DevIntern bug report for run #${runId}. You will see exactly what is sent before anything leaves this machine.`;
+  }
+  if (step === "preview") {
+    return "Nothing has been sent yet. This is the redacted payload Send will submit.";
+  }
+  return runId === null ? "No run attached" : `Run #${runId}`;
+}
+
 /**
  * One open-to-close session of the dialog. Mounted only while the dialog is
  * open, so a confirmed close discards the draft and reopening starts fresh.
  */
-function ReportSession({ run, onClose }: { run: RunRecord; onClose: () => void }) {
+function ReportSession({ runId, onClose }: { runId: number | null; onClose: () => void }) {
   const [state, dispatch] = useReducer(reportFlowReducer, INITIAL_REPORT_FLOW);
   const busy = isReportBusy(state);
   const dirty = isReportDraftDirty(state);
@@ -451,7 +467,7 @@ function ReportSession({ run, onClose }: { run: RunRecord; onClose: () => void }
     if (!canPreview(state)) return;
     dispatch({ type: "previewStart" });
     try {
-      dispatch({ type: "previewDone", preview: await previewRunReport(run.id, state.draft) });
+      dispatch({ type: "previewDone", preview: await previewReport(runId, state.draft) });
     } catch (cause: unknown) {
       dispatch({
         type: "previewFailed",
@@ -504,13 +520,7 @@ function ReportSession({ run, onClose }: { run: RunRecord; onClose: () => void }
       </Button>
       <DialogHeader>
         <DialogTitle>{STEP_TITLES[step]}</DialogTitle>
-        <DialogDescription>
-          {step === "compose"
-            ? `File a DevIntern bug report for run #${run.id}. You will see exactly what is sent before anything leaves this machine.`
-            : step === "preview"
-              ? "Nothing has been sent yet. This is the redacted payload Send will submit."
-              : `Run #${run.id}`}
-        </DialogDescription>
+        <DialogDescription>{reportStepDescription(step, runId)}</DialogDescription>
       </DialogHeader>
       <ReportDialogBody
         state={state}
@@ -520,6 +530,26 @@ function ReportSession({ run, onClose }: { run: RunRecord; onClose: () => void }
         onClose={requestClose}
       />
     </DialogContent>
+  );
+}
+
+/**
+ * The bug-report dialog, for one run or (with a null run id) for the worker as
+ * a whole. The caller owns the trigger.
+ */
+export function ReportDialog({
+  open,
+  onOpenChange,
+  runId,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  runId: number | null;
+}) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      {open ? <ReportSession runId={runId} onClose={() => onOpenChange(false)} /> : null}
+    </Dialog>
   );
 }
 
@@ -540,9 +570,7 @@ export function ReportProblem({ run }: { run: RunRecord }) {
         <Bug />
         <span className="max-sm:sr-only">Report a problem</span>
       </Button>
-      <Dialog open={open} onOpenChange={setOpen}>
-        {open ? <ReportSession run={run} onClose={() => setOpen(false)} /> : null}
-      </Dialog>
+      <ReportDialog open={open} onOpenChange={setOpen} runId={run.id} />
     </>
   );
 }

@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 
 import { NewTaskDialog } from "@/components/NewTaskDialog";
+import { SidebarHelp } from "@/components/SidebarHelp";
 import { StatusStrip } from "@/components/StatusStrip";
 import { Button } from "@/components/ui/button";
 import { AgentPrsView } from "@/views/AgentPrsView";
@@ -126,6 +127,8 @@ export function App() {
             );
           })}
         </nav>
+
+        <SidebarHelp />
       </aside>
 
       <div className="dashboard-main">

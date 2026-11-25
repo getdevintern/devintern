@@ -291,6 +291,51 @@
   color: var(--sidebar-primary);
 }
 
+.dashboard-help {
+  display: grid;
+  gap: 1px;
+  margin-top: auto;
+  padding-top: 12px;
+  border-top: 1px solid var(--sidebar-border);
+}
+
+.dashboard-help-link {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 30px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted-foreground);
+  font: inherit;
+  font-size: 0.8125rem;
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+  transition:
+    background-color 150ms ease-out,
+    color 150ms ease-out;
+}
+
+.dashboard-help-link svg {
+  flex: none;
+  color: var(--subtle-foreground);
+}
+
+.dashboard-help-link:hover {
+  background: color-mix(in srgb, var(--sidebar-accent) 60%, transparent);
+  color: var(--foreground);
+}
+
+.dashboard-help-version {
+  margin: 6px 10px 0;
+  color: var(--subtle-foreground);
+  font-size: 0.6875rem;
+  font-variant-numeric: tabular-nums;
+}
+
 .dashboard-main {
   min-width: 0;
   background: var(--background);
@@ -606,6 +651,42 @@ a.strip-link:hover .strip-item svg {
     margin: 0 20px 10px;
   }
 
+  /* Icon-only help actions on the brand row. */
+  .dashboard-sidebar {
+    position: relative;
+  }
+
+  .dashboard-help {
+    position: absolute;
+    top: 8px;
+    right: 12px;
+    display: flex;
+    margin: 0;
+    padding: 0;
+    border: 0;
+  }
+
+  .dashboard-help-link {
+    min-height: 36px;
+    min-width: 36px;
+    justify-content: center;
+    padding: 0;
+  }
+
+  /* Labels stay as accessible names; only the icon shows. */
+  .dashboard-help-link span {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .dashboard-help-version {
+    display: none;
+  }
+
   .dashboard-brand-name {
     flex-direction: row;
     align-items: baseline;
@@ -688,6 +769,7 @@ a.strip-link:hover .strip-item svg {
 
 @media (prefers-reduced-motion: reduce) {
   .dashboard-nav-link,
+  .dashboard-help-link,
   .dashboard-nav-link svg,
   .ref-link,
   a.strip-link {
