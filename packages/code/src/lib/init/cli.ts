@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, writeFileSync } from "fs";
 import { dirname, isAbsolute, join } from "path";
 import { detectSandboxProviders } from "@devintern/agent-harness";
 import { hasHelpArg } from "../cli/help";
+import { isPromptAbort } from "../cli/prompt-abort";
 import { flushAnalytics, trackSetupCompleted, trackSetupStarted } from "../observability/analytics";
 import { findWorkspaceRepoForCheckout } from "../workspace/manual-run";
 import { migrateLegacyCheckout } from "../workspace/migrate-checkout";
@@ -10,6 +11,7 @@ import { workspaceConfigPath, workspaceEnvPath } from "../workspace/paths";
 import { registerManualCheckout } from "../workspace/register-checkout";
 import { buildEnvExample } from "./scaffold";
 import { isInteractive, runInitUpgrade, runInitWizard } from "./wizard";
+import type { InitWizardDeps } from "./wizard";
 
 const INIT_USAGE = [
   "Usage: devintern init [options]",
@@ -73,6 +75,12 @@ async function initializeProject(): Promise<void> {
   trackSetupCompleted({ signedIn: "skipped" });
 }
 
+/** Injection points for {@link runInit}; production callers pass none. */
+export type InitCommandDeps = Omit<InitWizardDeps, "source"> & {
+  /** Whether prompts are available; defaults to a TTY check on stdin. */
+  interactive?: boolean;
+};
+
 /**
  * Run `devintern init`: the interactive wizard on a TTY (or the upgrade variant
  * when a project `.env` already exists), otherwise the non-interactive scaffold.
@@ -82,17 +90,39 @@ export async function runInitCommand(): Promise<never> {
     console.log(INIT_USAGE);
     process.exit(0);
   }
-  await migrateLegacyCheckout();
-  const registered = await findWorkspaceRepoForCheckout();
-  if (registered) {
-    process.exitCode = await updateRegisteredCheckout(registered);
-  } else if (isInteractive(process.argv, process.stdin)) {
-    await runInitWizard();
-  } else {
-    await initializeProject();
-  }
+  const code = await runInit();
   await flushAnalytics();
-  process.exit(process.exitCode ?? 0);
+  process.exit(code);
+}
+
+/**
+ * Body of `devintern init` without the process exit. Closing input at any
+ * prompt (Ctrl+D or a closed pipe) stops setup with a one-line message
+ * instead of a readline stack trace; files already written stay as they are.
+ *
+ * @returns Process exit code
+ */
+export async function runInit(deps: InitCommandDeps = {}): Promise<number> {
+  const cwd = deps.cwd ?? process.cwd();
+  const log = deps.log ?? console.log;
+  const interactive = deps.interactive ?? isInteractive(process.argv, process.stdin);
+  try {
+    await migrateLegacyCheckout(cwd);
+    const registered = await findWorkspaceRepoForCheckout({ cwd });
+    if (registered) {
+      return await updateRegisteredCheckout(registered, interactive, deps);
+    }
+    if (interactive) {
+      await runInitWizard({ ...deps, cwd });
+    } else {
+      await initializeProject();
+    }
+    return typeof process.exitCode === "number" ? process.exitCode : 0;
+  } catch (error) {
+    if (!isPromptAbort(error)) throw error;
+    log("\n❌ Input closed (Ctrl+D); setup stopped. Re-run `devintern init`.");
+    return 1;
+  }
 }
 
 /**
@@ -102,7 +132,11 @@ export async function runInitCommand(): Promise<never> {
  *
  * @returns Process exit code
  */
-async function updateRegisteredCheckout(run: ManualWorkspaceRun): Promise<number> {
+async function updateRegisteredCheckout(
+  run: ManualWorkspaceRun,
+  interactive: boolean,
+  deps: InitCommandDeps,
+): Promise<number> {
   const configPath = workspaceConfigPath(run.workspaceDir);
   if (!run.repo.envFile) {
     console.log(`ℹ️  This checkout is registered in ${configPath} as "${run.repo.name}".`);
@@ -114,7 +148,7 @@ async function updateRegisteredCheckout(run: ManualWorkspaceRun): Promise<number
   const envPath = isAbsolute(run.repo.envFile)
     ? run.repo.envFile
     : join(run.workspaceDir, run.repo.envFile);
-  if (!isInteractive(process.argv, process.stdin)) {
+  if (!interactive) {
     console.log(`ℹ️  This checkout is registered in ${configPath} as "${run.repo.name}".`);
     console.log(`   Edit ${envPath} to change its settings.`);
     return 0;
@@ -123,6 +157,6 @@ async function updateRegisteredCheckout(run: ManualWorkspaceRun): Promise<number
     mkdirSync(dirname(envPath), { recursive: true, mode: 0o700 });
     writeFileSync(envPath, "", { mode: 0o600 });
   }
-  await runInitUpgrade({ envPath });
+  await runInitUpgrade({ ...deps, envPath });
   return 0;
 }

@@ -7,6 +7,7 @@ import {
   loadEnvironment,
   loadSupabaseConfig,
 } from "../cli/bootstrap";
+import { isPromptAbort } from "../cli/prompt-abort";
 import { flushAnalytics, trackWorkerConnect } from "../observability/analytics";
 import { initSentryOnce } from "../observability/sentry-init";
 import { TaskTrackerManager } from "../trackers/manager";
@@ -300,14 +301,6 @@ async function runWorkerInitNonInteractive(args: string[]): Promise<never> {
   }
   await flushAnalytics();
   process.exit(report.result === "success" ? 0 : 1);
-}
-
-/** True for the readline rejection raised when stdin hits EOF (Ctrl+D). */
-function isPromptAbort(error: unknown): boolean {
-  return (
-    error instanceof Error &&
-    (error.name === "AbortError" || (error as NodeJS.ErrnoException).code === "ABORT_ERR")
-  );
 }
 
 /** Interactively configure unattended automation and a native user service. */
