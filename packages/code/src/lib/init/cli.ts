@@ -32,10 +32,10 @@ const INIT_USAGE = [
  * Scaffold `.devintern-code/` with env template, settings, and gitignore
  * entries (non-interactive fallback for `init --yes` / piped stdin).
  */
-async function initializeProject(): Promise<void> {
-  console.log("🚀 Initializing @devintern/code for this project...");
+async function initializeProject(cwd: string, log: (message: string) => void): Promise<void> {
+  log("🚀 Initializing @devintern/code for this project...");
 
-  const registered = await registerManualCheckout(process.cwd(), buildEnvExample());
+  const registered = await registerManualCheckout(cwd, buildEnvExample());
   if (!registered.ok) {
     console.error(`❌ ${registered.error}`);
     return;
@@ -54,23 +54,23 @@ async function initializeProject(): Promise<void> {
       const names = available
         .map((d) => `${d.provider.name}${d.detection.version ? ` (${d.detection.version})` : ""}`)
         .join(", ");
-      console.log(`\n🔒 Sandbox providers detected: ${names}`);
-      console.log(`   Set AGENT_SANDBOX=auto in ${envFile} to run agents isolated.`);
+      log(`\n🔒 Sandbox providers detected: ${names}`);
+      log(`   Set AGENT_SANDBOX=auto in ${envFile} to run agents isolated.`);
     } else {
-      console.log("\n🔓 No sandbox provider detected — agents will run unsandboxed.");
-      console.log("   Run 'devintern sandbox' for install options.");
+      log("\n🔓 No sandbox provider detected — agents will run unsandboxed.");
+      log("   Run 'devintern sandbox' for install options.");
     }
   } catch {
     // Detection is best-effort; init must not fail because of it.
   }
 
-  console.log("\n🎉 Project initialized successfully!");
-  console.log("\n📝 Next steps:");
-  console.log(`   1. Edit ${envFile}`);
-  console.log("      - Add your task tracker credentials (Jira, Linear, etc.)");
-  console.log(`   2. ${settingsHint}`);
-  console.log("      - Status names per tracker project, e.g. [trackers.jira.projects.PROJ]");
-  console.log("   3. Run 'devintern <TASK-KEY>' to start working on tasks");
+  log("\n🎉 Project initialized successfully!");
+  log("\n📝 Next steps:");
+  log(`   1. Edit ${envFile}`);
+  log("      - Add your task tracker credentials (Jira, Linear, etc.)");
+  log(`   2. ${settingsHint}`);
+  log("      - Status names per tracker project, e.g. [trackers.jira.projects.PROJ]");
+  log("   3. Run 'devintern <TASK-KEY>' to start working on tasks");
 
   trackSetupCompleted({ signedIn: "skipped" });
 }
@@ -115,7 +115,7 @@ export async function runInit(deps: InitCommandDeps = {}): Promise<number> {
     if (interactive) {
       await runInitWizard({ ...deps, cwd });
     } else {
-      await initializeProject();
+      await initializeProject(cwd, log);
     }
     return typeof process.exitCode === "number" ? process.exitCode : 0;
   } catch (error) {
@@ -137,10 +137,11 @@ async function updateRegisteredCheckout(
   interactive: boolean,
   deps: InitCommandDeps,
 ): Promise<number> {
+  const log = deps.log ?? console.log;
   const configPath = workspaceConfigPath(run.workspaceDir);
   if (!run.repo.envFile) {
-    console.log(`ℹ️  This checkout is registered in ${configPath} as "${run.repo.name}".`);
-    console.log(
+    log(`ℹ️  This checkout is registered in ${configPath} as "${run.repo.name}".`);
+    log(
       `   Its settings come from ${workspaceEnvPath(run.workspaceDir)} and [repos.env]; edit those directly.`,
     );
     return 0;
@@ -149,8 +150,8 @@ async function updateRegisteredCheckout(
     ? run.repo.envFile
     : join(run.workspaceDir, run.repo.envFile);
   if (!interactive) {
-    console.log(`ℹ️  This checkout is registered in ${configPath} as "${run.repo.name}".`);
-    console.log(`   Edit ${envPath} to change its settings.`);
+    log(`ℹ️  This checkout is registered in ${configPath} as "${run.repo.name}".`);
+    log(`   Edit ${envPath} to change its settings.`);
     return 0;
   }
   if (!existsSync(envPath)) {

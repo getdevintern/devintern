@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
+import { stdinClosedError } from "@devintern/auth";
 import { runInit } from "../src/lib/init/cli";
 import { isPromptAbort } from "../src/lib/cli/prompt-abort";
 import { registerManualCheckout } from "../src/lib/workspace/register-checkout";
@@ -52,8 +53,9 @@ function baseDeps() {
 }
 
 describe("isPromptAbort", () => {
-  test("matches the readline Ctrl+D rejection only", () => {
+  test("matches readline and sign-in prompt Ctrl+D rejections only", () => {
     expect(isPromptAbort(ctrlDError())).toBe(true);
+    expect(isPromptAbort(stdinClosedError())).toBe(true);
     expect(isPromptAbort(new Error("boom"))).toBe(false);
     expect(isPromptAbort("AbortError")).toBe(false);
   });
@@ -80,7 +82,8 @@ describe("runInit: closed input", () => {
     const code = await runInit({
       ...baseDeps(),
       prompt,
-      signIn: () => Promise.reject(ctrlDError()),
+      // The error the sign-in prompts (login method, email) raise on closed stdin.
+      signIn: () => Promise.reject(stdinClosedError()),
     });
 
     expect(code).toBe(1);
