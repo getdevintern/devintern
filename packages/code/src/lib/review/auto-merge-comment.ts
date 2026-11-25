@@ -5,6 +5,7 @@
  * comment per push.
  */
 
+import type { CiChecksProblem } from "./ci-checks";
 import type { AutoMergeMethod } from "./merge-gate";
 
 /** Hidden first line identifying the managed comment. */
@@ -25,7 +26,13 @@ export type LeftOpenReason =
   | { kind: "agent-unsafe"; reason: string; policy: string; reviewPathMatches?: string[] }
   /** A `custom` policy's rules could not be loaded, so no review ran. */
   | { kind: "rules-unavailable"; policy: string; problem: string }
-  | { kind: "not-evaluable"; detail: string };
+  | { kind: "not-evaluable"; detail: string }
+  /**
+   * The head commit's CI is not ready (gate 1): no passing check, checks
+   * pending or failing, or the check status could not be read. The PR is
+   * checked again on the same commit, so the comment says "waiting".
+   */
+  | { kind: "ci-checks"; problem: CiChecksProblem | "unreadable"; detail: string };
 
 export type AutoMergeCommentStatus =
   | { kind: "merged"; method: AutoMergeMethod; headSha: string; agentReason?: string }
@@ -57,6 +64,28 @@ function reviewPathLines(paths: readonly string[] | undefined, lead: string): st
     "",
     ...pathList(paths),
   ];
+}
+
+/** What happens next for a PR waiting on its CI checks. */
+function ciChecksHint(problem: CiChecksProblem | "unreadable"): string {
+  switch (problem) {
+    case "no-checks":
+    case "no-passing":
+      return (
+        "It can merge once CI reports a passing check on this commit. If this repository has " +
+        "no CI, set `auto_merge_allow_no_checks = true` (workspace-wide or on its `[[repos]]` " +
+        "entry) to merge without checks, or review and merge it yourself."
+      );
+    case "pending":
+      return "It can merge once the pending checks finish and pass.";
+    case "failing":
+      return "It can merge once the failing checks pass (fix or re-run them), or review and merge it yourself.";
+    case "unreadable":
+      return (
+        "devintern retries shortly. The GitHub credential needs `Checks: Read` and " +
+        "`Commit statuses: Read`."
+      );
+  }
 }
 
 function leftOpenBody(reason: LeftOpenReason): string[] {
@@ -108,6 +137,8 @@ function leftOpenBody(reason: LeftOpenReason): string[] {
         "Fix the workspace's `auto_merge_rules_file` (or `auto_merge_rules`), or review and " +
           "merge it yourself.",
       ];
+    case "ci-checks":
+      return [sanitizeCommentText(reason.detail), "", ciChecksHint(reason.problem)];
     case "not-evaluable":
       return [
         `It could not be evaluated automatically: ${sanitizeCommentText(reason.detail)}.`,
@@ -132,6 +163,16 @@ export function buildAutoMergeStatusComment(status: AutoMergeCommentStatus): str
       `🤖 **Auto-merge: merged** (${status.method}) at ${sha}.`,
       "",
       why,
+    ].join("\n");
+  }
+  if (status.reason.kind === "ci-checks") {
+    return [
+      AUTO_MERGE_COMMENT_MARKER,
+      `⏳ **Auto-merge: waiting for CI checks** (checked ${sha}).`,
+      "",
+      ...leftOpenBody(status.reason),
+      "",
+      "<sub>devintern checks this commit again while the pull request is open.</sub>",
     ].join("\n");
   }
   return [

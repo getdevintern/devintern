@@ -288,6 +288,32 @@ describe("AutoMergeWatcherAcquirer", () => {
     expect(liveRuns()).toEqual([{ origin: "auto_merge", status: "succeeded" }]);
   });
 
+  test("a CI wait stays waiting on the same head and is kept on the dashboard once", async () => {
+    const noChecks = {
+      outcome: "waiting" as const,
+      message:
+        "Ready gate: No CI checks reported for this commit; auto-merge needs at least one passing check.",
+      reviewed: false,
+      ciWait: true,
+    };
+    results = [noChecks, noChecks, { outcome: "merged", message: "ok", reviewed: false }];
+    const w = watcher();
+    await w.tick();
+    now += 10 * 60_000 + 1;
+    await w.tick();
+    // Not a decision: the same head is checked again and can merge once CI passes.
+    expect(queue.hasProcessed(AUTO_MERGE_SOURCE, autoMergeDecisionKey(REPO, 7, HEAD))).toBe(false);
+    now += 10 * 60_000 + 1;
+    await w.tick();
+    expect(calls).toHaveLength(3);
+    expect(calls.every((call) => call.sha === HEAD)).toBe(true);
+    // The first CI wait is kept with its reason; the identical repeat is discarded.
+    expect(liveRuns()).toEqual([
+      { origin: "auto_merge", status: "escalated" },
+      { origin: "auto_merge", status: "succeeded" },
+    ]);
+  });
+
   test("failures retry with backoff and give up after the cap", async () => {
     results = Array.from({ length: 5 }, () => ({
       outcome: "failed" as const,

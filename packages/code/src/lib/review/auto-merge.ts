@@ -4,11 +4,17 @@
  * A PR is merged only after passing every gate, cheapest first:
  *
  * 0. Preconditions (always): open, not a draft, not a fork, GitHub reports
- *    it mergeable with passing checks (`mergeable_state` `clean`/`has_hooks`),
- *    and no reviewer's latest review requests changes.
+ *    it mergeable (`mergeable_state` `clean`/`has_hooks`), and no reviewer's
+ *    latest review requests changes.
  * 1. Path policy (deterministic, `merge-gate.ts`): a deny-glob hit blocks the
  *    merge outright; a PR touching only safe globs (and no review glob)
  *    merges with no agent run.
+ *    CI checks (`ci-checks.ts`) run right after the path classification,
+ *    before any merge or agent run, because safe-path-only PRs may merge
+ *    without a passing check: no check failing or pending, and (for code
+ *    PRs, unless `allowNoChecks`) at least one `success`. `clean` alone is
+ *    not enough, since GitHub reports it for commits with no checks at all.
+ *    These waits are reported as the "Ready" gate.
  * 2. Agent review (optional): PRs that touch anything outside the safe globs,
  *    or any review glob, merge only on an explicit `"safe": true` verdict. A missing, malformed,
  *    or negative verdict never merges.
@@ -16,11 +22,14 @@
  * The merge call is pinned to the evaluated head SHA, and the PR is
  * re-fetched right before it, so commits pushed during the review can never
  * ride along. Every "not yet" condition returns `waiting` without side
- * effects; the worker re-evaluates later.
+ * effects, except CI waits, which post the status comment and the review
+ * label so a PR held by missing or red CI says so; the worker re-evaluates
+ * later.
  */
 
 import { runAgent } from "./address";
 import { parseChangeRequestUrl } from "../code-host/index";
+import { listCheckRunsForRef, listLatestCommitStatuses } from "../code-host/github/commit-checks";
 import { GitHubReviewsClient } from "../code-host/github/reviews";
 import type {
   PullRequestFile,
@@ -32,6 +41,8 @@ import { untrustedContentBlock } from "../prompts/untrusted-content";
 import { Utils } from "../utils";
 import { AUTO_MERGE_COMMENT_MARKER, buildAutoMergeStatusComment } from "./auto-merge-comment";
 import type { AutoMergeCommentStatus, LeftOpenReason } from "./auto-merge-comment";
+import { evaluateCiChecks, normalizeCiChecks } from "./ci-checks";
+import type { CiCheck } from "./ci-checks";
 import {
   classifyChangedPaths,
   DEFAULT_MERGE_SAFETY_POLICY,
@@ -52,6 +63,11 @@ export interface AutoMergePolicy extends MergePathPolicy {
   reviewLabel?: string;
   /** Merge-safety review strictness; unset means `strict`. */
   reviewPolicy?: MergeSafetyPolicy;
+  /**
+   * `auto_merge_allow_no_checks`: a code PR may merge without a passing CI
+   * check (failing or pending checks still block). Unset means false.
+   */
+  allowNoChecks?: boolean;
   /**
    * Operator-written review rules (`auto_merge_review_instructions`),
    * appended in a marked section that can only add restrictions.
@@ -100,6 +116,11 @@ export interface AutoMergeResult {
   reviewed: boolean;
   /** `deferred` on an agent usage limit: when the quota returns (ms epoch). */
   retryAt?: number;
+  /**
+   * `waiting` on the head commit's CI checks: the PR got a status comment
+   * and the review label, and is checked again on the same commit.
+   */
+  ciWait?: boolean;
 }
 
 /** GitHub operations on one PR (injected for tests). */
@@ -108,6 +129,8 @@ export interface AutoMergeGitHub {
   listFiles(): Promise<PullRequestFile[]>;
   listReviews(): Promise<Array<{ state: string; user: { login: string } | null }>>;
   getDiff(): Promise<string>;
+  /** Every check run and legacy commit status on `sha`; throws when it cannot read them all. */
+  listCiChecks(sha: string): Promise<CiCheck[]>;
   merge(sha: string, method: AutoMergeMethod): Promise<PullRequestMergeResult>;
   /** Create or edit the PR's auto-merge status comment. */
   upsertStatusComment(body: string): Promise<void>;
@@ -130,6 +153,8 @@ export interface AutoMergeOptions {
   lastAttempt?: boolean;
   /** Skip PR comments (tests). */
   noComment?: boolean;
+  /** Time limit for reading the head commit's CI checks (default {@link CI_CHECKS_TIMEOUT_MS}). */
+  ciChecksTimeoutMs?: number;
   verbose?: boolean;
   /** Source repository directory for the review worktree. */
   cwd?: string;
@@ -158,7 +183,16 @@ export const MAX_REVIEW_DIFF_CHARS = 150_000;
 /** Transcript label for the merge-safety agent (distinct from review replies). */
 export const MERGE_SAFETY_REVIEW_LOG_LABEL = "merge-safety-review";
 
-/** `mergeable_state` values meaning "mergeable and checks passing". */
+/** Time limit for reading the head commit's check runs and statuses. */
+export const CI_CHECKS_TIMEOUT_MS = 60_000;
+
+/** Prefix of messages for waits reported under the "Ready" gate (gate 1 in the docs). */
+const READY_GATE_PREFIX = "Ready gate: ";
+
+/**
+ * `mergeable_state` values meaning "mergeable"; with no checks at all GitHub
+ * still reports `clean`, so CI is checked separately (`ciChecksGate`).
+ */
 const MERGEABLE_STATES = new Set(["clean", "has_hooks"]);
 
 /** Human explanation for a `mergeable_state` that is not ready. */
@@ -340,6 +374,16 @@ function defaultGitHub(owner: string, repo: string, prNumber: number): AutoMerge
     listFiles: () => client.listPullRequestFiles(owner, repo, prNumber),
     listReviews: () => client.listPullRequestReviews(owner, repo, prNumber),
     getDiff: () => client.getPullRequestDiff(owner, repo, prNumber),
+    listCiChecks: async (sha) => {
+      const [runs, statuses] = await Promise.all([
+        listCheckRunsForRef(client, owner, repo, sha),
+        listLatestCommitStatuses(client, owner, repo, sha),
+      ]);
+      if (!runs.complete || !statuses.complete) {
+        throw new Error("GitHub returned only part of the commit's checks");
+      }
+      return normalizeCiChecks(runs.checkRuns, statuses.statuses);
+    },
     merge: (sha, method) => client.mergePullRequest(owner, repo, prNumber, { sha, method }),
     upsertStatusComment: (body) =>
       client.upsertMarkedIssueComment(owner, repo, prNumber, AUTO_MERGE_COMMENT_MARKER, body),
@@ -385,8 +429,10 @@ type MergeDecision =
       outcome: AutoMergeOutcome;
       message: string;
       reviewed: boolean;
-      /** Set for rejections: what the PR's status comment explains. */
+      /** Set when the PR is left open: what its status comment explains. */
       leftOpen?: LeftOpenReason;
+      /** Waiting on CI checks (see {@link AutoMergeResult.ciWait}). */
+      ciWait?: boolean;
     };
 
 const stop = (outcome: AutoMergeOutcome, message: string, reviewed = false): MergeDecision => ({
@@ -405,7 +451,60 @@ const leaveOpen = (message: string, leftOpen: LeftOpenReason, reviewed = false):
   leftOpen,
 });
 
-/** Gates 1 (path policy) and 2 (agent review). */
+/** Reject after `ms` with `message`; the timer never outlives the race. */
+async function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), ms);
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * CI part of the Ready gate; `null` means CI lets the PR merge. Runs after
+ * the path classification because a safe-path-only PR (`safeOnly`) needs no
+ * passing check. Failing or pending checks always wait; a read error fails
+ * closed as a retryable failure.
+ */
+async function ciChecksGate(ctx: GateContext, safeOnly: boolean): Promise<MergeDecision | null> {
+  const { options, github, pr } = ctx;
+  const timeoutMs = options.ciChecksTimeoutMs ?? CI_CHECKS_TIMEOUT_MS;
+  let checks: CiCheck[];
+  try {
+    checks = await withTimeout(
+      github.listCiChecks(pr.head.sha),
+      timeoutMs,
+      `timed out after ${Math.round(timeoutMs / 1000)}s`,
+    );
+  } catch (error) {
+    const detail = `The CI check status for this commit could not be read: ${(error as Error).message}.`;
+    return {
+      kind: "stop",
+      outcome: "failed",
+      message: `${READY_GATE_PREFIX}${detail}`,
+      reviewed: false,
+      leftOpen: { kind: "ci-checks", problem: "unreadable", detail },
+    };
+  }
+  const verdict = evaluateCiChecks(checks, {
+    requireSuccess: !safeOnly && !options.policy.allowNoChecks,
+  });
+  if (verdict.ready) return null;
+  return {
+    kind: "stop",
+    outcome: "waiting",
+    message: `${READY_GATE_PREFIX}${verdict.message}`,
+    reviewed: false,
+    leftOpen: { kind: "ci-checks", problem: verdict.problem, detail: verdict.message },
+    ciWait: true,
+  };
+}
+
+/** Gates 1 (path policy, then CI checks) and 2 (agent review). */
 async function decideMerge(ctx: GateContext): Promise<MergeDecision> {
   const { options, github, baseRepo, prNumber, pr } = ctx;
   const { policy } = options;
@@ -429,6 +528,8 @@ async function decideMerge(ctx: GateContext): Promise<MergeDecision> {
       detail: classification.reason,
     });
   }
+  const ciWait = await ciChecksGate(ctx, classification.kind === "safe");
+  if (ciWait) return ciWait;
   if (classification.kind === "safe") {
     const reason = "every change is inside the configured safe paths";
     console.log(`✅ ${baseRepo}#${prNumber}: ${reason}; no agent review needed`);
@@ -590,11 +691,17 @@ export async function autoMergePr(
   const decision = await decideMerge(ctx);
   const result: AutoMergeResult =
     decision.kind === "stop"
-      ? { outcome: decision.outcome, message: decision.message, reviewed: decision.reviewed }
+      ? {
+          outcome: decision.outcome,
+          message: decision.message,
+          reviewed: decision.reviewed,
+          ...(decision.ciWait ? { ciWait: true } : {}),
+        }
       : { ...(await mergeAtHead(ctx, decision)), reviewed: decision.reviewed };
-  if (decision.kind === "stop" && decision.leftOpen) {
+  const finalFailure = result.outcome === "failed" && options.lastAttempt;
+  if (decision.kind === "stop" && decision.leftOpen && !finalFailure) {
     await postStatus(ctx, { kind: "left-open", headSha: pr.head.sha, reason: decision.leftOpen });
-  } else if (result.outcome === "failed" && options.lastAttempt) {
+  } else if (finalFailure) {
     // The worker stops retrying this head after this attempt.
     await postStatus(ctx, {
       kind: "left-open",

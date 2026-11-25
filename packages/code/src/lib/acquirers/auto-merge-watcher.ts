@@ -17,7 +17,11 @@
  *
  * Each evaluation is recorded as a run while it executes, so the dashboard
  * shows it live. Evaluations that end in "not ready yet" (waiting, skipped)
- * are discarded afterwards; decisions stay in the run list.
+ * are discarded afterwards; decisions stay in the run list. A wait on the
+ * head commit's CI checks (no passing check, pending, failing) is kept as
+ * `escalated` the first time each reason is seen for a head, because the
+ * PR is labeled for a human and the dashboard should say why; repeats of
+ * the same wait are discarded so a repo without CI does not fill the list.
  *
  * Agent usage limits never drop a PR: the evaluation is `deferred` with the
  * quota's reset time, kept in the run list as **Deferred**, and the PR is
@@ -119,6 +123,8 @@ interface PrTracking {
   headSeenAt: number;
   failures: number;
   nextAttemptAt: number;
+  /** Message of the last CI wait kept in the run list for this head. */
+  ciWaitRecorded?: string;
   etag?: string;
   cached?: AutoMergePolledPr;
 }
@@ -435,7 +441,7 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
     if (result.outcome !== "waiting" || this.options.verbose) {
       console.log(`${icon} [${this.name}] ${label} ${result.outcome}: ${result.message}`);
     }
-    this.endRun(runId, result);
+    this.endRun(runId, result, state);
   }
 
   /** Open an in-progress run so the dashboard shows the evaluation live. */
@@ -469,7 +475,7 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
   }
 
   /** Keep decisions in the run list; drop "not ready yet" checks. */
-  private endRun(runId: number | null, result: AutoMergeResult): void {
+  private endRun(runId: number | null, result: AutoMergeResult, state: PrTracking): void {
     const { runStore } = this.options;
     if (!runStore || runId === null) return;
     try {
@@ -479,6 +485,14 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
         runStore.finishRun(runId, "escalated", result.message);
       } else if (result.outcome === "failed") {
         runStore.finishRun(runId, "failed", result.message);
+      } else if (
+        result.outcome === "waiting" &&
+        result.ciWait &&
+        state.ciWaitRecorded !== result.message
+      ) {
+        // Left open with a status comment and label: show why on the dashboard.
+        state.ciWaitRecorded = result.message;
+        runStore.finishRun(runId, "escalated", result.message);
       } else if (result.outcome === "deferred" && result.retryAt !== undefined) {
         // Visible as waiting on quota until the review resumes.
         runStore.finishRun(runId, "deferred", result.message);

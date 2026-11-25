@@ -35,6 +35,12 @@ export function parseAutoMergeSettings(
   }
   const agent = parseAgentSelection(workspaceTable, { label, keyPrefix: "auto_merge_" }, errors);
   const reviewInstructions = readReviewInstructions(workspaceTable, label, errors);
+  const allowNoChecks = readOptionalBoolean(
+    workspaceTable,
+    "auto_merge_allow_no_checks",
+    label,
+    errors,
+  );
   return {
     enabled,
     method,
@@ -45,6 +51,7 @@ export function parseAutoMergeSettings(
     reviewLabel: readReviewLabel(workspaceTable, label, errors),
     policy: readMergeSafetyPolicy(workspaceTable, label, errors) ?? DEFAULT_MERGE_SAFETY_POLICY,
     ...(reviewInstructions ? { reviewInstructions } : {}),
+    ...(allowNoChecks === undefined ? {} : { allowNoChecks }),
     ...readAutoMergeRules(workspaceTable, label, errors),
     ...(Object.keys(agent).length > 0 ? { agent } : {}),
   };
@@ -158,6 +165,14 @@ export function autoMergeReviewFor(
         ? { rules: source.rules }
         : {}),
   };
+}
+
+/** Effective `auto_merge_allow_no_checks` for one repository (the repo value wins when set). */
+export function autoMergeAllowNoChecksFor(
+  settings: AutoMergeSettings,
+  repo: Pick<RepoConfig, "autoMergeAllowNoChecks">,
+): boolean {
+  return repo.autoMergeAllowNoChecks ?? settings.allowNoChecks ?? false;
 }
 
 /** Effective auto-merge path policy for one repository (repo lists replace workspace lists). */

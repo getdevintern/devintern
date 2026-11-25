@@ -1,5 +1,15 @@
 # @devintern/code Changelog
 
+## [Unreleased]
+
+### Upgrade notes
+
+- **Auto-merge now waits for CI on code PRs.** GitHub reports a commit with no checks at all as mergeable, so a PR in a repository without CI passed the "Ready" gate and only the merge-safety review stood between it and a merge. A code PR now merges only when at least one check run or commit status on its head commit passed and none is failing or pending; `skipped` and `neutral` checks do not count as a pass. PRs that only touch `auto_merge_safe_paths` may still merge with no checks. **Who is affected:** workspaces with `auto_merge = true` that register repositories without CI; their code PRs now stay open with `auto_merge_review_label` and a status comment saying "No CI checks reported for this commit". **To keep the previous behavior**, set `auto_merge_allow_no_checks = true` in `[workspace]` or on the repo's `[[repos]]` entry. The GitHub credential now also needs read access to `Checks` and `Commit statuses`; if it cannot read them, the PR is not merged. See `docs/code/pr-follow-up.md#repositories-without-ci`
+
+### Added
+
+- **`auto_merge_allow_no_checks`** (default `false`, workspace-wide or per repo, repo wins) and `devintern auto-merge --allow-no-checks`: let code PRs merge without a passing CI check; failing or pending checks still block. A PR waiting on CI keeps being checked on the same commit and merges once CI passes; the reason shows in the status comment, on the dashboard's Auto-merge entry, and in `--dry-run` output
+
 ## [2.29.0] - 2026-11-25
 
 Workspace release, continued: DevIntern no longer reads or writes anything in a checkout's `.devintern-code/`, checkouts without a hosted remote register by path, and all run state lives in `~/.devintern`. Auto-merge gains merge-safety policy presets, custom rules, and review paths; `devintern automations` installs bundled automation packs; newly added GitHub repos verify without reinstalling the App. Duplicate ticket runs during scheduled retries, rerere-replayed merges rejected by commit hooks, worker doctor messages, and the dashboard's harness and stats views are fixed.

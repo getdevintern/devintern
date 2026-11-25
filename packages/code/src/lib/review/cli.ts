@@ -233,6 +233,7 @@ function printAutoMergeHelp(defaultLabel: string): void {
   console.log("Usage: devintern auto-merge <pr-url> [options]");
   console.log("");
   console.log("Merge a GitHub pull request when it is green, conflict-free, and safe:");
+  console.log("code PRs need at least one passing CI check (safe-path-only PRs do not);");
   console.log("PRs that only touch --safe-path globs merge without an agent run; other");
   console.log("PRs merge only when the agent's merge-safety review says so. A");
   console.log("--deny-path hit (or a built-in one such as .github/**) never merges, and a");
@@ -243,6 +244,9 @@ function printAutoMergeHelp(defaultLabel: string): void {
   console.log("  --deny-path <glob>     Never-merge glob (repeatable)");
   console.log("  --review-path <glob>   Always-review glob, never safe (repeatable)");
   console.log("  --no-review            Skip the agent review; only safe-path PRs merge");
+  console.log(
+    "  --allow-no-checks      Let code PRs merge without a passing CI check (failing or pending checks still block)",
+  );
   console.log("  --method <m>           merge | squash | rebase (default: squash)");
   console.log(
     "  --policy <p>           Review rubric: strict | standard | relaxed | custom (default: strict)",
@@ -383,6 +387,8 @@ function parseAutoMergeFlags(
       policy.rulesFile = resolveRulesFilePath(value, workspaceDir);
     } else if (arg === "--no-review") {
       policy.review = false;
+    } else if (arg === "--allow-no-checks") {
+      policy.allowNoChecks = true;
     } else if (arg === "--no-review-label") {
       policy.reviewLabel = "";
     } else if (arg === "--dry-run") {

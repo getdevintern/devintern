@@ -1,0 +1,258 @@
+import { afterEach, describe, expect, test } from "bun:test";
+
+import { autoMergeCliArgs, parseAutoMergeResultLine } from "../src/lib/acquirers/auto-merge-cli";
+import {
+  listCheckRunsForRef,
+  listLatestCommitStatuses,
+} from "../src/lib/code-host/github/commit-checks";
+import { GitHubReviewsClient } from "../src/lib/code-host/github/reviews";
+import { buildAutoMergeStatusComment } from "../src/lib/review/auto-merge-comment";
+import {
+  checkRunState,
+  commitStatusState,
+  evaluateCiChecks,
+  NO_CI_CHECKS_MESSAGE,
+  normalizeCiChecks,
+} from "../src/lib/review/ci-checks";
+import { parseAutoMergeArgs } from "../src/lib/review/cli";
+import { autoMergeAllowNoChecksFor, parseWorkspaceConfig } from "../src/lib/workspace/config";
+import { fleetAutoMergePolicyFingerprint } from "../src/lib/workspace/fleet-events";
+
+const gate = await import("../src/lib/review/merge-gate");
+
+describe("checkRunState / commitStatusState", () => {
+  test("maps check runs: incomplete is pending, unknown conclusions fail closed", () => {
+    for (const status of ["queued", "in_progress", "waiting", "requested", "pending"]) {
+      expect(checkRunState({ status, conclusion: null })).toBe("pending");
+    }
+    expect(checkRunState({ status: "completed", conclusion: "success" })).toBe("success");
+    expect(checkRunState({ status: "completed", conclusion: "skipped" })).toBe("neutral");
+    expect(checkRunState({ status: "completed", conclusion: "neutral" })).toBe("neutral");
+    for (const conclusion of [
+      "failure",
+      "timed_out",
+      "cancelled",
+      "action_required",
+      "stale",
+      "something-new",
+      null,
+    ]) {
+      expect(checkRunState({ status: "completed", conclusion })).toBe("failing");
+    }
+  });
+
+  test("maps commit statuses", () => {
+    expect(commitStatusState("success")).toBe("success");
+    expect(commitStatusState("pending")).toBe("pending");
+    expect(commitStatusState("failure")).toBe("failing");
+    expect(commitStatusState("error")).toBe("failing");
+  });
+});
+
+describe("evaluateCiChecks", () => {
+  const strict = { requireSuccess: true };
+
+  test("zero checks need a passing check unless waived", () => {
+    expect(evaluateCiChecks([], strict)).toEqual({
+      ready: false,
+      problem: "no-checks",
+      message: NO_CI_CHECKS_MESSAGE,
+    });
+    expect(evaluateCiChecks([], { requireSuccess: false })).toEqual({ ready: true });
+  });
+
+  test("failing beats pending, and pending beats a missing success", () => {
+    const checks = normalizeCiChecks(
+      [
+        { name: "a", status: "in_progress", conclusion: null },
+        { name: "b", status: "completed", conclusion: "failure" },
+      ],
+      [{ context: "c", state: "error" }],
+    );
+    const verdict = evaluateCiChecks(checks, strict);
+    expect(verdict).toMatchObject({ ready: false, problem: "failing" });
+    expect(verdict.ready ? "" : verdict.message).toBe("CI checks failed: b, c.");
+    expect(evaluateCiChecks([{ name: "a", state: "pending" }], { requireSuccess: false })).toEqual(
+      expect.objectContaining({ ready: false, problem: "pending" }),
+    );
+  });
+
+  test("neutral checks never pass or block", () => {
+    expect(evaluateCiChecks([{ name: "n", state: "neutral" }], strict)).toMatchObject({
+      ready: false,
+      problem: "no-passing",
+    });
+    expect(
+      evaluateCiChecks(
+        [
+          { name: "n", state: "neutral" },
+          { name: "s", state: "success" },
+        ],
+        strict,
+      ),
+    ).toEqual({ ready: true });
+  });
+});
+
+describe("auto-merge CI-wait status comment", () => {
+  test("says it is waiting and how to opt out", () => {
+    const body = buildAutoMergeStatusComment({
+      kind: "left-open",
+      headSha: "a".repeat(40),
+      reason: { kind: "ci-checks", problem: "no-checks", detail: NO_CI_CHECKS_MESSAGE },
+    });
+    expect(body).toContain("waiting for CI checks");
+    expect(body).toContain(NO_CI_CHECKS_MESSAGE);
+    expect(body).toContain("auto_merge_allow_no_checks = true");
+    expect(body).not.toContain("left open for human review");
+  });
+});
+
+describe("auto_merge_allow_no_checks config", () => {
+  const config = (workspace: string, repo = "") =>
+    parseWorkspaceConfig(`
+[workspace]
+auto_merge = true
+${workspace}
+
+[defaults]
+tracker = "markdown"
+
+[[repos]]
+name = "backend"
+remote = "git@github.com:acme/backend.git"
+${repo}
+`);
+  const effective = (workspace: string, repo = "") => {
+    const parsed = config(workspace, repo);
+    return autoMergeAllowNoChecksFor(parsed.workspace.autoMerge, parsed.repos[0]!);
+  };
+
+  test("defaults to false", () => {
+    expect(effective("")).toBe(false);
+  });
+
+  test("workspace value applies; a repo value overrides it both ways", () => {
+    expect(effective("auto_merge_allow_no_checks = true")).toBe(true);
+    expect(
+      effective("auto_merge_allow_no_checks = true", "auto_merge_allow_no_checks = false"),
+    ).toBe(false);
+    expect(
+      effective("auto_merge_allow_no_checks = false", "auto_merge_allow_no_checks = true"),
+    ).toBe(true);
+  });
+
+  test("rejects a non-boolean", () => {
+    expect(() => config('auto_merge_allow_no_checks = "yes"')).toThrow(
+      /auto_merge_allow_no_checks/,
+    );
+  });
+
+  test("turning it on changes the policy fingerprint; the default hashes as before", () => {
+    const fingerprint = (workspace: string, repo = "") =>
+      fleetAutoMergePolicyFingerprint(config(workspace, repo), "acme/backend", "/ws");
+    const base = fingerprint("");
+    expect(fingerprint("auto_merge_allow_no_checks = false")).toBe(base);
+    expect(fingerprint("auto_merge_allow_no_checks = true")).not.toBe(base);
+    expect(fingerprint("", "auto_merge_allow_no_checks = true")).not.toBe(base);
+  });
+});
+
+describe("--allow-no-checks", () => {
+  afterEach(() => {
+    process.exitCode = 0;
+  });
+
+  test("round-trips through the worker's CLI args", () => {
+    const policy = {
+      safePaths: [],
+      denyPaths: [],
+      review: true,
+      method: "squash" as const,
+      allowNoChecks: true,
+    };
+    const args = autoMergeCliArgs(policy, "a".repeat(40));
+    expect(args).toContain("--allow-no-checks");
+    expect(
+      parseAutoMergeArgs(["https://github.com/o/r/pull/1", ...args], gate)?.policy,
+    ).toMatchObject({ allowNoChecks: true });
+    expect(autoMergeCliArgs({ ...policy, allowNoChecks: false }, "a".repeat(40))).not.toContain(
+      "--allow-no-checks",
+    );
+    expect(parseAutoMergeArgs(["https://github.com/o/r/pull/1"], gate)?.policy.allowNoChecks).toBe(
+      undefined,
+    );
+  });
+
+  test("the subprocess result carries the CI-wait flag", () => {
+    expect(
+      parseAutoMergeResultLine(
+        JSON.stringify({ outcome: "waiting", message: "m", reviewed: false, ciWait: true }),
+      ),
+    ).toEqual({ outcome: "waiting", message: "m", reviewed: false, ciWait: true });
+  });
+});
+
+describe("commit check reads", () => {
+  const originalFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+  const respond = (handler: (url: string) => unknown): string[] => {
+    const urls: string[] = [];
+    globalThis.fetch = (async (url: Parameters<typeof fetch>[0]) => {
+      urls.push(String(url));
+      return new Response(JSON.stringify(handler(String(url))), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+    return urls;
+  };
+  const run = (id: number) => ({ id, name: `c${id}`, status: "completed", conclusion: "success" });
+  const client = () => new GitHubReviewsClient({ token: "test-token" });
+
+  test("reads every page of check runs", async () => {
+    const urls = respond((url) => {
+      const page = Number(new URL(url).searchParams.get("page"));
+      const start = (page - 1) * 100;
+      const count = Math.min(100, 150 - start);
+      return {
+        total_count: 150,
+        check_runs: Array.from({ length: count }, (_, i) => run(start + i)),
+      };
+    });
+    const result = await listCheckRunsForRef(client(), "o", "r", "sha");
+    expect(result.checkRuns).toHaveLength(150);
+    expect(result.complete).toBe(true);
+    expect(urls).toHaveLength(2);
+    expect(urls[0]).toContain(
+      "/repos/o/r/commits/sha/check-runs?filter=latest&per_page=100&page=1",
+    );
+  });
+
+  test("a list shorter than total_count is reported incomplete", async () => {
+    respond(() => ({ total_count: 5, check_runs: [run(1)] }));
+    expect((await listCheckRunsForRef(client(), "o", "r", "sha")).complete).toBe(false);
+    respond(() => ({
+      state: "success",
+      total_count: 3,
+      statuses: [{ id: 1, state: "success", context: "a" }],
+    }));
+    expect((await listLatestCommitStatuses(client(), "o", "r", "sha")).complete).toBe(false);
+  });
+
+  test("reads commit statuses page by page", async () => {
+    const urls = respond(() => ({
+      state: "success",
+      total_count: 1,
+      statuses: [{ id: 1, state: "success", context: "jenkins" }],
+    }));
+    const result = await listLatestCommitStatuses(client(), "o", "r", "sha");
+    expect(result).toEqual({
+      statuses: [{ id: 1, state: "success", context: "jenkins" }],
+      complete: true,
+    });
+    expect(urls[0]).toContain("/repos/o/r/commits/sha/status?per_page=100&page=1");
+  });
+});

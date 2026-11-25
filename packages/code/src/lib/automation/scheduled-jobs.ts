@@ -102,9 +102,10 @@ export function autoMergeDescription(settings: AutoMergeSettings | undefined): s
       `- **Review paths** (always sent to the agent review): ${globList(settings.reviewPaths)}`,
       `- **Agent review** of other PRs: ${settings.review ? `on (\`${mergeSafetyPolicyLabel(settings.policy, settings)}\` policy)` : "off (they stay open)"}`,
       `- **Merge method:** ${settings.method}`,
+      `- **CI checks:** ${settings.allowNoChecks ? "a code PR may merge without a passing check (`auto_merge_allow_no_checks`); failing or pending checks still block" : "a code PR needs at least one passing check; safe-path-only PRs may merge without checks"}`,
       "",
       "Per-repo `auto_merge_safe_paths`, `auto_merge_deny_paths`, `auto_merge_review_paths`, " +
-        "`auto_merge_policy`, " +
+        "`auto_merge_policy`, `auto_merge_allow_no_checks`, " +
         "`auto_merge_rules` / `auto_merge_rules_file`, and `auto_merge_review_instructions` " +
         "replace these settings.",
     );

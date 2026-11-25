@@ -286,3 +286,28 @@ test("estimation sweeps and the conflict window list beside automations with the
   expect(html).toContain('href="#/automations/estimation%3Agroom"');
   expect(html).toContain("Opens the conflict-resolution window now");
 });
+
+test("the Auto-merge entry shows why its last check left a PR open", () => {
+  const reason =
+    "Ready gate: No CI checks reported for this commit; auto-merge needs at least one passing check.";
+  const html = render([
+    automation({
+      id: "workspace:auto-merge",
+      kind: "auto_merge",
+      schedule: undefined,
+      lastRun: lastRun({
+        origin: "auto_merge",
+        status: "escalated",
+        taskKey: undefined,
+        prNumber: 7,
+        prUrl: "https://github.com/acme/widgets/pull/7",
+        outcomeReason: reason,
+      }),
+    }),
+  ]);
+  expect(html).toContain('data-slot="auto-merge-reason"');
+  expect(html).toContain("No CI checks reported for this commit");
+
+  const other = render([automation({ lastRun: lastRun({ outcomeReason: "done" }) })]);
+  expect(other).not.toContain('data-slot="auto-merge-reason"');
+});
