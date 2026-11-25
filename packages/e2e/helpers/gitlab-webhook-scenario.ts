@@ -5,7 +5,9 @@
  * the built CLI's `webhook serve` with the review queue live and the
  * deterministic `fake-agent.ts` as the agent. Deliveries are authenticated
  * either with GitLab Standard Webhooks signatures or with the legacy
- * `X-Gitlab-Token` shared secret. Everything lives under one temporary root,
+ * `X-Gitlab-Token` shared secret. {@link openStandaloneScenario} seeds the same
+ * repository and forge without the server, for running `address-review` and
+ * `resolve-conflicts` directly. Everything lives under one temporary root,
  * owned by a {@link ScenarioOwner} that the test file tears down in
  * `afterEach`.
  */
@@ -29,8 +31,10 @@ import { delimiter, join, resolve } from "node:path";
 import { isolatedEnvironment } from "./environment";
 import { FakeGitlabForge } from "./fake-gitlab-forge";
 import type { FakeGitlabCiFailure } from "./fake-gitlab-forge";
-import { checkedCommand } from "./process";
-import { WebhookServerFixture } from "./webhook-server";
+import { cliPath } from "./fixture-workspace";
+import { checkedCommand, command } from "./process";
+import type { CommandResult } from "./process";
+import { WebhookServerFixture, ensureQueueDb } from "./webhook-server";
 
 const packageRoot = resolve(import.meta.dir, "..");
 export const PROJECT_ID = 1;
@@ -297,28 +301,32 @@ async function seedRepository(
   return { remote, seed };
 }
 
-/**
- * Seed the repository, start the forge, and start `webhook serve` with the
- * review queue live. All state lives under one temporary root that `owned`
- * records as soon as it exists.
- */
-export async function openScenario(
+/** Seeded repository, forge, and child environment shared by both fixture modes. */
+interface PreparedForge {
+  root: string;
+  remote: string;
+  seed: string;
+  gitBin: string;
+  forge: FakeGitlabForge;
+  codeHostToken: string;
+  invocationsPath: string;
+  env: Record<string, string>;
+}
+
+/** Seed the repository and start the forge; `owned` records each resource as it exists. */
+async function prepareForge(
   owned: ScenarioOwner,
-  options: ScenarioOptions = {},
-): Promise<Scenario> {
+  options: ScenarioOptions,
+  rootPrefix: string,
+): Promise<PreparedForge> {
   const gitBin = Bun.which("git");
-  if (!gitBin) throw new Error("git is required for the webhook GitLab fixture");
-  const root = mkdtempSync(join(tmpdir(), "devintern-e2e-webhook-gitlab-"));
+  if (!gitBin) throw new Error("git is required for the GitLab forge fixture");
+  const root = mkdtempSync(join(tmpdir(), rootPrefix));
   owned.root = root;
   const baseEnv = isolatedEnvironment(root);
   const { remote, seed } = await seedRepository(root, baseEnv, options.baseChange);
 
   const codeHostToken = `glpat-e2e-${randomBytes(16).toString("hex")}`;
-  const auth = options.auth ?? "signature";
-  const signingToken =
-    auth === "signature" ? `whsec_${randomBytes(32).toString("base64")}` : undefined;
-  const sharedToken =
-    auth === "token" ? `e2e-gitlab-token-${randomBytes(16).toString("hex")}` : undefined;
   const forge = new FakeGitlabForge({
     gitDir: remote,
     gitBin,
@@ -356,26 +364,76 @@ export async function openScenario(
     GITLAB_CODE_HOST_TOKEN: codeHostToken,
     DEVINTERN_REVIEW_WORKTREE_PATH: join(root, "review-worktree"),
   };
+  return { root, remote, seed, gitBin, forge, codeHostToken, invocationsPath, env };
+}
+
+/**
+ * Seed the repository, start the forge, and start `webhook serve` with the
+ * review queue live. All state lives under one temporary root that `owned`
+ * records as soon as it exists.
+ */
+export async function openScenario(
+  owned: ScenarioOwner,
+  options: ScenarioOptions = {},
+): Promise<Scenario> {
+  const auth = options.auth ?? "signature";
+  const signingToken =
+    auth === "signature" ? `whsec_${randomBytes(32).toString("base64")}` : undefined;
+  const sharedToken =
+    auth === "token" ? `e2e-gitlab-token-${randomBytes(16).toString("hex")}` : undefined;
+  const { env, ...prepared } = await prepareForge(owned, options, "devintern-e2e-webhook-gitlab-");
   const server = await WebhookServerFixture.start({
-    root,
+    root: prepared.root,
     env,
-    cwd: seed,
+    cwd: prepared.seed,
     ...(signingToken ? { gitlabWebhookSigningToken: signingToken } : {}),
     ...(sharedToken ? { gitlabWebhookSecret: sharedToken } : {}),
   });
   owned.server = server;
-  return {
-    root,
-    remote,
-    seed,
-    gitBin,
-    forge,
-    server,
-    codeHostToken,
-    signingToken,
-    sharedToken,
-    invocationsPath,
-  };
+  return { ...prepared, server, signingToken, sharedToken };
+}
+
+/** Forge and repository for running a standalone CLI command (no `webhook serve`). */
+export interface StandaloneScenario extends Omit<PreparedForge, "env"> {
+  /** Full allowlisted child environment for the CLI. */
+  env: Record<string, string>;
+  queueDbPath: string;
+}
+
+/**
+ * Seed the repository and start the forge for standalone `address-review` /
+ * `resolve-conflicts` runs. The CLI gets the same plain GitLab env and git
+ * rewrite as the webhook scenario; no workspace is registered, so
+ * `workspaceCredentialsForChange` finds no `workspace.toml` and the command
+ * uses this env as-is.
+ */
+export async function openStandaloneScenario(
+  owned: ScenarioOwner,
+  options: Omit<ScenarioOptions, "auth"> = {},
+): Promise<StandaloneScenario> {
+  const prepared = await prepareForge(owned, options, "devintern-e2e-cli-gitlab-");
+  const env = { ...isolatedEnvironment(prepared.root), ...prepared.env };
+  // Pre-create the run-record DB so the legacy /tmp queue is never migrated in.
+  ensureQueueDb(env.WEBHOOK_QUEUE_DB);
+  return { ...prepared, env, queueDbPath: env.WEBHOOK_QUEUE_DB };
+}
+
+/** Run the built CLI from the seeded checkout with the standalone env. */
+export function runStandaloneCli(
+  scenario: StandaloneScenario,
+  args: string[],
+): Promise<CommandResult> {
+  return command([process.execPath, cliPath, ...args], scenario.seed, scenario.env, 150_000);
+}
+
+/** Captured CLI output never contains the forge token, raw or URL-encoded. */
+export function expectNoTokenInCliOutput(
+  scenario: StandaloneScenario,
+  result: CommandResult,
+): void {
+  const output = `${result.stdout}\n${result.stderr}`;
+  expect(output.includes(scenario.codeHostToken)).toBe(false);
+  expect(output.includes(encodeURIComponent(scenario.codeHostToken))).toBe(false);
 }
 
 /**

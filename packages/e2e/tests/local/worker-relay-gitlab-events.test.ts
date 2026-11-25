@@ -18,7 +18,12 @@
  * - `change.changed` for a registered MR that conflicts with its target runs
  *   conflict resolution once, after which the branch merges cleanly.
  *
- * `ci.changed` is not covered: the fake forge serves no pipeline/job routes.
+ * - `ci.changed` for a registered MR whose current head has a failed pipeline
+ *   reads the pipeline, job, and trace and runs CI repair once. A passing
+ *   pipeline, a stale head SHA (after the repair commit), and a redelivered
+ *   `deliveryId` run nothing; the cursor still advances past each.
+ * - A `ci.changed` envelope that names the change only by `ref.headSha` still
+ *   resolves the registered MR and runs CI repair.
  */
 
 import { expect, test } from "bun:test";
@@ -36,7 +41,10 @@ import {
 } from "node:fs";
 import { delimiter, join, relative } from "node:path";
 import { FakeGitlabForge } from "../../helpers/fake-gitlab-forge";
-import type { FakeGitlabReviewDiscussion } from "../../helpers/fake-gitlab-forge";
+import type {
+  FakeGitlabCiFailure,
+  FakeGitlabReviewDiscussion,
+} from "../../helpers/fake-gitlab-forge";
 import { FakeRelay } from "../../helpers/fake-relay";
 import type { FakeRelayCodeHostIdentity, FakeRelayEnvelope } from "../../helpers/fake-relay";
 import { GitlabForgeProxy } from "../../helpers/gitlab-forge-proxy";
@@ -66,6 +74,9 @@ const BRANCH_GREETING = 'export const greeting = "Hello, branch!";\n';
 const BASE_GREETING = 'export const greeting = "Hello, base!";\n';
 const MERGED_GREETING = 'export const greeting = "Hello, merged!";\n';
 const FEEDBACK_SOURCE = "gitlab:registered-mr-feedback";
+const CI_GREETING = 'export const greeting = "Hello, CI!";\n';
+const PIPELINE_ID = 3001;
+const JOB_ID = 4001;
 
 interface Harness {
   worker: WorkerFixture;
@@ -189,8 +200,11 @@ function installGitRewrite(worker: WorkerFixture, gitBin: string, httpUrl: strin
   return logPath;
 }
 
-/** Point the repo at the forge URL and enable automatic conflict resolution. */
-function patchWorkspace(worker: WorkerFixture, remoteUrl: string): void {
+/**
+ * Point the repo at the forge URL and enable automatic conflict resolution.
+ * CI repair is on only when the forge serves a pipeline (`ciRepair`).
+ */
+function patchWorkspace(worker: WorkerFixture, remoteUrl: string, ciRepair: boolean): void {
   const path = join(worker.workspaceDir, "workspace.toml");
   const remoteLine = `remote = "${worker.remote}"`;
   let text = readFileSync(path, "utf8");
@@ -198,10 +212,9 @@ function patchWorkspace(worker: WorkerFixture, remoteUrl: string): void {
     throw new Error("generated workspace.toml did not have the expected shape");
   }
   text = text.replace(remoteLine, `remote = "${remoteUrl}"`);
-  // CI repair stays off: the fake forge serves no pipeline routes.
   text = text.replace(
     "[workspace]\ndashboard = false\n",
-    '[workspace]\ndashboard = false\nci_failure_fix = false\nconflict_resolution = "auto"\n',
+    `[workspace]\ndashboard = false\nci_failure_fix = ${ciRepair}\nconflict_resolution = "auto"\n`,
   );
   writeFileSync(path, text);
 }
@@ -278,7 +291,12 @@ function processedEvents(dbPath: string, source: string): string[] {
  */
 async function openHarness(
   owned: Owned,
-  scenario: { review?: Omit<FakeGitlabReviewDiscussion, "reviewer">; conflict?: boolean },
+  scenario: {
+    review?: Omit<FakeGitlabReviewDiscussion, "reviewer">;
+    conflict?: boolean;
+    /** A failed pipeline served for the agent branch's seeded head. */
+    ci?: Omit<FakeGitlabCiFailure, "sha">;
+  },
 ): Promise<Harness> {
   const gitBin = Bun.which("git");
   if (!gitBin) throw new Error("git is required for the relay GitLab fixture");
@@ -315,6 +333,9 @@ async function openHarness(
     targetBranch: worker.baseBranch,
     token: forgeToken,
     ...(scenario.review ? { review: { ...scenario.review, reviewer: "e2e-reviewer" } } : {}),
+    ...(scenario.ci
+      ? { ci: { ...scenario.ci, sha: revParse(gitBin, worker.remote, AGENT_BRANCH) } }
+      : {}),
   });
   owned.forge = forge;
   const proxy = new GitlabForgeProxy({
@@ -332,7 +353,7 @@ async function openHarness(
     DEVINTERN_REVIEW_WORKTREE_PATH: join(worker.root, "review-worktree"),
   });
   const gitLog = installGitRewrite(worker, gitBin, remoteUrl);
-  patchWorkspace(worker, remoteUrl);
+  patchWorkspace(worker, remoteUrl, Boolean(scenario.ci));
   writeRelayState(worker.workspaceDir, relay.url, relayToken);
 
   const harness: Harness = {
@@ -731,6 +752,229 @@ cliTest(
       ).toBe(true);
       expect(relay.unexpectedRequests, settled).toEqual([]);
       expect(worker.running, settled).toBe(true);
+      expectNoSecretLeaks(harness);
+    } catch (error) {
+      failure = error;
+    } finally {
+      await release(owned, failure);
+    }
+    if (failure) throw failure;
+  },
+  240_000,
+);
+
+/** A failed job whose name and trace each carry a unique prompt marker. */
+function ciScenario(): {
+  jobMarker: string;
+  traceMarker: string;
+  ci: Omit<FakeGitlabCiFailure, "sha">;
+} {
+  const jobMarker = `E2EPROMPTMARKERJOB${randomBytes(6).toString("hex").toUpperCase()}`;
+  const traceMarker = `E2EPROMPTMARKERTRACE${randomBytes(6).toString("hex").toUpperCase()}`;
+  return {
+    jobMarker,
+    traceMarker,
+    ci: {
+      pipelineId: PIPELINE_ID,
+      jobId: JOB_ID,
+      jobName: `unit-${jobMarker}`,
+      // E2E_CI_FIX_MARKER selects the deterministic agent's CI-repair mode.
+      trace: `$ bun test\nE2E_CI_FIX_MARKER greeting assertion failed ${traceMarker}\nJob failed: exit code 1\n`,
+    },
+  };
+}
+
+/** Pipeline, job, trace, and commit-status reads, in order. */
+function ciRequests(forge: FakeGitlabForge, from = 0): string[] {
+  return forge.requests
+    .slice(from)
+    .map((request) => request.path)
+    .filter((path) => /\/(pipelines|jobs|statuses)(\/|\?|$)/.test(path));
+}
+
+function pipelinesFor(sha: string): string {
+  return `/api/v4/projects/1/pipelines?sha=${sha}&per_page=100&page=1`;
+}
+
+/**
+ * Exactly one CI-repair run saw the failed job and trace (which reached the
+ * prompt only via the forge), pushed one commit on top of `headBefore`, and
+ * was recorded with the CI-repair origin. Returns the new head.
+ */
+function expectCiRepair(
+  harness: Harness,
+  headBefore: string,
+  markers: { jobMarker: string; traceMarker: string },
+  detail: string,
+): string {
+  const { worker, forge, gitBin } = harness;
+  const runs = agentRuns(worker);
+  expect(runs, detail).toHaveLength(1);
+  expect(runs[0]?.mode, detail).toBe("ci");
+  expect(runs[0]?.promptMarkers ?? [], detail).toContain(markers.jobMarker);
+  expect(runs[0]?.promptMarkers ?? [], detail).toContain(markers.traceMarker);
+
+  const headAfter = revParse(gitBin, worker.remote, AGENT_BRANCH);
+  expect(headAfter, detail).not.toBe(headBefore);
+  // A fast-forward on the old head: history was not rewritten.
+  expect(
+    gitOutput(gitBin, worker.remote, ["rev-list", "--parents", "-n", "1", headAfter])
+      .split(/\s+/)
+      .slice(1),
+    detail,
+  ).toEqual([headBefore]);
+  expect(showFile(gitBin, worker.remote, AGENT_BRANCH, "src/greeting.ts"), detail).toBe(
+    CI_GREETING,
+  );
+  expect(pushLines(harness.gitLog), detail).toHaveLength(1);
+  expect(
+    worker.runRecords().filter((run) => run.origin === "ci_fix"),
+    detail,
+  ).toHaveLength(1);
+
+  const paths = ciRequests(forge);
+  expect(paths, detail).toContain(pipelinesFor(headBefore));
+  expect(paths, detail).toContain(
+    `/api/v4/projects/1/pipelines/${PIPELINE_ID}/jobs?include_retried=false&per_page=100&page=1`,
+  );
+  expect(paths, detail).toContain(`/api/v4/projects/1/jobs/${JOB_ID}/trace`);
+  expect(forge.unexpected, detail).toEqual([]);
+  expect(forge.authFailures, detail).toEqual([]);
+  return headAfter;
+}
+
+cliTest(
+  "relayed v2 GitLab ci.changed runs CI repair once on a failed head; passing, stale, and redelivered envelopes run nothing",
+  async () => {
+    const owned: Owned = {};
+    let failure: unknown;
+    try {
+      const fixture = ciScenario();
+      const harness = await openHarness(owned, { ci: fixture.ci });
+      const { worker, forge, relay, gitBin, codeHost } = harness;
+      registerMergeRequest(harness);
+      const headBefore = revParse(gitBin, worker.remote, AGENT_BRANCH);
+      const nonce = randomBytes(6).toString("hex");
+      expect(agentRuns(worker), diagnostics(harness)).toEqual([]);
+
+      // A passing pipeline on the current head: CI is read, no trace, no run.
+      forge.setCiStatus("success");
+      const passingFrom = forge.requests.length;
+      const passing = relay.publishCiChanged({
+        codeHost,
+        ref: { change: 1, headSha: headBefore },
+        deliveryId: `dlv-ci-success-${nonce}`,
+      });
+      await waitForCursor(harness, passing.seq, "the poll after the passing ci.changed");
+      const green = diagnostics(harness, "after passing ci.changed");
+      expect(ciRequests(forge, passingFrom), green).toContain(pipelinesFor(headBefore));
+      expect(
+        ciRequests(forge, passingFrom).some((path) => path.endsWith("/trace")),
+        green,
+      ).toBe(false);
+      expect(agentRuns(worker), green).toEqual([]);
+      expect(pushLines(harness.gitLog), green).toEqual([]);
+
+      // The pipeline on the same head now fails: one CI repair run.
+      forge.setCiStatus("failed");
+      const deliveryId = `dlv-ci-failed-${nonce}`;
+      const publishedAt = Date.now();
+      const failed = relay.publishCiChanged({
+        codeHost,
+        ref: { change: 1, branch: AGENT_BRANCH, headSha: headBefore },
+        deliveryId,
+      });
+      await waitForCursor(
+        harness,
+        failed.seq,
+        "the CI-repair job and cursor advance",
+        JOB_TIMEOUT_MS,
+      );
+      const repaired = diagnostics(harness, "after failed ci.changed");
+      const startedAt = agentStartSince(worker, publishedAt);
+      expect(startedAt, repaired).toBeDefined();
+      expect(startedAt! - publishedAt, repaired).toBeLessThan(RELAY_START_BOUND_MS);
+      const headAfter = expectCiRepair(harness, headBefore, fixture, repaired);
+
+      // A ci.changed for the pre-repair SHA is stale: the worker reads the MR's
+      // current head (the repair commit, which has no pipeline) and runs nothing.
+      const staleFrom = forge.requests.length;
+      const stale = relay.publishCiChanged({
+        codeHost,
+        ref: { change: 1, headSha: headBefore },
+        deliveryId: `dlv-ci-stale-${nonce}`,
+      });
+      await waitForCursor(harness, stale.seq, "the poll after the stale ci.changed");
+      const staleDetail = diagnostics(harness, "after stale ci.changed");
+      expect(ciRequests(forge, staleFrom), staleDetail).toContain(pipelinesFor(headAfter));
+      expect(ciRequests(forge, staleFrom), staleDetail).not.toContain(pipelinesFor(headBefore));
+      expect(
+        ciRequests(forge, staleFrom).some((path) => path.endsWith("/trace")),
+        staleDetail,
+      ).toBe(false);
+      expect(agentRuns(worker), staleDetail).toHaveLength(1);
+      expect(revParse(gitBin, worker.remote, AGENT_BRANCH), staleDetail).toBe(headAfter);
+
+      // A redelivery of the failed envelope's deliveryId is deduplicated before
+      // any forge request, and the cursor still moves past it.
+      const forgeBeforeReplay = forge.requests.length;
+      const replay = relay.publishCiChanged({
+        codeHost,
+        ref: { change: 1, branch: AGENT_BRANCH, headSha: headBefore },
+        deliveryId,
+      });
+      await waitForCursor(harness, replay.seq, "the poll after the replayed ci.changed");
+      const replayed = diagnostics(harness, "after replayed ci.changed");
+      expect(forge.requests.length, replayed).toBe(forgeBeforeReplay);
+      expect(agentRuns(worker), replayed).toHaveLength(1);
+      expect(pushLines(harness.gitLog), replayed).toHaveLength(1);
+
+      expect(
+        relay.requests.every((request) => request.authorized),
+        replayed,
+      ).toBe(true);
+      expect(relay.unexpectedRequests, replayed).toEqual([]);
+      expect(worker.running, replayed).toBe(true);
+      expectNoSecretLeaks(harness);
+    } catch (error) {
+      failure = error;
+    } finally {
+      await release(owned, failure);
+    }
+    if (failure) throw failure;
+  },
+  240_000,
+);
+
+cliTest(
+  "relayed v2 GitLab ci.changed identified only by ref.headSha runs CI repair on the registered MR",
+  async () => {
+    const owned: Owned = {};
+    let failure: unknown;
+    try {
+      const fixture = ciScenario();
+      const harness = await openHarness(owned, { ci: fixture.ci });
+      const { worker, relay, gitBin, codeHost } = harness;
+      registerMergeRequest(harness);
+      const headBefore = revParse(gitBin, worker.remote, AGENT_BRANCH);
+      expect(agentRuns(worker), diagnostics(harness)).toEqual([]);
+
+      // No `change` and no `branch`: the acquirer forwards the envelope and the
+      // project's registered MRs are reconciled against their current heads.
+      const headOnly = relay.publishCiChanged({
+        codeHost,
+        ref: { headSha: headBefore },
+        deliveryId: `dlv-ci-headsha-${randomBytes(6).toString("hex")}`,
+      });
+      await waitForCursor(
+        harness,
+        headOnly.seq,
+        "the headSha-only CI-repair job and cursor advance",
+        JOB_TIMEOUT_MS,
+      );
+      const detail = diagnostics(harness, "after headSha-only ci.changed");
+      expectCiRepair(harness, headBefore, fixture, detail);
+      expect(worker.running, detail).toBe(true);
       expectNoSecretLeaks(harness);
     } catch (error) {
       failure = error;

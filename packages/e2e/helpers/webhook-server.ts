@@ -64,7 +64,7 @@ export interface WebhookServerFixtureOptions {
  * migration's `existsSync(dbPath)` guard skip the copy, so a developer's real
  * pending events can never replay inside this isolated fixture.
  */
-function ensureQueueDb(dbPath: string): void {
+export function ensureQueueDb(dbPath: string): void {
   mkdirSync(dirname(dbPath), { recursive: true });
   const db = new Database(dbPath);
   db.close();

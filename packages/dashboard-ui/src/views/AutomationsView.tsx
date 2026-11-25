@@ -23,6 +23,7 @@ import type {
   SourceHealth,
   SourcesResponse,
 } from "@/lib/api";
+import { isDemoMode } from "@/lib/demo";
 import { groupAutomationsByRepo, showsGroupHeaders } from "@/lib/automation-groups";
 import {
   jobKind,
@@ -188,38 +189,41 @@ function AutomationRow({
           <span className="text-muted-foreground">–</span>
         )}
       </TableCell>
-      <TableCell
-        className="auto-cell-action px-4 py-2.5 text-right align-middle"
-        onClick={(event) => event.stopPropagation()}
-      >
-        {automation.enabled ? (
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={busy || inFlight}
-            aria-busy={busy || undefined}
-            onClick={() => onRunNow(automation)}
-            aria-label={`Run ${title} now`}
-            title={inFlight ? "An occurrence is already in flight" : runNowHint(kind)}
-          >
-            {started ? <Check className="text-success" /> : <Play />}{" "}
-            {busy ? "Starting…" : started ? "Started" : "Run now"}
-          </Button>
-        ) : (
-          <span
-            className="text-xs text-muted-foreground"
-            title="Enable this automation in the config to run it manually"
-          >
-            Enable in config
-          </span>
-        )}
-      </TableCell>
+      {/* The read-only demo has no actions, so it drops the column. */}
+      {isDemoMode() ? null : (
+        <TableCell
+          className="auto-cell-action px-4 py-2.5 text-right align-middle"
+          onClick={(event) => event.stopPropagation()}
+        >
+          {automation.enabled ? (
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={busy || inFlight}
+              aria-busy={busy || undefined}
+              onClick={() => onRunNow(automation)}
+              aria-label={`Run ${title} now`}
+              title={inFlight ? "An occurrence is already in flight" : runNowHint(kind)}
+            >
+              {started ? <Check className="text-success" /> : <Play />}{" "}
+              {busy ? "Starting…" : started ? "Started" : "Run now"}
+            </Button>
+          ) : (
+            <span
+              className="text-xs text-muted-foreground"
+              title="Enable this automation in the config to run it manually"
+            >
+              Enable in config
+            </span>
+          )}
+        </TableCell>
+      )}
     </TableRow>
   );
 }
 
 /** Number of columns in the automations table (for full-width group rows). */
-const COLUMN_COUNT = 5;
+const COLUMN_COUNT = isDemoMode() ? 4 : 5;
 
 /**
  * The automations table: humanized schedule (raw cron secondary), relative
@@ -268,7 +272,7 @@ export function AutomationsTable({
               <TableHead className="px-4">Schedule</TableHead>
               <TableHead className="px-4">Next run</TableHead>
               <TableHead className="px-4">Last run</TableHead>
-              <TableHead className="px-4 text-right">Actions</TableHead>
+              {isDemoMode() ? null : <TableHead className="px-4 text-right">Actions</TableHead>}
             </TableRow>
           </TableHeader>
           {groups.map((group) => (

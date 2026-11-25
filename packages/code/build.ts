@@ -51,4 +51,10 @@ cpSync(uiDist, "dist/dashboard-ui", { recursive: true });
 rmSync("dist/prompts", { recursive: true, force: true });
 cpSync("prompts", "dist/prompts", { recursive: true });
 
+// Ship the bundled automation catalog next to the bundle so
+// `devintern automations add` and the `doctor` catalog check work from the
+// published npm artifact.
+rmSync("dist/catalog", { recursive: true, force: true });
+cpSync("catalog", "dist/catalog", { recursive: true });
+
 console.log(`Built devintern v${pkg.version} (with dashboard UI)`);

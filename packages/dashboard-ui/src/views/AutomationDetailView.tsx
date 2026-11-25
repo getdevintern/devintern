@@ -7,6 +7,7 @@ import { EmptyState, StatusBadge, StatusPill } from "@/components/shared";
 import { Button } from "@/components/ui/button";
 import { runMatchesFilter, scheduledJobRunsUrl, usePoll } from "@/lib/api";
 import type { AutomationSchedule, AutomationsResponse, RunRecord, RunsResponse } from "@/lib/api";
+import { isDemoMode } from "@/lib/demo";
 import { Markdown } from "@/lib/markdown";
 import { formatRunOrigin } from "@/lib/run-origin";
 import {
@@ -341,7 +342,7 @@ export function AutomationDetailView({ automationId }: { automationId: string })
           {automation.enabled ? "Enabled" : "Disabled"}
         </StatusPill>
         <div className="toolbar-spacer" />
-        {automation.enabled ? (
+        {isDemoMode() ? null : automation.enabled ? (
           <Button
             size="sm"
             disabled={busy || automation.activity !== undefined}

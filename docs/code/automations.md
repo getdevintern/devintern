@@ -4,7 +4,7 @@ sidebarLabel: "Automations"
 description: "Use when the worker should run a prompt on a schedule: [[automations]] entries, prompt writing, opt-in PRs, no-op and blocked runs, and per-schedule agents."
 section: "Automation"
 order: 2.1
-dateModified: 2026-11-18
+dateModified: 2026-11-24
 ---
 
 # Recurring Automations
@@ -12,6 +12,8 @@ dateModified: 2026-11-18
 An automation is a prompt the [worker](./worker.md) runs on a schedule. The prompt is the task: nothing is created in your tracker, so an automation-only worker needs no tracker credentials. Each occurrence goes through the normal task pipeline and is recorded in the [dashboard](./dashboard.md) with the `scheduled` origin.
 
 To configure automations through a coding agent, use the [devintern-workspace skill](https://github.com/getdevintern/devintern/tree/main/plugins/devintern/skills/devintern-workspace). For example: "Add a weekly dependency-health automation for web-app, Mondays at 09:00, opening a PR for at most one verified upgrade."
+
+To start from a ready-made recipe instead of writing a prompt, install a bundled [automation pack](./automation-packs.md): `devintern automations add dependency-security --repo web-app`.
 
 ## Defining an automation
 

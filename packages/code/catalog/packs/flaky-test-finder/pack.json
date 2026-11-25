@@ -1,0 +1,10 @@
+{
+  "id": "flaky-test-finder",
+  "version": 1,
+  "name": "Flaky test finder",
+  "description": "Find intermittent tests from recent CI failures and stabilize at most one, verified by repeated runs.",
+  "schedule": { "cron": "0 6 * * 6" },
+  "openPr": true,
+  "allowNoChanges": true,
+  "prompt": "prompt.md"
+}

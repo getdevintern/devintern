@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import {
+  ArrowRight,
   TerminalSquare,
   ChartNoAxesCombined,
   GitPullRequest,
@@ -23,6 +24,7 @@ import { AutomationDetailView } from "@/views/AutomationDetailView";
 import { StatsView } from "@/views/StatsView";
 import { OverviewView } from "@/views/OverviewView";
 import { WorkspaceView } from "@/views/WorkspaceView";
+import { demoCtaUrl, isDemoMode } from "@/lib/demo";
 import { parseHash, redirectHash, RUNS_HASH, runHash } from "@/lib/routes";
 import type { Route } from "@/lib/routes";
 import { cn } from "@/lib/utils";
@@ -142,11 +144,30 @@ export function App() {
             )}
           </h1>
           <StatusStrip />
-          <Button size="sm" className="dashboard-new-task" onClick={() => setNewTaskOpen(true)}>
-            <Plus aria-hidden="true" />
-            New task
-          </Button>
-          <NewTaskDialog open={newTaskOpen} onOpenChange={setNewTaskOpen} />
+          {isDemoMode() ? (
+            <>
+              <span
+                className="dashboard-demo-badge"
+                title="A recorded snapshot of a real worker. Actions are disabled."
+              >
+                Read-only demo
+              </span>
+              <Button size="sm" className="dashboard-demo-cta" asChild>
+                <a href={demoCtaUrl()} target="_top">
+                  Try it on your repo
+                  <ArrowRight aria-hidden="true" />
+                </a>
+              </Button>
+            </>
+          ) : (
+            <>
+              <Button size="sm" className="dashboard-new-task" onClick={() => setNewTaskOpen(true)}>
+                <Plus aria-hidden="true" />
+                New task
+              </Button>
+              <NewTaskDialog open={newTaskOpen} onOpenChange={setNewTaskOpen} />
+            </>
+          )}
         </header>
 
         <main className="dashboard-content">
