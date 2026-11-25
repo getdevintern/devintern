@@ -38,6 +38,7 @@ import {
   hasGitHubAppCredentials,
   loadGitHubAppRecord,
 } from "../code-host/github/app-setup";
+import { isPromptAbort } from "../cli/prompt-abort";
 import { runTrackerSetup } from "./wizard";
 import { PRManager } from "../code-host/index";
 import { connectRelayTarget, hasGitHubRelayRegistration, loadRelayState } from "../relay/connect";
@@ -768,6 +769,7 @@ async function runLicenseStep(ctx: InitContext, workspaceDir: string): Promise<v
             failure = await ctx.deps.checkAutomationLicense(workspaceDir);
           }
         } catch (error) {
+          if (isPromptAbort(error)) throw error;
           ctx.log(`⚠️  Sign-in failed: ${(error as Error).message}`);
         }
       }
@@ -780,6 +782,8 @@ async function runLicenseStep(ctx: InitContext, workspaceDir: string): Promise<v
       }
     }
   } catch (error) {
+    // Ctrl+D at the sign-in prompt stops setup; worker/cli.ts reports it.
+    if (isPromptAbort(error)) throw error;
     ctx.log(
       `⚠️  License check errored (${(error as Error).message}); the worker re-checks at startup.`,
     );
@@ -822,6 +826,7 @@ async function resolveRelayUser(
       ctx.log(`✅ Signed in as ${user.email || user.id}.`);
     }
   } catch (error) {
+    if (isPromptAbort(error)) throw error;
     ctx.log(`⚠️  Sign-in failed: ${(error as Error).message}`);
   }
   return user;

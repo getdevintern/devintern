@@ -11,6 +11,9 @@ import {
 import { tmpdir } from "os";
 import path from "path";
 
+import { stdinClosedError } from "@devintern/auth";
+
+import { isPromptAbort } from "../src/lib/cli/prompt-abort";
 import { loadWorkspaceConfig, parseWorkspaceConfig } from "../src/lib/workspace/config";
 import { loadGitHubAppRecord, saveGitHubAppRecord } from "../src/lib/code-host/github/app-setup";
 import {
@@ -276,6 +279,52 @@ describe("runWorkerInit", () => {
     expect(checked).toEqual([workspaceDir, workspaceDir]);
     expect(signedIn).toEqual([workspaceDir]);
     expect(logs.join("\n")).toContain("Free Worker Pilot available");
+  });
+
+  test("Ctrl+D during license sign-in stops setup instead of continuing", async () => {
+    let checks = 0;
+    const run = runWorkerInit(
+      deps(["status=todo", "n", ""], {
+        checkAutomationLicense: async () => {
+          checks += 1;
+          return "No automation license found.";
+        },
+        signIn: async () => {
+          throw stdinClosedError();
+        },
+        getUser: async () => {
+          throw new Error("relay step must not run after an abort");
+        },
+      }),
+    );
+    const error = await run.then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+    expect(isPromptAbort(error)).toBe(true);
+    expect(checks).toBe(1);
+    expect(logs.join("\n")).not.toContain("Sign-in failed");
+    expect(logs.join("\n")).not.toContain("License check errored");
+  });
+
+  test("Ctrl+D during relay sign-in stops setup instead of continuing", async () => {
+    const run = runWorkerInit(
+      deps(["status=todo", "n", "", ""], {
+        getUser: async () => null,
+        signIn: async () => {
+          throw stdinClosedError();
+        },
+        connectRelay: async () => {
+          throw new Error("connectRelay must not run after an abort");
+        },
+      }),
+    );
+    const error = await run.then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+    expect(isPromptAbort(error)).toBe(true);
+    expect(logs.join("\n")).not.toContain("Sign-in failed");
   });
 
   test("passes the workspace to the license check (DEV-126)", async () => {
