@@ -32,6 +32,7 @@ import {
   validateConnection,
 } from "@devintern/task-trackers";
 import { findProjectRoot, upsertEnvVars } from "@devintern/utils";
+import { isPromptAbort } from "../cli/prompt-abort";
 import { resolveProjectConfigDir } from "../config/config-dir";
 import type { SetupSignInStatus, SetupSource } from "../observability/analytics";
 import {
@@ -167,6 +168,8 @@ async function runPostSetup(
           log("⚠️  Sign-in did not complete — run 'devintern login' before using those features.");
         }
       } catch (error) {
+        // Closed input stops the whole wizard, not just the sign-in step.
+        if (isPromptAbort(error)) throw error;
         signedIn = "failed";
         log(
           `⚠️  Sign-in failed: ${error instanceof Error ? error.message : error}\n` +

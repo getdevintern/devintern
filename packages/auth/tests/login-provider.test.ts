@@ -102,6 +102,25 @@ console.log("RESULT:" + JSON.stringify(await ${fn}()));`],
     });
   });
 
+  test.each(["promptForLoginMethod", "promptForEmail"])(
+    "%s rejects with an AbortError when stdin closes",
+    async (fn) => {
+      const proc = Bun.spawn(
+        [
+          "bun",
+          "-e",
+          `import { ${fn} } from "./src/login-provider";
+try { await ${fn}(); } catch (e) { console.log("RESULT:" + JSON.stringify([e.name, e.code])); }`,
+        ],
+        { cwd: new URL("..", import.meta.url).pathname, stdin: "pipe", stdout: "pipe" },
+      );
+      proc.stdin.end();
+      const output = await new Response(proc.stdout).text();
+      await proc.exited;
+      expect(output).toContain('RESULT:["AbortError","ABORT_ERR"]');
+    },
+  );
+
   test("promptForEmail accepts an address from stdin", async () => {
     expect(JSON.parse(await runPrompt("promptForEmail", "you@company.com\n"))).toBe(
       "you@company.com",

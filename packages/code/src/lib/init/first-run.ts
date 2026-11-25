@@ -10,6 +10,7 @@
  */
 
 import type { LogFn } from "@devintern/task-trackers";
+import { isPromptAbort } from "../cli/prompt-abort";
 import { trackSetupDeclined, trackSetupFailed } from "../observability/analytics";
 import { TRACKER_CAPABILITIES } from "../trackers/capabilities";
 
@@ -79,7 +80,14 @@ export async function ensureTrackerEnvConfigured(
   log(`   Missing credentials — ${problems}`);
 
   const prompt = deps.prompt ?? defaultPrompt;
-  const answer = await prompt("Run the guided setup now? Takes about a minute. [Y/n] ");
+  let answer: string;
+  try {
+    answer = await prompt("Run the guided setup now? Takes about a minute. [Y/n] ");
+  } catch (error) {
+    if (!isPromptAbort(error)) throw error;
+    log("\n❌ Input closed (Ctrl+D); setup skipped. Run `devintern init` to configure.");
+    return "failed";
+  }
   if (answer.trim().toLowerCase() === "n") {
     // Await the capture so the event is queued before the caller's exit path
     // flushes analytics (the offer is followed by validateEnvironment()).
@@ -93,7 +101,16 @@ export async function ensureTrackerEnvConfigured(
       const { runInitWizard } = await import("./wizard");
       await runInitWizard({ source: "rescue" });
     });
-  await runWizard();
+  try {
+    await runWizard();
+  } catch (error) {
+    // Closed input (Ctrl+D) is a user action, not a crash: keep it out of
+    // main()'s error path. Credentials written before the abort (e.g. when
+    // input closes at the sign-in step) still count, so fall through to the
+    // reload and re-check below.
+    if (!isPromptAbort(error)) throw error;
+    log("\n❌ Input closed (Ctrl+D); setup stopped. Run `devintern init` to finish.");
+  }
 
   await deps.reloadEnv?.();
   // In production `env` is `process.env` by reference, so the reload above

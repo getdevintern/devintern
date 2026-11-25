@@ -29,6 +29,7 @@ export {
   promptForOAuthProvider,
   resolveLogin,
   resolveLoginProvider,
+  stdinClosedError,
   type ResolvedLogin,
 } from "./login-provider";
 export {
