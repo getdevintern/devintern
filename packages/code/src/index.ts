@@ -26,7 +26,8 @@ import {
 } from "./lib/trackers/capabilities";
 import { acquireRunLocks } from "./lib/cli/run-locks";
 import { applyManualWorkspaceRun, findWorkspaceRepoForCheckout } from "./lib/workspace/manual-run";
-import { migrateLegacyCheckout, moveLegacyCheckoutState } from "./lib/workspace/migrate-checkout";
+import { moveLegacyCheckoutState } from "./lib/workspace/migrate-checkout";
+import { bootstrapCheckoutEnv } from "./lib/cli/checkout-env";
 import { Utils } from "./lib/utils";
 import { isAutomatedEnvironment } from "./lib/config/env-detector";
 import {
@@ -153,14 +154,9 @@ if (process.argv[2] === "init") {
   // A checkout of a registered workspace repo takes its env, state, and
   // prompts from the workspace; its own `.devintern-code/.env` is skipped.
   // First run of this release in a legacy checkout: move its settings first.
-  await migrateLegacyCheckout();
-  runContext.manualWorkspace = await findWorkspaceRepoForCheckout();
-  const envFileArg = findEnvFileArg(process.argv);
-  if (runContext.manualWorkspace) {
-    applyManualWorkspaceRun(runContext.manualWorkspace, { runtimeOnly: Boolean(envFileArg) });
-  }
-  loadEnvironment(envFileArg, {
-    skipProjectEnv: Boolean(runContext.manualWorkspace),
+  runContext.manualWorkspace = await bootstrapCheckoutEnv({
+    envFile: findEnvFileArg(process.argv),
+    migrate: true,
   });
 }
 
