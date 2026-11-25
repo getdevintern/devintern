@@ -375,7 +375,7 @@ export function toWorkspaceConfigView(
 
 /** Running worker's pid and start time (epoch ms) from its lock, when determinable. */
 function runningWorker(data: DashboardData): { pid?: number; startedAt: number } | undefined {
-  const worker = resolveWorkerStatus(data.workingDir, data.workspaceDir);
+  const worker = resolveWorkerStatus(data.workspaceDir);
   if (worker.status !== "running" || !worker.startedAt) {
     return undefined;
   }

@@ -40,7 +40,6 @@ export function acquireRunLocks(
   const checkoutLock = new LockManager(
     checkoutLocksDir(workspaceDir),
     checkoutLockFileName(process.cwd()),
-    { plainDir: true },
   );
   const lockResult = checkoutLock.acquire();
   if (!lockResult.success) {

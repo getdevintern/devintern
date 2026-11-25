@@ -11,16 +11,16 @@
  */
 
 import { flushErrorTracking } from "@devintern/utils";
-import { LockManager } from "./lib/lock-manager";
+import type { LockManager } from "./lib/lock-manager";
 import { acknowledgeWorkerHandover } from "./lib/worker/handover";
 import { initSentryOnce } from "./lib/observability/sentry-init";
 import { startWorkerCapture } from "./lib/observability/worker-capture";
 import type { WorkerCaptureHandle } from "./lib/observability/worker-capture";
 
 export interface WorkerOptions {
-  /** Single-instance lock override (workspace mode locks the workspace home
-   *  instead of the current directory). */
-  lock?: LockManager;
+  /** Single-instance lock; production callers pass `createWorkspaceLock()`
+   *  (`<workspace>/.worker.lock`). */
+  lock: LockManager;
   /** What this worker serves, for the startup banner (defaults to cwd). */
   label?: string;
   /** Directory for the dashboard's `worker.stdout.log` / `worker.stderr.log`
@@ -312,8 +312,7 @@ export async function startWorker(
   // Single-instance guard, separate from the CLI task lock so an idle daemon
   // does not block manual `devintern TASK-123` runs. The executor still takes
   // the task lock per run (one in-flight task per repo).
-  const lock =
-    options.lock ?? new LockManager(process.cwd(), ".worker.lock", { reclaimForeign: true });
+  const { lock } = options;
   const lockResult = lock.acquire();
   if (!lockResult.success) {
     console.error(`❌ ${lockResult.message.replace("devintern", "devintern worker")}`);
