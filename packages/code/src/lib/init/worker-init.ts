@@ -43,6 +43,7 @@ import { resolveWizardPrompts } from "../cli/prompt-session";
 import { WORKER_PILOT_OFFER, signInCommand } from "../account/worker-pilot";
 import { renderReadinessReport } from "../observability/readiness";
 import type { ReadinessCheck } from "../observability/readiness";
+import { trackerRequiredEnv } from "../trackers/manager";
 import { runTrackerSetup } from "./wizard";
 import { PRManager } from "../code-host/index";
 import { connectRelayTarget, hasGitHubRelayRegistration, loadRelayState } from "../relay/connect";
@@ -448,7 +449,7 @@ function applyEnvFile(envPath: string): Record<string, string> {
   return env;
 }
 
-async function defaultEnsureTracker(
+export async function defaultEnsureTracker(
   cwd: string,
   prompt: PromptFn,
   promptSecret: PromptFn,
@@ -467,6 +468,22 @@ async function defaultEnsureTracker(
   const sharedEnvPath = workspaceEnvPath(resolveWorkspaceDir());
   const shared = applyEnvFile(sharedEnvPath);
   if (shared.TASK_TRACKER) return shared.TASK_TRACKER.toLowerCase();
+
+  // `worker init --non-interactive` records the tracker in `[defaults].tracker`
+  // (workspace.toml is the source of truth) and its credentials in the workspace
+  // `.env`, without TASK_TRACKER. Treat that pair as configured.
+  const workspaceDir = resolveWorkspaceDir();
+  const configPath = workspaceConfigPath(workspaceDir);
+  const configured = existsSync(configPath) ? loadWorkspaceConfig(configPath).defaults.tracker : "";
+  if (
+    configured &&
+    trackerRequiredEnv(configured).every((key) => shared[key] || process.env[key])
+  ) {
+    log(`   Using ${configured} from ${configPath}`);
+    // The later steps (query dry run, readiness) build their client from this.
+    process.env.TASK_TRACKER ??= configured.toLowerCase();
+    return configured.toLowerCase();
+  }
 
   log("   No tracker config yet — running that subset of `devintern init`.");
   const result = await runTrackerSetup(prompt, log, defaultProbe, cwd, {
