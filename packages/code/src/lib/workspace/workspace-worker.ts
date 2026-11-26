@@ -59,6 +59,7 @@ import { createWorkspaceLock, openWorkspaceState } from "./state";
 import { BASE_WORKTREE_NAME, RepoManager } from "./repo-manager";
 import { Utils } from "../utils";
 import { probePushAccess } from "../code-host/github/push-probe";
+import { warnOnCiPermissionIssues } from "./ci-permission-check";
 import { AutomationAcquirer } from "../automation/acquirer";
 import type { AutomationConfig } from "../automation/config";
 import { automationTaskArgs } from "../automation/config";
@@ -977,6 +978,8 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   );
 
   await warnOnPushAuthIssues(config, repoManager);
+  // Runs in the background: CI-read permission problems are warnings only.
+  void warnOnCiPermissionIssues(config, workspaceDir);
 
   const acquirers: import("../../worker").Acquirer[] = [];
   // Native-blocker gate per polled source (keyed by team name; `undefined`

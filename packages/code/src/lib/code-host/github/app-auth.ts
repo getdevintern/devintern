@@ -36,8 +36,8 @@ interface InstallationCache {
  * - Repository permissions:
  *   - Contents: Read and write (to check and push branches)
  *   - Pull requests: Read and write (to create PRs)
- *   - Actions, Commit statuses: Read (when automatic CI fixes are enabled)
- *   - Checks, Commit statuses: Read (when auto-merge is enabled)
+ *   - Commit statuses, Checks: Read (when auto-merge or automatic CI fixes are enabled)
+ *   - Actions: Read (when automatic CI fixes are enabled)
  */
 export class GitHubAppAuth {
   private appId: string;
@@ -61,15 +61,18 @@ export class GitHubAppAuth {
   /**
    * Load GitHub App configuration from environment variables.
    *
+   * @param env - Environment to read (defaults to `process.env`)
    * @returns Configured auth instance, or `null` when env vars are missing
    */
-  static fromEnvironment(): GitHubAppAuth | null {
-    const appId = process.env.GITHUB_APP_ID;
+  static fromEnvironment(
+    env: Record<string, string | undefined> = process.env,
+  ): GitHubAppAuth | null {
+    const appId = env.GITHUB_APP_ID;
     if (!appId) {
       return null;
     }
 
-    const privateKey = GitHubAppAuth.loadPrivateKey();
+    const privateKey = GitHubAppAuth.loadPrivateKey(env);
     if (!privateKey) {
       return null;
     }
@@ -82,9 +85,9 @@ export class GitHubAppAuth {
    *
    * @returns PEM private key text, or `null` on failure
    */
-  private static loadPrivateKey(): string | null {
+  private static loadPrivateKey(env: Record<string, string | undefined>): string | null {
     // Try file path first
-    const keyPath = process.env.GITHUB_APP_PRIVATE_KEY_PATH;
+    const keyPath = env.GITHUB_APP_PRIVATE_KEY_PATH;
     if (keyPath) {
       try {
         return readFileSync(keyPath, "utf8");
@@ -95,7 +98,7 @@ export class GitHubAppAuth {
     }
 
     // Try base64-encoded key
-    const keyBase64 = process.env.GITHUB_APP_PRIVATE_KEY_BASE64;
+    const keyBase64 = env.GITHUB_APP_PRIVATE_KEY_BASE64;
     if (keyBase64) {
       try {
         return Buffer.from(keyBase64, "base64").toString("utf8");

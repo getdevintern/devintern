@@ -11,6 +11,7 @@
 ### Added
 
 - **`auto_merge_require_checks`** (default `false`, workspace-wide or per repo, repo wins) and `devintern auto-merge --require-checks`: code PRs merge only when at least one CI check passed on the head commit, so a commit with no checks waits; `skipped` and `neutral` checks do not count. A PR waiting on CI keeps being checked on the same commit and merges once CI passes; the reason shows in the status comment, on the dashboard's Auto-merge entry, and in `--dry-run` output, which also names failing or pending checks
+- **`worker doctor` reports GitHub credentials that can't read CI status**: with `[workspace].auto_merge` or `ci_failure_fix` on, a new **CI status access** row per GitHub repo fails when the token or GitHub App lacks `Commit statuses: Read` (or `Actions: Read` for CI fixes) and names the env file the token comes from. Before, the missing permission only showed up later, on a PR that would not merge. Missing `Checks` is only a note for tokens (fine-grained tokens can't get it) and a warning for an App; network errors warn. The worker runs the same probe at startup and prints one warning line per failing repo. See `docs/code/configuration.md#github-authentication`
 
 ## [2.29.0] - 2026-11-25
 
