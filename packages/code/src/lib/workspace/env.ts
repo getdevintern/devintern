@@ -682,3 +682,20 @@ function pinWorkerRuntimeEnv(env: Record<string, string | undefined>, workspaceD
   env.DEVINTERN_WORKSPACE_DIR = workspaceDir;
   env[WORKER_SUBPROCESS_ENV] = "1";
 }
+
+/** Env for a team's tracker client; throws naming the variables a team still lacks. */
+export function requireTeamTrackerEnv(
+  team: Parameters<typeof buildTeamEnv>[0],
+  workspaceDir: string,
+  required: string[],
+): ReturnType<typeof buildTeamEnv> {
+  const env = buildTeamEnv(team, workspaceDir);
+  const missing = required.filter((key) => !env[key]);
+  if (missing.length > 0) {
+    throw new Error(
+      `Team "${team.name}" (${team.tracker}) is missing required variables: ${missing.join(", ")}. ` +
+        "Add them to the workspace .env or the team's env_file.",
+    );
+  }
+  return env;
+}

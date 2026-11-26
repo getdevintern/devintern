@@ -35,10 +35,16 @@ import {
   workerLoginCommandFor,
 } from "../account/worker-pilot";
 import { redactUrlCredentials } from "../observability/dashboard-workspace";
+import {
+  installAgentStep,
+  readinessExitCode,
+  resultFor,
+  toReportCheck,
+} from "../observability/readiness-json";
+import type { ReadinessResult, ReportCheck } from "../observability/readiness-json";
 import { collectWorkerDoctorChecks } from "../observability/worker-readiness";
 import type { LicenseCheckOptions } from "@devintern/license-check";
 import type { WorkerDoctorDeps, WorkerEntitlementLike } from "../observability/worker-readiness";
-import type { ReadinessCheck } from "../observability/readiness";
 import { hasGitHubRelayRegistration, loadRelayState } from "../relay/connect";
 import { TRACKER_CAPABILITIES, trackersSupportingPolling } from "../trackers/capabilities";
 import { trackerRequiredEnv } from "../trackers/manager";
@@ -61,12 +67,7 @@ import {
   workspaceEnvPath,
 } from "../workspace/paths";
 import { TRACKER_SETUP } from "./scaffold";
-import {
-  acquireWorkspaceInitLock,
-  condenseMessage,
-  errorMessage,
-  writeFileAtomic,
-} from "./worker-init-fs";
+import { acquireWorkspaceInitLock, errorMessage, writeFileAtomic } from "./worker-init-fs";
 
 export {
   WORKER_INIT_LOCK_FILE,
@@ -97,28 +98,20 @@ export interface NonInteractiveInitArgs {
   signIn?: ResolvedLogin;
 }
 
-/** `action`: nothing is broken, one step for the user is left (signing in). */
-export type CheckStatus = "pass" | "warn" | "action" | "fail" | "skipped";
+export type { CheckStatus } from "../observability/readiness-json";
 
 /**
  * `action_required`: every check passed or warned except a step for the user
  * (signing in to start the Worker Pilot). Exit code 2.
  */
-export type InitResult = "success" | "action_required" | "failure";
+export type InitResult = ReadinessResult;
 
 /** One check in the report. */
-export interface InitCheck {
-  /** Stable check name (e.g. `tracker-auth`, `query`, `repo`). */
-  name: string;
-  label: string;
-  status: CheckStatus;
-  message: string;
-  hint?: string;
-}
+export type InitCheck = ReportCheck;
 
 /** One remaining step the user (or agent) still has to do. */
 export interface InitNextStep {
-  id: "sign-in" | "connect" | "add-repo" | "start" | "service";
+  id: "sign-in" | "connect" | "add-repo" | "install-agent" | "start" | "service";
   message: string;
   command: string;
 }
@@ -143,7 +136,7 @@ export interface NonInteractiveInitReport {
 
 /** Exit code for a report: 0 success, 2 action required, 1 failure. */
 export function initExitCode(result: InitResult): number {
-  return result === "success" ? 0 : result === "action_required" ? 2 : 1;
+  return readinessExitCode(result);
 }
 
 export interface NonInteractiveInitDeps {
@@ -637,22 +630,6 @@ function applyPlan(
   }
 }
 
-function toInitCheck(check: ReadinessCheck): InitCheck {
-  const status: CheckStatus =
-    check.status === "ok"
-      ? "pass"
-      : check.status === "warn" || check.status === "action"
-        ? check.status
-        : "fail";
-  return {
-    name: check.id,
-    label: check.label,
-    status,
-    message: condenseMessage(check.detail ?? ""),
-    ...(check.hint && status !== "pass" ? { hint: check.hint } : {}),
-  };
-}
-
 /** HTTP status named in a tracker error, for the credential-probe message. */
 function httpStatusOf(message: string): string | undefined {
   return /\b(401|403)\b/.exec(message)?.[1];
@@ -666,7 +643,7 @@ async function credentialCheck(
 ): Promise<InitCheck> {
   const name = trackerDisplayName(plan.tracker);
   const keys = trackerRequiredEnv(plan.tracker);
-  const base = { name: "tracker-auth", label: "Tracker credentials" } as const;
+  const base = { name: "tracker-auth", label: "Tracker credential probe" } as const;
   if (plan.tracker === "markdown") {
     return { ...base, status: "skipped", message: "markdown tracker: no credentials to check" };
   }
@@ -725,7 +702,7 @@ async function runChecks(
 
   const checks: InitCheck[] = [auth];
   for (const check of readiness) {
-    const mapped = toInitCheck(check);
+    const mapped = toReportCheck(check);
     if (check.id === "query" && authFailed) {
       checks.push({
         ...mapped,
@@ -773,8 +750,16 @@ function nextStepsFor(options: {
   hasRepo: boolean;
   loginCommand: string;
   signIn?: PendingSignIn;
+  /** The report's checks: a failed check withholds `start` and `service`. */
+  checks?: readonly InitCheck[];
+  /** Env the harness check resolved `AGENT_HARNESS` from. */
+  env?: Env;
 }): InitNextStep[] {
   const steps: InitNextStep[] = [];
+  const blocked = (options.checks ?? []).some((check) => check.status === "fail");
+  const harnessFailed = (options.checks ?? []).some(
+    (check) => check.name === "harness" && check.status === "fail",
+  );
   if (options.signIn) {
     steps.push({
       id: "sign-in",
@@ -790,6 +775,7 @@ function nextStepsFor(options: {
       command: signInCommand(options.loginCommand),
     });
   }
+  if (harnessFailed) steps.push(installAgentStep(options.env ?? {}));
   if (!options.hasRepo) {
     steps.push({
       id: "add-repo",
@@ -810,6 +796,7 @@ function nextStepsFor(options: {
       command: "devintern worker connect",
     });
   }
+  if (blocked) return steps;
   steps.push(
     {
       id: "start",
@@ -826,12 +813,7 @@ function nextStepsFor(options: {
   return steps;
 }
 
-/** `failure` if any check fails, `action_required` if one needs a user step, else `success`. */
-export function resultFor(checks: readonly InitCheck[]): InitResult {
-  if (checks.some((check) => check.status === "fail")) return "failure";
-  if (checks.some((check) => check.status === "action")) return "action_required";
-  return "success";
-}
+export { resultFor };
 
 /** Start a `--no-wait` sign-in for the workspace session. */
 async function defaultStartSignIn(
@@ -985,6 +967,12 @@ export async function runNonInteractiveWorkerInit(
       hasRepo,
       loginCommand,
       signIn: report.signIn,
+      checks,
+      env: {
+        ...processEnv,
+        ...parseEnvFile(workspaceEnvPath(workspaceDir)),
+        ...plan.credentialEnv,
+      },
     });
     report.result = resultFor(checks);
     return redactReport(report, secrets);

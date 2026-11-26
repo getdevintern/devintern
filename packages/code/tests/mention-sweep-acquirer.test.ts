@@ -322,6 +322,47 @@ describe("MentionSweepAcquirer", () => {
     expect(handled).toEqual([]);
   });
 
+  test("a disabled sweep logs one info line, never a warning or a sweeping line", async () => {
+    const savedAliases = process.env.GITHUB_BOT_ALIASES;
+    delete process.env.GITHUB_BOT_ALIASES;
+    const logs: string[] = [];
+    const warns: string[] = [];
+    const originalLog = console.log;
+    const originalWarn = console.warn;
+    console.log = (...args: unknown[]) => void logs.push(args.join(" "));
+    console.warn = (...args: unknown[]) => void warns.push(args.join(" "));
+    try {
+      const { acquirer } = makeAcquirer({ botName: null });
+      await acquirer.start();
+      await acquirer.tick();
+      await acquirer.tick();
+      acquirer.stop();
+    } finally {
+      console.log = originalLog;
+      console.warn = originalWarn;
+      if (savedAliases !== undefined) process.env.GITHUB_BOT_ALIASES = savedAliases;
+    }
+    expect(warns.filter((line) => line.includes("mention sweeping"))).toEqual([]);
+    expect(logs.filter((line) => line.includes("Sweeping"))).toEqual([]);
+    expect(logs.filter((line) => line.includes("mention sweeping is off"))).toHaveLength(1);
+  });
+
+  test("an enabled sweep announces itself once", async () => {
+    const logs: string[] = [];
+    const originalLog = console.log;
+    console.log = (...args: unknown[]) => void logs.push(args.join(" "));
+    try {
+      const { acquirer } = makeAcquirer({ botName: "devintern[bot]" });
+      await acquirer.start();
+      await acquirer.tick();
+      await acquirer.tick();
+      acquirer.stop();
+    } finally {
+      console.log = originalLog;
+    }
+    expect(logs.filter((line) => line.includes("Sweeping acme/widgets"))).toHaveLength(1);
+  });
+
   test("cursors advance past swept comments", async () => {
     const createdAt = new Date(Date.now() + 120_000).toISOString();
     const { acquirer } = makeAcquirer({

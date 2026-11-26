@@ -221,6 +221,51 @@ describe("runNonInteractiveWorkerInit", () => {
     });
   });
 
+  test("a failed harness check offers install-agent and withholds start and service", async () => {
+    const failedHarness = async () => ({
+      id: "harness",
+      label: "Agent harness",
+      status: "fail" as const,
+      detail: "no harness CLI found",
+      hint: "Install the agent CLI",
+    });
+    const report = await run(
+      { tracker: "jira", taskQuery: "project = APP" },
+      {
+        processEnv: { ...JIRA_ENV, AGENT_HARNESS: "codex" },
+        doctorOverrides: { checkHarness: failedHarness },
+      },
+    );
+    expect(report.result).toBe("failure");
+    const ids = report.nextSteps.map((step) => step.id);
+    expect(ids).toContain("install-agent");
+    expect(ids).not.toContain("start");
+    expect(ids).not.toContain("service");
+    expect(report.nextSteps.find((step) => step.id === "install-agent")?.command).toBe(
+      "npm install -g @openai/codex",
+    );
+
+    const unknown = await run(
+      { tracker: "jira", taskQuery: "project = APP", yes: true },
+      {
+        processEnv: { ...JIRA_ENV, AGENT_HARNESS: "goose" },
+        doctorOverrides: { checkHarness: failedHarness },
+      },
+    );
+    expect(unknown.nextSteps.find((step) => step.id === "install-agent")?.command).toBe(
+      "https://devintern.com/docs/code/agent-harness",
+    );
+  });
+
+  test("the credential probe and doctor's credentials row have distinct labels", async () => {
+    const report = await run(
+      { tracker: "jira", taskQuery: "project = APP" },
+      { processEnv: { ...JIRA_ENV } },
+    );
+    const labels = report.checks.map((check) => check.label);
+    expect(new Set(labels).size).toBe(labels.length);
+  });
+
   test("names every missing input and writes nothing", async () => {
     const report = await run({});
     expect(report.result).toBe("failure");
