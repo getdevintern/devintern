@@ -763,6 +763,53 @@ async function installLaunchd(
 }
 
 /**
+ * True when the installed definition is exactly what {@link installWorkerService}
+ * would write for these options, so installing again would change nothing.
+ */
+export function workerServiceDefinitionCurrent(
+  options: {
+    workspaceDir: string;
+    execPath: string;
+    runtimePath?: string;
+    environmentPath?: string;
+  },
+  deps: WorkerServiceDeps = {},
+): boolean {
+  const d = resolveDeps(deps);
+  const runtimePath = options.runtimePath ?? process.execPath;
+  const environmentPath = options.environmentPath ?? process.env.PATH ?? "";
+  const workspaceDirEnv = nonDefaultWorkspace(d, options.workspaceDir);
+  let path: string;
+  let expected: string;
+  if (d.platform === "linux") {
+    path = systemdUnitPath(d.homedir);
+    expected = renderSystemdUnit({
+      execPath: options.execPath,
+      projectDir: options.workspaceDir,
+      runtimePath,
+      environmentPath,
+      workspaceDirEnv,
+    });
+  } else if (d.platform === "darwin") {
+    path = launchdAgentPath(d.homedir);
+    expected = renderLaunchdPlist({
+      execPath: options.execPath,
+      workingDir: options.workspaceDir,
+      runtimePath,
+      environmentPath,
+      workspaceDirEnv,
+    });
+  } else {
+    return false;
+  }
+  try {
+    return d.exists(path) && d.readFile(path) === expected;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Install the service definition into the user-level location and start it.
  * On any failure the previous state is restored (a freshly written definition
  * is removed; an existing one is put back and reloaded) so the caller can

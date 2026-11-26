@@ -566,8 +566,9 @@ describe("devintern worker service", () => {
     // `command` is always runnable; the prose hint lives in `message`.
     expect(report.nextSteps.map((step) => step.command)).toEqual([
       `devintern worker login --workspace ${join(workspaceDir, "workspace.toml")} github --no-wait --json`,
-      "devintern worker service install",
+      `DEVINTERN_WORKSPACE_DIR=${workspaceDir} devintern worker service install --json`,
     ]);
+    expect(report.nextSteps.map((step) => step.id)).toEqual(["sign-in", "service"]);
     expect(report.nextSteps[0]?.message).toContain("sign in");
     // Same check shape as `worker init --json`.
     expect(report.checks).toEqual([
@@ -599,7 +600,12 @@ describe("devintern worker service", () => {
     expect(refused.result).toBe("refused");
     expect(serviceExitCode(refused)).toBe(1);
     expect(refused.checks?.[0]).toMatchObject({ name: "harness", status: "fail" });
-    expect(refused.nextSteps[0]?.command).toBe("npm install -g @anthropic-ai/claude-code");
+    expect(refused.code).toBe("agent_missing");
+    // npm when it is on PATH, otherwise the standalone installer (never a bare npm on a Bun-only host).
+    expect([
+      "npm install -g @anthropic-ai/claude-code",
+      "curl -fsSL https://claude.ai/install.sh | bash",
+    ]).toContain(refused.nextSteps[0]?.command ?? "");
 
     const forced = await runServiceAction(baseArgs({ force: true }), {
       workspaceDir,
@@ -616,7 +622,7 @@ describe("devintern worker service", () => {
     expect(forced.result).toBe("failed");
     expect(serviceExitCode(forced)).toBe(1);
     expect(forced.nextSteps.map((step) => step.command)).toContain(
-      "devintern worker service restart",
+      "devintern worker service restart --json",
     );
   });
 

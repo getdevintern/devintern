@@ -500,7 +500,7 @@ export function runWorkerReadCommand(
       return 1;
     }
     if (values.json) {
-      io.stdout(`${JSON.stringify(response.body)}\n`);
+      io.stdout(`${JSON.stringify(versionedDocument(key, response.body))}\n`);
     } else {
       io.stdout(`${(render as (body: unknown) => string)(response.body)}\n`);
     }
@@ -508,6 +508,25 @@ export function runWorkerReadCommand(
   } finally {
     data.close();
   }
+}
+
+/** `schema` of the `worker status --json` / `worker overview --json` documents. */
+export const WORKER_READ_JSON_SCHEMAS: Readonly<Record<string, string>> = {
+  status: "devintern.worker-status",
+  overview: "devintern.worker-overview",
+};
+
+/**
+ * `status` and `overview` print the API body with the same envelope as the
+ * other setup documents: `schema`, `version`, and `result` (the worker's
+ * liveness, `worker.status`). Other commands print the body unchanged.
+ */
+function versionedDocument(key: string, body: unknown): unknown {
+  const schema = WORKER_READ_JSON_SCHEMAS[key];
+  if (!schema || !body || typeof body !== "object" || Array.isArray(body)) return body;
+  const worker = (body as { worker?: { status?: unknown } }).worker;
+  const result = typeof worker?.status === "string" ? worker.status : "unknown";
+  return { schema, version: 1, result, ...body };
 }
 
 function errorMessage(response: ApiResponse): string {

@@ -86,8 +86,8 @@ cliTest(
       expect(checks.repo!.message).toContain("remote reachable");
       expect(checks.harness).toMatchObject({ status: "pass" });
       expect(report.checks.filter((check) => check.status === "fail")).toEqual([]);
-      // Never started here: these stay as next steps.
-      expect(report.nextSteps.map((step) => step.id)).toContain("start");
+      // Never started here: the background service stays a next step.
+      expect(report.nextSteps.map((step) => step.id)).toContain("service");
 
       expect(statSync(fixture.envPath).mode & 0o777).toBe(0o600);
       expect(readFileSync(fixture.envPath, "utf8")).toContain(
@@ -326,7 +326,8 @@ cliTest(
       expect(refused.exitCode).toBe(1);
       expect(refused.stdout).toBe("");
       expect(outputLines(refused.stderr)).toEqual([
-        `❌ ${fixture.configPath} already exists; nothing was changed. Pass --yes to update its tracker, task_query, and repository entries (all other settings are kept).`,
+        `❌ ${fixture.configPath} already exists with other settings; nothing was changed. Pass --yes to update its tracker, task_query, and repository entries (all other settings are kept).`,
+        expect.stringContaining("--task-query 'status=ready' --repo-from-cwd --yes --json"),
       ]);
       expect(readFileSync(fixture.configPath, "utf8")).toBe(configBefore);
       expect(fixture.hash(fixture.envPath)).toBe(envBefore);
@@ -475,7 +476,7 @@ cliTest(
       });
       expect(report.nextSteps[0]?.id).toBe("sign-in");
       expect(report.nextSteps[0]?.command).toMatch(
-        /^devintern worker login( --workspace \S+)? github$/,
+        /^devintern worker login( --workspace \S+)? github --no-wait --json$/,
       );
       expectNoStackTrace(init);
       // The setup is kept, so doctor has a workspace to judge.

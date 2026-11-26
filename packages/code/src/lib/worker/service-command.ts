@@ -12,11 +12,20 @@
 
 import { resolve } from "path";
 import type { ReadinessCheck } from "../observability/readiness";
-import { blockerNextSteps, toReportCheck } from "../observability/readiness-json";
-import type { ReportCheck } from "../observability/readiness-json";
+import {
+  blockerNextSteps,
+  failureCodeFor,
+  serviceInstallCommand,
+  toReportCheck,
+} from "../observability/readiness-json";
+import type { NextStep, ReportCheck } from "../observability/readiness-json";
 import { parseEnvFile } from "../workspace/env";
 import { resolveWorkspaceDir, workspaceConfigPath, workspaceEnvPath } from "../workspace/paths";
-import { checkServiceManager, detectWorkerService } from "./service";
+import {
+  checkServiceManager,
+  detectWorkerService,
+  workerServiceDefinitionCurrent,
+} from "./service";
 import type { ServiceInstallResult, WorkerServiceDeps } from "./service";
 import {
   DEFAULT_START_TIMEOUT_MS,
@@ -151,11 +160,8 @@ export interface ServiceCommandDeps {
   write?: (text: string) => void;
 }
 
-/** One step the user still has to take. */
-export interface ServiceNextStep {
-  message: string;
-  command: string;
-}
+/** One step the user still has to take (the shared next-step shape). */
+export type ServiceNextStep = NextStep;
 
 /** `--json` document. `result` values may grow; treat unknown ones as not done. */
 export interface ServiceCommandReport {
@@ -169,9 +175,16 @@ export interface ServiceCommandReport {
    */
   result: string;
   error?: string;
+  /** Stable code for a failure (`refused`, `error`): e.g. `query_rejected`, `service_unavailable`. */
+  code?: string;
   workspaceDir: string;
   /** install: an existing service was updated instead of installed. */
   updated?: boolean;
+  /**
+   * install: the service was already installed with this exact definition and
+   * running, so nothing was written and the worker was not restarted.
+   */
+  unchanged?: boolean;
   /** install: the `worker doctor` checks that ran first (same shape as `worker init --json`). */
   checks?: ReportCheck[];
   start?: StartCheck;
@@ -208,18 +221,24 @@ function nextStepsForStart(start: StartCheck | undefined): ServiceNextStep[] {
   if (start.state === "starting") {
     return [
       {
+        id: "check-start",
         message: "Check whether the worker finished starting",
-        command: "devintern worker service status",
+        command: "devintern worker service status --json",
       },
     ];
   }
   return [
-    { message: "See why the worker stopped", command: "devintern worker logs --level error" },
     {
+      id: "logs",
+      message: "See why the worker stopped",
+      command: "devintern worker logs --level error",
+    },
+    {
+      id: "restart",
       message: start.permanent
         ? "Fix the problem, then start the worker again"
         : "After fixing the problem, restart without waiting for the next retry",
-      command: "devintern worker service restart",
+      command: "devintern worker service restart --json",
     },
   ];
 }
@@ -236,6 +255,7 @@ async function runInstall(
     return {
       ...base,
       result: "error",
+      code: "service_unavailable",
       error: `A background service is not available here: ${manager.reason}. Run the worker in the foreground instead: devintern worker (inside tmux or screen to keep it running).`,
     };
   }
@@ -244,6 +264,7 @@ async function runInstall(
     return {
       ...base,
       result: "error",
+      code: "custom_service",
       error:
         "The installed devintern-worker service has custom settings; it is left untouched. Remove it yourself to let DevIntern manage it.",
     };
@@ -265,10 +286,13 @@ async function runInstall(
   );
   if (blockers.length > 0 && !args.force) {
     const onlyActions = blockers.every((check) => check.status === "action");
+    const reportChecks = checks?.map(toReportCheck) ?? [];
+    const code = failureCodeFor(reportChecks);
     return {
       ...base,
-      checks: checks?.map(toReportCheck),
+      checks: reportChecks,
       result: onlyActions ? "action_required" : "refused",
+      ...(code ? { code } : {}),
       error: onlyActions
         ? "Not installed: the worker would not start until you sign in."
         : "Not installed: the worker would not start with the problems above.",
@@ -278,8 +302,9 @@ async function runInstall(
           env: { ...process.env, ...parseEnvFile(workspaceEnvPath(workspaceDir)) },
         }),
         {
+          id: "service",
           message: "Then install the service (or pass --force to install it anyway)",
-          command: "devintern worker service install",
+          command: serviceInstallCommand(workspaceDir),
         },
       ],
     };
@@ -290,13 +315,33 @@ async function runInstall(
     );
   }
 
+  const definition = {
+    workspaceDir,
+    execPath: deps.execPath ?? (process.argv[1] ? resolve(process.argv[1]) : "devintern"),
+    runtimePath: deps.runtimePath ?? process.execPath,
+    environmentPath: deps.environmentPath ?? process.env.PATH ?? "",
+  };
+  // Idempotent: the same definition and a running worker means there is
+  // nothing to do, and restarting would interrupt the worker's tasks.
+  if (existing.installed && workerServiceDefinitionCurrent(definition, deps.service)) {
+    const current = await queryWorkerService(workspaceDir, deps.service);
+    if (current.state === "running") {
+      return {
+        ...base,
+        checks: checks?.map(toReportCheck),
+        result: "running",
+        updated: false,
+        unchanged: true,
+        service: current,
+        start: { state: "running", pid: current.worker.pid },
+      };
+    }
+  }
+
   if (args.waitMs > 0) log("⏳ Installing the service and waiting for the worker to start...");
   const { install, start } = await installAndStartWorkerService(
     {
-      workspaceDir,
-      execPath: deps.execPath ?? (process.argv[1] ? resolve(process.argv[1]) : "devintern"),
-      runtimePath: deps.runtimePath ?? process.execPath,
-      environmentPath: deps.environmentPath ?? process.env.PATH ?? "",
+      ...definition,
       waitMs: args.waitMs,
       now: deps.now,
       waitForStart: deps.waitForStart
@@ -324,6 +369,7 @@ function installReport(
       ...base,
       checks,
       result: "error",
+      code: "install_failed",
       error: `Could not install the service: ${install.error}. Nothing was left half-installed.`,
     };
   }
@@ -404,7 +450,17 @@ export async function runServiceAction(
     }
     case "status": {
       const service = await queryWorkerService(workspaceDir, deps.service);
-      return { ...base, result: service.state, service };
+      const nextSteps: ServiceNextStep[] =
+        service.state === "not_installed"
+          ? [
+              {
+                id: "service",
+                message: "Install and start the background service (it checks readiness first)",
+                command: serviceInstallCommand(workspaceDir),
+              },
+            ]
+          : [];
+      return { ...base, result: service.state, service, nextSteps };
     }
     case "logs":
       return { ...base, result: "logs" };
@@ -427,9 +483,11 @@ export function renderServiceReport(
         report.result !== "action_required"
       ) {
         lines.push(
-          report.updated
-            ? "✅ Updated the devintern-worker service and restarted it."
-            : "✅ Installed the devintern-worker service.",
+          report.unchanged
+            ? "✅ The devintern-worker service is already installed and running; nothing changed and the worker was not restarted (use `devintern worker service restart` to restart it)."
+            : report.updated
+              ? "✅ Updated the devintern-worker service and restarted it."
+              : "✅ Installed the devintern-worker service.",
         );
       }
       break;
@@ -569,7 +627,7 @@ export async function runWorkerServiceCommand(
   if (!parsed.ok) {
     if (parsed.json) {
       write(
-        `${JSON.stringify({ schema: WORKER_SERVICE_JSON_SCHEMA, version: WORKER_SERVICE_JSON_VERSION, result: "error", error: parsed.error }, null, 2)}\n`,
+        `${JSON.stringify({ schema: WORKER_SERVICE_JSON_SCHEMA, version: WORKER_SERVICE_JSON_VERSION, result: "error", code: "invalid_arguments", error: parsed.error }, null, 2)}\n`,
       );
     } else {
       error(`❌ ${parsed.error}`);
@@ -585,6 +643,7 @@ export async function runWorkerServiceCommand(
     workspaceDir,
     collectReadiness: deps.collectReadiness ?? defaultCollectReadiness,
   });
+  if (report.result === "error" && !report.code) report.code = "service_command_failed";
   if (args.json) {
     write(`${JSON.stringify(report, null, 2)}\n`);
   } else {

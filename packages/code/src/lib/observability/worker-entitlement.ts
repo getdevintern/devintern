@@ -19,7 +19,13 @@ export interface WorkerEntitlementLike {
   graceEndsAt?: string;
   /** Nothing is wrong except that nobody is signed in (see `LicenseCheckResult`). */
   signInRequired?: boolean;
+  /** No license was checked: `DEVINTERN_SKIP_LICENSE_CHECK=1` on a non-release build. */
+  skipped?: boolean;
 }
+
+/** Entitlement detail when the license check was skipped. */
+export const LICENSE_CHECK_SKIPPED_DETAIL =
+  "skipped (DEVINTERN_SKIP_LICENSE_CHECK=1; non-release build, no license was checked)";
 
 const SKU_NAMES: Record<string, string> = {
   "solo-automation": "Supporter license",
@@ -68,6 +74,9 @@ export function entitlementCheck(
 ): ReadinessCheck {
   const base = { id: "entitlement", label: "Automation entitlement" } as const;
   if (license.valid) {
+    if (license.skipped) {
+      return { ...base, status: "ok", detail: LICENSE_CHECK_SKIPPED_DETAIL };
+    }
     if (license.trialAvailable) {
       return {
         ...base,

@@ -19,6 +19,7 @@ import {
   removePendingLogin,
   writePendingLogin,
 } from "./pending-login";
+import type { PendingLogin } from "./pending-login";
 import {
   isRemoteCliSession,
   openBrowser,
@@ -523,7 +524,18 @@ export interface StartedPendingLogin {
   redirectTo: string;
   /** When the pending sign-in stops being accepted (ISO 8601). */
   expiresAt: string;
+  /**
+   * True when an unexpired sign-in for the same method was already waiting
+   * and is returned again (same address, same expiry) instead of replacing it.
+   */
+  reused?: boolean;
 }
+
+/**
+ * A pending sign-in is shown again only while at least this much of it is
+ * left, so the person still has time to finish it.
+ */
+export const PENDING_LOGIN_REUSE_MIN_REMAINING_MS = 5 * 60_000;
 
 /** Options for {@link startPendingLogin} and {@link completePendingLogin}. */
 export interface PendingLoginOptions {
@@ -533,6 +545,39 @@ export interface PendingLoginOptions {
   now?: () => number;
   /** Command shown in errors to start a sign-in again. */
   startCommand?: string;
+  /** Start a new sign-in even when one for the same method is still waiting. */
+  fresh?: boolean;
+}
+
+/**
+ * The waiting sign-in to show again for this request, or `null`: same method,
+ * address, and redirect, with enough time left. Never throws.
+ */
+async function reusablePendingLogin(
+  config: SupabaseAuthConfig,
+  resolved: ResolvedLogin,
+  redirectTo: string,
+  now: number,
+): Promise<StartedPendingLogin | null> {
+  let pending: PendingLogin;
+  try {
+    pending = await readPendingLogin(pendingLoginPath(config), "", now);
+  } catch {
+    return null;
+  }
+  if (pending.method !== resolved.method || pending.redirectTo !== redirectTo) return null;
+  const email = resolved.method === "email" ? resolved.email?.trim() : undefined;
+  if ((pending.email ?? undefined) !== email) return null;
+  if (resolved.method !== "email" && !pending.url) return null;
+  if (Date.parse(pending.expiresAt) - now < PENDING_LOGIN_REUSE_MIN_REMAINING_MS) return null;
+  return {
+    method: pending.method,
+    ...(pending.email ? { email: pending.email } : {}),
+    url: pending.url ?? null,
+    redirectTo: pending.redirectTo,
+    expiresAt: pending.expiresAt,
+    reused: true,
+  };
 }
 
 /**
@@ -541,6 +586,10 @@ export interface PendingLoginOptions {
  * to the session file, and return. {@link completePendingLogin} finishes it
  * with the address the browser lands on. No local server is started; the
  * browser's `127.0.0.1` page will not load, and that is expected.
+ *
+ * Starting again while an unexpired sign-in for the same method is waiting
+ * returns that one (`reused: true`) instead of invalidating the address
+ * already shown, unless `options.fresh` is set.
  *
  * @param config - Supabase auth configuration.
  * @param resolved - Login method (email needs the address).
@@ -556,6 +605,15 @@ export async function startPendingLogin(
   const port =
     options.port ?? resolveAuthCallbackPort(process.env, true) ?? DEFAULT_REMOTE_AUTH_CALLBACK_PORT;
   const redirectTo = `http://127.0.0.1:${port}/auth/callback`;
+  if (!options.fresh) {
+    const reused = await reusablePendingLogin(
+      config,
+      resolved,
+      redirectTo,
+      options.now?.() ?? Date.now(),
+    );
+    if (reused) return reused;
+  }
   const items = new Map<string, string>();
   const client = createPkceClientWithStorage(config, items);
   let url: string | null = null;
@@ -596,6 +654,7 @@ export async function startPendingLogin(
     method: resolved.method,
     ...(email ? { email } : {}),
     redirectTo,
+    ...(url ? { url } : {}),
     codeVerifier,
     createdAt: new Date(now).toISOString(),
     expiresAt,

@@ -58,6 +58,8 @@ import type { GitIdentityCheckInput } from "./git-identity-readiness";
 import { workerLivenessCheck } from "./worker-liveness-readiness";
 import { ciPermissionChecks } from "./ci-permission-readiness";
 import type { CiPermissionDoctorDeps } from "./ci-permission-readiness";
+import { gitPushDryRun } from "./repo-push-probe";
+import type { PushProbeOutcome } from "./repo-push-probe";
 
 type Env = Record<string, string | undefined>;
 
@@ -275,7 +277,14 @@ export interface RepoAccessProbes {
   lsRemote?: (remote: string, env: Env, timeoutMs: number) => Promise<RepoAccessResult>;
   /** Whether git has its own credential helper for a URL (default: ask git). */
   hasHelper?: (url: string, env: Env) => boolean;
+  /** Dry-run push with the worker's git credentials (default: {@link gitPushDryRun}). */
+  pushDryRun?: (remote: string, env: Env, timeoutMs: number) => Promise<PushProbeOutcome>;
 }
+
+/** Fix named when the token can read a GitHub repository but not push to it. */
+const PUSH_FIX =
+  "Give GITHUB_TOKEN Contents and Pull requests read and write access to the repository " +
+  "(fine-grained token) or the `repo` scope (classic token); for GitHub Issues also Issues read and write";
 
 /**
  * Default repository probe. GitHub remotes with a token are checked through
@@ -294,12 +303,16 @@ export function createDefaultRepoAccessCheck(
   const lsRemote = probes.lsRemote ?? gitLsRemote;
   const hasHelper =
     probes.hasHelper ?? ((url: string, env: Env) => hasConfiguredCredentialHelper(url, env));
+  const pushDryRun =
+    probes.pushDryRun ??
+    ((remote: string, env: Env, ms: number) =>
+      gitPushDryRun(remote, (args) => gitCredentialEnv(args, gitProbeEnv(env)), ms));
   return async (repo, env) => {
     const slug = gitHubSlugFromRemote(repo.remote);
     const token = env.GITHUB_TOKEN;
     if (slug && token) {
       // In parallel: the caller bounds the whole check with one timeout.
-      const [response, git] = await Promise.all([
+      const [response, git, push] = await Promise.all([
         fetchFn(`https://api.github.com/repos/${slug}`, {
           headers: {
             Accept: "application/vnd.github+json",
@@ -309,6 +322,10 @@ export function createDefaultRepoAccessCheck(
           signal: AbortSignal.timeout(timeoutMs),
         }),
         lsRemote(repo.remote, env, timeoutMs),
+        pushDryRun(repo.remote, env, timeoutMs).catch((error: unknown): PushProbeOutcome => ({
+          status: "unknown",
+          reason: errorMessage(error),
+        })),
       ]);
       if (!response.ok) {
         return {
@@ -318,7 +335,12 @@ export function createDefaultRepoAccessCheck(
           }`,
         };
       }
-      if (!git.ok) {
+      // `permissions` is the token owner's role; the dry run is what the token itself may do.
+      const permissions = await readRepoPermissions(response);
+      const pushDenied = permissions?.push === false || push.status === "denied";
+      // A refused clone names its own cause (helper precedence, Contents access);
+      // a clone that only timed out says less than a definite push denial.
+      if (!git.ok && !(pushDenied && /timed out/.test(git.reason))) {
         return {
           ok: false,
           reason: gitRefusedReason(
@@ -328,10 +350,30 @@ export function createDefaultRepoAccessCheck(
           ),
         };
       }
-      return { ok: true, detail: `GitHub ${slug} readable` };
+      if (pushDenied) {
+        const cause = push.status === "denied" ? ` (dry-run push: ${push.reason})` : "";
+        return {
+          ok: false,
+          reason: `GITHUB_TOKEN can read ${slug} but cannot push branches or open pull requests${cause}`,
+        };
+      }
+      return push.status === "ok"
+        ? { ok: true, detail: `GitHub ${slug} readable and writable (push verified)` }
+        : { ok: true, detail: `GitHub ${slug} readable; push not verified (${push.reason})` };
     }
     return lsRemote(repo.remote, env, timeoutMs);
   };
+}
+
+/** `permissions` from a `GET /repos/{owner}/{repo}` response, when it has them. */
+async function readRepoPermissions(response: Response): Promise<{ push?: boolean } | undefined> {
+  try {
+    const body = (await response.json()) as { permissions?: { push?: unknown } } | null;
+    const push = body?.permissions?.push;
+    return typeof push === "boolean" ? { push } : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Why git was refused a repo the API can see: the user's helper answered first, or the token lacks Contents access. */
@@ -780,7 +822,9 @@ async function collectConfigScopedChecks(
               label: "Repository access",
               status: "fail",
               detail: `${name}: ${result.reason}`,
-              hint: `Check the remote URL for "${repo.name}" and that GITHUB_TOKEN (or your git credentials) can read it`,
+              hint: result.reason.includes("cannot push")
+                ? PUSH_FIX
+                : `Check the remote URL for "${repo.name}" and that GITHUB_TOKEN (or your git credentials) can read it`,
             },
       );
     } catch (error) {

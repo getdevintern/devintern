@@ -24,6 +24,9 @@ function closingLine(report: NonInteractiveInitReport, failed: InitCheck[]): str
   if (report.result === "success") {
     return "✅ Worker setup complete. Nothing was started or installed.";
   }
+  if (report.result === "unchanged") {
+    return "✅ Worker setup unchanged: the workspace already had this setup and every check passed.";
+  }
   if (report.result === "action_required") {
     const signIn = report.nextSteps.find((step) => step.id === "sign-in");
     const how = report.signIn
@@ -34,7 +37,7 @@ function closingLine(report: NonInteractiveInitReport, failed: InitCheck[]): str
       `${how}, then \`devintern worker doctor\`.`
     );
   }
-  return `❌ Worker setup incomplete: ${failed.length} check(s) failed. Fix them and re-run with --yes, or run \`devintern worker doctor\`.`;
+  return `❌ Worker setup incomplete: ${failed.length} check(s) failed${report.persisted ? "" : "; nothing was saved"}. Follow the next steps above, then re-run the same command.`;
 }
 
 /** Human-readable rendering of the report. */
@@ -42,6 +45,7 @@ export function renderNonInteractiveReport(report: NonInteractiveInitReport): st
   const lines: string[] = [];
   if (report.error) {
     lines.push(`❌ ${report.error}`);
+    for (const step of report.nextSteps) lines.push(`   ${step.message}: ${step.command}`);
     return lines;
   }
   lines.push("", "Checks:");
@@ -56,9 +60,11 @@ export function renderNonInteractiveReport(report: NonInteractiveInitReport): st
   if (report.nextSteps.length > 0) {
     lines.push("", "Next steps:");
     report.nextSteps.forEach((step, index) => {
-      lines.push(`  ${index + 1}. ${step.message}: ${step.command}`);
+      lines.push(`  ${index + 1}. ${step.message}:`);
+      lines.push(`     ${step.command}`);
     });
   }
+  for (const warning of report.warnings) lines.push("", `⚠️  ${warning}`);
   const failed = report.checks.filter((check) => check.status === "fail");
   lines.push("", closingLine(report, failed));
   return lines;

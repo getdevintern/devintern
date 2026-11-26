@@ -31,6 +31,8 @@ export interface PendingLogin {
   email?: string;
   /** Redirect address the browser lands on (`http://127.0.0.1:<port>/auth/callback`). */
   redirectTo: string;
+  /** Sign-in address that was shown (OAuth only), so a repeated start can show it again. */
+  url?: string;
   /** Supabase storage value for the PKCE code verifier. */
   codeVerifier: string;
   createdAt: string;
@@ -95,7 +97,7 @@ export function parsePendingLogin(text: string): PendingLogin | null {
     return null;
   }
   if (!isRecord(raw) || raw.version !== PENDING_LOGIN_VERSION) return null;
-  const { method, email, redirectTo, codeVerifier, createdAt, expiresAt } = raw;
+  const { method, email, redirectTo, url, codeVerifier, createdAt, expiresAt } = raw;
   if (
     !isLoginMethod(method) ||
     typeof redirectTo !== "string" ||
@@ -104,7 +106,8 @@ export function parsePendingLogin(text: string): PendingLogin | null {
     !codeVerifier ||
     !isTimestamp(createdAt) ||
     !isTimestamp(expiresAt) ||
-    (email !== undefined && typeof email !== "string")
+    (email !== undefined && typeof email !== "string") ||
+    (url !== undefined && typeof url !== "string")
   ) {
     return null;
   }
@@ -113,6 +116,7 @@ export function parsePendingLogin(text: string): PendingLogin | null {
     method,
     ...(email ? { email } : {}),
     redirectTo,
+    ...(url ? { url } : {}),
     codeVerifier,
     createdAt,
     expiresAt,

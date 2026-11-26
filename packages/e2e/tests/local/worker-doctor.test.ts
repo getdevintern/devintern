@@ -68,7 +68,7 @@ test.skipIf(!builtCli)(
         `✅ Workspace config — 1 repo, 0 teams, 1 automation (${configPath})`,
         "✅ Work sources — 0 tracker queries, 1 automation, 0 error monitors, 1 repo",
         `✅ Repository access — [[repos]] "fixture" (${worker.remote}): remote reachable`,
-        "✅ Automation entitlement — license-key",
+        "✅ Automation entitlement — skipped (DEVINTERN_SKIP_LICENSE_CHECK=1; non-release build, no license was checked)",
         "✅ Agent harness — claude-code",
         "✅ Agent sandbox — none (agents run unsandboxed)",
         "✅ Dashboard port — dashboard disabled",

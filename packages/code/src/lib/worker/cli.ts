@@ -182,7 +182,7 @@ async function runWorkerDoctorSubcommand(args: string[]): Promise<never> {
     console.log("  --offline           Skip query, repository, and license checks (no network)");
     console.log("  --json              Print one JSON document (schema devintern.worker-doctor)");
     console.log(
-      "                      with result, checks, and nextSteps instead of the checklist",
+      "                      with result, setup (complete once a worker runs), checks,\n                      and nextSteps instead of the checklist",
     );
     console.log("  --test-notifications  Send a test message through each [notifications] channel");
     console.log("  -h, --help          Display this help message");
@@ -246,6 +246,10 @@ async function runWorkerDoctorSubcommand(args: string[]): Promise<never> {
   console.log(`🩺 devintern worker readiness${offline ? " (offline)" : ""}:\n`);
   console.log(report.lines.join("\n"));
   console.log(`\n${workerDoctorClosingLine(checks, report)}`);
+  const { setupStateFor } = await import("../observability/readiness-json");
+  const { setup, summary } = setupStateFor(checks);
+  // The done signal for scripts and agents reading the text output.
+  console.log(`Setup: ${setup} — ${summary}`);
   // 2: nothing is broken, but a step is left (sign in to start the Worker Pilot).
   process.exit(report.hasFailures ? 1 : report.hasActions ? 2 : 0);
 }
@@ -254,7 +258,7 @@ const WORKER_INIT_USAGE = [
   "Usage: devintern worker init [--no-service]",
   "       devintern worker init --non-interactive --tracker <id> --task-query <query>",
   "                             [--repo-from-cwd] [--env-file <path>] [--yes]",
-  "                             [--sign-in <method>] [--json]",
+  "                             [--sign-in <method>] [--remove-env-file] [--json]",
   "",
   "Interactively configure unattended automation and a native user service.",
   "",
@@ -268,13 +272,17 @@ const WORKER_INIT_USAGE = [
   "  --repo-from-cwd     Register the current Git repository (uses its origin remote)",
   "  --env-file <path>   Read credentials from this file (mode 0600) and save them",
   "                      to the workspace .env; otherwise they come from the environment",
-  "  --yes               Update an existing workspace.toml (other settings are kept)",
+  "  --yes               Update an existing workspace.toml (other settings are kept);",
+  "                      not needed to re-run with the same flags (reports unchanged)",
   "  --sign-in <method>  If sign-in is needed, start it without waiting (github, google,",
   "                      x, or your email address) and print the address to open",
+  "  --remove-env-file   Delete the --env-file once its values are saved (otherwise",
+  "                      it is left in place and the output says it can be deleted)",
   "  --json              Print one JSON document with checks, files, and next steps",
   "",
-  "Exit codes: 0 ready, 2 only a step for you is left (sign in to start the 14-day",
-  "free Worker Pilot, no card required), 1 a check failed or the input was invalid.",
+  "Exit codes: 0 ready or unchanged, 2 only a step for you is left (sign in to start",
+  "the 14-day free Worker Pilot, no card required), 1 a check failed or the input was",
+  "invalid. A rejected credential, query, or repository is never saved.",
   "",
   "Secrets are never accepted as flags. See https://devintern.com/docs/code/worker#non-interactive-setup",
 ].join("\n");
@@ -298,11 +306,15 @@ async function runWorkerInitNonInteractive(args: string[]): Promise<never> {
         version: WORKER_INIT_JSON_VERSION,
         result: "failure",
         error: parsed.error,
+        code: "invalid_arguments",
         workspaceDir: resolveWorkspaceDir(),
         tracker: null,
         taskQuery: null,
         repo: null,
         filesWritten: [],
+        changed: false,
+        persisted: false,
+        warnings: [],
         checks: [],
         nextSteps: [],
       };
@@ -345,7 +357,7 @@ async function runWorkerInitNonInteractive(args: string[]): Promise<never> {
       githubApp: "skipped",
       source: "non_interactive",
       outcome:
-        report.result === "success"
+        report.result === "success" || report.result === "unchanged"
           ? "succeeded"
           : report.result === "action_required"
             ? "action_required"
@@ -377,6 +389,7 @@ async function runWorkerInitSubcommand(args: string[]): Promise<never> {
       "--json",
       "--yes",
       "--sign-in",
+      "--remove-env-file",
     ].includes(arg.split("=")[0]),
   );
   if (nonInteractiveOnly) {
