@@ -248,6 +248,8 @@ export interface WorkerFixtureOptions {
   dashboard?: WorkerDashboardOptions;
   /** Extra TOML inserted after `[defaults]` and before `[[repos]]`. */
   workspaceTomlExtra?: string;
+  /** Extra TOML lines appended to one `[[repos]]` entry, keyed by repo name. */
+  repoTomlExtra?: Record<string, string>;
   /** Extra environment variables for the daemon and built CLI. */
   env?: Record<string, string>;
   /** Repo names to seed; defaults to one fixture repo. */
@@ -455,6 +457,7 @@ export class WorkerFixture {
         `name = "${name}"`,
         `remote = "${this.remoteFor(name)}"`,
         `default_branch = "${this.baseBranch}"`,
+        ...(this.options.repoTomlExtra?.[name] ? [this.options.repoTomlExtra[name]] : []),
         "",
       ]),
     ];
@@ -502,7 +505,7 @@ export class WorkerFixture {
   }
 
   /** Bare remote path for a seeded repo. */
-  private remoteFor(repo: string): string {
+  remoteFor(repo: string): string {
     return repo === this.repoNames[0]
       ? join(this.root, "remote.git")
       : join(this.root, `${repo}.git`);
