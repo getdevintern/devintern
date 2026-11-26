@@ -3,6 +3,7 @@
  * (schema `devintern.worker-connect`, version 1); human text goes to stderr.
  */
 
+import { pairingNextUrl } from "../relay/github-pairing";
 import type { ConnectOutcome } from "../relay/connect";
 import type { SentryMonitorReport } from "./worker-sentry-noninteractive";
 
@@ -24,6 +25,8 @@ export interface ConnectPairingJson {
   id: string;
   state: "pending";
   installUrl: string;
+  authorizeUrl?: string;
+  appInstalled?: boolean;
   /** ISO timestamp. */
   expiresAt: string;
 }
@@ -120,10 +123,14 @@ export function buildTargetDocument(input: TargetDocumentInput): ConnectTargetJs
         id: pairing.id,
         state: "pending",
         installUrl: pairing.installUrl,
+        ...(pairing.authorizeUrl ? { authorizeUrl: pairing.authorizeUrl } : {}),
+        ...(pairing.authorizeUrl && pairing.appInstalled !== undefined
+          ? { appInstalled: pairing.appInstalled }
+          : {}),
         expiresAt: new Date(pairing.expiresAt).toISOString(),
       },
       nextSteps: [
-        { id: "authorize-github-app", url: pairing.installUrl },
+        { id: "authorize-github-app", url: pairingNextUrl(pairing) },
         {
           id: "check-pairing",
           command: `devintern worker connect github --status --json${input.workspaceSuffix}`,
