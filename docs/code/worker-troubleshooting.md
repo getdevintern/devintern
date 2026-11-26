@@ -32,6 +32,19 @@ Startup failures are written to `worker.stderr.log` in the workspace home, so `d
 
 If `worker service install` says the worker would not start, it did not install anything. Fix the checks it lists and run it again. `--force` installs anyway, and the service then fails until the checks pass.
 
+## The agent CLI fails to start
+
+When the agent CLI exits right away without output (an invalid API key, a missing login, a broken install), the worker does not count it as a task attempt. It retries the task with growing waits (1, 2, 4, 8 minutes, up to 30). After 5 failed starts in a row, the task's run is marked `failed`, and you get a notification. The service still says `running` during all this, so check:
+
+- `devintern worker status`, `devintern worker service status`, and `devintern worker queue` list each affected task under `Agent start` with the agent's error and a fix, for example `Fix: run claude once in a terminal to log in, or check ANTHROPIC_API_KEY`.
+- `devintern worker logs --level error` has the full message.
+
+Fix the agent as the user the worker runs as (log in, or set the API key in `~/.devintern/.env`). Then retry any task that gave up: use the dashboard's Retry, update the ticket, or run `devintern worker add --resume <task>` for an ad-hoc task. To try again right away instead of waiting out the backoff, run `devintern worker service restart`.
+
+| Setting                             | Default | Meaning                                                           |
+| ----------------------------------- | ------- | ----------------------------------------------------------------- |
+| `DEVINTERN_AGENT_START_MAX_ATTEMPTS` | `5`     | Failed starts in a row before a task is marked `failed`           |
+
 ## The worker stops when you log out
 
 A systemd user service runs only while you are logged in, unless lingering is enabled for your user. `worker service install` enables it. When that needs root (no polkit agent, an SSH session without a login), it warns and prints the command; run it once:

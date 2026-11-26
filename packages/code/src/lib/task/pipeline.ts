@@ -8,6 +8,11 @@ import { adoptAgentCreatedChangeRequest } from "../agent/adopt-change-request";
 import { runClarityCheck } from "../agent/clarity";
 import { resolveExecutionPreferences } from "../agent/execution-preferences";
 import type { EffectiveExecutionPreferences } from "../agent/execution-preferences";
+import {
+  AGENT_START_STAGE,
+  agentStartMaxAttempts,
+  agentStartReason,
+} from "../agent/agent-start-failure";
 import { HarnessUnavailableError } from "../agent/harness-startup";
 import type { readImplementationReport } from "../agent/implementation-report";
 import { recordImplementationStage } from "./implementation-stage";
@@ -27,6 +32,7 @@ import {
   resolveProjectKey,
 } from "../config/project-settings";
 import { validateEnvironment } from "../config/validate-environment";
+import { readAgentStartFailureStreak } from "../observability/agent-start-health";
 import { flushAnalytics, trackInteractiveTaskRun } from "../observability/analytics";
 import { DEFAULT_AUTO_REVIEW_ITERATIONS } from "../review/auto-review-config";
 import { shouldSkipRetry } from "../state/retry-gate";
@@ -45,10 +51,11 @@ import {
   recordRunStage,
   recordRunTicket,
 } from "../state/run-recorder";
-import { failureFromError } from "../state/run-outcome";
+import { failureFromError, formatFailureCause } from "../state/run-outcome";
 import { pickupSelection, resolveSessionPickup } from "../state/session-pickup";
 import type { SessionPickupDecision, SessionPickupOptions } from "../state/session-pickup";
 import { finishTaskRun } from "../state/task-run";
+import { resolveQueueDbPath } from "../state/webhook-queue";
 import {
   deliveryDispositionFailure,
   deliveryRunDisposition,
@@ -446,8 +453,38 @@ async function handleTaskFailure(error: unknown, attempt: TaskAttempt): Promise<
   // posting a failure comment, recording retry state, or transitioning the
   // ticket. Interactive runs keep the normal failure path below.
   if (error instanceof HarnessUnavailableError && isWorkerChild()) {
-    await finishTaskRun("deferred", error.message);
-    console.warn(`\n🛠️  ${error.message}. Signaling worker to try the next harness.`);
+    // Bound the loop: an agent CLI that exits at once (bad API key, missing
+    // login) would otherwise be deferred and retried forever. After the
+    // budget the run settles `failed` (environment), which raises a
+    // notification and keeps the ticket out of the sweep until it changes.
+    const activeRun = getActiveRunContext();
+    const attempt =
+      (activeRun?.taskKey
+        ? readAgentStartFailureStreak(resolveQueueDbPath(), activeRun.taskKey, activeRun.id)
+        : 0) + 1;
+    const maxAttempts = agentStartMaxAttempts();
+    if (attempt >= maxAttempts) {
+      await finishTaskRun("failed", agentStartReason(error.message), {
+        failure: {
+          outcomeClass: "environment",
+          stage: AGENT_START_STAGE,
+          cause: formatFailureCause(error.message),
+        },
+      });
+      console.error(
+        `\n❌ ${error.message}. The agent CLI failed to start ${attempt} time(s) in a row; ` +
+          "giving up on this task until it is retried. See `devintern worker status`.",
+      );
+      if (runContext.lockManager) {
+        runContext.lockManager.release();
+      }
+      await flushAnalyticsAndExit(1);
+    }
+    await finishTaskRun("deferred", agentStartReason(error.message));
+    console.warn(
+      `\n🛠️  ${error.message}. Start attempt ${attempt}/${maxAttempts}; ` +
+        "signaling worker to try the next harness or retry later.",
+    );
     if (runContext.lockManager) {
       runContext.lockManager.release();
     }
