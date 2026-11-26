@@ -4,12 +4,12 @@ description: "Advanced: deploy a repo-local GitHub webhook listener (`devintern 
 section: "Automation"
 order: 4
 sidebarHidden: true
-dateModified: 2026-11-18
+dateModified: 2026-11-26
 ---
 
 # GitHub Webhooks and PR Automation
 
-Most installs should use the [worker](./worker.md) with the [relay](./relay.md) for PR review feedback: polling is always on, the central DevIntern AI App delivers events in seconds, and only `GITHUB_TOKEN` is needed locally.
+Most installs should use the [worker](./worker.md) with the [relay](./relay.md) for PR review feedback: polling is always on, the central DevIntern AI App delivers events in seconds, and only `GITHUB_TOKEN` is needed locally. To create that token (fine-grained with Contents, Pull requests, and Issues set to Read and write and Metadata Read, or classic with `repo`), see [Token permissions](./configuration.md#github-authentication).
 
 This page covers the advanced path: `devintern webhook serve` with a customer-owned GitHub App, for air-gapped or self-hosted installs that run their own public webhook endpoint.
 
@@ -49,7 +49,7 @@ Then under **Webhooks**, set the URL to `https://<your-host>/webhooks/github`, t
 | `LICENSE_KEY`                                                     | (required)                  | Automation license key from [devintern.com/account](https://devintern.com/account) |
 | `GITHUB_APP_ID`                                                   | —                           | App ID; required for mention-gated triggers and bot commits       |
 | `GITHUB_APP_PRIVATE_KEY_PATH` or `GITHUB_APP_PRIVATE_KEY_BASE64`  | —                           | App private key                                                   |
-| `GITHUB_TOKEN`                                                    | —                           | Fallback when no App is configured (no mention matching)          |
+| `GITHUB_TOKEN`                                                    | —                           | Fallback when no App is configured (no mention matching). [Permissions](./configuration.md#github-authentication) |
 | `WEBHOOK_PORT` / `WEBHOOK_HOST`                                   | `3000` / `0.0.0.0`          | Listen address (`--port` / `--host` override)                     |
 | `WEBHOOK_AUTO_REVIEW`                                             | `false`                     | Run the self-review loop after addressing feedback                |
 | `AUTO_REVIEW_ITERATIONS`                                          | `2`                         | Max review-fix cycles for the self-review loop                    |

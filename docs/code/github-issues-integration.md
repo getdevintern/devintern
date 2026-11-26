@@ -5,7 +5,7 @@ description: "Fetch GitHub issues, track status labels, implement with your codi
 section: "Automation"
 order: 5
 sidebarHidden: true
-dateModified: 2026-11-18
+dateModified: 2026-11-26
 tags: ["github", "github-issues", "devintern/code", "integration"]
 ---
 
@@ -18,7 +18,7 @@ For PR review automation, use the [worker](./worker.md) with the [relay](./relay
 ## Prerequisites
 
 - `@getdevintern/code` installed and a Git repository for your project
-- A GitHub token: classic with `repo` scope, or fine-grained with **Issues** and **Pull requests** read/write
+- A GitHub token: fine-grained (recommended) limited to this repository with **Contents**, **Pull requests**, and **Issues** set to Read and write and **Metadata** Read, or classic with the `repo` scope. See [Token permissions](./configuration.md#github-authentication) for the links
 
 ## Setup
 
