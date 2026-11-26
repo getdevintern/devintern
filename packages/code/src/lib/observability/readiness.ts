@@ -163,7 +163,7 @@ function describeEntryModel(name: string, parsed: readonly string[]): string {
  * loaded, so the whole probe must see that snapshot, not a mix of the two.
  * A no-op when `env` is `process.env` itself.
  */
-async function withEnvOverlay<T>(
+export async function withEnvOverlay<T>(
   env: Record<string, string | undefined>,
   fn: () => Promise<T>,
 ): Promise<T> {

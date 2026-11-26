@@ -17,6 +17,8 @@ If `devintern worker init` was interrupted (Ctrl+C or Ctrl+D), run it again. It 
 
 If `worker doctor` reports `Markdown tasks directory not found: ./tasks`, the folder was saved as a relative path by an older version. Set `MARKDOWN_TASKS_DIR` in `~/.devintern/.env` to the folder's absolute path.
 
+If `worker doctor` reports `Agent harness — <harness>: AGENT_CLI_PATH=<path> (set in <file>) does not exist` (or `is not executable`), the agent CLI path in that file is wrong. Fix it there, or remove the line to use the CLI on your `PATH`. Doctor checks the same files a worker task reads: `~/.devintern/.env`, then the repository's `env_file` (for example `~/.devintern/env/<repo>.env`) and `[repos.env]`, with later ones winning.
+
 ## The service keeps failing
 
 Run `devintern worker service status`. It shows the service state and, when the last start failed, the reason the worker printed.
