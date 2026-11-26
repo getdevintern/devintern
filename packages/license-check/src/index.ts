@@ -51,6 +51,8 @@ export interface LicenseCheckResult {
   trialEndsAt?: string;
   /** True when the trial is eligible but has not been activated yet. */
   trialAvailable?: boolean;
+  /** When source is "grace": the end of the 72-hour offline window (ISO 8601). */
+  graceEndsAt?: string;
   /**
    * True when nothing is wrong except that nobody is signed in: no
    * `LICENSE_KEY`, no session, and the check allows a Worker Pilot. Signing
@@ -147,6 +149,11 @@ function readCachedEntitlement(
   }
 }
 
+function graceEnd(checkedAt: string): string | undefined {
+  const checked = Date.parse(checkedAt);
+  return Number.isFinite(checked) ? new Date(checked + GRACE_WINDOW_MS).toISOString() : undefined;
+}
+
 /** Builds the grace-mode success result from a cached entitlement. */
 function graceResult(cached: CachedEntitlement, cause: string): LicenseCheckResult {
   const checkedDate = cached.checkedAt.slice(0, 10);
@@ -154,6 +161,7 @@ function graceResult(cached: CachedEntitlement, cause: string): LicenseCheckResu
     valid: true,
     source: "grace",
     entitlementSource: cached.entitlementSource,
+    graceEndsAt: graceEnd(cached.checkedAt),
     message:
       `License server unreachable (${cause}). ` +
       `Using cached entitlement from ${checkedDate}; valid for up to 72 hours after the last successful check.`,

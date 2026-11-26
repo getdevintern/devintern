@@ -94,7 +94,11 @@ import type {
 } from "../worker/service";
 import { installAndStartWorkerService } from "../worker/service-control";
 import type { StartCheck } from "../worker/service-control";
-import { SERVICE_RESTART_COMMAND, renderStartCheck } from "../worker/service-report";
+import {
+  SERVICE_RESTART_COMMAND,
+  dashboardUrlFor,
+  renderStartCheck,
+} from "../worker/service-report";
 
 export { renderLaunchdPlist, renderSystemdUnit } from "../worker/service";
 
@@ -1317,6 +1321,7 @@ function logWorkerNextSteps(
     githubAppOutcome: GitHubAppOutcome;
     relayConnected: boolean;
     blockers: ReadinessBlocker[];
+    dashboardUrl?: string | null;
   },
 ): void {
   const { serviceRunning, serviceInstalled, githubAppOutcome, relayConnected, blockers } = outcome;
@@ -1349,7 +1354,7 @@ function logWorkerNextSteps(
     } else {
       ctx.log("   1. Run `devintern worker`.");
     }
-    ctx.log("   2. Open http://localhost:4400 to see worker status and runs.");
+    ctx.log(`   2. Open ${outcome.dashboardUrl ?? "the dashboard"} to see worker status and runs.`);
     ctx.log("   3. Tasks matching your query use managed clones — your checkout is left alone.");
   }
   if (githubAppOutcome !== "skipped") return;
@@ -1459,6 +1464,7 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
     const service = await runServiceStep(ctx, workspaceDir, blockers);
 
     logWorkerNextSteps(ctx, {
+      dashboardUrl: dashboardUrlFor(workspaceDir),
       serviceRunning: service.serviceRunning,
       serviceInstalled: service.serviceInstalled === true,
       githubAppOutcome,

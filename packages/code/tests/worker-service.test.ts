@@ -16,6 +16,7 @@ import {
   SERVICE_MANAGED_MARKER,
   SYSTEMD_UNIT_NAME,
   systemdUnitPath,
+  userBusEnv,
 } from "../src/lib/worker/service";
 import type { RunCommandFn, WorkerServiceDeps } from "../src/lib/worker/service";
 
@@ -418,10 +419,62 @@ describe("checkServiceManager", () => {
     expect(result.available === false && result.reason).toContain("no systemd user session");
   });
 
+  test("a missing user manager gets an actionable message", async () => {
+    const { deps } = fakeServiceDeps({
+      platform: "linux",
+      uid: 1000,
+      run: async () => ({ status: 1, stdout: "", stderr: "No medium found" }),
+    });
+    const result = await checkServiceManager({
+      ...deps,
+      env: {},
+      username: "tester",
+      ownerUid: () => undefined,
+    });
+    const reason = result.available === false ? result.reason : "";
+    expect(reason).toContain("user manager is not running for tester");
+    expect(reason).toContain("sudo loginctl enable-linger tester");
+    expect(reason).toContain("XDG_RUNTIME_DIR=/run/user/1000");
+    expect(reason).toContain("DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus");
+  });
+
   test("macOS always has launchd", async () => {
     const { deps, commands } = fakeServiceDeps({ platform: "darwin" });
     expect(await checkServiceManager(deps)).toEqual({ available: true });
     expect(commands).toEqual([]);
+  });
+});
+
+describe("userBusEnv", () => {
+  const busDeps = (over: WorkerServiceDeps = {}): WorkerServiceDeps => ({
+    uid: 1000,
+    env: {},
+    ownerUid: () => 1000,
+    exists: (path) => path === "/run/user/1000/bus",
+    ...over,
+  });
+
+  test("points systemctl at the user bus when the session did not export it", () => {
+    expect(userBusEnv(busDeps())).toEqual({
+      XDG_RUNTIME_DIR: "/run/user/1000",
+      DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1000/bus",
+    });
+  });
+
+  test("leaves an exported XDG_RUNTIME_DIR alone", () => {
+    expect(userBusEnv(busDeps({ env: { XDG_RUNTIME_DIR: "/run/user/1000" } }))).toEqual({});
+  });
+
+  test("keeps an exported bus address", () => {
+    expect(
+      userBusEnv(busDeps({ env: { DBUS_SESSION_BUS_ADDRESS: "unix:path=/custom" } })),
+    ).toMatchObject({ DBUS_SESSION_BUS_ADDRESS: "unix:path=/custom" });
+  });
+
+  test("ignores a runtime dir owned by someone else, a missing dir, or a missing socket", () => {
+    expect(userBusEnv(busDeps({ ownerUid: () => 0 }))).toEqual({});
+    expect(userBusEnv(busDeps({ ownerUid: () => undefined }))).toEqual({});
+    expect(userBusEnv(busDeps({ exists: () => false }))).toEqual({});
   });
 });
 

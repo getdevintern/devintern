@@ -568,7 +568,7 @@ describe("runNonInteractiveWorkerInit", () => {
       );
       expect(report.result).toBe("success");
       expect(report.checks.find((check) => check.name === "entitlement")?.message).toBe(
-        `Worker Pilot active, ends ${endsAt.slice(0, 10)} (10 days left)`,
+        `Worker Pilot, active until ${endsAt.slice(0, 10)} (10 days left)`,
       );
     });
 

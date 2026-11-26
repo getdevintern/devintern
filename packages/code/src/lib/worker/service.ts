@@ -22,7 +22,15 @@
  * `worker service install` and the wizard report honestly.
  */
 
-import { existsSync, mkdirSync, readFileSync, rmdirSync, rmSync, writeFileSync } from "fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "fs";
 import { homedir as osHomedir, userInfo } from "os";
 import { dirname, join, resolve } from "path";
 import { WORKER_CONFIG_EXIT_CODE } from "./startup";
@@ -72,6 +80,10 @@ export interface WorkerServiceDeps {
   /** Remove a directory only when it is empty (rollback of directories install created). */
   removeEmptyDir?: (path: string) => void;
   run?: RunCommandFn;
+  /** Environment the service commands inherit (tests). Defaults to `process.env`. */
+  env?: Record<string, string | undefined>;
+  /** Owning uid of a path, or undefined when it does not exist (tests). */
+  ownerUid?: (path: string) => number | undefined;
 }
 
 export const SYSTEMD_UNIT_NAME = "devintern-worker.service";
@@ -121,13 +133,68 @@ function resolveDeps(deps: WorkerServiceDeps): ResolvedServiceDeps {
     mkdir: deps.mkdir ?? ((path) => mkdirSync(path, { recursive: true })),
     remove: deps.remove ?? ((path) => rmSync(path, { force: true })),
     removeEmptyDir: deps.removeEmptyDir ?? ((path) => rmdirSync(path)),
-    run: deps.run ?? defaultRun,
+    run: deps.run ?? makeDefaultRun(userBusEnv(deps)),
+    env: deps.env ?? process.env,
+    ownerUid: deps.ownerUid ?? defaultOwnerUid,
   };
 }
 
-const defaultRun: RunCommandFn = async (command, args) => {
+function defaultOwnerUid(path: string): number | undefined {
+  try {
+    return statSync(path).uid;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Where the current user's systemd user bus lives, when the login session did
+ * not export it (`docker exec`, `sudo -u`, `su` without a PAM session): the
+ * runtime directory, and the bus socket inside it. Undefined when nothing
+ * needs adding or no usable user manager is running.
+ */
+function runtimeDirFor(deps: WorkerServiceDeps): string | undefined {
+  const uid = deps.uid ?? (typeof process.getuid === "function" ? process.getuid() : undefined);
+  return uid === undefined ? undefined : `/run/user/${uid}`;
+}
+
+/**
+ * Extra environment that lets `systemctl --user` / `journalctl --user` reach
+ * a running user manager when `XDG_RUNTIME_DIR` is unset: only when the
+ * runtime directory is owned by this user and holds a `bus` socket. Empty
+ * otherwise; never mutates `process.env`.
+ */
+export function userBusEnv(deps: WorkerServiceDeps = {}): Record<string, string> {
+  const env = deps.env ?? process.env;
+  if (env.XDG_RUNTIME_DIR) return {};
+  const uid = deps.uid ?? (typeof process.getuid === "function" ? process.getuid() : undefined);
+  const dir = runtimeDirFor(deps);
+  if (uid === undefined || !dir) return {};
+  const owner = (deps.ownerUid ?? defaultOwnerUid)(dir);
+  const exists = deps.exists ?? ((path: string) => existsSync(path));
+  if (owner !== uid || !exists(`${dir}/bus`)) return {};
+  return {
+    XDG_RUNTIME_DIR: dir,
+    DBUS_SESSION_BUS_ADDRESS: env.DBUS_SESSION_BUS_ADDRESS || `unix:path=${dir}/bus`,
+  };
+}
+
+function makeDefaultRun(extraEnv: Record<string, string>): RunCommandFn {
+  return async (command, args) => {
+    const needsBus =
+      (command === "systemctl" || command === "journalctl") && args.includes("--user");
+    return spawnCommand(command, args, needsBus ? extraEnv : {});
+  };
+}
+
+const spawnCommand = async (
+  command: string,
+  args: string[],
+  extraEnv: Record<string, string>,
+): Promise<RunCommandResult> => {
   try {
     const proc = Bun.spawn([command, ...args], {
+      env: Object.keys(extraEnv).length > 0 ? { ...process.env, ...extraEnv } : undefined,
       stdout: "pipe",
       stderr: "pipe",
       stdin: "ignore",
@@ -161,6 +228,18 @@ export async function checkServiceManager(
   const result = await d.run("systemctl", ["--user", "show-environment"]);
   if (result.status === 0) return { available: true };
   if (result.status === 127) return { available: false, reason: "systemctl is not installed" };
+  const runtimeDir = runtimeDirFor(deps);
+  if (!d.env.XDG_RUNTIME_DIR && runtimeDir && d.ownerUid(runtimeDir) === undefined) {
+    const user = d.username || "$USER";
+    return {
+      available: false,
+      reason:
+        `the systemd user manager is not running for ${user} (${commandDetail(result)}). ` +
+        `Start it with \`sudo loginctl enable-linger ${user}\` and run this command again. ` +
+        `If it still cannot connect, export \`XDG_RUNTIME_DIR=${runtimeDir}\` and ` +
+        `\`DBUS_SESSION_BUS_ADDRESS=unix:path=${runtimeDir}/bus\` first`,
+    };
+  }
   return {
     available: false,
     reason: `no systemd user session is running (${commandDetail(result)})`,
