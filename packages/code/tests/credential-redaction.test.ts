@@ -91,6 +91,14 @@ const SHAPES: Array<[shape: string, text: string, secret: string]> = [
   ["assignment env", "GITHUB_TOKEN=plainvalue123 done", "plainvalue123"],
   ["assignment json", '{"password": "hunter2 spaced"}', "hunter2 spaced"],
   ["assignment yaml", "client_secret: yamlsecretvalue", "yamlsecretvalue"],
+  ["assignment plural env", "API_TOKENS=tokenlistvalue1", "tokenlistvalue1"],
+  ["assignment plural camel", "refreshTokens: refreshvalue2", "refreshvalue2"],
+  ["assignment plural json", '{"accessTokens": ["acc3ss1", "acc3ss2"]}', "acc3ss1"],
+  ["github after dash", `x-ghp_${r("A", 36)}`, `ghp_${r("A", 36)}`],
+  ["aws after dash", `id-AKIA${r("Q", 16)}`, `AKIA${r("Q", 16)}`],
+  ["openai after dash", `key-sk-${r("a", 40)}`, r("a", 40)],
+  ["url userinfo apostrophe", "https://bot:it'sAsecret@git.example.com/x", "it'sAsecret"],
+  ["url userinfo long", `https://bot:${r("p", 2000)}@git.example.com/x`, r("p", 2000)],
 ];
 
 /** Ordinary text that every redactor must leave unchanged. */
@@ -110,6 +118,7 @@ const BENIGN: string[] = [
   "maxTokens=4096",
   "tokens: 12000 used",
   "input_tokens=120 output_tokens=80",
+  '{"max_tokens": 4096, "total_tokens": "1,024"}',
   "compat_mode: legacy",
   "Bearer tokens are documented in the README",
   "Basic usage: devintern run",
@@ -139,6 +148,14 @@ describe.each(REDACTORS)("%s", (_name, redact) => {
       r('"k": ', 20_000),
       r("a:", 50_000),
       r('a: "', 33_334),
+      r("eyJa-", 20_000),
+      r("sk-a", 25_000),
+      r("glpat-", 16_667),
+      r("xoxb-_", 16_667),
+      r("-AKIA", 20_000),
+      r("-AIza", 20_000),
+      r("https://a:b'", 8_334),
+      r("API_TOKENS=1 ", 7_693),
     ];
     for (const input of inputs) {
       const started = performance.now();

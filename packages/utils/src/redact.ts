@@ -12,12 +12,16 @@
  * unknown formats and secrets in prose still pass through.
  *
  * Performance: every pattern must stay linear on long inputs. Token patterns
- * start with a lookbehind so a match can only begin where a run of token
+ * start with a lookbehind so a match can only begin where a run of word
  * characters begins; without it a long run with no match (a base64 blob, a
- * minified line) is rescanned from every offset, which is quadratic. Unbounded
- * greedy bodies need no trailing anchor because they always consume the whole
- * run; fixed-length bodies get a lookahead so they do not match a prefix of a
- * longer word.
+ * minified line) is rescanned from every offset, which is quadratic. A token
+ * may still start right after `-` (`x-ghp_...`, `id-AKIA...`), like `\b`
+ * allows: a greedy `{N,}` body either consumes the rest of the run or fails
+ * within N characters, and fixed-length bodies fail at their length, so
+ * restarting after each dash stays linear. The JWT rule is the exception: it
+ * can scan a whole dash-joined run before failing on the missing `.`, so it
+ * keeps `-` in its lookbehind. Fixed-length bodies get a lookahead so they do
+ * not match a prefix of a longer word.
  */
 
 /** Placeholder used in place of any detected secret. */
@@ -35,11 +39,14 @@ export interface CredentialPattern {
   replacement: string;
 }
 
-/** Start-of-run anchor for tokens whose body uses `[A-Za-z0-9_-]`. */
-const START = "(?<![A-Za-z0-9_-])";
+/** Start-of-word anchor for token patterns (the `\b` rule, linear). */
+const START = "(?<![A-Za-z0-9_])";
 
-function token(label: string, body: string): CredentialPattern {
-  return { label, pattern: new RegExp(`${START}${body}`, "g"), replacement: REDACTED };
+/** Stricter anchor for patterns that can fail late (see the JWT rule). */
+const START_OF_RUN = "(?<![A-Za-z0-9_-])";
+
+function token(label: string, body: string, start = START): CredentialPattern {
+  return { label, pattern: new RegExp(`${start}${body}`, "g"), replacement: REDACTED };
 }
 
 /**
@@ -82,12 +89,14 @@ export const CREDENTIAL_PATTERNS: readonly CredentialPattern[] = [
   token("polar token", "polar_[a-z]{2,4}_[A-Za-z0-9]{20,}"),
   token("npm token", "npm_[A-Za-z0-9]{30,}"),
   token("google api key", "AIza[0-9A-Za-z_-]{35}(?![A-Za-z0-9_-])"),
-  token("jwt", "eyJ[A-Za-z0-9_-]{8,}\\.eyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}"),
+  token("jwt", "eyJ[A-Za-z0-9_-]{8,}\\.eyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}", START_OF_RUN),
   {
-    // https://user:password@host. Bounded so repeated `http://a:` without an
-    // `@` cannot rescan the rest of the input from every occurrence.
+    // https://user:password@host. The password stops at `/`, so repeated
+    // `http://a:` without an `@` cannot rescan the rest of the input. `'` is
+    // a legal userinfo character; `"` is not, and stopping there keeps a
+    // match from spanning JSON strings.
     label: "url credentials",
-    pattern: /(\bhttps?:\/\/)[^/\s:@"']{1,256}:[^/\s@"']{1,1024}@/gi,
+    pattern: /(\bhttps?:\/\/)[^/\s:@"']{1,256}:[^/\s@"]+@/gi,
     replacement: `$1${REDACTED}@`,
   },
   {
@@ -98,35 +107,44 @@ export const CREDENTIAL_PATTERNS: readonly CredentialPattern[] = [
   },
 ];
 
-/**
- * Key names whose assigned value is treated as a credential, tested against
- * the key with count words removed (see {@link isSecretAssignmentKey}).
- */
+/** Key names whose assigned value is treated as a credential. */
 const SECRET_ASSIGNMENT_KEY =
   /token|secret|password|passwd|api[_-]?key|private[_-]?key|access[_-]?key/i;
 
 /**
- * Whether an assignment key names a credential. The key is split into words on
- * `_`/`-` and camelCase humps. Words ending in `tokens` are counts
- * (`max_tokens`, `inputTokens`), not credentials, so they are dropped before
- * the {@link SECRET_ASSIGNMENT_KEY} test. A personal access token key must have
- * `pat` as a whole word (`GITLAB_PAT`, `clientPat`, `pat`) or as an uppercase
- * suffix of the last word (`MYPAT`), so `path`, `patch`, `compatible`, and
- * `compat_mode` are not mistaken for one.
+ * How an assignment key relates to credentials:
+ * - `"secret"`: the value is masked.
+ * - `"count-or-secret"`: the key names a credential only through a word ending
+ *   in `tokens`. That word is a usage count (`max_tokens`, `inputTokens`) or a
+ *   list of credentials (`API_TOKENS`, `refreshTokens`), so the value is
+ *   masked unless it is a plain number.
+ * - `null`: not a credential key.
+ *
+ * The key is split into words on `_`/`-` and camelCase humps. A personal
+ * access token key must have `pat` as a whole word (`GITLAB_PAT`, `clientPat`,
+ * `pat`) or as an uppercase suffix of the last word (`MYPAT`), so `path`,
+ * `patch`, `compatible`, and `compat_mode` are not mistaken for one.
  */
-function isSecretAssignmentKey(rawKey: string): boolean {
+function classifyAssignmentKey(rawKey: string): "secret" | "count-or-secret" | null {
   const key = rawKey.replaceAll('"', "");
   const words = key.split(/[_-]+|(?<=[a-z0-9])(?=[A-Z])/).filter(Boolean);
-  if (words.some((word) => /^pat$/i.test(word))) return true;
-  if ((words.at(-1) ?? "").endsWith("PAT")) return true;
+  if (words.some((word) => /^pat$/i.test(word))) return "secret";
+  if ((words.at(-1) ?? "").endsWith("PAT")) return "secret";
   const kept = words.filter((word) => !/tokens$/i.test(word));
-  return SECRET_ASSIGNMENT_KEY.test(kept.join("_"));
+  if (SECRET_ASSIGNMENT_KEY.test(kept.join("_"))) return "secret";
+  if (kept.length < words.length && SECRET_ASSIGNMENT_KEY.test(words.join("_"))) {
+    return "count-or-secret";
+  }
+  return null;
 }
+
+/** A plain number, optionally quoted or followed by a separator (`4096,`). */
+const NUMERIC_VALUE = /^["']?\d[\d,._]*["']?[,;]?$/;
 
 /**
  * `KEY=value`, `KEY: value`, `"KEY": "value"`, and `?KEY=value` query
  * parameters. Only the key and separator are matched here; the key is a whole
- * run (anchored by lookbehind) checked with {@link isSecretAssignmentKey}, and
+ * run (anchored by lookbehind) checked with {@link classifyAssignmentKey}, and
  * the value is read only for secret keys. A non-secret key therefore never
  * swallows its value, so a secret key inside it (`error: {"password": "x"}`) is
  * still found, and a run like `a:a:a:...` stays linear. A key right after
@@ -147,12 +165,15 @@ export function redactSecretAssignments(text: string): string {
   let copied = 0;
   for (let match = keys.exec(text); match; match = keys.exec(text)) {
     const key = match[1] ?? match[2] ?? "";
-    if (!isSecretAssignmentKey(key)) continue;
+    const kind = classifyAssignmentKey(key);
+    if (kind === null) continue;
     const before = match[1] === undefined ? "" : text[match.index - 1];
     const value = before === "?" || before === "&" ? query : assigned;
     const valueStart = keys.lastIndex;
     value.lastIndex = valueStart;
-    if (!value.exec(text)) continue;
+    const found = value.exec(text);
+    if (!found) continue;
+    if (kind === "count-or-secret" && NUMERIC_VALUE.test(found[0])) continue;
     out += `${text.slice(copied, valueStart)}${REDACTED}`;
     copied = value.lastIndex;
     keys.lastIndex = copied;

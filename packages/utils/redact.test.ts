@@ -41,6 +41,18 @@ describe("redactText", () => {
     );
   });
 
+  test("masks plural token keys unless the value is a count", () => {
+    expect(redactText("API_TOKENS=abc123")).toBe(`API_TOKENS=${REDACTED}`);
+    expect(redactText("refreshTokens: abc123")).toBe(`refreshTokens: ${REDACTED}`);
+    expect(redactText("max_tokens: 4096 exceeded")).toBe("max_tokens: 4096 exceeded");
+    expect(redactText("?max_tokens=4096&x=1")).toBe("?max_tokens=4096&x=1");
+  });
+
+  test("masks tokens that follow a dash", () => {
+    expect(redactText(`id-AKIA${"Q".repeat(16)}`)).toBe(`id-${REDACTED}`);
+    expect(redactText(`x-ghp_${"a".repeat(36)}`)).toBe(`x-${REDACTED}`);
+  });
+
   test("masks tokens that end in - or _", () => {
     expect(redactText(`t glpat-${"a".repeat(19)}-`)).toBe(`t ${REDACTED}`);
   });
