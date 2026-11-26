@@ -85,8 +85,8 @@ Then install DevIntern and a coding agent, and run the guided setup:
 
 ```bash
 bun install -g @getdevintern/code
-bun install -g @anthropic-ai/claude-code   # or Codex, Cursor, OpenCode
-claude                                      # sign the agent in once
+curl -fsSL https://claude.ai/install.sh | bash   # Claude Code; or Codex, Cursor, OpenCode
+claude                                           # sign the agent in once
 
 # Connect your tracker, choose ready tickets, install the background service
 devintern worker init

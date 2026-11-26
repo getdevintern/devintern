@@ -36,8 +36,8 @@ The installer adds `~/.bun/bin` to your shell profile, which only takes effect i
 
 ```bash
 bun install -g @getdevintern/code
-bun install -g @anthropic-ai/claude-code   # Claude Code, the default agent
-claude                                      # sign in once, then exit
+curl -fsSL https://claude.ai/install.sh | bash   # Claude Code, the default agent
+claude                                           # sign in once, then exit
 ```
 
 `devintern --version` confirms the install. To use Codex, Cursor, OpenCode, or another agent instead, install and sign in to its CLI and see [Agent Harness](./agent-harness.md).
