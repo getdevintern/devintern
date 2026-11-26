@@ -8,6 +8,7 @@ import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 
 import { saveGitHubAppRecord } from "../code-host/github/app-setup";
+import { redactSecrets } from "../observability/worker-logs";
 import {
   connectRequest,
   ensureRelayToken,
@@ -240,7 +241,11 @@ export async function startGitHubRepoPairing(
       relayUrl,
       fetchImpl: options.fetchImpl,
     });
-    if (verification.kind === "ok") {
+    if (verification.kind === "unsupported") {
+      console.log(
+        "ℹ️  This relay cannot verify GitHub repositories without a browser; using the GitHub App pairing.",
+      );
+    } else {
       if (verification.verified.length > 0) {
         options.onVerified?.(verification.verified.map((repository) => repository.repo));
       }
@@ -296,6 +301,11 @@ export async function connectGitHubRepo(
     if (polled.kind === "expired") {
       clearPendingGitHubPairing(workingDir);
       throw new Error("GitHub pairing expired; run the connect command again");
+    }
+    // Transient relay trouble (5xx, 429) keeps retrying until the deadline;
+    // anything else (401, 403, 409, ...) cannot fix itself, so stop.
+    if (polled.kind === "failure" && !isTransientPairingFailure(polled)) {
+      throw new Error(describeGitHubPairingFailure(polled));
     }
     await sleep(2000);
   }
@@ -395,10 +405,72 @@ async function beginGitHubPairing(
   return pairing;
 }
 
+/** Machine-readable reason a pairing check failed at the relay. */
+export type GitHubPairingFailureCode =
+  | "relay_unauthorized"
+  | "relay_unavailable"
+  | "relay_rejected";
+
+export type GitHubPairingFailure = {
+  kind: "failure";
+  code: GitHubPairingFailureCode;
+  /** HTTP status the relay answered with. */
+  status: number;
+  /** Short, redacted excerpt of the relay's error body (may be empty). */
+  detail: string;
+};
+
 export type GitHubPairingPoll =
   | { kind: "complete"; state: RelayConnectState }
   | { kind: "pending" }
-  | { kind: "expired" };
+  | { kind: "expired" }
+  | GitHubPairingFailure;
+
+const MAX_RELAY_ERROR_DETAIL = 200;
+
+/** A short, single-line, secret-redacted excerpt of a relay error body. */
+async function relayErrorDetail(response: Response): Promise<string> {
+  const text = await response.text().catch(() => "");
+  let message = text;
+  try {
+    const parsed = JSON.parse(text) as { error?: unknown; message?: unknown } | null;
+    const field = parsed?.error ?? parsed?.message;
+    if (typeof field === "string") message = field;
+  } catch {
+    // Not JSON: use the raw text.
+  }
+  const flat = redactSecrets(message).replace(/\s+/g, " ").trim();
+  return flat.length > MAX_RELAY_ERROR_DETAIL
+    ? `${flat.slice(0, MAX_RELAY_ERROR_DETAIL)}...`
+    : flat;
+}
+
+/** Classify a non-OK pairing status response (404 means expired and is handled by the caller). */
+function pairingFailureCode(status: number): GitHubPairingFailureCode {
+  if (status === 401 || status === 403) return "relay_unauthorized";
+  if (status === 429 || status >= 500) return "relay_unavailable";
+  return "relay_rejected";
+}
+
+/** Whether a failed pairing check is worth retrying within the wait window. */
+export function isTransientPairingFailure(poll: GitHubPairingFailure): boolean {
+  return poll.code === "relay_unavailable";
+}
+
+/** One-line description of a failed pairing check, with the next step. */
+export function describeGitHubPairingFailure(poll: GitHubPairingFailure): string {
+  const suffix = poll.detail ? `: ${poll.detail}` : "";
+  if (poll.code === "relay_unauthorized") {
+    return (
+      `The relay rejected the session (HTTP ${poll.status})${suffix}. The session expired or is invalid; ` +
+      "run `devintern worker login <method> --no-wait`, then check again."
+    );
+  }
+  if (poll.code === "relay_unavailable") {
+    return `The relay is unavailable (HTTP ${poll.status})${suffix}. Retry later.`;
+  }
+  return `The relay rejected the pairing check (HTTP ${poll.status})${suffix}.`;
+}
 
 /** Check a pairing once; merges relay state when the App authorization completed. */
 export async function pollGitHubPairing(options: {
@@ -446,7 +518,13 @@ export async function pollGitHubPairing(options: {
     }
     return { kind: "pending" };
   }
-  return response.status === 404 ? { kind: "expired" } : { kind: "pending" };
+  if (response.status === 404) return { kind: "expired" };
+  return {
+    kind: "failure",
+    code: pairingFailureCode(response.status),
+    status: response.status,
+    detail: await relayErrorDetail(response),
+  };
 }
 
 /** Outcome of beginning a pairing without waiting for the browser step. */

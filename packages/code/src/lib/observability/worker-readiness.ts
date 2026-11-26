@@ -51,6 +51,7 @@ import { resolveWorkerStatus } from "./dashboard-api";
 import type { WorkerStatusView } from "./dashboard-api";
 import type { ReadinessCheck } from "./readiness";
 import { gitCommitIdentityCheck } from "./git-identity-readiness";
+import { relayReadinessCheck } from "./relay-readiness";
 import type { GitIdentityCheckInput } from "./git-identity-readiness";
 
 type Env = Record<string, string | undefined>;
@@ -978,6 +979,9 @@ export async function collectWorkerDoctorChecks(
       });
     }
   }
+
+  // 6b. Relay pairing (local state only; runs under --offline too)
+  checks.push(relayReadinessCheck(workspaceDir, config));
 
   // 7. Worker liveness (local lock file only; runs under --offline too)
   let worker: WorkerStatusView = { status: "stopped" };
