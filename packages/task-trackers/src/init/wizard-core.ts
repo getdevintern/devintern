@@ -31,6 +31,8 @@ export interface ConnectionValidationIo {
   prompt: PromptFn;
   probe: ProbeFn;
   log: LogFn;
+  /** Hidden-input prompt for {@link EnvPromptStep.secret} steps when values are edited. */
+  promptSecret?: PromptFn;
 }
 
 /** One credential/config prompt in an init wizard. */
@@ -47,6 +49,25 @@ export interface EnvPromptStep {
   example?: string;
   /** Default applied when the user presses Enter. */
   defaultValue?: string;
+  /** Token or key: read with the hidden-input prompt when the wizard has one. */
+  secret?: boolean;
+}
+
+/** Longest error message the wizards print on one line. */
+const MAX_MESSAGE_LENGTH = 300;
+
+/**
+ * One bounded line: an HTML error page body (some trackers return one for
+ * 404/5xx) is dropped, whitespace collapsed, and the result truncated.
+ */
+export function condenseMessage(message: string): string {
+  const html = message.search(/<(!doctype|html)\b/i);
+  const text = (
+    html >= 0 ? `${message.slice(0, html).replace(/[\s:-]+$/, "")} (HTML error page)` : message
+  )
+    .replace(/\s+/g, " ")
+    .trim();
+  return text.length > MAX_MESSAGE_LENGTH ? `${text.slice(0, MAX_MESSAGE_LENGTH - 1)}…` : text;
 }
 
 /** Resolve a step's deep link, which may depend on earlier answers. */
@@ -154,12 +175,18 @@ export async function promptForTracker(
   }
 }
 
-/** Run a table of prompt steps, collecting answers into `values`. */
+/**
+ * Run a table of prompt steps, collecting answers into `values`.
+ *
+ * @param promptSecret - Hidden-input prompt for `secret` steps; without one
+ *   they use `prompt`
+ */
 export async function promptSteps(
   steps: EnvPromptStep[],
   prompt: PromptFn,
   log: LogFn,
   values: Record<string, string>,
+  promptSecret?: PromptFn,
 ): Promise<void> {
   for (const step of steps) {
     const link = stepLink(step, values);
@@ -167,13 +194,15 @@ export async function promptSteps(
       log(`\n🔗 Create your ${step.label.toLowerCase()} at:\n   ${link}`);
     }
     const hints: string[] = [];
+    const ask = step.secret && promptSecret ? promptSecret : prompt;
+    if (step.secret && promptSecret) hints.push("input hidden");
     if (step.example) hints.push(`e.g. ${step.example}`);
     if (step.defaultValue) hints.push(`Enter for default`);
     else if (step.optional) hints.push("optional, Enter to skip");
     const suffix = hints.length > 0 ? ` (${hints.join("; ")})` : "";
 
     for (;;) {
-      const answer = (await prompt(`${step.label}${suffix}: `)).trim();
+      const answer = (await ask(`${step.label}${suffix}: `)).trim();
       if (answer) {
         values[step.key] = answer;
         break;
@@ -251,16 +280,17 @@ export async function promptReuseExistingConfig(
     prompt: PromptFn;
     log: LogFn;
     values: Record<string, string>;
+    promptSecret?: PromptFn;
   },
 ): Promise<boolean> {
-  const { sourceLabel, trackerName, steps, prompt, log, values } = opts;
+  const { sourceLabel, trackerName, steps, prompt, log, values, promptSecret } = opts;
   log(`\n📋 Found an existing ${sourceLabel} for ${trackerName}.`);
   const answer = (await prompt("Reuse those credentials? (Y/n): ")).trim().toLowerCase();
   if (answer === "n" || answer === "no") return false;
   Object.assign(values, existing.values);
   const missing = steps.filter((step) => !step.optional && !values[step.key]);
   if (missing.length > 0) {
-    await promptSteps(missing, prompt, log, values);
+    await promptSteps(missing, prompt, log, values, promptSecret);
   }
   return true;
 }
@@ -280,7 +310,7 @@ export async function validateConnection(
   io: ConnectionValidationIo,
   envPath: string,
 ): Promise<boolean> {
-  const { prompt, probe, log } = io;
+  const { prompt, probe, log, promptSecret } = io;
   let edits = 0;
   for (;;) {
     log("\n🔌 Checking the connection...");
@@ -289,7 +319,9 @@ export async function validateConnection(
       log("✅ Connection verified.");
       return true;
     } catch (error) {
-      log(`❌ Connection check failed: ${error instanceof Error ? error.message : error}`);
+      log(
+        `❌ Connection check failed: ${condenseMessage(error instanceof Error ? error.message : String(error))}`,
+      );
       const canEdit = edits < MAX_EDIT_ATTEMPTS;
       const choices = canEdit
         ? "[r]etry / [e]dit values / [s]kip validation"
@@ -301,7 +333,7 @@ export async function validateConnection(
       }
       if (answer === "e" && canEdit) {
         edits++;
-        await promptSteps(steps, prompt, log, values);
+        await promptSteps(steps, prompt, log, values, promptSecret);
       }
       // anything else (including 'r') retries with current values
     }

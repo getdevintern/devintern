@@ -346,7 +346,7 @@ describe("runNonInteractiveWorkerInit", () => {
     expect(report.checks.find((check) => check.name === "repo")?.status).toBe("pass");
   });
 
-  test("sign-in needed is a warning and a next step, not a failure", async () => {
+  test("sign-in needed fails like worker doctor, with the config saved and a sign-in next step", async () => {
     const report = await run(
       { tracker: "jira", taskQuery: "project = APP" },
       {
@@ -360,15 +360,22 @@ describe("runNonInteractiveWorkerInit", () => {
         },
       },
     );
-    expect(report.result).toBe("success");
+    expect(report.result).toBe("failure");
+    expect(report.filesWritten).toContain(join(workspaceDir, "workspace.toml"));
     expect(report.checks.find((check) => check.name === "entitlement")).toMatchObject({
-      status: "warn",
+      status: "fail",
       message: expect.stringContaining("sign-in needed"),
+      hint: expect.stringContaining("devintern worker login"),
     });
     expect(report.nextSteps[0]).toMatchObject({
       id: "sign-in",
       command: "devintern worker login",
     });
+    const text = renderNonInteractiveReport(report).join("\n");
+    expect(text).toContain(
+      "Configuration saved, but the worker will not start until it is signed in",
+    );
+    expect(text).not.toContain("re-run with --yes");
   });
 
   test("reads a 0600 --env-file and saves its values", async () => {

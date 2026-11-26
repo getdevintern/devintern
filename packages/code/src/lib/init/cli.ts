@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, writeFileSync } from "fs";
 import { dirname, isAbsolute, join } from "path";
 import { detectSandboxProviders } from "@devintern/agent-harness";
 import { hasHelpArg } from "../cli/help";
-import { isPromptAbort } from "../cli/prompt-abort";
+import { isPromptAbort, promptAbortReason } from "../cli/prompt-abort";
 import { flushAnalytics, trackSetupCompleted, trackSetupStarted } from "../observability/analytics";
 import { findWorkspaceRepoForCheckout } from "../workspace/manual-run";
 import { migrateLegacyCheckout } from "../workspace/migrate-checkout";
@@ -120,7 +120,7 @@ export async function runInit(deps: InitCommandDeps = {}): Promise<number> {
     return typeof process.exitCode === "number" ? process.exitCode : 0;
   } catch (error) {
     if (!isPromptAbort(error)) throw error;
-    log("\n❌ Input closed (Ctrl+D); setup stopped. Re-run `devintern init`.");
+    log(`\n❌ ${promptAbortReason(error)}; setup stopped. Re-run \`devintern init\`.`);
     return 1;
   }
 }

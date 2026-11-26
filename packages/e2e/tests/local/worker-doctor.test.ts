@@ -66,7 +66,7 @@ test.skipIf(!builtCli)(
       expect(ready.stdout).toContain("🩺 devintern worker readiness:");
       for (const line of [
         `✅ Workspace config — 1 repo, 0 teams, 1 automation (${configPath})`,
-        "✅ Work sources — 0 tracker querys, 1 automation, 0 error monitors, 1 repo",
+        "✅ Work sources — 0 tracker queries, 1 automation, 0 error monitors, 1 repo",
         `✅ Repository access — [[repos]] "fixture" (${worker.remote}): remote reachable`,
         "✅ Automation entitlement — license-key",
         "✅ Agent harness — claude-code",

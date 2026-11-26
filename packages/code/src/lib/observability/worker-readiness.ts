@@ -194,8 +194,8 @@ async function withTimeout<T>(promise: Promise<T>, ms: number, what: string): Pr
   }
 }
 
-function plural(count: number, noun: string): string {
-  return `${count} ${noun}${count === 1 ? "" : "s"}`;
+function plural(count: number, noun: string, pluralNoun = `${noun}s`): string {
+  return `${count} ${count === 1 ? noun : pluralNoun}`;
 }
 
 /** Default dry-run: build an isolated tracker client and run the query once. */
@@ -347,6 +347,7 @@ async function defaultCheckEntitlement(workspaceDir: string): Promise<WorkerEnti
     supabaseConfig: loadSupabaseConfig(workspaceCodeStateDir(workspaceDir)),
     requireAutomation: true,
     allowTrial: true,
+    loginCommand: "devintern worker login",
   });
 }
 
@@ -588,7 +589,7 @@ function polledSources(
 function workSourcesCheck(config: WorkspaceConfig): ReadinessCheck {
   const queries = config.teams.length > 0 ? config.teams.length : config.defaults.taskQuery ? 1 : 0;
   const detail =
-    `${plural(queries, "tracker query")}, ${plural(config.automations.length, "automation")}, ` +
+    `${plural(queries, "tracker query", "tracker queries")}, ${plural(config.automations.length, "automation")}, ` +
     `${plural(config.errorMonitors.length, "error monitor")}, ${plural(config.repos.length, "repo")}`;
   if (config.repos.length === 0) {
     return {

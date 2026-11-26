@@ -4,12 +4,18 @@ sidebarLabel: "Worker Troubleshooting"
 description: "Use when a worker task did not run, ran again, or failed: retrying tickets, actioned tickets, interrupted runs, pickup log messages, and reading worker logs."
 section: "Automation"
 order: 2.3
-dateModified: 2026-11-18
+dateModified: 2026-11-26
 ---
 
 # Worker Troubleshooting
 
 Start with `devintern worker doctor` ([details](./worker.md#checking-readiness-worker-doctor)). It catches most configuration problems before the worker runs. For automation-specific problems, see [Recurring Automations → Troubleshooting](./automations.md#troubleshooting).
+
+## Setup stopped partway
+
+If `devintern worker init` was interrupted (Ctrl+C or Ctrl+D), run it again. It keeps what was already saved and finishes the setup, even if the workspace still names a different tracker from before the query step. A workspace that already has a ready-tasks query keeps its tracker; change it by hand in `workspace.toml`.
+
+If `worker doctor` reports `Markdown tasks directory not found: ./tasks`, the folder was saved as a relative path by an older version. Set `MARKDOWN_TASKS_DIR` in `~/.devintern/.env` to the folder's absolute path.
 
 ## Re-running a task
 

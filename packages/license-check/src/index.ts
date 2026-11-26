@@ -68,6 +68,14 @@ export interface LicenseCheckOptions {
   requireAutomation?: boolean;
   /** Include a signed-in user's worker trial when no paid entitlement exists. */
   allowTrial?: boolean;
+  /**
+   * Word a missing automation license for someone setting up unattended use
+   * in a terminal (e.g. `worker init`) instead of for a run that was
+   * detected as automated.
+   */
+  setup?: boolean;
+  /** Sign-in command named in the message (defaults to `devintern login`). */
+  loginCommand?: string;
   /** Base delay between entitlement retries in ms (defaults to 500). */
   retryBaseDelayMs?: number;
 }
@@ -444,9 +452,12 @@ export async function checkLicense(options: LicenseCheckOptions): Promise<Licens
   // reliable than auth, which can fail when the purchase was made under a
   // different email than the Supabase login. Sign-in is the alternative path.
   const messages: string[] = [];
+  const loginCommand = options.loginCommand ?? "devintern login";
   if (requireAutomation) {
     messages.push(
-      "Automated execution detected (CI / systemd / cron) but no automation license was found.",
+      options.setup
+        ? "No automation license or Worker Pilot was found, and the unattended worker needs one to start."
+        : "Automated execution detected (CI / systemd / cron) but no automation license was found.",
     );
     if (entitlementCheckError) {
       messages.push(`License entitlement check failed: ${entitlementCheckError}.`);
@@ -457,7 +468,7 @@ export async function checkLicense(options: LicenseCheckOptions): Promise<Licens
     if (!user) {
       messages.push(
         allowTrial
-          ? "Alternatively, run `devintern login` to start a free Worker Pilot; no card is required."
+          ? `Alternatively, run \`${loginCommand}\` to start a free Worker Pilot; no card is required.`
           : "Alternatively, sign in if your account already holds one.",
       );
     }
