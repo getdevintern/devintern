@@ -79,6 +79,7 @@ Keys not shown here are documented on the page for their feature:
 | `[workspace].conflict_resolution*`, `auto_merge*`, `ci_failure_fix`; `[[repos]].sync_team_prs`, `auto_merge_safe_paths`, `auto_merge_deny_paths`, `auto_merge_review_paths` | [PR Follow-up](./pr-follow-up.md) |
 | `[worker.schedule]`, `[worker].auto_update`, `[workspace].dashboard_port`                                | [Worker Daemon](./worker.md)                                                       |
 | `[dashboard].allowed_origins`, `tailscale_autodetect`                                                    | [Dashboard](./dashboard.md#allowed-origins)                                        |
+| `[workspace].git_author_name`, `git_author_email` (also per `[[repos]]`)                                 | [Configuration: Commit identity](./configuration.md#commit-identity)               |
 | `[defaults].dependency_mode`                                                                             | [Delegation: Dependent tasks](./delegation.md#dependent-tasks---after)             |
 | `[[teams]].dependency_mode`                                                                              | [Worker Daemon: Ticket dependencies](./worker.md#ticket-dependencies)              |
 | `pipeline_file`                                                                                          | [below](#pipelines-for-the-fleet-and-per-repository)                               |

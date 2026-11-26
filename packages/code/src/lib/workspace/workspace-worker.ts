@@ -43,7 +43,7 @@ import type { RepoConfig, WorkspaceConfig } from "./config";
 import { workspaceHasConfiguredWork, workspaceHasStartupWork } from "./startup-work";
 import { migrateCommittedTrackerSettings } from "./migrate-checkout";
 import { loadWorkspaceTrackerSettings } from "./tracker-settings";
-import { applyWorkspaceProcessEnv, buildErrorMonitorEnv, buildTeamEnv } from "./env";
+import { applyWorkspaceProcessEnv, buildErrorMonitorEnv, requireTeamTrackerEnv } from "./env";
 import {
   automationsDir,
   injectedTasksDir,
@@ -1141,19 +1141,13 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
 
   if (multiTeam) {
     for (const team of config.teams) {
-      const env = buildTeamEnv(team, workspaceDir);
-      const missing = trackerRequiredEnv(team.tracker).filter((key) => !env[key]);
-      if (missing.length > 0) {
-        throw new Error(
-          `Team "${team.name}" (${team.tracker}) is missing required variables: ${missing.join(", ")}. ` +
-            "Add them to the workspace .env or the team's env_file.",
-        );
-      }
+      const env = requireTeamTrackerEnv(team, workspaceDir, trackerRequiredEnv(team.tracker));
       const client = createTrackerClient(team.tracker, env);
       const searchTasks = (query: string) => client.searchTasks(query);
       const detector = createChangeDetector(team.tracker, searchTasks, {
         env,
         source: `${team.tracker}:${team.name}`,
+        pollIntervalMs: () => pollIntervalSeconds * 1000,
       });
       if (!detector) {
         throw new Error(
@@ -1174,7 +1168,9 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
     // tracker credentials until a task query is enabled.
     const trackerManager = new TaskTrackerManager();
     const searchTasks = (query: string) => trackerManager.getClient().searchTasks(query);
-    const detector = createChangeDetector(config.defaults.tracker, searchTasks);
+    const detector = createChangeDetector(config.defaults.tracker, searchTasks, {
+      pollIntervalMs: () => pollIntervalSeconds * 1000,
+    });
     if (initialQuery && !detector) {
       throw new Error(
         `Could not initialize the ${config.defaults.tracker} change detector. ` +

@@ -179,6 +179,7 @@ export class MentionSweepAcquirer implements Acquirer {
   private busy = false;
   private botName: string | null | undefined; // undefined = not resolved yet
   private warnedNoBot = false;
+  private sweepAnnounced = false;
   private lastFeedbackPollAt: number;
 
   constructor(options: MentionSweepAcquirerOptions) {
@@ -189,9 +190,8 @@ export class MentionSweepAcquirer implements Acquirer {
   /** Start sweeping: immediate first tick, then on the configured interval. */
   async start(): Promise<void> {
     if (this.timer) return;
-    console.log(
-      `🔎 Sweeping ${this.options.repo} for @mentions every ${this.options.intervalSeconds}s`,
-    );
+    // The "Sweeping ..." line is logged by the first tick, once the bot
+    // identity resolves: a worker with no usable identity never sweeps.
     // Arm the interval first, then run the first tick in the background: the
     // busy guard turns an interval fire during it into a no-op, and a long
     // first tick must not hold later acquirers (see background-tick.ts).
@@ -263,11 +263,19 @@ export class MentionSweepAcquirer implements Acquirer {
   private async resolveBotName(): Promise<string | null> {
     if (this.botName === undefined) {
       this.botName = await this.options.github.getBotUsername();
-      if (!this.botName && botMentionAliases().length === 0 && !this.warnedNoBot) {
-        this.warnedNoBot = true;
-        console.warn(
-          `⚠️  [${this.name}] could not resolve a bot username (GitHub App auth required, ` +
-            `or set GITHUB_BOT_ALIASES); mention sweeping is disabled`,
+      if (!this.botName && botMentionAliases().length === 0) {
+        // Expected with token-mode auth, so info rather than a warning, once.
+        if (!this.warnedNoBot) {
+          this.warnedNoBot = true;
+          console.log(
+            `ℹ️  [${this.name}] mention sweeping is off for ${this.options.repo}: no bot ` +
+              `username (GitHub App auth required, or set GITHUB_BOT_ALIASES)`,
+          );
+        }
+      } else if (!this.sweepAnnounced) {
+        this.sweepAnnounced = true;
+        console.log(
+          `🔎 Sweeping ${this.options.repo} for @mentions every ${this.options.intervalSeconds}s`,
         );
       }
     }

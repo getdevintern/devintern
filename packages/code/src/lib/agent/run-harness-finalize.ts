@@ -66,6 +66,8 @@ export interface DeliveryState extends PipelineContext {
   noChanges: boolean;
   /** Set when the stacked base closed unmerged mid-run (see `stack-base-guard.ts`). */
   stackBlocked?: string;
+  /** Host configuration that made the commit fail (no git identity, broken signing). */
+  commitConfigError?: string;
 }
 
 /** Commit once, allowing the agent to repair pre-commit hook failures. */
@@ -80,6 +82,11 @@ async function commitWithHookRetry(ctx: FinalizeContext, taskKey: string, taskSu
     if (result.success) {
       console.log(`✅ ${result.message}`);
       return { success: true, result };
+    }
+    if (result.configError) {
+      // Host configuration, not a hook: an agent cannot fix it, so fail fast.
+      console.log(`\n❌ ${result.message}`);
+      return { success: false, result };
     }
     if (result.hookError && attempt <= ctx.hookRetries) {
       console.log(`\n⚠️  Git hook failed (attempt ${attempt}/${ctx.hookRetries + 1})`);
@@ -256,6 +263,10 @@ export async function commitImplementation(state: DeliveryState): Promise<boolea
   if (outcome.success) {
     state.committed = true;
     return true;
+  }
+  if ("configError" in outcome.result && outcome.result.configError) {
+    state.commitConfigError = outcome.result.configError;
+    return false;
   }
 
   const noChanges = outcome.result.message === "No changes to commit";
@@ -594,7 +605,12 @@ const commitStep: TaskStep<DeliveryState> = {
       return { kind: "continue", data: { skipped: true } };
     }
     if (!(await commitImplementation(state))) {
-      return { kind: "halt", reason: "Implementation was not committed" };
+      return {
+        kind: "halt",
+        reason: state.commitConfigError
+          ? `Implementation was not committed: ${state.commitConfigError}`
+          : "Implementation was not committed",
+      };
     }
     if (state.noChanges) {
       // Nothing to commit means there is also nothing to verify, review, or

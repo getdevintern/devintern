@@ -308,7 +308,7 @@ async function resolveFeatureBaseBranch(
     }
 
     // Handle worktree conflict - target branch is locked by another worktree
-    if (!switchResult.success && switchResult.error?.includes("already used by worktree")) {
+    if (!switchResult.success && isWorktreeConflictMessage(switchResult.error)) {
       console.log(
         `⚠️  Target branch '${targetBranch}' is locked by a worktree, will create branch from remote...`,
       );
@@ -409,10 +409,26 @@ function findWorktreePathForBranch(porcelain: string, branchName: string): strin
 
 /** Whether a failed checkout was refused because a worktree holds the branch. */
 function isWorktreeConflict(result: GitCommandResult): boolean {
+  return isWorktreeConflictMessage(result.error) || isWorktreeConflictMessage(result.output);
+}
+
+/**
+ * Whether git output says a branch is held by another worktree. Git >= 2.42
+ * words it `'<b>' is already used by worktree at '<path>'`; older git (e.g.
+ * 2.39 on Debian 12) says `'<b>' is already checked out at '<path>'`.
+ */
+export function isWorktreeConflictMessage(message: string | undefined): boolean {
   return (
-    Boolean(result.error?.includes("already used by worktree")) ||
-    result.output.includes("already used by worktree")
+    typeof message === "string" &&
+    (message.includes("already used by worktree") || message.includes("already checked out"))
   );
+}
+
+/** Worktree path named in a branch-conflict message (either git wording), if any. */
+export function extractConflictWorktreePath(message: string | undefined): string | null {
+  if (!message) return null;
+  const match = message.match(/already (?:used by worktree|checked out) at '([^']+)'/);
+  return match ? match[1] : null;
 }
 
 /** Path of the worktree currently holding `branchName`, if any. */
@@ -643,14 +659,12 @@ async function createFeatureBranchRef(
   }
 
   // Handle worktree conflict that wasn't caught by the proactive check
-  if (!createResult.success && createResult.error?.includes("already used by worktree")) {
+  if (!createResult.success && isWorktreeConflictMessage(createResult.error)) {
     console.log(`⚠️  Branch '${branchName}' is still locked by a worktree, forcing cleanup...`);
 
     // Extract worktree path from error message
-    const match = createResult.error.match(/already used by worktree at '([^']+)'/);
-    if (match) {
-      const worktreePath = match[1];
-
+    const worktreePath = extractConflictWorktreePath(createResult.error);
+    if (worktreePath) {
       // Force remove the worktree
       await Utils.executeGitCommand(["worktree", "remove", worktreePath, "--force"], gitOpts);
 

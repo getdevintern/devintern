@@ -18,7 +18,7 @@
  * release below is followed by an edit instead of a sleep through the backoff.
  *
  * As in worker-linear-polling.test.ts, the Linear delta detector over-reports
- * changes within 5 minutes of any write, so nothing here relies on the delta
+ * changes within 15 minutes of any write, so nothing here relies on the delta
  * returning nothing; exactly-once rests on the status-based query (the run
  * moves the issue out of `Todo`).
  *
