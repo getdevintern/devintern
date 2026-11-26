@@ -109,6 +109,14 @@ export interface RelayAcquirerOptions {
   verbose?: boolean;
   /** Records successful long polls so fallback acquirers can yield to relay. */
   onPollSuccess?: () => void;
+  /**
+   * Cursor to start from when none is stored yet: the relay buffer head at
+   * this worker identity's registration, so a new worker never replays old
+   * events. Without it a new worker starts at 0 (older relays).
+   */
+  initialCursor?: number;
+  /** Relay worker label, for the startup line. */
+  workerLabel?: string;
 }
 
 /** Dedupe source for relayed envelopes. */
@@ -144,6 +152,7 @@ export class RelayAcquirer implements Acquirer {
   private loopDone: Promise<void> | null = null;
   private backoffMs = BACKOFF_INITIAL_MS;
   private cursorSource: string;
+  private upgradeWarned = false;
 
   constructor(options: RelayAcquirerOptions) {
     this.options = options;
@@ -154,6 +163,7 @@ export class RelayAcquirer implements Acquirer {
   start(): void {
     this.running = true;
     console.log(`📡 Relay connected: ${this.options.relayUrl} (Mode 2)`);
+    if (this.options.workerLabel) console.log(`   Relay worker: ${this.options.workerLabel}`);
     this.loopDone = this.loop();
   }
 
@@ -189,7 +199,14 @@ export class RelayAcquirer implements Acquirer {
   /** One long-poll round trip; returns the number of envelopes processed. */
   private async pollOnce(): Promise<number> {
     const fetchImpl = this.options.fetchImpl ?? fetch;
-    const cursor = this.options.workerState.getCursor(this.cursorSource)?.cursorValue ?? "0";
+    const stored = this.options.workerState.getCursor(this.cursorSource)?.cursorValue;
+    // All of an account's relay partitions share one sequence space, so a
+    // legacy cursor stays valid after the worker gains an identity; only a
+    // worker with no cursor at all starts from the registration head.
+    const cursor = stored ?? String(this.options.initialCursor ?? 0);
+    if (stored === undefined && this.options.initialCursor !== undefined) {
+      this.options.workerState.setCursor(this.cursorSource, cursor);
+    }
 
     this.abort = new AbortController();
     const timeout = setTimeout(() => this.abort?.abort(), REQUEST_TIMEOUT_MS);
@@ -211,8 +228,21 @@ export class RelayAcquirer implements Acquirer {
       throw new Error(`relay returned HTTP ${response.status}`);
     }
 
-    const body = (await response.json()) as { events: RelayEnvelope[]; cursor: number };
+    const body = (await response.json()) as {
+      events: RelayEnvelope[];
+      cursor: number;
+      upgrade?: { message?: unknown };
+    };
     this.options.onPollSuccess?.();
+    if (body.upgrade && !this.upgradeWarned) {
+      // This token has no worker identity while other workers of the account do.
+      this.upgradeWarned = true;
+      const message =
+        typeof body.upgrade.message === "string"
+          ? body.upgrade.message
+          : "Run `devintern worker connect` to register this worker with the relay.";
+      console.warn(`⚠️  [relay] ${message}`);
+    }
     for (const envelope of body.events) {
       await this.dispatch(envelope);
       // Advance per envelope so a crash never re-delivers handled work

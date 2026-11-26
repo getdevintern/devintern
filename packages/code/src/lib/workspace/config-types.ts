@@ -103,6 +103,12 @@ export interface AutoMergeSettings {
   /** Merge-safety review strictness (`auto_merge_policy`, default `strict`). */
   policy: MergeSafetyPolicy;
   /**
+   * Require at least one passing CI check on a code PR's head commit
+   * (`auto_merge_require_checks`, default false). Failing or pending checks
+   * block either way. Omitted when the key is unset.
+   */
+  requireChecks?: boolean;
+  /**
    * Operator rules appended to the merge-safety prompt
    * (`auto_merge_review_instructions`). Omitted when unset or empty.
    */
@@ -207,6 +213,8 @@ export interface RepoConfig {
   autoMergeDenyPaths?: string[];
   /** Per-repo `auto_merge_review_paths`; replaces the workspace list when set. */
   autoMergeReviewPaths?: string[];
+  /** Per-repo `auto_merge_require_checks`; replaces the workspace value when set. */
+  autoMergeRequireChecks?: boolean;
   /** Per-repo `auto_merge_policy`; replaces the workspace policy when set. */
   autoMergePolicy?: MergeSafetyPolicy;
   /**

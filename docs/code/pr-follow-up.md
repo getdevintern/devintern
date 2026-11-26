@@ -4,7 +4,7 @@ sidebarLabel: "PR Follow-up"
 description: "Use when the worker should keep its pull requests moving: addressing review feedback, resolving merge conflicts, fixing CI, auto-merging safe PRs, and answering @mentions."
 section: "Automation"
 order: 2.2
-dateModified: 2026-11-18
+dateModified: 2026-11-25
 ---
 
 # PR Follow-up: Reviews, Conflicts, CI, and Auto-merge
@@ -113,6 +113,7 @@ auto_merge_review_paths = ["**/AGENTS.md", "**/CLAUDE.md", "**/skills/**"]  # al
 auto_merge_review = true                         # agent reviews PRs outside the safe paths
 auto_merge_method = "squash"                     # merge | squash | rebase
 auto_merge_review_label = "needs-human-review"   # label for PRs left open; "" disables
+auto_merge_require_checks = false               # true: code PRs also need a passing CI check
 auto_merge_policy = "standard"                   # strict (default) | standard | relaxed | custom
 # auto_merge_model = "sonnet"                    # also auto_merge_harness / auto_merge_effort
 
@@ -125,12 +126,27 @@ auto_merge_review_instructions = "Changes under billing/ always need a human."
 
 Each PR passes these gates in order. Any "no" leaves it open for a human:
 
-1. **Ready.** Open, not a draft, not from a fork, checks passing, no conflicts, and no outstanding "changes requested" review. Branch protection still applies. The head commit must be unchanged for 5 minutes (`WORKER_AUTO_MERGE_QUIET_SECONDS`).
+1. **Ready.** Open, not a draft, not from a fork, no conflicts, and no outstanding "changes requested" review. Branch protection still applies. The head commit must be unchanged for 5 minutes (`WORKER_AUTO_MERGE_QUIET_SECONDS`). CI on the head commit (check runs and commit statuses) must have no failing check (`failure`, `error`, `timed_out`, `cancelled`, `action_required`), and no pending check. `skipped` and `neutral` checks never block. A commit with no checks at all passes, so a repository without CI merges on the remaining gates; with `auto_merge_require_checks = true`, a code PR also needs at least one `success` (see [CI checks](#ci-checks)).
 2. **Deny paths.** A changed file matching `auto_merge_deny_paths` or a built-in deny path (`.github/**`, `**/CODEOWNERS`) blocks the merge.
 3. **Safe paths.** If every changed file matches `auto_merge_safe_paths` and none matches `auto_merge_review_paths`, the PR merges with no agent run.
 4. **Agent review.** Otherwise, with `auto_merge_review = true` (the default), the agent reviews the diff and the PR merges only on an explicit "safe" verdict. With `auto_merge_review = false`, the PR stays open.
 
-Globs are repo-relative; `docs/` means `docs/**`. A rename counts both paths. Per-repo `auto_merge_safe_paths`, `auto_merge_deny_paths`, `auto_merge_review_paths`, `auto_merge_policy`, `auto_merge_rules` / `auto_merge_rules_file`, and `auto_merge_review_instructions` replace the workspace values. The merge is pinned to the commit that passed the gates. A PR left open is checked again after new commits or a policy change.
+Globs are repo-relative; `docs/` means `docs/**`. A rename counts both paths. Per-repo `auto_merge_safe_paths`, `auto_merge_deny_paths`, `auto_merge_review_paths`, `auto_merge_require_checks`, `auto_merge_policy`, `auto_merge_rules` / `auto_merge_rules_file`, and `auto_merge_review_instructions` replace the workspace values. The merge is pinned to the commit that passed the gates. A PR left open is checked again after new commits or a policy change.
+
+### CI checks
+
+A PR with a failing check stays open with the label, and its status comment names the failing check. A PR whose checks are still running gets a status comment saying so, but no label, because it usually merges on its own once they pass. If the checks then pass but branch protection still blocks the merge (for example, a required approval), the status comment changes to say it is waiting for GitHub, and the label is removed. The same reason shows on the dashboard's **Auto-merge** entry and in `devintern auto-merge <pr-url> --dry-run`. If the check status cannot be read, the PR is not merged and the check is retried like any other failure; the status comment says so if the last retry fails too. On the dashboard's run list, a PR waiting on failing or missing CI counts as escalated (handed to a human) until it merges; a PR waiting on running checks does not.
+
+A repository without CI merges code PRs on the remaining gates (deny paths and the agent review). To make code PRs wait until CI reports at least one passing check, which also guards against CI that registers its checks late, turn on `auto_merge_require_checks`:
+
+```toml
+[[repos]]
+name = "api"
+remote = "git@github.com:acme/api.git"
+auto_merge_require_checks = true   # default false; also settable in [workspace]
+```
+
+With it on, a code PR with no passing check stays open with `auto_merge_review_label`, and its status comment says "No CI checks reported for this commit; auto-merge needs at least one passing check." The worker keeps checking the same commit, up to once an hour while nothing changes, and merges once a check passes. Safe-path-only PRs never need a passing check.
 
 ### Review paths
 
@@ -160,6 +176,7 @@ The agent is told which changed files matched a review path, and the status comm
 
 | Setting                          | Default  | What it does                                                                                                                                                                                                                       |
 | -------------------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `auto_merge_require_checks`     | `false`  | Code PRs need at least one passing CI check on the head commit, so a commit with no checks waits. Failing or pending checks block either way. See [CI checks](#ci-checks).                                                   |
 | `auto_merge_review_paths`        | none     | Globs that always go to the agent review, even when they also match a safe path. See [Review paths](#review-paths).                                                                                                               |
 | `auto_merge_policy`              | `strict` | `strict`, `standard`, `relaxed`, or `custom`.                                                                                                                                                                                      |
 | `auto_merge_rules`               | none     | The rubric for `custom`, inline. Up to 20,000 characters.                                                                                                                                                                         |
@@ -183,13 +200,13 @@ Changing the policy, the rules, the instructions, or the review paths re-checks 
 
 The worker explains each decision in one status comment on the PR, edited in place (an agent hold names the policy it ran under, such as `standard` or `custom: merge-rules.md`), and labels PRs left open with `auto_merge_review_label`. If the agent is usage-limited, the check waits for the quota to reset, and that wait does not count as a failed attempt. A check that fails (for example, the agent returns no verdict) is retried after 5 and then 10 minutes. After the third failure on the same commit, the status comment says the check kept failing, and the PR waits for new commits or a policy change. The dashboard's **Automations** page lists an **Auto-merge** entry; its **Run now** checks every open PR immediately.
 
-The GitHub credential needs `Pull requests: Read and write` and `Contents: Read and write`. To test the gates on one PR without merging:
+The GitHub credential needs the auto-merge permissions listed under [GitHub authentication](./configuration.md#github-authentication), including read access to `Commit statuses` (and `Checks` for a GitHub App). To test the gates on one PR without merging:
 
 ```bash
 devintern auto-merge <pr-url> --safe-path '**/*.md' --dry-run
 ```
 
-Other flags: `--deny-path` and `--review-path` (repeatable), `--no-review`, `--method`, `--policy <strict|standard|relaxed|custom>`, `--rules=<text>`, `--rules-file <path>`, `--review-instructions=<text>`, `--review-label <name>`, `--no-review-label`.
+Other flags: `--deny-path` and `--review-path` (repeatable), `--no-review`, `--require-checks`, `--method`, `--policy <strict|standard|relaxed|custom>`, `--rules=<text>`, `--rules-file <path>`, `--review-instructions=<text>`, `--review-label <name>`, `--no-review-label`.
 
 ## CI failures on the agent's PRs
 

@@ -11,6 +11,7 @@
 import { unverifiedWorkspaceRelayRepos } from "../init/worker-connect";
 import type { WorkspaceConfig } from "../workspace/config";
 import { verifyGitHubReposWithRelayToken } from "./connect";
+import { describeWorkerConflicts } from "./worker-identity";
 
 export interface RelayAutoVerifyOptions {
   /** Live workspace config; reloads mutate it in place. */
@@ -68,6 +69,7 @@ export function createRelayAutoVerifier(options: RelayAutoVerifyOptions): () => 
         );
       }
       logOnce(`🔐 [relay] GitHub repositories: ${parts.join("; ")}`);
+      for (const line of describeWorkerConflicts(result.conflicts)) warn(`⚠️  [relay] ${line}`);
     } catch (error) {
       // Retry on the next startup or config reload.
       lastLogged = "";

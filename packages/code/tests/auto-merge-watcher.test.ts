@@ -28,7 +28,12 @@ describe("AutoMergeWatcherAcquirer", () => {
   let queue: WebhookQueue;
   let now: number;
   let pr: AutoMergePolledPr;
-  let calls: Array<{ prNumber: number; sha: string; lastAttempt?: boolean }>;
+  let calls: Array<{
+    prNumber: number;
+    sha: string;
+    lastAttempt?: boolean;
+    ciWaitPosted?: string;
+  }>;
   let results: AutoMergeResult[];
   let enabled: boolean;
   let runs: Array<{ origin: string; status?: string; harness?: string } | null>;
@@ -45,8 +50,13 @@ describe("AutoMergeWatcherAcquirer", () => {
       now: () => now,
       quietSeconds: extra.quietSeconds ?? 0,
       fetchPr: async () => ({ data: pr, notModified: false }),
-      mergePr: async (_repo, prNumber, sha, { lastAttempt }) => {
-        calls.push({ prNumber, sha, ...(lastAttempt ? { lastAttempt } : {}) });
+      mergePr: async (_repo, prNumber, sha, { lastAttempt, ciWaitPosted }) => {
+        calls.push({
+          prNumber,
+          sha,
+          ...(lastAttempt ? { lastAttempt } : {}),
+          ...(ciWaitPosted !== undefined ? { ciWaitPosted } : {}),
+        });
         statusDuringMerge.push(runs.at(-1)?.status);
         return results.shift() ?? { outcome: "merged", message: "ok", reviewed: false };
       },
@@ -242,8 +252,8 @@ describe("AutoMergeWatcherAcquirer", () => {
   });
 
   test.each([
-    [{ mergeable_state: "unstable" }],
-    [{ mergeable_state: "blocked" }],
+    [{ mergeable_state: "dirty" }],
+    [{ mergeable_state: "behind" }],
     [{ draft: true }],
     [{ state: "closed" }],
     [{ head: { sha: HEAD, repo: { full_name: "fork/widgets" } } }],
@@ -251,6 +261,116 @@ describe("AutoMergeWatcherAcquirer", () => {
     pr = { ...pr, ...overrides };
     await watcher().tick();
     expect(calls).toHaveLength(0);
+  });
+
+  test("an unstable PR with a failing check is evaluated and its CI wait recorded", async () => {
+    pr = { ...pr, mergeable_state: "unstable" };
+    const failing = {
+      outcome: "waiting" as const,
+      message: "Ready gate: CI check failing on this commit: lint (failure).",
+      reviewed: false,
+      ciWait: true,
+    };
+    results = [failing, failing];
+    const w = watcher({ quietSeconds: 300 });
+    await w.tick();
+    // The quiet window still applies to held PRs.
+    expect(calls).toHaveLength(0);
+    now += 301_000;
+    await w.tick();
+    expect(calls).toHaveLength(1);
+    expect(liveRuns()).toEqual([{ origin: "auto_merge", status: "escalated" }]);
+    // Still failing: checked again after the backoff, passing the posted wait.
+    now += 10 * 60_000 + 1;
+    await w.tick();
+    expect(calls.map((call) => call.ciWaitPosted)).toEqual([undefined, failing.message]);
+    expect(queue.hasProcessed(AUTO_MERGE_SOURCE, autoMergeDecisionKey(REPO, 7, HEAD))).toBe(false);
+  });
+
+  test("a blocked PR not held by its checks is not re-evaluated until its state changes", async () => {
+    pr = { ...pr, mergeable_state: "blocked" };
+    results = [{ outcome: "waiting", message: "blocked by branch protection", reviewed: false }];
+    const w = watcher();
+    await w.tick();
+    expect(calls).toHaveLength(1);
+    // Two backoffs, still inside the 30-minute recheck window.
+    for (let i = 0; i < 2; i++) {
+      now += 10 * 60_000 + 1;
+      await w.tick();
+    }
+    expect(calls).toHaveLength(1);
+    expect(liveRuns()).toEqual([]);
+    // Approved: GitHub now reports it clean, so it is evaluated again.
+    pr = { ...pr, mergeable_state: "clean" };
+    await w.tick();
+    expect(calls).toHaveLength(2);
+  });
+
+  test("a blocked non-CI hold is re-evaluated once the finding ages (a late check fails)", async () => {
+    pr = { ...pr, mergeable_state: "blocked" };
+    const failing = {
+      outcome: "waiting" as const,
+      message: "Ready gate: CI check failed: unit tests.",
+      reviewed: false,
+      ciWait: true,
+    };
+    results = [
+      { outcome: "waiting", message: "blocked by branch protection", reviewed: false },
+      failing,
+    ];
+    const w = watcher();
+    await w.tick();
+    now += 29 * 60_000;
+    await w.tick();
+    expect(calls).toHaveLength(1);
+    now += 60_000 + 1;
+    await w.tick();
+    // Still blocked, but the required check now fails: the CI wait is posted.
+    expect(calls).toHaveLength(2);
+    expect(calls[1]?.ciWaitPosted).toBeUndefined();
+  });
+
+  test("a blocked PR whose checks could not be read is retried at the next backoff", async () => {
+    pr = { ...pr, mergeable_state: "blocked" };
+    results = [
+      { outcome: "waiting", message: "blocked", reviewed: false, ciChecksUnread: true },
+      { outcome: "waiting", message: "blocked", reviewed: false },
+    ];
+    const w = watcher();
+    await w.tick();
+    now += 10 * 60_000 + 1;
+    await w.tick();
+    expect(calls).toHaveLength(2);
+    // The second read succeeded and found no CI reason: back to the long hold.
+    now += 10 * 60_000 + 1;
+    await w.tick();
+    expect(calls).toHaveLength(2);
+  });
+
+  test("an unreadable check status keeps the posted CI wait for the next check", async () => {
+    pr = { ...pr, mergeable_state: "blocked" };
+    const pending = {
+      outcome: "waiting" as const,
+      message: "Ready gate: CI checks are still pending: test.",
+      reviewed: false,
+      ciWait: true,
+    };
+    results = [
+      pending,
+      { outcome: "waiting", message: "blocked", reviewed: false, ciChecksUnread: true },
+      { outcome: "waiting", message: "blocked", reviewed: false },
+    ];
+    const w = watcher();
+    for (let i = 0; i < 3; i++) {
+      await w.tick();
+      now += 10 * 60_000 + 1;
+    }
+    // The third check still knows the PR shows the CI wait, so it can replace it.
+    expect(calls.map((call) => call.ciWaitPosted)).toEqual([
+      undefined,
+      pending.message,
+      pending.message,
+    ]);
   });
 
   test("waits for the head to stay quiet", async () => {
@@ -286,6 +406,219 @@ describe("AutoMergeWatcherAcquirer", () => {
     expect(calls).toHaveLength(2);
     // The waiting check was shown live, then discarded.
     expect(liveRuns()).toEqual([{ origin: "auto_merge", status: "succeeded" }]);
+  });
+
+  test("a CI wait stays waiting on the same head and is kept on the dashboard once", async () => {
+    const noChecks = {
+      outcome: "waiting" as const,
+      message:
+        "Ready gate: No CI checks reported for this commit; auto-merge needs at least one passing check.",
+      reviewed: false,
+      ciWait: true,
+    };
+    results = [noChecks, noChecks, { outcome: "merged", message: "ok", reviewed: false }];
+    const w = watcher();
+    await w.tick();
+    now += 10 * 60_000 + 1;
+    await w.tick();
+    // Not a decision: the same head is checked again and can merge once CI passes.
+    expect(queue.hasProcessed(AUTO_MERGE_SOURCE, autoMergeDecisionKey(REPO, 7, HEAD))).toBe(false);
+    now += 10 * 60_000 + 1;
+    await w.tick();
+    expect(calls).toHaveLength(3);
+    expect(calls.every((call) => call.sha === HEAD)).toBe(true);
+    // Re-checks pass the wait the PR already shows, so it is not re-posted.
+    expect(calls.map((call) => call.ciWaitPosted)).toEqual([
+      undefined,
+      noChecks.message,
+      noChecks.message,
+    ]);
+    // The first CI wait is kept with its reason; the identical repeat is discarded.
+    expect(liveRuns()).toEqual([
+      { origin: "auto_merge", status: "escalated" },
+      { origin: "auto_merge", status: "succeeded" },
+    ]);
+  });
+
+  test("a pending-checks wait is quiet: no escalated run, and a shrinking list is one wait", async () => {
+    pr = { ...pr, mergeable_state: "unstable" };
+    const pending = (names: string) => ({
+      outcome: "waiting" as const,
+      message: `Ready gate: CI checks are still pending: ${names}.`,
+      reviewed: false,
+      ciWait: true,
+      ciWaitProblem: "pending" as const,
+    });
+    results = [
+      pending("lint, test"),
+      pending("test"),
+      {
+        outcome: "waiting",
+        message: "Ready gate: CI check failed: test.",
+        reviewed: false,
+        ciWait: true,
+        ciWaitProblem: "failing",
+      },
+    ];
+    const w = watcher();
+    await w.tick();
+    now += 10 * 60_000 + 1;
+    await w.tick();
+    now += 10 * 60_000 + 1;
+    await w.tick();
+    expect(calls).toHaveLength(3);
+    // Both pending checks pass the same key, so the comment is not re-posted.
+    expect(calls.map((call) => call.ciWaitPosted)).toEqual([undefined, "ci-pending", "ci-pending"]);
+    // Only the failure is an escalation; the pending checks were discarded.
+    expect(liveRuns()).toEqual([{ origin: "auto_merge", status: "escalated" }]);
+  });
+
+  test("a no-checks wait on the same head backs off 10, 20, 40, then 60 minutes", async () => {
+    const noChecks = {
+      outcome: "waiting" as const,
+      message:
+        "Ready gate: No CI checks reported for this commit; auto-merge needs at least one passing check.",
+      reviewed: false,
+      ciWait: true,
+      ciWaitProblem: "no-checks" as const,
+    };
+    results = Array.from({ length: 6 }, () => noChecks);
+    const w = watcher();
+    await w.tick();
+    expect(calls).toHaveLength(1);
+    const gaps: number[] = [];
+    let last = now;
+    for (let minute = 1; minute <= 200 && calls.length < 6; minute++) {
+      now += 60_000;
+      const before = calls.length;
+      await w.tick();
+      if (calls.length > before) {
+        gaps.push((now - last) / 60_000);
+        last = now;
+      }
+    }
+    expect(gaps).toEqual([10, 20, 40, 60, 60]);
+    // Mid-backoff, a check starting (state change) is evaluated right away...
+    now += 60_000;
+    pr = { ...pr, mergeable_state: "unstable" };
+    results = [noChecks];
+    await w.tick();
+    expect(calls).toHaveLength(7);
+    // ...and so is a push (a new head, which also starts over at 10 minutes).
+    now += 60_000;
+    pr = { ...pr, head: { ...pr.head, sha: "b".repeat(40) } };
+    results = [noChecks, noChecks];
+    await w.tick();
+    expect(calls.at(-1)?.sha).toBe("b".repeat(40));
+    now += 10 * 60_000;
+    await w.tick();
+    expect(calls).toHaveLength(9);
+  });
+
+  test("a policy change ends a no-checks backoff early", async () => {
+    const noChecks = {
+      outcome: "waiting" as const,
+      message:
+        "Ready gate: No CI checks reported for this commit; auto-merge needs at least one passing check.",
+      reviewed: false,
+      ciWait: true,
+      ciWaitProblem: "no-checks" as const,
+    };
+    fingerprint = "p1";
+    results = [noChecks, noChecks, noChecks];
+    const w = watcher();
+    await w.tick();
+    now += 10 * 60_000;
+    await w.tick();
+    now += 20 * 60_000;
+    await w.tick();
+    expect(calls).toHaveLength(3);
+    // Inside the 40-minute backoff, the same policy keeps the PR held...
+    now += 60_000;
+    await w.tick();
+    expect(calls).toHaveLength(3);
+    // ...and a policy change (e.g. require_checks turned on) re-checks it now.
+    fingerprint = "p2";
+    now += 60_000;
+    await w.tick();
+    expect(calls).toHaveLength(4);
+  });
+
+  test("a failing-check wait backs off like a static wait and ends early when CI turns green", async () => {
+    pr = { ...pr, mergeable_state: "unstable" };
+    const failing = {
+      outcome: "waiting" as const,
+      message: "Ready gate: CI check failing on this commit: lint (failure).",
+      reviewed: false,
+      ciWait: true,
+      ciWaitProblem: "failing" as const,
+    };
+    results = Array.from({ length: 4 }, () => failing);
+    const w = watcher();
+    await w.tick();
+    const gaps: number[] = [];
+    let last = now;
+    for (let minute = 1; minute <= 200 && calls.length < 4; minute++) {
+      now += 60_000;
+      const before = calls.length;
+      await w.tick();
+      if (calls.length > before) {
+        gaps.push((now - last) / 60_000);
+        last = now;
+      }
+    }
+    expect(gaps).toEqual([10, 20, 40]);
+    // A re-run passes: GitHub reports the PR clean, evaluated mid-backoff.
+    now += 60_000;
+    pr = { ...pr, mergeable_state: "clean" };
+    await w.tick();
+    expect(calls).toHaveLength(5);
+  });
+
+  test("a repeated blocked non-CI hold rechecks after 30, 60, then 120 minutes", async () => {
+    pr = { ...pr, mergeable_state: "blocked" };
+    results = Array.from({ length: 5 }, () => ({
+      outcome: "waiting" as const,
+      message: "blocked by branch protection",
+      reviewed: false,
+    }));
+    const w = watcher();
+    await w.tick();
+    const gaps: number[] = [];
+    let last = now;
+    for (let minute = 1; minute <= 400 && calls.length < 5; minute++) {
+      now += 60_000;
+      const before = calls.length;
+      await w.tick();
+      if (calls.length > before) {
+        gaps.push((now - last) / 60_000);
+        last = now;
+      }
+    }
+    expect(gaps).toEqual([30, 60, 120, 120]);
+  });
+
+  test("a changes-requested wait keeps the plain backoff and is not fetched during it", async () => {
+    let fetches = 0;
+    results = [{ outcome: "waiting", message: "changes requested", reviewed: false }];
+    const w = new AutoMergeWatcherAcquirer({
+      intervalSeconds: 60,
+      workerState,
+      queue,
+      enabled: () => true,
+      now: () => now,
+      quietSeconds: 0,
+      fetchPr: async () => {
+        fetches++;
+        return { data: pr, notModified: false };
+      },
+      mergePr: async () => results.shift() ?? { outcome: "merged", message: "ok", reviewed: false },
+    });
+    await w.tick();
+    now += 60_000;
+    pr = { ...pr, mergeable_state: "unstable" };
+    await w.tick();
+    expect(fetches).toBe(1);
   });
 
   test("failures retry with backoff and give up after the cap", async () => {

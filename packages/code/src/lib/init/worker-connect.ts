@@ -72,6 +72,8 @@ Options:
   --team <name>        Use one team's tracker credentials
   --repo <name>        Repository that owns a Sentry project
   --disconnect         Remove managed GitLab hooks; polling remains enabled
+  --takeover           Move registrations another worker on this account serves
+                       to this worker (it then receives their events alone)
   --json               Print one JSON document on stdout (text goes to stderr)
   -h, --help           Display this help message
 
@@ -136,6 +138,8 @@ export interface ParsedConnectArgs {
   noWait: boolean;
   /** GitHub: check the recorded pairing once. */
   status: boolean;
+  /** Move registrations owned by another worker of the account to this one. */
+  takeover: boolean;
   /** Sentry: never prompt. */
   nonInteractive: boolean;
   yes: boolean;
@@ -183,6 +187,7 @@ export function parseConnectArgs(args: string[]): ParsedConnectArgs {
     json: false,
     noWait: false,
     status: false,
+    takeover: false,
     nonInteractive: false,
     yes: false,
     projects: [],
@@ -201,6 +206,8 @@ export function parseConnectArgs(args: string[]): ParsedConnectArgs {
       parsed.noWait = true;
     } else if (arg === "--status" || arg === "--resume") {
       parsed.status = true;
+    } else if (arg === "--takeover") {
+      parsed.takeover = true;
     } else if (arg === "--non-interactive") {
       parsed.nonInteractive = true;
     } else if (arg === "--yes" || arg === "-y") {
@@ -340,6 +347,12 @@ function validateConnectArgs(parsed: ParsedConnectArgs): string | undefined {
   if (parsed.status && parsed.target !== "github") {
     return "--status is only valid for the GitHub connect target.";
   }
+  if (parsed.takeover && (parsed.target === "status" || parsed.target === "sentry")) {
+    return "--takeover is only valid for relay connect targets (github, gitlab, trackers).";
+  }
+  if (parsed.takeover && parsed.disconnect) {
+    return "--takeover and --disconnect cannot be combined.";
+  }
   if (parsed.noWait && parsed.status) {
     return "--no-wait and --status cannot be combined: --no-wait starts a pairing, --status checks it.";
   }
@@ -405,6 +418,7 @@ function createWorkspaceConnectDeps(
       : undefined,
     noWait: parsed.noWait,
     githubStatus: parsed.status,
+    takeover: parsed.takeover,
   };
 }
 
@@ -415,6 +429,7 @@ async function runAllConnectTargets(
   configPath: string,
   deps: WorkerConnectCommandDeps,
   noWait: boolean,
+  takeover: boolean,
 ): Promise<number> {
   let accessTokenPromise: Promise<string> | undefined;
   const sharedDeps: WorkerConnectCommandDeps = {
@@ -427,14 +442,17 @@ async function runAllConnectTargets(
       : undefined,
   };
   let failures = 0;
+  const takeoverArgs = takeover ? ["--takeover"] : [];
   if (workspaceRelayRepos(config).length > 0) {
     const githubArgs = noWait ? ["github", "--no-wait"] : ["github"];
-    if ((await runWorkerConnectCommand(githubArgs, sharedDeps)) !== 0) failures++;
+    if ((await runWorkerConnectCommand([...githubArgs, ...takeoverArgs], sharedDeps)) !== 0) {
+      failures++;
+    }
   } else {
     console.log("   No GitHub repositories found; skipping GitHub relay setup.");
   }
   if (workspaceGitLabRelayProjects(config, workspaceDir).length > 0) {
-    if ((await runWorkerConnectCommand(["gitlab"], sharedDeps)) !== 0) failures++;
+    if ((await runWorkerConnectCommand(["gitlab", ...takeoverArgs], sharedDeps)) !== 0) failures++;
   } else {
     console.log("   No GitLab repositories found; skipping GitLab relay setup.");
   }
@@ -689,6 +707,7 @@ async function runGitHubConnectTargets(
   }
   let failures = 0;
   let pairingStarted = false;
+  let connectRan = false;
   const tracked: WorkspaceRelayConnectDeps = {
     ...connectDeps,
     onOutcome(outcome) {
@@ -705,10 +724,16 @@ async function runGitHubConnectTargets(
       console.log(`✅ ${repo} is already verified; skipping.`);
     }
     if (unverified.length === 0) continue;
+    connectRan = true;
     const result = await runConnect("github", { ...tracked, repos: unverified });
     if (result !== 0) failures++;
     // One recorded pairing at a time: finish this one with --status, then run again.
     if (pairingStarted) break;
+  }
+  if (!connectRan) {
+    // Nothing to pair, but the relay worker identity still registers so this
+    // worker claims (or, with --takeover, moves) the verified repositories.
+    if ((await runConnect("github", { ...tracked, repos, identityOnly: true })) !== 0) failures++;
   }
   if (failures > 0) {
     console.error(`❌ ${failures} workspace repository pairing(s) failed.`);
@@ -798,7 +823,14 @@ async function runParsedConnect(
   const runConnect = deps.runConnect ?? connectRelayTarget;
 
   if (parsed.target === "all") {
-    return runAllConnectTargets(config, workspaceDir, configPath, deps, parsed.noWait);
+    return runAllConnectTargets(
+      config,
+      workspaceDir,
+      configPath,
+      deps,
+      parsed.noWait,
+      parsed.takeover,
+    );
   }
   if (parsed.target === "sentry") {
     return runSentryConnectTarget(config, workspaceDir, parsed, deps);
@@ -819,6 +851,7 @@ async function runParsedConnect(
         outcomes,
         errorLines: deps.sink.errors.slice(errorsBefore),
         workspaceSuffix: workspaceSuffix(configPath),
+        workerId: loadRelayState(workspaceDir)?.worker?.workerId,
       }),
     );
   }

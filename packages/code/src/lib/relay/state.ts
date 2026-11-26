@@ -37,6 +37,51 @@ export interface RelayRegistration {
   status?: string;
   hookId?: number;
   activatedAt?: number;
+  /** Worker identity this registration routes to (newer relays; null when unowned). */
+  ownerWorkerId?: string | null;
+  ownerLabel?: string | null;
+  ownerLastSeenAt?: number | null;
+}
+
+/** One relay registration a worker can own. */
+export interface RelayRegistrationRef {
+  kind: "repo" | "source" | "code-host";
+  key: string;
+  team?: string;
+}
+
+/** A registration another live worker of the same account owns. */
+export interface RelayOwnershipConflict extends RelayRegistrationRef {
+  ownerWorkerId: string;
+  ownerLabel: string;
+  /** Epoch milliseconds of the owner's last relay poll. */
+  lastSeenAt: number;
+}
+
+/**
+ * This workspace's relay worker identity. Events for registrations it owns
+ * are delivered to it alone; see `docs/code/relay.md` (Multiple workers).
+ */
+export interface RelayWorkerIdentity {
+  workerId: string;
+  /** Human label shown to other workers: hostname plus a workspace path hash. */
+  label: string;
+  /** ISO timestamp of the registration that created this identity. */
+  registeredAt: string;
+  /** Relay buffer head when the identity was created; a worker with no cursor starts here. */
+  startCursor: number;
+  /** Registrations the relay routes to this worker, as of `checkedAt`. */
+  owned?: RelayRegistrationRef[];
+  /** Registrations this workspace serves that another live worker owns, as of `checkedAt`. */
+  conflicts?: RelayOwnershipConflict[];
+  /** ISO timestamp of the last successful identity registration. */
+  checkedAt?: string;
+}
+
+/** A tracker source this workspace registered (so the worker can claim it). */
+export interface RelaySourceRegistration {
+  source: string;
+  team?: string;
 }
 
 export interface VerifiedGitHubRelayRepository {
@@ -75,6 +120,10 @@ export interface RelayConnectState {
   githubRepositories?: VerifiedGitHubRelayRepository[];
   /** Relay-managed GitLab hooks. Webhook signing material is never persisted here. */
   gitlabRepositories?: VerifiedGitLabRelayRepository[];
+  /** Tracker sources registered from this workspace. */
+  sources?: RelaySourceRegistration[];
+  /** Per-worker relay identity (newer relays). */
+  worker?: RelayWorkerIdentity;
 }
 
 function isVerifiedGitHubRepository(
@@ -235,6 +284,10 @@ export interface ConnectResponse {
 export interface RelayConnectDeps {
   /** Absolute workspace root (defaults to cwd for low-level callers). */
   workingDir?: string;
+  /** This workspace's relay worker id, sent with registrations (newer relays). */
+  workerId?: string;
+  /** Move registrations another live worker owns to this worker. */
+  takeover?: boolean;
   relayUrl?: string;
   fetchImpl?: typeof fetch;
   /** Injectable for tests; defaults to the on-disk Supabase session. */
@@ -243,6 +296,79 @@ export interface RelayConnectDeps {
   sleep?: (ms: number) => Promise<void>;
   /** Observe the GitHub installation URL (CLI prints it by default). */
   onGitHubInstallUrl?: (url: string) => void;
+}
+
+/** Relay error code for a registration another live worker of the account owns. */
+export const OWNERSHIP_CONFLICT_CODE = "registration_owned_by_other_worker";
+
+/** The relay refused a registration because another live worker owns it. */
+export class RelayOwnershipConflictError extends Error {
+  readonly code = OWNERSHIP_CONFLICT_CODE;
+  constructor(
+    message: string,
+    readonly conflicts: RelayOwnershipConflict[],
+  ) {
+    super(message);
+    this.name = "RelayOwnershipConflictError";
+  }
+}
+
+/** Parse relay conflict entries, dropping malformed ones. */
+export function parseOwnershipConflicts(raw: unknown): RelayOwnershipConflict[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((entry: Record<string, unknown> | null) => {
+    if (
+      !entry ||
+      (entry.kind !== "repo" && entry.kind !== "source" && entry.kind !== "code-host") ||
+      typeof entry.key !== "string" ||
+      typeof entry.ownerWorkerId !== "string" ||
+      typeof entry.ownerLabel !== "string" ||
+      typeof entry.lastSeenAt !== "number"
+    ) {
+      return [];
+    }
+    return [
+      {
+        kind: entry.kind,
+        key: entry.key,
+        ...(typeof entry.team === "string" ? { team: entry.team } : {}),
+        ownerWorkerId: entry.ownerWorkerId,
+        ownerLabel: entry.ownerLabel,
+        lastSeenAt: entry.lastSeenAt,
+      },
+    ];
+  });
+}
+
+/** One line naming who owns a conflicting registration. */
+export function describeOwnershipConflict(conflict: RelayOwnershipConflict): string {
+  const name = conflict.team ? `${conflict.key} (team ${conflict.team})` : conflict.key;
+  return `${name} is served by worker "${conflict.ownerLabel}" (last seen ${new Date(conflict.lastSeenAt).toISOString()})`;
+}
+
+/**
+ * Error for a failed relay response: a typed ownership conflict for 409
+ * `registration_owned_by_other_worker`, otherwise the relay's `error` text.
+ */
+export async function relayResponseError(response: Response): Promise<Error> {
+  const body = (await response.json().catch(() => null)) as {
+    error?: unknown;
+    code?: unknown;
+    conflicts?: unknown;
+  } | null;
+  const message =
+    typeof body?.error === "string" ? body.error : `relay returned HTTP ${response.status}`;
+  if (response.status === 409 && body?.code === OWNERSHIP_CONFLICT_CODE) {
+    return new RelayOwnershipConflictError(message, parseOwnershipConflicts(body.conflicts));
+  }
+  return new Error(message);
+}
+
+/** `workerId`/`takeover` connect-body fields; empty for relays without worker identities. */
+export function workerFields(deps: RelayConnectDeps): Record<string, unknown> {
+  return deps.workerId
+    ? { workerId: deps.workerId, ...(deps.takeover ? { takeover: true } : {}) }
+    : {};
 }
 
 export async function connectRequest(
@@ -313,6 +439,9 @@ export async function ensureRelayToken(
     github: sameCustomer ? existing.github : undefined,
     githubRepositories: sameCustomer ? existing.githubRepositories : undefined,
     gitlabRepositories: sameCustomer ? existing.gitlabRepositories : undefined,
+    sources: sameCustomer ? existing.sources : undefined,
+    // The identity survives a re-issued token: the next registration rebinds it by id.
+    worker: sameCustomer ? existing.worker : undefined,
   };
   saveRelayState(state, workingDir);
   return { relayToken: minted.relayToken, state };
@@ -348,6 +477,8 @@ export function mergeConnectState(
     github: verified[0] ?? previousForCustomer?.github,
     githubRepositories,
     gitlabRepositories: previousForCustomer?.gitlabRepositories,
+    sources: previousForCustomer?.sources,
+    worker: previousForCustomer?.worker,
   };
   saveRelayState(state, workingDir);
   return state;
@@ -389,4 +520,38 @@ export function verifiedRepositoriesFromResponse(
     ];
   }
   return [];
+}
+
+export interface RelayStatusResponse {
+  customerId: string;
+  licenseSource: string;
+  buffered: number;
+  registrations: RelayRegistration[];
+  /** This token's worker identity; null for an identity-less token (newer relays). */
+  worker?: { workerId: string; label: string; lastSeenAt: number } | null;
+  /** Every worker identity of the account (newer relays). */
+  workers?: Array<{ workerId: string; label: string; lastSeenAt: number; stale?: boolean }>;
+  /** Present when this token has no identity while other workers do. */
+  upgrade?: { code: string; message: string };
+}
+
+/**
+ * Fetch live relay status for this customer (data plane: relay token).
+ *
+ * @param options - Relay token and optional relay URL / fetch override
+ */
+export async function fetchRelayStatus(options: {
+  relayToken: string;
+  relayUrl?: string;
+  fetchImpl?: typeof fetch;
+}): Promise<RelayStatusResponse> {
+  const relayUrl = (options.relayUrl ?? resolveRelayUrl()).replace(/\/+$/, "");
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const response = await fetchImpl(`${relayUrl}/v1/status`, {
+    headers: { Authorization: `Bearer ${options.relayToken}` },
+  });
+  if (!response.ok) {
+    throw await relayResponseError(response);
+  }
+  return (await response.json()) as RelayStatusResponse;
 }
