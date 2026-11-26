@@ -35,6 +35,7 @@ import {
   parseEnvFile,
 } from "../workspace/env";
 import { resolveWorkspaceDir, workspaceConfigPath, workspaceEnvPath } from "../workspace/paths";
+import { defaultProbe } from "@devintern/task-trackers";
 import { createTrackerClient, trackerRequiredEnv } from "../trackers/manager";
 import { redactUrlCredentials } from "./dashboard-workspace";
 import { collectHarnessPreflight } from "../agent/sandbox";
@@ -75,6 +76,8 @@ export interface WorkerDoctorDeps {
   resolveWorkspaceDir?: () => string;
   /** Count tasks matching a query against one tracker with explicit credentials. */
   dryRunQuery?: (tracker: string, env: Env, query: string) => Promise<number>;
+  /** Authenticated call that proves a source's tracker credentials are accepted (throws when rejected). */
+  probeCredentials?: (tracker: string, env: Env) => Promise<void>;
   /** Verify a repository's remote is reachable and readable with the configured credentials. */
   checkRepoAccess?: (repo: RepoConfig, env: Env) => Promise<RepoAccessResult>;
   /** Automation entitlement for the workspace (license, trial, or grace). */
@@ -629,6 +632,13 @@ async function collectConfigScopedChecks(
 
   // 2. Tracker credentials per source
   const credentialed: PolledSource[] = [];
+  const probeCredentials =
+    deps.probeCredentials ??
+    ((tracker: string, env: Env) =>
+      defaultProbe(
+        tracker,
+        Object.fromEntries(Object.entries(env).filter((e): e is [string, string] => !!e[1])),
+      ));
   for (const source of sources) {
     const missing = trackerRequiredEnv(source.tracker).filter((key) => !source.env[key]);
     if (missing.length > 0) {
@@ -639,15 +649,33 @@ async function collectConfigScopedChecks(
         detail: `${source.name}: missing ${missing.join(", ")}`,
         hint: source.credentialHint,
       });
-    } else {
-      credentialed.push(source);
-      checks.push({
-        id: "credentials",
-        label: "Tracker credentials",
-        status: "ok",
-        detail: source.name,
-      });
+      continue;
     }
+    if (!offline) {
+      try {
+        await withTimeout(
+          probeCredentials(source.tracker, source.env),
+          timeoutMs,
+          "credential check",
+        );
+      } catch (error) {
+        checks.push({
+          id: "credentials",
+          label: "Tracker credentials",
+          status: "fail",
+          detail: `${source.name}: ${errorMessage(error)}`,
+          hint: source.credentialHint,
+        });
+        continue;
+      }
+    }
+    credentialed.push(source);
+    checks.push({
+      id: "credentials",
+      label: "Tracker credentials",
+      status: "ok",
+      detail: source.name,
+    });
   }
 
   // 3. Ready-tasks query dry-run, one API call per source

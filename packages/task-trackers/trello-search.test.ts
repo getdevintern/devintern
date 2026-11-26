@@ -104,10 +104,10 @@ describe("TrelloClient.searchCards", () => {
     const urls = mockFetch({ cards: [] });
 
     const client = new TrelloClient({ apiKey: "k", apiToken: "t" });
-    await client.searchCards("is:open", "board123");
+    await client.searchCards("is:open", "5f1c2a3b4d5e6f7a8b9c0d1e");
 
     const url = new URL(urls[0]);
-    expect(url.searchParams.get("idBoards")).toBe("board123");
+    expect(url.searchParams.get("idBoards")).toBe("5f1c2a3b4d5e6f7a8b9c0d1e");
   });
 
   test("returns empty result when no cards field", async () => {
