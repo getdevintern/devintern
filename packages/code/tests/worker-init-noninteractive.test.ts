@@ -28,6 +28,7 @@ import type {
   NonInteractiveInitArgs,
   NonInteractiveInitDeps,
 } from "../src/lib/init/worker-init-noninteractive";
+import { gitCommitIdentityCheck } from "../src/lib/observability/git-identity-readiness";
 import type { WorkerDoctorDeps } from "../src/lib/observability/worker-readiness";
 import { loadWorkspaceConfig } from "../src/lib/workspace/config";
 import { workspaceCodeStateDir } from "../src/lib/workspace/paths";
@@ -50,6 +51,11 @@ function doctorStubs(overrides: WorkerDoctorDeps = {}): WorkerDoctorDeps {
     checkEntitlement: async () => ({ valid: true, source: "license-key", message: "ok" }),
     checkHarness: async () => ({ id: "harness", label: "Agent harness", status: "ok" }),
     checkSandbox: async () => ({ id: "sandbox", label: "Agent sandbox", status: "ok" }),
+    checkGitIdentity: async () => ({
+      id: "git-identity",
+      label: "Git commit identity",
+      status: "ok",
+    }),
     isPortInUse: async () => false,
     workerStatus: () => ({ status: "stopped" }),
     ...overrides,
@@ -207,6 +213,27 @@ describe("runNonInteractiveWorkerInit", () => {
     // Nothing secret in the report.
     expect(JSON.stringify(report)).not.toContain(JIRA_ENV.JIRA_API_TOKEN);
     expect(existsSync(join(workspaceDir, WORKER_INIT_LOCK_FILE))).toBe(false);
+  });
+
+  test("a host without a git identity gets a Git commit identity warning, not a failure", async () => {
+    const report = await run(
+      { tracker: "jira", taskQuery: "project = APP", repoFromCwd: true, json: true },
+      {
+        processEnv: {
+          ...JIRA_ENV,
+          PATH: process.env.PATH,
+          HOME: join(root, "home"),
+          GIT_CONFIG_NOSYSTEM: "1",
+          GIT_CONFIG_GLOBAL: "/dev/null",
+        },
+        doctorOverrides: { checkGitIdentity: gitCommitIdentityCheck },
+      },
+    );
+    expect(report.result).toBe("success");
+    const identity = report.checks.find((check) => check.name === "git-identity");
+    expect(identity).toMatchObject({ label: "Git commit identity", status: "warn" });
+    expect(identity?.message).toContain("DevIntern <devintern@users.noreply.github.com>");
+    expect(identity?.hint).toContain("git_author_name");
   });
 
   test("0 matching tasks is a warning, not a failure", async () => {

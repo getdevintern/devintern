@@ -1,5 +1,6 @@
 import { executeGitCommandWithConfigLockRetry, hasConfigLockError } from "./git-exec";
 import { hasUncommittedWork, stageWorkTreeChanges } from "./git-stage";
+import { classifyCommitConfigError } from "./git-identity";
 import { Utils } from "./registry";
 
 /**
@@ -247,7 +248,7 @@ export async function commitChanges(
     author?: { name: string; email: string };
     cwd?: string;
   },
-): Promise<{ success: boolean; message: string; hookError?: string }> {
+): Promise<{ success: boolean; message: string; hookError?: string; configError?: string }> {
   const verbose = options?.verbose ?? false;
   const author = options?.author;
   const cwd = options?.cwd;
@@ -345,12 +346,23 @@ export async function commitChanges(
       };
     }
 
-    // Treat any commit failure as a potential hook/fixable error
+    const fullError = [commitResult.error, commitResult.output].filter(Boolean).join("\n").trim();
+
+    // Host configuration (no identity, broken signing) is not something the
+    // hook-fixing agent can or should repair: report it without `hookError`.
+    const configError = classifyCommitConfigError(fullError);
+    if (configError) {
+      return {
+        success: false,
+        message: `Failed to commit changes: ${configError}`,
+        configError,
+      };
+    }
+
+    // Treat any other commit failure as a potential hook/fixable error.
     // The full error context (stdout + stderr) will be passed to Agent
     // to diagnose and fix. This is more generic than keyword matching and
     // handles all types of commit failures (hooks, linting, tests, etc.)
-    const fullError = [commitResult.error, commitResult.output].filter(Boolean).join("\n").trim();
-
     return {
       success: false,
       message: `Failed to commit changes: ${commitResult.error}`,

@@ -84,6 +84,7 @@ function passingDeps(overrides: Partial<WorkerDoctorDeps> = {}): WorkerDoctorDep
     checkEntitlement: async () => ({ valid: true, source: "entitlement", message: "" }),
     checkHarness: async () => ok("harness"),
     checkSandbox: async () => ok("sandbox"),
+    checkGitIdentity: async () => ok("git-identity"),
     isPortInUse: async () => false,
     workerStatus: () => ({ status: "stopped" }),
     ...overrides,

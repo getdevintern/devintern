@@ -97,6 +97,27 @@ BITBUCKET_TOKEN=your-bitbucket-token
 
 Needs the `Repositories: Write` permission. Create it at [bitbucket.org/account/settings/app-passwords](https://bitbucket.org/account/settings/app-passwords/).
 
+## Commit identity
+
+DevIntern commits with whatever identity git already has on the host (`git config user.name` / `user.email`, or `GIT_AUTHOR_*` / `GIT_COMMITTER_*` in the environment) and never changes it. On a fresh machine with no git identity, it does not write any git config. Each commit uses the first identity found here:
+
+| Source                                    | Identity                                                                       |
+| ----------------------------------------- | ------------------------------------------------------------------------------ |
+| `git_author_name` + `git_author_email`    | The values you set (below)                                                     |
+| `GITHUB_TOKEN`                            | The token's GitHub user: display name (or login) and `<id>+<login>@users.noreply.github.com` |
+| GitLab code-host token                    | The token's GitLab user and its commit email                                   |
+| Nothing set                               | `DevIntern <devintern@users.noreply.github.com>`, with a warning in the log    |
+
+To pick the identity yourself, set both keys in `workspace.toml`. A `[[repos]]` entry can override the `[workspace]` values:
+
+```toml
+[workspace]
+git_author_name = "Acme DevIntern"
+git_author_email = "devintern@acme.example"
+```
+
+For runs outside a workspace, set `DEVINTERN_GIT_AUTHOR_NAME` and `DEVINTERN_GIT_AUTHOR_EMAIL` in `.env`. The customer-owned GitHub App mode commits as `slug[bot]` instead. `devintern worker doctor` shows the identity in its **Git commit identity** row.
+
 ## Agent harness
 
 `AGENT_HARNESS` selects the AI agent CLI. The default is `claude-code`. A comma-separated list such as `claude-code,codex` makes the worker switch to the next agent when one hits a usage limit. For models, effort, CLI paths, and per-harness notes, see [Agent Harness](./agent-harness.md).

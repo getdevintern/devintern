@@ -22,6 +22,7 @@ import { applyAgentSelectionEnv } from "../agent/selection";
 import type { AgentSelection } from "../agent/selection";
 import { ANALYTICS_CONFIG_DIR_ENV } from "../observability/analytics";
 import { WORKER_SUBPROCESS_ENV } from "../config/config-dir";
+import { GIT_AUTHOR_EMAIL_ENV, GIT_AUTHOR_NAME_ENV } from "../utils/git-identity";
 import {
   normalizeCodeHostUrl,
   parseGitLabHostAliases,
@@ -338,6 +339,13 @@ function composeRepoEnv(
   // when the config sets none, an env-provided value survives untouched.
   if (repo.prLabels && repo.prLabels.length > 0) {
     env.PR_LABELS = repo.prLabels.join(",");
+  }
+
+  // Commit identity for hosts without one (`utils/git-identity.ts`); a git
+  // identity configured on the host still wins.
+  if (repo.gitAuthor) {
+    env[GIT_AUTHOR_NAME_ENV] = repo.gitAuthor.name;
+    env[GIT_AUTHOR_EMAIL_ENV] = repo.gitAuthor.email;
   }
 
   applyAgentSelectionEnv(env, options.agentSelection);
