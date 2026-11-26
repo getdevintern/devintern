@@ -1,5 +1,7 @@
 import { spawn } from "child_process";
 import { statSync } from "fs";
+import { gitCredentialEnv, redactGitCredentials } from "./git-credentials";
+import { commitIdentityEnv, isGitCommitCommand } from "./git-identity";
 import { Utils } from "./registry";
 
 /**
@@ -24,12 +26,21 @@ export async function executeGitCommand(
     console.log(`🔧 Executing: git ${args.join(" ")}${cwd ? ` (in ${cwd})` : ""}`);
   }
 
+  const spawnCwd = cwd || process.cwd();
+  const callerEnv = options?.env ? { ...process.env, ...options.env } : process.env;
+  // A commit on a host without `user.name`/`user.email` gets the missing
+  // identity fields for this one process (`git-identity.ts`).
+  const identity = isGitCommitCommand(args)
+    ? await commitIdentityEnv(args, spawnCwd, callerEnv)
+    : undefined;
+  const baseEnv = identity ? { ...callerEnv, ...identity } : callerEnv;
+
   return new Promise((resolve) => {
     const useProcessGroup = Boolean(options?.timeoutMs) && process.platform !== "win32";
     const git = spawn("git", args, {
       stdio: ["pipe", "pipe", "pipe"],
-      cwd: cwd || process.cwd(),
-      env: options?.env ? { ...process.env, ...options.env } : process.env,
+      cwd: spawnCwd,
+      env: gitCredentialEnv(args, baseEnv, { cwd: spawnCwd }),
       detached: useProcessGroup,
     });
 
@@ -49,10 +60,10 @@ export async function executeGitCommand(
       settled = true;
       const result = {
         success: !timedOut && !spawnError && code === 0,
-        output: output.trim(),
+        output: redactGitCredentials(output.trim(), baseEnv),
         error: timedOut
           ? `Git command timed out after ${options?.timeoutMs}ms`
-          : spawnError?.message || error.trim(),
+          : redactGitCredentials(spawnError?.message || error.trim(), baseEnv),
       };
 
       if (verbose) {

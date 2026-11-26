@@ -1,3 +1,5 @@
+import { redactText } from "@devintern/utils";
+
 import { assertCurrentGitLabOrigin } from "../code-host/change-origin";
 import { createConflictChangeAdapter } from "./conflict-change-adapter";
 import type { ChangeRequestInfo } from "./conflict-change-adapter";
@@ -319,14 +321,18 @@ const MAX_PUBLIC_COMMENT_DETAIL_LENGTH = 300;
  * (console.error / result message).
  */
 export function sanitizeErrorForPublicComment(detail: string): string {
+  // The lookbehinds anchor each match to the start of its run so a long run
+  // without a match is scanned once, not from every offset.
   let sanitized = detail
     // URL credentials: https://user:token@host → https://***@host.
-    .replace(/[a-z][a-z0-9+.-]*:\/\/[^@\s/?]*@/gi, (match) => {
+    .replace(/(?<![a-z0-9+.-])[a-z][a-z0-9+.-]*:\/\/[^@\s/?]*@/gi, (match) => {
       const schemeEnd = match.indexOf(":");
       return `${match.slice(0, schemeEnd)}://***@`;
     })
     // Bare credential pairs: user:token@host → user:***@host.
-    .replace(/([^\s:@/'"]{1,256}):([^\s:@/'"]{1,1024})@/g, "$1:***@")
+    .replace(/(?<![^\s:@/'"])([^\s:@/'"]+):([^\s:@/'"]{1,1024})@/g, "$1:***@");
+  // Shared credential shapes (tokens, Bearer, PEM blocks, KEY=value secrets).
+  sanitized = redactText(sanitized)
     // Absolute local paths (POSIX and drive-letter form), keeping the delimiter.
     .replace(/(^|[\s"'=([])((?:\/|\w:\\)[\w@.+-]*(?:[/\\][\w@.+-]+)+)/g, "$1[path]")
     .replace(/\s+/g, " ")

@@ -617,7 +617,9 @@ describe.concurrent("CLI Argument Handling", () => {
       expect(output).not.toContain("team automation subscription");
       expect(output).not.toContain("single-repo automation only");
       expect(output).toContain("No repos configured");
-      expect(result.exitCode).toBe(1);
+      // A configuration error a restart cannot fix: EX_CONFIG, which the
+      // generated systemd unit does not restart.
+      expect(result.exitCode).toBe(78);
     } finally {
       try {
         rmSync(wsDir, { recursive: true, force: true });

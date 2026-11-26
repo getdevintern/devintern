@@ -310,6 +310,8 @@ export async function runTrackerSetup(
     writeEnv: (envContent: string) => Promise<string | null>;
     /** Hidden-input prompt for tokens; defaults to `prompt`. */
     promptSecret?: PromptFn;
+    /** Enter-for-default answers by env key (e.g. `GITHUB_REPO` from origin). */
+    stepDefaults?: Record<string, string>;
   },
 ): Promise<{ trackerId: string; values: Record<string, string>; envPath: string } | null> {
   const projectRoot = findProjectRoot({ startDir: cwd });
@@ -361,7 +363,13 @@ export async function runTrackerSetup(
   }
 
   if (!reusedExisting) {
-    await promptSteps(steps, prompt, log, values, promptSecret);
+    const prompted = steps.map((step) => {
+      const fallback = options.stepDefaults?.[step.key];
+      return fallback
+        ? { ...step, defaultValue: fallback, label: `${step.label} (origin: ${fallback})` }
+        : step;
+    });
+    await promptSteps(prompted, prompt, log, values, promptSecret);
   }
 
   if (trackerId === "markdown") {

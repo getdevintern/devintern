@@ -1,4 +1,5 @@
 import {
+  Bug,
   CircleAlert,
   GitMerge,
   GitPullRequest,
@@ -27,6 +28,7 @@ export const KIND_META: Record<NotificationKind, KindMeta> = {
   work_spawned: { label: "Spawned work", icon: Split, tone: "info" },
   pr_opened: { label: "PR opened", icon: GitPullRequest, tone: "success" },
   pr_auto_merged: { label: "PR auto-merged", icon: GitMerge, tone: "success" },
+  internal_error: { label: "DevIntern problem", icon: Bug, tone: "danger" },
 };
 
 export const TONE_ICON_CLASS: Record<StatusTone, string> = {

@@ -218,6 +218,7 @@ AGENT_HARNESS=claude-code
 #     Classic: 'repo' scope (or 'public_repo' for public repos only)
 #     Fine-grained: 'Pull requests: Read and write' + 'Contents: Read and write'
 #     Automatic CI fixes also need Actions (Read) and Commit statuses (Read).
+#     Auto-merge also needs Checks (Read) and Commit statuses (Read).
 #     (add 'Issues: Read and write' when TASK_TRACKER=github)
 # GITHUB_TOKEN=your-github-token-here
 #
@@ -230,6 +231,7 @@ AGENT_HARNESS=claude-code
 #     Install the App on your repositories after generating a private key.
 #     Permissions: Contents (Read and write), Pull requests (Read and write).
 #     Automatic CI fixes also need Actions and Commit statuses (Read).
+#     Auto-merge also needs Checks and Commit statuses (Read).
 #     Mentions/webhooks also need review-comment + issue-comment permissions:
 #     https://devintern.com/docs/code/github-integration
 # GITHUB_APP_ID=123456

@@ -129,13 +129,8 @@ function replaceLiteral(
 export function redactReportText(text: string, options: ReportRedactionOptions = {}): string {
   const maxChars = options.maxChars ?? 20_000;
   let out = stripAnsi(text ?? "");
+  // Shared credential shapes, including URL userinfo and query credentials.
   out = redactSecrets(out);
-  out = out
-    .replace(/(https?:\/\/)[^/\s:@]+:[^/\s@]+@/gi, "$1[redacted]@")
-    .replace(
-      /([?&](?:token|access_token|refresh_token|api[_-]?key|apikey|secret|password|signature|key)=)[^&\s]+/gi,
-      "$1[redacted]",
-    );
   out = out.replace(CONTROL_CHARACTERS, "");
   out = replaceLiteral(out, options.cwd ?? process.cwd(), "<repo>");
   out = replaceLiteral(out, options.homeDir ?? homedir(), "~");

@@ -41,12 +41,16 @@ import {
 import { isPromptAbort } from "../cli/prompt-abort";
 import { resolveWizardPrompts } from "../cli/prompt-session";
 import { WORKER_PILOT_OFFER, signInCommand } from "../account/worker-pilot";
+import { readinessBlockers } from "./worker-init-readiness";
+import type { ReadinessBlocker } from "./worker-init-readiness";
 import { renderReadinessReport } from "../observability/readiness";
 import type { ReadinessCheck } from "../observability/readiness";
+import { trackerRequiredEnv } from "../trackers/manager";
 import { runTrackerSetup } from "./wizard";
 import { PRManager } from "../code-host/index";
 import { connectRelayTarget, hasGitHubRelayRegistration, loadRelayState } from "../relay/connect";
 import { parseCronOrIntervalSchedule } from "../automation/config";
+import { Utils } from "../utils";
 import { writeSecretFile } from "../utils/secret-file";
 import { isValidTimeZone, parseTimeWindowSpec } from "../worker/schedule";
 import {
@@ -75,7 +79,6 @@ import type { SentryValidationOptions } from "./worker-sentry-setup";
 import {
   checkServiceManager,
   detectWorkerService,
-  installWorkerService,
   LAUNCHD_PLIST_NAME,
   manualServiceInstructions,
   renderLaunchdPlist,
@@ -89,6 +92,13 @@ import type {
   ServiceState,
   WorkerServiceDeps,
 } from "../worker/service";
+import { installAndStartWorkerService } from "../worker/service-control";
+import type { StartCheck } from "../worker/service-control";
+import {
+  SERVICE_RESTART_COMMAND,
+  dashboardUrlFor,
+  renderStartCheck,
+} from "../worker/service-report";
 
 export { renderLaunchdPlist, renderSystemdUnit } from "../worker/service";
 
@@ -150,6 +160,8 @@ export interface WorkerInitResult {
   ok: boolean;
   /** No failing readiness check (or license problem) is left after setup. */
   ready?: boolean;
+  /** Not ready, but only signing in remains (no failing check): exit code 2. */
+  signInOnly?: boolean;
 }
 
 export interface WorkerInitDeps {
@@ -232,6 +244,8 @@ export interface WorkerInitDeps {
     environmentPath: string;
     log: LogFn;
   }) => Promise<ServiceInstallResult>;
+  /** Override the honest start check after installing (tests). */
+  verifyServiceStart?: (ctx: { workspaceDir: string; since: number }) => Promise<StartCheck>;
 }
 
 interface InitUserLike {
@@ -263,7 +277,10 @@ interface WorkspaceSetup {
 }
 
 interface ServiceStepResult {
+  /** The worker was confirmed running under the service. */
   serviceRunning: boolean;
+  /** A service now manages the worker (running, starting, or failed). */
+  serviceInstalled?: boolean;
   serviceInstall: ServiceInstallOutcome;
 }
 
@@ -448,7 +465,14 @@ function applyEnvFile(envPath: string): Record<string, string> {
   return env;
 }
 
-async function defaultEnsureTracker(
+/** `owner/repo` of the checkout's GitHub `origin`, or null (no origin, not GitHub). */
+async function originGitHubSlug(cwd: string): Promise<string | null> {
+  const result = await Utils.executeGitCommand(["remote", "get-url", "origin"], { cwd });
+  const remote = result.success ? result.output.trim() : "";
+  return remote ? gitHubSlugFromRemote(remote) : null;
+}
+
+export async function defaultEnsureTracker(
   cwd: string,
   prompt: PromptFn,
   promptSecret: PromptFn,
@@ -468,9 +492,27 @@ async function defaultEnsureTracker(
   const shared = applyEnvFile(sharedEnvPath);
   if (shared.TASK_TRACKER) return shared.TASK_TRACKER.toLowerCase();
 
+  // `worker init --non-interactive` records the tracker in `[defaults].tracker`
+  // (workspace.toml is the source of truth) and its credentials in the workspace
+  // `.env`, without TASK_TRACKER. Treat that pair as configured.
+  const workspaceDir = resolveWorkspaceDir();
+  const configPath = workspaceConfigPath(workspaceDir);
+  const configured = existsSync(configPath) ? loadWorkspaceConfig(configPath).defaults.tracker : "";
+  if (
+    configured &&
+    trackerRequiredEnv(configured).every((key) => shared[key] || process.env[key])
+  ) {
+    log(`   Using ${configured} from ${configPath}`);
+    // The later steps (query dry run, readiness) build their client from this.
+    process.env.TASK_TRACKER ??= configured.toLowerCase();
+    return configured.toLowerCase();
+  }
+
   log("   No tracker config yet — running that subset of `devintern init`.");
+  const originSlug = await originGitHubSlug(cwd);
   const result = await runTrackerSetup(prompt, log, defaultProbe, cwd, {
     promptSecret,
+    stepDefaults: originSlug ? { GITHUB_REPO: originSlug } : undefined,
     writeEnv: async (envContent) => {
       mergeIntoSharedEnv(sharedEnvPath, envContent, log);
       return sharedEnvPath;
@@ -1109,16 +1151,27 @@ async function installServiceStep(
   printManual: () => void,
 ): Promise<ServiceStepResult> {
   const { execPath, runtimePath, environmentPath } = runtime;
-  const result = ctx.deps.installService
-    ? await ctx.deps.installService({
-        workspaceDir,
-        execPath,
-        runtimePath,
-        environmentPath,
-        log: ctx.log,
-      })
-    : await installWorkerService(
-        { workspaceDir, execPath, runtimePath, environmentPath },
+  const since = Date.now();
+  const verify = ctx.deps.verifyServiceStart;
+  const { install: result, start } = ctx.deps.installService
+    ? {
+        install: await ctx.deps.installService({
+          workspaceDir,
+          execPath,
+          runtimePath,
+          environmentPath,
+          log: ctx.log,
+        }),
+        start: undefined,
+      }
+    : await installAndStartWorkerService(
+        {
+          workspaceDir,
+          execPath,
+          runtimePath,
+          environmentPath,
+          waitForStart: verify ? (from) => verify({ workspaceDir, since: from }) : undefined,
+        },
         runtime.deps,
       );
 
@@ -1131,30 +1184,39 @@ async function installServiceStep(
 
   ctx.log(
     result.updated
-      ? "✅ devintern-worker service updated and restarted."
-      : "✅ devintern-worker service installed and running.",
+      ? "✅ devintern-worker service updated and restarted; waiting for the worker..."
+      : "✅ devintern-worker service installed; waiting for the worker to start...",
   );
-  ctx.log("   Open http://localhost:4400 to verify worker status and runs.");
+  const check =
+    start ?? (verify ? await verify({ workspaceDir, since }) : { state: "running" as const });
+  for (const line of renderStartCheck(check, { platform: runtime.platform, workspaceDir })) {
+    ctx.log(line);
+  }
   if (result.warning) {
     ctx.log(`⚠️  ${result.warning}`);
+  } else if (runtime.platform === "linux") {
+    ctx.log("   User lingering is on, so the service starts at boot and survives logout.");
   }
-  ctx.log(
-    runtime.platform === "linux"
-      ? result.warning
-        ? "   Run `loginctl enable-linger` to start the worker at boot before login."
-        : "   User lingering was enabled so the service starts at boot and survives logout."
-      : "   Stop it with: launchctl bootout gui/$(id -u)/com.devintern.worker",
-  );
-  return { serviceRunning: true, serviceInstall: result.updated ? "updated" : "installed" };
+  ctx.log("   Manage it with `devintern worker service status|restart|stop|logs`.");
+  return {
+    serviceRunning: check.state === "running",
+    serviceInstalled: true,
+    serviceInstall: result.updated ? "updated" : "installed",
+  };
 }
 
 /**
  * Step 9: offer to install and launch the native user service. The foreground
  * command remains an honest supported path on every platform, and a declined
  * offer (or a failed automatic install) keeps the manual
- * write-definition-and-print-instructions path alive.
+ * write-definition-and-print-instructions path alive. With readiness
+ * blockers the service is not offered: it would only start a failing worker.
  */
-async function runServiceStep(ctx: InitContext, workspaceDir: string): Promise<ServiceStepResult> {
+async function runServiceStep(
+  ctx: InitContext,
+  workspaceDir: string,
+  blockers: ReadinessBlocker[],
+): Promise<ServiceStepResult> {
   ctx.log("\n9️⃣  Background service (optional)");
   const platform = ctx.deps.platform ?? process.platform;
   const writeFile = ctx.deps.writeFile ?? ((path, content) => writeFileSync(path, content, "utf8"));
@@ -1212,47 +1274,24 @@ async function runServiceStep(ctx: InitContext, workspaceDir: string): Promise<S
     return { serviceRunning: state.active, serviceInstall: "existing" };
   }
 
+  if (blockers.length > 0) {
+    // Installing now would start a worker that exits (or crash-loops) at
+    // once; the closing summary lists what to do first.
+    ctx.log("   Not installed yet: the worker would not start until the steps below are done.");
+    ctx.log("   Then install it with: devintern worker service install");
+    return {
+      serviceRunning: false,
+      serviceInstalled: state.installed,
+      serviceInstall: "not_ready",
+    };
+  }
+
   const accepted = await confirmServiceInstall(ctx, state, platform);
   if (!accepted) {
     printManual();
     return { serviceRunning: false, serviceInstall: "declined" };
   }
   return installServiceStep(ctx, workspaceDir, runtime, printManual);
-}
-/**
- * What still keeps the worker from running, one line each: the failing
- * readiness checks when they ran, otherwise the license step's result.
- *
- * @param checks - `worker doctor` checks, or undefined when they did not run
- * @param licenseFailure - License step outcome (null when entitled)
- */
-export function readinessBlockers(
-  checks: ReadinessCheck[] | undefined,
-  licenseFailure: string | null | undefined,
-): ReadinessBlocker[] {
-  if (checks) {
-    return checks
-      .filter((check) => check.status === "fail" || check.status === "action")
-      .map((check) => ({
-        text: `${check.label}: ${check.hint ?? check.detail ?? "see the check above"}`,
-        action: check.status === "action",
-      }));
-  }
-  if (licenseFailure) {
-    return [
-      {
-        text: `Automation entitlement: run \`${signInCommand()}\` to begin your ${WORKER_PILOT_OFFER}, or set LICENSE_KEY in the workspace .env`,
-        action: false,
-      },
-    ];
-  }
-  return [];
-}
-
-/** Something that keeps the worker from starting; `action` is a step, not a failure. */
-export interface ReadinessBlocker {
-  text: string;
-  action: boolean;
 }
 
 /** Run the `worker doctor` checks and print them; undefined when they cannot run. */
@@ -1273,25 +1312,26 @@ async function logReadiness(
   }
 }
 
-/** Command that restarts the installed user service after a fix. */
-function serviceRestartCommand(platform: NodeJS.Platform): string {
-  return platform === "darwin"
-    ? `launchctl kickstart -k gui/$(id -u)/com.devintern.worker`
-    : "systemctl --user restart devintern-worker";
-}
-
 /** Print the closing summary and the GitHub App / relay guidance. */
 function logWorkerNextSteps(
   ctx: InitContext,
   outcome: {
     serviceRunning: boolean;
+    serviceInstalled: boolean;
     githubAppOutcome: GitHubAppOutcome;
     relayConnected: boolean;
     blockers: ReadinessBlocker[];
+    dashboardUrl?: string | null;
   },
 ): void {
-  const { serviceRunning, githubAppOutcome, relayConnected, blockers } = outcome;
-  if (blockers.length > 0) {
+  const { serviceRunning, serviceInstalled, githubAppOutcome, relayConnected, blockers } = outcome;
+  if (blockers.length === 0 && serviceInstalled && !serviceRunning) {
+    ctx.log(
+      "\n⚠️  Worker setup saved, but the service has not confirmed a running worker (see above).",
+    );
+    ctx.log("   Check it with `devintern worker service status`; after a fix:");
+    ctx.log(`   ${SERVICE_RESTART_COMMAND}`);
+  } else if (blockers.length > 0) {
     // Same wording as `worker doctor` and `worker init --non-interactive`:
     // a missing sign-in is one step left, not a broken setup.
     ctx.log(
@@ -1300,12 +1340,11 @@ function logWorkerNextSteps(
         : "\n⚠️  Worker setup saved, but the worker is not ready yet. Next steps:",
     );
     blockers.forEach((blocker, index) => ctx.log(`   ${index + 1}. ${blocker.text}`));
-    const platform = ctx.deps.platform ?? process.platform;
     ctx.log(
       `   ${blockers.length + 1}. Check again with \`devintern worker doctor\`, then ` +
-        (serviceRunning
-          ? `restart the service: ${serviceRestartCommand(platform)}`
-          : "start it with `devintern worker`."),
+        (serviceRunning || serviceInstalled
+          ? `restart the service: ${SERVICE_RESTART_COMMAND}`
+          : "install the background service with `devintern worker service install` (or run `devintern worker` in a terminal)."),
     );
   } else {
     ctx.log("\n🎉 Worker setup complete — the worker is ready.");
@@ -1315,7 +1354,7 @@ function logWorkerNextSteps(
     } else {
       ctx.log("   1. Run `devintern worker`.");
     }
-    ctx.log("   2. Open http://localhost:4400 to see worker status and runs.");
+    ctx.log(`   2. Open ${outcome.dashboardUrl ?? "the dashboard"} to see worker status and runs.`);
     ctx.log("   3. Tasks matching your query use managed clones — your checkout is left alone.");
   }
   if (githubAppOutcome !== "skipped") return;
@@ -1415,15 +1454,19 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
     // advanced, no-relay path for air-gapped/direct installations only.
     const githubAppOutcome = await runGitHubAppStep(ctx, workspaceDir, relay.relayConnected);
 
-    // 9. Offer to install and launch the native user service.
-    const service = await runServiceStep(ctx, workspaceDir);
-
-    // Close with the doctor's verdict, so "complete" never hides a worker
-    // that will refuse to start (no license, no agent CLI, missing folder).
+    // The doctor's verdict comes before the service step, so the wizard never
+    // installs a worker that will refuse to start (no license, no agent CLI,
+    // missing folder), and the closing summary never calls that complete.
     const checks = await logReadiness(ctx, workspaceDir);
     const blockers = readinessBlockers(checks, licenseFailure);
+
+    // 9. Offer to install and launch the native user service.
+    const service = await runServiceStep(ctx, workspaceDir, blockers);
+
     logWorkerNextSteps(ctx, {
+      dashboardUrl: dashboardUrlFor(workspaceDir),
       serviceRunning: service.serviceRunning,
+      serviceInstalled: service.serviceInstalled === true,
       githubAppOutcome,
       relayConnected: relay.relayConnected,
       blockers,
@@ -1435,7 +1478,11 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
       serviceInstall: service.serviceInstall,
       githubApp: githubAppOutcome,
     });
-    return { ok: true, ready: blockers.length === 0 };
+    return {
+      ok: true,
+      ready: blockers.length === 0,
+      signInOnly: blockers.length > 0 && blockers.every((blocker) => blocker.action),
+    };
   } finally {
     session.close();
   }

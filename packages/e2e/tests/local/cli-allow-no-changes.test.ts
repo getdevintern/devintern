@@ -75,7 +75,11 @@ test.skipIf(!existsSync(cliPath))(
       assertNoDeliveryClaims(result.stdout);
 
       expect(run.runRecords()).toEqual([
-        expect.objectContaining({ status: "failed", pr_url: null, outcome_reason: NOT_COMMITTED }),
+        expect.objectContaining({
+          status: "failed",
+          pr_url: null,
+          outcome_reason: `commit: ${NOT_COMMITTED}`,
+        }),
       ]);
       expect(run.agentInvocations().map((invocation) => invocation.mode)).toEqual(["no-change"]);
     } finally {
@@ -186,7 +190,7 @@ test.skipIf(!existsSync(cliPath))(
           tracker: "jira",
           status: "failed",
           pr_url: null,
-          outcome_reason: NOT_COMMITTED,
+          outcome_reason: `commit: ${NOT_COMMITTED}`,
         }),
       ]);
       expect(await failedTracker.getStatus(failedSeed.issue.key)).toBe(failedStatuses.todoStatus);

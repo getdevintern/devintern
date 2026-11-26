@@ -176,6 +176,16 @@ export function workspaceAppliedConfigPath(workspaceDir: string = resolveWorkspa
   return join(workspaceDir, ".worker.config-state.json");
 }
 
+/**
+ * Path of the worker's lifecycle record: whether the last worker process
+ * finished starting, stopped cleanly, or failed before it started (and why).
+ * `worker status` and `worker service` read it once the lock is gone; see
+ * `worker/lifecycle.ts`.
+ */
+export function workspaceWorkerLifecyclePath(workspaceDir: string = resolveWorkspaceDir()): string {
+  return join(workspaceDir, ".worker.lifecycle.json");
+}
+
 /** Shape of the worker's early startup marker. */
 export interface WorkerStartMarker {
   pid: number;

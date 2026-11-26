@@ -14,6 +14,7 @@ import {
   settleEstimationBaseline,
 } from "../state/estimation-state";
 import { beginRun } from "../state/run-recorder";
+import { failureFromError } from "../state/run-outcome";
 import { finishTaskRun } from "../state/task-run";
 import { TaskFormatter } from "../task/formatter";
 import { normalizeTaskKeys } from "../task/normalize-task-keys";
@@ -291,7 +292,9 @@ export async function runEstimationBatch(input: EstimationBatchInput): Promise<v
         tracker: process.env.TASK_TRACKER || "jira",
         stage: "estimate",
       });
-      await finishTaskRun("failed", (error as Error).message);
+      await finishTaskRun("failed", (error as Error).message, {
+        failure: failureFromError(error, "estimate"),
+      });
     }
   }
 

@@ -23,7 +23,14 @@ import {
   runAutoReviewLoop,
 } from "../review/auto-review-loop";
 import { recordIncompleteAttempt } from "../state/retry-state";
-import { recordRunStage } from "../state/run-recorder";
+import { noteRunFailure, recordRunStage } from "../state/run-recorder";
+import {
+  failureFromError,
+  failureStageName,
+  formatFailureCause,
+  tagOutcomeClass,
+} from "../state/run-outcome";
+import type { RunFailure } from "../state/run-outcome";
 import { postImplementationComment } from "../task/implementation-comment";
 import { Utils } from "../utils";
 import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "./git-hook-fixer";
@@ -59,6 +66,8 @@ export interface DeliveryState extends PipelineContext {
   noChanges: boolean;
   /** Set when the stacked base closed unmerged mid-run (see `stack-base-guard.ts`). */
   stackBlocked?: string;
+  /** Host configuration that made the commit fail (no git identity, broken signing). */
+  commitConfigError?: string;
 }
 
 /** Commit once, allowing the agent to repair pre-commit hook failures. */
@@ -73,6 +82,11 @@ async function commitWithHookRetry(ctx: FinalizeContext, taskKey: string, taskSu
     if (result.success) {
       console.log(`✅ ${result.message}`);
       return { success: true, result };
+    }
+    if (result.configError) {
+      // Host configuration, not a hook: an agent cannot fix it, so fail fast.
+      console.log(`\n❌ ${result.message}`);
+      return { success: false, result };
     }
     if (result.hookError && attempt <= ctx.hookRetries) {
       console.log(`\n⚠️  Git hook failed (attempt ${attempt}/${ctx.hookRetries + 1})`);
@@ -250,6 +264,10 @@ export async function commitImplementation(state: DeliveryState): Promise<boolea
     state.committed = true;
     return true;
   }
+  if ("configError" in outcome.result && outcome.result.configError) {
+    state.commitConfigError = outcome.result.configError;
+    return false;
+  }
 
   const noChanges = outcome.result.message === "No changes to commit";
   const headAdvanced = noChanges && (await headAdvancedDuringRun(ctx));
@@ -426,6 +444,24 @@ async function prepareArtifactPublication(
   return undefined;
 }
 
+/**
+ * Classify a failed push: a pre-push hook the agent could not satisfy is the
+ * agent's work failing; any other push failure is DevIntern's git step (or
+ * the environment, for credentials and network).
+ *
+ * `hookError` alone does not prove a hook ran: the push helper sets it for
+ * every failure except divergence, so the repo must also have a pre-push
+ * hook. A hook failure is classed `agent` without the environment check,
+ * because the hook's test output can mention `ECONNREFUSED` or `429`.
+ */
+async function notePushFailure(result: { message?: string; hookError?: unknown }): Promise<void> {
+  const error = new Error(`push failed: ${result.message ?? "unknown error"}`);
+  if (result.hookError && (await Utils.hasPrePushHook())) {
+    tagOutcomeClass(error, "agent", { definite: true });
+  }
+  noteRunFailure(failureFromError(error, "publish"));
+}
+
 /** Push, comment, and create a PR after the commit/review phases. */
 export async function publishImplementation(state: DeliveryState): Promise<TaskStepResult | void> {
   const ctx = state.context;
@@ -443,6 +479,7 @@ export async function publishImplementation(state: DeliveryState): Promise<TaskS
     }
     const pushed = await state.helpers.pushWithHookRetry();
     if (!pushed.success) {
+      await notePushFailure(pushed.result);
       console.log("   Cannot create PR without pushing branch to remote");
       return { kind: "halt", haltKind: "stop", reason: "Push failed" };
     }
@@ -568,7 +605,12 @@ const commitStep: TaskStep<DeliveryState> = {
       return { kind: "continue", data: { skipped: true } };
     }
     if (!(await commitImplementation(state))) {
-      return { kind: "halt", reason: "Implementation was not committed" };
+      return {
+        kind: "halt",
+        reason: state.commitConfigError
+          ? `Implementation was not committed: ${state.commitConfigError}`
+          : "Implementation was not committed",
+      };
     }
     if (state.noChanges) {
       // Nothing to commit means there is also nothing to verify, review, or
@@ -764,6 +806,31 @@ function unguardedDeliverySteps(state: DeliveryState): readonly TaskStep<Deliver
   ];
 }
 
+/**
+ * Classify a delivery halt for the run record. A closed stacked base is a
+ * hold for a human (not breakage); any other halt is the agent's work
+ * stopping short (findings it could not fix, a hook it could not satisfy,
+ * nothing committed). DevIntern-side failures (verify machinery, push) are
+ * noted earlier at their own catch sites, and the first note wins.
+ *
+ * @param step - Step that halted
+ * @param reason - Halt reason
+ * @param stackBlocked - Why the stacked base blocks the run, when it does
+ */
+export function deliveryHaltFailure(
+  step: string,
+  reason: string,
+  stackBlocked: string | undefined,
+): RunFailure {
+  if (stackBlocked) return { outcomeClass: "review_hold", stage: "stack_base" };
+  const cause = formatFailureCause(reason);
+  return {
+    outcomeClass: "agent",
+    stage: failureStageName(step),
+    ...(cause ? { cause } : {}),
+  };
+}
+
 /** Run the existing commit, review, and publish flow as separate steps. */
 export function finalizeAgentRun(ctx: FinalizeContext): void {
   const outputDir = ctx.taskKey
@@ -820,6 +887,15 @@ export function finalizeAgentRun(ctx: FinalizeContext): void {
   };
   runTaskSteps(deliverySteps(state), state)
     .then(async (result) => {
+      if (
+        result.kind === "halted" &&
+        result.haltKind !== "noop" &&
+        (result.haltKind !== "stop" ||
+          state.stackBlocked ||
+          ["commit", "auto-review", "publish"].includes(result.step))
+      ) {
+        noteRunFailure(deliveryHaltFailure(result.step, result.reason, state.stackBlocked));
+      }
       // A stacked base that closed unmerged is an escalation from any step:
       // the work is fine, it has no base to land on. `settleImplementationRun`
       // escalates on `activeTaskContext.stackBlocked` (set by the guard) even

@@ -4,7 +4,7 @@ sidebarLabel: "Configuration"
 description: "Use when setting up the .env file, choosing a task tracker, connecting GitHub or Bitbucket, or finding the page for agent, sandbox, and advanced settings in DevIntern Code."
 section: "Automation Reference"
 order: 0
-dateModified: 2026-11-18
+dateModified: 2026-11-26
 ---
 
 # DevIntern Code Configuration
@@ -69,9 +69,9 @@ Set `GITHUB_TOKEN` for CLI runs and for workspace automation. A workspace paired
 | `@devintern-ai` on any PR                                     | `GITHUB_TOKEN` + relay + DevIntern AI App installation |
 | Air-gapped mentions, `devintern webhook serve`, or custom `slug[bot]` attribution | Customer-owned GitHub App (below)   |
 
-**Token permissions.** A classic token needs the `repo` scope. A fine-grained token (recommended) needs `Contents: Read and write` and `Pull requests: Read and write`. Add `Actions: Read` and `Commit statuses: Read` when `[workspace].ci_failure_fix = true`, and `Issues: Read and write` when `TASK_TRACKER=github`. Create tokens at [github.com/settings/tokens](https://github.com/settings/tokens).
+**Token permissions.** A classic token needs the `repo` scope. A fine-grained token (recommended) needs `Contents: Read and write` and `Pull requests: Read and write`. Add `Commit statuses: Read` when `[workspace].auto_merge = true` (auto-merge reads every PR's CI checks, including PRs that only touch safe paths; fine-grained tokens cannot be granted `Checks`, so status comments then report check runs by count instead of by name, while a GitHub App or a classic token can read their names), `Actions: Read` and `Commit statuses: Read` when `[workspace].ci_failure_fix = true`, and `Issues: Read and write` when `TASK_TRACKER=github`. Create tokens at [github.com/settings/tokens](https://github.com/settings/tokens).
 
-> `Contents` must be **Read and write**. With read-only Contents, task fetching and PR reads work but `git push` fails with `403`. Pushes use git's own credentials, and an exported `GITHUB_TOKEN` takes precedence over a `gh` keyring login. SSH remotes use your SSH keys. The worker test-pushes each GitHub HTTPS remote at startup and warns if the push is rejected.
+> `Contents` must be **Read and write**. With read-only Contents, task fetching and PR reads work but `git push` fails with `403`. For `https://github.com` remotes, clones, fetches, and pushes use `GITHUB_TOKEN` when git has no credential helper of its own; the token is passed to git in memory, never written to `.git/config` or a remote URL. A configured helper (for example `gh auth setup-git` or a keychain) is used instead, and `gh` itself serves an exported `GITHUB_TOKEN` ahead of its keyring login. SSH remotes use your SSH keys. The worker test-pushes each GitHub HTTPS remote at startup and warns if the push is rejected.
 
 **Bot aliases.** Relay-backed workspaces recognize `@devintern-ai` automatically. To treat other bot logins as mentions too, set `GITHUB_BOT_ALIASES` to a comma-separated list (with or without the `[bot]` suffix).
 
@@ -85,7 +85,7 @@ GITHUB_APP_PRIVATE_KEY_PATH=/secure/path/to/your-app.private-key.pem
 # or, for CI: GITHUB_APP_PRIVATE_KEY_BASE64=$(base64 -w 0 your-app.private-key.pem)
 ```
 
-You need both the ID and a private key. An ID on its own does nothing. Create the App under **Settings → Developer settings → GitHub Apps** with repository permissions **Contents**, **Pull requests**, and **Issues** set to Read and write, plus **Actions** and **Commit statuses** set to Read if automatic CI fixes are on. Generate a private key and install the App on your repositories. The webhook server needs more permissions; see [GitHub Webhooks and PR Automation](./github-integration.md#update-app-permissions).
+You need both the ID and a private key. An ID on its own does nothing. Create the App under **Settings → Developer settings → GitHub Apps** with repository permissions **Contents**, **Pull requests**, and **Issues** set to Read and write, plus **Checks** and **Commit statuses** set to Read if auto-merge is on, and **Actions** and **Commit statuses** set to Read if automatic CI fixes are on. Generate a private key and install the App on your repositories. The webhook server needs more permissions; see [GitHub Webhooks and PR Automation](./github-integration.md#update-app-permissions).
 
 When both a token and an App are configured, relay workspaces use only `GITHUB_TOKEN`, no-relay workspaces and `devintern webhook serve` prefer the App, and the CLI prefers `GITHUB_TOKEN` when it creates PRs.
 
@@ -96,6 +96,27 @@ BITBUCKET_TOKEN=your-bitbucket-token
 ```
 
 Needs the `Repositories: Write` permission. Create it at [bitbucket.org/account/settings/app-passwords](https://bitbucket.org/account/settings/app-passwords/).
+
+## Commit identity
+
+DevIntern commits with whatever identity git already has on the host (`git config user.name` / `user.email`, or `GIT_AUTHOR_*` / `GIT_COMMITTER_*` in the environment) and never changes it. On a fresh machine with no git identity, it does not write any git config. Each commit uses the first identity found here:
+
+| Source                                    | Identity                                                                       |
+| ----------------------------------------- | ------------------------------------------------------------------------------ |
+| `git_author_name` + `git_author_email`    | The values you set (below)                                                     |
+| `GITHUB_TOKEN`                            | The token's GitHub user: display name (or login) and `<id>+<login>@users.noreply.github.com` |
+| GitLab code-host token                    | The token's GitLab user and its commit email                                   |
+| Nothing set                               | `DevIntern <devintern@users.noreply.github.com>`, with a warning in the log    |
+
+To pick the identity yourself, set both keys in `workspace.toml`. A `[[repos]]` entry can override the `[workspace]` values:
+
+```toml
+[workspace]
+git_author_name = "Acme DevIntern"
+git_author_email = "devintern@acme.example"
+```
+
+For runs outside a workspace, set `DEVINTERN_GIT_AUTHOR_NAME` and `DEVINTERN_GIT_AUTHOR_EMAIL` in `.env`. The customer-owned GitHub App mode commits as `slug[bot]` instead. `devintern worker doctor` shows the identity in its **Git commit identity** row.
 
 ## Agent harness
 

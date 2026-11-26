@@ -18,7 +18,13 @@ import {
   workspaceCodeStateDir,
   workspaceConfigPath,
 } from "../workspace/paths";
+import { startWorkerCapture } from "../observability/worker-capture";
 import { parseRunNowArgs, runWorkerRunNow } from "./run-now";
+import {
+  armWorkerStartupGuard,
+  exitWorkerStartupPermanently,
+  isPermanentLicenseDenial,
+} from "./startup";
 
 export { parseRunNowArgs, runWorkerRunNow };
 
@@ -158,12 +164,15 @@ async function runWorkerRunNowSubcommand(args: string[]): Promise<never> {
  */
 async function runWorkerDoctorSubcommand(args: string[]): Promise<never> {
   if (hasHelpArg(args)) {
-    console.log("Usage: devintern worker doctor [--workspace <path>] [--offline]");
+    console.log(
+      "Usage: devintern worker doctor [--workspace <path>] [--offline] [--json] [--test-notifications]",
+    );
     console.log("");
     console.log("Check whether this worker workspace can acquire and run work right now:");
     console.log("workspace.toml, per-team tracker credentials, ready-tasks query dry-runs,");
     console.log("repository access, automation entitlement, harness and sandbox, and the");
-    console.log("dashboard port. Changes nothing and does not start the worker.");
+    console.log("dashboard port, and notification channels. Changes nothing and does not");
+    console.log("start the worker (--test-notifications sends one test message per channel).");
     console.log("Exits 1 when a check fails, 2 when the only thing left is a step for you");
     console.log("(signing in to start the Worker Pilot), and 0 when ready.");
     console.log("");
@@ -171,11 +180,18 @@ async function runWorkerDoctorSubcommand(args: string[]): Promise<never> {
     console.log("  --workspace <path>  Use this workspace.toml (default: ~/.devintern/");
     console.log("                      workspace.toml, or DEVINTERN_WORKSPACE_DIR)");
     console.log("  --offline           Skip query, repository, and license checks (no network)");
+    console.log("  --json              Print one JSON document (schema devintern.worker-doctor)");
+    console.log(
+      "                      with result, checks, and nextSteps instead of the checklist",
+    );
+    console.log("  --test-notifications  Send a test message through each [notifications] channel");
     console.log("  -h, --help          Display this help message");
     process.exit(0);
   }
   let workspacePath: string | undefined;
   let offline = false;
+  let testNotifications = false;
+  let json = false;
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg === "--workspace") {
@@ -188,6 +204,10 @@ async function runWorkerDoctorSubcommand(args: string[]): Promise<never> {
       i++;
     } else if (arg === "--offline") {
       offline = true;
+    } else if (arg === "--test-notifications") {
+      testNotifications = true;
+    } else if (arg === "--json") {
+      json = true;
     } else {
       console.error(`❌ Unknown option for worker doctor: ${arg}`);
       console.error("   Run `devintern worker doctor --help` for usage.");
@@ -207,7 +227,21 @@ async function runWorkerDoctorSubcommand(args: string[]): Promise<never> {
   } catch {
     // Unreadable workspace .env: the config check reports the workspace state.
   }
-  const checks = await collectWorkerDoctorChecks({ workspacePath, offline }, { processEnv });
+  const checks = await collectWorkerDoctorChecks(
+    { workspacePath, offline, testNotifications },
+    { processEnv },
+  );
+  if (json) {
+    const { buildWorkerDoctorReport, readinessExitCode } =
+      await import("../observability/readiness-json");
+    const document = buildWorkerDoctorReport(checks, {
+      workspaceDir,
+      offline,
+      env: { ...process.env },
+    });
+    console.log(JSON.stringify(document, null, 2));
+    process.exit(readinessExitCode(document.result));
+  }
   const report = renderReadinessReport(checks);
   console.log(`🩺 devintern worker readiness${offline ? " (offline)" : ""}:\n`);
   console.log(report.lines.join("\n"));
@@ -228,7 +262,7 @@ const WORKER_INIT_USAGE = [
   "  --no-service        Skip the install-and-launch offer for the systemd/launchd service",
   "",
   "Non-interactive mode (coding agents, scripts, SSH without a TTY):",
-  "  --non-interactive   Set up from flags; never prompts, signs in, pairs, or installs",
+  "  --non-interactive   Set up from flags; never prompts, pairs, or installs (signs in only with --sign-in)",
   "  --tracker <id>      Tracker the worker polls (jira, linear, github, ...)",
   "  --task-query <q>    Ready-tasks query, written to [defaults].task_query",
   "  --repo-from-cwd     Register the current Git repository (uses its origin remote)",
@@ -374,7 +408,7 @@ async function runWorkerInitSubcommand(args: string[]): Promise<never> {
       setup: true,
       loginCommand: "devintern worker login",
     });
-  let ok = false;
+  let exitCode = 1;
   try {
     const result = await runWorkerInit({
       noService: args.some((arg) => arg === "--no-service"),
@@ -401,7 +435,9 @@ async function runWorkerInitSubcommand(args: string[]): Promise<never> {
         );
       },
     });
-    ok = result.ok;
+    // Same codes as `worker init --non-interactive`: 0 ready, 2 only sign-in
+    // is left, 1 a blocking check failed (or setup did not finish).
+    exitCode = !result.ok ? 1 : result.ready ? 0 : result.signInOnly ? 2 : 1;
   } catch (error) {
     if (!isPromptAbort(error)) throw error;
     console.log(
@@ -409,7 +445,7 @@ async function runWorkerInitSubcommand(args: string[]): Promise<never> {
     );
   }
   await flushAnalytics();
-  process.exit(ok ? 0 : 1);
+  process.exit(exitCode);
 }
 
 /** Parse daemon flags, load the workspace, gate on license, and run the worker. */
@@ -456,6 +492,9 @@ async function runWorkerDaemon(args: string[]): Promise<void> {
       );
       console.log("       devintern worker connect [target] [--workspace <path>]");
       console.log(
+        "       devintern worker service <install|start|stop|restart|status|uninstall|logs>",
+      );
+      console.log(
         "       devintern worker <runs|stats|automations|prs|queue|status|overview|logs> [--json]",
       );
       console.log("");
@@ -483,6 +522,7 @@ async function runWorkerDaemon(args: string[]): Promise<void> {
       console.log("  connect             Configure relay integrations or Sentry auto-fixes");
       console.log("  run-now             One immediate drain, ignoring working windows");
       console.log("  doctor              Check workspace readiness without starting the worker");
+      console.log("  service             Install, start, stop, or inspect the background service");
       console.log("");
       console.log("Read-only dashboard data (no dashboard, worker, or network needed; --json");
       console.log("prints the matching /api response body):");
@@ -515,6 +555,16 @@ async function runWorkerDaemon(args: string[]): Promise<void> {
   const selectedWorkspaceDir = workspacePath
     ? dirname(resolve(workspacePath))
     : resolveWorkspaceDir();
+  // Capture output and arm the startup record before anything can fail, so a
+  // license or config failure under a service lands in worker.*.log and in
+  // `worker status` / `worker service status`, not only in the journal.
+  // startWorker() reuses this capture.
+  try {
+    startWorkerCapture(selectedWorkspaceDir);
+  } catch {
+    // Never block the daemon on log capture.
+  }
+  armWorkerStartupGuard(selectedWorkspaceDir);
   ensureWorkspaceCodeState(selectedWorkspaceDir);
   applyWorkspaceProcessEnv(selectedWorkspaceDir);
   initSentryOnce(`code@${VERSION}`);
@@ -534,17 +584,93 @@ async function runWorkerDaemon(args: string[]): Promise<void> {
     allowTrial: true,
     loginCommand,
   });
+  if (!licenseResult.valid) {
+    await exitOnLicenseDenial(licenseResult, loginCommand);
+  }
   await enforceLicenseOrExit(licenseResult);
   if (licenseResult.source === "trial") {
     process.env.DEVINTERN_WORKER_TRIAL = "1";
   }
 
   const { runWorkspaceWorker } = await import("../workspace/workspace-worker");
+  try {
+    await startWorkspaceDaemon(runWorkspaceWorker, {
+      workspacePath,
+      verbose,
+      supabaseConfig,
+      loginCommand,
+      trialAvailable: licenseResult.trialAvailable === true,
+    });
+  } catch (error) {
+    await exitOnStartupError(error, loginCommand);
+  }
+}
+
+/** Print a failed license check with its fix, then exit (permanently when a restart cannot help). */
+async function exitOnLicenseDenial(
+  result: Awaited<ReturnType<typeof checkLicense>>,
+  loginCommand: string,
+): Promise<never> {
+  try {
+    requireLicense(result);
+  } catch {
+    // requireLicense printed the reason.
+  }
+  await flushAnalytics();
+  if (!isPermanentLicenseDenial(result)) process.exit(1);
+  exitWorkerStartupPermanently(licenseFixHint(result, loginCommand));
+}
+
+/** What to run after a permanent license failure, worded for a service. */
+function licenseFixHint(result: { signInRequired?: boolean }, loginCommand: string): string {
+  const fix = result.signInRequired
+    ? `Sign in with \`${loginCommand} github\` (or google, x, email you@company.com), or set LICENSE_KEY in the workspace .env`
+    : "Set LICENSE_KEY in the workspace .env (https://devintern.com/pricing)";
+  return [
+    `   The worker will not retry until this is fixed. ${fix},`,
+    "   then start it again: devintern worker service restart (or `devintern worker`).",
+  ].join("\n");
+}
+
+/** Report an error thrown while the daemon was starting and exit. */
+async function exitOnStartupError(error: unknown, loginCommand: string): Promise<never> {
+  const { LicenseCheckError } = await import("@devintern/license-check");
+  const { WorkspaceConfigError } = await import("../workspace/config");
+  const message = error instanceof Error ? error.message : String(error);
+  await flushAnalytics();
+  if (error instanceof LicenseCheckError) {
+    // requireLicense already printed the reason.
+    if (isPermanentLicenseDenial({ valid: false, message })) {
+      exitWorkerStartupPermanently(licenseFixHint({}, loginCommand));
+    }
+    process.exit(1);
+  }
+  console.error(`❌ The worker could not start: ${message}`);
+  if (error instanceof WorkspaceConfigError || /^Invalid .*workspace\.toml/.test(message)) {
+    exitWorkerStartupPermanently(
+      "   Fix workspace.toml (`devintern worker doctor` shows every problem), then start the worker again.",
+    );
+  }
+  process.exit(1);
+}
+
+/** Run the workspace daemon with the license-aware trial activation and access checks. */
+async function startWorkspaceDaemon(
+  runWorkspaceWorker: typeof import("../workspace/workspace-worker").runWorkspaceWorker,
+  options: {
+    workspacePath: string | undefined;
+    verbose: boolean;
+    supabaseConfig: ReturnType<typeof loadSupabaseConfig>;
+    loginCommand: string;
+    trialAvailable: boolean;
+  },
+): Promise<void> {
+  const { workspacePath, verbose, supabaseConfig, loginCommand } = options;
   await runWorkspaceWorker({
     workspacePath,
     verbose,
     cliVersion: VERSION,
-    beforeAcquirersStart: licenseResult.trialAvailable
+    beforeAcquirersStart: options.trialAvailable
       ? async () => {
           const activated = await activateWorkerTrial({
             productKey: "devintern/code",
@@ -594,6 +720,10 @@ export async function runWorkerCli(args: string[]): Promise<void> {
   if (subcommand === "init") return runWorkerInitSubcommand(rest);
   if (subcommand === "login") return runWorkerLoginSubcommand(rest);
   if (subcommand === "doctor") return runWorkerDoctorSubcommand(rest);
+  if (subcommand === "service") {
+    const { runWorkerServiceCommand } = await import("./service-command");
+    process.exit(await runWorkerServiceCommand(rest));
+  }
   if (subcommand && WORKER_READ_SUBCOMMANDS.has(subcommand)) {
     const { isWorkerReadCommand, runWorkerReadCommand } = await import("./dashboard-read-cli");
     if (isWorkerReadCommand(subcommand)) process.exit(runWorkerReadCommand(subcommand, rest));

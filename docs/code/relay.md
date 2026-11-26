@@ -43,6 +43,26 @@ For trackers, set the tracker credentials (see the table below), then run `devin
 | `devintern worker connect sentry`              | Add a Sentry auto-fix project (polled directly; not sent through the relay). See [Sentry Auto-fixes](./sentry-integration.md) |
 | `devintern worker connect status`              | Show relay status and repositories still awaiting verification            |
 
+## Pairing GitHub without a terminal
+
+`devintern worker connect github` prints the GitHub App install URL and waits up to 10 minutes for you to approve it. A coding agent or SSH session that cannot wait splits this in two, after signing in with `devintern worker login <method> --no-wait` (see [Signing in without a terminal](./worker.md#signing-in-without-a-terminal)):
+
+```bash
+devintern worker connect github --no-wait --json   # prints the install URL and exits 0
+# open the URL in any browser and approve the App, then:
+devintern worker connect github --status --json    # finishes local registration when approved
+```
+
+| Flag        | What it does                                                                                       |
+| ----------- | -------------------------------------------------------------------------------------------------- |
+| `--json`    | Print one JSON document on stdout; progress text goes to stderr. Works for every target            |
+| `--no-wait` | Start the pairing, print the install URL, and exit. Repositories under an existing installation are verified without a browser |
+| `--status`  | Check the pending pairing once (alias `--resume`). Also finishes a pairing whose wait was interrupted |
+
+With several GitHub accounts, each needs its own approval: run `--no-wait`, approve, `--status`, then repeat until nothing is left.
+
+`--json` prints `{"schema": "devintern.worker-connect", "version": 1, "target", "result", ...}`. `result` is `connected` (exit 0), `pending` (exit 0: `pairing` has `id`, `state`, `installUrl`, `expiresAt`, and, when the relay provides them, `authorizeUrl` and `appInstalled`; `nextSteps` lists the URL to open (the `authorizeUrl` when the App is already installed) and the `--status` command), `action_required` (exit 2: nobody is signed in, `nextSteps` holds the `devintern worker login <method> --no-wait --json` command), or `failure` (exit 1: `error` and often a `code` such as `pairing_expired`, `no_pending_pairing`, `relay_unauthorized`, or `relay_unavailable`). `devintern worker connect` with no target returns one document with a `targets` array. Treat an unknown `result` as not finished.
+
 ## Environment variables
 
 | Variable              | Required | Description                                                                    |
@@ -113,6 +133,16 @@ ssh -N -L 17865:127.0.0.1:17865 user@host
 ```
 
 You can also copy `~/.devintern/state/code/.auth-session.json` from a machine where you are already signed in.
+
+## Troubleshooting
+
+`devintern worker doctor` has a **Relay** row: `polling only` when you have not paired, the number of paired repositories and relay URL when you have, and a warning when a pairing is still pending or a workspace repository is not covered. It reads local state, so it also works with `--offline`.
+
+| Symptom | Fix |
+| ------- | --- |
+| App already installed: `--status` stays on "Waiting for the GitHub App authorization" and GitHub showed the App's settings page instead of an install | The App is already installed on that account but not linked to your DevIntern account yet, and saving its settings does not finish pairing. With a current relay, `connect` prints an authorize URL ("The DevIntern App is already installed on ..."): open it and approve once, and the pairing completes. The install URL is then only for changing which repositories the App can access. On an older relay, run `devintern worker connect github` again: it verifies repositories under an installation already linked to your account without a browser, and a repository not covered must be added to the installation's repository access first |
+| `--status` fails with "session expired or invalid" (`relay_unauthorized`) | Sign in again with `devintern worker login <method> --no-wait`, then re-run `--status`. The pending pairing is kept |
+| `--status` fails with "relay unavailable" (`relay_unavailable`) | The relay returned a server error or rate limit. Retry in a few minutes; polling keeps working meanwhile |
 
 ## Availability
 

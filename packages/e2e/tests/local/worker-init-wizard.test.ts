@@ -235,13 +235,49 @@ ptyTest(
         /1\. Automation entitlement: Run `devintern worker login( --workspace \S+)? github`/,
       );
       expect(run.output).not.toContain("🎉 Worker setup complete");
-      // Setup is saved, so the wizard itself still exits 0; the next steps carry the failure.
-      expect(run.exitCode, run.output).toBe(0);
+      // Setup is saved and only signing in is left: exit 2, like non-interactive init.
+      expect(run.exitCode, run.output).toBe(2);
       // The setup itself is kept.
       expect(fixture.config().defaults).toMatchObject({
         tracker: "markdown",
         task_query: "status=todo",
       });
+    });
+  },
+  180_000,
+);
+
+ptyTest(
+  "worker init wizard: after a non-interactive init it reuses the tracker instead of asking again",
+  async () => {
+    await withWizardFixture(async (fixture, proxy) => {
+      const init = await fixture.init(["--json"]);
+      expect(init.exitCode, init.stderr).toBe(0);
+
+      // Drop the tracker, tasks-directory and PR-token prompts (already configured).
+      // The query prompt shows the saved query as its default: keep it.
+      const answers: Answer[] = [
+        [/Ready-tasks query[^\n]*: $/, "\r"],
+        ...markdownAnswers(fixture, { licensing: false }).slice(4),
+      ];
+      const run = await runWizard(fixture, proxy, answers, { licensing: false });
+      expect(run.exitCode, run.output).toBe(0);
+      expect(run.output).toContain("Using markdown from");
+      expect(run.output).not.toContain("No tracker config yet");
+      expect(run.output).not.toMatch(TRACKER_PROMPT);
+      for (const pattern of STACK_TRACE_PATTERNS) expect(run.output).not.toMatch(pattern);
+
+      // Re-running the non-interactive init afterwards keeps the same setup.
+      const again = await fixture.init(["--yes", "--json"]);
+      expect(again.exitCode, again.stderr).toBe(0);
+      expect(fixture.config().defaults).toMatchObject({
+        tracker: "markdown",
+        task_query: "status=todo",
+      });
+      expect(fixture.config().repos).toHaveLength(1);
+      expect(readFileSync(fixture.envPath, "utf8")).toContain(
+        `MARKDOWN_TASKS_DIR=${fixture.tasksDir}`,
+      );
     });
   },
   180_000,

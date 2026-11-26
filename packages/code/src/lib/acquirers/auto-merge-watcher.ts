@@ -22,7 +22,12 @@
  *
  * Each evaluation is recorded as a run while it executes, so the dashboard
  * shows it live. Evaluations that end in "not ready yet" (waiting, skipped)
- * are discarded afterwards; decisions stay in the run list.
+ * are discarded afterwards; decisions stay in the run list. A wait on the
+ * head commit's CI checks (no passing check, pending, failing) is kept as
+ * `escalated` the first time each reason is seen for a head, because the
+ * PR is labeled for a human and the dashboard should say why; repeats of
+ * the same wait are discarded so a repo without CI does not fill the list,
+ * and are not re-posted to the PR (the comment and label are already there).
  *
  * Agent usage limits never drop a PR: the evaluation is `deferred` with the
  * quota's reset time, kept in the run list as **Deferred**, and the PR is
@@ -32,11 +37,13 @@
 
 import { startFirstTickInBackground } from "./background-tick";
 import type { Acquirer } from "../../worker";
+import { ciWaitKey } from "../review/auto-merge";
 import type { AutoMergeResult } from "../review/auto-merge";
 import type { ConditionalResult, PolledPr } from "../review/agent-pr-reconciler";
 import { classifyAgentPrState } from "../review/agent-pr-reconciler";
 import { describeGitHubAuthFailure, isGitHubAuthError } from "../code-host/github/github-errors";
 import type { RunStore } from "../state/run-recorder";
+import { failureFromError } from "../state/run-outcome";
 import type { WebhookQueue } from "../state/webhook-queue";
 import type { WorkerState } from "../state/worker-state";
 
@@ -71,6 +78,8 @@ export interface AutoMergeWatcherOptions {
       onStart?: () => void;
       /** The run row opened for this check; its review transcript is attributed to it. */
       runId?: number;
+      /** The CI wait this head's PR already shows; the same wait is not re-posted. */
+      ciWaitPosted?: string;
     },
   ): Promise<AutoMergeResult>;
   runStore?: Pick<RunStore, "createRun" | "finishRun" | "discardRun"> &
@@ -115,14 +124,35 @@ export const AUTO_MERGE_CHECK_STEP = "auto-merge";
 
 /** Re-check delay after a `waiting` outcome (changes requested, head moved). */
 const WAITING_BACKOFF_MS = 10 * 60_000;
+/**
+ * Longest re-check delay for a head that waits on checks that are not
+ * running (`no-checks`, `no-passing`, `failing`): the delay doubles from
+ * {@link WAITING_BACKOFF_MS} on each repeat, since such a head rarely
+ * changes without a push (which starts a fresh head) or a re-run (which
+ * changes `mergeable_state` once it passes).
+ */
+const STATIC_CI_WAIT_MAX_BACKOFF_MS = 60 * 60_000;
 /** Minimum re-check delay after a `deferred` outcome (agent usage limit). */
 const DEFERRED_BACKOFF_MS = 5 * 60_000;
 /** Failure retry delay: 5 min, then 10, so a misread quota error does not exhaust attempts in minutes. */
 const FAILURE_BACKOFF_BASE_MS = 5 * 60_000;
 const FAILURE_BACKOFF_MAX_MS = 30 * 60_000;
 
-/** `mergeable_state` values meaning "mergeable and checks passing". */
+/**
+ * `mergeable_state` values meaning "mergeable and checks passing". GitHub
+ * also reports `clean` when the head has no checks at all, so the CI part of
+ * the Ready gate re-reads the checks.
+ */
 const READY_STATES = new Set(["clean", "has_hooks"]);
+
+/**
+ * `mergeable_state` values GitHub uses when commit checks may hold the PR.
+ * They are evaluated so a failing or pending check gets its status comment
+ * and label; when the checks don't explain the hold (a blocked PR waiting on
+ * an approving review), the head is not evaluated again until the state
+ * changes, so it does not spawn an evaluation every backoff.
+ */
+const CI_HELD_STATES = new Set(["unstable", "blocked"]);
 
 interface PrTracking {
   headSha: string;
@@ -130,8 +160,159 @@ interface PrTracking {
   headSeenAt: number;
   failures: number;
   nextAttemptAt: number;
+  /**
+   * `ciWaitKey` of the last CI wait for this head: already on the PR
+   * (status comment, and label unless pending) and in the run list, so a
+   * repeat is neither re-posted nor recorded again.
+   */
+  ciWaitRecorded?: string;
+  /** Consecutive `no-checks`/`no-passing`/`failing` waits on this head (backoff growth). */
+  staticCiWaits?: number;
+  /**
+   * `mergeable_state` of the last static CI wait: during its (long)
+   * backoff the PR is still fetched (a conditional GET) and evaluated early
+   * when the head or this state changes, e.g. a check starts.
+   */
+  staticCiWaitState?: string;
+  /**
+   * Auto-merge policy fingerprint of the last static CI wait: a policy
+   * change (e.g. `auto_merge_require_checks`) ends its backoff early.
+   */
+  staticCiWaitPolicy?: string;
+  /**
+   * `unstable`/`blocked` state this head was evaluated in without a CI
+   * reason for the hold; skipped until the state changes or the finding
+   * is {@link NON_CI_HOLD_RECHECK_MS} old (a late check can turn it into
+   * a CI hold).
+   */
+  nonCiHold?: string;
+  /** When {@link PrTracking.nonCiHold} was found (ms epoch). */
+  nonCiHoldAt?: number;
+  /** Consecutive non-CI hold findings on this head (recheck window growth). */
+  nonCiHolds?: number;
   etag?: string;
   cached?: AutoMergePolledPr;
+}
+
+/**
+ * How long a non-CI hold finding stands before the PR is evaluated again in
+ * the same state: a required check created late (or failing later) keeps
+ * GitHub's state `blocked`/`unstable` but makes it a CI hold.
+ */
+const NON_CI_HOLD_RECHECK_MS = 30 * 60_000;
+/**
+ * Longest recheck window for a repeated non-CI hold: the window doubles from
+ * {@link NON_CI_HOLD_RECHECK_MS} on each repeat finding, since an approval
+ * (the usual cause) changes the state and is caught on the next poll.
+ */
+const NON_CI_HOLD_MAX_RECHECK_MS = 2 * 60 * 60_000;
+
+/** Recheck window of the current non-CI hold finding. */
+function nonCiHoldRecheckMs(state: PrTracking): number {
+  return Math.min(
+    NON_CI_HOLD_RECHECK_MS * 2 ** Math.max((state.nonCiHolds ?? 1) - 1, 0),
+    NON_CI_HOLD_MAX_RECHECK_MS,
+  );
+}
+
+/**
+ * Whether a PR in `mergeableState` is evaluated: ready, or held by GitHub
+ * and not already found held for a non-CI reason in this state. A state
+ * change, or the finding aging past {@link NON_CI_HOLD_RECHECK_MS}, clears it.
+ */
+function evaluableState(
+  state: PrTracking,
+  mergeableState: string,
+  force: boolean,
+  now: number,
+): boolean {
+  if (READY_STATES.has(mergeableState)) {
+    state.nonCiHold = undefined;
+    return true;
+  }
+  if (!CI_HELD_STATES.has(mergeableState)) return false;
+  if (
+    state.nonCiHold !== undefined &&
+    (state.nonCiHold !== mergeableState ||
+      now - (state.nonCiHoldAt ?? 0) >= nonCiHoldRecheckMs(state))
+  ) {
+    state.nonCiHold = undefined;
+  }
+  return force || state.nonCiHold === undefined;
+}
+
+/**
+ * Retry backoff for a PR before it is fetched: `hold` skips it, a
+ * `static-ci-wait` still fetches it (a conditional GET) so a new head or
+ * state ends the long backoff early.
+ */
+function retryBackoff(
+  previous: PrTracking | undefined,
+  force: boolean,
+  now: number,
+): "none" | "hold" | "static-ci-wait" {
+  if (force || !previous || previous.nextAttemptAt <= now) return "none";
+  return previous.staticCiWaitState === undefined ? "hold" : "static-ci-wait";
+}
+
+/** Whether a PR in a static CI wait's backoff still has that wait's head, state, and policy. */
+function staticCiWaitUnchanged(
+  state: PrTracking,
+  previous: PrTracking | undefined,
+  pr: AutoMergePolledPr,
+  policyFingerprint: string | undefined,
+): boolean {
+  return (
+    state === previous &&
+    state.staticCiWaitState === (pr.mergeable_state ?? "") &&
+    state.staticCiWaitPolicy === policyFingerprint
+  );
+}
+
+/**
+ * Re-check delay after a `waiting` outcome; tracks static CI waits
+ * (`no-checks`, `no-passing`, `failing`) on the head, whose delay doubles up to
+ * {@link STATIC_CI_WAIT_MAX_BACKOFF_MS}.
+ */
+function waitingBackoffMs(
+  state: PrTracking,
+  result: AutoMergeResult,
+  mergeableState: string,
+  policyFingerprint: string | undefined,
+): number {
+  const staticCiWait =
+    result.ciWaitProblem === "no-checks" ||
+    result.ciWaitProblem === "no-passing" ||
+    result.ciWaitProblem === "failing";
+  state.staticCiWaits = staticCiWait ? (state.staticCiWaits ?? 0) + 1 : 0;
+  state.staticCiWaitState = staticCiWait ? mergeableState : undefined;
+  state.staticCiWaitPolicy = staticCiWait ? policyFingerprint : undefined;
+  if (!staticCiWait) return WAITING_BACKOFF_MS;
+  return Math.min(
+    WAITING_BACKOFF_MS * 2 ** (state.staticCiWaits - 1),
+    STATIC_CI_WAIT_MAX_BACKOFF_MS,
+  );
+}
+
+/**
+ * GitHub holds the PR for something other than its checks: wait for the
+ * state to change (or the finding to age) instead of re-evaluating every
+ * backoff. Unread checks are not a finding: the next backoff retries.
+ */
+function recordNonCiHold(
+  state: PrTracking,
+  result: AutoMergeResult,
+  mergeableState: string,
+  finishedAt: number,
+): void {
+  const held =
+    CI_HELD_STATES.has(mergeableState) &&
+    result.outcome === "waiting" &&
+    !result.ciWait &&
+    !result.ciChecksUnread;
+  state.nonCiHold = held ? mergeableState : undefined;
+  state.nonCiHoldAt = held ? finishedAt : undefined;
+  state.nonCiHolds = held ? (state.nonCiHolds ?? 0) + 1 : 0;
 }
 
 /** Durable key of one auto-merge decision. */
@@ -311,7 +492,8 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
     const key = `${repo.toLowerCase()}#${prNumber}`;
     const now = this.now();
     const previous = this.tracking.get(key);
-    if (!force && previous && previous.nextAttemptAt > now) return;
+    const backoff = retryBackoff(previous, force, now);
+    if (backoff === "hold") return;
 
     const fetched = await this.options.fetchPr(repo, prNumber, previous?.etag);
     if (fetched.gone) return;
@@ -329,19 +511,28 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
       state.cached = pr;
     }
     this.tracking.set(key, state);
+    const policyFingerprint = this.options.policyFingerprint?.(repo);
+    // A static CI wait backs off long: only a new head, state, or policy ends it early.
+    if (
+      backoff === "static-ci-wait" &&
+      staticCiWaitUnchanged(state, previous, pr, policyFingerprint)
+    ) {
+      return;
+    }
 
     if (pr.draft) return;
     if (pr.head.repo?.full_name && pr.head.repo.full_name.toLowerCase() !== repo.toLowerCase()) {
       return;
     }
     if (this.skipStacked(repo, prNumber, pr)) return;
-    if (!READY_STATES.has(pr.mergeable_state ?? "")) return;
+    const mergeableState = pr.mergeable_state ?? "";
+    if (!evaluableState(state, mergeableState, force, now)) return;
     const quietMs = (this.options.quietSeconds ?? DEFAULT_AUTO_MERGE_QUIET_SECONDS) * 1000;
     if (!force && now - state.headSeenAt < quietMs) return;
-    const decisionKeys = this.undecidedKeys(repo, prNumber, headSha);
+    const decisionKeys = this.undecidedKeys(repo, prNumber, headSha, policyFingerprint);
     if (!decisionKeys) return;
 
-    await this.evaluate(repo, prNumber, state, decisionKeys);
+    await this.evaluate(repo, prNumber, state, decisionKeys, mergeableState, policyFingerprint);
   }
 
   /**
@@ -353,10 +544,10 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
     repo: string,
     prNumber: number,
     headSha: string,
+    policyFingerprint: string | undefined,
   ): [head: string, pr: string] | null {
-    const fingerprint = this.options.policyFingerprint?.(repo);
-    const headKey = autoMergeDecisionKey(repo, prNumber, headSha, fingerprint);
-    const prKey = autoMergePrDecisionKey(repo, prNumber, fingerprint);
+    const headKey = autoMergeDecisionKey(repo, prNumber, headSha, policyFingerprint);
+    const prKey = autoMergePrDecisionKey(repo, prNumber, policyFingerprint);
     const { queue } = this.options;
     if (queue.hasProcessed(AUTO_MERGE_SOURCE, headKey)) return null;
     if (this.options.once?.() && queue.hasProcessed(AUTO_MERGE_SOURCE, prKey)) return null;
@@ -401,30 +592,47 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
     prNumber: number,
     state: PrTracking,
     decisionKeys: [head: string, pr: string],
+    mergeableState: string,
+    policyFingerprint: string | undefined,
   ): Promise<void> {
     const runId = this.beginRun(repo, prNumber);
     // The run row exists before the check is admitted: until the supervisor
     // grants the repo's slot it is waiting, not evaluating.
     this.recordStep(runId, AUTO_MERGE_WAITING_STEP);
     const maxAttempts = this.options.maxAttempts ?? DEFAULT_AUTO_MERGE_MAX_ATTEMPTS;
+    const previousCiWait = state.ciWaitRecorded;
     let result: AutoMergeResult;
     try {
       result = await this.options.mergePr(repo, prNumber, state.headSha, {
         lastAttempt: state.failures + 1 >= maxAttempts,
         onStart: () => this.recordStep(runId, AUTO_MERGE_CHECK_STEP),
         ...(runId !== null ? { runId } : {}),
+        ...(previousCiWait !== undefined ? { ciWaitPosted: previousCiWait } : {}),
       });
     } catch (error) {
       result = { outcome: "failed", message: (error as Error).message, reviewed: false };
     }
+    // Any other result may have changed the status comment, so the next
+    // CI wait is posted again. Unread checks change nothing on the PR: the
+    // posted wait stays recorded so a later pass can replace it.
+    const currentCiWait = result.ciWait
+      ? ciWaitKey(result.ciWaitProblem, result.message)
+      : undefined;
+    state.ciWaitRecorded = result.ciWait
+      ? currentCiWait
+      : result.ciChecksUnread
+        ? previousCiWait
+        : undefined;
     const label = `${repo}#${prNumber}`;
     const finishedAt = this.now();
+    recordNonCiHold(state, result, mergeableState, finishedAt);
     // Both keys are always recorded, so turning `once` on later also skips
     // PRs decided while it was off.
     const markDecided = () => {
       for (const key of decisionKeys) this.options.queue.markProcessed(AUTO_MERGE_SOURCE, key);
     };
 
+    if (result.outcome !== "waiting") state.staticCiWaitState = undefined;
     switch (result.outcome) {
       case "merged":
         // Record the merge now instead of waiting for the next state poll,
@@ -440,7 +648,8 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
         markDecided();
         break;
       case "waiting":
-        state.nextAttemptAt = finishedAt + WAITING_BACKOFF_MS;
+        state.nextAttemptAt =
+          finishedAt + waitingBackoffMs(state, result, mergeableState, policyFingerprint);
         break;
       case "deferred":
         // Not an attempt: wait for the quota's reset (never less than the
@@ -477,7 +686,7 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
     if (result.outcome !== "waiting" || this.options.verbose) {
       console.log(`${icon} [${this.name}] ${label} ${result.outcome}: ${result.message}`);
     }
-    this.endRun(runId, result);
+    this.endRun(runId, result, currentCiWait !== undefined && previousCiWait === currentCiWait);
   }
 
   /** Open an in-progress run so the dashboard shows the evaluation live. */
@@ -511,16 +720,35 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
   }
 
   /** Keep decisions in the run list; drop "not ready yet" checks. */
-  private endRun(runId: number | null, result: AutoMergeResult): void {
+  private endRun(runId: number | null, result: AutoMergeResult, repeatedCiWait: boolean): void {
     const { runStore } = this.options;
     if (!runStore || runId === null) return;
     try {
       if (result.outcome === "merged") {
         runStore.finishRun(runId, "succeeded", result.message);
       } else if (result.outcome === "rejected") {
-        runStore.finishRun(runId, "escalated", result.message);
+        // The merge gate held the PR for a human: a routine review hold.
+        runStore.finishRun(runId, "escalated", result.message, {
+          failure: { outcomeClass: "review_hold", stage: "auto_merge" },
+        });
       } else if (result.outcome === "failed") {
-        runStore.finishRun(runId, "failed", result.message);
+        runStore.finishRun(runId, "failed", result.message, {
+          failure: failureFromError(result.message, "auto_merge"),
+        });
+      } else if (
+        result.outcome === "waiting" &&
+        result.ciWait &&
+        result.ciWaitProblem !== "pending" &&
+        !repeatedCiWait
+      ) {
+        // Left open with a status comment and the review label: show why on
+        // the dashboard. Recorded as `escalated` ("handed to a human") like
+        // other holds, so run counts include CI waits; the same head can
+        // still merge later without new commits. Pending checks resolve on
+        // their own: a quiet wait, not an escalation.
+        runStore.finishRun(runId, "escalated", result.message, {
+          failure: { outcomeClass: "review_hold", stage: "auto_merge" },
+        });
       } else if (result.outcome === "deferred" && result.retryAt !== undefined) {
         // Visible as waiting on quota until the review resumes.
         runStore.finishRun(runId, "deferred", result.message);

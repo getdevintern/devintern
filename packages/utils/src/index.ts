@@ -1,6 +1,16 @@
 export { fetchWithRetry, isRetryableNetworkError } from "./fetch-retry.ts";
 export { findConfigDir, findEnvFile, findProjectRoot, resolveConfigDir } from "./find-env-file.ts";
-export { REDACTED, redactText, redactValue } from "./redact.ts";
+export {
+  CREDENTIAL_PATTERNS,
+  findCredentialShapes,
+  REDACTED,
+  REDACTED_PRIVATE_KEY,
+  redactCredentialShapes,
+  redactSecretAssignments,
+  redactText,
+  redactValue,
+} from "./redact.ts";
+export type { CredentialPattern } from "./redact.ts";
 export {
   detectInstallKind,
   fetchLatestVersion,

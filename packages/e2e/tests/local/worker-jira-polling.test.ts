@@ -195,8 +195,8 @@ test.skipIf(!existsSync(cliPath))(
       const windows = tracker.searches.filter((jql) => DETECTOR_JQL.test(jql));
       expect(windows.length, detail()).toBeGreaterThan(0);
       for (const jql of windows) {
-        // DELTA_LOOKBACK_MS (5m) + 1m rounding: never narrower than 6 minutes.
-        expect(Number(jql.match(DETECTOR_JQL)?.[1]), detail()).toBeGreaterThanOrEqual(6);
+        // DELTA_LOOKBACK_MS (15m) + 1m rounding: never narrower than 16 minutes.
+        expect(Number(jql.match(DETECTOR_JQL)?.[1]), detail()).toBeGreaterThanOrEqual(16);
       }
       expect(
         tracker.searches.every((jql) => jql === query || DETECTOR_JQL.test(jql)),

@@ -28,7 +28,7 @@ When something does not get picked up, see [Worker Troubleshooting](./worker-tro
 devintern worker init
 ```
 
-`worker init` reuses tracker config from `devintern init` (or asks for it), writes a one-repo workspace, validates the ready-tasks query, and asks about task pickup hours, conflict handling, and CI repair. It can add a Sentry project, offers sign-in for the [14-day free Worker Pilot](#worker-pilot-and-licenses) (no card required) if you have no license, pairs your repositories with the [relay](./relay.md), and offers to install the worker as a service. `--no-service` skips the service step. Tokens you paste are not shown on screen. Re-running it keeps your answers as defaults (press Enter to keep the current query), and it finishes a setup an earlier run stopped partway. It ends with the same checks as [`worker doctor`](#checking-readiness-worker-doctor) and tells you whether the worker is ready, whether signing in is the one step left, or what is still missing (for example an agent CLI). For Markdown tasks, a relative folder such as `./tasks` is saved as an absolute path, resolved from where you run the wizard. Without a terminal (coding agents, scripts, SSH), use [non-interactive setup](#non-interactive-setup).
+`worker init` reuses tracker config from `devintern init` (or asks for it), writes a one-repo workspace, validates the ready-tasks query, and asks about task pickup hours, conflict handling, and CI repair. It can add a Sentry project, offers sign-in for the [14-day free Worker Pilot](#worker-pilot-and-licenses) (no card required) if you have no license, pairs your repositories with the [relay](./relay.md), and offers to install the worker as a service. `--no-service` skips the service step. Tokens you paste are not shown on screen. Re-running it keeps your answers as defaults (press Enter to keep the current query), and it finishes a setup an earlier run stopped partway. It ends with the same checks as [`worker doctor`](#checking-readiness-worker-doctor) and tells you whether the worker is ready, whether signing in is the one step left, or what is still missing (for example an agent CLI). Like the non-interactive mode it exits 0 when ready, 2 when only signing in is left, and 1 when a check fails. The repository prompt defaults to your `origin` remote. For Markdown tasks, a relative folder such as `./tasks` is saved as an absolute path, resolved from where you run the wizard. Without a terminal (coding agents, scripts, SSH), use [non-interactive setup](#non-interactive-setup).
 
 For GitHub, install the central [DevIntern AI App](https://github.com/apps/devintern-ai/installations/new) on the workspace repositories. Its private key stays with DevIntern. Events reach your worker as reference-only envelopes, and your local `GITHUB_TOKEN` does the API work. After adding repositories, run `devintern worker connect` to pair them. Without the relay, polling still works; `@mention` handling then needs a [customer-owned GitHub App](./configuration.md#advanced-customer-owned-github-app).
 
@@ -44,7 +44,7 @@ devintern worker init --non-interactive --tracker jira \
 
 Without a tracker account, point `MARKDOWN_TASKS_DIR` at an existing folder of [Markdown task files](./markdown-tasks.md): `MARKDOWN_TASKS_DIR=/abs/path/tasks devintern worker init --non-interactive --tracker markdown --task-query '<filter>' --repo-from-cwd`. A relative path is saved as an absolute path, resolved from the current directory.
 
-It writes `[defaults].tracker` and `task_query`, registers the current repository, and saves the tracker credentials to the workspace `.env`. It then checks the credentials and runs the same checks as `worker doctor`: a dry run of the query (0 matches is a warning), repository access, license, agent harness, and sandbox. It never prompts, opens a browser, pairs the relay, installs a service, or starts the worker. Those stay as next steps in the output. With `--sign-in <method>` it also starts the Worker Pilot sign-in when one is needed (see [Signing in without a terminal](#signing-in-without-a-terminal)).
+It writes `[defaults].tracker` and `task_query`, registers the current repository, and saves the tracker credentials to the workspace `.env`. It then checks the credentials and runs the same checks as `worker doctor`: a dry run of the query (0 matches is a warning), repository access, license, agent harness, and sandbox. It never prompts, opens a browser, pairs the relay, installs a service, or starts the worker. Those stay as next steps in the output; the background service is one command, [`devintern worker service install`](#running-as-a-service). With `--sign-in <method>` it also starts the Worker Pilot sign-in when one is needed (see [Signing in without a terminal](#signing-in-without-a-terminal)).
 
 | Flag                | Default            | What it does                                                                                          |
 | ------------------- | ------------------ | ----------------------------------------------------------------------------------------------------- |
@@ -79,13 +79,13 @@ A signed-in account without an entitlement (for example a Pilot already used), o
   "taskQuery": "project = APP AND labels = devintern",
   "repo": { "name": "app", "remote": "git@github.com:acme/app.git", "added": true },
   "filesWritten": ["/home/me/.devintern/.env", "/home/me/.devintern/workspace.toml"],
-  "checks": [{ "name": "tracker-auth", "label": "Tracker credentials", "status": "pass", "message": "JIRA accepted JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN" }],
+  "checks": [{ "name": "tracker-auth", "label": "Tracker credential probe", "status": "pass", "message": "JIRA accepted JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN" }],
   "nextSteps": [{ "id": "sign-in", "message": "Not started: sign in to begin your 14-day free Worker Pilot, no card required ...", "command": "devintern worker login github" }],
   "signIn": { "url": "https://...supabase.co/auth/v1/authorize?provider=github&...", "method": "github", "expiresAt": "2026-11-26T12:30:00.000Z", "complete": "devintern worker login --complete '<address>'" }
 }
 ```
 
-Each check `status` is `pass`, `warn`, `action`, `fail`, or `skipped`, and checks that are not `pass` carry a `hint`. If the command stops before the checks (bad input, or another `worker init` is changing the same workspace), `error` explains why and `checks` is empty. The files are written before the checks run, so after signing in you only run `worker doctor`, with no need to re-run init. `signIn` is present only when `--sign-in` started a sign-in. Next-step `id`s are `sign-in`, `add-repo`, `connect`, `start`, and `service`.
+Each check `status` is `pass`, `warn`, `action`, `fail`, or `skipped`, and checks that are not `pass` carry a `hint`. If the command stops before the checks (bad input, or another `worker init` is changing the same workspace), `error` explains why and `checks` is empty. The files are written before the checks run, so after signing in you only run `worker doctor`, with no need to re-run init. `signIn` is present only when `--sign-in` started a sign-in. Next-step `id`s are `sign-in`, `add-repo`, `install-agent`, `connect`, `start`, and `service`. When the agent CLI check fails, `install-agent` carries the install command (or a docs link) for your configured harness, and `start` and `service` are left out until no check fails.
 
 ### Signing in without a terminal
 
@@ -110,10 +110,10 @@ devintern webhook serve          # advanced: repo-local GitHub webhook listener
 An idle healthy worker and an idle misconfigured one look the same. Run the doctor before starting, and after changing config, tokens, or trackers:
 
 ```bash
-devintern worker doctor [--workspace <path>] [--offline]
+devintern worker doctor [--workspace <path>] [--offline] [--json] [--test-notifications]
 ```
 
-It checks that `workspace.toml` parses, that there is something to acquire, tracker credentials per team, a dry run of each `task_query` (with match counts), access to each repository, your automation license, the agent harness and sandbox, and whether the dashboard port is free. Every failing row includes a fix hint. It exits 0 when ready and 1 when a check fails. When the only thing left is signing in, the license row shows 👉 `Not started: sign in to begin your 14-day free Worker Pilot, no card required` and it exits 2. An active Pilot shows its end date. `--offline` skips network checks. The doctor never edits config or starts the worker. It is safe to run while the worker is up: it reports the running worker, and its dashboard on the port is not flagged as a conflict.
+It checks that `workspace.toml` parses, that there is something to acquire, tracker credentials per team, a dry run of each `task_query` (with match counts), access to each repository, the git commit identity (a warning when only the generic `DevIntern` identity is left; see [Commit identity](./configuration.md#commit-identity)), your automation license, the agent harness and sandbox, the [relay](./relay.md#troubleshooting) pairing (a warning when a pairing is pending or a repository is not covered), and whether the dashboard port is free. Every failing row includes a fix hint. It exits 0 when ready and 1 when a check fails. When the only thing left is signing in, the license row shows 👉 `Not started: sign in to begin your 14-day free Worker Pilot, no card required` and it exits 2. An active Pilot shows its end date. `--offline` skips network checks. `--test-notifications` sends one test message through each [notification channel](notifications.md). `--json` prints one document (`schema` `devintern.worker-doctor`, `version` 1) with `result` (`success`, `action_required`, or `failure`, exit codes 0, 2, and 1 as above), `checks` in the same shape as `worker init --json`, and `nextSteps`. The doctor never edits config or starts the worker. It is safe to run while the worker is up: it reports the running worker, and its dashboard on the port is not flagged as a conflict.
 
 ## Polling mode
 
@@ -203,12 +203,36 @@ The worker serves the [dashboard](./dashboard.md) on `http://localhost:4400`. Se
 
 ## Running as a service
 
-At its last step `worker init` offers to install and start the worker as a service:
+`devintern worker service` installs and runs the worker in the background: a systemd user unit in `~/.config/systemd/user/` on Linux, a launchd agent in `~/Library/LaunchAgents/` on macOS. It needs no terminal, so coding agents, provisioning scripts, and `ssh host cmd` can use it. The `worker init` wizard offers the same install at its last step.
 
-- **Linux**: a systemd user unit in `~/.config/systemd/user/`, enabled with `systemctl --user enable --now devintern-worker`. The wizard enables lingering so the worker starts after reboot without a login. If that fails, run `loginctl enable-linger` once.
-- **macOS**: a launchd agent in `~/Library/LaunchAgents/`, started with `launchctl bootstrap`.
+```bash
+devintern worker service install      # check readiness, install, start, wait until the worker runs
+devintern worker service status       # service and worker state, and why the last start failed
+```
 
-Both record your current `PATH`. Where there is no systemd user session (most containers, WSL without systemd), the wizard does not offer the service and tells you to run `devintern worker` in the foreground, for example inside `tmux`. If a step fails, the wizard rolls back, removes what it created, and prints the manual commands. Re-running `worker init` updates a DevIntern-managed service in place and never overwrites a hand-written one.
+| Action      | What it does                                                                                              |
+| ----------- | --------------------------------------------------------------------------------------------------------- |
+| `install`   | Runs the [`worker doctor`](#checking-readiness-worker-doctor) checks, installs or updates the service, starts it, and waits until the worker is running |
+| `start`     | Starts the installed service and waits until the worker is running                                       |
+| `stop`      | Stops the service. The worker finishes its graceful shutdown and exits cleanly                           |
+| `restart`   | Restarts the service, also after a failure, and waits until the worker is running                        |
+| `status`    | Shows the service state (`running`, `starting`, `restarting`, `failed`, `stopped`, `not_installed`) and the last start failure |
+| `uninstall` | Stops the service and removes the DevIntern-managed definition                                          |
+| `logs`      | Prints the service manager's log (`-n <lines>`, default 100). `devintern worker logs` shows the worker's own log |
+
+| Option             | Default | What it does                                                                     |
+| ------------------ | ------- | -------------------------------------------------------------------------------- |
+| `--json`           | off     | Print one JSON document (`schema` `devintern.worker-service`, `version` 1) instead of text |
+| `--force`          | off     | `install` only: install even when readiness checks fail                          |
+| `--wait <seconds>` | 45      | How long `install`, `start`, and `restart` wait for the worker. `0` skips the wait |
+
+`install` refuses when the worker could not start yet: it lists the failing checks (with the same `name`/`label`/`status`/`message`/`hint` shape as `worker init --json`, and a runnable `command` per next step), or says signing in is the one step left. After you fix them, run it again. Once the service is started, the command waits for the worker itself and reports one of three outcomes: running (with the dashboard address), failed (with the worker's last log lines and the fix), or still starting after `--wait`. Exit codes: `0` done, `1` failed, `2` install refused because only signing in is left, `3` still starting.
+
+Every action is safe to repeat. `install` updates a DevIntern-managed service in place and never overwrites a hand-written one. Both definitions record your current `PATH` (and `DEVINTERN_WORKSPACE_DIR`, for a workspace outside `~/.devintern`). If a step fails, nothing is left half-installed. Where there is no systemd user session (most containers, WSL without systemd), there is no service; run `devintern worker` in the foreground, for example inside `tmux`.
+
+On Linux, `install` enables lingering for your user so the worker starts at boot and keeps running after you log out. Where that needs root, it prints the command to run (`sudo loginctl enable-linger <user>`).
+
+A worker that cannot start because of its setup (no license, nobody signed in, invalid `workspace.toml`) is not restarted every 30 seconds: the service stops with status `failed` and the reason is in the worker log and in `worker service status`. Fix the problem, then run `devintern worker service restart`. Other crashes are restarted after 30 seconds. See [The service keeps failing](./worker-troubleshooting.md#the-service-keeps-failing).
 
 A hand-written Linux unit looks like this. One service runs the whole workspace:
 
@@ -226,7 +250,7 @@ WorkingDirectory=/home/you/.devintern
 WantedBy=multi-user.target
 ```
 
-On Windows, run `devintern worker` in a terminal. For `PATH` pinning and git push credentials under a service, see [Keeping unattended runs healthy](./automated-task-processing.md#keeping-unattended-runs-healthy).
+On Windows, run `devintern worker` in a terminal. For `PATH` pinning, git push credentials, and the commit identity on an unattended host, see [Keeping unattended runs healthy](./automated-task-processing.md#keeping-unattended-runs-healthy).
 
 ## Keeping the worker up to date
 

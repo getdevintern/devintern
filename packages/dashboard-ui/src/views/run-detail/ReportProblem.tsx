@@ -23,12 +23,13 @@ import {
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { previewReport, submitReport } from "@/lib/api";
-import type { ReportPreview, RunRecord, RunStatus } from "@/lib/api";
+import type { ReportDraft, ReportPreview, RunRecord, RunStatus } from "@/lib/api";
+import { OUTCOME_CLASS_META, runCause, workStatusText } from "@/lib/run-outcome";
 import { formatDuration } from "@/lib/utils";
 import {
   canPreview,
   canSend,
-  INITIAL_REPORT_FLOW,
+  initialReportFlow,
   isReportBusy,
   isReportDraftDirty,
   reportFlowReducer,
@@ -453,10 +454,19 @@ export function reportStepDescription(
  * One open-to-close session of the dialog. Mounted only while the dialog is
  * open, so a confirmed close discards the draft and reopening starts fresh.
  */
-function ReportSession({ runId, onClose }: { runId: number | null; onClose: () => void }) {
-  const [state, dispatch] = useReducer(reportFlowReducer, INITIAL_REPORT_FLOW);
+function ReportSession({
+  runId,
+  initialDraft,
+  onClose,
+}: {
+  runId: number | null;
+  initialDraft?: Partial<ReportDraft>;
+  onClose: () => void;
+}) {
+  const [state, dispatch] = useReducer(reportFlowReducer, initialDraft, initialReportFlow);
   const busy = isReportBusy(state);
-  const dirty = isReportDraftDirty(state);
+  // A pre-filled draft only counts as dirty once the user edits it.
+  const dirty = isReportDraftDirty(state, initialReportFlow(initialDraft).draft);
 
   const requestClose = () => {
     if (busy) return;
@@ -541,20 +551,57 @@ export function ReportDialog({
   open,
   onOpenChange,
   runId,
+  initialDraft,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   runId: number | null;
+  /** Pre-filled title/description (a DevIntern failure's stage and cause). */
+  initialDraft?: Partial<ReportDraft>;
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      {open ? <ReportSession runId={runId} onClose={() => onOpenChange(false)} /> : null}
+      {open ? (
+        <ReportSession
+          runId={runId}
+          initialDraft={initialDraft}
+          onClose={() => onOpenChange(false)}
+        />
+      ) : null}
     </Dialog>
   );
 }
 
+/**
+ * Draft for reporting a run whose outcome class is `internal`: the failing
+ * stage, the redacted cause, and the work status, so the report says what
+ * broke without the user retyping it. Other runs start with an empty draft.
+ */
+export function reportDraftForRun(run: RunRecord): Partial<ReportDraft> | undefined {
+  if (run.outcomeClass !== "internal") return undefined;
+  const stage = run.failureStage ?? "a pipeline step";
+  const cause = runCause(run);
+  const work = workStatusText(run);
+  return {
+    title: `${stage} failed in run #${run.id}`.slice(0, 200),
+    description: [
+      `Expected: run #${run.id} to finish; DevIntern classified the failure as "${OUTCOME_CLASS_META.internal.label}".`,
+      `Instead: the ${stage} step failed${cause ? `: ${cause}` : "."}`,
+      ...(work ? [`${work}.`] : []),
+      "",
+      "Steps to reproduce / anything else:",
+    ].join("\n"),
+  };
+}
+
 /** "Report a problem" action and dialog for one run. */
-export function ReportProblem({ run }: { run: RunRecord }) {
+export function ReportProblem({
+  run,
+  label = "Report a problem",
+}: {
+  run: RunRecord;
+  label?: string;
+}) {
   const [open, setOpen] = useState(false);
   if (run.status === "in_progress") return null;
   const failed = FAILED_STATUSES.includes(run.status);
@@ -564,13 +611,18 @@ export function ReportProblem({ run }: { run: RunRecord }) {
         variant={failed ? "outline" : "ghost"}
         onClick={() => setOpen(true)}
         title={failed ? undefined : "Report incorrect behavior in this run"}
-        aria-label="Report a problem"
+        aria-label={label}
         className="max-sm:px-2.5"
       >
         <Bug />
-        <span className="max-sm:sr-only">Report a problem</span>
+        <span className="max-sm:sr-only">{label}</span>
       </Button>
-      <ReportDialog open={open} onOpenChange={setOpen} runId={run.id} />
+      <ReportDialog
+        open={open}
+        onOpenChange={setOpen}
+        runId={run.id}
+        initialDraft={reportDraftForRun(run)}
+      />
     </>
   );
 }

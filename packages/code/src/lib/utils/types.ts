@@ -84,7 +84,7 @@ export interface UtilsSurface {
       author?: { name: string; email: string };
       cwd?: string;
     },
-  ): Promise<{ success: boolean; message: string; hookError?: string }>;
+  ): Promise<{ success: boolean; message: string; hookError?: string; configError?: string }>;
   fetchRemoteBranch(
     branch: string,
     options?: { verbose?: boolean; cwd?: string },
@@ -124,6 +124,7 @@ export interface UtilsSurface {
     message: string;
     hookError?: string;
   }>;
+  hasPrePushHook(cwd?: string): Promise<boolean>;
   runPrePushHookLocally(options?: { verbose?: boolean; cwd?: string }): Promise<{
     success: boolean;
     message: string;

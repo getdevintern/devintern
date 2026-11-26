@@ -84,6 +84,7 @@ function passingDeps(overrides: Partial<WorkerDoctorDeps> = {}): WorkerDoctorDep
     checkEntitlement: async () => ({ valid: true, source: "entitlement", message: "" }),
     checkHarness: async () => ok("harness"),
     checkSandbox: async () => ok("sandbox"),
+    checkGitIdentity: async () => ok("git-identity"),
     isPortInUse: async () => false,
     workerStatus: () => ({ status: "stopped" }),
     ...overrides,
@@ -452,7 +453,9 @@ remote = "git@github.com:acme/backend.git"
       }),
     );
     expect(byId(checks, "entitlement")[0]?.status).toBe("ok");
-    expect(byId(checks, "entitlement")[0]?.detail).toContain("starts when the worker first starts");
+    expect(byId(checks, "entitlement")[0]?.detail).toBe(
+      "Worker Pilot available; it starts when the worker starts",
+    );
   });
 
   test("nobody signed in is an action, not a failure, and the closing line says one step is left", async () => {
@@ -522,7 +525,7 @@ remote = "git@github.com:acme/backend.git"
     );
     expect(check).toMatchObject({
       status: "ok",
-      detail: "Worker Pilot active, ends 2026-12-10 (14 days left)",
+      detail: "Worker Pilot, active until 2026-12-10 (14 days left)",
     });
   });
 
@@ -868,13 +871,16 @@ describe("default repository access check", () => {
   const env = { GITHUB_TOKEN: "fake-token" };
   const apiOk = async () => new Response("{}", { status: 200 });
 
-  test("a token GitHub can read still fails when git has no credentials", async () => {
+  const gitRefused = async () => ({
+    ok: false as const,
+    reason: "git ls-remote exited 128: remote: Write access to repository not granted.",
+  });
+
+  test("git refused with GITHUB_TOKEN: the token lacks Contents access", async () => {
     const check = createDefaultRepoAccessCheck(1_000, {
       fetch: apiOk,
-      lsRemote: async () => ({
-        ok: false,
-        reason: "git ls-remote exited 128: fatal: could not read Username for 'https://github.com'",
-      }),
+      lsRemote: gitRefused,
+      hasHelper: () => false,
     });
     const result = await check(repo, env);
     expect(result.ok).toBe(false);
@@ -882,8 +888,22 @@ describe("default repository access check", () => {
     expect(result.reason).toContain(
       "can read acme/backend through the API, but git cannot clone it",
     );
-    expect(result.reason).toContain("could not read Username");
-    expect(result.reason).toContain("gh auth setup-git");
+    expect(result.reason).toContain("Write access to repository not granted");
+    expect(result.reason).toContain("Git used GITHUB_TOKEN and was refused");
+    expect(result.reason).toContain("Contents");
+    expect(result.reason).not.toContain("gh auth setup-git");
+  });
+
+  test("git refused through the user's own helper: names the helper", async () => {
+    const check = createDefaultRepoAccessCheck(1_000, {
+      fetch: apiOk,
+      lsRemote: gitRefused,
+      hasHelper: () => true,
+    });
+    const result = await check(repo, env);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toContain("takes precedence over GITHUB_TOKEN");
   });
 
   test("passes when both the API and git can read the repository", async () => {

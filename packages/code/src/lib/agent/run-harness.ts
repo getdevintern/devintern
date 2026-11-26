@@ -38,6 +38,7 @@ import { finalizeAgentRun } from "./run-harness-finalize";
 import { readHeadCommit } from "./run-harness-git";
 import type { FinalizeContext } from "./run-harness-git";
 import { recordIncompleteAttempt } from "../state/retry-state";
+import { tagOutcomeClass } from "../state/run-outcome";
 import {
   hasRunStage,
   latestRunStage,
@@ -57,6 +58,7 @@ import { harnessSpawnEnv } from "./spawn";
 import type { VerifyConfig } from "./verify";
 import { withImplementationSummary } from "./implementation-summary";
 import { readImplementationReport } from "./implementation-report";
+import { primeAgentCommitIdentity } from "../utils/git-identity";
 
 interface RunAgentHarnessOptions {
   taskFile: string;
@@ -127,6 +129,9 @@ export async function runAgentSession(
   const resolvedPath = await resolveExecutablePathWithRetry(executablePath, {
     displayName: harness.displayName,
   });
+  // A host without a git identity: agents get the one commits will use
+  // (`utils/git-identity.ts`), for commits they make themselves.
+  if (enableGit && !gitAuthor) await primeAgentCommitIdentity(process.cwd());
 
   return new Promise<AgentSessionResult>((resolve, reject) => {
     (async () => {
@@ -265,7 +270,12 @@ export async function runAgentSession(
 
         if (timedOut) {
           console.log(`⏰ ${harness.displayName} timed out after ${timeoutMinutes} minutes`);
-          reject(new Error(`${harness.displayName} timed out after ${timeoutMinutes} minutes`));
+          reject(
+            tagOutcomeClass(
+              new Error(`${harness.displayName} timed out after ${timeoutMinutes} minutes`),
+              "agent",
+            ),
+          );
           return;
         }
 
@@ -527,7 +537,12 @@ export async function runAgentSession(
           }
           console.log("   No JIRA comment will be posted due to execution failure");
           reject(
-            new Error(`Agent exited with code ${code}${failureDetail ? `: ${failureDetail}` : ""}`),
+            tagOutcomeClass(
+              new Error(
+                `Agent exited with code ${code}${failureDetail ? `: ${failureDetail}` : ""}`,
+              ),
+              "agent",
+            ),
           );
         }
       });

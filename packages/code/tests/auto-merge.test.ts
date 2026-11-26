@@ -7,13 +7,10 @@ import { Utils } from "../src/lib/utils";
 
 import {
   autoMergePr,
-  buildMergeSafetyPrompt,
+  ciWaitKey,
   ensureBaseCommit,
   MAX_CHECKOUT_REVIEW_DIFF_CHARS,
   MAX_REVIEW_DIFF_CHARS,
-  OPERATOR_RULES_BEGIN,
-  OPERATOR_RULES_END,
-  OPERATOR_SECTION_HEADING,
   outstandingChangeRequests,
 } from "../src/lib/review/auto-merge";
 import type {
@@ -22,6 +19,14 @@ import type {
   AutoMergePolicy,
 } from "../src/lib/review/auto-merge";
 import type { PullRequestFile, PullRequestInfo } from "../src/lib/code-host/github/reviews-types";
+import { normalizeCiChecks } from "../src/lib/review/ci-checks";
+import {
+  buildMergeSafetyPrompt,
+  OPERATOR_RULES_BEGIN,
+  OPERATOR_RULES_END,
+  OPERATOR_SECTION_HEADING,
+} from "../src/lib/review/merge-safety-prompt";
+import type { CiCheck } from "../src/lib/review/ci-checks";
 
 const URL = "https://github.com/acme/widgets/pull/7";
 const HEAD = "a".repeat(40);
@@ -54,6 +59,8 @@ function fakeGitHub(
     reviews?: Array<{ state: string; user: { login: string } | null }>;
     mergeError?: Error;
     labelError?: Error;
+    /** Head commit checks; defaults to one passing check. */
+    checks?: CiCheck[] | (() => Promise<CiCheck[]>);
   } = {},
 ): FakeGitHub {
   const prs = overrides.prs ?? [pr()];
@@ -66,6 +73,10 @@ function fakeGitHub(
     listFiles: async () => files,
     listReviews: async () => overrides.reviews ?? [],
     getDiff: async () => "diff --git a/src/x.ts b/src/x.ts\n+change",
+    listCiChecks: async () => {
+      const checks = overrides.checks ?? [{ name: "ci", state: "success" }];
+      return typeof checks === "function" ? checks() : checks;
+    },
     merge: async (sha, method) => {
       if (overrides.mergeError) throw overrides.mergeError;
       github.merges.push({ sha, method });
@@ -1040,6 +1051,483 @@ describe("buildMergeSafetyPrompt policies", () => {
       );
       expect(framing).toContain("when in doubt the answer is not safe");
     }
+  });
+});
+
+describe("autoMergePr CI checks (Ready gate)", () => {
+  const codeFiles = [file("src/x.ts")];
+  const docsFiles = [file("README.md")];
+  const success = (name = "ci"): CiCheck => ({ name, state: "success" });
+  const strict = { ...basePolicy, requireChecks: true };
+
+  test("requireChecks: a code PR with zero checks waits, labels, and explains, without running the agent", async () => {
+    const github = fakeGitHub(codeFiles, { checks: [] });
+    const opts = options(github, { policy: strict });
+    const result = await autoMergePr(URL, opts);
+    expect(result).toMatchObject({ outcome: "waiting", ciWait: true, reviewed: false });
+    expect(result.message).toBe(
+      "Ready gate: No CI checks reported for this commit; auto-merge needs at least one passing check.",
+    );
+    expect(github.merges).toHaveLength(0);
+    expect(opts.agentCalls).toHaveLength(0);
+    expect(github.comments).toHaveLength(1);
+    expect(github.comments[0]).toContain("waiting for CI checks");
+    expect(github.comments[0]).toContain(
+      "No CI checks reported for this commit; auto-merge needs at least one passing check.",
+    );
+    expect(github.comments[0]).toContain("remove `auto_merge_require_checks = true`");
+    expect(github.labels).toEqual(["+needs-human-review"]);
+  });
+
+  test("an empty review label adds no label for a no-checks wait", async () => {
+    const github = fakeGitHub(codeFiles, { checks: [] });
+    await autoMergePr(URL, options(github, { policy: { ...strict, reviewLabel: "" } }));
+    expect(github.comments).toHaveLength(1);
+    expect(github.labels).toEqual([]);
+  });
+
+  test("only legacy commit statuses, all success, pass", async () => {
+    const github = fakeGitHub(codeFiles, {
+      checks: normalizeCiChecks([], [{ context: "jenkins", state: "success" }]),
+    });
+    expect((await autoMergePr(URL, options(github))).outcome).toBe("merged");
+  });
+
+  test("only check runs, all completed success, pass", async () => {
+    const github = fakeGitHub(codeFiles, {
+      checks: normalizeCiChecks(
+        [
+          { name: "test", status: "completed", conclusion: "success" },
+          { name: "lint", status: "completed", conclusion: "success" },
+        ],
+        [],
+      ),
+    });
+    expect((await autoMergePr(URL, options(github))).outcome).toBe("merged");
+  });
+
+  test("a pending check next to a passing one waits and says so", async () => {
+    for (const status of ["queued", "in_progress"]) {
+      const github = fakeGitHub(codeFiles, {
+        checks: normalizeCiChecks(
+          [
+            { name: "lint", status: "completed", conclusion: "success" },
+            { name: "test", status, conclusion: null },
+          ],
+          [],
+        ),
+      });
+      const result = await autoMergePr(URL, options(github));
+      expect(result).toMatchObject({ outcome: "waiting", ciWait: true });
+      expect(github.merges).toHaveLength(0);
+      expect(github.comments[0]).toContain("CI checks are still pending: test.");
+    }
+  });
+
+  test("a failing check next to a passing one waits and names it", async () => {
+    const github = fakeGitHub(codeFiles, {
+      checks: normalizeCiChecks(
+        [
+          { name: "lint", status: "completed", conclusion: "success" },
+          { name: "unit tests", status: "completed", conclusion: "failure" },
+        ],
+        [],
+      ),
+    });
+    const result = await autoMergePr(URL, options(github));
+    expect(result.outcome).toBe("waiting");
+    expect(github.merges).toHaveLength(0);
+    expect(github.comments[0]).toContain("CI check failed: unit tests.");
+  });
+
+  test("requireChecks: skipped or neutral checks alone are not a passing check", async () => {
+    const checks = normalizeCiChecks(
+      [
+        { name: "deploy", status: "completed", conclusion: "skipped" },
+        { name: "info", status: "completed", conclusion: "neutral" },
+      ],
+      [],
+    );
+    const github = fakeGitHub(codeFiles, { checks });
+    const result = await autoMergePr(URL, options(github, { policy: strict }));
+    expect(result).toMatchObject({ outcome: "waiting", ciWait: true });
+    expect(result.message).toContain("No CI check passed on this commit (2 skipped or neutral)");
+    // Without requireChecks they neither pass nor block.
+    expect((await autoMergePr(URL, options(fakeGitHub(codeFiles, { checks })))).outcome).toBe(
+      "merged",
+    );
+    expect(github.merges).toHaveLength(0);
+  });
+
+  test("skipped checks next to a passing one do not block", async () => {
+    const github = fakeGitHub(codeFiles, {
+      checks: normalizeCiChecks(
+        [
+          { name: "deploy", status: "completed", conclusion: "skipped" },
+          { name: "test", status: "completed", conclusion: "success" },
+        ],
+        [],
+      ),
+    });
+    expect((await autoMergePr(URL, options(github))).outcome).toBe("merged");
+  });
+
+  test("a safe-path-only PR merges with zero checks", async () => {
+    const github = fakeGitHub(docsFiles, { checks: [] });
+    const result = await autoMergePr(URL, options(github));
+    expect(result).toMatchObject({ outcome: "merged", reviewed: false });
+  });
+
+  test("a safe-path-only PR with a failing or pending check waits", async () => {
+    for (const check of [
+      { name: "test", state: "failing" as const },
+      { name: "test", state: "pending" as const },
+    ]) {
+      const github = fakeGitHub(docsFiles, { checks: [check] });
+      const result = await autoMergePr(URL, options(github));
+      expect(result.outcome).toBe("waiting");
+      expect(github.merges).toHaveLength(0);
+    }
+  });
+
+  test("a zero-check code PR (no CI configured) goes through to the agent review", async () => {
+    const github = fakeGitHub(codeFiles, { checks: [] });
+    const opts = options(github);
+    const result = await autoMergePr(URL, opts);
+    expect(result).toMatchObject({ outcome: "merged", reviewed: true });
+    expect(opts.agentCalls).toHaveLength(1);
+  });
+
+  test("a zero-check code PR still runs deny paths and honors an unsafe verdict", async () => {
+    const denied = fakeGitHub([file(".github/workflows/ci.yml")], { checks: [] });
+    const deniedResult = await autoMergePr(URL, options(denied));
+    expect(deniedResult.outcome).toBe("rejected");
+
+    const unsafe = fakeGitHub(codeFiles, { checks: [] });
+    const unsafeResult = await autoMergePr(
+      URL,
+      options(unsafe, {
+        verdict: '{"safe": false, "reason": "changes auth"}',
+      }),
+    );
+    expect(unsafeResult.outcome).toBe("rejected");
+    expect(unsafe.merges).toHaveLength(0);
+  });
+
+  test("failing checks block with or without requireChecks", async () => {
+    const github = fakeGitHub(codeFiles, { checks: [{ name: "test", state: "failing" }] });
+    expect((await autoMergePr(URL, options(github))).outcome).toBe("waiting");
+    const result = await autoMergePr(URL, options(github, { policy: strict }));
+    expect(result.outcome).toBe("waiting");
+  });
+
+  test("deny paths still win over a missing CI check", async () => {
+    const github = fakeGitHub([file(".github/workflows/ci.yml")], { checks: [] });
+    const result = await autoMergePr(URL, options(github));
+    expect(result.outcome).toBe("rejected");
+    expect(github.comments[0]).toContain("deny path");
+  });
+
+  test("requireChecks: a PR left open for no checks merges on the same head once CI passes", async () => {
+    let checks: CiCheck[] = [];
+    const github = fakeGitHub(codeFiles, { checks: async () => checks });
+    expect((await autoMergePr(URL, options(github, { policy: strict }))).outcome).toBe("waiting");
+    checks = [success()];
+    expect((await autoMergePr(URL, options(github, { policy: strict }))).outcome).toBe("merged");
+    expect(github.merges).toEqual([{ sha: HEAD, method: "squash" }]);
+    expect(github.labels).toEqual(["+needs-human-review", "-needs-human-review"]);
+  });
+
+  test("a failed check read fails closed as a retryable failure and says why", async () => {
+    const github = fakeGitHub(codeFiles, {
+      checks: async () => {
+        throw new Error("GitHub API error (502): Bad Gateway");
+      },
+    });
+    const opts = options(github);
+    const result = await autoMergePr(URL, opts);
+    expect(result.outcome).toBe("failed");
+    expect(result.message).toContain("could not be read");
+    expect(github.merges).toHaveLength(0);
+    expect(opts.agentCalls).toHaveLength(0);
+    // Retryable: nothing is posted until the final attempt.
+    expect(github.comments).toHaveLength(0);
+    expect(github.labels).toHaveLength(0);
+  });
+
+  test("a check read that times out fails closed", async () => {
+    const github = fakeGitHub(codeFiles, { checks: () => new Promise<CiCheck[]>(() => {}) });
+    const result = await autoMergePr(URL, options(github, { ciChecksTimeoutMs: 10 }));
+    expect(result.outcome).toBe("failed");
+    expect(result.message).toContain("timed out");
+    expect(github.merges).toHaveLength(0);
+  });
+
+  test("the final failed check read says the check kept failing", async () => {
+    const github = fakeGitHub(codeFiles, {
+      checks: async () => {
+        throw new Error("boom");
+      },
+    });
+    await autoMergePr(URL, options(github, { lastAttempt: true }));
+    expect(github.comments[0]).toContain("kept failing");
+    expect(github.comments[0]).toContain("The CI check status for this commit could not be read");
+    expect(github.labels).toEqual(["+needs-human-review"]);
+  });
+
+  test("review disabled rejects a code PR with zero checks instead of waiting on CI", async () => {
+    let reads = 0;
+    const github = fakeGitHub(codeFiles, {
+      checks: async () => {
+        reads++;
+        return [];
+      },
+    });
+    const result = await autoMergePr(
+      URL,
+      options(github, { policy: { ...basePolicy, review: false } }),
+    );
+    expect(result.outcome).toBe("rejected");
+    expect(result.ciWait).toBeUndefined();
+    expect(result.message).toContain("agent review is disabled");
+    expect(reads).toBe(0);
+    expect(github.merges).toHaveLength(0);
+  });
+
+  describe("GitHub reports the checks holding the PR (unstable / blocked)", () => {
+    const failingNextToPassing = normalizeCiChecks(
+      [
+        { name: "lint", status: "completed", conclusion: "success" },
+        { name: "unit tests", status: "completed", conclusion: "failure" },
+      ],
+      [],
+    );
+
+    test.each(["unstable", "blocked"])(
+      "%s with a failing check names it, comments, and labels",
+      async (state) => {
+        const github = fakeGitHub(codeFiles, {
+          prs: [pr({ mergeable_state: state })],
+          checks: failingNextToPassing,
+        });
+        const opts = options(github);
+        const result = await autoMergePr(URL, opts);
+        expect(result).toMatchObject({ outcome: "waiting", ciWait: true, reviewed: false });
+        expect(result.message).toBe("Ready gate: CI check failed: unit tests.");
+        expect(github.comments).toHaveLength(1);
+        expect(github.comments[0]).toContain("CI check failed: unit tests.");
+        expect(github.labels).toEqual(["+needs-human-review"]);
+        expect(github.merges).toHaveLength(0);
+        expect(opts.agentCalls).toHaveLength(0);
+      },
+    );
+
+    test("unstable with a pending check says checks are pending", async () => {
+      const github = fakeGitHub(docsFiles, {
+        prs: [pr({ mergeable_state: "unstable" })],
+        checks: normalizeCiChecks([{ name: "test", status: "in_progress", conclusion: null }], []),
+      });
+      const result = await autoMergePr(URL, options(github));
+      expect(result).toMatchObject({ outcome: "waiting", ciWait: true, ciWaitProblem: "pending" });
+      expect(github.comments[0]).toContain("CI checks are still pending: test.");
+      // Pending checks resolve on their own: no call for a human.
+      expect(github.labels).toEqual([]);
+    });
+
+    test("a shrinking pending list is the same wait: not re-posted, never labeled", async () => {
+      let checks = normalizeCiChecks(
+        [
+          { name: "lint", status: "in_progress", conclusion: null },
+          { name: "test", status: "in_progress", conclusion: null },
+        ],
+        [],
+      );
+      const github = fakeGitHub(codeFiles, {
+        prs: [pr({ mergeable_state: "unstable" })],
+        checks: async () => checks,
+      });
+      const first = await autoMergePr(URL, options(github));
+      expect(first.message).toContain("still pending: lint, test");
+      expect(github.comments).toHaveLength(1);
+
+      checks = normalizeCiChecks(
+        [
+          { name: "lint", status: "completed", conclusion: "success" },
+          { name: "test", status: "in_progress", conclusion: null },
+        ],
+        [],
+      );
+      const posted = ciWaitKey(first.ciWaitProblem, first.message);
+      const second = await autoMergePr(URL, options(github, { ciWaitPosted: posted }));
+      expect(second.message).toContain("still pending: test.");
+      expect(ciWaitKey(second.ciWaitProblem, second.message)).toBe(posted);
+      expect(github.comments).toHaveLength(1);
+      expect(github.labels).toEqual([]);
+
+      // Pending turning into a failure is a new wait: posted and labeled.
+      checks = [{ name: "test", state: "failing" }];
+      const third = await autoMergePr(URL, options(github, { ciWaitPosted: posted }));
+      expect(third.ciWaitProblem).toBe("failing");
+      expect(github.comments).toHaveLength(2);
+      expect(github.labels).toEqual(["+needs-human-review"]);
+    });
+
+    test("a dry run reports the failing check and posts nothing", async () => {
+      const github = fakeGitHub(codeFiles, {
+        prs: [pr({ mergeable_state: "unstable" })],
+        checks: failingNextToPassing,
+      });
+      const result = await autoMergePr(URL, options(github, { dryRun: true }));
+      expect(result.message).toBe("Ready gate: CI check failed: unit tests.");
+      expect(github.comments).toHaveLength(0);
+      expect(github.labels).toHaveLength(0);
+    });
+
+    test("blocked with passing checks (another protection rule) is a plain wait", async () => {
+      const github = fakeGitHub(codeFiles, { prs: [pr({ mergeable_state: "blocked" })] });
+      const result = await autoMergePr(URL, options(github));
+      expect(result.outcome).toBe("waiting");
+      expect(result.ciWait).toBeUndefined();
+      expect(result.ciChecksUnread).toBeUndefined();
+      expect(github.comments).toHaveLength(0);
+      expect(github.labels).toHaveLength(0);
+    });
+
+    test("an unreadable check status keeps the plain wait (no retry consumed)", async () => {
+      const github = fakeGitHub(codeFiles, {
+        prs: [pr({ mergeable_state: "unstable" })],
+        checks: async () => {
+          throw new Error("HTTP 502");
+        },
+      });
+      const result = await autoMergePr(URL, options(github));
+      expect(result.outcome).toBe("waiting");
+      expect(result.ciChecksUnread).toBe(true);
+      expect(github.comments).toHaveLength(0);
+    });
+
+    test("blocked+pending, then blocked+passing replaces the CI wait comment", async () => {
+      let checks = normalizeCiChecks(
+        [{ name: "test", status: "in_progress", conclusion: null }],
+        [],
+      );
+      const github = fakeGitHub(codeFiles, {
+        prs: [pr({ mergeable_state: "blocked" })],
+        checks: async () => checks,
+      });
+      const first = await autoMergePr(URL, options(github));
+      expect(first).toMatchObject({ outcome: "waiting", ciWait: true });
+      expect(github.comments[0]).toContain("CI checks are still pending");
+
+      checks = [success()];
+      const second = await autoMergePr(
+        URL,
+        options(github, { ciWaitPosted: ciWaitKey(first.ciWaitProblem, first.message) }),
+      );
+      expect(second.outcome).toBe("waiting");
+      expect(second.ciWait).toBeUndefined();
+      expect(github.comments).toHaveLength(2);
+      expect(github.comments[1]).toContain("waiting for GitHub");
+      expect(github.comments[1]).toContain("branch protection blocks the merge");
+      expect(github.comments[1]).not.toContain("pending");
+      // Not left open for a human: any review label is removed (the
+      // pending wait never added one).
+      expect(github.labels).toEqual(["-needs-human-review"]);
+    });
+
+    test("an unreadable check status does not replace the posted CI wait", async () => {
+      const github = fakeGitHub(codeFiles, {
+        prs: [pr({ mergeable_state: "blocked" })],
+        checks: async () => {
+          throw new Error("HTTP 502");
+        },
+      });
+      await autoMergePr(URL, options(github, { ciWaitPosted: "Ready gate: x" }));
+      expect(github.comments).toHaveLength(0);
+    });
+
+    test.each(["unstable", "blocked"])(
+      "%s with a failing check: a deny path is rejected, not held for CI",
+      async (state) => {
+        const github = fakeGitHub([file(".github/workflows/ci.yml")], {
+          prs: [pr({ mergeable_state: state })],
+          checks: failingNextToPassing,
+        });
+        const result = await autoMergePr(URL, options(github));
+        expect(result.outcome).toBe("rejected");
+        expect(result.ciWait).toBeUndefined();
+        expect(github.comments[0]).toContain("deny path");
+        expect(github.comments[0]).not.toContain("waiting for CI checks");
+      },
+    );
+
+    test("unstable with a pending check: review disabled rejects a code PR", async () => {
+      const github = fakeGitHub(codeFiles, {
+        prs: [pr({ mergeable_state: "unstable" })],
+        checks: normalizeCiChecks([{ name: "test", status: "in_progress", conclusion: null }], []),
+      });
+      const result = await autoMergePr(
+        URL,
+        options(github, { policy: { ...basePolicy, review: false } }),
+      );
+      expect(result.outcome).toBe("rejected");
+      expect(result.message).toContain("agent review is disabled");
+      expect(github.comments[0]).not.toContain("waiting for CI checks");
+    });
+
+    test("unstable with a pending check: review disabled still holds a safe-only PR for CI", async () => {
+      const github = fakeGitHub(docsFiles, {
+        prs: [pr({ mergeable_state: "unstable" })],
+        checks: normalizeCiChecks([{ name: "test", status: "in_progress", conclusion: null }], []),
+      });
+      const result = await autoMergePr(
+        URL,
+        options(github, { policy: { ...basePolicy, review: false } }),
+      );
+      expect(result).toMatchObject({ outcome: "waiting", ciWait: true });
+    });
+
+    test("dirty never reads the checks", async () => {
+      let reads = 0;
+      const github = fakeGitHub(codeFiles, {
+        prs: [pr({ mergeable_state: "dirty" })],
+        checks: async () => {
+          reads++;
+          return failingNextToPassing;
+        },
+      });
+      expect((await autoMergePr(URL, options(github))).outcome).toBe("waiting");
+      expect(reads).toBe(0);
+    });
+  });
+
+  test("the same CI wait already on the PR is not re-posted, but its label is kept", async () => {
+    const message =
+      "Ready gate: No CI checks reported for this commit; auto-merge needs at least one passing check.";
+    const repeat = fakeGitHub(codeFiles, { checks: [] });
+    const result = await autoMergePr(
+      URL,
+      options(repeat, { policy: strict, ciWaitPosted: message }),
+    );
+    expect(result).toMatchObject({ outcome: "waiting", ciWait: true, message });
+    expect(repeat.comments).toHaveLength(0);
+    // The label is re-added (idempotent) in case a human removed it.
+    expect(repeat.labels).toEqual(["+needs-human-review"]);
+
+    // A different reason (now failing) is posted.
+    const changed = fakeGitHub(codeFiles, { checks: [{ name: "ci", state: "failing" }] });
+    await autoMergePr(URL, options(changed, { ciWaitPosted: message }));
+    expect(changed.comments).toHaveLength(1);
+    expect(changed.labels).toEqual(["+needs-human-review"]);
+  });
+
+  test("requireChecks: a dry run reports the no-checks Ready gate and does not comment", async () => {
+    const github = fakeGitHub(codeFiles, { checks: [] });
+    const result = await autoMergePr(URL, options(github, { policy: strict, dryRun: true }));
+    expect(result.outcome).toBe("waiting");
+    expect(result.message).toContain("Ready gate: No CI checks reported for this commit");
+    expect(github.comments).toHaveLength(0);
+    expect(github.merges).toHaveLength(0);
   });
 });
 

@@ -287,8 +287,11 @@ test.skipIf(skip)(
       if (worker.exitStatus === undefined) {
         throw new Error(`Worker kept running without a license:\n${worker.tail()}`);
       }
-      expect(worker.exitStatus).toBe(1);
+      // 78 (EX_CONFIG): nobody signed in is permanent, so a service manager
+      // stops retrying instead of restarting the worker every 30 s.
+      expect(worker.exitStatus).toBe(78);
       expect(worker.logs).toContain("❌ License check failed");
+      expect(worker.logs).toContain("The worker will not retry until this is fixed");
       expect(worker.logs).toContain(AUTOMATION_DENIAL);
       // The worker allows the trial, so it points a signed-out user at the
       // workspace sign-in (the session the daemon reads).

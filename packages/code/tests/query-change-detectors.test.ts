@@ -90,7 +90,7 @@ describe("query-based change detectors", () => {
     const since = Date.parse("2026-11-04T09:00:49.000Z");
     const result = await detector.changesSince(String(since));
 
-    expect(queries[0]).toBe("updated:>=2026-11-04T08:55:49Z");
+    expect(queries[0]).toBe("updated:>=2026-11-04T08:45:49Z");
     expect(Number(result.nextCursor)).toBeGreaterThan(since);
   });
 

@@ -204,7 +204,7 @@ describe("review worktree held by another live job", () => {
       expect(stored?.status).toBe("pending");
       expect(stored?.attempts).toBe(0);
       expect(scheduled).toEqual([60_000]);
-      expect(endRun).toHaveBeenCalledWith("deferred", expect.stringContaining("busy"));
+      expect(endRun).toHaveBeenCalledWith("deferred", expect.stringContaining("busy"), {});
       expect(captureError).not.toHaveBeenCalled();
     } finally {
       runtime.queue = null;

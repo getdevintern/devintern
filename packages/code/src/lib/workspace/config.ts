@@ -20,8 +20,10 @@ import type { DependencyMode } from "../dependencies/gate";
 import { parseAgentSelection } from "../agent/selection";
 import type { HarnessPinnedEntry } from "../agent/selection";
 import { parseDashboardAllowedOriginList } from "../observability/dashboard-origins";
+import { parseNotificationsSection } from "../notifications/delivery/config";
 import type {
   ConflictResolutionMode,
+  GitAuthorSetting,
   WorkspaceExecutionIsolation,
   WorkspaceSettings,
   WorkspaceDefaults,
@@ -49,6 +51,7 @@ import {
 } from "./config-auto-merge";
 
 export {
+  autoMergeRequireChecksFor,
   autoMergePathsFor,
   autoMergeReviewFor,
   DEFAULT_AUTO_MERGE_METHOD,
@@ -60,6 +63,7 @@ export type {
   DashboardSettings,
   ErrorMonitorConfig,
   ErrorMonitorConfigBase,
+  GitAuthorSetting,
   RepoConfig,
   RoutingRule,
   SentryErrorMonitorConfig,
@@ -155,7 +159,11 @@ export function parseWorkspaceConfig(
 
   applyTeamDefaults(teams, defaults, errors);
 
-  const { repos, repoNames } = parseReposSection(document, defaults.prLabels, errors);
+  const { repos, repoNames } = parseReposSection(
+    document,
+    { prLabels: defaults.prLabels, gitAuthor: workspace.gitAuthor },
+    errors,
+  );
   validateAutoMergeRules(workspace.autoMerge, repos, errors);
 
   // Only the worker polls. A workspace whose repos are all manual-only (used
@@ -202,6 +210,7 @@ export function parseWorkspaceConfig(
   const estimations = parseEstimationsSection(document, tracker, teams, errors);
 
   const dashboard = parseDashboardSection(document, errors);
+  const notifications = parseNotificationsSection(document.notifications, errors);
 
   validateManualOnlyReferences(
     repos,
@@ -224,6 +233,7 @@ export function parseWorkspaceConfig(
     workspace,
     dashboard,
     worker: { schedule: schedule.config, autoUpdate },
+    notifications,
     defaults,
     teams,
     repos,
@@ -330,6 +340,7 @@ function parseWorkspaceSettings(
     errors,
   );
   const autoMerge = parseAutoMergeSettings(workspaceTable, errors);
+  const gitAuthor = readGitAuthor(workspaceTable, "[workspace]", errors);
 
   return {
     execution: { isolation, maxConcurrency, maxConcurrencyPerRepo },
@@ -341,7 +352,33 @@ function parseWorkspaceSettings(
     conflictSchedule,
     ...(Object.keys(conflictAgent).length > 0 ? { conflictAgent } : {}),
     autoMerge,
+    ...(gitAuthor ? { gitAuthor } : {}),
   };
+}
+
+/**
+ * `git_author_name` + `git_author_email` of one table. Both or neither: a
+ * name alone would be paired with an unrelated email.
+ */
+function readGitAuthor(
+  table: Record<string, unknown>,
+  label: string,
+  errors: string[],
+): GitAuthorSetting | undefined {
+  const name = readString(table, "git_author_name", label, errors)?.trim();
+  const email = readString(table, "git_author_email", label, errors)?.trim();
+  if (!name && !email) return undefined;
+  if (!name || !email) {
+    errors.push(`${label}: set both git_author_name and git_author_email, or neither.`);
+    return undefined;
+  }
+  if (/[<>\n]/.test(name) || !/^[^\s<>@]+@[^\s<>@]+$/.test(email)) {
+    errors.push(
+      `${label}.git_author_name / git_author_email must be a plain name and an email address (e.g. "DevIntern Bot" and "bot@example.com").`,
+    );
+    return undefined;
+  }
+  return { name, email };
 }
 
 /** Parse `[workspace].conflict_resolution` and its optional schedule. */
@@ -495,9 +532,10 @@ function applyTeamDefaults(
 /** Parse `[[repos]]` entries and collect their names. */
 function parseReposSection(
   document: Record<string, unknown>,
-  defaultPrLabels: string[] | undefined,
+  inherited: { prLabels: string[] | undefined; gitAuthor: GitAuthorSetting | undefined },
   errors: string[],
 ): { repos: RepoConfig[]; repoNames: Set<string> } {
+  const defaultPrLabels = inherited.prLabels;
   const repos: RepoConfig[] = [];
   const repoNames = new Set<string>();
   for (const [index, table] of asTableArray(document.repos, "[[repos]]", errors).entries()) {
@@ -531,6 +569,8 @@ function parseReposSection(
     const env = readEnvTable(table, label, errors);
     const syncTeamPrs = readOptionalBoolean(table, "sync_team_prs", label, errors);
     const manualOnly = readOptionalBoolean(table, "manual_only", label, errors);
+    const requireChecks = readOptionalBoolean(table, "auto_merge_require_checks", label, errors);
+    const gitAuthor = readGitAuthor(table, label, errors) ?? inherited.gitAuthor;
     // Team-PR discovery uses GitHub's open-PR list and author_association;
     // there is no GitLab/Bitbucket equivalent wired, so reject instead of
     // silently doing nothing.
@@ -549,6 +589,7 @@ function parseReposSection(
         table.pr_labels === undefined
           ? defaultPrLabels
           : readStringList(table, "pr_labels", label, errors),
+      ...(gitAuthor ? { gitAuthor } : {}),
       pipelineFile: readString(table, "pipeline_file", label, errors),
       ...(table.auto_merge_safe_paths === undefined
         ? {}
@@ -562,6 +603,7 @@ function parseReposSection(
             autoMergeReviewPaths: readGlobList(table, "auto_merge_review_paths", label, errors),
           }),
       ...repoAutoMergeReview(table, label, errors),
+      ...(requireChecks === undefined ? {} : { autoMergeRequireChecks: requireChecks }),
       envFile: readString(table, "env_file", label, errors),
       ...(syncTeamPrs === undefined ? {} : { syncTeamPrs }),
       ...(manualOnly === true ? { manualOnly } : {}),
