@@ -7,6 +7,7 @@ import {
   AUTO_MERGE_SOURCE,
   AutoMergeWatcherAcquirer,
   autoMergeDecisionKey,
+  autoMergePrDecisionKey,
 } from "../src/lib/acquirers/auto-merge-watcher";
 import type { AutoMergePolledPr } from "../src/lib/acquirers/auto-merge-watcher";
 import {
@@ -41,7 +42,9 @@ describe("AutoMergeWatcherAcquirer", () => {
   let fingerprint: string | undefined;
 
   const liveRuns = () => runs.filter((run) => run !== null);
-  const watcher = (extra: { quietSeconds?: number; harness?: string } = {}) =>
+  const watcher = (
+    extra: { quietSeconds?: number; harness?: string; recheckOnPush?: boolean } = {},
+  ) =>
     new AutoMergeWatcherAcquirer({
       intervalSeconds: 60,
       workerState,
@@ -62,6 +65,9 @@ describe("AutoMergeWatcherAcquirer", () => {
       },
       harness: () => extra.harness,
       policyFingerprint: () => fingerprint ?? "",
+      ...(extra.recheckOnPush !== undefined
+        ? { recheckOnPush: () => extra.recheckOnPush as boolean }
+        : {}),
       runStore: {
         createRun: (meta) => {
           runs.push({
@@ -392,6 +398,111 @@ describe("AutoMergeWatcherAcquirer", () => {
     pr = { ...pr, head: { sha: "f".repeat(40), repo: null } };
     await w.tick();
     expect(calls).toHaveLength(2);
+  });
+
+  test("no recheck on push: a reviewed PR is not re-checked after new commits", async () => {
+    results = [{ outcome: "rejected", message: "outside safe paths", reviewed: true }];
+    const w = watcher({ recheckOnPush: false });
+    await w.tick();
+    expect(calls).toHaveLength(1);
+    pr = { ...pr, head: { sha: "f".repeat(40), repo: null } };
+    await w.tick();
+    expect(calls).toHaveLength(1);
+    expect(queue.hasProcessed(AUTO_MERGE_SOURCE, autoMergePrDecisionKey(REPO, 7, ""))).toBe(true);
+  });
+
+  test("no recheck on push: a rejection without an agent review is re-checked on new commits", async () => {
+    results = [
+      { outcome: "rejected", message: "src/x.ts matches deny pattern src/**", reviewed: false },
+      { outcome: "rejected", message: "agent review: risky", reviewed: true },
+    ];
+    const w = watcher({ recheckOnPush: false });
+    await w.tick();
+    expect(queue.hasProcessed(AUTO_MERGE_SOURCE, autoMergePrDecisionKey(REPO, 7, ""))).toBe(false);
+    pr = { ...pr, head: { sha: "f".repeat(40), repo: null } };
+    await w.tick();
+    expect(calls).toHaveLength(2);
+    // The agent review is final for the PR.
+    pr = { ...pr, head: { sha: "e".repeat(40), repo: null } };
+    await w.tick();
+    expect(calls).toHaveLength(2);
+  });
+
+  test("no recheck on push: a policy change still re-checks the PR", async () => {
+    results = [{ outcome: "rejected", message: "outside safe paths", reviewed: true }];
+    const w = watcher({ recheckOnPush: false });
+    await w.tick();
+    pr = { ...pr, head: { sha: "f".repeat(40), repo: null } };
+    fingerprint = "widened";
+    await w.tick();
+    expect(calls).toHaveLength(2);
+  });
+
+  test("no recheck on push: waiting and failures below the cap are not a decision", async () => {
+    results = [
+      { outcome: "waiting", message: "changes requested", reviewed: false },
+      { outcome: "failed", message: "boom", reviewed: false },
+    ];
+    const w = watcher({ recheckOnPush: false });
+    await w.tick();
+    now += 10 * 60_000 + 1;
+    await w.tick();
+    now += 5 * 60_000 + 1;
+    pr = { ...pr, head: { sha: "f".repeat(40), repo: null } };
+    await w.tick();
+    expect(calls).toHaveLength(3);
+  });
+
+  test("no recheck on push: exhausting the failure cap gives up on the head, not the PR", async () => {
+    results = Array.from({ length: 3 }, () => ({
+      outcome: "failed" as const,
+      message: "boom",
+      reviewed: false,
+    }));
+    const w = watcher({ recheckOnPush: false });
+    for (let i = 0; i < 4; i++) {
+      await w.tick();
+      now += 60 * 60_000;
+    }
+    expect(calls).toHaveLength(3);
+    expect(queue.hasProcessed(AUTO_MERGE_SOURCE, autoMergeDecisionKey(REPO, 7, HEAD, ""))).toBe(
+      true,
+    );
+    expect(queue.hasProcessed(AUTO_MERGE_SOURCE, autoMergePrDecisionKey(REPO, 7, ""))).toBe(false);
+    // A new commit gets one real decision, which then is final for the PR.
+    pr = { ...pr, head: { sha: "f".repeat(40), repo: null } };
+    results = [{ outcome: "rejected", message: "outside safe paths", reviewed: true }];
+    await w.tick();
+    expect(calls).toHaveLength(4);
+    expect(calls[3]?.sha).toBe("f".repeat(40));
+    pr = { ...pr, head: { sha: "e".repeat(40), repo: null } };
+    now += 60 * 60_000;
+    await w.tick();
+    expect(calls).toHaveLength(4);
+  });
+
+  test("no recheck on push: turning it off skips PRs reviewed while it was on", async () => {
+    let recheckOnPush = true;
+    results = [{ outcome: "rejected", message: "no", reviewed: true }];
+    const w = new AutoMergeWatcherAcquirer({
+      intervalSeconds: 60,
+      workerState,
+      queue,
+      enabled: () => true,
+      now: () => now,
+      quietSeconds: 0,
+      recheckOnPush: () => recheckOnPush,
+      fetchPr: async () => ({ data: pr, notModified: false }),
+      mergePr: async (_repo, prNumber, sha) => {
+        calls.push({ prNumber, sha });
+        return results.shift() ?? { outcome: "rejected", message: "no", reviewed: true };
+      },
+    });
+    await w.tick();
+    recheckOnPush = false;
+    pr = { ...pr, head: { sha: "f".repeat(40), repo: null } };
+    await w.tick();
+    expect(calls).toHaveLength(1);
   });
 
   test("waiting backs off without recording a decision or a run", async () => {
@@ -816,6 +927,14 @@ process.exit(75);
     ]);
     expect(autoMergeCliArgs({ ...policy, reviewLabel: "" }, HEAD).at(-1)).toBe("--no-review-label");
     expect(autoMergeCliArgs(policy, HEAD)).not.toContain("--review-label");
+  });
+
+  test("recheckOnPush false maps to --no-recheck-on-push", () => {
+    const policy = { safePaths: [], denyPaths: [], review: true, method: "squash" as const };
+    const flag = "--no-recheck-on-push";
+    expect(autoMergeCliArgs({ ...policy, recheckOnPush: false }, HEAD)).toContain(flag);
+    expect(autoMergeCliArgs({ ...policy, recheckOnPush: true }, HEAD)).not.toContain(flag);
+    expect(autoMergeCliArgs(policy, HEAD)).not.toContain(flag);
   });
 
   test("review policy and instructions map to --policy and --review-instructions=", () => {

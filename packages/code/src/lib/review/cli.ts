@@ -390,6 +390,9 @@ function parseAutoMergeFlags(
       policy.rulesFile = resolveRulesFilePath(value, workspaceDir);
     } else if (arg === "--no-review") {
       policy.review = false;
+    } else if (arg === "--no-recheck-on-push") {
+      // Worker-internal: the PR is not re-checked after new commits (status comment wording).
+      policy.recheckOnPush = false;
     } else if (arg === "--require-checks") {
       policy.requireChecks = true;
     } else if (arg === "--no-review-label") {

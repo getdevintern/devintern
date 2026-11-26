@@ -36,7 +36,13 @@ export type LeftOpenReason =
 
 export type AutoMergeCommentStatus =
   | { kind: "merged"; method: AutoMergeMethod; headSha: string; agentReason?: string }
-  | { kind: "left-open"; headSha: string; reason: LeftOpenReason }
+  | {
+      kind: "left-open";
+      headSha: string;
+      reason: LeftOpenReason;
+      /** `false`: new commits are not checked again (`auto_merge_recheck_on_push`). */
+      recheckOnPush?: boolean;
+    }
   /**
    * GitHub holds the PR for something other than its CI checks (they pass):
    * replaces an earlier CI wait so the comment does not go stale.
@@ -199,6 +205,8 @@ export function buildAutoMergeStatusComment(status: AutoMergeCommentStatus): str
     "",
     ...leftOpenBody(status.reason),
     "",
-    "<sub>devintern checks again after new commits or a change to the auto-merge policy.</sub>",
+    status.recheckOnPush === false
+      ? "<sub>devintern checks each pull request once and does not check again after new commits; a change to the auto-merge policy re-checks it.</sub>"
+      : "<sub>devintern checks again after new commits or a change to the auto-merge policy.</sub>",
   ].join("\n");
 }

@@ -4,6 +4,8 @@
 
 ### Upgrade notes
 
+- **Auto-merge reviews each PR once by default.** When the merge-safety agent review leaves a PR open, new commits to it (review fixes, conflict resolutions, updates) no longer start another review; a change to the auto-merge policy still re-checks it. PRs left open without an agent run (deny paths, size limits, review disabled) are still checked again after new commits. **Who is affected:** workspaces with `auto_merge = true`. Set `[workspace].auto_merge_recheck_on_push = true` for the previous behavior. See `docs/code/pr-follow-up.md#auto-merging-safe-prs`
+
 - **Auto-merge reads CI checks before merging a code PR.** A PR with a failing or pending check run or commit status on its head commit stays open, with a status comment naming the failing checks (and `auto_merge_review_label` for failing ones) instead of waiting silently. A repository without CI is the operator's choice, so a commit with no checks at all still merges on the remaining gates; set `auto_merge_require_checks = true` to require at least one passing check. **Who is affected:** workspaces with `auto_merge = true`. The GitHub credential now also needs read access to `Commit statuses` (and `Checks` for a GitHub App), for every auto-merged PR including those that only touch safe paths; if it cannot read them, the PR is not merged. Fine-grained personal access tokens cannot be granted `Checks`, so with one the worker reads the commit's combined CI state instead and names failing check runs only by count. See `docs/code/pr-follow-up.md#ci-checks` and `docs/code/configuration.md#github-authentication`
 
 ### Added

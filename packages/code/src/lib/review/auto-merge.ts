@@ -65,6 +65,12 @@ export interface AutoMergePolicy extends MergePathPolicy {
    * merges them. Unset or empty disables labeling.
    */
   reviewLabel?: string;
+  /**
+   * `false` when the worker does not review a PR again after new commits
+   * (`auto_merge_recheck_on_push = false`). Only changes the status
+   * comment's wording; unset keeps the "checks again" wording.
+   */
+  recheckOnPush?: boolean;
   /** Merge-safety review strictness; unset means `strict`. */
   reviewPolicy?: MergeSafetyPolicy;
   /**
@@ -803,7 +809,16 @@ export async function autoMergePr(
     // attempt below posts, like any other failure.
     await postStatus(
       ctx,
-      { kind: "left-open", headSha: pr.head.sha, reason: decision.leftOpen },
+      {
+        kind: "left-open",
+        headSha: pr.head.sha,
+        reason: decision.leftOpen,
+        // Only an agent review is final for the PR: free rejections are
+        // checked again on the next commit.
+        ...(options.policy.recheckOnPush === false && decision.reviewed
+          ? { recheckOnPush: false }
+          : {}),
+      },
       { syncLabel: labelLeftOpen },
     );
   } else if (finalFailure) {
@@ -815,6 +830,8 @@ export async function autoMergePr(
         kind: "not-evaluable",
         detail: `the automatic check kept failing (${result.message})`,
       },
+      // No "not checked again" footer: the worker gives up on this head
+      // only, so new commits are checked again whatever recheckOnPush is.
     });
   }
   return result;
