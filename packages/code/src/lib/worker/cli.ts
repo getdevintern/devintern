@@ -59,7 +59,11 @@ async function runWorkerLoginSubcommand(args: string[]): Promise<never> {
       : args.filter((_, index) => index !== workspaceFlag && index !== workspaceFlag + 1);
   ensureWorkspaceCodeState(workspaceDir);
   const { runLoginCommand } = await import("../account/cli");
-  return runLoginCommand(["devintern", "login", ...loginArgs], workspaceCodeStateDir(workspaceDir));
+  return runLoginCommand(
+    ["devintern", "login", ...loginArgs],
+    workspaceCodeStateDir(workspaceDir),
+    "devintern worker login",
+  );
 }
 
 /** True when `args` contains a `--help`/`-h` flag. */

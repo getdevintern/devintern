@@ -111,6 +111,15 @@ export interface AuthCallbackServer {
    */
   waitForCode: (timeoutMs?: number) => Promise<string>;
   /**
+   * Complete the callback from text the user pasted instead of letting the
+   * browser reach this server: the address the browser landed on when it
+   * could not load `127.0.0.1` (SSH, containers, another machine).
+   *
+   * @param input - Pasted text; see {@link parsePastedCallback}.
+   * @returns `false` when the text holds neither a code nor an OAuth error.
+   */
+  submitPastedCallback: (input: string) => boolean;
+  /**
    * Shut down the local callback HTTP server.
    *
    * Waits a short grace period so the browser can receive the HTML response
@@ -119,6 +128,29 @@ export interface AuthCallbackServer {
    * @param delayMs - Time to wait before stopping the server (defaults to 250ms).
    */
   stop: (delayMs?: number) => Promise<void>;
+}
+
+/** Authorization code or OAuth error read from a pasted callback address. */
+export type PastedCallback = { code: string } | { error: string };
+
+/**
+ * Parse a pasted callback address such as
+ * `http://127.0.0.1:17865/auth/callback?code=...`. A bare query string
+ * (`code=...`) also works. Any other text returns `null`.
+ *
+ * @param input - Text the user pasted into the terminal.
+ * @returns The code, the OAuth error, or `null` when neither is present.
+ */
+export function parsePastedCallback(input: string): PastedCallback | null {
+  const text = input.trim();
+  if (!text) return null;
+  const queryStart = text.indexOf("?");
+  const query = queryStart >= 0 ? text.slice(queryStart + 1) : text;
+  const params = new URLSearchParams(query.split("#")[0]);
+  const error = params.get("error_description") || params.get("error");
+  if (error) return { error };
+  const code = params.get("code")?.trim();
+  return code ? { code } : null;
 }
 
 /** Send an HTML callback page to the browser. */
@@ -214,6 +246,13 @@ export async function createAuthCallbackServer(
           );
         }),
       ]).finally(() => clearTimeout(timeoutTimer));
+    },
+    submitPastedCallback(input) {
+      const parsed = parsePastedCallback(input);
+      if (!parsed) return false;
+      if ("error" in parsed) codePromiseReject?.(new Error(parsed.error));
+      else codePromiseResolve?.(parsed.code);
+      return true;
     },
     stop(delayMs = DEFAULT_SHUTDOWN_DELAY_MS) {
       if (stopPromise) return stopPromise;
