@@ -563,9 +563,21 @@ describe("devintern worker service", () => {
     });
     expect(report.result).toBe("action_required");
     expect(serviceExitCode(report)).toBe(2);
+    // `command` is always runnable; the prose hint lives in `message`.
     expect(report.nextSteps.map((step) => step.command)).toEqual([
-      "Run `devintern worker login github`",
+      `devintern worker login --workspace ${join(workspaceDir, "workspace.toml")} github --no-wait --json`,
       "devintern worker service install",
+    ]);
+    expect(report.nextSteps[0]?.message).toContain("sign in");
+    // Same check shape as `worker init --json`.
+    expect(report.checks).toEqual([
+      {
+        name: "entitlement",
+        label: "Automation entitlement",
+        status: "action",
+        message: "Not started",
+        hint: "Run `devintern worker login github`",
+      },
     ]);
     expect(commands.some((command) => command.includes("daemon-reload"))).toBe(false);
   });
@@ -586,6 +598,8 @@ describe("devintern worker service", () => {
     });
     expect(refused.result).toBe("refused");
     expect(serviceExitCode(refused)).toBe(1);
+    expect(refused.checks?.[0]).toMatchObject({ name: "harness", status: "fail" });
+    expect(refused.nextSteps[0]?.command).toBe("npm install -g @anthropic-ai/claude-code");
 
     const forced = await runServiceAction(baseArgs({ force: true }), {
       workspaceDir,

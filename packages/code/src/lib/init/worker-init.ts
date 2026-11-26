@@ -41,6 +41,8 @@ import {
 import { isPromptAbort } from "../cli/prompt-abort";
 import { resolveWizardPrompts } from "../cli/prompt-session";
 import { WORKER_PILOT_OFFER, signInCommand } from "../account/worker-pilot";
+import { readinessBlockers } from "./worker-init-readiness";
+import type { ReadinessBlocker } from "./worker-init-readiness";
 import { renderReadinessReport } from "../observability/readiness";
 import type { ReadinessCheck } from "../observability/readiness";
 import { trackerRequiredEnv } from "../trackers/manager";
@@ -48,6 +50,7 @@ import { runTrackerSetup } from "./wizard";
 import { PRManager } from "../code-host/index";
 import { connectRelayTarget, hasGitHubRelayRegistration, loadRelayState } from "../relay/connect";
 import { parseCronOrIntervalSchedule } from "../automation/config";
+import { Utils } from "../utils";
 import { writeSecretFile } from "../utils/secret-file";
 import { isValidTimeZone, parseTimeWindowSpec } from "../worker/schedule";
 import {
@@ -153,6 +156,8 @@ export interface WorkerInitResult {
   ok: boolean;
   /** No failing readiness check (or license problem) is left after setup. */
   ready?: boolean;
+  /** Not ready, but only signing in remains (no failing check): exit code 2. */
+  signInOnly?: boolean;
 }
 
 export interface WorkerInitDeps {
@@ -456,6 +461,13 @@ function applyEnvFile(envPath: string): Record<string, string> {
   return env;
 }
 
+/** `owner/repo` of the checkout's GitHub `origin`, or null (no origin, not GitHub). */
+async function originGitHubSlug(cwd: string): Promise<string | null> {
+  const result = await Utils.executeGitCommand(["remote", "get-url", "origin"], { cwd });
+  const remote = result.success ? result.output.trim() : "";
+  return remote ? gitHubSlugFromRemote(remote) : null;
+}
+
 export async function defaultEnsureTracker(
   cwd: string,
   prompt: PromptFn,
@@ -493,8 +505,10 @@ export async function defaultEnsureTracker(
   }
 
   log("   No tracker config yet — running that subset of `devintern init`.");
+  const originSlug = await originGitHubSlug(cwd);
   const result = await runTrackerSetup(prompt, log, defaultProbe, cwd, {
     promptSecret,
+    stepDefaults: originSlug ? { GITHUB_REPO: originSlug } : undefined,
     writeEnv: async (envContent) => {
       mergeIntoSharedEnv(sharedEnvPath, envContent, log);
       return sharedEnvPath;
@@ -1275,41 +1289,6 @@ async function runServiceStep(
   }
   return installServiceStep(ctx, workspaceDir, runtime, printManual);
 }
-/**
- * What still keeps the worker from running, one line each: the failing
- * readiness checks when they ran, otherwise the license step's result.
- *
- * @param checks - `worker doctor` checks, or undefined when they did not run
- * @param licenseFailure - License step outcome (null when entitled)
- */
-export function readinessBlockers(
-  checks: ReadinessCheck[] | undefined,
-  licenseFailure: string | null | undefined,
-): ReadinessBlocker[] {
-  if (checks) {
-    return checks
-      .filter((check) => check.status === "fail" || check.status === "action")
-      .map((check) => ({
-        text: `${check.label}: ${check.hint ?? check.detail ?? "see the check above"}`,
-        action: check.status === "action",
-      }));
-  }
-  if (licenseFailure) {
-    return [
-      {
-        text: `Automation entitlement: run \`${signInCommand()}\` to begin your ${WORKER_PILOT_OFFER}, or set LICENSE_KEY in the workspace .env`,
-        action: false,
-      },
-    ];
-  }
-  return [];
-}
-
-/** Something that keeps the worker from starting; `action` is a step, not a failure. */
-export interface ReadinessBlocker {
-  text: string;
-  action: boolean;
-}
 
 /** Run the `worker doctor` checks and print them; undefined when they cannot run. */
 async function logReadiness(
@@ -1493,7 +1472,11 @@ export async function runWorkerInit(deps: WorkerInitDeps = {}): Promise<WorkerIn
       serviceInstall: service.serviceInstall,
       githubApp: githubAppOutcome,
     });
-    return { ok: true, ready: blockers.length === 0 };
+    return {
+      ok: true,
+      ready: blockers.length === 0,
+      signInOnly: blockers.length > 0 && blockers.every((blocker) => blocker.action),
+    };
   } finally {
     session.close();
   }

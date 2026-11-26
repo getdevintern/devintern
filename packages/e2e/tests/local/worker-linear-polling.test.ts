@@ -5,7 +5,7 @@
  * `createLinearChangeDetector` (packages/code/src/lib/acquirers/change-detector.ts),
  * which sends `{"updatedAt":{"gt":"<ISO>"}}` through `LinearClient.searchIssues`
  * (packages/task-trackers/src/clients/linear.ts; endpoint from `LINEAR_API_URL`).
- * The ISO bound is the persisted cursor minus `DELTA_LOOKBACK_MS` (5 minutes).
+ * The ISO bound is the persisted cursor minus `DELTA_LOOKBACK_MS` (15 minutes).
  * The first tick has no cursor and skips the delta query entirely. When the
  * delta returns anything, the acquirer re-runs `[defaults].task_query` and
  * dedupes on `(key, updatedAt)` (packages/code/src/lib/acquirers/task-polling.ts).
@@ -13,7 +13,7 @@
  * Observed behavior pinned here (not separately documented upstream):
  * - The delta filter is sent bare; it is not combined with the team/state
  *   filter of the user's query, so it matches any issue the API key can see.
- * - Because of the 5-minute overlap, every tick within 5 minutes of any write
+ * - Because of the 15-minute overlap, every tick within 15 minutes of any write
  *   (including the worker's own comment and state transition) counts as
  *   "changed" and re-runs the evaluate query. Exactly-once execution therefore
  *   rests on the status-based query (test 1) and the `(key, updated)` dedupe
@@ -41,7 +41,7 @@ const POLL_INTERVAL_SECONDS = 1;
 /** Idle ticks observed per quiet window: enough to prove no re-run. */
 const IDLE_TICKS = 3;
 /** `DELTA_LOOKBACK_MS` in change-detector.ts. */
-const DELTA_LOOKBACK_MS = 5 * 60_000;
+const DELTA_LOOKBACK_MS = 15 * 60_000;
 const BACKLOG = "Backlog";
 const ISO_MS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
@@ -201,7 +201,7 @@ async function waitForSearch(
 /**
  * Observe {@link IDLE_TICKS} more delta queries with no executions in flight
  * and prove each one's bound is the previous tick's detection time minus the
- * 5-minute lookback, and that no run or agent invocation happened.
+ * 15-minute lookback, and that no run or agent invocation happened.
  *
  * Each idle tick has no executions to await, so it persists its detection
  * start time (taken just before its delta request) as the next cursor.

@@ -891,7 +891,7 @@ GITLAB_WEBHOOK_ADMIN_TOKEN = "admin"
           ],
         }),
       );
-      expect(result).toEqual({ ok: true, ready: false });
+      expect(result).toEqual({ ok: true, ready: false, signInOnly: true });
       expect(questions.some((question) => question.includes("background service"))).toBe(false);
       expect(commands.some((command) => command.includes("enable"))).toBe(false);
       const all = logs.join("\n");
@@ -1097,7 +1097,7 @@ GITLAB_WEBHOOK_ADMIN_TOKEN = "admin"
           ],
         }),
       );
-      expect(result).toEqual({ ok: true, ready: false });
+      expect(result).toEqual({ ok: true, ready: false, signInOnly: false });
       const all = logs.join("\n");
       expect(all).toContain("Readiness (the same checks as `devintern worker doctor`)");
       expect(all).toContain("❌ Agent harness — claude not found");
@@ -1114,7 +1114,7 @@ GITLAB_WEBHOOK_ADMIN_TOKEN = "admin"
           ],
         }),
       );
-      expect(result).toEqual({ ok: true, ready: true });
+      expect(result).toEqual({ ok: true, ready: true, signInOnly: false });
       expect(logs.join("\n")).toContain("🎉 Worker setup complete — the worker is ready.");
     });
 
@@ -1147,7 +1147,7 @@ GITLAB_WEBHOOK_ADMIN_TOKEN = "admin"
           ],
         }),
       );
-      expect(result).toEqual({ ok: true, ready: false });
+      expect(result).toEqual({ ok: true, ready: false, signInOnly: true });
       const all = logs.join("\n");
       expect(all).toContain(
         "👉 Worker setup saved. One step left: sign in to begin your 14-day free Worker Pilot, no card required.",

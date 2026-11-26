@@ -164,7 +164,7 @@ async function runWorkerRunNowSubcommand(args: string[]): Promise<never> {
  */
 async function runWorkerDoctorSubcommand(args: string[]): Promise<never> {
   if (hasHelpArg(args)) {
-    console.log("Usage: devintern worker doctor [--workspace <path>] [--offline]");
+    console.log("Usage: devintern worker doctor [--workspace <path>] [--offline] [--json]");
     console.log("");
     console.log("Check whether this worker workspace can acquire and run work right now:");
     console.log("workspace.toml, per-team tracker credentials, ready-tasks query dry-runs,");
@@ -177,11 +177,16 @@ async function runWorkerDoctorSubcommand(args: string[]): Promise<never> {
     console.log("  --workspace <path>  Use this workspace.toml (default: ~/.devintern/");
     console.log("                      workspace.toml, or DEVINTERN_WORKSPACE_DIR)");
     console.log("  --offline           Skip query, repository, and license checks (no network)");
+    console.log("  --json              Print one JSON document (schema devintern.worker-doctor)");
+    console.log(
+      "                      with result, checks, and nextSteps instead of the checklist",
+    );
     console.log("  -h, --help          Display this help message");
     process.exit(0);
   }
   let workspacePath: string | undefined;
   let offline = false;
+  let json = false;
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg === "--workspace") {
@@ -194,6 +199,8 @@ async function runWorkerDoctorSubcommand(args: string[]): Promise<never> {
       i++;
     } else if (arg === "--offline") {
       offline = true;
+    } else if (arg === "--json") {
+      json = true;
     } else {
       console.error(`❌ Unknown option for worker doctor: ${arg}`);
       console.error("   Run `devintern worker doctor --help` for usage.");
@@ -214,6 +221,17 @@ async function runWorkerDoctorSubcommand(args: string[]): Promise<never> {
     // Unreadable workspace .env: the config check reports the workspace state.
   }
   const checks = await collectWorkerDoctorChecks({ workspacePath, offline }, { processEnv });
+  if (json) {
+    const { buildWorkerDoctorReport, readinessExitCode } =
+      await import("../observability/readiness-json");
+    const document = buildWorkerDoctorReport(checks, {
+      workspaceDir,
+      offline,
+      env: { ...process.env },
+    });
+    console.log(JSON.stringify(document, null, 2));
+    process.exit(readinessExitCode(document.result));
+  }
   const report = renderReadinessReport(checks);
   console.log(`🩺 devintern worker readiness${offline ? " (offline)" : ""}:\n`);
   console.log(report.lines.join("\n"));
@@ -234,7 +252,7 @@ const WORKER_INIT_USAGE = [
   "  --no-service        Skip the install-and-launch offer for the systemd/launchd service",
   "",
   "Non-interactive mode (coding agents, scripts, SSH without a TTY):",
-  "  --non-interactive   Set up from flags; never prompts, signs in, pairs, or installs",
+  "  --non-interactive   Set up from flags; never prompts, pairs, or installs (signs in only with --sign-in)",
   "  --tracker <id>      Tracker the worker polls (jira, linear, github, ...)",
   "  --task-query <q>    Ready-tasks query, written to [defaults].task_query",
   "  --repo-from-cwd     Register the current Git repository (uses its origin remote)",
@@ -380,7 +398,7 @@ async function runWorkerInitSubcommand(args: string[]): Promise<never> {
       setup: true,
       loginCommand: "devintern worker login",
     });
-  let ok = false;
+  let exitCode = 1;
   try {
     const result = await runWorkerInit({
       noService: args.some((arg) => arg === "--no-service"),
@@ -407,7 +425,9 @@ async function runWorkerInitSubcommand(args: string[]): Promise<never> {
         );
       },
     });
-    ok = result.ok;
+    // Same codes as `worker init --non-interactive`: 0 ready, 2 only sign-in
+    // is left, 1 a blocking check failed (or setup did not finish).
+    exitCode = !result.ok ? 1 : result.ready ? 0 : result.signInOnly ? 2 : 1;
   } catch (error) {
     if (!isPromptAbort(error)) throw error;
     console.log(
@@ -415,7 +435,7 @@ async function runWorkerInitSubcommand(args: string[]): Promise<never> {
     );
   }
   await flushAnalytics();
-  process.exit(ok ? 0 : 1);
+  process.exit(exitCode);
 }
 
 /** Parse daemon flags, load the workspace, gate on license, and run the worker. */
