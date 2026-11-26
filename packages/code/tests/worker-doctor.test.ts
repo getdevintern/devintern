@@ -453,7 +453,9 @@ remote = "git@github.com:acme/backend.git"
       }),
     );
     expect(byId(checks, "entitlement")[0]?.status).toBe("ok");
-    expect(byId(checks, "entitlement")[0]?.detail).toContain("starts when the worker first starts");
+    expect(byId(checks, "entitlement")[0]?.detail).toBe(
+      "Worker Pilot available; it starts when the worker starts",
+    );
   });
 
   test("nobody signed in is an action, not a failure, and the closing line says one step is left", async () => {
@@ -523,7 +525,7 @@ remote = "git@github.com:acme/backend.git"
     );
     expect(check).toMatchObject({
       status: "ok",
-      detail: "Worker Pilot active, ends 2026-12-10 (14 days left)",
+      detail: "Worker Pilot, active until 2026-12-10 (14 days left)",
     });
   });
 

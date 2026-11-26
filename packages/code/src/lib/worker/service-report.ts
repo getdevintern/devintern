@@ -5,21 +5,27 @@
  */
 
 import { loadWorkspaceConfig } from "../workspace/config";
-import { workspaceConfigPath } from "../workspace/paths";
+import { workspaceConfigPath, workspaceEnvPath } from "../workspace/paths";
+import { parseEnvFile } from "../workspace/env";
+import { DEFAULT_DASHBOARD_PORT, resolveDashboardPort } from "../observability/dashboard-port";
 import { serviceLogCommand } from "./service-control";
 import type { ServiceRunState, StartCheck, WorkerServiceStatus } from "./service-control";
 
 /** Command that (re)starts the installed service. */
 export const SERVICE_RESTART_COMMAND = "devintern worker service restart";
 
+function workspaceEnv(workspaceDir: string): Record<string, string | undefined> {
+  return { ...process.env, ...parseEnvFile(workspaceEnvPath(workspaceDir)) };
+}
+
 /** Dashboard address for this workspace, or null when the dashboard is off. */
 export function dashboardUrlFor(workspaceDir: string): string | null {
   try {
     const config = loadWorkspaceConfig(workspaceConfigPath(workspaceDir));
     if (!config.workspace.dashboard) return null;
-    return `http://localhost:${config.workspace.dashboardPort}`;
+    return `http://localhost:${resolveDashboardPort(config.workspace.dashboardPort, workspaceEnv(workspaceDir))}`;
   } catch {
-    return "http://localhost:4400";
+    return `http://localhost:${DEFAULT_DASHBOARD_PORT}`;
   }
 }
 
