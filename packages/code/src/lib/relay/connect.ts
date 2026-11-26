@@ -38,6 +38,7 @@ import {
   clearPendingGitHubPairing,
   connectGitHubRepo,
   describeGitHubPairingFailure,
+  describePairingInstructions,
   loadPendingGitHubPairing,
   pollGitHubPairing,
   startGitHubRepoPairing,
@@ -692,8 +693,7 @@ async function connectGitHubTarget(
       const start = await startGitHubRepoPairing(pairingOptions);
       if (start.kind === "pending") {
         deps.onGitHubInstallUrl?.(start.pairing.installUrl);
-        console.log("Open this URL to install and authorize the DevIntern GitHub App:");
-        console.log(`   ${start.pairing.installUrl}`);
+        for (const line of describePairingInstructions(start.pairing)) console.log(line);
         console.log("Then check the result with: devintern worker connect github --status");
         deps.onOutcome?.({ kind: "pending", target: "github", pairing: start.pairing });
         return 0;
@@ -709,11 +709,10 @@ async function connectGitHubTarget(
     }
     const state = await connectGitHubRepo({
       ...pairingOptions,
-      onInstallUrl(url) {
+      onInstallUrl(url, pairing) {
         installUrl = url;
         deps.onGitHubInstallUrl?.(url);
-        console.log("Open this URL to install and authorize the DevIntern GitHub App:");
-        console.log(`   ${url}`);
+        for (const line of describePairingInstructions(pairing)) console.log(line);
         console.log("Waiting for GitHub verification...");
       },
     });
@@ -831,11 +830,13 @@ async function connectGitHubStatus(
     if (polled.kind === "failure") {
       return fail(describeGitHubPairingFailure(polled), polled.code);
     }
-    console.log("⏳ Waiting for the GitHub App authorization. Open this URL and approve it:");
-    console.log(`   ${pairing.installUrl}`);
-    console.log(
-      "   If GitHub showed the App's settings page instead of an install, saving there won't finish pairing.",
-    );
+    console.log("⏳ Waiting for the GitHub App authorization.");
+    for (const line of describePairingInstructions(pairing)) console.log(line);
+    if (!pairing.authorizeUrl) {
+      console.log(
+        "   If GitHub showed the App's settings page instead of an install, saving there won't finish pairing.",
+      );
+    }
     console.log("   Re-run `devintern worker connect github` to verify without a browser.");
     deps.onOutcome?.({ kind: "pending", target: "github", pairing });
     return 0;

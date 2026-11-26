@@ -252,6 +252,13 @@ export async function startGitHubRepoPairing(
       if (verification.unverified.length === 0) {
         return { kind: "verified", state: verification.state, relayToken };
       }
+      for (const entry of verification.unverified) {
+        if (entry.reason === "not_paired_or_installed") {
+          console.log(
+            `ℹ️  ${entry.repo}: the App installation isn't linked to this account yet; authorizing once links it.`,
+          );
+        }
+      }
       repos = verification.unverified.map((entry) => entry.repo);
     }
   } catch (error) {
@@ -274,14 +281,16 @@ export async function startGitHubRepoPairing(
  * @param options - Repo slug plus signed-in access token
  */
 export async function connectGitHubRepo(
-  options: GitHubRepoPairingOptions & { onInstallUrl?: (url: string) => void },
+  options: GitHubRepoPairingOptions & {
+    onInstallUrl?: (url: string, pairing: PendingGitHubPairing) => void;
+  },
 ): Promise<RelayConnectState> {
   const start = await startGitHubRepoPairing(options);
   if (start.kind === "verified") return start.state;
   const { pairing, relayToken } = start;
   const relayUrl = (options.relayUrl ?? resolveRelayUrl()).replace(/\/+$/, "");
   const workingDir = options.workingDir ?? process.cwd();
-  options.onInstallUrl?.(pairing.installUrl);
+  options.onInstallUrl?.(pairing.installUrl, pairing);
 
   const sleep =
     options.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
@@ -318,11 +327,62 @@ export interface PendingGitHubPairing {
   /** Relay pairing id (the last segment of the status URL). */
   id: string;
   installUrl: string;
+  /** GitHub App user-authorization URL carrying the pairing state (newer relays). */
+  authorizeUrl?: string;
+  /** Whether the DevIntern App is already installed on the account (newer relays). */
+  appInstalled?: boolean;
   pairingStatusUrl: string;
   /** Epoch milliseconds. */
   expiresAt: number;
   repos: string[];
   relayUrl: string;
+}
+
+/** An `authorizeUrl` is only trusted when it is an https URL on github.com. */
+export function parseAuthorizeUrl(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  try {
+    const url = new URL(value);
+    const host = url.hostname.toLowerCase();
+    if (url.protocol !== "https:" || (host !== "github.com" && !host.endsWith(".github.com"))) {
+      return undefined;
+    }
+    return url.toString();
+  } catch {
+    return undefined;
+  }
+}
+
+/** Lines telling the user which URL to open for a pending pairing. */
+export function describePairingInstructions(pairing: PendingGitHubPairing): string[] {
+  const { authorizeUrl, installUrl } = pairing;
+  if (authorizeUrl && pairing.appInstalled === true) {
+    const owner = pairing.repos[0]?.split("/")[0] ?? "this account";
+    return [
+      `The DevIntern App is already installed on ${owner}. Authorize it to link this worker:`,
+      `   ${authorizeUrl}`,
+      "To change which repositories it can access:",
+      `   ${installUrl}`,
+    ];
+  }
+  const lines = [
+    "Open this URL to install and authorize the DevIntern GitHub App:",
+    `   ${installUrl}`,
+  ];
+  if (authorizeUrl) {
+    lines.push(
+      "If GitHub shows the App's settings page instead of an install, open this to finish:",
+      `   ${authorizeUrl}`,
+    );
+  }
+  return lines;
+}
+
+/** The single URL a person (or agent) should open next. */
+export function pairingNextUrl(pairing: PendingGitHubPairing): string {
+  return pairing.authorizeUrl && pairing.appInstalled === true
+    ? pairing.authorizeUrl
+    : pairing.installUrl;
 }
 
 function pendingPairingPath(workingDir: string): string {
@@ -351,7 +411,13 @@ export function loadPendingGitHubPairing(workingDir: string): PendingGitHubPairi
       typeof data.relayUrl === "string" &&
       Array.isArray(data.repos)
     ) {
-      return data as PendingGitHubPairing;
+      const authorizeUrl = parseAuthorizeUrl(data.authorizeUrl);
+      const appInstalled = typeof data.appInstalled === "boolean" ? data.appInstalled : undefined;
+      return {
+        ...(data as PendingGitHubPairing),
+        authorizeUrl,
+        appInstalled: authorizeUrl ? appInstalled : undefined,
+      };
     }
   } catch {
     // Missing or corrupt: treat as no pending pairing.
@@ -384,6 +450,8 @@ async function beginGitHubPairing(
     installUrl: string;
     pairingStatusUrl: string;
     expiresAt: number;
+    authorizeUrl?: unknown;
+    appInstalled?: unknown;
   };
   if (!data.installUrl || !data.pairingStatusUrl || !data.expiresAt) {
     throw new Error("relay returned an invalid GitHub pairing");
@@ -396,6 +464,7 @@ async function beginGitHubPairing(
         .filter(Boolean)
         .at(-1) ?? "",
     installUrl: data.installUrl,
+    ...authorizeFields(data.authorizeUrl, data.appInstalled),
     pairingStatusUrl: data.pairingStatusUrl,
     expiresAt: data.expiresAt,
     repos,
@@ -403,6 +472,15 @@ async function beginGitHubPairing(
   };
   savePendingGitHubPairing(pairing, deps.workingDir ?? process.cwd());
   return pairing;
+}
+
+function authorizeFields(
+  authorizeUrl: unknown,
+  appInstalled: unknown,
+): Pick<PendingGitHubPairing, "authorizeUrl" | "appInstalled"> {
+  const url = parseAuthorizeUrl(authorizeUrl);
+  if (!url) return {};
+  return { authorizeUrl: url, ...(typeof appInstalled === "boolean" ? { appInstalled } : {}) };
 }
 
 /** Machine-readable reason a pairing check failed at the relay. */
