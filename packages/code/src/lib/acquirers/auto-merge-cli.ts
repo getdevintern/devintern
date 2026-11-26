@@ -15,6 +15,7 @@ import { pinnedHarnessChildEnv } from "../agent/selection";
 import { harnessLogRunEnv } from "../observability/harness-logs";
 import { AUTO_MERGE_OUTCOMES } from "../review/auto-merge";
 import type { AutoMergeOutcome, AutoMergePolicy, AutoMergeResult } from "../review/auto-merge";
+import type { CiChecksProblem } from "../review/ci-checks";
 import { getWorkerFailover, runWithFailover } from "../worker/failover";
 import {
   AUTOMATION_ACCESS_EXIT_CODE,
@@ -46,21 +47,26 @@ export interface AutoMergeCliOptions {
   lastAttempt?: boolean;
   /** Worker run for this check; the child's agent transcript is filed under it. */
   runId?: number;
+  /** The CI wait the PR already shows (`--ci-wait-posted`); not re-posted. */
+  ciWaitPosted?: string;
 }
 
 /** CLI flags carrying the policy to the subprocess. */
 export function autoMergeCliArgs(
   policy: AutoMergePolicy,
   expectedHeadSha: string,
-  options: { lastAttempt?: boolean } = {},
+  options: { lastAttempt?: boolean; ciWaitPosted?: string } = {},
 ): string[] {
   return [
     "--expected-head",
     expectedHeadSha,
     ...(options.lastAttempt ? ["--last-attempt"] : []),
+    // `=` form: the message is free text.
+    ...(options.ciWaitPosted ? [`--ci-wait-posted=${options.ciWaitPosted}`] : []),
     "--method",
     policy.method,
     ...(policy.review ? [] : ["--no-review"]),
+    ...(policy.requireChecks ? ["--require-checks"] : []),
     ...(policy.reviewPolicy ? ["--policy", policy.reviewPolicy] : []),
     // `=` form: the text may start with "-" (a bullet list).
     ...(policy.reviewInstructions ? [`--review-instructions=${policy.reviewInstructions}`] : []),
@@ -77,6 +83,17 @@ export function autoMergeCliArgs(
         ? ["--review-label", policy.reviewLabel]
         : ["--no-review-label"]),
   ];
+}
+
+const CI_CHECKS_PROBLEMS: readonly CiChecksProblem[] = [
+  "no-checks",
+  "no-passing",
+  "pending",
+  "failing",
+];
+
+function isCiChecksProblem(value: unknown): value is CiChecksProblem {
+  return (CI_CHECKS_PROBLEMS as readonly unknown[]).includes(value);
 }
 
 /** Parse the subprocess result record; `null` when absent or malformed. */
@@ -99,6 +116,9 @@ export function parseAutoMergeResultLine(output: string): AutoMergeResult | null
         outcome: record.outcome as AutoMergeOutcome,
         message: record.message,
         reviewed: record.reviewed === true,
+        ...(record.ciWait === true ? { ciWait: true } : {}),
+        ...(isCiChecksProblem(record.ciWaitProblem) ? { ciWaitProblem: record.ciWaitProblem } : {}),
+        ...(record.ciChecksUnread === true ? { ciChecksUnread: true } : {}),
       };
     }
   }
@@ -252,6 +272,7 @@ export function runAutoMergeViaCli(
   const prUrl = `https://github.com/${repo}/pull/${prNumber}`;
   const args = autoMergeCliArgs(opts.policy, opts.expectedHeadSha, {
     lastAttempt: opts.lastAttempt,
+    ciWaitPosted: opts.ciWaitPosted,
   });
   const { harnessPin } = opts;
   return serializePrRun(repo, prNumber, async () => {

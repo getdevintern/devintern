@@ -37,6 +37,7 @@ interface InstallationCache {
  *   - Contents: Read and write (to check and push branches)
  *   - Pull requests: Read and write (to create PRs)
  *   - Actions, Commit statuses: Read (when automatic CI fixes are enabled)
+ *   - Checks, Commit statuses: Read (when auto-merge is enabled)
  */
 export class GitHubAppAuth {
   private appId: string;

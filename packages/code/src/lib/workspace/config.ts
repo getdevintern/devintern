@@ -51,6 +51,7 @@ import {
 } from "./config-auto-merge";
 
 export {
+  autoMergeRequireChecksFor,
   autoMergePathsFor,
   autoMergeReviewFor,
   DEFAULT_AUTO_MERGE_METHOD,
@@ -568,6 +569,7 @@ function parseReposSection(
     const env = readEnvTable(table, label, errors);
     const syncTeamPrs = readOptionalBoolean(table, "sync_team_prs", label, errors);
     const manualOnly = readOptionalBoolean(table, "manual_only", label, errors);
+    const requireChecks = readOptionalBoolean(table, "auto_merge_require_checks", label, errors);
     const gitAuthor = readGitAuthor(table, label, errors) ?? inherited.gitAuthor;
     // Team-PR discovery uses GitHub's open-PR list and author_association;
     // there is no GitLab/Bitbucket equivalent wired, so reject instead of
@@ -601,6 +603,7 @@ function parseReposSection(
             autoMergeReviewPaths: readGlobList(table, "auto_merge_review_paths", label, errors),
           }),
       ...repoAutoMergeReview(table, label, errors),
+      ...(requireChecks === undefined ? {} : { autoMergeRequireChecks: requireChecks }),
       envFile: readString(table, "env_file", label, errors),
       ...(syncTeamPrs === undefined ? {} : { syncTeamPrs }),
       ...(manualOnly === true ? { manualOnly } : {}),

@@ -107,7 +107,7 @@ export class GitHubReviewsClient {
    * @returns GitHub API bearer token
    * @throws When no auth is configured
    */
-  private async getToken(owner: string, repo: string): Promise<string> {
+  async getToken(owner: string, repo: string): Promise<string> {
     if (this.token) {
       return this.token;
     }

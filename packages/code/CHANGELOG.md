@@ -1,5 +1,15 @@
 # @devintern/code Changelog
 
+## [Unreleased]
+
+### Upgrade notes
+
+- **Auto-merge reads CI checks before merging a code PR.** A PR with a failing or pending check run or commit status on its head commit stays open, with a status comment naming the failing checks (and `auto_merge_review_label` for failing ones) instead of waiting silently. A repository without CI is the operator's choice, so a commit with no checks at all still merges on the remaining gates; set `auto_merge_require_checks = true` to require at least one passing check. **Who is affected:** workspaces with `auto_merge = true`. The GitHub credential now also needs read access to `Commit statuses` (and `Checks` for a GitHub App), for every auto-merged PR including those that only touch safe paths; if it cannot read them, the PR is not merged. Fine-grained personal access tokens cannot be granted `Checks`, so with one the worker reads the commit's combined CI state instead and names failing check runs only by count. See `docs/code/pr-follow-up.md#ci-checks` and `docs/code/configuration.md#github-authentication`
+
+### Added
+
+- **`auto_merge_require_checks`** (default `false`, workspace-wide or per repo, repo wins) and `devintern auto-merge --require-checks`: code PRs merge only when at least one CI check passed on the head commit, so a commit with no checks waits; `skipped` and `neutral` checks do not count. A PR waiting on CI keeps being checked on the same commit and merges once CI passes; the reason shows in the status comment, on the dashboard's Auto-merge entry, and in `--dry-run` output, which also names failing or pending checks
+
 ## [2.29.0] - 2026-11-25
 
 Workspace release, continued: DevIntern no longer reads or writes anything in a checkout's `.devintern-code/`, checkouts without a hosted remote register by path, and all run state lives in `~/.devintern`. Auto-merge gains merge-safety policy presets, custom rules, and review paths; `devintern automations` installs bundled automation packs; newly added GitHub repos verify without reinstalling the App. Duplicate ticket runs during scheduled retries, rerere-replayed merges rejected by commit hooks, worker doctor messages, and the dashboard's harness and stats views are fixed.
