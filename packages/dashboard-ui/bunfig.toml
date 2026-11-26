@@ -1,0 +1,4 @@
+[test]
+# Load Radix with a DOM present so interaction tests can open dialogs and
+# popovers; see the file for why.
+preload = ["./src/test-setup/radix-layout-effect.ts"]

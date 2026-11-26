@@ -9,6 +9,13 @@
  */
 
 import type { RunLineage, RunRecord, RunsResponse, SpawnedWork } from "./api";
+import type {
+  NotificationLink,
+  NotificationListResponse,
+  NotificationMutesResponse,
+  NotificationRecord,
+  NotificationUnreadResponse,
+} from "./api-notifications";
 
 /** Directory, next to `index.html`, that holds the recorded responses. */
 export const SNAPSHOT_DATA_DIR = "data";
@@ -194,4 +201,229 @@ export function pruneUnrecordedLineage(detail: unknown, recordedIds: ReadonlySet
     },
   );
   return { ...detail, lineage: { parent, spawned } };
+}
+
+// ---------------------------------------------------------------------------
+// Notification fixtures
+// ---------------------------------------------------------------------------
+
+const MINUTE_MS = 60_000;
+const HOUR_MS = 60 * MINUTE_MS;
+
+function runLinks(run: RunRecord | undefined): NotificationLink[] {
+  if (!run) return [];
+  return [
+    { label: `Run #${run.id}`, runId: run.id },
+    ...(run.prUrl
+      ? [
+          {
+            label: run.prNumber ? `${run.repo ?? "PR"}#${run.prNumber}` : "Pull request",
+            url: run.prUrl,
+          },
+        ]
+      : []),
+    ...(run.ticketUrl ? [{ label: run.ticketKey ?? "Ticket", url: run.ticketUrl }] : []),
+  ];
+}
+
+function runName(run: RunRecord): string {
+  const name = run.automationId ?? run.taskKey;
+  return name ? `Run #${run.id} (${name})` : `Run #${run.id}`;
+}
+
+/**
+ * Notification rows for the demo inbox, built around the recorded runs so
+ * their links open real run pages: a grouped error-monitor escalation with a
+ * large count, an escalated task, a `work_spawned` rollup on the run that
+ * delegated work, grouped PRs, and a resolved source outage (shown with
+ * "Show resolved").
+ *
+ * @param runs - Every recorded run, newest first
+ * @param now - Viewer's clock at page load
+ */
+export function demoNotifications(runs: readonly RunRecord[], now: number): NotificationRecord[] {
+  const errorRun = runs.find((run) => run.origin === "error_monitor");
+  const escalatedRun = runs.find((run) => run.status === "escalated" && run !== errorRun);
+  const spawnRun =
+    runs.find((run) => run.automationId === "docs-drift") ??
+    runs.find((run) => run.origin === "scheduled");
+  const prRuns = runs.filter((run) => run.prUrl).slice(0, 3);
+  const mergedRun = runs.find((run) => run.origin === "auto_merge") ?? prRuns[0];
+  const repoOf = (run: RunRecord | undefined, fallback: string) => run?.repo ?? fallback;
+  const base = { muted: false, links: [] as NotificationLink[] };
+  const rows: NotificationRecord[] = [
+    {
+      ...base,
+      id: 9,
+      kind: "escalated",
+      severity: "high",
+      groupKey: "escalated:sentry:checkout-total-undefined",
+      count: 88,
+      ...(errorRun ? { runId: errorRun.id } : {}),
+      repo: repoOf(errorRun, "acme/web"),
+      subject: "sentry:checkout-total-undefined",
+      title: "Sentry issue escalated 88 times: TypeError reading 'total' in checkout",
+      body: "The error monitor keeps reopening this issue; the agent could not reproduce it from the stack trace alone.",
+      links: runLinks(errorRun),
+      createdAt: now - 3 * 24 * HOUR_MS,
+      updatedAt: now - 4 * MINUTE_MS,
+    },
+    ...(escalatedRun
+      ? [
+          {
+            ...base,
+            id: 8,
+            kind: "escalated" as const,
+            severity: "high" as const,
+            groupKey: `escalated:task:${escalatedRun.taskKey ?? escalatedRun.id}`,
+            count: 1,
+            runId: escalatedRun.id,
+            repo: repoOf(escalatedRun, "acme/web"),
+            title: `${runName(escalatedRun)} escalated and needs a human`,
+            ...(escalatedRun.outcomeReason ? { body: escalatedRun.outcomeReason } : {}),
+            links: runLinks(escalatedRun),
+            createdAt: now - 2 * HOUR_MS,
+            updatedAt: now - 2 * HOUR_MS,
+          },
+        ]
+      : []),
+    {
+      ...base,
+      id: 7,
+      kind: "automation_broke",
+      severity: "high",
+      groupKey: "automation_broke:automation:dependency-updates",
+      count: 1,
+      repo: "acme/api",
+      subject: "automation:dependency-updates",
+      title: "Automation dependency-updates broke: the latest run failed after a successful run",
+      body: "npm install failed: the lockfile references a package version that was unpublished.",
+      createdAt: now - 5 * HOUR_MS,
+      updatedAt: now - 5 * HOUR_MS,
+      readAt: now - 4 * HOUR_MS,
+    },
+    ...(spawnRun
+      ? [
+          {
+            ...base,
+            id: 6,
+            kind: "work_spawned" as const,
+            severity: "normal" as const,
+            groupKey: `work_spawned:run:${spawnRun.id}`,
+            count: 1,
+            runId: spawnRun.id,
+            repo: repoOf(spawnRun, "acme/web"),
+            title: `${runName(spawnRun)} delegated 2 tasks and filed 1 ticket`,
+            body: "1/2 finished: 1 PR open",
+            links: [{ label: `Run #${spawnRun.id}`, runId: spawnRun.id }],
+            createdAt: now - 26 * MINUTE_MS,
+            updatedAt: now - 12 * MINUTE_MS,
+          },
+        ]
+      : []),
+    {
+      ...base,
+      id: 5,
+      kind: "pr_opened",
+      severity: "normal",
+      groupKey: "pr_opened:repo:today",
+      count: Math.max(prRuns.length, 1),
+      repo: repoOf(prRuns[0], "acme/web"),
+      title: prRuns.length > 1 ? `${prRuns.length} PRs opened today` : "Opened a pull request",
+      links: prRuns.flatMap((run) =>
+        run.prUrl
+          ? [{ label: `${run.repo ?? "PR"}#${run.prNumber ?? ""}`, url: run.prUrl, runId: run.id }]
+          : [],
+      ),
+      createdAt: now - 6 * HOUR_MS,
+      updatedAt: now - 35 * MINUTE_MS,
+      readAt: now - 30 * MINUTE_MS,
+    },
+    ...(mergedRun
+      ? [
+          {
+            ...base,
+            id: 4,
+            kind: "pr_auto_merged" as const,
+            severity: "normal" as const,
+            groupKey: `pr_auto_merged:${mergedRun.repo ?? "repo"}:today`,
+            count: 1,
+            runId: mergedRun.id,
+            repo: repoOf(mergedRun, "acme/web"),
+            title: `Auto-merged ${mergedRun.repo ?? "a"} PR #${mergedRun.prNumber ?? ""}`.trim(),
+            links: runLinks(mergedRun),
+            createdAt: now - 3 * HOUR_MS,
+            updatedAt: now - 3 * HOUR_MS,
+            readAt: now - 2 * HOUR_MS,
+          },
+        ]
+      : []),
+    {
+      ...base,
+      id: 3,
+      kind: "source_unhealthy",
+      severity: "high",
+      groupKey: "source_unhealthy:linear:product",
+      count: 3,
+      subject: "source:linear:product",
+      title: "linear source product: authentication failed",
+      body: "The Linear API key was rotated; tickets were not picked up until it was replaced.",
+      createdAt: now - 30 * HOUR_MS,
+      updatedAt: now - 28 * HOUR_MS,
+      readAt: now - 27 * HOUR_MS,
+      resolvedAt: now - 26 * HOUR_MS,
+    },
+  ];
+  return rows.sort((a, b) => b.updatedAt - a.updatedAt || b.id - a.id);
+}
+
+function flag(params: URLSearchParams, name: string): boolean | undefined {
+  const raw = params.get(name);
+  if (raw === "true" || raw === "1") return true;
+  if (raw === "false" || raw === "0") return false;
+  return undefined;
+}
+
+/**
+ * Answer a notification GET from the demo fixtures with the server's filters
+ * and paging, or null when the URL is not a notification read.
+ *
+ * @param all - Fixture rows, newest first
+ * @param apiUrl - Root-relative API URL
+ */
+export function answerDemoNotifications(
+  all: readonly NotificationRecord[],
+  apiUrl: string,
+): NotificationListResponse | NotificationUnreadResponse | NotificationMutesResponse | null {
+  const url = new URL(apiUrl, "http://snapshot.invalid");
+  const open = all.filter((row) => row.resolvedAt === undefined && !row.muted);
+  if (url.pathname === "/api/notifications/unread-count") {
+    const unread = open.filter((row) => row.readAt === undefined);
+    return {
+      unread: unread.length,
+      unreadHigh: unread.filter((row) => row.severity === "high").length,
+    };
+  }
+  if (url.pathname === "/api/notifications/mutes") return { mutes: [] };
+  if (url.pathname !== "/api/notifications") return null;
+  const params = url.searchParams;
+  const unresolved = flag(params, "unresolved");
+  const includeMuted = flag(params, "includeMuted") === true;
+  const severity = params.get("severity");
+  const kind = params.get("kind");
+  const matching = all.filter(
+    (row) =>
+      (includeMuted || !row.muted) &&
+      (unresolved !== true || row.resolvedAt === undefined) &&
+      (severity === null || row.severity === severity) &&
+      (kind === null || row.kind === kind),
+  );
+  const limit = Math.max(1, nonNegativeInt(params.get("limit"), DEFAULT_RUN_LIMIT));
+  const offset = nonNegativeInt(params.get("offset"), 0);
+  return {
+    notifications: matching.slice(offset, offset + limit),
+    total: matching.length,
+    limit,
+    offset,
+  };
 }
