@@ -243,6 +243,7 @@ function printAutoMergeHelp(defaultLabel: string): void {
   console.log("  --deny-path <glob>     Never-merge glob (repeatable)");
   console.log("  --review-path <glob>   Always-review glob, never safe (repeatable)");
   console.log("  --no-review            Skip the agent review; only safe-path PRs merge");
+  console.log("  --review-large-diffs   Review diffs too large to inline from the checkout");
   console.log("  --method <m>           merge | squash | rebase (default: squash)");
   console.log(
     "  --policy <p>           Review rubric: strict | standard | relaxed | custom (default: strict)",
@@ -383,6 +384,8 @@ function parseAutoMergeFlags(
       policy.rulesFile = resolveRulesFilePath(value, workspaceDir);
     } else if (arg === "--no-review") {
       policy.review = false;
+    } else if (arg === "--review-large-diffs") {
+      policy.reviewLargeDiffs = true;
     } else if (arg === "--no-review-label") {
       policy.reviewLabel = "";
     } else if (arg === "--dry-run") {
