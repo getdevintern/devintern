@@ -548,6 +548,8 @@ export interface RepoEntryExtras {
   conflicts?: Record<string, string>;
   /** Seeds a `[[routing.rules]]` entry unless a rule already claims this project. */
   projectKey?: string;
+  /** Written as the entry's `default_branch` (the branch task worktrees start from). */
+  defaultBranch?: string;
 }
 
 /**
@@ -570,6 +572,7 @@ export function appendRepoEntry(
   if (existing) return { content, name: existing.name, added: false };
   const name = deriveRepoName(remote, config.repos);
   let block = `\n[[repos]]\nname = ${tomlString(name)}\nremote = ${tomlString(remote)}\n`;
+  if (extras.defaultBranch) block += `default_branch = ${tomlString(extras.defaultBranch)}\n`;
   const conflicts = Object.entries(extras.conflicts ?? {});
   if (conflicts.length > 0) {
     block += "  [repos.env]\n";

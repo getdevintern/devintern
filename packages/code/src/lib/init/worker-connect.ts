@@ -708,10 +708,12 @@ async function runGitHubConnectTargets(
   let failures = 0;
   let pairingStarted = false;
   let connectRan = false;
+  let signedOut = false;
   const tracked: WorkspaceRelayConnectDeps = {
     ...connectDeps,
     onOutcome(outcome) {
       if (outcome.kind === "pending") pairingStarted = true;
+      if (outcome.kind === "not_signed_in") signedOut = true;
       connectDeps.onOutcome?.(outcome);
     },
   };
@@ -736,7 +738,11 @@ async function runGitHubConnectTargets(
     if ((await runConnect("github", { ...tracked, repos, identityOnly: true })) !== 0) failures++;
   }
   if (failures > 0) {
-    console.error(`❌ ${failures} workspace repository pairing(s) failed.`);
+    console.error(
+      signedOut
+        ? "❌ Not signed in: sign in to the workspace first, then run connect again."
+        : `❌ ${failures} workspace repository pairing(s) failed.`,
+    );
     return 1;
   }
   if (pairingStarted) {

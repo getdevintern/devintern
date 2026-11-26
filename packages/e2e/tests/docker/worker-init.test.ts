@@ -177,7 +177,7 @@ describe.skipIf(!image)("worker init on a blank machine (Docker)", () => {
         ]);
         expect(report.nextSteps[0]).toMatchObject({
           id: "sign-in",
-          command: "devintern worker login github",
+          command: "devintern worker login github --no-wait --json",
         });
 
         expect(await machine.workspaceFiles()).toEqual(
@@ -210,10 +210,16 @@ describe.skipIf(!image)("worker init on a blank machine (Docker)", () => {
         const skipped = await machine.sh(`${SKIP_LICENSE} devintern worker doctor`);
         expect(skipped.exitCode, skipped.stdout).toBe(0);
 
-        // Re-run without --yes: refused, unchanged. With --yes: only the query.
-        const refused = await machine.sh(INIT_MARKDOWN);
+        // The same flags again: a no-op (only sign-in is still left, so exit 2).
+        const same = await machine.sh(INIT_MARKDOWN);
+        expect(same.exitCode, same.stderr).toBe(2);
+        expect(await machine.checked(`cat ${WS}/workspace.toml`)).toBe(toml);
+        // Another query without --yes: refused, unchanged. With --yes: only the query.
+        const refused = await machine.sh(INIT_MARKDOWN.replace("status=todo", "status=ready"));
         expect(refused.exitCode).toBe(1);
-        expect(refused.stderr).toContain("already exists; nothing was changed. Pass --yes");
+        expect(refused.stderr).toContain(
+          "already exists with other settings; nothing was changed. Pass --yes",
+        );
         expect(await machine.checked(`cat ${WS}/workspace.toml`)).toBe(toml);
         const updated = await machine.sh(
           `${SKIP_LICENSE} ${INIT_MARKDOWN.replace("status=todo", "status=ready")} --yes --json`,

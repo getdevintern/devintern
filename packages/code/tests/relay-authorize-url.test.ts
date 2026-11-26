@@ -197,21 +197,33 @@ describe("GitHub pairing authorizeUrl", () => {
         authorizeUrl: AUTHORIZE_URL,
         appInstalled: true,
       });
-      expect(result.nextSteps?.[0]).toEqual({ id: "authorize-github-app", url: AUTHORIZE_URL });
+      expect(result.nextSteps?.[0]).toMatchObject({
+        id: "authorize-github-app",
+        command: AUTHORIZE_URL,
+        url: AUTHORIZE_URL,
+      });
     });
 
     test("appInstalled absent: authorize step keeps the install URL", () => {
       const result = doc({ ...base, authorizeUrl: AUTHORIZE_URL });
       expect(result.pairing?.authorizeUrl).toBe(AUTHORIZE_URL);
       expect(result.pairing).not.toHaveProperty("appInstalled");
-      expect(result.nextSteps?.[0]).toEqual({ id: "authorize-github-app", url: INSTALL_URL });
+      expect(result.nextSteps?.[0]).toMatchObject({
+        id: "authorize-github-app",
+        command: INSTALL_URL,
+        url: INSTALL_URL,
+      });
     });
 
     test("no authorizeUrl: shape is unchanged", () => {
       const result = doc(base);
       expect(result.pairing).not.toHaveProperty("authorizeUrl");
       expect(result.pairing).not.toHaveProperty("appInstalled");
-      expect(result.nextSteps?.[0]).toEqual({ id: "authorize-github-app", url: INSTALL_URL });
+      expect(result.nextSteps?.[0]).toMatchObject({
+        id: "authorize-github-app",
+        command: INSTALL_URL,
+        url: INSTALL_URL,
+      });
     });
   });
 });

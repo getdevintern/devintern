@@ -51,9 +51,10 @@ It writes `[defaults].tracker` and `task_query`, registers the current repositor
 | `--non-interactive` | off                | Use flags instead of prompts                                                                           |
 | `--tracker <id>`    | existing tracker   | `jira`, `linear`, `github`, `gitlab`, `azure-devops`, `asana`, `trello`, or `markdown`. Required for a new workspace |
 | `--task-query <q>`  | existing query     | Ready-tasks query in the tracker's language. Required for a new workspace                            |
-| `--repo-from-cwd`   | off                | Register the Git repository in the current directory, using its `origin` remote (any host), the same way `worker add-repo` does: its `.devintern-code/.env` is imported and a routing rule is seeded from its default project |
-| `--env-file <path>` | none               | Read credentials from this file (must be mode `0600`) and save them to the workspace `.env`           |
-| `--yes`             | off                | Update an existing `workspace.toml`: only the tracker, query, and repository named by the flags change |
+| `--repo-from-cwd`   | off                | Register the Git repository in the current directory, using its `origin` remote (any host), the same way `worker add-repo` does: its `.devintern-code/.env` is imported and a routing rule is seeded from its default project. The remote's default branch is saved as `default_branch`; if the checkout is on another branch, the output says how to target it |
+| `--env-file <path>` | none               | Read credentials from this file (must be mode `0600`) and save them to the workspace `.env`. The file is left in place, and the output says it can be deleted |
+| `--remove-env-file` | off                | Delete the `--env-file` once its values are saved. Never deleted when the command fails |
+| `--yes`             | off                | Update an existing `workspace.toml`: only the tracker, query, and repository named by the flags change. Not needed to re-run with the same flags |
 | `--sign-in <method>` | off               | If nobody is signed in, start the sign-in without waiting: `github`, `google`, `x`, or your email address. The output carries the address to open |
 | `--json`            | off                | Print one JSON document on stdout instead of text                                                     |
 
@@ -64,8 +65,9 @@ It writes `[defaults].tracker` and `task_query`, registers the current repositor
 | `result`          | Exit code | Meaning                                                                                       |
 | ----------------- | --------- | --------------------------------------------------------------------------------------------- |
 | `success`         | 0         | Every check passed or warned. The worker can start                                            |
+| `unchanged`       | 0         | The workspace already had exactly this setup and every check passed; nothing was written     |
 | `action_required` | 2         | The configuration is saved and nothing is broken; nobody is signed in yet. Sign in to start the Worker Pilot, then run `worker doctor` |
-| `failure`         | 1         | A check failed, or the input was invalid (`error` says why)                                   |
+| `failure`         | 1         | A check failed, or the input was invalid. `error` or the failed check says why, and `code` names it. `persisted` says whether the configuration was kept |
 
 A signed-in account without an entitlement (for example a Pilot already used), or a `LICENSE_KEY` that does not validate, is a `failure`. With `--json`, stdout holds only this document. `version` changes only when the shape breaks; new `result` and `status` values can be added, so treat any value you do not know as not ready:
 
@@ -80,12 +82,27 @@ A signed-in account without an entitlement (for example a Pilot already used), o
   "repo": { "name": "app", "remote": "git@github.com:acme/app.git", "added": true },
   "filesWritten": ["/home/me/.devintern/.env", "/home/me/.devintern/workspace.toml"],
   "checks": [{ "name": "tracker-auth", "label": "Tracker credential probe", "status": "pass", "message": "JIRA accepted JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN" }],
-  "nextSteps": [{ "id": "sign-in", "message": "Not started: sign in to begin your 14-day free Worker Pilot, no card required ...", "command": "devintern worker login github" }],
+  "changed": true,
+  "persisted": true,
+  "warnings": ["/home/me/devintern.env still holds the credentials; they are saved in /home/me/.devintern/.env now. ..."],
+  "nextSteps": [{ "id": "complete-sign-in", "message": "A person opens the sign-in url ...", "command": "devintern worker login --complete '<address>'", "url": "https://..." }],
   "signIn": { "url": "https://...supabase.co/auth/v1/authorize?provider=github&...", "method": "github", "expiresAt": "2026-11-26T12:30:00.000Z", "complete": "devintern worker login --complete '<address>'" }
 }
 ```
 
-Each check `status` is `pass`, `warn`, `action`, `fail`, or `skipped`, and checks that are not `pass` carry a `hint`. If the command stops before the checks (bad input, or another `worker init` is changing the same workspace), `error` explains why and `checks` is empty. The files are written before the checks run, so after signing in you only run `worker doctor`, with no need to re-run init. `signIn` is present only when `--sign-in` started a sign-in. Next-step `id`s are `sign-in`, `add-repo`, `install-agent`, `connect`, `start`, and `service`. When the agent CLI check fails, `install-agent` carries the install command (or a docs link) for your configured harness, and `start` and `service` are left out until no check fails.
+Each check `status` is `pass`, `warn`, `action`, `fail`, or `skipped`, and checks that are not `pass` carry a `hint`. If the command stops before the checks (bad input, or another `worker init` is changing the same workspace), `error` explains why and `checks` is empty. When the tracker credentials, the query, or repository access fails, the files the command wrote are restored (`persisted: false`), so a rejected query or token never stays in the workspace: fix it and run the same command again. When only the host is missing something (the agent CLI, the sandbox, a license) or only signing in is left, the configuration is kept, so after the fix you only run `worker doctor`. `signIn` is present only when `--sign-in` started a sign-in.
+
+Every `nextSteps` entry has `id`, `message`, and `command`, plus `url` when a person has to open a page. Each `command` runs as written without a terminal: sign-in and relay commands use `--no-wait --json`, and the background service comes before the foreground worker, which is named only in the message. Run the steps in order:
+
+| `id`                                                    | What it is                                                                                         |
+| ------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `sign-in`, `complete-sign-in`                           | Start the Worker Pilot sign-in, or finish one `--sign-in` started (`url` is the page to open)      |
+| `install-agent`                                         | Install the agent CLI: npm when it is on `PATH`, otherwise a standalone installer or `bun install -g` |
+| `fix-credentials`, `fix-query`, `fix-repo-access`, `fix-…` | The fix for a failed check: a corrected re-run of this command, or the page to change token access |
+| `update`, `retry`                                       | Re-run with `--yes` to change an existing workspace, or re-run after the fixes above               |
+| `add-repo`, `service`, `connect`                        | Register a repository, install the background service, pair the relay (optional, after sign-in)    |
+
+`code` values when the command stops early: `invalid_arguments`, `unsupported_tracker`, `env_file_unreadable`, `missing_input` (with a `missing` list), `invalid_query` (for example Jira JQL given to the `github` tracker), `not_a_repository`, `workspace_exists`, `workspace_invalid`, `workspace_busy`, and `write_failed`. After a failed check it is the first failure: `credentials_rejected`, `query_rejected`, `repo_access_denied`, `agent_missing`, `not_entitled`, or `check_failed`.
 
 ### Signing in without a terminal
 
@@ -96,7 +113,7 @@ devintern worker login github --no-wait          # or google, x, email you@compa
 devintern worker login --complete 'http://127.0.0.1:17865/auth/callback?code=...'
 ```
 
-After you sign in, the browser lands on a `127.0.0.1` page that does not load. That is expected: copy its full address into `--complete`. The address works once, only on the host that started the sign-in, and the pending sign-in expires after 30 minutes. `worker init --non-interactive --sign-in <method>` runs the first step for you. Run either command again to start over. With `--json`, `worker login` prints `{"result": "pending", "url", "method", "expiresAt", "complete"}`, `{"result": "signed_in", "user"}`, or `{"result": "failure", "error"}`.
+After you sign in, the browser lands on a `127.0.0.1` page that does not load. That is expected: copy its full address into `--complete`. The address works once, only on the host that started the sign-in, and the pending sign-in expires after 30 minutes. `worker init --non-interactive --sign-in <method>` runs the first step for you. Running the first step again while a sign-in for the same method is waiting (with more than 5 minutes left) prints the same address again (`"reused": true`), so an address you already shared keeps working. With `--json`, `worker login` prints `{"result": "pending", "url", "method", "expiresAt", "complete"}`, `{"result": "signed_in", "user"}`, or `{"result": "failure", "error"}`.
 
 To start a configured workspace by hand:
 
@@ -113,7 +130,7 @@ An idle healthy worker and an idle misconfigured one look the same. Run the doct
 devintern worker doctor [--workspace <path>] [--offline] [--json] [--test-notifications]
 ```
 
-It checks that `workspace.toml` parses, that there is something to acquire, tracker credentials per team, a dry run of each `task_query` (with match counts), access to each repository, whether the GitHub credential can read CI status when `auto_merge` or `ci_failure_fix` is on (see [token permissions](./configuration.md#github-authentication)), the git commit identity (a warning when only the generic `DevIntern` identity is left; see [Commit identity](./configuration.md#commit-identity)), your automation license, the agent harness and sandbox, the [relay](./relay.md#troubleshooting) pairing (a warning when a pairing is pending or a repository is not covered), and whether the dashboard port is free. Every failing row includes a fix hint. It exits 0 when ready and 1 when a check fails. When the only thing left is signing in, the license row shows 👉 `Not started: sign in to begin your 14-day free Worker Pilot, no card required` and it exits 2. An active Pilot shows its end date. `--offline` skips network checks. `--test-notifications` sends one test message through each [notification channel](notifications.md). `--json` prints one document (`schema` `devintern.worker-doctor`, `version` 1) with `result` (`success`, `action_required`, or `failure`, exit codes 0, 2, and 1 as above), `checks` in the same shape as `worker init --json`, and `nextSteps`. The doctor never edits config or starts the worker. It is safe to run while the worker is up: it reports the running worker, and its dashboard on the port is not flagged as a conflict.
+It checks that `workspace.toml` parses, that there is something to acquire, tracker credentials per team, a dry run of each `task_query` (with match counts), access to each repository, whether the GitHub credential can read CI status when `auto_merge` or `ci_failure_fix` is on (see [token permissions](./configuration.md#github-authentication)), the git commit identity (a warning when only the generic `DevIntern` identity is left; see [Commit identity](./configuration.md#commit-identity)), your automation license, the agent harness and sandbox, the [relay](./relay.md#troubleshooting) pairing (a warning when a pairing is pending or a repository is not covered), and whether the dashboard port is free. Every failing row includes a fix hint. It exits 0 when ready and 1 when a check fails. When the only thing left is signing in, the license row shows 👉 `Not started: sign in to begin your 14-day free Worker Pilot, no card required` and it exits 2. An active Pilot shows its end date. `--offline` skips network checks. `--test-notifications` sends one test message through each [notification channel](notifications.md). `--json` prints one document (`schema` `devintern.worker-doctor`, `version` 1) with `result` (`success`, `action_required`, or `failure`, exit codes 0, 2, and 1 as above), `code` on a failure, `checks` in the same shape as `worker init --json`, and `nextSteps` in the [same shape](#non-interactive-setup). `setup` says where setup stands, with a one-line `summary`: `complete` (every check passed and a worker is running; setup is done), `ready` (start the worker: the `service` step), `action_required`, or `not_ready`. The text output ends with the same signal, for example `Setup: complete — every check passed and the worker is running (pid 4242).` With `DEVINTERN_SKIP_LICENSE_CHECK=1` (non-release builds only), the license row says the check was skipped. The doctor never edits config or starts the worker. It is safe to run while the worker is up: it reports the running worker, and its dashboard on the port is not flagged as a conflict.
 
 ## Polling mode
 
@@ -226,7 +243,7 @@ devintern worker service status       # service and worker state, and why the la
 | `--force`          | off     | `install` only: install even when readiness checks fail                          |
 | `--wait <seconds>` | 45      | How long `install`, `start`, and `restart` wait for the worker. `0` skips the wait |
 
-`install` refuses when the worker could not start yet: it lists the failing checks (with the same `name`/`label`/`status`/`message`/`hint` shape as `worker init --json`, and a runnable `command` per next step), or says signing in is the one step left. After you fix them, run it again. Once the service is started, the command waits for the worker itself and reports one of three outcomes: running (with the dashboard address), failed (with the worker's last log lines and the fix), or still starting after `--wait`. Exit codes: `0` done, `1` failed, `2` install refused because only signing in is left, `3` still starting.
+`install` refuses when the worker could not start yet: it lists the failing checks (with the same `name`/`label`/`status`/`message`/`hint` shape as `worker init --json`, and a runnable `command` per next step), or says signing in is the one step left. After you fix them, run it again. Running `install` again while the same service definition is installed and the worker is running changes nothing and does not restart the worker (`"unchanged": true`); use `restart` for that. `status` of a service that is not installed offers the `install` command as a next step. Failures carry a `code`. Once the service is started, the command waits for the worker itself and reports one of three outcomes: running (with the dashboard address), failed (with the worker's last log lines and the fix), or still starting after `--wait`. Exit codes: `0` done, `1` failed, `2` install refused because only signing in is left, `3` still starting.
 
 Every action is safe to repeat. `install` updates a DevIntern-managed service in place and never overwrites a hand-written one. Both definitions record your current `PATH` (and `DEVINTERN_WORKSPACE_DIR`, for a workspace outside `~/.devintern`). If a step fails, nothing is left half-installed. Where there is no systemd user session (most containers, WSL without systemd), there is no service; run `devintern worker` in the foreground, for example inside `tmux`.
 

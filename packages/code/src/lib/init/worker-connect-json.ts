@@ -3,6 +3,7 @@
  * (schema `devintern.worker-connect`, version 1); human text goes to stderr.
  */
 
+import { OTHER_LOGIN_METHODS } from "../account/worker-pilot";
 import { pairingNextUrl } from "../relay/github-pairing";
 import type { ConnectOutcome } from "../relay/connect";
 import { takeoverCommand } from "../relay/worker-identity";
@@ -14,10 +15,15 @@ export const CONNECT_JSON_VERSION = 1;
 /** `connected` and `pending` exit 0, `action_required` exits 2, `failure` exits 1. */
 export type ConnectJsonResult = "connected" | "pending" | "action_required" | "failure";
 
+/**
+ * One step, the shared next-step shape (`id`, `message`, `command`): `command`
+ * is the command to run on the worker host, or the address to open when the
+ * step needs a person in a browser (then `url` repeats it).
+ */
 export interface ConnectNextStep {
   id: string;
-  /** Command to run on the worker host. */
-  command?: string;
+  message: string;
+  command: string;
   /** Address to open in a browser. */
   url?: string;
 }
@@ -63,6 +69,8 @@ export interface ConnectTargetJson {
 }
 
 export interface ConnectJsonDocument extends Omit<ConnectTargetJson, "target"> {
+  /** With several targets: every target's steps, in order, without duplicates. */
+  nextSteps?: ConnectNextStep[];
   schema: typeof CONNECT_JSON_SCHEMA;
   version: typeof CONNECT_JSON_VERSION;
   target: string;
@@ -115,10 +123,14 @@ function describeTarget(input: TargetDocumentInput): ConnectTargetJson {
       target,
       result: "action_required",
       error: signedOut.error,
+      code: "not_signed_in",
       nextSteps: [
         {
           id: "sign-in",
-          command: `devintern worker login <method> --no-wait --json${input.workspaceSuffix}`,
+          message:
+            `Sign in first, then run connect again. The command prints a sign-in url for a person ` +
+            `to open and the --complete command to finish on this host. Other methods: ${OTHER_LOGIN_METHODS}`,
+          command: `devintern worker login${input.workspaceSuffix} github --no-wait --json`,
         },
       ],
     };
@@ -130,7 +142,7 @@ function describeTarget(input: TargetDocumentInput): ConnectTargetJson {
       target,
       result: "failure",
       error: failed.error,
-      ...(failed.code ? { code: failed.code } : {}),
+      code: failed.code ?? "connect_failed",
       ...(conflicts.length > 0
         ? {
             conflicts: conflicts.map((conflict) => ({
@@ -144,6 +156,8 @@ function describeTarget(input: TargetDocumentInput): ConnectTargetJson {
             nextSteps: [
               {
                 id: "takeover",
+                message:
+                  "Another worker owns these registrations. Move them to this worker only when that worker is retired or should stop receiving these events",
                 command: `${takeoverCommand(conflicts[0]!)} --json${input.workspaceSuffix}`,
               },
             ],
@@ -172,9 +186,16 @@ function describeTarget(input: TargetDocumentInput): ConnectTargetJson {
         expiresAt: new Date(pairing.expiresAt).toISOString(),
       },
       nextSteps: [
-        { id: "authorize-github-app", url: pairingNextUrl(pairing) },
+        {
+          id: "authorize-github-app",
+          message:
+            "A person opens this address and approves the DevIntern GitHub App for the listed repositories",
+          command: pairingNextUrl(pairing),
+          url: pairingNextUrl(pairing),
+        },
         {
           id: "check-pairing",
+          message: "After the approval, confirm the pairing (exit 0 once connected)",
           command: `devintern worker connect github --status --json${input.workspaceSuffix}`,
         },
       ],
@@ -184,6 +205,7 @@ function describeTarget(input: TargetDocumentInput): ConnectTargetJson {
     return {
       target,
       result: "failure",
+      code: "connect_failed",
       error: plainMessage(input.errorLines.at(-1)) ?? `devintern worker connect ${target} failed.`,
     };
   }
@@ -207,7 +229,25 @@ export function buildConnectDocument(
   const base = { schema: CONNECT_JSON_SCHEMA, version: CONNECT_JSON_VERSION } as const;
   if (docs.length === 1 && target !== "all") return { ...base, ...docs[0]! };
   if (docs.length === 0) {
-    return { ...base, target, result: "failure", error: "Nothing was connected." };
+    return {
+      ...base,
+      target,
+      result: "failure",
+      code: "nothing_connected",
+      error: "Nothing was connected.",
+    };
   }
-  return { ...base, target, result: aggregateResult(docs), targets: docs };
+  const nextSteps: ConnectNextStep[] = [];
+  for (const step of docs.flatMap((doc) => doc.nextSteps ?? [])) {
+    if (!nextSteps.some((s) => s.id === step.id && s.command === step.command)) {
+      nextSteps.push(step);
+    }
+  }
+  return {
+    ...base,
+    target,
+    result: aggregateResult(docs),
+    ...(nextSteps.length > 0 ? { nextSteps } : {}),
+    targets: docs,
+  };
 }

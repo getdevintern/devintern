@@ -183,9 +183,15 @@ remote = "git@github.com:acme/api.git"
       expect(result.nextSteps).toEqual([
         {
           id: "authorize-github-app",
+          message: expect.stringContaining("approves the DevIntern GitHub App"),
+          command: "https://github.com/apps/devintern-ai/installations/new?state=abc",
           url: "https://github.com/apps/devintern-ai/installations/new?state=abc",
         },
-        { id: "check-pairing", command: expect.stringContaining("github --status --json") },
+        {
+          id: "check-pairing",
+          message: expect.any(String),
+          command: expect.stringContaining("github --status --json"),
+        },
       ]);
       // Never polled: --no-wait returns right after the relay hands out the pairing.
       expect(relayCalls.some((call) => call.url.includes("/pairings/"))).toBe(false);
@@ -330,11 +336,14 @@ remote = "git@github.com:acme/api.git"
         result: "action_required",
       });
       expect(result.error).toContain("Not authenticated");
+      expect(result.code).toBe("not_signed_in");
       expect(result.nextSteps).toEqual([
         {
           id: "sign-in",
+          message: expect.stringContaining("Sign in first"),
+          // The same form as `worker init` and `worker doctor` print.
           command: expect.stringMatching(
-            /^devintern worker login <method> --no-wait --json --workspace /,
+            /^devintern worker login --workspace \S+ github --no-wait --json$/,
           ),
         },
       ]);

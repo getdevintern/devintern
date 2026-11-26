@@ -167,7 +167,7 @@ describe.skipIf(!enabled)("systemd user service built CLI E2E", () => {
     // Signing in is the only step left: exit 2, like `worker doctor`.
     expect(exitCode, JSON.stringify(doc, null, 2)).toBe(2);
     expect(doc.result).toBe("action_required");
-    expect(doc.nextSteps.at(-1)?.command).toBe("devintern worker service install");
+    expect(doc.nextSteps.at(-1)?.command).toBe("devintern worker service install --json");
     expect((await container.user(`test -e ${UNIT}`)).exitCode).not.toBe(0);
   }, 240_000);
 
@@ -178,7 +178,9 @@ describe.skipIf(!enabled)("systemd user service built CLI E2E", () => {
     expect(doc.start?.state).toBe("failed");
     expect(doc.start?.permanent).toBe(true);
     expect(doc.start?.reason).toContain("License check failed");
-    expect(doc.nextSteps.map((step) => step.command)).toContain("devintern worker service restart");
+    expect(doc.nextSteps.map((step) => step.command)).toContain(
+      "devintern worker service restart --json",
+    );
     // systemd gave up at once (RestartPreventExitStatus=78): no 30 s loop.
     expect(await container.unitProperty("ActiveState")).toBe("failed");
     expect(await container.unitProperty("ExecMainStatus")).toBe("78");

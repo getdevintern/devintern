@@ -66,14 +66,34 @@ const ROUTE_ONLY_FIELDS: Record<string, string[]> = {
   "/api/worker": ["serverPid"],
 };
 
+/**
+ * The setup-document envelope only the CLI adds, by route: `worker status` and
+ * `worker overview` print `schema`, `version`, and `result` (`worker.status`)
+ * in front of the route body.
+ */
+const CLI_ENVELOPE: Record<string, string> = {
+  "/api/worker": "devintern.worker-status",
+  "/api/overview": "devintern.worker-overview",
+};
+
 function normalize(route: string, body: unknown, surface: "route" | "cli"): unknown {
   const path = route.split("?")[0]!;
   const fields = TIME_VARYING_FIELDS[path] ?? [];
   const routeOnly = ROUTE_ONLY_FIELDS[path] ?? [];
-  if (fields.length + routeOnly.length === 0 || typeof body !== "object" || body === null) {
-    return body;
-  }
+  const envelope = surface === "cli" ? CLI_ENVELOPE[path] : undefined;
+  if (fields.length + routeOnly.length === 0 && !envelope) return body;
+  if (typeof body !== "object" || body === null) return body;
   const copy = { ...(body as Record<string, unknown>) };
+  if (envelope) {
+    expect(copy).toMatchObject({
+      schema: envelope,
+      version: 1,
+      result: (copy.worker as { status: string }).status,
+    });
+    delete copy.schema;
+    delete copy.version;
+    delete copy.result;
+  }
   for (const field of fields) {
     expect(copy).toHaveProperty(field);
     delete copy[field];
