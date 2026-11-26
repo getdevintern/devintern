@@ -58,7 +58,7 @@ import type { GitIdentityCheckInput } from "./git-identity-readiness";
 import { workerLivenessCheck } from "./worker-liveness-readiness";
 import { ciPermissionChecks } from "./ci-permission-readiness";
 import type { CiPermissionDoctorDeps } from "./ci-permission-readiness";
-import { gitPushDryRun } from "./repo-push-probe";
+import { PUSH_FIX, gitPushDryRun, readRepoPermissions } from "./repo-push-probe";
 import type { PushProbeOutcome } from "./repo-push-probe";
 
 type Env = Record<string, string | undefined>;
@@ -281,11 +281,6 @@ export interface RepoAccessProbes {
   pushDryRun?: (remote: string, env: Env, timeoutMs: number) => Promise<PushProbeOutcome>;
 }
 
-/** Fix named when the token can read a GitHub repository but not push to it. */
-const PUSH_FIX =
-  "Give GITHUB_TOKEN Contents and Pull requests read and write access to the repository " +
-  "(fine-grained token) or the `repo` scope (classic token); for GitHub Issues also Issues read and write";
-
 /**
  * Default repository probe. GitHub remotes with a token are checked through
  * the REST API (the same credentials the worker's mention/CI sweeps use) and
@@ -363,17 +358,6 @@ export function createDefaultRepoAccessCheck(
     }
     return lsRemote(repo.remote, env, timeoutMs);
   };
-}
-
-/** `permissions` from a `GET /repos/{owner}/{repo}` response, when it has them. */
-async function readRepoPermissions(response: Response): Promise<{ push?: boolean } | undefined> {
-  try {
-    const body = (await response.json()) as { permissions?: { push?: unknown } } | null;
-    const push = body?.permissions?.push;
-    return typeof push === "boolean" ? { push } : undefined;
-  } catch {
-    return undefined;
-  }
 }
 
 /** Why git was refused a repo the API can see: the user's helper answered first, or the token lacks Contents access. */

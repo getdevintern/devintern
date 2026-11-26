@@ -82,3 +82,21 @@ export function gitPushDryRun(
     });
   });
 }
+
+/** Fix named when the token can read a GitHub repository but not push to it. */
+export const PUSH_FIX =
+  "Give GITHUB_TOKEN Contents and Pull requests read and write access to the repository " +
+  "(fine-grained token) or the `repo` scope (classic token); for GitHub Issues also Issues read and write";
+
+/** `permissions` from a `GET /repos/{owner}/{repo}` response, when it has them. */
+export async function readRepoPermissions(
+  response: Response,
+): Promise<{ push?: boolean } | undefined> {
+  try {
+    const body = (await response.json()) as { permissions?: { push?: unknown } } | null;
+    const push = body?.permissions?.push;
+    return typeof push === "boolean" ? { push } : undefined;
+  } catch {
+    return undefined;
+  }
+}
