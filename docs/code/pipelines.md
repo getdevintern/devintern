@@ -87,7 +87,7 @@ There is no `--verify` flag. Turn verification on by adding `{ "use": "verify" }
 On a failed verdict:
 
 - `loopback`: the agent repairs the findings, the repair is committed, and `verify` runs again, up to `maxIterations` times.
-- `halt`: the task is marked incomplete, reported to the tracker, and moved back to To Do. Nothing is pushed.
+- `halt`: the task is marked incomplete, reported to the tracker, and moved back to To Do. `finalize` does not run, so no PR is opened. On a worker, the run's committed work is still pushed to its task branch by default so a [resume](./delegation-runs.md#resuming-and-interrupted-tasks---resume) can continue from it; set `DEVINTERN_PUSH_UNFINISHED_WORK=0` to keep it local and push nothing.
 - `warn`: the findings are recorded as warnings and delivery continues.
 
 A relative `prompt` is used as a file path if that file exists next to the declaring configuration; otherwise the string is used as the prompt itself. A misspelled path does not fail the run, so check that the file resolves.
