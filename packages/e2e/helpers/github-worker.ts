@@ -27,11 +27,31 @@ import type { WorkerFixtureOptions } from "./worker";
 const packageRoot = resolve(import.meta.dir, "..");
 const fixture = join(packageRoot, "fixtures/simple-project");
 
+/**
+ * Poll GitHub Issues of the fixture repository instead of the default
+ * credential-free markdown tracker. The issues live in the same repository
+ * the worker opens PRs on (the tracker repository doubles as code host).
+ */
+export interface GitHubIssuesPolling {
+  /** `[defaults].task_query`, in GitHub search syntax. */
+  query: string;
+  /** Status labels written to `[trackers.github.projects."<repo>"]`. */
+  statuses: { todoStatus: string; inProgressStatus: string; prStatus: string };
+  /** Mutually-exclusive status label set (`GITHUB_STATUS_LABELS`). */
+  statusLabels: string[];
+}
+
 export interface GitHubWorkerOptions extends WorkerFixtureOptions {
   /** Enable the worker's CI repair acquirer (`[workspace] ci_failure_fix`). */
   ciFailureFix?: boolean;
   /** Worker poll interval in seconds; defaults to 1 for fast tests. */
   pollIntervalSeconds?: number;
+  /**
+   * Poll GitHub Issues with tracker comments and status transitions on.
+   * Use a poll interval of several seconds: every poll is a GitHub search
+   * request, and search allows 30 requests per minute.
+   */
+  issues?: GitHubIssuesPolling;
 }
 
 /**
@@ -72,6 +92,13 @@ export class GitHubWorkerFixture extends WorkerFixture {
     await this.github.assertWritable();
     this.prepareAgent();
     this.configureGitHubAuthentication();
+    if (this.githubOptions.issues) {
+      Object.assign(this.env, {
+        TASK_TRACKER: "github",
+        GITHUB_REPO: this.github.repository,
+        GITHUB_STATUS_LABELS: this.githubOptions.issues.statusLabels.join(","),
+      });
+    }
     await this.seedRemote();
     this.writeWorkspace();
   }
@@ -279,6 +306,12 @@ export class GitHubWorkerFixture extends WorkerFixture {
   }
 
   private writeWorkspace(): void {
+    const issues = this.githubOptions.issues;
+    // Issue polling keeps tracker comments and status labels on; the injected
+    // markdown tasks have no tracker to comment on.
+    const taskArgs = issues
+      ? `--create-pr --skip-clarity-check --pr-target-branch ${this.base}`
+      : `--create-pr --skip-clarity-check --skip-comments --pr-target-branch ${this.base}`;
     mkdirSync(this.workspaceDir, { recursive: true });
     writeFileSync(
       join(this.workspaceDir, "workspace.toml"),
@@ -293,21 +326,29 @@ export class GitHubWorkerFixture extends WorkerFixture {
         `max_concurrency_per_repo = ${this.githubOptions.maxConcurrencyPerRepo ?? 1}`,
         "",
         "[defaults]",
-        'tracker = "markdown"',
+        `tracker = ${JSON.stringify(issues ? "github" : "markdown")}`,
+        ...(issues ? [`task_query = ${JSON.stringify(issues.query)}`] : []),
         `poll_interval = ${this.githubOptions.pollIntervalSeconds ?? 1}`,
         // The task subprocess resolves an implicit PR target from the remote
         // HEAD (the shared repository's real default branch), not from
         // `[[repos]].default_branch`. Pin the run's unique base so a PR can
         // never target the shared default branch.
-        `worker_task_args = ${JSON.stringify(
-          `--create-pr --skip-clarity-check --skip-comments --pr-target-branch ${this.base}`,
-        )}`,
+        `worker_task_args = ${JSON.stringify(taskArgs)}`,
         "",
         "[[repos]]",
         `name = "${this.repoName}"`,
         `remote = ${JSON.stringify(this.remoteUrl)}`,
         `default_branch = ${JSON.stringify(this.base)}`,
         "",
+        ...(issues
+          ? [
+              `[trackers.github.projects.${JSON.stringify(this.github.repository)}]`,
+              `todo_status = ${JSON.stringify(issues.statuses.todoStatus)}`,
+              `in_progress_status = ${JSON.stringify(issues.statuses.inProgressStatus)}`,
+              `pr_status = ${JSON.stringify(issues.statuses.prStatus)}`,
+              "",
+            ]
+          : []),
       ].join("\n"),
     );
   }

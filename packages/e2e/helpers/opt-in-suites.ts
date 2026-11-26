@@ -70,6 +70,12 @@ export const OPT_IN_SUITES: readonly OptInSuite[] = [
     status: "skip",
   },
   {
+    name: "Native systemd user service E2E",
+    script: "test:e2e:service",
+    reason: "builds and runs a privileged systemd container with Docker",
+    status: "skip",
+  },
+  {
     name: "Workspace tracker smoke (read-only)",
     script: "test:trackers",
     reason: "reads the worker env and contacts Jira/Trello; no writes",

@@ -18,6 +18,7 @@ import type { ReadinessCheck } from "../src/lib/observability/readiness";
 import { renderReadinessReport } from "../src/lib/observability/readiness";
 import {
   collectWorkerDoctorChecks,
+  createDefaultRepoAccessCheck,
   defaultCheckSandbox,
   gitFailureCause,
   gitLsRemote,
@@ -783,6 +784,57 @@ describe("gitFailureCause", () => {
     const cause = gitFailureCause(`fatal: ${"x".repeat(500)}`);
     expect(cause?.length).toBeLessThanOrEqual(200);
     expect(cause?.endsWith("…")).toBe(true);
+  });
+});
+
+describe("default repository access check", () => {
+  const repo = {
+    name: "backend",
+    remote: "https://github.com/acme/backend.git",
+  } as Parameters<ReturnType<typeof createDefaultRepoAccessCheck>>[0];
+  const env = { GITHUB_TOKEN: "fake-token" };
+  const apiOk = async () => new Response("{}", { status: 200 });
+
+  test("a token GitHub can read still fails when git has no credentials", async () => {
+    const check = createDefaultRepoAccessCheck(1_000, {
+      fetch: apiOk,
+      lsRemote: async () => ({
+        ok: false,
+        reason: "git ls-remote exited 128: fatal: could not read Username for 'https://github.com'",
+      }),
+    });
+    const result = await check(repo, env);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toContain(
+      "can read acme/backend through the API, but git cannot clone it",
+    );
+    expect(result.reason).toContain("could not read Username");
+    expect(result.reason).toContain("gh auth setup-git");
+  });
+
+  test("passes when both the API and git can read the repository", async () => {
+    const remotes: string[] = [];
+    const check = createDefaultRepoAccessCheck(1_000, {
+      fetch: apiOk,
+      lsRemote: async (remote) => {
+        remotes.push(remote);
+        return { ok: true, detail: "remote reachable" };
+      },
+    });
+    expect(await check(repo, env)).toEqual({ ok: true, detail: "GitHub acme/backend readable" });
+    expect(remotes).toEqual([repo.remote]);
+  });
+
+  test("an API rejection is reported before the git result", async () => {
+    const check = createDefaultRepoAccessCheck(1_000, {
+      fetch: async () => new Response("{}", { status: 404 }),
+      lsRemote: async () => ({ ok: true, detail: "remote reachable" }),
+    });
+    expect(await check(repo, env)).toEqual({
+      ok: false,
+      reason: "GitHub API 404 for acme/backend (missing or not visible to GITHUB_TOKEN)",
+    });
   });
 });
 

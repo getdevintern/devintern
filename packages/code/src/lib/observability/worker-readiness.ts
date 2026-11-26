@@ -306,35 +306,62 @@ export function gitLsRemote(
   });
 }
 
+/** Injectable network probes for {@link createDefaultRepoAccessCheck} (tests). */
+export interface RepoAccessProbes {
+  fetch?: (url: string, init: RequestInit) => Promise<Response>;
+  lsRemote?: (remote: string, env: Env, timeoutMs: number) => Promise<RepoAccessResult>;
+}
+
 /**
  * Default repository probe. GitHub remotes with a token are checked through
- * the REST API (the same credentials the worker's mention/CI sweeps use);
- * everything else falls back to `git ls-remote`.
+ * the REST API (the same credentials the worker's mention/CI sweeps use) and
+ * with `git ls-remote`, because the worker clones and pushes through git's own
+ * credential chain: git never reads GITHUB_TOKEN by itself, so a box with a
+ * valid token but no credential helper passes the API and still cannot clone.
+ * Everything else uses `git ls-remote` only.
  */
-function createDefaultRepoAccessCheck(
+export function createDefaultRepoAccessCheck(
   timeoutMs: number,
+  probes: RepoAccessProbes = {},
 ): (repo: RepoConfig, env: Env) => Promise<RepoAccessResult> {
+  const fetchFn = probes.fetch ?? ((url: string, init: RequestInit) => fetch(url, init));
+  const lsRemote = probes.lsRemote ?? gitLsRemote;
   return async (repo, env) => {
     const slug = gitHubSlugFromRemote(repo.remote);
     const token = env.GITHUB_TOKEN;
     if (slug && token) {
-      const response = await fetch(`https://api.github.com/repos/${slug}`, {
-        headers: {
-          Accept: "application/vnd.github+json",
-          Authorization: `Bearer ${token}`,
-          "User-Agent": "devintern-worker-doctor",
-        },
-        signal: AbortSignal.timeout(timeoutMs),
-      });
-      if (response.ok) return { ok: true, detail: `GitHub ${slug} readable` };
-      return {
-        ok: false,
-        reason: `GitHub API ${response.status} for ${slug}${
-          response.status === 404 ? " (missing or not visible to GITHUB_TOKEN)" : ""
-        }`,
-      };
+      // In parallel: the caller bounds the whole check with one timeout.
+      const [response, git] = await Promise.all([
+        fetchFn(`https://api.github.com/repos/${slug}`, {
+          headers: {
+            Accept: "application/vnd.github+json",
+            Authorization: `Bearer ${token}`,
+            "User-Agent": "devintern-worker-doctor",
+          },
+          signal: AbortSignal.timeout(timeoutMs),
+        }),
+        lsRemote(repo.remote, env, timeoutMs),
+      ]);
+      if (!response.ok) {
+        return {
+          ok: false,
+          reason: `GitHub API ${response.status} for ${slug}${
+            response.status === 404 ? " (missing or not visible to GITHUB_TOKEN)" : ""
+          }`,
+        };
+      }
+      if (!git.ok) {
+        return {
+          ok: false,
+          reason:
+            `GITHUB_TOKEN can read ${slug} through the API, but git cannot clone it (${git.reason}). ` +
+            "Git does not use GITHUB_TOKEN on its own: configure a git credential helper " +
+            "(for example `gh auth setup-git`) or use an SSH remote",
+        };
+      }
+      return { ok: true, detail: `GitHub ${slug} readable` };
     }
-    return gitLsRemote(repo.remote, env, timeoutMs);
+    return lsRemote(repo.remote, env, timeoutMs);
   };
 }
 
