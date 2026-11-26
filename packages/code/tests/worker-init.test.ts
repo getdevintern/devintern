@@ -23,6 +23,7 @@ import {
 import {
   configureWorkerOperatingPolicy,
   copyProjectSessionToWorkspace,
+  defaultEnsureTracker,
   generateWebhookSecret,
   renderLaunchdPlist,
   renderSystemdUnit,
@@ -1058,6 +1059,62 @@ GITLAB_WEBHOOK_ADMIN_TOKEN = "admin"
       }),
     );
     expect(result.ok).toBe(true);
+  });
+
+  describe("tracker from [defaults].tracker (non-interactive init output)", () => {
+    const savedGithubToken = process.env.GITHUB_TOKEN;
+    const savedGithubRepo = process.env.GITHUB_REPO;
+
+    const log = (m: string) => logs.push(m);
+
+    beforeEach(() => {
+      // No legacy checkout .env and no TASK_TRACKER anywhere.
+      rmSync(path.join(tempDir, ".devintern-code"), { recursive: true, force: true });
+      delete process.env.TASK_TRACKER;
+      delete process.env.GITHUB_TOKEN;
+      delete process.env.GITHUB_REPO;
+      writeFileSync(
+        path.join(workspaceDir, "workspace.toml"),
+        '[defaults]\ntracker = "github"\ntask_query = "label:ready"\n',
+      );
+    });
+
+    afterEach(() => {
+      if (savedGithubToken === undefined) delete process.env.GITHUB_TOKEN;
+      else process.env.GITHUB_TOKEN = savedGithubToken;
+      if (savedGithubRepo === undefined) delete process.env.GITHUB_REPO;
+      else process.env.GITHUB_REPO = savedGithubRepo;
+    });
+
+    test("reuses the tracker when credentials are present", async () => {
+      writeFileSync(
+        path.join(workspaceDir, ".env"),
+        "GITHUB_TOKEN=ghp_test\nGITHUB_REPO=acme/app\n",
+      );
+      const tracker = await defaultEnsureTracker(
+        tempDir,
+        async () => "n",
+        async () => "",
+        log,
+      );
+      expect(tracker).toBe("github");
+      const all = logs.join("\n");
+      expect(all).toContain("Using github from");
+      expect(all).not.toContain("No tracker config yet");
+    });
+
+    test("asks as before when credentials are missing", async () => {
+      writeFileSync(path.join(workspaceDir, ".env"), "GITHUB_TOKEN=ghp_test\n");
+      const stop = async (): Promise<string> => {
+        throw new Error("tracker prompt reached");
+      };
+      await expect(defaultEnsureTracker(tempDir, stop, stop, log)).rejects.toThrow(
+        "tracker prompt reached",
+      );
+      const all = logs.join("\n");
+      expect(all).toContain("No tracker config yet");
+      expect(all).not.toContain("Using github from");
+    });
   });
 });
 
