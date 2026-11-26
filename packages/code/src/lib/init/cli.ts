@@ -33,7 +33,7 @@ const INIT_USAGE = [
  * entries (non-interactive fallback for `init --yes` / piped stdin).
  */
 async function initializeProject(cwd: string, log: (message: string) => void): Promise<void> {
-  log("🚀 Initializing @devintern/code for this project...");
+  log("🚀 Initializing @getdevintern/code for this project...");
 
   const registered = await registerManualCheckout(cwd, buildEnvExample());
   if (!registered.ok) {

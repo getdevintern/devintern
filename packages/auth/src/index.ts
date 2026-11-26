@@ -121,7 +121,45 @@ export interface LoginHooks {
    * is set (an embedding host owns the browser and has no terminal).
    */
   acceptPastedCallback?: boolean;
+  /**
+   * Command to sign in later. When set, pressing Enter (or typing `skip`)
+   * while waiting for the browser ends the wait with a
+   * {@link LoginSkippedError}, so a setup wizard can carry on without
+   * sign-in. Reads stdin, so leave it unset in hosts without a terminal.
+   */
+  skipCommand?: string;
 }
+
+/** Thrown by a login whose wait the user skipped (see {@link LoginHooks.skipCommand}). */
+export class LoginSkippedError extends Error {
+  constructor(message = "Sign-in skipped.") {
+    super(message);
+    this.name = "LoginSkippedError";
+  }
+}
+
+/** True when a login ended because the user skipped it. */
+export function isLoginSkipped(error: unknown): boolean {
+  return error instanceof Error && error.name === "LoginSkippedError";
+}
+
+/** Lines that skip the sign-in wait when {@link LoginHooks.skipCommand} is set. */
+function isSkipLine(line: string): boolean {
+  const answer = line.trim().toLowerCase();
+  return answer === "" || answer === "s" || answer === "skip";
+}
+
+/** "3 minutes" for a wait in milliseconds. */
+function describeWait(ms: number): string {
+  const minutes = Math.round(ms / 60_000);
+  return minutes === 1 ? "1 minute" : `${minutes} minutes`;
+}
+
+/**
+ * The sign-in address starts at Supabase, DevIntern's sign-in provider, so
+ * its host is not devintern.com; say so wherever the address is shown.
+ */
+const SIGN_IN_LINK_NOTE = "(DevIntern sign-in, hosted by our sign-in provider Supabase)";
 
 const PASTE_CALLBACK_HINT = [
   "Signing in from another machine? When the browser ends on a 127.0.0.1 page that",
@@ -141,13 +179,37 @@ function acceptsPastedCallback(hooks: LoginHooks | undefined): boolean {
 function acceptPastedCallbacks(
   callback: AuthCallbackServer,
   onStatus: (message: string) => void,
+  options: { acceptPaste: boolean; skipCommand?: string },
 ): () => void {
   return watchStdinLines((line) => {
-    if (!line.trim() || callback.submitPastedCallback(line)) return;
+    if (options.skipCommand && isSkipLine(line)) {
+      callback.cancel(new LoginSkippedError());
+      return;
+    }
+    if (!options.acceptPaste || !line.trim() || callback.submitPastedCallback(line)) return;
     onStatus(
       "That is not the sign-in address. Paste the full address from the browser (it contains `code=`).",
     );
   });
+}
+
+/**
+ * Start reading stdin during a sign-in wait (pasted callbacks and the skip
+ * key), and print the skip hint.
+ *
+ * @returns Stops reading stdin.
+ */
+export function watchLoginInput(
+  callback: AuthCallbackServer,
+  onStatus: (message: string) => void,
+  acceptPaste: boolean,
+  skipCommand: string | undefined,
+): () => void {
+  if (!acceptPaste && !skipCommand) return () => {};
+  if (skipCommand) {
+    onStatus(`Press Enter to skip and sign in later with \`${skipCommand}\`.`);
+  }
+  return acceptPastedCallbacks(callback, onStatus, { acceptPaste, skipCommand });
 }
 
 /** Read and validate the persisted session file, or `null` if missing or corrupt. */
@@ -247,7 +309,7 @@ function printRemoteLoginHints(
     [
       "Remote shell detected (SSH/mosh): a browser on this host will not complete login.",
       "",
-      "Open this URL in your laptop browser:",
+      `Open this sign-in link in your laptop browser ${SIGN_IN_LINK_NOTE}:`,
       url,
       "",
       ...(acceptPaste
@@ -307,7 +369,7 @@ export async function loginWithOAuth(
       printRemoteLoginHints(onStatus, callback.port, data.url, acceptPaste);
     } else {
       onStatus(`Opening ${providerName} login in your browser...`);
-      onStatus(`If the browser does not open, visit:\n${data.url}`);
+      onStatus(`If the browser does not open, visit this link ${SIGN_IN_LINK_NOTE}:\n${data.url}`);
       try {
         await openUrl(data.url);
       } catch (error) {
@@ -317,8 +379,10 @@ export async function loginWithOAuth(
         if (acceptPaste) onStatus(PASTE_CALLBACK_HINT);
       }
     }
-    if (acceptPaste) stopPaste = acceptPastedCallbacks(callback, onStatus);
-    onStatus("Waiting for authentication callback...");
+    stopPaste = watchLoginInput(callback, onStatus, acceptPaste, hooks?.skipCommand);
+    onStatus(
+      `Waiting for authentication callback (up to ${describeWait(AUTH_CALLBACK_TIMEOUT_MS)})...`,
+    );
 
     const code = await callback.waitForCode(AUTH_CALLBACK_TIMEOUT_MS);
     return await exchangeCodeAndPersist(config, client, code);
@@ -377,7 +441,6 @@ export async function loginWithEmail(
           "does not load. Copy that page's full address and paste it here, then press Enter.",
         ].join("\n"),
       );
-      stopPaste = acceptPastedCallbacks(callback, onStatus);
     } else if (remote) {
       onStatus(
         [
@@ -386,7 +449,10 @@ export async function loginWithEmail(
         ].join("\n"),
       );
     }
-    onStatus("Check your email and open the link (waiting up to 10 minutes)...");
+    stopPaste = watchLoginInput(callback, onStatus, acceptPaste, hooks?.skipCommand);
+    onStatus(
+      `Check your email and open the link (waiting up to ${describeWait(EMAIL_AUTH_CALLBACK_TIMEOUT_MS)})...`,
+    );
 
     const code = await callback.waitForCode(EMAIL_AUTH_CALLBACK_TIMEOUT_MS);
     return await exchangeCodeAndPersist(config, client, code);

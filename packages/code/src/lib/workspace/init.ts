@@ -589,6 +589,49 @@ export function appendRepoEntry(
   return { content: content + separator + block, name, added: true, seededProject };
 }
 
+/** The comment `devintern init` writes above a repo's `manual_only = true`. */
+const MANUAL_ONLY_COMMENT =
+  /^\s*#\s*Run by hand from your checkout only; the worker skips this repo\.\s*$/;
+
+/** The string value of a `name = "..."` line, or null for any other line. */
+function tomlNameValue(line: string): string | null {
+  const match = /^\s*name\s*=\s*("(?:[^"\\]|\\.)*"|'[^']*')\s*(#.*)?$/.exec(line);
+  const raw = match?.[1];
+  if (!raw) return null;
+  return raw.startsWith('"') ? (JSON.parse(raw) as string) : raw.slice(1, -1);
+}
+
+/**
+ * Turn the `manual_only` `[[repos]]` entry named `name` into a worker repo by
+ * removing its `manual_only = true` line (and the comment `devintern init`
+ * writes above it). Pure text edit, so comments elsewhere survive.
+ *
+ * @param content - Current workspace.toml text
+ * @param name - The entry's `name`
+ * @returns Updated text, or null when no such line was found in that entry
+ */
+export function promoteManualOnlyRepo(content: string, name: string): string | null {
+  const lines = content.split("\n");
+  const isHeader = (line: string) => /^\s*\[/.test(line);
+  const isRepoHeader = (line: string) => /^\s*\[\[repos\]\]\s*(#.*)?$/.test(line);
+  for (let start = 0; start < lines.length; start++) {
+    if (!isRepoHeader(lines[start] ?? "")) continue;
+    // The entry's own keys run until the next table header (a `[repos.env]`
+    // sub-table or the next entry).
+    let end = start + 1;
+    while (end < lines.length && !isHeader(lines[end] ?? "")) end++;
+    const body = lines.slice(start + 1, end);
+    if (!body.some((line) => tomlNameValue(line) === name)) continue;
+    const flag = body.findIndex((line) => /^\s*manual_only\s*=\s*true\s*(#.*)?$/.test(line));
+    if (flag === -1) return null;
+    const flagLine = start + 1 + flag;
+    const withComment = MANUAL_ONLY_COMMENT.test(lines[flagLine - 1] ?? "");
+    lines.splice(withComment ? flagLine - 1 : flagLine, withComment ? 2 : 1);
+    return lines.join("\n");
+  }
+  return null;
+}
+
 /** Tracker project/team a checkout's `.devintern-code/.env` defaults to, for routing. */
 export function repoDefaultProjectKey(repoEnv: Record<string, string>): string | undefined {
   return repoEnv.JIRA_DEFAULT_PROJECT_KEY || repoEnv.LINEAR_DEFAULT_TEAM_KEY || undefined;
@@ -652,7 +695,36 @@ export async function runWorkerAddRepo(
   const config = parseWorkspaceConfig(existingText, configPath);
   const isFirstRepo = config.repos.length === 0;
 
-  if (config.repos.some((repo) => repo.remote === remote)) {
+  const existing = config.repos.find((repo) => repo.remote === remote);
+  if (existing?.manualOnly) {
+    // `devintern init` registered this checkout for manual runs only; adding
+    // it to the worker means letting the worker run tasks there.
+    const promoted = promoteManualOnlyRepo(existingText, existing.name);
+    if (!promoted) {
+      error(
+        `❌ "${existing.name}" is manual-only, and its manual_only line could not be edited automatically. ` +
+          `Remove \`manual_only = true\` from its [[repos]] entry in ${configPath}.`,
+      );
+      return 1;
+    }
+    try {
+      parseWorkspaceConfig(promoted, configPath);
+    } catch (problem) {
+      error(`❌ "${existing.name}" cannot become a worker repo yet: ${(problem as Error).message}`);
+      return 1;
+    }
+    writeFileSync(configPath, promoted);
+    loadWorkspaceConfig(configPath);
+    log(
+      `✅ "${existing.name}" is now picked up by the worker (it was manual-only, registered by \`devintern init\`).`,
+    );
+    if (existing.envFile) {
+      log(`   Its settings stay in ${join(workspaceDir, existing.envFile)}.`);
+    }
+    mergeEnv(workspaceDir, cwd, {}, log);
+    return 0;
+  }
+  if (existing) {
     log(`ℹ️  ${remote} is already in the workspace; config unchanged.`);
     mergeEnv(workspaceDir, cwd, {}, log);
     return 0;

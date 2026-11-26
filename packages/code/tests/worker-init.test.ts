@@ -33,6 +33,9 @@ import {
   workspaceGitHubRepos,
 } from "../src/lib/init/worker-init";
 
+/** Start of the one-question worker-settings prompt. */
+const RECOMMENDED_QUESTION = "Use the recommended worker settings";
+
 /** The login name the service step passes to loginctl (same lookup order). */
 function loginName(): string {
   return process.env.USER || process.env.LOGNAME || userInfo().username;
@@ -179,7 +182,10 @@ describe("runWorkerInit", () => {
     return {
       cwd: tempDir,
       log: (m: string) => logs.push(m),
-      prompt: async () => queued.shift() ?? "n",
+      // "n" takes the expanded settings path (CI, conflicts, hours, Sentry),
+      // which these scripted answers walk through.
+      prompt: async (question: string) =>
+        question.startsWith(RECOMMENDED_QUESTION) ? "n" : (queued.shift() ?? "n"),
       ensureTracker: async () => "markdown",
       bootstrapWorkspace: async () => ({ workspaceDir }),
       configureOperatingPolicy: async () => {},
@@ -264,8 +270,55 @@ describe("runWorkerInit", () => {
       }),
     );
     expect(result.ok).toBe(true);
-    expect(logs.join("\n")).toContain("No automation license found.");
-    expect(logs.join("\n")).toContain("devintern.com/pricing");
+    const all = logs.join("\n");
+    // Signed out: the free Pilot leads; the paid license is the fallback.
+    expect(all).toContain("The worker needs the 14-day free Worker Pilot, no card required");
+    expect(all).not.toContain("No automation license found.");
+    expect(all.indexOf("Worker Pilot")).toBeLessThan(all.indexOf("LICENSE_KEY"));
+    expect(all).toContain("devintern.com/pricing");
+  });
+
+  test("a signed-in user without an entitlement sees the license check's reason", async () => {
+    const questions: string[] = [];
+    const result = await runWorkerInit(
+      deps(["status=todo"], {
+        checkAutomationLicense: async () => "Your Worker Pilot ended on 2026-11-01.",
+        getUser: async () => ({ id: "u1", email: "me@example.com" }),
+        prompt: async (question) => {
+          questions.push(question);
+          return question.startsWith("Ready-tasks") ? "status=todo" : "";
+        },
+      }),
+    );
+    expect(result.ok).toBe(true);
+    expect(logs.join("\n")).toContain("Your Worker Pilot ended on 2026-11-01.");
+    expect(questions.some((question) => question.includes("start the Worker Pilot"))).toBe(false);
+  });
+
+  test("declining the Pilot sign-in is not followed by a relay sign-in question", async () => {
+    const questions: string[] = [];
+    let signIns = 0;
+    const result = await runWorkerInit(
+      deps([], {
+        checkAutomationLicense: async () => "No automation license found.",
+        getUser: async () => null,
+        signIn: async () => {
+          signIns += 1;
+          return null;
+        },
+        prompt: async (question) => {
+          questions.push(question);
+          if (question.startsWith("Ready-tasks")) return "status=todo";
+          if (question.includes("Worker Pilot")) return "n";
+          return "";
+        },
+      }),
+    );
+    expect(result.ok).toBe(true);
+    expect(signIns).toBe(0);
+    expect(questions.some((question) => question.includes("connect the relay"))).toBe(false);
+    expect(logs.join("\n")).toContain("Relay needs sign-in; skipped.");
+    expect(logs.join("\n")).toContain("devintern worker connect");
   });
 
   test("offers workspace-scoped sign-in for a free Worker Pilot", async () => {

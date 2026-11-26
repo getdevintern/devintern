@@ -98,6 +98,17 @@ export function stdinClosedError(): Error {
   return error;
 }
 
+/**
+ * Close a readline over stdin without stopping anyone else reading it.
+ * `rl.close()` pauses stdin; when another reader (a setup wizard's prompt
+ * session) had it flowing before this one opened, its next prompt would
+ * never receive input, so stdin is resumed for it.
+ */
+function closeStdinReader(rl: ReturnType<typeof createInterface>, wasFlowing: boolean): void {
+  rl.close();
+  if (wasFlowing && process.stdin.isPaused()) process.stdin.resume();
+}
+
 /** Lines readline emitted past the one being awaited (piped multi-line input). */
 const pendingStdinLines: string[] = [];
 let stdinEnded = false;
@@ -118,6 +129,7 @@ function readStdinLine(): Promise<string> {
   }
 
   return new Promise((resolve, reject) => {
+    const wasFlowing = process.stdin.readableFlowing === true;
     const rl = createInterface({ input: process.stdin });
     let settled = false;
     rl.on("line", (line) => {
@@ -130,7 +142,7 @@ function readStdinLine(): Promise<string> {
       settled = true;
       // Resolve before close(): close() emits "close" synchronously.
       resolve(line);
-      rl.close();
+      closeStdinReader(rl, wasFlowing);
     });
     rl.once("close", () => {
       if (!settled) {
@@ -154,6 +166,7 @@ export function watchStdinLines(onLine: (line: string) => void): () => void {
   let stopped = false;
   for (const line of pendingStdinLines.splice(0)) onLine(line);
   if (stdinEnded) return () => {};
+  const wasFlowing = process.stdin.readableFlowing === true;
   const rl = createInterface({ input: process.stdin });
   rl.on("line", (line) => {
     if (!stopped) onLine(line);
@@ -164,7 +177,7 @@ export function watchStdinLines(onLine: (line: string) => void): () => void {
   return () => {
     if (stopped) return;
     stopped = true;
-    rl.close();
+    closeStdinReader(rl, wasFlowing);
   };
 }
 

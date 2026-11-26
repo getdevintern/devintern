@@ -17,6 +17,7 @@ import { listInstalledHarnesses, resolveHarness } from "@devintern/agent-harness
 import {
   createDefaultSupabaseAuthConfig,
   getAuthenticatedUser,
+  isLoginSkipped,
   login,
   resolveLogin,
 } from "@devintern/auth";
@@ -32,8 +33,10 @@ import {
   validateConnection,
 } from "@devintern/task-trackers";
 import { findProjectRoot, upsertEnvVars } from "@devintern/utils";
+import { signInCommand, workerLoginCommandFor } from "../account/worker-pilot";
 import { isPromptAbort } from "../cli/prompt-abort";
 import { resolveWizardPrompts } from "../cli/prompt-session";
+import type { PromptSession } from "../cli/prompt-session";
 import { resolveProjectConfigDir } from "../config/config-dir";
 import type { SetupSignInStatus, SetupSource } from "../observability/analytics";
 import {
@@ -51,9 +54,10 @@ import {
 import { collectReadinessChecks, renderReadinessReport } from "../observability/readiness";
 import type { ReadinessCheck } from "../observability/readiness";
 import { TRACKER_CAPABILITIES } from "../trackers/capabilities";
-import { workspaceCodeStateDir } from "../workspace/paths";
+import { gitHubSlugFromRemote } from "../workspace/env";
+import { workspaceCodeStateDir, workspaceConfigPath } from "../workspace/paths";
 import { findWorkspaceRepoForCheckout } from "../workspace/manual-run";
-import { registerManualCheckout } from "../workspace/register-checkout";
+import { readOriginRemote, registerManualCheckout } from "../workspace/register-checkout";
 import { writeSecretFile } from "../utils/secret-file";
 
 export { isInteractive };
@@ -81,7 +85,7 @@ export interface InitWizardDeps {
   getUser?: () => Promise<InitWizardUserLike | null>;
   /**
    * Interactive sign-in override; defaults to the full `devintern login`
-   * flow (provider picker + browser callback).
+   * flow (provider picker + browser callback, Enter skips the wait).
    */
   signIn?: () => Promise<InitWizardUserLike | null>;
   /** Installed agent CLIs; defaults to PATH probing of every harness. */
@@ -119,11 +123,12 @@ function wizardSupabaseConfig(cwd: string, target?: InitTarget): SupabaseAuthCon
  */
 async function runPostSetup(
   cwd: string,
-  prompt: PromptFn,
+  session: Pick<PromptSession, "prompt" | "guard">,
   log: (message: string) => void,
   deps: InitWizardDeps,
   target: InitTarget,
 ): Promise<{ signedIn: SetupSignInStatus; checks?: ReadinessCheck[] }> {
+  const { prompt } = session;
   // Agent CLI availability
   const agents =
     deps.listInstalledAgents?.() ??
@@ -150,6 +155,11 @@ async function runPostSetup(
     user = null;
   }
   let signedIn: SetupSignInStatus = "skipped";
+  const later = signInCommand(
+    target.workspaceDir
+      ? workerLoginCommandFor(workspaceConfigPath(target.workspaceDir))
+      : undefined,
+  );
   if (!user) {
     const answer = await prompt(
       "\nSign in to DevIntern now? Enables worker connect and license entitlements. [Y/n] ",
@@ -159,25 +169,35 @@ async function runPostSetup(
         deps.signIn ??
         (async () => {
           const resolved = await resolveLogin(process.argv);
-          return login(supabaseConfig, resolved);
+          return login(supabaseConfig, resolved, { skipCommand: later });
         });
       try {
-        const signedUp = await signIn();
+        const signedUp = await session.guard(signIn());
         if (signedUp) {
           log(`✅ Signed in as ${signedUp.email || signedUp.id}`);
           signedIn = "success";
         } else {
           signedIn = "failed";
-          log("⚠️  Sign-in did not complete — run 'devintern login' before using those features.");
+          log(`⚠️  Sign-in did not complete — run \`${later}\` before using those features.`);
         }
       } catch (error) {
         // Closed input stops the whole wizard, not just the sign-in step.
-        if (isPromptAbort(error)) throw error;
-        signedIn = "failed";
-        log(
-          `⚠️  Sign-in failed: ${error instanceof Error ? error.message : error}\n` +
-            "   Run 'devintern login' before using worker connect or licensed features.",
-        );
+        if (isPromptAbort(error)) {
+          log(
+            `\n⏸️  Setup stopped at sign-in. Your tracker settings are saved in ${target.envPath}.`,
+          );
+          log(`   Sign in later with \`${later}\`; \`devintern doctor\` checks the rest.`);
+          throw error;
+        }
+        if (isLoginSkipped(error)) {
+          log(`⏭️  Sign-in skipped. Sign in later with \`${later}\`.`);
+        } else {
+          signedIn = "failed";
+          log(
+            `⚠️  Sign-in failed: ${error instanceof Error ? error.message : error}\n` +
+              `   Run \`${later}\` before using worker connect or licensed features.`,
+          );
+        }
       }
     }
   } else {
@@ -211,7 +231,7 @@ export async function runInitWizard(deps: InitWizardDeps = {}): Promise<void> {
   const log = deps.log ?? console.log;
   const probe = deps.probe ?? defaultProbe;
 
-  log("🚀 Initializing @devintern/code for this project...");
+  log("🚀 Initializing @getdevintern/code for this project...");
 
   // Re-running init on a registered checkout edits its env file instead
   // (`devintern init` routes there); never prompt for a second registration.
@@ -240,14 +260,20 @@ export async function runInitWizard(deps: InitWizardDeps = {}): Promise<void> {
 
   try {
     trackSetupStarted(deps.source ?? "init");
-    const result = await runTrackerSetup(prompt, log, probe, cwd, { writeEnv, promptSecret });
+    const origin = await readOriginRemote(cwd);
+    const originSlug = origin ? gitHubSlugFromRemote(origin) : null;
+    const result = await runTrackerSetup(prompt, log, probe, cwd, {
+      writeEnv,
+      promptSecret,
+      stepDefaults: originSlug ? { GITHUB_REPO: originSlug } : undefined,
+    });
     if (!result) {
       trackSetupFailed("scaffold_refused");
       return;
     }
     const target: InitTarget = { envPath: result.envPath, workspaceDir };
 
-    const postSetup = await runPostSetup(cwd, prompt, log, deps, target);
+    const postSetup = await runPostSetup(cwd, session, log, deps, target);
     trackSetupCompleted({
       tracker: result.trackerId,
       signedIn: postSetup.signedIn,
@@ -312,6 +338,8 @@ export async function runTrackerSetup(
     promptSecret?: PromptFn;
     /** Enter-for-default answers by env key (e.g. `GITHUB_REPO` from origin). */
     stepDefaults?: Record<string, string>;
+    /** Where the values are saved, named when validation is skipped. */
+    envLabel?: string;
   },
 ): Promise<{ trackerId: string; values: Record<string, string>; envPath: string } | null> {
   const projectRoot = findProjectRoot({ startDir: cwd });
@@ -362,13 +390,15 @@ export async function runTrackerSetup(
     log(`\n📖 Setup guide (tokens, permissions, examples): ${docs}`);
   }
 
+  // Origin defaults apply to the first pass and to "edit values" after a
+  // failed connection check alike.
+  const prompted = steps.map((step) => {
+    const fallback = options.stepDefaults?.[step.key];
+    return fallback
+      ? { ...step, defaultValue: fallback, label: `${step.label} (origin: ${fallback})` }
+      : step;
+  });
   if (!reusedExisting) {
-    const prompted = steps.map((step) => {
-      const fallback = options.stepDefaults?.[step.key];
-      return fallback
-        ? { ...step, defaultValue: fallback, label: `${step.label} (origin: ${fallback})` }
-        : step;
-    });
     await promptSteps(prompted, prompt, log, values, promptSecret);
   }
 
@@ -379,9 +409,9 @@ export async function runTrackerSetup(
     await validateConnection(
       trackerId,
       values,
-      steps,
+      prompted,
       { prompt, probe, log, promptSecret },
-      "this repo's env file in ~/.devintern/",
+      options.envLabel ?? "this repo's env file in ~/.devintern/env/",
     );
   }
 

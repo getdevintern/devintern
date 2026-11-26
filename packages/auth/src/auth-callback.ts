@@ -120,6 +120,11 @@ export interface AuthCallbackServer {
    */
   submitPastedCallback: (input: string) => boolean;
   /**
+   * Stop waiting: a pending {@link waitForCode} rejects with `reason` (for
+   * example when the user chose to skip sign-in).
+   */
+  cancel: (reason: Error) => void;
+  /**
    * Shut down the local callback HTTP server.
    *
    * Waits a short grace period so the browser can receive the HTML response
@@ -253,6 +258,9 @@ export async function createAuthCallbackServer(
       if ("error" in parsed) codePromiseReject?.(new Error(parsed.error));
       else codePromiseResolve?.(parsed.code);
       return true;
+    },
+    cancel(reason) {
+      codePromiseReject?.(reason);
     },
     stop(delayMs = DEFAULT_SHUTDOWN_DELAY_MS) {
       if (stopPromise) return stopPromise;
