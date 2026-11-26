@@ -51,19 +51,25 @@ const ROW = "flex flex-wrap items-baseline gap-x-3 gap-y-1 text-[0.8125rem]";
  * status, tracker tickets it filed, and follow-up runs on the PR it opened.
  * Renders nothing when the run spawned nothing.
  */
-export function SpawnedWorkSection({ spawned }: { spawned: readonly SpawnedWork[] | undefined }) {
+export function SpawnedWorkSection({
+  spawned,
+  idPrefix = "rd",
+  className = "rounded-lg border border-border bg-card px-4 py-4 sm:px-5",
+}: {
+  spawned: readonly SpawnedWork[] | undefined;
+  /** Prefix for heading ids, so several sections can share a page (the inbox). */
+  idPrefix?: string;
+  className?: string;
+}) {
   const groups = groupSpawned(spawned);
   if (!hasSpawnedWork(groups)) return null;
   return (
-    <section
-      aria-labelledby="rd-spawned-heading"
-      className="space-y-4 rounded-lg border border-border bg-card px-4 py-4 sm:px-5"
-    >
-      <h3 id="rd-spawned-heading" className="section-title">
+    <section aria-labelledby={`${idPrefix}-spawned-heading`} className={`space-y-4 ${className}`}>
+      <h3 id={`${idPrefix}-spawned-heading`} className="section-title">
         Spawned work
       </h3>
       {groups.tasks.length > 0 ? (
-        <Group id="rd-spawned-tasks" title="Delegated tasks">
+        <Group id={`${idPrefix}-spawned-tasks`} title="Delegated tasks">
           {groups.tasks.map((task) => {
             const prHref = safeHref(task.prUrl);
             return (
@@ -92,7 +98,7 @@ export function SpawnedWorkSection({ spawned }: { spawned: readonly SpawnedWork[
         </Group>
       ) : null}
       {groups.issues.length > 0 ? (
-        <Group id="rd-spawned-issues" title="Tracker tickets">
+        <Group id={`${idPrefix}-spawned-issues`} title="Tracker tickets">
           {groups.issues.map((issue) => {
             const href = safeHref(issue.url);
             return (
@@ -112,7 +118,7 @@ export function SpawnedWorkSection({ spawned }: { spawned: readonly SpawnedWork[
         </Group>
       ) : null}
       {groups.followUps.length > 0 ? (
-        <Group id="rd-spawned-follow-ups" title="Follow-up runs">
+        <Group id={`${idPrefix}-spawned-follow-ups`} title="Follow-up runs">
           {groups.followUps.map((run) => (
             <li key={`run-${run.runId}`} className={ROW}>
               <a href={runHash(run.runId)} className="ref-link font-medium">

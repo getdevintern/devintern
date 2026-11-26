@@ -12,7 +12,8 @@ import { parseEnvInteger } from "../config/env-integer";
 import { InjectedTaskStore, succeededRunCoversClaim } from "../state/injected-tasks";
 import type { InjectedTask } from "../state/injected-tasks";
 import { RunStore } from "../state/run-recorder";
-import type { RunRecord } from "../state/run-recorder";
+import type { ReapOrphanedRunsOptions, RunRecord } from "../state/run-recorder";
+import type { RunFinishRuleOptions } from "../notifications/run-rules";
 import { latestScopedTaskRun, resolveSessionPickup } from "../state/session-pickup";
 import type { SessionPickupRunStore } from "../state/session-pickup";
 import { Utils } from "../utils";
@@ -198,7 +199,11 @@ function injectedRepoCwd(repoManager: RepoManager, repo: string): string | undef
  */
 export interface InjectedTaskRecoveryOptions {
   /** Run store used to reconstruct the interrupted run's session. */
-  runStore?: SessionPickupRunStore & { reapOrphanedRuns?: () => number };
+  runStore?: SessionPickupRunStore & {
+    reapOrphanedRuns?: () => number;
+    reapOrphanedRunIds?: (options?: ReapOrphanedRunsOptions) => number[];
+    notifySettledRun?: (runId: number, options?: RunFinishRuleOptions) => void;
+  };
   /**
    * Optional branch-existence probe scoped to the row's repo. Absent (or a
    * missing base worktree) trusts the recorded branch, matching
@@ -214,6 +219,12 @@ export interface InjectedTaskRecoveryOptions {
   hasLandedCommits?: (branch: string, task: InjectedTask) => boolean | Promise<boolean>;
   /** Automatic resumes allowed per row; defaults to the worker env setting. */
   maxAutoResumes?: number;
+  /**
+   * `local`-origin run ids the pre-lock orphan sweep already reaped with their
+   * finish rules deferred ({@link recoverOrphanedTaskRuns}'s `deferredRunIds`).
+   * Evaluated here once each row's resume decision is known.
+   */
+  deferredRunIds?: readonly number[];
   log?: typeof console.log;
   warn?: typeof console.warn;
 }
@@ -225,69 +236,109 @@ export async function recoverOrphanedInjectedTasks(
   const log = options.log ?? console.log;
   const warn = options.warn ?? console.warn;
   const limit = options.maxAutoResumes ?? injectedAutoResumeLimit();
-
-  for (const orphan of store.listRunning()) {
-    // A hard kill can leave the detached task child alive. That child is the
-    // same task and may still finish successfully, so resume only once it is
-    // gone (a mismatched start time means its pid was recycled).
-    if (skipInterruptedChildRunning(orphan, warn)) {
-      continue;
+  // Runs reaped by this pass (or by the pre-lock sweep) whose finish rules we
+  // intentionally deferred. They are evaluated at the end, once every resume
+  // decision is known: a run that is about to continue must not raise a
+  // "will not be retried" alarm.
+  const reapedIds = new Set<number>(options.deferredRunIds ?? []);
+  const resumedRunIds = new Set<number>();
+  const reapDeferred = (): void => {
+    const runStore = options.runStore;
+    if (!runStore) return;
+    if (runStore.reapOrphanedRunIds && runStore.notifySettledRun) {
+      for (const runId of runStore.reapOrphanedRunIds({ notify: false })) {
+        reapedIds.add(runId);
+      }
+      return;
     }
-    // Injected runs are local origin/tracker, pinned to the row's repo.
-    const scope = { origin: "local", tracker: "local", repo: orphan.repo } as const;
-    let decision: Awaited<ReturnType<typeof resolveSessionPickup>> = {
-      kind: "fresh",
-      reason: "run store unavailable",
-    };
-    let latestRun: RunRecord | undefined;
-    if (options.runStore) {
-      try {
-        latestRun = latestScopedTaskRun(options.runStore, orphan.taskKey, scope);
-        // Ordering or a failed sweep can leave the latest run `in_progress`.
-        // Reap it (idempotent; only touches runs still `in_progress`) so an
-        // interrupted attempt is evaluated as terminal, not as a live run.
-        if (latestRun?.status === "in_progress") {
-          options.runStore.reapOrphanedRuns?.();
+    // A partial run store (tests, older wiring) has no deferred entry point:
+    // fall back to the sweep's own notification behavior.
+    runStore.reapOrphanedRuns?.();
+  };
+
+  const notifyDeferred = (): void => {
+    const runStore = options.runStore;
+    if (!runStore?.notifySettledRun) return;
+    for (const runId of reapedIds) {
+      runStore.notifySettledRun(
+        runId,
+        resumedRunIds.has(runId) ? { skipRetriesExhausted: true } : {},
+      );
+    }
+  };
+
+  try {
+    for (const orphan of store.listRunning()) {
+      // A hard kill can leave the detached task child alive. That child is the
+      // same task and may still finish successfully, so resume only once it is
+      // gone (a mismatched start time means its pid was recycled).
+      if (skipInterruptedChildRunning(orphan, warn)) {
+        continue;
+      }
+      // Injected runs are local origin/tracker, pinned to the row's repo.
+      const scope = { origin: "local", tracker: "local", repo: orphan.repo } as const;
+      let decision: Awaited<ReturnType<typeof resolveSessionPickup>> = {
+        kind: "fresh",
+        reason: "run store unavailable",
+      };
+      let latestRun: RunRecord | undefined;
+      if (options.runStore) {
+        try {
           latestRun = latestScopedTaskRun(options.runStore, orphan.taskKey, scope);
+          // Ordering or a failed sweep can leave the latest run `in_progress`.
+          // Reap it (idempotent; only touches runs still `in_progress`) so an
+          // interrupted attempt is evaluated as terminal, not as a live run.
+          if (latestRun?.status === "in_progress") {
+            reapDeferred();
+            latestRun = latestScopedTaskRun(options.runStore, orphan.taskKey, scope);
+          }
+          decision = await resolvePickup({ runStore: options.runStore, orphan, options });
+        } catch (error) {
+          warn(
+            `⚠️  [fleet] could not evaluate session pickup for injected task ${orphan.taskKey}: ` +
+              `${(error as Error).message}`,
+          );
         }
-        decision = await resolvePickup({ runStore: options.runStore, orphan, options });
-      } catch (error) {
-        warn(
-          `⚠️  [fleet] could not evaluate session pickup for injected task ${orphan.taskKey}: ` +
-            `${(error as Error).message}`,
-        );
       }
-    }
 
-    if (decision.kind === "resume") {
-      const { runId, branch } = decision.session;
-      const resumed = store.autoResume(orphan.id, {
-        limit,
-        exhaustedMessage: injectedAutoResumeExhaustedMessage(orphan.taskKey, runId, branch),
-      });
-      if (!resumed) continue;
-      if (resumed.resumed) {
-        log(
-          `♻️  [fleet] auto-resuming interrupted injected task ${orphan.taskKey} ` +
-            `(run #${runId}, branch '${branch}')`,
-        );
-      } else {
-        warn(
-          `⚠️  [fleet] injected task ${orphan.taskKey} was interrupted by a worker restart ` +
-            `and its automatic resume budget is exhausted; run ` +
-            `\`devintern worker add --resume ${orphan.taskKey}\` or use the dashboard Re-queue action`,
-        );
+      if (decision.kind === "resume") {
+        const { runId, branch } = decision.session;
+        const resumed = store.autoResume(orphan.id, {
+          limit,
+          exhaustedMessage: injectedAutoResumeExhaustedMessage(orphan.taskKey, runId, branch),
+        });
+        if (!resumed) continue;
+        if (resumed.resumed) {
+          resumedRunIds.add(runId);
+          log(
+            `♻️  [fleet] auto-resuming interrupted injected task ${orphan.taskKey} ` +
+              `(run #${runId}, branch '${branch}')`,
+          );
+        } else {
+          warn(
+            `⚠️  [fleet] injected task ${orphan.taskKey} was interrupted by a worker restart ` +
+              `and its automatic resume budget is exhausted; run ` +
+              `\`devintern worker add --resume ${orphan.taskKey}\` or use the dashboard Re-queue action`,
+          );
+        }
+        continue;
       }
-      continue;
+      // Only a run that started after this claim proves the attempt finished:
+      // `--resume` re-queues settled rows, so a pre-restart success is stale.
+      if (succeededRunCoversClaim(latestRun, orphan.startedAt)) {
+        store.finish(
+          orphan.id,
+          "done",
+          `run #${latestRun!.id} already succeeded before the restart`,
+        );
+        continue;
+      }
+      store.finish(orphan.id, "failed", INJECTED_INTERRUPTED_MESSAGE);
+      warn(`⚠️  [fleet] injected task ${orphan.taskKey} was interrupted by a worker restart`);
     }
-    // Only a run that started after this claim proves the attempt finished:
-    // `--resume` re-queues settled rows, so a pre-restart success is stale.
-    if (succeededRunCoversClaim(latestRun, orphan.startedAt)) {
-      store.finish(orphan.id, "done", `run #${latestRun!.id} already succeeded before the restart`);
-      continue;
-    }
-    store.finish(orphan.id, "failed", INJECTED_INTERRUPTED_MESSAGE);
-    warn(`⚠️  [fleet] injected task ${orphan.taskKey} was interrupted by a worker restart`);
+  } finally {
+    // Best-effort: the finish rules must run even if one row's recovery threw.
+    notifyDeferred();
   }
 }
 
@@ -418,11 +469,13 @@ export function makeStartupInjectedRecovery(
   runStore: SessionPickupRunStore,
   workspaceDir: string,
   next?: () => Promise<void> | void,
+  deferredRunIds?: readonly number[],
 ): () => Promise<void> {
   return makeBeforeAcquirersStart(store, {
     runStore,
     branchExists: createInjectedBranchExistsProbe(workspaceDir),
     hasLandedCommits: createInjectedCommitProbe(workspaceDir),
+    ...(deferredRunIds ? { deferredRunIds } : {}),
     next,
   });
 }
@@ -435,10 +488,11 @@ export function createInjectedStartupRecovery(
   store: InjectedTaskStore,
   workspaceDir: string,
   next?: () => Promise<void> | void,
+  deferredRunIds?: readonly number[],
 ): { hook: () => Promise<void>; close: () => void } {
   const runStore = new RunStore(workspaceDbPath(workspaceDir));
   return {
-    hook: makeStartupInjectedRecovery(store, runStore, workspaceDir, next),
+    hook: makeStartupInjectedRecovery(store, runStore, workspaceDir, next, deferredRunIds),
     close: () => runStore.close(),
   };
 }

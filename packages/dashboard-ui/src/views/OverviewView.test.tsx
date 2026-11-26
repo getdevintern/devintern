@@ -7,6 +7,7 @@ import { queueBreakdown, queueParts, queueProgress } from "@/components/overview
 import { OverviewScreen } from "@/views/OverviewView";
 import type { RunRecord, WorkerResponse } from "@/lib/api";
 import type { OverviewResponse } from "@/lib/api-overview";
+import type { NotificationListResponse, NotificationRecord } from "@/lib/api-notifications";
 
 const NOW = new Date(2026, 10, 13, 12, 20, 0).getTime();
 const MINUTE = 60_000;
@@ -548,4 +549,48 @@ test("the queue fact keeps each count with its label", () => {
     "2 webhook",
     "1 retry",
   ]);
+});
+
+const NEEDS_YOU_ROW = {
+  id: 12,
+  kind: "escalated",
+  severity: "high",
+  groupKey: "escalated:sentry:checkout",
+  count: 88,
+  runId: 30,
+  repo: "acme/web",
+  title: "Sentry issue escalated 88 times",
+  links: [],
+  createdAt: NOW - HOUR,
+  updatedAt: NOW - 4 * MINUTE,
+  muted: false,
+} satisfies NotificationRecord;
+
+function renderWithNeedsYou(needsYou: NotificationListResponse | null): string {
+  return renderToStaticMarkup(
+    createElement(OverviewScreen, { overview: overview(), workerInfo, needsYou, now: NOW }),
+  );
+}
+
+test("Needs you is hidden until something unresolved needs a human", () => {
+  expect(renderWithNeedsYou(null)).not.toContain('data-slot="needs-you"');
+  expect(renderWithNeedsYou({ notifications: [], total: 0, limit: 5, offset: 0 })).not.toContain(
+    'data-slot="needs-you"',
+  );
+});
+
+test("Needs you lists the top high-severity rows with their counts and an inbox link", () => {
+  const html = renderWithNeedsYou({
+    notifications: [NEEDS_YOU_ROW],
+    total: 7,
+    limit: 5,
+    offset: 0,
+  });
+  expect(html).toContain('data-slot="needs-you"');
+  expect(html).toContain("Sentry issue escalated 88 times");
+  expect(html).toContain("×88");
+  expect(html).toContain("4m ago");
+  expect(html).toContain('href="#/runs/30"');
+  expect(html).toContain("View all 7");
+  expect(html).toContain('href="#/inbox"');
 });
