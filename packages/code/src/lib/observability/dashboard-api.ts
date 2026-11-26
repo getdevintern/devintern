@@ -59,6 +59,8 @@ import {
   interruptedChildStillRunning,
 } from "../workspace/injected-recovery";
 import { resolveWorkspaceDir } from "../workspace/paths";
+import { lastExitView, readWorkerLifecycle, stoppedWorkerExit } from "../worker/lifecycle";
+import type { WorkerLastExitView } from "../worker/lifecycle";
 import {
   readDashboardQueueStatuses,
   readDashboardRelayStats,
@@ -227,6 +229,8 @@ export interface WorkerStatusView {
   /** Lock file the status was read from; absent when undeterminable. */
   lockFile?: string;
   reason?: "pid-namespace"; // `unknown` because the lock owner is in another PID namespace
+  /** Additive: how the last worker ended (clean stop or failed start), when stopped. */
+  lastExit?: WorkerLastExitView;
 }
 
 export type { AgentPrView, OpenAgentPrView } from "./dashboard-agent-prs";
@@ -1385,7 +1389,8 @@ export function handleStats(data: DashboardData, params: URLSearchParams): ApiRe
  *
  * `stopped` when the lock's pid is dead. No readable lock means `unknown`, as
  * does a lock from another PID namespace with a fresh heartbeat (read inside a
- * sandbox), which also reports `reason: "pid-namespace"`.
+ * sandbox), which also reports `reason: "pid-namespace"`. Without a lock, a
+ * lifecycle record (clean stop, failed start) makes it `stopped` + `lastExit`.
  *
  * @param workspaceDir - Workspace home holding the worker lock
  */
@@ -1393,16 +1398,21 @@ export function resolveWorkerStatus(
   workspaceDir: string = resolveWorkspaceDir(),
 ): WorkerStatusView {
   const lock = LockManager.readLockStatus(workspaceDir, WORKER_LOCK_FILE);
+  const record = readWorkerLifecycle(workspaceDir);
   if (!lock) {
-    return { status: "unknown" };
+    if (!record) return { status: "unknown" };
+    const lastExit = lastExitView(record);
+    return { status: "stopped", ...(lastExit ? { lastExit } : {}) };
   }
   const unknown = lock.running === "unknown";
+  const lastExit = lock.running === false ? stoppedWorkerExit(record, lock.startedAt) : undefined;
   return {
     status: unknown ? "unknown" : lock.running ? "running" : "stopped",
     pid: lock.pid,
     startedAt: lock.startedAt,
     lockFile: lock.path,
     ...(unknown ? { reason: "pid-namespace" as const } : {}),
+    ...(lastExit ? { lastExit } : {}),
   };
 }
 

@@ -174,7 +174,7 @@ describe("installWorkerService on Linux", () => {
         runtimePath: "/opt/bun/bin/bun",
         environmentPath: "/opt/bun/bin:/usr/bin",
       },
-      deps,
+      { ...deps, username: "tester" },
     );
     expect(result).toEqual({ ok: true, updated: false });
     const unit = files.get(unitPath) ?? "";
@@ -189,8 +189,10 @@ describe("installWorkerService on Linux", () => {
       ["systemctl", "--user", "is-enabled", "devintern-worker"],
       ["systemctl", "--user", "daemon-reload"],
       ["systemctl", "--user", "enable", "--now", "devintern-worker"],
-      ["systemctl", "--user", "is-active", "devintern-worker"],
-      ["loginctl", "enable-linger"],
+      // No `is-active` here: it says "active" even for a worker that exits a
+      // second later; callers run the honest start check instead.
+      ["loginctl", "show-user", "tester", "--property=Linger", "--value"],
+      ["loginctl", "enable-linger", "tester"],
     ]);
   });
 
@@ -251,10 +253,73 @@ describe("installWorkerService on Linux", () => {
     });
     const result = await installWorkerService(
       { workspaceDir: "/srv/workspace", execPath: "devintern" },
-      deps,
+      { ...deps, username: "tester" },
     );
     expect(result.ok).toBe(true);
-    expect(result.warning).toContain("may stop at logout");
+    expect(result.warning).toBe(
+      "could not enable lingering for tester (Access denied). Until it is, the worker stops when you log out and does not start at boot. Run as root: sudo loginctl enable-linger tester",
+    );
+  });
+
+  test("skips enable-linger when lingering is already on", async () => {
+    const commands: string[][] = [];
+    const { deps } = fakeServiceDeps({
+      platform: "linux",
+      run: async (command, args) => {
+        commands.push([command, ...args]);
+        if (command === "loginctl") return { status: 0, stdout: "yes\n", stderr: "" };
+        return args.includes("is-active") || args.includes("is-enabled") ? inactive : ok;
+      },
+    });
+    const result = await installWorkerService(
+      { workspaceDir: "/srv/workspace", execPath: "devintern" },
+      { ...deps, username: "tester" },
+    );
+    expect(result).toEqual({ ok: true, updated: false });
+    expect(commands.filter(([command]) => command === "loginctl")).toEqual([
+      ["loginctl", "show-user", "tester", "--property=Linger", "--value"],
+    ]);
+  });
+
+  test("asks `id -un` when the login name is not known", async () => {
+    const commands: string[][] = [];
+    const { deps } = fakeServiceDeps({
+      platform: "linux",
+      run: async (command, args) => {
+        commands.push([command, ...args]);
+        if (command === "id") return { status: 0, stdout: "tester\n", stderr: "" };
+        if (command === "loginctl") return { status: 0, stdout: "yes\n", stderr: "" };
+        return args.includes("is-active") || args.includes("is-enabled") ? inactive : ok;
+      },
+    });
+    const result = await installWorkerService(
+      { workspaceDir: "/srv/workspace", execPath: "devintern" },
+      { ...deps, username: "" },
+    );
+    expect(result.warning).toBeUndefined();
+    expect(commands).toContainEqual([
+      "loginctl",
+      "show-user",
+      "tester",
+      "--property=Linger",
+      "--value",
+    ]);
+  });
+
+  test("exports a non-default workspace home to the unit", async () => {
+    const { deps, files } = fakeServiceDeps({ platform: "linux" });
+    await installWorkerService({ workspaceDir: "/srv/workspace", execPath: "devintern" }, deps);
+    expect(files.get(systemdUnitPath("/home/tester"))).toContain(
+      'Environment="DEVINTERN_WORKSPACE_DIR=/srv/workspace"\n',
+    );
+    const { deps: defaultDeps, files: defaultFiles } = fakeServiceDeps({ platform: "linux" });
+    await installWorkerService(
+      { workspaceDir: "/home/tester/.devintern", execPath: "devintern" },
+      defaultDeps,
+    );
+    expect(defaultFiles.get(systemdUnitPath("/home/tester"))).not.toContain(
+      "DEVINTERN_WORKSPACE_DIR",
+    );
   });
 
   test("removes a freshly written unit when the systemd user session fails (WSL)", async () => {
@@ -391,7 +456,6 @@ describe("installWorkerService on macOS", () => {
     expect(commands).toEqual([
       ["launchctl", "print", "gui/501/com.devintern.worker"],
       ["launchctl", "bootstrap", "gui/501", plistPath],
-      ["launchctl", "print", "gui/501/com.devintern.worker"],
     ]);
   });
 
@@ -561,14 +625,30 @@ describe("renderers keep self-capture semantics", () => {
     expect(unit).not.toContain("StandardError=");
   });
 
-  test("launchd agent keeps RunAtLoad and KeepAlive without redirects", () => {
+  test("systemd unit stops retrying permanent config errors and allows a graceful stop", () => {
+    const unit = renderSystemdUnit({ execPath: "devintern", projectDir: "/srv/app" });
+    expect(unit).toContain("Restart=on-failure\nRestartSec=30\nRestartPreventExitStatus=78\n");
+    expect(unit).toContain("TimeoutStopSec=120\n");
+  });
+
+  test("launchd agent keeps RunAtLoad and KeepAlive and logs to its own file", () => {
     const plist = renderLaunchdPlist({ execPath: "devintern", workingDir: "/srv/app" });
     expect(plist).toContain("<key>RunAtLoad</key>");
     expect(plist).toContain("<key>KeepAlive</key>");
-    expect(plist).not.toContain("StandardOutPath");
+    // Output before self-capture starts still lands somewhere, but not in the
+    // capture files the dashboard tails.
+    expect(plist).toContain(
+      "<key>StandardOutPath</key>\n  <string>/srv/app/worker.launchd.log</string>",
+    );
+    expect(plist).toContain(
+      "<key>StandardErrorPath</key>\n  <string>/srv/app/worker.launchd.log</string>",
+    );
+    expect(plist).not.toContain("worker.stdout.log");
+    expect(plist).toContain("<key>ThrottleInterval</key>\n  <integer>30</integer>");
     // launchd exports no identifying variables; the definition must opt the
-    // worker into service-manager restarts explicitly.
-    expect(plist).toContain("<key>DEVINTERN_SERVICE</key>");
-    expect(plist).toContain("<string>1</string>");
+    // worker into service-manager restarts explicitly, and say it is launchd
+    // so a permanent startup failure exits 0 (no RestartPreventExitStatus).
+    expect(plist).toContain("<key>DEVINTERN_SERVICE</key>\n    <string>1</string>");
+    expect(plist).toContain("<key>DEVINTERN_SERVICE_MANAGER</key>\n    <string>launchd</string>");
   });
 });

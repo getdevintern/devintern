@@ -40,6 +40,9 @@ const FILE_NAMES: Record<WorkerCaptureStream, string> = {
 /** Rename a capture file to `<name>.1` once it grows past this size. */
 export const WORKER_CAPTURE_ROTATE_BYTES = 8 * 1024 * 1024;
 
+/** The capture currently teeing console output, if any (one per process). */
+let activeCapture: WorkerCaptureHandle | null = null;
+
 interface Originals {
   log: typeof console.log;
   info: typeof console.info;
@@ -86,6 +89,10 @@ function writeLines(fd: number, chunk: string): void {
  * terminals keep streaming output. Returns a handle whose `stop()` restores
  * the original console.
  *
+ * A capture already running for the same directory is returned as is, so
+ * the daemon CLI can start capturing before its license check and the
+ * worker's own (later) call does not tee every line twice.
+ *
  * @param dir - Directory for the capture files (the workspace home)
  * @param options - Rotation threshold override
  */
@@ -98,6 +105,9 @@ export function startWorkerCapture(
     out: resolve(join(resolve(dir), FILE_NAMES.out)),
     err: resolve(join(resolve(dir), FILE_NAMES.err)),
   };
+  if (activeCapture && activeCapture.paths.out === paths.out) {
+    return activeCapture;
+  }
   const fds: Record<WorkerCaptureStream, number> = { out: -1, err: -1 };
 
   for (const stream of ["out", "err"] as const) {
@@ -133,9 +143,10 @@ export function startWorkerCapture(
   console.warn = tee("err", originals.warn);
   console.error = tee("err", originals.error);
 
-  return {
+  const handle: WorkerCaptureHandle = {
     paths,
     stop(): void {
+      if (activeCapture === handle) activeCapture = null;
       console.log = originals.log;
       console.info = originals.info;
       console.debug = originals.debug;
@@ -153,4 +164,6 @@ export function startWorkerCapture(
       }
     },
   };
+  activeCapture = handle;
+  return handle;
 }
