@@ -81,27 +81,7 @@ import {
 import type { ConfiguredSource, DashboardSourcesResult } from "./dashboard-sources";
 import { scheduledJobRunFilter, toAutomationView } from "./dashboard-automation-view";
 import type { DashboardAutomationView } from "./dashboard-automation-view";
-
-const RUN_STATUSES: RunStatus[] = [
-  "in_progress",
-  "succeeded",
-  "failed",
-  "deferred",
-  "escalated",
-  "abandoned",
-];
-const RUN_ORIGINS: RunOrigin[] = [
-  "task",
-  "error_monitor",
-  "pr_mention",
-  "ci_fix",
-  "conflict_resolution",
-  "auto_merge",
-  "scheduled",
-  "estimate",
-  "manual",
-  "local",
-];
+import { RUN_ORIGINS, RUN_STATUSES } from "./dashboard-run-filters";
 
 const STATS_WINDOWS: Record<string, number | null> = {
   "7d": 7 * 24 * 60 * 60 * 1000,
