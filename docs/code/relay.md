@@ -18,7 +18,7 @@ If the relay is unreachable, the worker's regular [polling](./worker.md#polling-
 ```bash
 devintern worker login github   # sign in for the worker workspace (or google, x, email you@company.com)
 devintern worker connect   # pair every GitHub and GitLab repository in the workspace
-devintern worker           # starts the relay connection alongside polling
+devintern worker service install   # (re)start the worker; it connects to the relay alongside polling
 ```
 
 `devintern worker init` offers the same pairing during setup. Authorize any GitHub App URL the CLI prints. GitLab hooks are created and tested automatically when the token has Maintainer or Owner access. Run `worker connect` again after adding repositories, or to repair or rotate a registration.
@@ -69,7 +69,7 @@ With several GitHub accounts, each needs its own approval: run `--no-wait`, appr
 | Variable              | Required | Description                                                                    |
 | --------------------- | -------- | ------------------------------------------------------------------------------ |
 | (signed-in session)   | Connect  | Run `devintern worker login` first; stored in `~/.devintern/state/code/.auth-session.json` |
-| `LICENSE_KEY`         | Worker   | Automation license for unattended `devintern worker` runs                      |
+| `LICENSE_KEY`         | Worker   | Automation license for unattended runs; not needed during the [Worker Pilot](./worker.md#worker-pilot-and-licenses) |
 | `WORKER_RELAY_URL`    | No       | Relay base URL (default `https://relay.devintern.com`)                         |
 | `DEVINTERN_AUTH_CALLBACK_PORT` | No | Fixed OAuth callback port for remote sign-in (default `17865`)              |
 
@@ -168,4 +168,4 @@ You can also copy `~/.devintern/state/code/.auth-session.json` from a machine wh
 
 ## Availability
 
-The relay requires an automation license (Supporter, Team, or Business, or a legacy server add-on). Every integration also works with plain polling if you prefer no DevIntern infrastructure.
+The relay requires a signed-in DevIntern account with automation access: an active [Worker Pilot](./worker.md#worker-pilot-and-licenses) or an automation license (Supporter, Team, or Business, or a legacy server add-on). Every integration also works with plain polling if you prefer no DevIntern infrastructure.
