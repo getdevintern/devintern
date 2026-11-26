@@ -9,6 +9,9 @@ await Bun.build({
   minify: true,
   define: {
     __VERSION__: JSON.stringify(pkg.version),
+    // True only in publish jobs: release bundles ignore DEVINTERN_SKIP_LICENSE_CHECK
+    // and DEVINTERN_API_BASE. Local and e2e builds leave it unset.
+    __DEVINTERN_RELEASE_BUILD__: JSON.stringify(process.env.DEVINTERN_RELEASE_BUILD === "1"),
     // Analytics is permanently disabled in builds without a key (local dev).
     __POSTHOG_API_KEY__: JSON.stringify(process.env.POSTHOG_API_KEY?.trim() ?? ""),
     __POSTHOG_HOST__: JSON.stringify(
