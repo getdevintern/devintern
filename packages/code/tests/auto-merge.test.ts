@@ -9,6 +9,7 @@ import {
   autoMergePr,
   buildMergeSafetyPrompt,
   ensureBaseCommit,
+  MAX_CHECKOUT_REVIEW_DIFF_CHARS,
   MAX_REVIEW_DIFF_CHARS,
   OPERATOR_RULES_BEGIN,
   OPERATOR_RULES_END,
@@ -546,25 +547,50 @@ describe("autoMergePr", () => {
       expect(opts.agentCalls[0]).toContain("too large to include");
     });
 
-    test("a very large diff has no upper size limit: it is reviewed, not rejected", async () => {
+    test("a diff at the checkout ceiling is still reviewed from the checkout", async () => {
       const github = bigGitHub();
-      const huge = `diff --git a/src/x.ts b/src/x.ts\n${"+".repeat(1_000_000)}`;
+      const header = "diff --git a/src/x.ts b/src/x.ts\n";
+      const atCeiling = header + "+".repeat(MAX_CHECKOUT_REVIEW_DIFF_CHARS - header.length);
+      github.getDiff = async () => atCeiling;
+      const opts = options(github, { baseCommit: async () => ({ success: true }) });
+      const result = await autoMergePr(URL, opts);
+      expect(atCeiling.length).toBe(MAX_CHECKOUT_REVIEW_DIFF_CHARS);
+      expect(result).toMatchObject({ outcome: "merged", reviewed: true });
+      expect(opts.agentCalls).toHaveLength(1);
+      const prompt = opts.agentCalls[0] ?? "";
+      expect(prompt).toContain(`The diff is ${atCeiling.length} characters, too large to include`);
+      expect(prompt.length).toBeLessThan(MAX_REVIEW_DIFF_CHARS);
+    });
+
+    test("above the checkout ceiling stay open: no checkout, no base fetch, no agent", async () => {
+      const github = bigGitHub();
+      const huge = `diff --git a/src/x.ts b/src/x.ts\n${"+".repeat(MAX_CHECKOUT_REVIEW_DIFF_CHARS)}`;
       github.getDiff = async () => huge;
+      let prepared = 0;
       let baseCalls = 0;
       const opts = options(github, {
         baseCommit: async () => {
           baseCalls++;
           return { success: true };
         },
+        worktree: {
+          prepare: async () => {
+            prepared++;
+            return { success: true, path: "/tmp/fake-worktree" };
+          },
+          remove: async () => {},
+        },
       });
       const result = await autoMergePr(URL, opts);
-      expect(result).toMatchObject({ outcome: "merged", reviewed: true });
-      expect(result.message).not.toContain("review limit");
-      expect(baseCalls).toBe(1);
-      expect(opts.agentCalls).toHaveLength(1);
-      const prompt = opts.agentCalls[0] ?? "";
-      expect(prompt).toContain(`The diff is ${huge.length} characters, too large to include`);
-      expect(prompt.length).toBeLessThan(MAX_REVIEW_DIFF_CHARS);
+      expect(result).toMatchObject({ outcome: "rejected", reviewed: false });
+      expect(result.message).toContain(
+        `the diff is ${huge.length} characters, above the ${MAX_CHECKOUT_REVIEW_DIFF_CHARS}-character review limit`,
+      );
+      expect(prepared).toBe(0);
+      expect(baseCalls).toBe(0);
+      expect(opts.agentCalls).toHaveLength(0);
+      expect(github.merges).toHaveLength(0);
+      expect(github.comments[0]).toContain("could not be evaluated automatically");
     });
 
     test("the checkout prompt opens with the untrusted-output rule", async () => {
