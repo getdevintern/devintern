@@ -24,6 +24,16 @@ import { isAbsolute, resolve } from "path";
 import { defaultProbe } from "@devintern/task-trackers";
 import { upsertEnvVars } from "@devintern/utils";
 
+import type { ResolvedLogin, StartedPendingLogin } from "@devintern/auth";
+
+import { pendingSignInSummary } from "../account/cli";
+import type { PendingSignIn } from "../account/cli";
+import { parseSignInMethod } from "../account/login-args";
+import {
+  WORKER_PILOT_NOT_STARTED,
+  signInCommand,
+  workerLoginCommandFor,
+} from "../account/worker-pilot";
 import { redactUrlCredentials } from "../observability/dashboard-workspace";
 import { collectWorkerDoctorChecks } from "../observability/worker-readiness";
 import type { LicenseCheckOptions } from "@devintern/license-check";
@@ -83,9 +93,18 @@ export interface NonInteractiveInitArgs {
   envFile?: string;
   json: boolean;
   yes: boolean;
+  /** `--sign-in <method>`: start a `--no-wait` sign-in when one is needed. */
+  signIn?: ResolvedLogin;
 }
 
-export type CheckStatus = "pass" | "warn" | "fail" | "skipped";
+/** `action`: nothing is broken, one step for the user is left (signing in). */
+export type CheckStatus = "pass" | "warn" | "action" | "fail" | "skipped";
+
+/**
+ * `action_required`: every check passed or warned except a step for the user
+ * (signing in to start the Worker Pilot). Exit code 2.
+ */
+export type InitResult = "success" | "action_required" | "failure";
 
 /** One check in the report. */
 export interface InitCheck {
@@ -108,7 +127,7 @@ export interface InitNextStep {
 export interface NonInteractiveInitReport {
   schema: typeof WORKER_INIT_JSON_SCHEMA;
   version: typeof WORKER_INIT_JSON_VERSION;
-  result: "success" | "failure";
+  result: InitResult;
   /** Set when the command stopped before running checks (bad input, busy workspace). */
   error?: string;
   workspaceDir: string;
@@ -118,6 +137,13 @@ export interface NonInteractiveInitReport {
   filesWritten: string[];
   checks: InitCheck[];
   nextSteps: InitNextStep[];
+  /** Set when `--sign-in` started a sign-in: open `url`, then run `complete` on this host. */
+  signIn?: PendingSignIn;
+}
+
+/** Exit code for a report: 0 success, 2 action required, 1 failure. */
+export function initExitCode(result: InitResult): number {
+  return result === "success" ? 0 : result === "action_required" ? 2 : 1;
 }
 
 export interface NonInteractiveInitDeps {
@@ -137,6 +163,10 @@ export interface NonInteractiveInitDeps {
   probeTimeoutMs?: number;
   /** Progress messages (human mode only). */
   log?: (message: string) => void;
+  /** Starts a `--no-wait` sign-in for the workspace (tests); defaults to `startPendingLogin`. */
+  startSignIn?: (workspaceDir: string, login: ResolvedLogin) => Promise<StartedPendingLogin>;
+  /** Home directory used to decide whether commands need `--workspace` (tests). */
+  home?: string;
 }
 
 const USAGE_HINT = "Run `devintern worker init --help` for options.";
@@ -171,6 +201,14 @@ export function parseNonInteractiveInitArgs(argv: string[]): ParseResult {
       }
       args[field] = value;
       if (eq < 0) i++;
+      continue;
+    }
+    if (flag === "--sign-in") {
+      const value = eq > 0 ? raw.slice(eq + 1) : argv[i + 1];
+      if (eq < 0) i++;
+      const signIn = parseSignInMethod(value);
+      if (!signIn.ok) return { ok: false, json, error: signIn.error };
+      args.signIn = signIn.login;
       continue;
     }
     if (eq > 0) {
@@ -253,7 +291,7 @@ function secretValues(env: Env): string[] {
 }
 
 /** Read the `--env-file`, refusing files readable by group or others. */
-function readEnvFile(
+export function readEnvFile(
   path: string,
 ): { ok: true; values: Record<string, string> } | { ok: false; error: string } {
   let mode: number;
@@ -601,7 +639,11 @@ function applyPlan(
 
 function toInitCheck(check: ReadinessCheck): InitCheck {
   const status: CheckStatus =
-    check.status === "ok" ? "pass" : check.status === "warn" ? "warn" : "fail";
+    check.status === "ok"
+      ? "pass"
+      : check.status === "warn" || check.status === "action"
+        ? check.status
+        : "fail";
   return {
     name: check.id,
     label: check.label,
@@ -655,7 +697,7 @@ async function runChecks(
   plan: Plan,
   workspaceDir: string,
   deps: NonInteractiveInitDeps,
-): Promise<{ checks: InitCheck[]; entitled: boolean }> {
+): Promise<{ checks: InitCheck[]; entitled: boolean; signInRequired: boolean }> {
   const timeoutMs = deps.probeTimeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS;
   const auth = await credentialCheck(plan, deps.probe ?? defaultProbe, timeoutMs);
   const authFailed = auth.status === "fail";
@@ -693,19 +735,15 @@ async function runChecks(
       });
       continue;
     }
-    if (check.id === "entitlement" && mapped.status === "fail") {
-      // Same verdict as `worker doctor`: the worker will not start without
-      // it. The config is already written, so the fix is one sign-in step.
-      checks.push({
-        ...mapped,
-        message: `sign-in needed: ${mapped.message}`,
-        hint: "Run `devintern worker login` to start the free Worker Pilot, or set LICENSE_KEY in the workspace .env",
-      });
-      continue;
-    }
+    // The entitlement row has the same verdict as `worker doctor`: `action`
+    // when nobody is signed in yet, `fail` for anything else.
     checks.push(mapped);
   }
-  return { checks, entitled: entitlement?.valid === true };
+  return {
+    checks,
+    entitled: entitlement?.valid === true,
+    signInRequired: entitlement?.valid !== true && entitlement?.signInRequired === true,
+  };
 }
 
 async function defaultEntitlement(
@@ -724,6 +762,7 @@ async function defaultEntitlement(
     supabaseConfig: loadSupabaseConfig(workspaceCodeStateDir(workspaceDir)),
     requireAutomation: true,
     allowTrial: true,
+    setup: true,
     loginCommand: "devintern worker login",
   });
 }
@@ -732,13 +771,23 @@ function nextStepsFor(options: {
   workspaceDir: string;
   entitled: boolean;
   hasRepo: boolean;
+  loginCommand: string;
+  signIn?: PendingSignIn;
 }): InitNextStep[] {
   const steps: InitNextStep[] = [];
-  if (!options.entitled) {
+  if (options.signIn) {
     steps.push({
       id: "sign-in",
-      message: "sign-in needed: sign in to start the free Worker Pilot (or set LICENSE_KEY)",
-      command: "devintern worker login",
+      message: `${WORKER_PILOT_NOT_STARTED}. Open signIn.url in a browser, then finish on this host with the address it lands on`,
+      command: options.signIn.complete,
+    });
+  } else if (!options.entitled) {
+    steps.push({
+      id: "sign-in",
+      message:
+        `${WORKER_PILOT_NOT_STARTED} (or set LICENSE_KEY). Other methods: google, x, ` +
+        "email you@company.com. Without a terminal, re-run with --sign-in <method>",
+      command: signInCommand(options.loginCommand),
     });
   }
   if (!options.hasRepo) {
@@ -769,11 +818,33 @@ function nextStepsFor(options: {
     },
     {
       id: "service",
-      message: "Or install it as a background service: run the wizard in a terminal",
-      command: "devintern worker init",
+      message:
+        "Or install it as a background service (systemd/launchd; checks readiness, then waits until the worker is running)",
+      command: "devintern worker service install",
     },
   );
   return steps;
+}
+
+/** `failure` if any check fails, `action_required` if one needs a user step, else `success`. */
+export function resultFor(checks: readonly InitCheck[]): InitResult {
+  if (checks.some((check) => check.status === "fail")) return "failure";
+  if (checks.some((check) => check.status === "action")) return "action_required";
+  return "success";
+}
+
+/** Start a `--no-wait` sign-in for the workspace session. */
+async function defaultStartSignIn(
+  workspaceDir: string,
+  login: ResolvedLogin,
+): Promise<StartedPendingLogin> {
+  const [{ startPendingLogin }, { loadSupabaseConfig }, { workspaceCodeStateDir }] =
+    await Promise.all([
+      import("@devintern/auth"),
+      import("../cli/bootstrap"),
+      import("../workspace/paths"),
+    ]);
+  return startPendingLogin(loadSupabaseConfig(workspaceCodeStateDir(workspaceDir)), login);
 }
 
 function emptyReport(workspaceDir: string): NonInteractiveInitReport {
@@ -876,8 +947,29 @@ export async function runNonInteractiveWorkerInit(
     if (applied.seededProject) log(`   Seeded routing rule: project = ${applied.seededProject}`);
 
     log("🩺 Running checks...");
-    const { checks, entitled } = await runChecks(plan, workspaceDir, deps);
+    const { checks, entitled, signInRequired } = await runChecks(plan, workspaceDir, deps);
     report.checks = checks;
+    const loginCommand = workerLoginCommandFor(workspaceConfigPath(workspaceDir), deps.home);
+    if (args.signIn && signInRequired) {
+      try {
+        const started = await (deps.startSignIn ?? defaultStartSignIn)(workspaceDir, args.signIn);
+        report.signIn = pendingSignInSummary(started, loginCommand);
+      } catch (error) {
+        checks.push({
+          name: "sign-in",
+          label: "Sign-in",
+          status: "fail",
+          message: `Could not start the sign-in: ${errorMessage(error)}`,
+          hint: `Retry with \`${signInCommand(loginCommand)} --no-wait\``,
+        });
+      }
+    } else if (args.signIn) {
+      log(
+        entitled
+          ? "ℹ️  --sign-in: not needed, this workspace already has an entitlement."
+          : "ℹ️  --sign-in: not started; signing in would not fix the entitlement check above.",
+      );
+    }
     let hasRepo = Boolean(applied.repo);
     try {
       hasRepo =
@@ -887,53 +979,17 @@ export async function runNonInteractiveWorkerInit(
     } catch {
       // The config check already reports an unreadable workspace.
     }
-    report.nextSteps = nextStepsFor({ workspaceDir, entitled, hasRepo });
-    report.result = checks.some((check) => check.status === "fail") ? "failure" : "success";
+    report.nextSteps = nextStepsFor({
+      workspaceDir,
+      entitled,
+      hasRepo,
+      loginCommand,
+      signIn: report.signIn,
+    });
+    report.result = resultFor(checks);
     return redactReport(report, secrets);
   } catch (error) {
     // `--json` consumers need a document even when something unexpected throws.
     return redactReport({ ...report, result: "failure", error: errorMessage(error) }, secrets);
   }
-}
-
-const STATUS_ICON: Record<CheckStatus, string> = {
-  pass: "✅",
-  warn: "⚠️ ",
-  fail: "❌",
-  skipped: "⏭️ ",
-};
-
-/** Last line of the text report: ready, only sign-in left, or failed checks to fix. */
-function closingLine(result: NonInteractiveInitReport["result"], failed: InitCheck[]): string {
-  if (result === "success") return "✅ Worker setup complete. Nothing was started or installed.";
-  if (failed.length > 0 && failed.every((check) => check.name === "entitlement")) {
-    return (
-      "❌ Configuration saved, but the worker will not start until it is signed in: run " +
-      "`devintern worker login` (or set LICENSE_KEY), then `devintern worker doctor`."
-    );
-  }
-  return `❌ Worker setup incomplete: ${failed.length} check(s) failed. Fix them and re-run with --yes, or run \`devintern worker doctor\`.`;
-}
-
-/** Human-readable rendering of the report. */
-export function renderNonInteractiveReport(report: NonInteractiveInitReport): string[] {
-  const lines: string[] = [];
-  if (report.error) {
-    lines.push(`❌ ${report.error}`);
-    return lines;
-  }
-  lines.push("", "Checks:");
-  for (const check of report.checks) {
-    lines.push(`  ${STATUS_ICON[check.status]} ${check.name}: ${check.message}`);
-    if (check.hint) lines.push(`     → ${check.hint}`);
-  }
-  if (report.nextSteps.length > 0) {
-    lines.push("", "Next steps:");
-    report.nextSteps.forEach((step, index) => {
-      lines.push(`  ${index + 1}. ${step.message}: ${step.command}`);
-    });
-  }
-  const failed = report.checks.filter((check) => check.status === "fail");
-  lines.push("", closingLine(report.result, failed));
-  return lines;
 }

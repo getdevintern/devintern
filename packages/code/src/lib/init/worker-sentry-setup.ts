@@ -38,7 +38,7 @@ export interface WorkerSentrySetupResult {
   id?: string;
 }
 
-async function defaultValidateSentry(options: SentryValidationOptions): Promise<number> {
+export async function defaultValidateSentry(options: SentryValidationOptions): Promise<number> {
   const issues = await new SentryClient(options).fetchUnresolvedIssues();
   return issues.length;
 }

@@ -20,6 +20,7 @@ import {
   collectWorkerDoctorChecks,
   createDefaultRepoAccessCheck,
   defaultCheckSandbox,
+  entitlementCheck,
   gitFailureCause,
   gitLsRemote,
   gitProbeEnv,
@@ -451,6 +452,78 @@ remote = "git@github.com:acme/backend.git"
       }),
     );
     expect(byId(checks, "entitlement")[0]?.status).toBe("ok");
+    expect(byId(checks, "entitlement")[0]?.detail).toContain("starts when the worker first starts");
+  });
+
+  test("nobody signed in is an action, not a failure, and the closing line says one step is left", async () => {
+    const workspacePath = writeWorkspace(TEAMS_CONFIG, JIRA_ENV);
+    const checks = await collectWorkerDoctorChecks(
+      { workspacePath },
+      passingDeps({
+        checkEntitlement: async () => ({
+          valid: false,
+          source: "none",
+          message: "No automation license or Worker Pilot was found.",
+          signInRequired: true,
+        }),
+      }),
+    );
+    const [entitlement] = byId(checks, "entitlement");
+    expect(entitlement).toMatchObject({
+      status: "action",
+      detail: "Not started: sign in to begin your 14-day free Worker Pilot, no card required",
+    });
+    // A non-default workspace: the command names it, with a method.
+    expect(entitlement?.hint).toContain(
+      `devintern worker login --workspace ${workspacePath} github`,
+    );
+    expect(entitlement?.hint).toContain("--no-wait");
+    const report = renderReadinessReport(checks);
+    expect(report).toMatchObject({ hasFailures: false, hasActions: true });
+    expect(report.lines).toContain(
+      "👉 Automation entitlement — Not started: sign in to begin your 14-day free Worker Pilot, no card required",
+    );
+    expect(workerDoctorClosingLine(checks, report)).toStartWith(
+      "👉 Setup is fine; one step left before the worker can start. Run `devintern worker login",
+    );
+  });
+
+  test("a failure next to the sign-in action still fails", async () => {
+    const workspacePath = writeWorkspace(TEAMS_CONFIG, JIRA_ENV);
+    const checks = await collectWorkerDoctorChecks(
+      { workspacePath },
+      passingDeps({
+        checkEntitlement: async () => ({
+          valid: false,
+          source: "none",
+          message: "x",
+          signInRequired: true,
+        }),
+        checkHarness: async () => ({ id: "harness", label: "Agent harness", status: "fail" }),
+      }),
+    );
+    const report = renderReadinessReport(checks);
+    expect(report).toMatchObject({ hasFailures: true, hasActions: true });
+    expect(workerDoctorClosingLine(checks, report)).toContain("Not ready");
+  });
+
+  test("an active Worker Pilot shows its end date", () => {
+    const now = Date.parse("2026-11-26T12:00:00Z");
+    const check = entitlementCheck(
+      {
+        valid: true,
+        source: "trial",
+        message: "active",
+        trialEndsAt: "2026-12-10T12:00:00Z",
+      },
+      "devintern worker login",
+      "hint",
+      now,
+    );
+    expect(check).toMatchObject({
+      status: "ok",
+      detail: "Worker Pilot active, ends 2026-12-10 (14 days left)",
+    });
   });
 
   test.each(["srt", "smolvm"])(
@@ -795,13 +868,16 @@ describe("default repository access check", () => {
   const env = { GITHUB_TOKEN: "fake-token" };
   const apiOk = async () => new Response("{}", { status: 200 });
 
-  test("a token GitHub can read still fails when git has no credentials", async () => {
+  const gitRefused = async () => ({
+    ok: false as const,
+    reason: "git ls-remote exited 128: remote: Write access to repository not granted.",
+  });
+
+  test("git refused with GITHUB_TOKEN: the token lacks Contents access", async () => {
     const check = createDefaultRepoAccessCheck(1_000, {
       fetch: apiOk,
-      lsRemote: async () => ({
-        ok: false,
-        reason: "git ls-remote exited 128: fatal: could not read Username for 'https://github.com'",
-      }),
+      lsRemote: gitRefused,
+      hasHelper: () => false,
     });
     const result = await check(repo, env);
     expect(result.ok).toBe(false);
@@ -809,8 +885,22 @@ describe("default repository access check", () => {
     expect(result.reason).toContain(
       "can read acme/backend through the API, but git cannot clone it",
     );
-    expect(result.reason).toContain("could not read Username");
-    expect(result.reason).toContain("gh auth setup-git");
+    expect(result.reason).toContain("Write access to repository not granted");
+    expect(result.reason).toContain("Git used GITHUB_TOKEN and was refused");
+    expect(result.reason).toContain("Contents");
+    expect(result.reason).not.toContain("gh auth setup-git");
+  });
+
+  test("git refused through the user's own helper: names the helper", async () => {
+    const check = createDefaultRepoAccessCheck(1_000, {
+      fetch: apiOk,
+      lsRemote: gitRefused,
+      hasHelper: () => true,
+    });
+    const result = await check(repo, env);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toContain("takes precedence over GITHUB_TOKEN");
   });
 
   test("passes when both the API and git can read the repository", async () => {

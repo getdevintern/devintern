@@ -17,11 +17,13 @@ import {
   WORKER_INIT_LOCK_FILE,
   acquireWorkspaceInitLock,
   condenseMessage,
+  initExitCode,
   parseNonInteractiveInitArgs,
   removeStaleLock,
-  renderNonInteractiveReport,
+  resultFor,
   runNonInteractiveWorkerInit,
 } from "../src/lib/init/worker-init-noninteractive";
+import { renderNonInteractiveReport } from "../src/lib/init/worker-init-noninteractive-text";
 import type {
   NonInteractiveInitArgs,
   NonInteractiveInitDeps,
@@ -96,6 +98,31 @@ describe("parseNonInteractiveInitArgs", () => {
   test("requires values for value flags", () => {
     const parsed = parseNonInteractiveInitArgs(["--tracker", "--json"]);
     expect(parsed).toMatchObject({ ok: false, json: true });
+  });
+
+  test("--sign-in takes an OAuth provider or an email address", () => {
+    expect(parseNonInteractiveInitArgs(["--sign-in", "github"])).toMatchObject({
+      ok: true,
+      args: { signIn: { method: "github" } },
+    });
+    expect(parseNonInteractiveInitArgs(["--sign-in=twitter"])).toMatchObject({
+      ok: true,
+      args: { signIn: { method: "x" } },
+    });
+    expect(parseNonInteractiveInitArgs(["--sign-in", "me@acme.test"])).toMatchObject({
+      ok: true,
+      args: { signIn: { method: "email", email: "me@acme.test" } },
+    });
+    for (const bad of [
+      ["--sign-in", "email"],
+      ["--sign-in"],
+      ["--sign-in", "--json"],
+      ["--sign-in", "facebook"],
+    ]) {
+      const parsed = parseNonInteractiveInitArgs(bad);
+      expect(parsed.ok).toBe(false);
+      if (!parsed.ok) expect(parsed.error).toContain("--sign-in");
+    }
   });
 });
 
@@ -346,36 +373,215 @@ describe("runNonInteractiveWorkerInit", () => {
     expect(report.checks.find((check) => check.name === "repo")?.status).toBe("pass");
   });
 
-  test("sign-in needed fails like worker doctor, with the config saved and a sign-in next step", async () => {
-    const report = await run(
-      { tracker: "jira", taskQuery: "project = APP" },
-      {
-        processEnv: { ...JIRA_ENV },
-        doctorOverrides: {
-          checkEntitlement: async () => ({
-            valid: false,
-            source: "none",
-            message: "Not signed in",
-          }),
+  describe("sign-in and the result / exit code matrix", () => {
+    const notSignedIn = async () => ({
+      valid: false,
+      source: "none",
+      message: "No automation license or Worker Pilot was found.",
+      signInRequired: true,
+    });
+    const pilotUsedUp = async () => ({
+      valid: false,
+      source: "none",
+      message: "Your account has no matching license.",
+    });
+    const fakeStart = (calls: unknown[]) => async (dir: string, login: unknown) => {
+      calls.push({ dir, login });
+      return {
+        method: "github" as const,
+        url: "https://example.supabase.co/auth/v1/authorize?provider=github",
+        redirectTo: "http://127.0.0.1:17865/auth/callback",
+        expiresAt: "2026-11-26T12:30:00.000Z",
+      };
+    };
+
+    test("only sign-in missing: action_required (exit 2), config saved, concrete sign-in step", async () => {
+      const report = await run(
+        { tracker: "jira", taskQuery: "project = APP" },
+        { processEnv: { ...JIRA_ENV }, doctorOverrides: { checkEntitlement: notSignedIn } },
+      );
+      expect(report.result).toBe("action_required");
+      expect(initExitCode(report.result)).toBe(2);
+      expect(report.filesWritten).toContain(join(workspaceDir, "workspace.toml"));
+      expect(report.checks.find((check) => check.name === "entitlement")).toMatchObject({
+        status: "action",
+        message: "Not started: sign in to begin your 14-day free Worker Pilot, no card required",
+        hint: expect.stringContaining("devintern worker login"),
+      });
+      expect(report.checks.some((check) => check.status === "fail")).toBe(false);
+      const signIn = report.nextSteps[0];
+      expect(signIn.id).toBe("sign-in");
+      // A concrete command with a method, for this (non-default) workspace.
+      expect(signIn.command).toBe(
+        `devintern worker login --workspace ${join(workspaceDir, "workspace.toml")} github`,
+      );
+      expect(signIn.message).toContain("14-day free Worker Pilot, no card required");
+      expect(report.signIn).toBeUndefined();
+      const text = renderNonInteractiveReport(report).join("\n");
+      expect(text).toContain("👉 entitlement: Not started");
+      expect(text).toContain(
+        "👉 Configuration saved. One step left: sign in to begin your 14-day free Worker Pilot, no card required",
+      );
+      expect(text).not.toContain("re-run with --yes");
+      expect(text).not.toContain("❌");
+    });
+
+    test("sign-in missing plus a warning is still action_required", async () => {
+      const report = await run(
+        { tracker: "jira", taskQuery: "project = APP" },
+        {
+          processEnv: { ...JIRA_ENV },
+          doctorOverrides: { checkEntitlement: notSignedIn, dryRunQuery: async () => 0 },
         },
-      },
-    );
-    expect(report.result).toBe("failure");
-    expect(report.filesWritten).toContain(join(workspaceDir, "workspace.toml"));
-    expect(report.checks.find((check) => check.name === "entitlement")).toMatchObject({
-      status: "fail",
-      message: expect.stringContaining("sign-in needed"),
-      hint: expect.stringContaining("devintern worker login"),
+      );
+      expect(report.checks.some((check) => check.status === "warn")).toBe(true);
+      expect(report.result).toBe("action_required");
     });
-    expect(report.nextSteps[0]).toMatchObject({
-      id: "sign-in",
-      command: "devintern worker login",
+
+    test("sign-in missing plus a real failure is a failure (exit 1)", async () => {
+      const report = await run(
+        { tracker: "jira", taskQuery: "project = APP" },
+        {
+          processEnv: { ...JIRA_ENV },
+          doctorOverrides: {
+            checkEntitlement: notSignedIn,
+            checkHarness: async () => ({
+              id: "harness",
+              label: "Agent harness",
+              status: "fail",
+              detail: "claude not found",
+            }),
+          },
+        },
+      );
+      expect(report.result).toBe("failure");
+      expect(initExitCode(report.result)).toBe(1);
+      expect(report.nextSteps[0].id).toBe("sign-in");
     });
-    const text = renderNonInteractiveReport(report).join("\n");
-    expect(text).toContain(
-      "Configuration saved, but the worker will not start until it is signed in",
-    );
-    expect(text).not.toContain("re-run with --yes");
+
+    test("signed in without an entitlement (Pilot used up) is a failure, not an action", async () => {
+      const report = await run(
+        { tracker: "jira", taskQuery: "project = APP" },
+        { processEnv: { ...JIRA_ENV }, doctorOverrides: { checkEntitlement: pilotUsedUp } },
+      );
+      expect(report.result).toBe("failure");
+      expect(report.checks.find((check) => check.name === "entitlement")?.status).toBe("fail");
+    });
+
+    test("a paid LICENSE_KEY passes as before (exit 0)", async () => {
+      const report = await run(
+        { tracker: "jira", taskQuery: "project = APP" },
+        { processEnv: { ...JIRA_ENV } },
+      );
+      expect(report.result).toBe("success");
+      expect(initExitCode(report.result)).toBe(0);
+      expect(report.nextSteps.some((step) => step.id === "sign-in")).toBe(false);
+    });
+
+    test("an active Worker Pilot shows its end date", async () => {
+      const endsAt = new Date(Date.now() + 10 * 24 * 60 * 60 * 1000).toISOString();
+      const report = await run(
+        { tracker: "jira", taskQuery: "project = APP" },
+        {
+          processEnv: { ...JIRA_ENV },
+          doctorOverrides: {
+            checkEntitlement: async () => ({
+              valid: true,
+              source: "trial",
+              message: "Free Worker Pilot active.",
+              trialEndsAt: endsAt,
+            }),
+          },
+        },
+      );
+      expect(report.result).toBe("success");
+      expect(report.checks.find((check) => check.name === "entitlement")?.message).toBe(
+        `Worker Pilot active, ends ${endsAt.slice(0, 10)} (10 days left)`,
+      );
+    });
+
+    test("--sign-in starts the sign-in and puts {url, method, expiresAt, complete} in the report", async () => {
+      const calls: unknown[] = [];
+      const report = await run(
+        { tracker: "jira", taskQuery: "project = APP", signIn: { method: "github" } },
+        {
+          processEnv: { ...JIRA_ENV },
+          doctorOverrides: { checkEntitlement: notSignedIn },
+          startSignIn: fakeStart(calls),
+        },
+      );
+      expect(calls).toEqual([{ dir: workspaceDir, login: { method: "github" } }]);
+      const complete = `devintern worker login --workspace ${join(workspaceDir, "workspace.toml")} --complete '<address>'`;
+      expect(report.signIn).toEqual({
+        url: "https://example.supabase.co/auth/v1/authorize?provider=github",
+        method: "github",
+        expiresAt: "2026-11-26T12:30:00.000Z",
+        complete,
+      });
+      expect(Object.keys(JSON.parse(JSON.stringify(report)).signIn).sort()).toEqual([
+        "complete",
+        "expiresAt",
+        "method",
+        "url",
+      ]);
+      expect(report.result).toBe("action_required");
+      expect(report.nextSteps[0]).toMatchObject({ id: "sign-in", command: complete });
+      const text = renderNonInteractiveReport(report).join("\n");
+      expect(text).toContain(
+        "🔑 Sign in to begin your 14-day free Worker Pilot, no card required:",
+      );
+      expect(text).toContain("https://example.supabase.co/auth/v1/authorize?provider=github");
+      expect(text).toContain(complete);
+      expect(text).toContain("open the address above, then run");
+    });
+
+    test("--sign-in does nothing when the workspace is already entitled", async () => {
+      const calls: unknown[] = [];
+      const report = await run(
+        { tracker: "jira", taskQuery: "project = APP", signIn: { method: "github" } },
+        { processEnv: { ...JIRA_ENV }, startSignIn: fakeStart(calls) },
+      );
+      expect(calls).toEqual([]);
+      expect(report.signIn).toBeUndefined();
+      expect(report.result).toBe("success");
+    });
+
+    test("--sign-in that cannot start is a failed check", async () => {
+      const report = await run(
+        { tracker: "jira", taskQuery: "project = APP", signIn: { method: "github" } },
+        {
+          processEnv: { ...JIRA_ENV },
+          doctorOverrides: { checkEntitlement: notSignedIn },
+          startSignIn: async () => {
+            throw new Error("network down");
+          },
+        },
+      );
+      expect(report.signIn).toBeUndefined();
+      expect(report.checks.find((check) => check.name === "sign-in")).toMatchObject({
+        status: "fail",
+        message: "Could not start the sign-in: network down",
+      });
+      expect(report.result).toBe("failure");
+    });
+
+    test("resultFor and initExitCode", () => {
+      const check = (status: "pass" | "warn" | "action" | "fail" | "skipped") => ({
+        name: status,
+        label: status,
+        status,
+        message: "",
+      });
+      expect(resultFor([check("pass"), check("skipped")])).toBe("success");
+      expect(resultFor([check("pass"), check("warn")])).toBe("success");
+      expect(resultFor([check("warn"), check("action")])).toBe("action_required");
+      expect(resultFor([check("action"), check("fail")])).toBe("failure");
+      expect([
+        initExitCode("success"),
+        initExitCode("action_required"),
+        initExitCode("failure"),
+      ]).toEqual([0, 2, 1]);
+    });
   });
 
   test("reads a 0600 --env-file and saves its values", async () => {

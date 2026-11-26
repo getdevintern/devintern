@@ -52,7 +52,26 @@ export interface RunRecord {
   stepActive?: boolean;
   startedAt: number;
   finishedAt?: number;
+  /** Whose problem a non-successful run was (unset for successes and old runs). */
+  outcomeClass?: RunOutcomeClass;
+  /** Stage or step that failed (`verify`, `publish`, …). */
+  failureStage?: string;
+  /** Redacted one-line cause of the failing stage. */
+  failureCause?: string;
+  /** Where the run's unfinished work went. */
+  workStatus?: RunWorkStatus;
+  /** Branch (`saved`) or worktree path (`kept`). */
+  workRef?: string;
 }
+
+/**
+ * `review_hold`: a review or merge rule wants a human; `agent`: the agent
+ * could not finish; `internal`: a DevIntern step failed; `environment`:
+ * credentials, network, rate limits, or a missing tool.
+ */
+export type RunOutcomeClass = "review_hold" | "agent" | "internal" | "environment";
+
+export type RunWorkStatus = "saved" | "kept" | "discarded" | "none";
 
 /** Outcome stages carry the run's terminal status (escalated, deferred, …). */
 export type StageStatus =

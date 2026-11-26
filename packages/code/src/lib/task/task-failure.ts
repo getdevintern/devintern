@@ -14,7 +14,8 @@ import {
   loadProjectSettings,
 } from "../config/project-settings";
 import { flushAnalytics, trackInteractiveTaskRun } from "../observability/analytics";
-import { getActiveRunContext, readRunStep } from "../state/run-recorder";
+import { failureFromError } from "../state/run-outcome";
+import { currentRunStep, getActiveRunContext } from "../state/run-recorder";
 import { finishTaskRun } from "../state/task-run";
 import {
   HARNESS_UNAVAILABLE_EXIT_CODE,
@@ -95,8 +96,10 @@ export async function handleTaskFailure(error: unknown, attempt: TaskAttempt): P
   const err = error as Error;
   // Captured before the run ends so a defect report can be attached to it.
   const failedRunId = getActiveRunContext()?.id;
-  const failedStep = failedRunId === undefined ? undefined : readRunStep(failedRunId);
-  await finishUnfinishedRun("failed", err.message);
+  const failedStep = currentRunStep();
+  // An exception reaching here is a DevIntern step failing (or the
+  // environment), unless the step that halted already classified it.
+  await finishUnfinishedRun("failed", err.message, failureFromError(err, failedStep));
 
   // A failed run may still have pushed a branch and opened a PR itself (agents
   // sometimes run `gh pr create`). Register and label it so review polling and

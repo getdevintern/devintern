@@ -458,24 +458,33 @@ cliTest(
 );
 
 cliTest(
-  "worker init --non-interactive: a missing license fails init and doctor alike, and a skipped check passes",
+  "worker init --non-interactive: no sign-in yet is action_required (exit 2) in init and doctor alike, and a skipped check passes",
   async () => {
     await withFixture(async (fixture) => {
-      // Licensing on, with no LICENSE_KEY or session in the temp HOME.
+      // Licensing on, with no LICENSE_KEY or session in the temp HOME: nothing
+      // is broken; signing in to start the Worker Pilot is the one step left.
       const licensing = { DEVINTERN_SKIP_LICENSE_CHECK: "0" };
       const init = await fixture.init(["--json"], { env: licensing });
-      expect(init.exitCode, init.stdout + init.stderr).toBe(1);
+      expect(init.exitCode, init.stdout + init.stderr).toBe(2);
       const report = parseReport(init.stdout);
-      expect(report.result).toBe("failure");
+      expect(report.result).toBe("action_required");
       const entitlement = report.checks.find((check) => /entitlement/i.test(check.label));
-      expect(entitlement, init.stdout).toMatchObject({ status: "fail" });
+      expect(entitlement, init.stdout).toMatchObject({
+        status: "action",
+        message: "Not started: sign in to begin your 14-day free Worker Pilot, no card required",
+      });
+      expect(report.nextSteps[0]?.id).toBe("sign-in");
+      expect(report.nextSteps[0]?.command).toMatch(
+        /^devintern worker login( --workspace \S+)? github$/,
+      );
       expectNoStackTrace(init);
       // The setup is kept, so doctor has a workspace to judge.
       expect(fixture.config().defaults).toMatchObject({ tracker: "markdown" });
 
       const doctor = await fixture.run(["worker", "doctor"], { env: licensing });
-      expect(doctor.exitCode, doctor.stdout + doctor.stderr).toBe(1);
-      expect(doctor.stdout).toMatch(/❌ Automation entitlement/);
+      expect(doctor.exitCode, doctor.stdout + doctor.stderr).toBe(2);
+      expect(doctor.stdout).toMatch(/👉 Automation entitlement — Not started/);
+      expect(doctor.stdout).not.toMatch(/❌ Automation entitlement/);
 
       // With the check skipped, doctor passes on the same workspace.
       const skipped = await fixture.run(["worker", "doctor"], {

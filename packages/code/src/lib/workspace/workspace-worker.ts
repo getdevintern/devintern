@@ -14,6 +14,7 @@ import { randomUUID } from "crypto";
 
 import { parseEnvInteger } from "../config/env-integer";
 import { createPickupGate } from "../worker/schedule";
+import { exitWorkerStartupPermanently } from "../worker/startup";
 import type { PickupGate, ScheduleSnapshot } from "../worker/schedule";
 import { recoverOrphanedTaskRuns, resolveStatusName } from "../worker/orphan-recovery";
 import type { OrphanRecoveryResult } from "../worker/orphan-recovery";
@@ -901,7 +902,7 @@ function assertWorkerHasRepos(config: WorkspaceConfig, configPath: string): void
       "   Add [[repos]] entries without manual_only = true " +
       "(or run `devintern worker add-repo` inside an existing repo).",
   );
-  process.exit(1);
+  exitWorkerStartupPermanently();
 }
 
 /** Reload hooks published by buildFleetEventAcquirers into the worker loop. */
@@ -1466,7 +1467,7 @@ function assertWorkspaceHasWork(
     console.error(
       "❌ Workspace mode needs a task query: set [defaults].task_query in workspace.toml.",
     );
-    process.exit(1);
+    exitWorkerStartupPermanently();
   }
   if (workspaceHasConfiguredWork(config, multiTeam, initialQuery)) return;
 

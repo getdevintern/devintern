@@ -44,6 +44,13 @@ export const INITIAL_REPORT_FLOW: ReportFlowState = {
   phase: { step: "compose", busy: false },
 };
 
+/** Initial flow state, optionally with a pre-filled draft (a DevIntern failure banner). */
+export function initialReportFlow(draft?: Partial<ReportDraft>): ReportFlowState {
+  return draft
+    ? { ...INITIAL_REPORT_FLOW, draft: { ...INITIAL_REPORT_FLOW.draft, ...draft } }
+    : INITIAL_REPORT_FLOW;
+}
+
 /** Whether the compose form is complete enough to preview. */
 export function canPreview(state: ReportFlowState): boolean {
   return (
@@ -61,11 +68,21 @@ export function canSend(state: ReportFlowState): boolean {
   return !phase.preview.contactRequired || EMAIL_PATTERN.test(state.email.trim());
 }
 
-/** Whether closing would throw away an unsent report (typed title or description). */
-export function isReportDraftDirty(state: ReportFlowState): boolean {
+/**
+ * Whether closing would throw away an unsent report: the title or description
+ * differs from the pre-filled draft and is not empty (clearing a pre-filled
+ * form leaves nothing to lose).
+ */
+export function isReportDraftDirty(
+  state: ReportFlowState,
+  initial: ReportDraft = INITIAL_REPORT_FLOW.draft,
+): boolean {
   const { phase, draft } = state;
   if (phase.step === "sent" || phase.step === "saved") return false;
-  return draft.title.trim() !== "" || draft.description.trim() !== "";
+  const title = draft.title.trim();
+  const description = draft.description.trim();
+  if (title === "" && description === "") return false;
+  return title !== initial.title.trim() || description !== initial.description.trim();
 }
 
 /** Whether a preview or send request is in flight (the dialog must stay open). */

@@ -11,12 +11,12 @@ import {
   RunStore,
   beginRun,
   beginRunStep,
+  currentRunStep,
   endRun,
   getActiveRunContext,
   hasRunStage,
   latestRunStage,
   markRunCleanStop,
-  readRunStep,
   recordRunHarness,
   recordStageForRun,
   recordRunStage,
@@ -643,7 +643,7 @@ describe("RunStore", () => {
     const runId = getActiveRunContext()!.id;
     const exitStep = beginRunStep("implementation");
     exitStep();
-    expect(readRunStep(runId)).toBe("implementation");
+    expect(currentRunStep()).toBe("implementation");
     endRun("failed", "boom");
 
     recordStageForRun(runId, "defect_report", {

@@ -213,6 +213,8 @@ describe("checkLicense entitlement API", () => {
       requireAutomation: true,
     });
     expect(second.valid).toBe(false);
+    // Signed in but not entitled is a real failure, not a pending sign-in.
+    expect(second.signInRequired).toBeUndefined();
 
     mode = "down";
     const third = await checkLicense({
@@ -301,8 +303,18 @@ describe("checkLicense entitlement API", () => {
 
     expect(result.valid).toBe(false);
     expect(result.message).toContain("devintern login");
-    expect(result.message).toContain("no card is required");
+    expect(result.message).toContain("14-day free Worker Pilot (no card required)");
+    expect(result.signInRequired).toBe(true);
     expect(calls).toBe(0);
+
+    // Without the Pilot, signing in is not the next step by itself.
+    const noTrial = await checkLicense({
+      productKey: "devintern/code",
+      supabaseConfig: freshSupabaseConfig(),
+      requireAutomation: true,
+    });
+    expect(noTrial.valid).toBe(false);
+    expect(noTrial.signInRequired).toBeUndefined();
   });
 
   test("activates the Worker Pilot with the signed-in user's token", async () => {
@@ -347,7 +359,7 @@ describe("checkLicense entitlement API", () => {
 
     const runtime = await checkLicense(base);
     expect(runtime.message).toContain("Automated execution detected (CI / systemd / cron)");
-    expect(runtime.message).toContain("run `devintern login` to start a free Worker Pilot");
+    expect(runtime.message).toContain("run `devintern login` to start your 14-day free Worker Pilot");
 
     const setup = await checkLicense({
       ...base,
@@ -357,7 +369,7 @@ describe("checkLicense entitlement API", () => {
     expect(setup.valid).toBe(false);
     expect(setup.message).not.toContain("Automated execution detected");
     expect(setup.message).toContain("the unattended worker needs one to start");
-    expect(setup.message).toContain("run `devintern worker login` to start a free Worker Pilot");
+    expect(setup.message).toContain("run `devintern worker login` to start your 14-day free Worker Pilot");
   });
 });
 

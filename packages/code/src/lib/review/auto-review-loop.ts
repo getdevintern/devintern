@@ -32,6 +32,7 @@ import { validateReviewFeedback, validateReviewFeedbackStructure } from "./feedb
 import { DEFAULT_AUTO_REVIEW_ITERATIONS } from "./auto-review-config";
 import { agentSandboxPolicy, getSandbox } from "../agent/sandbox";
 import { createHarnessLogSink } from "../observability/harness-logs";
+import { gitCredentialEnv, redactGitCredentials } from "../utils/git-credentials";
 import { hasStagedChanges, stageWorkTreeChanges } from "../utils/git-stage";
 import type {
   AutoReviewLoopOptions,
@@ -152,20 +153,12 @@ export function getPRDiff(baseBranch: string, workingDir: string): string {
   // Explicitly fetch the base branch we need
   console.log(`📥 Fetching ${remoteBase} from origin...`);
   try {
-    execFileSync("git", ["fetch", "origin", `refs/heads/${branchName}:${remoteBase}`], {
-      cwd: workingDir,
-      encoding: "utf-8",
-      stdio: "pipe",
-    });
+    gitNetworkSync(["fetch", "origin", `refs/heads/${branchName}:${remoteBase}`], workingDir);
   } catch {
     // Try a broader fetch if specific branch fetch fails
     console.log(`⚠️  Specific branch fetch failed, trying full fetch...`);
     try {
-      execFileSync("git", ["fetch", "origin"], {
-        cwd: workingDir,
-        encoding: "utf-8",
-        stdio: "pipe",
-      });
+      gitNetworkSync(["fetch", "origin"], workingDir);
     } catch {
       console.log(`⚠️  Full fetch also failed, continuing with existing refs...`);
     }
@@ -182,18 +175,10 @@ export function getPRDiff(baseBranch: string, workingDir: string): string {
     if (isShallow === "true") {
       console.log(`📥 Shallow repository detected, fetching full history...`);
       try {
-        execFileSync("git", ["fetch", "--unshallow", "origin"], {
-          cwd: workingDir,
-          encoding: "utf-8",
-          stdio: "pipe",
-        });
+        gitNetworkSync(["fetch", "--unshallow", "origin"], workingDir);
       } catch {
         console.log(`⚠️  Failed to unshallow, trying to deepen history...`);
-        execFileSync("git", ["fetch", "--deepen=1000", "origin"], {
-          cwd: workingDir,
-          encoding: "utf-8",
-          stdio: "pipe",
-        });
+        gitNetworkSync(["fetch", "--deepen=1000", "origin"], workingDir);
       }
     }
   } catch {
@@ -583,18 +568,32 @@ function assertOnExpectedBranch(expectedBranch: string, workingDir: string): voi
  */
 function pushChanges(branch: string, workingDir: string, forceWithLease = false): void {
   try {
-    // Never push the bare current HEAD; always target the explicit, escaped
-    // branch ref so a drifted HEAD cannot publish a stray branch.
-    const forceFlag = forceWithLease ? " --force-with-lease" : "";
-    execSync(`git push${forceFlag} origin ${shellEscape(branch)}`, {
+    // Never push the bare current HEAD; always target the explicit branch
+    // ref (argv, no shell) so a drifted HEAD cannot publish a stray branch.
+    const args = ["push", ...(forceWithLease ? ["--force-with-lease"] : []), "origin", branch];
+    execFileSync("git", args, {
       cwd: workingDir,
       maxBuffer: 10 * 1024 * 1024, // 10MB buffer for git hooks output
       encoding: "utf-8",
+      env: gitCredentialEnv(args, process.env, { cwd: workingDir }),
     });
     console.log(`Pushed changes to ${branch}`);
   } catch (error) {
-    throw new Error(`Failed to push changes: ${error}`);
+    throw new Error(`Failed to push changes: ${redactGitCredentials(String(error), process.env)}`);
   }
+}
+
+/**
+ * Run a git network command synchronously with code-host HTTPS credentials
+ * (see {@link gitCredentialEnv}); returns stdout, throws on failure.
+ */
+function gitNetworkSync(args: string[], workingDir: string): string {
+  return execFileSync("git", args, {
+    cwd: workingDir,
+    encoding: "utf-8",
+    stdio: "pipe",
+    env: gitCredentialEnv(args, process.env, { cwd: workingDir }),
+  });
 }
 
 /**

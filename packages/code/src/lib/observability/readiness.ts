@@ -24,7 +24,11 @@ import { harnessModelEnvKey, resolveAgentModel } from "../agent/model";
 import { TRACKER_CAPABILITIES } from "../trackers/capabilities";
 import { defaultCatalogDir, validateCatalog } from "../automation/catalog";
 
-export type ReadinessStatus = "ok" | "warn" | "fail";
+/**
+ * `action`: not broken, but the user has one step to take before it runs
+ * (the worker's "sign in to start the Worker Pilot"). Exits 2, not 1.
+ */
+export type ReadinessStatus = "ok" | "warn" | "action" | "fail";
 
 export interface ReadinessCheck {
   /** Stable identifier (e.g. "git", "agent", "auth"). */
@@ -609,11 +613,14 @@ export interface RenderedReadinessReport {
   lines: string[];
   hasFailures: boolean;
   hasWarnings: boolean;
+  /** Some check needs a step from the user (for example signing in); nothing is broken. */
+  hasActions: boolean;
 }
 
 const STATUS_ICON: Record<ReadinessStatus, string> = {
   ok: "✅",
   warn: "⚠️ ",
+  action: "👉",
   fail: "❌",
 };
 
@@ -622,6 +629,7 @@ export function renderReadinessReport(checks: ReadinessCheck[]): RenderedReadine
   const lines: string[] = [];
   let hasFailures = false;
   let hasWarnings = false;
+  let hasActions = false;
 
   for (const check of checks) {
     lines.push(
@@ -635,7 +643,8 @@ export function renderReadinessReport(checks: ReadinessCheck[]): RenderedReadine
     }
     if (check.status === "fail") hasFailures = true;
     if (check.status === "warn") hasWarnings = true;
+    if (check.status === "action") hasActions = true;
   }
 
-  return { lines, hasFailures, hasWarnings };
+  return { lines, hasFailures, hasWarnings, hasActions };
 }

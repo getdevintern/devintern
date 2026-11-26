@@ -34,6 +34,8 @@ import { committerEnv } from "../dependencies/stack-git";
 import type { Git } from "../dependencies/stack-git";
 import { getActiveRunContext, hasRunStage } from "../state/run-recorder";
 import { finishTaskRun } from "../state/task-run";
+import { formatFailureCause } from "../state/run-outcome";
+import type { RunFailure, RunWork } from "../state/run-outcome";
 import { Utils } from "../utils";
 import { hasUncommittedWork, stageWorkTreeChanges } from "../utils/git-stage";
 import { markWorktreeKept } from "../utils/worktree-keep";
@@ -275,17 +277,41 @@ export async function preserveUnfinishedWork(input: PreserveWorkInput): Promise<
   };
 }
 
+/** The run's work status for what {@link preserveUnfinishedWork} did. */
+export function preservedWorkStatus(preserved: PreservedWork): RunWork {
+  switch (preserved.kind) {
+    case "pushed":
+      return { status: "saved", ref: preserved.branch };
+    case "kept":
+      return { status: "kept", ref: preserved.path };
+    case "none":
+      return { status: "none" };
+  }
+}
+
 /**
  * End a run that did not succeed, first saving any work its worktree still
  * holds (see {@link preserveUnfinishedWork}) and naming where it went in the
  * outcome reason so the dashboard shows it. Only worker task processes, whose
  * worktree is removed after the run, and only after implementation started.
+ *
+ * The run records its work status: `saved` (branch), `kept` (worktree path),
+ * `none`, or `discarded` when preservation itself failed and the worktree is
+ * about to be removed with the work in it.
+ *
+ * @param status - Terminal status
+ * @param reason - Outcome reason (replaced by `<stage>: <cause>` when a
+ *   classified failure carries its cause)
+ * @param failure - Default classification for this path; a failure noted
+ *   earlier in the run wins
  */
 export async function finishUnfinishedRun(
   status: "escalated" | "failed",
   reason: string,
+  failure?: RunFailure,
 ): Promise<void> {
   let note: string | undefined;
+  let work: RunWork | undefined;
   if (runContext.options?.git && isWorkerTaskProcess() && hasRunStage("implementation")) {
     try {
       const run = getActiveRunContext();
@@ -296,9 +322,27 @@ export async function finishUnfinishedRun(
         changeRequestState: (branch) => new PRManager().getChangeRequestState(branch),
       });
       note = preserved.note;
+      work = preservedWorkStatus(preserved);
     } catch (error) {
       console.warn(`⚠️  Could not preserve unfinished work: ${(error as Error).message}`);
+      const cause = formatFailureCause((error as Error).message, 160);
+      // Last resort: keep the worktree so the worker does not remove the work.
+      const cwd = process.cwd();
+      const kept = await markWorktreeKept(cwd, `could not preserve work: ${cause}`).catch(
+        () => false,
+      );
+      if (kept) {
+        note = `unsaved work kept in worktree ${cwd} (could not preserve it: ${cause})`;
+        work = { status: "kept", ref: cwd };
+      } else {
+        note = `work discarded: could not preserve it (${cause})`;
+        work = { status: "discarded" };
+      }
     }
   }
-  await finishTaskRun(status, note ? `${reason}; ${note}` : reason);
+  await finishTaskRun(status, reason, {
+    ...(note ? { note } : {}),
+    ...(work ? { work } : {}),
+    ...(failure ? { failure } : {}),
+  });
 }

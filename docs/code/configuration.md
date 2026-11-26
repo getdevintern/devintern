@@ -4,7 +4,7 @@ sidebarLabel: "Configuration"
 description: "Use when setting up the .env file, choosing a task tracker, connecting GitHub or Bitbucket, or finding the page for agent, sandbox, and advanced settings in DevIntern Code."
 section: "Automation Reference"
 order: 0
-dateModified: 2026-11-18
+dateModified: 2026-11-26
 ---
 
 # DevIntern Code Configuration
@@ -71,7 +71,7 @@ Set `GITHUB_TOKEN` for CLI runs and for workspace automation. A workspace paired
 
 **Token permissions.** A classic token needs the `repo` scope. A fine-grained token (recommended) needs `Contents: Read and write` and `Pull requests: Read and write`. Add `Actions: Read` and `Commit statuses: Read` when `[workspace].ci_failure_fix = true`, and `Issues: Read and write` when `TASK_TRACKER=github`. Create tokens at [github.com/settings/tokens](https://github.com/settings/tokens).
 
-> `Contents` must be **Read and write**. With read-only Contents, task fetching and PR reads work but `git push` fails with `403`. Pushes use git's own credentials, and an exported `GITHUB_TOKEN` takes precedence over a `gh` keyring login. SSH remotes use your SSH keys. The worker test-pushes each GitHub HTTPS remote at startup and warns if the push is rejected.
+> `Contents` must be **Read and write**. With read-only Contents, task fetching and PR reads work but `git push` fails with `403`. For `https://github.com` remotes, clones, fetches, and pushes use `GITHUB_TOKEN` when git has no credential helper of its own; the token is passed to git in memory, never written to `.git/config` or a remote URL. A configured helper (for example `gh auth setup-git` or a keychain) is used instead, and `gh` itself serves an exported `GITHUB_TOKEN` ahead of its keyring login. SSH remotes use your SSH keys. The worker test-pushes each GitHub HTTPS remote at startup and warns if the push is rejected.
 
 **Bot aliases.** Relay-backed workspaces recognize `@devintern-ai` automatically. To treat other bot logins as mentions too, set `GITHUB_BOT_ALIASES` to a comma-separated list (with or without the `[bot]` suffix).
 

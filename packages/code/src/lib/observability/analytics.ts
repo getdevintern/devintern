@@ -69,7 +69,7 @@ export type SetupFailureReason =
 export type WorkerInitSource = "wizard" | "non_interactive";
 
 /** Readiness check outcomes reported by doctor and the init summary. */
-export type ReadinessCheckStatus = "ok" | "warn" | "fail";
+export type ReadinessCheckStatus = "ok" | "warn" | "action" | "fail";
 /** A structural subset of readiness.ts's ReadinessCheck (no import cycle). */
 export interface ReadinessCheckLike {
   id: string;
@@ -84,7 +84,8 @@ export type ServiceInstallOutcome =
   | "failed"
   | "skipped"
   | "existing"
-  | "unavailable";
+  | "unavailable"
+  | "not_ready";
 export type GitHubAppOutcome = "connected" | "existing" | "skipped" | "unavailable";
 export type LoginOutcome = "succeeded" | "failed";
 
@@ -488,7 +489,7 @@ export function trackWorkerInitCompleted(props: {
   githubApp: GitHubAppOutcome;
   source?: WorkerInitSource;
   /** Non-interactive runs complete even when a check fails; this records which. */
-  outcome?: "succeeded" | "failed";
+  outcome?: "succeeded" | "action_required" | "failed";
 }): void {
   void track("worker_init_completed", {
     source: props.source ?? "wizard",

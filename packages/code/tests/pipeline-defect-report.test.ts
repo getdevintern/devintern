@@ -135,7 +135,7 @@ describe("handleTaskFailure automatic defect reports", () => {
     const { thrown, run, stages } = await failRun(error);
     expect(thrown).toBe(error);
     expect(run?.status).toBe("failed");
-    expect(run?.outcomeReason).toBe(error.message);
+    expect(run?.outcomeReason).toBe(`implementation: ${error.message}`);
     const stage = stages.find((entry) => entry.stage === "defect_report");
     expect(stage?.status).toBe("failed");
   });
