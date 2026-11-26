@@ -18,6 +18,8 @@ const LOGIN_USAGE = [
   "  -h, --help              Display this help message",
   "",
   "When no method is given, an interactive prompt asks how to sign in.",
+  "If the browser runs on another machine (SSH, a container), paste the address",
+  "it ends on (a 127.0.0.1 page that does not load) into this terminal.",
 ].join("\n");
 
 const LOGOUT_USAGE = [
@@ -38,8 +40,18 @@ const WHOAMI_USAGE = [
   "  -h, --help  Display this help message",
 ].join("\n");
 
-/** `devintern login` — sign in and persist the local auth session. */
-export async function runLoginCommand(argv: string[], configDir?: string): Promise<never> {
+/**
+ * `devintern login` — sign in and persist the local auth session.
+ *
+ * @param argv - Process-style argv (`["devintern", "login", ...]`).
+ * @param configDir - State directory that receives the session file.
+ * @param commandName - Command shown in hints (`devintern worker login` for workers).
+ */
+export async function runLoginCommand(
+  argv: string[],
+  configDir?: string,
+  commandName = "devintern login",
+): Promise<never> {
   if (hasHelpArg(argv)) {
     console.log(LOGIN_USAGE);
     process.exit(0);
@@ -54,6 +66,13 @@ export async function runLoginCommand(argv: string[], configDir?: string): Promi
     process.exit(0);
   } catch (error) {
     console.error(`❌ ${(error as Error).message}`);
+    if ((error as Error).name === "AbortError") {
+      // No terminal to answer the method/email prompt (stdin closed or </dev/null).
+      console.error(
+        `   No terminal to answer the prompt. Pass it as arguments: \`${commandName} github\` ` +
+          `(or google, x) or \`${commandName} email you@company.com\`.`,
+      );
+    }
     await trackLoginResult({ outcome: "failed" });
     await flushAnalytics();
     process.exit(1);

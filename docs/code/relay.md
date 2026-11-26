@@ -4,7 +4,7 @@ sidebarLabel: "Relay & Connections"
 description: "Use when the worker should receive PR and tracker events in seconds through the DevIntern relay instead of polling or self-hosted webhooks."
 section: "Automation"
 order: 5
-dateModified: 2026-11-18
+dateModified: 2026-11-26
 ---
 
 # Relay (Instant Events)
@@ -102,18 +102,15 @@ Pairing state is stored in owner-only `~/.devintern/state/code/relay.json`.
 
 ## Signing in over SSH or mosh
 
-Browser sign-in redirects to `127.0.0.1` on the machine running the CLI. On a remote host, either copy the session file from a machine with a browser:
+Browser sign-in redirects to `127.0.0.1` on the machine running the CLI. On a remote host or in a container, run `devintern worker login github` (or `google`, `x`, `email you@company.com`) and open the printed URL in your laptop browser. After you sign in, the browser lands on a `127.0.0.1` page that does not load. Copy that page's full address, paste it into the waiting terminal, and press Enter. This works over SSH, mosh, and `docker run -it`. An email sign-in link works the same way.
 
-```bash
-devintern login   # on your laptop
-scp ~/.devintern/state/code/.auth-session.json user@host:~/.devintern/state/code/
-```
-
-or forward the callback port over SSH (mosh cannot forward ports) and open the printed URL locally:
+Over SSH you can instead forward the callback port before opening the URL (mosh cannot forward ports):
 
 ```bash
 ssh -N -L 17865:127.0.0.1:17865 user@host
 ```
+
+You can also copy `~/.devintern/state/code/.auth-session.json` from a machine where you are already signed in.
 
 ## Availability
 

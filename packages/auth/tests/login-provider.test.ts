@@ -128,6 +128,43 @@ try { await ${fn}(); } catch (e) { console.log("RESULT:" + JSON.stringify([e.nam
   });
 });
 
+describe("watchStdinLines", () => {
+  async function runWatch(stdin: string): Promise<string> {
+    const proc = Bun.spawn(
+      [
+        "bun",
+        "-e",
+        `import { promptForLoginMethod, watchStdinLines } from "./src/login-provider";
+const { method } = await promptForLoginMethod();
+const lines = [];
+const stop = watchStdinLines((line) => lines.push(line));
+await new Promise((resolve) => setTimeout(resolve, 200));
+stop();
+console.log("RESULT:" + JSON.stringify([method, lines]));`,
+      ],
+      { cwd: new URL("..", import.meta.url).pathname, stdin: "pipe", stdout: "pipe" },
+    );
+    proc.stdin.write(stdin);
+    proc.stdin.end();
+    const output = await new Response(proc.stdout).text();
+    await proc.exited;
+    const result = output.split("RESULT:")[1];
+    if (!result) throw new Error(`No result in output:\n${output}`);
+    return result.trim();
+  }
+
+  test("delivers lines buffered by an earlier prompt, then later lines", async () => {
+    expect(JSON.parse(await runWatch("1\nhttp://127.0.0.1:1/auth/callback?code=x\n"))).toEqual([
+      "github",
+      ["http://127.0.0.1:1/auth/callback?code=x"],
+    ]);
+  });
+
+  test("delivers nothing when stdin is already closed", async () => {
+    expect(JSON.parse(await runWatch("github\n"))).toEqual(["github", []]);
+  });
+});
+
 describe("loginMethodLabel", () => {
   test("returns display names", () => {
     expect(loginMethodLabel("github")).toBe("GitHub");

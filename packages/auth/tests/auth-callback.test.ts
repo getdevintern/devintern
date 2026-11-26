@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { createAuthCallbackServer } from "../src/auth-callback";
+import { createAuthCallbackServer, parsePastedCallback } from "../src/auth-callback";
 
 describe("createAuthCallbackServer", () => {
   test("returns a valid redirect URL with localhost", async () => {
@@ -134,5 +134,51 @@ describe("createAuthCallbackServer", () => {
     const p2 = server.stop(50);
     expect(p1).toBe(p2);
     await p1;
+  });
+});
+
+describe("parsePastedCallback", () => {
+  test("reads the code from the full callback address", () => {
+    expect(
+      parsePastedCallback("  http://127.0.0.1:17865/auth/callback?code=abc-123&state=x  "),
+    ).toEqual({ code: "abc-123" });
+  });
+
+  test("reads a bare query string", () => {
+    expect(parsePastedCallback("code=abc-123")).toEqual({ code: "abc-123" });
+  });
+
+  test("reports the OAuth error description", () => {
+    expect(
+      parsePastedCallback(
+        "http://127.0.0.1:1/auth/callback?error=access_denied&error_description=User+denied",
+      ),
+    ).toEqual({ error: "User denied" });
+  });
+
+  test("returns null for text without a code", () => {
+    expect(parsePastedCallback("")).toBeNull();
+    expect(parsePastedCallback("github")).toBeNull();
+    expect(parsePastedCallback("http://127.0.0.1:1/auth/callback")).toBeNull();
+  });
+});
+
+describe("submitPastedCallback", () => {
+  test("resolves waitForCode with a pasted code", async () => {
+    const server = await createAuthCallbackServer();
+    const waitPromise = server.waitForCode();
+    expect(server.submitPastedCallback("not a url")).toBe(false);
+    expect(server.submitPastedCallback(`${server.redirectTo}?code=pasted-code`)).toBe(true);
+    expect(await waitPromise).toBe("pasted-code");
+    await server.stop(0);
+  });
+
+  test("rejects waitForCode with a pasted OAuth error", async () => {
+    const server = await createAuthCallbackServer();
+    const waitPromise = server.waitForCode();
+    waitPromise.catch(() => {});
+    expect(server.submitPastedCallback("?error=access_denied")).toBe(true);
+    await expect(waitPromise).rejects.toThrow("access_denied");
+    await server.stop(0);
   });
 });

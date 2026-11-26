@@ -143,6 +143,32 @@ function readStdinLine(): Promise<string> {
 }
 
 /**
+ * Call `onLine` for every stdin line until the returned stop function runs.
+ * Lines buffered by an earlier prompt are delivered first. A closed or empty
+ * stdin (`</dev/null`) delivers nothing and is not an error.
+ *
+ * @param onLine - Receives each line as typed or piped.
+ * @returns Stops reading stdin.
+ */
+export function watchStdinLines(onLine: (line: string) => void): () => void {
+  let stopped = false;
+  for (const line of pendingStdinLines.splice(0)) onLine(line);
+  if (stdinEnded) return () => {};
+  const rl = createInterface({ input: process.stdin });
+  rl.on("line", (line) => {
+    if (!stopped) onLine(line);
+  });
+  rl.once("close", () => {
+    if (!stopped) stdinEnded = true;
+  });
+  return () => {
+    if (stopped) return;
+    stopped = true;
+    rl.close();
+  };
+}
+
+/**
  * Read login method from CLI argv when explicitly passed.
  *
  * Returns null when the user should be prompted interactively.
