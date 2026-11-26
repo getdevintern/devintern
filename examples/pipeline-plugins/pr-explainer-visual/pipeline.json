@@ -13,7 +13,7 @@
     { "use": "auto-review" },
     {
       "use": "pr-explainer-visual",
-      "promptFile": "/home/you/.devintern/pipelines/prompts/pr-explainer-visual.md",
+      "promptFile": "./prompts/pr-explainer-visual.md",
       "outputName": "pr-explanation.md"
     },
     { "use": "finalize" }

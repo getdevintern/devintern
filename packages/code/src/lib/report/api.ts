@@ -138,6 +138,7 @@ export function createBugReporter(options: BugReporterOptions = {}): BugReporter
       logs: draft.logs,
       logPaths: draft.logPaths,
       runId: draft.runId,
+      attachRun: draft.attachRun,
       taskKey: draft.taskKey,
       last: draft.last,
       shareIdentifiers: draft.shareIdentifiers,

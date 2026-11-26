@@ -249,6 +249,24 @@ export function injectedTasksDir(workspaceDir: string = resolveWorkspaceDir()): 
   return join(workspaceDir, "injected");
 }
 
+/**
+ * Directory holding per-run outputs files (`DEVINTERN_RUN_OUTPUTS`): JSONL
+ * records an agent run appends for the work it created, ingested into the
+ * `run_outputs` table when the run finishes. Under `state/` so sandboxed
+ * agents can already write it.
+ */
+export function runOutputsDir(workspaceDir: string = resolveWorkspaceDir()): string {
+  return join(workspaceStateDir(workspaceDir), "run-outputs");
+}
+
+/** Outputs file for one run (see {@link runOutputsDir}). */
+export function runOutputsPath(
+  runId: number,
+  workspaceDir: string = resolveWorkspaceDir(),
+): string {
+  return join(runOutputsDir(workspaceDir), `${runId}.jsonl`);
+}
+
 /** Directory holding per-task worktrees (`worktrees/<repo>/<task>`). */
 export function worktreesDir(workspaceDir: string = resolveWorkspaceDir()): string {
   return join(workspaceDir, "worktrees");

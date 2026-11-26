@@ -5,7 +5,7 @@
     { "use": "commit" },
     {
       "use": "agent-review",
-      "promptFile": "/home/you/.devintern/pipelines/prompts/agent-review.md",
+      "promptFile": "./prompts/agent-review.md",
       "minPriority": "medium",
       "maxIterations": 2,
       "onBlocked": "loopback"

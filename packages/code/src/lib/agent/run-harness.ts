@@ -1,4 +1,5 @@
 import { existsSync, readFileSync, writeFileSync } from "fs";
+import type { StackBase } from "../dependencies/gate";
 import { join } from "path";
 import {
   buildHarnessInvocation,
@@ -23,7 +24,11 @@ import {
 import { DEFAULT_AUTO_REVIEW_ITERATIONS } from "../review/auto-review-config";
 import { createHarnessLogSink } from "../observability/harness-logs";
 import { resolvePipelineSteps } from "../task/pipeline-config";
-import { describePipelineSelection, selectPipelineConfig } from "../task/pipeline-selection";
+import {
+  describePipelineSelection,
+  pipelineDirFor,
+  selectPipelineConfig,
+} from "../task/pipeline-selection";
 import { loadArtifactUploader } from "../artifacts/upload";
 import type { LoadedArtifactUploader } from "../artifacts/upload";
 import type { PipelineConfig } from "../../types/settings";
@@ -78,11 +83,13 @@ interface RunAgentHarnessOptions {
   verify?: VerifyConfig;
   /** Branch successfully inherited from a prior attempt. */
   resumeBranch?: string;
+  /** The PR this run is stacked on; delivery follows it if it merges mid-run. */
+  stackBase?: StackBase;
 }
 
 export type AgentSessionResult =
   | { kind: "halted" }
-  | { kind: "complete"; context: Omit<FinalizeContext, "resolve" | "reject"> };
+  | { kind: "complete"; context: Omit<FinalizeContext, "resolve" | "reject" | "pipelineDir"> };
 
 /**
  * Run the main agent harness implementation session for a formatted task.
@@ -620,10 +627,9 @@ function recordHaltedImplementation(
 
 /** Run implementation and deliver it when the agent completed meaningful work. */
 export async function runAgentHarness(input: RunAgentHarnessOptions): Promise<void> {
-  // Select exactly one pipeline: a workspace per-repo override, the repo's
-  // settings.json, the workspace default, or the built-in default. The CLI
-  // `verify` fallback only applies when no scope declared a pipeline, and is
-  // never merged into a selected one. Selection, file loading, plugin loading,
+  // Select exactly one pipeline: a workspace per-repo override, the workspace
+  // default, or the built-in default. The CLI `verify` fallback only applies
+  // when no scope declared a pipeline, and is never merged into a selected one. Selection, file loading, plugin loading,
   // and ordering validation all run before the agent starts.
   const verifyFallback: PipelineConfig | undefined = input.verify
     ? {
@@ -667,6 +673,7 @@ export async function runAgentHarness(input: RunAgentHarnessOptions): Promise<vo
       finalizeAgentRun({
         ...session.context,
         pipelineSteps,
+        pipelineDir: pipelineDirFor(selection),
         artifactPolicy: configuredPipeline?.artifacts,
         artifactUploader,
         runRepair: async (prompt) => {

@@ -36,8 +36,6 @@ import type {
   PullRequestInfo,
   PullRequestMergeResult,
 } from "../code-host/github/reviews-types";
-import { loadPrompt, loadPromptTemplate, renderPrompt } from "../prompts/loader";
-import { untrustedContentBlock } from "../prompts/untrusted-content";
 import { Utils } from "../utils";
 import { AUTO_MERGE_COMMENT_MARKER, buildAutoMergeStatusComment } from "./auto-merge-comment";
 import type { AutoMergeCommentStatus, LeftOpenReason } from "./auto-merge-comment";
@@ -49,6 +47,7 @@ import {
   parseMergeSafetyVerdict,
 } from "./merge-gate";
 import type { AutoMergeMethod, MergePathPolicy, MergeSafetyPolicy } from "./merge-gate";
+import { buildMergeSafetyPrompt } from "./merge-safety-prompt";
 import { loadMergeSafetyRules, mergeSafetyPolicyLabel } from "./merge-safety-rules";
 
 /** Full auto-merge policy for one repository. */
@@ -73,6 +72,12 @@ export interface AutoMergePolicy extends MergePathPolicy {
    * appended in a marked section that can only add restrictions.
    */
   reviewInstructions?: string;
+  /**
+   * Review diffs over {@link MAX_REVIEW_DIFF_CHARS} from the checkout
+   * (`auto_merge_review_large_diffs`, default off). Off leaves them open for
+   * a human. Diffs over {@link MAX_CHECKOUT_REVIEW_DIFF_CHARS} always stay open.
+   */
+  reviewLargeDiffs?: boolean;
   /** `custom` policy: inline rubric text (`auto_merge_rules`). */
   rules?: string;
   /**
@@ -188,10 +193,52 @@ export interface AutoMergeOptions {
     ): Promise<{ success: boolean; path?: string; error?: string; inUse?: boolean }>;
     remove(path: string): Promise<void>;
   };
+  /**
+   * Make the PR's base commit available in the review checkout (tests);
+   * defaults to {@link ensureBaseCommit}. Used only for diffs too large to
+   * inline in the prompt.
+   */
+  baseCommit?: (
+    workDir: string,
+    base: PullRequestRefs,
+  ) => Promise<{ success: boolean; error?: string }>;
 }
 
-/** Diffs above this size are not sent to the agent (rejected instead). */
+/** Base and head of a pull request, as validated commit SHAs. */
+export interface PullRequestRefs {
+  baseRef: string;
+  baseSha: string;
+  headSha: string;
+}
+
+/**
+ * Diffs above this size are not inlined in the prompt: the agent inspects
+ * them with `git diff` in the review checkout instead.
+ */
 export const MAX_REVIEW_DIFF_CHARS = 150_000;
+
+/**
+ * Hard ceiling for a checkout review: diffs above it always stay open for a
+ * human, even with `auto_merge_review_large_diffs` on. Kept near what one
+ * agent context can hold (~100k tokens), so paging the whole diff does not
+ * rely on the harness keeping hundreds of thousands of tokens of output.
+ */
+export const MAX_CHECKOUT_REVIEW_DIFF_CHARS = 400_000;
+
+/** Upper bound for one base-commit fetch into the review checkout. */
+const FETCH_TIMEOUT_MS = 120_000;
+
+/** A full, lowercase SHA-1 commit id. */
+const COMMIT_SHA = /^[0-9a-f]{40}$/;
+
+/**
+ * A changed path a checkout review accepts: an allowlist of characters that
+ * are inert in an unquoted POSIX shell word, with no path segment starting
+ * with `-` (which a command could read as an option). Any other path leaves
+ * the PR open, so a crafted filename cannot become shell syntax even if the
+ * agent strays from the paging commands and types it, quoted or not.
+ */
+const SHELL_SAFE_PATH = /^(?!-)(?!.*\/-)[A-Za-z0-9._\/@+=,:-]+$/;
 
 /** Transcript label for the merge-safety agent (distinct from review replies). */
 export const MERGE_SAFETY_REVIEW_LOG_LABEL = "merge-safety-review";
@@ -247,137 +294,6 @@ function gitHubErrorStatus(error: unknown): number | undefined {
     error instanceof Error ? error.message : String(error),
   );
   return match ? Number(match[1]) : undefined;
-}
-
-/** Bundled prompt holding the fixed frame shared by every policy. */
-const MERGE_SAFETY_FRAME_PROMPT = "merge-safety";
-
-/** Bundled rubric per preset (`custom` uses the operator's rules instead). */
-const MERGE_SAFETY_RUBRIC_PROMPTS: Record<Exclude<MergeSafetyPolicy, "custom">, string> = {
-  strict: "merge-safety-rubric-strict",
-  standard: "merge-safety-rubric-standard",
-  relaxed: "merge-safety-rubric-relaxed",
-};
-
-/** Role-statement sentence for the `custom` policy (presets carry their own). */
-const CUSTOM_POLICY_SUMMARY = "A PR with clumsy code can be safe to merge.";
-
-/** Delimiters around operator-owned `custom` rules in the prompt. */
-export const OPERATOR_RULES_BEGIN = "--- BEGIN OPERATOR RULES ---";
-export const OPERATOR_RULES_END = "--- END OPERATOR RULES ---";
-
-/** The `custom` rubric: the operator's rules in a delimited section. */
-function operatorRulesRubric(rules: string): string {
-  return [
-    "This repository uses a **custom** merge-safety policy: the workspace operator wrote the " +
-      "rules below, and they decide which kinds of change need a human. Answer " +
-      '`"safe": false` if the change plausibly falls under anything the rules mark unsafe. ' +
-      "When the rules do not settle whether a change is safe, it is not safe.",
-    "",
-    "### Operator Rules",
-    OPERATOR_RULES_BEGIN,
-    rules.trim(),
-    OPERATOR_RULES_END,
-  ].join("\n");
-}
-
-/** Policy summary sentence and rubric text for one policy. */
-function mergeSafetyRubric(
-  policy: MergeSafetyPolicy,
-  rules: string | undefined,
-): { summary: string; rubric: string } {
-  if (policy === "custom") {
-    if (!rules?.trim()) throw new Error("The custom merge-safety policy needs operator rules");
-    return { summary: CUSTOM_POLICY_SUMMARY, rubric: operatorRulesRubric(rules) };
-  }
-  // Bundled only, like the frame (see buildMergeSafetyPrompt).
-  const template = loadPromptTemplate(MERGE_SAFETY_RUBRIC_PROMPTS[policy], {
-    useAmbientOverrides: false,
-  });
-  const summary = template.attributes?.summary;
-  if (typeof summary !== "string" || !summary) {
-    throw new Error(`Prompt '${template.name}' is missing its summary frontmatter`);
-  }
-  return {
-    summary,
-    rubric: renderPrompt(template, { maxDiffChars: String(MAX_REVIEW_DIFF_CHARS) }),
-  };
-}
-
-/** Heading of the operator section appended to the merge-safety prompt. */
-export const OPERATOR_SECTION_HEADING = "## Operator Instructions";
-
-/**
- * The marked operator section (`auto_merge_review_instructions`), or `""`
- * when there are none, which leaves the template text exactly as bundled.
- * The text is trusted operator config, but the framing limits it to adding
- * restrictions.
- */
-export function operatorInstructionsSection(instructions: string | undefined): string {
-  const text = instructions?.trim();
-  if (!text) return "";
-  return [
-    "",
-    "",
-    OPERATOR_SECTION_HEADING,
-    "The workspace operator added the repository-specific rules below. They are trusted " +
-      "configuration, but they can only make this review stricter: they never remove or relax " +
-      'any condition in "What Makes a Merge Unsafe", and they never override the rule that ' +
-      "when in doubt the answer is not safe. If an operator rule seems to allow something " +
-      "that section marks unsafe, that section wins.",
-    "",
-    "--- BEGIN OPERATOR INSTRUCTIONS ---",
-    text,
-    "--- END OPERATOR INSTRUCTIONS ---",
-  ].join("\n");
-}
-
-/** A framed list of changed paths, or `(none)` when empty. */
-function changedPathsBlock(paths: readonly string[]): string {
-  if (paths.length === 0) return "(none)";
-  return untrustedContentBlock(paths.map((path) => `- ${path}`).join("\n"), "changed paths");
-}
-
-/**
- * Build the agent's merge-safety prompt: the fixed bundled frame around the
- * policy's rubric (a bundled preset, or the operator's `custom` rules).
- */
-export function buildMergeSafetyPrompt(options: {
-  repository: string;
-  prNumber: number;
-  title: string;
-  /** Changed paths outside the safe globs. */
-  reviewPaths: string[];
-  /** Changed paths matching `auto_merge_review_paths` (always reviewed). */
-  alwaysReviewPaths?: string[];
-  diff: string;
-  /** Review strictness; defaults to `strict`. */
-  policy?: MergeSafetyPolicy;
-  /** Operator-written rules appended in the operator section. */
-  instructions?: string;
-  /** The `custom` policy's rubric text (required for `custom`, ignored otherwise). */
-  rules?: string;
-}): string {
-  // Trust boundary: the verdict gates merges, and an unsandboxed agent could
-  // write a `~/.devintern/prompts/` override forcing `"safe": true`. Pin the
-  // frame and the preset rubrics to the bundled catalog.
-  const policy = options.policy ?? DEFAULT_MERGE_SAFETY_POLICY;
-  const { summary, rubric } = mergeSafetyRubric(policy, options.rules);
-  return loadPrompt(
-    MERGE_SAFETY_FRAME_PROMPT,
-    {
-      policySummary: summary,
-      rubric,
-      repository: options.repository,
-      prNumber: String(options.prNumber),
-      prTitle: untrustedContentBlock(options.title, "pull request title"),
-      reviewPaths: changedPathsBlock(options.reviewPaths),
-      alwaysReviewPaths: changedPathsBlock(options.alwaysReviewPaths ?? []),
-      prDiff: untrustedContentBlock(`\`\`\`diff\n${options.diff}\n\`\`\``, "pull request diff"),
-      operatorSection: operatorInstructionsSection(options.instructions),
-    },
-    { useAmbientOverrides: false },
-  );
 }
 
 function defaultGitHub(owner: string, repo: string, prNumber: number): AutoMergeGitHub {
@@ -587,7 +503,7 @@ export function ciWaitKey(problem: CiChecksProblem | undefined, message: string)
 /** Paths that passed the path policy: safe-only, or what the agent reviews. */
 type PathsAdmitted =
   | { kind: "safe" }
-  | { kind: "review"; outsideSafe: string[]; reviewMatches: string[] };
+  | { kind: "review"; files: PullRequestFile[]; outsideSafe: string[]; reviewMatches: string[] };
 
 /**
  * Path part of gate 1: a final rejection (deny path, unevaluable, or code
@@ -630,7 +546,7 @@ async function pathGate(ctx: GateContext): Promise<StopDecision | PathsAdmitted>
       { kind: "outside-safe-paths", paths: outsideSafe, reviewPathMatches: reviewMatches },
     );
   }
-  return { kind: "review", outsideSafe, reviewMatches };
+  return { kind: "review", files, outsideSafe, reviewMatches };
 }
 
 /** Gates 1 (path policy, then CI checks) and 2 (agent review). */
@@ -647,7 +563,7 @@ async function decideMerge(ctx: GateContext): Promise<MergeDecision> {
     console.log(`✅ ${baseRepo}#${prNumber}: ${reason}; no agent review needed`);
     return { kind: "merge", reason, viaReview: false, reviewed: false };
   }
-  const { outsideSafe, reviewMatches } = paths;
+  const { files, outsideSafe, reviewMatches } = paths;
   const ciWait = await ciChecksGate(ctx, false);
   if (ciWait) return ciWait;
 
@@ -669,18 +585,44 @@ async function decideMerge(ctx: GateContext): Promise<MergeDecision> {
     rules = loaded.text;
   }
   const diff = await github.getDiff();
+  // Too large to inline: left open, unless the policy opts in to a checkout
+  // review where the agent diffs base...head itself.
+  let refs: PullRequestRefs | undefined;
   if (diff.length > MAX_REVIEW_DIFF_CHARS) {
-    const detail = `the diff is ${diff.length} characters, above the ${MAX_REVIEW_DIFF_CHARS}-character review limit`;
-    return leaveOpen(detail, { kind: "not-evaluable", detail });
+    if (!policy.reviewLargeDiffs || diff.length > MAX_CHECKOUT_REVIEW_DIFF_CHARS) {
+      const limit = policy.reviewLargeDiffs
+        ? MAX_CHECKOUT_REVIEW_DIFF_CHARS
+        : MAX_REVIEW_DIFF_CHARS;
+      const detail = `the diff is ${diff.length} characters, above the ${limit}-character review limit`;
+      return leaveOpen(detail, { kind: "not-evaluable", detail });
+    }
+    if (!COMMIT_SHA.test(pr.base.sha) || !COMMIT_SHA.test(pr.head.sha)) {
+      const detail =
+        "the diff is too large to inline and GitHub did not report valid base and head commits";
+      return leaveOpen(detail, { kind: "not-evaluable", detail });
+    }
+    const unsafePath = files
+      .flatMap((file) => [file.filename, file.previous_filename ?? ""])
+      .find((path) => path !== "" && !SHELL_SAFE_PATH.test(path));
+    if (unsafePath !== undefined) {
+      const detail =
+        `the diff is too large to inline and the changed path ${JSON.stringify(unsafePath)} ` +
+        "is not shell-safe (only letters, digits, and . _ / @ + = , : - are allowed, " +
+        "and no path segment may start with -)";
+      return leaveOpen(detail, { kind: "not-evaluable", detail });
+    }
+    refs = { baseRef: pr.base.ref, baseSha: pr.base.sha, headSha: pr.head.sha };
   }
   console.log(
     `🔎 ${baseRepo}#${prNumber}: ${outsideSafe.length} path(s) outside the safe paths, ` +
-      `${reviewMatches.length} matching review paths; asking the agent`,
+      `${reviewMatches.length} matching review paths; asking the agent` +
+      (refs ? ` (diff of ${diff.length} characters reviewed from the checkout)` : ""),
   );
   const verdict = await reviewWithAgent({
     options,
     branch: pr.head.ref,
     headSha: pr.head.sha,
+    refs,
     prompt: buildMergeSafetyPrompt({
       repository: baseRepo,
       prNumber,
@@ -688,11 +630,16 @@ async function decideMerge(ctx: GateContext): Promise<MergeDecision> {
       reviewPaths: outsideSafe,
       alwaysReviewPaths: reviewMatches,
       diff,
+      ...(refs ? { notInlined: { baseSha: refs.baseSha, headSha: refs.headSha } } : {}),
       policy: reviewPolicy,
       instructions: policy.reviewInstructions,
       rules,
     }),
   });
+  if (verdict.kind === "base-unavailable") {
+    const detail = `the diff is too large to inline and the base commit could not be prepared for review (${verdict.message})`;
+    return leaveOpen(detail, { kind: "not-evaluable", detail });
+  }
   if (verdict.kind !== "verdict") return stop(verdict.kind, verdict.message, verdict.ran);
   if (!verdict.safe) {
     return leaveOpen(
@@ -864,15 +811,64 @@ export async function autoMergePr(
 
 type AgentReview =
   | { kind: "verdict"; ran: true; safe: boolean; reason: string }
-  | { kind: "failed" | "waiting"; ran: boolean; message: string };
+  | { kind: "failed" | "waiting"; ran: boolean; message: string }
+  | { kind: "base-unavailable"; ran: false; message: string };
+
+/**
+ * Make `base.baseSha` available in the review checkout and check that it
+ * shares history with the head, so `git diff base...head` works. Fetches
+ * the commit by SHA, then the base branch, only when it is missing. Writes
+ * no refs (fetches land in `FETCH_HEAD`).
+ */
+export async function ensureBaseCommit(
+  workDir: string,
+  refs: PullRequestRefs,
+  options: { verbose?: boolean } = {},
+): Promise<{ success: boolean; error?: string }> {
+  const git = (args: string[], timeoutMs?: number) =>
+    Utils.executeGitCommand(args, { cwd: workDir, verbose: options.verbose, timeoutMs });
+  const hasCommit = async () => (await git(["cat-file", "-e", `${refs.baseSha}^{commit}`])).success;
+  if (!(await hasCommit())) {
+    const bySha = await git(["fetch", "--no-tags", "origin", refs.baseSha], FETCH_TIMEOUT_MS);
+    // The base branch name comes from the PR payload: only a well-formed,
+    // non-option branch name is passed to git.
+    const refOk =
+      !refs.baseRef.startsWith("-") &&
+      (await git(["check-ref-format", "--branch", refs.baseRef])).success;
+    let fetchError = bySha.error;
+    if (!bySha.success && refOk) {
+      const byRef = await git(
+        ["fetch", "--no-tags", "origin", `refs/heads/${refs.baseRef}`],
+        FETCH_TIMEOUT_MS,
+      );
+      fetchError = byRef.error || fetchError;
+    }
+    if (!(await hasCommit())) {
+      return {
+        success: false,
+        error: `could not fetch base commit ${refs.baseSha}${fetchError ? `: ${fetchError.trim()}` : ""}`,
+      };
+    }
+  }
+  const mergeBase = await git(["merge-base", refs.baseSha, refs.headSha]);
+  if (!mergeBase.success || !COMMIT_SHA.test(mergeBase.output.trim())) {
+    return {
+      success: false,
+      error: `no merge base between ${refs.baseSha} and ${refs.headSha}`,
+    };
+  }
+  return { success: true };
+}
 
 async function reviewWithAgent(params: {
   options: AutoMergeOptions;
   branch: string;
   headSha: string;
+  /** Set when the diff is not inlined: the base must exist in the checkout. */
+  refs?: PullRequestRefs;
   prompt: string;
 }): Promise<AgentReview> {
-  const { options, branch, headSha, prompt } = params;
+  const { options, branch, headSha, refs, prompt } = params;
   const verbose = options.verbose ?? false;
   const worktree = options.worktree ?? {
     // Read-only review of a CI-green PR: no package install needed.
@@ -903,6 +899,14 @@ async function reviewWithAgent(params: {
       const head = await Utils.executeGitCommand(["rev-parse", "HEAD"], { cwd: workDir });
       if (!head.success || head.output.trim() !== headSha) {
         return { kind: "waiting", ran: false, message: "PR head moved while preparing the review" };
+      }
+    }
+    if (refs) {
+      const base = options.baseCommit
+        ? await options.baseCommit(workDir, refs)
+        : await ensureBaseCommit(workDir, refs, { verbose });
+      if (!base.success) {
+        return { kind: "base-unavailable", ran: false, message: base.error ?? "unknown error" };
       }
     }
     const injected = options.agentRunner;

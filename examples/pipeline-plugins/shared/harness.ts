@@ -42,6 +42,8 @@ export type AgentResponder = (prompt: string, call: number) => string | Promise<
 export interface TestContextOptions {
   /** Repository worktree the step runs in. */
   workingDir: string;
+  /** Directory of the declaring pipeline file; defaults to `null` (built-in pipeline). */
+  pipelineDir?: string | null;
   /** Artifact directory; defaults to `workingDir`. */
   outputDir?: string;
   taskKey?: string;
@@ -98,6 +100,7 @@ export function createTestContext(options: TestContextOptions): TestContext {
     taskContent: options.taskContent ?? "Implement the example change.",
     taskFile: join(options.workingDir, "task-details.md"),
     workingDir: options.workingDir,
+    pipelineDir: options.pipelineDir ?? null,
     outputDir: options.outputDir ?? options.workingDir,
     output: "Implementation output",
     committed: options.committed ?? true,

@@ -167,6 +167,39 @@ describe("report preview", () => {
   });
 });
 
+describe("general report preview", () => {
+  test("attaches no run even when the database has failed runs", async () => {
+    seedFailedRun();
+    const { reports, requests } = harness();
+
+    const response = await reports.previewGeneral(DRAFT);
+    expect(response.status).toBe(200);
+    const body = response.body as ReportPreviewResponse;
+
+    expect(body.runId).toBeNull();
+    expect(body.attachments.run).toBeNull();
+    expect(body.payload.context?.run).toBeUndefined();
+    expect(body.attachments.environment.cliVersion).toBe("9.9.9");
+    expect(requests).toHaveLength(0);
+  });
+
+  test("rejects invalid bodies", async () => {
+    const { reports } = harness();
+    expect((await reports.previewGeneral({ title: "only a title" })).status).toBe(400);
+    expect((await reports.previewGeneral(undefined)).status).toBe(400);
+  });
+
+  test("a general preview submits like a run preview", async () => {
+    const { reports, requests } = harness();
+    const preview = (await reports.previewGeneral(DRAFT)).body as ReportPreviewResponse;
+    const result = await reports.submit({ previewId: preview.previewId, email: "dev@example.com" });
+    expect(result.status).toBe(200);
+    expect(requests).toHaveLength(1);
+    const sent = requests[0]?.body as { context?: { run?: unknown } } | undefined;
+    expect(sent?.context?.run).toBeUndefined();
+  });
+});
+
 describe("report submission", () => {
   test("submits exactly the previewed payload plus the typed contact", async () => {
     const runId = seedFailedRun();
@@ -333,8 +366,17 @@ describe("dashboard server routes", () => {
       expect(submit.status).toBe(200);
       expect(requests).toHaveLength(1);
 
+      const general = await fetch(`${base}/api/reports/preview`, {
+        method: "POST",
+        headers: writeHeaders(base),
+        body: JSON.stringify(DRAFT),
+      });
+      expect(general.status).toBe(200);
+      expect(((await general.json()) as ReportPreviewResponse).runId).toBeNull();
+
       // POST-only, like the other action routes.
       expect((await fetch(`${base}/api/reports`)).status).toBe(404);
+      expect((await fetch(`${base}/api/reports/preview`)).status).toBe(404);
     } finally {
       server.stop();
     }

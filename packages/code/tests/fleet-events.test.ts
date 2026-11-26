@@ -444,6 +444,30 @@ ${repoExtra}
     const review = fingerprint('auto_merge_review_paths = ["**/AGENTS.md"]');
     expect(review).not.toBe(base);
     expect(fingerprint("", 'auto_merge_review_paths = ["**/AGENTS.md"]')).toBe(review);
+    // Large-diff review: off hashes like unset; turning it on re-checks held PRs.
+    expect(fingerprint("auto_merge_review_large_diffs = false")).toBe(base);
+    expect(fingerprint("auto_merge_review_large_diffs = true")).not.toBe(base);
+  });
+
+  test("the runner passes auto_merge_review_large_diffs to the CLI (off by default)", async () => {
+    const root = join(tmpdir(), `fleet-auto-merge-large-${process.pid}-${Date.now()}`);
+    mkdirSync(root, { recursive: true });
+    const policies: unknown[] = [];
+    for (const extra of ["", "auto_merge_review_large_diffs = true"]) {
+      const run = createFleetAutoMerge({
+        config: workspace(extra),
+        workspaceDir: root,
+        repoManager: new FakeRepoManager(root),
+        userHasPushAccess: async () => true,
+        runAutoMerge: async (_slug, _pr, opts) => {
+          policies.push(opts.policy);
+          return { outcome: "waiting", message: "stub", reviewed: false };
+        },
+      });
+      await run("acme/backend", 1, "a".repeat(40));
+    }
+    expect(policies).toMatchObject([{ reviewLargeDiffs: false }, { reviewLargeDiffs: true }]);
+    rmSync(root, { recursive: true, force: true });
   });
 
   test("the runner passes the repo's review paths to the CLI", async () => {

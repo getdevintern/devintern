@@ -249,6 +249,7 @@ function printAutoMergeHelp(defaultLabel: string): void {
   console.log(
     "  --allow-no-checks      Let code PRs merge without a passing CI check (failing or pending checks still block)",
   );
+  console.log("  --review-large-diffs   Review diffs too large to inline from the checkout");
   console.log("  --method <m>           merge | squash | rebase (default: squash)");
   console.log(
     "  --policy <p>           Review rubric: strict | standard | relaxed | custom (default: strict)",
@@ -391,6 +392,8 @@ function parseAutoMergeFlags(
       policy.review = false;
     } else if (arg === "--allow-no-checks") {
       policy.allowNoChecks = true;
+    } else if (arg === "--review-large-diffs") {
+      policy.reviewLargeDiffs = true;
     } else if (arg === "--no-review-label") {
       policy.reviewLabel = "";
     } else if (arg === "--dry-run") {

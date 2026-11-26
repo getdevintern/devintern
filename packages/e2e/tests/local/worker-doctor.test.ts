@@ -66,7 +66,7 @@ test.skipIf(!builtCli)(
       expect(ready.stdout).toContain("🩺 devintern worker readiness:");
       for (const line of [
         `✅ Workspace config — 1 repo, 0 teams, 1 automation (${configPath})`,
-        "✅ Work sources — 0 tracker querys, 1 automation, 0 error monitors, 1 repo",
+        "✅ Work sources — 0 tracker queries, 1 automation, 0 error monitors, 1 repo",
         `✅ Repository access — [[repos]] "fixture" (${worker.remote}): remote reachable`,
         "✅ Automation entitlement — license-key",
         "✅ Agent harness — claude-code",
@@ -93,16 +93,23 @@ test.skipIf(!builtCli)(
         "✅ Ready to run (with the warnings above) — start it with `devintern worker`.",
       );
 
-      // Licensing on, no LICENSE_KEY and no session in the isolated HOME: the
-      // entitlement check fails closed without contacting any service.
+      // Licensing on, no LICENSE_KEY and no session in the isolated HOME:
+      // nothing is broken, signing in is the one step left. It is reported as
+      // an action (exit 2), without contacting any service.
       const started = performance.now();
       const unlicensed = await doctor([], { DEVINTERN_SKIP_LICENSE_CHECK: "0" });
       const elapsedMs = performance.now() - started;
-      expectFails(
-        unlicensed,
-        "❌ Automation entitlement — none: Automated execution detected (CI / systemd / cron) but no automation license was found.",
-        "Run `devintern worker login` to start the free Worker Pilot, or set LICENSE_KEY in the workspace .env (https://devintern.com/pricing)",
+      expect(unlicensed.exitCode).toBe(2);
+      expect(unlicensed.stdout).toContain(
+        "👉 Automation entitlement — Not started: sign in to begin your 14-day free Worker Pilot, no card required",
       );
+      expect(unlicensed.stdout).toMatch(
+        /💡 Run `devintern worker login( --workspace \S+)? github`/,
+      );
+      expect(unlicensed.stdout).toContain(
+        "👉 Setup is fine; one step left before the worker can start.",
+      );
+      expect(unlicensed.stdout).not.toContain("❌");
       expect(unlicensed.stdout).toContain(
         `✅ Repository access — [[repos]] "fixture" (${worker.remote}): remote reachable`,
       );

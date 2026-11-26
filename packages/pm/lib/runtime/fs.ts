@@ -5,6 +5,7 @@
  */
 
 import {
+  appendFile as nodeAppendFile,
   readFile as nodeReadFile,
   writeFile as nodeWriteFile,
   access,
@@ -73,4 +74,19 @@ export async function mkdir(path: string): Promise<void> {
  */
 export async function rm(path: string): Promise<void> {
   await nodeRm(path, { recursive: true, force: true });
+}
+
+/**
+ * Append text to a file in a single write, creating parent directories if
+ * needed. Opened with `O_APPEND`, so one call of a short line never interleaves
+ * with concurrent appenders.
+ * @param path - Absolute or relative file path.
+ * @param content - UTF-8 string to append.
+ */
+export async function appendFile(path: string, content: string): Promise<void> {
+  const dir = dirname(path);
+  if (dir !== ".") {
+    await nodeMkdir(dir, { recursive: true });
+  }
+  await nodeAppendFile(path, content, "utf-8");
 }

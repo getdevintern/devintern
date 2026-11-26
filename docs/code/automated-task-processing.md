@@ -4,7 +4,7 @@ description: "Choose when the worker picks up tasks and keep unattended runs hea
 section: "Automation"
 order: 5
 sidebarHidden: true
-dateModified: 2026-11-18
+dateModified: 2026-11-26
 ---
 
 # Running the Worker Unattended
@@ -59,5 +59,6 @@ The startup banner shows the windows, timezone, and whether pickup is open. Each
 ## Keeping unattended runs healthy
 
 - **Git push over SSH:** the service has no interactive SSH agent. Point the host at a key in `~/.ssh/config` (`Host github.com` / `IdentityFile ~/.ssh/your_key`), or use an HTTPS remote with `GITHUB_TOKEN`.
+- **Git over HTTPS:** git does not read `GITHUB_TOKEN` by itself, so a fresh machine cannot clone or push until a credential helper is configured. Run `gh auth setup-git` once; with `GITHUB_TOKEN` set, `gh` hands that token to git. `devintern worker doctor` fails the repository check when the API accepts the token but git cannot read the repository.
 - **Leftover processes:** dev servers and watchers the agent starts are stopped when each run ends, times out, or is interrupted. No setup needed.
 - **Hand-written service units:** pin `PATH` to include the directory with `bun` (`dirname "$(which bun)"`), or the service fails with `bun: command not found`.

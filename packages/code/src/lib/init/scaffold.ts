@@ -37,6 +37,7 @@ export const TRACKER_SETUP: Record<string, EnvPromptStep[]> = {
     { key: "JIRA_EMAIL", label: "JIRA account email", example: "you@company.com" },
     {
       key: "JIRA_API_TOKEN",
+      secret: true,
       label: "JIRA API token",
       link: "https://id.atlassian.com/manage-profile/security/api-tokens",
     },
@@ -50,6 +51,7 @@ export const TRACKER_SETUP: Record<string, EnvPromptStep[]> = {
   linear: [
     {
       key: "LINEAR_API_KEY",
+      secret: true,
       label: "Linear personal API key (Settings > Security & access > Personal API keys)",
       link: "https://linear.app/settings/account/security",
     },
@@ -63,6 +65,7 @@ export const TRACKER_SETUP: Record<string, EnvPromptStep[]> = {
   github: [
     {
       key: "GITHUB_TOKEN",
+      secret: true,
       label: "GitHub personal access token ('repo' scope)",
       link: GITHUB_TOKEN_LINK,
     },
@@ -84,6 +87,7 @@ export const TRACKER_SETUP: Record<string, EnvPromptStep[]> = {
     },
     {
       key: "GITLAB_TOKEN",
+      secret: true,
       label: "GitLab personal access token (scopes: api)",
       link: (values) => {
         const host = (values.GITLAB_BASE_URL || "https://gitlab.com").replace(/\/+$/, "");
@@ -103,6 +107,7 @@ export const TRACKER_SETUP: Record<string, EnvPromptStep[]> = {
     { key: "AZURE_DEVOPS_ORG", label: "Azure DevOps organization name", example: "my-org" },
     {
       key: "AZURE_DEVOPS_PAT",
+      secret: true,
       label: "Azure DevOps personal access token (Work Items: Read & Write)",
       link: (values) =>
         `https://dev.azure.com/${values.AZURE_DEVOPS_ORG || "your-org"}/_usersSettings/tokens`,
@@ -112,6 +117,7 @@ export const TRACKER_SETUP: Record<string, EnvPromptStep[]> = {
   asana: [
     {
       key: "ASANA_API_TOKEN",
+      secret: true,
       label: "Asana personal access token (My apps > Personal access tokens)",
       link: "https://app.asana.com/0/my-apps",
     },
@@ -131,6 +137,7 @@ export const TRACKER_SETUP: Record<string, EnvPromptStep[]> = {
     },
     {
       key: "TRELLO_API_TOKEN",
+      secret: true,
       label: "Trello API token",
       link: (values) =>
         `https://trello.com/1/authorize?expiration=never&scope=read,write&response_type=token&name=DevIntern&key=${
@@ -157,6 +164,7 @@ export const TRACKER_SETUP: Record<string, EnvPromptStep[]> = {
 export const GITHUB_PR_TOKEN_STEP: EnvPromptStep = {
   key: "GITHUB_TOKEN",
   label: "GitHub token for creating pull requests",
+  secret: true,
   link: GITHUB_TOKEN_LINK,
   optional: true,
 };

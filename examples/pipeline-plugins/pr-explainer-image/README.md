@@ -32,6 +32,7 @@ for the supported tokens, hosts, and size limits.
 ```bash
 mkdir -p ~/.devintern/pipelines/steps ~/.devintern/pipelines/prompts ~/.devintern/pipelines/adapters
 cp examples/pipeline-plugins/pr-explainer-image/plugin.ts ~/.devintern/pipelines/steps/pr-explainer-image.ts
+cp examples/pipeline-plugins/shared/prompt-path.ts ~/.devintern/pipelines/steps/prompt-path.ts
 cp examples/pipeline-plugins/pr-explainer-image/prompts/image.md ~/.devintern/pipelines/prompts/pr-explainer-image.md
 cp examples/pipeline-plugins/pr-explainer-image/artifact-storage.ts ~/.devintern/pipelines/adapters/artifact-storage.ts
 cp examples/pipeline-plugins/pr-explainer-image/check-upload.ts ~/.devintern/pipelines/adapters/check-upload.ts
@@ -39,11 +40,17 @@ cp examples/pipeline-plugins/pr-explainer-image/pipeline.json ~/.devintern/pipel
 cd ~/.devintern/pipelines && bun add @getdevintern/code
 ```
 
+In the copied `pr-explainer-image.ts`, change the `../shared/prompt-path` import
+to `./prompt-path.ts`.
+
 Set `pipeline_file = "pipelines/backend.json"` on the repository's
 `[[repos]]` entry in `~/.devintern/workspace.toml` (see
 [Install and copy a plugin](../README.md#install-and-copy-a-plugin)).
-`promptFile` is read relative to the task checkout, so the pipeline file
-gives it as an absolute path: replace `/home/you` with your home directory.
+A relative `promptFile` such as `./prompts/pr-explainer-image.md` is read next to the
+pipeline file (`~/.devintern/pipelines/`), so the same pipeline works for
+every repository. An absolute path is used as written. Requires
+`@getdevintern/code` 2.30.0 or later; older versions read a relative path
+from the task checkout.
 
 The pipeline uses the built-in `"uploader": "files-sdk"` target. The two files
 copied into `adapters/` are only for the manual upload probe, not plugin loading.

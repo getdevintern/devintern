@@ -50,6 +50,8 @@ export function parseAutoMergeSettings(
     reviewPaths: readGlobList(workspaceTable, "auto_merge_review_paths", label, errors),
     reviewLabel: readReviewLabel(workspaceTable, label, errors),
     policy: readMergeSafetyPolicy(workspaceTable, label, errors) ?? DEFAULT_MERGE_SAFETY_POLICY,
+    reviewLargeDiffs:
+      readOptionalBoolean(workspaceTable, "auto_merge_review_large_diffs", label, errors) ?? false,
     ...(reviewInstructions ? { reviewInstructions } : {}),
     ...(allowNoChecks === undefined ? {} : { allowNoChecks }),
     ...readAutoMergeRules(workspaceTable, label, errors),

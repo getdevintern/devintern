@@ -7,6 +7,7 @@ import { tmpdir } from "os";
 import type { RepoConfig } from "../src/lib/workspace/config";
 import { RepoManager } from "../src/lib/workspace/repo-manager";
 import { Utils } from "../src/lib/utils";
+import { markWorktreeKept } from "../src/lib/utils/worktree-keep";
 
 function git(cwd: string, command: string): string {
   return execSync(`git ${command}`, { cwd, encoding: "utf8" }).trim();
@@ -270,6 +271,18 @@ describe("RepoManager", () => {
     expect(existsSync(stale)).toBe(false);
     expect(existsSync(fresh)).toBe(true);
     expect(existsSync(base)).toBe(true);
+  });
+
+  test("sweepStaleWorktrees keeps a worktree marked as holding unsaved work", async () => {
+    await manager.ensureBareClone(repo);
+    await manager.ensureBaseWorktree(repo);
+    const kept = await manager.createTaskWorktree(repo, "KEEP-1");
+    expect(await markWorktreeKept(kept, "push of 'feature/x' failed")).toBe(true);
+    const oldTime = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000);
+    utimesSync(kept, oldTime, oldTime);
+
+    expect(await manager.sweepStaleWorktrees(repo.name, 7)).toEqual([]);
+    expect(existsSync(kept)).toBe(true);
   });
 
   test("ensurePrJobWorktree tracks the default branch and never moves the base checkout", async () => {

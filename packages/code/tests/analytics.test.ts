@@ -467,6 +467,7 @@ describe("worker init and connect events", () => {
     expect(recorded[2]!.properties).toEqual({
       cli_version: expect.any(String),
       os: process.platform,
+      source: "wizard",
       tracker: "jira",
       relay_connect: "succeeded",
       service_install: "installed",

@@ -10,11 +10,16 @@
  */
 
 import type { RunRecord } from "./api";
+import type { NotificationRecord } from "./api-notifications";
 import {
+  answerDemoNotifications,
+  demoNotifications,
   filterRecordedRuns,
+  isRunDetailUrl,
   isRunListUrl,
   parseSnapshotMeta,
   rebaseTimestamps,
+  pruneUnrecordedLineage,
   RUNS_ALL_FILE,
   SNAPSHOT_DATA_DIR,
   snapshotFile,
@@ -105,6 +110,15 @@ export function createDemoFetch(options: DemoFetchOptions): typeof fetch {
     );
     return runs;
   };
+  let notifications: Promise<NotificationRecord[]> | undefined;
+  const fixtureNotifications = (): Promise<NotificationRecord[]> => {
+    notifications ??= recordedRuns().then((all) =>
+      // Fixture times count back from the viewer's load time; run ids and
+      // links come from the recording so they open real run pages.
+      demoNotifications(all, loadedAt),
+    );
+    return notifications;
+  };
 
   const demoFetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const target = apiTarget(input, origin);
@@ -113,6 +127,11 @@ export function createDemoFetch(options: DemoFetchOptions): typeof fetch {
     if (method !== "GET" && method !== "HEAD") {
       return jsonResponse(403, { error: DEMO_READ_ONLY_MESSAGE });
     }
+    // Snapshots predate the notification center: answer it from fixtures.
+    const notificationBody = target.startsWith("/api/notifications")
+      ? answerDemoNotifications(await fixtureNotifications(), target)
+      : null;
+    if (notificationBody !== null) return jsonResponse(200, notificationBody);
     const delta = await shiftMs();
     if (isRunListUrl(target)) {
       return jsonResponse(
@@ -123,8 +142,12 @@ export function createDemoFetch(options: DemoFetchOptions): typeof fetch {
     const file = snapshotFile(target);
     if (file === null) return jsonResponse(404, { error: "not part of this demo" });
     if (file.endsWith(".bin")) return realFetch(new URL(file, baseUrl), init);
-    const body = await load(file);
+    let body = await load(file);
     if (body === undefined) return jsonResponse(404, { error: "not part of this demo" });
+    if (isRunDetailUrl(target)) {
+      const recordedIds = new Set((await recordedRuns()).map((run) => run.id));
+      body = pruneUnrecordedLineage(body, recordedIds);
+    }
     return jsonResponse(200, rebaseTimestamps(body, delta));
   };
   return demoFetch as typeof fetch;

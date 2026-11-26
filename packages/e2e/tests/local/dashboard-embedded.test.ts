@@ -166,7 +166,7 @@ test.skipIf(!builtCli)(
       // --- 1. embedded API --------------------------------------------------
       const health = await request(`${baseUrl}/api/health`);
       expect(health.status).toBe(200);
-      expect(await health.json()).toEqual({ status: "ok" });
+      expect(await health.json()).toEqual({ status: "ok", version: expect.any(String) });
 
       const status = await jsonOf<{ worker: { status: string; pid?: number }; dbMissing: boolean }>(
         await request(`${baseUrl}/api/worker`),

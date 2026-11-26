@@ -9,6 +9,7 @@ import { parseGitLabHostAliases, parseGitRemoteUrl } from "./provider";
 import type { ChangeRequestIdentity, CodeHostRepository } from "./provider";
 import { isTransientPrFailure, parsePrLabels, resolveGitLabCodeHostConfig } from "./shared";
 import type { PRInfo, PRResult } from "./shared";
+import type { StackPrSnapshot } from "../dependencies/stack-maintainer";
 
 export class PRManager {
   private githubClient?: GitHubPRClient;
@@ -197,6 +198,24 @@ export class PRManager {
       console.warn(
         `⚠️  Could not check the PR state of '${sourceBranch}': ${(error as Error).message}`,
       );
+      return undefined;
+    }
+  }
+
+  /**
+   * Live state of pull request `prNumber` in this checkout's repository.
+   * GitHub only; other hosts, missing credentials, and failed lookups read as
+   * unknown (`undefined`), so callers can fall back to git evidence.
+   */
+  async getPullRequestSnapshot(prNumber: number): Promise<StackPrSnapshot | null | undefined> {
+    const repoInfo = await this.detectRepository();
+    if (repoInfo.platform !== "github") return undefined;
+    const client = await this.githubClientFor(repoInfo.repository);
+    if (!client) return undefined;
+    try {
+      return await client.getPullRequestSnapshot(repoInfo.repository, prNumber);
+    } catch (error) {
+      console.warn(`⚠️  Could not check PR #${prNumber}: ${(error as Error).message}`);
       return undefined;
     }
   }

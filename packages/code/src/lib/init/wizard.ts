@@ -11,8 +11,8 @@
  * falls back to the non-interactive template scaffold.
  */
 
-import { existsSync, readFileSync, writeFileSync } from "fs";
-import { join, resolve } from "path";
+import { existsSync, readFileSync } from "fs";
+import { isAbsolute, join, resolve } from "path";
 import { listInstalledHarnesses, resolveHarness } from "@devintern/agent-harness";
 import {
   createDefaultSupabaseAuthConfig,
@@ -32,6 +32,8 @@ import {
   validateConnection,
 } from "@devintern/task-trackers";
 import { findProjectRoot, upsertEnvVars } from "@devintern/utils";
+import { isPromptAbort } from "../cli/prompt-abort";
+import { resolveWizardPrompts } from "../cli/prompt-session";
 import { resolveProjectConfigDir } from "../config/config-dir";
 import type { SetupSignInStatus, SetupSource } from "../observability/analytics";
 import {
@@ -52,6 +54,7 @@ import { TRACKER_CAPABILITIES } from "../trackers/capabilities";
 import { workspaceCodeStateDir } from "../workspace/paths";
 import { findWorkspaceRepoForCheckout } from "../workspace/manual-run";
 import { registerManualCheckout } from "../workspace/register-checkout";
+import { writeSecretFile } from "../utils/secret-file";
 
 export { isInteractive };
 
@@ -67,6 +70,8 @@ export interface InitWizardUserLike {
 export interface InitWizardDeps {
   /** Reads one line of user input; defaults to node:readline over stdin. */
   prompt?: PromptFn;
+  /** Reads a token without echoing it; defaults to `prompt` when `prompt` is injected. */
+  promptSecret?: PromptFn;
   /** Credential probe; defaults to a cheap authenticated API call per tracker. */
   probe?: ProbeFn;
   /** Working directory; defaults to `process.cwd()`. */
@@ -166,6 +171,8 @@ async function runPostSetup(
           log("⚠️  Sign-in did not complete — run 'devintern login' before using those features.");
         }
       } catch (error) {
+        // Closed input stops the whole wizard, not just the sign-in step.
+        if (isPromptAbort(error)) throw error;
         signedIn = "failed";
         log(
           `⚠️  Sign-in failed: ${error instanceof Error ? error.message : error}\n` +
@@ -215,13 +222,8 @@ export async function runInitWizard(deps: InitWizardDeps = {}): Promise<void> {
     return;
   }
 
-  let rl: import("node:readline/promises").Interface | undefined;
-  let prompt = deps.prompt;
-  if (!prompt) {
-    const { createInterface } = await import("node:readline/promises");
-    rl = createInterface({ input: process.stdin, output: process.stdout });
-    prompt = (question: string) => rl!.question(question);
-  }
+  const session = await resolveWizardPrompts(deps);
+  const { prompt, promptSecret } = session;
 
   // The checkout is registered in the workspace as a manual-only repo (by its
   // origin, or by its directory when it has no recognised remote).
@@ -238,7 +240,7 @@ export async function runInitWizard(deps: InitWizardDeps = {}): Promise<void> {
 
   try {
     trackSetupStarted(deps.source ?? "init");
-    const result = await runTrackerSetup(prompt, log, probe, cwd, { writeEnv });
+    const result = await runTrackerSetup(prompt, log, probe, cwd, { writeEnv, promptSecret });
     if (!result) {
       trackSetupFailed("scaffold_refused");
       return;
@@ -266,7 +268,28 @@ export async function runInitWizard(deps: InitWizardDeps = {}): Promise<void> {
       log("   3. Run 'devintern <TASK-KEY>' to start working on tasks");
     }
   } finally {
-    rl?.close();
+    session.close();
+  }
+}
+
+/**
+ * Save `MARKDOWN_TASKS_DIR` as an absolute path. The worker service runs from
+ * the workspace directory and each task from its checkout, so a relative
+ * folder would point somewhere different for each of them; resolve it from
+ * where the user ran setup, which is what they meant.
+ */
+export function absolutizeMarkdownTasksDir(
+  values: Record<string, string>,
+  cwd: string,
+  log: LogFn,
+): void {
+  const dir = values.MARKDOWN_TASKS_DIR;
+  if (!dir) return;
+  const absolute = isAbsolute(dir) ? dir : resolve(cwd, dir);
+  values.MARKDOWN_TASKS_DIR = absolute;
+  if (absolute !== dir) log(`   Saved as the absolute path ${absolute}`);
+  if (!existsSync(absolute)) {
+    log(`   ℹ️  ${absolute} does not exist yet: create it and add your task files there.`);
   }
 }
 
@@ -285,9 +308,12 @@ export async function runTrackerSetup(
   options: {
     /** Write the collected env content; returns the written path, or null to refuse. */
     writeEnv: (envContent: string) => Promise<string | null>;
+    /** Hidden-input prompt for tokens; defaults to `prompt`. */
+    promptSecret?: PromptFn;
   },
 ): Promise<{ trackerId: string; values: Record<string, string>; envPath: string } | null> {
   const projectRoot = findProjectRoot({ startDir: cwd });
+  const promptSecret = options.promptSecret ?? prompt;
   const values: Record<string, string> = {};
   let trackerId: string | undefined;
 
@@ -304,6 +330,7 @@ export async function runTrackerSetup(
         prompt,
         log,
         values,
+        promptSecret,
       });
       if (reused) trackerId = existing.trackerId;
     }
@@ -334,17 +361,18 @@ export async function runTrackerSetup(
   }
 
   if (!reusedExisting) {
-    await promptSteps(steps, prompt, log, values);
+    await promptSteps(steps, prompt, log, values, promptSecret);
   }
 
   if (trackerId === "markdown") {
+    absolutizeMarkdownTasksDir(values, cwd, log);
     log("\nℹ️  No credentials needed for the markdown tracker.");
   } else {
     await validateConnection(
       trackerId,
       values,
       steps,
-      { prompt, probe, log },
+      { prompt, probe, log, promptSecret },
       "this repo's env file in ~/.devintern/",
     );
   }
@@ -355,7 +383,7 @@ export async function runTrackerSetup(
       "\n📦 DevIntern opens pull requests on GitHub. A token enables that (skip if you use Bitbucket or want to set it up later).",
     );
     log(`   Token permissions and GitHub App setup: ${GITHUB_PR_DOCS}`);
-    await promptSteps([GITHUB_PR_TOKEN_STEP], prompt, log, values);
+    await promptSteps([GITHUB_PR_TOKEN_STEP], prompt, log, values, promptSecret);
   }
 
   const envContent = renderEnvFile(trackerId, values);
@@ -379,6 +407,7 @@ export async function runInitUpgrade(
 ): Promise<void> {
   const log = deps.log ?? console.log;
   const probe = deps.probe ?? defaultProbe;
+  const cwd = deps.cwd ?? process.cwd();
   const envPath = deps.envPath;
   const envLabel = envPath;
 
@@ -392,13 +421,8 @@ export async function runInitUpgrade(
   const currentTracker = (existing.TASK_TRACKER || "jira").toLowerCase();
   const currentName = TRACKER_CAPABILITIES[currentTracker]?.displayName ?? currentTracker;
 
-  let rl: import("node:readline/promises").Interface | undefined;
-  let prompt = deps.prompt;
-  if (!prompt) {
-    const { createInterface } = await import("node:readline/promises");
-    rl = createInterface({ input: process.stdin, output: process.stdout });
-    prompt = (question: string) => rl!.question(question);
-  }
+  const session = await resolveWizardPrompts(deps);
+  const { prompt, promptSecret } = session;
 
   try {
     log("🔧 Existing devintern configuration found.");
@@ -438,7 +462,8 @@ export async function runInitUpgrade(
       const docs = TRACKER_DOCS[currentTracker];
       if (docs) log(`\n📖 Setup guide: ${docs}`);
       const values: Record<string, string> = {};
-      await promptSteps(prefill(steps), prompt, log, values);
+      await promptSteps(prefill(steps), prompt, log, values, promptSecret);
+      absolutizeMarkdownTasksDir(values, cwd, log);
 
       // Optional PR-integration token, kept from config when present.
       if (currentTracker !== "github" && !existing.GITHUB_TOKEN) {
@@ -446,7 +471,7 @@ export async function runInitUpgrade(
           "\n📦 DevIntern opens pull requests on GitHub. A token enables that (skip if you use Bitbucket or want to set it up later).",
         );
         log(`   Token permissions and GitHub App setup: ${GITHUB_PR_DOCS}`);
-        await promptSteps([GITHUB_PR_TOKEN_STEP], prompt, log, values);
+        await promptSteps([GITHUB_PR_TOKEN_STEP], prompt, log, values, promptSecret);
       }
 
       if (currentTracker !== "markdown") {
@@ -454,12 +479,12 @@ export async function runInitUpgrade(
           currentTracker,
           { ...existing, ...values },
           steps,
-          { prompt, probe, log },
+          { prompt, probe, log, promptSecret },
           envLabel,
         );
       }
 
-      writeFileSync(envPath, upsertEnvVars(originalContent, values), "utf8");
+      writeSecretFile(envPath, upsertEnvVars(originalContent, values));
       log(`\n✅ Updated ${envLabel}`);
       return;
     }
@@ -480,7 +505,8 @@ export async function runInitUpgrade(
     if (docs) log(`\n📖 Setup guide (tokens, permissions, examples): ${docs}`);
 
     const values: Record<string, string> = {};
-    await promptSteps(prefill(steps), prompt, log, values);
+    await promptSteps(prefill(steps), prompt, log, values, promptSecret);
+    absolutizeMarkdownTasksDir(values, cwd, log);
     if (trackerId !== "github" && existing.GITHUB_TOKEN) {
       // Carry the PR token over so GitHub integration keeps working.
       values.GITHUB_TOKEN = existing.GITHUB_TOKEN;
@@ -489,17 +515,22 @@ export async function runInitUpgrade(
         "\n📦 DevIntern opens pull requests on GitHub. A token enables that (skip if you use Bitbucket or want to set it up later).",
       );
       log(`   Token permissions and GitHub App setup: ${GITHUB_PR_DOCS}`);
-      await promptSteps([GITHUB_PR_TOKEN_STEP], prompt, log, values);
+      await promptSteps([GITHUB_PR_TOKEN_STEP], prompt, log, values, promptSecret);
     }
 
     if (trackerId !== "markdown") {
-      await validateConnection(trackerId, values, steps, { prompt, probe, log }, envLabel);
+      await validateConnection(
+        trackerId,
+        values,
+        steps,
+        { prompt, probe, log, promptSecret },
+        envLabel,
+      );
     }
 
-    writeFileSync(
+    writeSecretFile(
       envPath,
       upsertEnvVars(originalContent, { TASK_TRACKER: trackerId, ...values }),
-      "utf8",
     );
     log(
       `\n✅ Switched to ${
@@ -507,6 +538,6 @@ export async function runInitUpgrade(
       } in ${envLabel}`,
     );
   } finally {
-    rl?.close();
+    session.close();
   }
 }

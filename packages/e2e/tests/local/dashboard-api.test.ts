@@ -160,7 +160,7 @@ test.skipIf(!builtCli)(
       // --- health -----------------------------------------------------------
       const healthResponse = await fetch(`${baseUrl}/api/health`);
       expect(healthResponse.status).toBe(200);
-      expect(await healthResponse.json()).toEqual({ status: "ok" });
+      expect(await healthResponse.json()).toEqual({ status: "ok", version: expect.any(String) });
 
       // --- run list ---------------------------------------------------------
       const list = await readJson<RunsResponse>(await fetch(`${baseUrl}/api/runs`));
@@ -350,7 +350,7 @@ test.skipIf(!builtCli || !hasIpv6Loopback())(
 
       const health = await fetch(`${dashboard.baseUrl}/api/health`);
       expect(health.status).toBe(200);
-      expect(await health.json()).toEqual({ status: "ok" });
+      expect(await health.json()).toEqual({ status: "ok", version: expect.any(String) });
 
       const status = await workerStatus(dashboard.baseUrl);
       expect(status.dbMissing).toBe(true);

@@ -49,7 +49,8 @@ export function initInjectedTaskSchema(db: Database): void {
       created_at INTEGER NOT NULL,
       started_at INTEGER,
       finished_at INTEGER,
-      team TEXT
+      team TEXT,
+      parent_run_id INTEGER
     )
   `);
   db.run(`
@@ -84,6 +85,10 @@ export function initInjectedTaskSchema(db: Database): void {
   if (!columns.some((column) => column.name === "team")) {
     addColumnIfMissing(db, "team TEXT");
   }
+  // Run lineage: the agent run that delegated this task (`worker add` inside a run).
+  if (!columns.some((column) => column.name === "parent_run_id")) {
+    addColumnIfMissing(db, "parent_run_id INTEGER");
+  }
   for (const name of [
     "depends_on",
     "dependency_mode",
@@ -100,6 +105,9 @@ export function initInjectedTaskSchema(db: Database): void {
     }
   }
   db.run("CREATE INDEX IF NOT EXISTS idx_injected_tasks_status ON injected_tasks(status)");
+  db.run(
+    "CREATE INDEX IF NOT EXISTS idx_injected_tasks_parent_run ON injected_tasks(parent_run_id)",
+  );
   db.run(
     "CREATE INDEX IF NOT EXISTS idx_injected_tasks_finished_at ON injected_tasks(finished_at)",
   );
