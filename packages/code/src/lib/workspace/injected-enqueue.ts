@@ -120,6 +120,8 @@ export interface InjectedTaskRequest {
   after?: string[];
   /** Resolved dependency mode (default `merged`); stored only with dependencies. */
   dependencyMode?: DependencyMode;
+  /** Agent run that delegated the task (run lineage); never applied to a deduplicated row. */
+  parentRunId?: number;
 }
 
 /** A rejected dependency declaration (unknown, cross-repo, or cyclic). */
@@ -290,6 +292,7 @@ export function enqueueInjectedTask(
         taskFile,
         idempotencyKey: request.idempotencyKey,
         actor: request.actor ?? "local:add",
+        ...(request.parentRunId !== undefined ? { parentRunId: request.parentRunId } : {}),
         dependsOn,
         dependencyMode,
         dependencyState: initial && initial.kind !== "ready" ? initial.kind : undefined,

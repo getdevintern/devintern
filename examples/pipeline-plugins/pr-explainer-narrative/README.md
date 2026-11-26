@@ -17,7 +17,7 @@ so it describes the final diff.
 | ------------------------------------- | -------------------------------------------------- |
 | `plugin.ts`                           | Registers the shared explainer scaffold.           |
 | `prompts/narrative.md`                | Editable narrative prompt.                         |
-| `settings.json`                       | Pipeline registration.                             |
+| `pipeline.json`                       | Workspace pipeline file.                           |
 | `fixtures/sample.diff`                | Fixture diff (shared with the visual variant).     |
 | `fixtures/expected.md`                | Example output.                                    |
 | `CREDITS.md`                          | Provenance and pinned revisions.                   |
@@ -29,15 +29,26 @@ The execution scaffold is shared with the visual variant in
 ## Setup
 
 ```bash
-mkdir -p .devintern-code/steps .devintern-code/prompts
-cp examples/pipeline-plugins/shared/explainer.ts .devintern-code/steps/explainer.ts
-cp examples/pipeline-plugins/pr-explainer-narrative/plugin.ts .devintern-code/steps/pr-explainer-narrative.ts
-cp examples/pipeline-plugins/pr-explainer-narrative/prompts/narrative.md .devintern-code/prompts/pr-explainer-narrative.md
-bun add -d @getdevintern/code
+mkdir -p ~/.devintern/pipelines/steps ~/.devintern/pipelines/prompts
+cp examples/pipeline-plugins/shared/explainer.ts ~/.devintern/pipelines/steps/explainer.ts
+cp examples/pipeline-plugins/pr-explainer-narrative/plugin.ts ~/.devintern/pipelines/steps/pr-explainer-narrative.ts
+cp examples/pipeline-plugins/shared/prompt-path.ts ~/.devintern/pipelines/steps/prompt-path.ts
+cp examples/pipeline-plugins/pr-explainer-narrative/prompts/narrative.md ~/.devintern/pipelines/prompts/pr-explainer-narrative.md
+cp examples/pipeline-plugins/pr-explainer-narrative/pipeline.json ~/.devintern/pipelines/backend.json
+cd ~/.devintern/pipelines && bun add @getdevintern/code
 ```
 
-Adjust the import in the copied `plugin.ts` to point at
-`./explainer.ts`, then merge the `pipeline` block from `settings.json`.
+Adjust the import in the copied `plugin.ts` to point at `./explainer.ts`.
+
+Set `pipeline_file = "pipelines/backend.json"` on the repository's
+`[[repos]]` entry in `~/.devintern/workspace.toml` (see
+[Install and copy a plugin](../README.md#install-and-copy-a-plugin)).
+
+A relative `promptFile` such as `./prompts/pr-explainer-narrative.md` is read next to the
+pipeline file (`~/.devintern/pipelines/`), so the same pipeline works for
+every repository. An absolute path is used as written. Requires
+`@getdevintern/code` 2.30.0 or later; older versions read a relative path
+from the task checkout.
 
 ## Result
 

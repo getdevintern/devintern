@@ -95,7 +95,7 @@ export async function applyActionedTransition(input: ActionedTransitionInput): P
       // worker, where a missing actioned status is the duplicate-PR hazard.
       console.warn(
         `⚠️  No prStatus configured for ${projectKey}; recording ${taskKey} as actioned locally so it ` +
-          "is not re-implemented. Add a prStatus in .devintern-code/settings.json (or exclude " +
+          "is not re-implemented. Add pr_status under [trackers] in ~/.devintern/workspace.toml (or exclude " +
           "actioned tickets in the sweep query) to also move it out of the tracker.",
       );
     }

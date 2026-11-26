@@ -36,7 +36,7 @@ The worker waits until the PR head has been quiet for a short period before acti
 devintern resolve-conflicts <pr-url>
 ```
 
-Run from a checkout of a workspace repository, `resolve-conflicts` and `address-review` use the workspace and repo credentials and the worker's sign-in. In other checkouts they use that project's own `.devintern-code` configuration.
+Run from a checkout of a workspace repository, `resolve-conflicts` and `address-review` use the workspace and repo credentials and the worker's sign-in. In other checkouts they use that project's own settings and the shared sign-in in `~/.devintern/state/code/`.
 
 On GitLab, conflict resolution supports `auto` mode and the manual command. `scheduled` mode does not process GitLab MRs yet; see [GitLab integration](./gitlab-integration.md).
 
@@ -127,7 +127,7 @@ auto_merge_review_instructions = "Changes under billing/ always need a human."
 Each PR passes these gates in order. Any "no" leaves it open for a human:
 
 1. **Ready.** Open, not a draft, not from a fork, checks passing, no conflicts, and no outstanding "changes requested" review. Branch protection still applies. The head commit must be unchanged for 5 minutes (`WORKER_AUTO_MERGE_QUIET_SECONDS`).
-2. **Deny paths.** A changed file matching `auto_merge_deny_paths` or a built-in deny path (`.github/**`, `**/CODEOWNERS`, `.devintern-code/**`) blocks the merge.
+2. **Deny paths.** A changed file matching `auto_merge_deny_paths` or a built-in deny path (`.github/**`, `**/CODEOWNERS`) blocks the merge.
 3. **Safe paths.** If every changed file matches `auto_merge_safe_paths` and none matches `auto_merge_review_paths`, the PR merges with no agent run.
 4. **Agent review.** Otherwise, with `auto_merge_review = true` (the default), the agent reviews the diff and the PR merges only on an explicit "safe" verdict. With `auto_merge_review = false`, the PR stays open.
 
@@ -152,7 +152,7 @@ The agent is told which changed files matched a review path, and the status comm
 
 ### Review policy
 
-`auto_merge_policy` picks the rubric the agent review in gate 4 judges PRs by. Whatever the policy, the review never merges a PR it is unsure about, a diff it cannot read in full (truncated, generated, binary, or over 150,000 characters), or a PR whose text tells it to approve.
+`auto_merge_policy` picks the rubric the agent review in gate 4 judges PRs by. Whatever the policy, the review never merges a PR it is unsure about, a change it cannot read in full (truncated, generated, or binary), or a PR whose text tells it to approve. A diff over 150,000 characters stays open for a human unless you set `auto_merge_review_large_diffs = true`; then the agent pages through it from the PR checkout with `git diff`. Diffs over 400,000 characters always stay open. A large diff can still be left open if the agent cannot read all of it (for example, one very long generated or minified file), or if a changed file name contains anything other than letters, digits, and `. _ / @ + = , : -` (this includes spaces and non-ASCII names) or has a path segment that starts with `-`.
 
 | Policy             | Leaves open for a human                                                                                                                                                                                                                                                                                                                             | Use when                                                                                                |
 | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
@@ -168,6 +168,7 @@ The agent is told which changed files matched a review path, and the status comm
 | `auto_merge_rules`               | none     | The rubric for `custom`, inline. Up to 20,000 characters.                                                                                                                                                                                   |
 | `auto_merge_rules_file`          | none     | The rubric for `custom`, in a file. Relative paths are taken from the workspace home (`~/.devintern`); `~` is expanded. The file is read on every review, so edits apply right away and re-check PRs it left open. Up to 20,000 characters. |
 | `auto_merge_review_instructions` | none     | Extra rules added after the rubric for any policy, including `custom`, for example paths that always need a human. They can only make the review stricter. Set `""` in a `[[repos]]` entry to drop the workspace text for that repo.        |
+| `auto_merge_review_large_diffs`  | `false`  | Review diffs over 150,000 characters (up to 400,000) from the PR checkout instead of leaving them open. Workspace-level only.                                                                                                               |
 
 `custom` needs exactly one of `auto_merge_rules` and `auto_merge_rules_file`, and those keys are rejected under any other policy. A `[[repos]]` entry that sets either key replaces the workspace's rules for that repo. Rules come only from `workspace.toml` or the file it names, never from the repository being reviewed. If the rules file is missing, empty, unreadable, or too long, the review does not run: the PR stays open, and the status comment names the problem.
 

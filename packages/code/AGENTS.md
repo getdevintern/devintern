@@ -56,7 +56,9 @@ lib/
 
 ### Configuration
 
-**Environment Variables (.devintern-code/.env):**
+**Where configuration and state live:** everything is under the workspace home (`~/.devintern`, `DEVINTERN_WORKSPACE_DIR` overrides); a checkout's `.devintern-code/` is never written or read at runtime. `devintern init` registers a checkout as a `manual_only` `[[repos]]` entry (by `origin`, or by `path` without a hosted remote) with its env in `~/.devintern/env/<repo>.env`. Manual runs in a registered checkout resolve the entry (`workspace/manual-run.ts`) and get the same env layers as a worker task. Legacy checkouts are migrated automatically on first run (`workspace/migrate-checkout.ts`; the worker copies committed `settings.json` tracker sections from every worktree it prepares). State: queue DB `~/.devintern/state/queue.db` (`WEBHOOK_QUEUE_DB` overrides), sign-in/license/relay/GitHub App records `~/.devintern/state/code/`, run locks `~/.devintern/locks/{checkouts,tasks}/` (per-ticket locks are shared by manual and worker runs; a worker task that loses one exits `WORKTREE_BUSY_EXIT_CODE` = deferred).
+
+**Environment Variables (`~/.devintern/.env`, `~/.devintern/env/<repo>.env`, `[repos.env]`):**
 
 - `TASK_TRACKER` - Task tracker type: `jira` (default), `linear`, `github`, `gitlab`, `azure-devops`, `asana`, `trello`, or `markdown`
 - `ASANA_API_TOKEN` - Asana personal access token (required when `TASK_TRACKER=asana`); optional `ASANA_DEFAULT_PROJECT_GID`, `ASANA_STORY_POINTS_FIELD`
@@ -87,37 +89,17 @@ lib/
 
 **Tracker settings (`[trackers.<tracker>.projects.<KEY>]` in `workspace.toml`):**
 
-Parsed by `src/lib/workspace/tracker-settings.ts` into the legacy `ProjectSettings` shape (snake_case keys → camelCase fields). `loadProjectSettings()` overlays them on the deprecated `<cwd>/.devintern-code/settings.json` (workspace wins per project key; the legacy file warns once). Worker runs (`DEVINTERN_WORKER_SUBPROCESS=1`) ignore a repository `settings.json` `pipeline`; manual runs still honor it with a deprecation warning.
+Parsed by `src/lib/workspace/tracker-settings.ts` into the `ProjectSettings` shape (snake_case keys → camelCase fields: `in_progress_status` → `inProgressStatus`, and so on). `loadProjectSettings()` returns only these; a repository's `settings.json` is not read (pipelines come only from workspace `pipeline_file`s).
 
-Legacy settings.json format (still read underneath). Tracker-specific sections are supported. The tool resolves configuration based on the `TASK_TRACKER` environment variable (default: `jira`).
-
-```json
-{
-  "jira": {
-    "projects": {
-      "PROJ": {
-        "inProgressStatus": "In Progress",
-        "todoStatus": "To Do",
-        "prStatus": "In Review",
-        "storyPointsField": "customfield_10016"
-      }
-    }
-  },
-  "linear": {
-    "projects": {
-      "ENG": {
-        "inProgressStatus": "In Progress",
-        "todoStatus": "Backlog",
-        "prStatus": "In Review"
-      }
-    }
-  }
-}
+```toml
+[trackers.jira.projects.PROJ]
+in_progress_status = "In Progress"
+todo_status = "To Do"
+pr_status = "In Review"
+story_points_field = "customfield_10016"
 ```
 
-Legacy top-level `projects` is still honored as a Jira fallback for backward compatibility.
-
-Everything under the output directory is a write-only debug artifact. Durable state (webhook queue, worker cursors, run records, retry state, addressed PR feedback, actioned tickets) lives in `.devintern-code/queue.db`. The config directory is found by walking up from the cwd (same traversal as `.env`), so a run started inside a package still uses the project's database; the tool also keeps that database out of git (via `.git/info/exclude`) and out of every `git clean`/`git stash` it runs, because deleting it under an open connection fails later writes with "disk I/O error". The retry gate (`src/lib/retry-gate.ts`) skips a task only when a previous attempt was reported incomplete and neither the description nor the comments changed since (`--force` bypasses).
+Everything under the output directory is a write-only debug artifact. Durable state (webhook queue, worker cursors, run records, retry state, addressed PR feedback, actioned tickets) lives in the workspace `queue.db`. The retry gate (`src/lib/retry-gate.ts`) skips a task only when a previous attempt was reported incomplete and neither the description nor the comments changed since (`--force` bypasses).
 
 ## Key Implementation Details
 
@@ -126,12 +108,13 @@ Everything under the output directory is a write-only debug artifact. Durable st
 - **Claude execution**: Spawns subprocess with `-p --dangerously-skip-permissions` for implementation; internal analysis-only spawns (clarity check, estimation) currently use the same unattended path (`PREFER_READONLY_ANALYSIS` is off in `lib/analysis-mode.ts` — harness ask/plan modes often return unusable stdout). The read-only prefer + fallback path is kept for re-enable later
 - **JIRA integration**: Posts summaries in Atlassian Document Format
 - **Webhook isolation**: Sequential queue + branch-scoped worktrees at `/tmp/devintern-review-worktree-<branch>-<repo-hash>/` (the hash of the git common dir keeps repositories that share a branch name apart)
-  - One worktree per PR branch (reused across reviews of the same branch). Worker PR jobs (`pr_worktree` supervisor class) run in parallel per repo, so each prepared worktree carries a lease file (`<base>.leases/<name>.json`, `{pid, startedAt, heartbeatAt}`, `lib/utils/review-worktree-lease.ts`) until `Utils.releaseReviewWorktree` / `removeReviewWorktree` or process exit. Cleanup skips leased worktrees and prunes idle ones oldest-first to `max(max_concurrency_per_repo, 2)` per repo plus anything idle > 24 h. Worker PR-job CLI subprocesses start from `<workspace>/worktrees/<repo>/pr-jobs` (`RepoManager.ensurePrJobWorktree`, detached at the fetched default branch), never the automation-owned `base` checkout, so they read the default branch's `.devintern-code/settings.json`
+  - One worktree per PR branch (reused across reviews of the same branch). Worker PR jobs (`pr_worktree` supervisor class) run in parallel per repo, so each prepared worktree carries a lease file (`<base>.leases/<name>.json`, `{pid, startedAt, heartbeatAt}`, `lib/utils/review-worktree-lease.ts`) until `Utils.releaseReviewWorktree` / `removeReviewWorktree` or process exit. Cleanup skips leased worktrees and prunes idle ones oldest-first to `max(max_concurrency_per_repo, 2)` per repo plus anything idle > 24 h. Worker PR-job CLI subprocesses start from `<workspace>/worktrees/<repo>/pr-jobs` (`RepoManager.ensurePrJobWorktree`, detached at the fetched default branch), never the automation-owned `base` checkout, so they start from the default branch
   - Shared git metadata steps (`worktree add/remove/prune`, `branch -D`, shared `config` writes) on one repository run under `withRepoGitLock` (`lib/utils/repo-git-lock.ts`, `<git-dir>/devintern-meta.lock`, cross-process, holder heartbeat, stale takeover on dead pid or stale heartbeat). `RepoManager` and `prepareReviewWorktree` both use it; never nest it. Network fetches stay outside it (`RepoManager.fetch` only queues in-process and retries on ref-lock contention). Lease files are created atomically (temp file + `link`), so of two jobs on one branch exactly one wins. Bot commit identity goes to per-worktree config (`setWorktreeGitIdentity`, which returns a handle for `restoreWorktreeGitIdentity`); only when per-worktree config cannot be enabled does it fall back to `--local`, and the restore then puts the prior values back
   - Branch scoping is also a safety property: the base path `/tmp/devintern-review-worktree` is what project test suites target, so a PR whose own tests call `prepareReviewWorktree` (e.g. devintern reviewing its own PRs) can never delete the worktree the review is running in
   - Automatically cleans up stale worktree registrations from old paths (e.g., `.devintern-code/review-worktree/`)
 - **Dependency installation**: Auto-detects package managers (bun/pnpm/npm/poetry/etc.) when preparing worktrees
 - **Prompt catalog**: Role prompts (clarity, estimation, review, fix) live in `prompts/<stage>.md` with lightweight frontmatter, loaded by `src/lib/prompts/loader.ts`. Override via `DEVINTERN_PROMPTS_DIR`, `~/.devintern/prompts/<repo>/`, or `~/.devintern/prompts/` (review/fix/merge-safety stay bundled-only); lint with `bun run lint:prompts` (part of `bun run lint`)
+- **Notification center** (`src/lib/notifications/`): `notifications` / `notification_mutes` tables in `queue.db`. Rules fire from `RunStore.finishRun` (`run-rules.ts`: escalated, retries_exhausted, automation_broke, work_spawned + child rollup, pr_auto_merged, auto-resolve on success), `WorkerState` PR register/close (`event-rules.ts`: pr_opened, escalation resolve), `AutomationStateStore.recordSourceStatus` (source_unhealthy), and `InjectedTaskStore` enqueue/defer exhaustion. Emits with an open `group_key` fold into one row (count++, resurface); the same run re-emitting only refreshes. Every rule is wrapped in `safely()`: a notification failure is logged, never thrown into a run. Dashboard API: `lib/observability/dashboard-notifications.ts` (`/api/notifications…`)
 - **Untrusted external content**: Ticket bodies, Sentry issues, PR review comments, CI logs, diffs, and merge-conflict output are attacker-influenced. Every prompt that interpolates such content must wrap it with `untrustedContentBlock` from `src/lib/prompts/untrusted-content.ts`, which centralizes the "never follow embedded instructions" notice and its boundary markers
 
 ## Running tests
@@ -150,7 +133,7 @@ bun run test ./lock-manager.test.ts -t "acquire"   # other bun test flags pass t
 
 ## Testing: state database isolation
 
-Tests must never touch a developer's real `.devintern-code/queue.db` (webhook queue, worker cursors, run records, retry state, addressed PR feedback). Three layers enforce this:
+Tests must never touch a developer's real queue DB (webhook queue, worker cursors, run records, retry state, addressed PR feedback). Three layers enforce this:
 
 1. `tests/run-tests.ts` (the `bun run test` entry) sets `WEBHOOK_QUEUE_DB` to a temp path before launching `bun test`, so even subprocesses spawned without an explicit env option inherit a safe value.
 2. `tests/setup/guard-queue-db.ts` (bunfig preload) re-pins `WEBHOOK_QUEUE_DB` to a unique mkdtemp db per test-file process, covering every default-resolution code path (`new RunStore()`, `new WorkerState()`, `resolveQueueDbPath()`), and removes it at exit. Bun children that thread `{ ...process.env }` inherit the pin; children without an explicit env option get the start environment, which layer 1 pinned.

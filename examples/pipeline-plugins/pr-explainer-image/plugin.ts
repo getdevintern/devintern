@@ -1,7 +1,9 @@
 import { mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { join } from "node:path";
 import { untrustedContentBlock } from "@getdevintern/code/pipeline";
 import type { StepDefinition } from "@getdevintern/code/pipeline";
+
+import { resolvePromptPath } from "../shared/prompt-path";
 
 const definition: StepDefinition = {
   name: "pr-explainer-image",
@@ -14,7 +16,9 @@ const definition: StepDefinition = {
       name: "pr-explainer-image",
       async run(context) {
         try {
-          const file = isAbsolute(promptFile) ? promptFile : join(context.workingDir, promptFile);
+          // Relative to the pipeline file's directory (or the checkout for the
+          // built-in pipeline); a missing file reports this absolute path.
+          const file = resolvePromptPath(promptFile, context);
           const instructions = readFileSync(file, "utf8");
           mkdirSync(context.outputDir, { recursive: true });
           // A fresh directory prevents a failed generation from reusing stale output.

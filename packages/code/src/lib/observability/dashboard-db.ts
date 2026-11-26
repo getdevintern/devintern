@@ -1,20 +1,11 @@
 /**
  * Database resolution for the local observability dashboard.
  *
- * The dashboard reads two different kinds of state, and they do not always
- * live in the same file:
- *
- * - Run history (runs, stats, agent PRs, artifacts, retry audit) belongs to
- *   whoever recorded the run. A direct `devintern TASK` run writes to the
- *   project-scoped `<project>/.devintern-code/queue.db`; a workspace worker
- *   writes to `<workspace>/state/queue.db` via `WEBHOOK_QUEUE_DB`.
- * - Durable queue counts (ad-hoc `worker add` tasks and scheduled retries)
- *   belong to the worker's shared queue database, which is the workspace DB
- *   whenever a workspace is configured.
- *
- * A standalone `devintern dashboard` must therefore keep reading its run
- * history from the project-scoped DB (so local runs stay visible when a
- * workspace also exists) while counting queue work in the workspace DB.
+ * Run history and the durable work queues live in the workspace database
+ * (`<workspace>/state/queue.db`): manual runs and worker tasks both record
+ * there. An explicit `WEBHOOK_QUEUE_DB` (worker-embedded dashboard, or a user
+ * pin) wins for both. `--workspace` points the queue counts at another
+ * workspace.
  *
  * Kept separate from `dashboard-api.ts` so both the API defaults and the
  * standalone command share one rule.
@@ -26,7 +17,7 @@ import { basename, join, resolve } from "path";
 
 import { configureSqliteConnection } from "../state/sqlite";
 import { readRelayQueueStats, resolveQueueDbPath, WebhookQueue } from "../state/webhook-queue";
-import { hasWorkspace, resolveWorkspaceDir, workspaceDbPath } from "../workspace/paths";
+import { resolveWorkspaceDir, workspaceDbPath } from "../workspace/paths";
 
 /**
  * Resolve a `--workspace` argument to the workspace `workspace.toml` path.
@@ -55,40 +46,18 @@ export function resolveWorkspaceArgPath(input: string): string | null {
   }
 }
 
-/**
- * Resolve the database that owns run history.
- *
- * Preserves the pre-workspace behavior: the same project-scoped DB a direct
- * CLI run writes. An explicit `WEBHOOK_QUEUE_DB` (worker-embedded dashboard,
- * or a user pin) still wins through {@linkcode resolveQueueDbPath}.
- *
- * @param projectDir - Directory the project-scoped DB resolves from
- */
-export function resolveDashboardHistoryDbPath(projectDir: string = process.cwd()): string {
-  return resolveQueueDbPath(projectDir);
+/** Resolve the database that owns run history. */
+export function resolveDashboardHistoryDbPath(): string {
+  return resolveQueueDbPath();
 }
 
 /**
  * Resolve the database holding the durable work queues the dashboard counts.
  *
- * Defaulting a standalone `devintern dashboard` to the project-scoped
- * `.devintern-code/queue.db` left the injected/retry status counters at zero
- * even while work was pending, so prefer the workspace DB whenever a
- * workspace is configured. No workspace (legacy single-project layouts) keeps
- * the old project-scoped resolution. An explicit `WEBHOOK_QUEUE_DB` still
- * wins.
- *
  * @param workspaceDir - Workspace home (defaults to `~/.devintern`)
- * @param projectDir - Directory the legacy project-scoped DB resolves from
  */
-export function resolveDashboardQueueDbPath(
-  workspaceDir: string = resolveWorkspaceDir(),
-  projectDir: string = process.cwd(),
-): string {
-  if (!process.env.WEBHOOK_QUEUE_DB && hasWorkspace(workspaceDir)) {
-    return workspaceDbPath(workspaceDir);
-  }
-  return resolveQueueDbPath(projectDir);
+export function resolveDashboardQueueDbPath(workspaceDir: string = resolveWorkspaceDir()): string {
+  return process.env.WEBHOOK_QUEUE_DB || workspaceDbPath(workspaceDir);
 }
 
 const EMPTY_QUEUE_STATUS_COUNTS = { pending: 0, running: 0 };

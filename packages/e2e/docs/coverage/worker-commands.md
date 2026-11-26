@@ -17,10 +17,10 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 ### `worker init`
 
 - Surface: `devintern worker` surface
-- Status: `gap`
-- Evidence: —
-- Missing: Non-interactive failure and prompt-free path.
-- Last reviewed: 2026-11-17
+- Status: `default`
+- Evidence: `tests/local/worker-init-noninteractive.test.ts`: `--non-interactive` Markdown happy path with a stub agent CLI (exit 0, one `devintern.worker-init` v1 JSON document, `result: "success"`, mode-0600 `.env`, `[defaults].tracker`/`task_query` and one `[[repos]]` entry for the local bare `origin`; a follow-up `worker doctor` reports the same tracker, query, repository, and harness checks), text mode, 0 matches as a `query` warning, no agent CLI on PATH as a `harness` failure with exit 1, input errors that write nothing and exit 1 with one `❌` line (missing flags in text and JSON, `--jira-token`, unsupported tracker, a 0644 `--env-file`, `--repo-from-cwd` outside Git and without `origin`, `--yes`/`--tracker` without `--non-interactive`), an existing workspace refused without `--yes` (bytes unchanged) and `--yes` changing only `task_query`, three concurrent runs with exactly one writer and one repo entry, plain `worker init` with no TTY pointing to `--non-interactive`, and `--env-file` secrets absent from stdout and stderr. `tests/local/worker-init-wizard.test.ts`: the interactive wizard on a Bun PTY. The Markdown path through every prompt with the license check skipped ends exit 0 with every readiness check passing and "Worker setup complete — the worker is ready"; with licensing on, declining the sign-in saves the setup, shows the **Automation entitlement** readiness check as a 👉 action ("Not started: sign in to begin your 14-day free Worker Pilot, no card required"), and ends with "One step left" instead of "not ready yet". Ctrl+D and Ctrl+C at the first prompt (nothing written) and at the mid-flow query prompt each end with one clean line ("Input closed (Ctrl+D)" or "Interrupted (Ctrl+C)"), a non-zero exit, and no stack trace. The aborted workspace keeps `tracker = "markdown"` and a re-run completes. A relative `./tasks` is saved to `.env` as an absolute path and `worker doctor` run from another directory finds the task. A token typed at the hidden GitHub token prompt never appears in the terminal output and is saved to the 0600 `.env`. `tests/docker/worker-init.test.ts`: the same non-interactive scenarios on a blank Debian container with the packed CLI installed globally (`bun run --filter @getdevintern/code build`, then `bun run --filter @devintern/e2e test` and `test:docker`). `worker-init-noninteractive` also covers a missing sign-in: with licensing on and no session, `--non-interactive` exits 2 with `result: "action_required"`, an `action` entitlement check, and a `devintern worker login github` next step, and `worker doctor` exits 2 with the same 👉 row; with the check skipped doctor passes
+- Missing: Trackers other than Markdown (their credential probes need fake servers wired into init); the wizard's non-Markdown tracker prompts (so the hidden-input check uses the GitHub token prompt, not a tracker token), a GitHub remote's App step, and a "yes" to the service. The Jira `/myself` check with a wrong token, the GitHub `GITHUB_REPO` access check, and Trello short board id resolution are covered by unit tests in `packages/task-trackers/credential-probes.test.ts`, not here.
+- Last reviewed: 2026-11-26
 
 ### `worker login`
 
@@ -138,9 +138,17 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 
 - Surface: `devintern worker` surface
 - Status: `default`
-- Evidence: `tests/local/worker-doctor.test.ts`: a `WorkerFixture` workspace (local bare remote, deterministic agent, one automation) passes every check and exits 0 without creating the state database or lock; `--offline` turns the repository and license checks into warnings, exit 0; with licensing on and no `LICENSE_KEY` or session, **Automation entitlement** fails closed (exit 1, no network); a busy dashboard port is a warning; a missing `workspace.toml` (by `--workspace` and by default location), a nonexistent remote path (detail names git's `does not appear to be a git repository` cause), and unparseable TOML exit 1 with the failing check and its hint; `--json` is rejected as an unknown option (doctor has no JSON mode); a credential in the workspace `.env` never appears in output; zero requests reach the refusing proxy (`bun run --filter @getdevintern/code build`, then `bun run --filter @devintern/e2e test`)
-- Missing: Tracker credential and task-query dry-run checks (`[defaults].task_query`, `[[teams]]`); GitHub remotes checked through the API; a signed-in entitlement; harness and sandbox failures.
-- Last reviewed: 2026-11-23
+- Evidence: `tests/local/worker-doctor.test.ts`: a `WorkerFixture` workspace (local bare remote, deterministic agent, one automation) passes every check and exits 0 without creating the state database or lock; `--offline` turns the repository and license checks into warnings, exit 0; with licensing on and no `LICENSE_KEY` or session, **Automation entitlement** is a 👉 sign-in action (exit 2, no network); a busy dashboard port is a warning; a missing `workspace.toml` (by `--workspace` and by default location), a nonexistent remote path (detail names git's `does not appear to be a git repository` cause), and unparseable TOML exit 1 with the failing check and its hint; `--json` is rejected as an unknown option (doctor has no JSON mode); a credential in the workspace `.env` never appears in output; zero requests reach the refusing proxy (`bun run --filter @getdevintern/code build`, then `bun run --filter @devintern/e2e test`)
+- Missing: GitHub remotes checked through the API; a signed-in entitlement; harness and sandbox failures. (Tracker credential and task-query checks have their own row below.)
+- Last reviewed: 2026-11-25
+
+### worker doctor: tracker credentials and task-query dry run (`[defaults]`, `[[teams]]`)
+
+- Surface: `devintern worker` surface
+- Status: `default`
+- Evidence: `tests/local/worker-doctor-trackers.test.ts` against `providers/fake-jira.ts`. `[defaults]` (Jira, credentials in the workspace `.env`): **Tracker credentials** passes and **Task query** reports `2 tasks match`, the fake records exactly the configured JQL once, exit 0. A query the fake rejects with 400 and Jira-style `errorMessages` exits 1 with the Jira error and the `Fix [defaults].task_query in workspace.toml` hint, after exactly one search. With `JIRA_API_TOKEN` absent, the credential row names the variable and the `.env` path, the dry run is `not run (missing tracker credentials)`, and no request reaches the fake. `[[teams]]`: two Jira teams on separate fakes (one via `env_file`, one via `[teams.env]`) both pass with their own JQL. A missing token or a rejected query fails only that team, labelled `jira (team "<name>")`, with the team hint (naming `env/alpha.env` when set). `--offline` still runs the local credential check (a missing token still exits 1) and turns each dry run into a `skipped (--offline)` warning with no fake request. Tokens never appear raw or URL-encoded in output; no state database or lock is created; the refusing proxy sees zero requests (`bun run --filter @getdevintern/code build`, then `bun run --filter @devintern/e2e test`)
+- Missing: Trackers other than Jira; a dry-run timeout; namespaced team values in the workspace `.env` (`JIRA_<TEAM>_*`); live Jira `/search/jql` drift. Observed (unconfirmed intent): the **Work sources** detail pluralizes as `2 tracker querys` (not asserted).
+- Last reviewed: 2026-11-25
 
 ## Backlog
 
@@ -309,12 +317,82 @@ nonexistent remote path, unparseable TOML, and the rejected `--json`. It
 rewrites `workspace.toml` between cases. A random fake `GITHUB_TOKEN` in the
 workspace `.env` must not appear in stdout or stderr, raw or URL-encoded.
 
-Prerequisites for both: the built CLI only (no tracker, code host, network, or
-credentials). Each test owns one temporary root (HOME, workspace, state
-database, bare remote) and removes it in `finally` together with the daemon,
-the recording proxy, and any listener it bound.
+### Worker doctor tracker checks
+
+`tests/local/worker-doctor-trackers.test.ts` runs `devintern worker doctor`
+against a prepared, never started `WorkerFixture` workspace with
+`[defaults].tracker = "jira"` and in-process `FakeJiraTracker` servers on
+loopback. Jira credentials live only in the workspace `.env`, a team
+`env_file`, or `[teams.env]`, with random fake tokens; the child environment
+carries none.
+
+- `[defaults].task_query`: the ready path reports the dry-run match count and
+  the fake's `searches` equal the configured JQL. A query rejected through
+  `FakeJiraTracker.rejectSearchesContaining` (400 with `errorMessages`, as Jira
+  answers an unknown status) fails with the `[defaults].task_query` hint. A
+  `.env` without `JIRA_API_TOKEN` fails the credential row, the dry run is not
+  run, and the fake records no search.
+- `[[teams]]`: two teams on two fakes pass independently. Breaking one team's
+  credentials (in `[teams.env]`, then in its `env_file`) or query fails only
+  that team, and the other team's dry run still runs.
+- `--offline` keeps the local credential check and skips every dry run as a
+  warning with no request.
+
+Prerequisites for all three: the built CLI only (no real tracker, code host,
+network, or credentials; the tracker suite uses loopback fake Jira servers).
+Each test owns one temporary root (HOME, workspace, state database, bare
+remote) and removes it in `finally` together with the daemon, the recording
+proxy, the fake trackers, and any listener it bound.
 
 ```sh
 bun run --filter @getdevintern/code build
 bun run --filter @devintern/e2e test
+```
+
+### Worker init (`worker init`, non-interactive and wizard)
+
+`tests/local/worker-init-noninteractive.test.ts` runs the built CLI's
+`devintern worker init --non-interactive` with stdin closed and no TTY. Each
+test owns a temporary root (`helpers/worker-init.ts`): HOME, the workspace, a
+Markdown task folder with one `status: todo` task, and a checkout whose
+`origin` is a local bare repository, so the query and repository checks run
+for real without a network. PATH is built from scratch (`git`, `which`, `bun`,
+and a stub `claude` when the test wants an agent), so an agent CLI installed on
+the host cannot change the harness verdict. Assertions read the `--json`
+document and the files on disk rather than CLI prose, except for the one-line
+input errors. Fake secrets (a `GITHUB_TOKEN` and a `LICENSE_KEY` in a 0600
+`--env-file`) must reach the workspace `.env` and never stdout or stderr, raw
+or URL-encoded, in JSON mode, text mode, or a follow-up `worker doctor`.
+
+`tests/local/worker-init-wizard.test.ts` drives the interactive wizard on a Bun
+pseudo-terminal (`Bun.spawn({ terminal })`) with no extra system packages.
+Ctrl+D and Ctrl+C are sent as the raw bytes `\x04` and `\x03` through the PTY:
+closing stdin, or `script` with `</dev/null`, never delivers EOF to the
+wizard's raw-mode readline. Most cases skip the license check (`DEVINTERN_SKIP_LICENSE_CHECK=1`);
+the sign-in case turns licensing on with no key or session, so the
+Worker Pilot sign-in prompt appears and is declined. The PATH has no
+`systemctl`, so no service step is offered. HTTP(S) goes through a
+refusing loopback proxy that must see zero requests. The PTY cases skip only
+where Bun has no PTY support (Windows).
+
+### Worker init blank-machine smoke (Docker)
+
+`tests/docker/worker-init.test.ts` is opt-in because it needs a Docker daemon.
+`bun run --filter @devintern/e2e test:docker` (scripts/docker.ts) packs the
+built CLI with `bun pm pack`, builds `docker/worker-init/Dockerfile` (the
+`oven/bun:<host Bun version>-debian` image, git only, a non-root user with the
+host's uid, and the CLI installed with `bun add -g`), and runs the file. Each
+test starts a fresh container with `--network none` and runs commands through
+`docker exec` without `-i`/`-t` (no TTY, stdin closed), so the CLI sees a
+first-time install: the default `~/.devintern`, no agent CLI, no session or
+license, and no skip flags except where a scenario sets the license skip itself.
+Scenarios: the Markdown setup with a stub agent (exit 2, `action_required`, on the missing
+sign-in alone with a `sign-in` next step, doctor exiting 2 and then passing
+with the license skipped, re-run refusal, `--yes` changing only the query), no agent CLI,
+0 matches, the input errors, no TTY, concurrent runs, and `--env-file`
+redaction. The e2e-local workflow runs it after the local suite.
+
+```sh
+bun run --filter @getdevintern/code build
+bun run --filter @devintern/e2e test:docker
 ```

@@ -18,7 +18,7 @@ import { Database } from "bun:sqlite";
 import { isAutomatedEnvironment } from "../config/env-detector";
 import { readWorkerLogs } from "../observability/worker-logs";
 import { resolveWorkspaceDir } from "../workspace/paths";
-import { resolveReportConfigDir } from "./paths";
+import { reportWorkspaceDir } from "./paths";
 import { detectRepoSlug, redactReportText, safeSourceLabel } from "./redact";
 import type {
   ReportContext,
@@ -45,6 +45,8 @@ export interface CollectDiagnosticsOptions {
   logs?: boolean;
   logPaths?: string[];
   runId?: number;
+  /** Attach a local run at all. Default true; false collects environment and logs only. */
+  attachRun?: boolean;
   taskKey?: string;
   last?: boolean;
   shareIdentifiers?: boolean;
@@ -209,7 +211,7 @@ function resolveRunDbPath(cwd: string, explicit?: string): string {
   if (explicit?.trim()) return resolve(explicit.trim());
   const override = process.env.WEBHOOK_QUEUE_DB?.trim();
   if (override) return override;
-  return join(resolveReportConfigDir(undefined, cwd), "queue.db");
+  return join(reportWorkspaceDir(), "state", "queue.db");
 }
 
 /** Open the run database read-only, or return null when it does not exist. */
@@ -407,7 +409,7 @@ export async function collectDiagnostics(
   }
 
   const db = openRunDb(cwd, options.runDbPath);
-  const run = db ? selectRun(db, options) : null;
+  const run = db && options.attachRun !== false ? selectRun(db, options) : null;
   // Redact the run's task key even when it is omitted from the payload. A
   // `--last` report has no explicit --task value, but the failure reason and
   // logs still contain the key.

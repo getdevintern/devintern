@@ -6,6 +6,7 @@ import {
   ANALYTICS_CONFIG_DIR_ENV,
   setAnalyticsCaptureForTests,
 } from "../src/lib/observability/analytics";
+import { stdinClosedError } from "@devintern/auth";
 import { ensureTrackerEnvConfigured, missingTrackerEnv } from "../src/lib/init/first-run";
 
 // Snapshot the real wizard exports BEFORE any mock.module override so tests
@@ -101,6 +102,76 @@ describe("ensureTrackerEnvConfigured", () => {
     expect(wizardRan).toBe(true);
     expect(reloaded).toBe(true);
     expect(outcome).toBe("ready");
+  });
+
+  test("Ctrl+D at the rescue offer fails with one line instead of throwing", async () => {
+    const logs: string[] = [];
+    let wizardRan = false;
+    const outcome = await ensureTrackerEnvConfigured({
+      env: { TASK_TRACKER: "jira" },
+      stdinIsTTY: true,
+      log: (msg) => logs.push(String(msg)),
+      prompt: async () => {
+        throw stdinClosedError();
+      },
+      runWizard: async () => {
+        wizardRan = true;
+      },
+    });
+    expect(outcome).toBe("failed");
+    expect(wizardRan).toBe(false);
+    expect(logs.at(-1)).toContain("Input closed (Ctrl+D)");
+  });
+
+  test("Ctrl+D inside the wizard before credentials are written fails without throwing", async () => {
+    const logs: string[] = [];
+    let reloaded = false;
+    const outcome = await ensureTrackerEnvConfigured({
+      env: { TASK_TRACKER: "jira" },
+      stdinIsTTY: true,
+      log: (msg) => logs.push(String(msg)),
+      prompt: async () => "y",
+      runWizard: async () => {
+        throw stdinClosedError();
+      },
+      reloadEnv: () => {
+        reloaded = true;
+      },
+    });
+    expect(outcome).toBe("failed");
+    expect(reloaded).toBe(true);
+    expect(logs.some((l) => l.includes("Input closed (Ctrl+D)"))).toBe(true);
+  });
+
+  test("Ctrl+D at sign-in after credentials were written still lets the run proceed", async () => {
+    const mutableEnv: Record<string, string | undefined> = { TASK_TRACKER: "jira" };
+    const outcome = await ensureTrackerEnvConfigured({
+      env: mutableEnv,
+      stdinIsTTY: true,
+      log: () => {},
+      prompt: async () => "y",
+      runWizard: async () => {
+        mutableEnv.JIRA_BASE_URL = "https://acme.atlassian.net";
+        mutableEnv.JIRA_EMAIL = "dev@acme.com";
+        mutableEnv.JIRA_API_TOKEN = "secret";
+        throw stdinClosedError();
+      },
+    });
+    expect(outcome).toBe("ready");
+  });
+
+  test("non-abort wizard errors still propagate", async () => {
+    await expect(
+      ensureTrackerEnvConfigured({
+        env: { TASK_TRACKER: "jira" },
+        stdinIsTTY: true,
+        log: () => {},
+        prompt: async () => "y",
+        runWizard: async () => {
+          throw new Error("boom");
+        },
+      }),
+    ).rejects.toThrow("boom");
   });
 
   test("wizard that leaves credentials missing still fails", async () => {

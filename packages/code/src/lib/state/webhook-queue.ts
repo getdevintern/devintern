@@ -8,11 +8,9 @@
 
 import { Database } from "bun:sqlite";
 import { copyFileSync, existsSync, mkdirSync } from "fs";
-import { dirname, join } from "path";
+import { dirname } from "path";
 
-import { findConfigDir } from "@devintern/utils";
-import { ensureGitInfoExcluded } from "../utils/git-exclude";
-import { hasWorkspace, workspaceDbPath } from "../workspace/paths";
+import { resolveWorkspaceDir, workspaceDbPath } from "../workspace/paths";
 import { configureSqliteConnection } from "./sqlite";
 import {
   RowParseError,
@@ -108,50 +106,18 @@ const BASE_SYNC_EVENT_STATUSES = [
 ] as const satisfies readonly BaseSyncEventStatus[];
 
 /**
- * Resolve the queue database path: `WEBHOOK_QUEUE_DB` env override, otherwise
- * the workspace DB when run from a workspace home, otherwise
- * `queue.db` inside the nearest `.devintern-code` directory so queue state,
- * cursors, and run records persist across reboots.
- *
- * The config directory is searched upwards from `projectDir` (same traversal
- * as `.env` resolution), so running from a subdirectory of the project reuses
- * the project's database instead of creating a stray one next to the cwd.
- *
- * @param projectDir - Directory to search from (defaults to the current working directory)
+ * Resolve the queue database path: the `WEBHOOK_QUEUE_DB` override, otherwise
+ * the workspace DB (`~/.devintern/state/queue.db`). Every run, manual or
+ * worker, in any checkout, records into the one workspace database; nothing
+ * is written into repository checkouts.
  */
-export function resolveQueueDbPath(projectDir: string = process.cwd()): string {
-  if (process.env.WEBHOOK_QUEUE_DB) {
-    return process.env.WEBHOOK_QUEUE_DB;
-  }
-
-  const configDir =
-    findConfigDir({ configDirName: ".devintern-code", startDir: projectDir }) ??
-    join(projectDir, ".devintern-code");
-  // From the workspace home itself, use the workspace DB rather than creating
-  // a stray `<workspace>/.devintern-code/queue.db`.
-  const owner = dirname(configDir);
-  return hasWorkspace(owner) ? workspaceDbPath(owner) : join(configDir, "queue.db");
-}
-
-/** Local ignore pattern for the state database, at any depth. */
-const QUEUE_DB_IGNORE_PATTERN = "**/.devintern-code/queue.db*";
-
-/**
- * Keep the state database out of git without touching the project's committed
- * `.gitignore`, using the per-clone `.git/info/exclude`.
- *
- * Projects initialised before `.devintern-code/*` was ignored wholesale leave
- * `queue.db` untracked-but-visible, where `git add -A` sweeps it into the
- * implementation commit and `git clean` deletes it mid-run. Best-effort: any
- * failure (not a repo, read-only .git) is ignored.
- */
-function ensureDbIgnored(dbPath: string): void {
-  ensureGitInfoExcluded(dirname(dbPath), QUEUE_DB_IGNORE_PATTERN, dbPath);
+export function resolveQueueDbPath(): string {
+  return process.env.WEBHOOK_QUEUE_DB || workspaceDbPath(resolveWorkspaceDir());
 }
 
 /**
- * Create the state database's directory and keep the database itself out of
- * git. Shared by every store that opens `queue.db` for writing.
+ * Create the state database's directory. Shared by every store that opens
+ * `queue.db` for writing.
  *
  * @param dbPath - Path of the database file about to be opened
  */
@@ -160,7 +126,6 @@ export function prepareQueueDbDirectory(dbPath: string): void {
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true });
   }
-  ensureDbIgnored(dbPath);
 }
 
 /**

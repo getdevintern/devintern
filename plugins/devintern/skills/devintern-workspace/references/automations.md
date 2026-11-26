@@ -4,6 +4,10 @@ Use `[[automations]]` in the selected `workspace.toml` for recurring prompt-base
 
 Read the [recurring automation guide](https://devintern.com/docs/code/automations) for product behavior and [How occurrences run](https://devintern.com/docs/code/automations#how-occurrences-run) for execution context. In a source checkout, use `docs/code/automations.md`, `docs/code/workspaces.md`, and `packages/code/src/lib/automation/config.ts`. Installed skills must work without that checkout.
 
+## Start from a bundled pack when one fits
+
+For common repository maintenance (CI fixes on the default branch, dependency security or freshness, flaky or slow tests, docs drift), check `devintern automations list` first. When a pack matches the request, install it with `devintern automations add <pack> --repo <name>` (`--id` for a second copy, `--disabled` for a paused draft), then edit the installed entry for the requested schedule or project-specific commands. See the [automation packs guide](https://devintern.com/docs/code/automation-packs). Write a prompt from scratch only when no pack fits.
+
 ## Translate the request into an entry
 
 Identify the registered repository, desired outcome, cadence, output destination, and whether the result should open a PR. Infer these from the request and existing configuration where possible; ask only about choices that materially change behavior. A request to add an automation authorizes configuring that schedule, but does not by itself request an immediate trial run.

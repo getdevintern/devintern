@@ -74,11 +74,14 @@ describe("registerManualCheckout", () => {
     if (!again.ok) expect(again.error).toContain("already registered");
   });
 
-  test("refuses a checkout without an origin", async () => {
+  test("registers a checkout without a recognised remote by its directory", async () => {
     git(checkout, ["remote", "remove", "origin"]);
     const result = await registerManualCheckout(checkout, "", silentLog);
-    expect(result.ok).toBe(false);
-    expect(existsSync(workspace)).toBe(false);
+    if (!result.ok) throw new Error(result.error);
+    const repo = loadWorkspaceConfig(join(workspace, "workspace.toml")).repos[0];
+    expect(repo?.path).toBe(checkout);
+    expect(repo?.remote).toBe("");
+    expect((await registerManualCheckout(join(checkout), "", silentLog)).ok).toBe(false);
   });
 });
 
@@ -112,7 +115,10 @@ describe("init wizard in a checkout with an origin", () => {
       cwd: checkout,
       log: silentLog,
     });
-    expect(readFileSync(result.envPath, "utf8")).toContain("MARKDOWN_TASKS_DIR=./todo");
+    // Saved absolute, resolved from the checkout the wizard ran in.
+    expect(readFileSync(result.envPath, "utf8")).toContain(
+      `MARKDOWN_TASKS_DIR=${join(checkout, "todo")}`,
+    );
     expect(existsSync(join(checkout, ".devintern-code"))).toBe(false);
   });
 });

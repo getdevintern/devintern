@@ -27,6 +27,7 @@ import { loadSupabaseConfig } from "../cli/bootstrap";
 import type { RepoConfig, WorkspaceConfig } from "./config";
 import { loadWorkerWorkspaceConfig, resolveCredentialTeam } from "./config";
 import { InjectedTaskStore } from "../state/injected-tasks";
+import { appendRunOutput, parseRunId, RUN_ID_ENV, RUN_OUTPUTS_ENV } from "../state/run-outputs";
 import type { InjectedTask } from "../state/injected-tasks";
 import { applyWorkspaceProcessEnv, repoGitHubSlug } from "./env";
 import {
@@ -104,6 +105,48 @@ export interface WorkerAddOptions {
   restartGraceMs?: number;
   /** Override how often `--wait` re-reads the task row; injectable for tests. */
   waitPollIntervalMs?: number;
+  /** Environment read for `DEVINTERN_RUN_ID` / `DEVINTERN_RUN_OUTPUTS`; injectable for tests. */
+  env?: NodeJS.ProcessEnv;
+}
+
+/** Where a new task's lineage is recorded: its parent run and that run's outputs file. */
+interface TaskLineage {
+  parentRunId?: number;
+  /** Outputs file of {@link parentRunId}; set only when the env names that same run. */
+  outputsFile?: string;
+}
+
+/**
+ * Resolve the delegating run: `--parent-run` wins over `DEVINTERN_RUN_ID`. The
+ * outputs file is used only when it belongs to the chosen parent, so an
+ * explicit `--parent-run` never credits the surrounding run with the task.
+ */
+function resolveTaskLineage(add: AddOptions, env: NodeJS.ProcessEnv): TaskLineage {
+  const envRunId = parseRunId(env[RUN_ID_ENV]);
+  const parentRunId = add.parentRunId ?? envRunId;
+  const outputs = env[RUN_OUTPUTS_ENV]?.trim();
+  return {
+    ...(parentRunId !== undefined ? { parentRunId } : {}),
+    ...(outputs && parentRunId !== undefined && parentRunId === envRunId
+      ? { outputsFile: outputs }
+      : {}),
+  };
+}
+
+/** Append the new task to its parent run's outputs file; failures only warn. */
+function recordTaskOutput(task: InjectedTask, lineage: TaskLineage, status: (m: string) => void) {
+  if (!lineage.outputsFile) return;
+  try {
+    appendRunOutput(lineage.outputsFile, {
+      kind: "injected_task",
+      id: task.id,
+      taskKey: task.taskKey,
+      title: task.title,
+      repo: task.repo,
+    });
+  } catch (cause) {
+    status(`⚠️  Could not record the task in the run outputs: ${(cause as Error).message}`);
+  }
 }
 
 function capitalize(text: string): string {
@@ -255,7 +298,12 @@ export async function runWorkerAdd(
 
   // `--resume` re-queues an existing row, so title/body/repo resolution (and
   // their validation) apply only to a new enqueue.
-  let target: { repo: RepoConfig; body: string; credentialTeam?: string } | null = null;
+  let target: {
+    repo: RepoConfig;
+    body: string;
+    credentialTeam?: string;
+    lineage: TaskLineage;
+  } | null = null;
   if (!add.resume) {
     const repoResult = resolveTargetRepo(config, add.repo, error);
     if (!repoResult.ok) return repoResult.code;
@@ -276,6 +324,7 @@ export async function runWorkerAdd(
     target = {
       repo: repoResult.repo,
       body: bodyResult.body,
+      lineage: resolveTaskLineage(add, options.env ?? process.env),
       ...(teamResult.team ? { credentialTeam: teamResult.team.name } : {}),
     };
   }
@@ -285,7 +334,7 @@ export async function runWorkerAdd(
   // `"unknown"`: the lock was taken in another PID namespace (this command runs
   // inside a PID-isolated sandbox), so a live worker cannot be ruled out.
   const workerRunning: PidLiveness =
-    LockManager.readLockStatus(selectedDir, ".worker.lock", { plainDir: true })?.running ?? false;
+    LockManager.readLockStatus(selectedDir, ".worker.lock")?.running ?? false;
   if (workerRunning === false && add.wait) {
     error("❌ --wait needs a running worker, but none is active for this workspace.");
     error("   Start it with `devintern worker`, or drop --wait to enqueue durably.");
@@ -384,7 +433,7 @@ interface TaskContext {
 /** Create the markdown file + durable row, then optionally wait. */
 async function enqueueNewTask(
   add: AddOptions,
-  target: { repo: RepoConfig; body: string; credentialTeam?: string },
+  target: { repo: RepoConfig; body: string; credentialTeam?: string; lineage: TaskLineage },
   ctx: TaskContext & { workerRunning: PidLiveness },
 ): Promise<number> {
   const { repo, body } = target;
@@ -400,6 +449,9 @@ async function enqueueNewTask(
       body,
       idempotencyKey: add.idempotencyKey,
       actor: "local:add",
+      ...(target.lineage.parentRunId !== undefined
+        ? { parentRunId: target.lineage.parentRunId }
+        : {}),
       after: add.after,
       dependencyMode: resolveDependencyMode({
         override: add.dependencyMode,
@@ -417,6 +469,7 @@ async function enqueueNewTask(
   if (deduplicated) {
     return await reportTask(task, ctx);
   }
+  recordTaskOutput(task, target.lineage, status);
   if (ignoredDependencies.length > 0) {
     status(
       `⚠️  Ignoring 'Depends on:' ${ignoredDependencies.join(", ")}: no ad-hoc task with that key ` +
@@ -435,6 +488,9 @@ async function enqueueNewTask(
     status(`✅ Enqueued ${task.taskKey} for repo "${task.repo}" (task #${task.id}).`);
     if (target.credentialTeam) {
       status(`   Credentials: team "${target.credentialTeam}" (env_file and [teams.env]).`);
+    }
+    if (task.parentRunId !== undefined) {
+      status(`   Sourced from run #${task.parentRunId}.`);
     }
     if (task.dependsOn.length > 0) {
       status(
@@ -793,8 +849,7 @@ async function waitForTask(
     // dead worker's lock turns `false` after LOCK_HEARTBEAT_STALE_MS, so the
     // restart-grace failure below still fires.
     const workerRunning =
-      LockManager.readLockStatus(ctx.selectedDir, ".worker.lock", { plainDir: true })?.running ??
-      false;
+      LockManager.readLockStatus(ctx.selectedDir, ".worker.lock")?.running ?? false;
     if (workerRunning !== false) {
       // A replacement worker came back within the grace: a later restart gets
       // its own grace window rather than inheriting an old one.

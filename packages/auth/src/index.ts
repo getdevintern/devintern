@@ -3,10 +3,22 @@ import type { Session, User } from "@supabase/supabase-js";
 import {
   AUTH_CALLBACK_TIMEOUT_MS,
   createAuthCallbackServer,
+  DEFAULT_REMOTE_AUTH_CALLBACK_PORT,
   EMAIL_AUTH_CALLBACK_TIMEOUT_MS,
+  parsePastedCallback,
 } from "./auth-callback";
-import { loginMethodLabel, promptForEmail } from "./login-provider";
+import type { AuthCallbackServer } from "./auth-callback";
+import { loginMethodLabel, promptForEmail, watchStdinLines } from "./login-provider";
 import type { ResolvedLogin, OAuthProvider } from "./login-provider";
+import {
+  PENDING_LOGIN_TTL_MS,
+  PendingLoginError,
+  pastedAddressMismatch,
+  pendingLoginPath,
+  readPendingLogin,
+  removePendingLogin,
+  writePendingLogin,
+} from "./pending-login";
 import {
   isRemoteCliSession,
   openBrowser,
@@ -29,6 +41,7 @@ export {
   promptForOAuthProvider,
   resolveLogin,
   resolveLoginProvider,
+  stdinClosedError,
   type ResolvedLogin,
 } from "./login-provider";
 export {
@@ -36,8 +49,21 @@ export {
   DEFAULT_REMOTE_AUTH_CALLBACK_PORT,
   EMAIL_AUTH_CALLBACK_TIMEOUT_MS,
   createAuthCallbackServer,
+  parsePastedCallback,
+  type PastedCallback,
 } from "./auth-callback";
 export { isRemoteCliSession, resolveAuthCallbackPort } from "./runtime";
+export {
+  PENDING_LOGIN_FILE,
+  PENDING_LOGIN_TTL_MS,
+  PendingLoginError,
+  parsePendingLogin,
+  pastedAddressMismatch,
+  pendingLoginPath,
+  readPendingLogin,
+  type PendingLogin,
+  type PendingLoginErrorCode,
+} from "./pending-login";
 
 export const DEFAULT_SUPABASE_URL = "https://robbzuhuqcgpfevaorux.supabase.co";
 export const DEFAULT_SUPABASE_PUBLISHABLE_KEY = "sb_publishable_E31lRt1Z8hq3XuJIutiB3g_Y2sSEc5D";
@@ -89,6 +115,39 @@ export interface LoginHooks {
   openUrl?: (url: string) => Promise<void>;
   /** Receive human-readable progress messages (default: console.log). */
   onStatus?: (message: string) => void;
+  /**
+   * Also accept the callback address pasted on stdin, for a browser that
+   * cannot reach this host's `127.0.0.1`. Defaults to `true` unless `openUrl`
+   * is set (an embedding host owns the browser and has no terminal).
+   */
+  acceptPastedCallback?: boolean;
+}
+
+const PASTE_CALLBACK_HINT = [
+  "Signing in from another machine? When the browser ends on a 127.0.0.1 page that",
+  "does not load, copy that page's full address and paste it here, then press Enter.",
+].join("\n");
+
+/** Whether a login should read pasted callback addresses from stdin. */
+function acceptsPastedCallback(hooks: LoginHooks | undefined): boolean {
+  return hooks?.acceptPastedCallback ?? hooks?.openUrl === undefined;
+}
+
+/**
+ * Feed callback addresses pasted on stdin to the callback server.
+ *
+ * @returns Stops reading stdin.
+ */
+function acceptPastedCallbacks(
+  callback: AuthCallbackServer,
+  onStatus: (message: string) => void,
+): () => void {
+  return watchStdinLines((line) => {
+    if (!line.trim() || callback.submitPastedCallback(line)) return;
+    onStatus(
+      "That is not the sign-in address. Paste the full address from the browser (it contains `code=`).",
+    );
+  });
 }
 
 /** Read and validate the persisted session file, or `null` if missing or corrupt. */
@@ -173,27 +232,33 @@ async function exchangeCodeAndPersist(
 /**
  * Print how to complete browser OAuth when the CLI has no local GUI (SSH/mosh).
  *
- * Mosh cannot forward TCP — prefer copying a session from a laptop login.
- * SSH can LocalForward the fixed callback port so the laptop browser reaches
- * this process.
+ * Pasting the address the laptop browser lands on works everywhere, including
+ * mosh. SSH can instead LocalForward the fixed callback port so the laptop
+ * browser reaches this process directly.
  */
 function printRemoteLoginHints(
   onStatus: (message: string) => void,
   port: number,
   url: string,
+  acceptPaste: boolean,
 ): void {
+  const tunnel = `ssh -N -L ${port}:127.0.0.1:${port} user@this-host`;
   onStatus(
     [
-      "Remote shell detected (SSH/mosh) — a browser on this host will not complete login.",
+      "Remote shell detected (SSH/mosh): a browser on this host will not complete login.",
       "",
-      "Easiest (works with mosh): on your laptop run `devintern login`, then copy",
-      "  .devintern-code/.auth-session.json",
-      "to this machine (same path under the project) and Ctrl-C here; re-run once signed in.",
-      "",
-      "Or SSH-tunnel the callback (mosh cannot forward ports — use ssh):",
-      `  ssh -N -L ${port}:127.0.0.1:${port} user@this-host`,
-      "Then open this URL in your laptop browser:",
+      "Open this URL in your laptop browser:",
       url,
+      "",
+      ...(acceptPaste
+        ? [
+            "The browser then ends on a 127.0.0.1 page that does not load. Copy that page's",
+            "full address and paste it here, then press Enter.",
+            "",
+            "Or tunnel the callback before opening the URL (ssh only; mosh cannot forward ports):",
+          ]
+        : ["Tunnel the callback before opening the URL (ssh only; mosh cannot forward ports):"]),
+      `  ${tunnel}`,
     ].join("\n"),
   );
 }
@@ -213,6 +278,7 @@ export async function loginWithOAuth(
 ): Promise<AuthenticatedUser> {
   const openUrl = hooks?.openUrl ?? openBrowser;
   const onStatus = hooks?.onStatus ?? console.log;
+  const acceptPaste = acceptsPastedCallback(hooks);
   const client = createSupabaseClient(config);
   const providerName = loginMethodLabel(provider);
   const remote = isRemoteCliSession();
@@ -221,6 +287,7 @@ export async function loginWithOAuth(
     callbackPort === undefined ? {} : { port: callbackPort },
   );
 
+  let stopPaste = () => {};
   try {
     const { data, error } = await client.auth.signInWithOAuth({
       provider,
@@ -237,7 +304,7 @@ export async function loginWithOAuth(
     }
 
     if (remote) {
-      printRemoteLoginHints(onStatus, callback.port, data.url);
+      printRemoteLoginHints(onStatus, callback.port, data.url, acceptPaste);
     } else {
       onStatus(`Opening ${providerName} login in your browser...`);
       onStatus(`If the browser does not open, visit:\n${data.url}`);
@@ -247,13 +314,16 @@ export async function loginWithOAuth(
         onStatus(
           `Could not open the browser automatically (${(error as Error).message}). Open the URL above.`,
         );
+        if (acceptPaste) onStatus(PASTE_CALLBACK_HINT);
       }
     }
+    if (acceptPaste) stopPaste = acceptPastedCallbacks(callback, onStatus);
     onStatus("Waiting for authentication callback...");
 
     const code = await callback.waitForCode(AUTH_CALLBACK_TIMEOUT_MS);
-    return exchangeCodeAndPersist(config, client, code);
+    return await exchangeCodeAndPersist(config, client, code);
   } finally {
+    stopPaste();
     callback.stop().catch(() => {});
   }
 }
@@ -278,6 +348,7 @@ export async function loginWithEmail(
     throw new Error("Email is required.");
   }
 
+  const acceptPaste = acceptsPastedCallback(hooks);
   const client = createSupabaseClient(config);
   const remote = isRemoteCliSession();
   const callbackPort = resolveAuthCallbackPort();
@@ -285,6 +356,7 @@ export async function loginWithEmail(
     callbackPort === undefined ? {} : { port: callbackPort },
   );
 
+  let stopPaste = () => {};
   try {
     const { error } = await client.auth.signInWithOtp({
       email: address,
@@ -298,20 +370,28 @@ export async function loginWithEmail(
     }
 
     onStatus(`Sign-in link sent to ${address}.`);
-    if (remote) {
+    if (acceptPaste) {
       onStatus(
         [
-          "Remote shell detected — open the email link on your laptop after tunneling:",
+          "Opening the link on another device or over SSH? It ends on a 127.0.0.1 page that",
+          "does not load. Copy that page's full address and paste it here, then press Enter.",
+        ].join("\n"),
+      );
+      stopPaste = acceptPastedCallbacks(callback, onStatus);
+    } else if (remote) {
+      onStatus(
+        [
+          "Remote shell detected: open the email link on your laptop after tunneling:",
           `  ssh -N -L ${callback.port}:127.0.0.1:${callback.port} user@this-host`,
-          "(mosh cannot forward TCP; prefer `devintern login` on a laptop and copy .auth-session.json)",
         ].join("\n"),
       );
     }
     onStatus("Check your email and open the link (waiting up to 10 minutes)...");
 
     const code = await callback.waitForCode(EMAIL_AUTH_CALLBACK_TIMEOUT_MS);
-    return exchangeCodeAndPersist(config, client, code);
+    return await exchangeCodeAndPersist(config, client, code);
   } finally {
+    stopPaste();
     callback.stop().catch(() => {});
   }
 }
@@ -333,6 +413,183 @@ export async function login(
     return loginWithEmail(config, resolved.email, hooks);
   }
   return loginWithOAuth(config, resolved.method, hooks);
+}
+
+/** Supabase storage key for the two-step sign-in client (its verifier is `<key>-code-verifier`). */
+const PENDING_STORAGE_KEY = "devintern-cli-auth";
+const PENDING_VERIFIER_KEY = `${PENDING_STORAGE_KEY}-code-verifier`;
+
+/**
+ * Supabase client whose auth storage is a plain map, so the PKCE code
+ * verifier can be saved after starting a sign-in and restored to finish it in
+ * another process. Nothing else is persisted.
+ */
+function createPkceClientWithStorage(config: SupabaseAuthConfig, items: Map<string, string>) {
+  return createClient(config.url, config.publishableKey, {
+    auth: {
+      flowType: "pkce",
+      autoRefreshToken: false,
+      // Custom storage applies only with persistSession; it is in memory.
+      persistSession: true,
+      storageKey: PENDING_STORAGE_KEY,
+      storage: {
+        getItem: (key: string) => items.get(key) ?? null,
+        setItem: (key: string, value: string) => {
+          items.set(key, value);
+        },
+        removeItem: (key: string) => {
+          items.delete(key);
+        },
+      },
+      detectSessionInUrl: false,
+    },
+  });
+}
+
+/** A sign-in started with {@link startPendingLogin}. */
+export interface StartedPendingLogin {
+  method: ResolvedLogin["method"];
+  /** Set for email sign-in: where the link was sent. */
+  email?: string;
+  /** Address to open in a browser; `null` for email (the link is in the inbox). */
+  url: string | null;
+  /** Address the browser lands on after sign-in. */
+  redirectTo: string;
+  /** When the pending sign-in stops being accepted (ISO 8601). */
+  expiresAt: string;
+}
+
+/** Options for {@link startPendingLogin} and {@link completePendingLogin}. */
+export interface PendingLoginOptions {
+  /** Callback port in the redirect address (default: `DEVINTERN_AUTH_CALLBACK_PORT` or 17865). */
+  port?: number;
+  /** Current time in ms (tests). */
+  now?: () => number;
+  /** Command shown in errors to start a sign-in again. */
+  startCommand?: string;
+}
+
+/**
+ * Start a sign-in without waiting for it: build the sign-in address (or send
+ * the email link), save the PKCE verifier to an owner-only pending file next
+ * to the session file, and return. {@link completePendingLogin} finishes it
+ * with the address the browser lands on. No local server is started; the
+ * browser's `127.0.0.1` page will not load, and that is expected.
+ *
+ * @param config - Supabase auth configuration.
+ * @param resolved - Login method (email needs the address).
+ * @param options - Port and clock overrides.
+ * @returns The address to open and the expiry.
+ * @throws When the email address is missing or Supabase rejects the request.
+ */
+export async function startPendingLogin(
+  config: SupabaseAuthConfig,
+  resolved: ResolvedLogin,
+  options: PendingLoginOptions = {},
+): Promise<StartedPendingLogin> {
+  const port =
+    options.port ?? resolveAuthCallbackPort(process.env, true) ?? DEFAULT_REMOTE_AUTH_CALLBACK_PORT;
+  const redirectTo = `http://127.0.0.1:${port}/auth/callback`;
+  const items = new Map<string, string>();
+  const client = createPkceClientWithStorage(config, items);
+  let url: string | null = null;
+  let email: string | undefined;
+  if (resolved.method === "email") {
+    email = resolved.email?.trim();
+    if (!email) {
+      throw new Error("Email sign-in needs the address, for example `email you@company.com`.");
+    }
+    const { error } = await client.auth.signInWithOtp({
+      email,
+      options: { emailRedirectTo: redirectTo },
+    });
+    if (error) throw new Error(`Could not send sign-in email: ${error.message}`);
+  } else {
+    const { data, error } = await client.auth.signInWithOAuth({
+      provider: resolved.method,
+      options: { redirectTo, skipBrowserRedirect: true },
+    });
+    if (error) {
+      throw new Error(
+        `Could not start ${loginMethodLabel(resolved.method)} login: ${error.message}`,
+      );
+    }
+    if (!data.url) throw new Error("Supabase did not return an OAuth URL.");
+    url = data.url;
+  }
+  // Supabase stores JSON-encoded values; keep the plain verifier on disk.
+  const stored = items.get(PENDING_VERIFIER_KEY);
+  const codeVerifier = stored ? (JSON.parse(stored) as unknown) : undefined;
+  if (typeof codeVerifier !== "string" || !codeVerifier) {
+    throw new Error("Supabase did not create a PKCE code verifier.");
+  }
+  const now = options.now?.() ?? Date.now();
+  const expiresAt = new Date(now + PENDING_LOGIN_TTL_MS).toISOString();
+  await writePendingLogin(pendingLoginPath(config), {
+    version: 1,
+    method: resolved.method,
+    ...(email ? { email } : {}),
+    redirectTo,
+    codeVerifier,
+    createdAt: new Date(now).toISOString(),
+    expiresAt,
+  });
+  return { method: resolved.method, ...(email ? { email } : {}), url, redirectTo, expiresAt };
+}
+
+/**
+ * Finish a sign-in started with {@link startPendingLogin}: exchange the code
+ * in the pasted address with the saved verifier, save the session exactly as
+ * an interactive login does, and delete the pending file.
+ *
+ * @param config - Supabase auth configuration.
+ * @param address - The address the browser landed on (or its `code=...` query).
+ * @param options - Clock and command overrides.
+ * @returns The signed-in user.
+ * @throws {PendingLoginError} When nothing is pending, it expired, the address
+ *   is not a sign-in address or belongs to another sign-in, or the exchange fails.
+ */
+export async function completePendingLogin(
+  config: SupabaseAuthConfig,
+  address: string,
+  options: PendingLoginOptions = {},
+): Promise<AuthenticatedUser> {
+  const startCommand = options.startCommand ?? "devintern login github --no-wait";
+  const path = pendingLoginPath(config);
+  const pending = await readPendingLogin(path, startCommand, options.now?.() ?? Date.now());
+  const parsed = parsePastedCallback(address);
+  if (!parsed) {
+    throw new PendingLoginError(
+      "bad-address",
+      "That is not a sign-in address. Pass the full address the browser landed on " +
+        "(a 127.0.0.1 page that does not load; it contains `code=`).",
+    );
+  }
+  if ("error" in parsed) {
+    await removePendingLogin(path);
+    throw new PendingLoginError(
+      "oauth-error",
+      `Sign-in was not completed: ${parsed.error}. Start again with \`${startCommand}\`.`,
+    );
+  }
+  const mismatch = pastedAddressMismatch(address, pending);
+  if (mismatch) throw new PendingLoginError("mismatch", mismatch);
+
+  const items = new Map([[PENDING_VERIFIER_KEY, JSON.stringify(pending.codeVerifier)]]);
+  const client = createPkceClientWithStorage(config, items);
+  const { data, error } = await client.auth.exchangeCodeForSession(parsed.code);
+  if (error || !data.session || !data.user) {
+    // Keep the pending file: a mistyped code can be retried until it expires.
+    throw new PendingLoginError(
+      "exchange-failed",
+      `Sign-in failed: ${error?.message || "no session was returned"}. The address works once, ` +
+        "only on the host that started the sign-in, and only for a few minutes. " +
+        `If it keeps failing, start again with \`${startCommand}\`.`,
+    );
+  }
+  const user = await persistAuthenticatedSession(config, data.session, data.user);
+  await removePendingLogin(path);
+  return user;
 }
 
 /**

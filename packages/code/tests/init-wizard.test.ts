@@ -1,15 +1,20 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
-import { tmpdir } from "os";
-import { join } from "path";
-import { BUNDLED_TRELLO_API_KEY } from "@devintern/task-trackers";
 import {
-  TRACKER_SETUP,
-  buildEnvExample,
-  renderEnvFile,
-  scaffoldProject,
-} from "../src/lib/init/scaffold";
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "fs";
+import { tmpdir } from "os";
+import { basename, join } from "path";
+import { BUNDLED_TRELLO_API_KEY } from "@devintern/task-trackers";
+import { TRACKER_SETUP, buildEnvExample, renderEnvFile } from "../src/lib/init/scaffold";
 import { isInteractive, runInitUpgrade, runInitWizard } from "../src/lib/init/wizard";
+import { registerManualCheckout } from "../src/lib/workspace/register-checkout";
 import {
   ANALYTICS_CONFIG_DIR_ENV,
   setAnalyticsCaptureForTests,
@@ -40,6 +45,20 @@ function promptQueue(answers: string[]) {
 }
 
 const silentLog = () => {};
+
+/** Env file the upgrade tests seed and update. */
+function upgradeEnvPath(): string {
+  return join(tempDir, ".devintern-code", ".env");
+}
+
+/** Env file `devintern init` registers for the checkout at `dir`. */
+function wizardEnvPath(dir: string = tempDir): string {
+  return join(process.env.DEVINTERN_WORKSPACE_DIR!, "env", `${basename(dir)}.env`);
+}
+
+function readWizardEnv(dir: string = tempDir): string {
+  return readFileSync(wizardEnvPath(dir), "utf8");
+}
 
 /** Default deps for wizard tests: no session on disk, deterministic agents. */
 function testDeps(overrides: Record<string, unknown> = {}) {
@@ -123,48 +142,6 @@ describe("renderEnvFile", () => {
   });
 });
 
-describe("scaffoldProject", () => {
-  test("writes env files, settings.json, and .gitignore entries", () => {
-    expect(scaffoldProject({ cwd: tempDir })).toBe(true);
-    const configDir = join(tempDir, ".devintern-code");
-    expect(readFileSync(join(configDir, ".env"), "utf8")).toBe(
-      readFileSync(join(configDir, ".env.example"), "utf8"),
-    );
-    const settings = JSON.parse(readFileSync(join(configDir, "settings.json"), "utf8"));
-    expect(Object.keys(settings)).toContain("azure-devops");
-    expect(readFileSync(join(tempDir, ".gitignore"), "utf8")).toContain(".devintern-code/.env");
-  });
-
-  test("refuses to touch an existing config dir", () => {
-    expect(scaffoldProject({ cwd: tempDir })).toBe(true);
-    expect(scaffoldProject({ cwd: tempDir, envContent: "OVERWRITTEN" })).toBe(false);
-    expect(readFileSync(join(tempDir, ".devintern-code", ".env"), "utf8")).not.toContain(
-      "OVERWRITTEN",
-    );
-  });
-
-  test("scaffolds at the repository root when run from a subdirectory", () => {
-    mkdirSync(join(tempDir, ".git"), { recursive: true });
-    const subDir = join(tempDir, "packages", "app");
-    mkdirSync(subDir, { recursive: true });
-
-    expect(scaffoldProject({ cwd: subDir })).toBe(true);
-    expect(existsSync(join(tempDir, ".devintern-code", ".env"))).toBe(true);
-    expect(existsSync(join(subDir, ".devintern-code"))).toBe(false);
-    expect(readFileSync(join(tempDir, ".gitignore"), "utf8")).toContain(".devintern-code/.env");
-  });
-
-  test("completes an existing config dir that has no .env, keeping other files", () => {
-    const configDir = join(tempDir, ".devintern-code");
-    mkdirSync(configDir, { recursive: true });
-    writeFileSync(join(configDir, "settings.json"), '{"custom":true}', "utf8");
-
-    expect(scaffoldProject({ cwd: tempDir })).toBe(true);
-    expect(readFileSync(join(configDir, ".env"), "utf8")).toContain("TASK_TRACKER=jira");
-    expect(readFileSync(join(configDir, "settings.json"), "utf8")).toBe('{"custom":true}');
-  });
-});
-
 describe("runInitWizard", () => {
   test("jira happy path: prompts, validates, writes real .env", async () => {
     const probeCalls: Array<{ trackerId: string; env: Record<string, string> }> = [];
@@ -191,14 +168,89 @@ describe("runInitWizard", () => {
 
     expect(probeCalls).toHaveLength(1);
     expect(probeCalls[0].trackerId).toBe("jira");
-    const env = readFileSync(join(tempDir, ".devintern-code", ".env"), "utf8");
+    const env = readWizardEnv();
     expect(env).toContain("TASK_TRACKER=jira");
     expect(env).toContain("JIRA_API_TOKEN=secret-token");
     expect(env).toContain("JIRA_DEFAULT_PROJECT_KEY=PROJ");
     expect(env).toContain("# GITHUB_TOKEN=");
-    // .env.example keeps the full template
-    const example = readFileSync(join(tempDir, ".devintern-code", ".env.example"), "utf8");
-    expect(example).toContain("MARKDOWN_TASKS_DIR");
+    // Nothing is written into the checkout.
+    expect(existsSync(join(tempDir, ".devintern-code"))).toBe(false);
+  });
+
+  test("tokens go through the hidden-input prompt; other answers do not", async () => {
+    const { prompt, asked } = promptQueue([
+      "jira",
+      "https://acme.atlassian.net",
+      "dev@acme.com",
+      "PROJ",
+      "n", // decline sign-in offer
+    ]);
+    const secretAsked: string[] = [];
+    const secrets = ["secret-token", "ghp_hidden"];
+    await runInitWizard({
+      ...testDeps(),
+      prompt,
+      promptSecret: (question: string) => {
+        secretAsked.push(question);
+        return Promise.resolve(secrets.shift() ?? "");
+      },
+      probe: () => Promise.resolve(),
+      cwd: tempDir,
+      log: silentLog,
+    });
+    expect(secretAsked).toEqual([
+      "JIRA API token (input hidden): ",
+      "GitHub token for creating pull requests (input hidden; optional, Enter to skip): ",
+    ]);
+    expect(asked.some((question) => question.includes("token"))).toBe(false);
+    const env = readWizardEnv();
+    expect(env).toContain("JIRA_API_TOKEN=secret-token");
+    expect(env).toContain("GITHUB_TOKEN=ghp_hidden");
+  });
+
+  test("every tracker token step is marked secret", () => {
+    const secretKeys = Object.values(TRACKER_SETUP)
+      .flat()
+      .filter((step) => step.secret)
+      .map((step) => step.key)
+      .sort();
+    expect(secretKeys).toEqual([
+      "ASANA_API_TOKEN",
+      "AZURE_DEVOPS_PAT",
+      "GITHUB_TOKEN",
+      "GITLAB_TOKEN",
+      "JIRA_API_TOKEN",
+      "LINEAR_API_KEY",
+      "TRELLO_API_TOKEN",
+    ]);
+  });
+
+  test("an HTML error page from the connection check prints one bounded line", async () => {
+    const logs: string[] = [];
+    const { prompt } = promptQueue([
+      "jira",
+      "https://acme.atlassian.net",
+      "dev@acme.com",
+      "tok",
+      "",
+      "s", // skip validation
+      "",
+      "n",
+    ]);
+    await runInitWizard({
+      ...testDeps(),
+      prompt,
+      probe: () =>
+        Promise.reject(
+          new Error(
+            `JIRA API error: 404 - <!DOCTYPE html><html><head><title>Oops</title></head><body>${"x".repeat(2000)}</body></html>`,
+          ),
+        ),
+      cwd: tempDir,
+      log: (message: string) => logs.push(message),
+    });
+    const failure = logs.find((line) => line.startsWith("❌ Connection check failed"));
+    expect(failure).toBe("❌ Connection check failed: JIRA API error: 404 (HTML error page)");
   });
 
   test("accepts tracker id input and re-prompts on invalid menu choice", async () => {
@@ -220,7 +272,7 @@ describe("runInitWizard", () => {
       log: silentLog,
     });
 
-    const env = readFileSync(join(tempDir, ".devintern-code", ".env"), "utf8");
+    const env = readWizardEnv();
     expect(env).toContain("TASK_TRACKER=linear");
     expect(env).toContain("LINEAR_API_KEY=lin_api_123");
   });
@@ -245,7 +297,9 @@ describe("runInitWizard", () => {
       log: silentLog,
     });
 
-    expect(existsSync(join(tempDir, ".devintern-code", ".env"))).toBe(true);
+    // Registered at the repository root, not the subdirectory.
+    expect(existsSync(wizardEnvPath())).toBe(true);
+    expect(existsSync(join(tempDir, ".devintern-code"))).toBe(false);
     expect(existsSync(join(subDir, ".devintern-code"))).toBe(false);
   });
 
@@ -272,7 +326,7 @@ describe("runInitWizard", () => {
     });
 
     expect(attempts).toBe(2);
-    expect(existsSync(join(tempDir, ".devintern-code", ".env"))).toBe(true);
+    expect(existsSync(wizardEnvPath())).toBe(true);
   });
 
   test("failed probe: edit values then success", async () => {
@@ -302,7 +356,7 @@ describe("runInitWizard", () => {
     });
 
     expect(seenKeys).toEqual(["lin_wrong", "lin_right"]);
-    const env = readFileSync(join(tempDir, ".devintern-code", ".env"), "utf8");
+    const env = readWizardEnv();
     expect(env).toContain("LINEAR_API_KEY=lin_right");
   });
 
@@ -325,7 +379,7 @@ describe("runInitWizard", () => {
       log: (m) => logs.push(m),
     });
 
-    const env = readFileSync(join(tempDir, ".devintern-code", ".env"), "utf8");
+    const env = readWizardEnv();
     expect(env).toContain("ASANA_API_TOKEN=asana-token");
     const output = logs.join("\n");
     expect(output).toContain("Skipping validation");
@@ -363,7 +417,7 @@ describe("runInitWizard", () => {
 
     expect(asked.some((q) => q.includes("Enter a number"))).toBe(false);
     expect(probeEnvs[0].LINEAR_API_KEY).toBe("lin_api_shared");
-    const env = readFileSync(join(tempDir, ".devintern-code", ".env"), "utf8");
+    const env = readWizardEnv();
     expect(env).toContain("TASK_TRACKER=linear");
     expect(env).toContain("LINEAR_API_KEY=lin_api_shared");
     expect(env).toContain("LINEAR_DEFAULT_TEAM_KEY=ENG");
@@ -393,7 +447,7 @@ describe("runInitWizard", () => {
     });
 
     expect(asked.some((q) => q.includes("Enter a number"))).toBe(true);
-    const env = readFileSync(join(tempDir, ".devintern-code", ".env"), "utf8");
+    const env = readWizardEnv();
     expect(env).toContain("TASK_TRACKER=markdown");
     expect(env).not.toContain("lin_api_shared");
   });
@@ -422,7 +476,7 @@ describe("runInitWizard", () => {
 
     // Probe sees the bundled key so validation exercises real credentials
     expect(probeEnvs[0].TRELLO_API_KEY).toBe(BUNDLED_TRELLO_API_KEY);
-    const env = readFileSync(join(tempDir, ".devintern-code", ".env"), "utf8");
+    const env = readWizardEnv();
     expect(env).toContain(`TRELLO_API_KEY=${BUNDLED_TRELLO_API_KEY}`);
     expect(env).toContain("TRELLO_API_TOKEN=trello-token");
   });
@@ -449,7 +503,7 @@ describe("runInitWizard", () => {
       "1. Markdown files (markdown) — local .md task files, no account needed",
     );
     expect(output).toContain("2. JIRA (jira)");
-    const env = readFileSync(join(tempDir, ".devintern-code", ".env"), "utf8");
+    const env = readWizardEnv();
     expect(env).toContain("TASK_TRACKER=markdown");
   });
 
@@ -474,9 +528,10 @@ describe("runInitWizard", () => {
     });
 
     expect(probed).toBe(false);
-    const env = readFileSync(join(tempDir, ".devintern-code", ".env"), "utf8");
+    const env = readWizardEnv();
     expect(env).toContain("TASK_TRACKER=markdown");
-    expect(env).toContain("MARKDOWN_TASKS_DIR=./tasks");
+    // Saved absolute: the worker service and task runs use other cwds.
+    expect(env).toContain(`MARKDOWN_TASKS_DIR=${join(tempDir, "tasks")}`);
   });
 
   test("github tracker skips the extra PR-token step", async () => {
@@ -497,7 +552,7 @@ describe("runInitWizard", () => {
     });
 
     expect(remaining).toHaveLength(0);
-    const env = readFileSync(join(tempDir, ".devintern-code", ".env"), "utf8");
+    const env = readWizardEnv();
     expect(env).toContain("GITHUB_TOKEN=ghp_token");
     expect(env).toContain("GITHUB_REPO=acme/widgets");
   });
@@ -519,15 +574,8 @@ describe("runInitWizard", () => {
       log: silentLog,
     });
 
-    const env = readFileSync(join(tempDir, ".devintern-code", ".env"), "utf8");
+    const env = readWizardEnv();
     expect(env).toContain("GITHUB_TOKEN=ghp_pr_token");
-  });
-
-  test("refuses when .devintern-code already exists without prompting", async () => {
-    scaffoldProject({ cwd: tempDir });
-    const { prompt, asked } = promptQueue([]);
-    await runInitWizard({ prompt, probe: () => Promise.resolve(), cwd: tempDir, log: silentLog });
-    expect(asked).toHaveLength(0);
   });
 
   test("keeps guiding when the config folder exists but .env is missing", async () => {
@@ -548,7 +596,7 @@ describe("runInitWizard", () => {
       log: silentLog,
     });
 
-    const env = readFileSync(join(tempDir, ".devintern-code", ".env"), "utf8");
+    const env = readWizardEnv();
     expect(env).toContain("TASK_TRACKER=linear");
     expect(env).toContain("LINEAR_API_KEY=lin_api_123");
   });
@@ -738,8 +786,8 @@ describe("runInitWizard analytics", () => {
     expect(recorded[0]?.properties).toMatchObject({ source: "rescue" });
   });
 
-  test("an existing configuration never starts the funnel", async () => {
-    scaffoldProject({ cwd: tempDir });
+  test("an existing registration never starts the funnel", async () => {
+    await registerManualCheckout(tempDir, "", silentLog);
     const recorded = stubAnalytics();
     const { prompt, asked } = promptQueue([]);
 
@@ -783,6 +831,7 @@ describe("runInitUpgrade", () => {
     ]);
     let probed: Record<string, string> | undefined;
     await runInitUpgrade({
+      envPath: upgradeEnvPath(),
       prompt,
       probe: (_, env) => {
         probed = env;
@@ -810,6 +859,7 @@ describe("runInitUpgrade", () => {
       "ghp_rotated",
     ]);
     await runInitUpgrade({
+      envPath: upgradeEnvPath(),
       prompt,
       probe: () => Promise.resolve(),
       cwd: tempDir,
@@ -832,6 +882,7 @@ describe("runInitUpgrade", () => {
       "PROJ", // default project key
     ]);
     await runInitUpgrade({
+      envPath: upgradeEnvPath(),
       prompt,
       probe: () => Promise.resolve(),
       cwd: tempDir,
@@ -845,36 +896,94 @@ describe("runInitUpgrade", () => {
     expect(env).toContain("LINEAR_API_KEY=lin_old_key");
   });
 
+  test.skipIf(process.platform === "win32")(
+    "update credentials: a group/world-readable env file ends up owner-only",
+    async () => {
+      seedExistingConfig();
+      chmodSync(upgradeEnvPath(), 0o644);
+      const { prompt } = promptQueue(["1", "lin_rotated", "", "ghp_rotated"]);
+      await runInitUpgrade({
+        envPath: upgradeEnvPath(),
+        prompt,
+        probe: () => Promise.resolve(),
+        cwd: tempDir,
+        log: silentLog,
+      });
+      expect(readFileSync(upgradeEnvPath(), "utf8")).toContain("LINEAR_API_KEY=lin_rotated");
+      expect(statSync(upgradeEnvPath()).mode & 0o777).toBe(0o600);
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "switch tracker: a group/world-readable env file ends up owner-only",
+    async () => {
+      seedExistingConfig("GITHUB_TOKEN=ghp_shared\n");
+      chmodSync(upgradeEnvPath(), 0o644);
+      const { prompt } = promptQueue([
+        "2",
+        "jira",
+        "https://acme.atlassian.net",
+        "dev@acme.com",
+        "jira-token",
+        "PROJ",
+      ]);
+      await runInitUpgrade({
+        envPath: upgradeEnvPath(),
+        prompt,
+        probe: () => Promise.resolve(),
+        cwd: tempDir,
+        log: silentLog,
+      });
+      expect(readFileSync(upgradeEnvPath(), "utf8")).toContain("TASK_TRACKER=jira");
+      expect(statSync(upgradeEnvPath()).mode & 0o777).toBe(0o600);
+    },
+  );
+
   test("exit option leaves the file untouched", async () => {
     seedExistingConfig();
     const before = readFileSync(join(tempDir, ".devintern-code", ".env"), "utf8");
     const { prompt } = promptQueue(["3"]);
-    await runInitUpgrade({ prompt, probe: () => Promise.resolve(), cwd: tempDir, log: silentLog });
+    await runInitUpgrade({
+      envPath: upgradeEnvPath(),
+      prompt,
+      probe: () => Promise.resolve(),
+      cwd: tempDir,
+      log: silentLog,
+    });
     expect(readFileSync(join(tempDir, ".devintern-code", ".env"), "utf8")).toBe(before);
   });
 
-  test("missing .env falls back to scaffold guidance without prompting", async () => {
+  test("a missing env file is reported without prompting", async () => {
     mkdirSync(join(tempDir, ".devintern-code"), { recursive: true });
     const { prompt, asked } = promptQueue([]);
-    await runInitUpgrade({ prompt, probe: () => Promise.resolve(), cwd: tempDir, log: silentLog });
+    await runInitUpgrade({
+      envPath: upgradeEnvPath(),
+      prompt,
+      probe: () => Promise.resolve(),
+      cwd: tempDir,
+      log: silentLog,
+    });
     expect(asked).toHaveLength(0);
   });
 });
 
 describe("init --yes subprocess", () => {
   // Spawns a fresh bun process; under full-suite load this exceeds bun's 5s default.
-  test("writes the template files without prompting", () => {
+  test("registers the checkout and writes the template env without prompting", () => {
     const result = Bun.spawnSync(
       ["bun", "run", join(import.meta.dir, "..", "src", "index.ts"), "init", "--yes"],
       {
         cwd: tempDir,
+        // Pass the per-file pinned workspace (children otherwise get the start env).
+        env: { ...process.env },
         stdin: "ignore",
         stdout: "pipe",
         stderr: "pipe",
       },
     );
     expect(result.exitCode).toBe(0);
-    const env = readFileSync(join(tempDir, ".devintern-code", ".env"), "utf8");
+    const env = readWizardEnv();
+    expect(existsSync(join(tempDir, ".devintern-code"))).toBe(false);
     expect(env).toContain("TASK_TRACKER=jira");
     expect(env).toContain("# LINEAR_API_KEY=");
   }, 30_000);

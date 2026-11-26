@@ -6,6 +6,8 @@
  * 1. `POST /api/runs/:id/report/preview` collects and redacts the bundle for
  *    that run (the same collection as the CLI), stores the prepared payload
  *    in memory under a random preview id, and returns it for review.
+ *    `POST /api/reports/preview` does the same without a run: the environment
+ *    and worker log tails only, for problems not tied to one run.
  * 2. `POST /api/reports` submits exactly the stored payload. The only field the
  *    send step may add is the anonymous contact email the user typed there.
  *
@@ -130,7 +132,7 @@ export interface DashboardReportDeps {
 }
 
 interface StoredPreview {
-  runId: number;
+  runId: number | null;
   prepared: PreparedReport;
   reporter: BugReporter;
   signedIn: boolean;
@@ -142,7 +144,8 @@ interface StoredPreview {
 export interface ReportPreviewResponse {
   previewId: string;
   expiresAt: number;
-  runId: number;
+  /** The attached run, or null for a general report. */
+  runId: number | null;
   signedIn: boolean;
   /** Anonymous reports need a contact email on submit. */
   contactRequired: boolean;
@@ -179,7 +182,7 @@ export class DashboardReports {
   }
 
   private get configDir(): string {
-    return this.deps.configDir ?? resolveRuntimeStateDir(this.data.workingDir);
+    return this.deps.configDir ?? resolveRuntimeStateDir();
   }
 
   private prune(): void {
@@ -205,7 +208,20 @@ export class DashboardReports {
     if (!this.data.getRunDetail(runId)) {
       return { status: 404, body: { error: `run ${runId} not found` } };
     }
+    return this.prepareAndStore(runId, parsed.value);
+  }
 
+  /** `POST /api/reports/preview`: a report with no run attached. */
+  async previewGeneral(body: unknown): Promise<ApiResponse> {
+    const parsed = parseReportPreviewRequest(body);
+    if (!parsed.ok) return badRequest(parsed.error);
+    return this.prepareAndStore(null, parsed.value);
+  }
+
+  private async prepareAndStore(
+    runId: number | null,
+    request: ReportPreviewRequest,
+  ): Promise<ApiResponse> {
     const configDir = this.configDir;
     const identity = await (this.deps.resolveIdentity ?? resolveIdentity)(configDir);
     const reporter = createBugReporter({
@@ -224,13 +240,13 @@ export class DashboardReports {
     let prepared: PreparedReport;
     try {
       prepared = await reporter.prepare({
-        title: parsed.value.title,
-        description: parsed.value.description,
+        title: request.title,
+        description: request.description,
         source: "cli",
-        runId,
+        ...(runId === null ? { attachRun: false } : { runId }),
         diagnostics: true,
         logs: true,
-        shareIdentifiers: parsed.value.shareIdentifiers,
+        shareIdentifiers: request.shareIdentifiers,
       });
     } catch (error) {
       return {
@@ -252,7 +268,7 @@ export class DashboardReports {
     this.prune();
 
     const { omitted, ...attachments } = summarizeReportPayload(prepared.payload, {
-      shareIdentifiers: parsed.value.shareIdentifiers,
+      shareIdentifiers: request.shareIdentifiers,
     });
     const response: ReportPreviewResponse = {
       previewId,

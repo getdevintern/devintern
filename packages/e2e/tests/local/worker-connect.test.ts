@@ -303,7 +303,7 @@ function sentryAnswers(
     ["Sentry project slug: ", PROJECT],
     ["Sentry search filter (optional, e.g. environment:production): ", ""],
   ];
-  if (token !== undefined) answers.push(["Sentry auth token (input is visible): ", token]);
+  if (token !== undefined) answers.push(["Sentry auth token (input hidden): ", token]);
   return answers;
 }
 
@@ -464,13 +464,10 @@ ptyTest(
       expect(statSync(tokenFile).mode & 0o777).toBe(0o600);
       expect(readFileSync(tokenFile, "utf8") === `SENTRY_AUTH_TOKEN=${FIXTURE_TOKEN}\n`).toBe(true);
 
-      // The prompt is documented as visible, so the PTY echoes the typed token
-      // once, directly after its prompt. The CLI's own log lines must not
-      // repeat it, so it appears exactly once in the merged transcript.
-      expect(occurrences(first.output, FIXTURE_TOKEN)).toBe(1);
-      expect(
-        first.output.includes(`Sentry auth token (input is visible): ${FIXTURE_TOKEN}\n`),
-      ).toBe(true);
+      // The token prompt hides its input, and the CLI's own log lines must
+      // not repeat it, so the token never appears in the merged transcript.
+      expect(occurrences(first.output, FIXTURE_TOKEN)).toBe(0);
+      expect(first.output.includes("Sentry auth token (input hidden): \n")).toBe(true);
 
       // Re-run with the token in the environment: no token prompt, no duplicate.
       const configBefore = fixture.snapshot();
@@ -481,7 +478,7 @@ ptyTest(
       );
       expect(second.exitCode, redact(second.output)).toBe(0);
       expect(second.output).toContain("Using SENTRY_AUTH_TOKEN from the existing environment.");
-      expect(second.output).not.toContain("Sentry auth token (input is visible)");
+      expect(second.output).not.toContain("Sentry auth token (input hidden)");
       expect(second.output).toContain(
         `Sentry monitor "${monitors[0]!.id}" is already configured; no duplicate added.`,
       );
@@ -521,8 +518,8 @@ ptyTest(
       expect(sentry.unexpectedRequests).toEqual([]);
       expect(fixture.snapshot()).toEqual(before);
       expect(fixture.errorMonitors()).toEqual([]);
-      // Only the visible typed echo; the failure message must not repeat it.
-      expect(occurrences(result.output, BAD_TOKEN)).toBe(1);
+      // The prompt hides the typed token and the failure message must not repeat it.
+      expect(occurrences(result.output, BAD_TOKEN)).toBe(0);
       expect(fixture.recorder.requests).toEqual([]);
     } finally {
       await fixture.release();

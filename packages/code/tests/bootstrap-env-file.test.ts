@@ -87,13 +87,14 @@ describe("explicit --env-file is the sole .env source", () => {
     expect(loaded.custom).toBe("from-custom");
   });
 
-  test("without --env-file the project .env is still loaded", () => {
+  test("without --env-file a plain project .env is loaded, a legacy .devintern-code/.env is not", () => {
     mkdirSync(join(root, ".devintern-code"), { recursive: true });
-    writeFileSync(join(root, ".devintern-code", ".env"), "E2E_PROJECT_ONLY=from-project\n");
+    writeFileSync(join(root, ".devintern-code", ".env"), "E2E_PROJECT_ONLY=from-legacy\n");
+    writeFileSync(join(root, ".env"), "E2E_PROJECT_ONLY=from-project\n");
 
     const loaded = loadWith(["node", "devintern", "TASK-1"]);
 
-    expect(loaded.path).toBe(join(root, ".devintern-code", ".env"));
+    expect(loaded.path).toBe(join(root, ".env"));
     expect(loaded.project).toBe("from-project");
   });
 });

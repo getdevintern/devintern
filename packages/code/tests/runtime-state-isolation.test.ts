@@ -11,23 +11,13 @@ import { tmpdir } from "os";
 import { join } from "path";
 
 import {
-  resolveProjectConfigDir,
   resolveRuntimeStateDir,
   setManualWorkspaceStateDir,
   WORKER_SUBPROCESS_ENV,
 } from "../src/lib/config/config-dir";
 import { loadSupabaseConfig } from "../src/lib/cli/bootstrap";
-import { excludeWorkerRuntimeFiles } from "../src/lib/utils/git-exclude";
 import { buildRepoEnv, buildWorkspaceContextEnv } from "../src/lib/workspace/env";
 import { ensureWorkspaceCodeState } from "../src/lib/workspace/paths";
-
-function git(cwd: string, args: string[]): string {
-  const result = spawnSync("git", args, { cwd, encoding: "utf8" });
-  if (result.status !== 0) {
-    throw new Error(`git ${args.join(" ")} failed: ${result.stderr || result.stdout}`);
-  }
-  return result.stdout;
-}
 
 describe("fleet config-dir isolation (DEV-126)", () => {
   let root: string;
@@ -77,19 +67,14 @@ describe("fleet config-dir isolation (DEV-126)", () => {
     );
   });
 
-  test("worker subprocesses use workspace state while normal runs stay project scoped", () => {
-    const worktree = join(root, "worktree");
+  test("every run uses the workspace runtime state, never a checkout", () => {
     const workspace = join(root, "workspace");
-    // A `.git` entry stops the ancestor walk, pinning the fallback to worktree.
-    mkdirSync(join(worktree, ".git"), { recursive: true });
+    process.env.DEVINTERN_WORKSPACE_DIR = workspace;
 
     delete process.env[WORKER_SUBPROCESS_ENV];
-    expect(resolveProjectConfigDir(worktree)).toBe(join(worktree, ".devintern-code"));
-    expect(resolveRuntimeStateDir(worktree)).toBe(join(worktree, ".devintern-code"));
-    process.env.DEVINTERN_WORKSPACE_DIR = workspace;
+    expect(resolveRuntimeStateDir()).toBe(join(workspace, "state", "code"));
     process.env[WORKER_SUBPROCESS_ENV] = "1";
-    expect(resolveRuntimeStateDir(worktree)).toBe(join(workspace, "state", "code"));
-    expect(resolveProjectConfigDir(worktree)).toBe(join(worktree, ".devintern-code"));
+    expect(resolveRuntimeStateDir()).toBe(join(workspace, "state", "code"));
   });
 
   test("manual commands for registered repos use the workspace session", () => {
@@ -98,12 +83,12 @@ describe("fleet config-dir isolation (DEV-126)", () => {
     mkdirSync(join(checkout, ".git"), { recursive: true });
     delete process.env[WORKER_SUBPROCESS_ENV];
 
+    process.env.DEVINTERN_WORKSPACE_DIR = join(root, "default-workspace");
     setManualWorkspaceStateDir(workspace);
-    expect(resolveRuntimeStateDir(checkout)).toBe(join(workspace, "state", "code"));
-    expect(resolveProjectConfigDir(checkout)).toBe(join(checkout, ".devintern-code"));
+    expect(resolveRuntimeStateDir()).toBe(join(workspace, "state", "code"));
 
     setManualWorkspaceStateDir(null);
-    expect(resolveRuntimeStateDir(checkout)).toBe(join(checkout, ".devintern-code"));
+    expect(resolveRuntimeStateDir()).toBe(join(root, "default-workspace", "state", "code"));
   });
 
   test("worker subprocesses do not load a checkout's local credentials", () => {
@@ -206,59 +191,5 @@ describe("worker daemon auth/license state (DEV-126)", () => {
     expect(existsSync(join(legacy, "relay.json"))).toBe(false);
     expect(readFileSync(join(legacy, "queue.db"), "utf8")).toBe("not empty");
     expect(readFileSync(join(legacy, "notes.txt"), "utf8")).toBe("mine");
-  });
-
-  test("a command run from the workspace home uses the workspace runtime state", () => {
-    delete process.env[WORKER_SUBPROCESS_ENV];
-    const workspace = join(root, "workspace");
-    mkdirSync(join(workspace, ".devintern-code"), { recursive: true });
-    writeFileSync(join(workspace, "workspace.toml"), "");
-    expect(resolveRuntimeStateDir(workspace)).toBe(join(workspace, "state", "code"));
-
-    const project = join(root, "project");
-    mkdirSync(join(project, ".devintern-code"), { recursive: true });
-    expect(resolveRuntimeStateDir(project)).toBe(join(project, ".devintern-code"));
-  });
-});
-
-describe("defensive .git/info/exclude for .devintern-code (DEV-126)", () => {
-  let repo: string;
-
-  beforeEach(() => {
-    repo = mkdtempSync(join(tmpdir(), "runtime-exclude-"));
-    git(repo, ["init", "-q"]);
-    git(repo, ["config", "user.email", "test@example.com"]);
-    git(repo, ["config", "user.name", "Test"]);
-    writeFileSync(join(repo, "app.ts"), "export const x = 1;\n");
-    git(repo, ["add", "-A"]);
-    git(repo, ["commit", "-qm", "init"]);
-  });
-
-  afterEach(() => {
-    rmSync(repo, { recursive: true, force: true });
-  });
-
-  test("runtime files stay out of git while new project config remains stageable", () => {
-    mkdirSync(join(repo, ".devintern-code"), { recursive: true });
-    writeFileSync(
-      join(repo, ".gitignore"),
-      ".devintern-code/*\n!.devintern-code/settings.json\n!.devintern-code/.env.example\n",
-    );
-    excludeWorkerRuntimeFiles(repo);
-    excludeWorkerRuntimeFiles(repo);
-
-    // Runtime artifacts appearing in the checkout stay out of the index...
-    writeFileSync(join(repo, ".devintern-code", ".pid.lock"), "{}");
-    writeFileSync(join(repo, ".devintern-code", "license-cache.json"), "{}");
-    writeFileSync(join(repo, ".devintern-code", "queue.db-wal"), "{}");
-    writeFileSync(join(repo, ".devintern-code", "settings.json"), "{}\n");
-    writeFileSync(join(repo, ".devintern-code", ".env.example"), "EXAMPLE=1\n");
-    git(repo, ["add", "-A"]);
-    const staged = git(repo, ["diff", "--cached", "--name-only"]);
-    expect(staged).not.toContain(".pid.lock");
-    expect(staged).not.toContain("license-cache.json");
-    expect(staged).not.toContain("queue.db-wal");
-    expect(staged).toContain(".devintern-code/settings.json");
-    expect(staged).toContain(".devintern-code/.env.example");
   });
 });

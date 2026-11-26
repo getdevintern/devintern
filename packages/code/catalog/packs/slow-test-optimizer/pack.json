@@ -1,0 +1,10 @@
+{
+  "id": "slow-test-optimizer",
+  "version": 1,
+  "name": "Slow test optimizer",
+  "description": "Measure the slowest tests and make one optimization that keeps every assertion and passes ten consecutive runs.",
+  "schedule": { "cron": "0 9 * * 0" },
+  "openPr": true,
+  "allowNoChanges": true,
+  "prompt": "prompt.md"
+}

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { execSync } from "child_process";
 import {
   chmodSync,
@@ -86,6 +86,28 @@ describe("worker scaffold/add-repo", () => {
     expect(config.repos).toEqual([]);
 
     expect(runWorkerScaffold()).toBe(1); // second run refuses
+  });
+
+  test("scaffold next steps name tracker, task_query, env path, and doctor", () => {
+    const lines: string[] = [];
+    const logSpy = spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+      lines.push(args.join(" "));
+    });
+    try {
+      expect(runWorkerScaffold()).toBe(0);
+    } finally {
+      logSpy.mockRestore();
+    }
+    const output = lines.join("\n");
+    const steps = output.slice(output.indexOf("Next steps:"));
+    expect(steps).toContain("[defaults].tracker and task_query");
+    expect(steps).toContain('tracker = "markdown" with MARKDOWN_TASKS_DIR');
+    expect(steps).toContain(workspaceEnvPath());
+    expect(steps).toMatch(/Multiple repos\? Add \[\[routing\.rules\]\]/);
+    const doctorAt = steps.indexOf("devintern worker doctor");
+    const startAt = steps.indexOf("Start the worker: devintern worker");
+    expect(doctorAt).toBeGreaterThan(-1);
+    expect(startAt).toBeGreaterThan(doctorAt);
   });
 
   test("scaffold has no bare # comment lines (Bun.TOML redefinition bug)", () => {
@@ -245,6 +267,59 @@ remote = "git@github.com:acme/app.git"
     expect(config.workspace.conflictSchedule?.interval).toBe("1d");
     expect(config.worker.schedule?.active.map((window) => window.spec)).toEqual(["22:00-06:00"]);
     expect(config.worker.schedule?.timezone).toBe("Asia/Ho_Chi_Minh");
+  });
+
+  test("upsertWorkerOperatingPolicy rewrites keys in place without moving comments", () => {
+    const original = `[defaults]
+tracker = "markdown"
+
+[workspace]
+dashboard = true
+ci_failure_fix = false
+# When automatic merge-conflict resolution runs.
+# conflict_resolution = "scheduled"
+# conflict_resolution_cron = "0 3 * * *"
+
+# Optional bounded host concurrency.
+# [workspace.execution]
+# max_concurrency = 4
+
+[worker.schedule]
+# Night shift only.
+active = ["22:00-06:00"]
+timezone = "UTC"
+
+# Repositories below.
+[[repos]]
+name = "app"
+remote = "git@github.com:acme/app.git"
+`;
+    const policy = {
+      ciFailureFix: true,
+      conflictResolution: "scheduled" as const,
+      conflictResolutionCron: "0 4 * * *",
+      activeWindows: ["09:00-17:00"],
+      timezone: "Europe/Berlin",
+    };
+    const updated = upsertWorkerOperatingPolicy(original, policy);
+    expect(updated).toContain(`ci_failure_fix = true
+# When automatic merge-conflict resolution runs.
+conflict_resolution = "scheduled"
+conflict_resolution_cron = "0 4 * * *"
+
+# Optional bounded host concurrency.`);
+    expect(updated).toContain(`[worker.schedule]
+# Night shift only.
+active = ["09:00-17:00"]
+timezone = "Europe/Berlin"
+blocked = []
+catch_up_missed = true
+
+# Repositories below.
+[[repos]]`);
+    expect(parseWorkspaceConfig(updated).worker.schedule?.timezone).toBe("Europe/Berlin");
+    // Re-running with the same answers changes nothing.
+    expect(upsertWorkerOperatingPolicy(updated, policy)).toBe(updated);
   });
 
   test("writeSentryErrorMonitor appends once and chooses a unique stable id", async () => {

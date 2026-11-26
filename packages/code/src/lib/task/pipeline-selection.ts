@@ -1,33 +1,28 @@
 /**
  * Selects the one pipeline a routed task runs.
  *
- * A task subprocess can see three layers of pipeline configuration:
+ * Pipelines are configured only in the workspace, so a pull request can never
+ * change the steps or plugin code a run executes:
  *
- * 1. A workspace per-repository override (`[[repos]].pipeline_file`), pinned
- *    into the subprocess environment by the fleet worker.
- * 2. The repository's checked-in `.devintern-code/settings.json` pipeline
- *    (deprecated; ignored in worker task runs, so a pull request cannot
- *    change the steps or plugin code the worker executes).
- * 3. A workspace-wide default (`[defaults].pipeline_file`).
+ * 1. A per-repository override (`[[repos]].pipeline_file`), pinned into the
+ *    run's environment.
+ * 2. A workspace-wide default (`[defaults].pipeline_file`).
  *
  * Exactly one complete definition is selected — ordered step arrays are never
  * merged across scopes. When none is present the built-in default applies.
- *
- * Relative plugin and verification prompt paths declared by a workspace file
- * resolve against that file's directory; repository settings keep resolving
- * against the repository worktree (the process working directory).
+ * Relative plugin and verification prompt paths resolve against the
+ * declaring file's directory.
  */
 
 import { existsSync, readFileSync } from "fs";
-import { dirname, isAbsolute, join, resolve } from "path";
+import { dirname, isAbsolute, resolve } from "path";
 
-import type { PipelineConfig, ProjectSettings } from "../../types/settings";
-import { WORKER_SUBPROCESS_ENV } from "../config/config-dir";
+import type { PipelineConfig } from "../../types/settings";
 import { WORKSPACE_PIPELINE_DEFAULT_ENV, WORKSPACE_PIPELINE_REPO_ENV } from "../workspace/env";
 import { DEFAULT_PIPELINE } from "./pipeline-config";
 
 /** Where the selected pipeline definition came from. */
-export type PipelineScope = "workspace-repo" | "repository" | "workspace-default" | "built-in";
+export type PipelineScope = "workspace-repo" | "workspace-default" | "built-in";
 
 /** The complete pipeline chosen for one task, with its configuration source. */
 export interface SelectedPipeline {
@@ -42,6 +37,16 @@ export interface SelectedPipeline {
    * and (for workspace files) verification prompts.
    */
   baseDir: string;
+}
+
+/**
+ * Directory exposed to plugins as `PipelineContext.pipelineDir`: the declaring
+ * workspace file's directory, as given (no `realpath`, matching
+ * {@link resolveWorkspaceRelativePaths}), or `null` for the built-in default.
+ * Unlike `baseDir`, the built-in scope never falls back to the checkout.
+ */
+export function pipelineDirFor(selection: SelectedPipeline): string | null {
+  return selection.sourcePath === null ? null : resolve(dirname(selection.sourcePath));
 }
 
 /**
@@ -130,18 +135,15 @@ export function resolveWorkspaceRelativePaths(
 /**
  * Resolve the pipeline a task should run, honoring scope precedence.
  *
- * Precedence: workspace per-repository override > repository
- * `.devintern-code/settings.json` pipeline (manual runs only) > workspace
- * default > built-in default. A referenced workspace file that is missing or invalid throws
- * (never a silent fallback).
+ * Precedence: workspace per-repository override > workspace default >
+ * built-in default. A referenced workspace file that is missing or invalid
+ * throws (never a silent fallback).
  *
- * @param input.settings - Parsed repository settings, or `null`.
  * @param input.cwd - Repository worktree (the process working directory).
  * @param input.env - Environment carrying workspace pipeline references
  *                    (defaults to `process.env`).
  */
 export function selectPipelineConfig(input: {
-  settings: ProjectSettings | null;
   cwd: string;
   env?: NodeJS.ProcessEnv;
 }): SelectedPipeline {
@@ -158,26 +160,6 @@ export function selectPipelineConfig(input: {
     };
   }
 
-  const settingsPipeline = input.settings?.pipeline;
-  const settingsPath = join(input.cwd, ".devintern-code", "settings.json");
-  if (settingsPipeline && env[WORKER_SUBPROCESS_ENV] === "1") {
-    warnOnce(
-      `⚠️  Ignoring the pipeline in ${settingsPath}: worker runs only use workspace pipelines. ` +
-        "Set pipeline_file on the repo's [[repos]] entry in workspace.toml instead.",
-    );
-  } else if (settingsPipeline) {
-    warnOnce(
-      `⚠️  The pipeline in ${settingsPath} is deprecated; ` +
-        "move it to a workspace pipeline_file (see the pipelines docs).",
-    );
-    return {
-      config: settingsPipeline,
-      scope: "repository",
-      sourcePath: settingsPath,
-      baseDir: input.cwd,
-    };
-  }
-
   const defaultFile = env[WORKSPACE_PIPELINE_DEFAULT_ENV];
   if (defaultFile) {
     const baseDir = dirname(defaultFile);
@@ -190,15 +172,6 @@ export function selectPipelineConfig(input: {
   }
 
   return { config: undefined, scope: "built-in", sourcePath: null, baseDir: input.cwd };
-}
-
-const warnedMessages = new Set<string>();
-
-/** Print a deprecation warning once per process. */
-function warnOnce(message: string): void {
-  if (warnedMessages.has(message)) return;
-  warnedMessages.add(message);
-  console.warn(message);
 }
 
 /** Human-readable step sequence for the selected (or built-in) pipeline. */

@@ -4,7 +4,7 @@ sidebarLabel: "Dashboard"
 description: "Use when checking what the worker is doing, reading agent transcripts, diagnosing failed runs, retrying work, or delegating an ad-hoc task from the local dashboard."
 section: "Automation"
 order: 4
-dateModified: 2026-11-18
+dateModified: 2026-11-25
 ---
 
 # Worker Dashboard
@@ -14,11 +14,12 @@ The dashboard shows what the worker has been doing: current and past runs, agent
 | Page            | What it shows                                                                                                  |
 | --------------- | -------------------------------------------------------------------------------------------------------------- |
 | **Overview**    | Worker health, active and queued work, recently finished tasks. The landing page.                              |
+| **Inbox**       | Notifications: what needs you, and what DevIntern changed outside itself. See [Inbox](#inbox).                 |
 | **Runs**        | Full run history. Open a run to follow its stages, read each agent transcript, open the task or PR, retry, or report a problem. |
 | **Automations** | Recurring automations, estimations, and scheduled jobs, with **Run now**.                                      |
 | **Pull requests** | The agent's PRs, switchable between **Open** (awaiting review, oldest first) and **Merged** (up to the 50 most recently merged, newest first), each linked to its ticket. Merges are recorded when the worker sees them, so PRs merged before this feature and PRs closed without merging are not listed. |
 | **Workspace**   | A read-only view of `workspace.toml`: routing, repositories, automations, credentials (key names only), and policy. |
-| **Stats**       | Success rates, durations, and **When runs happen**, a weekday × hour heatmap. Use it to move automations into quiet hours. |
+| **Stats**       | Success rates, durations, and **When runs happen**, a weekday × hour heatmap. Use it to move automations into quiet hours. Success and escalation rates and the median duration exclude auto-merge decisions, which are shown on their own line. |
 
 ## Check worker health
 
@@ -42,6 +43,22 @@ Below the running rows:
 - **Queued**: accepted work that has not started, such as ad-hoc tasks, dashboard retries, PR events, automations waiting for their repository's checkout, and PR jobs (shown as `owner/repo#N`) waiting for a free slot or for another job on the same PR. Expand a row for its details: task key, repository, who queued it, when, why it may be held back, and for ad-hoc tasks the prompt. Expanding a pending ad-hoc task shows **Cancel task**: confirm it and the task is withdrawn before the worker starts it. If the worker started it in the meantime, the dashboard says it already started and changes nothing. Recently cancelled tasks are listed below the queue with who cancelled them and when. See [Cancel a pending task](delegation.md#cancel-a-pending-task).
 - **Recently finished**: the last five finished tasks with outcome and PR. **View all runs** opens **Runs**.
 
+## Inbox
+
+The bell in the header shows how many notifications are unread; a `!` on the count means some of them need you. Open it for the latest items, or choose **Open inbox**. When something needs you, **Overview** also lists it in a **Needs you** block at the top.
+
+| Tab           | What lands there                                                                                  |
+| ------------- | ------------------------------------------------------------------------------------------------- |
+| **Needs you** | A task escalated, retries ran out, an automation broke after working, or a source stopped being readable. |
+| **Activity**  | PRs DevIntern opened or auto-merged, and work a run delegated or tickets it filed.                |
+| **All**       | Both.                                                                                             |
+
+Repeats of the same event share one row with a count such as **×88**, and the row comes back as unread when it happens again. Each row links to its run, PR, or ticket. On a delegated-work row, **Show spawned work** lists the child tasks and tickets with their current status.
+
+- **Mark read** clears the unread state. **Mark all read** does it for every row.
+- **Resolve** closes a row you have dealt with. Rows also resolve on their own when the problem goes away, for example when a later run of the same task succeeds. Turn on **Show resolved** to see them again.
+- **Mute** hides this row and every future notification from the same cause. Use it for a known, noisy problem you do not want to hear about. Muted groups are listed at the bottom of the inbox with **Unmute**.
+
 ## Retry a failed run
 
 Fix the cause first (missing credentials, unclear task details, a temporary agent failure), then open the run and choose **Retry**. The worker queues a fresh attempt with the same routing and checks for queued retries every 5 seconds (`WORKER_RETRY_INTERVAL_SECONDS`). A run that already has an attempt queued or running cannot be retried again.
@@ -53,6 +70,8 @@ Ad-hoc tasks from `devintern worker add` show **Re-queue task** instead. It resu
 When a run fails in a way the output does not explain, or completes with the wrong result, open it and choose **Report a problem**. It files the same redacted bug report as `devintern report --run <id>`; see [Reporting Bugs](reporting-bugs.md#report-from-the-dashboard).
 
 Missing credentials, usage limits, and failed verification checks are configuration issues, not DevIntern bugs. Fix those and retry.
+
+For a problem that is not tied to one run, choose **Report a bug** at the bottom of the sidebar. It sends your environment and recent worker logs, with no run attached. **Request a feature** opens a public GitHub issue form with your version filled in.
 
 ## Run an automation now
 
@@ -115,7 +134,7 @@ Every read-only dashboard view is also a `devintern worker` subcommand. These co
 | `devintern worker runs show <id>`         | One run with its stages, retry status, harness logs, and artifacts    |
 | `devintern worker runs logs <id> [name]`  | A run's agent transcripts, or the redacted tail of one                |
 | `devintern worker runs artifacts <id> [artifact-id]` | A run's artifacts, or one artifact's content               |
-| `devintern worker stats`                  | Success rates, durations, and activity by hour (`--window 7d\|30d\|90d\|all`, default `30d`; `--tz <zone>`) |
+| `devintern worker stats`                  | Success rates, durations, and activity by hour (`--window 7d\|30d\|90d\|all`, default `30d`; `--tz <zone>`). Rates and the median duration exclude auto-merge decisions, which are shown on their own line |
 | `devintern worker automations`            | Automations with next and last run                                    |
 | `devintern worker prs`                    | PRs and MRs opened by the agent: open (default) or recently merged (`--state open\|merged`; `--limit N`, 1..500, default 50) |
 | `devintern worker queue`                  | Queued work that has not started                                      |

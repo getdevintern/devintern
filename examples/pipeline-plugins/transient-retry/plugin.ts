@@ -8,11 +8,12 @@
  * should return `{ kind: "halt" }` instead.
  *
  * The example counts down a persisted counter so the behavior is deterministic
- * without touching the network. Copy it to `.devintern-code/steps/` and register
- * it in `settings.json` (see settings.json here).
+ * without touching the network. Copy it to `~/.devintern/pipelines/steps/` and
+ * register it in a workspace pipeline file (see pipeline.json here).
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 
 import { StepExecutionError } from "@getdevintern/code/pipeline";
@@ -32,7 +33,12 @@ interface RetryState {
   attempts: number;
 }
 
-const DEFAULT_STATE_PATH = ".devintern-code/transient-retry-state.json";
+/** Default counter file: the workspace's `state/`, outside the repository. */
+const DEFAULT_STATE_PATH = join(
+  process.env.DEVINTERN_WORKSPACE_DIR?.trim() || join(homedir(), ".devintern"),
+  "state",
+  "transient-retry-state.json",
+);
 
 function readState(file: string, initialFailures: number): RetryState {
   if (!existsSync(file)) return { remaining: initialFailures, attempts: 0 };

@@ -36,9 +36,6 @@
  * reap-only behavior with a warning, never a startup failure.
  */
 
-import { existsSync, readFileSync } from "fs";
-import { join } from "path";
-
 import { isMarkdownFilePath } from "@devintern/task-trackers";
 
 import type { ProjectSettings } from "../../types/settings";
@@ -117,6 +114,13 @@ export interface OrphanRecoveryResult {
    * that should be resumed rather than restarted. The caller schedules them.
    */
   resumable: RunRecord[];
+  /**
+   * Reaped `local`-origin (ad-hoc) run ids whose finish rules were deferred:
+   * the post-lock injected-task recovery decides whether each is resumed, so
+   * the caller must hand these to `recoverOrphanedInjectedTasks` (via
+   * `deferredRunIds`) instead of notifying them here.
+   */
+  deferredRunIds: number[];
 }
 
 /**
@@ -140,22 +144,59 @@ export async function recoverOrphanedTaskRuns(
   }
 
   // Reap first (all origins) — the pre-existing behavior this module builds on.
-  let reaped = 0;
+  // Defer the finish rules until the resume decision below: a run this startup
+  // is about to resume must not raise a false "will not be retried" alarm.
+  let reapedIds: number[] = [];
   try {
-    reaped = deps.runStore.reapOrphanedRuns();
+    reapedIds = deps.runStore.reapOrphanedRunIds({ notify: false });
   } catch (error) {
     warn(`⚠️  Could not reap orphaned runs: ${(error as Error).message}`);
   }
+  const reaped = reapedIds.length;
+  const resumable: RunRecord[] = [];
+  // Ad-hoc (`local`) runs are the post-lock injected-task recovery's job: it
+  // alone knows whether the row is auto-resumed, so it must apply the
+  // skipRetriesExhausted decision. Defer them instead of notifying here.
+  const deferredRunIds: number[] = [];
+  // Tickets this recovery deliberately left alone (moved on, stale, or
+  // unreadable tracker state). The pre-existing reap marks their runs `failed`,
+  // so the retries_exhausted rule would alarm about a task recovery itself
+  // decided was handled — skip that one rule for them.
+  const skippedTaskKeys = new Set<string>();
+  // Emit the deferred finish rules: a resumable run skips only the
+  // retries_exhausted alarm (it continues as a new run), while every other
+  // reaped run is evaluated exactly as before.
+  const notifyReaped = (): void => {
+    const resumed = new Set(resumable.map((run) => run.id));
+    for (const runId of reapedIds) {
+      let run: RunRecord | null = null;
+      try {
+        run = deps.runStore.getRun(runId);
+      } catch {
+        // A read failure must not drop the notification: notify as before.
+      }
+      if (run?.origin === "local") {
+        deferredRunIds.push(runId);
+        continue;
+      }
+      const leftAlone = run?.taskKey !== undefined && skippedTaskKeys.has(run.taskKey);
+      deps.runStore.notifySettledRun(
+        runId,
+        resumed.has(runId) || leftAlone ? { skipRetriesExhausted: true } : {},
+      );
+    }
+  };
 
   if (reaped === 0) {
-    return { reaped, recovered: 0, skipped: 0, resumable: [] };
+    return { reaped, recovered: 0, skipped: 0, resumable: [], deferredRunIds: [] };
   }
 
   // PR, automation, and error-monitor runs have no tracker ticket to repair.
   // Reaping them is sufficient and must not initialize or warn about a task
   // tracker merely because a non-ticket subprocess was interrupted.
   if (orphans.length === 0) {
-    return { reaped, recovered: 0, skipped: 0, resumable: [] };
+    notifyReaped();
+    return { reaped, recovered: 0, skipped: 0, resumable: [], deferredRunIds };
   }
 
   if (!deps.tracker) {
@@ -163,7 +204,8 @@ export async function recoverOrphanedTaskRuns(
       `⚠️  ${orphans.length} orphaned task run(s) from the previous worker marked failed, ` +
         "but no tracker client is available to notify their tickets",
     );
-    return { reaped, recovered: 0, skipped: 0, resumable: [] };
+    notifyReaped();
+    return { reaped, recovered: 0, skipped: 0, resumable: [], deferredRunIds };
   }
 
   log(
@@ -173,7 +215,6 @@ export async function recoverOrphanedTaskRuns(
 
   let recovered = 0;
   let skipped = 0;
-  const resumable: RunRecord[] = [];
   const notified = new Set<string>();
   const resolvePickup =
     deps.resolvePickup ??
@@ -209,6 +250,7 @@ export async function recoverOrphanedTaskRuns(
       log(
         `⏭️  Orphaned run for ${taskKey} started more than ${Math.round(maxAgeMs / 86_400_000)} day(s) ago; leaving the ticket alone`,
       );
+      skippedTaskKeys.add(taskKey);
       skipped++;
       continue;
     }
@@ -226,12 +268,14 @@ export async function recoverOrphanedTaskRuns(
           `⏭️  ${taskKey} is now '${currentStatus ?? "unknown"}' (not '${inProgressStatus}'); ` +
             "assuming it was handled after the crash and leaving it alone",
         );
+        skippedTaskKeys.add(taskKey);
         skipped++;
         continue;
       }
       movedToInProgress = Boolean(inProgressStatus);
     } catch (error) {
       warn(`⚠️  Could not fetch ${taskKey} to recover it: ${(error as Error).message}`);
+      skippedTaskKeys.add(taskKey);
       skipped++;
       continue;
     }
@@ -285,7 +329,8 @@ export async function recoverOrphanedTaskRuns(
         "their recorded branch and report instead of restarting.",
     );
   }
-  return { reaped, recovered, skipped, resumable };
+  notifyReaped();
+  return { reaped, recovered, skipped, resumable, deferredRunIds };
 }
 
 /**
@@ -305,67 +350,9 @@ export function defaultProjectKeyFor(taskKey: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Settings resolution for status names.
-//
-// Fleet tasks run as CLI subprocesses in per-repo worktrees, so the pipeline
-// reads each repo's `.devintern-code/settings.json` relative to its cwd. The
-// recovery path runs in the worker process before any worktree exists for the
-// orphaned run, so it reads settings from the repos' persistent base
-// worktrees instead (first configured repo wins per project key).
+// Settings resolution for status names: the workspace's `[trackers]` table,
+// loaded by the caller (see `loadWorkspaceTrackerSettings`).
 // ---------------------------------------------------------------------------
-
-const TRACKER_SECTION_KEYS = [
-  "jira",
-  "linear",
-  "trello",
-  "azure-devops",
-  "asana",
-  "github",
-  "gitlab",
-  "markdown",
-] as const;
-
-/**
- * Merge workspace `[trackers]` settings and the legacy
- * `.devintern-code/settings.json` of the given directories into one settings
- * view (workspace first, then earlier directories win per project key).
- * Returns null when no source has any settings.
- */
-export function loadProjectSettingsFrom(
-  dirs: string[],
-  workspaceSettings: ProjectSettings | null = null,
-): ProjectSettings | null {
-  let merged: ProjectSettings | null = workspaceSettings ? { ...workspaceSettings } : null;
-  for (const dir of dirs) {
-    const settingsPath = join(dir, ".devintern-code", "settings.json");
-    if (!existsSync(settingsPath)) {
-      continue;
-    }
-    try {
-      const settings = JSON.parse(readFileSync(settingsPath, "utf8")) as ProjectSettings;
-      merged = merged ?? {};
-      mergeSettingsInto(merged, settings);
-    } catch {
-      // Unreadable settings degrade to "no status names configured".
-    }
-  }
-  return merged;
-}
-
-/** First-wins merge of tracker project sections and the legacy top-level map. */
-function mergeSettingsInto(target: ProjectSettings, source: ProjectSettings): void {
-  for (const key of TRACKER_SECTION_KEYS) {
-    const projects = source[key]?.projects;
-    if (!projects) {
-      continue;
-    }
-    const existing = target[key]?.projects ?? {};
-    target[key] = { projects: { ...projects, ...existing } };
-  }
-  if (source.projects) {
-    target.projects = { ...source.projects, ...target.projects };
-  }
-}
 
 /**
  * Resolve a status name (`inProgressStatus` / `todoStatus` / `prStatus`) for

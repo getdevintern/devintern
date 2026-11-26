@@ -36,13 +36,13 @@ describe("LockManager", () => {
   });
 
   test("should acquire and release lock successfully", () => {
-    const lock1 = new LockManager(testDir);
+    const lock1 = new LockManager(testDir, ".pid.lock");
     const result1 = lock1.acquire();
 
     expect(result1.success).toBe(true);
 
     // Try to acquire with second instance - should fail
-    const lock2 = new LockManager(testDir);
+    const lock2 = new LockManager(testDir, ".pid.lock");
     const result2 = lock2.acquire();
 
     expect(result2.success).toBe(false);
@@ -55,7 +55,7 @@ describe("LockManager", () => {
     expect(existsSync(lock1.getLockFilePath())).toBe(false);
 
     // Now third instance should be able to acquire
-    const lock3 = new LockManager(testDir);
+    const lock3 = new LockManager(testDir, ".pid.lock");
     const result3 = lock3.acquire();
 
     expect(result3.success).toBe(true);
@@ -64,7 +64,7 @@ describe("LockManager", () => {
 
   test("should detect and remove stale locks", () => {
     // Create a lock and release it to ensure we start clean
-    const cleanLock = new LockManager(testDir);
+    const cleanLock = new LockManager(testDir, ".pid.lock");
     const cleanResult = cleanLock.acquire();
     if (cleanResult.success) {
       cleanLock.release();
@@ -81,7 +81,7 @@ describe("LockManager", () => {
     writeFileSync(lockPath, JSON.stringify(staleLockData, null, 2), "utf8");
 
     // Try to acquire lock - should detect stale lock and proceed
-    const lock = new LockManager(testDir);
+    const lock = new LockManager(testDir, ".pid.lock");
     const result = lock.acquire();
 
     expect(result.success).toBe(true);
@@ -92,14 +92,16 @@ describe("LockManager", () => {
   });
 
   test("should store lock file in correct location", () => {
-    const lock = new LockManager(testDir);
+    const lockDir = join(testDir, "locks", "nested");
+    const lock = new LockManager(lockDir, ".pid.lock");
     const lockPath = lock.getLockFilePath();
 
-    // Verify lock is in .devintern-code directory with correct filename
-    expect(lockPath).toContain(".devintern-code");
-    expect(lockPath).toEndWith(".pid.lock");
+    // The lock file sits directly in the given directory, which is created.
+    expect(lockPath).toBe(join(lockDir, ".pid.lock"));
+    expect(existsSync(lockDir)).toBe(true);
+    expect(existsSync(join(testDir, ".devintern-code"))).toBe(false);
+    expect(existsSync(join(lockDir, ".devintern-code"))).toBe(false);
 
-    // Verify .devintern-code directory is created and lock file is created
     const result = lock.acquire();
     expect(result.success).toBe(true);
     expect(existsSync(lockPath)).toBe(true);
@@ -108,7 +110,7 @@ describe("LockManager", () => {
   });
 
   test("should handle multiple release calls gracefully (idempotence)", () => {
-    const lock = new LockManager(testDir);
+    const lock = new LockManager(testDir, ".pid.lock");
     const result = lock.acquire();
 
     expect(result.success).toBe(true);
@@ -122,12 +124,12 @@ describe("LockManager", () => {
   });
 
   test("should prevent multiple instances from acquiring lock", () => {
-    const lock1 = new LockManager(testDir);
+    const lock1 = new LockManager(testDir, ".pid.lock");
     const result1 = lock1.acquire();
 
     expect(result1.success).toBe(true);
 
-    const lock2 = new LockManager(testDir);
+    const lock2 = new LockManager(testDir, ".pid.lock");
     const result2 = lock2.acquire();
 
     expect(result2.success).toBe(false);
@@ -138,7 +140,7 @@ describe("LockManager", () => {
   });
 
   test("should include process information in lock file", () => {
-    const lock = new LockManager(testDir);
+    const lock = new LockManager(testDir, ".pid.lock");
     const result = lock.acquire();
 
     expect(result.success).toBe(true);
@@ -163,14 +165,14 @@ describe("LockManager custom lock file", () => {
     );
     mkdirSync(dir, { recursive: true });
     try {
-      const taskLock = new LockManager(dir);
+      const taskLock = new LockManager(dir, ".pid.lock");
       const workerLock = new LockManager(dir, ".worker.lock");
 
       expect(taskLock.acquire().success).toBe(true);
       // A second task lock is blocked, but the worker lock is independent.
-      expect(new LockManager(dir).acquire().success).toBe(false);
+      expect(new LockManager(dir, ".pid.lock").acquire().success).toBe(false);
       expect(workerLock.acquire().success).toBe(true);
-      expect(existsSync(join(dir, ".devintern-code", ".worker.lock"))).toBe(true);
+      expect(existsSync(join(dir, ".worker.lock"))).toBe(true);
 
       taskLock.release();
       workerLock.release();
@@ -181,7 +183,7 @@ describe("LockManager custom lock file", () => {
 });
 
 describe("LockManager.readLockStatus", () => {
-  test("reads a nested project lock and reports liveness, pid, and path", () => {
+  test("reads a lock in the given directory and reports liveness, pid, and path", () => {
     const dir = join(
       tmpdir(),
       `lock-status-${Date.now()}-${Math.random().toString(36).substring(7)}`,
@@ -190,38 +192,16 @@ describe("LockManager.readLockStatus", () => {
     try {
       const lock = new LockManager(dir, ".worker.lock");
       expect(lock.acquire().success).toBe(true);
+      expect(existsSync(join(dir, ".worker.lock"))).toBe(true);
 
       const status = LockManager.readLockStatus(dir, ".worker.lock");
       expect(status?.running).toBe(true);
       expect(status?.pid).toBe(process.pid);
-      expect(status?.path).toBe(join(dir, ".devintern-code", ".worker.lock"));
+      expect(status?.path).toBe(join(dir, ".worker.lock"));
 
       lock.release();
       expect(LockManager.readLockStatus(dir, ".worker.lock")).toBeNull();
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  test("plainDir reads workspace locks that sit directly in the directory", () => {
-    const dir = join(
-      tmpdir(),
-      `lock-status-plain-${Date.now()}-${Math.random().toString(36).substring(7)}`,
-    );
-    mkdirSync(dir, { recursive: true });
-    try {
-      const workspaceLock = new LockManager(dir, ".worker.lock", { plainDir: true });
-      expect(workspaceLock.acquire().success).toBe(true);
-      expect(existsSync(join(dir, ".worker.lock"))).toBe(true);
-
-      // Nested lookup misses the plain lock; plainDir finds it.
-      expect(LockManager.readLockStatus(dir, ".worker.lock")).toBeNull();
-      const status = LockManager.readLockStatus(dir, ".worker.lock", { plainDir: true });
-      expect(status?.running).toBe(true);
-      expect(status?.pid).toBe(process.pid);
-      expect(status?.path).toBe(join(dir, ".worker.lock"));
-
-      workspaceLock.release();
+      expect(existsSync(join(dir, ".devintern-code"))).toBe(false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -249,7 +229,6 @@ describe("LockManager PID-namespace liveness", () => {
 
   function status(probes: { signalPid: (pid: number) => void; ns?: string }) {
     return LockManager.readLockStatus(testDir, ".worker.lock", {
-      plainDir: true,
       probes: { signalPid: probes.signalPid, readPidNamespace: () => probes.ns },
     });
   }
@@ -319,7 +298,6 @@ describe("LockManager PID-namespace liveness", () => {
       });
       expect(status({ signalPid, ns: OWN_NS })?.running).toBe(false);
       const lock = new LockManager(testDir, ".worker.lock", {
-        plainDir: true,
         reclaimForeign: true,
         probes: { signalPid, readPidNamespace: () => OWN_NS },
       });
@@ -333,7 +311,6 @@ describe("LockManager PID-namespace liveness", () => {
     const old = new Date(Date.now() - 60 * 60_000).toISOString();
     writeLock({ pid: process.pid, pidNamespace: FOREIGN_NS, timestamp: old, heartbeatAt: old });
     const lock = new LockManager(testDir, ".worker.lock", {
-      plainDir: true,
       reclaimForeign: true,
       probes: { readPidNamespace: () => OWN_NS },
     });
@@ -344,13 +321,11 @@ describe("LockManager PID-namespace liveness", () => {
   test("a same-namespace lock with our pid that this process does not hold is reclaimed", () => {
     writeLock({ pid: process.pid, pidNamespace: OWN_NS });
     const lock = new LockManager(testDir, ".worker.lock", {
-      plainDir: true,
       probes: { readPidNamespace: () => OWN_NS },
     });
     expect(lock.acquire().success).toBe(true);
     // ...but a second in-process acquire of a held lock is still refused.
     const again = new LockManager(testDir, ".worker.lock", {
-      plainDir: true,
       probes: { readPidNamespace: () => OWN_NS },
     });
     expect(again.acquire().success).toBe(false);
@@ -368,7 +343,6 @@ describe("LockManager PID-namespace liveness", () => {
     });
     expect(status({ signalPid: errno("ESRCH"), ns: OWN_NS })?.running).toBe(false);
     const lock = new LockManager(testDir, ".worker.lock", {
-      plainDir: true,
       reclaimForeign: true,
       probes: { signalPid: errno("ESRCH"), readPidNamespace: () => OWN_NS },
     });
@@ -380,7 +354,6 @@ describe("LockManager PID-namespace liveness", () => {
 
   test("acquire records the owner's namespace, and omits it when unreadable", () => {
     const withNs = new LockManager(testDir, ".a.lock", {
-      plainDir: true,
       probes: { readPidNamespace: () => OWN_NS },
     });
     expect(withNs.acquire().success).toBe(true);
@@ -388,7 +361,6 @@ describe("LockManager PID-namespace liveness", () => {
     withNs.release();
 
     const withoutNs = new LockManager(testDir, ".b.lock", {
-      plainDir: true,
       probes: { readPidNamespace: () => undefined },
     });
     expect(withoutNs.acquire().success).toBe(true);
@@ -401,7 +373,6 @@ describe("LockManager PID-namespace liveness", () => {
   test("acquire refuses to steal a lock it cannot verify", () => {
     const lockPath = writeLock({ pidNamespace: FOREIGN_NS });
     const lock = new LockManager(testDir, ".worker.lock", {
-      plainDir: true,
       probes: { signalPid: errno("ESRCH"), readPidNamespace: () => OWN_NS },
     });
     const result = lock.acquire();
@@ -434,7 +405,6 @@ describe("LockManager PID-namespace liveness", () => {
     const old = new Date(Date.now() - LOCK_HEARTBEAT_RECLAIM_MS - 1_000).toISOString();
     const lockPath = writeLock({ pidNamespace: FOREIGN_NS, timestamp: old, heartbeatAt: old });
     const lock = new LockManager(testDir, ".worker.lock", {
-      plainDir: true,
       reclaimForeign: true,
       probes: { signalPid: errno("ESRCH"), readPidNamespace: () => OWN_NS },
     });
@@ -454,7 +424,6 @@ describe("LockManager PID-namespace liveness", () => {
       heartbeatAt: ancient,
     });
     const lock = new LockManager(testDir, ".worker.lock", {
-      plainDir: true,
       probes: { signalPid: errno("ESRCH"), readPidNamespace: () => OWN_NS },
     });
     const result = lock.acquire();
@@ -475,7 +444,7 @@ describe("LockManager PID-namespace liveness", () => {
       timestamp: ancient,
       heartbeatAt: ancient,
     });
-    const taskLock = new LockManager(testDir);
+    const taskLock = new LockManager(testDir, ".pid.lock");
     writeFileSync(taskLock.getLockFilePath(), foreign);
     const runLock = createRepoRunLock("repo", testDir);
     writeFileSync(runLock.getLockFilePath(), foreign);
@@ -492,13 +461,11 @@ describe("LockManager PID-namespace liveness", () => {
   test("refreshHeartbeat advances heartbeatAt and keeps a foreign reader at unknown", () => {
     let clock = Date.parse("2026-01-01T00:00:00.000Z");
     const owner = new LockManager(testDir, ".worker.lock", {
-      plainDir: true,
       probes: { readPidNamespace: () => FOREIGN_NS, now: () => clock },
     });
     expect(owner.acquire().success).toBe(true);
     const reader = (now: number) =>
       LockManager.readLockStatus(testDir, ".worker.lock", {
-        plainDir: true,
         probes: { signalPid: errno("ESRCH"), readPidNamespace: () => OWN_NS, now: () => now },
       })?.running;
 
@@ -516,7 +483,7 @@ describe("LockManager PID-namespace liveness", () => {
   });
 
   test("refreshHeartbeat never rewrites a lock now owned by another pid", () => {
-    const owner = new LockManager(testDir, ".worker.lock", { plainDir: true });
+    const owner = new LockManager(testDir, ".worker.lock");
     expect(owner.acquire().success).toBe(true);
     const lockPath = owner.getLockFilePath();
     writeFileSync(lockPath, JSON.stringify({ pid: DEAD_PID, timestamp: "x", heartbeatAt: "x" }));
@@ -531,7 +498,6 @@ describe("LockManager PID-namespace liveness", () => {
   test("acquire still steals a truly stale same-namespace lock", () => {
     const lockPath = writeLock({ pidNamespace: OWN_NS });
     const lock = new LockManager(testDir, ".worker.lock", {
-      plainDir: true,
       probes: { signalPid: errno("ESRCH"), readPidNamespace: () => OWN_NS },
     });
     expect(lock.acquire().success).toBe(true);

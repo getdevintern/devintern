@@ -9,9 +9,8 @@
  * are all unreachable and nothing leaves the machine. Only fake credentials
  * are used, and the tests assert none of them is echoed.
  *
- * Session files live where the CLI reads them: `<project>/.devintern-code/`
- * for a task run and `<workspace>/state/code/` for the worker
- * (`loadSupabaseConfig`, packages/code/src/lib/cli/bootstrap.ts).
+ * Session files live where the CLI reads them: `<workspace>/state/code/` for
+ * every command (`loadSupabaseConfig`, packages/code/src/lib/cli/bootstrap.ts).
  */
 
 import { expect, test } from "bun:test";
@@ -45,7 +44,10 @@ const LICENSE_KEY_GUIDANCE =
   "Set LICENSE_KEY to a Supporter, Team, or Business license key from https://devintern.com/account";
 const SIGN_IN_ALTERNATIVE = "Alternatively, sign in if your account already holds one.";
 const WORKER_PILOT_ALTERNATIVE =
-  "Alternatively, run `devintern login` to start a free Worker Pilot; no card is required.";
+  "Alternatively, run `devintern login` to start your 14-day free Worker Pilot (no card required).";
+/** The daemon names the workspace sign-in (with `--workspace` for a non-default workspace). */
+const WORKER_DAEMON_PILOT_ALTERNATIVE =
+  /Alternatively, run `devintern worker login( --workspace [^`]+)?` to start your 14-day free Worker Pilot \(no card required\)\./;
 const NOT_SIGNED_IN = "Not signed in. Run `devintern login`.";
 
 /**
@@ -211,7 +213,7 @@ test.skipIf(skip)(
     await withGatedTaskRun(async (run, proxy) => {
       // Expired token: supabase-js retries the refresh with backoff before
       // giving up; the preload skips the sleeps, not the attempts.
-      const accessToken = writeFakeSession(join(run.cwd, ".devintern-code/.auth-session.json"), {
+      const accessToken = writeFakeSession(workspaceSessionPath(run.env), {
         expired: true,
       });
       const result = await run.runTask({ bunArgs: FAST_AUTH_BACKOFF });
@@ -288,8 +290,9 @@ test.skipIf(skip)(
       expect(worker.exitStatus).toBe(1);
       expect(worker.logs).toContain("❌ License check failed");
       expect(worker.logs).toContain(AUTOMATION_DENIAL);
-      // The worker allows the trial, so it points a signed-out user at login.
-      expect(worker.logs).toContain(WORKER_PILOT_ALTERNATIVE);
+      // The worker allows the trial, so it points a signed-out user at the
+      // workspace sign-in (the session the daemon reads).
+      expect(worker.logs).toMatch(WORKER_DAEMON_PILOT_ALTERNATIVE);
       expect(worker.logs).not.toContain("Draining injected tasks");
       expect(worker.agentInvocations()).toEqual([]);
       expect(worker.agentTimeline()).toEqual([]);
@@ -308,6 +311,13 @@ test.skipIf(skip)(
   60_000,
 );
 
+/** Sign-in session path for the run's workspace (created on demand). */
+function workspaceSessionPath(env: Record<string, string | undefined>): string {
+  const dir = join(env.DEVINTERN_WORKSPACE_DIR!, "state", "code");
+  mkdirSync(dir, { recursive: true });
+  return join(dir, ".auth-session.json");
+}
+
 /** Account commands in a bare temp project, with Supabase refused by the proxy. */
 async function withAccountProject(
   body: (run: (args: string[]) => Promise<CommandResult>, sessionPath: string) => Promise<void>,
@@ -318,12 +328,12 @@ async function withAccountProject(
   const root = mkdtempSync(join(tmpdir(), "devintern-e2e-account-"));
   try {
     const cwd = join(root, "project");
-    mkdirSync(join(cwd, ".devintern-code"), { recursive: true });
+    mkdirSync(cwd, { recursive: true });
     const env = { ...isolatedEnvironment(root), ...proxyEnvironment(proxy.url) };
     delete (env as Record<string, string>).DEVINTERN_SKIP_LICENSE_CHECK;
     await body(
       (args) => command([process.execPath, ...bunArgs, cliPath, ...args], cwd, env, 90_000),
-      join(cwd, ".devintern-code/.auth-session.json"),
+      workspaceSessionPath(env),
     );
     proxyCheck(proxy);
   } finally {

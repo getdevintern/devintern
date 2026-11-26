@@ -29,7 +29,8 @@ describe("relay-connect auth", () => {
 
   beforeEach(() => {
     dir = join(tmpdir(), `relay-connect-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-    mkdirSync(join(dir, ".devintern-code"), { recursive: true });
+    // A workspace home: relay state lives in its state/code/.
+    mkdirSync(join(dir, "state", "code"), { recursive: true });
     calls = [];
   });
 
@@ -135,7 +136,7 @@ describe("relay-connect auth", () => {
     expect(relayToken).toBe("drt_minted_abc");
     expect(state.customerId).toBe("user_1");
     expect(loadRelayState(dir)?.relayToken).toBe("drt_minted_abc");
-    expect(statSync(join(dir, ".devintern-code", "relay.json")).mode & 0o777).toBe(0o600);
+    expect(statSync(join(dir, "state", "code", "relay.json")).mode & 0o777).toBe(0o600);
     expect(calls[0].auth).toBe("Bearer supa-access");
 
     // Second call reuses the stored token (no re-mint).
@@ -270,7 +271,7 @@ describe("relay-connect auth", () => {
         connectedAt: expect.any(String),
       },
     ]);
-    const persisted = readFileSync(join(dir, ".devintern-code", "relay.json"), "utf8");
+    const persisted = readFileSync(join(dir, "state", "code", "relay.json"), "utf8");
     expect(persisted).not.toContain(signingToken);
     expect(persisted).not.toContain(legacySecret);
 
@@ -590,7 +591,7 @@ describe("relay-connect auth", () => {
       expect(hasGitHubRelayRegistration(state, "acme/api")).toBe(true);
       expect(state.relayToken).toBe("drt_verify_1");
       const appRecord = JSON.parse(
-        readFileSync(join(dir, ".devintern-code", "github-app.json"), "utf8"),
+        readFileSync(join(dir, "state", "code", "github-app.json"), "utf8"),
       ) as { repositories: Array<{ repo: string; repositoryId: number }> };
       expect(appRecord.repositories.map((record) => record.repo).sort()).toEqual([
         "acme/api",
@@ -980,12 +981,12 @@ describe("relay-connect auth", () => {
       getAccessToken: async () => "supa-access",
     });
     expect(code).toBe(0);
-    const saved = JSON.parse(readFileSync(join(dir, ".devintern-code", "relay.json"), "utf8")) as {
+    const saved = JSON.parse(readFileSync(join(dir, "state", "code", "relay.json"), "utf8")) as {
       relayToken: string;
     };
     expect(saved.relayToken).toBe("drt_cli_1");
     const appRecord = JSON.parse(
-      readFileSync(join(dir, ".devintern-code", "github-app.json"), "utf8"),
+      readFileSync(join(dir, "state", "code", "github-app.json"), "utf8"),
     ) as { repositories: Array<{ installationId: number; repositoryId: number }> };
     expect(appRecord.repositories[0]?.installationId).toBe(7001);
     expect(appRecord.repositories[0]?.repositoryId).toBe(9001);

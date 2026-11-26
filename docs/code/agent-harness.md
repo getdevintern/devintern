@@ -9,7 +9,7 @@ dateModified: 2026-11-18
 
 # Agent Harness Configuration
 
-The **harness** is the AI agent CLI that DevIntern Code runs to do the work. Set it in `.devintern-code/.env` (or the workspace `.env` for a worker):
+The **harness** is the AI agent CLI that DevIntern Code runs to do the work. Set it in the repository's env file `~/.devintern/env/<repo>.env` (or the workspace `.env` for every repo):
 
 ```bash
 AGENT_HARNESS=claude-code        # default
@@ -37,6 +37,7 @@ Usually `AGENT_HARNESS` is all you need. DevIntern finds the harness's standard 
 | `kilo-code`                      | `kilo`         |                                                                                                          |
 | `kimi`                           | `kimi`         |                                                                                                          |
 | `qwen`                           | `qwen`         | Set the model with `AGENT_MODEL` (for example `qwen3-coder-plus`) or in `~/.qwen/settings.json`          |
+| `pi`                             | `pi`           | `AGENT_EFFORT` takes effect only when a model is configured                                              |
 
 `AGENT_HARNESS=gemini` still works but routes to Antigravity and prints a deprecation warning. DevIntern never starts the retired `gemini` binary.
 

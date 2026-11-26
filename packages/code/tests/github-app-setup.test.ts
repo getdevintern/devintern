@@ -20,7 +20,8 @@ describe("github-app-setup", () => {
 
   beforeEach(() => {
     tempDir = mkdtempSync(path.join(tmpdir(), "devintern-github-app-setup-"));
-    mkdirSync(path.join(tempDir, ".devintern-code"), { recursive: true });
+    // A workspace home: pairings live in its state/code/.
+    mkdirSync(path.join(tempDir, "state", "code"), { recursive: true });
   });
 
   afterEach(() => {
@@ -67,10 +68,10 @@ describe("github-app-setup", () => {
 
   test("returns null when missing, malformed, or shape-invalid", () => {
     expect(loadGitHubAppRecord(tempDir)).toBeNull();
-    writeFileSync(path.join(tempDir, ".devintern-code", "github-app.json"), "{not json", "utf8");
+    writeFileSync(path.join(tempDir, "state", "code", "github-app.json"), "{not json", "utf8");
     expect(loadGitHubAppRecord(tempDir)).toBeNull();
     writeFileSync(
-      path.join(tempDir, ".devintern-code", "github-app.json"),
+      path.join(tempDir, "state", "code", "github-app.json"),
       '{"enabled":true}',
       "utf8",
     );

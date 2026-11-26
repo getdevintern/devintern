@@ -1,6 +1,10 @@
 import { extractImplementationSummary } from "../agent/implementation-summary";
 import type { StackBase } from "../dependencies/gate";
-import { parseStackedOnMarker, stackBaseFromEnv } from "../dependencies/stacked-base";
+import {
+  isStackBaseReleased,
+  parseStackedOnMarker,
+  stackBaseFromEnv,
+} from "../dependencies/stacked-base";
 
 /**
  * Structured PR-body template.
@@ -97,6 +101,8 @@ export interface PrBodyInput {
  * Accepts the raw tracker description (string or rich document).
  */
 export function stackedOnFromDescription(description: unknown): StackBase | undefined {
+  // The base merged mid-run and the PR now targets its merge target.
+  if (isStackBaseReleased()) return undefined;
   return (
     (typeof description === "string"
       ? (parseStackedOnMarker(description) ?? undefined)

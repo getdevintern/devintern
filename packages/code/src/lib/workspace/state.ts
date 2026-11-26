@@ -2,8 +2,7 @@
  * Central workspace state.
  *
  * Fleet mode keeps all durable worker state in one SQLite database under the
- * workspace home (`~/.devintern/state/queue.db`) instead of a per-repo
- * `.devintern-code/queue.db`. The existing stores are reused as-is — both
+ * workspace home (`~/.devintern/state/queue.db`). The existing stores are reused as-is — both
  * accept a `dbPath` — so cursors, dedupe, agent PRs, and run records share
  * one file across every repo the worker drives. `agent_prs` and `runs` are
  * already repo-keyed; cursor sources are namespaced strings (the fleet query
@@ -85,7 +84,7 @@ export function createWorkspaceLock(workspaceDir: string = resolveWorkspaceDir()
   if (!existsSync(workspaceDir)) {
     mkdirSync(workspaceDir, { recursive: true });
   }
-  return new LockManager(workspaceDir, ".worker.lock", { plainDir: true, reclaimForeign: true });
+  return new LockManager(workspaceDir, ".worker.lock", { reclaimForeign: true });
 }
 
 /**
@@ -102,7 +101,7 @@ export function createRepoRunLock(
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true });
   }
-  return new LockManager(dir, `${repoName}.run.lock`, { plainDir: true });
+  return new LockManager(dir, `${repoName}.run.lock`);
 }
 
 /**

@@ -1,0 +1,51 @@
+name: Feature request
+description: Suggest a new feature or an improvement to DevIntern.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the idea. This issue is **public**, so leave out anything private about your codebase or company.
+  - type: dropdown
+    id: product
+    attributes:
+      label: Product
+      options:
+        - DevIntern Code (devintern CLI or worker)
+        - Dashboard
+        - DevIntern PM (devpm CLI)
+        - DevIntern PM desktop app
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: The situation or workflow where DevIntern falls short today.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like to happen?
+      description: How it could work, including any commands, settings, or screens you picture.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives or workarounds
+      description: What you do today instead, or other approaches you considered.
+    validations:
+      required: false
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `devintern --version` or `devpm --version`, if relevant.
+      placeholder: "2.29.0"
+    validations:
+      required: false

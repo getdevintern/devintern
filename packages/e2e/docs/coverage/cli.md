@@ -138,17 +138,17 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 
 - Surface: `devintern` command surface
 - Status: `partial`
-- Evidence: GitLab live lifecycle
-- Missing: GitHub; `--no-push`, `--no-reply`, `--ci-feedback`, `--expected-head`.
-- Last reviewed: 2026-11-17
+- Evidence: GitLab live lifecycle. `tests/local/cli-address-review.test.ts` runs it standalone against the fake GitLab forge: default push and reply, `--no-push`, `--no-reply`, `--ci-feedback`, stale and current `--expected-head`, and the missing-value errors (`bun run --filter @getdevintern/code build`, then `bun run --filter @devintern/e2e test`).
+- Missing: GitHub, because `packages/code/src/lib/code-host/github/reviews.ts` hardcodes `https://api.github.com` and cannot be faked offline. Observed (unconfirmed intent): a stale `--expected-head` in plain review mode fails with "MR head changed before CI repair started; refusing stale feedback.", which names CI repair.
+- Last reviewed: 2026-11-25
 
 ### `resolve-conflicts`
 
 - Surface: `devintern` command surface
 - Status: `partial`
-- Evidence: `tests/local/worker-conflict-failover.test.ts` asserts the standalone first-harness-only contract and a nonzero exhausted-primary result (`bun run build`, then `bun run --filter @devintern/e2e test`). GitLab worker auto mode remains live.
-- Missing: Scheduled/disabled modes and live provider options this story does not claim. One-shot multi-harness failover is not implemented.
-- Last reviewed: 2026-11-17
+- Evidence: `tests/local/worker-conflict-failover.test.ts` asserts the standalone first-harness-only contract and a nonzero exhausted-primary result. `tests/local/cli-resolve-conflicts.test.ts` runs it standalone on a conflicting MR against the fake GitLab forge: stale `--expected-head` / `--expected-base` defer with exit 2 and no agent run or push, `--no-push` leaves the remote unchanged, and current guards push a merge commit on top of the old head (`bun run --filter @getdevintern/code build`, then `bun run --filter @devintern/e2e test`). GitLab worker auto mode remains live.
+- Missing: GitHub options (same `api.github.com` limit as `address-review`). Scheduled/disabled worker modes. One-shot multi-harness failover is not implemented. Observed (unconfirmed intent): the parser takes `args[++i]` unchecked, so a trailing `--expected-head` with no value runs with no head guard instead of failing as a usage error.
+- Last reviewed: 2026-11-25
 
 ### `doctor`
 
@@ -172,7 +172,7 @@ Priority numbers are the global ranking from the
 [index](../coverage-matrix.md#priority-backlog); lower runs first.
 
 - Priority 6: ~~`--auto-review` loop and iteration cap on GitHub and GitLab~~ (the local loop/cap is implemented by `tests/local/cli-auto-review.test.ts`; provider parity with real PR review feedback remains live/opt-in).
-- Priority 9: Standalone `address-review` options, plus `resolve-conflicts` scheduled/disabled modes and live provider options. The offline first-harness-only contract is covered by `tests/local/worker-conflict-failover.test.ts`.
+- Priority 9: `resolve-conflicts` scheduled/disabled worker modes, and GitHub `address-review` / `resolve-conflicts` options (needs an overridable GitHub API base). Standalone GitLab options are covered by `tests/local/cli-address-review.test.ts` and `tests/local/cli-resolve-conflicts.test.ts`; the offline first-harness-only contract by `tests/local/worker-conflict-failover.test.ts`.
 
 ## Test notes
 
@@ -265,3 +265,12 @@ the product, so none is asserted.
 bun run --filter @getdevintern/code build
 bun run --filter @devintern/e2e test
 ```
+
+### Standalone `address-review` and `resolve-conflicts` (GitLab)
+
+`tests/local/cli-address-review.test.ts` and `tests/local/cli-resolve-conflicts.test.ts` run the built CLI directly from the seeded checkout, with no worker or `webhook serve`. They use `openStandaloneScenario` in `helpers/gitlab-webhook-scenario.ts`: the same bare repo, loopback `FakeGitlabForge`, git `insteadOf` rewrite, and deterministic agent as the webhook tests. Credentials come from a plain project env (`GITLAB_CODE_HOST_URL`, `GITLAB_CODE_HOST_TOKEN`). No workspace is registered, so `workspaceCredentialsForChange` finds no `workspace.toml` and leaves the env alone.
+
+- `address-review`: a missing `--ci-feedback` / `--expected-head` value exits 1 with no forge request or agent run. `--no-push` commits locally (the checkout's branch moves, the bare remote does not) and posts no reply. A stale `--expected-head` exits 1 with no agent run. The current head pushes a fast-forward and posts one discussion reply. `--no-reply` pushes and posts nothing. `--ci-feedback` (the `CiFailureFeedback` JSON the worker writes) puts the check name and log excerpt in the prompt, pushes the CI fix, and posts no reply even though the MR has an open discussion.
+- `resolve-conflicts`: a stale `--expected-head` or `--expected-base` prints `Deferred: ...` and exits 2. `--no-push` runs the agent and leaves the remote and forge untouched. Current guards (`--expected-base` is GitLab's `diff_refs.base_sha`, the merge base) push a merge commit with parents `[old head, target tip]` and post one outcome note.
+
+Every run asserts the forge token is absent from stdout and stderr, raw and URL-encoded. Run with the commands in [Run locally](../../README.md#run-locally).

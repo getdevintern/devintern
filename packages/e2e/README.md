@@ -28,6 +28,21 @@ The local suite lists opt-in suites as skipped and planned tracker coverage as
 todo, so `bun run test` (or the Turbo command above) shows what it does not
 exercise. Use the explicit commands below to run those suites.
 
+### Blank-machine Docker smoke
+
+`test:docker` installs the packed CLI in a clean Debian container and runs the
+`worker init --non-interactive` scenarios there with no TTY, no network
+(`--network none`), and stdin closed. It needs a built CLI and a Docker daemon
+your user can reach; it pulls `oven/bun:<your Bun version>-debian` on first
+run. It does not run in `test`; the e2e-local workflow runs it after the local
+suite. Scenarios are listed in
+[docs/coverage/worker-commands.md](docs/coverage/worker-commands.md#worker-init-blank-machine-smoke-docker).
+
+```sh
+bun run --filter @getdevintern/code build
+bun run --filter @devintern/e2e test:docker
+```
+
 Local runs default to the private `getdevintern/devintern-e2e` repository and read
 credentials from `gh auth token` in memory. Your GitHub account must have write
 access to that repository. No token is written to disk. Override the repository
@@ -166,6 +181,24 @@ GitLab suite requires `test:e2e:gitlab`; `test:e2e` remains the GitHub suite.
 
 Infrastructure references: [GitLab Docker installation](https://docs.gitlab.com/install/docker/installation/),
 [19.3.5 patch release](https://docs.gitlab.com/releases/patches/patch-release-gitlab-19-4-2-released/).
+
+## Native systemd service
+
+Docker Engine must be installed and accessible to your user. The suite builds a
+Debian image with systemd as PID 1, installs the packed CLI for a non-root user,
+and runs a privileged container (its own network namespace, never the host's).
+It needs no credentials and never touches the host's service manager or home
+directory.
+
+```sh
+bun run --filter @getdevintern/code build
+bun run --filter @devintern/e2e test:e2e:service
+```
+
+The container is removed when the suite ends; the `devintern-e2e-systemd:local`
+image is kept so later runs start faster (`docker rmi devintern-e2e-systemd:local`
+removes it). What it checks is in
+[docs/coverage/worker-daemon.md](docs/coverage/worker-daemon.md#native-systemd-service).
 
 ## Bitbucket Cloud and GitLab.com
 

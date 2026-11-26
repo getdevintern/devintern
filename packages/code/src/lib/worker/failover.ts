@@ -223,9 +223,17 @@ export class WorkerFailover {
   /**
    * Record a usage limit and fail over. Pauses via {@link onPause} when the
    * chain is exhausted; always rearms the failback timer.
+   *
+   * @param hint - Reset hint the child wrote, if any
+   * @param harness - Harness the limited child ran on. Pass it whenever runs
+   *   can overlap: by the time a long run reports, another run may already
+   *   have failed over, and charging the limit to the now-active fallback
+   *   would close the whole chain.
    */
-  reportFromHint(hint?: UsageLimitHint): FailoverOutcome {
-    const harness = this.manager.activeName;
+  reportFromHint(
+    hint?: UsageLimitHint,
+    harness: string = this.manager.activeName,
+  ): FailoverOutcome {
     const now = this.now();
     const known =
       hint?.untilMs && hint.untilMs > now ? hint.untilMs : resetHintToMs(hint?.resetsAt, now);
@@ -236,7 +244,7 @@ export class WorkerFailover {
     } else {
       until = now + this.unknownResetCooldownMs(harness, hint?.period);
     }
-    const outcome = this.manager.reportUsageLimit(until);
+    const outcome = this.manager.reportUsageLimit(until, harness);
     if (outcome.kind === "exhausted") {
       this.paused = true;
       this.onPause?.({ untilMs: outcome.untilMs, harness, resetHint: hint?.resetsAt });
@@ -249,8 +257,8 @@ export class WorkerFailover {
    * A run on the active harness completed, so its quota is back: the next
    * limit without a reset time starts again from the base fallback.
    */
-  recordSuccess(): void {
-    this.unknownResetStreak.delete(this.manager.activeName);
+  recordSuccess(harness: string = this.manager.activeName): void {
+    this.unknownResetStreak.delete(harness);
   }
 
   /**
@@ -473,6 +481,9 @@ export async function runWithFailover(
     failover.manager.ensureAvailableActive();
     const hintDir = mkdtempSync(join(tmpdir(), "devintern-usage-limit-"));
     const hintPath = join(hintDir, "hint.json");
+    // Captured before the spawn: concurrent runs can fail over while this
+    // child runs, and its exit must be charged to the harness it ran on.
+    const harness = failover.activeName;
     try {
       const code = await spawnOnce(failover.childEnv(baseEnv, hintPath));
       if (code === AUTOMATION_ACCESS_EXIT_CODE) return "deferred";
@@ -483,6 +494,7 @@ export async function runWithFailover(
         // the next one without recording a usage-limit window.
         const outcome = failover.manager.reportHarnessUnavailable(
           Date.now() + HARNESS_UNAVAILABLE_COOLDOWN_MS,
+          harness,
         );
         if (outcome.kind === "exhausted") {
           return "deferred";
@@ -490,11 +502,11 @@ export async function runWithFailover(
         continue;
       }
       if (code !== USAGE_LIMIT_EXIT_CODE) {
-        if (code === 0) failover.recordSuccess();
+        if (code === 0) failover.recordSuccess(harness);
         return code === 0 ? "ok" : "failed";
       }
       const hint = readUsageLimitHint(hintPath);
-      const outcome = failover.reportFromHint(hint);
+      const outcome = failover.reportFromHint(hint, harness);
       if (outcome.kind === "exhausted") {
         return "deferred";
       }

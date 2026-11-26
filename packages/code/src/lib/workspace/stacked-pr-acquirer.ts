@@ -9,9 +9,11 @@
 
 import { startFirstTickInBackground } from "../acquirers/background-tick";
 import { parseEnvInteger } from "../config/env-integer";
-import type { StackHost, StackPrSnapshot } from "../dependencies/stack-maintainer";
+import type { StackHost } from "../dependencies/stack-maintainer";
 import { STACK_NOTICE_MARKER, StackMaintainer } from "../dependencies/stack-maintainer";
 import { createGitStack } from "../dependencies/stack-git";
+import { parseStackPr } from "../dependencies/stack-pr-snapshot";
+import type { GitHubPrPayload } from "../dependencies/stack-pr-snapshot";
 import type { InjectedTaskStore } from "../state/injected-tasks";
 import { RunStore } from "../state/run-recorder";
 import { Utils } from "../utils";
@@ -25,6 +27,8 @@ import {
 } from "./fleet-event-acquirers";
 import type { RepoManager } from "./repo-manager";
 
+export { parseStackPr };
+
 type GitHubClient = import("../code-host/github/reviews").GitHubReviewsClient;
 
 /** Default seconds between stacked-PR passes (`WORKER_STACKED_PRS_INTERVAL_SECONDS`). */
@@ -34,45 +38,6 @@ export const DEFAULT_STACKED_PR_INTERVAL_SECONDS = 60;
 function slugOf(config: WorkspaceConfig, repoName: string): string | undefined {
   const repo = config.repos.find((candidate) => candidate.name === repoName);
   return repo ? repoGitHubSlug(repo) : undefined;
-}
-
-/** GitHub single-PR payload fields the adapter reads (untrusted). */
-interface GitHubPrPayload {
-  state?: unknown;
-  merged?: unknown;
-  merged_at?: unknown;
-  html_url?: unknown;
-  head?: { ref?: unknown; sha?: unknown };
-  base?: { ref?: unknown };
-}
-
-/** Parse a GitHub PR payload into a {@link StackPrSnapshot}; `null` when unusable. */
-export function parseStackPr(number: number, data: GitHubPrPayload): StackPrSnapshot | null {
-  const headRef = data.head?.ref;
-  const headSha = data.head?.sha;
-  const baseRef = data.base?.ref;
-  if (typeof headRef !== "string" || typeof headSha !== "string" || typeof baseRef !== "string") {
-    return null;
-  }
-  let state: StackPrSnapshot["state"];
-  if (data.state === "open") {
-    state = "open";
-  } else if (data.state === "closed") {
-    const merged =
-      data.merged === true || (typeof data.merged_at === "string" && data.merged_at !== "");
-    if (!merged && data.merged !== false) return null;
-    state = merged ? "merged" : "closed";
-  } else {
-    return null;
-  }
-  return {
-    number,
-    state,
-    headRef,
-    headSha,
-    baseRef,
-    url: typeof data.html_url === "string" ? data.html_url : undefined,
-  };
 }
 
 /** {@link StackHost} for GitHub repos, with ETag-cached PR reads. */

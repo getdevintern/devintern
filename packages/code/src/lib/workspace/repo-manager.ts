@@ -24,10 +24,11 @@ import { join } from "path";
 import { randomUUID } from "crypto";
 
 import { Utils } from "../utils";
-import { excludeWorkerRuntimeFiles } from "../utils/git-exclude";
 import { withRepoGitLock } from "../utils/repo-git-lock";
+import { worktreeKeepReason } from "../utils/worktree-keep";
 import type { RepoConfig } from "./config";
 import { reposDir, resolveWorkspaceDir, worktreesDir } from "./paths";
+import { migrateCommittedTrackerSettings } from "./migrate-checkout";
 
 /** Name of the persistent per-repo worktree used for review/mention runs. */
 export const BASE_WORKTREE_NAME = "base";
@@ -233,9 +234,8 @@ export class RepoManager {
    * default branch.
    *
    * PR jobs (reviews, CI fixes, base syncs) run their CLI subprocess from
-   * here: it reads the project's tracked `.devintern-code/settings.json` from
-   * its cwd, so that must be the default branch, not whatever an automation
-   * left in the base checkout. The agents themselves work in branch-scoped
+   * here, so it must be the default branch, not whatever an automation left
+   * in the base checkout. The agents themselves work in branch-scoped
    * PR worktrees. Several PR jobs share this checkout, so it is only moved
    * when it lags `origin/<branch>`, and a failed move (another job's git
    * command holding its index) keeps the previous default-branch commit
@@ -328,7 +328,8 @@ export class RepoManager {
   /**
    * Remove leftover task worktrees older than the TTL.
    *
-   * Runs on worker start. The base and PR-job worktrees are never swept.
+   * Runs on worker start. The base and PR-job worktrees are never swept, nor
+   * is a worktree marked as holding unsaved work (`utils/worktree-keep.ts`).
    *
    * @returns Paths that were removed.
    */
@@ -349,6 +350,14 @@ export class RepoManager {
           continue;
         }
       } catch {
+        continue;
+      }
+      // A run that could not push its work marked the worktree as its only copy.
+      const keep = await worktreeKeepReason(path);
+      if (keep) {
+        console.warn(
+          `⚠️  Not sweeping ${path}: it holds unsaved work (${keep}). Remove it by hand once saved.`,
+        );
         continue;
       }
       await this.removeTaskWorktree(repoName, path);
@@ -378,9 +387,9 @@ export class RepoManager {
       throw new Error(`Failed to add worktree at ${path} (${ref}): ${result.error}`);
     }
     await Utils.isolateWorktreeHooks(path);
-    // Exclude only runtime artifacts: new settings.json and .env.example
-    // must remain eligible for a worker-generated PR.
-    excludeWorkerRuntimeFiles(path);
+    // Repos that still commit `.devintern-code/settings.json` keep their
+    // status names: copy new tracker keys into workspace.toml [trackers].
+    migrateCommittedTrackerSettings(this.workspaceDir, path);
   }
 
   /**

@@ -78,6 +78,51 @@ describe("runWithFailover", () => {
     expect(seen).toEqual(["codex", "grok"]);
   });
 
+  test("a limit from a run that started before another run failed over stays on its harness", async () => {
+    const failover = await startWorkerFailover({
+      checkInstalled: false,
+      sandboxName: "none",
+      raw: "codex,grok",
+      log: () => {},
+    });
+
+    // Two concurrent task runs both start on codex.
+    let releaseSlow!: () => void;
+    const slowGate = new Promise<void>((resolve) => {
+      releaseSlow = resolve;
+    });
+    const slowSeen: string[] = [];
+    const slow = runWithFailover(async (env) => {
+      slowSeen.push(env.AGENT_HARNESS ?? "");
+      if (slowSeen.length === 1) {
+        await slowGate;
+        writeFileSync(env[USAGE_LIMIT_FILE_ENV]!, JSON.stringify({ untilMs: Date.now() + 60_000 }));
+        return USAGE_LIMIT_EXIT_CODE;
+      }
+      return 0;
+    });
+
+    const fastSeen: string[] = [];
+    const fast = await runWithFailover(async (env) => {
+      fastSeen.push(env.AGENT_HARNESS ?? "");
+      if (fastSeen.length === 1) {
+        writeFileSync(env[USAGE_LIMIT_FILE_ENV]!, JSON.stringify({ untilMs: Date.now() + 60_000 }));
+        return USAGE_LIMIT_EXIT_CODE;
+      }
+      return 0;
+    });
+    expect(fast).toBe("ok");
+    expect(fastSeen).toEqual(["codex", "grok"]);
+
+    // The slow codex run now reports the same codex limit; grok must stay open.
+    releaseSlow();
+    expect(await slow).toBe("ok");
+    expect(slowSeen).toEqual(["codex", "grok"]);
+    expect(failover.activeName).toBe("grok");
+    expect(failover.manager.isLimited("grok")).toBe(false);
+    expect(failover.allLimited()).toBe(false);
+  });
+
   test("returns deferred when every harness in the chain is limited", async () => {
     await startWorkerFailover({
       checkInstalled: false,

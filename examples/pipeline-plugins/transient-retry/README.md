@@ -20,26 +20,29 @@ permanent findings and must return `{ kind: "halt" }` (see the `run-tests` and
 | File                              | Purpose                                          |
 | --------------------------------- | ------------------------------------------------ |
 | `plugin.ts`                       | The step definition.                             |
-| `settings.json`                   | Pipeline registration.                           |
+| `pipeline.json`                   | Workspace pipeline file. |
 | `tests/transient-retry.test.ts`   | Transient-success, transient-exhausted, and permanent-finding paths. |
 
 ## Setup
 
-1. Copy the plugin into your repository:
+1. Copy the plugin and its pipeline file into your workspace:
 
    ```bash
-   mkdir -p .devintern-code/steps
-   cp examples/pipeline-plugins/transient-retry/plugin.ts .devintern-code/steps/transient-retry.ts
-   bun add -d @getdevintern/code
+   mkdir -p ~/.devintern/pipelines/steps
+   cp examples/pipeline-plugins/transient-retry/plugin.ts ~/.devintern/pipelines/steps/transient-retry.ts
+   cp examples/pipeline-plugins/transient-retry/pipeline.json ~/.devintern/pipelines/backend.json
+   cd ~/.devintern/pipelines && bun add @getdevintern/code
    ```
 
-2. Merge the `pipeline` block from `settings.json`.
+2. Set `pipeline_file = "pipelines/backend.json"` on the repository's
+   `[[repos]]` entry in `~/.devintern/workspace.toml` (see
+   [Install and copy a plugin](../README.md#install-and-copy-a-plugin)).
 
 ## Options
 
 | Option             | Default                                             | Meaning                                   |
 | ------------------ | --------------------------------------------------- | ----------------------------------------- |
-| `statePath`        | `.devintern-code/transient-retry-state.json`        | Counter file relative to `workingDir`.    |
+| `statePath`        | `~/.devintern/state/transient-retry-state.json`     | Counter file; a relative path resolves against `workingDir`. |
 | `failures`         | `0`                                                 | Simulated transient failures before success. |
 | `permanentFailure` | `false`                                             | Return `halt` immediately, to show the contrast. |
 

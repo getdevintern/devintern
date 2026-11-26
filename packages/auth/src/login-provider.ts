@@ -82,6 +82,22 @@ export function oauthProviderLabel(provider: OAuthProvider): string {
   return loginMethodLabel(provider);
 }
 
+/**
+ * Error raised when stdin closes (Ctrl-D, closed pipe) before a prompt gets an
+ * answer. Shaped like readline's own Ctrl-D rejection (`name: "AbortError"`,
+ * `code: "ABORT_ERR"`) so CLI callers can treat both the same way.
+ *
+ * @returns A fresh stdin-closed error.
+ */
+export function stdinClosedError(): Error {
+  const error = new Error("Standard input closed before a response was entered.") as Error & {
+    code: string;
+  };
+  error.name = "AbortError";
+  error.code = "ABORT_ERR";
+  return error;
+}
+
 /** Lines readline emitted past the one being awaited (piped multi-line input). */
 const pendingStdinLines: string[] = [];
 let stdinEnded = false;
@@ -98,7 +114,7 @@ function readStdinLine(): Promise<string> {
     return Promise.resolve(buffered);
   }
   if (stdinEnded) {
-    return Promise.reject(new Error("Standard input closed before a response was entered."));
+    return Promise.reject(stdinClosedError());
   }
 
   return new Promise((resolve, reject) => {
@@ -120,10 +136,36 @@ function readStdinLine(): Promise<string> {
       if (!settled) {
         settled = true;
         stdinEnded = true;
-        reject(new Error("Standard input closed before a response was entered."));
+        reject(stdinClosedError());
       }
     });
   });
+}
+
+/**
+ * Call `onLine` for every stdin line until the returned stop function runs.
+ * Lines buffered by an earlier prompt are delivered first. A closed or empty
+ * stdin (`</dev/null`) delivers nothing and is not an error.
+ *
+ * @param onLine - Receives each line as typed or piped.
+ * @returns Stops reading stdin.
+ */
+export function watchStdinLines(onLine: (line: string) => void): () => void {
+  let stopped = false;
+  for (const line of pendingStdinLines.splice(0)) onLine(line);
+  if (stdinEnded) return () => {};
+  const rl = createInterface({ input: process.stdin });
+  rl.on("line", (line) => {
+    if (!stopped) onLine(line);
+  });
+  rl.once("close", () => {
+    if (!stopped) stdinEnded = true;
+  });
+  return () => {
+    if (stopped) return;
+    stopped = true;
+    rl.close();
+  };
 }
 
 /**

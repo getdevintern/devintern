@@ -4,7 +4,7 @@ sidebarLabel: "Bug Reports"
 description: "File a redacted DevIntern bug report from the CLI or the dashboard, attach a relevant run, and preview the evidence before sending."
 section: "Automation Reference"
 order: 2
-dateModified: 2026-11-18
+dateModified: 2026-11-25
 tags: ["troubleshooting", "bug-report", "diagnostics", "privacy"]
 ---
 
@@ -49,7 +49,7 @@ Log attachment is bounded (64 KB per source) and credentials are masked. Pass `-
 
 ## Report from the dashboard
 
-The [worker dashboard](dashboard.md) can file the same report without a terminal. Open the run and choose **Report a problem**.
+The [worker dashboard](dashboard.md) can file the same report without a terminal. Open the run and choose **Report a problem**. For a problem that is not tied to one run, choose **Report a bug** at the bottom of the sidebar instead: it attaches your environment and recent worker logs, but no run.
 
 1. Enter a title and describe what you expected and what happened. Do not paste secrets, credentials, or customer data. Leave **Share identifiers** off unless the task key and repository slug help triage (it matches `--share-identifiers`).
 2. Choose **Preview report** to see the full redacted payload, collected like `devintern report --run <id>`. Nothing is sent yet.
@@ -74,7 +74,7 @@ devintern report list
 devintern report show 8f2a1c
 ```
 
-Every report is saved to `.devintern-code/reports/` before sending. If sending fails, the command prints the `--from` path to retry. Sent reports are kept locally for 30 days.
+Every report is saved to `~/.devintern/state/code/reports/` before sending. If sending fails, the command prints the `--from` path to retry. Sent reports are kept locally for 30 days.
 
 ## What is sent
 
@@ -99,8 +99,14 @@ Install the [devintern-report skill](agent-skills.md) and ask your agent to repo
 bunx skills add getdevintern/devintern --skill devintern-report --agent codex
 ```
 
+## Public issues and feature requests
+
+For bugs that need no logs or run details, such as a docs mistake or an install problem, you can open a [public bug report](https://github.com/getdevintern/devintern/issues/new?template=bug_report.yml) on GitHub instead. Post only short, redacted excerpts there.
+
+Suggest features with the [feature request form](https://github.com/getdevintern/devintern/issues/new?template=feature_request.yml), or choose **Request a feature** in the dashboard sidebar.
+
 ## Privacy
 
-Bug reports are private to DevIntern. They are not posted to public GitHub issues. A maintainer may promote a redacted summary to an internal issue and link it back to the stored report.
+Reports sent with `devintern report` or the dashboard are private to DevIntern. They are not posted to public GitHub issues. A maintainer may promote a redacted summary to an internal issue and link it back to the stored report.
 
 See [devintern.com/privacy](https://devintern.com/privacy/) for data handling and retention.

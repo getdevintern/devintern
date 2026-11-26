@@ -4,7 +4,7 @@
  * Fire-and-forget events with flush-on-exit. Never sends task keys, prompts,
  * repo names, paths, or credentials — only allowlisted enum/bool/number props
  * (see ALLOWED_PROP_KEYS). Opt out via DEVINTERN_TELEMETRY_DISABLED=1 or
- * `analytics.enabled: false` in .devintern-code/settings.json; the settings
+ * `analytics.enabled: false` in ~/.devintern/settings.json; the settings
  * opt-out is reported once as an anonymous `analytics_opt_out` event so the
  * funnel can exclude it going forward. The env kill-switch suppresses even
  * that acknowledgement, guaranteeing zero outbound analytics traffic.
@@ -14,7 +14,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { PostHog } from "posthog-node";
-import { resolveConfigDir } from "@devintern/utils";
+import { resolveWorkspaceDir } from "../workspace/paths";
 
 // Injected at build time via --define; absent when running from source,
 // which permanently disables analytics in dev builds.
@@ -22,7 +22,6 @@ declare const __POSTHOG_API_KEY__: string;
 declare const __POSTHOG_HOST__: string;
 declare const __VERSION__: string;
 
-const CONFIG_DIR_NAME = ".devintern-code";
 const DEFAULT_POSTHOG_HOST = "https://us.i.posthog.com";
 
 const CLI_VERSION = typeof __VERSION__ !== "undefined" ? __VERSION__ : "0.0.0";
@@ -63,10 +62,14 @@ export type SetupFailureReason =
   | "tracker_setup_incomplete"
   | "tracker_not_pollable"
   | "workspace_error"
-  | "workspace_tracker_mismatch";
+  | "workspace_tracker_mismatch"
+  | "non_interactive_input";
+
+/** How `devintern worker init` ran: the guided wizard or flag-driven setup. */
+export type WorkerInitSource = "wizard" | "non_interactive";
 
 /** Readiness check outcomes reported by doctor and the init summary. */
-export type ReadinessCheckStatus = "ok" | "warn" | "fail";
+export type ReadinessCheckStatus = "ok" | "warn" | "action" | "fail";
 /** A structural subset of readiness.ts's ReadinessCheck (no import cycle). */
 export interface ReadinessCheckLike {
   id: string;
@@ -191,15 +194,11 @@ interface TelemetrySettingsShape {
 }
 
 function analyticsConfigDir(configDir?: string): string {
-  return (
-    configDir ??
-    process.env[ANALYTICS_CONFIG_DIR_ENV] ??
-    resolveConfigDir({ startDir: process.cwd(), configDirName: CONFIG_DIR_NAME })
-  );
+  return configDir ?? process.env[ANALYTICS_CONFIG_DIR_ENV] ?? resolveWorkspaceDir();
 }
 
 /**
- * Reads `analytics.enabled` from .devintern-code/settings.json. Returns
+ * Reads `analytics.enabled` from `~/.devintern/settings.json`. Returns
  * `undefined` when unset or unreadable so env/config absence means opt-in.
  */
 export function readAnalyticsEnabledFromSettings(configDir?: string): boolean | undefined {
@@ -477,8 +476,8 @@ export function trackInteractiveTaskRun(props: {
 }
 
 /** Emit when `devintern worker init` starts. */
-export function trackWorkerInitStarted(): void {
-  void track("worker_init_started", { cli_version: CLI_VERSION, os: process.platform });
+export function trackWorkerInitStarted(source: WorkerInitSource = "wizard"): void {
+  void track("worker_init_started", { cli_version: CLI_VERSION, os: process.platform, source });
 }
 
 /** Emit when the worker wizard finishes, with per-step outcome categories. */
@@ -487,8 +486,13 @@ export function trackWorkerInitCompleted(props: {
   relayConnect: RelayConnectOutcome;
   serviceInstall: ServiceInstallOutcome;
   githubApp: GitHubAppOutcome;
+  source?: WorkerInitSource;
+  /** Non-interactive runs complete even when a check fails; this records which. */
+  outcome?: "succeeded" | "action_required" | "failed";
 }): void {
   void track("worker_init_completed", {
+    source: props.source ?? "wizard",
+    outcome: props.outcome,
     cli_version: CLI_VERSION,
     os: process.platform,
     tracker: props.tracker,
@@ -499,8 +503,16 @@ export function trackWorkerInitCompleted(props: {
 }
 
 /** Emit when `devintern worker init` aborts before completing. */
-export function trackWorkerInitFailed(reason: SetupFailureReason): void {
-  void track("worker_init_failed", { cli_version: CLI_VERSION, os: process.platform, reason });
+export function trackWorkerInitFailed(
+  reason: SetupFailureReason,
+  source: WorkerInitSource = "wizard",
+): void {
+  void track("worker_init_failed", {
+    cli_version: CLI_VERSION,
+    os: process.platform,
+    reason,
+    source,
+  });
 }
 
 /**

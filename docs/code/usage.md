@@ -52,7 +52,7 @@ You can mix a tracker task with local files: `devintern PROJ-123 ./extra-context
 | `--estimate`                        | off             | Add story-point estimates instead of implementing. See [Story Points Estimation](./story-points-estimation.md).                         |
 | `--sandbox <provider>`              | `AGENT_SANDBOX` | Run the agent in a sandbox: `none`, `auto`, `native`, `nono`, or `docker`. See [Sandboxing the Agent](./configuration.md#sandboxing-the-agent). |
 | `--agent-path <path>`               | `PATH` lookup   | Path to the agent CLI executable.                                                                                                       |
-| `--env-file <path>`                 | `.devintern-code/.env` | Load a different `.env` file.                                                                                                    |
+| `--env-file <path>`                 | workspace env files | Load a different `.env` file instead.                                                                                                    |
 | `-v`, `--verbose`                   | off             | Verbose output for debugging.                                                                                                           |
 | `--no-update`                       | off             | Skip the update check for this run.                                                                                                     |
 
@@ -152,6 +152,6 @@ The effective harness, model, and effort are printed before the run and saved in
 
 **"PR creation failed"**: check that your GitHub or Bitbucket token (or GitHub App installation) has access to the repository, then run again with `--verbose`. The branch is already pushed and a `Pull request could not be created` comment is posted on the ticket. Fix the cause and re-run with `--create-pr`.
 
-**"Issue not found" / card fetch errors**: check the tracker credentials in `.devintern-code/.env` and that the task exists and you can access it. For Jira, check `JIRA_BASE_URL`. For Trello, set `TASK_TRACKER=trello`, `TRELLO_API_KEY`, and `TRELLO_API_TOKEN`.
+**"Issue not found" / card fetch errors**: check the tracker credentials in `~/.devintern/env/<repo>.env` and that the task exists and you can access it. For Jira, check `JIRA_BASE_URL`. For Trello, set `TASK_TRACKER=trello`, `TRELLO_API_KEY`, and `TRELLO_API_TOKEN`.
 
 Run `devintern doctor` to check your setup.

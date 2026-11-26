@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import { parseWorkspaceConfig } from "../src/lib/workspace/config";
 import { workerWorkspaceView } from "../src/lib/workspace/manual-only";
+import { findRepoForPath } from "../src/lib/workspace/manual-run";
 
 const MANUAL_REPO = `
 [[repos]]
@@ -68,5 +69,37 @@ project = "NOTE"
     expect(() =>
       parseWorkspaceConfig('[[repos]]\nname = "x"\nremote = "y"\nmanual_only = "yes"\n'),
     ).toThrow(/manual_only/);
+  });
+
+  test("a manual repo can be registered by an absolute path instead of a remote", () => {
+    const config = parseWorkspaceConfig(`
+[[repos]]
+name = "scratch"
+path = "/home/me/scratch"
+manual_only = true
+
+[[repos]]
+name = "nested"
+path = "/home/me/scratch/inner"
+manual_only = true
+`);
+    expect(config.repos[0]?.path).toBe("/home/me/scratch");
+    expect(config.repos[0]?.remote).toBe("");
+    expect(findRepoForPath(config, "/home/me/scratch/src")?.name).toBe("scratch");
+    expect(findRepoForPath(config, "/home/me/scratch/inner/a")?.name).toBe("nested");
+    expect(findRepoForPath(config, "/home/me/scratch-other")).toBeNull();
+  });
+
+  test("path is only for manual repos without a remote", () => {
+    const bad = [
+      '[[repos]]\nname = "a"\npath = "/x"\n',
+      '[[repos]]\nname = "a"\npath = "relative"\nmanual_only = true\n',
+      '[[repos]]\nname = "a"\npath = "/x"\nremote = "git@github.com:a/b.git"\nmanual_only = true\n',
+    ];
+    for (const text of bad) {
+      expect(() => parseWorkspaceConfig('[defaults]\ntracker = "jira"\n' + text)).toThrow(
+        /path must be an absolute directory/,
+      );
+    }
   });
 });

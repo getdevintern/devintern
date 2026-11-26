@@ -1,0 +1,10 @@
+{
+  "id": "dependency-security",
+  "version": 1,
+  "name": "Dependency security",
+  "description": "Fix known dependency vulnerabilities: batch in-range lockfile fixes, plus at most one breaking upgrade for a high or critical advisory.",
+  "schedule": { "cron": "0 8 * * 1" },
+  "openPr": true,
+  "allowNoChanges": true,
+  "prompt": "prompt.md"
+}

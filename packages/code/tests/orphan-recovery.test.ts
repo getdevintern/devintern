@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, rmSync, writeFileSync } from "fs";
+import { rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
@@ -7,7 +7,6 @@ import {
   DEFAULT_ORPHAN_MAX_AGE_MS,
   ORPHANED_RUN_REASON,
   defaultProjectKeyFor,
-  loadProjectSettingsFrom,
   recoverOrphanedTaskRuns,
   resolveStatusName,
 } from "../src/lib/worker/orphan-recovery";
@@ -441,7 +440,13 @@ describe("recoverOrphanedTaskRuns", () => {
 
     const result = await recover();
 
-    expect(result).toEqual({ reaped: 0, recovered: 0, skipped: 0, resumable: [] });
+    expect(result).toEqual({
+      reaped: 0,
+      recovered: 0,
+      skipped: 0,
+      resumable: [],
+      deferredRunIds: [],
+    });
     expect(posted).toHaveLength(0);
   });
 
@@ -471,83 +476,17 @@ describe("defaultProjectKeyFor", () => {
   });
 });
 
-describe("settings resolution", () => {
-  let dirA: string;
-  let dirB: string;
-
-  beforeEach(() => {
-    dirA = join(tmpdir(), `orphan-settings-a-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-    dirB = join(tmpdir(), `orphan-settings-b-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-    mkdirSync(join(dirA, ".devintern-code"), { recursive: true });
-    mkdirSync(join(dirB, ".devintern-code"), { recursive: true });
-  });
-
-  afterEach(() => {
-    rmSync(dirA, { recursive: true, force: true });
-    rmSync(dirB, { recursive: true, force: true });
-  });
-
-  test("merges tracker sections from repo settings dirs, first dir wins", () => {
-    writeFileSync(
-      join(dirA, ".devintern-code", "settings.json"),
-      JSON.stringify({
-        jira: { projects: { PROJ: { inProgressStatus: "Doing", todoStatus: "Backlog" } } },
-      }),
-    );
-    writeFileSync(
-      join(dirB, ".devintern-code", "settings.json"),
-      JSON.stringify({
-        jira: {
-          projects: { PROJ: { inProgressStatus: "Overridden" }, OTHER: { todoStatus: "To Do" } },
-        },
-        linear: { projects: { ENG: { inProgressStatus: "Started" } } },
-      }),
-    );
-
-    const settings = loadProjectSettingsFrom([dirA, dirB]);
+describe("resolveStatusName", () => {
+  test("reads the tracker section, the single Trello board, and the legacy Jira map", () => {
+    const settings = {
+      projects: { LEG: { todoStatus: "Legacy" } },
+      jira: { projects: { PROJ: { inProgressStatus: "Doing" } } },
+      trello: { projects: { board1: { prStatus: "Review" } } },
+    };
     expect(resolveStatusName(settings, "jira", "PROJ", "inProgressStatus")).toBe("Doing");
-    expect(resolveStatusName(settings, "jira", "PROJ", "todoStatus")).toBe("Backlog");
-    expect(resolveStatusName(settings, "jira", "OTHER", "todoStatus")).toBe("To Do");
-    expect(resolveStatusName(settings, "linear", "ENG", "inProgressStatus")).toBe("Started");
-  });
-
-  test("falls back to the legacy top-level projects map for Jira", () => {
-    writeFileSync(
-      join(dirA, ".devintern-code", "settings.json"),
-      JSON.stringify({
-        projects: { LEG: { inProgressStatus: "In Progress", todoStatus: "To Do" } },
-      }),
-    );
-
-    const settings = loadProjectSettingsFrom([dirA]);
-    expect(resolveStatusName(settings, "jira", "LEG", "inProgressStatus")).toBe("In Progress");
+    expect(resolveStatusName(settings, "trello", "other-board", "prStatus")).toBe("Review");
+    expect(resolveStatusName(settings, "jira", "LEG", "todoStatus")).toBe("Legacy");
     expect(resolveStatusName(settings, "linear", "LEG", "todoStatus")).toBeUndefined();
-  });
-
-  test("workspace [trackers] settings win over repo settings per project key", () => {
-    writeFileSync(
-      join(dirA, ".devintern-code", "settings.json"),
-      JSON.stringify({
-        jira: { projects: { PROJ: { todoStatus: "Repo" }, OTHER: { todoStatus: "Other" } } },
-      }),
-    );
-    const settings = loadProjectSettingsFrom([dirA], {
-      jira: { projects: { PROJ: { todoStatus: "Workspace" } } },
-    });
-    expect(resolveStatusName(settings, "jira", "PROJ", "todoStatus")).toBe("Workspace");
-    expect(resolveStatusName(settings, "jira", "OTHER", "todoStatus")).toBe("Other");
-    expect(
-      resolveStatusName(
-        loadProjectSettingsFrom([dirB], { jira: { projects: { PROJ: { todoStatus: "W" } } } }),
-        "jira",
-        "PROJ",
-        "todoStatus",
-      ),
-    ).toBe("W");
-  });
-
-  test("returns null when no directory has settings", () => {
-    expect(loadProjectSettingsFrom([dirA, dirB])).toBeNull();
     expect(resolveStatusName(null, "jira", "PROJ", "todoStatus")).toBeUndefined();
   });
 });

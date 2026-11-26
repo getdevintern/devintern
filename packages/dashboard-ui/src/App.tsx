@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import {
+  ArrowRight,
+  Inbox,
   TerminalSquare,
   ChartNoAxesCombined,
   GitPullRequest,
@@ -12,6 +14,8 @@ import {
 } from "lucide-react";
 
 import { NewTaskDialog } from "@/components/NewTaskDialog";
+import { NotificationBell } from "@/components/notifications/NotificationBell";
+import { SidebarHelp } from "@/components/SidebarHelp";
 import { StatusStrip } from "@/components/StatusStrip";
 import { Button } from "@/components/ui/button";
 import { AgentPrsView } from "@/views/AgentPrsView";
@@ -23,12 +27,15 @@ import { AutomationDetailView } from "@/views/AutomationDetailView";
 import { StatsView } from "@/views/StatsView";
 import { OverviewView } from "@/views/OverviewView";
 import { WorkspaceView } from "@/views/WorkspaceView";
-import { parseHash, redirectHash, RUNS_HASH, runHash } from "@/lib/routes";
+import { InboxView } from "@/views/InboxView";
+import { demoCtaUrl, isDemoMode } from "@/lib/demo";
+import { INBOX_HASH, parseHash, redirectHash, RUNS_HASH, runHash } from "@/lib/routes";
 import type { Route } from "@/lib/routes";
 import { cn } from "@/lib/utils";
 
 const sections = [
   { label: "Overview", hash: "#/", view: "overview", icon: LayoutDashboard },
+  { label: "Inbox", hash: INBOX_HASH, view: "inbox", icon: Inbox },
   { label: "Runs", hash: RUNS_HASH, view: "runs", icon: ListTodo },
   { label: "Automations", hash: "#/automations", view: "automations", icon: Workflow },
   { label: "Pull requests", hash: "#/prs", view: "prs", icon: GitPullRequest },
@@ -47,6 +54,7 @@ const pageTitles: Record<Route["view"], string> = {
   stats: "Statistics",
   logs: "Worker logs",
   workspace: "Workspace",
+  inbox: "Inbox",
 };
 
 /** Route for the current hash, first rewriting a retired hash in place (no history entry). */
@@ -124,6 +132,8 @@ export function App() {
             );
           })}
         </nav>
+
+        <SidebarHelp />
       </aside>
 
       <div className="dashboard-main">
@@ -142,11 +152,31 @@ export function App() {
             )}
           </h1>
           <StatusStrip />
-          <Button size="sm" className="dashboard-new-task" onClick={() => setNewTaskOpen(true)}>
-            <Plus aria-hidden="true" />
-            New task
-          </Button>
-          <NewTaskDialog open={newTaskOpen} onOpenChange={setNewTaskOpen} />
+          <NotificationBell />
+          {isDemoMode() ? (
+            <>
+              <span
+                className="dashboard-demo-badge"
+                title="A recorded snapshot of a real worker. Actions are disabled."
+              >
+                Read-only demo
+              </span>
+              <Button size="sm" className="dashboard-demo-cta" asChild>
+                <a href={demoCtaUrl()} target="_top">
+                  Try it on your repo
+                  <ArrowRight aria-hidden="true" />
+                </a>
+              </Button>
+            </>
+          ) : (
+            <>
+              <Button size="sm" className="dashboard-new-task" onClick={() => setNewTaskOpen(true)}>
+                <Plus aria-hidden="true" />
+                New task
+              </Button>
+              <NewTaskDialog open={newTaskOpen} onOpenChange={setNewTaskOpen} />
+            </>
+          )}
         </header>
 
         <main className="dashboard-content">
@@ -167,6 +197,7 @@ export function App() {
           {route.view === "stats" ? <StatsView /> : null}
           {route.view === "logs" ? <LogsView /> : null}
           {route.view === "workspace" ? <WorkspaceView /> : null}
+          {route.view === "inbox" ? <InboxView /> : null}
         </main>
       </div>
     </div>

@@ -8,34 +8,34 @@ Examples (Jira):
   devintern PROJ-123 PROJ-456 PROJ-789 --create-pr
   devintern --query "project = PROJ AND status = 'To Do'" --create-pr
 
-Examples (Linear; set TASK_TRACKER=linear in .devintern-code/.env):
+Examples (Linear; set TASK_TRACKER=linear in ~/.devintern/env/<repo>.env):
   devintern ENG-42 --create-pr
   devintern ENG-42 ENG-43 ENG-44 --create-pr
   devintern https://linear.app/acme/issue/ENG-42/issue-slug --create-pr
   devintern --query '{"state":{"name":{"eq":"Todo"}}}' --create-pr
   devintern --query "login bug" --create-pr
 
-Examples (GitHub Issues; set TASK_TRACKER=github and GITHUB_REPO in .devintern-code/.env):
+Examples (GitHub Issues; set TASK_TRACKER=github and GITHUB_REPO in ~/.devintern/env/<repo>.env):
   devintern 123 --create-pr
   devintern https://github.com/acme/webapp/issues/123 --create-pr
   devintern --query "is:open label:bug" --create-pr
 
-Examples (GitLab; set TASK_TRACKER=gitlab and GITLAB_PROJECT in .devintern-code/.env):
+Examples (GitLab; set TASK_TRACKER=gitlab and GITLAB_PROJECT in ~/.devintern/env/<repo>.env):
   devintern 123 --create-pr
   devintern https://gitlab.com/group/sub/repo/-/issues/123 --create-pr
   devintern --query "is:open label:bug" --create-pr
 
-Examples (Azure DevOps; set TASK_TRACKER=azure-devops in .devintern-code/.env):
+Examples (Azure DevOps; set TASK_TRACKER=azure-devops in ~/.devintern/env/<repo>.env):
   devintern 4211 --create-pr
   devintern https://dev.azure.com/my-org/MyProject/_workitems/edit/4211 --create-pr
   devintern --query "SELECT [System.Id] FROM WorkItems WHERE [System.State] = 'New'" --create-pr
 
-Examples (Asana; set TASK_TRACKER=asana in .devintern-code/.env):
+Examples (Asana; set TASK_TRACKER=asana in ~/.devintern/env/<repo>.env):
   devintern 1200000000000001 --create-pr
   devintern https://app.asana.com/0/1200000000000000/1200000000000001 --create-pr
   devintern --query 'section:"To Do" completed:false' --create-pr
 
-Examples (Trello; set TASK_TRACKER=trello in .devintern-code/.env):
+Examples (Trello; set TASK_TRACKER=trello in ~/.devintern/env/<repo>.env):
   devintern 4uWKPOTv --create-pr
   devintern https://trello.com/c/4uWKPOTv/card-slug --create-pr
   devintern --query 'list:"To Do" is:open' --create-pr
@@ -45,12 +45,12 @@ Examples (Markdown; no PM credentials required for file paths):
   devintern /path/to/my-task.md --create-pr
   devintern ./epic.md ./subtask-a.md ./subtask-b.md --no-git
 
-Examples (Markdown tracker; set TASK_TRACKER=markdown and MARKDOWN_TASKS_DIR in .devintern-code/.env):
+Examples (Markdown tracker; set TASK_TRACKER=markdown and MARKDOWN_TASKS_DIR in ~/.devintern/env/<repo>.env):
   devintern 2025-01-01T12-00-00-abcd-my-feature --create-pr
   devintern --query "status=todo" --create-pr
 
 Subcommands:
-  init                 Initialize .devintern-code configuration in current directory
+  init                 Set up this repository (settings go to ~/.devintern)
                        Interactive wizard in a terminal; pass --yes (or --no-interactive)
                        to write the config templates without prompts
   worker               Run the workspace worker daemon;
@@ -66,16 +66,19 @@ Subcommands:
   whoami               Show current authenticated user
    sandbox              Sandbox doctor: providers, remaining setup steps, and what
                         the next run will do (exit 1 if it would fail)
+  automations          List, show, and install bundled automation packs into
+                        workspace.toml (add, list, show)
   doctor               Readiness check: runtime, git, agent CLI, tracker
-                        credentials, sign-in, license (exit 1 if anything fails)
+                        credentials, sign-in, license, bundled catalog
+                        (exit 1 if anything fails)
   report               File a redacted bug report for DevIntern itself
                         (run 'devintern report --help' for options)
 
 Licensing:
   Interactive runs are free forever and need no sign-in. Unattended runs
   (worker, CI, cron) require an automation license; a signed-in user can start
-  the no-card Worker Pilot first: run 'devintern login' to sign in, then
-  'devintern worker'. The pilot runs 14 days with no task limit.
+  the 14-day free Worker Pilot first (no card required, no task limit): run
+  'devintern worker login github' to sign in, then 'devintern worker'.
 
 Run 'devintern <subcommand> --help' for subcommand-specific options.`;
 

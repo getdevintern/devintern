@@ -314,6 +314,38 @@ export class GitHubClient {
   }
 
   /**
+   * Verify the token alone with `GET /user`.
+   *
+   * @throws When GitHub rejects the token or the request fails.
+   */
+  async verifyToken(): Promise<void> {
+    await this.request<unknown>("/user");
+  }
+
+  /**
+   * Verify the token can see the configured repository (`GET /repos/{owner}/{repo}`).
+   *
+   * GitHub answers 404 for a private repo the token cannot access, so 404 and
+   * 403 both read as "no access".
+   *
+   * @throws When the repo is not visible to the token or the request fails.
+   */
+  async verifyRepoAccess(): Promise<void> {
+    const slug = `${this.owner}/${this.repo}`;
+    const response = await this.send(
+      `/repos/${encodeURIComponent(this.owner)}/${encodeURIComponent(this.repo)}`,
+      "GET",
+    );
+    if (response.ok) return;
+    if (response.status === 404 || response.status === 403) {
+      throw new Error(
+        `GitHub token cannot access ${slug} (HTTP ${response.status}): check GITHUB_REPO and that the token is granted this repository`,
+      );
+    }
+    throw new Error(`GitHub API error (${response.status}) checking ${slug}`);
+  }
+
+  /**
    * List repositories for the authenticated user.
    *
    * @returns Up to 100 repository records.

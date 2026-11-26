@@ -15,7 +15,6 @@ import { existsSync } from "fs";
 import { resolve } from "path";
 
 import { LockManager } from "../lock-manager";
-import type { LockStatus } from "../lock-manager";
 import type {
   AutomationScheduleStatus,
   DashboardAutomationActions,
@@ -31,6 +30,7 @@ import type {
   RunStatus,
 } from "../state/run-recorder";
 import { InjectedTaskStore } from "../state/injected-tasks";
+import { readRunLineage } from "../state/run-lineage";
 import type { InjectedTask } from "../state/injected-tasks";
 import type { ScheduleSnapshot } from "../worker/schedule";
 import type { QueuedJobSnapshot } from "../worker/supervisor";
@@ -279,11 +279,8 @@ export class DashboardData {
   constructor(options: DashboardDataOptions = {}) {
     this.workingDir = options.workingDir ?? process.cwd();
     this.workspaceDir = options.workspaceDir ?? resolveWorkspaceDir();
-    this.dbPath = options.dbPath ?? resolveDashboardHistoryDbPath(this.workingDir);
-    this.queueDbPath =
-      options.queueDbPath ??
-      options.dbPath ??
-      resolveDashboardQueueDbPath(undefined, this.workingDir);
+    this.dbPath = options.dbPath ?? resolveDashboardHistoryDbPath();
+    this.queueDbPath = options.queueDbPath ?? options.dbPath ?? resolveDashboardQueueDbPath();
     this.scheduleSnapshot = options.scheduleSnapshot ?? (() => null);
     this.retryMode = options.retryMode ?? "spawn";
     this.inflightRetryTtlMs = options.inflightRetryTtlMs ?? INFLIGHT_RETRY_TTL_MS;
@@ -1272,6 +1269,7 @@ export function handleRunDetail(data: DashboardData, idParam: string): ApiRespon
       retry,
       harnessLogs: data.listRunHarnessLogs(id),
       artifacts: data.listRunArtifacts(id),
+      lineage: readRunLineage(data.dbPath, data.queueDbPath, detail.run),
     },
   };
 }
@@ -1383,30 +1381,21 @@ export function handleStats(data: DashboardData, params: URLSearchParams): ApiRe
 }
 
 /**
- * Resolve worker liveness from the daemon's lock file.
+ * Resolve worker liveness from the workspace lock (`<workspace>/.worker.lock`).
  *
- * Both `.devintern-code/.worker.lock` (simple mode) and the workspace-home lock
- * (fleet mode) are consulted. A live lock beats a stale (dead-pid) one; `stopped`
- * only when every readable lock is dead. No readable lock, or one from another
- * PID namespace (read inside a sandbox, and beats a stale one), means `unknown`.
+ * `stopped` when the lock's pid is dead. No readable lock means `unknown`, as
+ * does a lock from another PID namespace with a fresh heartbeat (read inside a
+ * sandbox), which also reports `reason: "pid-namespace"`.
  *
- * @param workingDir - Project root the dashboard was started from
- * @param workspaceDir - Workspace home whose lock is also consulted
+ * @param workspaceDir - Workspace home holding the worker lock
  */
 export function resolveWorkerStatus(
-  workingDir: string,
   workspaceDir: string = resolveWorkspaceDir(),
 ): WorkerStatusView {
-  const locks = [
-    LockManager.readLockStatus(workingDir, WORKER_LOCK_FILE),
-    LockManager.readLockStatus(workspaceDir, WORKER_LOCK_FILE, { plainDir: true }),
-  ].filter((lock): lock is LockStatus => lock !== null);
-  if (locks.length === 0) {
+  const lock = LockManager.readLockStatus(workspaceDir, WORKER_LOCK_FILE);
+  if (!lock) {
     return { status: "unknown" };
   }
-  // Live beats unverifiable beats stale, whichever location each sits in.
-  const rank = (l: LockStatus) => (l.running === true ? 0 : l.running === "unknown" ? 1 : 2);
-  const lock = locks.sort((a, b) => rank(a) - rank(b))[0]; // `locks` is a fresh array
   const unknown = lock.running === "unknown";
   return {
     status: unknown ? "unknown" : lock.running ? "running" : "stopped",
@@ -1422,16 +1411,20 @@ export function resolveWorkerStatus(
  * and automation source health.
  *
  * @param data - Dashboard data source
+ * @param serverPid - Pid of the process serving this dashboard over HTTP.
+ *   Only the HTTP route passes it; the `worker status` CLI runs this handler
+ *   in its own process, where no dashboard server pid exists, so it omits it.
  */
-export function handleWorkerStatus(data: DashboardData): ApiResponse {
+export function handleWorkerStatus(data: DashboardData, serverPid?: number): ApiResponse {
   const sources = data.getSources();
   return {
     status: 200,
     body: {
-      worker: resolveWorkerStatus(data.workingDir, data.workspaceDir),
-      // Additive: pid of the process serving this dashboard. Equals `worker.pid`
-      // only for the worker's in-process dashboard (`worker doctor` relies on it).
-      serverPid: process.pid,
+      worker: resolveWorkerStatus(data.workspaceDir),
+      // Additive, HTTP route only: pid of the process serving this dashboard.
+      // Equals `worker.pid` only for the worker's in-process dashboard
+      // (`worker doctor` relies on it).
+      ...(serverPid !== undefined ? { serverPid } : {}),
       queue: data.getQueueStats(),
       agentPrs: data.getAgentPrCounts(),
       schedule: data.getScheduleSnapshot(),

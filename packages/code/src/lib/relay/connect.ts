@@ -18,7 +18,7 @@ import { saveGitHubAppRecord } from "../code-host/github/app-setup";
 import { GitLabWebhookAdminClient } from "../code-host/gitlab/webhook-admin";
 import type { GitLabProjectHook, GitLabWebhookProject } from "../code-host/gitlab/webhook-admin";
 import { resolveGitLabCodeHostConfig } from "../code-host/index";
-import { codeStateDirFor, isWorkspaceHome } from "../workspace/paths";
+import { codeStateDirFor, isWorkspaceHome, resolveWorkspaceDir } from "../workspace/paths";
 
 export const DEFAULT_RELAY_URL = "https://relay.devintern.com";
 
@@ -204,7 +204,9 @@ function authSessionPath(workingDir: string): string {
  *
  * @param workingDir - Workspace root (defaults to cwd for low-level callers)
  */
-export function loadRelayState(workingDir: string = process.cwd()): RelayConnectState | null {
+export function loadRelayState(
+  workingDir: string = resolveWorkspaceDir(),
+): RelayConnectState | null {
   const path = relayStatePath(workingDir);
   if (!existsSync(path)) {
     return null;
@@ -218,7 +220,10 @@ export function loadRelayState(workingDir: string = process.cwd()): RelayConnect
 }
 
 /** Persist connect state beside the auth session. */
-export function saveRelayState(state: RelayConnectState, workingDir: string = process.cwd()): void {
+export function saveRelayState(
+  state: RelayConnectState,
+  workingDir: string = resolveWorkspaceDir(),
+): void {
   const path = relayStatePath(workingDir);
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, JSON.stringify(state, null, 2) + "\n", { encoding: "utf8", mode: 0o600 });
@@ -368,7 +373,7 @@ export async function issueRelayToken(
 }
 
 /**
- * Ensure `.devintern-code/relay.json` holds a usable relay token, minting one
+ * Ensure `state/code/relay.json` holds a usable relay token, minting one
  * when missing (or when `force` is set).
  */
 export async function ensureRelayToken(
@@ -1158,7 +1163,9 @@ async function connectTrelloTarget({ env, connectOpts }: TrackerConnectContext):
   try {
     const { ingestUrl } = await registerRelaySource({ source: "trello", ...connectOpts });
     const { TrelloClient } = await import("@devintern/task-trackers");
-    const webhook = await new TrelloClient({ apiKey, apiToken }).createWebhook(ingestUrl, boardId);
+    const trello = new TrelloClient({ apiKey, apiToken });
+    // Webhooks need the 24-character id; TRELLO_DEFAULT_BOARD_ID may be the short URL id.
+    const webhook = await trello.createWebhook(ingestUrl, await trello.resolveBoardId(boardId));
     console.log(
       `✅ Trello webhook registered (${webhook.id}); card events on board ${boardId} now relay instantly.`,
     );

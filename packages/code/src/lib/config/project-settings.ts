@@ -1,62 +1,17 @@
-import { existsSync, readFileSync } from "fs";
 import { resolve } from "path";
 import type { BaseProjectConfig, ProjectSettings, TrackerSection } from "../../types/settings";
-import {
-  loadWorkspaceTrackerSettings,
-  mergeTrackerSettings,
-  TRACKER_SETTINGS_NAMES,
-} from "../workspace/tracker-settings";
+import { loadWorkspaceTrackerSettings } from "../workspace/tracker-settings";
 
 /**
- * Load workflow settings for the current run.
+ * Load workflow settings for the current run: tracker project settings from
+ * `[trackers]` in the workspace's `workspace.toml`. A repository's
+ * `.devintern-code/settings.json` is no longer read; its tracker sections are
+ * copied into the workspace by the automatic migration.
  *
- * Tracker project settings come from `[trackers]` in the workspace's
- * `workspace.toml`. The legacy `<cwd>/.devintern-code/settings.json` is still
- * read underneath them (a project key in the workspace wins), with a one-time
- * deprecation warning when it still carries tracker sections.
- *
- * @returns Merged settings, or `null` when neither source has any
+ * @returns Settings, or `null` when the workspace defines none
  */
 export function loadProjectSettings(): ProjectSettings | null {
-  return mergeTrackerSettings(loadWorkspaceTrackerSettings(), loadLegacyProjectSettings());
-}
-
-let warnedLegacySettingsPath: string | null = null;
-
-/** Whether settings carry any tracker project section (or the legacy map). */
-function hasTrackerSections(settings: ProjectSettings): boolean {
-  return (
-    Boolean(settings.projects) || TRACKER_SETTINGS_NAMES.some((name) => settings[name]?.projects)
-  );
-}
-
-/**
- * Read `<cwd>/.devintern-code/settings.json`.
- *
- * @returns Parsed settings, or `null` when missing or invalid
- */
-export function loadLegacyProjectSettings(): ProjectSettings | null {
-  const settingsPath = resolve(process.cwd(), ".devintern-code", "settings.json");
-
-  if (!existsSync(settingsPath)) {
-    return null;
-  }
-
-  try {
-    const settingsContent = readFileSync(settingsPath, "utf8");
-    const settings = JSON.parse(settingsContent) as ProjectSettings;
-    if (hasTrackerSections(settings) && warnedLegacySettingsPath !== settingsPath) {
-      warnedLegacySettingsPath = settingsPath;
-      console.warn(
-        `⚠️  Tracker settings in ${settingsPath} are deprecated; ` +
-          "move them to [trackers.<tracker>.projects.<KEY>] in ~/.devintern/workspace.toml.",
-      );
-    }
-    return settings;
-  } catch (error) {
-    console.warn(`⚠️  Failed to parse settings.json: ${error}`);
-    return null;
-  }
+  return loadWorkspaceTrackerSettings();
 }
 
 /** Resolve the active tracker type from environment. */
@@ -101,7 +56,7 @@ export function resolveProjectKey(taskKey: string, task?: { raw: unknown }): str
 export function printMissingEnvHelp(): void {
   console.error("\nPlease ensure you have a .env file in one of these locations:");
   console.error(
-    `   - Project-specific: ${resolve(process.cwd(), ".devintern-code", ".env")} (or in any parent directory)`,
+    "   - This repository's settings: ~/.devintern/env/<repo>.env (run 'devintern init')",
   );
   console.error(
     `   - Current directory: ${resolve(process.cwd(), ".env")} (or in any parent directory)`,

@@ -17,7 +17,7 @@
 import { execFile } from "child_process";
 import { createServer } from "net";
 import { dirname, resolve } from "path";
-import { readFileSync } from "fs";
+import { existsSync, readFileSync } from "fs";
 import {
   activeSandboxName,
   detectSandboxProviders,
@@ -26,6 +26,7 @@ import {
   sandboxInheritsEnclosingSandbox,
 } from "@devintern/agent-harness";
 import { WorkspaceConfigError, parseWorkspaceConfig } from "../workspace/config";
+import { workerWorkspaceView } from "../workspace/manual-only";
 import type { RepoConfig, TeamConfig, WorkspaceConfig } from "../workspace/config";
 import {
   buildRepoCredentialEnv,
@@ -34,6 +35,10 @@ import {
   parseEnvFile,
 } from "../workspace/env";
 import { resolveWorkspaceDir, workspaceConfigPath, workspaceEnvPath } from "../workspace/paths";
+import { defaultProbe } from "@devintern/task-trackers";
+import { WORKER_PILOT_OFFER, signInCommand, workerLoginCommandFor } from "../account/worker-pilot";
+import { entitlementCheck } from "./worker-entitlement";
+import type { WorkerEntitlementLike } from "./worker-entitlement";
 import { createTrackerClient, trackerRequiredEnv } from "../trackers/manager";
 import { redactUrlCredentials } from "./dashboard-workspace";
 import { collectHarnessPreflight } from "../agent/sandbox";
@@ -49,13 +54,8 @@ const DEFAULT_DASHBOARD_PORT = 4400;
 /** Per-probe timeout for query dry-runs and repository checks. */
 const DEFAULT_PROBE_TIMEOUT_MS = 30_000;
 
-/** Minimal license result the entitlement check needs (subset of `LicenseCheckResult`). */
-export interface WorkerEntitlementLike {
-  valid: boolean;
-  source: string;
-  message: string;
-  trialAvailable?: boolean;
-}
+export type { WorkerEntitlementLike } from "./worker-entitlement";
+export { entitlementCheck } from "./worker-entitlement";
 
 /** Outcome of one repository access probe. */
 export type RepoAccessResult = { ok: true; detail?: string } | { ok: false; reason: string };
@@ -74,6 +74,8 @@ export interface WorkerDoctorDeps {
   resolveWorkspaceDir?: () => string;
   /** Count tasks matching a query against one tracker with explicit credentials. */
   dryRunQuery?: (tracker: string, env: Env, query: string) => Promise<number>;
+  /** Authenticated call that proves a source's tracker credentials are accepted (throws when rejected). */
+  probeCredentials?: (tracker: string, env: Env) => Promise<void>;
   /** Verify a repository's remote is reachable and readable with the configured credentials. */
   checkRepoAccess?: (repo: RepoConfig, env: Env) => Promise<RepoAccessResult>;
   /** Automation entitlement for the workspace (license, trial, or grace). */
@@ -115,7 +117,7 @@ async function defaultDashboardServerPid(port: number): Promise<number | undefin
 
 /** Default liveness: the same lock lookup `devintern worker status` uses. */
 function defaultWorkerStatus(workspaceDir: string): WorkerStatusView {
-  return resolveWorkerStatus(workspaceDir, workspaceDir);
+  return resolveWorkerStatus(workspaceDir);
 }
 
 /**
@@ -154,10 +156,16 @@ function workerLivenessCheck(worker: WorkerStatusView): ReadinessCheck | undefin
  */
 export function workerDoctorClosingLine(
   checks: ReadinessCheck[],
-  report: { hasFailures: boolean; hasWarnings: boolean },
+  report: { hasFailures: boolean; hasWarnings: boolean; hasActions?: boolean },
 ): string {
   if (report.hasFailures) {
     return "❌ Not ready — the worker would sit idle or fail. Fix the checks above.";
+  }
+  if (report.hasActions) {
+    const steps = checks
+      .filter((check) => check.status === "action")
+      .map((check) => check.hint ?? check.detail ?? check.label);
+    return `👉 Setup is fine; one step left before the worker can start. ${steps.join(" ")}`;
   }
   const worker = checks.find((check) => check.id === "worker");
   if (worker?.status === "ok") {
@@ -193,11 +201,24 @@ async function withTimeout<T>(promise: Promise<T>, ms: number, what: string): Pr
   }
 }
 
-function plural(count: number, noun: string): string {
-  return `${count} ${noun}${count === 1 ? "" : "s"}`;
+function plural(count: number, noun: string, pluralNoun = `${noun}s`): string {
+  return `${count} ${count === 1 ? noun : pluralNoun}`;
 }
 
 /** Default dry-run: build an isolated tracker client and run the query once. */
+/**
+ * Hint for a Markdown source whose `MARKDOWN_TASKS_DIR` folder does not exist:
+ * the fix is the folder, not `task_query`. Resolved against this process's
+ * cwd, the same way the Markdown client resolves it.
+ */
+function missingMarkdownTasksDirHint(tracker: string, env: Env): string | undefined {
+  const dir = env.MARKDOWN_TASKS_DIR;
+  if (tracker !== "markdown" || !dir) return undefined;
+  const absolute = resolve(dir);
+  if (existsSync(absolute)) return undefined;
+  return `Create the folder ${absolute}, or set MARKDOWN_TASKS_DIR to an existing folder that holds the task files`;
+}
+
 async function defaultDryRunQuery(tracker: string, env: Env, query: string): Promise<number> {
   const client = createTrackerClient(tracker, env);
   const result = await client.searchTasks(query);
@@ -289,35 +310,62 @@ export function gitLsRemote(
   });
 }
 
+/** Injectable network probes for {@link createDefaultRepoAccessCheck} (tests). */
+export interface RepoAccessProbes {
+  fetch?: (url: string, init: RequestInit) => Promise<Response>;
+  lsRemote?: (remote: string, env: Env, timeoutMs: number) => Promise<RepoAccessResult>;
+}
+
 /**
  * Default repository probe. GitHub remotes with a token are checked through
- * the REST API (the same credentials the worker's mention/CI sweeps use);
- * everything else falls back to `git ls-remote`.
+ * the REST API (the same credentials the worker's mention/CI sweeps use) and
+ * with `git ls-remote`, because the worker clones and pushes through git's own
+ * credential chain: git never reads GITHUB_TOKEN by itself, so a box with a
+ * valid token but no credential helper passes the API and still cannot clone.
+ * Everything else uses `git ls-remote` only.
  */
-function createDefaultRepoAccessCheck(
+export function createDefaultRepoAccessCheck(
   timeoutMs: number,
+  probes: RepoAccessProbes = {},
 ): (repo: RepoConfig, env: Env) => Promise<RepoAccessResult> {
+  const fetchFn = probes.fetch ?? ((url: string, init: RequestInit) => fetch(url, init));
+  const lsRemote = probes.lsRemote ?? gitLsRemote;
   return async (repo, env) => {
     const slug = gitHubSlugFromRemote(repo.remote);
     const token = env.GITHUB_TOKEN;
     if (slug && token) {
-      const response = await fetch(`https://api.github.com/repos/${slug}`, {
-        headers: {
-          Accept: "application/vnd.github+json",
-          Authorization: `Bearer ${token}`,
-          "User-Agent": "devintern-worker-doctor",
-        },
-        signal: AbortSignal.timeout(timeoutMs),
-      });
-      if (response.ok) return { ok: true, detail: `GitHub ${slug} readable` };
-      return {
-        ok: false,
-        reason: `GitHub API ${response.status} for ${slug}${
-          response.status === 404 ? " (missing or not visible to GITHUB_TOKEN)" : ""
-        }`,
-      };
+      // In parallel: the caller bounds the whole check with one timeout.
+      const [response, git] = await Promise.all([
+        fetchFn(`https://api.github.com/repos/${slug}`, {
+          headers: {
+            Accept: "application/vnd.github+json",
+            Authorization: `Bearer ${token}`,
+            "User-Agent": "devintern-worker-doctor",
+          },
+          signal: AbortSignal.timeout(timeoutMs),
+        }),
+        lsRemote(repo.remote, env, timeoutMs),
+      ]);
+      if (!response.ok) {
+        return {
+          ok: false,
+          reason: `GitHub API ${response.status} for ${slug}${
+            response.status === 404 ? " (missing or not visible to GITHUB_TOKEN)" : ""
+          }`,
+        };
+      }
+      if (!git.ok) {
+        return {
+          ok: false,
+          reason:
+            `GITHUB_TOKEN can read ${slug} through the API, but git cannot clone it (${git.reason}). ` +
+            "Git does not use GITHUB_TOKEN on its own: configure a git credential helper " +
+            "(for example `gh auth setup-git`) or use an SSH remote",
+        };
+      }
+      return { ok: true, detail: `GitHub ${slug} readable` };
     }
-    return gitLsRemote(repo.remote, env, timeoutMs);
+    return lsRemote(repo.remote, env, timeoutMs);
   };
 }
 
@@ -333,6 +381,9 @@ async function defaultCheckEntitlement(workspaceDir: string): Promise<WorkerEnti
     supabaseConfig: loadSupabaseConfig(workspaceCodeStateDir(workspaceDir)),
     requireAutomation: true,
     allowTrial: true,
+    // Doctor runs in a terminal or for an agent setting up, not as the daemon.
+    setup: true,
+    loginCommand: "devintern worker login",
   });
 }
 
@@ -509,7 +560,8 @@ function loadWorkspace(
         `${plural(config.repos.length, "repo")}, ${plural(config.teams.length, "team")}, ` +
         `${plural(config.automations.length, "automation")} (${configPath})`,
     });
-    return { workspaceDir, configPath, config };
+    // The doctor checks what the worker runs; manual-only repos are skipped.
+    return { workspaceDir, configPath, config: workerWorkspaceView(config) };
   } catch (error) {
     const problems = error instanceof WorkspaceConfigError ? error.problems : [errorMessage(error)];
     for (const problem of problems) {
@@ -573,7 +625,7 @@ function polledSources(
 function workSourcesCheck(config: WorkspaceConfig): ReadinessCheck {
   const queries = config.teams.length > 0 ? config.teams.length : config.defaults.taskQuery ? 1 : 0;
   const detail =
-    `${plural(queries, "tracker query")}, ${plural(config.automations.length, "automation")}, ` +
+    `${plural(queries, "tracker query", "tracker queries")}, ${plural(config.automations.length, "automation")}, ` +
     `${plural(config.errorMonitors.length, "error monitor")}, ${plural(config.repos.length, "repo")}`;
   if (config.repos.length === 0) {
     return {
@@ -614,6 +666,13 @@ async function collectConfigScopedChecks(
 
   // 2. Tracker credentials per source
   const credentialed: PolledSource[] = [];
+  const probeCredentials =
+    deps.probeCredentials ??
+    ((tracker: string, env: Env) =>
+      defaultProbe(
+        tracker,
+        Object.fromEntries(Object.entries(env).filter((e): e is [string, string] => !!e[1])),
+      ));
   for (const source of sources) {
     const missing = trackerRequiredEnv(source.tracker).filter((key) => !source.env[key]);
     if (missing.length > 0) {
@@ -624,15 +683,33 @@ async function collectConfigScopedChecks(
         detail: `${source.name}: missing ${missing.join(", ")}`,
         hint: source.credentialHint,
       });
-    } else {
-      credentialed.push(source);
-      checks.push({
-        id: "credentials",
-        label: "Tracker credentials",
-        status: "ok",
-        detail: source.name,
-      });
+      continue;
     }
+    if (!offline) {
+      try {
+        await withTimeout(
+          probeCredentials(source.tracker, source.env),
+          timeoutMs,
+          "credential check",
+        );
+      } catch (error) {
+        checks.push({
+          id: "credentials",
+          label: "Tracker credentials",
+          status: "fail",
+          detail: `${source.name}: ${errorMessage(error)}`,
+          hint: source.credentialHint,
+        });
+        continue;
+      }
+    }
+    credentialed.push(source);
+    checks.push({
+      id: "credentials",
+      label: "Tracker credentials",
+      status: "ok",
+      detail: source.name,
+    });
   }
 
   // 3. Ready-tasks query dry-run, one API call per source
@@ -667,8 +744,14 @@ async function collectConfigScopedChecks(
       checks.push({
         id: "query",
         label: "Task query",
-        status: "ok",
+        // 0 matches is valid (nothing is ready yet), but worth a second look.
+        status: count === 0 ? "warn" : "ok",
         detail: `${source.name}: ${plural(count, "task")} match${count === 1 ? "es" : ""}`,
+        ...(count === 0
+          ? {
+              hint: "The query works but matches nothing right now; the worker keeps polling. Check it selects the tasks you expect",
+            }
+          : {}),
       });
     } catch (error) {
       checks.push({
@@ -676,9 +759,11 @@ async function collectConfigScopedChecks(
         label: "Task query",
         status: "fail",
         detail: `${source.name}: ${errorMessage(error)}`,
-        hint: source.team
-          ? `Fix task_query for [[teams]] "${source.team.name}" in workspace.toml (renamed status, project, or field?)`
-          : "Fix [defaults].task_query in workspace.toml (renamed status, project, or field?)",
+        hint:
+          missingMarkdownTasksDirHint(source.tracker, source.env) ??
+          (source.team
+            ? `Fix task_query for [[teams]] "${source.team.name}" in workspace.toml (renamed status, project, or field?)`
+            : "Fix [defaults].task_query in workspace.toml (renamed status, project, or field?)"),
       });
     }
   }
@@ -824,28 +909,15 @@ export async function collectWorkerDoctorChecks(
       hint: "Rerun `devintern worker doctor` without --offline to verify the license",
     });
   } else {
+    const loginCommand = workerLoginCommandFor(
+      options.workspacePath ?? workspaceConfigPath(workspaceDir),
+    );
     const entitlementHint =
-      "Run `devintern worker login` to start the free Worker Pilot, or set LICENSE_KEY in the workspace .env (https://devintern.com/pricing)";
+      `Run \`${signInCommand(loginCommand)}\` to start your ${WORKER_PILOT_OFFER}, ` +
+      "or set LICENSE_KEY in the workspace .env (https://devintern.com/pricing)";
     try {
       const license = await (deps.checkEntitlement ?? defaultCheckEntitlement)(workspaceDir);
-      checks.push(
-        license.valid
-          ? {
-              id: "entitlement",
-              label: "Automation entitlement",
-              status: "ok",
-              detail: license.trialAvailable
-                ? "trial: Worker Pilot available; starts when the worker runs"
-                : `${license.source}${license.source === "trial" || license.source === "grace" ? `: ${license.message}` : ""}`,
-            }
-          : {
-              id: "entitlement",
-              label: "Automation entitlement",
-              status: "fail",
-              detail: `${license.source}: ${license.message}`,
-              hint: entitlementHint,
-            },
-      );
+      checks.push(entitlementCheck(license, loginCommand, entitlementHint));
     } catch (error) {
       checks.push({
         id: "entitlement",

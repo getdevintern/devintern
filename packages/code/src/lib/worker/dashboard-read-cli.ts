@@ -686,7 +686,18 @@ function renderArtifact(body: TaskArtifactContent): string {
   return `${note}${body.content}`;
 }
 
-function renderStats(body: { window: string; stats: RunStats | null }): string {
+/** Auto-merge gate outcomes in operator terms; null when the window has no auto-merge runs. */
+function autoMergeLine(stats: RunStats): string | null {
+  if ((stats.byOrigin.auto_merge ?? 0) === 0) return null;
+  const counts = stats.byOriginStatus?.auto_merge;
+  if (!counts) return null;
+  const parts = [`${counts.succeeded} merged`, `${counts.escalated} left for review`];
+  if (counts.failed > 0) parts.push(`${counts.failed} failed`);
+  if (counts.abandoned > 0) parts.push(`${counts.abandoned} abandoned`);
+  return `Auto-merge:       ${parts.join(", ")}`;
+}
+
+export function renderStats(body: { window: string; stats: RunStats | null }): string {
   const { stats } = body;
   if (!stats) return `No run statistics (window ${body.window}).`;
   const byStatus = Object.entries(stats.totals.byStatus)
@@ -700,10 +711,14 @@ function renderStats(body: { window: string; stats: RunStats | null }): string {
   const lines = [
     `Window:           ${body.window}`,
     `Runs:             ${stats.totals.runs}${byStatus ? ` (${byStatus})` : ""}`,
-    `Success rate:     ${formatPercent(stats.successRate)}`,
-    `Escalation rate:  ${formatPercent(stats.escalationRate)}`,
-    `Median duration:  ${formatDuration(stats.medianDurationMs)} (succeeded runs with a PR)`,
+    `Success rate:     ${formatPercent(stats.successRate)} (excludes auto-merge)`,
+    `Escalation rate:  ${formatPercent(stats.escalationRate)} (excludes auto-merge)`,
   ];
+  const autoMerge = autoMergeLine(stats);
+  if (autoMerge) lines.push(autoMerge);
+  lines.push(
+    `Median duration:  ${formatDuration(stats.medianDurationMs)} (succeeded runs with a PR, excludes auto-merge)`,
+  );
   if (byOrigin) lines.push(`By origin:        ${byOrigin}`);
   lines.push(...renderActivity(stats));
   if (stats.byHarness.length > 0) {

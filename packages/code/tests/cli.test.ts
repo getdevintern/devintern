@@ -2,7 +2,7 @@ import { describe, expect, setDefaultTimeout, test } from "bun:test";
 import { spawnSync } from "child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
-import { join } from "path";
+import { basename, join } from "path";
 
 // Fresh bun subprocesses for each case; under full-suite load they routinely
 // exceed bun's 5s default.
@@ -63,8 +63,12 @@ async function runCLI(
   try {
     // Skip git for argument-handling runs (init has its own gitignore checks).
     // The webhook subcommand parses its own args and rejects --no-git.
+    // Login rejects unknown flags, so it gets none either.
+    const strictArgs = args[0] === "login" || (args[0] === "worker" && args[1] === "login");
     const extraArgs =
-      args[0] === "init" || args.includes("--no-git") || args[0] === "webhook" ? [] : ["--no-git"];
+      args[0] === "init" || args.includes("--no-git") || args[0] === "webhook" || strictArgs
+        ? []
+        : ["--no-git"];
     const env = options.rawEnv
       ? { ...process.env, ...options.env }
       : cliTrackerTestEnv(options.env);
@@ -99,6 +103,49 @@ async function runCLI(
 }
 
 describe.concurrent("CLI Argument Handling", () => {
+  const withWorkspace = (testDir: string) => {
+    mkdirSync(join(testDir, ".workspace"), { recursive: true });
+    writeFileSync(join(testDir, ".workspace", "workspace.toml"), "");
+  };
+
+  test("worker login rejects unknown flags instead of starting a sign-in", async () => {
+    const result = await runCLI(["worker", "login", "github", "--no-browser"], {
+      prepareDir: withWorkspace,
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("Unknown option for devintern worker login");
+    expect(result.stderr).toContain("--no-browser");
+    expect(result.stderr).toContain("--no-wait");
+    expect(result.stdout).not.toContain("supabase.co");
+  });
+
+  test("worker login --json reports argument errors as a JSON document", async () => {
+    const result = await runCLI(["worker", "login", "--no-wait", "--json"], {
+      prepareDir: withWorkspace,
+    });
+    expect(result.exitCode).toBe(1);
+    const doc = JSON.parse(result.stdout);
+    expect(doc).toMatchObject({ schema: "devintern.login", version: 1, result: "failure" });
+    expect(doc.error).toContain("--no-wait needs a sign-in method");
+  });
+
+  test("worker login --complete without a pending sign-in fails cleanly", async () => {
+    const result = await runCLI(
+      ["worker", "login", "--complete", "http://127.0.0.1:17865/auth/callback?code=x", "--json"],
+      { prepareDir: withWorkspace },
+    );
+    expect(result.exitCode).toBe(1);
+    expect(JSON.parse(result.stdout)).toMatchObject({ result: "failure", code: "missing" });
+  });
+
+  test("worker login --help lists the two-step options", async () => {
+    const result = await runCLI(["worker", "login", "--help"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("--no-wait");
+    expect(result.stdout).toContain("--complete <address>");
+    expect(result.stdout).toContain("14-day free Worker Pilot, no card required");
+  });
+
   test("spawn env must disable Sentry for CLI subprocesses (DEVINTERN-6)", () => {
     // These tests spawn the real CLI against a closed tracker port. The
     // fetch failure surfaces as fetchWithRetry's TypeError ("Unable to
@@ -592,23 +639,20 @@ describe.concurrent("CLI Init Command", () => {
   test("init should work without other arguments", async () => {
     const result = await runCLI(["init"]);
     // Check for either success message or "already exists" message
-    const hasInitOutput =
-      result.stdout.includes("Created configuration folder") ||
-      result.stdout.includes("Configuration folder already exists");
-    expect(hasInitOutput).toBe(true);
+    expect(result.stdout).toContain("Registered");
     expect(result.exitCode).toBe(0);
   });
 
-  test("init should add review worktree and other entries to .gitignore", async () => {
+  test("init writes nothing into the checkout", async () => {
     // Create unique temp directory for this test
     const testDir = join(
       tmpdir(),
       `cli-init-test-${Date.now()}-${Math.random().toString(36).substring(7)}`,
     );
+    const workspaceDir = join(testDir, "..", `${basename(testDir)}-home`);
     mkdirSync(testDir, { recursive: true });
 
     try {
-      // Run init command in the test directory
       const result = spawnSync("bun", [CLI_PATH, "init"], {
         encoding: "utf8",
         timeout: CLI_SPAWN_TIMEOUT_MS,
@@ -616,38 +660,21 @@ describe.concurrent("CLI Init Command", () => {
         env: {
           ...process.env,
           DEVINTERN_NO_UPDATE: "1",
+          DEVINTERN_WORKSPACE_DIR: workspaceDir,
         },
       });
 
       expect(result.status).toBe(0);
-
-      // Check that .gitignore was created or updated
-      const gitignorePath = join(testDir, ".gitignore");
-      expect(existsSync(gitignorePath)).toBe(true);
-
-      // Read .gitignore and verify all entries are present
-      const gitignoreContent = readFileSync(gitignorePath, "utf8");
-
-      // Everything under .devintern-code/ is ignored (credentials, lock file,
-      // and the queue.db state database that `git clean` must not delete)…
-      expect(gitignoreContent).toContain(".devintern-code/*");
-      // …except the two files worth committing, whitelisted after the wildcard
-      expect(gitignoreContent.indexOf("!.devintern-code/settings.json")).toBeGreaterThan(
-        gitignoreContent.indexOf(".devintern-code/*"),
-      );
-      expect(gitignoreContent).toContain("!.devintern-code/.env.example");
-
-      // Should have the comment header
-      expect(gitignoreContent).toContain(
-        "@devintern/code - Keep credentials and local state out of git",
-      );
+      // No config folder or .gitignore block in the project...
+      expect(existsSync(join(testDir, ".devintern-code"))).toBe(false);
+      expect(existsSync(join(testDir, ".gitignore"))).toBe(false);
+      // ...the checkout is registered in the workspace instead.
+      const toml = readFileSync(join(workspaceDir, "workspace.toml"), "utf8");
+      expect(toml).toContain("manual_only = true");
+      expect(toml).toContain(`path = ${JSON.stringify(testDir)}`);
     } finally {
-      // Clean up temp directory
-      try {
-        rmSync(testDir, { recursive: true, force: true });
-      } catch {
-        // Ignore cleanup errors
-      }
+      rmSync(testDir, { recursive: true, force: true });
+      rmSync(workspaceDir, { recursive: true, force: true });
     }
   });
 });

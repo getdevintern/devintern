@@ -99,6 +99,11 @@ export interface AutoMergeSettings {
   /** Merge-safety review strictness (`auto_merge_policy`, default `strict`). */
   policy: MergeSafetyPolicy;
   /**
+   * Review diffs too large to inline from the PR checkout
+   * (`auto_merge_review_large_diffs`, default false: they stay open).
+   */
+  reviewLargeDiffs: boolean;
+  /**
    * Operator rules appended to the merge-safety prompt
    * (`auto_merge_review_instructions`). Omitted when unset or empty.
    */
@@ -171,8 +176,17 @@ export interface TeamConfig {
 export interface RepoConfig {
   /** Unique name; also the directory name under `repos/` and `worktrees/`. */
   name: string;
-  /** Git remote URL the bare clone tracks. */
+  /**
+   * Git remote URL the bare clone tracks. Empty for a `manual_only` repo
+   * registered by {@link RepoConfig.path} instead.
+   */
   remote: string;
+  /**
+   * Absolute local checkout directory of a `manual_only` repo without a
+   * recognised remote (for example a fresh `git init`). Manual runs started
+   * in this directory, or below it, use this entry.
+   */
+  path?: string;
   /** Default branch task worktrees start from; falls back to `origin/HEAD`. */
   defaultBranch?: string;
   /** Labels applied to PRs created for this repo; falls back to `defaults.pr_labels`. */
