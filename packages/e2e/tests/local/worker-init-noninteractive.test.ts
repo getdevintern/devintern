@@ -457,15 +457,32 @@ cliTest(
   240_000,
 );
 
-// Known bugs being fixed in parallel. Each becomes a real assertion once the
-// fix lands; do not turn these into tests that pass on the current behaviour.
-for (const name of [
-  "worker init --non-interactive --tracker jira: a wrong JIRA_API_TOKEN fails the credential probe (currently accepted)",
-  "worker init --non-interactive --tracker github: the probe checks access to GITHUB_REPO, not only the token",
-  "worker init --non-interactive --tracker trello: a short board id in the query is accepted by search",
-  "worker init --non-interactive: a missing license is reported the same way as worker doctor (init warns, doctor fails)",
-]) {
-  test.todo(name, () => {
-    throw new Error("Known bug; see docs/coverage/worker-commands.md (worker init)");
-  });
-}
+cliTest(
+  "worker init --non-interactive: a missing license fails init and doctor alike, and a skipped check passes",
+  async () => {
+    await withFixture(async (fixture) => {
+      // Licensing on, with no LICENSE_KEY or session in the temp HOME.
+      const licensing = { DEVINTERN_SKIP_LICENSE_CHECK: "0" };
+      const init = await fixture.init(["--json"], { env: licensing });
+      expect(init.exitCode, init.stdout + init.stderr).toBe(1);
+      const report = parseReport(init.stdout);
+      expect(report.result).toBe("failure");
+      const entitlement = report.checks.find((check) => /entitlement/i.test(check.label));
+      expect(entitlement, init.stdout).toMatchObject({ status: "fail" });
+      expectNoStackTrace(init);
+      // The setup is kept, so doctor has a workspace to judge.
+      expect(fixture.config().defaults).toMatchObject({ tracker: "markdown" });
+
+      const doctor = await fixture.run(["worker", "doctor"], { env: licensing });
+      expect(doctor.exitCode, doctor.stdout + doctor.stderr).toBe(1);
+      expect(doctor.stdout).toMatch(/❌ Automation entitlement/);
+
+      // With the check skipped, doctor passes on the same workspace.
+      const skipped = await fixture.run(["worker", "doctor"], {
+        env: { DEVINTERN_SKIP_LICENSE_CHECK: "1" },
+      });
+      expect(skipped.exitCode, skipped.stdout + skipped.stderr).toBe(0);
+    });
+  },
+  120_000,
+);

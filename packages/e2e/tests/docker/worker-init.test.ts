@@ -47,6 +47,9 @@ printf '#!/bin/sh\\necho stub agent 0.0.0\\n' > ${HOME}/bin/claude
 chmod +x ${HOME}/bin/claude
 `;
 
+/** The entitlement needs a signed-in session, which a blank machine lacks; this skips it. */
+const SKIP_LICENSE = "DEVINTERN_SKIP_LICENSE_CHECK=1";
+
 const INIT_MARKDOWN = `MARKDOWN_TASKS_DIR=${TASKS} devintern worker init --non-interactive --tracker markdown --task-query status=todo --repo-from-cwd`;
 
 async function exec(args: string[]): Promise<CommandResult> {
@@ -148,13 +151,15 @@ describe.skipIf(!image)("worker init on a blank machine (Docker)", () => {
   test("happy path with a stub agent: one JSON document, 0600 .env, doctor agrees", async () => {
     await onBlankMachine(
       async (machine) => {
+        // No license or session on a blank machine: init saves the setup but
+        // fails the entitlement check, with a sign-in next step.
         const result = await machine.sh(`${INIT_MARKDOWN} --json`);
-        expect(result.exitCode, result.stdout + result.stderr).toBe(0);
+        expect(result.exitCode, result.stdout + result.stderr).toBe(1);
         const report = parseReport(result.stdout);
         expect(report).toMatchObject({
           schema: "devintern.worker-init",
           version: 1,
-          result: "success",
+          result: "failure",
           workspaceDir: WS,
           tracker: "markdown",
           taskQuery: "status=todo",
@@ -162,8 +167,9 @@ describe.skipIf(!image)("worker init on a blank machine (Docker)", () => {
         });
         const status = Object.fromEntries(report.checks.map((check) => [check.name, check.status]));
         expect(status).toMatchObject({ query: "pass", repo: "pass", harness: "pass" });
-        // No license or session on a blank machine: a warning plus a next step.
-        expect(status.entitlement).toBe("warn");
+        expect(report.checks.filter((check) => check.status === "fail")).toEqual([
+          expect.objectContaining({ name: expect.stringMatching(/entitlement/) }),
+        ]);
         expect(report.nextSteps.map((step) => step.id)).toContain("sign-in");
 
         expect(await machine.workspaceFiles()).toEqual(
@@ -177,10 +183,11 @@ describe.skipIf(!image)("worker init on a blank machine (Docker)", () => {
         expect(config.defaults).toMatchObject({ tracker: "markdown", task_query: "status=todo" });
         expect(config.repos).toEqual([expect.objectContaining({ name: "app", remote: REMOTE })]);
 
-        // Doctor reads the same files. Its overall verdict differs on the
-        // license (a known bug: init warns, doctor fails), so only the shared
-        // checks are compared here.
+        // Doctor reads the same files and agrees: it fails on the entitlement
+        // alone, and passes once the license check is skipped.
         const doctor = await machine.sh("devintern worker doctor");
+        expect(doctor.exitCode, doctor.stdout).toBe(1);
+        expect(doctor.stdout).toMatch(/❌ Automation entitlement/);
         for (const line of [
           "✅ Tracker credentials — markdown ([defaults])",
           "✅ Task query — markdown ([defaults]): 1 task matches",
@@ -189,6 +196,8 @@ describe.skipIf(!image)("worker init on a blank machine (Docker)", () => {
         ]) {
           expect(doctor.stdout).toContain(line);
         }
+        const skipped = await machine.sh(`${SKIP_LICENSE} devintern worker doctor`);
+        expect(skipped.exitCode, skipped.stdout).toBe(0);
 
         // Re-run without --yes: refused, unchanged. With --yes: only the query.
         const refused = await machine.sh(INIT_MARKDOWN);
@@ -196,7 +205,7 @@ describe.skipIf(!image)("worker init on a blank machine (Docker)", () => {
         expect(refused.stderr).toContain("already exists; nothing was changed. Pass --yes");
         expect(await machine.checked(`cat ${WS}/workspace.toml`)).toBe(toml);
         const updated = await machine.sh(
-          `${INIT_MARKDOWN.replace("status=todo", "status=ready")} --yes --json`,
+          `${SKIP_LICENSE} ${INIT_MARKDOWN.replace("status=todo", "status=ready")} --yes --json`,
         );
         expect(updated.exitCode, updated.stdout).toBe(0);
         expect(await machine.checked(`cat ${WS}/workspace.toml`)).toBe(
@@ -209,7 +218,7 @@ describe.skipIf(!image)("worker init on a blank machine (Docker)", () => {
 
   test("a blank machine without an agent CLI fails the harness check", async () => {
     await onBlankMachine(async (machine) => {
-      const result = await machine.sh(`${INIT_MARKDOWN} --json`);
+      const result = await machine.sh(`${SKIP_LICENSE} ${INIT_MARKDOWN} --json`);
       expect(result.exitCode).toBe(1);
       const report = parseReport(result.stdout);
       expect(report.error).toBeUndefined();
@@ -223,7 +232,7 @@ describe.skipIf(!image)("worker init on a blank machine (Docker)", () => {
     await onBlankMachine(
       async (machine) => {
         await machine.checked(`rm ${TASKS}/T-1.md`);
-        const result = await machine.sh(`${INIT_MARKDOWN} --json`);
+        const result = await machine.sh(`${SKIP_LICENSE} ${INIT_MARKDOWN} --json`);
         expect(result.exitCode, result.stdout).toBe(0);
         const query = parseReport(result.stdout).checks.find((check) => check.name === "query");
         expect(query).toMatchObject({ status: "warn" });

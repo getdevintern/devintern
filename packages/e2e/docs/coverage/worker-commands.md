@@ -18,8 +18,8 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 
 - Surface: `devintern worker` surface
 - Status: `default`
-- Evidence: `tests/local/worker-init-noninteractive.test.ts`: `--non-interactive` Markdown happy path with a stub agent CLI (exit 0, one `devintern.worker-init` v1 JSON document, `result: "success"`, mode-0600 `.env`, `[defaults].tracker`/`task_query` and one `[[repos]]` entry for the local bare `origin`; a follow-up `worker doctor` reports the same tracker, query, repository, and harness checks), text mode, 0 matches as a `query` warning, no agent CLI on PATH as a `harness` failure with exit 1, input errors that write nothing and exit 1 with one `❌` line (missing flags in text and JSON, `--jira-token`, unsupported tracker, a 0644 `--env-file`, `--repo-from-cwd` outside Git and without `origin`, `--yes`/`--tracker` without `--non-interactive`), an existing workspace refused without `--yes` (bytes unchanged) and `--yes` changing only `task_query`, three concurrent runs with exactly one writer and one repo entry, plain `worker init` with no TTY pointing to `--non-interactive`, and `--env-file` secrets absent from stdout and stderr. `tests/local/worker-init-wizard.test.ts`: the interactive wizard on a Bun PTY, Markdown path through every prompt declining sign-in, relay, Sentry, and the service, and Ctrl+D and Ctrl+C at the first prompt and at the mid-flow query prompt (one clean line, non-zero exit, no stack trace; nothing written at the first prompt). `tests/docker/worker-init.test.ts`: the same non-interactive scenarios on a blank Debian container with the packed CLI installed globally (`bun run --filter @getdevintern/code build`, then `bun run --filter @devintern/e2e test` and `test:docker`)
-- Missing: Trackers other than Markdown (credential probes need fake Jira/GitHub/Trello servers wired into init); the wizard's non-Markdown tracker prompts, a GitHub remote's App step, and a "yes" to the service. Known bugs tracked as `test.todo` in both local files: a wrong Jira token accepted by the credential probe, the GitHub probe not checking `GITHUB_REPO` access, a short Trello board id rejected by search, Ctrl+C/Ctrl+D mid-flow leaving `tracker = "jira"` that blocks a re-run, a relative `./tasks` `MARKDOWN_TASKS_DIR` in the wizard, token prompts echoing secrets, Ctrl+C reported as "(Ctrl+D)", and a missing license being a warning in init but a failure in doctor.
+- Evidence: `tests/local/worker-init-noninteractive.test.ts`: `--non-interactive` Markdown happy path with a stub agent CLI (exit 0, one `devintern.worker-init` v1 JSON document, `result: "success"`, mode-0600 `.env`, `[defaults].tracker`/`task_query` and one `[[repos]]` entry for the local bare `origin`; a follow-up `worker doctor` reports the same tracker, query, repository, and harness checks), text mode, 0 matches as a `query` warning, no agent CLI on PATH as a `harness` failure with exit 1, input errors that write nothing and exit 1 with one `❌` line (missing flags in text and JSON, `--jira-token`, unsupported tracker, a 0644 `--env-file`, `--repo-from-cwd` outside Git and without `origin`, `--yes`/`--tracker` without `--non-interactive`), an existing workspace refused without `--yes` (bytes unchanged) and `--yes` changing only `task_query`, three concurrent runs with exactly one writer and one repo entry, plain `worker init` with no TTY pointing to `--non-interactive`, and `--env-file` secrets absent from stdout and stderr. `tests/local/worker-init-wizard.test.ts`: the interactive wizard on a Bun PTY. The Markdown path through every prompt with the license check skipped ends exit 0 with every readiness check passing and "Worker setup complete — the worker is ready"; with licensing on, declining the sign-in saves the setup, fails the **Automation entitlement** readiness check, and lists it under "not ready yet". Ctrl+D and Ctrl+C at the first prompt (nothing written) and at the mid-flow query prompt each end with one clean line ("Input closed (Ctrl+D)" or "Interrupted (Ctrl+C)"), a non-zero exit, and no stack trace. The aborted workspace keeps `tracker = "markdown"` and a re-run completes. A relative `./tasks` is saved to `.env` as an absolute path and `worker doctor` run from another directory finds the task. A token typed at the hidden GitHub token prompt never appears in the terminal output and is saved to the 0600 `.env`. `tests/docker/worker-init.test.ts`: the same non-interactive scenarios on a blank Debian container with the packed CLI installed globally (`bun run --filter @getdevintern/code build`, then `bun run --filter @devintern/e2e test` and `test:docker`). `worker-init-noninteractive` also covers a missing license: with licensing on, `--non-interactive` exits 1 with a failed entitlement check and `worker doctor` fails the same way; with the check skipped doctor passes
+- Missing: Trackers other than Markdown (their credential probes need fake servers wired into init); the wizard's non-Markdown tracker prompts (so the hidden-input check uses the GitHub token prompt, not a tracker token), a GitHub remote's App step, and a "yes" to the service. The Jira `/myself` check with a wrong token, the GitHub `GITHUB_REPO` access check, and Trello short board id resolution are covered by unit tests in `packages/task-trackers/credential-probes.test.ts`, not here.
 - Last reviewed: 2026-11-26
 
 ### `worker login`
@@ -368,8 +368,10 @@ or URL-encoded, in JSON mode, text mode, or a follow-up `worker doctor`.
 pseudo-terminal (`Bun.spawn({ terminal })`) with no extra system packages.
 Ctrl+D and Ctrl+C are sent as the raw bytes `\x04` and `\x03` through the PTY:
 closing stdin, or `script` with `</dev/null`, never delivers EOF to the
-wizard's raw-mode readline. Licensing is on with no key or session, so the
-Worker Pilot sign-in prompt appears and is declined. HTTP(S) goes through a
+wizard's raw-mode readline. Most cases skip the license check (`DEVINTERN_SKIP_LICENSE_CHECK=1`);
+the sign-in case turns licensing on with no key or session, so the
+Worker Pilot sign-in prompt appears and is declined. The PATH has no
+`systemctl`, so no service step is offered. HTTP(S) goes through a
 refusing loopback proxy that must see zero requests. The PTY cases skip only
 where Bun has no PTY support (Windows).
 
@@ -383,9 +385,10 @@ host's uid, and the CLI installed with `bun add -g`), and runs the file. Each
 test starts a fresh container with `--network none` and runs commands through
 `docker exec` without `-i`/`-t` (no TTY, stdin closed), so the CLI sees a
 first-time install: the default `~/.devintern`, no agent CLI, no session or
-license, and none of the suite's skip flags. Scenarios: the Markdown happy path
-with a stub agent (license as a warning plus a `sign-in` next step, doctor's
-shared checks, re-run refusal, `--yes` changing only the query), no agent CLI,
+license, and no skip flags except where a scenario sets the license skip itself.
+Scenarios: the Markdown setup with a stub agent (exit 1 on the missing
+entitlement alone with a `sign-in` next step, doctor failing and then passing
+with the license skipped, re-run refusal, `--yes` changing only the query), no agent CLI,
 0 matches, the input errors, no TTY, concurrent runs, and `--env-file`
 redaction. The e2e-local workflow runs it after the local suite.
 
