@@ -167,6 +167,24 @@ GitLab suite requires `test:e2e:gitlab`; `test:e2e` remains the GitHub suite.
 Infrastructure references: [GitLab Docker installation](https://docs.gitlab.com/install/docker/installation/),
 [19.3.5 patch release](https://docs.gitlab.com/releases/patches/patch-release-gitlab-19-4-2-released/).
 
+## Native systemd service
+
+Docker Engine must be installed and accessible to your user. The suite builds a
+Debian image with systemd as PID 1, installs the packed CLI for a non-root user,
+and runs a privileged container (its own network namespace, never the host's).
+It needs no credentials and never touches the host's service manager or home
+directory.
+
+```sh
+bun run --filter @getdevintern/code build
+bun run --filter @devintern/e2e test:e2e:service
+```
+
+The container is removed when the suite ends; the `devintern-e2e-systemd:local`
+image is kept so later runs start faster (`docker rmi devintern-e2e-systemd:local`
+removes it). What it checks is in
+[docs/coverage/worker-daemon.md](docs/coverage/worker-daemon.md#native-systemd-service).
+
 ## Bitbucket Cloud and GitLab.com
 
 Create a **dedicated fixture repository/project** on each hosted provider and
