@@ -61,6 +61,7 @@ import {
   interruptedChildStillRunning,
 } from "../workspace/injected-recovery";
 import { resolveWorkspaceDir } from "../workspace/paths";
+import { relayWorkerView } from "../relay/worker-identity";
 import { lastExitView, readWorkerLifecycle, stoppedWorkerExit } from "../worker/lifecycle";
 import type { WorkerLastExitView } from "../worker/lifecycle";
 import {
@@ -1437,6 +1438,8 @@ export function handleWorkerStatus(data: DashboardData, serverPid?: number): Api
       dbMissing: data.dbMissing,
       queueDbPath: data.queueDbPath,
       queueDbMissing: data.queueDbMissing,
+      // Additive: this workspace's relay worker identity (null without one).
+      relay: relayWorkerView(data.workspaceDir),
       // Additive: configured automation source health (empty on read errors).
       sources: sources.sources,
       ...(sources.error !== undefined ? { sourcesError: sources.error } : {}),

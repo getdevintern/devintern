@@ -155,7 +155,7 @@ Every read-only dashboard view is also a `devintern worker` subcommand. These co
 | `devintern worker automations`            | Automations with next and last run                                    |
 | `devintern worker prs`                    | PRs and MRs opened by the agent: open (default) or recently merged (`--state open\|merged`; `--limit N`, 1..500, default 50) |
 | `devintern worker queue`                  | Queued work that has not started                                      |
-| `devintern worker status`                 | Worker liveness, queue counts, poll cursors                           |
+| `devintern worker status`                 | Worker liveness, relay identity, queue counts, poll cursors           |
 | `devintern worker overview`               | Capacity, harness health, tracker freshness                           |
 | `devintern worker logs`                   | Recent worker log entries (`--lines N`, default 500; `--level`)       |
 

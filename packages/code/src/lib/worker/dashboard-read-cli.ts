@@ -22,6 +22,7 @@ import { dirname, resolve } from "path";
 import { parseArgs } from "util";
 
 import { loadWorkspaceAutomationActions } from "../automation/workspace-dashboard";
+import type { RelayWorkerView } from "../relay/worker-identity";
 import {
   DashboardData,
   handleAgentPrs,
@@ -883,10 +884,12 @@ function renderStatus(body: {
   cursors: { source: string; cursorValue: string; updatedAt: number }[];
   dbPath: string;
   dbMissing: boolean;
+  relay?: RelayWorkerView | null;
 }): string {
   const { queue } = body;
   const lines = [
     `Worker:     ${workerLine(body.worker)}`,
+    ...relayStatusLines(body.relay),
     `Database:   ${body.dbPath}${body.dbMissing ? " (missing)" : ""}`,
     `Webhooks:   ${queue.pending} pending, ${queue.processing} processing, ${queue.failed} failed`,
     `Ad-hoc:     ${queue.injected.pending} pending, ${queue.injected.running} running`,
@@ -900,6 +903,22 @@ function renderStatus(body: {
     }
   }
   return lines.join("\n");
+}
+
+/** `Relay:` line (and conflict lines) for `worker status`. */
+function relayStatusLines(relay: RelayWorkerView | null | undefined): string[] {
+  if (!relay) return [];
+  const owned =
+    relay.owned.length === 0
+      ? "owns nothing yet"
+      : `owns ${relay.owned.map((ref) => (ref.team ? `${ref.key} (team ${ref.team})` : ref.key)).join(", ")}`;
+  return [
+    `Relay:      ${relay.label} (${relay.workerId}), ${owned}`,
+    ...relay.conflicts.map(
+      (conflict) =>
+        `            ⚠️  ${conflict.key} is served by "${conflict.ownerLabel}" (last seen ${conflict.lastSeenAt})`,
+    ),
+  ];
 }
 
 function renderOverview(body: OverviewResponse): string {
