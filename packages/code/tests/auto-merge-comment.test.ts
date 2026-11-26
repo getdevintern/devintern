@@ -65,7 +65,7 @@ describe("buildAutoMergeStatusComment", () => {
       kind: "left-open",
       headSha: SHA,
       reason,
-      once: true,
+      recheckOnPush: false,
     });
     expect(once).toContain("does not check again after new commits");
   });

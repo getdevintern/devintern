@@ -40,8 +40,8 @@ export type AutoMergeCommentStatus =
       kind: "left-open";
       headSha: string;
       reason: LeftOpenReason;
-      /** Checked once per PR (`auto_merge_once`): new commits are not re-checked. */
-      once?: boolean;
+      /** `false`: new commits are not checked again (`auto_merge_recheck_on_push`). */
+      recheckOnPush?: boolean;
     }
   /**
    * GitHub holds the PR for something other than its CI checks (they pass):
@@ -205,7 +205,7 @@ export function buildAutoMergeStatusComment(status: AutoMergeCommentStatus): str
     "",
     ...leftOpenBody(status.reason),
     "",
-    status.once
+    status.recheckOnPush === false
       ? "<sub>devintern checks each pull request once and does not check again after new commits; a change to the auto-merge policy re-checks it.</sub>"
       : "<sub>devintern checks again after new commits or a change to the auto-merge policy.</sub>",
   ].join("\n");

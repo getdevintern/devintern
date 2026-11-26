@@ -101,12 +101,12 @@ export interface AutoMergeSettings {
    */
   reviewLabel: string;
   /**
-   * Check each PR once (`auto_merge_once`, default true): after a decision,
-   * later commits (updates, conflict resolutions) are not re-checked, which
-   * saves agent review tokens. A policy change still re-checks. When false,
-   * every new head commit is checked again.
+   * Review a PR again after new commits (`auto_merge_recheck_on_push`,
+   * default false). When false, a PR the agent review decided is not
+   * reviewed again on later commits (updates, conflict resolutions), which
+   * saves agent tokens; a policy change still re-checks it.
    */
-  once: boolean;
+  recheckOnPush: boolean;
   /** Merge-safety review strictness (`auto_merge_policy`, default `strict`). */
   policy: MergeSafetyPolicy;
   /**

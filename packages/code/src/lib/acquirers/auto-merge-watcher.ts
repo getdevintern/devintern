@@ -15,10 +15,13 @@
  * (for example widening the safe paths or enabling the review). `waiting`
  * outcomes back off without consuming attempts; failures retry up to a cap.
  *
- * With `once` (`[workspace].auto_merge_once`, the default), a decision is also
- * recorded per PR and policy, so later commits (updates, conflict
- * resolutions) are not checked again; only a policy change re-checks the PR.
- * Exhausting the failure cap is not a decision: it gives up on that head only.
+ * A decision the agent review produced is also recorded per PR and policy.
+ * Unless `recheckOnPush` (`[workspace].auto_merge_recheck_on_push`, default
+ * off) is on, later commits (updates, conflict resolutions) are then not
+ * reviewed again; only a policy change re-checks the PR. Decisions that cost
+ * no agent run (deny paths, size limits, review disabled) are per head only,
+ * so a later commit is checked again for free. Exhausting the failure cap is
+ * not a decision either: it gives up on that head only.
  *
  * Each evaluation is recorded as a run while it executes, so the dashboard
  * shows it live. Evaluations that end in "not ready yet" (waiting, skipped)
@@ -92,11 +95,11 @@ export interface AutoMergeWatcherOptions {
    */
   policyFingerprint?: (repo: string) => string;
   /**
-   * Live `[workspace].auto_merge_once` switch: once a PR has a decision, its
-   * later head commits are not checked again (default: off here; the
-   * workspace default is on).
+   * Live `[workspace].auto_merge_recheck_on_push` switch. When it returns
+   * false, a PR the agent review already decided is not checked again after
+   * new commits. Unset re-checks every head (the workspace default is false).
    */
-  once?: () => boolean;
+  recheckOnPush?: () => boolean;
   /**
    * Whether `baseRef` is a branch some tracked task's PR is stacked on (the
    * stacked-PR maintainer's links), beyond the agent PR branches the registry
@@ -326,13 +329,16 @@ export function autoMergeDecisionKey(
   return policyFingerprint ? `${base}:${policyFingerprint}` : base;
 }
 
-/** Durable key of a PR-level auto-merge decision (`auto_merge_once`). */
+/**
+ * Durable key of a PR-level decision made by the agent review: with
+ * `auto_merge_recheck_on_push = false`, later heads of the PR are skipped.
+ */
 export function autoMergePrDecisionKey(
   repo: string,
   prNumber: number,
   policyFingerprint?: string,
 ): string {
-  const base = `${repo.toLowerCase()}#${prNumber}:once`;
+  const base = `${repo.toLowerCase()}#${prNumber}:reviewed`;
   return policyFingerprint ? `${base}:${policyFingerprint}` : base;
 }
 
@@ -537,8 +543,8 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
 
   /**
    * Decision keys (per head, per PR) for a head that still needs a check, or
-   * `null` when this head, or with `once` this PR, was already decided under
-   * the current policy.
+   * `null` when this head, or (without `recheckOnPush`) this PR's agent
+   * review, was already decided under the current policy.
    */
   private undecidedKeys(
     repo: string,
@@ -550,7 +556,8 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
     const prKey = autoMergePrDecisionKey(repo, prNumber, policyFingerprint);
     const { queue } = this.options;
     if (queue.hasProcessed(AUTO_MERGE_SOURCE, headKey)) return null;
-    if (this.options.once?.() && queue.hasProcessed(AUTO_MERGE_SOURCE, prKey)) return null;
+    const recheckOnPush = this.options.recheckOnPush?.() ?? true;
+    if (!recheckOnPush && queue.hasProcessed(AUTO_MERGE_SOURCE, prKey)) return null;
     return [headKey, prKey];
   }
 
@@ -626,10 +633,13 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
     const label = `${repo}#${prNumber}`;
     const finishedAt = this.now();
     recordNonCiHold(state, result, mergeableState, finishedAt);
-    // Both keys are always recorded, so turning `once` on later also skips
-    // PRs decided while it was off.
+    // The PR key is recorded only when the agent review ran (that is what
+    // skipping later heads saves), and whatever `recheckOnPush` is, so
+    // turning it off later also skips PRs reviewed while it was on.
     const markDecided = () => {
-      for (const key of decisionKeys) this.options.queue.markProcessed(AUTO_MERGE_SOURCE, key);
+      const [headKey, prKey] = decisionKeys;
+      this.options.queue.markProcessed(AUTO_MERGE_SOURCE, headKey);
+      if (result.reviewed) this.options.queue.markProcessed(AUTO_MERGE_SOURCE, prKey);
     };
 
     if (result.outcome !== "waiting") state.staticCiWaitState = undefined;
@@ -663,8 +673,8 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
             `⛔ [${this.name}] ${label} auto-merge failed ${state.failures} time(s); ` +
               "giving up until new commits land",
           );
-          // A failure is not a decision: only this head is given up on, so
-          // with `once` a later commit can still produce one real decision.
+          // A failure is not a decision: only this head is given up on, so a
+          // later commit can still get one real review.
           this.options.queue.markProcessed(AUTO_MERGE_SOURCE, decisionKeys[0]);
         } else {
           state.nextAttemptAt =

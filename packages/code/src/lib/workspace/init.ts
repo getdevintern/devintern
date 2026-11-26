@@ -55,7 +55,7 @@ ci_failure_fix = false
 # auto_merge_review = true
 # auto_merge_method = "squash"                # merge | squash | rebase
 # auto_merge_review_label = "needs-human-review"  # label PRs left open; "" disables
-# auto_merge_once = true                      # false: re-check after every new commit
+# auto_merge_recheck_on_push = false          # true: review again after every new commit
 # Failing or pending CI checks always block. true: code PRs also wait until
 # at least one check passed (safe-path-only PRs do not), so repos without CI
 # never auto-merge code.

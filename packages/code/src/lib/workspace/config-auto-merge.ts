@@ -45,7 +45,8 @@ export function parseAutoMergeSettings(
     enabled,
     method,
     review: readOptionalBoolean(workspaceTable, "auto_merge_review", label, errors) ?? true,
-    once: readOptionalBoolean(workspaceTable, "auto_merge_once", label, errors) ?? true,
+    recheckOnPush:
+      readOptionalBoolean(workspaceTable, "auto_merge_recheck_on_push", label, errors) ?? false,
     safePaths: readGlobList(workspaceTable, "auto_merge_safe_paths", label, errors),
     denyPaths: readGlobList(workspaceTable, "auto_merge_deny_paths", label, errors),
     reviewPaths: readGlobList(workspaceTable, "auto_merge_review_paths", label, errors),

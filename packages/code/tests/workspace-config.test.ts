@@ -1136,20 +1136,20 @@ remote = "git@github.com:acme/api.git"
       denyPaths: [],
       reviewPaths: [],
       reviewLabel: "needs-human-review",
-      once: true,
+      recheckOnPush: false,
       policy: "strict",
     });
   });
 
-  test("auto_merge_once is on by default and can be turned off", () => {
+  test("auto_merge_recheck_on_push is off by default and can be turned on", () => {
     const parse = (value: string) =>
       parseWorkspaceConfig(`
 [workspace]
-auto_merge_once = ${value}
-${base}`).workspace.autoMerge.once;
+auto_merge_recheck_on_push = ${value}
+${base}`).workspace.autoMerge.recheckOnPush;
     expect(parse("false")).toBe(false);
     expect(parse("true")).toBe(true);
-    expect(() => parse('"yes"')).toThrow(/auto_merge_once/);
+    expect(() => parse('"yes"')).toThrow(/auto_merge_recheck_on_push/);
   });
 
   test("auto_merge_review_label renames the label; an empty string disables it", () => {
@@ -1172,7 +1172,7 @@ auto_merge_review = false
 auto_merge_safe_paths = ["**/*.md", "docs/"]
 auto_merge_deny_paths = ["db/migrations/**"]
 auto_merge_model = "sonnet"
-auto_merge_once = false
+auto_merge_recheck_on_push = true
 
 [defaults]
 tracker = "jira"
@@ -1194,7 +1194,7 @@ remote = "git@github.com:acme/web.git"
       denyPaths: ["db/migrations/**"],
       reviewPaths: [],
       reviewLabel: "needs-human-review",
-      once: false,
+      recheckOnPush: true,
       policy: "strict",
       agent: { model: "sonnet" },
     });

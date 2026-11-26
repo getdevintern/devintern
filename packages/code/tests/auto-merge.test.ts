@@ -363,19 +363,33 @@ describe("autoMergePr", () => {
     expect(github.comments[0]).toContain("kept failing");
   });
 
-  test("with once, the final failure still says new commits re-check the PR", async () => {
+  test("without recheck on push, the final failure still says new commits re-check the PR", async () => {
     const github = fakeGitHub([file("src/x.ts")]);
     await autoMergePr(
       URL,
       options(github, {
         verdict: "no json",
         lastAttempt: true,
-        policy: { ...basePolicy, once: true },
+        policy: { ...basePolicy, recheckOnPush: false },
       }),
     );
     expect(github.comments[0]).toContain("kept failing");
     expect(github.comments[0]).toContain("checks again after new commits");
     expect(github.comments[0]).not.toContain("does not check again after new commits");
+  });
+
+  test("without recheck on push, only an agent rejection says new commits are not re-checked", async () => {
+    const policy = { ...basePolicy, recheckOnPush: false };
+    const reviewed = fakeGitHub([file("src/x.ts")]);
+    await autoMergePr(
+      URL,
+      options(reviewed, { verdict: '{"safe": false, "reason": "risky"}', policy }),
+    );
+    expect(reviewed.comments[0]).toContain("does not check again after new commits");
+    const free = fakeGitHub([file("src/x.ts")]);
+    await autoMergePr(URL, options(free, { policy: { ...policy, review: false } }));
+    expect(free.comments[0]).toContain("checks again after new commits");
+    expect(free.comments[0]).not.toContain("does not check again");
   });
 
   test("a usage limit during review propagates (the worker defers) and posts nothing", async () => {
