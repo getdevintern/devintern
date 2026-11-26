@@ -23,7 +23,9 @@ import {
   runAutoReviewLoop,
 } from "../review/auto-review-loop";
 import { recordIncompleteAttempt } from "../state/retry-state";
-import { recordRunStage } from "../state/run-recorder";
+import { noteRunFailure, recordRunStage } from "../state/run-recorder";
+import { failureFromError, failureStageName, formatFailureCause } from "../state/run-outcome";
+import type { RunFailure } from "../state/run-outcome";
 import { postImplementationComment } from "../task/implementation-comment";
 import { Utils } from "../utils";
 import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "./git-hook-fixer";
@@ -426,6 +428,21 @@ async function prepareArtifactPublication(
   return undefined;
 }
 
+/**
+ * Classify a failed push: a hook the agent could not satisfy is the agent's
+ * work failing; any other push failure is DevIntern's git step (or the
+ * environment, for credentials and network).
+ */
+function notePushFailure(result: { message?: string; hookError?: unknown }): void {
+  noteRunFailure(
+    failureFromError(
+      new Error(`push failed: ${result.message ?? "unknown error"}`),
+      "publish",
+      result.hookError ? "agent" : "internal",
+    ),
+  );
+}
+
 /** Push, comment, and create a PR after the commit/review phases. */
 export async function publishImplementation(state: DeliveryState): Promise<TaskStepResult | void> {
   const ctx = state.context;
@@ -443,6 +460,7 @@ export async function publishImplementation(state: DeliveryState): Promise<TaskS
     }
     const pushed = await state.helpers.pushWithHookRetry();
     if (!pushed.success) {
+      notePushFailure(pushed.result);
       console.log("   Cannot create PR without pushing branch to remote");
       return { kind: "halt", haltKind: "stop", reason: "Push failed" };
     }
@@ -764,6 +782,31 @@ function unguardedDeliverySteps(state: DeliveryState): readonly TaskStep<Deliver
   ];
 }
 
+/**
+ * Classify a delivery halt for the run record. A closed stacked base is a
+ * hold for a human (not breakage); any other halt is the agent's work
+ * stopping short (findings it could not fix, a hook it could not satisfy,
+ * nothing committed). DevIntern-side failures (verify machinery, push) are
+ * noted earlier at their own catch sites, and the first note wins.
+ *
+ * @param step - Step that halted
+ * @param reason - Halt reason
+ * @param stackBlocked - Why the stacked base blocks the run, when it does
+ */
+export function deliveryHaltFailure(
+  step: string,
+  reason: string,
+  stackBlocked: string | undefined,
+): RunFailure {
+  if (stackBlocked) return { outcomeClass: "review_hold", stage: "stack_base" };
+  const cause = formatFailureCause(reason);
+  return {
+    outcomeClass: "agent",
+    stage: failureStageName(step),
+    ...(cause ? { cause } : {}),
+  };
+}
+
 /** Run the existing commit, review, and publish flow as separate steps. */
 export function finalizeAgentRun(ctx: FinalizeContext): void {
   const outputDir = ctx.taskKey
@@ -820,6 +863,15 @@ export function finalizeAgentRun(ctx: FinalizeContext): void {
   };
   runTaskSteps(deliverySteps(state), state)
     .then(async (result) => {
+      if (
+        result.kind === "halted" &&
+        result.haltKind !== "noop" &&
+        (result.haltKind !== "stop" ||
+          state.stackBlocked ||
+          ["commit", "auto-review", "publish"].includes(result.step))
+      ) {
+        noteRunFailure(deliveryHaltFailure(result.step, result.reason, state.stackBlocked));
+      }
       // A stacked base that closed unmerged is an escalation from any step:
       // the work is fine, it has no base to land on. `settleImplementationRun`
       // escalates on `activeTaskContext.stackBlocked` (set by the guard) even

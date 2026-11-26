@@ -19,11 +19,11 @@ import { dirname, join } from "path";
 import { computeRunActivity, hostTimeZone } from "./run-activity";
 import type { RunActivity } from "./run-activity";
 import { configureSqliteConnection } from "./sqlite";
+import { initRunsSchema } from "./run-schema";
 import { prepareQueueDbDirectory, resolveQueueDbPath } from "./webhook-queue";
 import { runOutputsDir, runOutputsPath } from "../workspace/paths";
 import {
   ingestRunOutputsFile,
-  initRunOutputsSchema,
   insertRunOutputs,
   listRunOutputs,
   RUN_ID_ENV,
@@ -31,6 +31,8 @@ import {
 } from "./run-outputs";
 import type { RunOutputRecord, StoredRunOutput } from "./run-outputs";
 import { notifyRunFinished } from "../notifications/run-rules";
+import { isRunOutcomeClass, isRunWorkStatus } from "./run-outcome";
+import type { RunFailure, RunOutcomeClass, RunWork, RunWorkStatus } from "./run-outcome";
 import type { RunFinishRuleOptions } from "../notifications/run-rules";
 
 /** Options shared by the orphan reap entry points. */
@@ -138,6 +140,22 @@ export interface RunRecord extends RunMeta {
   step?: string;
   stepStartedAt?: number;
   stepActive?: boolean;
+  /** Whose problem a non-successful run was; unset for successes and unclassified runs. */
+  outcomeClass?: RunOutcomeClass;
+  /** Stage or step that failed (`verify`, `publish`, …), when known. */
+  failureStage?: string;
+  /** Redacted one-line cause recorded with the failing stage. */
+  failureCause?: string;
+  /** Where the run's unfinished work went, when preservation ran. */
+  workStatus?: RunWorkStatus;
+  /** Branch (`saved`) or worktree path (`kept`). */
+  workRef?: string;
+}
+
+/** Classification and work status written with a run's terminal status. */
+export interface RunOutcomeDetail {
+  failure?: RunFailure;
+  work?: RunWork;
 }
 
 export interface RunStageRecord {
@@ -158,6 +176,7 @@ export interface RunFilter {
   status?: RunStatus;
   origin?: RunOrigin;
   automationId?: string;
+  outcomeClass?: RunOutcomeClass;
 }
 
 export interface RunStatsWeek {
@@ -272,95 +291,7 @@ export class RunStore {
 
   /** Create tables if they do not exist. */
   private initializeSchema(): void {
-    this.db.run(`
-      CREATE TABLE IF NOT EXISTS runs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        origin TEXT NOT NULL,
-        task_key TEXT,
-        tracker TEXT,
-        team TEXT,
-        harness TEXT,
-        branch TEXT,
-        repo TEXT,
-        pr_number INTEGER,
-        pr_url TEXT,
-        status TEXT NOT NULL DEFAULT 'in_progress',
-        outcome_reason TEXT,
-        started_at INTEGER NOT NULL,
-        finished_at INTEGER,
-        attempt INTEGER,
-        automation_id TEXT,
-        ticket_key TEXT,
-        ticket_url TEXT,
-        task_description TEXT,
-        queue_claim TEXT,
-        clean_stop INTEGER NOT NULL DEFAULT 0,
-        pr_failure TEXT
-      )
-    `);
-
-    // Additive migration for databases created before the attempt column.
-    const columns = this.db.query("PRAGMA table_info(runs)").all() as Array<{ name: string }>;
-    if (!columns.some((c) => c.name === "attempt")) {
-      this.db.run("ALTER TABLE runs ADD COLUMN attempt INTEGER");
-    }
-    if (!columns.some((c) => c.name === "team")) {
-      this.db.run("ALTER TABLE runs ADD COLUMN team TEXT");
-    }
-    if (!columns.some((c) => c.name === "automation_id")) {
-      this.db.run("ALTER TABLE runs ADD COLUMN automation_id TEXT");
-    }
-    if (!columns.some((c) => c.name === "ticket_key")) {
-      this.db.run("ALTER TABLE runs ADD COLUMN ticket_key TEXT");
-    }
-    if (!columns.some((c) => c.name === "ticket_url")) {
-      this.db.run("ALTER TABLE runs ADD COLUMN ticket_url TEXT");
-    }
-    if (!columns.some((c) => c.name === "task_description")) {
-      this.db.run("ALTER TABLE runs ADD COLUMN task_description TEXT");
-    }
-    if (!columns.some((c) => c.name === "clean_stop")) {
-      this.db.run("ALTER TABLE runs ADD COLUMN clean_stop INTEGER NOT NULL DEFAULT 0");
-    }
-    if (!columns.some((c) => c.name === "step")) {
-      this.db.run("ALTER TABLE runs ADD COLUMN step TEXT");
-    }
-    if (!columns.some((c) => c.name === "step_started_at")) {
-      this.db.run("ALTER TABLE runs ADD COLUMN step_started_at INTEGER");
-    }
-    if (!columns.some((c) => c.name === "step_active")) {
-      this.db.run("ALTER TABLE runs ADD COLUMN step_active INTEGER NOT NULL DEFAULT 0");
-    }
-    if (!columns.some((c) => c.name === "queue_claim")) {
-      this.db.run("ALTER TABLE runs ADD COLUMN queue_claim TEXT");
-    }
-    if (!columns.some((c) => c.name === "pr_failure")) {
-      this.db.run("ALTER TABLE runs ADD COLUMN pr_failure TEXT");
-    }
-    // Not unique: one queue claim can produce several runs when the worker changes harnesses.
-    this.db.run("CREATE INDEX IF NOT EXISTS idx_runs_queue_claim ON runs(queue_claim)");
-    this.db.run("CREATE INDEX IF NOT EXISTS idx_runs_automation_id ON runs(automation_id)");
-
-    this.db.run(`
-      CREATE INDEX IF NOT EXISTS idx_runs_task_key ON runs(task_key)
-    `);
-
-    this.db.run(`
-      CREATE TABLE IF NOT EXISTS run_stages (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        run_id INTEGER NOT NULL,
-        stage TEXT NOT NULL,
-        status TEXT NOT NULL,
-        summary TEXT,
-        detail TEXT,
-        created_at INTEGER NOT NULL
-      )
-    `);
-
-    this.db.run(`
-      CREATE INDEX IF NOT EXISTS idx_run_stages_run_id ON run_stages(run_id)
-    `);
-    initRunOutputsSchema(this.db);
+    initRunsSchema(this.db);
   }
 
   /** Store a run's outputs records (see `run-outputs.ts`); duplicates are ignored. */
@@ -649,14 +580,38 @@ export class RunStore {
    * outcomes or leaving a terminal run with no outcome after an interruption.
    *
    * @param runId - Run id
+   * A success clears any classification a prior finish recorded; a deferred
+   * run (it retries) records none.
+   *
    * @param status - Terminal status
    * @param reason - Optional human-readable reason
+   * @param outcome - Outcome class, failing stage/cause, and work status
    */
-  finishRun(runId: number, status: Exclude<RunStatus, "in_progress">, reason?: string): void {
+  finishRun(
+    runId: number,
+    status: Exclude<RunStatus, "in_progress">,
+    reason?: string,
+    outcome: RunOutcomeDetail = {},
+  ): void {
+    const classified = status === "failed" || status === "escalated" || status === "abandoned";
+    const failure = classified ? outcome.failure : undefined;
+    const work = status === "succeeded" ? undefined : outcome.work;
     this.db.transaction(() => {
       this.db.run(
-        `UPDATE runs SET status = ?, outcome_reason = ?, finished_at = ?, step_active = 0 WHERE id = ?`,
-        [status, reason ?? null, Date.now(), runId],
+        `UPDATE runs SET status = ?, outcome_reason = ?, finished_at = ?, step_active = 0,
+           outcome_class = ?, failure_stage = ?, failure_cause = ?, work_status = ?, work_ref = ?
+         WHERE id = ?`,
+        [
+          status,
+          reason ?? null,
+          Date.now(),
+          failure?.outcomeClass ?? null,
+          failure?.stage ?? null,
+          failure?.cause ? redactText(failure.cause).slice(0, 1_000) : null,
+          work?.status ?? null,
+          work?.ref ?? null,
+          runId,
+        ],
       );
       this.replaceOutcomeStage(runId, status, reason);
     })();
@@ -861,6 +816,10 @@ export class RunStore {
     if (filter.automationId) {
       clauses.push("automation_id = ?");
       params.push(filter.automationId);
+    }
+    if (filter.outcomeClass) {
+      clauses.push("outcome_class = ?");
+      params.push(filter.outcomeClass);
     }
     return { where: clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "", params };
   }
@@ -1111,6 +1070,11 @@ export class RunStore {
       stepActive: row.status === "in_progress" && row.step_active === 1,
       cleanStop: (row.clean_stop as number | null) === 1 ? true : undefined,
       prFailure: typeof row.pr_failure === "string" ? row.pr_failure : undefined,
+      outcomeClass: isRunOutcomeClass(row.outcome_class) ? row.outcome_class : undefined,
+      failureStage: typeof row.failure_stage === "string" ? row.failure_stage : undefined,
+      failureCause: typeof row.failure_cause === "string" ? row.failure_cause : undefined,
+      workStatus: isRunWorkStatus(row.work_status) ? row.work_status : undefined,
+      workRef: typeof row.work_ref === "string" ? row.work_ref : undefined,
     };
   }
 
@@ -1131,6 +1095,8 @@ export class RunStore {
 let currentStore: RunStore | null = null;
 let currentRunId: number | null = null;
 let currentRunMeta: RunMeta | null = null;
+/** First classified failure noted for the current run (see {@link noteRunFailure}). */
+let pendingFailure: RunFailure | null = null;
 
 /**
  * Identity of the run currently being processed, for ambient consumers such
@@ -1172,6 +1138,7 @@ function warnOnce(action: string, error: unknown): void {
  * @param meta - Run origin and metadata
  */
 export function beginRun(meta: RunMeta): void {
+  pendingFailure = null;
   try {
     currentStore ??= new RunStore();
     currentRunId = currentStore.createRun(meta);
@@ -1452,18 +1419,59 @@ export function markRunCleanStop(runId: number): void {
 }
 
 /**
+ * Classify the current run's failure at the point it is known (a stage's
+ * catch block, a step's halt). The first note wins: a later, more generic
+ * failure path (the incomplete-implementation escalation, the task failure
+ * handler) must not overwrite the real cause. No-op when no run is active.
+ *
+ * @param failure - Class, failing stage, and redacted cause
+ */
+export function noteRunFailure(failure: RunFailure): void {
+  if (currentRunId === null || pendingFailure !== null) return;
+  pendingFailure = failure;
+}
+
+/** The current run's last recorded step (see {@link beginRunStep}), if any. */
+export function currentRunStep(): string | undefined {
+  if (currentStore === null || currentRunId === null) return undefined;
+  try {
+    return currentStore.getRun(currentRunId)?.step;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The failure noted for the current run, if any. */
+export function pendingRunFailure(): RunFailure | undefined {
+  return pendingFailure ?? undefined;
+}
+
+/**
  * Finish the current run and clear the context (no-op when no run is active).
+ *
+ * A failure noted with {@link noteRunFailure} takes precedence over
+ * `outcome.failure` (the caller's default for its path).
  *
  * @param status - Terminal status
  * @param reason - Optional human-readable reason
+ * @param outcome - Default classification and work status for this path
  */
-export function endRun(status: Exclude<RunStatus, "in_progress">, reason?: string): void {
+export function endRun(
+  status: Exclude<RunStatus, "in_progress">,
+  reason?: string,
+  outcome: RunOutcomeDetail = {},
+): void {
+  const failure = pendingFailure ?? outcome.failure;
+  pendingFailure = null;
   if (currentStore === null || currentRunId === null) {
     return;
   }
   try {
     ingestRunOutputsFile(currentStore, currentRunId, runOutputsPath(currentRunId));
-    currentStore.finishRun(currentRunId, status, reason);
+    currentStore.finishRun(currentRunId, status, reason, {
+      ...(failure ? { failure } : {}),
+      ...(outcome.work ? { work: outcome.work } : {}),
+    });
   } catch (error) {
     warnOnce("end", error);
   } finally {

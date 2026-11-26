@@ -9,6 +9,15 @@
  * | `automation_broke`  | an automation run failed right after a succeeded run            | the automation's next success             |
  * | `work_spawned`      | a run delegated ad-hoc tasks and/or filed tracker tickets       | (informational; rolls up child progress)  |
  * | `pr_auto_merged`    | an auto-merge run merged a PR (grouped per repo per day)        | (informational)                           |
+ * | `internal_error`    | a run's outcome class is `internal` (grouped by stage + error signature) | every affected task's latest run succeeded |
+ * | `source_unhealthy`  | a run's outcome class is `environment` (grouped by stage + signature)    | a later success on the subject            |
+ *
+ * The outcome class routes a non-successful run: `internal` and
+ * `environment` runs raise only their own kind (never an `escalated` or
+ * `retries_exhausted` row, so DevIntern bugs are not grouped with routine
+ * review holds); `review_hold`, `agent`, and unclassified runs keep the
+ * escalated / retries-exhausted rules. A run whose work was discarded says so
+ * in its notification body; every run-failure kind is high severity.
  *
  * Not notified: ordinary successful runs, deferrals (they retry), failures of
  * origins that run their own attempt budget and escalate when it is spent
@@ -81,6 +90,11 @@ export interface RunFacts {
   ticketUrl?: string;
   outcomeReason?: string;
   startedAt: number;
+  outcomeClass?: string;
+  failureStage?: string;
+  failureCause?: string;
+  workStatus?: string;
+  workRef?: string;
 }
 
 function text(value: unknown): string | undefined {
@@ -112,6 +126,11 @@ function toRunFacts(raw: unknown): RunFacts | null {
     ticketUrl: text(row.ticket_url),
     outcomeReason: text(row.outcome_reason),
     startedAt: int(row.started_at) ?? 0,
+    outcomeClass: text(row.outcome_class),
+    failureStage: text(row.failure_stage),
+    failureCause: text(row.failure_cause),
+    workStatus: text(row.work_status),
+    workRef: text(row.work_ref),
   };
 }
 
@@ -235,11 +254,91 @@ function emitEscalated(emitter: NotificationEmitter, run: RunFacts): void {
     });
     return;
   }
+  const work = workStatusLine(run);
   emitter.emit({
     ...base,
     groupKey: `escalated:${run.origin}:${base.subject}`,
     title: `${runLabel(run)} escalated and needs a human`,
-    body: reason,
+    body: [reason, work].filter(Boolean).join("\n") || undefined,
+  });
+}
+
+/** One line saying where a failed run's work went, for a notification body. */
+export function workStatusLine(run: Pick<RunFacts, "workStatus" | "workRef">): string | undefined {
+  switch (run.workStatus) {
+    case "saved":
+      return run.workRef ? `Work saved on branch ${run.workRef}` : "Work saved to its branch";
+    case "kept":
+      return run.workRef ? `Work kept in worktree ${run.workRef}` : "Work kept in its worktree";
+    case "discarded":
+      return "Work discarded";
+    default:
+      return undefined;
+  }
+}
+
+/** Cause shown and grouped on: the recorded stage cause, else the outcome reason. */
+function failureCause(run: RunFacts): string | undefined {
+  return reasonText(run.failureCause ?? run.outcomeReason);
+}
+
+function failureBody(run: RunFacts): string | undefined {
+  const lines = [failureCause(run), workStatusLine(run)].filter(Boolean);
+  return lines.length > 0 ? lines.join("\n") : undefined;
+}
+
+/** `internal_error` group: one row per failing stage and normalized error signature. */
+export function internalErrorGroupKey(
+  run: Pick<RunFacts, "failureStage" | "failureCause" | "outcomeReason">,
+): string {
+  const stage = run.failureStage ?? "unknown";
+  return `internal_error:${stage}:${normalizeCause(redactText(run.failureCause ?? run.outcomeReason ?? ""))}`;
+}
+
+/**
+ * A DevIntern pipeline step failed. Repeats of one bug across runs and tasks
+ * fold into one row with a count ("Likely DevIntern bug: verify failed (×3)").
+ */
+function emitInternalError(emitter: NotificationEmitter, run: RunFacts): void {
+  const stage = run.failureStage ?? "a pipeline step";
+  const title = `Likely DevIntern bug: ${stage} failed`;
+  emitter.emit({
+    kind: "internal_error",
+    severity: "high",
+    groupKey: internalErrorGroupKey(run),
+    runId: run.id,
+    repo: run.repo,
+    subject: runSubject(run),
+    title,
+    groupTitle: (count) => (count === 1 ? title : `${title} (×${count})`),
+    body: failureBody(run),
+    links: runLinks(run),
+    appendLinks: true,
+  });
+}
+
+/**
+ * Credentials, network, rate limits, or a missing tool stopped a run: the
+ * same kind as an unhealthy source, grouped by stage and error signature so a
+ * revoked token across many tasks is one row.
+ */
+function emitEnvironmentProblem(emitter: NotificationEmitter, run: RunFacts): void {
+  const stage = run.failureStage ?? "run";
+  const cause = normalizeCause(redactText(run.failureCause ?? run.outcomeReason ?? ""));
+  const title = `${runLabel(run)} could not reach a service or tool (${stage})`;
+  emitter.emit({
+    kind: "source_unhealthy",
+    severity: "high",
+    groupKey: `source_unhealthy:environment:${stage}:${cause}`,
+    runId: run.id,
+    repo: run.repo,
+    subject: runSubject(run),
+    title,
+    groupTitle: (count) =>
+      count === 1 ? title : `${count} runs could not reach a service or tool (${stage})`,
+    body: failureBody(run),
+    links: runLinks(run),
+    appendLinks: true,
   });
 }
 
@@ -336,13 +435,71 @@ function emitAutoMerged(emitter: NotificationEmitter, run: RunFacts, now: number
 }
 
 /** A success closes what was open about its subject. */
-function resolveOnSuccess(emitter: NotificationEmitter, run: RunFacts): void {
+function resolveOnSuccess(emitter: NotificationEmitter, db: Database, run: RunFacts): void {
   if (run.status !== "succeeded") return;
   if (!COMPLETING_ORIGINS.has(run.origin)) return;
+  // Environment problems use `task:`/`automation:` subjects; real source
+  // health rows use `source:` subjects, so this never resolves those.
   emitter.resolve({
-    kinds: ["escalated", "retries_exhausted", "automation_broke"],
+    kinds: ["escalated", "retries_exhausted", "automation_broke", "source_unhealthy"],
     subject: runSubject(run),
   });
+  resolveRecoveredInternalErrors(emitter, db, run);
+}
+
+/**
+ * Resolve open `internal_error` rows the succeeded run's task belonged to,
+ * once every task the row rolled up has a latest run that succeeded. A row
+ * folding one bug across several tasks stays open while any of them is still
+ * broken. A row with no task runs (an auto-merge check of a PR) resolves on
+ * the next success of its subject instead.
+ */
+function resolveRecoveredInternalErrors(
+  emitter: NotificationEmitter,
+  db: Database,
+  run: RunFacts,
+): void {
+  const taskKey = run.taskKey;
+  const subject = runSubject(run);
+  const open = emitter.store.list({
+    unresolved: true,
+    kind: "internal_error",
+    includeMuted: true,
+    limit: 200,
+  }).notifications;
+  for (const row of open) {
+    const runIds = [
+      ...new Set(row.links.flatMap((link) => (link.runId === undefined ? [] : [link.runId]))),
+    ];
+    if (row.runId !== undefined && !runIds.includes(row.runId)) runIds.push(row.runId);
+    if (runIds.length === 0) continue;
+    const placeholders = runIds.map(() => "?").join(", ");
+    const tasks = (
+      db
+        .query(
+          `SELECT DISTINCT task_key FROM runs WHERE id IN (${placeholders}) AND task_key IS NOT NULL`,
+        )
+        .all(...runIds) as Array<{ task_key: string }>
+    ).map((entry) => entry.task_key);
+    if (tasks.length === 0) {
+      if (row.subject === subject) {
+        emitter.resolve({ kinds: ["internal_error"], groupKey: row.groupKey });
+      }
+      continue;
+    }
+    if (taskKey === undefined || !tasks.includes(taskKey)) continue;
+    const recovered = tasks.every((key) => latestRunForTask(db, key)?.status === "succeeded");
+    if (recovered) emitter.resolve({ kinds: ["internal_error"], groupKey: row.groupKey });
+  }
+}
+
+/** Classes routed to their own kind instead of `escalated` / `retries_exhausted`. */
+function isDevInternSide(run: RunFacts): boolean {
+  return (
+    SETTLED_STATUSES.has(run.status) &&
+    run.status !== "succeeded" &&
+    (run.outcomeClass === "internal" || run.outcomeClass === "environment")
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -587,8 +744,21 @@ export function notifyRunFinished(
     const run = readRun(db, runId);
     if (!run || run.status === "in_progress") return;
     const emitter = new NotificationEmitter(db, now);
-    if (run.status === "escalated") safely("escalated", () => emitEscalated(emitter, run));
-    if (!options.skipRetriesExhausted && isRetryExhausted(db, run) && run.taskKey) {
+    const devInternSide = isDevInternSide(run);
+    if (devInternSide && run.outcomeClass === "internal") {
+      safely("internal-error", () => emitInternalError(emitter, run));
+    } else if (devInternSide) {
+      safely("environment", () => emitEnvironmentProblem(emitter, run));
+    }
+    if (run.status === "escalated" && !devInternSide) {
+      safely("escalated", () => emitEscalated(emitter, run));
+    }
+    if (
+      !devInternSide &&
+      !options.skipRetriesExhausted &&
+      isRetryExhausted(db, run) &&
+      run.taskKey
+    ) {
       const taskKey = run.taskKey;
       safely("retries-exhausted", () =>
         emitRetriesExhausted(emitter, run, taskKey, run.outcomeReason),
@@ -596,7 +766,7 @@ export function notifyRunFinished(
     }
     safely("automation-broke", () => emitAutomationBroke(emitter, db, run));
     safely("auto-merged", () => emitAutoMerged(emitter, run, now()));
-    safely("resolve", () => resolveOnSuccess(emitter, run));
+    safely("resolve", () => resolveOnSuccess(emitter, db, run));
     if (SETTLED_STATUSES.has(run.status)) {
       safely("work-spawned", () => syncWorkSpawned(emitter, db, run, { mode: "parent_settled" }));
     }

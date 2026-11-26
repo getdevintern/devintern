@@ -54,6 +54,7 @@ import {
 import { nextScheduleOccurrence } from "../automation/config";
 import type { CronOrIntervalSchedule } from "../automation/config";
 import type { RunStore } from "../state/run-recorder";
+import { failureFromError } from "../state/run-outcome";
 import type { TaskExecutionResult } from "./task-polling";
 import type { WebhookQueue } from "../state/webhook-queue";
 import type { WorkerState } from "../state/worker-state";
@@ -1010,6 +1011,9 @@ export class ReviewPollingAcquirer implements Acquirer {
               ? "deferred"
               : "succeeded",
           result.message,
+          result.outcome === "failed"
+            ? { failure: failureFromError(result.message, "base_sync") }
+            : {},
         );
       } catch (error) {
         console.warn(`⚠️  Run recording (base sync end) failed: ${(error as Error).message}`);

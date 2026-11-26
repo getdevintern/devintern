@@ -21,6 +21,8 @@ import type {
   ManualTriggerOutcome,
 } from "../automation/acquirer";
 import { RunStore } from "../state/run-recorder";
+import { RUN_OUTCOME_CLASSES, isRunOutcomeClass } from "../state/run-outcome";
+import type { RunOutcomeClass } from "../state/run-outcome";
 import { hostTimeZone, isValidTimeZone } from "../state/run-activity";
 import type {
   RunOrigin,
@@ -368,6 +370,7 @@ export class DashboardData {
     status?: RunStatus;
     origin?: RunOrigin;
     automationId?: string;
+    outcomeClass?: RunOutcomeClass;
     limit: number;
     offset: number;
   }): { runs: RunRecord[]; total: number } {
@@ -1209,7 +1212,8 @@ export async function handleRunAutomation(
  * `GET /api/runs` — paginated run list with optional filters.
  *
  * @param data - Dashboard data source
- * @param params - Query params: `limit`, `offset`, `status`, `origin`, `taskKey`, `automationId`
+ * @param params - Query params: `limit`, `offset`, `status`, `origin`, `taskKey`,
+ *   `automationId`, `outcomeClass`
  */
 export function handleRuns(data: DashboardData, params: URLSearchParams): ApiResponse {
   const rawLimit = params.get("limit");
@@ -1231,10 +1235,16 @@ export function handleRuns(data: DashboardData, params: URLSearchParams): ApiRes
     return badRequest(`origin must be one of: ${RUN_ORIGINS.join(", ")}`);
   }
 
+  const outcomeClass = params.get("outcomeClass") ?? undefined;
+  if (outcomeClass !== undefined && !isRunOutcomeClass(outcomeClass)) {
+    return badRequest(`outcomeClass must be one of: ${RUN_OUTCOME_CLASSES.join(", ")}`);
+  }
+
   const result = data.listRuns({
     taskKey: params.get("taskKey") ?? undefined,
     status: status as RunStatus | undefined,
     origin: origin as RunOrigin | undefined,
+    ...(outcomeClass ? { outcomeClass } : {}),
     automationId: params.get("automationId") ?? undefined,
     limit,
     offset,

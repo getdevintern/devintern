@@ -12,7 +12,8 @@ export type NotificationKind =
   | "work_spawned"
   | "pr_opened"
   | "pr_auto_merged"
-  | "source_unhealthy";
+  | "source_unhealthy"
+  | "internal_error";
 
 export type NotificationSeverity = "high" | "normal";
 
@@ -97,15 +98,33 @@ export function notificationsUrl(query: NotificationListQuery = {}): string {
   return search ? `${NOTIFICATIONS_URL}?${search}` : NOTIFICATIONS_URL;
 }
 
-/** Inbox tabs. */
-export type InboxTab = "needs_you" | "activity" | "all";
+/**
+ * Inbox tabs. `problems` (DevIntern-side failures) and `review` (escalations
+ * waiting on a human) are kept apart so a likely DevIntern bug is never
+ * buried among routine review holds.
+ */
+export type InboxTab = "needs_you" | "problems" | "review" | "activity" | "all";
 
-export const INBOX_TABS: readonly InboxTab[] = ["needs_you", "activity", "all"];
+export const INBOX_TABS: readonly InboxTab[] = [
+  "needs_you",
+  "problems",
+  "review",
+  "activity",
+  "all",
+];
 
 export const INBOX_TAB_LABELS: Record<InboxTab, string> = {
   needs_you: "Needs you",
+  problems: "DevIntern problems",
+  review: "Waiting on review",
   activity: "Activity",
   all: "All",
+};
+
+/** Kind behind a kind-scoped inbox tab. */
+const TAB_KINDS: Partial<Record<InboxTab, NotificationKind>> = {
+  problems: "internal_error",
+  review: "escalated",
 };
 
 /** The list query behind an inbox tab; resolved rows are hidden unless asked for. */
@@ -118,6 +137,7 @@ export function inboxQuery(
     ...(showResolved ? {} : { unresolved: true }),
     ...(tab === "needs_you" ? { severity: "high" as const } : {}),
     ...(tab === "activity" ? { severity: "normal" as const } : {}),
+    ...(TAB_KINDS[tab] ? { kind: TAB_KINDS[tab] } : {}),
     limit,
   };
 }

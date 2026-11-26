@@ -22,6 +22,9 @@ import {
   IMPLEMENTATION_SUMMARY_START as SUMMARY_START,
 } from "@devintern/agent-harness";
 
+import { isEnvironmentError } from "../state/run-outcome";
+import type { RunFailure } from "../state/run-outcome";
+
 /** Statuses the marker accepts. */
 export type ImplementationOutcomeStatus = "done" | "noop" | "blocked" | "partial";
 
@@ -233,6 +236,28 @@ export function deliveryRunDisposition(
     return { status: "escalated", reason: `${disposition.reason}; ${prReason}` };
   }
   return { status: "failed", reason: prReason };
+}
+
+/**
+ * Class of a run that delivered: an agent-reported `blocked` outcome is the
+ * agent's; a PR the code host would not create is DevIntern's publish step
+ * (or the environment). No cause is attached, so the reason keeps its
+ * queryable prefix (`pushed but PR creation failed: …`).
+ *
+ * @param status - Disposition status
+ * @param prFailure - PR creation failure message, when one happened
+ */
+export function deliveryDispositionFailure(
+  status: "succeeded" | "escalated" | "failed",
+  prFailure: string | undefined,
+): RunFailure | undefined {
+  if (status === "escalated") return { outcomeClass: "agent", stage: "implementation" };
+  if (status !== "failed") return undefined;
+  return {
+    outcomeClass:
+      prFailure !== undefined && isEnvironmentError(prFailure) ? "environment" : "internal",
+    stage: "publish",
+  };
 }
 
 /** Prompt instruction describing the marker; appended to the summary request. */

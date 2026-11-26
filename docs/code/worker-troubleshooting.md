@@ -100,7 +100,7 @@ In a multi-repo workspace, a task whose routing rules match no repository, or mo
 
 ## Runs that fail at delivery
 
-A run fails, and no PR is created, when it leaves nothing to publish (no changes and no new commits), fails pre-push validation, or cannot push its branch. Commits the agent made itself count as changes. The batch CLI's exit code is not a per-task result; check each run in the [dashboard](./dashboard.md).
+A run fails, and no PR is created, when it leaves nothing to publish (no changes and no new commits), fails pre-push validation, or cannot push its branch. Commits the agent made itself count as changes. The batch CLI's exit code is not a per-task result; check each run in the [dashboard](./dashboard.md). Its outcome class tells you whether the agent, your setup, or DevIntern itself stopped the run; see [Why a run did not succeed](./dashboard.md#why-a-run-did-not-succeed).
 
 ## Reading logs and run data
 

@@ -26,8 +26,9 @@ import { parseChangeRequestUrl } from "../code-host/index";
 import { agentSandboxPolicy, getSandbox } from "../agent/sandbox";
 import { createHarnessLogSink } from "../observability/harness-logs";
 import { redactSecrets, stripAnsi } from "../observability/worker-logs";
-import { beginRun, endRun, recordRunStage } from "../state/run-recorder";
+import { beginRun, currentRunStep, endRun, recordRunStage } from "../state/run-recorder";
 import type { RunOrigin } from "../state/run-recorder";
+import { failureFromError } from "../state/run-outcome";
 import { formatCiFixPrompt, formatReviewPrompt } from "./formatter";
 import type { CiFailureFeedback } from "./formatter";
 import { GIT_CLEAN_ARGS, Utils } from "../utils";
@@ -851,7 +852,9 @@ export async function addressReview(
     if (error instanceof UsageLimitError) {
       endRun("deferred", error.message);
     } else {
-      endRun("failed", (error as Error).message);
+      endRun("failed", (error as Error).message, {
+        failure: failureFromError(error, currentRunStep() ?? "address_review"),
+      });
     }
     throw error;
   } finally {
