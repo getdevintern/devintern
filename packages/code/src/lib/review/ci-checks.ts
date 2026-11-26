@@ -9,8 +9,8 @@
  * - any failing check (`failure`, `error`, `timed_out`, `cancelled`,
  *   `action_required`, or an unknown conclusion) → not ready;
  * - any pending check (`queued`, `in_progress`, status `pending`, ...) → not ready;
- * - otherwise at least one `success` is required, unless the caller waives
- *   it (safe-path-only PRs and `auto_merge_allow_no_checks`).
+ * - otherwise at least one `success` is required when the caller asks;
+ *   only asks for it with `auto_merge_require_checks` (never for safe-path-only PRs).
  *
  * `skipped` and `neutral` checks never count as the required success and
  * never block on their own.
@@ -56,6 +56,42 @@ export function normalizeCiChecks(
       name: status.context || "(unnamed status)",
       state: commitStatusState(status.state),
     })),
+  ];
+}
+
+/** Name for check runs whose details the credential cannot read. */
+export function hiddenCheckRunsName(count: number): string {
+  return `${count} check ${count === 1 ? "run" : "runs"} (names need the Checks: Read permission)`;
+}
+
+/** Rollup states (GraphQL `StatusState`) mapped to one check's state. */
+function rollupCheckState(state: string): CiCheckState {
+  if (state === "SUCCESS") return "success";
+  if (state === "PENDING" || state === "EXPECTED") return "pending";
+  // FAILURE, ERROR, or an unknown state: fail closed.
+  return "failing";
+}
+
+/**
+ * The head commit's checks when check runs cannot be listed (a fine-grained
+ * token has no Checks permission): the commit statuses by name, plus one
+ * entry standing for the check runs, whose state comes from GitHub's
+ * combined `statusCheckRollup`. When the statuses alone already explain a
+ * failing or pending rollup, the check runs' own state is unknown, so their
+ * entry is neutral rather than blamed by name. GitHub counts `skipped` and
+ * `neutral` runs as success in the rollup.
+ */
+export function ciChecksFromRollup(
+  statusChecks: readonly CiCheck[],
+  rollup: { state: string | null; total: number },
+): CiCheck[] {
+  const hidden = rollup.total - statusChecks.length;
+  if (hidden <= 0 || rollup.state === null) return [...statusChecks];
+  const rolled = rollupCheckState(rollup.state);
+  const explained = rolled !== "success" && statusChecks.some((check) => check.state === rolled);
+  return [
+    ...statusChecks,
+    { name: hiddenCheckRunsName(hidden), state: explained ? "neutral" : rolled },
   ];
 }
 

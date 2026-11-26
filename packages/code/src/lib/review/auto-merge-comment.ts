@@ -77,9 +77,9 @@ function ciChecksHint(problem: CiChecksProblem | "unreadable"): string {
     case "no-checks":
     case "no-passing":
       return (
-        "It can merge once CI reports a passing check on this commit. If this repository has " +
-        "no CI, set `auto_merge_allow_no_checks = true` (workspace-wide or on its `[[repos]]` " +
-        "entry) to merge without checks, or review and merge it yourself."
+        "It can merge once CI reports a passing check on this commit. To merge without checks, " +
+        "remove `auto_merge_require_checks = true` (workspace-wide or on its `[[repos]]` " +
+        "entry), or review and merge it yourself."
       );
     case "pending":
       return "It can merge once the pending checks finish and pass.";
@@ -87,8 +87,8 @@ function ciChecksHint(problem: CiChecksProblem | "unreadable"): string {
       return "It can merge once the failing checks pass (fix or re-run them), or review and merge it yourself.";
     case "unreadable":
       return (
-        "devintern retries shortly. The GitHub credential needs `Checks: Read` and " +
-        "`Commit statuses: Read`."
+        "devintern retries shortly. The GitHub credential needs `Commit statuses: Read` " +
+        "(and `Checks: Read` for a GitHub App)."
       );
   }
 }

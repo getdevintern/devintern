@@ -164,7 +164,7 @@ interface PrTracking {
   staticCiWaitState?: string;
   /**
    * Auto-merge policy fingerprint of the last static CI wait: a policy
-   * change (e.g. `auto_merge_allow_no_checks`) ends its backoff early.
+   * change (e.g. `auto_merge_require_checks`) ends its backoff early.
    */
   staticCiWaitPolicy?: string;
   /**

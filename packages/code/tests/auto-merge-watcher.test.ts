@@ -537,7 +537,7 @@ describe("AutoMergeWatcherAcquirer", () => {
     now += 60_000;
     await w.tick();
     expect(calls).toHaveLength(3);
-    // ...and a policy change (e.g. allow_no_checks turned on) re-checks it now.
+    // ...and a policy change (e.g. require_checks turned on) re-checks it now.
     fingerprint = "p2";
     now += 60_000;
     await w.tick();

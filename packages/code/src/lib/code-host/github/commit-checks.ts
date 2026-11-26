@@ -4,6 +4,8 @@
  * truncated list is never mistaken for "no failures".
  */
 
+import { Utils } from "../../utils";
+import { apiErrorMessage } from "./github-errors";
 import type { GitHubReviewsClient } from "./reviews";
 import type { CheckRun, CombinedStatus } from "./reviews-types";
 
@@ -11,6 +13,7 @@ import type { CheckRun, CombinedStatus } from "./reviews-types";
 const MAX_PAGES = 10;
 
 type Getter = Pick<GitHubReviewsClient, "conditionalGet">;
+type TokenSource = Pick<GitHubReviewsClient, "getToken">;
 
 /** GET one page; the response is never a 304 without an ETag. */
 async function getPage<T>(client: Getter, path: string, owner: string, repo: string): Promise<T> {
@@ -63,4 +66,59 @@ export async function listLatestCommitStatuses(
     if (batch.statuses.length < 100 || statuses.length >= total) break;
   }
   return { statuses, complete: statuses.length >= total };
+}
+
+const ROLLUP_QUERY = `query($owner: String!, $repo: String!, $sha: GitObjectID!) {
+  repository(owner: $owner, name: $repo) {
+    object(oid: $sha) {
+      ... on Commit { statusCheckRollup { state contexts { totalCount } } }
+    }
+  }
+}`;
+
+interface RollupResponse {
+  data?: {
+    repository: {
+      object: {
+        statusCheckRollup: { state: string; contexts: { totalCount: number } } | null;
+      } | null;
+    } | null;
+  } | null;
+  errors?: Array<{ message: string }>;
+}
+
+/**
+ * GitHub's combined CI state for a commit (`statusCheckRollup`), readable
+ * without the Checks permission. Fine-grained personal access tokens cannot
+ * be granted Checks, so for them this is the only view of check runs: the
+ * overall state and how many checks (runs plus statuses) there are, but not
+ * their names. `state` is null when the commit has no checks.
+ */
+export async function checkRollupForRef(
+  client: TokenSource,
+  owner: string,
+  repo: string,
+  sha: string,
+): Promise<{ state: string | null; total: number }> {
+  const token = await client.getToken(owner, repo);
+  const http = await Utils.fetchWithRetry("https://api.github.com/graphql", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+      "User-Agent": "devintern",
+    },
+    body: JSON.stringify({ query: ROLLUP_QUERY, variables: { owner, repo, sha } }),
+  });
+  if (!http.ok) throw new Error(apiErrorMessage(http.status, http.statusText));
+  const response = (await http.json()) as RollupResponse;
+  const commit = response.data?.repository?.object;
+  if (!commit) {
+    const detail = response.errors?.map((error) => error.message).join("; ");
+    throw new Error(`GitHub returned no CI state for ${sha}${detail ? `: ${detail}` : ""}`);
+  }
+  const rollup = commit.statusCheckRollup;
+  return rollup
+    ? { state: rollup.state, total: rollup.contexts.totalCount }
+    : { state: null, total: 0 };
 }

@@ -247,7 +247,7 @@ function printAutoMergeHelp(defaultLabel: string): void {
   console.log("  --review-path <glob>   Always-review glob, never safe (repeatable)");
   console.log("  --no-review            Skip the agent review; only safe-path PRs merge");
   console.log(
-    "  --allow-no-checks      Let code PRs merge without a passing CI check (failing or pending checks still block)",
+    "  --require-checks       Code PRs need at least one passing CI check (failing or pending checks always block)",
   );
   console.log("  --method <m>           merge | squash | rebase (default: squash)");
   console.log(
@@ -389,8 +389,8 @@ function parseAutoMergeFlags(
       policy.rulesFile = resolveRulesFilePath(value, workspaceDir);
     } else if (arg === "--no-review") {
       policy.review = false;
-    } else if (arg === "--allow-no-checks") {
-      policy.allowNoChecks = true;
+    } else if (arg === "--require-checks") {
+      policy.requireChecks = true;
     } else if (arg === "--no-review-label") {
       policy.reviewLabel = "";
     } else if (arg === "--dry-run") {

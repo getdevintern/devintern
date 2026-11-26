@@ -26,7 +26,7 @@ import type { AutomaticResolveResult } from "../acquirers/review-polling";
 import type { TaskExecutionResult } from "../acquirers/task-polling";
 import { DEFAULT_MERGE_SAFETY_POLICY } from "../review/merge-gate";
 import { readRulesFile } from "../review/merge-safety-rules";
-import { autoMergeAllowNoChecksFor, autoMergePathsFor, autoMergeReviewFor } from "./config";
+import { autoMergeRequireChecksFor, autoMergePathsFor, autoMergeReviewFor } from "./config";
 import type { RepoConfig, WorkspaceConfig } from "./config";
 import { buildFleetEventEnv, gitHubSlugFromRemote } from "./env";
 import { toRoutableTask } from "./router";
@@ -294,7 +294,7 @@ export function createFleetResolveConflicts(
 
 /**
  * Fingerprint of the auto-merge policy that decides a repo's PRs (safe, deny,
- * and review paths, `allow_no_checks`,
+ * and review paths, `require_checks`,
  * review switch, review policy, operator instructions, and `custom` rules,
  * including the current contents of a rules file; not the merge method or
  * review label, which don't change the decision, so renaming the label
@@ -317,7 +317,7 @@ export function fleetAutoMergePolicyFingerprint(
         reviewPaths: settings.reviewPaths,
       };
   const review = autoMergeReviewFor(settings, repo ?? {}, workspaceDir);
-  const allowNoChecks = autoMergeAllowNoChecksFor(settings, repo ?? {});
+  const requireChecks = autoMergeRequireChecksFor(settings, repo ?? {});
   let rules: string | undefined = review.rules;
   if (review.rulesFile) {
     const loaded = readRulesFile(review.rulesFile);
@@ -336,7 +336,7 @@ export function fleetAutoMergePolicyFingerprint(
     ...(review.reviewInstructions ? { reviewInstructions: review.reviewInstructions } : {}),
     ...(rules === undefined ? {} : { rules }),
     // Only when on, so the default hashes as before; switching it re-checks held PRs.
-    ...(allowNoChecks ? { allowNoChecks } : {}),
+    ...(requireChecks ? { requireChecks } : {}),
   });
   return Bun.hash(material).toString(16);
 }
@@ -378,7 +378,7 @@ export function createFleetAutoMerge(
           review: settings.review,
           method: settings.method,
           reviewLabel: settings.reviewLabel,
-          ...(autoMergeAllowNoChecksFor(settings, repo) ? { allowNoChecks: true } : {}),
+          ...(autoMergeRequireChecksFor(settings, repo) ? { requireChecks: true } : {}),
         },
         expectedHeadSha,
         lastAttempt: options?.lastAttempt ?? false,

@@ -48,7 +48,7 @@ import {
 } from "./config-auto-merge";
 
 export {
-  autoMergeAllowNoChecksFor,
+  autoMergeRequireChecksFor,
   autoMergePathsFor,
   autoMergeReviewFor,
   DEFAULT_AUTO_MERGE_METHOD,
@@ -531,7 +531,7 @@ function parseReposSection(
     const env = readEnvTable(table, label, errors);
     const syncTeamPrs = readOptionalBoolean(table, "sync_team_prs", label, errors);
     const manualOnly = readOptionalBoolean(table, "manual_only", label, errors);
-    const allowNoChecks = readOptionalBoolean(table, "auto_merge_allow_no_checks", label, errors);
+    const requireChecks = readOptionalBoolean(table, "auto_merge_require_checks", label, errors);
     // Team-PR discovery uses GitHub's open-PR list and author_association;
     // there is no GitLab/Bitbucket equivalent wired, so reject instead of
     // silently doing nothing.
@@ -563,7 +563,7 @@ function parseReposSection(
             autoMergeReviewPaths: readGlobList(table, "auto_merge_review_paths", label, errors),
           }),
       ...repoAutoMergeReview(table, label, errors),
-      ...(allowNoChecks === undefined ? {} : { autoMergeAllowNoChecks: allowNoChecks }),
+      ...(requireChecks === undefined ? {} : { autoMergeRequireChecks: requireChecks }),
       envFile: readString(table, "env_file", label, errors),
       ...(syncTeamPrs === undefined ? {} : { syncTeamPrs }),
       ...(manualOnly === true ? { manualOnly } : {}),

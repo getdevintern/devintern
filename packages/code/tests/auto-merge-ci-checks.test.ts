@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 
 import { autoMergeCliArgs, parseAutoMergeResultLine } from "../src/lib/acquirers/auto-merge-cli";
 import {
+  checkRollupForRef,
   listCheckRunsForRef,
   listLatestCommitStatuses,
 } from "../src/lib/code-host/github/commit-checks";
@@ -9,13 +10,15 @@ import { GitHubReviewsClient } from "../src/lib/code-host/github/reviews";
 import { buildAutoMergeStatusComment } from "../src/lib/review/auto-merge-comment";
 import {
   checkRunState,
+  ciChecksFromRollup,
   commitStatusState,
+  hiddenCheckRunsName,
   evaluateCiChecks,
   NO_CI_CHECKS_MESSAGE,
   normalizeCiChecks,
 } from "../src/lib/review/ci-checks";
 import { parseAutoMergeArgs } from "../src/lib/review/cli";
-import { autoMergeAllowNoChecksFor, parseWorkspaceConfig } from "../src/lib/workspace/config";
+import { autoMergeRequireChecksFor, parseWorkspaceConfig } from "../src/lib/workspace/config";
 import { fleetAutoMergePolicyFingerprint } from "../src/lib/workspace/fleet-events";
 
 const gate = await import("../src/lib/review/merge-gate");
@@ -94,6 +97,52 @@ describe("evaluateCiChecks", () => {
   });
 });
 
+describe("ciChecksFromRollup (token without Checks permission)", () => {
+  const status = (state: "success" | "failing" | "pending") => ({ name: "ci/status", state });
+
+  test("no checks at all stays empty", () => {
+    expect(ciChecksFromRollup([], { state: null, total: 0 })).toEqual([]);
+  });
+
+  test("hidden check runs take the rollup state", () => {
+    for (const [state, expected] of [
+      ["SUCCESS", "success"],
+      ["PENDING", "pending"],
+      ["EXPECTED", "pending"],
+      ["FAILURE", "failing"],
+      ["ERROR", "failing"],
+      ["SOMETHING_NEW", "failing"],
+    ] as const) {
+      expect(ciChecksFromRollup([], { state, total: 2 })).toEqual([
+        { name: hiddenCheckRunsName(2), state: expected },
+      ]);
+    }
+  });
+
+  test("statuses alone add no hidden entry", () => {
+    expect(ciChecksFromRollup([status("success")], { state: "SUCCESS", total: 1 })).toEqual([
+      status("success"),
+    ]);
+  });
+
+  test("a failing status that explains the rollup leaves the runs neutral", () => {
+    const checks = ciChecksFromRollup([status("failing")], { state: "FAILURE", total: 3 });
+    expect(checks).toEqual([status("failing"), { name: hiddenCheckRunsName(2), state: "neutral" }]);
+    expect(evaluateCiChecks(checks, { requireSuccess: false })).toMatchObject({
+      problem: "failing",
+      message: "CI check failed: ci/status.",
+    });
+  });
+
+  test("a failing rollup with passing statuses blames the hidden runs", () => {
+    const checks = ciChecksFromRollup([status("success")], { state: "FAILURE", total: 2 });
+    expect(evaluateCiChecks(checks, { requireSuccess: false })).toMatchObject({
+      problem: "failing",
+      message: `CI check failed: ${hiddenCheckRunsName(1)}.`,
+    });
+  });
+});
+
 describe("auto-merge CI-wait status comment", () => {
   test("says it is waiting and how to opt out", () => {
     const body = buildAutoMergeStatusComment({
@@ -103,12 +152,12 @@ describe("auto-merge CI-wait status comment", () => {
     });
     expect(body).toContain("waiting for CI checks");
     expect(body).toContain(NO_CI_CHECKS_MESSAGE);
-    expect(body).toContain("auto_merge_allow_no_checks = true");
+    expect(body).toContain("auto_merge_require_checks = true");
     expect(body).not.toContain("left open for human review");
   });
 });
 
-describe("auto_merge_allow_no_checks config", () => {
+describe("auto_merge_require_checks config", () => {
   const config = (workspace: string, repo = "") =>
     parseWorkspaceConfig(`
 [workspace]
@@ -125,7 +174,7 @@ ${repo}
 `);
   const effective = (workspace: string, repo = "") => {
     const parsed = config(workspace, repo);
-    return autoMergeAllowNoChecksFor(parsed.workspace.autoMerge, parsed.repos[0]!);
+    return autoMergeRequireChecksFor(parsed.workspace.autoMerge, parsed.repos[0]!);
   };
 
   test("defaults to false", () => {
@@ -133,32 +182,30 @@ ${repo}
   });
 
   test("workspace value applies; a repo value overrides it both ways", () => {
-    expect(effective("auto_merge_allow_no_checks = true")).toBe(true);
-    expect(
-      effective("auto_merge_allow_no_checks = true", "auto_merge_allow_no_checks = false"),
-    ).toBe(false);
-    expect(
-      effective("auto_merge_allow_no_checks = false", "auto_merge_allow_no_checks = true"),
-    ).toBe(true);
+    expect(effective("auto_merge_require_checks = true")).toBe(true);
+    expect(effective("auto_merge_require_checks = true", "auto_merge_require_checks = false")).toBe(
+      false,
+    );
+    expect(effective("auto_merge_require_checks = false", "auto_merge_require_checks = true")).toBe(
+      true,
+    );
   });
 
   test("rejects a non-boolean", () => {
-    expect(() => config('auto_merge_allow_no_checks = "yes"')).toThrow(
-      /auto_merge_allow_no_checks/,
-    );
+    expect(() => config('auto_merge_require_checks = "yes"')).toThrow(/auto_merge_require_checks/);
   });
 
   test("turning it on changes the policy fingerprint; the default hashes as before", () => {
     const fingerprint = (workspace: string, repo = "") =>
       fleetAutoMergePolicyFingerprint(config(workspace, repo), "acme/backend", "/ws");
     const base = fingerprint("");
-    expect(fingerprint("auto_merge_allow_no_checks = false")).toBe(base);
-    expect(fingerprint("auto_merge_allow_no_checks = true")).not.toBe(base);
-    expect(fingerprint("", "auto_merge_allow_no_checks = true")).not.toBe(base);
+    expect(fingerprint("auto_merge_require_checks = false")).toBe(base);
+    expect(fingerprint("auto_merge_require_checks = true")).not.toBe(base);
+    expect(fingerprint("", "auto_merge_require_checks = true")).not.toBe(base);
   });
 });
 
-describe("--allow-no-checks", () => {
+describe("--require-checks", () => {
   afterEach(() => {
     process.exitCode = 0;
   });
@@ -169,17 +216,17 @@ describe("--allow-no-checks", () => {
       denyPaths: [],
       review: true,
       method: "squash" as const,
-      allowNoChecks: true,
+      requireChecks: true,
     };
     const args = autoMergeCliArgs(policy, "a".repeat(40));
-    expect(args).toContain("--allow-no-checks");
+    expect(args).toContain("--require-checks");
     expect(
       parseAutoMergeArgs(["https://github.com/o/r/pull/1", ...args], gate)?.policy,
-    ).toMatchObject({ allowNoChecks: true });
-    expect(autoMergeCliArgs({ ...policy, allowNoChecks: false }, "a".repeat(40))).not.toContain(
-      "--allow-no-checks",
+    ).toMatchObject({ requireChecks: true });
+    expect(autoMergeCliArgs({ ...policy, requireChecks: false }, "a".repeat(40))).not.toContain(
+      "--require-checks",
     );
-    expect(parseAutoMergeArgs(["https://github.com/o/r/pull/1"], gate)?.policy.allowNoChecks).toBe(
+    expect(parseAutoMergeArgs(["https://github.com/o/r/pull/1"], gate)?.policy.requireChecks).toBe(
       undefined,
     );
   });
@@ -245,6 +292,31 @@ describe("commit check reads", () => {
   };
   const run = (id: number) => ({ id, name: `c${id}`, status: "completed", conclusion: "success" });
   const client = () => new GitHubReviewsClient({ token: "test-token" });
+
+  test("reads the combined CI state over GraphQL", async () => {
+    const urls = respond(() => ({
+      data: {
+        repository: {
+          object: { statusCheckRollup: { state: "PENDING", contexts: { totalCount: 3 } } },
+        },
+      },
+    }));
+    expect(await checkRollupForRef(client(), "o", "r", "abc")).toEqual({
+      state: "PENDING",
+      total: 3,
+    });
+    expect(urls).toEqual(["https://api.github.com/graphql"]);
+  });
+
+  test("a commit with no checks has a null rollup", async () => {
+    respond(() => ({ data: { repository: { object: { statusCheckRollup: null } } } }));
+    expect(await checkRollupForRef(client(), "o", "r", "abc")).toEqual({ state: null, total: 0 });
+  });
+
+  test("an unknown commit throws instead of reading as no checks", async () => {
+    respond(() => ({ data: { repository: { object: null } }, errors: [{ message: "nope" }] }));
+    await expect(checkRollupForRef(client(), "o", "r", "abc")).rejects.toThrow("nope");
+  });
 
   test("reads every page of check runs", async () => {
     const urls = respond((url) => {

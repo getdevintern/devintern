@@ -11,9 +11,10 @@
  *    merges with no agent run.
  *    CI checks (`ci-checks.ts`) run right after the path classification,
  *    before any merge or agent run, because safe-path-only PRs may merge
- *    without a passing check: no check failing or pending, and (for code
- *    PRs, unless `allowNoChecks`) at least one `success`. `clean` alone is
- *    not enough, since GitHub reports it for commits with no checks at all.
+ *    without a passing check: no check failing or pending, and (only for
+ *    code PRs with `requireChecks`) at least one `success`. A repository
+ *    without CI merges code PRs by default; `clean` alone would not tell
+ *    "no checks" from "passed", which is what `requireChecks` is for.
  *    These waits are reported as the "Ready" gate.
  * 2. Agent review (optional): PRs that touch anything outside the safe globs,
  *    or any review glob, merge only on an explicit `"safe": true` verdict. A missing, malformed,
@@ -29,7 +30,11 @@
 
 import { runAgent } from "./address";
 import { parseChangeRequestUrl } from "../code-host/index";
-import { listCheckRunsForRef, listLatestCommitStatuses } from "../code-host/github/commit-checks";
+import {
+  checkRollupForRef,
+  listCheckRunsForRef,
+  listLatestCommitStatuses,
+} from "../code-host/github/commit-checks";
 import { GitHubReviewsClient } from "../code-host/github/reviews";
 import type {
   PullRequestFile,
@@ -41,7 +46,7 @@ import { untrustedContentBlock } from "../prompts/untrusted-content";
 import { Utils } from "../utils";
 import { AUTO_MERGE_COMMENT_MARKER, buildAutoMergeStatusComment } from "./auto-merge-comment";
 import type { AutoMergeCommentStatus, LeftOpenReason } from "./auto-merge-comment";
-import { evaluateCiChecks, normalizeCiChecks } from "./ci-checks";
+import { ciChecksFromRollup, evaluateCiChecks, normalizeCiChecks } from "./ci-checks";
 import type { CiCheck, CiChecksProblem, CiChecksVerdict } from "./ci-checks";
 import {
   classifyChangedPaths,
@@ -64,10 +69,12 @@ export interface AutoMergePolicy extends MergePathPolicy {
   /** Merge-safety review strictness; unset means `strict`. */
   reviewPolicy?: MergeSafetyPolicy;
   /**
-   * `auto_merge_allow_no_checks`: a code PR may merge without a passing CI
-   * check (failing or pending checks still block). Unset means false.
+   * `auto_merge_require_checks`: a code PR needs at least one passing CI
+   * check, so a commit with no checks waits. Unset means false: no checks
+   * is the repository's choice and does not block. Failing or pending
+   * checks block either way.
    */
-  allowNoChecks?: boolean;
+  requireChecks?: boolean;
   /**
    * Operator-written review rules (`auto_merge_review_instructions`),
    * appended in a marked section that can only add restrictions.
@@ -389,13 +396,19 @@ function defaultGitHub(owner: string, repo: string, prNumber: number): AutoMerge
     getDiff: () => client.getPullRequestDiff(owner, repo, prNumber),
     listCiChecks: async (sha) => {
       const [runs, statuses] = await Promise.all([
-        listCheckRunsForRef(client, owner, repo, sha),
+        listCheckRunsForRef(client, owner, repo, sha).catch((error: Error) => {
+          // Fine-grained tokens cannot be granted Checks; fall back below.
+          if (isForbidden(error)) return null;
+          throw error;
+        }),
         listLatestCommitStatuses(client, owner, repo, sha),
       ]);
-      if (!runs.complete || !statuses.complete) {
+      if ((runs && !runs.complete) || !statuses.complete) {
         throw new Error("GitHub returned only part of the commit's checks");
       }
-      return normalizeCiChecks(runs.checkRuns, statuses.statuses);
+      if (runs) return normalizeCiChecks(runs.checkRuns, statuses.statuses);
+      const rollup = await checkRollupForRef(client, owner, repo, sha);
+      return ciChecksFromRollup(normalizeCiChecks([], statuses.statuses), rollup);
     },
     merge: (sha, method) => client.mergePullRequest(owner, repo, prNumber, { sha, method }),
     upsertStatusComment: (body) =>
@@ -403,6 +416,11 @@ function defaultGitHub(owner: string, repo: string, prNumber: number): AutoMerge
     addLabel: (label) => client.addIssueLabels(owner, repo, prNumber, [label]),
     removeLabel: (label) => client.removeIssueLabel(owner, repo, prNumber, label),
   };
+}
+
+/** A GitHub API 403: the credential lacks a permission. */
+function isForbidden(error: Error): boolean {
+  return error.message.startsWith("GitHub API error (403)");
 }
 
 type Precondition = Pick<AutoMergeResult, "outcome" | "message">;
@@ -521,7 +539,7 @@ async function ciChecksGate(ctx: GateContext, safeOnly: boolean): Promise<MergeD
     };
   }
   const verdict = evaluateCiChecks(read.checks, {
-    requireSuccess: !safeOnly && !ctx.options.policy.allowNoChecks,
+    requireSuccess: !safeOnly && ctx.options.policy.requireChecks === true,
   });
   return verdict.ready ? null : ciWaitDecision(verdict);
 }
