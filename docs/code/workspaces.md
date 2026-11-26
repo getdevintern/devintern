@@ -25,7 +25,7 @@ cd ~/code/frontend && devintern worker add-repo
 
 - The worker keeps a bare clone of each repository under `~/.devintern/repos/` and runs each task in a fresh worktree under `~/.devintern/worktrees/`. Your own checkouts are never touched.
 - Before the agent starts, dependencies are installed by detecting the package manager from the lockfile. If that fails, the run continues with a warning.
-- Worktrees are removed after a successful run and kept after a failure for debugging, then deleted after `worktrees_ttl_days`.
+- Worktrees are removed after a successful run and kept after a failure for debugging, then deleted after `worktrees_ttl_days` (except a worktree holding [unfinished work that could not be pushed](delegation-runs.md)).
 - Runs, queue, and schedule state live in `~/.devintern/state/queue.db`. Worker sign-in and relay pairing live in `~/.devintern/state/code/`; use `devintern worker login` to sign in.
 
 ## The workspace file

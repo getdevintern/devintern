@@ -29,7 +29,7 @@ import { Utils } from "../utils";
 import { isCommitAlreadyComplete, runAgentHarnessToFixGitHook } from "./git-hook-fixer";
 import { resolveAgentEffort, resolveAgentModel } from "./model";
 import { createPlanImplementationPrompt, detectPlanOnlyBehavior, logHookErrorToFile } from "./plan";
-import { createGitHelpers, headAdvancedDuringRun } from "./run-harness-git";
+import { createGitHelpers, headAdvancedDuringRun, readHeadCommit } from "./run-harness-git";
 import type { FinalizeContext } from "./run-harness-git";
 import { agentSandboxPolicy, getSandbox } from "./sandbox";
 import { harnessSpawnEnv } from "./spawn";
@@ -41,6 +41,8 @@ import type { PipelineContext } from "../task/pipeline-registry";
 import { buildRepairPrompt, verifyImplementation } from "./verify";
 import type { VerifyDependencies } from "./verify";
 import { extractImplementationSummary, withImplementationSummary } from "./implementation-summary";
+import { describeMissingStackBase, ensureStackBase } from "./stack-base-guard";
+import type { RunStackDeps } from "../dependencies/stack-run";
 
 type GitHelpers = ReturnType<typeof createGitHelpers>;
 
@@ -55,6 +57,8 @@ export interface DeliveryState extends PipelineContext {
   implementationStepSeen: boolean;
   /** Set when `--allow-no-changes` accepted a delivery with nothing to commit. */
   noChanges: boolean;
+  /** Set when the stacked base closed unmerged mid-run (see `stack-base-guard.ts`). */
+  stackBlocked?: string;
 }
 
 /** Commit once, allowing the agent to repair pre-commit hook failures. */
@@ -511,7 +515,11 @@ async function repairImplementation(state: DeliveryState) {
   return;
 }
 
-async function reportPipelineHalt(state: DeliveryState, reason: string): Promise<void> {
+async function reportPipelineHalt(
+  state: DeliveryState,
+  reason: string,
+  options: { countAttempt?: boolean } = {},
+): Promise<void> {
   // The shutdown handler already reported the interruption; a second comment
   // and a retry-gate entry would contradict it.
   if (isShuttingDown()) {
@@ -532,11 +540,14 @@ async function reportPipelineHalt(state: DeliveryState, reason: string): Promise
   if (!(taskKey && tracker && task && !ctx.skipComments)) return;
   try {
     await tracker.postIncompleteImplementationComment(taskKey, report, ctx.taskSummary);
-    recordIncompleteAttempt(
-      taskKey,
-      process.env.TASK_TRACKER || "jira",
-      tracker.extractDescriptionText(task),
-    );
+    // A stacked base that closed is not the agent failing the task, so it
+    // does not count against the retry gate.
+    if (options.countAttempt !== false)
+      recordIncompleteAttempt(
+        taskKey,
+        process.env.TASK_TRACKER || "jira",
+        tracker.extractDescriptionText(task),
+      );
   } catch (error) {
     console.warn(`⚠️  Failed to post verification failure: ${error}`);
   }
@@ -621,7 +632,65 @@ function verifyDependencies(state: DeliveryState): VerifyDependencies {
   };
 }
 
+/**
+ * Re-resolve a stacked run's base before a step that reads it (a diff, the
+ * push, or the PR target), so a base that merged mid-run is followed instead
+ * of failing on its deleted branch.
+ */
+function withStackBase(step: TaskStep<DeliveryState>): TaskStep<DeliveryState> {
+  return {
+    name: step.name,
+    run: async (state) => (await ensureStackBase(state)) ?? step.run(state),
+  };
+}
+
+/**
+ * Stack-base check before the commit step. Its "agent committed its own work"
+ * fallback counts commits ahead of the PR target, which a merged base's pruned
+ * branch cannot answer, so the run moves to the merge target first (the
+ * rebase autostashes uncommitted work).
+ *
+ * The rebase moves `HEAD`, which would read as the agent committing. When the
+ * agent had not moved `HEAD`, the rebased head becomes the pre-run baseline so
+ * plan-only detection still applies.
+ */
+export async function ensureStackBaseBeforeCommit(
+  state: DeliveryState,
+  deps?: RunStackDeps,
+): Promise<{ kind: "halt"; reason: string } | void> {
+  const ctx = state.context;
+  const untouched =
+    ctx.stackBase !== undefined &&
+    ctx.headBeforeRun !== undefined &&
+    (await readHeadCommit()) === ctx.headBeforeRun;
+  const halt = await ensureStackBase(state, deps);
+  if (halt) return halt;
+  if (untouched) ctx.headBeforeRun = (await readHeadCommit()) ?? ctx.headBeforeRun;
+}
+
 function deliverySteps(state: DeliveryState): readonly TaskStep<DeliveryState>[] {
+  const steps = unguardedDeliverySteps(state);
+  // Once publish opened the PR, the stack maintainer follows its base; a
+  // guard on a later step would rebase and re-push a branch under review.
+  const publishIndex = steps.indexOf(publishStep);
+  return steps.map((step, index): TaskStep<DeliveryState> => {
+    if (
+      step === implementStep ||
+      step.name.startsWith("__repair-") ||
+      step.name === "repair" ||
+      (publishIndex !== -1 && index > publishIndex)
+    ) {
+      return step;
+    }
+    if (step !== commitStep) return withStackBase(step);
+    return {
+      name: step.name,
+      run: async (current) => (await ensureStackBaseBeforeCommit(current)) ?? step.run(current),
+    };
+  });
+}
+
+function unguardedDeliverySteps(state: DeliveryState): readonly TaskStep<DeliveryState>[] {
   const configured = state.context.pipelineSteps;
   if (!configured) {
     return state.context.verify
@@ -728,7 +797,17 @@ export function finalizeAgentRun(ctx: FinalizeContext): void {
     results: [],
     runAgentPrompt: (prompt) =>
       runAgentPrompt(prompt, process.cwd(), ctx.harness, ctx.executablePath),
-    getDiff: () => getPRDiff(ctx.prTargetBranch, process.cwd()),
+    getDiff: () => {
+      try {
+        return getPRDiff(ctx.prTargetBranch, process.cwd());
+      } catch (error) {
+        const base = ctx.stackBase;
+        if (base && ctx.prTargetBranch.replace(/^origin\//, "") === base.branch) {
+          throw describeMissingStackBase(base, error as Error);
+        }
+        throw error;
+      }
+    },
     parseReviewFeedback,
     filterByPriority,
     output: ctx.stdoutOutput,
@@ -741,6 +820,15 @@ export function finalizeAgentRun(ctx: FinalizeContext): void {
   };
   runTaskSteps(deliverySteps(state), state)
     .then(async (result) => {
+      // A stacked base that closed unmerged is an escalation from any step:
+      // the work is fine, it has no base to land on. `settleImplementationRun`
+      // escalates on `activeTaskContext.stackBlocked` (set by the guard) even
+      // when the halt report is skipped during shutdown.
+      if (result.kind === "halted" && state.stackBlocked) {
+        await reportPipelineHalt(state, state.stackBlocked, { countAttempt: false });
+        ctx.resolve();
+        return;
+      }
       if (
         result.kind === "halted" &&
         result.haltKind !== "noop" &&

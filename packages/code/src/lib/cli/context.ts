@@ -23,6 +23,11 @@ export interface ActiveTaskContext {
    * records such a run as `failed` instead of `succeeded`.
    */
   prDeliveryFailure?: PrDeliveryFailure;
+  /**
+   * Set when the run's stacked base closed without merging (or could not be
+   * followed) mid-run: the actionable reason the run escalates with.
+   */
+  stackBlocked?: string;
 }
 
 /** A PR that was requested after a successful push but could not be created. */

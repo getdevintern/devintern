@@ -25,6 +25,7 @@ import { randomUUID } from "crypto";
 
 import { Utils } from "../utils";
 import { withRepoGitLock } from "../utils/repo-git-lock";
+import { worktreeKeepReason } from "../utils/worktree-keep";
 import type { RepoConfig } from "./config";
 import { reposDir, resolveWorkspaceDir, worktreesDir } from "./paths";
 import { migrateCommittedTrackerSettings } from "./migrate-checkout";
@@ -327,7 +328,8 @@ export class RepoManager {
   /**
    * Remove leftover task worktrees older than the TTL.
    *
-   * Runs on worker start. The base and PR-job worktrees are never swept.
+   * Runs on worker start. The base and PR-job worktrees are never swept, nor
+   * is a worktree marked as holding unsaved work (`utils/worktree-keep.ts`).
    *
    * @returns Paths that were removed.
    */
@@ -348,6 +350,14 @@ export class RepoManager {
           continue;
         }
       } catch {
+        continue;
+      }
+      // A run that could not push its work marked the worktree as its only copy.
+      const keep = await worktreeKeepReason(path);
+      if (keep) {
+        console.warn(
+          `⚠️  Not sweeping ${path}: it holds unsaved work (${keep}). Remove it by hand once saved.`,
+        );
         continue;
       }
       await this.removeTaskWorktree(repoName, path);
