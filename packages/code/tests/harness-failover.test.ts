@@ -76,6 +76,25 @@ describe("HarnessFailover", () => {
     expect(h.limits["codex"]).toBe(3000);
   });
 
+  test("a limit reported for a harness that is no longer active does not close the fallback", () => {
+    const h = makeFailover(["claude-code", "opencode"]);
+    h.failover.reportUsageLimit(2000);
+    expect(h.failover.activeName).toBe("opencode");
+    const late = h.failover.reportUsageLimit(2000, "claude-code");
+    expect(late).toEqual({ kind: "stayed", entry: "opencode", untilMs: 2000 });
+    expect(h.failover.isLimited("opencode")).toBe(false);
+    expect(h.limits["opencode"]).toBeUndefined();
+  });
+
+  test("a startup failure reported for an inactive harness leaves the active one usable", () => {
+    const h = makeFailover(["claude-code", "opencode"]);
+    h.failover.reportUsageLimit(2000);
+    const late = h.failover.reportHarnessUnavailable(5000, "claude-code");
+    expect(late.kind).toBe("stayed");
+    expect(h.failover.isUnavailable("opencode")).toBe(false);
+    expect(h.failover.activeName).toBe("opencode");
+  });
+
   test("exhausts when every entry is limited and reports the earliest reset", () => {
     const h = makeFailover(["claude-code", "codex"]);
     h.failover.reportUsageLimit(5000);

@@ -232,12 +232,19 @@ export class HarnessFailover {
    * limited the outcome is `exhausted` and the caller must pause its queue
    * until {@link earliestResetMs}.
    *
-   * @param resetUntilMs - Epoch ms when the active harness's window ends
+   * Concurrent runs make the reporting harness and the active one differ: a
+   * child spawned on the primary can hit the same limit after another run
+   * already failed over. The window is charged to the harness the child ran
+   * on, so a stale report never closes the fallback that is now active.
+   *
+   * @param resetUntilMs - Epoch ms when the reporting harness's window ends
    *   (already resolved from the reset hint or a fallback cooldown).
+   * @param harness - Harness the limited child ran on (defaults to active).
    * @returns What the failover decided.
    */
-  reportUsageLimit(resetUntilMs: number): FailoverOutcome {
-    const from = this.active;
+  reportUsageLimit(resetUntilMs: number, harness: string = this.activeName): FailoverOutcome {
+    const from = this.entries.find((entry) => entry.name === harness) ?? this.active;
+    const previous = this.active;
     this.setWindow(from.name, resetUntilMs);
 
     const target = this.selectAvailable();
@@ -252,9 +259,9 @@ export class HarnessFailover {
 
     const toIndex = this.entries.indexOf(target);
     this.activeIndex = toIndex;
-    this.persistActive?.(this.activeName);
+    if (target.name !== previous.name) this.persistActive?.(this.activeName);
 
-    if (target.name !== from.name) {
+    if (target.name !== previous.name) {
       const fallbackPosition =
         toIndex === 0 ? "primary" : `fallback ${toIndex + 1}/${this.entries.length}`;
       this.log(
@@ -277,10 +284,12 @@ export class HarnessFailover {
    * is `exhausted` and the caller defers the task.
    *
    * @param untilMs - Epoch ms when the process may retry this entry.
+   * @param harness - Harness the child tried to start (defaults to active).
    * @returns What the failover decided.
    */
-  reportHarnessUnavailable(untilMs: number): FailoverOutcome {
-    const from = this.active;
+  reportHarnessUnavailable(untilMs: number, harness: string = this.activeName): FailoverOutcome {
+    const from = this.entries.find((entry) => entry.name === harness) ?? this.active;
+    const previous = this.active;
     const existing = this.unavailable.get(from.name) ?? 0;
     this.unavailable.set(from.name, Math.max(existing, untilMs));
 
@@ -299,8 +308,8 @@ export class HarnessFailover {
 
     const toIndex = this.entries.indexOf(target);
     this.activeIndex = toIndex;
-    this.persistActive?.(this.activeName);
-    if (target.name !== from.name) {
+    if (target.name !== previous.name) this.persistActive?.(this.activeName);
+    if (target.name !== previous.name) {
       const fallbackPosition =
         toIndex === 0 ? "primary" : `fallback ${toIndex + 1}/${this.entries.length}`;
       this.log(
