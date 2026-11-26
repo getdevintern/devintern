@@ -51,6 +51,7 @@ export function applyWorkspaceConfig(target: WorkspaceConfig, next: WorkspaceCon
   target.routing = next.routing;
   target.automations = next.automations;
   target.estimations = next.estimations;
+  target.notifications = next.notifications;
 }
 
 /** Deterministic serialization used to skip no-op saves/touches. */

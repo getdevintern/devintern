@@ -164,12 +164,15 @@ async function runWorkerRunNowSubcommand(args: string[]): Promise<never> {
  */
 async function runWorkerDoctorSubcommand(args: string[]): Promise<never> {
   if (hasHelpArg(args)) {
-    console.log("Usage: devintern worker doctor [--workspace <path>] [--offline] [--json]");
+    console.log(
+      "Usage: devintern worker doctor [--workspace <path>] [--offline] [--json] [--test-notifications]",
+    );
     console.log("");
     console.log("Check whether this worker workspace can acquire and run work right now:");
     console.log("workspace.toml, per-team tracker credentials, ready-tasks query dry-runs,");
     console.log("repository access, automation entitlement, harness and sandbox, and the");
-    console.log("dashboard port. Changes nothing and does not start the worker.");
+    console.log("dashboard port, and notification channels. Changes nothing and does not");
+    console.log("start the worker (--test-notifications sends one test message per channel).");
     console.log("Exits 1 when a check fails, 2 when the only thing left is a step for you");
     console.log("(signing in to start the Worker Pilot), and 0 when ready.");
     console.log("");
@@ -181,11 +184,13 @@ async function runWorkerDoctorSubcommand(args: string[]): Promise<never> {
     console.log(
       "                      with result, checks, and nextSteps instead of the checklist",
     );
+    console.log("  --test-notifications  Send a test message through each [notifications] channel");
     console.log("  -h, --help          Display this help message");
     process.exit(0);
   }
   let workspacePath: string | undefined;
   let offline = false;
+  let testNotifications = false;
   let json = false;
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -199,6 +204,8 @@ async function runWorkerDoctorSubcommand(args: string[]): Promise<never> {
       i++;
     } else if (arg === "--offline") {
       offline = true;
+    } else if (arg === "--test-notifications") {
+      testNotifications = true;
     } else if (arg === "--json") {
       json = true;
     } else {
@@ -220,7 +227,10 @@ async function runWorkerDoctorSubcommand(args: string[]): Promise<never> {
   } catch {
     // Unreadable workspace .env: the config check reports the workspace state.
   }
-  const checks = await collectWorkerDoctorChecks({ workspacePath, offline }, { processEnv });
+  const checks = await collectWorkerDoctorChecks(
+    { workspacePath, offline, testNotifications },
+    { processEnv },
+  );
   if (json) {
     const { buildWorkerDoctorReport, readinessExitCode } =
       await import("../observability/readiness-json");

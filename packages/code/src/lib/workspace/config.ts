@@ -20,6 +20,7 @@ import type { DependencyMode } from "../dependencies/gate";
 import { parseAgentSelection } from "../agent/selection";
 import type { HarnessPinnedEntry } from "../agent/selection";
 import { parseDashboardAllowedOriginList } from "../observability/dashboard-origins";
+import { parseNotificationsSection } from "../notifications/delivery/config";
 import type {
   ConflictResolutionMode,
   GitAuthorSetting,
@@ -208,6 +209,7 @@ export function parseWorkspaceConfig(
   const estimations = parseEstimationsSection(document, tracker, teams, errors);
 
   const dashboard = parseDashboardSection(document, errors);
+  const notifications = parseNotificationsSection(document.notifications, errors);
 
   validateManualOnlyReferences(
     repos,
@@ -230,6 +232,7 @@ export function parseWorkspaceConfig(
     workspace,
     dashboard,
     worker: { schedule: schedule.config, autoUpdate },
+    notifications,
     defaults,
     teams,
     repos,

@@ -20,7 +20,7 @@ import { recoverOrphanedTaskRuns, resolveStatusName } from "../worker/orphan-rec
 import type { OrphanRecoveryResult } from "../worker/orphan-recovery";
 import { RunStore } from "../state/run-recorder";
 import type { RunRecord } from "../state/run-recorder";
-import { pruneResolvedNotifications, startNotificationSweeper } from "../notifications/maintenance";
+import { startNotificationMaintenance } from "../notifications/maintenance";
 import { readImplementationReport } from "../state/session-pickup";
 import { RetryStateStore } from "../state/retry-state";
 import { ScheduledRetryStore } from "../state/run-retry";
@@ -942,8 +942,9 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
   assertWorkspaceHasWork(config, retryQueue, injectedTasks, multiTeam, initialQuery);
 
   const state = openWorkspaceState(workspaceDir);
-  pruneResolvedNotifications(state.dbPath);
-  startNotificationSweeper(state.dbPath);
+  // Prune + sweeper now; delivery starts in onStarted (lock held), so a worker
+  // that loses the lock race never double-sends.
+  const notificationDelivery = startNotificationMaintenance(state.dbPath, () => config);
   await startLoggedWorkerFailover(state.queue);
   const repoManager = new RepoManager(workspaceDir);
   const supervisor = createTaskSupervisor({
@@ -1372,6 +1373,7 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
       onShutdown: () => {
         reloader.stop();
         autoUpdater.stop();
+        notificationDelivery.stop();
         errorMonitorStatusStore?.close();
         errorMonitorStatusStore = null;
         injectedStartup.close();
@@ -1380,18 +1382,13 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
         // successor starts (binds the same dashboard port) while this
         // process is still alive, so a socket still bound here can fail it
         // with EADDRINUSE and leave the daemon down.
-        if (dashboardServer) {
-          try {
-            dashboardServer.stop();
-          } catch {
-            // Already stopped.
-          }
-          dashboardServer = null;
-        }
+        stopDashboardServer(dashboardServer);
+        dashboardServer = null;
       },
       finalExitCode: () => autoUpdater.finalExitCode(),
       onStarted: async (acquirerNames) => {
         holdsWorkerLock = true;
+        notificationDelivery.start();
         // Re-read the file now that the lock is held: records which version
         // is live (or why the on-disk version was rejected) for the dashboard.
         reloader.reload("worker started");
@@ -1406,6 +1403,15 @@ export async function runWorkspaceWorker(options: RunWorkspaceWorkerOptions): Pr
     },
     acquirers,
   );
+}
+
+/** Stop the dashboard server if it is running (already-stopped is fine). */
+function stopDashboardServer(server: { stop(): void } | null): void {
+  try {
+    server?.stop();
+  } catch {
+    // Already stopped.
+  }
 }
 
 /** Log the configured agent concurrency and warn when jobs can run in parallel. */
