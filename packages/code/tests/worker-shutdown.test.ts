@@ -383,4 +383,46 @@ describe("createWorkerShutdownHandler", () => {
 
     expect(exits).toEqual([1]);
   });
+
+  test("records a clean stop with the final exit code after releasing the lock", async () => {
+    const order: string[] = [];
+    const handler = createWorkerShutdownHandler({
+      acquirers: [],
+      lock: { release: () => order.push("lock") },
+      flush: async () => undefined,
+      recordStopped: (code) => order.push(`record:${code}`),
+      exit: (code) => order.push(`exit:${code}`),
+    });
+
+    await handler("SIGTERM");
+
+    expect(order).toEqual(["lock", "record:0", "exit:0"]);
+  });
+
+  test("exits 1 when the whole shutdown outlives its deadline", async () => {
+    const exits: number[] = [];
+    let release: () => void = () => undefined;
+    // oxlint-disable-next-line promise/avoid-new -- a stop that never settles on its own.
+    const hanging = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const recorded: number[] = [];
+    const handler = createWorkerShutdownHandler({
+      acquirers: [{ name: "stuck", stop: () => hanging }],
+      lock: { release: () => undefined },
+      flush: async () => undefined,
+      deadlineMs: 20,
+      recordStopped: (code) => recorded.push(code),
+      exit: (code) => exits.push(code),
+    });
+
+    const done = handler("SIGTERM");
+    await Bun.sleep(60);
+    expect(exits).toEqual([1]);
+    release();
+    await done;
+    // The forced exit is not a clean stop, and nothing exits twice.
+    expect(exits).toEqual([1]);
+    expect(recorded).toEqual([]);
+  });
 });

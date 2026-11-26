@@ -4,7 +4,7 @@ sidebarLabel: "Sentry Auto-fixes"
 description: "Turn Sentry error groups into repo-routed fixes from the workspace worker"
 section: "Automation Reference"
 order: 3
-dateModified: 2026-11-18
+dateModified: 2026-11-26
 ---
 
 # Sentry Auto-fixes
@@ -24,6 +24,28 @@ The workspace [worker](./worker.md) can poll Sentry projects for unresolved erro
 devintern worker connect sentry
 devintern worker connect sentry --repo backend   # pick the repository explicitly
 ```
+
+### Without a terminal
+
+A coding agent or SSH session with no TTY passes the non-secret settings as flags. The token comes from `SENTRY_AUTH_TOKEN` in the environment or from a file passed with `--env-file`, never from a flag:
+
+```bash
+devintern worker connect sentry --org acme --project api,web --repo backend \
+  --env-file ~/sentry.env --json
+```
+
+| Flag                   | Default             | Description                                                                   |
+| ---------------------- | ------------------- | ----------------------------------------------------------------------------- |
+| `--org <slug>`         | (required)          | Sentry organization slug                                                      |
+| `--project <slug>`     | (required)          | Project slug; repeat the flag or comma-separate for several projects          |
+| `--sentry-url <url>`   | `https://sentry.io` | Self-hosted or regional Sentry URL, such as `https://de.sentry.io`            |
+| `--query <filter>`     | none                | Sentry issue search filter                                                    |
+| `--repo <name>`        | only repo           | Repository that owns the code; required with several repositories             |
+| `--env-file <path>`    | none                | File holding `SENTRY_AUTH_TOKEN`. It must be mode `0600` or it is refused     |
+| `--yes`                | off                 | Refresh the stored token of a monitor that already exists                     |
+| `--json`               | off                 | One JSON document on stdout. Implies no prompts                               |
+
+Every project is checked against Sentry first; if any check fails nothing is written. The result is the same `[[error_monitors]]` entry and 0600 token file as the interactive setup. An existing monitor for the same organization, project, and repository is left alone unless you pass `--yes`, which replaces its token. To change `query`, edit `workspace.toml`. The output lists each monitor as `{id, organization, project, repo, baseUrl, envFile, action, unresolvedIssues}` where `action` is `added`, `updated`, or `unchanged`. Failures set `result` to `failure` with an `error` and a `code` such as `missing_token`, `missing_flags`, `env_file_unreadable`, `monitor_exists`, or `sentry_validation_failed`.
 
 For manual setup, add one `[[error_monitors]]` entry per Sentry project in `workspace.toml`:
 

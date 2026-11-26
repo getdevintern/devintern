@@ -1,5 +1,6 @@
 import { GitLabReviewPollingAcquirer } from "../src/lib/acquirers/gitlab-review-polling";
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { markWorktreeKept } from "../src/lib/utils/worktree-keep";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -239,6 +240,34 @@ describe("createWorkspaceTaskAcquirer", () => {
 
     expect(ran).toHaveLength(1);
     expect(existsSync(ran[0].cwd)).toBe(true);
+  });
+
+  test("a clean exit that marked unsaved work keeps the worktree", async () => {
+    tasks = [{ key: "T-2b", updated: "u1", labels: ["frontend"] }];
+    const acquirer = createWorkspaceTaskAcquirer({
+      config: CONFIG,
+      workspaceDir,
+      workerState: state.workerState,
+      queue: state.queue,
+      skips: state.skips,
+      repoManager,
+      detector: alwaysChanged,
+      searchTasks: async () => ({ tasks }),
+      query: "status=todo",
+      intervalSeconds: 3600,
+      runTask: async (taskKey, args, opts) => {
+        ran.push({ taskKey, args, cwd: opts.cwd, env: opts.env });
+        // An escalated run whose unfinished work could not be pushed.
+        Bun.spawnSync(["git", "init", "--quiet"], { cwd: opts.cwd });
+        await markWorktreeKept(opts.cwd, "push failed");
+        return true;
+      },
+    });
+    await acquirer.tick();
+
+    expect(ran).toHaveLength(1);
+    expect(existsSync(ran[0].cwd)).toBe(true);
+    expect(repoManager.calls.some((call) => call.startsWith("remove:"))).toBe(false);
   });
 
   test("ambiguous tasks are recorded, not executed, and not retried at the same stamp", async () => {

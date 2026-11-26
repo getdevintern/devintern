@@ -18,9 +18,9 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 
 - Surface: `devintern worker` surface
 - Status: `live`
-- Evidence: GitLab worker suite
-- Missing: GitHub worker path (Jira, Trello, Azure DevOps, Linear, and Asana: see the tracker files).
-- Last reviewed: 2026-11-17
+- Evidence: GitLab worker suite; `tests/code/github-tracker-worker.test.ts` (`test:e2e:tracker`) for GitHub Issues
+- Missing: Jira, Trello, Azure DevOps, Linear, and Asana: see the tracker files.
+- Last reviewed: 2026-11-26
 
 ### Scheduled `[[automations]]`: schedule, no-op, branch/push policy, hot reload
 
@@ -73,10 +73,10 @@ Status values are defined in the [coverage index](../coverage-matrix.md#status-l
 ### Native service install/uninstall
 
 - Surface: `devintern worker` surface
-- Status: `gap`
-- Evidence: —
-- Missing: systemd/launchd path without touching the host service manager.
-- Last reviewed: 2026-11-17
+- Status: `partial`
+- Evidence: `tests/service/systemd-service.test.ts` (`bun run --filter @devintern/e2e test:e2e:service`; needs Docker). In a systemd container, `devintern worker service install` runs with no TTY: unlicensed it is refused (exit 2) and installs nothing; with `--force` it reports the license failure (exit 1, `start.permanent`), the unit ends `failed` with status 78 and no restarts, the reason is in `worker.stderr.log`, and `worker status` says the start failed. With the license bypass it reports a running worker; the unit has an absolute Bun runtime and bundle path, the recorded `PATH`, `WorkingDirectory=~/.devintern`, and `RestartPreventExitStatus=78`; the service reads the workspace `.env` and pushes a markdown task branch; `worker status` and `/api/worker` report the service pid; `kill -9` is restarted by systemd; `service stop` ends inactive with `Result=success` and exit 0 after "👋 Worker stopped", and `worker status` says stopped; `start` and `restart` wait for a running worker; a wizard run updates the unit in place; a `loginctl` that cannot enable lingering yields the `sudo loginctl enable-linger tester` warning; `uninstall` removes the unit and is idempotent.
+- Missing: launchd (macOS); a real polkit-less `loginctl enable-linger` failure (the suite enables lingering as root so the user manager runs, and stubs `loginctl` for the warning).
+- Last reviewed: 2026-11-26
 
 ### Auto-update
 
@@ -100,7 +100,7 @@ Priority numbers are the global ranking from the
 [index](../coverage-matrix.md#priority-backlog); lower runs first.
 
 - Priority 13: Quiet hours, concurrency, and orphan recovery on a deterministic local workspace. Scheduled automations are implemented by `tests/local/worker-automations.test.ts`. Scheduled estimations are implemented by `tests/local/worker-scheduled-estimation.test.ts`.
-- Priority 18: Native service install and auto-update in a sandboxed user-scope fixture.
+- Priority 18: Native service install and auto-update in a sandboxed user-scope fixture. The systemd install is covered by `tests/service/systemd-service.test.ts`; launchd and auto-update remain.
 
 ## Test notes
 
@@ -187,3 +187,10 @@ bun run --filter @devintern/e2e test
 ### Multi-repo team routing
 
 `tests/local/worker-team-routing.test.ts` verifies team routing, ambiguous and unrouted task skips, and layered repo and team environment settings with local bare remotes.
+
+### Native systemd service
+
+- Proves: `devintern worker service` on a blank Debian box with systemd as PID 1, with no TTY: the readiness refusal and the honest license-failure report (unit `failed`, status 78, no restart loop, reason in the worker log and `worker status`), then with a license a running worker (unit contents, enabled and active), that the service loads `~/.devintern/.env` (license skip, agent path, `MARKDOWN_TASKS_DIR`) and pushes a task branch to a local bare remote (on a host with no global git config, so the commit carries the `DevIntern` fallback identity), that `worker status` and the dashboard see the service pid, restart after `kill -9`, a clean `stop` (inactive, exit 0, status stopped), `start`/`restart`, an in-place update from the wizard, the lingering warning, and `uninstall`.
+- How: `scripts/service.ts` packs the built CLI with `bun pm pack`; `helpers/systemd-container.ts` builds `infrastructure/service/Dockerfile`, which installs the tarball with `bun add -g` for a non-root user, starts a privileged container (never `--network host`), and enables lingering as root. `worker init --non-interactive` writes the markdown workspace without the license bypass; the suite adds `DEVINTERN_SKIP_LICENSE_CHECK=1` to the workspace `.env` only for the success path. `expect` drives the interactive wizard for the in-place update. The workspace `.env` sets `TASK_TRACKER=markdown`, because the wizard reads the tracker from there and not from `[defaults].tracker`. The lingering warning uses a stub `loginctl` on `PATH` for that one install.
+- Run: `bun run --filter @devintern/e2e test:e2e:service`.
+- Prerequisites: the built CLI and a Docker daemon your user can access. No network credentials. The first run builds the image (about a minute); the suite then takes about 45 s, most of it the unit's `RestartSec=30`. The container is removed afterwards; the `devintern-e2e-systemd:local` image stays cached.

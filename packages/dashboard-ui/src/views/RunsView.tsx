@@ -1,6 +1,7 @@
 import { Fragment, useMemo, useState } from "react";
 import { ChevronDown, ChevronLeft, ChevronRight, CornerDownRight } from "lucide-react";
 
+import { OutcomeClassBadge } from "@/components/OutcomeClassBadge";
 import { RunResult } from "@/components/RunResult";
 import { EmptyState, FilterSelect, StatusBadge } from "@/components/shared";
 import { TicketKey } from "@/components/TicketKey";
@@ -14,9 +15,15 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { usePoll } from "@/lib/api";
-import type { RunOrigin, RunRecord, RunStatus, RunsResponse } from "@/lib/api";
+import type { RunOrigin, RunOutcomeClass, RunRecord, RunStatus, RunsResponse } from "@/lib/api";
 import { groupRunAttempts } from "@/lib/run-groups";
 import { formatRunOrigin } from "@/lib/run-origin";
+import {
+  OUTCOME_CLASSES,
+  OUTCOME_CLASS_META,
+  isUnsuccessfulRun,
+  runCause,
+} from "@/lib/run-outcome";
 import { runPrHref, runWorkLink } from "@/lib/run-work";
 import { cn, formatDuration, formatPastTime } from "@/lib/utils";
 
@@ -45,10 +52,19 @@ const ORIGIN_FILTERS: (RunOrigin | "all")[] = [
   "local",
 ];
 
+const CLASS_FILTERS: (RunOutcomeClass | "all")[] = ["all", ...OUTCOME_CLASSES];
+
 /** Paginated, filterable list of worker runs. */
-export function RunsView({ onOpenRun }: { onOpenRun: (id: number) => void }) {
+export function RunsView({
+  onOpenRun,
+  initialOutcomeClass = "all",
+}: {
+  onOpenRun: (id: number) => void;
+  initialOutcomeClass?: RunOutcomeClass | "all";
+}) {
   const [status, setStatus] = useState<RunStatus | "all">("all");
   const [origin, setOrigin] = useState<RunOrigin | "all">("all");
+  const [outcomeClass, setOutcomeClass] = useState<RunOutcomeClass | "all">(initialOutcomeClass);
   const [page, setPage] = useState(0);
 
   const url = useMemo(() => {
@@ -58,8 +74,9 @@ export function RunsView({ onOpenRun }: { onOpenRun: (id: number) => void }) {
     });
     if (status !== "all") params.set("status", status);
     if (origin !== "all") params.set("origin", origin);
+    if (outcomeClass !== "all") params.set("outcomeClass", outcomeClass);
     return `/api/runs?${params}`;
-  }, [status, origin, page]);
+  }, [status, origin, outcomeClass, page]);
 
   const { data, error } = usePoll<RunsResponse>(url);
   const totalPages = data ? Math.max(1, Math.ceil(data.total / PAGE_SIZE)) : 1;
@@ -83,6 +100,16 @@ export function RunsView({ onOpenRun }: { onOpenRun: (id: number) => void }) {
           formatLabel={(option) => (option === "all" ? "all" : formatRunOrigin(option))}
           onChange={(next) => {
             setOrigin(next);
+            setPage(0);
+          }}
+        />
+        <FilterSelect
+          label="Class"
+          options={CLASS_FILTERS}
+          value={outcomeClass}
+          formatLabel={(option) => (option === "all" ? "all" : OUTCOME_CLASS_META[option].label)}
+          onChange={(next) => {
+            setOutcomeClass(next);
             setPage(0);
           }}
         />
@@ -158,8 +185,52 @@ function hasResultLink(run: RunRecord): boolean {
   return Boolean(run.ticketKey) || run.prNumber !== undefined || Boolean(runPrHref(run));
 }
 
+/** Whether a run shows an outcome class badge with its cause underneath. */
+function classifiedRun(run: RunRecord): run is RunRecord & { outcomeClass: RunOutcomeClass } {
+  return run.outcomeClass !== undefined && isUnsuccessfulRun(run);
+}
+
+/**
+ * A classified run: the class badge, then the cause as a secondary line
+ * (`verify: remote branch … not found`), plus any PR link.
+ */
+function ClassifiedOutcome({
+  run,
+  wrap,
+}: {
+  run: RunRecord & { outcomeClass: RunOutcomeClass };
+  wrap: boolean;
+}) {
+  const cause = runCause(run);
+  return (
+    <span className="flex min-w-0 flex-col items-start gap-1">
+      <span className="flex min-w-0 items-center gap-2">
+        <OutcomeClassBadge outcomeClass={run.outcomeClass} />
+        {hasResultLink(run) ? (
+          <span className="shrink-0">
+            <RunResult run={run} />
+          </span>
+        ) : null}
+      </span>
+      {cause ? (
+        <span
+          className={cn(
+            "max-w-full min-w-0 text-[0.8125rem]",
+            wrap ? "line-clamp-2" : "truncate",
+            OUTCOME_TONE[run.status] ?? "text-muted-foreground",
+          )}
+          title={cause}
+        >
+          {cause}
+        </span>
+      ) : null}
+    </span>
+  );
+}
+
 /** Outcome reason for non-successful runs, live step for running ones, plus any PR link. */
 function RunOutcome({ run, wrap = false }: { run: RunRecord; wrap?: boolean }) {
+  if (classifiedRun(run)) return <ClassifiedOutcome run={run} wrap={wrap} />;
   const reason =
     run.status === "in_progress"
       ? run.step
@@ -438,6 +509,7 @@ export function RunsTable({
           const isOpen = expanded.has(group.key);
           const showOutcome =
             hasResultLink(run) ||
+            classifiedRun(run) ||
             (run.status === "in_progress"
               ? Boolean(run.step)
               : run.status !== "succeeded" && Boolean(run.outcomeReason));
@@ -497,7 +569,8 @@ export function RunsTable({
                             {formatStarted(attempt.startedAt, now)}
                           </span>
                         </div>
-                        {attempt.status !== "succeeded" && attempt.outcomeReason ? (
+                        {(attempt.status !== "succeeded" && attempt.outcomeReason) ||
+                        classifiedRun(attempt) ? (
                           <RunOutcome run={attempt} wrap />
                         ) : null}
                       </div>

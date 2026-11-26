@@ -71,6 +71,8 @@ jobs:
       # still bakes the analytics key into the bundle.
       POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}
       POSTHOG_HOST: ${{ vars.POSTHOG_HOST || secrets.POSTHOG_HOST }}
+      # Release bundles ignore DEVINTERN_SKIP_LICENSE_CHECK / DEVINTERN_API_BASE.
+      DEVINTERN_RELEASE_BUILD: "1"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -128,6 +130,8 @@ jobs:
     env:
       POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}
       POSTHOG_HOST: ${{ vars.POSTHOG_HOST || secrets.POSTHOG_HOST }}
+      # Release bundles ignore DEVINTERN_SKIP_LICENSE_CHECK / DEVINTERN_API_BASE.
+      DEVINTERN_RELEASE_BUILD: "1"
     steps:
       - name: Checkout
         uses: actions/checkout@v4

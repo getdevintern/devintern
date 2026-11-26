@@ -1,0 +1,5 @@
+[test]
+# guard-run-env.ts drops the DevIntern run-lineage variables so tests that
+# create tickets through the engine never append stub records to a live run's
+# outputs file when `bun test` runs inside a DevIntern agent run.
+preload = ["./guard-run-env.ts"]

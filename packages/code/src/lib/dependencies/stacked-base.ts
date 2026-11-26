@@ -116,3 +116,27 @@ export function takeStackBaseFromEnv(
   }
   return applied.stackedOn;
 }
+
+/** Set once this run moved off its stack base (see {@link releaseStackBase}). */
+let stackReleased = false;
+
+/**
+ * The run's stack base merged or vanished mid-run and the run now targets
+ * another branch: stop claiming the stack. Clears {@link STACKED_ON_ENV} and
+ * makes {@link isStackBaseReleased} true so the PR body omits the "Stacked
+ * on" note that the description marker would otherwise add.
+ */
+export function releaseStackBase(env: Record<string, string | undefined> = process.env): void {
+  stackReleased = true;
+  delete env[STACKED_ON_ENV];
+}
+
+/** Whether {@link releaseStackBase} ran for the current task. */
+export function isStackBaseReleased(): boolean {
+  return stackReleased;
+}
+
+/** Forget a previous task's release (each task starts stacked as acquired). */
+export function resetStackBaseRelease(): void {
+  stackReleased = false;
+}

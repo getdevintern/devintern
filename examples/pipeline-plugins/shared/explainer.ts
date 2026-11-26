@@ -11,7 +11,7 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, isAbsolute, join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { untrustedContentBlock } from "@getdevintern/code/pipeline";
 import type {
@@ -21,8 +21,13 @@ import type {
   TaskStepResult,
 } from "@getdevintern/code/pipeline";
 
+import { resolvePromptPath } from "./prompt-path";
+
 export interface ExplainerOptions {
-  /** Markdown prompt file, relative to `context.workingDir`. */
+  /**
+   * Markdown prompt file. Relative paths resolve against `context.pipelineDir`
+   * (the pipeline file's directory), or `context.workingDir` when it is `null`.
+   */
   promptFile?: string;
   /** Artifact filename written under `context.outputDir`. */
   outputName?: string;
@@ -43,12 +48,14 @@ export function evidenceFromResults(results: TaskStepRecord[]): string {
     .slice(-MAX_EVIDENCE_CHARS);
 }
 
-function readPrompt(options: ExplainerOptions, workingDir: string): string | undefined {
-  if (typeof options.promptFile !== "string" || !options.promptFile.trim()) return undefined;
-  const file = isAbsolute(options.promptFile)
-    ? options.promptFile
-    : join(workingDir, options.promptFile);
-  return existsSync(file) ? readFileSync(file, "utf8") : undefined;
+type PromptLookup = { instructions: string } | { missing: string | undefined };
+
+function readPrompt(options: ExplainerOptions, context: PipelineContext): PromptLookup {
+  if (typeof options.promptFile !== "string" || !options.promptFile.trim()) {
+    return { missing: undefined };
+  }
+  const file = resolvePromptPath(options.promptFile, context);
+  return existsSync(file) ? { instructions: readFileSync(file, "utf8") } : { missing: file };
 }
 
 /** Build a `StepDefinition` for one explainer variant. */
@@ -67,13 +74,15 @@ export function createExplainerDefinition(name: string): StepDefinition {
         async run(context: PipelineContext): Promise<TaskStepResult> {
           const resultPath = join(context.outputDir, outputName);
           try {
-            const instructions = readPrompt(options, context.workingDir);
-            if (!instructions) {
+            const lookup = readPrompt(options, context);
+            if (!("instructions" in lookup)) {
+              const where = lookup.missing ? ` at ${lookup.missing}` : " (no promptFile set)";
               return {
                 kind: "warn",
-                reason: `${name}: prompt file not found; skipping the explanation artifact.`,
+                reason: `${name}: prompt file not found${where}; skipping the explanation artifact.`,
               };
             }
+            const { instructions } = lookup;
 
             const latest = [
               ...new Map(

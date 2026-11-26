@@ -22,13 +22,14 @@ import {
 } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { previewRunReport, submitReport } from "@/lib/api";
-import type { ReportPreview, RunRecord, RunStatus } from "@/lib/api";
+import { previewReport, submitReport } from "@/lib/api";
+import type { ReportDraft, ReportPreview, RunRecord, RunStatus } from "@/lib/api";
+import { OUTCOME_CLASS_META, runCause, workStatusText } from "@/lib/run-outcome";
 import { formatDuration } from "@/lib/utils";
 import {
   canPreview,
   canSend,
-  INITIAL_REPORT_FLOW,
+  initialReportFlow,
   isReportBusy,
   isReportDraftDirty,
   reportFlowReducer,
@@ -433,14 +434,39 @@ const STEP_TITLES: Record<ReportFlowState["phase"]["step"], string> = {
   saved: "Report saved locally",
 };
 
+/** The dialog's subtitle for a step, with or without an attached run. */
+export function reportStepDescription(
+  step: ReportFlowState["phase"]["step"],
+  runId: number | null,
+): string {
+  if (step === "compose") {
+    return runId === null
+      ? "File a DevIntern bug report with your environment and recent worker logs. To attach a run, open it under Runs and choose Report a problem. You will see exactly what is sent before anything leaves this machine."
+      : `File a DevIntern bug report for run #${runId}. You will see exactly what is sent before anything leaves this machine.`;
+  }
+  if (step === "preview") {
+    return "Nothing has been sent yet. This is the redacted payload Send will submit.";
+  }
+  return runId === null ? "No run attached" : `Run #${runId}`;
+}
+
 /**
  * One open-to-close session of the dialog. Mounted only while the dialog is
  * open, so a confirmed close discards the draft and reopening starts fresh.
  */
-function ReportSession({ run, onClose }: { run: RunRecord; onClose: () => void }) {
-  const [state, dispatch] = useReducer(reportFlowReducer, INITIAL_REPORT_FLOW);
+function ReportSession({
+  runId,
+  initialDraft,
+  onClose,
+}: {
+  runId: number | null;
+  initialDraft?: Partial<ReportDraft>;
+  onClose: () => void;
+}) {
+  const [state, dispatch] = useReducer(reportFlowReducer, initialDraft, initialReportFlow);
   const busy = isReportBusy(state);
-  const dirty = isReportDraftDirty(state);
+  // A pre-filled draft only counts as dirty once the user edits it.
+  const dirty = isReportDraftDirty(state, initialReportFlow(initialDraft).draft);
 
   const requestClose = () => {
     if (busy) return;
@@ -451,7 +477,7 @@ function ReportSession({ run, onClose }: { run: RunRecord; onClose: () => void }
     if (!canPreview(state)) return;
     dispatch({ type: "previewStart" });
     try {
-      dispatch({ type: "previewDone", preview: await previewRunReport(run.id, state.draft) });
+      dispatch({ type: "previewDone", preview: await previewReport(runId, state.draft) });
     } catch (cause: unknown) {
       dispatch({
         type: "previewFailed",
@@ -504,13 +530,7 @@ function ReportSession({ run, onClose }: { run: RunRecord; onClose: () => void }
       </Button>
       <DialogHeader>
         <DialogTitle>{STEP_TITLES[step]}</DialogTitle>
-        <DialogDescription>
-          {step === "compose"
-            ? `File a DevIntern bug report for run #${run.id}. You will see exactly what is sent before anything leaves this machine.`
-            : step === "preview"
-              ? "Nothing has been sent yet. This is the redacted payload Send will submit."
-              : `Run #${run.id}`}
-        </DialogDescription>
+        <DialogDescription>{reportStepDescription(step, runId)}</DialogDescription>
       </DialogHeader>
       <ReportDialogBody
         state={state}
@@ -523,8 +543,65 @@ function ReportSession({ run, onClose }: { run: RunRecord; onClose: () => void }
   );
 }
 
+/**
+ * The bug-report dialog, for one run or (with a null run id) for the worker as
+ * a whole. The caller owns the trigger.
+ */
+export function ReportDialog({
+  open,
+  onOpenChange,
+  runId,
+  initialDraft,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  runId: number | null;
+  /** Pre-filled title/description (a DevIntern failure's stage and cause). */
+  initialDraft?: Partial<ReportDraft>;
+}) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      {open ? (
+        <ReportSession
+          runId={runId}
+          initialDraft={initialDraft}
+          onClose={() => onOpenChange(false)}
+        />
+      ) : null}
+    </Dialog>
+  );
+}
+
+/**
+ * Draft for reporting a run whose outcome class is `internal`: the failing
+ * stage, the redacted cause, and the work status, so the report says what
+ * broke without the user retyping it. Other runs start with an empty draft.
+ */
+export function reportDraftForRun(run: RunRecord): Partial<ReportDraft> | undefined {
+  if (run.outcomeClass !== "internal") return undefined;
+  const stage = run.failureStage ?? "a pipeline step";
+  const cause = runCause(run);
+  const work = workStatusText(run);
+  return {
+    title: `${stage} failed in run #${run.id}`.slice(0, 200),
+    description: [
+      `Expected: run #${run.id} to finish; DevIntern classified the failure as "${OUTCOME_CLASS_META.internal.label}".`,
+      `Instead: the ${stage} step failed${cause ? `: ${cause}` : "."}`,
+      ...(work ? [`${work}.`] : []),
+      "",
+      "Steps to reproduce / anything else:",
+    ].join("\n"),
+  };
+}
+
 /** "Report a problem" action and dialog for one run. */
-export function ReportProblem({ run }: { run: RunRecord }) {
+export function ReportProblem({
+  run,
+  label = "Report a problem",
+}: {
+  run: RunRecord;
+  label?: string;
+}) {
   const [open, setOpen] = useState(false);
   if (run.status === "in_progress") return null;
   const failed = FAILED_STATUSES.includes(run.status);
@@ -534,15 +611,18 @@ export function ReportProblem({ run }: { run: RunRecord }) {
         variant={failed ? "outline" : "ghost"}
         onClick={() => setOpen(true)}
         title={failed ? undefined : "Report incorrect behavior in this run"}
-        aria-label="Report a problem"
+        aria-label={label}
         className="max-sm:px-2.5"
       >
         <Bug />
-        <span className="max-sm:sr-only">Report a problem</span>
+        <span className="max-sm:sr-only">{label}</span>
       </Button>
-      <Dialog open={open} onOpenChange={setOpen}>
-        {open ? <ReportSession run={run} onClose={() => setOpen(false)} /> : null}
-      </Dialog>
+      <ReportDialog
+        open={open}
+        onOpenChange={setOpen}
+        runId={run.id}
+        initialDraft={reportDraftForRun(run)}
+      />
     </>
   );
 }

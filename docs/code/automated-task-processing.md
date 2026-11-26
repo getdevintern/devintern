@@ -4,7 +4,7 @@ description: "Choose when the worker picks up tasks and keep unattended runs hea
 section: "Automation"
 order: 5
 sidebarHidden: true
-dateModified: 2026-11-18
+dateModified: 2026-11-26
 ---
 
 # Running the Worker Unattended
@@ -59,5 +59,7 @@ The startup banner shows the windows, timezone, and whether pickup is open. Each
 ## Keeping unattended runs healthy
 
 - **Git push over SSH:** the service has no interactive SSH agent. Point the host at a key in `~/.ssh/config` (`Host github.com` / `IdentityFile ~/.ssh/your_key`), or use an HTTPS remote with `GITHUB_TOKEN`.
+- **Git over HTTPS:** for `https://github.com` remotes the worker hands `GITHUB_TOKEN` to git itself, so a fresh machine needs no credential helper (GitLab remotes use `GITLAB_CODE_HOST_TOKEN` the same way). If git already has a credential helper for the host, such as `gh auth setup-git` or a system keychain, that helper is used instead. `devintern worker doctor` fails the repository check when the API accepts the token but git cannot read the repository, and says whether the token lacks `Contents` access or your own helper is the one failing.
+- **Git commit identity:** a host with no `git config user.name`/`user.email` still delivers. Commits use the `git_author_name`/`git_author_email` workspace setting, else the `GITHUB_TOKEN` user, else a generic `DevIntern` identity; nothing is written to git config. `devintern worker doctor` warns when only the generic identity is left. See [Commit identity](./configuration.md#commit-identity). If a commit still fails for a host reason (no identity, broken commit signing), the run fails at once with the fix in the log and the ticket comment; the agent is not asked to fix it.
 - **Leftover processes:** dev servers and watchers the agent starts are stopped when each run ends, times out, or is interrupted. No setup needed.
 - **Hand-written service units:** pin `PATH` to include the directory with `bun` (`dirname "$(which bun)"`), or the service fails with `bun: command not found`.

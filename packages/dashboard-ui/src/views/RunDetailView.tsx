@@ -25,11 +25,14 @@ import { Markdown } from "@/lib/markdown";
 import { automationHash } from "@/lib/routes";
 import { dropHeadline, runReport } from "@/lib/run-report";
 import type { RunReport } from "@/lib/run-report";
-import type { RunDetailResponse, RunRecord } from "@/lib/api";
+import type { RunDetailResponse, RunLineageParent, RunRecord } from "@/lib/api";
 import { formatRunOrigin } from "@/lib/run-origin";
+import { isUnsuccessfulRun, runCause } from "@/lib/run-outcome";
 import { runPrHref, runWorkLink } from "@/lib/run-work";
 import { cn, formatDuration, formatTime } from "@/lib/utils";
 import { attemptInfo, runTitle, statusTone } from "./run-detail/helpers";
+import { FailureBanner } from "./run-detail/FailureBanner";
+import { SourcedFrom, SpawnedWorkSection } from "./run-detail/Lineage";
 import { Reference } from "./run-detail/Reference";
 import { ReportProblem } from "./run-detail/ReportProblem";
 import { RetryAuditList, RetryConfirm, RetryFeedback } from "./run-detail/RetryParts";
@@ -64,6 +67,11 @@ const PANEL_ICONS: Record<StatusTone, LucideIcon> = {
   neutral: Info,
 };
 
+/** Whether the failure banner renders for this run (see `FailureBanner`). */
+function bannerShows(run: RunRecord): boolean {
+  return isUnsuccessfulRun(run) && Boolean(run.outcomeClass ?? run.workStatus);
+}
+
 /** Whether the Report card, not the outcome panel, carries this run's headline. */
 function reportLeadsHeadline(run: RunRecord, report?: RunReport): boolean {
   return Boolean(report?.headline) && run.status === "succeeded" && !run.outcomeReason;
@@ -86,15 +94,19 @@ function OutcomePanel({
   const prHref = runPrHref(run);
   // A succeeded report run leads its Report card with the headline instead.
   const leads = reportLeadsHeadline(run, report);
+  // The failure banner already states a classified run's cause.
+  const bannerCause = bannerShows(run) ? runCause(run) : undefined;
   const headline = leads
     ? undefined
-    : (run.outcomeReason ??
-      report?.headline ??
-      (run.status === "succeeded"
-        ? prHref && run.prNumber !== undefined
-          ? `Pull request #${run.prNumber} opened`
-          : "Completed"
-        : undefined));
+    : run.outcomeReason !== undefined && run.outcomeReason === bannerCause
+      ? undefined
+      : (run.outcomeReason ??
+        report?.headline ??
+        (run.status === "succeeded"
+          ? prHref && run.prNumber !== undefined
+            ? `Pull request #${run.prNumber} opened`
+            : "Completed"
+          : undefined));
   const notRetriable =
     data.retry.eligible || run.status === "succeeded" ? undefined : data.retry.reason;
   const quiet = tone === "success";
@@ -284,11 +296,26 @@ function Fact({ label, children }: { label: string; children: React.ReactNode })
   );
 }
 
-function Facts({ run, attempt, total }: { run: RunRecord; attempt?: number; total?: number }) {
+function Facts({
+  run,
+  attempt,
+  total,
+  parent,
+}: {
+  run: RunRecord;
+  attempt?: number;
+  total?: number;
+  parent?: RunLineageParent | null;
+}) {
   const prHref = runPrHref(run);
   return (
     <dl className="grid grid-cols-2 gap-x-4 gap-y-3 lg:grid-cols-1 lg:gap-y-2.5">
       <Fact label="Origin">{formatRunOrigin(run.origin)}</Fact>
+      {parent ? (
+        <Fact label="Sourced from">
+          <SourcedFrom parent={parent} />
+        </Fact>
+      ) : null}
       {run.tracker ? <Fact label="Tracker">{run.tracker}</Fact> : null}
       {run.harness ? <Fact label="Harness">{run.harness}</Fact> : null}
       {attempt !== undefined ? (
@@ -415,6 +442,7 @@ function RunHeader({
   const prHref = runPrHref(run);
   return (
     <header className="space-y-4">
+      <FailureBanner run={run} canReport={!isDemoMode()} />
       <div className="flex flex-wrap items-start gap-x-6 gap-y-2">
         <div className="min-w-0 flex-1 basis-52 sm:basis-80">
           <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
@@ -467,7 +495,10 @@ function RunHeader({
               </a>
             </Button>
           ) : null}
-          {isDemoMode() ? null : <ReportProblem run={run} />}
+          {/* The banner carries a pre-filled report action for DevIntern problems. */}
+          {isDemoMode() || (bannerShows(run) && run.outcomeClass === "internal") ? null : (
+            <ReportProblem run={run} />
+          )}
         </div>
       </div>
 
@@ -527,10 +558,11 @@ export function RunDetailView({ runId }: { runId: number; onBack?: () => void })
                   showsHeadline={!run.outcomeReason}
                 />
               ) : null}
+              <SpawnedWorkSection spawned={data.lineage?.spawned} />
               <Timeline run={run} stages={data.stages} compact={Boolean(report)} />
             </div>
             <aside aria-label="Run facts" className="rd-rail space-y-6">
-              <Facts run={run} attempt={attempt} total={total} />
+              <Facts run={run} attempt={attempt} total={total} parent={data.lineage?.parent} />
               <RetryAuditList entries={data.retry.audit} />
             </aside>
             <div className="rd-reference-area min-w-0">

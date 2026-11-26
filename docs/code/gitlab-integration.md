@@ -5,7 +5,7 @@ description: "Implement GitLab issues and experimentally create merge requests o
 section: "Automation"
 order: 6
 sidebarHidden: true
-dateModified: 2026-11-18
+dateModified: 2026-11-26
 tags: ["gitlab", "gitlab-self-hosted", "devintern/code", "integration"]
 ---
 
@@ -81,7 +81,7 @@ GitLab code-host support is **experimental**. Enable it with a separate code-hos
 | ----------------------------------------- | ------------------------------------------------------------------------------------------------- |
 | `DEVINTERN_EXPERIMENTAL_GITLAB_CODE_HOST` | `true` to enable MR creation and follow-up                                                         |
 | `GITLAB_CODE_HOST_URL`                    | Instance root, including any relative path (omit for GitLab.com)                                   |
-| `GITLAB_CODE_HOST_TOKEN`                  | Personal, project, or group token with API access. `GITLAB_TOKEN` is reused only when `TASK_TRACKER=gitlab` and `GITLAB_BASE_URL` is the same instance |
+| `GITLAB_CODE_HOST_TOKEN`                  | Personal, project, or group token with API access. `GITLAB_TOKEN` is reused only when `TASK_TRACKER=gitlab` and `GITLAB_BASE_URL` is the same instance. Also used for git over HTTPS when git has no credential helper for the instance |
 | `GITLAB_WEBHOOK_ADMIN_TOKEN`              | Optional Maintainer/Owner token used only to create relay hooks                                    |
 | `GITLAB_CODE_HOST_ALIASES`                | Comma-separated SSH host aliases that differ from the browser hostname                             |
 | `GITLAB_CODE_HOST_CA_FILE`                | PEM bundle for an internal certificate authority (do not disable TLS verification)                |

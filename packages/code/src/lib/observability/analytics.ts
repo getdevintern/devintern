@@ -62,10 +62,14 @@ export type SetupFailureReason =
   | "tracker_setup_incomplete"
   | "tracker_not_pollable"
   | "workspace_error"
-  | "workspace_tracker_mismatch";
+  | "workspace_tracker_mismatch"
+  | "non_interactive_input";
+
+/** How `devintern worker init` ran: the guided wizard or flag-driven setup. */
+export type WorkerInitSource = "wizard" | "non_interactive";
 
 /** Readiness check outcomes reported by doctor and the init summary. */
-export type ReadinessCheckStatus = "ok" | "warn" | "fail";
+export type ReadinessCheckStatus = "ok" | "warn" | "action" | "fail";
 /** A structural subset of readiness.ts's ReadinessCheck (no import cycle). */
 export interface ReadinessCheckLike {
   id: string;
@@ -80,7 +84,8 @@ export type ServiceInstallOutcome =
   | "failed"
   | "skipped"
   | "existing"
-  | "unavailable";
+  | "unavailable"
+  | "not_ready";
 export type GitHubAppOutcome = "connected" | "existing" | "skipped" | "unavailable";
 export type LoginOutcome = "succeeded" | "failed";
 
@@ -472,8 +477,8 @@ export function trackInteractiveTaskRun(props: {
 }
 
 /** Emit when `devintern worker init` starts. */
-export function trackWorkerInitStarted(): void {
-  void track("worker_init_started", { cli_version: CLI_VERSION, os: process.platform });
+export function trackWorkerInitStarted(source: WorkerInitSource = "wizard"): void {
+  void track("worker_init_started", { cli_version: CLI_VERSION, os: process.platform, source });
 }
 
 /** Emit when the worker wizard finishes, with per-step outcome categories. */
@@ -482,8 +487,13 @@ export function trackWorkerInitCompleted(props: {
   relayConnect: RelayConnectOutcome;
   serviceInstall: ServiceInstallOutcome;
   githubApp: GitHubAppOutcome;
+  source?: WorkerInitSource;
+  /** Non-interactive runs complete even when a check fails; this records which. */
+  outcome?: "succeeded" | "action_required" | "failed";
 }): void {
   void track("worker_init_completed", {
+    source: props.source ?? "wizard",
+    outcome: props.outcome,
     cli_version: CLI_VERSION,
     os: process.platform,
     tracker: props.tracker,
@@ -494,8 +504,16 @@ export function trackWorkerInitCompleted(props: {
 }
 
 /** Emit when `devintern worker init` aborts before completing. */
-export function trackWorkerInitFailed(reason: SetupFailureReason): void {
-  void track("worker_init_failed", { cli_version: CLI_VERSION, os: process.platform, reason });
+export function trackWorkerInitFailed(
+  reason: SetupFailureReason,
+  source: WorkerInitSource = "wizard",
+): void {
+  void track("worker_init_failed", {
+    cli_version: CLI_VERSION,
+    os: process.platform,
+    reason,
+    source,
+  });
 }
 
 /**

@@ -4,7 +4,7 @@ sidebarLabel: "Delegate Tasks"
 description: "Use when a coding agent or script should hand agreed implementation work to a running DevIntern worker with `devintern worker add`, without creating a tracker ticket."
 section: "Automation"
 order: 1.5
-dateModified: 2026-11-20
+dateModified: 2026-11-25
 tags: ["worker", "delegation", "worker-add", "agents", "automation", "ssh", "remote"]
 ---
 
@@ -95,6 +95,7 @@ records, and the [dashboard](dashboard.md), and start on a `feature/local-<slug>
 | `--after <taskKey>`        | Start only after this ad-hoc task (same repo) finishes; repeatable. See [Dependent tasks](./delegation-dependencies.md) |
 | `--stack`                  | Dependency mode `stacked`: start on an unmerged dependency's branch once it succeeded (overrides `[defaults].dependency_mode`) |
 | `--wait-merge`             | Dependency mode `merged`: wait until every dependency's PR merged (overrides `[defaults].dependency_mode`)                      |
+| `--parent-run <runId>`     | Record the run that delegated this task (default: `DEVINTERN_RUN_ID`; see [Run lineage](#run-lineage)) |
 | `--resume <taskKey>`       | Re-queue a settled ad-hoc task under its existing key; it continues the prior branch unless that branch is gone or its PR was merged or closed |
 | `--wait`                   | Block until the run finishes; exit `0` on success, `1` on failure, `3` if the task was [cancelled](#cancel-a-pending-task) first |
 | `--wait-timeout <seconds>` | Give up waiting after this long (default 21600 = 6h; `0` waits without a limit)                                                 |
@@ -218,6 +219,16 @@ window. A task that depends on a cancelled one stays blocked.
 ## Resuming and interrupted tasks (`--resume`)
 
 Re-queue a failed or interrupted task with `--resume <taskKey>`; it continues on the same branch and PR. For automatic resume after a worker restart, concurrency, and retries, see [Wait for and Resume Delegated Tasks](./delegation-runs.md#resuming-and-interrupted-tasks---resume).
+
+## Run lineage
+
+Inside a DevIntern agent run, the worker sets `DEVINTERN_RUN_ID` (the run's ID) and `DEVINTERN_RUN_OUTPUTS` (a file under `~/.devintern/state/`). A `worker add` in that run records the run as the task's source, so the dashboard shows **Sourced from Run #N** on the task's run and lists the task under **Spawned work** on the delegating run. Use `--parent-run <runId>` to name a different source; it overrides `DEVINTERN_RUN_ID`. Runs that act on an existing PR (CI fix, auto-merge, conflict resolution, review feedback) automatically link to the run that opened the PR.
+
+Your own tools can report work they create by appending one JSON line per item to `$DEVINTERN_RUN_OUTPUTS`. DevIntern reads the file when the run ends and skips any line it cannot parse:
+
+```bash
+echo '{"v":1,"kind":"tracker_issue","tracker":"jira","key":"DEV-210","url":"https://acme.atlassian.net/browse/DEV-210","title":"Explain workspace setup"}' >> "$DEVINTERN_RUN_OUTPUTS"
+```
 
 ## Delegate from another machine
 

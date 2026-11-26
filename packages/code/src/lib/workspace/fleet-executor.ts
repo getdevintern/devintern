@@ -26,6 +26,8 @@ import { RunStore } from "../state/run-recorder";
 import { resolveRunIdentity } from "../task/run-identity";
 import type { StackBase } from "../dependencies/gate";
 import { encodeStackBaseEnv, STACKED_ON_ENV } from "../dependencies/stacked-base";
+import { worktreeKeepReason } from "../utils/worktree-keep";
+import { failureFromError } from "../state/run-outcome";
 import type { TrackerDependencyGate } from "./tracker-dependency-gate";
 
 /** Cap the description snapshot read from an ad-hoc task file. */
@@ -46,6 +48,8 @@ function recordSetupFailedRun(input: {
   /** Ad-hoc task markdown; its text becomes the run's title/description. */
   descriptionFile?: string;
   reason: string;
+  /** The setup error, for the run's outcome class. */
+  error?: unknown;
 }): void {
   let store: RunStore | undefined;
   try {
@@ -67,7 +71,9 @@ function recordSetupFailedRun(input: {
       );
       store.setRunTicket(runId, { description });
     }
-    store.finishRun(runId, "failed", input.reason);
+    store.finishRun(runId, "failed", input.reason, {
+      failure: failureFromError(input.error ?? input.reason, "worktree_setup"),
+    });
   } catch (error) {
     console.warn(
       `⚠️  could not record setup failure for ${input.taskKey}: ${(error as Error).message}`,
@@ -518,6 +524,7 @@ export function createGatedFleetTaskExecutor(
               queueClaim: options.queueClaim,
               descriptionFile: options.runOrigin === "local" ? options.taskRef : undefined,
               reason: `Worktree setup failed: ${(error as Error).message}`,
+              error,
             });
             throw error;
           }
@@ -532,7 +539,15 @@ export function createGatedFleetTaskExecutor(
 
           // A retry-gate skip is a clean outcome: no run was started, so the
           // disposable worktree holds no work to debug.
-          if (ok === true || ok === "skipped") {
+          // An escalated run also exits 0; one whose unfinished work could
+          // not be pushed marks its worktree to be kept (see preserve-work.ts).
+          const keepReason =
+            ok === true || ok === "skipped" ? await worktreeKeepReason(worktree) : undefined;
+          if (keepReason) {
+            console.warn(
+              `⚠️  ${scope} keeping worktree with ${taskKey}'s unsaved work: ${worktree} (${keepReason})`,
+            );
+          } else if (ok === true || ok === "skipped") {
             await repoManager.removeTaskWorktree(repo.name, worktree);
           } else {
             console.warn(`⚠️  ${scope} keeping worktree for debugging: ${worktree}`);

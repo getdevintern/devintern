@@ -1,10 +1,15 @@
 import { expect, test } from "bun:test";
 
 import type { RunRecord } from "@/lib/api";
+import type { NotificationListResponse } from "@/lib/api-notifications";
 import {
+  answerDemoNotifications,
+  demoNotifications,
   filterRecordedRuns,
+  isRunDetailUrl,
   isRunListUrl,
   parseSnapshotMeta,
+  pruneUnrecordedLineage,
   rebaseTimestamps,
   snapshotFile,
 } from "@/lib/demo-snapshot";
@@ -97,4 +102,125 @@ test("parses snapshot metadata", () => {
   expect(parseSnapshotMeta({ exportedAt: 5 })).toEqual({ exportedAt: 5 });
   expect(parseSnapshotMeta({ exportedAt: "5" })).toBeNull();
   expect(parseSnapshotMeta(null)).toBeNull();
+});
+
+test("recognizes run detail URLs", () => {
+  expect(isRunDetailUrl("/api/runs/30")).toBe(true);
+  expect(isRunDetailUrl("/api/runs/30/artifacts")).toBe(false);
+  expect(isRunDetailUrl("/api/runs")).toBe(false);
+});
+
+test("keeps recorded lineage inside the recording", () => {
+  const detail = {
+    run: { id: 2 },
+    lineage: {
+      parent: { runId: 99, origin: "scheduled", status: "succeeded", relation: "delegated" },
+      spawned: [
+        { kind: "delegated_task", id: 1, taskKey: "local-a", latestRunId: 3 },
+        { kind: "delegated_task", id: 2, taskKey: "local-b", latestRunId: 98 },
+        { kind: "tracker_issue", key: "DEV-1" },
+        { kind: "follow_up_run", runId: 97, origin: "ci_fix", status: "failed", startedAt: 1 },
+        { kind: "follow_up_run", runId: 3, origin: "ci_fix", status: "failed", startedAt: 1 },
+      ],
+    },
+  };
+  const pruned = pruneUnrecordedLineage(detail, new Set([2, 3])) as typeof detail;
+  expect(pruned.lineage.parent).toBeNull();
+  expect(JSON.parse(JSON.stringify(pruned.lineage.spawned))).toEqual([
+    { kind: "delegated_task", id: 1, taskKey: "local-a", latestRunId: 3 },
+    { kind: "delegated_task", id: 2, taskKey: "local-b" },
+    { kind: "tracker_issue", key: "DEV-1" },
+    { kind: "follow_up_run", runId: 3, origin: "ci_fix", status: "failed", startedAt: 1 },
+  ]);
+  // A detail without lineage (older recording) passes through unchanged.
+  expect(pruneUnrecordedLineage({ run: { id: 1 } }, new Set())).toEqual({ run: { id: 1 } });
+});
+
+const DEMO_NOW = 1_795_000_000_000;
+const DEMO_RUNS: RunRecord[] = [
+  {
+    id: 41,
+    origin: "scheduled",
+    automationId: "docs-drift",
+    status: "succeeded",
+    repo: "acme/docs",
+    startedAt: DEMO_NOW - 3_600_000,
+  },
+  {
+    id: 30,
+    origin: "error_monitor",
+    status: "escalated",
+    repo: "acme/web",
+    startedAt: DEMO_NOW - 7_200_000,
+  },
+  {
+    id: 22,
+    origin: "task",
+    taskKey: "PRD-214",
+    status: "escalated",
+    repo: "acme/web",
+    outcomeReason: "Asked for clarification",
+    startedAt: DEMO_NOW - 9_000_000,
+  },
+  {
+    id: 12,
+    origin: "task",
+    status: "succeeded",
+    repo: "acme/sdk",
+    prNumber: 92,
+    prUrl: "https://github.com/acme/sdk/pull/92",
+    startedAt: DEMO_NOW - 10_000_000,
+  },
+];
+
+test("demo notifications include a large grouped escalation and a work_spawned rollup", () => {
+  const rows = demoNotifications(DEMO_RUNS, DEMO_NOW);
+  const grouped = rows.find((row) => row.kind === "escalated" && row.count > 50);
+  expect(grouped?.runId).toBe(30);
+  expect(grouped?.severity).toBe("high");
+  const spawned = rows.find((row) => row.kind === "work_spawned");
+  // The rollup points at the run that delegated work, whose detail has lineage.
+  expect(spawned?.runId).toBe(41);
+  expect(rows.find((row) => row.kind === "escalated" && row.count === 1)?.runId).toBe(22);
+  expect(rows.some((row) => row.resolvedAt !== undefined)).toBe(true);
+  // Newest first, unique ids, every run link points at a recorded run.
+  const ids = new Set(rows.map((row) => row.id));
+  expect(ids.size).toBe(rows.length);
+  expect(rows.map((row) => row.updatedAt)).toEqual(
+    rows.map((row) => row.updatedAt).sort((a, b) => b - a),
+  );
+  const recorded = new Set(DEMO_RUNS.map((run) => run.id));
+  for (const link of rows.flatMap((row) => row.links)) {
+    if (link.runId !== undefined) expect(recorded.has(link.runId)).toBe(true);
+  }
+});
+
+test("demo notifications still render without recorded runs", () => {
+  const rows = demoNotifications([], DEMO_NOW);
+  expect(rows.some((row) => row.count > 50)).toBe(true);
+  expect(rows.every((row) => row.runId === undefined)).toBe(true);
+});
+
+test("answers notification reads with the server's filters", () => {
+  const rows = demoNotifications(DEMO_RUNS, DEMO_NOW);
+  const needsYou = answerDemoNotifications(
+    rows,
+    "/api/notifications?unresolved=true&severity=high&limit=2",
+  ) as NotificationListResponse;
+  expect(needsYou.notifications).toHaveLength(2);
+  expect(needsYou.total).toBe(
+    rows.filter((row) => row.severity === "high" && row.resolvedAt === undefined).length,
+  );
+  expect(needsYou.notifications.every((row) => row.severity === "high")).toBe(true);
+  const all = answerDemoNotifications(rows, "/api/notifications") as NotificationListResponse;
+  expect(all.total).toBe(rows.length);
+  const counts = answerDemoNotifications(rows, "/api/notifications/unread-count");
+  expect(counts).toEqual({
+    unread: rows.filter((row) => row.readAt === undefined && row.resolvedAt === undefined).length,
+    unreadHigh: rows.filter(
+      (row) => row.readAt === undefined && row.resolvedAt === undefined && row.severity === "high",
+    ).length,
+  });
+  expect(answerDemoNotifications(rows, "/api/notifications/mutes")).toEqual({ mutes: [] });
+  expect(answerDemoNotifications(rows, "/api/runs")).toBeNull();
 });

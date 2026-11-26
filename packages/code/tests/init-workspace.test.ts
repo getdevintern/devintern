@@ -115,7 +115,10 @@ describe("init wizard in a checkout with an origin", () => {
       cwd: checkout,
       log: silentLog,
     });
-    expect(readFileSync(result.envPath, "utf8")).toContain("MARKDOWN_TASKS_DIR=./todo");
+    // Saved absolute, resolved from the checkout the wizard ran in.
+    expect(readFileSync(result.envPath, "utf8")).toContain(
+      `MARKDOWN_TASKS_DIR=${join(checkout, "todo")}`,
+    );
     expect(existsSync(join(checkout, ".devintern-code"))).toBe(false);
   });
 });

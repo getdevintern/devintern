@@ -189,6 +189,39 @@ describe("dashboard API", () => {
     expect((none.body as { total: number }).total).toBe(0);
   });
 
+  test("handleRuns filters by outcome class and exposes the outcome fields", () => {
+    const store = new RunStore(dbPath);
+    const internal = store.createRun({ origin: "local", taskKey: "local-a" });
+    store.finishRun(internal, "escalated", "verify: Remote branch feature/x not found", {
+      failure: {
+        outcomeClass: "internal",
+        stage: "verify",
+        cause: "Remote branch feature/x not found",
+      },
+      work: { status: "saved", ref: "feature/local-a" },
+    });
+    const hold = store.createRun({ origin: "auto_merge", prNumber: 3 });
+    store.finishRun(hold, "escalated", "matches deny pattern a/**", {
+      failure: { outcomeClass: "review_hold", stage: "auto_merge" },
+    });
+    store.close();
+
+    const response = handleRuns(data, new URLSearchParams("outcomeClass=internal"));
+    const body = response.body as { runs: Record<string, unknown>[]; total: number };
+    expect(body.total).toBe(1);
+    expect(body.runs[0]).toMatchObject({
+      id: internal,
+      outcomeClass: "internal",
+      failureStage: "verify",
+      failureCause: "Remote branch feature/x not found",
+      workStatus: "saved",
+      workRef: "feature/local-a",
+    });
+    const detail = handleRunDetail(data, String(hold)).body as { run: Record<string, unknown> };
+    expect(detail.run).toMatchObject({ outcomeClass: "review_hold", failureStage: "auto_merge" });
+    expect(handleRuns(data, new URLSearchParams("outcomeClass=bogus")).status).toBe(400);
+  });
+
   test("handleRuns rejects invalid params", () => {
     expect(handleRuns(data, new URLSearchParams("limit=0")).status).toBe(400);
     expect(handleRuns(data, new URLSearchParams("limit=9999")).status).toBe(400);
@@ -1209,6 +1242,7 @@ describe("dashboard server", () => {
 
       const health = await fetch(`${base}/api/health`);
       expect(health.status).toBe(200);
+      expect(await health.json()).toMatchObject({ status: "ok", version: expect.any(String) });
 
       const runs = (await (await fetch(`${base}/api/runs`)).json()) as { total: number };
       expect(runs.total).toBe(1);

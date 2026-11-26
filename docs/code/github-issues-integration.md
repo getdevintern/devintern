@@ -22,13 +22,13 @@ For PR review automation, use the [worker](./worker.md) with the [relay](./relay
 
 ## Setup
 
-Set in this repository's env file (`~/.devintern/env/<repo>.env`, created by `devintern init`):
+Set in the workspace `.env` (`~/.devintern/.env`, written by `devintern worker init`) or, for one repository, its env file (`~/.devintern/env/<repo>.env`, created by `devintern init`):
 
 | Variable               | Required | Description                                                                         |
 | ---------------------- | -------- | ----------------------------------------------------------------------------------- |
 | `TASK_TRACKER`         | Yes      | `github`                                                                            |
 | `GITHUB_TOKEN`         | Yes      | Personal access token (the same one used for PR creation)                            |
-| `GITHUB_REPO`          | Yes      | Repository whose issues you implement, as `owner/repo`                              |
+| `GITHUB_REPO`          | Yes      | Repository whose issues you implement, as `owner/repo`. `devintern worker init` derives it from your `origin` remote and writes it to the workspace `.env`, so you only set it by hand for another repository |
 | `GITHUB_STATUS_LABELS` | No       | Comma-separated status labels (e.g. `To Do,In Progress,In Review`); on each transition the others are removed |
 
 GitHub App credentials (`GITHUB_APP_ID` + private key) cannot replace `GITHUB_TOKEN` for this tracker. See [GitHub authentication](./configuration.md#github-authentication).

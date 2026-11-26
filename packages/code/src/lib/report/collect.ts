@@ -45,6 +45,8 @@ export interface CollectDiagnosticsOptions {
   logs?: boolean;
   logPaths?: string[];
   runId?: number;
+  /** Attach a local run at all. Default true; false collects environment and logs only. */
+  attachRun?: boolean;
   taskKey?: string;
   last?: boolean;
   shareIdentifiers?: boolean;
@@ -407,7 +409,7 @@ export async function collectDiagnostics(
   }
 
   const db = openRunDb(cwd, options.runDbPath);
-  const run = db ? selectRun(db, options) : null;
+  const run = db && options.attachRun !== false ? selectRun(db, options) : null;
   // Redact the run's task key even when it is omitted from the payload. A
   // `--last` report has no explicit --task value, but the failure reason and
   // logs still contain the key.

@@ -47,7 +47,7 @@ Check `devintern worker connect --help`. Commands support `--workspace /path/to/
 
 When multiple teams use the same tracker, select `--team <name>` explicitly; with exactly one matching team the CLI can infer it. `--team` is not valid for GitHub/GitLab code-host pairing or status. GitHub Issues has no separate tracker connect step: distinguish its token/query setup from GitHub App pairing. Tracker registration does not replace local API credentials. Jira/Trello/Azure private ingest URLs act as authentication material; keep them out of committed files and summaries.
 
-`devintern worker connect sentry --repo <registered-name>` is a separate, directly polled error-monitor setup, not relay pairing. Use the [Sentry guide](https://devintern.com/docs/code/sentry-integration) for the auth token, organization/project, and validation. A Sentry DSN cannot substitute for the polling token.
+`devintern worker connect sentry --repo <registered-name>` (or `--org`/`--project`/`--env-file` flags without a terminal) is a separate, directly polled error-monitor setup, not relay pairing. Use the [Sentry guide](https://devintern.com/docs/code/sentry-integration) for the auth token, organization/project, and validation. A Sentry DSN cannot substitute for the polling token.
 
 ## Browser-assisted completion
 

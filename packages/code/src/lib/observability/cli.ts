@@ -1,11 +1,7 @@
 import { checkLicense } from "@devintern/license-check";
 import { dirname, resolve } from "path";
-import {
-  enforceLicenseOrExit,
-  getLoadedEnvPath,
-  loadEnvironment,
-  loadSupabaseConfig,
-} from "../cli/bootstrap";
+import { enforceLicenseOrExit, loadEnvironment, loadSupabaseConfig } from "../cli/bootstrap";
+import { bootstrapCheckoutEnv, checkoutEnvPath } from "../cli/checkout-env";
 import { hasHelpArg } from "../cli/help";
 import { flushAnalytics, trackDoctorRun } from "./analytics";
 
@@ -195,14 +191,18 @@ export async function runDoctorCommand(): Promise<never> {
   }
   const strict = args.includes("--strict");
   const { collectReadinessChecks, renderReadinessReport } = await import("./readiness");
-  loadEnvironment();
+  // A registered checkout reads the workspace env layers, like a task run.
+  const workspaceRun = await bootstrapCheckoutEnv();
   let supabaseConfig;
   try {
     supabaseConfig = loadSupabaseConfig();
   } catch {
     supabaseConfig = undefined;
   }
-  const checks = await collectReadinessChecks({ envPath: getLoadedEnvPath(), supabaseConfig });
+  const checks = await collectReadinessChecks({
+    envPath: checkoutEnvPath(workspaceRun),
+    supabaseConfig,
+  });
   console.log("🩺 devintern readiness:\n");
   const report = renderReadinessReport(checks);
   console.log(report.lines.join("\n"));

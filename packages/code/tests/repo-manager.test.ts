@@ -7,6 +7,7 @@ import { tmpdir } from "os";
 import type { RepoConfig } from "../src/lib/workspace/config";
 import { RepoManager } from "../src/lib/workspace/repo-manager";
 import { Utils } from "../src/lib/utils";
+import { markWorktreeKept } from "../src/lib/utils/worktree-keep";
 
 function git(cwd: string, command: string): string {
   return execSync(`git ${command}`, { cwd, encoding: "utf8" }).trim();
@@ -204,6 +205,25 @@ describe("RepoManager", () => {
     expect(git(clonePath, "config --get extensions.worktreeConfig")).toBe("true");
   });
 
+  test("clone and fetch carry the repo's own code-host credentials", async () => {
+    const perRepo: RepoConfig = { ...repo, env: { GITHUB_TOKEN: "per-repo-token" } };
+    const seen: Array<{ args: string[]; token?: string }> = [];
+    const original = Utils.executeGitCommand;
+    const spy = spyOn(Utils, "executeGitCommand").mockImplementation(async (args, options) => {
+      seen.push({ args, token: options?.env?.GITHUB_TOKEN });
+      return original(args, options);
+    });
+    try {
+      await manager.ensureBareClone(perRepo);
+      await manager.fetch(perRepo.name);
+    } finally {
+      spy.mockRestore();
+    }
+    const network = seen.filter(({ args }) => args[0] === "clone" || args[0] === "fetch");
+    expect(network.map(({ args }) => args[0])).toEqual(["clone", "fetch", "fetch"]);
+    for (const call of network) expect(call.token).toBe("per-repo-token");
+  });
+
   test("resolveDefaultBranch falls back to origin/HEAD when unset in config", async () => {
     await manager.ensureBareClone(repo);
     const noBranchConfigured: RepoConfig = { ...repo, defaultBranch: undefined };
@@ -270,6 +290,18 @@ describe("RepoManager", () => {
     expect(existsSync(stale)).toBe(false);
     expect(existsSync(fresh)).toBe(true);
     expect(existsSync(base)).toBe(true);
+  });
+
+  test("sweepStaleWorktrees keeps a worktree marked as holding unsaved work", async () => {
+    await manager.ensureBareClone(repo);
+    await manager.ensureBaseWorktree(repo);
+    const kept = await manager.createTaskWorktree(repo, "KEEP-1");
+    expect(await markWorktreeKept(kept, "push of 'feature/x' failed")).toBe(true);
+    const oldTime = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000);
+    utimesSync(kept, oldTime, oldTime);
+
+    expect(await manager.sweepStaleWorktrees(repo.name, 7)).toEqual([]);
+    expect(existsSync(kept)).toBe(true);
   });
 
   test("ensurePrJobWorktree tracks the default branch and never moves the base checkout", async () => {

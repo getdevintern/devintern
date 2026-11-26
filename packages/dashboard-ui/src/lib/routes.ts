@@ -8,10 +8,14 @@ export type Route =
   | { view: "prs" }
   | { view: "stats" }
   | { view: "logs" }
-  | { view: "workspace" };
+  | { view: "workspace" }
+  | { view: "inbox" };
 
 /** Hash of the runs list (the landing `#/` is the overview). */
 export const RUNS_HASH = "#/runs";
+
+/** Hash of the notification inbox. */
+export const INBOX_HASH = "#/inbox";
 
 /** Hash of one run's detail page. */
 export function runHash(id: number): string {
@@ -57,5 +61,6 @@ export function parseHash(hash: string): Route {
   if (hash === "#/prs") return { view: "prs" };
   if (hash === "#/logs") return { view: "logs" };
   if (hash === "#/workspace") return { view: "workspace" };
+  if (hash === INBOX_HASH) return { view: "inbox" };
   return { view: "overview" };
 }

@@ -15,6 +15,8 @@
 import { buildHarnessInvocation, buildPromptArgs } from "@devintern/agent-harness";
 import type { AgentHarness, AgentRunOptions, HarnessInvocation } from "@devintern/agent-harness";
 
+import { agentCommitIdentityEnv } from "../utils/git-identity";
+
 /** stdio used for every headless spawn: ignore stdin, pipe stdout/stderr. */
 export const HEADLESS_AGENT_STDIO: ["ignore", "pipe", "pipe"] = ["ignore", "pipe", "pipe"];
 
@@ -43,11 +45,17 @@ export async function buildHeadlessAgentInvocation(
 /**
  * Merge a harness environment overlay over the inherited environment.
  *
+ * On a host without a git identity, the run's commit identity
+ * (`primeAgentCommitIdentity`) is added too, so a commit the agent makes
+ * itself does not fail with "Author identity unknown".
+ *
  * @param env - Overlay from {@link buildHeadlessAgentInvocation}, if any.
  * @returns Full env for `spawn`, or `undefined` to inherit unchanged.
  */
 export function harnessSpawnEnv(
   env: Record<string, string> | undefined,
 ): NodeJS.ProcessEnv | undefined {
-  return env ? { ...process.env, ...env } : undefined;
+  const identity = agentCommitIdentityEnv();
+  if (!env && !identity) return undefined;
+  return { ...process.env, ...identity, ...env };
 }

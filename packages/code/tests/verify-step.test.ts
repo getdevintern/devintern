@@ -33,6 +33,7 @@ function state(verify: FinalizeContext["verify"]): DeliveryState {
     taskContent: "Implement the feature",
     taskFile: join(outputDir, "task.md"),
     workingDir: process.cwd(),
+    pipelineDir: null,
     outputDir,
     prTargetBranch: "main",
     projectSettings: null,

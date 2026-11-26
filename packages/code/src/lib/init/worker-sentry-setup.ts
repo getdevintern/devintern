@@ -5,6 +5,7 @@ import { join } from "path";
 
 import { parseEnvContent } from "@devintern/task-trackers";
 
+import { resolveWizardPrompts } from "../cli/prompt-session";
 import { DEFAULT_SENTRY_BASE_URL, SentryClient } from "../observability/sentry-client";
 import { loadWorkspaceConfig } from "../workspace/config";
 import { writeSentryErrorMonitor } from "../workspace/init";
@@ -25,6 +26,8 @@ export interface WorkerSentrySetupOptions {
   workspaceDir: string;
   repoName?: string;
   prompt?: SentrySetupPromptFn;
+  /** Hidden-input prompt for the auth token; defaults to `prompt` when that is given. */
+  promptSecret?: SentrySetupPromptFn;
   log?: SentrySetupLogFn;
   validateSentry?: (options: SentryValidationOptions) => Promise<number>;
 }
@@ -35,7 +38,7 @@ export interface WorkerSentrySetupResult {
   id?: string;
 }
 
-async function defaultValidateSentry(options: SentryValidationOptions): Promise<number> {
+export async function defaultValidateSentry(options: SentryValidationOptions): Promise<number> {
   const issues = await new SentryClient(options).fetchUnresolvedIssues();
   return issues.length;
 }
@@ -45,13 +48,8 @@ export async function runWorkerSentrySetup(
   options: WorkerSentrySetupOptions,
 ): Promise<WorkerSentrySetupResult> {
   const log = options.log ?? console.log;
-  let rl: import("node:readline/promises").Interface | undefined;
-  let prompt = options.prompt;
-  if (!prompt) {
-    const { createInterface } = await import("node:readline/promises");
-    rl = createInterface({ input: process.stdin, output: process.stdout });
-    prompt = (question: string) => rl!.question(question);
-  }
+  const session = await resolveWizardPrompts(options);
+  const { prompt, promptSecret } = session;
 
   try {
     const config = loadWorkspaceConfig(workspaceConfigPath(options.workspaceDir));
@@ -91,7 +89,7 @@ export async function runWorkerSentrySetup(
       "   Create a token with event:write access: https://sentry.io/settings/account/api/auth-tokens/",
     );
     const authToken =
-      existingToken || (await prompt("Sentry auth token (input is visible): ")).trim();
+      existingToken || (await promptSecret("Sentry auth token (input hidden): ")).trim();
     if (!authToken) {
       log("⚠️  Sentry setup skipped: an auth token is required.");
       return { ok: false };
@@ -128,6 +126,6 @@ export async function runWorkerSentrySetup(
       return { ok: false };
     }
   } finally {
-    rl?.close();
+    session.close();
   }
 }

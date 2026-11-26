@@ -11,16 +11,17 @@
  */
 
 import { chmodSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "fs";
-import { basename, join } from "path";
+import { basename, dirname, join } from "path";
 
 import { findProjectRoot } from "@devintern/utils";
 
 import { Utils } from "../utils";
 import { loadWorkspaceConfig, parseWorkspaceConfig } from "./config";
+import type { WorkspaceConfig } from "./config";
 import { parseEnvFile } from "./env";
 import { resolveWorkspaceDir, workspaceConfigPath, workspaceEnvPath } from "./paths";
 
-const CONFIG_TEMPLATE = `# DevIntern workspace: one worker drives every repo listed here.
+export const CONFIG_TEMPLATE = `# DevIntern workspace: one worker drives every repo listed here.
 # Docs: https://devintern.com/docs/code/workspaces
 
 [workspace]
@@ -159,7 +160,7 @@ poll_interval = 60
 # repo = "backend"            # required in a multi-repo workspace
 `;
 
-const ENV_TEMPLATE = `# Shared workspace environment: tracker credentials, GITHUB_TOKEN,
+export const ENV_TEMPLATE = `# Shared workspace environment: tracker credentials, GITHUB_TOKEN,
 # and agent settings. The hosted relay uses the central DevIntern AI App.
 # Advanced no-relay installs may add GITHUB_APP_ID + a private key here.
 # Per-repo overrides go in [repos.env] in workspace.toml.
@@ -261,17 +262,46 @@ function replaceTomlSection(
   );
 }
 
+/**
+ * Set or remove `key = value` lines in one table body without moving the
+ * comments around them: an existing line is replaced where it is, a
+ * commented-out example (`# key = ...`) is activated in place, and a new key
+ * goes right after the table's last key, before any trailing comments that
+ * belong to the next table. Removing a key leaves its commented examples.
+ */
 function replaceTomlKeys(body: string, values: Record<string, string | undefined>): string {
-  let next = body;
+  const lines = body.split("\n");
+  const isKeyLine = (line: string) => line.trim() !== "" && !line.trim().startsWith("#");
   for (const [key, value] of Object.entries(values)) {
-    const pattern = new RegExp(`^\\s*#?\\s*${key}\\s*=\\s*.*(?:\\n|$)`, "gm");
-    next = next.replace(pattern, "");
-    if (value !== undefined) {
-      const separator = next.length > 0 && !next.endsWith("\n") ? "\n" : "";
-      next += `${separator}${key} = ${value}\n`;
+    const active = new RegExp(`^\\s*${key}\\s*=`);
+    const commented = new RegExp(`^\\s*#\\s*${key}\\s*=`);
+    const first = lines.findIndex((line) => active.test(line));
+    // Drop every active line but the first (it is replaced below).
+    for (let index = lines.length - 1; index > first; index--) {
+      if (active.test(lines[index] ?? "")) lines.splice(index, 1);
     }
+    if (value === undefined) {
+      if (first >= 0) lines.splice(first, 1);
+      continue;
+    }
+    const line = `${key} = ${value}`;
+    if (first >= 0) {
+      lines[first] = line;
+      continue;
+    }
+    const example = lines.findIndex((candidate) => commented.test(candidate));
+    if (example >= 0) {
+      lines[example] = line;
+      continue;
+    }
+    let insertAt = 0;
+    lines.forEach((candidate, index) => {
+      if (isKeyLine(candidate)) insertAt = index + 1;
+    });
+    lines.splice(insertAt, 0, line);
   }
-  return next;
+  const next = lines.join("\n");
+  return next === "" || next.endsWith("\n") ? next : `${next}\n`;
 }
 
 /** Update the worker's consequential operating choices while preserving unrelated TOML. */
@@ -333,6 +363,50 @@ export interface SentryMonitorWriteResult {
   added: boolean;
 }
 
+const normalizeSentryBaseUrl = (value?: string) =>
+  (value ?? "https://sentry.io").replace(/\/+$/, "");
+
+/** The configured Sentry monitor for this organization, project, repo, and base URL, if any. */
+export function findSentryErrorMonitor(
+  config: WorkspaceConfig,
+  input: Pick<SentryMonitorInput, "organization" | "project" | "repo" | "baseUrl">,
+): WorkspaceConfig["errorMonitors"][number] | undefined {
+  return config.errorMonitors.find(
+    (monitor) =>
+      monitor.provider === "sentry" &&
+      monitor.organization === input.organization &&
+      monitor.project === input.project &&
+      monitor.repo === input.repo &&
+      normalizeSentryBaseUrl(monitor.baseUrl) === normalizeSentryBaseUrl(input.baseUrl),
+  );
+}
+
+/**
+ * Replace `SENTRY_AUTH_TOKEN` in a monitor's own env file, keeping other lines
+ * and the owner-only mode.
+ *
+ * @returns The workspace-relative env file path, or null when the monitor has none.
+ */
+export function refreshSentryMonitorToken(
+  workspaceDir: string,
+  monitor: { envFile?: string },
+  authToken: string,
+): string | null {
+  if (!monitor.envFile) return null;
+  const path = join(workspaceDir, monitor.envFile);
+  const lines = existsSync(path)
+    ? readFileSync(path, "utf8")
+        .split("\n")
+        .filter((line) => line.length > 0 && !/^\s*SENTRY_AUTH_TOKEN\s*=/.test(line))
+    : [];
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, `${[...lines, `SENTRY_AUTH_TOKEN=${authToken}`].join("\n")}\n`, {
+    mode: 0o600,
+  });
+  chmodSync(path, 0o600);
+  return monitor.envFile;
+}
+
 /**
  * Add one repo-bound Sentry monitor while preserving hand-written TOML.
  * Re-running setup for the same Sentry project is idempotent.
@@ -344,15 +418,7 @@ export function writeSentryErrorMonitor(
   const configPath = workspaceConfigPath(workspaceDir);
   const content = readFileSync(configPath, "utf8");
   const config = parseWorkspaceConfig(content, configPath);
-  const normalizeBaseUrl = (value?: string) => (value ?? "https://sentry.io").replace(/\/+$/, "");
-  const existing = config.errorMonitors.find(
-    (monitor) =>
-      monitor.provider === "sentry" &&
-      monitor.organization === input.organization &&
-      monitor.project === input.project &&
-      monitor.repo === input.repo &&
-      normalizeBaseUrl(monitor.baseUrl) === normalizeBaseUrl(input.baseUrl),
-  );
+  const existing = findSentryErrorMonitor(config, input);
   if (existing) {
     const existingEnvPath = join(workspaceDir, existing.envFile ?? "");
     if (existing.envFile && existsSync(existingEnvPath)) chmodSync(existingEnvPath, 0o600);
@@ -387,8 +453,8 @@ export function writeSentryErrorMonitor(
     `organization = ${tomlString(input.organization)}`,
     `project = ${tomlString(input.project)}`,
   ];
-  if (input.baseUrl && normalizeBaseUrl(input.baseUrl) !== "https://sentry.io") {
-    lines.push(`base_url = ${tomlString(normalizeBaseUrl(input.baseUrl))}`);
+  if (input.baseUrl && normalizeSentryBaseUrl(input.baseUrl) !== "https://sentry.io") {
+    lines.push(`base_url = ${tomlString(normalizeSentryBaseUrl(input.baseUrl))}`);
   }
   if (input.query) lines.push(`query = ${tomlString(input.query)}`);
   lines.push(`env_file = ${tomlString(envFile)}`, "");
@@ -475,6 +541,77 @@ export function runWorkerScaffold(): number {
   return 0;
 }
 
+/** add-repo's extras for a new `[[repos]]` entry. */
+export interface RepoEntryExtras {
+  /** Values that differ from the workspace `.env`; kept in the entry's `[repos.env]`. */
+  conflicts?: Record<string, string>;
+  /** Seeds a `[[routing.rules]]` entry unless a rule already claims this project. */
+  projectKey?: string;
+}
+
+/**
+ * Append a `[[repos]]` entry for `remote` to workspace.toml text, unless an
+ * entry with that remote already exists. Pure: the caller validates and
+ * writes the result. Shared by `worker add-repo` and `worker init --repo-from-cwd`.
+ *
+ * @param content - Current workspace.toml text
+ * @param remote - Origin remote URL of the repository
+ * @param extras - Repo-local env conflicts and a routing project to seed
+ * @returns Updated text, the entry's name, whether it was added, and the seeded project
+ */
+export function appendRepoEntry(
+  content: string,
+  remote: string,
+  extras: RepoEntryExtras = {},
+): { content: string; name: string; added: boolean; seededProject?: string } {
+  const config = parseWorkspaceConfig(content);
+  const existing = config.repos.find((repo) => repo.remote === remote);
+  if (existing) return { content, name: existing.name, added: false };
+  const name = deriveRepoName(remote, config.repos);
+  let block = `\n[[repos]]\nname = ${tomlString(name)}\nremote = ${tomlString(remote)}\n`;
+  const conflicts = Object.entries(extras.conflicts ?? {});
+  if (conflicts.length > 0) {
+    block += "  [repos.env]\n";
+    for (const [key, value] of conflicts) {
+      block += `  ${key} = ${tomlString(value)}\n`;
+    }
+  }
+  const { projectKey } = extras;
+  const projectTaken = config.routing.some(
+    (rule) => rule.project && projectKey && rule.project.toLowerCase() === projectKey.toLowerCase(),
+  );
+  const seededProject = projectKey && !projectTaken ? projectKey : undefined;
+  if (seededProject) {
+    block += `\n[[routing.rules]]\nrepo = ${tomlString(name)}\nproject = ${tomlString(seededProject)}\n`;
+  }
+  const separator = content.endsWith("\n") ? "" : "\n";
+  return { content: content + separator + block, name, added: true, seededProject };
+}
+
+/** Tracker project/team a checkout's `.devintern-code/.env` defaults to, for routing. */
+export function repoDefaultProjectKey(repoEnv: Record<string, string>): string | undefined {
+  return repoEnv.JIRA_DEFAULT_PROJECT_KEY || repoEnv.LINEAR_DEFAULT_TEAM_KEY || undefined;
+}
+
+/**
+ * Split a checkout's project env against the workspace env: keys the
+ * workspace lacks are `additions` for the shared `.env`; differing values are
+ * `conflicts` to keep repo-local (never overwrite a shared value).
+ */
+export function splitRepoEnv(
+  repoEnv: Record<string, string>,
+  workspaceEnv: Record<string, string | undefined>,
+): { additions: Record<string, string>; conflicts: Record<string, string> } {
+  const additions: Record<string, string> = {};
+  const conflicts: Record<string, string> = {};
+  for (const [key, value] of Object.entries(repoEnv)) {
+    if (ENV_SHARED_SKIP.has(key)) continue;
+    if (workspaceEnv[key] === undefined) additions[key] = value;
+    else if (workspaceEnv[key] !== value) conflicts[key] = value;
+  }
+  return { additions, conflicts };
+}
+
 export interface WorkerAddRepoOptions {
   log?: WorkspaceLogFn;
   error?: WorkspaceLogFn;
@@ -520,32 +657,14 @@ export async function runWorkerAddRepo(
     return 0;
   }
 
-  const name = deriveRepoName(remote, config.repos);
-
   // Merge the repo's env: missing keys go to the shared .env; conflicting
-  // values are demoted to this repo's inline [repos.env].
+  // values are demoted to this repo's inline [repos.env]. A routing rule is
+  // seeded from the repo's default project key; a 1-repo workspace needs none.
   const conflicts = mergeEnv(workspaceDir, cwd, {}, log);
-
-  let block = `\n[[repos]]\nname = ${tomlString(name)}\nremote = ${tomlString(remote)}\n`;
-  if (Object.keys(conflicts).length > 0) {
-    block += "  [repos.env]\n";
-    for (const [key, value] of Object.entries(conflicts)) {
-      block += `  ${key} = ${tomlString(value)}\n`;
-    }
-  }
-
-  // Seed a routing rule from the repo's default project key, unless a rule
-  // already claims that project. A 1-repo workspace needs no rule.
-  const repoEnv = readRepoEnv(cwd);
-  const projectKey = repoEnv.JIRA_DEFAULT_PROJECT_KEY || repoEnv.LINEAR_DEFAULT_TEAM_KEY;
-  const projectTaken = config.routing.some(
-    (rule) => rule.project && projectKey && rule.project.toLowerCase() === projectKey.toLowerCase(),
-  );
-  if (projectKey && !projectTaken) {
-    block += `\n[[routing.rules]]\nrepo = ${tomlString(name)}\nproject = ${tomlString(projectKey)}\n`;
-  }
-
-  const updated = existingText.endsWith("\n") ? existingText + block : existingText + "\n" + block;
+  const projectKey = repoDefaultProjectKey(readRepoEnv(cwd));
+  const appended = appendRepoEntry(existingText, remote, { conflicts, projectKey });
+  const { name, seededProject } = appended;
+  const updated = appended.content;
 
   // Validate the result before committing it to disk.
   parseWorkspaceConfig(updated, configPath);
@@ -559,8 +678,8 @@ export async function runWorkerAddRepo(
         Object.keys(conflicts).join(", "),
     );
   }
-  if (projectKey && !projectTaken) {
-    log(`   Seeded routing rule: project = ${projectKey}`);
+  if (seededProject) {
+    log(`   Seeded routing rule: project = ${seededProject}`);
   } else if (isFirstRepo) {
     log(
       "   1-repo workspace: every ready task runs here. Add routing rules when you add another repo.",
@@ -634,7 +753,7 @@ export async function ensureWorkspaceAndAddRepo(
   return { ok: true, workspaceDir, created, repoName };
 }
 
-function readRepoEnv(cwd: string): Record<string, string> {
+export function readRepoEnv(cwd: string): Record<string, string> {
   // Same traversal as tracker setup: `worker init` / `worker add-repo` from a
   // package subdirectory must still find the repo-root `.devintern-code/.env`.
   const projectRoot = findProjectRoot({ startDir: cwd });
@@ -657,17 +776,9 @@ function mergeEnv(
   const envPath = workspaceEnvPath(workspaceDir);
   const workspaceEnv = parseEnvFile(envPath);
 
-  const additions: string[] = [];
-  for (const [key, value] of Object.entries(repoEnv)) {
-    if (ENV_SHARED_SKIP.has(key)) {
-      continue;
-    }
-    if (!(key in workspaceEnv)) {
-      additions.push(`${key}=${value}`);
-    } else if (workspaceEnv[key] !== value) {
-      conflicts[key] = value;
-    }
-  }
+  const split = splitRepoEnv(repoEnv, workspaceEnv);
+  Object.assign(conflicts, split.conflicts);
+  const additions = Object.entries(split.additions).map(([key, value]) => `${key}=${value}`);
 
   if (additions.length > 0) {
     const existing = existsSync(envPath) ? readFileSync(envPath, "utf8") : "";

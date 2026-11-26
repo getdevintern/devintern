@@ -44,6 +44,25 @@ async function resolveHookDir(cwd: string): Promise<{ hookDir?: string; error?: 
 }
 
 /**
+ * Whether the repository has an executable `pre-push` hook, i.e. whether a
+ * failed push could have been the hook rejecting it rather than git or the
+ * remote. Unknown (the git dir cannot be resolved) counts as no hook.
+ *
+ * @param cwd - Repository working directory
+ */
+export async function hasPrePushHook(cwd: string = process.cwd()): Promise<boolean> {
+  const { hookDir } = await resolveHookDir(cwd);
+  if (!hookDir) return false;
+  const hookPath = join(hookDir, "pre-push");
+  if (!existsSync(hookPath)) return false;
+  try {
+    return (statSync(hookPath).mode & 0o111) !== 0;
+  } catch {
+    return true;
+  }
+}
+
+/**
  * Run the local `pre-push` hook without pushing (dry validation).
  *
  * @param options - Verbose logging and working directory
@@ -226,5 +245,6 @@ export async function runPrePushHookLocally(options?: {
 }
 
 Object.assign(Utils, {
+  hasPrePushHook,
   runPrePushHookLocally,
 });

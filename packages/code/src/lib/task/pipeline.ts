@@ -9,7 +9,8 @@ import { runClarityCheck } from "../agent/clarity";
 import { resolveExecutionPreferences } from "../agent/execution-preferences";
 import type { EffectiveExecutionPreferences } from "../agent/execution-preferences";
 import { HarnessUnavailableError } from "../agent/harness-startup";
-import { readImplementationReport } from "../agent/implementation-report";
+import type { readImplementationReport } from "../agent/implementation-report";
+import { recordImplementationStage } from "./implementation-stage";
 import { resolveAgentEffort, resolveAgentModel } from "../agent/model";
 import { getAgentRuntimeOverrides, setAgentRuntimeOverrides } from "../agent/runtime-overrides";
 import type { AgentRuntimeOverrides } from "../agent/runtime-overrides";
@@ -37,26 +38,32 @@ import { QUEUE_CLAIM_ENV } from "../workspace/queue-failure-reason";
 import {
   RunStore,
   beginRun,
+  currentRunStep,
   getActiveRunContext,
-  hasRunStage,
-  latestRunStage,
   recordRunBranch,
   recordRunHarness,
   recordRunStage,
   recordRunTicket,
-  replaceRunStage,
 } from "../state/run-recorder";
+import { failureFromError } from "../state/run-outcome";
 import { pickupSelection, resolveSessionPickup } from "../state/session-pickup";
 import type { SessionPickupDecision, SessionPickupOptions } from "../state/session-pickup";
 import { finishTaskRun } from "../state/task-run";
-import { deliveryRunDisposition, outcomeRunDisposition } from "../agent/implementation-outcome";
+import {
+  deliveryDispositionFailure,
+  deliveryRunDisposition,
+  outcomeRunDisposition,
+} from "../agent/implementation-outcome";
 import { TaskFormatter } from "../task/formatter";
+import type { StackBase } from "../dependencies/gate";
 import {
   renderStackedOnSection,
+  resetStackBaseRelease,
   stackBaseFromEnv,
   takeStackBaseFromEnv,
 } from "../dependencies/stacked-base";
-import { dropUnusedStackBase, recordConfirmedStackBase } from "./stack-base-run";
+import { finishUnfinishedRun } from "./preserve-work";
+import { dropUnusedStackBase, recordConfirmedStackBase, runStackBase } from "./stack-base-run";
 import { reopenSucceededPickupOption } from "./reopen-pickup";
 import type { RetryPromptContext } from "../task/formatter";
 import { buildTicketUrl } from "../task/ticket-url";
@@ -139,7 +146,9 @@ async function runFeasibilityCheck(input: FeasibilityCheckInput): Promise<void> 
           `\n⚠️  Task ${workflowKey} failed clarity assessment but continuing with batch processing...`,
         );
       } else {
-        await finishTaskRun("abandoned", "failed feasibility assessment");
+        await finishTaskRun("abandoned", "failed feasibility assessment", {
+          failure: { outcomeClass: "agent", stage: "feasibility" },
+        });
         if (runContext.lockManager) {
           runContext.lockManager.release();
         }
@@ -189,83 +198,8 @@ interface ImplementationInput {
   taskDetails: ReturnType<TaskTrackerClient["formatTaskDetails"]>;
   effectiveTargetBranch: string;
   resumeBranch?: string;
-}
-
-/** Extract the `report` string from a recorded stage's JSON detail. */
-function readStageReport(detail: string | undefined): string | undefined {
-  if (!detail) return undefined;
-  try {
-    const parsed = JSON.parse(detail) as { report?: unknown };
-    return typeof parsed.report === "string" && parsed.report.trim() ? parsed.report : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-/**
- * Record the implementation stage from this attempt's summary files, correcting
- * an early record when a later phase changed the outcome.
- *
- * The harness writes the stage before commit/verify/auto-review so an
- * interruption in those phases still leaves resumable state. Afterwards:
- *
- * - finalize writes `implementation-summary-incomplete.md` on a halt, turning
- *   the early success into a failure; or
- * - a successful verify/plan repair rewrites `implementation-summary.md`, so
- *   the early report no longer describes what was actually implemented.
- *
- * Both cases replace the single row so the dashboard and session pickup never
- * hand a stale status/report to the next agent, preserving the prior report
- * under `agentReport`.
- *
- * @param taskDir - Per-task output directory holding the summary files
- * @param implementationStartedAt - Epoch ms when the agent session started
- * @param harnessName - Display name recorded on the stage
- * @param execution - Effective model/effort for this task, when known
- */
-export function recordImplementationStage(
-  taskDir: string,
-  implementationStartedAt: number,
-  harnessName: string,
-  execution: { model?: string; effort?: string } = {},
-): ReturnType<typeof readImplementationReport> {
-  const implementationReport = readImplementationReport(taskDir, implementationStartedAt);
-  const { incomplete, report } = implementationReport;
-
-  const stage = {
-    status: incomplete ? ("failed" as const) : ("succeeded" as const),
-    summary: incomplete
-      ? `incomplete implementation with ${harnessName}`
-      : `implemented with ${harnessName}`,
-    detail: {
-      harness: harnessName,
-      ...(execution.model === undefined ? {} : { model: execution.model }),
-      ...(execution.effort === undefined ? {} : { effort: execution.effort }),
-      durationMs: Date.now() - implementationStartedAt,
-      ...(report === undefined ? {} : { report }),
-    },
-  };
-
-  const recorded = hasRunStage("implementation") ? latestRunStage("implementation") : undefined;
-  if (!recorded) {
-    recordRunStage("implementation", stage);
-  } else {
-    const recordedReport = readStageReport(recorded.detail);
-    const reportChanged = report !== undefined && report !== recordedReport;
-    if (recorded.status !== stage.status || reportChanged) {
-      replaceRunStage("implementation", {
-        ...stage,
-        detail: {
-          ...stage.detail,
-          ...(recordedReport === undefined || recordedReport === report
-            ? {}
-            : { agentReport: recordedReport }),
-        },
-      });
-    }
-  }
-
-  return implementationReport;
+  /** The PR this run is stacked on, when `effectiveTargetBranch` is its branch. */
+  stackBase?: StackBase;
 }
 
 /**
@@ -330,6 +264,7 @@ async function runImplementation(input: ImplementationInput): Promise<void> {
     prTargetBranchExplicit: options.prTargetBranchExplicit,
     requestedPrTargetBranch: options.requestedPrTargetBranch,
     resumeBranch: input.resumeBranch,
+    stackBase: input.stackBase,
   });
 
   // An incomplete-summary file written during this run means the agent
@@ -390,8 +325,20 @@ export async function settleImplementationRun(input: {
   if (isMarkdownTaskTracker(tracker) && disposition.status === "succeeded") {
     await tracker.markDoneIfSuccessful(workflowKey, taskDir);
   }
-  if (implementationIncomplete) {
-    await finishTaskRun("escalated", "implementation incomplete; handed back to a human");
+  // A closed stacked base escalates even without the incomplete summary (skipped during shutdown).
+  const stackBlocked = runContext.activeTaskContext?.stackBlocked;
+  if (implementationIncomplete || stackBlocked) {
+    // Default classes for this path; a failure noted where it happened (the
+    // verify machinery, a push) wins and names its stage and cause instead.
+    await finishUnfinishedRun(
+      "escalated",
+      stackBlocked
+        ? `implementation handed back to a human: ${stackBlocked}`
+        : "implementation incomplete; handed back to a human",
+      stackBlocked
+        ? { outcomeClass: "review_hold", stage: "stack_base" }
+        : { outcomeClass: "agent", stage: "implementation" },
+    );
   } else {
     // Markdown tasks have no remote PR, so `applyActionedTransition` is a
     // no-op for them; record the file (Done, or left open when blocked) as
@@ -427,7 +374,14 @@ export async function settleImplementationRun(input: {
     } else if (disposition.reason) {
       console.log(`\nℹ️  Agent reported the goal as ${disposition.reason}`);
     }
-    await finishTaskRun(disposition.status, disposition.reason);
+    // The run delivered (pushed, PR attempted), so there is nothing to preserve.
+    await finishTaskRun(disposition.status, disposition.reason, {
+      failure: deliveryDispositionFailure(
+        disposition.status,
+        runContext.activeTaskContext?.prDeliveryFailure?.message,
+        runContext.activeTaskContext?.prDeliveryFailure?.permanent === true,
+      ),
+    });
     // A later reopen of the ticket starts with a clean retry slate.
     clearRetryState(workflowKey);
   }
@@ -501,7 +455,9 @@ async function handleTaskFailure(error: unknown, attempt: TaskAttempt): Promise<
   }
 
   const err = error as Error;
-  await finishTaskRun("failed", err.message);
+  // An exception reaching here is a DevIntern step failing (or the
+  // environment), unless the step that halted already classified it.
+  await finishUnfinishedRun("failed", err.message, failureFromError(err, currentRunStep()));
 
   // A failed run may still have pushed a branch and opened a PR itself (agents
   // sometimes run `gh pr create`). Register and label it so review polling and
@@ -1125,7 +1081,9 @@ export async function ensureFeatureBranch(input: {
         console.error(`   devintern ${taskKey} --no-git`);
       }
 
-      await finishTaskRun("abandoned", "feature branch creation failed");
+      await finishTaskRun("abandoned", "feature branch creation failed", {
+        failure: failureFromError(new Error(branchResult.message), "branch"),
+      });
       // Release lock before exiting
       if (runContext.lockManager) {
         runContext.lockManager.release();
@@ -1259,6 +1217,7 @@ export const taskSteps: readonly TaskStep<TaskExecutionContext>[] = [
       taskDetails,
       effectiveTargetBranch,
       resumeBranch,
+      stackBase,
     }) =>
       runImplementation({
         outputFile,
@@ -1269,6 +1228,7 @@ export const taskSteps: readonly TaskStep<TaskExecutionContext>[] = [
         taskDetails,
         effectiveTargetBranch,
         resumeBranch,
+        stackBase,
       }),
   },
 ];
@@ -1331,6 +1291,7 @@ export async function processSingleTask(
 
     displayTaskSummary({ taskDetails, tracker, linkedResources, relatedIssues, comments });
 
+    resetStackBaseRelease();
     // Set only for a tracker ticket the worker stacked (see prepareTask).
     const stackBase = stackBaseFromEnv();
     const effectiveTargetBranch = await resolveEffectiveTargetBranch(
@@ -1442,6 +1403,9 @@ export async function processSingleTask(
         task,
         taskDetails,
         effectiveTargetBranch,
+        // Tracker tickets carry the base in the env, ad-hoc tasks in the
+        // description marker. Delivery re-checks it in case it merges mid-run.
+        stackBase: runStackBase(descriptionText, stackBase, effectiveTargetBranch),
         attachmentMap: new Map<string, string>(),
         relatedIssues,
         priorRetryState,
@@ -1454,7 +1418,7 @@ export async function processSingleTask(
       restoreExecution();
     }
     if (result.kind === "halted") {
-      await finishTaskRun("escalated", result.reason);
+      await finishUnfinishedRun("escalated", result.reason);
       runContext.activeTaskContext = null;
     }
   } catch (error) {

@@ -1,5 +1,6 @@
 import { readFileSync } from "fs";
-import { isAbsolute, join } from "path";
+import { homedir } from "os";
+import { isAbsolute, join, resolve } from "path";
 import {
   supportsEstimate,
   supportsPolling,
@@ -21,6 +22,7 @@ import type { HarnessPinnedEntry } from "../agent/selection";
 import { parseDashboardAllowedOriginList } from "../observability/dashboard-origins";
 import type {
   ConflictResolutionMode,
+  GitAuthorSetting,
   WorkspaceExecutionIsolation,
   WorkspaceSettings,
   WorkspaceDefaults,
@@ -60,6 +62,7 @@ export type {
   DashboardSettings,
   ErrorMonitorConfig,
   ErrorMonitorConfigBase,
+  GitAuthorSetting,
   RepoConfig,
   RoutingRule,
   SentryErrorMonitorConfig,
@@ -155,7 +158,11 @@ export function parseWorkspaceConfig(
 
   applyTeamDefaults(teams, defaults, errors);
 
-  const { repos, repoNames } = parseReposSection(document, defaults.prLabels, errors);
+  const { repos, repoNames } = parseReposSection(
+    document,
+    { prLabels: defaults.prLabels, gitAuthor: workspace.gitAuthor },
+    errors,
+  );
   validateAutoMergeRules(workspace.autoMerge, repos, errors);
 
   // Only the worker polls. A workspace whose repos are all manual-only (used
@@ -330,6 +337,7 @@ function parseWorkspaceSettings(
     errors,
   );
   const autoMerge = parseAutoMergeSettings(workspaceTable, errors);
+  const gitAuthor = readGitAuthor(workspaceTable, "[workspace]", errors);
 
   return {
     execution: { isolation, maxConcurrency, maxConcurrencyPerRepo },
@@ -341,7 +349,33 @@ function parseWorkspaceSettings(
     conflictSchedule,
     ...(Object.keys(conflictAgent).length > 0 ? { conflictAgent } : {}),
     autoMerge,
+    ...(gitAuthor ? { gitAuthor } : {}),
   };
+}
+
+/**
+ * `git_author_name` + `git_author_email` of one table. Both or neither: a
+ * name alone would be paired with an unrelated email.
+ */
+function readGitAuthor(
+  table: Record<string, unknown>,
+  label: string,
+  errors: string[],
+): GitAuthorSetting | undefined {
+  const name = readString(table, "git_author_name", label, errors)?.trim();
+  const email = readString(table, "git_author_email", label, errors)?.trim();
+  if (!name && !email) return undefined;
+  if (!name || !email) {
+    errors.push(`${label}: set both git_author_name and git_author_email, or neither.`);
+    return undefined;
+  }
+  if (/[<>\n]/.test(name) || !/^[^\s<>@]+@[^\s<>@]+$/.test(email)) {
+    errors.push(
+      `${label}.git_author_name / git_author_email must be a plain name and an email address (e.g. "DevIntern Bot" and "bot@example.com").`,
+    );
+    return undefined;
+  }
+  return { name, email };
 }
 
 /** Parse `[workspace].conflict_resolution` and its optional schedule. */
@@ -495,9 +529,10 @@ function applyTeamDefaults(
 /** Parse `[[repos]]` entries and collect their names. */
 function parseReposSection(
   document: Record<string, unknown>,
-  defaultPrLabels: string[] | undefined,
+  inherited: { prLabels: string[] | undefined; gitAuthor: GitAuthorSetting | undefined },
   errors: string[],
 ): { repos: RepoConfig[]; repoNames: Set<string> } {
+  const defaultPrLabels = inherited.prLabels;
   const repos: RepoConfig[] = [];
   const repoNames = new Set<string>();
   for (const [index, table] of asTableArray(document.repos, "[[repos]]", errors).entries()) {
@@ -532,6 +567,7 @@ function parseReposSection(
     const syncTeamPrs = readOptionalBoolean(table, "sync_team_prs", label, errors);
     const manualOnly = readOptionalBoolean(table, "manual_only", label, errors);
     const requireChecks = readOptionalBoolean(table, "auto_merge_require_checks", label, errors);
+    const gitAuthor = readGitAuthor(table, label, errors) ?? inherited.gitAuthor;
     // Team-PR discovery uses GitHub's open-PR list and author_association;
     // there is no GitLab/Bitbucket equivalent wired, so reject instead of
     // silently doing nothing.
@@ -550,6 +586,7 @@ function parseReposSection(
         table.pr_labels === undefined
           ? defaultPrLabels
           : readStringList(table, "pr_labels", label, errors),
+      ...(gitAuthor ? { gitAuthor } : {}),
       pipelineFile: readString(table, "pipeline_file", label, errors),
       ...(table.auto_merge_safe_paths === undefined
         ? {}
@@ -818,14 +855,18 @@ export function loadWorkspaceConfig(path: string): WorkspaceConfig {
 /**
  * Resolve a `pipeline_file` reference against the workspace directory.
  *
- * Relative paths are workspace-relative (normally `~/.devintern`); absolute
- * paths are returned unchanged.
+ * A leading `~/` expands to the home directory, relative paths are
+ * workspace-relative (normally `~/.devintern`), and absolute paths are
+ * returned unchanged, so the result is always absolute.
  *
  * @param workspaceDir - Workspace home directory.
  * @param file - The declared `pipeline_file` value.
  */
 export function resolveWorkspacePipelinePath(workspaceDir: string, file: string): string {
-  return isAbsolute(file) ? file : join(workspaceDir, file);
+  if (file === "~" || file.startsWith("~/") || file.startsWith("~\\")) {
+    return join(homedir(), file.slice(1));
+  }
+  return isAbsolute(file) ? file : resolve(workspaceDir, file);
 }
 
 /**

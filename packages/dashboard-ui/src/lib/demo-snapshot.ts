@@ -8,7 +8,14 @@
  * (writing one), so both sides agree on every file name.
  */
 
-import type { RunRecord, RunsResponse } from "./api";
+import type { RunLineage, RunRecord, RunsResponse, SpawnedWork } from "./api";
+import type {
+  NotificationLink,
+  NotificationListResponse,
+  NotificationMutesResponse,
+  NotificationRecord,
+  NotificationUnreadResponse,
+} from "./api-notifications";
 
 /** Directory, next to `index.html`, that holds the recorded responses. */
 export const SNAPSHOT_DATA_DIR = "data";
@@ -96,12 +103,14 @@ export function filterRecordedRuns(all: readonly RunRecord[], apiUrl: string): R
   const status = params.get("status");
   const origin = params.get("origin");
   const automationId = params.get("automationId");
+  const outcomeClass = params.get("outcomeClass");
   const matching = all.filter(
     (run) =>
       (taskKey === null || run.taskKey === taskKey) &&
       (status === null || run.status === status) &&
       (origin === null || run.origin === origin) &&
-      (automationId === null || run.automationId === automationId),
+      (automationId === null || run.automationId === automationId) &&
+      (outcomeClass === null || run.outcomeClass === outcomeClass),
   );
   const limit = Math.max(1, nonNegativeInt(params.get("limit"), DEFAULT_RUN_LIMIT));
   const offset = nonNegativeInt(params.get("offset"), 0);
@@ -160,4 +169,367 @@ export function parseSnapshotMeta(value: unknown): DemoSnapshotMeta | null {
   if (value === null || typeof value !== "object") return null;
   const exportedAt = (value as { exportedAt?: unknown }).exportedAt;
   return typeof exportedAt === "number" && Number.isFinite(exportedAt) ? { exportedAt } : null;
+}
+
+const RUN_DETAIL_PATTERN = /^\/api\/runs\/\d+$/;
+
+/** Whether a URL is one run's detail (`/api/runs/:id`), whose lineage links other runs. */
+export function isRunDetailUrl(apiUrl: string): boolean {
+  return RUN_DETAIL_PATTERN.test(new URL(apiUrl, "http://snapshot.invalid").pathname);
+}
+
+/**
+ * Keep a recorded run detail's lineage inside the recording: a source run that
+ * was not recorded is dropped, and links from spawned work to unrecorded runs
+ * are removed (the entry itself stays), so the demo never links to a run page
+ * it cannot show.
+ *
+ * @param detail - Recorded `/api/runs/:id` body
+ * @param recordedIds - Ids of every run in the recording
+ */
+export function pruneUnrecordedLineage(detail: unknown, recordedIds: ReadonlySet<number>): unknown {
+  if (detail === null || typeof detail !== "object") return detail;
+  const lineage = (detail as { lineage?: RunLineage }).lineage;
+  if (!lineage || typeof lineage !== "object") return detail;
+  const parent = lineage.parent && recordedIds.has(lineage.parent.runId) ? lineage.parent : null;
+  const spawned = (Array.isArray(lineage.spawned) ? lineage.spawned : []).flatMap(
+    (item): SpawnedWork[] => {
+      if (item.kind === "follow_up_run") return recordedIds.has(item.runId) ? [item] : [];
+      if (item.kind === "delegated_task" && item.latestRunId !== undefined) {
+        if (recordedIds.has(item.latestRunId)) return [item];
+        return [{ ...item, latestRunId: undefined }];
+      }
+      return [item];
+    },
+  );
+  return { ...detail, lineage: { parent, spawned } };
+}
+
+// ---------------------------------------------------------------------------
+// Outcome-class fixtures
+// ---------------------------------------------------------------------------
+
+/** Cause of the demo's DevIntern-side failure: a stacked base merged mid-run (cf. run 953). */
+export const DEMO_INTERNAL_CAUSE =
+  "Remote branch refs/remotes/origin/feature/notification-center-backend not found";
+
+function classificationFields(run: RunRecord): Partial<RunRecord> {
+  return {
+    outcomeClass: run.outcomeClass,
+    failureStage: run.failureStage,
+    failureCause: run.failureCause,
+    workStatus: run.workStatus,
+    workRef: run.workRef,
+  };
+}
+
+/**
+ * Outcome classes for recorded runs that predate classification: the first
+ * escalated or failed task run becomes the DevIntern-side verify failure
+ * (work saved on its branch), auto-merge escalations become review holds,
+ * and other unsuccessful runs read as the agent stopping. A recording that
+ * already carries classes is left as recorded.
+ *
+ * @param runs - Every recorded run, newest first
+ */
+export function classifyDemoRuns(runs: readonly RunRecord[]): RunRecord[] {
+  if (runs.some((run) => run.outcomeClass !== undefined)) return [...runs];
+  const unsuccessful = (run: RunRecord) =>
+    run.status === "failed" || run.status === "escalated" || run.status === "abandoned";
+  const internal = runs.find(
+    (run) => unsuccessful(run) && run.origin !== "auto_merge" && run.taskKey !== undefined,
+  );
+  return runs.map((run): RunRecord => {
+    if (!unsuccessful(run)) return run;
+    if (run === internal) {
+      const branch = run.branch ?? `feature/${(run.taskKey ?? `run-${run.id}`).toLowerCase()}`;
+      return {
+        ...run,
+        outcomeClass: "internal",
+        failureStage: "verify",
+        failureCause: DEMO_INTERNAL_CAUSE,
+        outcomeReason: `verify: ${DEMO_INTERNAL_CAUSE}; work preserved on branch '${branch}'`,
+        workStatus: "saved",
+        workRef: branch,
+      };
+    }
+    if (run.origin === "auto_merge" && run.status === "escalated") {
+      return { ...run, outcomeClass: "review_hold", failureStage: "auto_merge" };
+    }
+    return { ...run, outcomeClass: "agent" };
+  });
+}
+
+/**
+ * Apply {@link classifyDemoRuns}' fields to a recorded run-detail body so the
+ * run page shows the same class as the list.
+ *
+ * @param body - Recorded `/api/runs/:id` body
+ * @param classified - Classified run list
+ */
+export function classifyDemoRunDetail(body: unknown, classified: readonly RunRecord[]): unknown {
+  if (typeof body !== "object" || body === null) return body;
+  const detail = body as { run?: RunRecord };
+  const run = detail.run;
+  if (!run || typeof run.id !== "number") return body;
+  const match = classified.find((candidate) => candidate.id === run.id);
+  if (!match || match.outcomeClass === undefined) return body;
+  return {
+    ...detail,
+    run: { ...run, outcomeReason: match.outcomeReason, ...classificationFields(match) },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Notification fixtures
+// ---------------------------------------------------------------------------
+
+const MINUTE_MS = 60_000;
+const HOUR_MS = 60 * MINUTE_MS;
+
+function runLinks(run: RunRecord | undefined): NotificationLink[] {
+  if (!run) return [];
+  return [
+    { label: `Run #${run.id}`, runId: run.id },
+    ...(run.prUrl
+      ? [
+          {
+            label: run.prNumber ? `${run.repo ?? "PR"}#${run.prNumber}` : "Pull request",
+            url: run.prUrl,
+          },
+        ]
+      : []),
+    ...(run.ticketUrl ? [{ label: run.ticketKey ?? "Ticket", url: run.ticketUrl }] : []),
+  ];
+}
+
+function runName(run: RunRecord): string {
+  const name = run.automationId ?? run.taskKey;
+  return name ? `Run #${run.id} (${name})` : `Run #${run.id}`;
+}
+
+/**
+ * Notification rows for the demo inbox, built around the recorded runs so
+ * their links open real run pages: a grouped error-monitor escalation with a
+ * large count, an escalated task, a `work_spawned` rollup on the run that
+ * delegated work, grouped PRs, a grouped DevIntern-side failure (the run
+ * {@link classifyDemoRuns} marks `internal`), and a resolved source outage
+ * (shown with "Show resolved").
+ *
+ * @param runs - Every recorded run, newest first
+ * @param now - Viewer's clock at page load
+ */
+export function demoNotifications(runs: readonly RunRecord[], now: number): NotificationRecord[] {
+  const errorRun = runs.find((run) => run.origin === "error_monitor");
+  const internalRun = runs.find((run) => run.outcomeClass === "internal");
+  const escalatedRun = runs.find(
+    (run) => run.status === "escalated" && run !== errorRun && run !== internalRun,
+  );
+  const spawnRun =
+    runs.find((run) => run.automationId === "docs-drift") ??
+    runs.find((run) => run.origin === "scheduled");
+  const prRuns = runs.filter((run) => run.prUrl).slice(0, 3);
+  const mergedRun = runs.find((run) => run.origin === "auto_merge") ?? prRuns[0];
+  const repoOf = (run: RunRecord | undefined, fallback: string) => run?.repo ?? fallback;
+  const base = { muted: false, links: [] as NotificationLink[] };
+  const rows: NotificationRecord[] = [
+    ...(internalRun
+      ? [
+          {
+            ...base,
+            id: 10,
+            kind: "internal_error" as const,
+            severity: "high" as const,
+            groupKey: `internal_error:${internalRun.failureStage ?? "verify"}:remote branch <path> not found`,
+            count: 3,
+            runId: internalRun.id,
+            repo: repoOf(internalRun, "acme/web"),
+            subject: internalRun.taskKey ? `task:${internalRun.taskKey}` : `run:${internalRun.id}`,
+            title: `Likely DevIntern bug: ${internalRun.failureStage ?? "verify"} failed (×3)`,
+            body: [
+              internalRun.failureCause ?? DEMO_INTERNAL_CAUSE,
+              internalRun.workRef ? `Work saved on branch ${internalRun.workRef}` : undefined,
+            ]
+              .filter(Boolean)
+              .join("\n"),
+            links: runLinks(internalRun),
+            createdAt: now - 9 * HOUR_MS,
+            updatedAt: now - 7 * MINUTE_MS,
+          },
+        ]
+      : []),
+    {
+      ...base,
+      id: 9,
+      kind: "escalated",
+      severity: "high",
+      groupKey: "escalated:sentry:checkout-total-undefined",
+      count: 88,
+      ...(errorRun ? { runId: errorRun.id } : {}),
+      repo: repoOf(errorRun, "acme/web"),
+      subject: "sentry:checkout-total-undefined",
+      title: "Sentry issue escalated 88 times: TypeError reading 'total' in checkout",
+      body: "The error monitor keeps reopening this issue; the agent could not reproduce it from the stack trace alone.",
+      links: runLinks(errorRun),
+      createdAt: now - 3 * 24 * HOUR_MS,
+      updatedAt: now - 4 * MINUTE_MS,
+    },
+    ...(escalatedRun
+      ? [
+          {
+            ...base,
+            id: 8,
+            kind: "escalated" as const,
+            severity: "high" as const,
+            groupKey: `escalated:task:${escalatedRun.taskKey ?? escalatedRun.id}`,
+            count: 1,
+            runId: escalatedRun.id,
+            repo: repoOf(escalatedRun, "acme/web"),
+            title: `${runName(escalatedRun)} escalated and needs a human`,
+            ...(escalatedRun.outcomeReason ? { body: escalatedRun.outcomeReason } : {}),
+            links: runLinks(escalatedRun),
+            createdAt: now - 2 * HOUR_MS,
+            updatedAt: now - 2 * HOUR_MS,
+          },
+        ]
+      : []),
+    {
+      ...base,
+      id: 7,
+      kind: "automation_broke",
+      severity: "high",
+      groupKey: "automation_broke:automation:dependency-updates",
+      count: 1,
+      repo: "acme/api",
+      subject: "automation:dependency-updates",
+      title: "Automation dependency-updates broke: the latest run failed after a successful run",
+      body: "npm install failed: the lockfile references a package version that was unpublished.",
+      createdAt: now - 5 * HOUR_MS,
+      updatedAt: now - 5 * HOUR_MS,
+      readAt: now - 4 * HOUR_MS,
+    },
+    ...(spawnRun
+      ? [
+          {
+            ...base,
+            id: 6,
+            kind: "work_spawned" as const,
+            severity: "normal" as const,
+            groupKey: `work_spawned:run:${spawnRun.id}`,
+            count: 1,
+            runId: spawnRun.id,
+            repo: repoOf(spawnRun, "acme/web"),
+            title: `${runName(spawnRun)} delegated 2 tasks and filed 1 ticket`,
+            body: "1/2 finished: 1 PR open",
+            links: [{ label: `Run #${spawnRun.id}`, runId: spawnRun.id }],
+            createdAt: now - 26 * MINUTE_MS,
+            updatedAt: now - 12 * MINUTE_MS,
+          },
+        ]
+      : []),
+    {
+      ...base,
+      id: 5,
+      kind: "pr_opened",
+      severity: "normal",
+      groupKey: "pr_opened:repo:today",
+      count: Math.max(prRuns.length, 1),
+      repo: repoOf(prRuns[0], "acme/web"),
+      title: prRuns.length > 1 ? `${prRuns.length} PRs opened today` : "Opened a pull request",
+      links: prRuns.flatMap((run) =>
+        run.prUrl
+          ? [{ label: `${run.repo ?? "PR"}#${run.prNumber ?? ""}`, url: run.prUrl, runId: run.id }]
+          : [],
+      ),
+      createdAt: now - 6 * HOUR_MS,
+      updatedAt: now - 35 * MINUTE_MS,
+      readAt: now - 30 * MINUTE_MS,
+    },
+    ...(mergedRun
+      ? [
+          {
+            ...base,
+            id: 4,
+            kind: "pr_auto_merged" as const,
+            severity: "normal" as const,
+            groupKey: `pr_auto_merged:${mergedRun.repo ?? "repo"}:today`,
+            count: 1,
+            runId: mergedRun.id,
+            repo: repoOf(mergedRun, "acme/web"),
+            title: `Auto-merged ${mergedRun.repo ?? "a"} PR #${mergedRun.prNumber ?? ""}`.trim(),
+            links: runLinks(mergedRun),
+            createdAt: now - 3 * HOUR_MS,
+            updatedAt: now - 3 * HOUR_MS,
+            readAt: now - 2 * HOUR_MS,
+          },
+        ]
+      : []),
+    {
+      ...base,
+      id: 3,
+      kind: "source_unhealthy",
+      severity: "high",
+      groupKey: "source_unhealthy:linear:product",
+      count: 3,
+      subject: "source:linear:product",
+      title: "linear source product: authentication failed",
+      body: "The Linear API key was rotated; tickets were not picked up until it was replaced.",
+      createdAt: now - 30 * HOUR_MS,
+      updatedAt: now - 28 * HOUR_MS,
+      readAt: now - 27 * HOUR_MS,
+      resolvedAt: now - 26 * HOUR_MS,
+    },
+  ];
+  return rows.sort((a, b) => b.updatedAt - a.updatedAt || b.id - a.id);
+}
+
+function flag(params: URLSearchParams, name: string): boolean | undefined {
+  const raw = params.get(name);
+  if (raw === "true" || raw === "1") return true;
+  if (raw === "false" || raw === "0") return false;
+  return undefined;
+}
+
+/**
+ * Answer a notification GET from the demo fixtures with the server's filters
+ * and paging, or null when the URL is not a notification read.
+ *
+ * @param all - Fixture rows, newest first
+ * @param apiUrl - Root-relative API URL
+ */
+export function answerDemoNotifications(
+  all: readonly NotificationRecord[],
+  apiUrl: string,
+): NotificationListResponse | NotificationUnreadResponse | NotificationMutesResponse | null {
+  const url = new URL(apiUrl, "http://snapshot.invalid");
+  const open = all.filter((row) => row.resolvedAt === undefined && !row.muted);
+  if (url.pathname === "/api/notifications/unread-count") {
+    const unread = open.filter((row) => row.readAt === undefined);
+    return {
+      unread: unread.length,
+      unreadHigh: unread.filter((row) => row.severity === "high").length,
+    };
+  }
+  if (url.pathname === "/api/notifications/mutes") return { mutes: [] };
+  if (url.pathname !== "/api/notifications") return null;
+  const params = url.searchParams;
+  const unresolved = flag(params, "unresolved");
+  const includeMuted = flag(params, "includeMuted") === true;
+  const severity = params.get("severity");
+  const kind = params.get("kind");
+  const matching = all.filter(
+    (row) =>
+      (includeMuted || !row.muted) &&
+      (unresolved !== true || row.resolvedAt === undefined) &&
+      (severity === null || row.severity === severity) &&
+      (kind === null || row.kind === kind),
+  );
+  const limit = Math.max(1, nonNegativeInt(params.get("limit"), DEFAULT_RUN_LIMIT));
+  const offset = nonNegativeInt(params.get("offset"), 0);
+  return {
+    notifications: matching.slice(offset, offset + limit),
+    total: matching.length,
+    limit,
+    offset,
+  };
 }

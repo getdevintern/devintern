@@ -18,7 +18,9 @@ import type { ReadinessCheck } from "../src/lib/observability/readiness";
 import { renderReadinessReport } from "../src/lib/observability/readiness";
 import {
   collectWorkerDoctorChecks,
+  createDefaultRepoAccessCheck,
   defaultCheckSandbox,
+  entitlementCheck,
   gitFailureCause,
   gitLsRemote,
   gitProbeEnv,
@@ -76,11 +78,13 @@ function writeWorkspace(toml: string, env?: string): string {
 function passingDeps(overrides: Partial<WorkerDoctorDeps> = {}): WorkerDoctorDeps {
   return {
     processEnv: {},
+    probeCredentials: async () => {},
     dryRunQuery: async () => 3,
     checkRepoAccess: async () => ({ ok: true }),
     checkEntitlement: async () => ({ valid: true, source: "entitlement", message: "" }),
     checkHarness: async () => ok("harness"),
     checkSandbox: async () => ok("sandbox"),
+    checkGitIdentity: async () => ok("git-identity"),
     isPortInUse: async () => false,
     workerStatus: () => ({ status: "stopped" }),
     ...overrides,
@@ -272,6 +276,58 @@ repo = "backend"
     expect(renderReadinessReport(checks).hasFailures).toBe(true);
   });
 
+  test("a rejected tracker credential fails the credentials check and skips the query", async () => {
+    const workspacePath = writeWorkspace(TEAMS_CONFIG, JIRA_ENV);
+    let queried = false;
+    const checks = await collectWorkerDoctorChecks(
+      { workspacePath },
+      passingDeps({
+        probeCredentials: async () => {
+          throw new Error("JIRA API Error: 401 Unauthorized");
+        },
+        dryRunQuery: async () => {
+          queried = true;
+          return 1;
+        },
+      }),
+    );
+    const [credentials] = byId(checks, "credentials");
+    expect(credentials?.status).toBe("fail");
+    expect(credentials?.detail).toContain("401");
+    expect(byId(checks, "query")[0]?.status).toBe("fail");
+    expect(queried).toBe(false);
+  });
+
+  test("--offline skips the credential probe", async () => {
+    const workspacePath = writeWorkspace(TEAMS_CONFIG, JIRA_ENV);
+    const checks = await collectWorkerDoctorChecks(
+      { workspacePath, offline: true },
+      passingDeps({
+        probeCredentials: async () => {
+          throw new Error("must not be called");
+        },
+      }),
+    );
+    expect(byId(checks, "credentials")[0]?.status).toBe("ok");
+  });
+
+  test("a missing Markdown tasks folder hints to create it, not to fix task_query", async () => {
+    const tasksDir = join(workspaceDir, "missing-tasks");
+    const workspacePath = writeWorkspace(
+      '[defaults]\ntracker = "markdown"\ntask_query = "*"\n',
+      `MARKDOWN_TASKS_DIR=${tasksDir}\n`,
+    );
+    const deps = passingDeps();
+    delete deps.dryRunQuery; // the real Markdown client
+    const checks = await collectWorkerDoctorChecks({ workspacePath }, deps);
+    const [query] = byId(checks, "query");
+    expect(query?.status).toBe("fail");
+    expect(query?.detail).toContain(`Markdown tasks directory not found: ${tasksDir}`);
+    expect(query?.hint).toBe(
+      `Create the folder ${tasksDir}, or set MARKDOWN_TASKS_DIR to an existing folder that holds the task files`,
+    );
+  });
+
   test("a hung query times out as a failing check", async () => {
     const workspacePath = writeWorkspace(TEAMS_CONFIG, JIRA_ENV);
     const checks = await collectWorkerDoctorChecks(
@@ -397,6 +453,78 @@ remote = "git@github.com:acme/backend.git"
       }),
     );
     expect(byId(checks, "entitlement")[0]?.status).toBe("ok");
+    expect(byId(checks, "entitlement")[0]?.detail).toContain("starts when the worker first starts");
+  });
+
+  test("nobody signed in is an action, not a failure, and the closing line says one step is left", async () => {
+    const workspacePath = writeWorkspace(TEAMS_CONFIG, JIRA_ENV);
+    const checks = await collectWorkerDoctorChecks(
+      { workspacePath },
+      passingDeps({
+        checkEntitlement: async () => ({
+          valid: false,
+          source: "none",
+          message: "No automation license or Worker Pilot was found.",
+          signInRequired: true,
+        }),
+      }),
+    );
+    const [entitlement] = byId(checks, "entitlement");
+    expect(entitlement).toMatchObject({
+      status: "action",
+      detail: "Not started: sign in to begin your 14-day free Worker Pilot, no card required",
+    });
+    // A non-default workspace: the command names it, with a method.
+    expect(entitlement?.hint).toContain(
+      `devintern worker login --workspace ${workspacePath} github`,
+    );
+    expect(entitlement?.hint).toContain("--no-wait");
+    const report = renderReadinessReport(checks);
+    expect(report).toMatchObject({ hasFailures: false, hasActions: true });
+    expect(report.lines).toContain(
+      "👉 Automation entitlement — Not started: sign in to begin your 14-day free Worker Pilot, no card required",
+    );
+    expect(workerDoctorClosingLine(checks, report)).toStartWith(
+      "👉 Setup is fine; one step left before the worker can start. Run `devintern worker login",
+    );
+  });
+
+  test("a failure next to the sign-in action still fails", async () => {
+    const workspacePath = writeWorkspace(TEAMS_CONFIG, JIRA_ENV);
+    const checks = await collectWorkerDoctorChecks(
+      { workspacePath },
+      passingDeps({
+        checkEntitlement: async () => ({
+          valid: false,
+          source: "none",
+          message: "x",
+          signInRequired: true,
+        }),
+        checkHarness: async () => ({ id: "harness", label: "Agent harness", status: "fail" }),
+      }),
+    );
+    const report = renderReadinessReport(checks);
+    expect(report).toMatchObject({ hasFailures: true, hasActions: true });
+    expect(workerDoctorClosingLine(checks, report)).toContain("Not ready");
+  });
+
+  test("an active Worker Pilot shows its end date", () => {
+    const now = Date.parse("2026-11-26T12:00:00Z");
+    const check = entitlementCheck(
+      {
+        valid: true,
+        source: "trial",
+        message: "active",
+        trialEndsAt: "2026-12-10T12:00:00Z",
+      },
+      "devintern worker login",
+      "hint",
+      now,
+    );
+    expect(check).toMatchObject({
+      status: "ok",
+      detail: "Worker Pilot active, ends 2026-12-10 (14 days left)",
+    });
   });
 
   test.each(["srt", "smolvm"])(
@@ -603,8 +731,15 @@ remote = "git@github.com:acme/backend.git"
       "0 repos, 0 teams, 0 automations",
     );
     expect(byId(checks, "work-sources")[0]?.status).toBe("warn");
+    expect(byId(checks, "work-sources")[0]?.detail).toContain("0 tracker queries");
     expect(renderReadinessReport(checks).hasFailures).toBe(false);
     expectHintsOnProblems(checks);
+  });
+
+  test("work sources count one tracker query in the singular", async () => {
+    const workspacePath = writeWorkspace(TEAMS_CONFIG, JIRA_ENV);
+    const checks = await collectWorkerDoctorChecks({ workspacePath }, passingDeps());
+    expect(byId(checks, "work-sources")[0]?.detail).toContain("1 tracker query,");
   });
 });
 
@@ -723,6 +858,74 @@ describe("gitFailureCause", () => {
     const cause = gitFailureCause(`fatal: ${"x".repeat(500)}`);
     expect(cause?.length).toBeLessThanOrEqual(200);
     expect(cause?.endsWith("…")).toBe(true);
+  });
+});
+
+describe("default repository access check", () => {
+  const repo = {
+    name: "backend",
+    remote: "https://github.com/acme/backend.git",
+  } as Parameters<ReturnType<typeof createDefaultRepoAccessCheck>>[0];
+  const env = { GITHUB_TOKEN: "fake-token" };
+  const apiOk = async () => new Response("{}", { status: 200 });
+
+  const gitRefused = async () => ({
+    ok: false as const,
+    reason: "git ls-remote exited 128: remote: Write access to repository not granted.",
+  });
+
+  test("git refused with GITHUB_TOKEN: the token lacks Contents access", async () => {
+    const check = createDefaultRepoAccessCheck(1_000, {
+      fetch: apiOk,
+      lsRemote: gitRefused,
+      hasHelper: () => false,
+    });
+    const result = await check(repo, env);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toContain(
+      "can read acme/backend through the API, but git cannot clone it",
+    );
+    expect(result.reason).toContain("Write access to repository not granted");
+    expect(result.reason).toContain("Git used GITHUB_TOKEN and was refused");
+    expect(result.reason).toContain("Contents");
+    expect(result.reason).not.toContain("gh auth setup-git");
+  });
+
+  test("git refused through the user's own helper: names the helper", async () => {
+    const check = createDefaultRepoAccessCheck(1_000, {
+      fetch: apiOk,
+      lsRemote: gitRefused,
+      hasHelper: () => true,
+    });
+    const result = await check(repo, env);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toContain("takes precedence over GITHUB_TOKEN");
+  });
+
+  test("passes when both the API and git can read the repository", async () => {
+    const remotes: string[] = [];
+    const check = createDefaultRepoAccessCheck(1_000, {
+      fetch: apiOk,
+      lsRemote: async (remote) => {
+        remotes.push(remote);
+        return { ok: true, detail: "remote reachable" };
+      },
+    });
+    expect(await check(repo, env)).toEqual({ ok: true, detail: "GitHub acme/backend readable" });
+    expect(remotes).toEqual([repo.remote]);
+  });
+
+  test("an API rejection is reported before the git result", async () => {
+    const check = createDefaultRepoAccessCheck(1_000, {
+      fetch: async () => new Response("{}", { status: 404 }),
+      lsRemote: async () => ({ ok: true, detail: "remote reachable" }),
+    });
+    expect(await check(repo, env)).toEqual({
+      ok: false,
+      reason: "GitHub API 404 for acme/backend (missing or not visible to GITHUB_TOKEN)",
+    });
   });
 });
 

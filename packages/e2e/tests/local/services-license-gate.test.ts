@@ -44,7 +44,10 @@ const LICENSE_KEY_GUIDANCE =
   "Set LICENSE_KEY to a Supporter, Team, or Business license key from https://devintern.com/account";
 const SIGN_IN_ALTERNATIVE = "Alternatively, sign in if your account already holds one.";
 const WORKER_PILOT_ALTERNATIVE =
-  "Alternatively, run `devintern login` to start a free Worker Pilot; no card is required.";
+  "Alternatively, run `devintern login` to start your 14-day free Worker Pilot (no card required).";
+/** The daemon names the workspace sign-in (with `--workspace` for a non-default workspace). */
+const WORKER_DAEMON_PILOT_ALTERNATIVE =
+  /Alternatively, run `devintern worker login( --workspace [^`]+)?` to start your 14-day free Worker Pilot \(no card required\)\./;
 const NOT_SIGNED_IN = "Not signed in. Run `devintern login`.";
 
 /**
@@ -284,11 +287,15 @@ test.skipIf(skip)(
       if (worker.exitStatus === undefined) {
         throw new Error(`Worker kept running without a license:\n${worker.tail()}`);
       }
-      expect(worker.exitStatus).toBe(1);
+      // 78 (EX_CONFIG): nobody signed in is permanent, so a service manager
+      // stops retrying instead of restarting the worker every 30 s.
+      expect(worker.exitStatus).toBe(78);
       expect(worker.logs).toContain("❌ License check failed");
+      expect(worker.logs).toContain("The worker will not retry until this is fixed");
       expect(worker.logs).toContain(AUTOMATION_DENIAL);
-      // The worker allows the trial, so it points a signed-out user at login.
-      expect(worker.logs).toContain(WORKER_PILOT_ALTERNATIVE);
+      // The worker allows the trial, so it points a signed-out user at the
+      // workspace sign-in (the session the daemon reads).
+      expect(worker.logs).toMatch(WORKER_DAEMON_PILOT_ALTERNATIVE);
       expect(worker.logs).not.toContain("Draining injected tasks");
       expect(worker.agentInvocations()).toEqual([]);
       expect(worker.agentTimeline()).toEqual([]);

@@ -4,6 +4,9 @@ import { PRClient } from "../base-client";
 import { prNumberFromUrl } from "../shared";
 import type { PRInfo, PRResult } from "../shared";
 import type { ChangeRequestIdentity } from "../provider";
+import { parseStackPr } from "../../dependencies/stack-pr-snapshot";
+import type { GitHubPrPayload } from "../../dependencies/stack-pr-snapshot";
+import type { StackPrSnapshot } from "../../dependencies/stack-maintainer";
 
 export class GitHubPRClient extends PRClient {
   /**
@@ -230,6 +233,39 @@ export class GitHubPRClient extends PRClient {
     if (!Array.isArray(pulls)) throw new Error("GitHub PR lookup returned an unexpected body");
     if (pulls.length === 0) return "none";
     return pulls.some((pr) => (pr as { state?: unknown })?.state === "open") ? "open" : "closed";
+  }
+
+  /**
+   * One pull request's live state (open, merged, or closed), head, and base.
+   *
+   * @param repository - `owner/repo` slug
+   * @param prNumber - Pull request number
+   * @returns The snapshot, or `null` when the payload is unusable
+   * @throws When the lookup fails (bad credentials, not found, rate limit,
+   *   server or network error)
+   */
+  async getPullRequestSnapshot(
+    repository: string,
+    prNumber: number,
+  ): Promise<StackPrSnapshot | null> {
+    const [owner, repo] = repository.split("/");
+    if (!owner || !repo) throw new Error(`invalid repository slug '${repository}'`);
+    const response = await Utils.fetchWithRetry(
+      `${this.baseUrl}/repos/${owner}/${repo}/pulls/${prNumber}`,
+      {
+        headers: {
+          Authorization: `Bearer ${this.token}`,
+          Accept: "application/vnd.github.v3+json",
+          "User-Agent": "devintern",
+        },
+      },
+    );
+    if (!response.ok) {
+      throw new Error(`GitHub PR lookup failed: ${response.status} ${response.statusText}`);
+    }
+    const data = (await response.json()) as unknown;
+    if (typeof data !== "object" || data === null) return null;
+    return parseStackPr(prNumber, data as GitHubPrPayload);
   }
 
   /**

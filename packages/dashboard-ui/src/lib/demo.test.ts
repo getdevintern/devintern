@@ -81,3 +81,33 @@ test("passes non-API and cross-origin requests through", async () => {
   await fetch("https://elsewhere.test/api/overview");
   expect(requests).toEqual([`${BASE}assets/app.css`, "https://elsewhere.test/api/overview"]);
 });
+
+test("serves the notification inbox from fixtures around the recorded runs", async () => {
+  const { fetch } = demoFetch({
+    "data/api/runs.all.json": {
+      runs: [
+        {
+          id: 41,
+          origin: "scheduled",
+          automationId: "docs-drift",
+          status: "succeeded",
+          startedAt: EXPORTED_AT,
+        },
+      ],
+    },
+  });
+  const counts = (await (await fetch("/api/notifications/unread-count")).json()) as {
+    unread: number;
+    unreadHigh: number;
+  };
+  expect(counts.unreadHigh).toBeGreaterThan(0);
+  const list = (await (await fetch("/api/notifications?limit=50")).json()) as {
+    notifications: Array<{ kind: string; runId?: number; updatedAt: number }>;
+  };
+  const spawned = list.notifications.find((row) => row.kind === "work_spawned");
+  expect(spawned?.runId).toBe(41);
+  // Ages count back from the viewer's load time.
+  expect(list.notifications.every((row) => row.updatedAt <= LOADED_AT)).toBe(true);
+  const write = await fetch("/api/notifications/1/read", { method: "POST" });
+  expect(write.status).toBe(403);
+});

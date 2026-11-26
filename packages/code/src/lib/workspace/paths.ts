@@ -176,6 +176,16 @@ export function workspaceAppliedConfigPath(workspaceDir: string = resolveWorkspa
   return join(workspaceDir, ".worker.config-state.json");
 }
 
+/**
+ * Path of the worker's lifecycle record: whether the last worker process
+ * finished starting, stopped cleanly, or failed before it started (and why).
+ * `worker status` and `worker service` read it once the lock is gone; see
+ * `worker/lifecycle.ts`.
+ */
+export function workspaceWorkerLifecyclePath(workspaceDir: string = resolveWorkspaceDir()): string {
+  return join(workspaceDir, ".worker.lifecycle.json");
+}
+
 /** Shape of the worker's early startup marker. */
 export interface WorkerStartMarker {
   pid: number;
@@ -247,6 +257,24 @@ export function reposDir(workspaceDir: string = resolveWorkspaceDir()): string {
  */
 export function injectedTasksDir(workspaceDir: string = resolveWorkspaceDir()): string {
   return join(workspaceDir, "injected");
+}
+
+/**
+ * Directory holding per-run outputs files (`DEVINTERN_RUN_OUTPUTS`): JSONL
+ * records an agent run appends for the work it created, ingested into the
+ * `run_outputs` table when the run finishes. Under `state/` so sandboxed
+ * agents can already write it.
+ */
+export function runOutputsDir(workspaceDir: string = resolveWorkspaceDir()): string {
+  return join(workspaceStateDir(workspaceDir), "run-outputs");
+}
+
+/** Outputs file for one run (see {@link runOutputsDir}). */
+export function runOutputsPath(
+  runId: number,
+  workspaceDir: string = resolveWorkspaceDir(),
+): string {
+  return join(runOutputsDir(workspaceDir), `${runId}.jsonl`);
 }
 
 /** Directory holding per-task worktrees (`worktrees/<repo>/<task>`). */

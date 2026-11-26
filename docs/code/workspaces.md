@@ -25,7 +25,7 @@ cd ~/code/frontend && devintern worker add-repo
 
 - The worker keeps a bare clone of each repository under `~/.devintern/repos/` and runs each task in a fresh worktree under `~/.devintern/worktrees/`. Your own checkouts are never touched.
 - Before the agent starts, dependencies are installed by detecting the package manager from the lockfile. If that fails, the run continues with a warning.
-- Worktrees are removed after a successful run and kept after a failure for debugging, then deleted after `worktrees_ttl_days`.
+- Worktrees are removed after a successful run and kept after a failure for debugging, then deleted after `worktrees_ttl_days` (except a worktree holding [unfinished work that could not be pushed](delegation-runs.md)).
 - Runs, queue, and schedule state live in `~/.devintern/state/queue.db`. Worker sign-in and relay pairing live in `~/.devintern/state/code/`; use `devintern worker login` to sign in.
 
 ## The workspace file
@@ -79,6 +79,7 @@ Keys not shown here are documented on the page for their feature:
 | `[workspace].conflict_resolution*`, `auto_merge*`, `ci_failure_fix`; `[[repos]].sync_team_prs`, `auto_merge_safe_paths`, `auto_merge_deny_paths`, `auto_merge_review_paths` | [PR Follow-up](./pr-follow-up.md) |
 | `[worker.schedule]`, `[worker].auto_update`, `[workspace].dashboard_port`                                | [Worker Daemon](./worker.md)                                                       |
 | `[dashboard].allowed_origins`, `tailscale_autodetect`                                                    | [Dashboard](./dashboard.md#allowed-origins)                                        |
+| `[workspace].git_author_name`, `git_author_email` (also per `[[repos]]`)                                 | [Configuration: Commit identity](./configuration.md#commit-identity)               |
 | `[defaults].dependency_mode`                                                                             | [Delegation: Dependent tasks](./delegation.md#dependent-tasks---after)             |
 | `[[teams]].dependency_mode`                                                                              | [Worker Daemon: Ticket dependencies](./worker.md#ticket-dependencies)              |
 | `pipeline_file`                                                                                          | [below](#pipelines-for-the-fleet-and-per-repository)                               |
@@ -136,7 +137,7 @@ labels = ["web"]
 
 ## Pipelines for the fleet and per repository
 
-Set `pipeline_file` to a JSON pipeline definition (`steps`, `plugins`, and `artifacts` at the top level; see [Customizing the Task Pipeline](./pipelines.md)) for the whole fleet in `[defaults]`, or for one repo in `[[repos]]`. Paths resolve against `~/.devintern`.
+Set `pipeline_file` to a JSON pipeline definition (`steps`, `plugins`, and `artifacts` at the top level; see [Customizing the Task Pipeline](./pipelines.md)) for the whole fleet in `[defaults]`, or for one repo in `[[repos]]`. Relative paths resolve against `~/.devintern`, and a leading `~/` expands to your home directory.
 
 ```toml
 [defaults]

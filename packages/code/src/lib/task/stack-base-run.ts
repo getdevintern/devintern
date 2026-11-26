@@ -1,7 +1,7 @@
 /** Confirm or drop a worker-provided stack base once the run's PR target is known. */
 
 import type { StackBase } from "../dependencies/gate";
-import { STACKED_ON_ENV } from "../dependencies/stacked-base";
+import { parseStackedOnMarker, STACKED_ON_ENV } from "../dependencies/stacked-base";
 import { recordTrackerStackedOn } from "../state/tracker-dependencies";
 import { resolveQueueDbPath } from "../state/webhook-queue";
 import { WORKSPACE_TEAM_ENV } from "../workspace/env";
@@ -58,4 +58,18 @@ export function dropUnusedStackBase(
       `base branch '${stackBase.branch}' is unavailable, targeting '${effectiveTargetBranch}' instead`,
   );
   return true;
+}
+
+/**
+ * The stack base delivery should keep checking: the worker-provided one (a
+ * tracker ticket) or the description marker (an ad-hoc task), only while the
+ * run really targets that base's branch.
+ */
+export function runStackBase(
+  descriptionText: string | undefined,
+  envBase: StackBase | undefined,
+  effectiveTargetBranch: string,
+): StackBase | undefined {
+  const base = envBase ?? parseStackedOnMarker(descriptionText) ?? undefined;
+  return base && base.branch === effectiveTargetBranch ? base : undefined;
 }
