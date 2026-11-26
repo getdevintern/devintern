@@ -58,6 +58,7 @@ import type { RunRecord, RunStageRecord, RunStats } from "../state/run-recorder"
 import type { WorkerLogsResult } from "../observability/worker-logs";
 import { configureSqliteConnection } from "../state/sqlite";
 import { resolveWorkspaceDir, workspaceDbPath } from "../workspace/paths";
+import { summarizeStartupFailure } from "./lifecycle";
 
 /** Top-level `devintern worker` subcommands handled here. */
 export const WORKER_READ_COMMANDS = [
@@ -480,8 +481,12 @@ export function runWorkerReadCommand(
     io.stderr(`❌ ${workspace.error}\n`);
     return 1;
   }
-  const dbError = probeDatabase(workspaceDbPath(workspace.dir));
-  if (dbError) {
+  const dbPath = workspaceDbPath(workspace.dir);
+  const dbError = probeDatabase(dbPath);
+  // `status` still answers before the first successful start: a worker that
+  // failed its license check never created the database, and saying why it
+  // is stopped matters more than empty queue counts.
+  if (dbError && !(key === "status" && !existsSync(dbPath))) {
     io.stderr(`❌ ${dbError}\n`);
     return 1;
   }
@@ -861,6 +866,12 @@ function workerLine(worker: WorkerStatusView): string {
   const since = worker.startedAt ? ` since ${worker.startedAt}` : "";
   if (worker.reason === "pid-namespace") {
     return `${worker.status} (cannot verify from this sandbox${worker.pid === undefined ? "" : `; pid ${worker.pid}`})${since}`;
+  }
+  const exit = worker.lastExit;
+  if (worker.status === "stopped" && exit) {
+    if (exit.outcome === "stopped") return `stopped (clean stop at ${exit.at})`;
+    const reason = summarizeStartupFailure(exit.message) ?? "see the worker log";
+    return `stopped (failed to start at ${exit.at}: ${reason})`;
   }
   return `${worker.status}${pid}${since}`;
 }

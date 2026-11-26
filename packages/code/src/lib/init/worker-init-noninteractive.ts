@@ -818,8 +818,9 @@ function nextStepsFor(options: {
     },
     {
       id: "service",
-      message: "Or install it as a background service: run the wizard in a terminal",
-      command: "devintern worker init",
+      message:
+        "Or install it as a background service (systemd/launchd; checks readiness, then waits until the worker is running)",
+      command: "devintern worker service install",
     },
   );
   return steps;

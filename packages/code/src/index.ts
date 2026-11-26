@@ -8,7 +8,7 @@ import type { ResolvedHarness } from "@devintern/agent-harness";
 import { isMarkdownFilePath } from "@devintern/task-trackers";
 import { captureError, flushErrorTracking } from "@devintern/utils";
 import { setSandboxOverride } from "./lib/agent/sandbox";
-import { beginShutdown, isShuttingDown } from "./lib/cli/shutdown-state";
+import { beginShutdown, isShuttingDown, isSignalHandlingClaimed } from "./lib/cli/shutdown-state";
 import { initSentryOnce } from "./lib/observability/sentry-init";
 import { flushAnalytics, isAnonymousIdNewlyCreated, track } from "./lib/observability/analytics";
 import type { AnalyticsPropValue } from "./lib/observability/analytics";
@@ -410,6 +410,9 @@ process.on("unhandledRejection", (error: Error) => {
 
 // Handle process termination signals
 async function gracefulShutdown(signal: "SIGINT" | "SIGTERM", exitCode: number): Promise<void> {
+  // The worker daemon runs its own graceful shutdown and exits 0 when it
+  // finishes; exiting here first would skip it (and fail the service unit).
+  if (isSignalHandlingClaimed()) return;
   if (isShuttingDown()) return;
   beginShutdown();
   console.log(`\n\n⚠️  Received ${signal}, cleaning up...`);
