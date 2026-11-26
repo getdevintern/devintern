@@ -22,18 +22,22 @@ import {
   ensureRelayToken,
   gitLabRelayRepository,
   loadRelayState,
+  fetchRelayStatus,
   mergeConnectState,
+  relayResponseError,
   resolveRelayUrl,
   saveRelayState,
   verifiedGitHubRelayRepositories,
+  workerFields,
 } from "./state";
 import type {
   ConnectResponse,
   RelayConnectDeps,
   RelayConnectState,
-  RelayRegistration,
   VerifiedGitLabRelayRepository,
 } from "./state";
+import { connectWorkerIdentity, failureOutcome } from "./connect-worker";
+import type { ConnectOutcome } from "./connect-worker";
 import {
   clearPendingGitHubPairing,
   connectGitHubRepo,
@@ -43,12 +47,12 @@ import {
   pollGitHubPairing,
   startGitHubRepoPairing,
 } from "./github-pairing";
-import type { PendingGitHubPairing } from "./github-pairing";
 
 export {
   DEFAULT_RELAY_URL,
   RELAY_BOT_LOGIN,
   ensureRelayToken,
+  fetchRelayStatus,
   gitLabRelayRepository,
   hasGitHubRelayRegistration,
   hasGitHubRelayRouting,
@@ -58,11 +62,15 @@ export {
   resolveRelayUrl,
   saveRelayState,
   verifiedGitHubRelayRepositories,
+  OWNERSHIP_CONFLICT_CODE,
+  RelayOwnershipConflictError,
 } from "./state";
 export type {
   RelayConnectDeps,
   RelayConnectState,
+  RelayOwnershipConflict,
   RelayRegistration,
+  RelayWorkerIdentity,
   VerifiedGitHubRelayRepository,
   VerifiedGitLabRelayRepository,
 } from "./state";
@@ -84,6 +92,8 @@ export type {
   PendingGitHubPairing,
   UnverifiedGitHubRelayRepository,
 } from "./github-pairing";
+
+export type { ConnectOutcome } from "./connect-worker";
 
 export type RelayConnectTarget =
   | "github"
@@ -130,14 +140,12 @@ export interface WorkspaceRelayConnectDeps extends RelayConnectDeps {
   githubStatus?: boolean;
   /** Structured result of the connect attempt (the `--json` output is built from it). */
   onOutcome?: (outcome: ConnectOutcome) => void;
+  /**
+   * GitHub: every workspace repository is already verified locally; only
+   * register the worker identity and claim (or, with `takeover`, move) them.
+   */
+  identityOnly?: boolean;
 }
-
-/** Structured result of one relay connect attempt. */
-export type ConnectOutcome =
-  | { kind: "connected"; target: string; repos?: string[]; relayUrl?: string }
-  | { kind: "pending"; target: "github"; pairing: PendingGitHubPairing }
-  | { kind: "not_signed_in"; target: string; error: string }
-  | { kind: "failed"; target: string; error: string; code?: string };
 
 const RELAY_CONNECT_TARGETS = new Set<RelayConnectTarget>([
   "github",
@@ -189,6 +197,8 @@ export async function beginGitLabRelayRegistration(options: {
   workingDir?: string;
   relayUrl?: string;
   fetchImpl?: typeof fetch;
+  workerId?: string;
+  takeover?: boolean;
 }): Promise<GitLabRelayRegistrationBegin> {
   const deps: RelayConnectDeps = options;
   await ensureRelayToken(options.accessToken, deps);
@@ -199,12 +209,12 @@ export async function beginGitLabRelayRegistration(options: {
       instanceUrl: options.instanceUrl,
       projectId: options.projectId,
       projectPath: options.projectPath,
+      ...workerFields(deps),
     },
     deps,
   );
   if (!response.ok) {
-    const body = (await response.json().catch(() => null)) as { error?: string } | null;
-    throw new Error(body?.error ?? `relay returned HTTP ${response.status}`);
+    throw await relayResponseError(response);
   }
   const data = (await response.json()) as GitLabRelayRegistrationBegin;
   if (
@@ -230,6 +240,8 @@ export async function completeGitLabRelayRegistration(options: {
   workingDir?: string;
   relayUrl?: string;
   fetchImpl?: typeof fetch;
+  workerId?: string;
+  takeover?: boolean;
 }): Promise<RelayConnectState> {
   const workingDir = options.workingDir ?? process.cwd();
   const previous = loadRelayState(workingDir);
@@ -240,12 +252,12 @@ export async function completeGitLabRelayRegistration(options: {
       action: "complete-gitlab-registration",
       registrationId: options.registrationId,
       hookId: options.hookId,
+      ...workerFields(options),
     },
     options,
   );
   if (!response.ok) {
-    const body = (await response.json().catch(() => null)) as { error?: string } | null;
-    throw new Error(body?.error ?? `relay returned HTTP ${response.status}`);
+    throw await relayResponseError(response);
   }
   const data = (await response.json()) as {
     registration?: {
@@ -349,11 +361,15 @@ export async function registerRelaySource(options: {
   workingDir?: string;
   relayUrl?: string;
   fetchImpl?: typeof fetch;
+  workerId?: string;
+  takeover?: boolean;
 }): Promise<{ ingestUrl: string; state: RelayConnectState }> {
   const deps: RelayConnectDeps = {
     workingDir: options.workingDir,
     relayUrl: options.relayUrl,
     fetchImpl: options.fetchImpl,
+    workerId: options.workerId,
+    takeover: options.takeover,
   };
   const { relayToken } = await ensureRelayToken(options.accessToken, deps);
   const relayUrl = (options.relayUrl ?? resolveRelayUrl()).replace(/\/+$/, "");
@@ -366,12 +382,12 @@ export async function registerRelaySource(options: {
       source: options.source,
       team: options.team,
       secret: options.secret,
+      ...workerFields(deps),
     },
     deps,
   );
   if (!response.ok) {
-    const body = (await response.json().catch(() => null)) as { error?: string } | null;
-    throw new Error(body?.error ?? `relay returned HTTP ${response.status}`);
+    throw await relayResponseError(response);
   }
 
   const data = (await response.json()) as ConnectResponse & { ingestUrl: string };
@@ -391,7 +407,14 @@ export async function registerRelaySource(options: {
     // persisting an explicit team dimension for current state readers.
     registration.team = options.team;
   }
-  const state = mergeConnectState(workingDir, relayUrl, data, relayToken);
+  const merged = mergeConnectState(workingDir, relayUrl, data, relayToken);
+  // Remember the source so this workspace's worker claims it on startup.
+  const sources = (merged.sources ?? []).filter(
+    (entry) => !(entry.source === options.source && (entry.team ?? "") === (options.team ?? "")),
+  );
+  sources.push({ source: options.source, ...(options.team ? { team: options.team } : {}) });
+  const state = { ...merged, sources };
+  saveRelayState(state, workingDir);
   return { ingestUrl: data.ingestUrl, state };
 }
 
@@ -414,6 +437,10 @@ interface RelayConnectOptions {
   team?: string;
   relayUrl?: string;
   fetchImpl?: typeof fetch;
+  /** This workspace's relay worker id (newer relays). */
+  workerId?: string;
+  /** Move registrations another live worker owns to this worker. */
+  takeover?: boolean;
 }
 
 /** Tracker sources whose connect flow shares the register-source + webhook shape. */
@@ -422,6 +449,19 @@ type TrackerRelayTarget = Exclude<RelayConnectTarget, "github" | "gitlab" | "sta
 interface TrackerConnectContext {
   env: Record<string, string | undefined>;
   connectOpts: RelayConnectOptions;
+  onOutcome?: (outcome: ConnectOutcome) => void;
+}
+
+/** Print and report a tracker connect failure. */
+function trackerFailure(
+  ctx: TrackerConnectContext,
+  target: TrackerRelayTarget,
+  label: string,
+  error: unknown,
+): number {
+  console.error(`❌ ${label} connect failed: ${(error as Error).message}`);
+  ctx.onOutcome?.(failureOutcome(target, error));
+  return 1;
 }
 
 /** Print relay status and the registrations currently routed for this customer. */
@@ -434,6 +474,13 @@ async function connectStatusTarget(
     const status = await fetchRelayStatus({ relayToken, ...resolvedDeps });
     console.log(`📡 Relay: ${resolveRelayUrl()}`);
     console.log(`   Customer: ${status.customerId} (${status.licenseSource})`);
+    if (status.worker) {
+      console.log(`   This worker: ${status.worker.label} (${status.worker.workerId})`);
+    }
+    if (status.workers && status.workers.length > 1) {
+      console.log(`   Workers on this account: ${status.workers.length}`);
+    }
+    if (status.upgrade) console.log(`   ⚠️  ${status.upgrade.message}`);
     console.log(`   Buffered envelopes: ${status.buffered}`);
     if (status.registrations.length === 0) {
       console.log("   No registrations yet. Run: devintern worker connect");
@@ -441,8 +488,13 @@ async function connectStatusTarget(
     for (const reg of status.registrations) {
       const team = reg.team ? ` (team: ${reg.team})` : "";
       const buffered = reg.buffered === undefined ? "" : `, buffered: ${reg.buffered}`;
+      const owner = !reg.ownerWorkerId
+        ? ""
+        : reg.ownerWorkerId === status.worker?.workerId
+          ? ", served by this worker"
+          : `, served by ${reg.ownerLabel ?? reg.ownerWorkerId}`;
       console.log(
-        `   - ${reg.kind}:${reg.key}${team} (last event: ${formatTimestamp(reg.lastEventAt)}${buffered})`,
+        `   - ${reg.kind}:${reg.key}${team} (last event: ${formatTimestamp(reg.lastEventAt)}${buffered}${owner})`,
       );
     }
     return 0;
@@ -531,11 +583,13 @@ async function connectGitLabTarget(
   } catch (error) {
     console.error(`❌ GitLab relay connect failed: ${(error as Error).message}`);
     console.error("   Polling remains enabled; fix access or connectivity and retry.");
+    deps.onOutcome?.(failureOutcome("gitlab", error));
     return 1;
   }
 }
 
-async function connectLinearTarget({ env, connectOpts }: TrackerConnectContext): Promise<number> {
+async function connectLinearTarget(ctx: TrackerConnectContext): Promise<number> {
+  const { env, connectOpts } = ctx;
   const apiKey = env.LINEAR_API_KEY;
   if (!apiKey) {
     console.error("❌ LINEAR_API_KEY is required to register a Linear webhook.");
@@ -550,12 +604,12 @@ async function connectLinearTarget({ env, connectOpts }: TrackerConnectContext):
     console.log("   Undo in Linear: Settings > API > Webhooks.");
     return 0;
   } catch (error) {
-    console.error(`❌ Linear connect failed: ${(error as Error).message}`);
-    return 1;
+    return trackerFailure(ctx, "linear", "Linear", error);
   }
 }
 
-async function connectAsanaTarget({ env, connectOpts }: TrackerConnectContext): Promise<number> {
+async function connectAsanaTarget(ctx: TrackerConnectContext): Promise<number> {
+  const { env, connectOpts } = ctx;
   const apiToken = env.ASANA_API_TOKEN;
   const projectGid = env.ASANA_DEFAULT_PROJECT_GID;
   if (!apiToken || !projectGid) {
@@ -575,12 +629,12 @@ async function connectAsanaTarget({ env, connectOpts }: TrackerConnectContext): 
     console.log("   Undo via the Asana API: DELETE /webhooks/" + webhook.gid);
     return 0;
   } catch (error) {
-    console.error(`❌ Asana connect failed: ${(error as Error).message}`);
-    return 1;
+    return trackerFailure(ctx, "asana", "Asana", error);
   }
 }
 
-async function connectTrelloTarget({ env, connectOpts }: TrackerConnectContext): Promise<number> {
+async function connectTrelloTarget(ctx: TrackerConnectContext): Promise<number> {
+  const { env, connectOpts } = ctx;
   const apiKey = env.TRELLO_API_KEY;
   const apiToken = env.TRELLO_API_TOKEN;
   const boardId = env.TRELLO_DEFAULT_BOARD_ID;
@@ -602,15 +656,12 @@ async function connectTrelloTarget({ env, connectOpts }: TrackerConnectContext):
     console.log("   Delivery auth relies on the private ingest URL; keep it secret.");
     return 0;
   } catch (error) {
-    console.error(`❌ Trello connect failed: ${(error as Error).message}`);
-    return 1;
+    return trackerFailure(ctx, "trello", "Trello", error);
   }
 }
 
-async function connectAzureDevOpsTarget({
-  env,
-  connectOpts,
-}: TrackerConnectContext): Promise<number> {
+async function connectAzureDevOpsTarget(ctx: TrackerConnectContext): Promise<number> {
+  const { env, connectOpts } = ctx;
   const organization = env.AZURE_DEVOPS_ORG;
   const pat = env.AZURE_DEVOPS_PAT;
   const project = env.AZURE_DEVOPS_PROJECT;
@@ -631,12 +682,12 @@ async function connectAzureDevOpsTarget({
     console.log("   Undo in Azure DevOps: Project settings > Service hooks.");
     return 0;
   } catch (error) {
-    console.error(`❌ Azure DevOps connect failed: ${(error as Error).message}`);
-    return 1;
+    return trackerFailure(ctx, "azure-devops", "Azure DevOps", error);
   }
 }
 
-async function connectJiraTarget({ connectOpts }: TrackerConnectContext): Promise<number> {
+async function connectJiraTarget(ctx: TrackerConnectContext): Promise<number> {
+  const { connectOpts } = ctx;
   try {
     const { ingestUrl } = await registerRelaySource({ source: "jira", ...connectOpts });
     console.log("✅ Jira ingest URL registered. Jira webhooks need one-time admin setup:");
@@ -649,8 +700,7 @@ async function connectJiraTarget({ connectOpts }: TrackerConnectContext): Promis
     console.log("   Keep the URL secret; it authenticates deliveries for your account.");
     return 0;
   } catch (error) {
-    console.error(`❌ Jira connect failed: ${(error as Error).message}`);
-    return 1;
+    return trackerFailure(ctx, "jira", "Jira", error);
   }
 }
 
@@ -766,7 +816,7 @@ async function connectGitHubTarget(
     return missing.length > 0 ? 1 : 0;
   } catch (error) {
     console.error(`❌ Relay connect failed: ${(error as Error).message}`);
-    deps.onOutcome?.({ kind: "failed", target: "github", error: (error as Error).message });
+    deps.onOutcome?.(failureOutcome("github", error));
     return 1;
   }
 }
@@ -883,13 +933,33 @@ export async function connectRelayTarget(
     return 1;
   }
 
+  const identity = await connectWorkerIdentity(target, {
+    ...deps,
+    accessToken,
+    relayDeps: resolvedDeps,
+  });
+  if ("failed" in identity) return 1;
+
   const connectOpts: RelayConnectOptions = {
     accessToken,
     workingDir,
     team: deps.team,
     relayUrl: deps.relayUrl,
     fetchImpl: deps.fetchImpl,
+    workerId: identity.workerId,
+    takeover: deps.takeover,
   };
+
+  if (target === "github" && deps.identityOnly) {
+    const state = loadRelayState(workingDir);
+    deps.onOutcome?.({
+      kind: "connected",
+      target: "github",
+      repos: verifiedGitHubRelayRepositories(state).map((repository) => repository.repo),
+      relayUrl: state?.relayUrl,
+    });
+    return 0;
+  }
 
   if (target === "status") {
     return connectStatusTarget(resolvedDeps, accessToken);
@@ -902,34 +972,9 @@ export async function connectRelayTarget(
       ? connectGitHubStatus(deps, connectOpts)
       : connectGitHubTarget(repos, deps, connectOpts);
   }
-  return TRACKER_CONNECT_HANDLERS[target as TrackerRelayTarget]({ env, connectOpts });
-}
-
-interface StatusResponse {
-  customerId: string;
-  licenseSource: string;
-  buffered: number;
-  registrations: RelayRegistration[];
-}
-
-/**
- * Fetch live relay status for this customer (data plane: relay token).
- *
- * @param options - Relay token and optional relay URL / fetch override
- */
-export async function fetchRelayStatus(options: {
-  relayToken: string;
-  relayUrl?: string;
-  fetchImpl?: typeof fetch;
-}): Promise<StatusResponse> {
-  const relayUrl = (options.relayUrl ?? resolveRelayUrl()).replace(/\/+$/, "");
-  const fetchImpl = options.fetchImpl ?? fetch;
-  const response = await fetchImpl(`${relayUrl}/v1/status`, {
-    headers: { Authorization: `Bearer ${options.relayToken}` },
+  return TRACKER_CONNECT_HANDLERS[target as TrackerRelayTarget]({
+    env,
+    connectOpts,
+    onOutcome: deps.onOutcome,
   });
-  if (!response.ok) {
-    const body = (await response.json().catch(() => null)) as { error?: string } | null;
-    throw new Error(body?.error ?? `relay returned HTTP ${response.status}`);
-  }
-  return (await response.json()) as StatusResponse;
 }

@@ -5,6 +5,7 @@
 
 import { pairingNextUrl } from "../relay/github-pairing";
 import type { ConnectOutcome } from "../relay/connect";
+import { takeoverCommand } from "../relay/worker-identity";
 import type { SentryMonitorReport } from "./worker-sentry-noninteractive";
 
 export const CONNECT_JSON_SCHEMA = "devintern.worker-connect";
@@ -31,11 +32,26 @@ export interface ConnectPairingJson {
   expiresAt: string;
 }
 
+/** A registration another worker on the account serves. */
+export interface ConnectConflictJson {
+  kind: "repo" | "source" | "code-host";
+  key: string;
+  team?: string;
+  ownerWorkerId: string;
+  ownerLabel: string;
+  /** ISO timestamp of the owning worker's last relay poll. */
+  lastSeenAt: string;
+}
+
 export interface ConnectTargetJson {
   target: string;
   result: ConnectJsonResult;
   error?: string;
   code?: string;
+  /** This workspace's relay worker identity, when the relay supports per-worker routing. */
+  workerId?: string;
+  /** With `code: registration_owned_by_other_worker`: who serves each registration. */
+  conflicts?: ConnectConflictJson[];
   repos?: string[];
   relayUrl?: string;
   pairing?: ConnectPairingJson;
@@ -81,10 +97,17 @@ export interface TargetDocumentInput {
   errorLines: string[];
   /** ` --workspace <path>` when the workspace is not the default, else empty. */
   workspaceSuffix: string;
+  /** Relay worker id after the run, when registered. */
+  workerId?: string;
 }
 
 /** Describe what one connect target did. */
 export function buildTargetDocument(input: TargetDocumentInput): ConnectTargetJson {
+  const doc = describeTarget(input);
+  return input.workerId ? { ...doc, workerId: input.workerId } : doc;
+}
+
+function describeTarget(input: TargetDocumentInput): ConnectTargetJson {
   const { target, outcomes } = input;
   const signedOut = outcomes.find((outcome) => outcome.kind === "not_signed_in");
   if (signedOut && signedOut.kind === "not_signed_in") {
@@ -102,11 +125,30 @@ export function buildTargetDocument(input: TargetDocumentInput): ConnectTargetJs
   }
   const failed = outcomes.find((outcome) => outcome.kind === "failed");
   if (failed && failed.kind === "failed") {
+    const conflicts = failed.conflicts ?? [];
     return {
       target,
       result: "failure",
       error: failed.error,
       ...(failed.code ? { code: failed.code } : {}),
+      ...(conflicts.length > 0
+        ? {
+            conflicts: conflicts.map((conflict) => ({
+              kind: conflict.kind,
+              key: conflict.key,
+              ...(conflict.team ? { team: conflict.team } : {}),
+              ownerWorkerId: conflict.ownerWorkerId,
+              ownerLabel: conflict.ownerLabel,
+              lastSeenAt: new Date(conflict.lastSeenAt).toISOString(),
+            })),
+            nextSteps: [
+              {
+                id: "takeover",
+                command: `${takeoverCommand(conflicts[0]!)} --json${input.workspaceSuffix}`,
+              },
+            ],
+          }
+        : {}),
     };
   }
   const pending = outcomes.find((outcome) => outcome.kind === "pending");

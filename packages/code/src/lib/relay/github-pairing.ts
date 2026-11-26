@@ -14,15 +14,20 @@ import {
   ensureRelayToken,
   loadRelayState,
   mergeConnectState,
+  parseOwnershipConflicts,
   relayConfigDir,
+  RelayOwnershipConflictError,
+  relayResponseError,
   resolveRelayUrl,
   verifiedGitHubRelayRepositories,
   verifiedRepositoriesFromResponse,
+  workerFields,
 } from "./state";
 import type {
   ConnectResponse,
   RelayConnectDeps,
   RelayConnectState,
+  RelayOwnershipConflict,
   VerifiedGitHubRelayRepository,
 } from "./state";
 
@@ -43,10 +48,13 @@ export type GitHubRepoVerificationResult =
       verified: VerifiedGitHubRelayRepository[];
       /** Requested repositories that still need the browser pairing. */
       unverified: UnverifiedGitHubRelayRepository[];
+      /** Verified repositories another worker of the account serves (unattended verify). */
+      conflicts: RelayOwnershipConflict[];
     };
 
 interface VerifyResponse extends ConnectResponse {
   unverified?: Array<{ repo?: unknown; reason?: unknown }>;
+  conflicts?: unknown;
 }
 
 function normalizeRepoList(repos: string[]): string[] {
@@ -80,8 +88,7 @@ async function applyVerificationResponse(
 ): Promise<GitHubRepoVerificationResult> {
   if (!response.ok) {
     if (await isVerificationUnsupported(response)) return { kind: "unsupported" };
-    const body = (await response.json().catch(() => null)) as { error?: string } | null;
-    throw new Error(body?.error ?? `relay returned HTTP ${response.status}`);
+    throw await relayResponseError(response);
   }
   const data = (await response.json().catch(() => null)) as VerifyResponse | null;
   if (!data || typeof data.customerId !== "string" || !data.customerId) {
@@ -122,7 +129,13 @@ async function applyVerificationResponse(
       );
     }
   }
-  return { kind: "ok", state, verified, unverified };
+  return {
+    kind: "ok",
+    state,
+    verified,
+    unverified,
+    conflicts: parseOwnershipConflicts(data.conflicts),
+  };
 }
 
 /**
@@ -139,12 +152,14 @@ export async function verifyGitHubReposWithSession(options: {
   workingDir?: string;
   relayUrl?: string;
   fetchImpl?: typeof fetch;
+  workerId?: string;
+  takeover?: boolean;
 }): Promise<GitHubRepoVerificationResult> {
   const repos = normalizeRepoList(options.repos);
   const relayUrl = (options.relayUrl ?? resolveRelayUrl()).replace(/\/+$/, "");
   const response = await connectRequest(
     options.accessToken,
-    { action: "verify-github-repos", repos },
+    { action: "verify-github-repos", repos, ...workerFields(options) },
     { relayUrl, fetchImpl: options.fetchImpl },
   );
   return applyVerificationResponse(
@@ -204,6 +219,10 @@ export interface GitHubRepoPairingOptions {
   sleep?: (ms: number) => Promise<void>;
   /** Observe repositories verified through an existing installation (no browser). */
   onVerified?: (repos: string[]) => void;
+  /** This workspace's relay worker id (newer relays). */
+  workerId?: string;
+  /** Move repositories another live worker owns to this worker. */
+  takeover?: boolean;
 }
 
 /**
@@ -218,6 +237,8 @@ export async function startGitHubRepoPairing(
     relayUrl: options.relayUrl,
     fetchImpl: options.fetchImpl,
     sleep: options.sleep,
+    workerId: options.workerId,
+    takeover: options.takeover,
   };
   const requested = normalizeRepoList(options.repos);
   if (requested.length === 0) {
@@ -240,6 +261,8 @@ export async function startGitHubRepoPairing(
       workingDir,
       relayUrl,
       fetchImpl: options.fetchImpl,
+      workerId: options.workerId,
+      takeover: options.takeover,
     });
     if (verification.kind === "unsupported") {
       console.log(
@@ -262,6 +285,8 @@ export async function startGitHubRepoPairing(
       repos = verification.unverified.map((entry) => entry.repo);
     }
   } catch (error) {
+    // Another worker owns a repository: a browser pairing would be refused too.
+    if (error instanceof RelayOwnershipConflictError) throw error;
     console.warn(
       `⚠️  Browser-free GitHub verification failed (${(error as Error).message}); ` +
         "continuing with the GitHub App pairing.",
@@ -439,12 +464,11 @@ async function beginGitHubPairing(
 ): Promise<PendingGitHubPairing> {
   const response = await connectRequest(
     accessToken,
-    { action: "begin-github-pairing", repo: repos[0], repos },
+    { action: "begin-github-pairing", repo: repos[0], repos, ...workerFields(deps) },
     deps,
   );
   if (!response.ok) {
-    const body = (await response.json().catch(() => null)) as { error?: string } | null;
-    throw new Error(body?.error ?? `relay returned HTTP ${response.status}`);
+    throw await relayResponseError(response);
   }
   const data = (await response.json()) as {
     installUrl: string;

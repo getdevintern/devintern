@@ -42,6 +42,7 @@ For trackers, set the tracker credentials (see the table below), then run `devin
 | `devintern worker connect jira`                | Print your private ingest URL and the one-time Jira admin webhook steps   |
 | `devintern worker connect sentry`              | Add a Sentry auto-fix project (polled directly; not sent through the relay). See [Sentry Auto-fixes](./sentry-integration.md) |
 | `devintern worker connect status`              | Show relay status and repositories still awaiting verification            |
+| `devintern worker connect <target> --takeover` | Move registrations another worker on your account serves to this worker. See [Multiple workers](#multiple-workers-on-one-account) |
 
 ## Pairing GitHub without a terminal
 
@@ -61,7 +62,7 @@ devintern worker connect github --status --json    # finishes local registration
 
 With several GitHub accounts, each needs its own approval: run `--no-wait`, approve, `--status`, then repeat until nothing is left.
 
-`--json` prints `{"schema": "devintern.worker-connect", "version": 1, "target", "result", ...}`. `result` is `connected` (exit 0), `pending` (exit 0: `pairing` has `id`, `state`, `installUrl`, `expiresAt`, and, when the relay provides them, `authorizeUrl` and `appInstalled`; `nextSteps` lists the URL to open (the `authorizeUrl` when the App is already installed) and the `--status` command), `action_required` (exit 2: nobody is signed in, `nextSteps` holds the `devintern worker login <method> --no-wait --json` command), or `failure` (exit 1: `error` and often a `code` such as `pairing_expired`, `no_pending_pairing`, `relay_unauthorized`, or `relay_unavailable`). `devintern worker connect` with no target returns one document with a `targets` array. Treat an unknown `result` as not finished.
+`--json` prints `{"schema": "devintern.worker-connect", "version": 1, "target", "result", ...}`. `result` is `connected` (exit 0), `pending` (exit 0: `pairing` has `id`, `state`, `installUrl`, `expiresAt`, and, when the relay provides them, `authorizeUrl` and `appInstalled`; `nextSteps` lists the URL to open (the `authorizeUrl` when the App is already installed) and the `--status` command), `action_required` (exit 2: nobody is signed in, `nextSteps` holds the `devintern worker login <method> --no-wait --json` command), or `failure` (exit 1: `error` and often a `code` such as `pairing_expired`, `no_pending_pairing`, `relay_unauthorized`, `relay_unavailable`, or `registration_owned_by_other_worker`). With a current relay every document also has `workerId`, this worker's relay identity. A `registration_owned_by_other_worker` failure lists `conflicts` (`kind`, `key`, optional `team`, `ownerWorkerId`, `ownerLabel`, and `lastSeenAt` as an ISO timestamp) and a `takeover` next step. `devintern worker connect` with no target returns one document with a `targets` array. Treat an unknown `result` as not finished.
 
 ## Environment variables
 
@@ -111,7 +112,7 @@ The relay never receives diffs, file contents, ticket bodies, comment text, CI l
 - **GitLab** hooks are created with your local token, which stays on your machine. Self-Managed instances need only outbound HTTPS to `relay.devintern.com`.
 - **Linear** and **Asana** deliveries are signature-verified. **Trello**, **Azure DevOps**, and **Jira** deliveries are authenticated by the unguessable ingest URL, so keep it secret.
 
-Pairing state is stored in owner-only `~/.devintern/state/code/relay.json`.
+Pairing state and this worker's relay identity are stored in owner-only `~/.devintern/state/code/relay.json`.
 
 ## How events are handled
 
@@ -119,6 +120,25 @@ Pairing state is stored in owner-only `~/.devintern/state/code/relay.json`.
 - PR comments that mention `@devintern-ai` are acted on only for users with push access.
 - Tracker events re-run your configured ready-tasks query before acting, so "ready" still means what your query says.
 - GitLab events are hints: the worker re-fetches MR, discussion, and CI state before acting.
+
+## Multiple workers on one account
+
+Each worker workspace has its own relay identity, created the first time it runs `devintern worker connect` or starts with a current CLI. Its label is the hostname plus a short hash of the workspace path, for example `build-01:ws-3f9a1c2e`. `devintern worker status` and the `worker doctor` Relay row show it.
+
+A repository, GitLab project, or tracker registration (per team) belongs to one worker, and the relay delivers its events only to that worker, so two workers never both act on the same review or `@mention`. Events for registrations nobody owns go to every worker of the account, as before.
+
+| Situation | What happens |
+| --------- | ------------ |
+| A second worker connects a repository another worker serves | `worker connect` fails with `registration_owned_by_other_worker`, naming the other worker's label and when it last polled |
+| You want this worker to serve it instead | Run the same command with `--takeover`, for example `devintern worker connect github --takeover`. New events go to this worker; events already delivered to the old one stay there |
+| The owning worker has not polled the relay for 7 days | Its registrations are free: another worker claims them without `--takeover`, and until then their events go to every worker |
+| A worker connects or starts for the first time | It starts at the relay's current position and does not replay events buffered before it existed |
+
+To move a workspace to a new host, stop the old worker, then run `devintern worker connect --takeover` on the new one.
+
+### Upgrading from an older CLI
+
+Workers on CLIs without relay identities keep receiving the account-wide event stream. Once any worker on the account has an identity, they receive only events no other worker owns, and their log shows a hint to upgrade. Upgrade every worker, then start each one (or run `devintern worker connect`): it claims the repositories and trackers its workspace connected, and `worker doctor` warns about any that another worker already serves.
 
 ## Signing in over SSH or mosh
 
@@ -136,13 +156,15 @@ You can also copy `~/.devintern/state/code/.auth-session.json` from a machine wh
 
 ## Troubleshooting
 
-`devintern worker doctor` has a **Relay** row: `polling only` when you have not paired, the number of paired repositories and relay URL when you have, and a warning when a pairing is still pending or a workspace repository is not covered. It reads local state, so it also works with `--offline`.
+`devintern worker doctor` has a **Relay** row: `polling only` when you have not paired, the number of paired repositories, relay URL, this worker's label, and what it owns when you have, and a warning when a pairing is still pending, a workspace repository is not covered, or another worker serves one of this workspace's registrations. It reads local state as of the last connect or worker start, so it also works with `--offline`.
 
 | Symptom | Fix |
 | ------- | --- |
 | App already installed: `--status` stays on "Waiting for the GitHub App authorization" and GitHub showed the App's settings page instead of an install | The App is already installed on that account but not linked to your DevIntern account yet, and saving its settings does not finish pairing. With a current relay, `connect` prints an authorize URL ("The DevIntern App is already installed on ..."): open it and approve once, and the pairing completes. The install URL is then only for changing which repositories the App can access. On an older relay, run `devintern worker connect github` again: it verifies repositories under an installation already linked to your account without a browser, and a repository not covered must be added to the installation's repository access first |
 | `--status` fails with "session expired or invalid" (`relay_unauthorized`) | Sign in again with `devintern worker login <method> --no-wait`, then re-run `--status`. The pending pairing is kept |
 | `--status` fails with "relay unavailable" (`relay_unavailable`) | The relay returned a server error or rate limit. Retry in a few minutes; polling keeps working meanwhile |
+| `connect` fails with `registration_owned_by_other_worker`, or doctor says a repository "is served by worker ..." | Another worker on your account owns it. Stop that worker or leave it be, or run the connect command again with `--takeover` to move it here. See [Multiple workers](#multiple-workers-on-one-account) |
+| Worker log: "Another worker on this account uses per-worker relay routing" | This worker's CLI predates relay identities. Upgrade it and restart the worker |
 
 ## Availability
 

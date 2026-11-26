@@ -45,6 +45,8 @@ Check `devintern worker connect --help`. Commands support `--workspace /path/to/
 | `devintern worker connect jira` | Prints a private ingest URL and Jira admin webhook instructions; it does not configure or validate Jira API access. |
 | `devintern worker connect status` | Reports relay state and workspace repositories awaiting verification. |
 
+Each worker workspace has its own relay identity, and each repository, GitLab project, or tracker team registration is served by one worker of the account. When `worker connect` fails with `code` `registration_owned_by_other_worker`, another worker already serves it: report the `conflicts` entries (`ownerLabel`, `lastSeenAt`) to the user and ask before rerunning with `--takeover`, which moves its events to this worker. Never pass `--takeover` by default. A worker silent for 7 days loses its registrations automatically.
+
 When multiple teams use the same tracker, select `--team <name>` explicitly; with exactly one matching team the CLI can infer it. `--team` is not valid for GitHub/GitLab code-host pairing or status. GitHub Issues has no separate tracker connect step: distinguish its token/query setup from GitHub App pairing. Tracker registration does not replace local API credentials. Jira/Trello/Azure private ingest URLs act as authentication material; keep them out of committed files and summaries.
 
 `devintern worker connect sentry --repo <registered-name>` (or `--org`/`--project`/`--env-file` flags without a terminal) is a separate, directly polled error-monitor setup, not relay pairing. Use the [Sentry guide](https://devintern.com/docs/code/sentry-integration) for the auth token, organization/project, and validation. A Sentry DSN cannot substitute for the polling token.
