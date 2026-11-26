@@ -45,9 +45,19 @@ const MAX_LIMIT = 200;
 const EMPTY_COPY: Record<InboxTab, { title: string; body: string; resolvedBody: string }> = {
   needs_you: {
     title: "Nothing needs you",
-    body: "Escalations, exhausted retries, broken automations, and unhealthy sources show up here until they are resolved.",
+    body: "DevIntern problems, escalations, exhausted retries, broken automations, and unhealthy sources show up here until they are resolved.",
     resolvedBody:
-      "No escalations, exhausted retries, broken automations, or unhealthy sources yet.",
+      "No DevIntern problems, escalations, exhausted retries, broken automations, or unhealthy sources yet.",
+  },
+  problems: {
+    title: "No DevIntern problems",
+    body: "When a DevIntern step itself fails (verification, git, PR creation), it shows up here, grouped by error, until a later run of the task succeeds.",
+    resolvedBody: "DevIntern has not recorded a failure of its own pipeline yet.",
+  },
+  review: {
+    title: "Nothing waiting on review",
+    body: "Runs a review or merge rule handed back to a human, and runs the agent could not finish, show up here.",
+    resolvedBody: "No escalations yet.",
   },
   activity: {
     title: "No recent activity",

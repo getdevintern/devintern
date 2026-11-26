@@ -25,6 +25,13 @@ export interface AutomaticResolveResult {
   capacity?: true;
   /** Earliest time a capacity defer should be retried, when known. */
   retryAt?: number;
+  /**
+   * On a `failed` outcome, how far the resolver got (`setup`, `aborted`,
+   * `push-failed`, `landed-but-unconfirmed`; see `FailureKind` in
+   * `review/conflict-resolver.ts`). Carried through the result record; absent
+   * when the subprocess died without writing one.
+   */
+  failureKind?: string;
 }
 
 const prRunTails = new Map<string, Promise<void>>();

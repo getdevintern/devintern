@@ -11,12 +11,13 @@
  */
 
 import { chmodSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "fs";
-import { basename, join } from "path";
+import { basename, dirname, join } from "path";
 
 import { findProjectRoot } from "@devintern/utils";
 
 import { Utils } from "../utils";
 import { loadWorkspaceConfig, parseWorkspaceConfig } from "./config";
+import type { WorkspaceConfig } from "./config";
 import { parseEnvFile } from "./env";
 import { resolveWorkspaceDir, workspaceConfigPath, workspaceEnvPath } from "./paths";
 
@@ -361,6 +362,50 @@ export interface SentryMonitorWriteResult {
   added: boolean;
 }
 
+const normalizeSentryBaseUrl = (value?: string) =>
+  (value ?? "https://sentry.io").replace(/\/+$/, "");
+
+/** The configured Sentry monitor for this organization, project, repo, and base URL, if any. */
+export function findSentryErrorMonitor(
+  config: WorkspaceConfig,
+  input: Pick<SentryMonitorInput, "organization" | "project" | "repo" | "baseUrl">,
+): WorkspaceConfig["errorMonitors"][number] | undefined {
+  return config.errorMonitors.find(
+    (monitor) =>
+      monitor.provider === "sentry" &&
+      monitor.organization === input.organization &&
+      monitor.project === input.project &&
+      monitor.repo === input.repo &&
+      normalizeSentryBaseUrl(monitor.baseUrl) === normalizeSentryBaseUrl(input.baseUrl),
+  );
+}
+
+/**
+ * Replace `SENTRY_AUTH_TOKEN` in a monitor's own env file, keeping other lines
+ * and the owner-only mode.
+ *
+ * @returns The workspace-relative env file path, or null when the monitor has none.
+ */
+export function refreshSentryMonitorToken(
+  workspaceDir: string,
+  monitor: { envFile?: string },
+  authToken: string,
+): string | null {
+  if (!monitor.envFile) return null;
+  const path = join(workspaceDir, monitor.envFile);
+  const lines = existsSync(path)
+    ? readFileSync(path, "utf8")
+        .split("\n")
+        .filter((line) => line.length > 0 && !/^\s*SENTRY_AUTH_TOKEN\s*=/.test(line))
+    : [];
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, `${[...lines, `SENTRY_AUTH_TOKEN=${authToken}`].join("\n")}\n`, {
+    mode: 0o600,
+  });
+  chmodSync(path, 0o600);
+  return monitor.envFile;
+}
+
 /**
  * Add one repo-bound Sentry monitor while preserving hand-written TOML.
  * Re-running setup for the same Sentry project is idempotent.
@@ -372,15 +417,7 @@ export function writeSentryErrorMonitor(
   const configPath = workspaceConfigPath(workspaceDir);
   const content = readFileSync(configPath, "utf8");
   const config = parseWorkspaceConfig(content, configPath);
-  const normalizeBaseUrl = (value?: string) => (value ?? "https://sentry.io").replace(/\/+$/, "");
-  const existing = config.errorMonitors.find(
-    (monitor) =>
-      monitor.provider === "sentry" &&
-      monitor.organization === input.organization &&
-      monitor.project === input.project &&
-      monitor.repo === input.repo &&
-      normalizeBaseUrl(monitor.baseUrl) === normalizeBaseUrl(input.baseUrl),
-  );
+  const existing = findSentryErrorMonitor(config, input);
   if (existing) {
     const existingEnvPath = join(workspaceDir, existing.envFile ?? "");
     if (existing.envFile && existsSync(existingEnvPath)) chmodSync(existingEnvPath, 0o600);
@@ -415,8 +452,8 @@ export function writeSentryErrorMonitor(
     `organization = ${tomlString(input.organization)}`,
     `project = ${tomlString(input.project)}`,
   ];
-  if (input.baseUrl && normalizeBaseUrl(input.baseUrl) !== "https://sentry.io") {
-    lines.push(`base_url = ${tomlString(normalizeBaseUrl(input.baseUrl))}`);
+  if (input.baseUrl && normalizeSentryBaseUrl(input.baseUrl) !== "https://sentry.io") {
+    lines.push(`base_url = ${tomlString(normalizeSentryBaseUrl(input.baseUrl))}`);
   }
   if (input.query) lines.push(`query = ${tomlString(input.query)}`);
   lines.push(`env_file = ${tomlString(envFile)}`, "");

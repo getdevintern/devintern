@@ -18,7 +18,13 @@ import {
   workspaceCodeStateDir,
   workspaceConfigPath,
 } from "../workspace/paths";
+import { startWorkerCapture } from "../observability/worker-capture";
 import { parseRunNowArgs, runWorkerRunNow } from "./run-now";
+import {
+  armWorkerStartupGuard,
+  exitWorkerStartupPermanently,
+  isPermanentLicenseDenial,
+} from "./startup";
 
 export { parseRunNowArgs, runWorkerRunNow };
 
@@ -456,6 +462,9 @@ async function runWorkerDaemon(args: string[]): Promise<void> {
       );
       console.log("       devintern worker connect [target] [--workspace <path>]");
       console.log(
+        "       devintern worker service <install|start|stop|restart|status|uninstall|logs>",
+      );
+      console.log(
         "       devintern worker <runs|stats|automations|prs|queue|status|overview|logs> [--json]",
       );
       console.log("");
@@ -483,6 +492,7 @@ async function runWorkerDaemon(args: string[]): Promise<void> {
       console.log("  connect             Configure relay integrations or Sentry auto-fixes");
       console.log("  run-now             One immediate drain, ignoring working windows");
       console.log("  doctor              Check workspace readiness without starting the worker");
+      console.log("  service             Install, start, stop, or inspect the background service");
       console.log("");
       console.log("Read-only dashboard data (no dashboard, worker, or network needed; --json");
       console.log("prints the matching /api response body):");
@@ -515,6 +525,16 @@ async function runWorkerDaemon(args: string[]): Promise<void> {
   const selectedWorkspaceDir = workspacePath
     ? dirname(resolve(workspacePath))
     : resolveWorkspaceDir();
+  // Capture output and arm the startup record before anything can fail, so a
+  // license or config failure under a service lands in worker.*.log and in
+  // `worker status` / `worker service status`, not only in the journal.
+  // startWorker() reuses this capture.
+  try {
+    startWorkerCapture(selectedWorkspaceDir);
+  } catch {
+    // Never block the daemon on log capture.
+  }
+  armWorkerStartupGuard(selectedWorkspaceDir);
   ensureWorkspaceCodeState(selectedWorkspaceDir);
   applyWorkspaceProcessEnv(selectedWorkspaceDir);
   initSentryOnce(`code@${VERSION}`);
@@ -534,17 +554,93 @@ async function runWorkerDaemon(args: string[]): Promise<void> {
     allowTrial: true,
     loginCommand,
   });
+  if (!licenseResult.valid) {
+    await exitOnLicenseDenial(licenseResult, loginCommand);
+  }
   await enforceLicenseOrExit(licenseResult);
   if (licenseResult.source === "trial") {
     process.env.DEVINTERN_WORKER_TRIAL = "1";
   }
 
   const { runWorkspaceWorker } = await import("../workspace/workspace-worker");
+  try {
+    await startWorkspaceDaemon(runWorkspaceWorker, {
+      workspacePath,
+      verbose,
+      supabaseConfig,
+      loginCommand,
+      trialAvailable: licenseResult.trialAvailable === true,
+    });
+  } catch (error) {
+    await exitOnStartupError(error, loginCommand);
+  }
+}
+
+/** Print a failed license check with its fix, then exit (permanently when a restart cannot help). */
+async function exitOnLicenseDenial(
+  result: Awaited<ReturnType<typeof checkLicense>>,
+  loginCommand: string,
+): Promise<never> {
+  try {
+    requireLicense(result);
+  } catch {
+    // requireLicense printed the reason.
+  }
+  await flushAnalytics();
+  if (!isPermanentLicenseDenial(result)) process.exit(1);
+  exitWorkerStartupPermanently(licenseFixHint(result, loginCommand));
+}
+
+/** What to run after a permanent license failure, worded for a service. */
+function licenseFixHint(result: { signInRequired?: boolean }, loginCommand: string): string {
+  const fix = result.signInRequired
+    ? `Sign in with \`${loginCommand} github\` (or google, x, email you@company.com), or set LICENSE_KEY in the workspace .env`
+    : "Set LICENSE_KEY in the workspace .env (https://devintern.com/pricing)";
+  return [
+    `   The worker will not retry until this is fixed. ${fix},`,
+    "   then start it again: devintern worker service restart (or `devintern worker`).",
+  ].join("\n");
+}
+
+/** Report an error thrown while the daemon was starting and exit. */
+async function exitOnStartupError(error: unknown, loginCommand: string): Promise<never> {
+  const { LicenseCheckError } = await import("@devintern/license-check");
+  const { WorkspaceConfigError } = await import("../workspace/config");
+  const message = error instanceof Error ? error.message : String(error);
+  await flushAnalytics();
+  if (error instanceof LicenseCheckError) {
+    // requireLicense already printed the reason.
+    if (isPermanentLicenseDenial({ valid: false, message })) {
+      exitWorkerStartupPermanently(licenseFixHint({}, loginCommand));
+    }
+    process.exit(1);
+  }
+  console.error(`❌ The worker could not start: ${message}`);
+  if (error instanceof WorkspaceConfigError || /^Invalid .*workspace\.toml/.test(message)) {
+    exitWorkerStartupPermanently(
+      "   Fix workspace.toml (`devintern worker doctor` shows every problem), then start the worker again.",
+    );
+  }
+  process.exit(1);
+}
+
+/** Run the workspace daemon with the license-aware trial activation and access checks. */
+async function startWorkspaceDaemon(
+  runWorkspaceWorker: typeof import("../workspace/workspace-worker").runWorkspaceWorker,
+  options: {
+    workspacePath: string | undefined;
+    verbose: boolean;
+    supabaseConfig: ReturnType<typeof loadSupabaseConfig>;
+    loginCommand: string;
+    trialAvailable: boolean;
+  },
+): Promise<void> {
+  const { workspacePath, verbose, supabaseConfig, loginCommand } = options;
   await runWorkspaceWorker({
     workspacePath,
     verbose,
     cliVersion: VERSION,
-    beforeAcquirersStart: licenseResult.trialAvailable
+    beforeAcquirersStart: options.trialAvailable
       ? async () => {
           const activated = await activateWorkerTrial({
             productKey: "devintern/code",
@@ -594,6 +690,10 @@ export async function runWorkerCli(args: string[]): Promise<void> {
   if (subcommand === "init") return runWorkerInitSubcommand(rest);
   if (subcommand === "login") return runWorkerLoginSubcommand(rest);
   if (subcommand === "doctor") return runWorkerDoctorSubcommand(rest);
+  if (subcommand === "service") {
+    const { runWorkerServiceCommand } = await import("./service-command");
+    process.exit(await runWorkerServiceCommand(rest));
+  }
   if (subcommand && WORKER_READ_SUBCOMMANDS.has(subcommand)) {
     const { isWorkerReadCommand, runWorkerReadCommand } = await import("./dashboard-read-cli");
     if (isWorkerReadCommand(subcommand)) process.exit(runWorkerReadCommand(subcommand, rest));

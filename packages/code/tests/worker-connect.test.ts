@@ -9,7 +9,7 @@ import {
   verifiedGitHubRelayRepositories,
 } from "../src/lib/relay/connect";
 import { createRelayAutoVerifier } from "../src/lib/relay/auto-verify";
-import { runWorkerConnectCommand } from "../src/lib/init/worker-connect";
+import { parseConnectArgs, runWorkerConnectCommand } from "../src/lib/init/worker-connect";
 import { loadWorkspaceConfig } from "../src/lib/workspace/config";
 
 describe("runWorkerConnectCommand", () => {
@@ -274,7 +274,7 @@ remote = "git@gitlab.com:acme/platform.git"
     // running the status flow the shared parse selected.
     const result = await runWorkerConnectCommand(["bogus"], {
       workspaceDir,
-      parsed: { target: "status", help: false, disconnect: false },
+      parsed: parseConnectArgs(["status"]),
       runConnect: async (target) => {
         expect(target).toBe("status");
         return 0;

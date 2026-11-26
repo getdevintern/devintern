@@ -103,12 +103,14 @@ export function filterRecordedRuns(all: readonly RunRecord[], apiUrl: string): R
   const status = params.get("status");
   const origin = params.get("origin");
   const automationId = params.get("automationId");
+  const outcomeClass = params.get("outcomeClass");
   const matching = all.filter(
     (run) =>
       (taskKey === null || run.taskKey === taskKey) &&
       (status === null || run.status === status) &&
       (origin === null || run.origin === origin) &&
-      (automationId === null || run.automationId === automationId),
+      (automationId === null || run.automationId === automationId) &&
+      (outcomeClass === null || run.outcomeClass === outcomeClass),
   );
   const limit = Math.max(1, nonNegativeInt(params.get("limit"), DEFAULT_RUN_LIMIT));
   const offset = nonNegativeInt(params.get("offset"), 0);
@@ -204,6 +206,81 @@ export function pruneUnrecordedLineage(detail: unknown, recordedIds: ReadonlySet
 }
 
 // ---------------------------------------------------------------------------
+// Outcome-class fixtures
+// ---------------------------------------------------------------------------
+
+/** Cause of the demo's DevIntern-side failure: a stacked base merged mid-run (cf. run 953). */
+export const DEMO_INTERNAL_CAUSE =
+  "Remote branch refs/remotes/origin/feature/notification-center-backend not found";
+
+function classificationFields(run: RunRecord): Partial<RunRecord> {
+  return {
+    outcomeClass: run.outcomeClass,
+    failureStage: run.failureStage,
+    failureCause: run.failureCause,
+    workStatus: run.workStatus,
+    workRef: run.workRef,
+  };
+}
+
+/**
+ * Outcome classes for recorded runs that predate classification: the first
+ * escalated or failed task run becomes the DevIntern-side verify failure
+ * (work saved on its branch), auto-merge escalations become review holds,
+ * and other unsuccessful runs read as the agent stopping. A recording that
+ * already carries classes is left as recorded.
+ *
+ * @param runs - Every recorded run, newest first
+ */
+export function classifyDemoRuns(runs: readonly RunRecord[]): RunRecord[] {
+  if (runs.some((run) => run.outcomeClass !== undefined)) return [...runs];
+  const unsuccessful = (run: RunRecord) =>
+    run.status === "failed" || run.status === "escalated" || run.status === "abandoned";
+  const internal = runs.find(
+    (run) => unsuccessful(run) && run.origin !== "auto_merge" && run.taskKey !== undefined,
+  );
+  return runs.map((run): RunRecord => {
+    if (!unsuccessful(run)) return run;
+    if (run === internal) {
+      const branch = run.branch ?? `feature/${(run.taskKey ?? `run-${run.id}`).toLowerCase()}`;
+      return {
+        ...run,
+        outcomeClass: "internal",
+        failureStage: "verify",
+        failureCause: DEMO_INTERNAL_CAUSE,
+        outcomeReason: `verify: ${DEMO_INTERNAL_CAUSE}; work preserved on branch '${branch}'`,
+        workStatus: "saved",
+        workRef: branch,
+      };
+    }
+    if (run.origin === "auto_merge" && run.status === "escalated") {
+      return { ...run, outcomeClass: "review_hold", failureStage: "auto_merge" };
+    }
+    return { ...run, outcomeClass: "agent" };
+  });
+}
+
+/**
+ * Apply {@link classifyDemoRuns}' fields to a recorded run-detail body so the
+ * run page shows the same class as the list.
+ *
+ * @param body - Recorded `/api/runs/:id` body
+ * @param classified - Classified run list
+ */
+export function classifyDemoRunDetail(body: unknown, classified: readonly RunRecord[]): unknown {
+  if (typeof body !== "object" || body === null) return body;
+  const detail = body as { run?: RunRecord };
+  const run = detail.run;
+  if (!run || typeof run.id !== "number") return body;
+  const match = classified.find((candidate) => candidate.id === run.id);
+  if (!match || match.outcomeClass === undefined) return body;
+  return {
+    ...detail,
+    run: { ...run, outcomeReason: match.outcomeReason, ...classificationFields(match) },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Notification fixtures
 // ---------------------------------------------------------------------------
 
@@ -235,15 +312,19 @@ function runName(run: RunRecord): string {
  * Notification rows for the demo inbox, built around the recorded runs so
  * their links open real run pages: a grouped error-monitor escalation with a
  * large count, an escalated task, a `work_spawned` rollup on the run that
- * delegated work, grouped PRs, and a resolved source outage (shown with
- * "Show resolved").
+ * delegated work, grouped PRs, a grouped DevIntern-side failure (the run
+ * {@link classifyDemoRuns} marks `internal`), and a resolved source outage
+ * (shown with "Show resolved").
  *
  * @param runs - Every recorded run, newest first
  * @param now - Viewer's clock at page load
  */
 export function demoNotifications(runs: readonly RunRecord[], now: number): NotificationRecord[] {
   const errorRun = runs.find((run) => run.origin === "error_monitor");
-  const escalatedRun = runs.find((run) => run.status === "escalated" && run !== errorRun);
+  const internalRun = runs.find((run) => run.outcomeClass === "internal");
+  const escalatedRun = runs.find(
+    (run) => run.status === "escalated" && run !== errorRun && run !== internalRun,
+  );
   const spawnRun =
     runs.find((run) => run.automationId === "docs-drift") ??
     runs.find((run) => run.origin === "scheduled");
@@ -252,6 +333,31 @@ export function demoNotifications(runs: readonly RunRecord[], now: number): Noti
   const repoOf = (run: RunRecord | undefined, fallback: string) => run?.repo ?? fallback;
   const base = { muted: false, links: [] as NotificationLink[] };
   const rows: NotificationRecord[] = [
+    ...(internalRun
+      ? [
+          {
+            ...base,
+            id: 10,
+            kind: "internal_error" as const,
+            severity: "high" as const,
+            groupKey: `internal_error:${internalRun.failureStage ?? "verify"}:remote branch <path> not found`,
+            count: 3,
+            runId: internalRun.id,
+            repo: repoOf(internalRun, "acme/web"),
+            subject: internalRun.taskKey ? `task:${internalRun.taskKey}` : `run:${internalRun.id}`,
+            title: `Likely DevIntern bug: ${internalRun.failureStage ?? "verify"} failed (×3)`,
+            body: [
+              internalRun.failureCause ?? DEMO_INTERNAL_CAUSE,
+              internalRun.workRef ? `Work saved on branch ${internalRun.workRef}` : undefined,
+            ]
+              .filter(Boolean)
+              .join("\n"),
+            links: runLinks(internalRun),
+            createdAt: now - 9 * HOUR_MS,
+            updatedAt: now - 7 * MINUTE_MS,
+          },
+        ]
+      : []),
     {
       ...base,
       id: 9,

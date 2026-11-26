@@ -38,6 +38,7 @@ import { finalizeAgentRun } from "./run-harness-finalize";
 import { readHeadCommit } from "./run-harness-git";
 import type { FinalizeContext } from "./run-harness-git";
 import { recordIncompleteAttempt } from "../state/retry-state";
+import { tagOutcomeClass } from "../state/run-outcome";
 import {
   hasRunStage,
   latestRunStage,
@@ -265,7 +266,12 @@ export async function runAgentSession(
 
         if (timedOut) {
           console.log(`⏰ ${harness.displayName} timed out after ${timeoutMinutes} minutes`);
-          reject(new Error(`${harness.displayName} timed out after ${timeoutMinutes} minutes`));
+          reject(
+            tagOutcomeClass(
+              new Error(`${harness.displayName} timed out after ${timeoutMinutes} minutes`),
+              "agent",
+            ),
+          );
           return;
         }
 
@@ -527,7 +533,12 @@ export async function runAgentSession(
           }
           console.log("   No JIRA comment will be posted due to execution failure");
           reject(
-            new Error(`Agent exited with code ${code}${failureDetail ? `: ${failureDetail}` : ""}`),
+            tagOutcomeClass(
+              new Error(
+                `Agent exited with code ${code}${failureDetail ? `: ${failureDetail}` : ""}`,
+              ),
+              "agent",
+            ),
           );
         }
       });

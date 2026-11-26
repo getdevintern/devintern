@@ -16,6 +16,7 @@ export const NOTIFICATION_KINDS = [
   "pr_opened",
   "pr_auto_merged",
   "source_unhealthy",
+  "internal_error",
 ] as const;
 
 export type NotificationKind = (typeof NOTIFICATION_KINDS)[number];

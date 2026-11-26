@@ -86,6 +86,20 @@ export const RESOLVED = row({
   resolvedAt: NOW - 20 * MINUTE,
 });
 
+/** A grouped DevIntern-side failure (not part of {@link ALL_ROWS}). */
+export const INTERNAL_ERROR = row({
+  id: 6,
+  kind: "internal_error",
+  severity: "high",
+  groupKey: "internal_error:verify:remote branch <path> not found",
+  count: 3,
+  runId: 953,
+  repo: "acme/web",
+  title: "Likely DevIntern bug: verify failed (×3)",
+  body: "Remote branch refs/remotes/origin/feature/x not found\nWork saved on branch feature/y",
+  links: [{ label: "Run #953", runId: 953 }],
+});
+
 export const ALL_ROWS: NotificationRecord[] = [
   ESCALATION_GROUP,
   SOURCE_DOWN,

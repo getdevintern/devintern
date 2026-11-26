@@ -84,7 +84,8 @@ export type ServiceInstallOutcome =
   | "failed"
   | "skipped"
   | "existing"
-  | "unavailable";
+  | "unavailable"
+  | "not_ready";
 export type GitHubAppOutcome = "connected" | "existing" | "skipped" | "unavailable";
 export type LoginOutcome = "succeeded" | "failed";
 

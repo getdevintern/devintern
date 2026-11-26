@@ -38,6 +38,7 @@ import type { ConditionalResult, PolledPr } from "../review/agent-pr-reconciler"
 import { classifyAgentPrState } from "../review/agent-pr-reconciler";
 import { describeGitHubAuthFailure, isGitHubAuthError } from "../code-host/github/github-errors";
 import type { RunStore } from "../state/run-recorder";
+import { failureFromError } from "../state/run-outcome";
 import type { WebhookQueue } from "../state/webhook-queue";
 import type { WorkerState } from "../state/worker-state";
 
@@ -679,9 +680,14 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
       if (result.outcome === "merged") {
         runStore.finishRun(runId, "succeeded", result.message);
       } else if (result.outcome === "rejected") {
-        runStore.finishRun(runId, "escalated", result.message);
+        // The merge gate held the PR for a human: a routine review hold.
+        runStore.finishRun(runId, "escalated", result.message, {
+          failure: { outcomeClass: "review_hold", stage: "auto_merge" },
+        });
       } else if (result.outcome === "failed") {
-        runStore.finishRun(runId, "failed", result.message);
+        runStore.finishRun(runId, "failed", result.message, {
+          failure: failureFromError(result.message, "auto_merge"),
+        });
       } else if (
         result.outcome === "waiting" &&
         result.ciWait &&
@@ -693,7 +699,9 @@ export class AutoMergeWatcherAcquirer implements Acquirer {
         // other holds, so run counts include CI waits; the same head can
         // still merge later without new commits. Pending checks resolve on
         // their own: a quiet wait, not an escalation.
-        runStore.finishRun(runId, "escalated", result.message);
+        runStore.finishRun(runId, "escalated", result.message, {
+          failure: { outcomeClass: "review_hold", stage: "auto_merge" },
+        });
       } else if (result.outcome === "deferred" && result.retryAt !== undefined) {
         // Visible as waiting on quota until the review resumes.
         runStore.finishRun(runId, "deferred", result.message);

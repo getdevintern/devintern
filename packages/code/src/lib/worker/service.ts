@@ -10,15 +10,22 @@
  * half-installed definition behind. Everything effectful (file system, command
  * runner, home directory, uid) is injectable for tests.
  *
- * The definitions stay redirection-free (`Type=simple`, no StandardOutput /
- * StandardError keys): the daemon tees its own console output into the
- * dashboard capture files (see `worker-capture.ts`), so adding a redirect
- * would hide the output from the dashboard.
+ * The daemon tees its own console output into the dashboard capture files
+ * (see `worker-capture.ts`), starting before its license check, so the
+ * systemd unit keeps stdout/stderr on the journal (`Type=simple`, no
+ * StandardOutput / StandardError keys). launchd has no journal, so the agent
+ * sends the process streams to `worker.launchd.log`, a file the dashboard
+ * does not tail: it only matters for output printed before capture starts.
+ *
+ * Installing only starts the service; whether the worker really came up is
+ * checked by `service-control.ts` (`waitForWorkerStart`), which
+ * `worker service install` and the wizard report honestly.
  */
 
 import { existsSync, mkdirSync, readFileSync, rmdirSync, rmSync, writeFileSync } from "fs";
-import { homedir as osHomedir } from "os";
-import { dirname, join } from "path";
+import { homedir as osHomedir, userInfo } from "os";
+import { dirname, join, resolve } from "path";
+import { WORKER_CONFIG_EXIT_CODE } from "./startup";
 
 export type RunCommandResult = {
   /** Exit code; 127 is used when the binary itself could not be spawned. */
@@ -55,6 +62,8 @@ export interface WorkerServiceDeps {
   homedir?: string;
   /** POSIX uid used by `launchctl gui/<uid>` (tests). */
   uid?: number;
+  /** Login name passed to `loginctl enable-linger` (tests). */
+  username?: string;
   exists?: (path: string) => boolean;
   readFile?: (path: string) => string;
   writeFile?: (path: string, content: string) => void;
@@ -69,17 +78,43 @@ export const SYSTEMD_UNIT_NAME = "devintern-worker.service";
 export const LAUNCHD_LABEL = "com.devintern.worker";
 export const LAUNCHD_PLIST_NAME = `${LAUNCHD_LABEL}.plist`;
 export const SERVICE_MANAGED_MARKER = "Managed by devintern worker init";
+/** launchd's stdout/stderr file in the workspace home (not tailed by the dashboard). */
+export const LAUNCHD_LOG_NAME = "worker.launchd.log";
 
-function resolveDeps(deps: WorkerServiceDeps): Required<
-  Omit<WorkerServiceDeps, "platform" | "uid">
-> & {
+/** Service deps with every default filled in. */
+export type ResolvedServiceDeps = Required<Omit<WorkerServiceDeps, "platform" | "uid">> & {
   platform: NodeJS.Platform;
   uid?: number;
-} {
+};
+
+/**
+ * Current login name; empty when it cannot be read without a command.
+ * Bun's `userInfo()` reports "unknown" when it cannot resolve the name
+ * (seen under `docker exec -u` with no USER); `ensureLinger` then asks
+ * `id -un`.
+ */
+function currentUsername(): string {
+  const fromEnv = process.env.USER || process.env.LOGNAME;
+  if (fromEnv) return fromEnv;
+  try {
+    const name = userInfo().username;
+    return name && name !== "unknown" ? name : "";
+  } catch {
+    return "";
+  }
+}
+
+/** Fill in the real file system, command runner, home, and ids. */
+export function resolveServiceDeps(deps: WorkerServiceDeps): ResolvedServiceDeps {
+  return resolveDeps(deps);
+}
+
+function resolveDeps(deps: WorkerServiceDeps): ResolvedServiceDeps {
   return {
     platform: deps.platform ?? process.platform,
     homedir: deps.homedir ?? osHomedir(),
     uid: deps.uid ?? (typeof process.getuid === "function" ? process.getuid() : undefined),
+    username: deps.username ?? currentUsername(),
     exists: deps.exists ?? ((path) => existsSync(path)),
     readFile: deps.readFile ?? ((path) => readFileSync(path, "utf8")),
     writeFile: deps.writeFile ?? ((path, content) => writeFileSync(path, content, "utf8")),
@@ -162,7 +197,7 @@ function removeCreatedDirs(d: ReturnType<typeof resolveDeps>, created: string[])
 }
 
 /** Collapse a command's streams into one short single-line detail string. */
-function commandDetail(result: RunCommandResult): string {
+export function commandDetail(result: RunCommandResult): string {
   const detail = [result.stderr, result.stdout]
     .map((text) => text.trim().split("\n").filter(Boolean).join("; ").trim())
     .filter(Boolean)
@@ -176,7 +211,13 @@ function commandDetail(result: RunCommandResult): string {
  * No stdout/stderr redirection here on purpose: the daemon tees its own
  * console output into the dashboard's capture files (see `worker-capture.ts`),
  * so custom units and shell wrappers need no redirect either — adding one
- * would hide the output from the dashboard.
+ * would hide the output from the journal.
+ *
+ * `RestartPreventExitStatus=` stops the 30 s restart loop when the worker
+ * exits with {@link WORKER_CONFIG_EXIT_CODE} (no license, invalid config):
+ * the unit ends `failed` with the reason in the log until the user fixes it
+ * and restarts. `TimeoutStopSec=` leaves room for the worker's own bounded
+ * graceful shutdown (`DEFAULT_SHUTDOWN_DEADLINE_MS`).
  *
  * @param options - Binary path, working directory, and whether to run the direct webhook service
  */
@@ -185,6 +226,8 @@ export function renderSystemdUnit(options: {
   projectDir: string;
   runtimePath?: string;
   environmentPath?: string;
+  /** Non-default workspace home, exported as `DEVINTERN_WORKSPACE_DIR`. */
+  workspaceDirEnv?: string;
   listen?: boolean;
 }): string {
   const command = options.listen ? "webhook serve" : "worker";
@@ -195,9 +238,11 @@ export function renderSystemdUnit(options: {
   const executable = options.runtimePath
     ? `${quote(options.runtimePath)} ${quote(options.execPath)}`
     : quote(options.execPath);
-  const environment = options.environmentPath
-    ? `Environment=${quote(`PATH=${options.environmentPath}`)}\n`
-    : "";
+  const environment =
+    (options.environmentPath ? `Environment=${quote(`PATH=${options.environmentPath}`)}\n` : "") +
+    (options.workspaceDirEnv
+      ? `Environment=${quote(`DEVINTERN_WORKSPACE_DIR=${options.workspaceDirEnv}`)}\n`
+      : "");
   return `# ${SERVICE_MANAGED_MARKER}
 [Unit]
 Description=devintern ${options.listen ? "webhook server" : "worker"} (${options.projectDir})
@@ -210,6 +255,8 @@ WorkingDirectory=${quote(options.projectDir)}
 ${environment}ExecStart=${executable} ${command}
 Restart=on-failure
 RestartSec=30
+RestartPreventExitStatus=${WORKER_CONFIG_EXIT_CODE}
+TimeoutStopSec=120
 
 [Install]
 WantedBy=default.target
@@ -228,30 +275,44 @@ function escapeXml(value: string): string {
 /**
  * Render a per-user macOS launchd agent for the workspace worker.
  *
- * Like the systemd unit, this does not redirect stdout/stderr: the worker
- * self-captures into the dashboard's log files (see `worker-capture.ts`).
+ * The worker self-captures into the dashboard's log files (see
+ * `worker-capture.ts`). launchd has no journal, so the process streams also
+ * go to `worker.launchd.log` in the working directory: without it, a worker
+ * that dies before capture starts (a missing runtime, a module load error)
+ * would crash-loop with no log anywhere.
  *
  * The definition always sets `DEVINTERN_SERVICE=1` so the worker knows a
  * manager will restart it (launchd exports no identifying variables and the
- * parent-process heuristic cannot be relied on for every setup).
+ * parent-process heuristic cannot be relied on for every setup), and
+ * `DEVINTERN_SERVICE_MANAGER=launchd`, which makes a permanent startup
+ * failure exit 0 (launchd has no `RestartPreventExitStatus`; see
+ * `permanentStartupExitCode`). `ThrottleInterval` spaces out other restarts.
  */
 export function renderLaunchdPlist(options: {
   execPath: string;
   workingDir: string;
   runtimePath?: string;
   environmentPath?: string;
+  /** Non-default workspace home, exported as `DEVINTERN_WORKSPACE_DIR`. */
+  workspaceDirEnv?: string;
   label?: string;
 }): string {
   const label = options.label ?? LAUNCHD_LABEL;
   const runtimeArgument = options.runtimePath
     ? `    <string>${escapeXml(options.runtimePath)}</string>\n`
     : "";
+  const workspaceEnv = options.workspaceDirEnv
+    ? `    <key>DEVINTERN_WORKSPACE_DIR</key>\n    <string>${escapeXml(options.workspaceDirEnv)}</string>\n`
+    : "";
   const environment = `  <key>EnvironmentVariables</key>
   <dict>
-${options.environmentPath ? `    <key>PATH</key>\n    <string>${escapeXml(options.environmentPath)}</string>\n` : ""}    <key>DEVINTERN_SERVICE</key>
+${options.environmentPath ? `    <key>PATH</key>\n    <string>${escapeXml(options.environmentPath)}</string>\n` : ""}${workspaceEnv}    <key>DEVINTERN_SERVICE</key>
     <string>1</string>
+    <key>DEVINTERN_SERVICE_MANAGER</key>
+    <string>launchd</string>
   </dict>
 `;
+  const logPath = escapeXml(join(options.workingDir, LAUNCHD_LOG_NAME));
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!-- ${SERVICE_MANAGED_MARKER} -->
@@ -273,6 +334,12 @@ ${environment}  <key>WorkingDirectory</key>
     <key>SuccessfulExit</key>
     <false/>
   </dict>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+  <key>StandardOutPath</key>
+  <string>${logPath}</string>
+  <key>StandardErrorPath</key>
+  <string>${logPath}</string>
 </dict>
 </plist>
 `;
@@ -354,8 +421,9 @@ export function manualServiceInstructions(options: {
       `cp ${join(options.workspaceDir, SYSTEMD_UNIT_NAME)} ~/.config/systemd/user/${SYSTEMD_UNIT_NAME}`,
       "systemctl --user daemon-reload",
       "systemctl --user enable --now devintern-worker",
-      "# once, so the worker keeps running after you log out:",
-      "loginctl enable-linger",
+      "# once, so the worker starts at boot and keeps running after you log out",
+      "# (if this is refused, run it as root: sudo loginctl enable-linger $USER):",
+      'loginctl enable-linger "$USER"',
     ];
   }
   if (options.platform === "darwin") {
@@ -408,6 +476,46 @@ async function rollbackSystemd(
   }
 }
 
+/**
+ * The workspace home to export into the service environment, or undefined
+ * for the default `~/.devintern`. The daemon resolves its workspace from
+ * `DEVINTERN_WORKSPACE_DIR`, which a service does not inherit from the
+ * shell that installed it.
+ */
+function nonDefaultWorkspace(d: ResolvedServiceDeps, workspaceDir: string): string | undefined {
+  return resolve(workspaceDir) === join(d.homedir, ".devintern")
+    ? undefined
+    : resolve(workspaceDir);
+}
+
+/**
+ * Keep the user manager running without a login session, so the worker
+ * starts at boot and survives logout. Returns a warning with the exact root
+ * command when lingering is off and cannot be enabled (no polkit agent,
+ * no login session), or undefined when it is on.
+ *
+ * The user is always named: `loginctl enable-linger` without one means "the
+ * caller's session", which does not exist over `ssh host cmd`, in cron, or
+ * in a container ("No such device or address").
+ */
+export async function ensureLinger(d: ResolvedServiceDeps): Promise<string | undefined> {
+  let user = d.username;
+  if (!user) {
+    const id = await d.run("id", ["-un"]);
+    user = id.status === 0 ? id.stdout.trim() : "";
+  }
+  const rootCommand = `sudo loginctl enable-linger ${user || "$USER"}`;
+  const consequence = "Until it is, the worker stops when you log out and does not start at boot.";
+  if (!user) {
+    return `could not determine your user name to enable lingering. ${consequence} Run as root: ${rootCommand}`;
+  }
+  const current = await d.run("loginctl", ["show-user", user, "--property=Linger", "--value"]);
+  if (current.status === 0 && current.stdout.trim() === "yes") return undefined;
+  const enable = await d.run("loginctl", ["enable-linger", user]);
+  if (enable.status === 0) return undefined;
+  return `could not enable lingering for ${user} (${commandDetail(enable)}). ${consequence} Run as root: ${rootCommand}`;
+}
+
 async function installSystemd(
   options: {
     workspaceDir: string;
@@ -437,6 +545,7 @@ async function installSystemd(
         projectDir: options.workspaceDir,
         runtimePath: options.runtimePath,
         environmentPath: options.environmentPath,
+        workspaceDirEnv: nonDefaultWorkspace(d, options.workspaceDir),
       }),
     );
     const reload = await d.run("systemctl", ["--user", "daemon-reload"]);
@@ -453,19 +562,11 @@ async function installSystemd(
         `systemctl --user ${wasEnabled ? "restart" : "enable --now"} devintern-worker failed: ${commandDetail(start)}`,
       );
     }
-    if (!(await systemdActive(d.run))) {
-      throw new Error("the devintern-worker unit does not report active after starting it");
-    }
-    const linger = await d.run("loginctl", ["enable-linger"]);
-    return {
-      ok: true,
-      updated: previous !== null,
-      ...(linger.status === 0
-        ? {}
-        : {
-            warning: `could not enable lingering, so the worker may stop at logout: ${commandDetail(linger)}`,
-          }),
-    };
+    // Whether the worker really came up is the caller's honest start check
+    // (`waitForWorkerStart`): `is-active` right after starting says "active"
+    // even for a worker that exits a second later.
+    const warning = await ensureLinger(d);
+    return { ok: true, updated: previous !== null, ...(warning ? { warning } : {}) };
   } catch (error) {
     await rollbackSystemd(d, { unitPath, previous, wasActive, wasEnabled, createdDirs });
     return { ok: false, error: (error as Error).message };
@@ -551,6 +652,7 @@ async function installLaunchd(
         workingDir: options.workspaceDir,
         runtimePath: options.runtimePath,
         environmentPath: options.environmentPath,
+        workspaceDirEnv: nonDefaultWorkspace(d, options.workspaceDir),
       }),
     );
     const bootstrap = await d.run("launchctl", ["bootstrap", domain, plistPath]);
@@ -563,9 +665,9 @@ async function installLaunchd(
       }
     }
     bootstrapped = true;
-    if (!(await launchdRunning(d.run, target))) {
-      throw new Error("the launchd agent does not report a running process after starting it");
-    }
+    // The caller's honest start check (`waitForWorkerStart`) decides whether
+    // the worker came up; launchd reports "running" even for a worker that
+    // exits a second later.
     return { ok: true, updated: wasLoaded };
   } catch (error) {
     await rollbackLaunchd(d, {

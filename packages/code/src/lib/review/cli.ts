@@ -2,6 +2,7 @@ import { captureError, flushErrorTracking } from "@devintern/utils";
 import { loadEnvironment } from "../cli/bootstrap";
 import { setManualWorkspaceStateDir } from "../config/config-dir";
 import { endRun } from "../state/run-recorder";
+import { failureFromError } from "../state/run-outcome";
 import {
   exitIfWorkerUsageLimit,
   WORKTREE_BUSY_EXIT_CODE,
@@ -117,7 +118,7 @@ export async function runAddressReviewCommand(args: string[]): Promise<void> {
     }
     // Close any run record addressReview opened before it failed (no-op
     // when none is active — addressReview also ends runs it completes).
-    endRun("failed", message);
+    endRun("failed", message, { failure: failureFromError(error, "address_review") });
     captureError(error, { command: "address-review", prUrl });
     console.error(`❌ Error: ${message}`);
     // This is a handled exception, so the process-level fatal handlers do
